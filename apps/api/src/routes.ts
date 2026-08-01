@@ -1,0 +1,718 @@
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type pg from 'pg';
+import { z, type ZodType } from 'zod';
+import {
+  accessApprovalSchema,
+  accessRequestSchema,
+  categoryInputSchema,
+  guestInputSchema,
+  languageSchema,
+  loginSchema,
+  orderBatchSchema,
+  productInputSchema,
+  roomInputSchema,
+  settleTabSchema,
+  venueSettingsSchema,
+  voidSchema,
+} from '@sky-bar/shared';
+import { audit, emitEvent, eventBus, type RealtimeEvent } from './events.js';
+import { pool, transaction } from './db.js';
+import {
+  authenticateHost,
+  authenticateGuest,
+  clearGuestCookie,
+  clearHostCookie,
+  createHostSession,
+  hashPassword,
+  hashToken,
+  newToken,
+  requireAdmin,
+  requireGuest,
+  requireHost,
+  setGuestCookie,
+  verifyPassword,
+} from './security.js';
+
+class HttpError extends Error {
+  constructor(public statusCode: number, public code: string, message: string) {
+    super(message);
+  }
+}
+
+function body<T>(schema: ZodType<T>, request: FastifyRequest): T {
+  const result = schema.safeParse(request.body);
+  if (!result.success) throw new HttpError(400, 'VALIDATION_ERROR', result.error.issues[0]?.message ?? 'Invalid request.');
+  return result.data;
+}
+
+function id(request: FastifyRequest): string {
+  const value = (request.params as { id?: string }).id;
+  if (!value || !z.string().uuid().safeParse(value).success) throw new HttpError(400, 'INVALID_ID', 'A valid identifier is required.');
+  return value;
+}
+
+function mapList<T>(rows: T[]) { return { data: rows }; }
+
+async function activeTab(guestId: string, client: pg.Pool | pg.PoolClient = pool): Promise<string> {
+  const result = await client.query<{ id: string }>(
+    `INSERT INTO order_tabs(guest_id,status) VALUES ($1,'open')
+     ON CONFLICT (guest_id) WHERE status='open' DO UPDATE SET guest_id=excluded.guest_id RETURNING id`,
+    [guestId],
+  );
+  const tabId = result.rows[0]?.id;
+  if (!tabId) throw new HttpError(500, 'TAB_ERROR', 'Could not open a tab.');
+  return tabId;
+}
+
+async function tabDetail(guestId: string) {
+  const tab = await pool.query(
+    `SELECT t.id,g.id AS "guestId",g.name AS "guestName",r.name AS "roomName",t.opened_at AS "openedAt"
+       FROM order_tabs t JOIN guests g ON g.id=t.guest_id JOIN rooms r ON r.id=g.room_id
+      WHERE t.guest_id=$1 AND t.status='open'`,
+    [guestId],
+  );
+  if (!tab.rows[0]) return { id: null, guestId, items: [], itemCount: 0, totalCents: 0 };
+  await pool.query(`UPDATE order_items SET status='open' WHERE tab_id=$1 AND status='provisional' AND provisional_until<=now()`, [tab.rows[0].id]);
+  const items = await pool.query(
+    `SELECT id,product_id AS "productId",product_name AS "productName",unit_price_cents AS "unitPriceCents",quantity,
+            source,status,provisional_until AS "provisionalUntil",created_at AS "createdAt"
+       FROM order_items WHERE tab_id=$1 AND status IN ('open','provisional') ORDER BY created_at`,
+    [tab.rows[0].id],
+  );
+  const totalCents = items.rows.reduce((sum, item) => sum + Number(item.unitPriceCents) * Number(item.quantity), 0);
+  const itemCount = items.rows.reduce((sum, item) => sum + Number(item.quantity), 0);
+  return { ...tab.rows[0], items: items.rows, totalCents, itemCount };
+}
+
+export async function registerRoutes(app: FastifyInstance): Promise<void> {
+  app.setErrorHandler((error, _request, reply) => {
+    if (error instanceof HttpError) {
+      return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
+    }
+    if ((error as { code?: string }).code === '23505') {
+      return reply.code(409).send({ error: { code: 'CONFLICT', message: 'This change conflicts with existing data.' } });
+    }
+    app.log.error(error);
+    return reply.code(500).send({ error: { code: 'INTERNAL_ERROR', message: 'An unexpected error occurred.' } });
+  });
+
+  app.addHook('onRequest', async (request, reply) => {
+    if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method)) return;
+    if (request.url.startsWith('/api/v1/public/') || request.url === '/api/v1/auth/login') return;
+    if ((request.cookies.skybar_host || request.cookies.skybar_guest) && request.headers['x-skybar-csrf'] !== '1') {
+      await reply.code(403).send({ error: { code: 'CSRF', message: 'Missing request verification header.' } });
+    }
+  });
+
+  app.get('/api/v1/health', async () => {
+    await pool.query('SELECT 1');
+    return { status: 'ok' };
+  });
+
+  app.get('/api/v1/public/bootstrap', async () => {
+    const [venue, rooms] = await Promise.all([
+      pool.query('SELECT name,default_language AS "defaultLanguage",timezone FROM venue_settings WHERE id=1'),
+      pool.query('SELECT id,name FROM rooms WHERE archived_at IS NULL ORDER BY position,name'),
+    ]);
+    return { venue: venue.rows[0], rooms: rooms.rows };
+  });
+
+  app.post('/api/v1/public/access-requests', async (request, reply) => {
+    const input = body(accessRequestSchema, request);
+    const room = await pool.query('SELECT id FROM rooms WHERE id=$1 AND archived_at IS NULL', [input.roomId]);
+    if (!room.rowCount) throw new HttpError(404, 'ROOM_NOT_FOUND', 'Room not found.');
+    const token = newToken();
+    const result = await pool.query<{ id: string }>(
+      `INSERT INTO access_requests(name,room_id,language,status_token_hash) VALUES ($1,$2,$3,$4) RETURNING id`,
+      [input.name, input.roomId, input.language, hashToken(token)],
+    );
+    const requestId = result.rows[0]?.id;
+    if (!requestId) throw new HttpError(500, 'REQUEST_ERROR', 'Could not create the request.');
+    await emitEvent('access-request.changed', { id: requestId });
+    return reply.code(201).send({ id: requestId, statusToken: token, status: 'pending' });
+  });
+
+  app.get('/api/v1/public/access-requests/:id/status', async (request, reply) => {
+    const requestId = id(request);
+    const token = (request.query as { token?: string }).token;
+    if (!token) throw new HttpError(401, 'INVALID_TOKEN', 'Request token required.');
+    const result = await pool.query<{
+      id: string; status: string; guestId: string | null; expiresAt: Date | null; language: string;
+    }>(
+      `SELECT id,status,guest_id AS "guestId",expires_at AS "expiresAt",language
+         FROM access_requests WHERE id=$1 AND status_token_hash=$2`,
+      [requestId, hashToken(token)],
+    );
+    const access = result.rows[0];
+    if (!access) throw new HttpError(404, 'REQUEST_NOT_FOUND', 'Request not found.');
+    if (access.status === 'approved' && access.guestId && access.expiresAt) {
+      const existing = request.cookies.skybar_guest;
+      if (!existing) {
+        const guestToken = newToken();
+        await pool.query(
+          `INSERT INTO guest_sessions(guest_id,request_id,token_hash,user_agent,expires_at) VALUES ($1,$2,$3,$4,$5)`,
+          [access.guestId, requestId, hashToken(guestToken), request.headers['user-agent']?.slice(0, 300) ?? 'Unknown device', access.expiresAt],
+        );
+        setGuestCookie(reply, guestToken, new Date(access.expiresAt));
+      }
+    }
+    return { status: access.status, expiresAt: access.expiresAt };
+  });
+
+  app.post('/api/v1/auth/login', async (request, reply) => {
+    const input = body(loginSchema, request);
+    const result = await pool.query<{
+      id: string; email: string; name: string; passwordHash: string; role: string; language: string;
+    }>(
+      `SELECT id,email,name,password_hash AS "passwordHash",role,language FROM hosts WHERE lower(email)=lower($1) AND active=true`,
+      [input.email],
+    );
+    const host = result.rows[0];
+    if (!host || !(await verifyPassword(host.passwordHash, input.password))) {
+      throw new HttpError(401, 'INVALID_CREDENTIALS', 'Email or password is incorrect.');
+    }
+    await createHostSession(pool, host.id, request, reply);
+    await audit('host.login', 'host', host.id, {}, { hostId: host.id });
+    return { host: { id: host.id, email: host.email, name: host.name, role: host.role, language: host.language } };
+  });
+
+  app.post('/api/v1/auth/logout', { preHandler: requireHost }, async (request, reply) => {
+    await pool.query('UPDATE host_sessions SET revoked_at=now() WHERE id=$1', [request.hostIdentity!.sessionId]);
+    clearHostCookie(reply);
+    return reply.code(204).send();
+  });
+
+  app.get('/api/v1/auth/me', async (request) => {
+    const host = await authenticateHost(request);
+    if (!host) throw new HttpError(401, 'UNAUTHENTICATED', 'Host authentication required.');
+    const venue = await pool.query('SELECT name,default_language AS "defaultLanguage",timezone,version FROM venue_settings WHERE id=1');
+    return { host, venue: venue.rows[0] };
+  });
+
+  app.get('/api/v1/account/sessions', { preHandler: requireHost }, async (request) => mapList((await pool.query(
+    `SELECT id,user_agent AS "userAgent",created_at AS "createdAt",last_seen_at AS "lastSeenAt",expires_at AS "expiresAt",
+            (id=$2) AS current FROM host_sessions WHERE host_id=$1 AND revoked_at IS NULL AND expires_at>now() ORDER BY last_seen_at DESC`,
+    [request.hostIdentity!.id, request.hostIdentity!.sessionId],
+  )).rows));
+
+  app.delete('/api/v1/account/sessions/:id', { preHandler: requireHost }, async (request, reply) => {
+    const sessionId = id(request);
+    await pool.query('UPDATE host_sessions SET revoked_at=now() WHERE id=$1 AND host_id=$2', [sessionId, request.hostIdentity!.id]);
+    if (sessionId === request.hostIdentity!.sessionId) clearHostCookie(reply);
+    return reply.code(204).send();
+  });
+
+  app.patch('/api/v1/account', { preHandler: requireHost }, async (request) => {
+    const schema = z.object({
+      name: z.string().trim().min(1).max(120).optional(),
+      language: languageSchema.optional(),
+      currentPassword: z.string().optional(),
+      newPassword: z.string().min(12).max(256).optional(),
+    });
+    const input = body(schema, request);
+    if (input.newPassword) {
+      const current = await pool.query<{ passwordHash: string }>('SELECT password_hash AS "passwordHash" FROM hosts WHERE id=$1', [request.hostIdentity!.id]);
+      if (!input.currentPassword || !(await verifyPassword(current.rows[0]!.passwordHash, input.currentPassword))) {
+        throw new HttpError(400, 'INVALID_PASSWORD', 'Current password is incorrect.');
+      }
+      await pool.query('UPDATE hosts SET password_hash=$1 WHERE id=$2', [await hashPassword(input.newPassword), request.hostIdentity!.id]);
+      await pool.query('UPDATE host_sessions SET revoked_at=now() WHERE host_id=$1 AND id<>$2', [request.hostIdentity!.id, request.hostIdentity!.sessionId]);
+    }
+    await pool.query('UPDATE hosts SET name=COALESCE($1,name),language=COALESCE($2,language) WHERE id=$3', [input.name ?? null, input.language ?? null, request.hostIdentity!.id]);
+    return { ok: true };
+  });
+
+  app.get('/api/v1/hosts', { preHandler: requireAdmin }, async () => mapList((await pool.query(
+    `SELECT id,email,name,role,language,active,created_at AS "createdAt" FROM hosts ORDER BY active DESC,name`,
+  )).rows));
+
+  app.post('/api/v1/hosts', { preHandler: requireAdmin }, async (request, reply) => {
+    const input = body(z.object({
+      email: z.string().trim().toLowerCase().email().max(254),
+      name: z.string().trim().min(1).max(120),
+      password: z.string().min(12).max(256),
+      role: z.enum(['admin','staff']),
+      language: languageSchema.default('de'),
+    }), request);
+    const result = await pool.query(
+      `INSERT INTO hosts(email,name,password_hash,role,language) VALUES (lower($1),$2,$3,$4,$5)
+       RETURNING id,email,name,role,language,active`,
+      [input.email,input.name,await hashPassword(input.password),input.role,input.language],
+    );
+    await audit('host.created','host',result.rows[0].id,{email:input.email,role:input.role},{hostId:request.hostIdentity!.id});
+    return reply.code(201).send(result.rows[0]);
+  });
+
+  app.patch('/api/v1/hosts/:id', { preHandler: requireAdmin }, async (request) => {
+    const hostId=id(request);
+    const input=body(z.object({active:z.boolean().optional(),role:z.enum(['admin','staff']).optional()}),request);
+    if(hostId===request.hostIdentity!.id && input.active===false) throw new HttpError(409,'SELF_DISABLE','You cannot disable your own account.');
+    if(input.active===false || input.role==='staff'){
+      const target=await pool.query<{role:string}>('SELECT role FROM hosts WHERE id=$1',[hostId]);
+      if(target.rows[0]?.role==='admin'){
+        const admins=await pool.query<{count:number}>(`SELECT count(*)::int AS count FROM hosts WHERE role='admin' AND active=true`);
+        if((admins.rows[0]?.count??0)<=1) throw new HttpError(409,'LAST_ADMIN','At least one active administrator is required.');
+      }
+    }
+    const result=await pool.query(
+      `UPDATE hosts SET active=COALESCE($1,active),role=COALESCE($2,role) WHERE id=$3
+       RETURNING id,email,name,role,language,active`,[input.active??null,input.role??null,hostId]);
+    if(!result.rowCount) throw new HttpError(404,'HOST_NOT_FOUND','Host not found.');
+    if(input.active===false) await pool.query('UPDATE host_sessions SET revoked_at=now() WHERE host_id=$1 AND revoked_at IS NULL',[hostId]);
+    await audit('host.updated','host',hostId,input,{hostId:request.hostIdentity!.id});
+    return result.rows[0];
+  });
+
+  app.get('/api/v1/venue', { preHandler: requireHost }, async () => (await pool.query(
+    'SELECT name,default_language AS "defaultLanguage",timezone,version FROM venue_settings WHERE id=1',
+  )).rows[0]);
+
+  app.put('/api/v1/venue', { preHandler: requireAdmin }, async (request) => {
+    const input = body(venueSettingsSchema, request);
+    const previous = await pool.query<{ name: string }>('SELECT name FROM venue_settings WHERE id=1');
+    const result = await pool.query(
+      `UPDATE venue_settings SET name=$1,default_language=$2,timezone=$3,version=version+1,updated_at=now()
+       WHERE id=1 RETURNING name,default_language AS "defaultLanguage",timezone,version`,
+      [input.name, input.language, input.timezone],
+    );
+    await audit('venue.updated', 'venue', '1', { oldName: previous.rows[0]?.name, newName: input.name }, { hostId: request.hostIdentity!.id });
+    await emitEvent('venue.changed', {});
+    return result.rows[0];
+  });
+
+  app.get('/api/v1/dashboard', { preHandler: requireHost }, async () => {
+    const result = await pool.query(
+      `SELECT
+        (SELECT count(*)::int FROM access_requests WHERE status='pending') AS "pendingRequests",
+        (SELECT count(*)::int FROM rooms WHERE archived_at IS NULL) AS "activeRooms",
+        (SELECT count(*)::int FROM guests WHERE archived_at IS NULL) AS "activeGuests",
+        (SELECT count(*)::int FROM order_items WHERE status IN ('open','provisional')) AS "openItemCount",
+        (SELECT COALESCE(sum(unit_price_cents*quantity),0)::int FROM order_items WHERE status IN ('open','provisional')) AS "openValueCents",
+        (SELECT COALESCE(sum(total_cents),0)::int FROM bills WHERE settled_at>=date_trunc('day',now()) AND voided_at IS NULL) AS "todaySalesCents"`,
+    );
+    return result.rows[0];
+  });
+
+  app.get('/api/v1/rooms', { preHandler: requireHost }, async () => mapList((await pool.query(
+    `SELECT r.id,r.name,r.position,r.version,count(g.id)::int AS "guestCount"
+       FROM rooms r LEFT JOIN guests g ON g.room_id=r.id AND g.archived_at IS NULL
+      WHERE r.archived_at IS NULL GROUP BY r.id ORDER BY r.position,r.name`,
+  )).rows));
+
+  app.post('/api/v1/rooms', { preHandler: requireAdmin }, async (request, reply) => {
+    const input = body(roomInputSchema, request);
+    const result = await pool.query('INSERT INTO rooms(name,position) VALUES ($1,(SELECT COALESCE(max(position),-1)+1 FROM rooms)) RETURNING id,name,position,version', [input.name]);
+    await emitEvent('rooms.changed', {});
+    return reply.code(201).send(result.rows[0]);
+  });
+
+  app.patch('/api/v1/rooms/:id', { preHandler: requireAdmin }, async (request) => {
+    const input = body(roomInputSchema, request);
+    const result = await pool.query('UPDATE rooms SET name=$1,version=version+1 WHERE id=$2 AND archived_at IS NULL RETURNING id,name,position,version', [input.name, id(request)]);
+    if (!result.rowCount) throw new HttpError(404, 'ROOM_NOT_FOUND', 'Room not found.');
+    await emitEvent('rooms.changed', {});
+    return result.rows[0];
+  });
+
+  app.put('/api/v1/rooms/order', { preHandler: requireAdmin }, async (request) => {
+    const ids = body(z.object({ ids: z.array(z.string().uuid()) }), request).ids;
+    await transaction(async (client) => {
+      for (const [position, roomId] of ids.entries()) await client.query('UPDATE rooms SET position=$1 WHERE id=$2 AND archived_at IS NULL', [position, roomId]);
+    });
+    await emitEvent('rooms.changed', {});
+    return { ok: true };
+  });
+
+  app.delete('/api/v1/rooms/:id', { preHandler: requireAdmin }, async (request, reply) => {
+    const roomId = id(request);
+    const active = await pool.query('SELECT 1 FROM guests WHERE room_id=$1 AND archived_at IS NULL LIMIT 1', [roomId]);
+    if (active.rowCount) throw new HttpError(409, 'ROOM_HAS_GUESTS', 'Move or archive active guests first.');
+    await pool.query('UPDATE rooms SET archived_at=now(),version=version+1 WHERE id=$1', [roomId]);
+    await emitEvent('rooms.changed', {});
+    return reply.code(204).send();
+  });
+
+  app.get('/api/v1/guests', { preHandler: requireHost }, async () => mapList((await pool.query(
+    `SELECT g.id,g.name,g.language,g.room_id AS "roomId",r.name AS "roomName",g.version,
+            COALESCE(sum(CASE WHEN oi.status IN ('open','provisional') THEN oi.unit_price_cents*oi.quantity ELSE 0 END),0)::int AS "totalCents",
+            COALESCE(sum(CASE WHEN oi.status IN ('open','provisional') THEN oi.quantity ELSE 0 END),0)::int AS "itemCount"
+       FROM guests g JOIN rooms r ON r.id=g.room_id LEFT JOIN order_tabs t ON t.guest_id=g.id AND t.status='open'
+       LEFT JOIN order_items oi ON oi.tab_id=t.id WHERE g.archived_at IS NULL GROUP BY g.id,r.name,r.position ORDER BY r.position,g.name`,
+  )).rows));
+
+  app.post('/api/v1/guests', { preHandler: requireHost }, async (request, reply) => {
+    const input = body(guestInputSchema, request);
+    const result = await pool.query('INSERT INTO guests(name,room_id,language) VALUES ($1,$2,$3) RETURNING id,name,room_id AS "roomId",language,version', [input.name, input.roomId, input.language]);
+    await emitEvent('guests.changed', {});
+    return reply.code(201).send(result.rows[0]);
+  });
+
+  app.patch('/api/v1/guests/:id', { preHandler: requireHost }, async (request) => {
+    const input = body(guestInputSchema, request);
+    const result = await pool.query(
+      'UPDATE guests SET name=$1,room_id=$2,language=$3,version=version+1 WHERE id=$4 AND archived_at IS NULL RETURNING id,name,room_id AS "roomId",language,version',
+      [input.name, input.roomId, input.language, id(request)],
+    );
+    if (!result.rowCount) throw new HttpError(404, 'GUEST_NOT_FOUND', 'Guest not found.');
+    await emitEvent('guests.changed', {});
+    return result.rows[0];
+  });
+
+  app.delete('/api/v1/guests/:id', { preHandler: requireHost }, async (request, reply) => {
+    const guestId = id(request);
+    const open = await pool.query(`SELECT 1 FROM order_tabs t JOIN order_items i ON i.tab_id=t.id WHERE t.guest_id=$1 AND i.status IN ('open','provisional') LIMIT 1`, [guestId]);
+    if (open.rowCount) throw new HttpError(409, 'GUEST_HAS_ORDERS', 'Settle or void open orders first.');
+    await transaction(async (client) => {
+      await client.query('UPDATE guests SET archived_at=now(),version=version+1 WHERE id=$1', [guestId]);
+      await client.query('UPDATE guest_sessions SET revoked_at=now() WHERE guest_id=$1 AND revoked_at IS NULL', [guestId]);
+    });
+    await emitEvent('guests.changed', {});
+    return reply.code(204).send();
+  });
+
+  app.get('/api/v1/guests/:id/sessions', { preHandler: requireHost }, async (request) => mapList((await pool.query(
+    `SELECT id,user_agent AS "userAgent",created_at AS "createdAt",expires_at AS "expiresAt"
+       FROM guest_sessions WHERE guest_id=$1 AND revoked_at IS NULL AND expires_at>now() ORDER BY created_at DESC`,[id(request)],
+  )).rows));
+
+  app.delete('/api/v1/guests/:guestId/sessions/:id', { preHandler: requireHost }, async (request, reply) => {
+    const params=request.params as {guestId:string;id:string};
+    if(!z.string().uuid().safeParse(params.guestId).success||!z.string().uuid().safeParse(params.id).success) throw new HttpError(400,'INVALID_ID','A valid identifier is required.');
+    await pool.query('UPDATE guest_sessions SET revoked_at=now() WHERE id=$1 AND guest_id=$2',[params.id,params.guestId]);
+    await audit('guest-session.revoked','guest-session',params.id,{guestId:params.guestId},{hostId:request.hostIdentity!.id});
+    return reply.code(204).send();
+  });
+
+  app.get('/api/v1/categories', { preHandler: requireHost }, async () => mapList((await pool.query(
+    'SELECT id,name,position,version FROM categories WHERE archived_at IS NULL ORDER BY position',
+  )).rows));
+
+  app.post('/api/v1/categories', { preHandler: requireAdmin }, async (request, reply) => {
+    const input = body(categoryInputSchema, request);
+    const result = await pool.query('INSERT INTO categories(name,position) VALUES ($1,(SELECT COALESCE(max(position),-1)+1 FROM categories)) RETURNING id,name,position,version', [JSON.stringify(input.name)]);
+    await emitEvent('catalog.changed', {});
+    return reply.code(201).send(result.rows[0]);
+  });
+
+  app.get('/api/v1/products', { preHandler: requireHost }, async () => {
+    const [settings, products] = await Promise.all([
+      pool.query('SELECT catalog_version AS "catalogVersion" FROM venue_settings WHERE id=1'),
+      pool.query(`SELECT p.id,p.category_id AS "categoryId",p.name,p.description,p.price_cents AS "priceCents",p.enabled,
+                         p.self_service_only AS "selfServiceOnly",p.position,p.version
+                    FROM products p WHERE p.archived_at IS NULL ORDER BY p.category_id,p.position`),
+    ]);
+    return { catalogVersion: settings.rows[0]?.catalogVersion ?? 1, data: products.rows };
+  });
+
+  app.post('/api/v1/products', { preHandler: requireAdmin }, async (request, reply) => {
+    const input = body(productInputSchema, request);
+    const result = await transaction(async (client) => {
+      const version = (await client.query<{ catalogVersion: number }>(
+        'UPDATE venue_settings SET catalog_version=catalog_version+1 WHERE id=1 RETURNING catalog_version AS "catalogVersion"',
+      )).rows[0]!.catalogVersion;
+      const product = (await client.query(
+        `INSERT INTO products(category_id,name,description,price_cents,enabled,self_service_only,position,catalog_version)
+         VALUES ($1,$2,$3,$4,$5,$6,(SELECT COALESCE(max(position),-1)+1 FROM products WHERE category_id=$1),$7)
+         RETURNING id,category_id AS "categoryId",name,description,price_cents AS "priceCents",enabled,self_service_only AS "selfServiceOnly",position,version`,
+        [input.categoryId, JSON.stringify(input.name), input.description ? JSON.stringify(input.description) : null, input.priceCents, input.enabled, input.selfServiceOnly, version],
+      )).rows[0];
+      await client.query('INSERT INTO product_versions(product_id,catalog_version,name,price_cents,enabled,self_service_only) VALUES ($1,$2,$3,$4,$5,$6)', [product.id, version, JSON.stringify(input.name), input.priceCents, input.enabled, input.selfServiceOnly]);
+      return product;
+    });
+    await emitEvent('catalog.changed', {});
+    return reply.code(201).send(result);
+  });
+
+  app.patch('/api/v1/products/:id', { preHandler: requireAdmin }, async (request) => {
+    const productId = id(request);
+    const input = body(productInputSchema, request);
+    const result = await transaction(async (client) => {
+      const version = (await client.query<{ catalogVersion: number }>('UPDATE venue_settings SET catalog_version=catalog_version+1 WHERE id=1 RETURNING catalog_version AS "catalogVersion"')).rows[0]!.catalogVersion;
+      const productResult = await client.query(
+        `UPDATE products SET category_id=$1,name=$2,description=$3,price_cents=$4,enabled=$5,self_service_only=$6,
+                catalog_version=$7,version=version+1 WHERE id=$8 AND archived_at IS NULL
+         RETURNING id,category_id AS "categoryId",name,description,price_cents AS "priceCents",enabled,self_service_only AS "selfServiceOnly",position,version`,
+        [input.categoryId, JSON.stringify(input.name), input.description ? JSON.stringify(input.description) : null, input.priceCents, input.enabled, input.selfServiceOnly, version, productId],
+      );
+      if (!productResult.rowCount) throw new HttpError(404, 'PRODUCT_NOT_FOUND', 'Product not found.');
+      await client.query('INSERT INTO product_versions(product_id,catalog_version,name,price_cents,enabled,self_service_only) VALUES ($1,$2,$3,$4,$5,$6)', [productId, version, JSON.stringify(input.name), input.priceCents, input.enabled, input.selfServiceOnly]);
+      return productResult.rows[0];
+    });
+    await emitEvent('catalog.changed', {});
+    return result;
+  });
+
+  app.delete('/api/v1/products/:id', { preHandler: requireAdmin }, async (request, reply) => {
+    await pool.query('UPDATE products SET archived_at=now(),enabled=false,version=version+1 WHERE id=$1', [id(request)]);
+    await pool.query('UPDATE venue_settings SET catalog_version=catalog_version+1 WHERE id=1');
+    await emitEvent('catalog.changed', {});
+    return reply.code(204).send();
+  });
+
+  app.get('/api/v1/access-requests', { preHandler: requireHost }, async () => mapList((await pool.query(
+    `SELECT a.id,a.name,a.room_id AS "roomId",r.name AS "roomName",a.language,a.status,a.requested_at AS "requestedAt"
+       FROM access_requests a JOIN rooms r ON r.id=a.room_id WHERE a.status='pending' ORDER BY a.requested_at`,
+  )).rows));
+
+  app.post('/api/v1/access-requests/:id/approve', { preHandler: requireHost }, async (request) => {
+    const requestId = id(request);
+    const input = body(accessApprovalSchema, request);
+    if (new Date(input.expiresAt) <= new Date()) throw new HttpError(400, 'INVALID_EXPIRY', 'Expiry must be in the future.');
+    const result = await transaction(async (client) => {
+      const pending = await client.query<{ name: string; roomId: string; language: string }>(
+        `SELECT name,room_id AS "roomId",language FROM access_requests WHERE id=$1 AND status='pending' FOR UPDATE`, [requestId],
+      );
+      const access = pending.rows[0];
+      if (!access) throw new HttpError(409, 'REQUEST_RESOLVED', 'This request is no longer pending.');
+      let guestId = input.guestId;
+      if (guestId) {
+        const guest = await client.query('SELECT id FROM guests WHERE id=$1 AND archived_at IS NULL', [guestId]);
+        if (!guest.rowCount) throw new HttpError(404, 'GUEST_NOT_FOUND', 'Guest not found.');
+      } else {
+        guestId = (await client.query<{ id: string }>('INSERT INTO guests(name,room_id,language) VALUES ($1,$2,$3) RETURNING id', [access.name, access.roomId, access.language])).rows[0]!.id;
+      }
+      await client.query(
+        `UPDATE access_requests SET status='approved',guest_id=$1,expires_at=$2,resolved_at=now(),resolved_by=$3 WHERE id=$4`,
+        [guestId, input.expiresAt, request.hostIdentity!.id, requestId],
+      );
+      await audit('access.approved', 'access-request', requestId, { guestId, expiresAt: input.expiresAt }, { hostId: request.hostIdentity!.id }, client);
+      return { guestId };
+    });
+    await emitEvent('access-request.changed', { id: requestId });
+    await emitEvent('guests.changed', {});
+    return result;
+  });
+
+  app.post('/api/v1/access-requests/:id/deny', { preHandler: requireHost }, async (request) => {
+    const requestId = id(request);
+    const result = await pool.query(`UPDATE access_requests SET status='denied',resolved_at=now(),resolved_by=$1 WHERE id=$2 AND status='pending' RETURNING id`, [request.hostIdentity!.id, requestId]);
+    if (!result.rowCount) throw new HttpError(409, 'REQUEST_RESOLVED', 'This request is no longer pending.');
+    await audit('access.denied', 'access-request', requestId, {}, { hostId: request.hostIdentity!.id });
+    await emitEvent('access-request.changed', { id: requestId });
+    return { ok: true };
+  });
+
+  app.get('/api/v1/orders', { preHandler: requireHost }, async () => mapList((await pool.query(
+    `SELECT t.id,t.guest_id AS "guestId",g.name AS "guestName",r.name AS "roomName",t.opened_at AS "openedAt",
+            COALESCE(sum(CASE WHEN i.status IN ('open','provisional') THEN i.quantity ELSE 0 END),0)::int AS "itemCount",
+            COALESCE(sum(CASE WHEN i.status IN ('open','provisional') THEN i.unit_price_cents*i.quantity ELSE 0 END),0)::int AS "totalCents"
+       FROM order_tabs t JOIN guests g ON g.id=t.guest_id JOIN rooms r ON r.id=g.room_id
+       LEFT JOIN order_items i ON i.tab_id=t.id WHERE t.status='open' GROUP BY t.id,g.name,r.name HAVING count(i.id)>0 ORDER BY t.opened_at`,
+  )).rows));
+
+  app.get('/api/v1/guests/:id/tab', { preHandler: requireHost }, async (request) => tabDetail(id(request)));
+
+  app.post('/api/v1/order-batches', { preHandler: requireHost }, async (request, reply) => {
+    const input = body(orderBatchSchema, request);
+    const result = await transaction(async (client) => {
+      const duplicate = await client.query('SELECT tab_id AS "tabId" FROM order_batches WHERE mutation_id=$1', [input.mutationId]);
+      if (duplicate.rows[0]) return duplicate.rows[0];
+      const guest = await client.query('SELECT id FROM guests WHERE id=$1 AND archived_at IS NULL', [input.guestId]);
+      if (!guest.rowCount) throw new HttpError(404, 'GUEST_NOT_FOUND', 'Guest not found.');
+      const tabId = await activeTab(input.guestId, client);
+      const batch = await client.query<{ id: string }>(
+        'INSERT INTO order_batches(mutation_id,tab_id,host_id,captured_at) VALUES ($1,$2,$3,$4) RETURNING id',
+        [input.mutationId, tabId, request.hostIdentity!.id, input.capturedAt],
+      );
+      for (const line of input.items) {
+        const product = await client.query<{ name: Record<string, string>; priceCents: number }>(
+          `SELECT name,price_cents AS "priceCents" FROM product_versions
+            WHERE product_id=$1 AND catalog_version<=$2 ORDER BY catalog_version DESC LIMIT 1`,
+          [line.productId, input.catalogVersion],
+        );
+        const snapshot = product.rows[0];
+        if (!snapshot) throw new HttpError(409, 'CATALOG_CONFLICT', 'A selected product is unavailable in the captured catalog.');
+        await client.query(
+          `INSERT INTO order_items(tab_id,batch_id,product_id,product_name,unit_price_cents,quantity,source,status,submitted_by_host)
+           VALUES ($1,$2,$3,$4,$5,$6,'host','open',$7)`,
+          [tabId, batch.rows[0]!.id, line.productId, JSON.stringify(snapshot.name), snapshot.priceCents, line.quantity, request.hostIdentity!.id],
+        );
+      }
+      await audit('order.batch-created', 'tab', tabId, { mutationId: input.mutationId }, { hostId: request.hostIdentity!.id }, client);
+      return { tabId };
+    });
+    await emitEvent('orders.changed', { guestId: input.guestId });
+    return reply.code(201).send(result);
+  });
+
+  app.post('/api/v1/order-items/:id/void', { preHandler: requireHost }, async (request) => {
+    const itemId = id(request);
+    const input = body(voidSchema, request);
+    const result = await pool.query(
+      `UPDATE order_items SET status='voided',voided_at=now(),voided_by_host=$1,void_reason=$2
+        WHERE id=$3 AND status IN ('open','provisional') RETURNING tab_id AS "tabId"`,
+      [request.hostIdentity!.id, input.reason, itemId],
+    );
+    if (!result.rowCount) throw new HttpError(409, 'ITEM_NOT_OPEN', 'The item is no longer open.');
+    await audit('order-item.voided', 'order-item', itemId, { reason: input.reason, mutationId: input.mutationId }, { hostId: request.hostIdentity!.id });
+    await emitEvent('orders.changed', { tabId: result.rows[0].tabId });
+    return { ok: true };
+  });
+
+  app.post('/api/v1/tabs/:id/settle', { preHandler: requireHost }, async (request) => {
+    const tabId = id(request);
+    const input = body(settleTabSchema, request);
+    const bill = await transaction(async (client) => {
+      const duplicate = await client.query('SELECT id,number FROM bills WHERE mutation_id=$1', [input.mutationId]);
+      if (duplicate.rows[0]) return duplicate.rows[0];
+      const tab = await client.query<{
+        guestId: string; guestName: string; roomName: string; venueName: string;
+      }>(
+        `SELECT t.guest_id AS "guestId",g.name AS "guestName",r.name AS "roomName",v.name AS "venueName"
+           FROM order_tabs t JOIN guests g ON g.id=t.guest_id JOIN rooms r ON r.id=g.room_id CROSS JOIN venue_settings v
+          WHERE t.id=$1 AND t.status='open' FOR UPDATE OF t`,
+        [tabId],
+      );
+      const current = tab.rows[0];
+      if (!current) throw new HttpError(409, 'TAB_NOT_OPEN', 'The tab is no longer open.');
+      if (!current.venueName.trim()) throw new HttpError(409, 'VENUE_REQUIRED', 'Set the venue name before billing.');
+      const provisional = await client.query(`SELECT 1 FROM order_items WHERE tab_id=$1 AND status='provisional' AND provisional_until>now() LIMIT 1`, [tabId]);
+      if (provisional.rowCount) throw new HttpError(409, 'UNDO_PENDING', 'Wait for the guest undo window to finish.');
+      await client.query(`UPDATE order_items SET status='open' WHERE tab_id=$1 AND status='provisional'`, [tabId]);
+      const items = await client.query<{
+        id: string; productName: Record<string, string>; unitPriceCents: number; quantity: number; source: string;
+      }>(
+        `SELECT id,product_name AS "productName",unit_price_cents AS "unitPriceCents",quantity,source
+           FROM order_items WHERE tab_id=$1 AND status='open' FOR UPDATE`,
+        [tabId],
+      );
+      if (!items.rowCount) throw new HttpError(409, 'EMPTY_TAB', 'There are no open items to bill.');
+      const total = items.rows.reduce((sum, item) => sum + item.unitPriceCents * item.quantity, 0);
+      const created = await client.query<{ id: string; number: number }>(
+        `INSERT INTO bills(tab_id,guest_id,host_id,mutation_id,venue_name,guest_name,room_name,total_cents,payment_method,payment_note)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id,number`,
+        [tabId, current.guestId, request.hostIdentity!.id, input.mutationId, current.venueName, current.guestName, current.roomName, total, input.paymentMethod, input.note ?? null],
+      );
+      const newBill = created.rows[0]!;
+      for (const item of items.rows) {
+        await client.query(
+          `INSERT INTO bill_items(bill_id,original_order_item_id,product_name,unit_price_cents,quantity,source) VALUES ($1,$2,$3,$4,$5,$6)`,
+          [newBill.id, item.id, JSON.stringify(item.productName), item.unitPriceCents, item.quantity, item.source],
+        );
+      }
+      await client.query(`UPDATE order_items SET status='billed',bill_id=$1 WHERE tab_id=$2 AND status='open'`, [newBill.id, tabId]);
+      await client.query(`UPDATE order_tabs SET status='billed',closed_at=now() WHERE id=$1`, [tabId]);
+      await audit('bill.settled', 'bill', newBill.id, { totalCents: total, paymentMethod: input.paymentMethod }, { hostId: request.hostIdentity!.id }, client);
+      return newBill;
+    });
+    await emitEvent('orders.changed', {});
+    await emitEvent('bills.changed', { id: bill.id });
+    return bill;
+  });
+
+  app.get('/api/v1/bills', { preHandler: requireHost }, async () => mapList((await pool.query(
+    `SELECT id,number,venue_name AS "venueName",guest_name AS "guestName",room_name AS "roomName",total_cents AS "totalCents",
+            payment_method AS "paymentMethod",settled_at AS "settledAt",voided_at AS "voidedAt"
+       FROM bills ORDER BY settled_at DESC LIMIT 500`,
+  )).rows));
+
+  app.get('/api/v1/bills/:id', { preHandler: requireHost }, async (request) => {
+    const billId = id(request);
+    const bill = await pool.query(
+      `SELECT b.id,b.number,b.venue_name AS "venueName",b.guest_name AS "guestName",b.room_name AS "roomName",
+              b.total_cents AS "totalCents",b.payment_method AS "paymentMethod",b.payment_note AS "paymentNote",
+              b.settled_at AS "settledAt",b.voided_at AS "voidedAt",b.void_reason AS "voidReason",h.name AS "hostName"
+         FROM bills b JOIN hosts h ON h.id=b.host_id WHERE b.id=$1`, [billId],
+    );
+    if (!bill.rows[0]) throw new HttpError(404, 'BILL_NOT_FOUND', 'Bill not found.');
+    const items = await pool.query(
+      `SELECT product_name AS "productName",unit_price_cents AS "unitPriceCents",quantity,source FROM bill_items WHERE bill_id=$1`, [billId],
+    );
+    return { ...bill.rows[0], items: items.rows };
+  });
+
+  app.post('/api/v1/bills/:id/void', { preHandler: requireAdmin }, async (request) => {
+    const billId = id(request);
+    const input = body(voidSchema, request);
+    await transaction(async (client) => {
+      const result = await client.query<{ tabId: string; guestId: string }>(
+        `UPDATE bills SET voided_at=now(),void_reason=$1,voided_by=$2 WHERE id=$3 AND voided_at IS NULL RETURNING tab_id AS "tabId",guest_id AS "guestId"`,
+        [input.reason, request.hostIdentity!.id, billId],
+      );
+      const bill = result.rows[0];
+      if (!bill) throw new HttpError(409, 'BILL_NOT_ACTIVE', 'The bill has already been voided.');
+      const open = await client.query<{ id: string }>(`SELECT id FROM order_tabs WHERE guest_id=$1 AND status='open' FOR UPDATE`, [bill.guestId]);
+      const destination = open.rows[0]?.id ?? bill.tabId;
+      if (!open.rows[0]) await client.query(`UPDATE order_tabs SET status='open',closed_at=NULL WHERE id=$1`, [bill.tabId]);
+      await client.query(`UPDATE order_items SET tab_id=$1,status='open',bill_id=NULL WHERE bill_id=$2`, [destination, billId]);
+      await audit('bill.voided', 'bill', billId, { reason: input.reason, mutationId: input.mutationId }, { hostId: request.hostIdentity!.id }, client);
+    });
+    await emitEvent('bills.changed', { id: billId });
+    await emitEvent('orders.changed', {});
+    return { ok: true };
+  });
+
+  app.get('/api/v1/events', { preHandler: async (request,reply)=>{
+    if(!(await authenticateHost(request))&&!(await authenticateGuest(request))) await reply.code(401).send({error:{code:'UNAUTHENTICATED',message:'Authentication required.'}});
+  } }, async (request, reply) => {
+    reply.hijack();
+    const origin = request.headers.origin;
+    if (origin) reply.raw.setHeader('Access-Control-Allow-Origin', origin);
+    reply.raw.setHeader('Content-Type', 'text/event-stream');
+    reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
+    reply.raw.setHeader('Connection', 'keep-alive');
+    reply.raw.write('retry: 3000\n\n');
+    const listener = (event: RealtimeEvent) => reply.raw.write(`id: ${event.id}\nevent: ${event.topic}\ndata: ${JSON.stringify(event.payload)}\n\n`);
+    const keepAlive = setInterval(() => reply.raw.write(': keepalive\n\n'), 20_000);
+    eventBus.on('event', listener);
+    request.raw.on('close', () => {
+      clearInterval(keepAlive);
+      eventBus.off('event', listener);
+    });
+  });
+
+  app.get('/api/v1/guest/me', { preHandler: requireGuest }, async (request) => ({ guest: request.guestIdentity }));
+  app.post('/api/v1/guest/logout', { preHandler: requireGuest }, async (request, reply) => {
+    await pool.query('UPDATE guest_sessions SET revoked_at=now() WHERE id=$1', [request.guestIdentity!.sessionId]);
+    clearGuestCookie(reply);
+    return reply.code(204).send();
+  });
+  app.get('/api/v1/guest/tab', { preHandler: requireGuest }, async (request) => tabDetail(request.guestIdentity!.id));
+  app.get('/api/v1/guest/catalog', { preHandler: requireGuest }, async () => {
+    const result = await pool.query(
+      `SELECT p.id,p.name,p.description,p.price_cents AS "priceCents",p.category_id AS "categoryId",c.name AS "categoryName"
+         FROM products p JOIN categories c ON c.id=p.category_id
+        WHERE p.archived_at IS NULL AND p.enabled=true AND p.self_service_only=true AND c.archived_at IS NULL
+        ORDER BY c.position,p.position`,
+    );
+    return mapList(result.rows);
+  });
+
+  app.post('/api/v1/guest/items', { preHandler: requireGuest }, async (request, reply) => {
+    const input = body(z.object({ mutationId: z.string().uuid(), productId: z.string().uuid() }), request);
+    const item = await transaction(async (client) => {
+      const duplicate = await client.query('SELECT id,provisional_until AS "provisionalUntil" FROM order_items WHERE guest_mutation_id=$1', [input.mutationId]);
+      if (duplicate.rows[0]) return duplicate.rows[0];
+      const product = await client.query<{ name: Record<string, string>; priceCents: number }>(
+        `SELECT name,price_cents AS "priceCents" FROM products WHERE id=$1 AND enabled=true AND self_service_only=true AND archived_at IS NULL`,
+        [input.productId],
+      );
+      const selected = product.rows[0];
+      if (!selected) throw new HttpError(404, 'PRODUCT_NOT_AVAILABLE', 'This self-service product is unavailable.');
+      const tabId = await activeTab(request.guestIdentity!.id, client);
+      const result = await client.query(
+        `INSERT INTO order_items(tab_id,product_id,product_name,unit_price_cents,quantity,source,status,submitted_by_guest_session,provisional_until,guest_mutation_id)
+         VALUES ($1,$2,$3,$4,1,'guest','provisional',$5,now()+interval '10 seconds',$6)
+         RETURNING id,provisional_until AS "provisionalUntil"`,
+        [tabId, input.productId, JSON.stringify(selected.name), selected.priceCents, request.guestIdentity!.sessionId, input.mutationId],
+      );
+      await audit('guest-item.submitted', 'order-item', result.rows[0].id, {}, { guestSessionId: request.guestIdentity!.sessionId }, client);
+      return result.rows[0];
+    });
+    await emitEvent('orders.changed', { guestId: request.guestIdentity!.id });
+    return reply.code(201).send(item);
+  });
+
+  app.post('/api/v1/guest/items/:id/undo', { preHandler: requireGuest }, async (request) => {
+    const itemId = id(request);
+    const result = await pool.query(
+      `UPDATE order_items SET status='voided',voided_at=now(),void_reason='guest-undo'
+        WHERE id=$1 AND submitted_by_guest_session=$2 AND status='provisional' AND provisional_until>now() RETURNING tab_id AS "tabId"`,
+      [itemId, request.guestIdentity!.sessionId],
+    );
+    if (!result.rowCount) throw new HttpError(409, 'UNDO_EXPIRED', 'The undo window has expired.');
+    await audit('guest-item.undone', 'order-item', itemId, {}, { guestSessionId: request.guestIdentity!.sessionId });
+    await emitEvent('orders.changed', { guestId: request.guestIdentity!.id });
+    return { ok: true };
+  });
+}

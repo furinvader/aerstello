@@ -1,0 +1,33 @@
+# Architecture
+
+## Runtime topology
+
+The production container serves the built React PWA and Fastify API from one origin. PostgreSQL is the durable source of truth. Server-sent events are invalidation hints; clients always refetch authoritative REST resources after an event or reconnect.
+
+The browser stores the application shell and recently read operational data through Workbox. IndexedDB stores only replayable host mutations. Authentication remains cookie-based and is never persisted in application storage.
+
+## Identity and authorization
+
+Hosts authenticate with email and Argon2id-hashed passwords. Opaque session tokens are HMAC-hashed in PostgreSQL and sent only in Secure, HttpOnly, SameSite cookies. Admins manage configuration, venue identity, host accounts, and bill reversals; staff handle rooms/guests operationally, access requests, orders, and settlement.
+
+Public guest requests carry a one-time status token. Approval links or creates a guest and assigns an expiry. The requesting browser exchanges approved status for an expiring device grant. Requests and live guest sessions reveal data only for their bound guest.
+
+## Order and bill lifecycle
+
+Products have catalog versions. An offline order references the catalog version displayed during capture, allowing the API to snapshot the matching name and price rather than silently applying a later price.
+
+Host product selections are submitted as an atomic batch. Guest self-service selections create one provisional line with a server-enforced 10-second undo deadline. Open-tab totals include provisional items, but settlement rejects the tab until all undo deadlines pass.
+
+Settlement locks the open tab and items, creates the bill and immutable bill lines, snapshots the current venue/guest/room identity, marks order items billed, and closes the tab in one transaction. A later venue rename only affects operational UI and new bills. Admin reversal voids the bill through an audit event and moves original order items into the guest's current tab.
+
+## Offline and concurrency
+
+The host PWA queues order batches and eligible item-void commands when `navigator.onLine` is false. UUID mutation keys make replay idempotent. If another device settles before a queued addition arrives, that addition creates a new tab. A queued void against a billed item is rejected and presented as a sync conflict.
+
+Billing, guest creation, access approval, catalog configuration, and venue settings are online-only. This boundary prevents duplicate settlement and unsafe configuration merges.
+
+## Localization and responsive layout
+
+UI/device language is DE, IT, or EN. Unsupported device languages fall back to DE. Localized catalog fields require German and fall back to German when Italian or English text is empty.
+
+The narrow/portrait layout uses bottom navigation; wide landscape layouts use a left rail. Take Orders is visually prominent in both. Touch targets are at least 44px and safe-area insets are respected.
