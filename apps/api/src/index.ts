@@ -7,6 +7,7 @@ import fastifyStatic from '@fastify/static';
 import Fastify from 'fastify';
 import { config } from './config.js';
 import { migrate, pool } from './db.js';
+import { startRealtimeRelay } from './events.js';
 import { ipRateLimitKey, ipRateLimitMax } from './rate-limit.js';
 import { registerRoutes } from './routes.js';
 
@@ -51,8 +52,11 @@ if (config.NODE_ENV === 'production') {
   }
 }
 
+let stopRealtimeRelay: (()=>void)|undefined;
+
 async function shutdown(signal: string) {
   app.log.info({ signal }, 'Shutting down');
+  stopRealtimeRelay?.();
   await app.close();
   await pool.end();
   process.exit(0);
@@ -62,4 +66,5 @@ process.on('SIGTERM', () => void shutdown('SIGTERM'));
 process.on('SIGINT', () => void shutdown('SIGINT'));
 
 await migrate();
+stopRealtimeRelay=await startRealtimeRelay(app.log);
 await app.listen({ port: config.PORT, host: '0.0.0.0' });

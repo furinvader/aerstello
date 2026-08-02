@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { hashPassword, hashToken, recordHostSessionActivity, verifyPassword } from './security.js';
+import { hashPassword, hashToken, lockVerifiedHostLogin, recordHostSessionActivity, verifyPassword } from './security.js';
 
 describe('security primitives', () => {
   it('hashes opaque tokens deterministically without retaining the token', () => {
@@ -23,5 +23,20 @@ describe('security primitives', () => {
       expect.objectContaining({sessionId:'session-a'}),
       'Could not update host session activity',
     ));
+  });
+
+  it('locks and rechecks the verified password hash before session creation', async () => {
+    const current = {
+      id: 'host-a', email: 'host@example.test', name: 'Host', passwordHash: 'verified-hash', role: 'admin', language: 'de',
+    };
+    const query = vi.fn(async () => ({ rows: [current] }));
+
+    await expect(lockVerifiedHostLogin({ query } as never, current.id, current.passwordHash)).resolves.toEqual(current);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('FOR UPDATE'), [current.id, current.passwordHash]);
+  });
+
+  it('rejects a verified login after the password hash changes', async () => {
+    const query = vi.fn(async () => ({ rows: [] }));
+    await expect(lockVerifiedHostLogin({ query } as never, 'host-a', 'stale-hash')).resolves.toBeUndefined();
   });
 });

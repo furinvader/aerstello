@@ -36,6 +36,7 @@ import {
   hashPassword,
   hashToken,
   hostSessionIsActive,
+  lockVerifiedHostLogin,
   newToken,
   requireAdmin,
   requireGuest,
@@ -254,9 +255,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!host || !validPassword) {
       throw new HttpError(401, 'INVALID_CREDENTIALS', 'Email or password is incorrect.');
     }
-    await createHostSession(pool, host.id, request, reply);
-    await audit('host.login', 'host', host.id, {}, { hostId: host.id });
-    return { host: { id: host.id, email: host.email, name: host.name, role: host.role, language: host.language } };
+    const current = await transaction(async (client) => {
+      const locked = await lockVerifiedHostLogin(client, host.id, host.passwordHash);
+      if (!locked) throw new HttpError(401, 'INVALID_CREDENTIALS', 'Email or password is incorrect.');
+      await createHostSession(client, locked.id, request, reply);
+      await audit('host.login', 'host', locked.id, {}, { hostId: locked.id }, client);
+      return locked;
+    });
+    return { host: { id: current.id, email: current.email, name: current.name, role: current.role, language: current.language } };
   });
 
   app.post('/api/v1/auth/logout', { preHandler: requireHost }, async (request, reply) => {
@@ -1063,7 +1069,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const bill = await pool.query(
       `SELECT b.id,b.number::text AS number,b.venue_name AS "venueName",b.venue_timezone AS "venueTimezone",b.guest_name AS "guestName",b.room_name AS "roomName",
               b.total_cents AS "totalCents",b.payment_method AS "paymentMethod",b.payment_note AS "paymentNote",
-              b.settled_at AS "settledAt",b.voided_at AS "voidedAt",b.void_reason AS "voidReason",b.host_name AS "hostName"
+              b.settled_at AS "settledAt",b.voided_at AS "voidedAt",b.void_reason AS "voidReason",
+              b.host_name AS "hostName",b.host_name_known AS "hostNameKnown"
          FROM bills b WHERE b.id=$1`, [billId],
     );
     if (!bill.rows[0]) throw new HttpError(404, 'BILL_NOT_FOUND', 'Bill not found.');

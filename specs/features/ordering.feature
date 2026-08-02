@@ -165,6 +165,11 @@ Feature: Host order entry and billing
     When the settling host changes their name after billing
     Then the bill still shows the original host name
 
+  Scenario: A legacy bill does not invent historical host attribution
+    Given an authenticated administrator
+    When the host opens a legacy bill without trustworthy host attribution
+    Then the bill explains that the historical host is unavailable
+
   Scenario: A voided bill keeps its correction when printed
     Given an authenticated administrator
     When the host opens a voided bill for printing

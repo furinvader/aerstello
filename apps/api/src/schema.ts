@@ -157,6 +157,7 @@ export const bills = pgTable('bills', {
   guestName: text('guest_name').notNull(),
   roomName: text('room_name').notNull(),
   hostName: text('host_name').notNull(),
+  hostNameKnown: boolean('host_name_known').notNull().default(true),
   totalCents: integer('total_cents').notNull(),
   paymentMethod: paymentMethod('payment_method').notNull(),
   paymentNote: text('payment_note'),

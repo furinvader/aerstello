@@ -14,6 +14,15 @@ export interface HostIdentity {
   sessionId: string;
 }
 
+export interface VerifiedHostLogin {
+  id: string;
+  email: string;
+  name: string;
+  passwordHash: string;
+  role: 'admin' | 'staff';
+  language: 'de' | 'it' | 'en';
+}
+
 export interface GuestIdentity {
   id: string;
   name: string;
@@ -85,6 +94,21 @@ export async function createHostSession(client: pg.Pool | pg.PoolClient, hostId:
     [hostId, hashToken(token), request.headers['user-agent']?.slice(0, 300) ?? 'Unknown device', expires],
   );
   reply.setCookie(hostCookie, token, cookieOptions(expires));
+}
+
+export async function lockVerifiedHostLogin(
+  client: pg.PoolClient,
+  hostId: string,
+  verifiedPasswordHash: string,
+): Promise<VerifiedHostLogin | undefined> {
+  const result = await client.query<VerifiedHostLogin>(
+    `SELECT id,email,name,password_hash AS "passwordHash",role,language
+       FROM hosts
+      WHERE id=$1 AND active=true AND password_hash=$2
+      FOR UPDATE`,
+    [hostId, verifiedPasswordHash],
+  );
+  return result.rows[0];
 }
 
 export function setGuestCookie(reply: FastifyReply, token: string, expires: Date): void {

@@ -71,3 +71,8 @@ Feature: Secure host accounts and devices
     Given an authenticated administrator
     When the administrator credentials are recovered from the command line
     Then the existing host device is signed out
+
+  Scenario: Credential recovery rejects an in-flight old-password login
+    Given the seeded Sky Bar venue
+    When credential recovery completes while an old-password login is being verified
+    Then the old-password login is rejected without creating a session

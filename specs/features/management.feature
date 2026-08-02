@@ -114,6 +114,11 @@ Feature: Venue operations configuration
     When administrators submit conflicting room orders concurrently
     Then every room reorder completes without a server error
 
+  Scenario: Realtime changes propagate between API replicas
+    Given an authenticated administrator
+    When another API replica creates a room
+    Then the connected host receives the other replica room event
+
   Scenario: A stale room reorder cannot overwrite a newer order
     Given an authenticated administrator
     When a room reorder response is lost before another administrator reorders rooms

@@ -1,15 +1,16 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Redirect, useLocation, useSearch } from 'wouter';
 import { api, apiErrorMessage, json } from './api';
 import { Button, Card, Field, Notice } from './components';
 import { useI18n } from './i18n';
+import { isPermanentSyncConflict } from './offline';
 import type { Language } from '@sky-bar/shared';
 import type { Room } from './types';
 
-function PublicFrame({ children }: { children: React.ReactNode }) {
+function PublicFrame({ children, languageLocked = false }: { children: React.ReactNode; languageLocked?: boolean }) {
   const { language, setLanguage, t } = useI18n();
-  return <main className="public-shell"><header className="public-brand"><img src="/sky-bar.svg" alt=""/><span>Sky Bar</span><select aria-label={t('language')} value={language} onChange={(e) => setLanguage(e.target.value as Language)}><option value="de">DE</option><option value="it">IT</option><option value="en">EN</option></select></header>{children}</main>;
+  return <main className="public-shell"><header className="public-brand"><img src="/sky-bar.svg" alt=""/><span>Sky Bar</span><select aria-label={t('language')} value={language} disabled={languageLocked} onChange={(e) => setLanguage(e.target.value as Language)}><option value="de">DE</option><option value="it">IT</option><option value="en">EN</option></select></header>{children}</main>;
 }
 
 export function LaunchPage() {
@@ -41,7 +42,7 @@ export function LoginPage() {
 
 interface Bootstrap { venue: { name: string; defaultLanguage: Language }; rooms: Pick<Room, 'id'|'name'>[] }
 interface PendingAccess { id: string; token: string; grantId: string }
-interface AccessSubmission { key: string; mutationId: string; name: string; roomId: string; language: Language }
+interface AccessSubmission { mutationId: string; name: string; roomId: string; language: Language }
 
 function loadDurableRecovery(key: string): string | null {
   const durable = localStorage.getItem(key);
@@ -56,13 +57,13 @@ export function RequestAccessPage() {
   const search = useSearch();
   const params = new URLSearchParams(search);
   const bootstrap = useQuery<Bootstrap>({ queryKey: ['public-bootstrap'], queryFn: () => api('/public/bootstrap') });
-  const submission = useRef<AccessSubmission | null>((() => {
+  const [submission, setSubmission] = useState<AccessSubmission | null>(() => {
     const raw=loadDurableRecovery('skybar-access-submission');
     if(!raw)return null;
     try{return JSON.parse(raw) as AccessSubmission;}catch{localStorage.removeItem('skybar-access-submission');return null;}
-  })());
-  const [name, setName] = useState(submission.current?.name ?? '');
-  const [roomId, setRoomId] = useState(submission.current?.roomId ?? params.get('room') ?? '');
+  });
+  const [name, setName] = useState(submission?.name ?? '');
+  const [roomId, setRoomId] = useState(submission?.roomId ?? params.get('room') ?? '');
   const [pending, setPending] = useState<PendingAccess | null>(() => {
     const raw = loadDurableRecovery('skybar-pending');
     if (!raw) return null;
@@ -83,8 +84,8 @@ export function RequestAccessPage() {
     if (bootstrap.data?.venue.defaultLanguage) applyDefaultLanguage(bootstrap.data.venue.defaultLanguage);
   }, [applyDefaultLanguage, bootstrap.data?.venue.defaultLanguage]);
   useEffect(() => {
-    if (submission.current?.language) setLanguage(submission.current.language);
-  }, [setLanguage]);
+    if (submission?.language && submission.language !== language) setLanguage(submission.language);
+  }, [language, setLanguage, submission?.language]);
   useEffect(() => {
     if (!pending) return;
     const stopPolling = (status:'denied'|'expired'|'disabled',showError = false) => {
@@ -105,16 +106,16 @@ export function RequestAccessPage() {
   }, [pending, navigate, t]);
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setError(''); setTerminalStatus(null);
+    const command=submission??{mutationId:crypto.randomUUID(),name,roomId,language};
+    setSubmission(command);
+    localStorage.setItem('skybar-access-submission',JSON.stringify(command));
     try {
-      const key=JSON.stringify({name,roomId,language});
-      if(submission.current?.key!==key) submission.current={key,mutationId:crypto.randomUUID(),name,roomId,language};
-      localStorage.setItem('skybar-access-submission',JSON.stringify(submission.current));
-      const result = await api<{ id: string; statusToken: string }>('/public/access-requests', { method: 'POST', body: json({ mutationId:submission.current.mutationId,name,roomId,language }) });
-      localStorage.removeItem('skybar-access-submission');submission.current=null;
+      const result = await api<{ id: string; statusToken: string }>('/public/access-requests', { method: 'POST', body: json(command) });
+      localStorage.removeItem('skybar-access-submission');setSubmission(null);
       const next = { id: result.id, token: result.statusToken, grantId: crypto.randomUUID() }; localStorage.setItem('skybar-pending', JSON.stringify(next)); setPending(next);
-    } catch (caught) { setError(apiErrorMessage(caught, language, t('requestFailed'))); }
+    } catch (caught) { if(isPermanentSyncConflict(caught)){localStorage.removeItem('skybar-access-submission');setSubmission(null)}setError(apiErrorMessage(caught, language, t('requestFailed'))); }
   };
   const terminalTitle=terminalStatus==='expired'?t('accessExpired'):terminalStatus==='disabled'?t('accessDisabled'):t('deny');
   const terminalMessage=terminalStatus==='expired'?t('requestExpired'):terminalStatus==='disabled'?t('requestDisabled'):t('requestDenied');
-  return <PublicFrame><Card className="auth-card"><p className="eyebrow">{bootstrap.data?.venue.name || 'Sky Bar'}</p><h1>{t('guestAccess')}</h1>{pending || terminalStatus ? <div className="request-wait"><div className="pulse-orb"/><h2>{terminalStatus ? terminalTitle : t('pending')}</h2><p className="muted">{terminalStatus ? terminalMessage : t('requestWaiting')}</p>{terminalStatus && <Button onClick={() => { setTerminalStatus(null); setError(''); }}>{t('requestAccess')}</Button>}</div> : <form onSubmit={submit} className="stack"><Field label={t('name')}><input value={name} onChange={(e) => setName(e.target.value)} required autoFocus /></Field><Field label={t('rooms')}><select value={roomId} onChange={(e) => setRoomId(e.target.value)} required><option value="">{t('selectRoom')}</option>{bootstrap.data?.rooms.map((room) => <option value={room.id} key={room.id}>{room.name}</option>)}</select></Field><Field label={t('language')}><select value={language} onChange={(e) => setLanguage(e.target.value as Language)}><option value="de">Deutsch</option><option value="it">Italiano</option><option value="en">English</option></select></Field>{error && <Notice kind="error">{error}</Notice>}<Button type="submit">{t('requestAccess')}</Button></form>}<a className="text-link" href="/login">{t('hostLogin')} →</a></Card></PublicFrame>;
+  return <PublicFrame languageLocked={Boolean(submission)}><Card className="auth-card"><p className="eyebrow">{bootstrap.data?.venue.name || 'Sky Bar'}</p><h1>{t('guestAccess')}</h1>{pending || terminalStatus ? <div className="request-wait"><div className="pulse-orb"/><h2>{terminalStatus ? terminalTitle : t('pending')}</h2><p className="muted">{terminalStatus ? terminalMessage : t('requestWaiting')}</p>{terminalStatus && <Button onClick={() => { setTerminalStatus(null); setError(''); }}>{t('requestAccess')}</Button>}</div> : <form onSubmit={submit} className="stack"><Field label={t('name')}><input value={name} onChange={(e) => setName(e.target.value)} required autoFocus disabled={Boolean(submission)}/></Field><Field label={t('rooms')}><select value={roomId} onChange={(e) => setRoomId(e.target.value)} required disabled={Boolean(submission)}><option value="">{t('selectRoom')}</option>{bootstrap.data?.rooms.map((room) => <option value={room.id} key={room.id}>{room.name}</option>)}</select></Field><Field label={t('language')}><select value={language} onChange={(e) => setLanguage(e.target.value as Language)} disabled={Boolean(submission)}><option value="de">Deutsch</option><option value="it">Italiano</option><option value="en">English</option></select></Field>{error && <Notice kind="error">{error}</Notice>}<Button type="submit">{submission?t('retry'):t('requestAccess')}</Button></form>}<a className="text-link" href="/login">{t('hostLogin')} →</a></Card></PublicFrame>;
 }

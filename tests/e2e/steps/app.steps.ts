@@ -1,4 +1,6 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { once } from 'node:events';
+import argon2 from 'argon2';
 import pg from 'pg';
 import { expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
@@ -9,6 +11,7 @@ const e2eBaseURL = `http://127.0.0.1:${process.env.E2E_WEB_PORT ?? '5173'}`;
 let guestPage: import('@playwright/test').Page | undefined;
 let manifestPayload: { name?: string; icons?: unknown[]; start_url?: string } | undefined;
 const extraContexts: import('@playwright/test').BrowserContext[] = [];
+const extraApiProcesses: ChildProcess[] = [];
 let firstGuestAccessStatus = 0;
 let secondGuestAccessStatus = 0;
 let crossRoomApprovalStatus = 0;
@@ -153,6 +156,9 @@ let reopenedHostSessionStatus = 0;
 let uncertainVoidReasonLocked = false;
 let retriedVoidReasons: string[] = [];
 let snapshottedBillHostName = '';
+let uncertainAccessRequestFieldsLocked = false;
+let credentialRaceLoginStatuses: number[] = [];
+let credentialRaceActiveSessions = 0;
 
 Before(async () => {
   execFileSync('npm',['run','db:seed','-w','@sky-bar/api'],{cwd:process.cwd(),env:{...process.env,E2E_RESET:'true',SEED_ADMIN_PASSWORD:'SkyBarTest123!'},stdio:'pipe'});
@@ -161,6 +167,13 @@ Before(async () => {
 After(async () => {
   if (guestPage) { await guestPage.context().close(); guestPage=undefined; }
   await Promise.all(extraContexts.splice(0).map((context) => context.close()));
+  await Promise.all(extraApiProcesses.splice(0).map(async(child)=>{
+    if(child.exitCode!==null)return;
+    const exited=once(child,'exit');
+    child.kill('SIGTERM');
+    await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5_000))]);
+    if(child.exitCode===null)child.kill('SIGKILL');
+  }));
 });
 
 async function signIn(page: import('@playwright/test').Page) {
@@ -258,6 +271,32 @@ When('the administrator credentials are recovered from the command line', async 
   recoveredDeviceStatus=(await page.context().request.get('/api/v1/auth/me')).status();
 });
 Then('the existing host device is signed out',async()=>{expect(recoveredDeviceStatus).toBe(401)});
+When('credential recovery completes while an old-password login is being verified',async({page})=>{
+  const oldPassword='RacingOldPassword123!';
+  const oldHash=await argon2.hash(oldPassword,{type:argon2.argon2id,memoryCost:19_456,timeCost:12,parallelism:1});
+  const newHash=await argon2.hash('RacingNewPassword123!',{type:argon2.argon2id,memoryCost:19_456,timeCost:2,parallelism:1});
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});
+  await database.connect();
+  try{
+    await database.query("UPDATE hosts SET password_hash=$1 WHERE lower(email)='admin@skybar.test'",[oldHash]);
+    await database.query("UPDATE host_sessions SET revoked_at=now() WHERE host_id=(SELECT id FROM hosts WHERE lower(email)='admin@skybar.test') AND revoked_at IS NULL");
+    const login=page.context().request.post('/api/v1/auth/login',{data:{email:'admin@skybar.test',password:oldPassword}});
+    await expect.poll(async()=>Number((await database.query(
+      `SELECT count(*) FROM pg_stat_activity
+        WHERE pid<>pg_backend_pid() AND state='idle'
+          AND query LIKE '%password_hash AS "passwordHash"%lower(email)=lower($1)%'`,
+    )).rows[0].count),{timeout:5_000,intervals:[10,20,50]}).toBeGreaterThan(0);
+    await database.query('BEGIN');
+    await database.query("UPDATE hosts SET password_hash=$1,version=version+1 WHERE lower(email)='admin@skybar.test'",[newHash]);
+    await database.query("UPDATE host_sessions SET revoked_at=now() WHERE host_id=(SELECT id FROM hosts WHERE lower(email)='admin@skybar.test') AND revoked_at IS NULL");
+    await database.query('COMMIT');
+    credentialRaceLoginStatuses=[(await login).status()];
+    credentialRaceActiveSessions=Number((await database.query(
+      "SELECT count(*) FROM host_sessions WHERE host_id=(SELECT id FROM hosts WHERE lower(email)='admin@skybar.test') AND revoked_at IS NULL AND expires_at>now()",
+    )).rows[0].count);
+  }finally{await database.end()}
+});
+Then('the old-password login is rejected without creating a session',async()=>{expect(credentialRaceLoginStatuses).toEqual([401]);expect(credentialRaceActiveSessions).toBe(0)});
 
 When('the administrator changes the venue name to {string}', async ({ page }, name:string) => { await page.goto('/app/settings');await page.getByLabel('Name des Betriebs').fill(name);await page.getByRole('button',{name:'Speichern'}).click(); });
 Then('the navigation shows the venue name {string}', async ({ page }, name:string) => { await expect(page.locator('.brand strong')).toHaveText(name); });
@@ -381,11 +420,13 @@ When('the guest retries an access request after its first response is lost',asyn
   });
   await guestPage!.locator('form button[type="submit"]').click();
   await expect(guestPage!.locator('.notice--error')).toBeVisible();
-  await guestPage!.locator('form button[type="submit"]').click();
+  uncertainAccessRequestFieldsLocked=await guestPage!.locator('form input,form select').evaluateAll(fields=>fields.every(field=>(field as HTMLInputElement).disabled));
+  await guestPage!.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();
   await expect(guestPage!.locator('.request-wait')).toBeVisible();
   retriedAccessRequestMutationIds=await guestPage!.evaluate(()=>(window as unknown as {__skyBarAccessRequestRetryIds:string[]}).__skyBarAccessRequestRetryIds);
 });
 Then('both access request attempts use the same mutation identifier',async()=>{expect(retriedAccessRequestMutationIds).toHaveLength(2);expect(new Set(retriedAccessRequestMutationIds).size).toBe(1)});
+Then('the uncertain access request fields stay locked for retry',async()=>{expect(uncertainAccessRequestFieldsLocked).toBe(true)});
 Then('the host sees only one pending request from that guest',async({page})=>{const requests=await (await page.context().request.get('/api/v1/access-requests')).json() as {data:{name:string}[]};pendingAccessRequestCount=requests.data.filter((item)=>item.name==='Retry Guest').length;expect(pendingAccessRequestCount).toBe(1)});
 When('the guest closes the pending request page',async()=>{await guestPage!.close()});
 Then('reopening the request restores the approved guest access',async()=>{const context=guestPage!.context();guestPage=await context.newPage();await guestPage.goto('/guest/request');await expect(guestPage).toHaveURL(/\/guest$/,{timeout:10_000});await expect(guestPage.getByRole('heading',{name:'Persistent Guest'})).toBeVisible()});
@@ -588,6 +629,35 @@ When('the administrator archives a room with an active guest',async({page})=>{aw
 Then('the room screen explains that active guests must be moved',async({page})=>{await expect(page.locator('.notice--error')).toContainText(/aktiven Gäste.*anderes Zimmer|ospiti attivi.*camera|active guests.*another room/)});
 When('administrators submit conflicting room orders concurrently',async({page})=>{const request=page.context().request;concurrentRoomOrderStatuses=[];for(let attempt=0;attempt<8;attempt+=1){const current=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;version:number}[]};const [a,b,c]=current.data;const versions=new Map(current.data.map(room=>[room.id,room.version]));const command=(ids:string[])=>({rooms:ids.map(id=>({id,expectedVersion:versions.get(id)!}))});const responses=await Promise.all([request.put('/api/v1/rooms/order',{headers:csrfHeaders,data:command([b!.id,a!.id,c!.id])}),request.put('/api/v1/rooms/order',{headers:csrfHeaders,data:command([a!.id,c!.id,b!.id])})]);concurrentRoomOrderStatuses.push(...responses.map(response=>response.status()))}});
 Then('every room reorder completes without a server error',async()=>{expect(concurrentRoomOrderStatuses).toHaveLength(16);for(let index=0;index<concurrentRoomOrderStatuses.length;index+=2)expect(concurrentRoomOrderStatuses.slice(index,index+2).sort()).toEqual([200,409])});
+When('another API replica creates a room',async({page})=>{
+  const replicaPort=3199;
+  const replica=spawn(process.execPath,['apps/api/dist/index.js'],{
+    cwd:process.cwd(),
+    env:{...process.env,PORT:String(replicaPort),LOG_LEVEL:'warn',RATE_LIMIT_MAX:'5000'},
+    stdio:'ignore',
+  });
+  extraApiProcesses.push(replica);
+  await expect.poll(async()=>{try{return (await fetch(`http://127.0.0.1:${replicaPort}/api/v1/health`)).status}catch{return 0}},{timeout:15_000}).toBe(200);
+  await page.evaluate(()=>new Promise<void>((resolve,reject)=>{
+    sessionStorage.setItem('__skyBarReplicaRoomEvent','0');
+    const events=new EventSource('/api/v1/events');
+    Object.assign(window,{__skyBarReplicaStream:events});
+    events.addEventListener('rooms.changed',()=>sessionStorage.setItem('__skyBarReplicaRoomEvent','1'));
+    events.addEventListener('open',()=>resolve(),{once:true});
+    events.addEventListener('error',()=>{if(events.readyState===EventSource.CLOSED)reject(new Error('Replica test stream closed before opening'))},{once:true});
+  }));
+  const cookie=(await page.context().cookies()).map(item=>`${item.name}=${item.value}`).join('; ');
+  const response=await fetch(`http://127.0.0.1:${replicaPort}/api/v1/rooms`,{
+    method:'POST',
+    headers:{cookie,'content-type':'application/json','x-skybar-csrf':'1'},
+    body:JSON.stringify({mutationId:crypto.randomUUID(),name:'Replica room'}),
+  });
+  expect(response.status).toBe(201);
+});
+Then('the connected host receives the other replica room event',async({page})=>{
+  await expect.poll(()=>page.evaluate(()=>sessionStorage.getItem('__skyBarReplicaRoomEvent')),{timeout:10_000}).toBe('1');
+  await page.evaluate(()=>((window as unknown as {__skyBarReplicaStream:EventSource}).__skyBarReplicaStream).close());
+});
 When('a room reorder response is lost before another administrator reorders rooms',async({page})=>{const request=page.context().request;const original=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;version:number}[]};const [a,b,c]=original.data;const command=(ids:string[],rooms:{id:string;version:number}[])=>({rooms:ids.map(id=>({id,expectedVersion:rooms.find(room=>room.id===id)!.version}))});const staleCommand=command([b!.id,a!.id,c!.id],original.data);expect((await request.put('/api/v1/rooms/order',{headers:csrfHeaders,data:staleCommand})).status()).toBe(200);const afterFirst=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;version:number}[]};expectedRoomOrderFinalIds=[c!.id,b!.id,a!.id];expect((await request.put('/api/v1/rooms/order',{headers:csrfHeaders,data:command(expectedRoomOrderFinalIds,afterFirst.data)})).status()).toBe(200);staleRoomOrderStatus=(await request.put('/api/v1/rooms/order',{headers:csrfHeaders,data:staleCommand})).status();staleRoomOrderFinalIds=((await (await request.get('/api/v1/rooms')).json()) as {data:{id:string}[]}).data.map(room=>room.id)});
 Then('retrying the stale room reorder is rejected',async()=>{expect(staleRoomOrderStatus).toBe(409)});
 Then('the newer room order remains configured',async()=>{expect(staleRoomOrderFinalIds).toEqual(expectedRoomOrderFinalIds)});
@@ -605,6 +675,7 @@ When('the host changes their language to Italian',async({page})=>{await page.got
 Then('the navigation is shown in Italian',async({page})=>{await expect(page.getByText('Panoramica')).toBeVisible()});
 When('the host changes their language to Italian and opens the product editor',async({page})=>{await page.goto('/app/account');await page.getByLabel(/Sprache|Language/).selectOption('it');await page.getByRole('button',{name:/Speichern|Save/}).click();await expect(page.getByText('Panoramica')).toBeVisible();await page.goto('/app/products');await page.getByRole('button',{name:/Aggiungi/}).first().click()});
 Then('the product name label is shown in Italian',async({page})=>{await expect(page.getByLabel('Nome · DE')).toBeVisible()});
+Then('the product category options are shown in Italian',async({page})=>{await expect(page.getByLabel('Categoria').locator('option').first()).toHaveText('Bevande')});
 When('the guest selects Italian',async()=>{await guestPage!.getByLabel(/Sprache|Lingua|Language/).selectOption('it')});
 Then('untranslated product content falls back to German',async()=>{await expect(guestPage!.getByText('Hauskeks',{exact:true})).toBeVisible()});
 When('the venue default language is Italian',async({page,browser})=>{const request=page.context().request;const venue=await (await request.get('/api/v1/venue')).json() as {name:string;timezone:string;version:number};expect((await request.put('/api/v1/venue',{headers:csrfHeaders,data:{name:venue.name,timezone:venue.timezone,language:'it',expectedVersion:venue.version}})).status()).toBe(200);const context=await browser.newContext({baseURL:e2eBaseURL,locale:'en-US'});extraContexts.push(context);freshGuestPage=await context.newPage();await freshGuestPage.goto('/guest/request')});
@@ -824,6 +895,18 @@ When('the venue timezone changes after a bill is settled',async({page})=>{const 
 Then('the bill date uses its snapshotted venue timezone',async({page})=>{await expect(page.locator('.bill-meta')).toContainText(snapshottedBillDate)});
 When('the settling host changes their name after billing',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const settled=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};expect((await request.patch('/api/v1/account',{headers:csrfHeaders,data:{name:'Renamed Host'}})).status()).toBe(200);const bill=await (await request.get(`/api/v1/bills/${settled.id}`)).json() as {hostName:string};snapshottedBillHostName=bill.hostName;await page.goto(`/app/bills/${settled.id}`)});
 Then('the bill still shows the original host name',async({page})=>{expect(snapshottedBillHostName).toBe('Mira Host');await expect(page.locator('.bill-meta')).toContainText('Mira Host');await expect(page.locator('.bill-meta')).not.toContainText('Renamed Host')});
+When('the host opens a legacy bill without trustworthy host attribution',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);
+  const guest=guests.data.find(item=>item.name==='Anna Berger')!;
+  const product=products.data.find(item=>item.name.de==='Helles')!;
+  const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};
+  const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});
+  await database.connect();
+  try{await database.query("UPDATE bills SET host_name='',host_name_known=false WHERE id=$1",[bill.id])}finally{await database.end()}
+  await page.goto(`/app/bills/${bill.id}`);
+});
+Then('the bill explains that the historical host is unavailable',async({page})=>{await expect(page.locator('.bill-meta')).toContainText('Historischer Host nicht verfügbar');await expect(page.locator('.bill-meta')).not.toContainText('Mira Host')});
 
 When('the same item void mutation is submitted twice',async({page})=>{
   const {request,me,guests,products}=await operationalData(page);

@@ -27,6 +27,7 @@ Feature: Guest device access and self-service
     Given an authenticated administrator and a separate guest device
     When the guest retries an access request after its first response is lost
     Then both access request attempts use the same mutation identifier
+    And the uncertain access request fields stay locked for retry
     And the host sees only one pending request from that guest
 
   Scenario: A pending access request survives closing the app

@@ -10,6 +10,7 @@ Feature: German, Italian, and English localization
     Given an authenticated administrator
     When the host changes their language to Italian and opens the product editor
     Then the product name label is shown in Italian
+    And the product category options are shown in Italian
 
   Scenario: Missing product translation falls back to German
     Given an approved guest device for "Luca Rossi" in room "102"
