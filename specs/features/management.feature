@@ -8,6 +8,13 @@ Feature: Venue operations configuration
     When the administrator renames room "Garden 7" to "Garden 8"
     Then room "Garden 8" is listed
 
+  Scenario: An uncertain room creation is recovered idempotently
+    Given an authenticated administrator
+    When the administrator retries room creation after its first response is lost
+    Then both room creation attempts use the same mutation identifier
+    And only one recoverable room exists
+    And changing the replayed room creation is rejected
+
   Scenario: A host creates and edits a guest
     Given an authenticated administrator
     When the host creates guest "Ada Test" in room "101"

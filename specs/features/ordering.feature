@@ -33,6 +33,12 @@ Feature: Host order entry and billing
     When the host removes the open item while offline
     Then the item removal is queued for synchronization
 
+  Scenario: An empty open tab cannot be offered for settlement
+    Given an authenticated administrator
+    And an open "Helles" order for "Anna Berger" in room "101"
+    When the host removes the only open item
+    Then no settlement action is offered for the empty tab
+
   Scenario: A transient synchronization failure is retried
     Given an authenticated administrator with the order catalog loaded
     When a queued order encounters one transient synchronization failure

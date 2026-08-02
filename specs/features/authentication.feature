@@ -18,6 +18,11 @@ Feature: Secure host accounts and devices
     Then the password change keeps the current device and revokes the other device
     And the new password can be used to sign in
 
+  Scenario: An incorrect current password is explained
+    Given an authenticated administrator
+    When the administrator submits an incorrect current password
+    Then the account screen shows the localized password error
+
   Scenario: Revoking the current device signs out immediately
     Given an authenticated administrator
     When the host revokes the current device from the account screen

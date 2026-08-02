@@ -13,6 +13,7 @@ import {
   orderBatchSchema,
   productCreateSchema,
   productInputSchema,
+  roomCreateSchema,
   roomInputSchema,
   settleTabSchema,
   venueSettingsSchema,
@@ -408,10 +409,32 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   )).rows));
 
   app.post('/api/v1/rooms', { preHandler: requireAdmin }, async (request, reply) => {
-    const input = body(roomInputSchema, request);
-    const result = await pool.query('INSERT INTO rooms(name,position) VALUES ($1,(SELECT COALESCE(max(position),-1)+1 FROM rooms)) RETURNING id,name,position,version', [input.name]);
-    await emitEvent('rooms.changed', {});
-    return reply.code(201).send(result.rows[0]);
+    const input = body(roomCreateSchema, request);
+    const created = await transaction(async (client) => {
+      await client.query('LOCK TABLE rooms IN SHARE ROW EXCLUSIVE MODE');
+      const replay = await client.query<{ id:string;name:string;position:number;version:number;hostId:string;commandName:string }>(
+        `SELECT id,name,position,version,created_by_host AS "hostId",create_name AS "commandName"
+           FROM rooms WHERE create_mutation_id=$1`,
+        [input.mutationId],
+      );
+      if (replay.rows[0]) {
+        if (replay.rows[0].hostId !== request.hostIdentity!.id) throw new HttpError(403, 'HOST_MISMATCH', 'This room creation belongs to another host.');
+        if (replay.rows[0].commandName !== input.name) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to a different room creation command.');
+        const { hostId: _hostId, commandName: _commandName, ...room } = replay.rows[0];
+        return { room, event: undefined };
+      }
+      const result = await client.query<{ id:string;name:string;position:number;version:number }>(
+        `INSERT INTO rooms(name,position,create_mutation_id,create_name,created_by_host)
+         VALUES ($1,(SELECT COALESCE(max(position),-1)+1 FROM rooms),$2,$1,$3) RETURNING id,name,position,version`,
+        [input.name,input.mutationId,request.hostIdentity!.id],
+      );
+      return { room: result.rows[0]!, event: await storeEvent('rooms.changed', {}, client) };
+    });
+    if (created.event) {
+      try { publishEvent(created.event); }
+      catch (error) { app.log.error(error, 'Could not publish committed room event'); }
+    }
+    return reply.code(201).send(created.room);
   });
 
   app.patch('/api/v1/rooms/:id', { preHandler: requireAdmin }, async (request) => {

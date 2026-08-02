@@ -21,6 +21,14 @@ Feature: Guest device access and self-service
     Then both access request attempts use the same mutation identifier
     And the host sees only one pending request from that guest
 
+  Scenario: A pending access request survives closing the app
+    Given an authenticated administrator and a separate guest device
+    When "Persistent Guest" requests access for room "102"
+    Then the host sees the pending request for "Persistent Guest"
+    When the guest closes the pending request page
+    And the host approves the request for one day
+    Then reopening the request restores the approved guest access
+
   Scenario: A denied access request stops polling
     Given an authenticated administrator and a separate guest device
     When "Denied Poller" requests access for room "102"

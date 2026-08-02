@@ -36,6 +36,10 @@ export const roomInputSchema = z.object({
   name: z.string().trim().min(1).max(80),
 });
 
+export const roomCreateSchema = roomInputSchema.extend({
+  mutationId: z.string().uuid(),
+});
+
 export const guestInputSchema = z.object({
   name: z.string().trim().min(1).max(120),
   roomId: z.string().uuid(),
