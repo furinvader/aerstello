@@ -12,6 +12,7 @@ const localizedErrors: Partial<Record<string, Record<Language, string>>> = {
   ROOM_HAS_GUESTS: { de: 'Bitte zuerst alle aktiven Gäste in ein anderes Zimmer verschieben oder archivieren.', it: 'Sposta prima tutti gli ospiti attivi in un’altra camera o archiviali.', en: 'Move all active guests to another room or archive them first.' },
   ROOM_HAS_REQUESTS: { de: 'Bitte zuerst alle ausstehenden Zugangsanfragen für dieses Zimmer bearbeiten.', it: 'Gestisci prima tutte le richieste di accesso in sospeso per questa camera.', en: 'Resolve all pending access requests for this room first.' },
   GUEST_NOT_FOUND: { de: 'Der Gast ist nicht mehr verfügbar.', it: 'L’ospite non è più disponibile.', en: 'The guest is no longer available.' },
+  GUEST_HAS_ORDERS: { de: 'Bitte zuerst die offene Bestellung dieses Gasts abschließen.', it: 'Chiudi prima l’ordine aperto di questo ospite.', en: 'Settle this guest’s open order first.' },
   CATALOG_CONFLICT: { de: 'Der Produktkatalog hat sich geändert. Bitte die Bestellung prüfen.', it: 'Il catalogo è cambiato. Controlla l’ordine.', en: 'The product catalog changed. Please review the order.' },
   TAB_TOTAL_LIMIT: { de: 'Der offene Betrag hat die zulässige Höchstgrenze erreicht.', it: 'Il conto aperto ha raggiunto il limite massimo.', en: 'The open tab has reached its maximum total.' },
   UNDO_PENDING: { de: 'Bitte warten, bis die Rückgängig-Frist des Gasts abgelaufen ist.', it: 'Attendi la fine del periodo di annullamento dell’ospite.', en: 'Wait for the guest undo window to finish.' },

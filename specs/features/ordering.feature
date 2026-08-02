@@ -57,6 +57,12 @@ Feature: Host order entry and billing
     And order editing was locked while the result was uncertain
     And the guest tab contains the order only once
 
+  Scenario: An HTTP timeout preserves the uncertain order command
+    Given an authenticated administrator
+    When the host retries an order after a committed HTTP timeout
+    Then both order attempts use the same mutation identifier
+    And the guest tab contains the order only once
+
   Scenario: An uncertain order survives a page reload
     Given an authenticated administrator
     When the host reloads after an order response is lost

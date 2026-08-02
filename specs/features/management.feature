@@ -8,6 +8,11 @@ Feature: Venue operations configuration
     When the administrator renames room "Garden 7" to "Garden 8"
     Then room "Garden 8" is listed
 
+  Scenario: Invalid room renames are explained
+    Given an authenticated administrator
+    When the administrator submits an invalid room rename
+    Then the room editor shows a validation error
+
   Scenario: An uncertain room creation is recovered idempotently
     Given an authenticated administrator
     When the administrator retries room creation after its first response is lost
@@ -39,6 +44,11 @@ Feature: Venue operations configuration
     Given an authenticated administrator
     When another device creates guest "Realtime Guest" in room "101"
     Then guest "Realtime Guest" appears after the committed event
+
+  Scenario: Guest archival reports an order acquired after confirmation
+    Given an authenticated administrator
+    When a guest receives an order while their archive confirmation is open
+    Then the archive confirmation explains that the order must be settled
 
   Scenario: An administrator creates a localized self-service product
     Given an authenticated administrator
