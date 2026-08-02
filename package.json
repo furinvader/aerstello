@@ -8,6 +8,7 @@
   ],
   "scripts": {
     "dev": "concurrently -n api,web -c blue,cyan \"npm run dev -w @sky-bar/api\" \"npm run dev -w @sky-bar/web\"",
+    "start:e2e:ci": "npm run build && concurrently -k -s first -n api,web -c blue,cyan \"npm run start -w @sky-bar/api\" \"npm run preview:e2e -w @sky-bar/web\"",
     "build": "npm run build -w @sky-bar/shared && npm run build -w @sky-bar/api && npm run build -w @sky-bar/web",
     "typecheck": "npm run build -w @sky-bar/shared && npm run typecheck -w @sky-bar/api && npm run typecheck -w @sky-bar/web",
     "test": "npm run test --workspaces --if-present",

@@ -4,6 +4,7 @@ import AxeBuilder from '@axe-core/playwright';
 import { createBdd } from 'playwright-bdd';
 
 const { Before, After, Given, When, Then } = createBdd();
+const e2eBaseURL = `http://127.0.0.1:${process.env.E2E_WEB_PORT ?? '5173'}`;
 let guestPage: import('@playwright/test').Page | undefined;
 let manifestPayload: { name?: string; icons?: unknown[] } | undefined;
 const extraContexts: import('@playwright/test').BrowserContext[] = [];
@@ -104,7 +105,7 @@ When('two devices exchange the same approved access request token',async({page,b
   const room=bootstrap.rooms.find((item)=>item.name==='102')!;
   const created=await (await request.post('/api/v1/public/access-requests',{data:{name:'One-time guest',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
   await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{expiresAt:new Date(Date.now()+86_400_000).toISOString()}});
-  const first=await browser.newContext({baseURL:'http://127.0.0.1:5173'});const second=await browser.newContext({baseURL:'http://127.0.0.1:5173'});extraContexts.push(first,second);
+  const first=await browser.newContext({baseURL:e2eBaseURL});const second=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(first,second);
   await Promise.all([
     first.request.get(`/api/v1/public/access-requests/${created.id}/status?token=${encodeURIComponent(created.statusToken)}`),
     second.request.get(`/api/v1/public/access-requests/${created.id}/status?token=${encodeURIComponent(created.statusToken)}`),

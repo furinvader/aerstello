@@ -2,6 +2,10 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 
+const apiPort = process.env.PORT ?? '3001';
+const webPort = Number(process.env.E2E_WEB_PORT ?? '5173');
+const apiProxy = { '/api': { target: `http://127.0.0.1:${apiPort}`, changeOrigin: true } };
+
 export default defineConfig({
   plugins: [
     react(),
@@ -38,7 +42,11 @@ export default defineConfig({
     }),
   ],
   server: {
-    port: 5173,
-    proxy: { '/api': { target: 'http://localhost:3001', changeOrigin: true } },
+    port: webPort,
+    proxy: apiProxy,
+  },
+  preview: {
+    port: webPort,
+    proxy: apiProxy,
   },
 });
