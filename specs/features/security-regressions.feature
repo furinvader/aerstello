@@ -32,6 +32,11 @@ Feature: Device grants and replay protection
     Then both bill void responses succeed
     And the billed items are restored only once
 
+  Scenario: Bill reversal and guest archival are serialized
+    Given an authenticated administrator
+    When guest archival races with reversal of their bill
+    Then either the archive or the bill reversal is rejected
+
   Scenario: Revoked sessions stop receiving realtime events
     Given an authenticated administrator
     When the administrator session is revoked while its event stream is open

@@ -8,6 +8,12 @@ Feature: Guest device access and self-service
     When the host approves the request for one day
     Then the guest device opens Luca's guest view without a password
 
+  Scenario: A lost grant response can be recovered by the requesting device
+    Given an authenticated administrator
+    When an approved guest grant response is lost before its cookie is retained
+    Then retrying the same grant exchange restores guest access
+    And a different grant exchange receives no guest access
+
   Scenario: A guest can undo a self-service item for ten seconds
     Given an approved guest device for "Luca Rossi" in room "102"
     When the guest adds "Mineralwasser" from self-service

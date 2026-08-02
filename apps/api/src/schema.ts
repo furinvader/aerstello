@@ -177,6 +177,7 @@ export const accessRequests = pgTable('access_requests', {
   resolvedBy: uuid('resolved_by').references(() => hosts.id),
   expiresAt: timestamp('expires_at', { withTimezone: true }),
   statusTokenConsumedAt: timestamp('status_token_consumed_at', { withTimezone: true }),
+  grantExchangeId: uuid('grant_exchange_id'),
 });
 
 export const guestSessions = pgTable('guest_sessions', {

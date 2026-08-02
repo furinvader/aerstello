@@ -28,9 +28,20 @@ export function HostShell({children}:{children:ReactNode}) {
   const hostId = me.data?.host.id;
   useEffect(() => {
     if (!hostId) { setQueued(0); setConflicts([]); return; }
-    const sync = async () => { setOnline(navigator.onLine); if (navigator.onLine) { await flushQueue(hostId); await client.invalidateQueries(); } setQueued(await pendingMutationCount(hostId)); setConflicts(await mutationConflicts(hostId)); };
+    let syncing = false;
+    const sync = async () => {
+      if (syncing) return;
+      syncing = true;
+      try {
+        setOnline(navigator.onLine);
+        if (navigator.onLine && await flushQueue(hostId) > 0) await client.invalidateQueries();
+        setQueued(await pendingMutationCount(hostId));
+        setConflicts(await mutationConflicts(hostId));
+      } finally { syncing = false; }
+    };
     window.addEventListener('online', sync); window.addEventListener('offline', sync); void sync();
-    return () => { window.removeEventListener('online', sync); window.removeEventListener('offline', sync); };
+    const timer = window.setInterval(() => void sync(), 5000);
+    return () => { window.removeEventListener('online', sync); window.removeEventListener('offline', sync); clearInterval(timer); };
   }, [client, hostId]);
   useEffect(() => {
     if (!me.isSuccess) return;
@@ -52,7 +63,7 @@ export function HostShell({children}:{children:ReactNode}) {
     { to:'/app/orders', label:t('orders'), icon:ClipboardList },
     { to:'/app/bills', label:t('bills'), icon:CreditCard },
     { to:'/app/guests', label:t('guests'), icon:UserRound },
-    { to:'/app/rooms', label:t('rooms'), icon:BedDouble },
+    { to:'/app/rooms', label:t('rooms'), icon:BedDouble, admin:true },
     { to:'/app/products', label:t('products'), icon:Boxes, admin:true },
     { to:'/app/requests', label:t('requests'), icon:UserRoundCheck, badge:requests.data?.data.length },
     { to:'/app/settings', label:t('settings'), icon:Building2, admin:true },

@@ -16,6 +16,17 @@ Feature: Host order entry and billing
     When the device goes offline and the host submits one "Helles" for "Anna Berger" in room "101"
     Then the order is marked as queued for synchronization
 
+  Scenario: A host removes an incorrect item while offline
+    Given an authenticated administrator
+    And an open "Helles" order for "Anna Berger" in room "101"
+    When the host removes the open item while offline
+    Then the item removal is queued for synchronization
+
+  Scenario: A transient synchronization failure is retried
+    Given an authenticated administrator with the order catalog loaded
+    When a queued order encounters one transient synchronization failure
+    Then the queued order is retried without another connectivity event
+
   Scenario: An uncertain order response is retried idempotently
     Given an authenticated administrator
     When the host retries an order after its first response is lost

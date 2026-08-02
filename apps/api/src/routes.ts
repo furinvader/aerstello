@@ -24,6 +24,7 @@ import {
   clearGuestCookie,
   clearHostCookie,
   createHostSession,
+  guestGrantToken,
   guestSessionIsActive,
   hashPassword,
   hashToken,
@@ -112,6 +113,8 @@ async function tabDetail(guestId: string) {
 }
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
+  const dummyPasswordHash = await hashPassword(newToken());
+
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof HttpError) {
       return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
@@ -161,32 +164,42 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/v1/public/access-requests/:id/status', async (request, reply) => {
     const requestId = id(request);
-    const token = (request.query as { token?: string }).token;
-    if (!token) throw new HttpError(401, 'INVALID_TOKEN', 'Request token required.');
+    const { token, grantId } = query(z.object({
+      token: z.string().min(1).max(256),
+      grantId: z.string().uuid(),
+    }), request);
     const grant = await transaction(async (client) => {
       const result = await client.query<{
-        status: string; guestId: string | null; expiresAt: Date | null; statusTokenConsumedAt: Date | null;
+        status: string; guestId: string | null; expiresAt: Date | null; statusTokenConsumedAt: Date | null; grantExchangeId: string | null;
       }>(
         `SELECT status,guest_id AS "guestId",expires_at AS "expiresAt",
-                status_token_consumed_at AS "statusTokenConsumedAt"
+                status_token_consumed_at AS "statusTokenConsumedAt",grant_exchange_id AS "grantExchangeId"
            FROM access_requests WHERE id=$1 AND status_token_hash=$2 FOR UPDATE`,
         [requestId, hashToken(token)],
       );
       const access = result.rows[0];
       if (!access) throw new HttpError(404, 'REQUEST_NOT_FOUND', 'Request not found.');
       if (access.status === 'approved' && access.guestId && access.expiresAt && !access.statusTokenConsumedAt) {
-        const guestToken=newToken();
+        const guestToken=guestGrantToken(requestId, grantId);
         await client.query(
           `INSERT INTO guest_sessions(guest_id,request_id,token_hash,user_agent,expires_at) VALUES ($1,$2,$3,$4,$5)`,
           [access.guestId, requestId, hashToken(guestToken), request.headers['user-agent']?.slice(0, 300) ?? 'Unknown device', access.expiresAt],
         );
-        await client.query('UPDATE access_requests SET status_token_consumed_at=now() WHERE id=$1', [requestId]);
+        await client.query('UPDATE access_requests SET status_token_consumed_at=now(),grant_exchange_id=$2 WHERE id=$1', [requestId, grantId]);
         return { access, guestToken };
+      }
+      if (access.status === 'approved' && access.guestId && access.expiresAt && access.grantExchangeId === grantId) {
+        const guestToken=guestGrantToken(requestId, grantId);
+        const session = await client.query(
+          `SELECT 1 FROM guest_sessions WHERE request_id=$1 AND token_hash=$2 AND revoked_at IS NULL AND expires_at>now()`,
+          [requestId, hashToken(guestToken)],
+        );
+        if (session.rowCount) return { access, guestToken };
       }
       return { access, guestToken:undefined };
     });
     if (grant.guestToken && grant.access.expiresAt) setGuestCookie(reply, grant.guestToken, new Date(grant.access.expiresAt));
-    return { status: grant.access.status, expiresAt: grant.access.expiresAt };
+    return { status: grant.access.status, expiresAt: grant.access.expiresAt, granted: Boolean(grant.guestToken) };
   });
 
   app.post('/api/v1/auth/login', async (request, reply) => {
@@ -198,7 +211,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       [input.email],
     );
     const host = result.rows[0];
-    if (!host || !(await verifyPassword(host.passwordHash, input.password))) {
+    const validPassword = await verifyPassword(host?.passwordHash ?? dummyPasswordHash, input.password);
+    if (!host || !validPassword) {
       throw new HttpError(401, 'INVALID_CREDENTIALS', 'Email or password is incorrect.');
     }
     await createHostSession(pool, host.id, request, reply);
@@ -776,6 +790,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         if (duplicate.rows[0].hostId !== request.hostIdentity!.id) throw new HttpError(403, 'HOST_MISMATCH', 'This bill void belongs to another host.');
         return { guestId: duplicate.rows[0].guestId };
       }
+      const owner = await client.query<{ guestId: string }>('SELECT guest_id AS "guestId" FROM bills WHERE id=$1', [billId]);
+      if (!owner.rows[0]) throw new HttpError(404, 'BILL_NOT_FOUND', 'Bill not found.');
+      const activeGuest = await client.query('SELECT id FROM guests WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [owner.rows[0].guestId]);
+      if (!activeGuest.rowCount) throw new HttpError(409, 'GUEST_ARCHIVED', 'An archived guest cannot have a bill reopened.');
       const result = await client.query<{ tabId: string; guestId: string; totalCents: number }>(
         `UPDATE bills SET voided_at=now(),void_reason=$1,voided_by=$2,void_mutation_id=$3
           WHERE id=$4 AND voided_at IS NULL

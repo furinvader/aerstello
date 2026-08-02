@@ -43,6 +43,12 @@ export function newToken(): string {
   return randomBytes(32).toString('base64url');
 }
 
+export function guestGrantToken(requestId: string, grantExchangeId: string): string {
+  return createHmac('sha256', config.SESSION_SECRET)
+    .update(`guest-grant:${requestId}:${grantExchangeId}`)
+    .digest('base64url');
+}
+
 export async function hashPassword(password: string): Promise<string> {
   return argon2.hash(password, { type: argon2.argon2id, memoryCost: 19_456, timeCost: 2, parallelism: 1 });
 }
