@@ -14,6 +14,23 @@ import { useHostContext } from './host-shell';
 import type { AccessRequest, Bill, Category, Guest, Host, OrderItem, Product, Room, Tab, TabSummary, Venue } from './types';
 
 const list = <T,>(path: string) => api<{ data: T[] }>(path);
+const uncertainOrderKey = (hostId: string) => `skybar-uncertain-order:${hostId}`;
+
+function loadUncertainOrder(hostId: string): QueuedMutation | null {
+  try {
+    const raw = sessionStorage.getItem(uncertainOrderKey(hostId));
+    if (!raw) return null;
+    const mutation = JSON.parse(raw) as QueuedMutation;
+    if (mutation.hostId === hostId && mutation.path === '/order-batches' && mutation.display?.kind === 'order') return mutation;
+  } catch { /* Ignore and remove malformed recovery state below. */ }
+  sessionStorage.removeItem(uncertainOrderKey(hostId));
+  return null;
+}
+
+function persistUncertainOrder(hostId: string, mutation: QueuedMutation | null): void {
+  if (mutation) sessionStorage.setItem(uncertainOrderKey(hostId), JSON.stringify(mutation));
+  else sessionStorage.removeItem(uncertainOrderKey(hostId));
+}
 
 export function DashboardPage() {
   const { t, language } = useI18n();
@@ -38,29 +55,35 @@ export function TakeOrdersPage() {
   const guests = useQuery<{data:Guest[]}>({queryKey:['guests'],queryFn:()=>list('/guests')});
   const categories = useQuery<{data:Category[]}>({queryKey:['categories'],queryFn:()=>list('/categories')});
   const products = useQuery<{data:Product[];catalogVersion:number}>({queryKey:['products'],queryFn:()=>api('/products')});
-  const initialGuest = new URLSearchParams(location.search).get('guest') ?? '';
+  const [restoredSubmission]=useState(()=>loadUncertainOrder(host.id));
+  const initialGuest = restoredSubmission?.display?.kind === 'order'
+    ? restoredSubmission.display.guestId
+    : new URLSearchParams(location.search).get('guest') ?? '';
   const initialGuestData = guests.data?.data.find((guest)=>guest.id===initialGuest);
   const [roomId,setRoomId]=useState(initialGuestData?.roomId ?? '');
   const [guestId,setGuestId]=useState(initialGuest);
   const [search,setSearch]=useState('');
-  const [cart,setCart]=useState<Record<string,number>>({});
+  const [cart,setCart]=useState<Record<string,number>>(()=>restoredSubmission?.display?.kind === 'order'
+    ? Object.fromEntries(restoredSubmission.display.items.map(item=>[item.productId,item.quantity]))
+    : {});
   const [createGuest,setCreateGuest]=useState(false);
   const [settleTab,setSettleTab]=useState<Tab|null>(null);
   const [voidingItem,setVoidingItem]=useState<{item:OrderItem;mutationId:string;createdAt:string}|null>(null);
   const [submitting,setSubmitting]=useState(false);
-  const [uncertainOrder,setUncertainOrder]=useState(false);
-  const [message,setMessage]=useState<{kind:'success'|'error';text:string}|null>(null);
-  const stagedSubmission=useRef<QueuedMutation|null>(null);
+  const [uncertainOrder,setUncertainOrder]=useState(Boolean(restoredSubmission));
+  const [message,setMessage]=useState<{kind:'success'|'error';text:string}|null>(()=>restoredSubmission?{kind:'error',text:t('uncertainOrderHelp')}:null);
+  const stagedSubmission=useRef<QueuedMutation|null>(restoredSubmission);
   const tab=useQuery<Tab>({queryKey:['tab',guestId],queryFn:()=>api(`/guests/${guestId}/tab`),enabled:Boolean(guestId)});
   const selectedGuest=guests.data?.data.find(guest=>guest.id===guestId);
   const eligibleProducts=products.data?.data.filter(product=>product.enabled&&!product.selfServiceOnly)??[];
   const cartLines=Object.entries(cart).flatMap(([productId,quantity])=>{const product=products.data?.data.find(item=>item.id===productId);return product?[{product,quantity}]:[]});
   const cartTotal=cartLines.reduce((sum,line)=>sum+line.product.priceCents*line.quantity,0);
+  useEffect(()=>{const selected=guests.data?.data.find(guest=>guest.id===guestId);if(selected&&!roomId)setRoomId(selected.roomId)},[guestId,guests.data?.data,roomId]);
   const selectGuest=(nextGuestId:string,nextRoomId:string)=>{
     if(nextGuestId!==guestId&&uncertainOrder){setMessage({kind:'error',text:t('uncertainOrderHelp')});return}
     if(nextGuestId!==guestId&&cartLines.length){
       if(!globalThis.confirm(t('changeGuestCartWarning')))return;
-      setCart({});stagedSubmission.current=null;
+      setCart({});stagedSubmission.current=null;persistUncertainOrder(host.id,null);
     }
     setGuestId(nextGuestId);setRoomId(nextRoomId);
   };
@@ -71,9 +94,11 @@ export function TakeOrdersPage() {
     if(!stagedSubmission.current){
       const mutationId=crypto.randomUUID();const capturedAt=new Date().toISOString();const items=cartLines.map(line=>({productId:line.product.id,quantity:line.quantity}));
       stagedSubmission.current={id:mutationId,hostId:host.id,path:'/order-batches',method:'POST',createdAt:capturedAt,body:{mutationId,originHostId:host.id,guestId,catalogVersion:products.data.catalogVersion,capturedAt,items},display:{kind:'order',guestId,guestName:selectedGuest?.name??guestId,roomName:selectedGuest?.roomName??'',items:cartLines.map(line=>({productId:line.product.id,productName:line.product.name,quantity:line.quantity}))}};
+      try { persistUncertainOrder(host.id,stagedSubmission.current); }
+      catch { stagedSubmission.current=null;setSubmitting(false);setMessage({kind:'error',text:t('requestFailed')});return; }
     }
-    try{const result=await submitOrQueue(stagedSubmission.current);stagedSubmission.current=null;setUncertainOrder(false);setCart({});setMessage({kind:'success',text:result.queued?t('orderQueued'):t('orderAdded')});await client.invalidateQueries({queryKey:['tab',guestId]});}
-    catch(caught){const uncertain=!(caught instanceof ApiError)||caught.status>=500;setUncertainOrder(uncertain);if(!uncertain)stagedSubmission.current=null;setMessage({kind:'error',text:uncertain?t('uncertainOrderHelp'):apiErrorMessage(caught,language,t('requestFailed'))});}
+    try{const result=await submitOrQueue(stagedSubmission.current);persistUncertainOrder(host.id,null);stagedSubmission.current=null;setUncertainOrder(false);setCart({});setMessage({kind:'success',text:result.queued?t('orderQueued'):t('orderAdded')});await client.invalidateQueries({queryKey:['tab',guestId]});}
+    catch(caught){const uncertain=!(caught instanceof ApiError)||caught.status>=500;setUncertainOrder(uncertain);if(!uncertain){persistUncertainOrder(host.id,null);stagedSubmission.current=null}setMessage({kind:'error',text:uncertain?t('uncertainOrderHelp'):apiErrorMessage(caught,language,t('requestFailed'))});}
     finally{setSubmitting(false)}
   };
   const voidItem=async(reason:string)=>{
@@ -164,7 +189,7 @@ export function RequestsPage(){
 }
 
 function ApproveRequestModal({request,guests,onClose,onApproved}:{request:AccessRequest;guests:Guest[];onClose:()=>void;onApproved:()=>void}){
-  const {t,language}=useI18n();const matches=guests.filter(guest=>guest.roomId===request.roomId);const [guestId,setGuestId]=useState(matches[0]?.id??'new');const [expiresAt,setExpiresAt]=useState(()=>toLocalDateTimeInputValue(new Date(Date.now()+24*60*60*1000)));const [error,setError]=useState('');const submit=async(e:FormEvent)=>{e.preventDefault();try{await api(`/access-requests/${request.id}/approve`,{method:'POST',body:json({guestId:guestId==='new'?undefined:guestId,expiresAt:new Date(expiresAt).toISOString()})});onApproved()}catch(caught){setError(apiErrorMessage(caught,language,t('requestFailed')))}};
+  const {t,language}=useI18n();const matches=guests.filter(guest=>guest.roomId===request.roomId);const [guestId,setGuestId]=useState('new');const [expiresAt,setExpiresAt]=useState(()=>toLocalDateTimeInputValue(new Date(Date.now()+24*60*60*1000)));const [error,setError]=useState('');const submit=async(e:FormEvent)=>{e.preventDefault();try{await api(`/access-requests/${request.id}/approve`,{method:'POST',body:json({guestId:guestId==='new'?undefined:guestId,expiresAt:new Date(expiresAt).toISOString()})});onApproved()}catch(caught){setError(apiErrorMessage(caught,language,t('requestFailed')))}};
   return <Modal title={`${t('approve')} · ${request.name}`} onClose={onClose}><form className="stack" onSubmit={submit}><Field label={t('linkGuest')}><select value={guestId} onChange={e=>setGuestId(e.target.value)}><option value="new">{t('createGuest')} · {request.name} · {request.roomName}</option>{matches.map(guest=><option key={guest.id} value={guest.id}>{t('linkTo')} {guest.name}</option>)}</select></Field><Field label={t('accessExpires')}><input type="datetime-local" value={expiresAt} onChange={e=>setExpiresAt(e.target.value)} required/></Field>{error&&<Notice kind="error">{error}</Notice>}<Button type="submit"><Check/> {t('approve')}</Button></form></Modal>;
 }
 

@@ -8,6 +8,13 @@ Feature: Guest device access and self-service
     When the host approves the request for one day
     Then the guest device opens Luca's guest view without a password
 
+  Scenario: Approval defaults to a separate guest identity
+    Given an authenticated administrator and a separate guest device
+    When "New Roommate" requests access for room "101"
+    Then the host sees the pending request for "New Roommate"
+    When the host opens approval for "New Roommate"
+    Then creating a new guest is selected by default
+
   Scenario: An uncertain access request response is recoverable
     Given an authenticated administrator and a separate guest device
     When the guest retries an access request after its first response is lost

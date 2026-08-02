@@ -50,6 +50,12 @@ Feature: Host order entry and billing
     And order editing was locked while the result was uncertain
     And the guest tab contains the order only once
 
+  Scenario: An uncertain order survives a page reload
+    Given an authenticated administrator
+    When the host reloads after an order response is lost
+    Then the restored order retry uses the original mutation identifier
+    And the guest tab contains the restored order only once
+
   Scenario: An uncertain settlement response is retried idempotently
     Given an authenticated administrator
     When the host retries settlement after its first response is lost

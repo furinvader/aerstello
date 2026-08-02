@@ -327,7 +327,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const hostId=id(request);
     const input=body(z.object({active:z.boolean().optional(),role:z.enum(['admin','staff']).optional()}),request);
     if(hostId===request.hostIdentity!.id && input.active===false) throw new HttpError(409,'SELF_DISABLE','You cannot disable your own account.');
-    return transaction(async (client) => {
+    const updated = await transaction(async (client) => {
       const admins=await client.query<{id:string}>(`SELECT id FROM hosts WHERE role='admin' AND active=true ORDER BY id FOR UPDATE`);
       const target=await client.query<{role:'admin'|'staff';active:boolean}>('SELECT role,active FROM hosts WHERE id=$1 FOR UPDATE',[hostId]);
       const current=target.rows[0];
@@ -341,8 +341,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
          RETURNING id,email,name,role,language,active`,[input.active??null,input.role??null,hostId]);
       if(input.active===false) await client.query('UPDATE host_sessions SET revoked_at=now() WHERE host_id=$1 AND revoked_at IS NULL',[hostId]);
       await audit('host.updated','host',hostId,input,{hostId:request.hostIdentity!.id},client);
-      return result.rows[0];
+      const event=await storeEvent('host-auth.changed',{hostId},client);
+      return {host:result.rows[0],event};
     });
+    try { publishEvent(updated.event); }
+    catch (error) { app.log.error(error, 'Could not publish committed host authorization event'); }
+    return updated.host;
   });
 
   app.get('/api/v1/venue', { preHandler: requireHost }, async () => (await pool.query(

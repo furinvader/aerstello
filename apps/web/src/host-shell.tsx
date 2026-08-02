@@ -61,7 +61,7 @@ export function HostShell({children}:{children:ReactNode}) {
     };
     events.addEventListener('open', refresh);
     events.addEventListener('error', () => void revalidateSession());
-    ['access-request.changed','orders.changed','bills.changed','rooms.changed','guests.changed','catalog.changed','venue.changed'].forEach((event) => events.addEventListener(event, refresh));
+    ['access-request.changed','orders.changed','bills.changed','rooms.changed','guests.changed','catalog.changed','venue.changed','host-auth.changed'].forEach((event) => events.addEventListener(event, refresh));
     return () => events.close();
   }, [me.isSuccess, client]);
   useLayoutEffect(() => { if (me.data?.host.language && language !== me.data.host.language) setLanguage(me.data.host.language); }, [me.data?.host.language, language, setLanguage]);

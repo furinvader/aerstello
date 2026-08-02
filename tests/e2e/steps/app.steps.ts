@@ -71,6 +71,9 @@ let recoverableProductCount = 0;
 let changedProductCreationReplayStatus = 0;
 let deniedPollCounts: [number, number] = [0, 0];
 let approvalDefaultLifetimeHours = 0;
+let reloadedOrderMutationIds: string[] = [];
+let reloadedOrderItemCount = 0;
+let roleChangedHostPage: import('@playwright/test').Page | undefined;
 
 Before(async () => {
   execFileSync('npm',['run','db:seed','-w','@sky-bar/api'],{cwd:process.cwd(),env:{...process.env,E2E_RESET:'true'},stdio:'pipe'});
@@ -116,6 +119,8 @@ Given('an authenticated staff host', async ({ page }) => {
 Then('room management is absent from the navigation', async ({ page }) => { await expect(page.getByRole('link',{name:/^Zimmer$|^Camere$|^Rooms$/})).toHaveCount(0); });
 Then('opening the room-management URL shows no mutation controls', async ({ page }) => { await page.goto('/app/rooms');await expect(page.locator('.notice--error')).toBeVisible();await expect(page.locator('.inline-form,.sortable-list')).toHaveCount(0); });
 Then('opening the product-management URL shows no mutation controls', async ({ page }) => { await page.goto('/app/products');await expect(page.locator('.notice--error')).toBeVisible();await expect(page.locator('.inline-form,.product-admin-list')).toHaveCount(0); });
+When('another administrator demotes an open host session to staff',async({page,browser})=>{const request=page.context().request;const created=await (await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{email:'role-refresh@skybar.test',name:'Role Refresh',password:'RoleRefresh123!',role:'admin',language:'en'}})).json() as {id:string};const context=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(context);roleChangedHostPage=await context.newPage();await roleChangedHostPage.goto('/login');await roleChangedHostPage.getByLabel('Email').fill('role-refresh@skybar.test');await roleChangedHostPage.getByLabel('Password').fill('RoleRefresh123!');await roleChangedHostPage.getByRole('button',{name:'Sign in'}).click();await expect(roleChangedHostPage.getByRole('link',{name:'Rooms'})).toBeVisible();expect((await request.patch(`/api/v1/hosts/${created.id}`,{headers:csrfHeaders,data:{role:'staff'}})).status()).toBe(200)});
+Then('administrator controls disappear from the affected session',async()=>{await expect(roleChangedHostPage!.getByRole('link',{name:'Rooms'})).toHaveCount(0,{timeout:10_000});expect(((await (await roleChangedHostPage!.context().request.get('/api/v1/auth/me')).json()) as {host:{role:string}}).host.role).toBe('staff')});
 When('the current host session is revoked from another administrator',async({page,browser})=>{
   const request=page.context().request;
   expect((await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{email:'remote-admin@skybar.test',name:'Remote Admin',password:'RemoteAdmin123!',role:'admin',language:'de'}})).status()).toBe(201);
@@ -217,6 +222,8 @@ Then('the queued financial mutation is preserved for review',async({page})=>{awa
 Given('an authenticated administrator and a separate guest device',async({page,browser})=>{await signIn(page);const context=await browser.newContext();guestPage=await context.newPage();});
 When('{string} requests access for room {string}',async({},name:string,room:string)=>{await guestPage!.goto('/guest/request');await guestPage!.locator('form select').nth(1).selectOption('de');await guestPage!.getByLabel('Name').fill(name);await guestPage!.locator('form select').first().selectOption({label:room});await guestPage!.locator('form button[type="submit"]').click()});
 Then('the host sees the pending request for {string}',async({page},name:string)=>{await page.goto('/app/requests');await expect(page.getByText(name,{exact:true})).toBeVisible()});
+When('the host opens approval for {string}',async({page},name:string)=>{const card=page.locator('.request-card').filter({hasText:name});await card.getByRole('button',{name:/Genehmigen|Approva|Approve/}).click()});
+Then('creating a new guest is selected by default',async({page})=>{await expect(page.locator('.modal select').first()).toHaveValue('new')});
 When('the host approves the request for one day',async({page})=>{await page.getByRole('button',{name:/Genehmigen|Approve/}).click();await page.locator('.modal').getByRole('button',{name:/Genehmigen|Approve/}).click()});
 Then("the guest device opens Luca's guest view without a password",async()=>{await expect(guestPage!).toHaveURL(/\/guest$/,{timeout:10000});await expect(guestPage!.getByRole('heading',{name:'Luca Rossi'})).toBeVisible()});
 When('the guest retries an access request after its first response is lost',async()=>{
@@ -464,6 +471,14 @@ When('the host retries an order after its first response is lost',async({page})=
 Then('both order attempts use the same mutation identifier',async()=>{expect(retriedOrderMutationIds).toHaveLength(2);expect(new Set(retriedOrderMutationIds).size).toBe(1)});
 Then('order editing was locked while the result was uncertain',async()=>{expect(uncertainOrderControlsLocked).toBe(true)});
 Then('the guest tab contains the order only once',async()=>{expect(retriedOrderItemCount).toBe(1)});
+
+When('the host reloads after an order response is lost',async({page})=>{
+  await chooseOrder(page,'Helles','Anna Berger','101');
+  await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__skyBarReloadOrderIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);await originalFetch(input,init);throw new TypeError('Simulated lost response')}return originalFetch(input,init)}});
+  await page.getByRole('button',{name:/Bestellung buchen|Submit order/}).click();await expect(page.locator('.notice--error')).toBeVisible();const firstIds=await page.evaluate(()=>(window as unknown as {__skyBarReloadOrderIds:string[]}).__skyBarReloadOrderIds);await page.reload();await expect(page.locator('.cart-lines').getByText('Helles',{exact:true})).toBeVisible();await expect(page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__skyBarReloadOrderIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST')ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);return originalFetch(input,init)}});await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(page.getByText(/Bestellung hinzugefügt|Order added/)).toBeVisible();const secondIds=await page.evaluate(()=>(window as unknown as {__skyBarReloadOrderIds:string[]}).__skyBarReloadOrderIds);reloadedOrderMutationIds=[...firstIds,...secondIds];const {request,guests}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;reloadedOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
+});
+Then('the restored order retry uses the original mutation identifier',async()=>{expect(reloadedOrderMutationIds).toHaveLength(2);expect(new Set(reloadedOrderMutationIds).size).toBe(1)});
+Then('the guest tab contains the restored order only once',async()=>{expect(reloadedOrderItemCount).toBe(1)});
 
 When('the host retries settlement after its first response is lost',async({page})=>{
   await chooseOrder(page,'Helles','Anna Berger','101');await page.getByRole('button',{name:/Bestellung buchen/}).click();await expect(page.locator('.tab-pill')).toContainText('1 Artikel');

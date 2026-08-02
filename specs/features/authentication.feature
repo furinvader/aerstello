@@ -23,6 +23,11 @@ Feature: Secure host accounts and devices
     And opening the room-management URL shows no mutation controls
     And opening the product-management URL shows no mutation controls
 
+  Scenario: Role changes refresh an open host session
+    Given an authenticated administrator
+    When another administrator demotes an open host session to staff
+    Then administrator controls disappear from the affected session
+
   Scenario: Remote revocation clears the open host application
     Given an authenticated administrator
     When the current host session is revoked from another administrator
