@@ -29,7 +29,7 @@ let tabTotalBeforeExcess = 0;
 let tabTotalAfterExcess = 0;
 let guestArchiveRaceStatuses: [number, number][] = [];
 let retriedGuestUndoMutationIds: string[] = [];
-let oldestBillNumber = 0;
+let oldestBillNumber = '';
 let revokedStreamEventCount = 0;
 let transientReplayAttempts = 0;
 let loginFailureResults: { status: number; body: unknown }[] = [];
@@ -63,6 +63,9 @@ let uncertainSettlementDetailsLocked = false;
 let changedSettlementReplayStatus = 0;
 let sharedNetworkPollStatuses: number[] = [];
 let conflictGuestId = '';
+let changedItemVoidReplayStatus = 0;
+let changedBillVoidReplayStatus = 0;
+let snapshottedBillDate = '';
 
 Before(async () => {
   execFileSync('npm',['run','db:seed','-w','@sky-bar/api'],{cwd:process.cwd(),env:{...process.env,E2E_RESET:'true'},stdio:'pipe'});
@@ -290,6 +293,8 @@ Then('room {string} is listed',async({page},name:string)=>{await expect(page.get
 When('the administrator renames room {string} to {string}',async({page},oldName:string,newName:string)=>{const row=page.locator('.sortable-list>div').filter({hasText:oldName});await row.getByRole('button').nth(2).click();await page.locator('.modal input').fill(newName);await page.locator('.modal').getByRole('button',{name:'Speichern'}).click()});
 When('the host creates guest {string} in room {string}',async({page},name:string,room:string)=>{await page.goto('/app/guests');await page.getByRole('button',{name:/Hinzufügen/}).click();await page.locator('.modal').getByLabel('Name').fill(name);await page.locator('.modal').getByLabel('Zimmer').selectOption({label:room});await page.locator('.modal').getByRole('button',{name:'Speichern'}).click()});
 Then('guest {string} is listed in room {string}',async({page},name:string,room:string)=>{const row=page.locator('.table-row').filter({hasText:name});await expect(row).toContainText(room)});
+When('another device creates guest {string} in room {string}',async({page},name:string,roomName:string)=>{await page.goto('/app/guests');await expect(page.getByText('Anna Berger',{exact:true})).toBeVisible();const request=page.context().request;const rooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;name:string}[]};const room=rooms.data.find(item=>item.name===roomName)!;expect((await request.post('/api/v1/guests',{headers:csrfHeaders,data:{name,roomId:room.id,language:'de'}})).status()).toBe(201)});
+Then('guest {string} appears after the committed event',async({page},name:string)=>{await expect(page.getByText(name,{exact:true})).toBeVisible({timeout:10_000})});
 When('the administrator creates the self-service product {string} priced {string}',async({page},name:string,price:string)=>{await page.goto('/app/products');await page.getByRole('button',{name:/Hinzufügen/}).first().click();await page.getByLabel('Name · DE').fill(name);await page.getByLabel(/Preis · EUR|Prezzo · EUR|Price · EUR/).fill(price);await page.locator('.modal').getByText(/Selbstbedienung|Self-service/,{exact:true}).click();await page.locator('.modal').getByRole('button',{name:'Speichern'}).click()});
 Then('product {string} is listed as self-service',async({page},name:string)=>{const row=page.locator('.product-admin-list>button').filter({hasText:name});await expect(row).toContainText('Selbstbedienung')});
 When('the administrator tries to create product {string} priced {string}',async({page},name:string,price:string)=>{await page.goto('/app/products');await page.getByRole('button',{name:/Hinzufügen/}).first().click();await page.getByLabel('Name · DE').fill(name);await page.getByLabel(/Preis · EUR|Prezzo · EUR|Price · EUR/).fill(price);await page.locator('.modal').getByRole('button',{name:'Speichern'}).click()});
@@ -304,12 +309,16 @@ Then('either the archive or the order is rejected',async()=>{for(const [archive,
 When('the PWA manifest is requested',async({request})=>{const response=await request.get('/manifest.webmanifest');expect(response.ok()).toBeTruthy();manifestPayload=await response.json()});
 Then('it names the software {string} and provides application icons',async({},name:string)=>{expect(manifestPayload?.name).toBe(name);expect(manifestPayload?.icons?.length).toBeGreaterThanOrEqual(2)});
 Then('Take Orders navigation is visually prominent',async({page})=>{await expect(page.locator('.nav-primary')).toHaveCSS('background-color','rgb(66, 189, 255)')});
+When('the host opens the bills screen',async({page})=>{await page.goto('/app/bills')});
+Then('only Bills is active in the primary navigation',async({page})=>{await expect(page.locator('.sidebar nav a.active')).toHaveCount(1);await expect(page.locator('.sidebar nav a.active')).toHaveAttribute('href','/app/bills')});
 When('the host changes their language to Italian',async({page})=>{await page.goto('/app/account');await page.getByLabel(/Sprache|Language/).selectOption('it');await page.getByRole('button',{name:/Speichern|Save/}).click()});
 Then('the navigation is shown in Italian',async({page})=>{await expect(page.getByText('Panoramica')).toBeVisible()});
 When('the guest selects Italian',async()=>{await guestPage!.getByLabel(/Sprache|Lingua|Language/).selectOption('it')});
 Then('untranslated product content falls back to German',async()=>{await expect(guestPage!.getByText('Hauskeks',{exact:true})).toBeVisible()});
 When('the venue default language is Italian',async({page,browser})=>{const request=page.context().request;const venue=await (await request.get('/api/v1/venue')).json() as {name:string;timezone:string};expect((await request.put('/api/v1/venue',{headers:csrfHeaders,data:{name:venue.name,timezone:venue.timezone,language:'it'}})).status()).toBe(200);const context=await browser.newContext({baseURL:e2eBaseURL,locale:'en-US'});extraContexts.push(context);freshGuestPage=await context.newPage();await freshGuestPage.goto('/guest/request')});
 Then('a fresh English guest device starts in Italian',async()=>{await expect(freshGuestPage!.getByRole('heading',{name:'Accesso ospite'})).toBeVisible()});
+When('a fresh guest selects Italian on the access form',async({page})=>{await page.goto('/guest/request');await page.locator('form select').nth(1).selectOption('it')});
+Then('the guest name field is labeled in Italian',async({page})=>{await expect(page.getByLabel('Nome')).toBeVisible()});
 
 const csrfHeaders = { 'x-skybar-csrf': '1' };
 async function operationalData(page: import('@playwright/test').Page) {
@@ -470,8 +479,11 @@ When('a tab accumulates more than 9900 zero-cost items across valid batches',asy
 });
 Then('the aggregate tab can still be settled',async()=>{expect(aggregateSettlementStatus).toBe(200)});
 
-When('the venue has more bills than one archive page',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const product=products.data.find((item)=>item.name.de==='Helles')!;for(let index=0;index<51;index+=1){const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {number:string};if(index===0)oldestBillNumber=Number(bill.number)}const firstPage=await (await request.get('/api/v1/bills?page=1&pageSize=50')).json() as {data:{number:number}[]};expect(firstPage.data.some((bill)=>bill.number===oldestBillNumber)).toBe(false)});
-Then('the host can find the oldest bill by its number',async({page})=>{await page.goto('/app/bills');const [response]=await Promise.all([page.waitForResponse((candidate)=>candidate.url().includes(`/api/v1/bills?search=${oldestBillNumber}&`)),page.getByPlaceholder(/Nach Gast|Cerca per|Search by/).fill(String(oldestBillNumber))]);const result=await response.json() as {data:{id:string;number:number}[]};expect(result.data.map((bill)=>bill.number)).toContain(oldestBillNumber);const found=result.data.find((bill)=>bill.number===oldestBillNumber)!;await expect(page.locator(`a[href="/app/bills/${found.id}"]`)).toBeVisible()});
+When('the venue has more bills than one archive page',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const product=products.data.find((item)=>item.name.de==='Helles')!;for(let index=0;index<51;index+=1){const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {number:string};if(index===0)oldestBillNumber=bill.number}const firstPage=await (await request.get('/api/v1/bills?page=1&pageSize=50')).json() as {data:{number:string}[]};expect(firstPage.data.some((bill)=>bill.number===oldestBillNumber)).toBe(false)});
+Then('the host can find the oldest bill by its number',async({page})=>{await page.goto('/app/bills');const [response]=await Promise.all([page.waitForResponse((candidate)=>candidate.url().includes(`/api/v1/bills?search=${oldestBillNumber}&`)),page.getByPlaceholder(/Nach Gast|Cerca per|Search by/).fill(oldestBillNumber)]);const result=await response.json() as {data:{id:string;number:string}[]};expect(result.data.map((bill)=>bill.number)).toContain(oldestBillNumber);const found=result.data.find((bill)=>bill.number===oldestBillNumber)!;await expect(page.locator(`a[href="/app/bills/${found.id}"]`)).toBeVisible()});
+
+When('the venue timezone changes after a bill is settled',async({page})=>{const {request,me,guests,products}=await operationalData(page);const venue=await (await request.get('/api/v1/venue')).json() as {name:string;defaultLanguage:string};expect((await request.put('/api/v1/venue',{headers:csrfHeaders,data:{name:venue.name,language:venue.defaultLanguage,timezone:'Pacific/Kiritimati'}})).status()).toBe(200);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const settled=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};const bill=await (await request.get(`/api/v1/bills/${settled.id}`)).json() as {settledAt:string;venueTimezone:string};expect(bill.venueTimezone).toBe('Pacific/Kiritimati');snapshottedBillDate=new Date(bill.settledAt).toLocaleDateString('de',{timeZone:bill.venueTimezone});expect((await request.put('/api/v1/venue',{headers:csrfHeaders,data:{name:venue.name,language:venue.defaultLanguage,timezone:'Pacific/Honolulu'}})).status()).toBe(200);await page.goto(`/app/bills/${settled.id}`)});
+Then('the bill date uses its snapshotted venue timezone',async({page})=>{await expect(page.locator('.bill-meta')).toContainText(snapshottedBillDate)});
 
 When('the same item void mutation is submitted twice',async({page})=>{
   const {request,me,guests,products}=await operationalData(page);
@@ -482,8 +494,10 @@ When('the same item void mutation is submitted twice',async({page})=>{
   repeatedVoidStatuses=[];
   repeatedVoidStatuses.push((await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:{mutationId,reason:'E2E correction'}})).status());
   repeatedVoidStatuses.push((await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:{mutationId,reason:'E2E correction'}})).status());
+  changedItemVoidReplayStatus=(await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:{mutationId,reason:'Changed correction'}})).status();
 });
 Then('both item void responses succeed',async()=>{expect(repeatedVoidStatuses).toEqual([200,200])});
+Then('changing the replayed item void reason is rejected',async()=>{expect(changedItemVoidReplayStatus).toBe(409)});
 
 When('the same order mutation is submitted concurrently',async({page})=>{
   const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const mutationId=crypto.randomUUID();const data={mutationId,originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]};
@@ -496,10 +510,11 @@ When('the same bill void mutation is submitted twice',async({page})=>{
   const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const product=products.data.find((item)=>item.name.de==='Helles')!;
   const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};
   const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};const mutationId=crypto.randomUUID();repeatedBillVoidStatuses=[];
-  repeatedBillVoidStatuses.push((await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId,reason:'E2E correction'}})).status());repeatedBillVoidStatuses.push((await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId,reason:'E2E correction'}})).status());restoredBillItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
+  repeatedBillVoidStatuses.push((await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId,reason:'E2E correction'}})).status());repeatedBillVoidStatuses.push((await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId,reason:'E2E correction'}})).status());changedBillVoidReplayStatus=(await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId,reason:'Changed correction'}})).status();restoredBillItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
 });
 Then('both bill void responses succeed',async()=>{expect(repeatedBillVoidStatuses).toEqual([200,200])});
 Then('the billed items are restored only once',async()=>{expect(restoredBillItemCount).toBe(1)});
+Then('changing the replayed bill void reason is rejected',async()=>{expect(changedBillVoidReplayStatus).toBe(409)});
 
 When('guest archival races with reversal of their bill',async({page})=>{
   const {request,me,products}=await operationalData(page);const rooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;name:string}[]};const product=products.data.find(item=>item.name.de==='Helles')!;const room=rooms.data.find(item=>item.name==='102')!;billArchiveRaceStatuses=[];

@@ -45,6 +45,7 @@ Feature: Device grants and replay protection
     Given an authenticated administrator
     When the same item void mutation is submitted twice
     Then both item void responses succeed
+    And changing the replayed item void reason is rejected
 
   Scenario: Concurrent replay of an order returns its prior success
     Given an authenticated administrator
@@ -62,6 +63,7 @@ Feature: Device grants and replay protection
     When the same bill void mutation is submitted twice
     Then both bill void responses succeed
     And the billed items are restored only once
+    And changing the replayed bill void reason is rejected
 
   Scenario: Bill reversal and guest archival are serialized
     Given an authenticated administrator

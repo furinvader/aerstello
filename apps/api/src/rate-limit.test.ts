@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { rateLimitKey } from './rate-limit.js';
+import { ipRateLimitKey, ipRateLimitMax, isAccessStatusRequest, rateLimitKey } from './rate-limit.js';
 
 describe('rate limit keys', () => {
   const url = '/api/v1/public/access-requests/0198b529-e428-7000-8000-000000000001/status';
@@ -9,6 +9,9 @@ describe('rate limit keys', () => {
     const second = rateLimitKey({ ip: '192.0.2.1', method: 'POST', url, body: { token: 'second-capability' } });
     expect(first).not.toBe(second);
     expect(first).not.toContain('first-capability');
+    expect(ipRateLimitKey({ ip: '192.0.2.1' })).toBe('ip:192.0.2.1');
+    expect(isAccessStatusRequest({ method: 'POST', url })).toBe(true);
+    expect(ipRateLimitMax({ method: 'POST', url }, 300, 3000)).toBe(3000);
   });
 
   it('keeps ordinary requests in the shared address bucket', () => {

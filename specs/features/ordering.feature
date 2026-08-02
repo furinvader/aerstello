@@ -85,6 +85,11 @@ Feature: Host order entry and billing
     When the venue has more bills than one archive page
     Then the host can find the oldest bill by its number
 
+  Scenario: A bill keeps its settlement-time venue timezone
+    Given an authenticated administrator
+    When the venue timezone changes after a bill is settled
+    Then the bill date uses its snapshotted venue timezone
+
   Scenario: A voided bill keeps its correction when printed
     Given an authenticated administrator
     When the host opens a voided bill for printing

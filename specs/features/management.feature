@@ -13,6 +13,11 @@ Feature: Venue operations configuration
     When the host creates guest "Ada Test" in room "101"
     Then guest "Ada Test" is listed in room "101"
 
+  Scenario: Committed guests are published to other devices
+    Given an authenticated administrator
+    When another device creates guest "Realtime Guest" in room "101"
+    Then guest "Realtime Guest" appears after the committed event
+
   Scenario: An administrator creates a localized self-service product
     Given an authenticated administrator
     When the administrator creates the self-service product "Apfelsaft" priced "3.10"

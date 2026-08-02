@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { boolean, index, integer, jsonb, pgEnum, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import { bigint, boolean, index, integer, jsonb, pgEnum, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 
 export const role = pgEnum('host_role', ['admin', 'staff']);
 export const language = pgEnum('language', ['de', 'it', 'en']);
@@ -108,12 +108,13 @@ export const orderBatches = pgTable('order_batches', {
 
 export const bills = pgTable('bills', {
   id: uuid('id').primaryKey().defaultRandom(),
-  number: integer('number').generatedAlwaysAsIdentity(),
+  number: bigint('number', { mode: 'bigint' }).generatedAlwaysAsIdentity(),
   tabId: uuid('tab_id').notNull().references(() => orderTabs.id),
   guestId: uuid('guest_id').notNull().references(() => guests.id),
   hostId: uuid('host_id').notNull().references(() => hosts.id),
   mutationId: uuid('mutation_id').notNull().unique(),
   venueName: text('venue_name').notNull(),
+  venueTimezone: text('venue_timezone').notNull(),
   guestName: text('guest_name').notNull(),
   roomName: text('room_name').notNull(),
   totalCents: integer('total_cents').notNull(),

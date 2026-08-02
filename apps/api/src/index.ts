@@ -7,7 +7,7 @@ import fastifyStatic from '@fastify/static';
 import Fastify from 'fastify';
 import { config } from './config.js';
 import { migrate, pool } from './db.js';
-import { rateLimitKey } from './rate-limit.js';
+import { ipRateLimitKey, ipRateLimitMax } from './rate-limit.js';
 import { registerRoutes } from './routes.js';
 
 const app = Fastify({
@@ -22,10 +22,10 @@ await app.register(cors, {
 });
 await app.register(rateLimit, {
   global: true,
-  max: config.RATE_LIMIT_MAX,
+  max: (request) => ipRateLimitMax(request, config.RATE_LIMIT_MAX, config.ACCESS_STATUS_IP_LIMIT_MAX),
   timeWindow: '1 minute',
   hook: 'preHandler',
-  keyGenerator: rateLimitKey,
+  keyGenerator: ipRateLimitKey,
 });
 
 await registerRoutes(app);

@@ -9,3 +9,8 @@ Feature: Responsive installable application
   Scenario: Primary ordering navigation remains prominent
     Given an authenticated administrator
     Then Take Orders navigation is visually prominent
+
+  Scenario: Nested pages have one active navigation destination
+    Given an authenticated administrator
+    When the host opens the bills screen
+    Then only Bills is active in the primary navigation

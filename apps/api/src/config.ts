@@ -11,6 +11,7 @@ const configSchema = z.object({
   TRUST_PROXY: z.enum(['true', 'false']).default('false'),
   LOG_LEVEL: z.string().default('info'),
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),
+  ACCESS_STATUS_IP_LIMIT_MAX: z.coerce.number().int().positive().default(3000),
 }).superRefine((value, context) => {
   if (value.NODE_ENV === 'production' && value.SESSION_SECRET === developmentSessionSecret) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ['SESSION_SECRET'], message: 'SESSION_SECRET must be explicitly configured in production.' });

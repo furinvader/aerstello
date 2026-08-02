@@ -16,8 +16,10 @@ import {
   venueSettingsSchema,
   voidSchema,
 } from '@sky-bar/shared';
-import { audit, emitEvent, eventBus, type RealtimeEvent } from './events.js';
+import { audit, emitEvent, eventBus, publishEvent, storeEvent, type RealtimeEvent } from './events.js';
 import { pool, transaction } from './db.js';
+import { config } from './config.js';
+import { rateLimitKey } from './rate-limit.js';
 import {
   accessStatusToken,
   authenticateHost,
@@ -182,7 +184,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(201).send({ id: requestId, statusToken: token, status: 'pending' });
   });
 
-  app.post('/api/v1/public/access-requests/:id/status', async (request, reply) => {
+  app.post('/api/v1/public/access-requests/:id/status', { preHandler: app.rateLimit({
+    max: config.RATE_LIMIT_MAX,
+    timeWindow: '1 minute',
+    groupId: 'access-status-capability',
+    keyGenerator: rateLimitKey,
+  }) }, async (request, reply) => {
     const requestId = id(request);
     const { token, grantId } = body(z.object({
       token: z.string().min(1).max(256),
@@ -428,10 +435,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const room = await client.query('SELECT id FROM rooms WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [input.roomId]);
       if (!room.rowCount) throw new HttpError(404, 'ROOM_NOT_FOUND', 'Room not found.');
       const created = await client.query('INSERT INTO guests(name,room_id,language) VALUES ($1,$2,$3) RETURNING id,name,room_id AS "roomId",language,version', [input.name, input.roomId, input.language]);
-      await emitEvent('guests.changed', {}, client);
-      return created;
+      const event = await storeEvent('guests.changed', {}, client);
+      return { created, event };
     });
-    return reply.code(201).send(result.rows[0]);
+    try { publishEvent(result.event); }
+    catch (error) { app.log.error(error, 'Could not publish committed guest event'); }
+    return reply.code(201).send(result.created.rows[0]);
   });
 
   app.patch('/api/v1/guests/:id', { preHandler: requireHost }, async (request) => {
@@ -675,12 +684,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const itemId = id(request);
     const input = body(voidSchema, request);
     const result = await transaction(async (client) => {
-      const duplicate=await client.query<{itemId:string;tabId:string;guestId:string;hostId:string}>(
-        `SELECT i.id AS "itemId",i.tab_id AS "tabId",t.guest_id AS "guestId",i.voided_by_host AS "hostId" FROM order_items i JOIN order_tabs t ON t.id=i.tab_id
+      const duplicate=await client.query<{itemId:string;tabId:string;guestId:string;hostId:string;reason:string}>(
+        `SELECT i.id AS "itemId",i.tab_id AS "tabId",t.guest_id AS "guestId",i.voided_by_host AS "hostId",i.void_reason AS reason FROM order_items i JOIN order_tabs t ON t.id=i.tab_id
           WHERE i.host_void_mutation_id=$1`,[input.mutationId]);
       if(duplicate.rows[0]){
         if(duplicate.rows[0].itemId!==itemId) throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to another item.');
         if(duplicate.rows[0].hostId!==request.hostIdentity!.id) throw new HttpError(403,'HOST_MISMATCH','This void belongs to another host.');
+        if(duplicate.rows[0].reason!==input.reason) throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to a different void command.');
         return duplicate.rows[0];
       }
       const updated=await client.query<{tabId:string}>(
@@ -688,12 +698,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           WHERE id=$4 AND status IN ('open','provisional') RETURNING tab_id AS "tabId"`,
         [request.hostIdentity!.id,input.reason,input.mutationId,itemId]);
       if(!updated.rowCount){
-        const replay=await client.query<{itemId:string;tabId:string;guestId:string;hostId:string}>(
-          `SELECT i.id AS "itemId",i.tab_id AS "tabId",t.guest_id AS "guestId",i.voided_by_host AS "hostId" FROM order_items i JOIN order_tabs t ON t.id=i.tab_id
+        const replay=await client.query<{itemId:string;tabId:string;guestId:string;hostId:string;reason:string}>(
+          `SELECT i.id AS "itemId",i.tab_id AS "tabId",t.guest_id AS "guestId",i.voided_by_host AS "hostId",i.void_reason AS reason FROM order_items i JOIN order_tabs t ON t.id=i.tab_id
             WHERE i.host_void_mutation_id=$1`,[input.mutationId]);
         if(replay.rows[0]){
           if(replay.rows[0].itemId!==itemId) throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to another item.');
           if(replay.rows[0].hostId!==request.hostIdentity!.id) throw new HttpError(403,'HOST_MISMATCH','This void belongs to another host.');
+          if(replay.rows[0].reason!==input.reason) throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to a different void command.');
           return replay.rows[0];
         }
         throw new HttpError(409,'ITEM_NOT_OPEN','The item is no longer open.');
@@ -711,8 +722,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const input = body(settleTabSchema, request);
     const bill = await transaction(async (client) => {
       const replay = async () => {
-        const duplicate = await client.query<{ id: string; number: number; guestId: string; hostId: string; tabId: string; totalCents: number; itemCount: number; paymentMethod: string; paymentNote: string | null }>(
-          `SELECT b.id,b.number,b.guest_id AS "guestId",b.host_id AS "hostId",b.tab_id AS "tabId",
+        const duplicate = await client.query<{ id: string; number: string; guestId: string; hostId: string; tabId: string; totalCents: number; itemCount: number; paymentMethod: string; paymentNote: string | null }>(
+          `SELECT b.id,b.number::text AS number,b.guest_id AS "guestId",b.host_id AS "hostId",b.tab_id AS "tabId",
                   b.total_cents AS "totalCents",b.payment_method AS "paymentMethod",b.payment_note AS "paymentNote",
                   COALESCE((SELECT sum(bi.quantity)::int FROM bill_items bi WHERE bi.bill_id=b.id),0) AS "itemCount"
              FROM bills b WHERE b.mutation_id=$1`,
@@ -732,9 +743,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const duplicate = await replay();
       if (duplicate) return duplicate;
       const tab = await client.query<{
-        guestId: string; guestName: string; roomName: string; venueName: string;
+        guestId: string; guestName: string; roomName: string; venueName: string; venueTimezone: string;
       }>(
-        `SELECT t.guest_id AS "guestId",g.name AS "guestName",r.name AS "roomName",v.name AS "venueName"
+        `SELECT t.guest_id AS "guestId",g.name AS "guestName",r.name AS "roomName",v.name AS "venueName",v.timezone AS "venueTimezone"
            FROM order_tabs t JOIN guests g ON g.id=t.guest_id JOIN rooms r ON r.id=g.room_id CROSS JOIN venue_settings v
           WHERE t.id=$1 AND t.status='open' FOR UPDATE OF t`,
         [tabId],
@@ -764,10 +775,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (itemCount !== input.expectedItemCount || total !== input.expectedTotalCents) {
         throw new HttpError(409, 'TAB_CHANGED', 'The tab changed after settlement was opened. Review the current items and total.');
       }
-      const created = await client.query<{ id: string; number: number }>(
-        `INSERT INTO bills(tab_id,guest_id,host_id,mutation_id,venue_name,guest_name,room_name,total_cents,payment_method,payment_note)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id,number`,
-        [tabId, current.guestId, request.hostIdentity!.id, input.mutationId, current.venueName, current.guestName, current.roomName, total, input.paymentMethod, input.note ?? null],
+      const created = await client.query<{ id: string; number: string }>(
+        `INSERT INTO bills(tab_id,guest_id,host_id,mutation_id,venue_name,venue_timezone,guest_name,room_name,total_cents,payment_method,payment_note)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id,number::text AS number`,
+        [tabId, current.guestId, request.hostIdentity!.id, input.mutationId, current.venueName, current.venueTimezone, current.guestName, current.roomName, total, input.paymentMethod, input.note ?? null],
       );
       const newBill = created.rows[0]!;
       for (const item of items.rows) {
@@ -798,13 +809,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const offset = (requestedPage - 1) * pageSize;
     const result = await pool.query<{ data: unknown[]; total: number }>(
       `WITH filtered AS (
-         SELECT id,number,venue_name AS "venueName",guest_name AS "guestName",room_name AS "roomName",total_cents AS "totalCents",
+         SELECT id,number::text AS number,venue_name AS "venueName",venue_timezone AS "venueTimezone",guest_name AS "guestName",room_name AS "roomName",total_cents AS "totalCents",
                 payment_method AS "paymentMethod",settled_at AS "settledAt",voided_at AS "voidedAt",
                 CASE WHEN number::text=$1 THEN 0 ELSE 1 END AS search_rank
            FROM bills
           WHERE $1='' OR number::text ILIKE '%'||$1||'%' OR guest_name ILIKE '%'||$1||'%' OR room_name ILIKE '%'||$1||'%'
        ), bill_page AS (
-         SELECT id,number,"venueName","guestName","roomName","totalCents","paymentMethod","settledAt","voidedAt"
+         SELECT id,number,"venueName","venueTimezone","guestName","roomName","totalCents","paymentMethod","settledAt","voidedAt"
            FROM filtered ORDER BY search_rank,"settledAt" DESC,id DESC LIMIT $2 OFFSET $3
        )
        SELECT COALESCE((SELECT jsonb_agg(to_jsonb(bill_page) ORDER BY "settledAt" DESC,id DESC) FROM bill_page),'[]'::jsonb) AS data,
@@ -826,7 +837,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/v1/bills/:id', { preHandler: requireHost }, async (request) => {
     const billId = id(request);
     const bill = await pool.query(
-      `SELECT b.id,b.number,b.venue_name AS "venueName",b.guest_name AS "guestName",b.room_name AS "roomName",
+      `SELECT b.id,b.number::text AS number,b.venue_name AS "venueName",b.venue_timezone AS "venueTimezone",b.guest_name AS "guestName",b.room_name AS "roomName",
               b.total_cents AS "totalCents",b.payment_method AS "paymentMethod",b.payment_note AS "paymentNote",
               b.settled_at AS "settledAt",b.voided_at AS "voidedAt",b.void_reason AS "voidReason",h.name AS "hostName"
          FROM bills b JOIN hosts h ON h.id=b.host_id WHERE b.id=$1`, [billId],
@@ -842,13 +853,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const billId = id(request);
     const input = body(voidSchema, request);
     const voided = await transaction(async (client) => {
-      const duplicate = await client.query<{ billId: string; guestId: string; hostId: string }>(
-        `SELECT id AS "billId",guest_id AS "guestId",voided_by AS "hostId" FROM bills WHERE void_mutation_id=$1`,
+      const duplicate = await client.query<{ billId: string; guestId: string; hostId: string; reason: string }>(
+        `SELECT id AS "billId",guest_id AS "guestId",voided_by AS "hostId",void_reason AS reason FROM bills WHERE void_mutation_id=$1`,
         [input.mutationId],
       );
       if (duplicate.rows[0]) {
         if (duplicate.rows[0].billId !== billId) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another bill.');
         if (duplicate.rows[0].hostId !== request.hostIdentity!.id) throw new HttpError(403, 'HOST_MISMATCH', 'This bill void belongs to another host.');
+        if (duplicate.rows[0].reason !== input.reason) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to a different bill-void command.');
         return { guestId: duplicate.rows[0].guestId };
       }
       const owner = await client.query<{ guestId: string }>('SELECT guest_id AS "guestId" FROM bills WHERE id=$1', [billId]);
@@ -863,13 +875,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       );
       const bill = result.rows[0];
       if (!bill) {
-        const replay = await client.query<{ billId: string; guestId: string; hostId: string }>(
-          `SELECT id AS "billId",guest_id AS "guestId",voided_by AS "hostId" FROM bills WHERE void_mutation_id=$1`,
+        const replay = await client.query<{ billId: string; guestId: string; hostId: string; reason: string }>(
+          `SELECT id AS "billId",guest_id AS "guestId",voided_by AS "hostId",void_reason AS reason FROM bills WHERE void_mutation_id=$1`,
           [input.mutationId],
         );
         if (replay.rows[0]) {
           if (replay.rows[0].billId !== billId) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another bill.');
           if (replay.rows[0].hostId !== request.hostIdentity!.id) throw new HttpError(403, 'HOST_MISMATCH', 'This bill void belongs to another host.');
+          if (replay.rows[0].reason !== input.reason) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to a different bill-void command.');
           return { guestId: replay.rows[0].guestId };
         }
         throw new HttpError(409, 'BILL_NOT_ACTIVE', 'The bill has already been voided.');

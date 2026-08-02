@@ -3,7 +3,7 @@ import type pg from 'pg';
 import { pool } from './db.js';
 
 export interface RealtimeEvent {
-  id: number;
+  id: string;
   topic: string;
   payload: Record<string, unknown>;
 }
@@ -11,13 +11,22 @@ export interface RealtimeEvent {
 export const eventBus = new EventEmitter();
 eventBus.setMaxListeners(1000);
 
-export async function emitEvent(topic: string, payload: Record<string, unknown>, client: pg.Pool | pg.PoolClient = pool): Promise<void> {
+export async function storeEvent(topic: string, payload: Record<string, unknown>, client: pg.Pool | pg.PoolClient = pool): Promise<RealtimeEvent> {
   const result = await client.query<RealtimeEvent>(
     'INSERT INTO realtime_events(topic,payload) VALUES ($1,$2) RETURNING id,topic,payload',
     [topic, JSON.stringify(payload)],
   );
   const event = result.rows[0];
-  if (event) eventBus.emit('event', event);
+  if (!event) throw new Error('Could not persist realtime event');
+  return event;
+}
+
+export function publishEvent(event: RealtimeEvent): void {
+  eventBus.emit('event', event);
+}
+
+export async function emitEvent(topic: string, payload: Record<string, unknown>, client: pg.Pool | pg.PoolClient = pool): Promise<void> {
+  publishEvent(await storeEvent(topic, payload, client));
 }
 
 export async function audit(

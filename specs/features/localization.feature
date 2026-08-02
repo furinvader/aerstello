@@ -15,3 +15,8 @@ Feature: German, Italian, and English localization
     Given an authenticated administrator
     When the venue default language is Italian
     Then a fresh English guest device starts in Italian
+
+  Scenario: The guest access form localizes its name label
+    Given the seeded Sky Bar venue
+    When a fresh guest selects Italian on the access form
+    Then the guest name field is labeled in Italian
