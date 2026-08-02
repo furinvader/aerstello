@@ -104,6 +104,7 @@ export const accessRequestSchema = z.object({
 });
 
 export const accessApprovalSchema = z.object({
+  mutationId: z.string().uuid(),
   guestId: z.string().uuid().optional(),
   expiresAt: z.string().datetime(),
 });

@@ -713,8 +713,20 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/v1/access-requests/:id/approve', { preHandler: requireHost }, async (request) => {
     const requestId = id(request);
     const input = body(accessApprovalSchema, request);
-    if (new Date(input.expiresAt) <= new Date()) throw new HttpError(400, 'INVALID_EXPIRY', 'Expiry must be in the future.');
     const result = await transaction(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[input.mutationId]);
+      const replay=await client.query<{requestId:string;guestId:string;hostId:string;commandGuestId:string|null;commandExpiresAt:Date}>(
+        `SELECT id AS "requestId",guest_id AS "guestId",resolved_by AS "hostId",approval_linked_guest_id AS "commandGuestId",
+                approval_expires_at AS "commandExpiresAt" FROM access_requests WHERE approval_mutation_id=$1`,[input.mutationId],
+      );
+      if(replay.rows[0]){
+        const prior=replay.rows[0];
+        if(prior.requestId!==requestId) throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to another access approval.');
+        if(prior.hostId!==request.hostIdentity!.id) throw new HttpError(403,'HOST_MISMATCH','This access approval belongs to another host.');
+        if(prior.commandGuestId!==(input.guestId??null)||prior.commandExpiresAt.getTime()!==new Date(input.expiresAt).getTime()) throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to a different access approval command.');
+        return {guestId:prior.guestId,events:[] as RealtimeEvent[]};
+      }
+      if (new Date(input.expiresAt) <= new Date()) throw new HttpError(400, 'INVALID_EXPIRY', 'Expiry must be in the future.');
       const pending = await client.query<{ name: string; roomId: string; language: string }>(
         `SELECT name,room_id AS "roomId",language FROM access_requests WHERE id=$1 AND status='pending' FOR UPDATE`, [requestId],
       );
@@ -730,15 +742,16 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         guestId = (await client.query<{ id: string }>('INSERT INTO guests(name,room_id,language) VALUES ($1,$2,$3) RETURNING id', [access.name, access.roomId, access.language])).rows[0]!.id;
       }
       await client.query(
-        `UPDATE access_requests SET status='approved',guest_id=$1,expires_at=$2,resolved_at=now(),resolved_by=$3 WHERE id=$4`,
-        [guestId, input.expiresAt, request.hostIdentity!.id, requestId],
+        `UPDATE access_requests SET status='approved',guest_id=$1,expires_at=$2,resolved_at=now(),resolved_by=$3,
+                approval_mutation_id=$4,approval_linked_guest_id=$5,approval_expires_at=$2 WHERE id=$6`,
+        [guestId,input.expiresAt,request.hostIdentity!.id,input.mutationId,input.guestId??null,requestId],
       );
       await audit('access.approved', 'access-request', requestId, { guestId, expiresAt: input.expiresAt }, { hostId: request.hostIdentity!.id }, client);
-      return { guestId };
+      const events=[await storeEvent('access-request.changed',{id:requestId},client),await storeEvent('guests.changed',{},client)];
+      return { guestId,events };
     });
-    await emitEvent('access-request.changed', { id: requestId });
-    await emitEvent('guests.changed', {});
-    return result;
+    for(const event of result.events){try{publishEvent(event)}catch(error){app.log.error(error,'Could not publish committed access approval event')}}
+    return {guestId:result.guestId};
   });
 
   app.post('/api/v1/access-requests/:id/deny', { preHandler: requireHost }, async (request) => {
@@ -774,7 +787,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         if (!duplicate.rows[0]) return undefined;
         if (duplicate.rows[0].hostId !== request.hostIdentity!.id) throw new HttpError(403, 'HOST_MISMATCH', 'This order belongs to another host.');
         if (duplicate.rows[0].guestId !== input.guestId) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another guest.');
-        if (!isDeepStrictEqual(duplicate.rows[0].command, input)) {
+        if (duplicate.rows[0].command!==null&&!isDeepStrictEqual(duplicate.rows[0].command, input)) {
           throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to a different order command.');
         }
         return { tabId: duplicate.rows[0].tabId };

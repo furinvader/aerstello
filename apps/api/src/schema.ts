@@ -129,7 +129,7 @@ export const orderBatches = pgTable('order_batches', {
   mutationId: uuid('mutation_id').notNull().unique(),
   tabId: uuid('tab_id').notNull().references(() => orderTabs.id),
   hostId: uuid('host_id').notNull().references(() => hosts.id),
-  command: jsonb('command').notNull(),
+  command: jsonb('command'),
   capturedAt: timestamp('captured_at', { withTimezone: true }).notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
@@ -207,9 +207,12 @@ export const accessRequests = pgTable('access_requests', {
   resolvedAt: timestamp('resolved_at', { withTimezone: true }),
   resolvedBy: uuid('resolved_by').references(() => hosts.id),
   expiresAt: timestamp('expires_at', { withTimezone: true }),
+  approvalMutationId: uuid('approval_mutation_id'),
+  approvalLinkedGuestId: uuid('approval_linked_guest_id').references(() => guests.id),
+  approvalExpiresAt: timestamp('approval_expires_at', { withTimezone: true }),
   statusTokenConsumedAt: timestamp('status_token_consumed_at', { withTimezone: true }),
   grantExchangeId: uuid('grant_exchange_id'),
-});
+}, (t) => [uniqueIndex('access_requests_approval_mutation_uq').on(t.approvalMutationId).where(sql`${t.approvalMutationId} IS NOT NULL`)]);
 
 export const guestSessions = pgTable('guest_sessions', {
   id: uuid('id').primaryKey().defaultRandom(),

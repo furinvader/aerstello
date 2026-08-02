@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import pg from 'pg';
 import { expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { createBdd } from 'playwright-bdd';
@@ -98,6 +99,16 @@ let expectedItalianSessionTimestamp = '';
 let dashboardCurrentItemCount = 0;
 let dashboardCurrentValueCents = 0;
 let dashboardExpectedValueCents = 0;
+let closedOrderMutationIds: string[] = [];
+let closedOrderItemCount = 0;
+let capturedUncertainTotal = '';
+let capturedOrderTabTotalCents = 0;
+let capturedExpectedTotalCents = 0;
+let legacyOrderReplayStatuses: number[] = [];
+let legacyOrderItemCount = 0;
+let retriedApprovalMutationIds: string[] = [];
+let uncertainApprovalFieldsLocked = false;
+let approvedGuestIdentityCount = 0;
 
 Before(async () => {
   execFileSync('npm',['run','db:seed','-w','@sky-bar/api'],{cwd:process.cwd(),env:{...process.env,E2E_RESET:'true'},stdio:'pipe'});
@@ -266,6 +277,11 @@ When('{string} requests access for room {string}',async({},name:string,room:stri
 Then('the host sees the pending request for {string}',async({page},name:string)=>{await page.goto('/app/requests');await expect(page.getByText(name,{exact:true})).toBeVisible()});
 When('the host opens approval for {string}',async({page},name:string)=>{const card=page.locator('.request-card').filter({hasText:name});await card.getByRole('button',{name:/Genehmigen|Approva|Approve/}).click()});
 Then('creating a new guest is selected by default',async({page})=>{await expect(page.locator('.modal select').first()).toHaveValue('new')});
+When('the host retries an approval after its first response is lost',async({page})=>{await guestPage!.goto('/guest/request');await guestPage!.locator('form select').nth(1).selectOption('de');await guestPage!.getByLabel('Name').fill('Approval Retry');await guestPage!.locator('form select').first().selectOption({label:'102'});await guestPage!.locator('form button[type="submit"]').click();await page.goto('/app/requests');const card=page.locator('.request-card').filter({hasText:'Approval Retry'});await expect(card).toBeVisible();await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarApprovalRetryCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/access-requests/')&&url.endsWith('/approve')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});await card.getByRole('button',{name:/Genehmigen|Approva|Approve/}).click();const modal=page.locator('.modal');await modal.getByRole('button',{name:/Genehmigen|Approva|Approve/}).click();await expect(modal.locator('.notice--error')).toBeVisible();uncertainApprovalFieldsLocked=await modal.locator('input,select').evaluateAll(fields=>fields.every(field=>(field as HTMLInputElement).disabled));await modal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(modal).toHaveCount(0);const commands=await page.evaluate(()=>(window as unknown as {__skyBarApprovalRetryCommands:Array<Record<string,unknown>>}).__skyBarApprovalRetryCommands);retriedApprovalMutationIds=commands.map(command=>String(command.mutationId));const guests=await (await page.context().request.get('/api/v1/guests')).json() as {data:{name:string}[]};approvedGuestIdentityCount=guests.data.filter(guest=>guest.name==='Approval Retry').length});
+Then('both approval attempts use the same mutation identifier',async()=>{expect(retriedApprovalMutationIds).toHaveLength(2);expect(new Set(retriedApprovalMutationIds).size).toBe(1)});
+Then('approval fields stay locked while the result is uncertain',async()=>{expect(uncertainApprovalFieldsLocked).toBe(true)});
+Then('only one approved guest identity exists',async()=>{expect(approvedGuestIdentityCount).toBe(1)});
+Then('the guest device receives access',async()=>{await expect(guestPage!).toHaveURL(/\/guest$/,{timeout:10_000});await expect(guestPage!.getByRole('heading',{name:'Approval Retry'})).toBeVisible()});
 When('the host approves the request for one day',async({page})=>{await page.getByRole('button',{name:/Genehmigen|Approve/}).click();await page.locator('.modal').getByRole('button',{name:/Genehmigen|Approve/}).click()});
 Then("the guest device opens Luca's guest view without a password",async()=>{await expect(guestPage!).toHaveURL(/\/guest$/,{timeout:10000});await expect(guestPage!.getByRole('heading',{name:'Luca Rossi'})).toBeVisible()});
 When('the guest retries an access request after its first response is lost',async()=>{
@@ -320,7 +336,7 @@ When('an approved guest grant response is lost before its cookie is retained',as
   const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
   const room=bootstrap.rooms.find(item=>item.name==='102')!;
   const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Recoverable grant',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
-  expect((await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{expiresAt:new Date(Date.now()+86_400_000).toISOString()}})).status()).toBe(200);
+  expect((await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expiresAt:new Date(Date.now()+86_400_000).toISOString()}})).status()).toBe(200);
   const same=await browser.newContext({baseURL:e2eBaseURL});const different=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(same,different);
   const grantId=crypto.randomUUID();const statusPath=`/api/v1/public/access-requests/${created.id}/status`;const statusData={token:created.statusToken,grantId};
   expect((await same.request.post(statusPath,{data:statusData})).status()).toBe(200);
@@ -335,7 +351,7 @@ Then('a different grant exchange receives no guest access',async()=>{expect(diff
 When('an approved guest request expires before its grant exchange',async({page,browser})=>{
   const request=page.context().request;const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};const room=bootstrap.rooms.find(item=>item.name==='102')!;
   const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Expired grant',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
-  expect((await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{expiresAt:new Date(Date.now()+1500).toISOString()}})).status()).toBe(200);
+  expect((await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expiresAt:new Date(Date.now()+1500).toISOString()}})).status()).toBe(200);
   await page.waitForTimeout(1800);
   const context=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(context);const response=await context.request.post(`/api/v1/public/access-requests/${created.id}/status`,{data:{token:created.statusToken,grantId:crypto.randomUUID()}});
   expiredGrantResult=await response.json() as {status:string;granted:boolean};expiredGrantGuestStatus=(await context.request.get('/api/v1/guest/me')).status();
@@ -448,7 +464,7 @@ When('two devices exchange the same approved access request token',async({page,b
   const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
   const room=bootstrap.rooms.find((item)=>item.name==='102')!;
   const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'One-time guest',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
-  await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{expiresAt:new Date(Date.now()+86_400_000).toISOString()}});
+  await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expiresAt:new Date(Date.now()+86_400_000).toISOString()}});
   const first=await browser.newContext({baseURL:e2eBaseURL});const second=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(first,second);
   await Promise.all([
     first.request.post(`/api/v1/public/access-requests/${created.id}/status`,{data:{token:created.statusToken,grantId:crypto.randomUUID()}}),
@@ -464,7 +480,7 @@ When('an approved request is exchanged for a guest grant',async({page,browser})=
   const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
   const room=bootstrap.rooms.find(item=>item.name==='102')!;
   const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Body grant',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
-  expect((await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{expiresAt:new Date(Date.now()+86_400_000).toISOString()}})).status()).toBe(200);
+  expect((await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expiresAt:new Date(Date.now()+86_400_000).toISOString()}})).status()).toBe(200);
   const context=await browser.newContext({baseURL:e2eBaseURL});
   extraContexts.push(context);
   const pending={id:created.id,token:created.statusToken,grantId:crypto.randomUUID()};
@@ -487,7 +503,7 @@ When('thirteen guest devices poll pending access from one network',async({page})
 });
 Then('none of their valid status polls is rate limited',async()=>{expect(sharedNetworkPollStatuses).toHaveLength(325);expect(sharedNetworkPollStatuses).not.toContain(429);expect(new Set(sharedNetworkPollStatuses)).toEqual(new Set([200]))});
 
-When('guest archival races with their first grant exchange',async({page,browser})=>{const request=page.context().request;const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};const room=bootstrap.rooms.find(item=>item.name==='102')!;const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Archived grant race',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};const approved=await (await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{expiresAt:new Date(Date.now()+86_400_000).toISOString()}})).json() as {guestId:string};const context=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(context);const [,exchange]=await Promise.all([request.delete(`/api/v1/guests/${approved.guestId}`,{headers:csrfHeaders}),context.request.post(`/api/v1/public/access-requests/${created.id}/status`,{data:{token:created.statusToken,grantId:crypto.randomUUID()}})]);expect(exchange.status()).toBe(200);archivedGrantGuestStatus=(await context.request.get('/api/v1/guest/me')).status()});
+When('guest archival races with their first grant exchange',async({page,browser})=>{const request=page.context().request;const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};const room=bootstrap.rooms.find(item=>item.name==='102')!;const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Archived grant race',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};const approved=await (await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expiresAt:new Date(Date.now()+86_400_000).toISOString()}})).json() as {guestId:string};const context=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(context);const [,exchange]=await Promise.all([request.delete(`/api/v1/guests/${approved.guestId}`,{headers:csrfHeaders}),context.request.post(`/api/v1/public/access-requests/${created.id}/status`,{data:{token:created.statusToken,grantId:crypto.randomUUID()}})]);expect(exchange.status()).toBe(200);archivedGrantGuestStatus=(await context.request.get('/api/v1/guest/me')).status()});
 Then('no archived guest session remains active',async()=>{expect(archivedGrantGuestStatus).toBe(401)});
 
 When('the host links a room {string} request to a guest in room {string}',async({page},requestRoom:string,guestRoom:string)=>{
@@ -496,14 +512,14 @@ When('the host links a room {string} request to a guest in room {string}',async(
   const rooms=bootstrap.rooms;
   const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Room-bound guest',roomId:rooms.find((room)=>room.name===requestRoom)!.id,language:'de'}})).json() as {id:string};
   const guests=await (await request.get('/api/v1/guests')).json() as {data:{id:string;roomName:string}[]};
-  const response=await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{guestId:guests.data.find((guest)=>guest.roomName===guestRoom)!.id,expiresAt:new Date(Date.now()+86_400_000).toISOString()}});
+  const response=await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),guestId:guests.data.find((guest)=>guest.roomName===guestRoom)!.id,expiresAt:new Date(Date.now()+86_400_000).toISOString()}});
   crossRoomApprovalStatus=response.status();
 });
 Then('the cross-room approval is rejected',async()=>{expect(crossRoomApprovalStatus).toBe(404)});
 
 When('linked approval races with moving its guest to another room',async({page})=>{
   const request=page.context().request;const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};const source=bootstrap.rooms.find(item=>item.name==='102')!;const target=bootstrap.rooms.find(item=>item.name==='101')!;approvalMoveRaceStatuses=[];
-  for(let attempt=0;attempt<8;attempt+=1){const guest=await (await request.post('/api/v1/guests',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:`Approval race ${attempt}`,roomId:source.id,language:'de'}})).json() as {id:string};const access=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:`Approval race ${attempt}`,roomId:source.id,language:'de'}})).json() as {id:string};const [approval,move]=await Promise.all([request.post(`/api/v1/access-requests/${access.id}/approve`,{headers:csrfHeaders,data:{guestId:guest.id,expiresAt:new Date(Date.now()+86_400_000).toISOString()}}),request.patch(`/api/v1/guests/${guest.id}`,{headers:csrfHeaders,data:{name:`Approval race ${attempt}`,roomId:target.id,language:'de'}})]);approvalMoveRaceStatuses.push([approval.status(),move.status()])}
+  for(let attempt=0;attempt<8;attempt+=1){const guest=await (await request.post('/api/v1/guests',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:`Approval race ${attempt}`,roomId:source.id,language:'de'}})).json() as {id:string};const access=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:`Approval race ${attempt}`,roomId:source.id,language:'de'}})).json() as {id:string};const [approval,move]=await Promise.all([request.post(`/api/v1/access-requests/${access.id}/approve`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),guestId:guest.id,expiresAt:new Date(Date.now()+86_400_000).toISOString()}}),request.patch(`/api/v1/guests/${guest.id}`,{headers:csrfHeaders,data:{name:`Approval race ${attempt}`,roomId:target.id,language:'de'}})]);approvalMoveRaceStatuses.push([approval.status(),move.status()])}
 });
 Then('approval either wins before the move or rejects the moved guest',async()=>{for(const statuses of approvalMoveRaceStatuses)expect([[200,200],[404,200]]).toContainEqual(statuses)});
 
@@ -557,6 +573,17 @@ When('the host reloads after an order response is lost',async({page})=>{
 });
 Then('the restored order retry uses the original mutation identifier',async()=>{expect(reloadedOrderMutationIds).toHaveLength(2);expect(new Set(reloadedOrderMutationIds).size).toBe(1)});
 Then('the guest tab contains the restored order only once',async()=>{expect(reloadedOrderItemCount).toBe(1)});
+
+When('the host closes the app after an order response is lost',async({page})=>{await chooseOrder(page,'Helles','Anna Berger','101');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__skyBarClosedOrderIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);await originalFetch(input,init);throw new TypeError('Simulated lost response')}return originalFetch(input,init)}});await page.getByRole('button',{name:/Bestellung buchen|Submit order/}).click();await expect(page.locator('.notice--error')).toBeVisible();closedOrderMutationIds=await page.evaluate(()=>(window as unknown as {__skyBarClosedOrderIds:string[]}).__skyBarClosedOrderIds);const context=page.context();await page.close();const reopened=await context.newPage();await reopened.goto('/app/orders/new');await expect(reopened.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();await reopened.evaluate(()=>{const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__skyBarClosedOrderIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST')ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);return originalFetch(input,init)}});await reopened.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(reopened.getByText(/Bestellung hinzugefügt|Order added/)).toBeVisible();closedOrderMutationIds.push(...await reopened.evaluate(()=>(window as unknown as {__skyBarClosedOrderIds:string[]}).__skyBarClosedOrderIds));const {request,guests}=await operationalData(reopened);const guest=guests.data.find(item=>item.name==='Anna Berger')!;closedOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount});
+Then('reopening the order uses the original mutation identifier',async()=>{expect(closedOrderMutationIds).toHaveLength(2);expect(new Set(closedOrderMutationIds).size).toBe(1)});
+Then('the guest tab contains the reopened order only once',async()=>{expect(closedOrderItemCount).toBe(1)});
+
+When('a product price changes after its order response is lost',async({page})=>{await chooseOrder(page,'Helles','Anna Berger','101');capturedUncertainTotal=await page.locator('.cart-total strong').innerText();const {request,products}=await operationalData(page);const product=products.data.find(item=>item.name.de==='Helles')!;capturedExpectedTotalCents=product.priceCents;await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);Object.assign(window,{__skyBarLosePriceOrderResponse:true});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'&&(window as unknown as {__skyBarLosePriceOrderResponse:boolean}).__skyBarLosePriceOrderResponse){(window as unknown as {__skyBarLosePriceOrderResponse:boolean}).__skyBarLosePriceOrderResponse=false;await originalFetch(input,init);throw new TypeError('Simulated lost response')}return originalFetch(input,init)}});await page.getByRole('button',{name:/Bestellung buchen|Submit order/}).click();await expect(page.locator('.notice--error')).toBeVisible();const refreshed=page.waitForResponse(response=>response.url().endsWith('/api/v1/products')&&response.request().method()==='GET');expect((await request.patch(`/api/v1/products/${product.id}`,{headers:csrfHeaders,data:{name:product.name,...(product.description?{description:product.description}:{}),priceCents:product.priceCents+1000,categoryId:product.categoryId,enabled:product.enabled,selfServiceOnly:product.selfServiceOnly}})).status()).toBe(200);await refreshed});
+Then('the uncertain cart still shows its captured total',async({page})=>{await expect(page.locator('.cart-total strong')).toHaveText(capturedUncertainTotal)});
+Then('retrying retains the captured charge',async({page})=>{await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(page.getByText(/Bestellung hinzugefügt|Order added/)).toBeVisible();const {request,guests}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;capturedOrderTabTotalCents=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {totalCents:number}).totalCents;expect(capturedOrderTabTotalCents).toBe(capturedExpectedTotalCents)});
+
+When('a legacy order batch with an unknown command is retried',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const command={mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]};legacyOrderReplayStatuses=[(await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:command})).status()];const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();try{await database.query('UPDATE order_batches SET command=NULL WHERE mutation_id=$1',[command.mutationId])}finally{await database.end()}legacyOrderReplayStatuses.push((await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:command})).status());legacyOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount});
+Then('the legacy order retry succeeds without another charge',async()=>{expect(legacyOrderReplayStatuses).toEqual([201,201]);expect(legacyOrderItemCount).toBe(1)});
 
 When('an order mutation is replayed with a changed quantity',async({page})=>{
   const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;

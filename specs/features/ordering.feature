@@ -63,6 +63,23 @@ Feature: Host order entry and billing
     Then the restored order retry uses the original mutation identifier
     And the guest tab contains the restored order only once
 
+  Scenario: An uncertain order survives closing the app
+    Given an authenticated administrator
+    When the host closes the app after an order response is lost
+    Then reopening the order uses the original mutation identifier
+    And the guest tab contains the reopened order only once
+
+  Scenario: An uncertain order keeps its captured catalog prices
+    Given an authenticated administrator
+    When a product price changes after its order response is lost
+    Then the uncertain cart still shows its captured total
+    And retrying retains the captured charge
+
+  Scenario: A pre-command-snapshot order remains replayable
+    Given an authenticated administrator
+    When a legacy order batch with an unknown command is retried
+    Then the legacy order retry succeeds without another charge
+
   Scenario: Reusing an order mutation cannot change its command
     Given an authenticated administrator
     When an order mutation is replayed with a changed quantity

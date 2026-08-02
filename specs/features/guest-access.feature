@@ -15,6 +15,14 @@ Feature: Guest device access and self-service
     When the host opens approval for "New Roommate"
     Then creating a new guest is selected by default
 
+  Scenario: An uncertain access approval is recovered idempotently
+    Given an authenticated administrator and a separate guest device
+    When the host retries an approval after its first response is lost
+    Then both approval attempts use the same mutation identifier
+    And approval fields stay locked while the result is uncertain
+    And only one approved guest identity exists
+    And the guest device receives access
+
   Scenario: An uncertain access request response is recoverable
     Given an authenticated administrator and a separate guest device
     When the guest retries an access request after its first response is lost

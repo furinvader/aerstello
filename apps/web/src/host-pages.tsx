@@ -18,18 +18,23 @@ const uncertainOrderKey = (hostId: string) => `skybar-uncertain-order:${hostId}`
 
 function loadUncertainOrder(hostId: string): QueuedMutation | null {
   try {
-    const raw = sessionStorage.getItem(uncertainOrderKey(hostId));
+    const durable=localStorage.getItem(uncertainOrderKey(hostId));
+    const legacy=sessionStorage.getItem(uncertainOrderKey(hostId));
+    if(legacy)sessionStorage.removeItem(uncertainOrderKey(hostId));
+    if(!durable&&legacy)localStorage.setItem(uncertainOrderKey(hostId),legacy);
+    const raw = durable??legacy;
     if (!raw) return null;
     const mutation = JSON.parse(raw) as QueuedMutation;
     if (mutation.hostId === hostId && mutation.path === '/order-batches' && mutation.display?.kind === 'order') return mutation;
   } catch { /* Ignore and remove malformed recovery state below. */ }
-  sessionStorage.removeItem(uncertainOrderKey(hostId));
+  localStorage.removeItem(uncertainOrderKey(hostId));sessionStorage.removeItem(uncertainOrderKey(hostId));
   return null;
 }
 
 function persistUncertainOrder(hostId: string, mutation: QueuedMutation | null): void {
-  if (mutation) sessionStorage.setItem(uncertainOrderKey(hostId), JSON.stringify(mutation));
-  else sessionStorage.removeItem(uncertainOrderKey(hostId));
+  sessionStorage.removeItem(uncertainOrderKey(hostId));
+  if (mutation) localStorage.setItem(uncertainOrderKey(hostId), JSON.stringify(mutation));
+  else localStorage.removeItem(uncertainOrderKey(hostId));
 }
 
 export function DashboardPage() {
@@ -76,7 +81,10 @@ export function TakeOrdersPage() {
   const tab=useQuery<Tab>({queryKey:['tab',guestId],queryFn:async()=>{const current=await api<Tab>(`/guests/${guestId}/tab`);return current.itemCount>0?current:{...current,id:null}},enabled:Boolean(guestId)});
   const selectedGuest=guests.data?.data.find(guest=>guest.id===guestId);
   const eligibleProducts=products.data?.data.filter(product=>product.enabled&&!product.selfServiceOnly)??[];
-  const cartLines=Object.entries(cart).flatMap(([productId,quantity])=>{const product=products.data?.data.find(item=>item.id===productId);return product?[{product,quantity}]:[]});
+  const stagedDisplay=stagedSubmission.current?.display?.kind==='order'?stagedSubmission.current.display:undefined;
+  const cartLines=stagedDisplay
+    ? stagedDisplay.items.map(item=>({product:{id:item.productId,name:item.productName,priceCents:item.unitPriceCents??products.data?.data.find(product=>product.id===item.productId)?.priceCents??0},quantity:item.quantity}))
+    : Object.entries(cart).flatMap(([productId,quantity])=>{const product=products.data?.data.find(item=>item.id===productId);return product?[{product,quantity}]:[]});
   const cartTotal=cartLines.reduce((sum,line)=>sum+line.product.priceCents*line.quantity,0);
   useEffect(()=>{const selected=guests.data?.data.find(guest=>guest.id===guestId);if(selected&&!roomId)setRoomId(selected.roomId)},[guestId,guests.data?.data,roomId]);
   const selectGuest=(nextGuestId:string,nextRoomId:string)=>{
@@ -93,7 +101,7 @@ export function TakeOrdersPage() {
     setSubmitting(true);
     if(!stagedSubmission.current){
       const mutationId=crypto.randomUUID();const capturedAt=new Date().toISOString();const items=cartLines.map(line=>({productId:line.product.id,quantity:line.quantity}));
-      stagedSubmission.current={id:mutationId,hostId:host.id,path:'/order-batches',method:'POST',createdAt:capturedAt,body:{mutationId,originHostId:host.id,guestId,catalogVersion:products.data.catalogVersion,capturedAt,items},display:{kind:'order',guestId,guestName:selectedGuest?.name??guestId,roomName:selectedGuest?.roomName??'',items:cartLines.map(line=>({productId:line.product.id,productName:line.product.name,quantity:line.quantity}))}};
+      stagedSubmission.current={id:mutationId,hostId:host.id,path:'/order-batches',method:'POST',createdAt:capturedAt,body:{mutationId,originHostId:host.id,guestId,catalogVersion:products.data.catalogVersion,capturedAt,items},display:{kind:'order',guestId,guestName:selectedGuest?.name??guestId,roomName:selectedGuest?.roomName??'',items:cartLines.map(line=>({productId:line.product.id,productName:line.product.name,unitPriceCents:line.product.priceCents,quantity:line.quantity}))}};
       try { persistUncertainOrder(host.id,stagedSubmission.current); }
       catch { stagedSubmission.current=null;setSubmitting(false);setMessage({kind:'error',text:t('requestFailed')});return; }
     }
@@ -207,8 +215,8 @@ export function RequestsPage(){
 }
 
 function ApproveRequestModal({request,guests,onClose,onApproved}:{request:AccessRequest;guests:Guest[];onClose:()=>void;onApproved:()=>void}){
-  const {t,language}=useI18n();const matches=guests.filter(guest=>guest.roomId===request.roomId);const [guestId,setGuestId]=useState('new');const [expiresAt,setExpiresAt]=useState(()=>toLocalDateTimeInputValue(new Date(Date.now()+24*60*60*1000)));const [error,setError]=useState('');const submit=async(e:FormEvent)=>{e.preventDefault();try{await api(`/access-requests/${request.id}/approve`,{method:'POST',body:json({guestId:guestId==='new'?undefined:guestId,expiresAt:new Date(expiresAt).toISOString()})});onApproved()}catch(caught){setError(apiErrorMessage(caught,language,t('requestFailed')))}};
-  return <Modal title={`${t('approve')} · ${request.name}`} onClose={onClose}><form className="stack" onSubmit={submit}><Field label={t('linkGuest')}><select value={guestId} onChange={e=>setGuestId(e.target.value)}><option value="new">{t('createGuest')} · {request.name} · {request.roomName}</option>{matches.map(guest=><option key={guest.id} value={guest.id}>{t('linkTo')} {guest.name}</option>)}</select></Field><Field label={t('accessExpires')}><input type="datetime-local" value={expiresAt} onChange={e=>setExpiresAt(e.target.value)} required/></Field>{error&&<Notice kind="error">{error}</Notice>}<Button type="submit"><Check/> {t('approve')}</Button></form></Modal>;
+  const {t,language}=useI18n();const matches=guests.filter(guest=>guest.roomId===request.roomId);const [guestId,setGuestId]=useState('new');const [expiresAt,setExpiresAt]=useState(()=>toLocalDateTimeInputValue(new Date(Date.now()+24*60*60*1000)));const [error,setError]=useState('');const [pendingCommand,setPendingCommand]=useState<{mutationId:string;guestId?:string;expiresAt:string}>();const submit=async(e:FormEvent)=>{e.preventDefault();const command=pendingCommand??{mutationId:crypto.randomUUID(),...(guestId==='new'?{}:{guestId}),expiresAt:new Date(expiresAt).toISOString()};setPendingCommand(command);try{await api(`/access-requests/${request.id}/approve`,{method:'POST',body:json(command)});onApproved()}catch(caught){if(caught instanceof ApiError&&caught.status<500)setPendingCommand(undefined);setError(apiErrorMessage(caught,language,t('requestFailed')))}};
+  return <Modal title={`${t('approve')} · ${request.name}`} onClose={onClose}><form className="stack" onSubmit={submit}><Field label={t('linkGuest')}><select value={guestId} onChange={e=>setGuestId(e.target.value)} disabled={Boolean(pendingCommand)}><option value="new">{t('createGuest')} · {request.name} · {request.roomName}</option>{matches.map(guest=><option key={guest.id} value={guest.id}>{t('linkTo')} {guest.name}</option>)}</select></Field><Field label={t('accessExpires')}><input type="datetime-local" value={expiresAt} onChange={e=>setExpiresAt(e.target.value)} required disabled={Boolean(pendingCommand)}/></Field>{error&&<Notice kind="error">{error}</Notice>}<Button type="submit"><Check/> {pendingCommand?t('retry'):t('approve')}</Button></form></Modal>;
 }
 
 interface DeviceSession{id:string;userAgent:string;createdAt:string;lastSeenAt:string;expiresAt:string;current:boolean}
