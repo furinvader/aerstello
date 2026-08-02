@@ -6,7 +6,7 @@ import { BedDouble, Boxes, Building2, ClipboardList, CreditCard, Gauge, GlassWat
 import { ApiError, api, apiErrorCodeMessage } from './api';
 import { Button, Modal } from './components';
 import { useI18n } from './i18n';
-import { discardMutationConflict, flushQueue, mutationConflicts, pendingMutationCount, retryMutationConflict, type QueuedMutation } from './offline';
+import { claimLegacyMutationConflicts, discardMutationConflict, flushQueue, mutationConflicts, pendingMutationCount, retryMutationConflict, type QueuedMutation } from './offline';
 import type { Host, Venue } from './types';
 
 const HostContext = createContext<{host:Host;venue:Venue}|null>(null);
@@ -35,6 +35,7 @@ export function HostShell({children}:{children:ReactNode}) {
       syncing = true;
       try {
         setOnline(navigator.onLine);
+        await claimLegacyMutationConflicts(hostId);
         if (navigator.onLine && await flushQueue(hostId) > 0) await client.invalidateQueries();
         setQueued(await pendingMutationCount(hostId));
         setConflicts(await mutationConflicts(hostId));

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isValidTimeZone, settleTabSchema, venueSettingsSchema } from './contracts.js';
+import { isValidTimeZone, productCreateSchema, settleTabSchema, venueSettingsSchema } from './contracts.js';
 
 describe('venue contracts', () => {
   it('accepts recognized IANA time zones', () => {
@@ -18,5 +18,11 @@ describe('venue contracts', () => {
       expectedTotalCents:0,
       paymentMethod:'cash',
     }).success).toBe(true);
+  });
+
+  it('requires an idempotency key when creating a product', () => {
+    const product = { name: { de: 'Saft', it: '', en: '' }, priceCents: 300, categoryId: '00000000-0000-4000-8000-000000000002' };
+    expect(productCreateSchema.safeParse(product).success).toBe(false);
+    expect(productCreateSchema.safeParse({ ...product, mutationId: '00000000-0000-4000-8000-000000000003' }).success).toBe(true);
   });
 });

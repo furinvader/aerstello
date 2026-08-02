@@ -30,14 +30,52 @@ export interface QueuedMutation {
   display?: QueuedMutationDisplay;
 }
 
+type LegacyQueuedMutation = Omit<QueuedMutation, 'hostId'> & { hostId?: string };
+export const LEGACY_UNASSIGNED_HOST_ID = '00000000-0000-0000-0000-000000000000';
+
+function objectBody(body: unknown): Record<string, unknown> | undefined {
+  return typeof body === 'object' && body !== null && !Array.isArray(body) ? body as Record<string, unknown> : undefined;
+}
+
+export function migrateLegacyMutation(mutation: LegacyQueuedMutation): QueuedMutation {
+  const body = objectBody(mutation.body);
+  const originHostId = typeof body?.originHostId === 'string' ? body.originHostId : undefined;
+  return {
+    ...mutation,
+    hostId: mutation.hostId ?? originHostId ?? LEGACY_UNASSIGNED_HOST_ID,
+    status: 'conflict',
+    errorCode: 'LEGACY_MUTATION_REVIEW',
+    lastError: 'Review this preserved mutation before retrying it.',
+  };
+}
+
+export function claimLegacyMutationForHost(mutation: QueuedMutation, hostId: string): QueuedMutation {
+  const body = objectBody(mutation.body);
+  return {
+    ...mutation,
+    hostId,
+    body: mutation.path === '/order-batches' && body && typeof body.originHostId !== 'string'
+      ? { ...body, originHostId: hostId }
+      : mutation.body,
+  };
+}
+
 const db = new Dexie('sky-bar') as Dexie & { mutations: EntityTable<QueuedMutation, 'id'> };
 db.version(1).stores({ mutations: 'id,createdAt' });
 db.version(2).stores({ mutations: 'id,hostId,[hostId+createdAt],createdAt' }).upgrade((transaction) =>
-  transaction.table('mutations').clear(),
+  transaction.table('mutations').toCollection().modify((mutation: LegacyQueuedMutation) => {
+    Object.assign(mutation, migrateLegacyMutation(mutation));
+  }),
 );
 db.version(3).stores({ mutations: 'id,hostId,status,[hostId+status],[hostId+createdAt],createdAt' }).upgrade((transaction) =>
-  transaction.table('mutations').toCollection().modify((mutation: QueuedMutation) => { mutation.status = 'pending'; }),
+  transaction.table('mutations').toCollection().modify((mutation: QueuedMutation) => { mutation.status ??= 'pending'; }),
 );
+
+export async function claimLegacyMutationConflicts(hostId: string): Promise<void> {
+  await db.mutations.where('hostId').equals(LEGACY_UNASSIGNED_HOST_ID).modify((mutation) => {
+    Object.assign(mutation, claimLegacyMutationForHost(mutation, hostId));
+  });
+}
 
 export function isPermanentSyncConflict(error: unknown): error is ApiError {
   return error instanceof ApiError

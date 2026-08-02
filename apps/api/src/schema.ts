@@ -80,6 +80,19 @@ export const products = pgTable('products', {
   version: integer('version').notNull().default(1),
 });
 
+export const productCreateCommands = pgTable('product_create_commands', {
+  mutationId: uuid('mutation_id').primaryKey(),
+  hostId: uuid('host_id').notNull().references(() => hosts.id),
+  productId: uuid('product_id').unique().references(() => products.id),
+  categoryId: uuid('category_id').notNull().references(() => categories.id),
+  name: jsonb('name').notNull(),
+  description: jsonb('description'),
+  priceCents: integer('price_cents').notNull(),
+  enabled: boolean('enabled').notNull(),
+  selfServiceOnly: boolean('self_service_only').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const productVersions = pgTable('product_versions', {
   productId: uuid('product_id').notNull().references(() => products.id),
   catalogVersion: integer('catalog_version').notNull(),

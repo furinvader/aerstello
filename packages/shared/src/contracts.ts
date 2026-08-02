@@ -55,6 +55,10 @@ export const productInputSchema = z.object({
   selfServiceOnly: z.boolean().default(false),
 });
 
+export const productCreateSchema = productInputSchema.extend({
+  mutationId: z.string().uuid(),
+});
+
 export const orderBatchSchema = z.object({
   mutationId: z.string().uuid(),
   originHostId: z.string().uuid(),

@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type pg from 'pg';
+import { isDeepStrictEqual } from 'node:util';
 import { z, type ZodType } from 'zod';
 import {
   MAX_MONEY_CENTS,
@@ -10,6 +11,7 @@ import {
   languageSchema,
   loginSchema,
   orderBatchSchema,
+  productCreateSchema,
   productInputSchema,
   roomInputSchema,
   settleTabSchema,
@@ -515,8 +517,50 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/api/v1/products', { preHandler: requireAdmin }, async (request, reply) => {
-    const input = body(productInputSchema, request);
+    const input = body(productCreateSchema, request);
     const result = await transaction(async (client) => {
+      type ProductCreateReplay = {
+        hostId: string; productId: string | null; commandCategoryId: string; commandName: Record<string, string>;
+        commandDescription: Record<string, string> | null; commandPriceCents: number; commandEnabled: boolean;
+        commandSelfServiceOnly: boolean; id: string; categoryId: string; name: Record<string, string>;
+        description: Record<string, string> | null; priceCents: number; enabled: boolean; selfServiceOnly: boolean;
+        position: number; version: number;
+      };
+      const findReplay = async () => (await client.query<ProductCreateReplay>(
+        `SELECT c.host_id AS "hostId",c.product_id AS "productId",c.category_id AS "commandCategoryId",c.name AS "commandName",
+                c.description AS "commandDescription",c.price_cents AS "commandPriceCents",c.enabled AS "commandEnabled",
+                c.self_service_only AS "commandSelfServiceOnly",p.id,p.category_id AS "categoryId",p.name,p.description,
+                p.price_cents AS "priceCents",p.enabled,p.self_service_only AS "selfServiceOnly",p.position,p.version
+           FROM product_create_commands c LEFT JOIN products p ON p.id=c.product_id WHERE c.mutation_id=$1`,
+        [input.mutationId],
+      )).rows[0];
+      const replayProduct = (stored: ProductCreateReplay) => {
+        if (stored.hostId !== request.hostIdentity!.id) throw new HttpError(403, 'HOST_MISMATCH', 'This product creation belongs to another host.');
+        if (stored.commandCategoryId !== input.categoryId
+          || !isDeepStrictEqual(stored.commandName, input.name)
+          || !isDeepStrictEqual(stored.commandDescription, input.description ?? null)
+          || stored.commandPriceCents !== input.priceCents
+          || stored.commandEnabled !== input.enabled
+          || stored.commandSelfServiceOnly !== input.selfServiceOnly) {
+          throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to a different product creation command.');
+        }
+        if (!stored.productId) throw new HttpError(409, 'MUTATION_PENDING', 'This product creation is still being processed.');
+        return {
+          id: stored.id, categoryId: stored.categoryId, name: stored.name, description: stored.description,
+          priceCents: stored.priceCents, enabled: stored.enabled, selfServiceOnly: stored.selfServiceOnly,
+          position: stored.position, version: stored.version,
+        };
+      };
+      const reserved = await client.query(
+        `INSERT INTO product_create_commands(mutation_id,host_id,category_id,name,description,price_cents,enabled,self_service_only)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (mutation_id) DO NOTHING RETURNING mutation_id`,
+        [input.mutationId, request.hostIdentity!.id, input.categoryId, JSON.stringify(input.name), input.description ? JSON.stringify(input.description) : null, input.priceCents, input.enabled, input.selfServiceOnly],
+      );
+      if (!reserved.rowCount) {
+        const replay = await findReplay();
+        if (!replay) throw new HttpError(409, 'MUTATION_PENDING', 'This product creation is still being processed.');
+        return { product: replayProduct(replay), event: undefined };
+      }
       const version = (await client.query<{ catalogVersion: number }>(
         'UPDATE venue_settings SET catalog_version=catalog_version+1 WHERE id=1 RETURNING catalog_version AS "catalogVersion"',
       )).rows[0]!.catalogVersion;
@@ -527,10 +571,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         [input.categoryId, JSON.stringify(input.name), input.description ? JSON.stringify(input.description) : null, input.priceCents, input.enabled, input.selfServiceOnly, version],
       )).rows[0];
       await client.query('INSERT INTO product_versions(product_id,catalog_version,name,price_cents,enabled,self_service_only) VALUES ($1,$2,$3,$4,$5,$6)', [product.id, version, JSON.stringify(input.name), input.priceCents, input.enabled, input.selfServiceOnly]);
-      return product;
+      await client.query('UPDATE product_create_commands SET product_id=$1 WHERE mutation_id=$2', [product.id, input.mutationId]);
+      const event = await storeEvent('catalog.changed', {}, client);
+      return { product, event };
     });
-    await emitEvent('catalog.changed', {});
-    return reply.code(201).send(result);
+    if (result.event) {
+      try { publishEvent(result.event); }
+      catch (error) { app.log.error(error, 'Could not publish committed catalog event'); }
+    }
+    return reply.code(201).send(result.product);
   });
 
   app.patch('/api/v1/products/:id', { preHandler: requireAdmin }, async (request) => {

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from './api';
-import { isPermanentSyncConflict, replayQueuedMutations, type QueuedMutation } from './offline';
+import { claimLegacyMutationForHost, isPermanentSyncConflict, migrateLegacyMutation, replayQueuedMutations, type QueuedMutation } from './offline';
 
 const mutation = (id: string): QueuedMutation => ({
   id,
@@ -40,5 +40,27 @@ describe('offline mutation replay', () => {
   it('treats retryable client responses as transient', () => {
     expect(isPermanentSyncConflict(new ApiError('UNAUTHENTICATED', 'Sign in', 401))).toBe(false);
     expect(isPermanentSyncConflict(new ApiError('RATE_LIMITED', 'Slow down', 429))).toBe(false);
+  });
+
+  it('quarantines version-one mutations without deleting their command', () => {
+    const legacy = {
+      id: 'legacy-order',
+      path: '/order-batches',
+      method: 'POST' as const,
+      body: { mutationId: 'legacy-order', guestId: 'guest-a', items: [{ productId: 'product-a', quantity: 1 }] },
+      createdAt: '2026-08-02T00:00:00.000Z',
+    };
+
+    const migrated = migrateLegacyMutation(legacy);
+    expect(migrated).toEqual(expect.objectContaining({
+      id: legacy.id,
+      path: legacy.path,
+      body: legacy.body,
+      status: 'conflict',
+      errorCode: 'LEGACY_MUTATION_REVIEW',
+    }));
+    const claimed = claimLegacyMutationForHost(migrated, 'host-a');
+    expect(claimed.hostId).toBe('host-a');
+    expect(claimed.body).toEqual(expect.objectContaining({ mutationId: 'legacy-order', originHostId: 'host-a' }));
   });
 });

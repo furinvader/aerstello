@@ -22,6 +22,10 @@ Feature: Host order entry and billing
     When the device goes offline and the host submits one "Helles" for "Anna Berger" in room "101"
     Then the order is marked as queued for synchronization
 
+  Scenario: A version-one queued order survives the database upgrade
+    Given a version-one device database contains a queued financial mutation
+    Then the queued financial mutation is preserved for review
+
   Scenario: A host removes an incorrect item while offline
     Given an authenticated administrator
     And an open "Helles" order for "Anna Berger" in room "101"

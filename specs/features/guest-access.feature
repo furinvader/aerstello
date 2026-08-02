@@ -14,6 +14,18 @@ Feature: Guest device access and self-service
     Then both access request attempts use the same mutation identifier
     And the host sees only one pending request from that guest
 
+  Scenario: A denied access request stops polling
+    Given an authenticated administrator and a separate guest device
+    When "Denied Poller" requests access for room "102"
+    Then the host sees the pending request for "Denied Poller"
+    When the host denies the request for "Denied Poller"
+    Then the denied guest device stops status polling
+
+  Scenario: Approval defaults to one local day
+    Given an authenticated administrator
+    When a host in a non-UTC timezone opens a guest approval
+    Then the approval expiry is one local day from now
+
   Scenario: A lost grant response can be recovered by the requesting device
     Given an authenticated administrator
     When an approved guest grant response is lost before its cookie is retained
