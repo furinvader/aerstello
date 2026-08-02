@@ -6,7 +6,7 @@ const administratorPassword = seedPassword(process.env);
 await migrate();
 await transaction(async (client) => {
   if (process.env.E2E_RESET === 'true') {
-    await client.query(`TRUNCATE audit_events,realtime_events,bill_items,order_items,bills,order_batches,order_tabs,guest_sessions,access_requests,product_versions,products,categories,guests,rooms,host_sessions,hosts RESTART IDENTITY CASCADE`);
+    await client.query(`TRUNCATE rate_limit_counters,host_account_commands,product_create_commands,audit_events,realtime_events,bill_items,order_items,bills,order_batches,order_tabs,guest_sessions,access_requests,product_versions,products,categories,guests,rooms,host_sessions,hosts RESTART IDENTITY CASCADE`);
     await client.query(`UPDATE venue_settings SET name='',default_language='de',timezone='Europe/Berlin',catalog_version=1,version=1`);
   }
   const passwordHash = await hashPassword(administratorPassword);

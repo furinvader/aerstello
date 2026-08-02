@@ -1,4 +1,8 @@
 import { createHash } from 'node:crypto';
+import type { FastifyRateLimitOptions, FastifyRateLimitStore } from '@fastify/rate-limit';
+import type { RouteOptions } from 'fastify';
+import type pg from 'pg';
+import { pool } from './db.js';
 
 interface RateLimitRequest {
   ip: string;
@@ -32,4 +36,65 @@ export function rateLimitKey(request: RateLimitRequest): string {
     return `access-status:${request.ip}:${capability}`;
   }
   return ipRateLimitKey(request);
+}
+
+type RateLimitDatabase = Pick<pg.Pool, 'query'>;
+type StoreOptions = FastifyRateLimitOptions & {
+  groupId?: string;
+  timeWindow?: number;
+  routeInfo?: { method?: string | string[]; url?: string };
+};
+
+export async function incrementRateLimitCounter(
+  scope: string,
+  key: string,
+  timeWindowMs: number,
+  client: RateLimitDatabase = pool,
+): Promise<{ current: number; ttl: number }> {
+  const keyHash = createHash('sha256').update(key).digest('base64url');
+  const result = await client.query<{ current: number; ttl: number }>(
+    `INSERT INTO rate_limit_counters(scope,key_hash,count,expires_at)
+     VALUES ($1,$2,1,clock_timestamp()+($3::double precision*interval '1 millisecond'))
+     ON CONFLICT (scope,key_hash) DO UPDATE SET
+       count=CASE WHEN rate_limit_counters.expires_at<=clock_timestamp() THEN 1 ELSE rate_limit_counters.count+1 END,
+       expires_at=CASE WHEN rate_limit_counters.expires_at<=clock_timestamp()
+                       THEN clock_timestamp()+($3::double precision*interval '1 millisecond')
+                       ELSE rate_limit_counters.expires_at END
+     RETURNING count AS current,
+       greatest(0,ceil(extract(epoch FROM (expires_at-clock_timestamp()))*1000))::int AS ttl`,
+    [scope, keyHash, timeWindowMs],
+  );
+  const counter = result.rows[0];
+  if (!counter) throw new Error('Could not persist rate-limit counter');
+  return counter;
+}
+
+function rateLimitScope(options: StoreOptions): string {
+  if (options.groupId) return `group:${options.groupId}`;
+  const method = Array.isArray(options.routeInfo?.method) ? options.routeInfo.method.join(',') : options.routeInfo?.method;
+  return method && options.routeInfo?.url ? `route:${method}:${options.routeInfo.url}` : 'global';
+}
+
+export class PostgresRateLimitStore implements FastifyRateLimitStore {
+  private readonly options: StoreOptions;
+  private readonly scope: string;
+
+  constructor(options: FastifyRateLimitOptions) {
+    this.options = options as StoreOptions;
+    this.scope = rateLimitScope(this.options);
+  }
+
+  incr(key: string, callback: (error: Error | null, result?: { current: number; ttl: number }) => void): void {
+    void incrementRateLimitCounter(this.scope, key, this.options.timeWindow ?? 60_000)
+      .then((result) => callback(null, result))
+      .catch((error: unknown) => callback(error instanceof Error ? error : new Error('Rate-limit store failed')));
+  }
+
+  child(routeOptions: RouteOptions & { path: string; prefix: string }): FastifyRateLimitStore {
+    return new PostgresRateLimitStore({ ...this.options, ...routeOptions } as FastifyRateLimitOptions);
+  }
+}
+
+export async function pruneExpiredRateLimitCounters(client: RateLimitDatabase = pool): Promise<void> {
+  await client.query("DELETE FROM rate_limit_counters WHERE expires_at<clock_timestamp()-interval '1 hour'");
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { guestRealtimeEvent } from './routes.js';
+import { guestRealtimeEvent, safeFastifyClientError } from './routes.js';
 
 describe('guest realtime event filtering', () => {
   it('delivers only the guest own order invalidation without identifiers', () => {
@@ -17,5 +17,20 @@ describe('guest realtime event filtering', () => {
       .toEqual({ id: '5', topic: 'guests.changed', payload: {} });
     expect(guestRealtimeEvent({ id: '6', topic: 'rooms.changed', payload: { roomId: 'room-a' } }, 'guest-a'))
       .toEqual({ id: '6', topic: 'rooms.changed', payload: {} });
+  });
+});
+
+describe('request error responses', () => {
+  it('preserves safe Fastify client errors', () => {
+    expect(safeFastifyClientError({
+      statusCode: 400,
+      code: 'FST_ERR_CTP_INVALID_JSON_BODY',
+      message: 'Body is not valid JSON',
+    })).toEqual({
+      statusCode: 400,
+      code: 'FST_ERR_CTP_INVALID_JSON_BODY',
+      message: 'Body is not valid JSON',
+    });
+    expect(safeFastifyClientError({ statusCode: 500, code: 'PRIVATE_FAILURE', message: 'secret' })).toBeUndefined();
   });
 });

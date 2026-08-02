@@ -2,7 +2,7 @@
 
 ## Runtime topology
 
-The production container serves the built React PWA and Fastify API from one origin. PostgreSQL is the durable source of truth. Server-sent events are invalidation hints; clients always refetch authoritative REST resources after an event or reconnect. Every API replica tails the retained PostgreSQL event log, so a mutation handled by one replica reaches streams connected to the others as well as its own process.
+The production container serves the built React PWA and Fastify API from one origin. PostgreSQL is the durable source of truth. Server-sent events are invalidation hints; clients always refetch authoritative REST resources after an event or reconnect. Mutation transactions persist their invalidation record before commit, and every API replica tails the retained PostgreSQL event log, so a committed mutation handled by one replica reaches streams connected to the others as well as its own process.
 
 The browser stores the application shell and explicitly non-identity-scoped bootstrap/catalog responses through Workbox. IndexedDB stores only replayable host mutations, partitioned by the originating host identity. Authentication remains cookie-based and is never persisted in application storage.
 
@@ -14,7 +14,7 @@ Long-lived event streams revalidate their bound host or guest session periodical
 
 Host clients revalidate authentication when a stream closes and clear the authenticated query cache before returning remotely revoked devices to login. Staff navigation and direct room/product management URLs expose no administrator mutation controls. Hosts can inspect and revoke individual guest device sessions from the guest directory.
 
-Command-line administrator credential recovery revokes every active session for that account in the same transaction as the password reset. Login locks the host after password verification and rechecks the exact verified hash before creating a session, so an in-flight old-password login cannot slip past recovery or a concurrent password change. The administrator must sign in again on every device after recovery.
+Command-line administrator credential recovery revokes every active session for that account in the same transaction as the password reset. Login locks the host after password verification and rechecks the exact verified hash before creating a session, so an in-flight old-password login cannot slip past recovery or a concurrent password change. Profile and password saves carry a host version plus an idempotency key; an uncertain replay returns its original result and can never restore older profile values over a later device's edit. The administrator must sign in again on every device after recovery.
 
 Public guest request creation carries a browser-persisted mutation UUID. The browser freezes the submitted name, room, and language while the result is uncertain. The server stores that key and derives the same one-time status token for an identical retry, so a lost creation response cannot orphan a second pending request. Status polling sends the token in a POST body, never a request URL. Approval links or creates a guest in the requested room and assigns an expiry. The requesting browser atomically binds unexpired approved status to its persisted grant-exchange UUID while locking and rechecking the active guest. The session cookie value is server-derived from that binding, allowing the same browser to recover a lost response without minting another grant; a different exchange UUID receives no access. Requests, live guest sessions, and realtime events reveal data only for their bound guest.
 
@@ -34,7 +34,9 @@ The bill archive is searched and paginated by the API rather than truncated in t
 
 The host PWA queues order batches and item-void commands from the open-tab controls when `navigator.onLine` is false. Each record is bound to its originating host, and the API rejects replay under another identity. UUID mutation keys make replay idempotent and are retained when an online response is uncertain. If another device settles before a queued addition arrives, that addition creates a new tab. Permanent client conflicts are quarantined for host review so later queue entries can continue; transient failures remain pending, stop the current replay pass, and are retried on a bounded timer while connectivity remains available.
 
-Billing, guest creation, access approval, catalog configuration, and venue settings are online-only. This boundary prevents duplicate settlement and unsafe configuration merges. A room cannot be archived while it has active guests or pending access requests, and public request creation shares the room lock with archival.
+Billing, guest creation, access approval, catalog configuration, and venue settings are online-only. This boundary prevents duplicate settlement and unsafe configuration merges. Product archival carries both the displayed product version and a client mutation UUID, so stale requests are rejected and lost responses can be replayed without removing a newer configuration. A room cannot be archived while it has active guests or pending access requests, and public request creation shares the room lock with archival.
+
+Rate-limit counters live in PostgreSQL rather than process memory. Global address ceilings and per-capability guest polling ceilings therefore remain effective when traffic is distributed across multiple API replicas.
 
 ## Localization and responsive layout
 

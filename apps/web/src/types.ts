@@ -1,6 +1,6 @@
 import type { Language, LocalizedText } from '@sky-bar/shared';
 
-export interface Host { id: string; email: string; name: string; role: 'admin' | 'staff'; language: Language; sessionId: string }
+export interface Host { id: string; email: string; name: string; role: 'admin' | 'staff'; language: Language; version: number; sessionId: string }
 export interface Venue { name: string; defaultLanguage: Language; timezone: string; version: number }
 export interface Room { id: string; name: string; position: number; guestCount?: number; version: number }
 export interface Guest { id: string; name: string; roomId: string; roomName: string; language: Language; itemCount: number; totalCents: number; version: number }

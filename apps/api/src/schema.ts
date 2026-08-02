@@ -102,8 +102,14 @@ export const products = pgTable('products', {
   position: integer('position').notNull().default(0),
   catalogVersion: integer('catalog_version').notNull(),
   archivedAt: timestamp('archived_at', { withTimezone: true }),
+  archiveMutationId: uuid('archive_mutation_id'),
+  archiveExpectedVersion: integer('archive_expected_version'),
+  archivedByHost: uuid('archived_by_host').references(() => hosts.id),
   version: integer('version').notNull().default(1),
-}, (t) => [check('products_price_cents_check', sql`${t.priceCents} >= 0`)]);
+}, (t) => [
+  check('products_price_cents_check', sql`${t.priceCents} >= 0`),
+  uniqueIndex('products_archive_mutation_uq').on(t.archiveMutationId).where(sql`${t.archiveMutationId} IS NOT NULL`),
+]);
 
 export const productCreateCommands = pgTable('product_create_commands', {
   mutationId: uuid('mutation_id').primaryKey(),
@@ -115,6 +121,16 @@ export const productCreateCommands = pgTable('product_create_commands', {
   priceCents: integer('price_cents').notNull(),
   enabled: boolean('enabled').notNull(),
   selfServiceOnly: boolean('self_service_only').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const hostAccountCommands = pgTable('host_account_commands', {
+  mutationId: uuid('mutation_id').primaryKey(),
+  hostId: uuid('host_id').notNull().references(() => hosts.id),
+  commandHash: text('command_hash').notNull(),
+  resultName: text('result_name').notNull(),
+  resultLanguage: language('result_language').notNull(),
+  resultVersion: integer('result_version').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -265,3 +281,13 @@ export const realtimeEvents = pgTable('realtime_events', {
   payload: jsonb('payload').notNull().default({}),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const rateLimitCounters = pgTable('rate_limit_counters', {
+  scope: text('scope').notNull(),
+  keyHash: text('key_hash').notNull(),
+  count: integer('count').notNull(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+}, (t) => [
+  primaryKey({ columns: [t.scope, t.keyHash], name: 'rate_limit_counters_pkey' }),
+  index('rate_limit_counters_expiry_idx').on(t.expiresAt),
+]);

@@ -8,7 +8,7 @@ import Fastify from 'fastify';
 import { config } from './config.js';
 import { migrate, pool } from './db.js';
 import { startRealtimeRelay } from './events.js';
-import { ipRateLimitKey, ipRateLimitMax } from './rate-limit.js';
+import { ipRateLimitKey, ipRateLimitMax, PostgresRateLimitStore, pruneExpiredRateLimitCounters } from './rate-limit.js';
 import { registerRoutes } from './routes.js';
 
 const app = Fastify({
@@ -27,6 +27,7 @@ await app.register(rateLimit, {
   timeWindow: '1 minute',
   hook: 'preHandler',
   keyGenerator: ipRateLimitKey,
+  store: PostgresRateLimitStore,
 });
 
 await registerRoutes(app);
@@ -53,10 +54,12 @@ if (config.NODE_ENV === 'production') {
 }
 
 let stopRealtimeRelay: (()=>void)|undefined;
+let rateLimitCleanup: NodeJS.Timeout|undefined;
 
 async function shutdown(signal: string) {
   app.log.info({ signal }, 'Shutting down');
   stopRealtimeRelay?.();
+  if(rateLimitCleanup)clearInterval(rateLimitCleanup);
   await app.close();
   await pool.end();
   process.exit(0);
@@ -67,4 +70,6 @@ process.on('SIGINT', () => void shutdown('SIGINT'));
 
 await migrate();
 stopRealtimeRelay=await startRealtimeRelay(app.log);
+rateLimitCleanup=setInterval(()=>void pruneExpiredRateLimitCounters().catch((error: unknown)=>app.log.warn({error},'Could not prune expired rate-limit counters')),5*60_000);
+rateLimitCleanup.unref();
 await app.listen({ port: config.PORT, host: '0.0.0.0' });

@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { z, type ZodType } from 'zod';
 import {
   MAX_MONEY_CENTS,
+  accountUpdateSchema,
   accessApprovalSchema,
   accessRequestSchema,
   categoryCreateSchema,
@@ -13,6 +14,7 @@ import {
   loginSchema,
   orderBatchSchema,
   productCreateSchema,
+  productArchiveSchema,
   productUpdateSchema,
   roomCreateSchema,
   roomUpdateSchema,
@@ -20,7 +22,7 @@ import {
   venueSettingsSchema,
   voidSchema,
 } from '@sky-bar/shared';
-import { audit, emitEvent, eventBus, publishEvent, storeEvent, type RealtimeEvent } from './events.js';
+import { audit, eventBus, publishEvent, storeEvent, type RealtimeEvent } from './events.js';
 import { pool, transaction } from './db.js';
 import { config } from './config.js';
 import { rateLimitKey } from './rate-limit.js';
@@ -49,6 +51,18 @@ class HttpError extends Error {
   constructor(public statusCode: number, public code: string, message: string) {
     super(message);
   }
+}
+
+export function safeFastifyClientError(error: unknown): { statusCode: number; code: string; message: string } | undefined {
+  const candidate = error as { statusCode?: unknown; code?: unknown; message?: unknown };
+  if (typeof candidate.statusCode !== 'number' || candidate.statusCode < 400 || candidate.statusCode >= 500) return undefined;
+  const code = typeof candidate.code === 'string' && /^[A-Z][A-Z0-9_]+$/.test(candidate.code)
+    ? candidate.code
+    : 'REQUEST_ERROR';
+  const message = typeof candidate.message === 'string' && candidate.message.length > 0
+    ? candidate.message
+    : 'The request could not be processed.';
+  return { statusCode: candidate.statusCode, code, message };
 }
 
 function body<T>(schema: ZodType<T>, request: FastifyRequest): T {
@@ -132,6 +146,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if ((error as { code?: string }).code === '23505') {
       return reply.code(409).send({ error: { code: 'CONFLICT', message: 'This change conflicts with existing data.' } });
     }
+    const clientError = safeFastifyClientError(error);
+    if (clientError) {
+      return reply.code(clientError.statusCode).send({ error: { code: clientError.code, message: clientError.message } });
+    }
     app.log.error(error);
     return reply.code(500).send({ error: { code: 'INTERNAL_ERROR', message: 'An unexpected error occurred.' } });
   });
@@ -172,7 +190,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         return stored;
       };
       const existing=await findExisting();
-      if(existing)return validate(existing);
+      if(existing)return {access:validate(existing),event:undefined};
       const room = await client.query('SELECT id FROM rooms WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [input.roomId]);
       if (!room.rowCount) throw new HttpError(404, 'ROOM_NOT_FOUND', 'Room not found.');
       const inserted = await client.query<{ id: string; name: string; roomId: string; language: string }>(
@@ -183,10 +201,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       );
       const stored = inserted.rows[0] ?? await findExisting();
       if (!stored) throw new HttpError(500, 'REQUEST_ERROR', 'Could not create the request.');
-      return validate(stored);
+      const access=validate(stored);
+      return {access,event:inserted.rows[0]?await storeEvent('access-request.changed',{id:access.id},client):undefined};
     });
-    const requestId = result.id;
-    await emitEvent('access-request.changed', { id: requestId });
+    const requestId = result.access.id;
+    if(result.event){try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed access-request event')}}
     return reply.code(201).send({ id: requestId, statusToken: token, status: 'pending' });
   });
 
@@ -292,13 +311,28 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.patch('/api/v1/account', { preHandler: requireHost }, async (request) => {
-    const schema = z.object({
-      name: z.string().trim().min(1).max(120).optional(),
-      language: languageSchema.optional(),
-      currentPassword: z.string().optional(),
-      newPassword: z.string().min(12).max(256).optional(),
-    });
-    const input = body(schema, request);
+    const input = body(accountUpdateSchema, request);
+    const commandHash = hashToken(`account-command:${JSON.stringify([
+      input.expectedVersion,
+      input.name ?? null,
+      input.language ?? null,
+      input.currentPassword ?? null,
+      input.newPassword ?? null,
+    ])}`);
+    type AccountReplay = { hostId: string; commandHash: string; name: string; language: 'de'|'it'|'en'; version: number };
+    const validateReplay = (stored: AccountReplay) => {
+      if (stored.hostId !== request.hostIdentity!.id) throw new HttpError(403, 'HOST_MISMATCH', 'This account update belongs to another host.');
+      if (stored.commandHash !== commandHash) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another account update.');
+      return { name: stored.name, language: stored.language, version: stored.version };
+    };
+    const findReplay = async (client: pg.Pool | pg.PoolClient) => (await client.query<AccountReplay>(
+      `SELECT host_id AS "hostId",command_hash AS "commandHash",result_name AS name,
+              result_language AS language,result_version AS version
+         FROM host_account_commands WHERE mutation_id=$1`,
+      [input.mutationId],
+    )).rows[0];
+    const replay = await findReplay(pool);
+    if (replay) return validateReplay(replay);
     let expectedPasswordHash: string | undefined;
     let newPasswordHash: string | undefined;
     if (input.newPassword) {
@@ -309,25 +343,43 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       expectedPasswordHash = current.rows[0]!.passwordHash;
       newPasswordHash = await hashPassword(input.newPassword);
     }
-    const authEvent = await transaction(async (client) => {
-      let event: RealtimeEvent | undefined;
-      if (newPasswordHash) {
-        const updated = await client.query(
-          'UPDATE hosts SET password_hash=$1 WHERE id=$2 AND password_hash=$3',
-          [newPasswordHash, request.hostIdentity!.id, expectedPasswordHash],
+    const result = await transaction(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [input.mutationId]);
+      const stored = await findReplay(client);
+      if (stored) return { host: validateReplay(stored), event: undefined };
+      const updated = await client.query<{ name: string; language: 'de'|'it'|'en'; version: number }>(
+        `UPDATE hosts SET name=COALESCE($1,name),language=COALESCE($2,language),
+                password_hash=COALESCE($3,password_hash),version=version+1
+          WHERE id=$4 AND version=$5 AND ($6::text IS NULL OR password_hash=$6)
+          RETURNING name,language,version`,
+        [input.name ?? null, input.language ?? null, newPasswordHash ?? null, request.hostIdentity!.id, input.expectedVersion, expectedPasswordHash ?? null],
+      );
+      if (!updated.rowCount) {
+        const current = await client.query<{ version: number; passwordHash: string }>(
+          'SELECT version,password_hash AS "passwordHash" FROM hosts WHERE id=$1',
+          [request.hostIdentity!.id],
         );
-        if (!updated.rowCount) throw new HttpError(409, 'PASSWORD_CHANGED', 'The password changed in another session. Try again.');
-        await client.query('UPDATE host_sessions SET revoked_at=now() WHERE host_id=$1 AND id<>$2', [request.hostIdentity!.id, request.hostIdentity!.sessionId]);
-        event = await storeEvent('host-auth.changed', { hostId: request.hostIdentity!.id }, client);
+        if (expectedPasswordHash && current.rows[0]?.passwordHash !== expectedPasswordHash) {
+          throw new HttpError(409, 'PASSWORD_CHANGED', 'The password changed in another session. Try again.');
+        }
+        throw new HttpError(409, 'ACCOUNT_CHANGED', 'The account was changed in another session. Reload and try again.');
       }
-      await client.query('UPDATE hosts SET name=COALESCE($1,name),language=COALESCE($2,language) WHERE id=$3', [input.name ?? null, input.language ?? null, request.hostIdentity!.id]);
-      return event;
+      if (newPasswordHash) {
+        await client.query('UPDATE host_sessions SET revoked_at=now() WHERE host_id=$1 AND id<>$2', [request.hostIdentity!.id, request.hostIdentity!.sessionId]);
+      }
+      const host = updated.rows[0]!;
+      await client.query(
+        `INSERT INTO host_account_commands(mutation_id,host_id,command_hash,result_name,result_language,result_version)
+         VALUES ($1,$2,$3,$4,$5,$6)`,
+        [input.mutationId, request.hostIdentity!.id, commandHash, host.name, host.language, host.version],
+      );
+      return { host, event: await storeEvent('host-auth.changed', { hostId: request.hostIdentity!.id }, client) };
     });
-    if (authEvent) {
-      try { publishEvent(authEvent); }
+    if (result.event) {
+      try { publishEvent(result.event); }
       catch (error) { app.log.error(error, 'Could not publish committed host authorization event'); }
     }
-    return { ok: true };
+    return result.host;
   });
 
   app.get('/api/v1/hosts', { preHandler: requireAdmin }, async () => mapList((await pool.query(
@@ -481,33 +533,37 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.patch('/api/v1/rooms/:id', { preHandler: requireAdmin }, async (request) => {
     const input = body(roomUpdateSchema, request);
     const roomId=id(request);
-    const result = await pool.query('UPDATE rooms SET name=$1,version=version+1 WHERE id=$2 AND version=$3 AND archived_at IS NULL RETURNING id,name,position,version', [input.name, roomId, input.expectedVersion]);
-    if (!result.rowCount) {
-      const current=await pool.query('SELECT 1 FROM rooms WHERE id=$1 AND archived_at IS NULL',[roomId]);
-      if(!current.rowCount)throw new HttpError(404, 'ROOM_NOT_FOUND', 'Room not found.');
-      throw new HttpError(409,'ROOM_CHANGED','The room was changed by another administrator.');
-    }
-    await emitEvent('rooms.changed', {});
-    return result.rows[0];
+    const result = await transaction(async(client)=>{
+      const updated = await client.query('UPDATE rooms SET name=$1,version=version+1 WHERE id=$2 AND version=$3 AND archived_at IS NULL RETURNING id,name,position,version', [input.name, roomId, input.expectedVersion]);
+      if (!updated.rowCount) {
+        const current=await client.query('SELECT 1 FROM rooms WHERE id=$1 AND archived_at IS NULL',[roomId]);
+        if(!current.rowCount)throw new HttpError(404, 'ROOM_NOT_FOUND', 'Room not found.');
+        throw new HttpError(409,'ROOM_CHANGED','The room was changed by another administrator.');
+      }
+      return {room:updated.rows[0],event:await storeEvent('rooms.changed',{},client)};
+    });
+    try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed room update event')}
+    return result.room;
   });
 
   app.put('/api/v1/rooms/order', { preHandler: requireAdmin }, async (request) => {
     const input = body(z.object({ rooms: z.array(z.object({id:z.string().uuid(),expectedVersion:z.number().int().positive()})).min(1)
       .refine(values=>new Set(values.map(room=>room.id)).size===values.length) }), request);
-    await transaction(async (client) => {
+    const result=await transaction(async (client) => {
       const locked=await client.query<{id:string;version:number}>('SELECT id,version FROM rooms WHERE archived_at IS NULL ORDER BY id FOR UPDATE');
       const requested=new Map(input.rooms.map(room=>[room.id,room.expectedVersion]));
       if(locked.rowCount!==input.rooms.length||locked.rows.some(room=>!requested.has(room.id)))throw new HttpError(409,'ROOM_SET_CHANGED','The active room set changed. Reload the rooms and try again.');
       if(locked.rows.some(room=>requested.get(room.id)!==room.version))throw new HttpError(409,'ROOM_ORDER_CHANGED','The room order changed. Reload the rooms and try again.');
       for (const [position, room] of input.rooms.entries()) await client.query('UPDATE rooms SET position=$1,version=version+1 WHERE id=$2 AND archived_at IS NULL', [position, room.id]);
+      return {event:await storeEvent('rooms.changed',{},client)};
     });
-    await emitEvent('rooms.changed', {});
+    try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed room-order event')}
     return { ok: true };
   });
 
   app.delete('/api/v1/rooms/:id', { preHandler: requireAdmin }, async (request, reply) => {
     const roomId = id(request);
-    await transaction(async (client) => {
+    const result=await transaction(async (client) => {
       const room = await client.query('SELECT id FROM rooms WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [roomId]);
       if (!room.rowCount) throw new HttpError(404, 'ROOM_NOT_FOUND', 'Room not found.');
       const active = await client.query('SELECT 1 FROM guests WHERE room_id=$1 AND archived_at IS NULL LIMIT 1', [roomId]);
@@ -515,8 +571,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const pending = await client.query(`SELECT 1 FROM access_requests WHERE room_id=$1 AND status='pending' LIMIT 1`, [roomId]);
       if (pending.rowCount) throw new HttpError(409, 'ROOM_HAS_REQUESTS', 'Resolve pending access requests first.');
       await client.query('UPDATE rooms SET archived_at=now(),version=version+1 WHERE id=$1', [roomId]);
+      return {event:await storeEvent('rooms.changed',{},client)};
     });
-    await emitEvent('rooms.changed', {});
+    try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed room archival event')}
     return reply.code(204).send();
   });
 
@@ -565,31 +622,33 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const result = await transaction(async (client) => {
       const room = await client.query('SELECT id FROM rooms WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [input.roomId]);
       if (!room.rowCount) throw new HttpError(404, 'ROOM_NOT_FOUND', 'Room not found.');
-      return client.query(
+      const updated=await client.query(
         'UPDATE guests SET name=$1,room_id=$2,language=$3,version=version+1 WHERE id=$4 AND version=$5 AND archived_at IS NULL RETURNING id,name,room_id AS "roomId",language,version',
         [input.name, input.roomId, input.language, guestId, input.expectedVersion],
       );
+      if (!updated.rowCount) {
+        const current=await client.query('SELECT 1 FROM guests WHERE id=$1 AND archived_at IS NULL',[guestId]);
+        if(!current.rowCount)throw new HttpError(404, 'GUEST_NOT_FOUND', 'Guest not found.');
+        throw new HttpError(409,'GUEST_CHANGED','The guest was changed by another host.');
+      }
+      return {guest:updated.rows[0],event:await storeEvent('guests.changed',{},client)};
     });
-    if (!result.rowCount) {
-      const current=await pool.query('SELECT 1 FROM guests WHERE id=$1 AND archived_at IS NULL',[guestId]);
-      if(!current.rowCount)throw new HttpError(404, 'GUEST_NOT_FOUND', 'Guest not found.');
-      throw new HttpError(409,'GUEST_CHANGED','The guest was changed by another host.');
-    }
-    await emitEvent('guests.changed', {});
-    return result.rows[0];
+    try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed guest update event')}
+    return result.guest;
   });
 
   app.delete('/api/v1/guests/:id', { preHandler: requireHost }, async (request, reply) => {
     const guestId = id(request);
-    await transaction(async (client) => {
+    const result=await transaction(async (client) => {
       const guest = await client.query('SELECT id FROM guests WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [guestId]);
       if (!guest.rowCount) throw new HttpError(404, 'GUEST_NOT_FOUND', 'Guest not found.');
       const open = await client.query(`SELECT 1 FROM order_tabs t JOIN order_items i ON i.tab_id=t.id WHERE t.guest_id=$1 AND i.status IN ('open','provisional') LIMIT 1`, [guestId]);
       if (open.rowCount) throw new HttpError(409, 'GUEST_HAS_ORDERS', 'Settle or void open orders first.');
       await client.query('UPDATE guests SET archived_at=now(),version=version+1 WHERE id=$1', [guestId]);
       await client.query('UPDATE guest_sessions SET revoked_at=now() WHERE guest_id=$1 AND revoked_at IS NULL', [guestId]);
+      return {event:await storeEvent('guests.changed',{},client)};
     });
-    await emitEvent('guests.changed', {});
+    try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed guest archival event')}
     return reply.code(204).send();
   });
 
@@ -743,27 +802,45 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         throw new HttpError(409, 'PRODUCT_CHANGED', 'The product was changed by another administrator.');
       }
       await client.query('INSERT INTO product_versions(product_id,catalog_version,name,price_cents,enabled,self_service_only) VALUES ($1,$2,$3,$4,$5,$6)', [productId, version, JSON.stringify(input.name), input.priceCents, input.enabled, input.selfServiceOnly]);
-      return productResult.rows[0];
+      return {product:productResult.rows[0],event:await storeEvent('catalog.changed',{},client)};
     });
-    await emitEvent('catalog.changed', {});
-    return result;
+    try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed product update event')}
+    return result.product;
   });
 
   app.delete('/api/v1/products/:id', { preHandler: requireAdmin }, async (request, reply) => {
     const productId=id(request);
-    await transaction(async (client) => {
+    const input=body(productArchiveSchema,request);
+    const result=await transaction(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[input.mutationId]);
+      const replay=await client.query<{productId:string;hostId:string;expectedVersion:number}>(
+        `SELECT id AS "productId",archived_by_host AS "hostId",archive_expected_version AS "expectedVersion"
+           FROM products WHERE archive_mutation_id=$1`,[input.mutationId]);
+      if(replay.rows[0]){
+        const stored=replay.rows[0];
+        if(stored.hostId!==request.hostIdentity!.id)throw new HttpError(403,'HOST_MISMATCH','This product archival belongs to another host.');
+        if(stored.productId!==productId||stored.expectedVersion!==input.expectedVersion)throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to another product archival.');
+        return {event:undefined};
+      }
       const version=(await client.query<{catalogVersion:number}>('UPDATE venue_settings SET catalog_version=catalog_version+1 WHERE id=1 RETURNING catalog_version AS "catalogVersion"')).rows[0]!.catalogVersion;
       const product=await client.query<{name:Record<string,string>;priceCents:number;selfServiceOnly:boolean}>(
-        `UPDATE products SET archived_at=now(),enabled=false,catalog_version=$1,version=version+1
-          WHERE id=$2 AND archived_at IS NULL
-          RETURNING name,price_cents AS "priceCents",self_service_only AS "selfServiceOnly"`,[version,productId]);
-      if(!product.rowCount) throw new HttpError(404,'PRODUCT_NOT_FOUND','Product not found.');
+        `UPDATE products SET archived_at=now(),enabled=false,catalog_version=$1,version=version+1,
+                archive_mutation_id=$2,archive_expected_version=$3,archived_by_host=$4
+          WHERE id=$5 AND version=$3 AND archived_at IS NULL
+          RETURNING name,price_cents AS "priceCents",self_service_only AS "selfServiceOnly"`,
+        [version,input.mutationId,input.expectedVersion,request.hostIdentity!.id,productId]);
+      if(!product.rowCount){
+        const current=await client.query('SELECT 1 FROM products WHERE id=$1 AND archived_at IS NULL',[productId]);
+        if(current.rowCount)throw new HttpError(409,'PRODUCT_CHANGED','The product was changed by another administrator.');
+        throw new HttpError(404,'PRODUCT_NOT_FOUND','Product not found.');
+      }
       const archived=product.rows[0]!;
       await client.query(
         'INSERT INTO product_versions(product_id,catalog_version,name,price_cents,enabled,self_service_only) VALUES ($1,$2,$3,$4,false,$5)',
         [productId,version,JSON.stringify(archived.name),archived.priceCents,archived.selfServiceOnly]);
+      return {event:await storeEvent('catalog.changed',{},client)};
     });
-    await emitEvent('catalog.changed', {});
+    if(result.event){try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed product archival event')}}
     return reply.code(204).send();
   });
 
@@ -868,7 +945,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         if (duplicate.rows[0].command!==null&&!isDeepStrictEqual(duplicate.rows[0].command, input)) {
           throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to a different order command.');
         }
-        return { tabId: duplicate.rows[0].tabId };
+        return { tabId: duplicate.rows[0].tabId, event: undefined };
       };
       const duplicate = await replay();
       if (duplicate) return duplicate;
@@ -903,10 +980,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         );
       }
       await audit('order.batch-created', 'tab', tabId, { mutationId: input.mutationId }, { hostId: request.hostIdentity!.id }, client);
-      return { tabId };
+      return {tabId,event:await storeEvent('orders.changed',{guestId:input.guestId},client)};
     });
-    await emitEvent('orders.changed', { guestId: input.guestId });
-    return reply.code(201).send(result);
+    if(result.event){try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed order event')}}
+    return reply.code(201).send({tabId:result.tabId});
   });
 
   app.post('/api/v1/order-items/:id/void', { preHandler: requireHost }, async (request) => {
@@ -920,7 +997,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         if(duplicate.rows[0].itemId!==itemId) throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to another item.');
         if(duplicate.rows[0].hostId!==request.hostIdentity!.id) throw new HttpError(403,'HOST_MISMATCH','This void belongs to another host.');
         if(duplicate.rows[0].reason!==input.reason) throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to a different void command.');
-        return duplicate.rows[0];
+        return {...duplicate.rows[0],event:undefined};
       }
       const updated=await client.query<{tabId:string}>(
         `UPDATE order_items SET status='voided',voided_at=now(),voided_by_host=$1,void_reason=$2,host_void_mutation_id=$3
@@ -934,15 +1011,16 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           if(replay.rows[0].itemId!==itemId) throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to another item.');
           if(replay.rows[0].hostId!==request.hostIdentity!.id) throw new HttpError(403,'HOST_MISMATCH','This void belongs to another host.');
           if(replay.rows[0].reason!==input.reason) throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to a different void command.');
-          return replay.rows[0];
+          return {...replay.rows[0],event:undefined};
         }
         throw new HttpError(409,'ITEM_NOT_OPEN','The item is no longer open.');
       }
       const tab=await client.query<{guestId:string}>('SELECT guest_id AS "guestId" FROM order_tabs WHERE id=$1',[updated.rows[0]!.tabId]);
       await audit('order-item.voided','order-item',itemId,{reason:input.reason,mutationId:input.mutationId},{hostId:request.hostIdentity!.id},client);
-      return {tabId:updated.rows[0]!.tabId,guestId:tab.rows[0]!.guestId};
+      const guestId=tab.rows[0]!.guestId;
+      return {tabId:updated.rows[0]!.tabId,guestId,event:await storeEvent('orders.changed',{guestId},client)};
     });
-    await emitEvent('orders.changed', { guestId: result.guestId });
+    if(result.event){try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed item-void event')}}
     return { ok: true };
   });
 
@@ -967,7 +1045,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           || duplicate.rows[0].paymentNote !== (input.note ?? null)) {
           throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to a different settlement command.');
         }
-        return duplicate.rows[0];
+        return {...duplicate.rows[0],events:[] as RealtimeEvent[]};
       };
       const duplicate = await replay();
       if (duplicate) return duplicate;
@@ -1020,11 +1098,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       await client.query(`UPDATE order_items SET status='billed',bill_id=$1 WHERE tab_id=$2 AND status='open'`, [newBill.id, tabId]);
       await client.query(`UPDATE order_tabs SET status='billed',closed_at=now() WHERE id=$1`, [tabId]);
       await audit('bill.settled', 'bill', newBill.id, { totalCents: total, paymentMethod: input.paymentMethod }, { hostId: request.hostIdentity!.id }, client);
-      return { ...newBill, guestId: current.guestId };
+      return { ...newBill, guestId: current.guestId, events:[
+        await storeEvent('orders.changed',{guestId:current.guestId},client),
+        await storeEvent('bills.changed',{id:newBill.id},client),
+      ] };
     });
-    await emitEvent('orders.changed', { guestId: bill.guestId });
-    await emitEvent('bills.changed', { id: bill.id });
-    return bill;
+    for(const event of bill.events){try{publishEvent(event)}catch(error){app.log.error(error,'Could not publish committed settlement event')}}
+    const {events:_events,...response}=bill;
+    return response;
   });
 
   app.get('/api/v1/bills', { preHandler: requireHost }, async (request) => {
@@ -1092,7 +1173,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         if (duplicate.rows[0].billId !== billId) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another bill.');
         if (duplicate.rows[0].hostId !== request.hostIdentity!.id) throw new HttpError(403, 'HOST_MISMATCH', 'This bill void belongs to another host.');
         if (duplicate.rows[0].reason !== input.reason) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to a different bill-void command.');
-        return { guestId: duplicate.rows[0].guestId };
+        return { guestId: duplicate.rows[0].guestId, events:[] as RealtimeEvent[] };
       }
       const owner = await client.query<{ guestId: string }>('SELECT guest_id AS "guestId" FROM bills WHERE id=$1', [billId]);
       if (!owner.rows[0]) throw new HttpError(404, 'BILL_NOT_FOUND', 'Bill not found.');
@@ -1114,7 +1195,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           if (replay.rows[0].billId !== billId) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another bill.');
           if (replay.rows[0].hostId !== request.hostIdentity!.id) throw new HttpError(403, 'HOST_MISMATCH', 'This bill void belongs to another host.');
           if (replay.rows[0].reason !== input.reason) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to a different bill-void command.');
-          return { guestId: replay.rows[0].guestId };
+          return { guestId: replay.rows[0].guestId, events:[] as RealtimeEvent[] };
         }
         throw new HttpError(409, 'BILL_NOT_ACTIVE', 'The bill has already been voided.');
       }
@@ -1123,10 +1204,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (!open.rows[0]) await client.query(`UPDATE order_tabs SET status='open',closed_at=NULL WHERE id=$1`, [bill.tabId]);
       await client.query(`UPDATE order_items SET tab_id=$1,status='open',bill_id=NULL WHERE bill_id=$2`, [destination, billId]);
       await audit('bill.voided', 'bill', billId, { reason: input.reason, mutationId: input.mutationId }, { hostId: request.hostIdentity!.id }, client);
-      return { guestId: bill.guestId };
+      return { guestId: bill.guestId, events:[
+        await storeEvent('bills.changed',{id:billId},client),
+        await storeEvent('orders.changed',{guestId:bill.guestId},client),
+      ] };
     });
-    await emitEvent('bills.changed', { id: billId });
-    await emitEvent('orders.changed', { guestId: voided.guestId });
+    for(const event of voided.events){try{publishEvent(event)}catch(error){app.log.error(error,'Could not publish committed bill-void event')}}
     return { ok: true };
   });
 
@@ -1219,7 +1302,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         if (duplicate.rows[0].productId !== input.productId) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another product.');
         if (duplicate.rows[0].expectedPriceCents !== null && duplicate.rows[0].expectedPriceCents !== input.expectedPriceCents) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another displayed price.');
         if (duplicate.rows[0].expectedProductVersion !== null && duplicate.rows[0].expectedProductVersion !== input.expectedProductVersion) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another displayed product version.');
-        return duplicate.rows[0];
+        return {...duplicate.rows[0],event:undefined};
       };
       const duplicate = await replay();
       if (duplicate) return duplicate;
@@ -1245,16 +1328,17 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         [tabId,input.productId,JSON.stringify(selected.name),selected.priceCents,request.guestIdentity!.sessionId,input.mutationId,input.expectedPriceCents,input.expectedProductVersion],
       );
       await audit('guest-item.submitted', 'order-item', result.rows[0].id, {}, { guestSessionId: request.guestIdentity!.sessionId }, client);
-      return result.rows[0];
+      return {...result.rows[0],event:await storeEvent('orders.changed',{guestId:request.guestIdentity!.id},client)};
     });
-    await emitEvent('orders.changed', { guestId: request.guestIdentity!.id });
-    return reply.code(201).send(item);
+    if(item.event){try{publishEvent(item.event)}catch(error){app.log.error(error,'Could not publish committed guest-item event')}}
+    const {event:_event,...response}=item;
+    return reply.code(201).send(response);
   });
 
   app.post('/api/v1/guest/items/:id/undo', { preHandler: requireGuest }, async (request) => {
     const itemId = id(request);
     const input = body(z.object({ mutationId: z.string().uuid() }), request);
-    await transaction(async (client) => {
+    const result=await transaction(async (client) => {
       const duplicate = await client.query<{ itemId: string; sessionId: string }>(
         `SELECT id AS "itemId",submitted_by_guest_session AS "sessionId" FROM order_items WHERE guest_undo_mutation_id=$1`,
         [input.mutationId],
@@ -1262,7 +1346,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (duplicate.rows[0]) {
         if (duplicate.rows[0].itemId !== itemId) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another item.');
         if (duplicate.rows[0].sessionId !== request.guestIdentity!.sessionId) throw new HttpError(403, 'GUEST_MISMATCH', 'This undo belongs to another guest device.');
-        return;
+        return {event:undefined};
       }
       const result = await client.query(
         `UPDATE order_items SET status='voided',voided_at=now(),void_reason='guest-undo',guest_undo_mutation_id=$1
@@ -1277,13 +1361,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         if (replay.rows[0]) {
           if (replay.rows[0].itemId !== itemId) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another item.');
           if (replay.rows[0].sessionId !== request.guestIdentity!.sessionId) throw new HttpError(403, 'GUEST_MISMATCH', 'This undo belongs to another guest device.');
-          return;
+          return {event:undefined};
         }
         throw new HttpError(409, 'UNDO_EXPIRED', 'The undo window has expired.');
       }
       await audit('guest-item.undone', 'order-item', itemId, { mutationId: input.mutationId }, { guestSessionId: request.guestIdentity!.sessionId }, client);
+      return {event:await storeEvent('orders.changed',{guestId:request.guestIdentity!.id},client)};
     });
-    await emitEvent('orders.changed', { guestId: request.guestIdentity!.id });
+    if(result.event){try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed guest-undo event')}}
     return { ok: true };
   });
 }

@@ -12,6 +12,13 @@ Feature: Secure host accounts and devices
     When the host opens the account screen
     Then the current device is listed
 
+  Scenario: An uncertain profile save cannot overwrite a newer device
+    Given an authenticated administrator
+    When a profile save response is lost before another device edits the profile
+    Then both profile save attempts use the same mutation identifier
+    And the uncertain profile fields stay locked for retry
+    And the newer profile remains configured
+
   Scenario: An uncertain host account creation is recovered idempotently
     Given an authenticated administrator
     When the administrator retries host creation after its response is lost

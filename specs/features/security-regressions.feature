@@ -16,6 +16,16 @@ Feature: Device grants and replay protection
     When thirteen guest devices poll pending access from one network
     Then none of their valid status polls is rate limited
 
+  Scenario: Rate limits are shared by API replicas
+    Given an authenticated administrator
+    When requests at the address limit are split across API replicas
+    Then the shared address limit is enforced once
+
+  Scenario: Malformed JSON remains a definitive client error
+    Given the seeded Sky Bar venue
+    When a client submits malformed JSON
+    Then the malformed request is rejected as a client error
+
   Scenario: An archived guest cannot receive a pending grant
     Given an authenticated administrator
     When guest archival races with their first grant exchange

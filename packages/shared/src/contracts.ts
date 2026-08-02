@@ -84,6 +84,20 @@ export const productUpdateSchema = productInputSchema.extend({
   expectedVersion: z.number().int().positive(),
 });
 
+export const productArchiveSchema = z.object({
+  mutationId: z.string().uuid(),
+  expectedVersion: z.number().int().positive(),
+});
+
+export const accountUpdateSchema = z.object({
+  mutationId: z.string().uuid(),
+  expectedVersion: z.number().int().positive(),
+  name: z.string().trim().min(1).max(120).optional(),
+  language: languageSchema.optional(),
+  currentPassword: z.string().optional(),
+  newPassword: z.string().min(12).max(256).optional(),
+});
+
 export const orderBatchSchema = z.object({
   mutationId: z.string().uuid(),
   originHostId: z.string().uuid(),

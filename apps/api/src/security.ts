@@ -11,6 +11,7 @@ export interface HostIdentity {
   name: string;
   role: 'admin' | 'staff';
   language: 'de' | 'it' | 'en';
+  version: number;
   sessionId: string;
 }
 
@@ -135,7 +136,7 @@ export async function authenticateHost(request: FastifyRequest): Promise<HostIde
   const token = request.cookies[hostCookie];
   if (!token) return undefined;
   const result = await pool.query<HostIdentity>(
-    `SELECT h.id, h.email, h.name, h.role, h.language, s.id AS "sessionId"
+    `SELECT h.id, h.email, h.name, h.role, h.language, h.version, s.id AS "sessionId"
        FROM host_sessions s JOIN hosts h ON h.id=s.host_id
       WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>now() AND h.active=true`,
     [hashToken(token)],

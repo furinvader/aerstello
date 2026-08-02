@@ -89,6 +89,24 @@ Feature: Venue operations configuration
     Then retrying the stale product update is rejected
     And the newer product price remains configured
 
+  Scenario: An uncertain product archival is recovered idempotently
+    Given an authenticated administrator
+    When the administrator retries product archival after its response is lost
+    Then both product archival attempts use the same mutation identifier
+    And the uncertain product fields stay locked for archival retry
+    And the product is archived only once
+
+  Scenario: A stale product archival cannot remove a newer edit
+    Given an authenticated administrator
+    When another administrator edits a product before a stale archival arrives
+    Then the stale product archival is rejected
+    And the product's newer edit remains configured
+
+  Scenario: Guest changes and their realtime event commit together
+    Given an authenticated administrator
+    When realtime event persistence fails during a guest edit
+    Then the guest edit is rolled back
+
   Scenario: Product prices require exact cents
     Given an authenticated administrator
     When the administrator tries to create product "Invalid price" priced "1.005"
