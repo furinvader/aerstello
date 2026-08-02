@@ -329,19 +329,42 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.post('/api/v1/hosts', { preHandler: requireAdmin }, async (request, reply) => {
     const input = body(z.object({
+      mutationId: z.string().uuid(),
       email: z.string().trim().toLowerCase().email().max(254),
       name: z.string().trim().min(1).max(120),
       password: z.string().min(12).max(256),
       role: z.enum(['admin','staff']),
       language: languageSchema.default('de'),
     }), request);
-    const result = await pool.query(
-      `INSERT INTO hosts(email,name,password_hash,role,language) VALUES (lower($1),$2,$3,$4,$5)
-       RETURNING id,email,name,role,language,active`,
-      [input.email,input.name,await hashPassword(input.password),input.role,input.language],
-    );
-    await audit('host.created','host',result.rows[0].id,{email:input.email,role:input.role},{hostId:request.hostIdentity!.id});
-    return reply.code(201).send(result.rows[0]);
+    const host=await transaction(async(client)=>{
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[input.mutationId]);
+      const replay=await client.query<{
+        id:string;email:string;name:string;role:string;language:string;active:boolean;hostId:string;
+        commandEmail:string;commandName:string;commandPasswordHash:string;commandRole:string;commandLanguage:string;
+      }>(
+        `SELECT id,email,name,role,language,active,created_by_host AS "hostId",create_email AS "commandEmail",
+                create_name AS "commandName",create_password_hash AS "commandPasswordHash",create_role AS "commandRole",
+                create_language AS "commandLanguage" FROM hosts WHERE create_mutation_id=$1`,[input.mutationId],
+      );
+      if(replay.rows[0]){
+        const prior=replay.rows[0];
+        if(prior.hostId!==request.hostIdentity!.id) throw new HttpError(403,'HOST_MISMATCH','This account creation belongs to another host.');
+        const samePassword=await verifyPassword(prior.commandPasswordHash,input.password);
+        if(prior.commandEmail!==input.email||prior.commandName!==input.name||!samePassword||prior.commandRole!==input.role||prior.commandLanguage!==input.language){
+          throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to a different account command.');
+        }
+        return {id:prior.id,email:prior.email,name:prior.name,role:prior.role,language:prior.language,active:prior.active};
+      }
+      const passwordHash=await hashPassword(input.password);
+      const result=await client.query(
+        `INSERT INTO hosts(email,name,password_hash,role,language,create_mutation_id,create_email,create_name,create_password_hash,create_role,create_language,created_by_host)
+         VALUES (lower($1),$2,$3,$4,$5,$6,$1,$2,$7,$4,$5,$8) RETURNING id,email,name,role,language,active`,
+        [input.email,input.name,passwordHash,input.role,input.language,input.mutationId,passwordHash,request.hostIdentity!.id],
+      );
+      await audit('host.created','host',result.rows[0].id,{email:input.email,role:input.role},{hostId:request.hostIdentity!.id},client);
+      return result.rows[0];
+    });
+    return reply.code(201).send(host);
   });
 
   app.patch('/api/v1/hosts/:id', { preHandler: requireAdmin }, async (request) => {
@@ -756,10 +779,26 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.post('/api/v1/access-requests/:id/deny', { preHandler: requireHost }, async (request) => {
     const requestId = id(request);
-    const result = await pool.query(`UPDATE access_requests SET status='denied',resolved_at=now(),resolved_by=$1 WHERE id=$2 AND status='pending' RETURNING id`, [request.hostIdentity!.id, requestId]);
-    if (!result.rowCount) throw new HttpError(409, 'REQUEST_RESOLVED', 'This request is no longer pending.');
-    await audit('access.denied', 'access-request', requestId, {}, { hostId: request.hostIdentity!.id });
-    await emitEvent('access-request.changed', { id: requestId });
+    const input=body(z.object({mutationId:z.string().uuid()}),request);
+    const event=await transaction(async(client)=>{
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[input.mutationId]);
+      const replay=await client.query<{requestId:string;hostId:string}>(
+        `SELECT id AS "requestId",resolved_by AS "hostId" FROM access_requests WHERE denial_mutation_id=$1`,[input.mutationId],
+      );
+      if(replay.rows[0]){
+        if(replay.rows[0].requestId!==requestId) throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to another denial.');
+        if(replay.rows[0].hostId!==request.hostIdentity!.id) throw new HttpError(403,'HOST_MISMATCH','This denial belongs to another host.');
+        return undefined;
+      }
+      const result=await client.query(
+        `UPDATE access_requests SET status='denied',resolved_at=now(),resolved_by=$1,denial_mutation_id=$2
+          WHERE id=$3 AND status='pending' RETURNING id`,[request.hostIdentity!.id,input.mutationId,requestId],
+      );
+      if(!result.rowCount) throw new HttpError(409,'REQUEST_RESOLVED','This request is no longer pending.');
+      await audit('access.denied','access-request',requestId,{}, {hostId:request.hostIdentity!.id},client);
+      return storeEvent('access-request.changed',{id:requestId},client);
+    });
+    if(event){try{publishEvent(event)}catch(error){app.log.error(error,'Could not publish committed access denial event')}}
     return { ok: true };
   });
 
@@ -1121,17 +1160,23 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/api/v1/guest/items', { preHandler: requireGuest }, async (request, reply) => {
-    const input = body(z.object({ mutationId: z.string().uuid(), productId: z.string().uuid() }), request);
+    const input = body(z.object({
+      mutationId: z.string().uuid(),
+      productId: z.string().uuid(),
+      expectedPriceCents: z.number().int().min(0).max(10_000_000).optional(),
+    }), request);
     const item = await transaction(async (client) => {
       const replay = async () => {
-        const duplicate = await client.query<{ id: string; provisionalUntil: string; sessionId: string; productId: string }>(
-          `SELECT id,provisional_until AS "provisionalUntil",submitted_by_guest_session AS "sessionId",product_id AS "productId"
+        const duplicate = await client.query<{ id: string; provisionalUntil: string; sessionId: string; productId: string; expectedPriceCents: number|null }>(
+          `SELECT id,provisional_until AS "provisionalUntil",submitted_by_guest_session AS "sessionId",product_id AS "productId",
+                  guest_expected_price_cents AS "expectedPriceCents"
              FROM order_items WHERE guest_mutation_id=$1`,
           [input.mutationId],
         );
         if (!duplicate.rows[0]) return undefined;
         if (duplicate.rows[0].sessionId !== request.guestIdentity!.sessionId) throw new HttpError(403, 'GUEST_MISMATCH', 'This item belongs to another guest device.');
         if (duplicate.rows[0].productId !== input.productId) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another product.');
+        if (duplicate.rows[0].expectedPriceCents !== (input.expectedPriceCents ?? null)) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another displayed price.');
         return duplicate.rows[0];
       };
       const duplicate = await replay();
@@ -1140,19 +1185,21 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (!guest.rowCount) throw new HttpError(404, 'GUEST_NOT_FOUND', 'Guest not found.');
       const serializedDuplicate = await replay();
       if (serializedDuplicate) return serializedDuplicate;
+      if(input.expectedPriceCents===undefined) throw new HttpError(400,'EXPECTED_PRICE_REQUIRED','The displayed product price is required.');
       const product = await client.query<{ name: Record<string, string>; priceCents: number }>(
         `SELECT name,price_cents AS "priceCents" FROM products WHERE id=$1 AND enabled=true AND self_service_only=true AND archived_at IS NULL`,
         [input.productId],
       );
       const selected = product.rows[0];
       if (!selected) throw new HttpError(404, 'PRODUCT_NOT_AVAILABLE', 'This self-service product is unavailable.');
+      if(selected.priceCents!==input.expectedPriceCents) throw new HttpError(409,'CATALOG_CONFLICT','The displayed product price has changed. Refresh the catalog and try again.');
       const tabId = await activeTab(request.guestIdentity!.id, client);
       await ensureTabTotalWithinRange(tabId, BigInt(selected.priceCents), client);
       const result = await client.query(
-        `INSERT INTO order_items(tab_id,product_id,product_name,unit_price_cents,quantity,source,status,submitted_by_guest_session,provisional_until,guest_mutation_id)
-         VALUES ($1,$2,$3,$4,1,'guest','provisional',$5,now()+interval '10 seconds',$6)
+        `INSERT INTO order_items(tab_id,product_id,product_name,unit_price_cents,quantity,source,status,submitted_by_guest_session,provisional_until,guest_mutation_id,guest_expected_price_cents)
+         VALUES ($1,$2,$3,$4,1,'guest','provisional',$5,now()+interval '10 seconds',$6,$7)
          RETURNING id,provisional_until AS "provisionalUntil"`,
-        [tabId, input.productId, JSON.stringify(selected.name), selected.priceCents, request.guestIdentity!.sessionId, input.mutationId],
+        [tabId,input.productId,JSON.stringify(selected.name),selected.priceCents,request.guestIdentity!.sessionId,input.mutationId,input.expectedPriceCents],
       );
       await audit('guest-item.submitted', 'order-item', result.rows[0].id, {}, { guestSessionId: request.guestIdentity!.sessionId }, client);
       return result.rows[0];

@@ -12,6 +12,13 @@ Feature: Secure host accounts and devices
     When the host opens the account screen
     Then the current device is listed
 
+  Scenario: An uncertain host account creation is recovered idempotently
+    Given an authenticated administrator
+    When the administrator retries host creation after its response is lost
+    Then both host creation attempts use the same mutation identifier
+    And the uncertain host fields stay locked for retry
+    And only one recoverable host account exists
+
   Scenario: Device timestamps follow the selected host language
     Given an authenticated administrator
     When the host selects Italian on an English-locale device

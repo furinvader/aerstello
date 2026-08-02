@@ -67,7 +67,7 @@ export function RequestAccessPage() {
       return null;
     }
   });
-  const [terminalStatus, setTerminalStatus] = useState<'denied' | null>(null);
+  const [terminalStatus, setTerminalStatus] = useState<'denied'|'expired'|'disabled'|null>(null);
   const [error, setError] = useState('');
   const [, navigate] = useLocation();
   useEffect(() => {
@@ -78,18 +78,18 @@ export function RequestAccessPage() {
   }, [setLanguage]);
   useEffect(() => {
     if (!pending) return;
-    const stopPolling = (showError = false) => {
+    const stopPolling = (status:'denied'|'expired'|'disabled',showError = false) => {
       localStorage.removeItem('skybar-pending');
       setPending(null);
-      setTerminalStatus('denied');
+      setTerminalStatus(status);
       if (showError) setError(t('requestFailed'));
     };
     const poll = async () => {
       try {
         const result = await api<{ status: string; granted: boolean }>(`/public/access-requests/${pending.id}/status`, { method:'POST', body:json({ token:pending.token, grantId:pending.grantId }) });
         if (result.status === 'approved' && result.granted) { localStorage.removeItem('skybar-pending'); setPending(null); navigate('/guest'); }
-        else if (result.status === 'approved' && !result.granted) stopPolling(true);
-        else if (['denied','expired','disabled'].includes(result.status)) stopPolling();
+        else if (result.status === 'approved' && !result.granted) stopPolling('denied',true);
+        else if (result.status==='denied'||result.status==='expired'||result.status==='disabled') stopPolling(result.status);
       } catch { /* Keep polling across transient network errors. */ }
     };
     void poll(); const timer = window.setInterval(() => void poll(), 2500); return () => clearInterval(timer);
@@ -105,5 +105,7 @@ export function RequestAccessPage() {
       const next = { id: result.id, token: result.statusToken, grantId: crypto.randomUUID() }; localStorage.setItem('skybar-pending', JSON.stringify(next)); setPending(next);
     } catch (caught) { setError(apiErrorMessage(caught, language, t('requestFailed'))); }
   };
-  return <PublicFrame><Card className="auth-card"><p className="eyebrow">{bootstrap.data?.venue.name || 'Sky Bar'}</p><h1>{t('guestAccess')}</h1>{pending || terminalStatus ? <div className="request-wait"><div className="pulse-orb"/><h2>{terminalStatus ? t('deny') : t('pending')}</h2><p className="muted">{terminalStatus ? t('requestDenied') : t('requestWaiting')}</p>{terminalStatus && <Button onClick={() => { setTerminalStatus(null); setError(''); }}>{t('requestAccess')}</Button>}</div> : <form onSubmit={submit} className="stack"><Field label={t('name')}><input value={name} onChange={(e) => setName(e.target.value)} required autoFocus /></Field><Field label={t('rooms')}><select value={roomId} onChange={(e) => setRoomId(e.target.value)} required><option value="">{t('selectRoom')}</option>{bootstrap.data?.rooms.map((room) => <option value={room.id} key={room.id}>{room.name}</option>)}</select></Field><Field label={t('language')}><select value={language} onChange={(e) => setLanguage(e.target.value as Language)}><option value="de">Deutsch</option><option value="it">Italiano</option><option value="en">English</option></select></Field>{error && <Notice kind="error">{error}</Notice>}<Button type="submit">{t('requestAccess')}</Button></form>}<a className="text-link" href="/login">{t('hostLogin')} →</a></Card></PublicFrame>;
+  const terminalTitle=terminalStatus==='expired'?t('accessExpired'):terminalStatus==='disabled'?t('accessDisabled'):t('deny');
+  const terminalMessage=terminalStatus==='expired'?t('requestExpired'):terminalStatus==='disabled'?t('requestDisabled'):t('requestDenied');
+  return <PublicFrame><Card className="auth-card"><p className="eyebrow">{bootstrap.data?.venue.name || 'Sky Bar'}</p><h1>{t('guestAccess')}</h1>{pending || terminalStatus ? <div className="request-wait"><div className="pulse-orb"/><h2>{terminalStatus ? terminalTitle : t('pending')}</h2><p className="muted">{terminalStatus ? terminalMessage : t('requestWaiting')}</p>{terminalStatus && <Button onClick={() => { setTerminalStatus(null); setError(''); }}>{t('requestAccess')}</Button>}</div> : <form onSubmit={submit} className="stack"><Field label={t('name')}><input value={name} onChange={(e) => setName(e.target.value)} required autoFocus /></Field><Field label={t('rooms')}><select value={roomId} onChange={(e) => setRoomId(e.target.value)} required><option value="">{t('selectRoom')}</option>{bootstrap.data?.rooms.map((room) => <option value={room.id} key={room.id}>{room.name}</option>)}</select></Field><Field label={t('language')}><select value={language} onChange={(e) => setLanguage(e.target.value as Language)}><option value="de">Deutsch</option><option value="it">Italiano</option><option value="en">English</option></select></Field>{error && <Notice kind="error">{error}</Notice>}<Button type="submit">{t('requestAccess')}</Button></form>}<a className="text-link" href="/login">{t('hostLogin')} →</a></Card></PublicFrame>;
 }

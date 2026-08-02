@@ -44,6 +44,19 @@ Feature: Guest device access and self-service
     When the host denies the request for "Denied Poller"
     Then the denied guest device stops status polling
 
+  Scenario: An uncertain access denial is recovered idempotently
+    Given an authenticated administrator and a separate guest device
+    When the host retries a denial after its first response is lost
+    Then both denial attempts use the same mutation identifier
+    And the denied request remains resolved only once
+
+  Scenario: Guests see why approved access is unavailable
+    Given an authenticated administrator and a separate guest device
+    When approved guest access expires before the requesting page exchanges it
+    Then the requesting page explains that access expired
+    When an approved linked guest is disabled before exchange
+    Then the requesting page explains that access is disabled
+
   Scenario: Approval defaults to one local day
     Given an authenticated administrator
     When a host in a non-UTC timezone opens a guest approval
@@ -82,6 +95,11 @@ Feature: Guest device access and self-service
     When the guest uses undo
     Then the guest tab has no open items
     And the host has no empty open order for "Luca Rossi"
+
+  Scenario: A guest addition is bound to its displayed price
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When a self-service price changes after the guest catalog is displayed
+    Then adding the stale self-service product is rejected without a charge
 
   Scenario: The guest undo control expires on time
     Given an approved guest device for "Luca Rossi" in room "102"

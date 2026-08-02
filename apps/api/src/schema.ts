@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { bigint, boolean, index, integer, jsonb, pgEnum, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import { bigint, boolean, index, integer, jsonb, pgEnum, pgTable, text, timestamp, uniqueIndex, uuid, type AnyPgColumn } from 'drizzle-orm/pg-core';
 
 export const role = pgEnum('host_role', ['admin', 'staff']);
 export const language = pgEnum('language', ['de', 'it', 'en']);
@@ -26,8 +26,18 @@ export const hosts = pgTable('hosts', {
   role: role('role').notNull().default('staff'),
   language: language('language').notNull().default('de'),
   active: boolean('active').notNull().default(true),
+  createMutationId: uuid('create_mutation_id'),
+  createEmail: text('create_email'),
+  createName: text('create_name'),
+  createPasswordHash: text('create_password_hash'),
+  createRole: role('create_role'),
+  createLanguage: language('create_language'),
+  createdByHost: uuid('created_by_host').references(():AnyPgColumn => hosts.id),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-}, (t) => [uniqueIndex('hosts_email_lower_uq').on(sql`lower(${t.email})`)]);
+}, (t) => [
+  uniqueIndex('hosts_email_lower_uq').on(sql`lower(${t.email})`),
+  uniqueIndex('hosts_create_mutation_uq').on(t.createMutationId).where(sql`${t.createMutationId} IS NOT NULL`),
+]);
 
 export const hostSessions = pgTable('host_sessions', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -172,6 +182,7 @@ export const orderItems = pgTable('order_items', {
   submittedByGuestSession: uuid('submitted_by_guest_session'),
   provisionalUntil: timestamp('provisional_until', { withTimezone: true }),
   guestMutationId: uuid('guest_mutation_id').unique(),
+  guestExpectedPriceCents: integer('guest_expected_price_cents'),
   billId: uuid('bill_id').references(() => bills.id),
   voidedAt: timestamp('voided_at', { withTimezone: true }),
   voidedByHost: uuid('voided_by_host').references(() => hosts.id),
@@ -210,9 +221,13 @@ export const accessRequests = pgTable('access_requests', {
   approvalMutationId: uuid('approval_mutation_id'),
   approvalLinkedGuestId: uuid('approval_linked_guest_id').references(() => guests.id),
   approvalExpiresAt: timestamp('approval_expires_at', { withTimezone: true }),
+  denialMutationId: uuid('denial_mutation_id'),
   statusTokenConsumedAt: timestamp('status_token_consumed_at', { withTimezone: true }),
   grantExchangeId: uuid('grant_exchange_id'),
-}, (t) => [uniqueIndex('access_requests_approval_mutation_uq').on(t.approvalMutationId).where(sql`${t.approvalMutationId} IS NOT NULL`)]);
+}, (t) => [
+  uniqueIndex('access_requests_approval_mutation_uq').on(t.approvalMutationId).where(sql`${t.approvalMutationId} IS NOT NULL`),
+  uniqueIndex('access_requests_denial_mutation_uq').on(t.denialMutationId).where(sql`${t.denialMutationId} IS NOT NULL`),
+]);
 
 export const guestSessions = pgTable('guest_sessions', {
   id: uuid('id').primaryKey().defaultRandom(),

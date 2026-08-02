@@ -9,7 +9,7 @@ import { useI18n } from './i18n';
 import type { Product, Tab } from './types';
 
 interface UndoEntry { id: string; productId: string; until: number; mutationId: string }
-interface PendingAddStore { sessionId: string; entries: [string,string][] }
+interface PendingAddStore { sessionId: string; entries: [string,string,number?][] }
 const pendingAddKey='skybar-guest-pending-adds';
 
 function loadPendingAdds(): PendingAddStore {
@@ -78,19 +78,21 @@ export function GuestPage() {
     return () => window.clearTimeout(timer);
   }, [undos,client]);
   const add = useMutation({
-    mutationFn: (productId: string) => {
+    mutationFn: (product: Pick<Product,'id'|'priceCents'>) => {
       const sessionId=me.data!.guest.sessionId;
       if(pendingAdds.current.sessionId!==sessionId)pendingAdds.current={sessionId,entries:[]};
-      const entries=new Map(pendingAdds.current.entries);
-      const mutationId=entries.get(productId)??crypto.randomUUID();
-      entries.set(productId,mutationId);pendingAdds.current={sessionId,entries:[...entries]};
+      const existing=pendingAdds.current.entries.find(entry=>entry[0]===product.id);
+      const mutationId=existing?.[1]??crypto.randomUUID();
+      const expectedPriceCents=existing?existing[2]:product.priceCents;
+      const entries=[...pendingAdds.current.entries.filter(entry=>entry[0]!==product.id),[product.id,mutationId,expectedPriceCents] as [string,string,number?]];
+      pendingAdds.current={sessionId,entries};
       persistPendingAdds(pendingAdds.current);
-      return api<{ id: string; provisionalUntil: string }>('/guest/items', { method: 'POST', body: json({ mutationId, productId }) });
+      return api<{ id: string; provisionalUntil: string }>('/guest/items', { method: 'POST', body: json({ mutationId,productId:product.id,expectedPriceCents }) });
     },
-    onSuccess: (item,productId) => {
-      const entries=new Map(pendingAdds.current.entries);entries.delete(productId);pendingAdds.current={...pendingAdds.current,entries:[...entries]};
+    onSuccess: (item,product) => {
+      pendingAdds.current={...pendingAdds.current,entries:pendingAdds.current.entries.filter(entry=>entry[0]!==product.id)};
       persistPendingAdds(pendingAdds.current);setError('');
-      setUndos((current)=>[...current.filter((entry)=>entry.id!==item.id),{id:item.id,productId,until:new Date(item.provisionalUntil).getTime(),mutationId:crypto.randomUUID()}]);
+      setUndos((current)=>[...current.filter((entry)=>entry.id!==item.id),{id:item.id,productId:product.id,until:new Date(item.provisionalUntil).getTime(),mutationId:crypto.randomUUID()}]);
       void client.invalidateQueries({ queryKey: ['guest-tab'] });
     },
     onError: (caught) => setError(apiErrorMessage(caught, language, t('requestFailed'))),
@@ -100,5 +102,5 @@ export function GuestPage() {
   if (me.isError) return <Redirect to="/guest/request" />;
   const guest = me.data!.guest;
   const categories = [...new Set(catalog.data?.data.map((product) => localized(product.categoryName, language)) ?? [])];
-  return <main className="guest-shell"><header className="guest-header"><div><p className="eyebrow">{guest.roomName}</p><h1>{guest.name}</h1></div><div className="guest-header-actions"><select aria-label={t('language')} value={language} onChange={(event)=>setLanguage(event.target.value as 'de'|'it'|'en')}><option value="de">DE</option><option value="it">IT</option><option value="en">EN</option></select><Button variant="ghost" aria-label={t('logout')} onClick={() => void api('/guest/logout', { method:'POST' }).then(() => location.assign('/guest/request'))}><LogOut/></Button></div></header><section className="guest-total"><ReceiptText/><div><span>{tab.data?.itemCount ?? 0} {t('items')}</span><strong>{formatMoney(tab.data?.totalCents ?? 0, language)}</strong></div></section>{error && <Notice kind="error">{error}</Notice>}<div className="guest-tabs"><section><h2>{t('selfService')}</h2>{categories.map((category) => <div key={category} className="catalog-group"><h3>{category}</h3><div className="product-grid">{catalog.data?.data.filter((product) => localized(product.categoryName, language) === category).map((product) => <button className="product-tile" key={product.id} onClick={() => add.mutate(product.id)} disabled={add.isPending}><span>{localized(product.name, language)}</span><strong>{formatMoney(product.priceCents, language)}</strong><Plus/></button>)}</div></div>)}</section><section><h2>{t('orders')}</h2><Card>{tab.data?.items.length ? <div className="line-list">{tab.data.items.map((item) => <div className="line-item" key={item.id}><div><strong>{item.quantity} × {localized(item.productName, language)}</strong><span>{item.source === 'guest' ? t('selfService') : t('host')}{item.status === 'provisional'&&item.provisionalUntil&&new Date(item.provisionalUntil).getTime()>Date.now() && <> · <Clock3 size={13}/> 10s</>}</span></div><strong>{formatMoney(item.unitPriceCents * item.quantity, language)}</strong></div>)}</div> : <Empty>{t('empty')}</Empty>}</Card></section></div>{undos.length>0&&<div className="undo-stack">{undos.filter((undo)=>undo.until>Date.now()).map((undo)=>{const product=catalog.data?.data.find((item)=>item.id===undo.productId);return <div className="undo-toast" key={undo.id}><span>{t('itemAdded')}{product?` · ${localized(product.name,language)}`:''}</span><Button variant="secondary" onClick={() => void undoItem(undo)}>{t('undo')}</Button></div>})}</div>}</main>;
+  return <main className="guest-shell"><header className="guest-header"><div><p className="eyebrow">{guest.roomName}</p><h1>{guest.name}</h1></div><div className="guest-header-actions"><select aria-label={t('language')} value={language} onChange={(event)=>setLanguage(event.target.value as 'de'|'it'|'en')}><option value="de">DE</option><option value="it">IT</option><option value="en">EN</option></select><Button variant="ghost" aria-label={t('logout')} onClick={() => void api('/guest/logout', { method:'POST' }).then(() => location.assign('/guest/request'))}><LogOut/></Button></div></header><section className="guest-total"><ReceiptText/><div><span>{tab.data?.itemCount ?? 0} {t('items')}</span><strong>{formatMoney(tab.data?.totalCents ?? 0, language)}</strong></div></section>{error && <Notice kind="error">{error}</Notice>}<div className="guest-tabs"><section><h2>{t('selfService')}</h2>{categories.map((category) => <div key={category} className="catalog-group"><h3>{category}</h3><div className="product-grid">{catalog.data?.data.filter((product) => localized(product.categoryName, language) === category).map((product) => <button className="product-tile" key={product.id} onClick={() => add.mutate(product)} disabled={add.isPending}><span>{localized(product.name, language)}</span><strong>{formatMoney(product.priceCents, language)}</strong><Plus/></button>)}</div></div>)}</section><section><h2>{t('orders')}</h2><Card>{tab.data?.items.length ? <div className="line-list">{tab.data.items.map((item) => <div className="line-item" key={item.id}><div><strong>{item.quantity} × {localized(item.productName, language)}</strong><span>{item.source === 'guest' ? t('selfService') : t('host')}{item.status === 'provisional'&&item.provisionalUntil&&new Date(item.provisionalUntil).getTime()>Date.now() && <> · <Clock3 size={13}/> 10s</>}</span></div><strong>{formatMoney(item.unitPriceCents * item.quantity, language)}</strong></div>)}</div> : <Empty>{t('empty')}</Empty>}</Card></section></div>{undos.length>0&&<div className="undo-stack">{undos.filter((undo)=>undo.until>Date.now()).map((undo)=>{const product=catalog.data?.data.find((item)=>item.id===undo.productId);return <div className="undo-toast" key={undo.id}><span>{t('itemAdded')}{product?` · ${localized(product.name,language)}`:''}</span><Button variant="secondary" onClick={() => void undoItem(undo)}>{t('undo')}</Button></div>})}</div>}</main>;
 }
