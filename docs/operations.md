@@ -2,7 +2,7 @@
 
 ## Configuration
 
-Production requires `DATABASE_URL`, `SESSION_SECRET`, and HTTPS. The supplied Compose service publishes the app directly and therefore defaults `TRUST_PROXY` to `false`. Set `TRUST_PROXY=true` only when clients can reach the app exclusively through a trusted reverse proxy that replaces forwarded headers. Keep PostgreSQL and the API on a private network and expose only the HTTPS proxy.
+Production requires `DATABASE_URL`, an explicitly configured nondefault `SESSION_SECRET`, and HTTPS. Startup fails when production uses the development secret. The supplied Compose service publishes the app directly and therefore defaults `TRUST_PROXY` to `false`. Set `TRUST_PROXY=true` only when clients can reach the app exclusively through a trusted reverse proxy that replaces forwarded headers. Keep PostgreSQL and the API on a private network and expose only the HTTPS proxy.
 
 `RATE_LIMIT_MAX` controls the per-IP request ceiling in each one-minute window and defaults to `300`. Raise it only when a trusted reverse proxy is configured correctly and operational traffic requires it.
 

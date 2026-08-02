@@ -24,6 +24,11 @@ Feature: Guest device access and self-service
     When the host revokes Luca's device from the guest directory
     Then Luca's revoked device loses guest access
 
+  Scenario: Remote revocation clears the open guest application
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When the host revokes Luca's device from the guest directory
+    Then Luca's open guest view returns to access request without cached data
+
   Scenario: A guest can undo a self-service item for ten seconds
     Given an approved guest device for "Luca Rossi" in room "102"
     When the guest adds "Mineralwasser" from self-service
@@ -43,3 +48,9 @@ Feature: Guest device access and self-service
     When the guest retries undo after its first response is lost
     Then both guest undo attempts use the same mutation identifier
     And the guest tab has no open items
+
+  Scenario: Concurrent self-service replay returns one item
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When the same guest item mutation is submitted concurrently
+    Then both concurrent guest item responses succeed
+    And the concurrent guest item is stored only once

@@ -14,6 +14,7 @@ const localizedErrors: Partial<Record<string, Record<Language, string>>> = {
   TAB_TOTAL_LIMIT: { de: 'Der offene Betrag hat die zulässige Höchstgrenze erreicht.', it: 'Il conto aperto ha raggiunto il limite massimo.', en: 'The open tab has reached its maximum total.' },
   UNDO_PENDING: { de: 'Bitte warten, bis die Rückgängig-Frist des Gasts abgelaufen ist.', it: 'Attendi la fine del periodo di annullamento dell’ospite.', en: 'Wait for the guest undo window to finish.' },
   TAB_NOT_OPEN: { de: 'Diese Bestellung wurde bereits abgeschlossen.', it: 'Questo ordine è già stato chiuso.', en: 'This tab has already been closed.' },
+  TAB_CHANGED: { de: 'Die Bestellung hat sich geändert. Bitte Artikel und Gesamtbetrag erneut prüfen.', it: 'L’ordine è cambiato. Controlla di nuovo gli articoli e il totale.', en: 'The order changed. Review the items and total again.' },
   EMPTY_TAB: { de: 'Es sind keine offenen Artikel abzurechnen.', it: 'Non ci sono articoli aperti da incassare.', en: 'There are no open items to settle.' },
   VENUE_REQUIRED: { de: 'Bitte zuerst den Namen des Betriebs festlegen.', it: 'Imposta prima il nome del locale.', en: 'Set the venue name before billing.' },
   BILL_NOT_ACTIVE: { de: 'Diese Rechnung wurde bereits storniert.', it: 'Questo conto è già stato annullato.', en: 'This bill has already been voided.' },

@@ -62,11 +62,11 @@ export function RequestAccessPage() {
     if (!pending) return;
     const poll = async () => {
       try {
-        const result = await api<{ status: string; granted: boolean }>(`/public/access-requests/${pending.id}/status?token=${encodeURIComponent(pending.token)}&grantId=${pending.grantId}`);
+        const result = await api<{ status: string; granted: boolean }>(`/public/access-requests/${pending.id}/status`, { method:'POST', body:json({ token:pending.token, grantId:pending.grantId }) });
         setStatus(result.status);
         if (result.status === 'approved' && result.granted) { sessionStorage.removeItem('skybar-pending'); navigate('/guest'); }
         if (result.status === 'approved' && !result.granted) { setStatus('denied'); sessionStorage.removeItem('skybar-pending'); setPending(null); setError(t('requestFailed')); }
-        if (result.status === 'expired') { setStatus('denied'); sessionStorage.removeItem('skybar-pending'); }
+        if (result.status === 'expired' || result.status === 'disabled') { setStatus('denied'); sessionStorage.removeItem('skybar-pending'); }
       } catch { /* Keep polling across transient network errors. */ }
     };
     void poll(); const timer = window.setInterval(() => void poll(), 2500); return () => clearInterval(timer);

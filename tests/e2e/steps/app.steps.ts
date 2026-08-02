@@ -43,6 +43,15 @@ let guestRevokedStatus = 0;
 let approvalMoveRaceStatuses: [number, number][] = [];
 let concurrentOrderStatuses: number[] = [];
 let concurrentOrderItemCount = 0;
+let concurrentSettlementStatuses: number[] = [];
+let concurrentSettlementBillCount = 0;
+let staleSettlementBillCount = 0;
+let concurrentGuestItemStatuses: number[] = [];
+let concurrentGuestItemCount = 0;
+let pendingRoomArchiveStatus = 0;
+let pendingRoomRequestCount = 0;
+let grantExchangeRequest: { method: string; url: string; body: unknown } | undefined;
+let archivedGrantGuestStatus = 0;
 
 Before(async () => {
   execFileSync('npm',['run','db:seed','-w','@sky-bar/api'],{cwd:process.cwd(),env:{...process.env,E2E_RESET:'true'},stdio:'pipe'});
@@ -170,6 +179,9 @@ When('the guest retries undo after its first response is lost',async()=>{
   await guestPage!.getByRole('button',{name:'Rückgängig'}).click();await expect(guestPage!.locator('.notice--error')).toBeVisible();await guestPage!.getByRole('button',{name:'Rückgängig'}).click();retriedGuestUndoMutationIds=await guestPage!.evaluate(()=>(window as unknown as {__skyBarGuestUndoRetryIds:string[]}).__skyBarGuestUndoRetryIds);
 });
 Then('both guest undo attempts use the same mutation identifier',async()=>{expect(retriedGuestUndoMutationIds).toHaveLength(2);expect(new Set(retriedGuestUndoMutationIds).size).toBe(1)});
+When('the same guest item mutation is submitted concurrently',async()=>{const request=guestPage!.context().request;const catalog=await (await request.get('/api/v1/guest/catalog')).json() as {data:{id:string;name:{de:string}}[]};const product=catalog.data.find(item=>item.name.de==='Mineralwasser')!;const data={mutationId:crypto.randomUUID(),productId:product.id};const responses=await Promise.all([request.post('/api/v1/guest/items',{headers:csrfHeaders,data}),request.post('/api/v1/guest/items',{headers:csrfHeaders,data})]);concurrentGuestItemStatuses=responses.map(response=>response.status());concurrentGuestItemCount=((await (await request.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount});
+Then('both concurrent guest item responses succeed',async()=>{expect(concurrentGuestItemStatuses).toEqual([201,201])});
+Then('the concurrent guest item is stored only once',async()=>{expect(concurrentGuestItemCount).toBe(1)});
 
 When('an approved guest grant response is lost before its cookie is retained',async({page,browser})=>{
   const request=page.context().request;
@@ -178,12 +190,12 @@ When('an approved guest grant response is lost before its cookie is retained',as
   const created=await (await request.post('/api/v1/public/access-requests',{data:{name:'Recoverable grant',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
   expect((await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{expiresAt:new Date(Date.now()+86_400_000).toISOString()}})).status()).toBe(200);
   const same=await browser.newContext({baseURL:e2eBaseURL});const different=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(same,different);
-  const grantId=crypto.randomUUID();const statusPath=`/api/v1/public/access-requests/${created.id}/status?token=${encodeURIComponent(created.statusToken)}&grantId=${grantId}`;
-  expect((await same.request.get(statusPath)).status()).toBe(200);
+  const grantId=crypto.randomUUID();const statusPath=`/api/v1/public/access-requests/${created.id}/status`;const statusData={token:created.statusToken,grantId};
+  expect((await same.request.post(statusPath,{data:statusData})).status()).toBe(200);
   await same.clearCookies();
-  expect((await same.request.get(statusPath)).status()).toBe(200);
+  expect((await same.request.post(statusPath,{data:statusData})).status()).toBe(200);
   recoveredGrantStatus=(await same.request.get('/api/v1/guest/me')).status();
-  await different.request.get(`/api/v1/public/access-requests/${created.id}/status?token=${encodeURIComponent(created.statusToken)}&grantId=${crypto.randomUUID()}`);
+  await different.request.post(statusPath,{data:{token:created.statusToken,grantId:crypto.randomUUID()}});
   differentGrantStatus=(await different.request.get('/api/v1/guest/me')).status();
 });
 Then('retrying the same grant exchange restores guest access',async()=>{expect(recoveredGrantStatus).toBe(200)});
@@ -193,12 +205,13 @@ When('an approved guest request expires before its grant exchange',async({page,b
   const created=await (await request.post('/api/v1/public/access-requests',{data:{name:'Expired grant',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
   expect((await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{expiresAt:new Date(Date.now()+1500).toISOString()}})).status()).toBe(200);
   await page.waitForTimeout(1800);
-  const context=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(context);const response=await context.request.get(`/api/v1/public/access-requests/${created.id}/status?token=${encodeURIComponent(created.statusToken)}&grantId=${crypto.randomUUID()}`);
+  const context=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(context);const response=await context.request.post(`/api/v1/public/access-requests/${created.id}/status`,{data:{token:created.statusToken,grantId:crypto.randomUUID()}});
   expiredGrantResult=await response.json() as {status:string;granted:boolean};expiredGrantGuestStatus=(await context.request.get('/api/v1/guest/me')).status();
 });
 Then('the expired exchange is not consumed or granted',async()=>{expect(expiredGrantResult).toEqual(expect.objectContaining({status:'expired',granted:false}));expect(expiredGrantGuestStatus).toBe(401)});
 When("the host revokes Luca's device from the guest directory",async({page})=>{await page.goto('/app/guests');const row=page.locator('.table-row').filter({hasText:'Luca Rossi'});await row.getByRole('button',{name:/Angemeldete Geräte|Dispositivi connessi|Logged-in devices/}).click();await expect(page.locator('.modal .device-list')).toBeVisible();await page.locator('.modal').getByRole('button',{name:/Widerrufen|Revoca|Revoke/}).click();await expect(page.locator('.modal .device-list')).toHaveCount(0)});
 Then("Luca's revoked device loses guest access",async()=>{guestRevokedStatus=(await guestPage!.context().request.get('/api/v1/guest/me')).status();expect(guestRevokedStatus).toBe(401)});
+Then("Luca's open guest view returns to access request without cached data",async()=>{await expect(guestPage!).toHaveURL(/\/guest\/request$/,{timeout:10_000});await expect(guestPage!.getByText('Luca Rossi',{exact:true})).toHaveCount(0)});
 
 When('the administrator creates room {string}',async({page},name:string)=>{await page.goto('/app/rooms');await page.getByPlaceholder(/Zimmername|Nome camera|Room name/).fill(name);await page.locator('.inline-form').getByRole('button').click()});
 Then('room {string} is listed',async({page},name:string)=>{await expect(page.getByText(name,{exact:true})).toBeVisible()});
@@ -211,6 +224,8 @@ When('the administrator tries to create product {string} priced {string}',async(
 Then('the product price is rejected before submission',async({page})=>{const price=page.getByLabel(/Preis · EUR|Prezzo · EUR|Price · EUR/);await expect(price).toBeVisible();expect(await price.evaluate((input:HTMLInputElement)=>input.validity.valid)).toBe(false)});
 When('the host attempts to create a guest in an archived room',async({page})=>{const request=page.context().request;const room=await (await request.post('/api/v1/rooms',{headers:csrfHeaders,data:{name:'Archived room'}})).json() as {id:string};expect((await request.delete(`/api/v1/rooms/${room.id}`,{headers:csrfHeaders})).status()).toBe(204);archivedRoomGuestStatus=(await request.post('/api/v1/guests',{headers:csrfHeaders,data:{name:'Late guest',roomId:room.id,language:'de'}})).status()});
 Then('the archived room guest is rejected',async()=>{expect(archivedRoomGuestStatus).toBe(404)});
+When('the administrator archives a room with a pending access request',async({page})=>{const request=page.context().request;const room=await (await request.post('/api/v1/rooms',{headers:csrfHeaders,data:{name:'Pending request room'}})).json() as {id:string};const pending=await (await request.post('/api/v1/public/access-requests',{data:{name:'Waiting guest',roomId:room.id,language:'de'}})).json() as {id:string};pendingRoomArchiveStatus=(await request.delete(`/api/v1/rooms/${room.id}`,{headers:csrfHeaders})).status();const requests=await (await request.get('/api/v1/access-requests')).json() as {data:{id:string}[]};pendingRoomRequestCount=requests.data.filter(item=>item.id===pending.id).length});
+Then('room archival is rejected and the request remains pending',async()=>{expect(pendingRoomArchiveStatus).toBe(409);expect(pendingRoomRequestCount).toBe(1)});
 When('guest archival races with a new order',async({page})=>{const {request,me,products}=await operationalData(page);const rooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;name:string}[]};const product=products.data.find((item)=>item.name.de==='Helles')!;guestArchiveRaceStatuses=[];for(let attempt=0;attempt<8;attempt+=1){const guest=await (await request.post('/api/v1/guests',{headers:csrfHeaders,data:{name:`Race guest ${attempt}`,roomId:rooms.data.find((room)=>room.name==='102')!.id,language:'de'}})).json() as {id:string};const [archive,order]=await Promise.all([request.delete(`/api/v1/guests/${guest.id}`,{headers:csrfHeaders}),request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})]);guestArchiveRaceStatuses.push([archive.status(),order.status()])}});
 Then('either the archive or the order is rejected',async()=>{for(const [archive,order] of guestArchiveRaceStatuses){expect([[204,404],[409,201]]).toContainEqual([archive,order])}});
 
@@ -241,13 +256,34 @@ When('two devices exchange the same approved access request token',async({page,b
   await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{expiresAt:new Date(Date.now()+86_400_000).toISOString()}});
   const first=await browser.newContext({baseURL:e2eBaseURL});const second=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(first,second);
   await Promise.all([
-    first.request.get(`/api/v1/public/access-requests/${created.id}/status?token=${encodeURIComponent(created.statusToken)}&grantId=${crypto.randomUUID()}`),
-    second.request.get(`/api/v1/public/access-requests/${created.id}/status?token=${encodeURIComponent(created.statusToken)}&grantId=${crypto.randomUUID()}`),
+    first.request.post(`/api/v1/public/access-requests/${created.id}/status`,{data:{token:created.statusToken,grantId:crypto.randomUUID()}}),
+    second.request.post(`/api/v1/public/access-requests/${created.id}/status`,{data:{token:created.statusToken,grantId:crypto.randomUUID()}}),
   ]);
   firstGuestAccessStatus=(await first.request.get('/api/v1/guest/me')).status();
   secondGuestAccessStatus=(await second.request.get('/api/v1/guest/me')).status();
 });
 Then('exactly one device receives guest access',async()=>{expect([firstGuestAccessStatus,secondGuestAccessStatus].sort()).toEqual([200,401])});
+
+When('an approved request is exchanged for a guest grant',async({page,browser})=>{
+  const request=page.context().request;
+  const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
+  const room=bootstrap.rooms.find(item=>item.name==='102')!;
+  const created=await (await request.post('/api/v1/public/access-requests',{data:{name:'Body grant',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
+  expect((await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{expiresAt:new Date(Date.now()+86_400_000).toISOString()}})).status()).toBe(200);
+  const context=await browser.newContext({baseURL:e2eBaseURL});
+  extraContexts.push(context);
+  const pending={id:created.id,token:created.statusToken,grantId:crypto.randomUUID()};
+  await context.addInitScript((value)=>sessionStorage.setItem('skybar-pending',JSON.stringify(value)),pending);
+  const device=await context.newPage();
+  const observed=device.waitForRequest(candidate=>candidate.url().includes(`/api/v1/public/access-requests/${created.id}/status`));
+  await device.goto('/guest/request');
+  const exchange=await observed;
+  grantExchangeRequest={method:exchange.method(),url:exchange.url(),body:exchange.postDataJSON()};
+});
+Then('the grant token is sent in the request body',async()=>{expect(grantExchangeRequest?.method).toBe('POST');expect(new URL(grantExchangeRequest!.url).search).toBe('');expect(grantExchangeRequest?.body).toEqual(expect.objectContaining({token:expect.any(String),grantId:expect.any(String)}))});
+
+When('guest archival races with their first grant exchange',async({page,browser})=>{const request=page.context().request;const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};const room=bootstrap.rooms.find(item=>item.name==='102')!;const created=await (await request.post('/api/v1/public/access-requests',{data:{name:'Archived grant race',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};const approved=await (await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{expiresAt:new Date(Date.now()+86_400_000).toISOString()}})).json() as {guestId:string};const context=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(context);const [,exchange]=await Promise.all([request.delete(`/api/v1/guests/${approved.guestId}`,{headers:csrfHeaders}),context.request.post(`/api/v1/public/access-requests/${created.id}/status`,{data:{token:created.statusToken,grantId:crypto.randomUUID()}})]);expect(exchange.status()).toBe(200);archivedGrantGuestStatus=(await context.request.get('/api/v1/guest/me')).status()});
+Then('no archived guest session remains active',async()=>{expect(archivedGrantGuestStatus).toBe(401)});
 
 When('the host links a room {string} request to a guest in room {string}',async({page},requestRoom:string,guestRoom:string)=>{
   const request=page.context().request;
@@ -320,6 +356,13 @@ When('the host retries settlement after its first response is lost',async({page}
 Then('both settlement attempts use the same mutation identifier',async()=>{expect(retriedSettlementMutationIds).toHaveLength(2);expect(new Set(retriedSettlementMutationIds).size).toBe(1)});
 Then('the host reaches the single resulting bill',async({page})=>{await expect(page.locator('.bill-sheet')).toBeVisible();const bills=await (await page.context().request.get('/api/v1/bills')).json() as {data:unknown[]};expect(bills.data).toHaveLength(1)});
 
+When('the same settlement mutation is submitted concurrently',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const data={mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'};const responses=await Promise.all([request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data}),request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data})]);concurrentSettlementStatuses=responses.map(response=>response.status());concurrentSettlementBillCount=((await (await request.get('/api/v1/bills')).json()) as {data:unknown[]}).data.length});
+Then('both concurrent settlement responses succeed',async()=>{expect(concurrentSettlementStatuses).toEqual([200,200])});
+Then('concurrent settlement creates only one bill',async()=>{expect(concurrentSettlementBillCount).toBe(1)});
+When('another order changes the tab while settlement is open',async({page})=>{await chooseOrder(page,'Helles','Anna Berger','101');await page.getByRole('button',{name:/Bestellung buchen/}).click();await expect(page.locator('.tab-pill')).toContainText('1 Artikel');await page.getByRole('button',{name:/Abrechnen/}).click();const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;expect((await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).status()).toBe(201);await page.locator('.modal').getByRole('button',{name:'Abrechnen'}).click();await expect(page.locator('.modal .notice--error')).toBeVisible();staleSettlementBillCount=((await (await request.get('/api/v1/bills')).json()) as {data:unknown[]}).data.length});
+Then('settlement reports that the displayed tab changed',async({page})=>{await expect(page.locator('.modal')).toContainText(/Bestellung hat sich geändert|ordine è cambiato|order changed/i)});
+Then('no bill is created for the stale confirmation',async()=>{expect(staleSettlementBillCount).toBe(0)});
+
 When('the host submits orders beyond the maximum tab total',async({page})=>{
   const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const categoryId=products.data[0]!.categoryId;
   const created=await request.post('/api/v1/products',{headers:csrfHeaders,data:{name:{de:'Limitprodukt',it:'',en:''},priceCents:10_000_000,categoryId,enabled:true,selfServiceOnly:false}});expect(created.status()).toBe(201);const product=await created.json() as {id:string};const catalog=await (await request.get('/api/v1/products')).json() as {catalogVersion:number};
@@ -328,7 +371,7 @@ When('the host submits orders beyond the maximum tab total',async({page})=>{
 });
 Then('the excessive order is rejected without changing the tab',async()=>{expect(excessiveOrderStatus).toBe(409);expect(tabTotalBeforeExcess).toBe(1_980_000_000);expect(tabTotalAfterExcess).toBe(tabTotalBeforeExcess)});
 
-When('the venue has more bills than one archive page',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const product=products.data.find((item)=>item.name.de==='Helles')!;for(let index=0;index<51;index+=1){const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),paymentMethod:'cash'}})).json() as {number:string};if(index===0)oldestBillNumber=Number(bill.number)}const firstPage=await (await request.get('/api/v1/bills?page=1&pageSize=50')).json() as {data:{number:number}[]};expect(firstPage.data.some((bill)=>bill.number===oldestBillNumber)).toBe(false)});
+When('the venue has more bills than one archive page',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const product=products.data.find((item)=>item.name.de==='Helles')!;for(let index=0;index<51;index+=1){const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {number:string};if(index===0)oldestBillNumber=Number(bill.number)}const firstPage=await (await request.get('/api/v1/bills?page=1&pageSize=50')).json() as {data:{number:number}[]};expect(firstPage.data.some((bill)=>bill.number===oldestBillNumber)).toBe(false)});
 Then('the host can find the oldest bill by its number',async({page})=>{await page.goto('/app/bills');const [response]=await Promise.all([page.waitForResponse((candidate)=>candidate.url().includes(`/api/v1/bills?search=${oldestBillNumber}&`)),page.getByPlaceholder(/Nach Gast|Cerca per|Search by/).fill(String(oldestBillNumber))]);const result=await response.json() as {data:{id:string;number:number}[]};expect(result.data.map((bill)=>bill.number)).toContain(oldestBillNumber);const found=result.data.find((bill)=>bill.number===oldestBillNumber)!;await expect(page.locator(`a[href="/app/bills/${found.id}"]`)).toBeVisible()});
 
 When('the same item void mutation is submitted twice',async({page})=>{
@@ -353,7 +396,7 @@ Then('the concurrent order is stored only once',async()=>{expect(concurrentOrder
 When('the same bill void mutation is submitted twice',async({page})=>{
   const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const product=products.data.find((item)=>item.name.de==='Helles')!;
   const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};
-  const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),paymentMethod:'cash'}})).json() as {id:string};const mutationId=crypto.randomUUID();repeatedBillVoidStatuses=[];
+  const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};const mutationId=crypto.randomUUID();repeatedBillVoidStatuses=[];
   repeatedBillVoidStatuses.push((await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId,reason:'E2E correction'}})).status());repeatedBillVoidStatuses.push((await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId,reason:'E2E correction'}})).status());restoredBillItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
 });
 Then('both bill void responses succeed',async()=>{expect(repeatedBillVoidStatuses).toEqual([200,200])});
@@ -364,14 +407,14 @@ When('guest archival races with reversal of their bill',async({page})=>{
   for(let attempt=0;attempt<8;attempt+=1){
     const guest=await (await request.post('/api/v1/guests',{headers:csrfHeaders,data:{name:`Bill race guest ${attempt}`,roomId:room.id,language:'de'}})).json() as {id:string};
     const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};
-    const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),paymentMethod:'cash'}})).json() as {id:string};
+    const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};
     const [archive,reversal]=await Promise.all([request.delete(`/api/v1/guests/${guest.id}`,{headers:csrfHeaders}),request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Race correction'}})]);
     billArchiveRaceStatuses.push([archive.status(),reversal.status()]);
   }
 });
 Then('either the archive or the bill reversal is rejected',async()=>{for(const statuses of billArchiveRaceStatuses)expect([[204,409],[409,200]]).toContainEqual(statuses)});
 
-When('the host opens a voided bill for printing',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),paymentMethod:'cash'}})).json() as {id:string};expect((await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Printed correction'}})).status()).toBe(200);await page.goto(`/app/bills/${bill.id}`);await page.emulateMedia({media:'print'})});
+When('the host opens a voided bill for printing',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};expect((await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Printed correction'}})).status()).toBe(200);await page.goto(`/app/bills/${bill.id}`);await page.emulateMedia({media:'print'})});
 Then('the printed bill shows its void reason',async({page})=>{await expect(page.locator('.bill-void-marker .notice')).toBeVisible();await expect(page.locator('.bill-void-marker')).toContainText('Printed correction')});
 
 When('the administrator session is revoked while its event stream is open',async({page,browser})=>{

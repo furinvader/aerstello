@@ -28,6 +28,11 @@ Feature: Venue operations configuration
     When the host attempts to create a guest in an archived room
     Then the archived room guest is rejected
 
+  Scenario: A room with pending access requests cannot be archived
+    Given an authenticated administrator
+    When the administrator archives a room with a pending access request
+    Then room archival is rejected and the request remains pending
+
   Scenario: Guest archival and new orders are serialized
     Given an authenticated administrator
     When guest archival races with a new order

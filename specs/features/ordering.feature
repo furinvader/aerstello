@@ -39,6 +39,18 @@ Feature: Host order entry and billing
     Then both settlement attempts use the same mutation identifier
     And the host reaches the single resulting bill
 
+  Scenario: Concurrent settlement replay returns one bill
+    Given an authenticated administrator
+    When the same settlement mutation is submitted concurrently
+    Then both concurrent settlement responses succeed
+    And concurrent settlement creates only one bill
+
+  Scenario: Settlement rejects a tab changed after confirmation opened
+    Given an authenticated administrator
+    When another order changes the tab while settlement is open
+    Then settlement reports that the displayed tab changed
+    And no bill is created for the stale confirmation
+
   Scenario: An open tab cannot exceed the database money range
     Given an authenticated administrator
     When the host submits orders beyond the maximum tab total

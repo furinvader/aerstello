@@ -6,6 +6,16 @@ Feature: Device grants and replay protection
     When two devices exchange the same approved access request token
     Then exactly one device receives guest access
 
+  Scenario: Grant exchange does not expose its token in the URL
+    Given an authenticated administrator
+    When an approved request is exchanged for a guest grant
+    Then the grant token is sent in the request body
+
+  Scenario: An archived guest cannot receive a pending grant
+    Given an authenticated administrator
+    When guest archival races with their first grant exchange
+    Then no archived guest session remains active
+
   Scenario: An access request cannot be linked across rooms
     Given an authenticated administrator
     When the host links a room "102" request to a guest in room "101"

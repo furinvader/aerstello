@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Redirect } from 'wouter';
 import { Clock3, LogOut, Plus, ReceiptText } from 'lucide-react';
 import { formatMoney, localized, type LocalizedText } from '@sky-bar/shared';
-import { api, apiErrorMessage, json } from './api';
+import { ApiError, api, apiErrorMessage, json } from './api';
 import { Button, Card, Empty, Notice } from './components';
 import { useI18n } from './i18n';
 import type { Product, Tab } from './types';
@@ -21,7 +21,18 @@ export function GuestPage() {
     if (!me.isSuccess) return;
     const events = new EventSource('/api/v1/events');
     const refresh = () => { void client.invalidateQueries({ queryKey: ['guest-tab'] }); void client.invalidateQueries({ queryKey: ['guest-catalog'] }); };
+    const revalidateSession = async () => {
+      try { await api('/guest/me'); }
+      catch (caught) {
+        if (caught instanceof ApiError && caught.status === 401) {
+          events.close();
+          client.clear();
+          globalThis.location.assign('/guest/request');
+        }
+      }
+    };
     events.addEventListener('open', refresh);
+    events.addEventListener('error', () => void revalidateSession());
     events.addEventListener('orders.changed', refresh);
     events.addEventListener('catalog.changed', refresh);
     return () => events.close();
