@@ -1,13 +1,15 @@
 import { hashPassword } from './security.js';
 import { migrate, pool, transaction } from './db.js';
+import { seedPassword } from './seed-config.js';
 
+const administratorPassword = seedPassword(process.env);
 await migrate();
 await transaction(async (client) => {
   if (process.env.E2E_RESET === 'true') {
     await client.query(`TRUNCATE audit_events,realtime_events,bill_items,order_items,bills,order_batches,order_tabs,guest_sessions,access_requests,product_versions,products,categories,guests,rooms,host_sessions,hosts RESTART IDENTITY CASCADE`);
     await client.query(`UPDATE venue_settings SET name='',default_language='de',timezone='Europe/Berlin',catalog_version=1,version=1`);
   }
-  const passwordHash = await hashPassword(process.env.SEED_ADMIN_PASSWORD ?? 'SkyBarTest123!');
+  const passwordHash = await hashPassword(administratorPassword);
   await client.query(
     `INSERT INTO hosts(email,name,password_hash,role,language) VALUES ('admin@skybar.test','Mira Host',$1,'admin','de')
      ON CONFLICT ((lower(email))) DO UPDATE SET password_hash=excluded.password_hash,active=true,role='admin'`,
@@ -46,5 +48,5 @@ await transaction(async (client) => {
     await client.query(`INSERT INTO product_versions(product_id,catalog_version,name,price_cents,enabled,self_service_only) VALUES ($1,$2,$3,$4,true,$5)`,[product.rows[0]!.id,version,JSON.stringify(example.name),example.price,example.self]);
   }
 });
-console.log('Seed complete: admin@skybar.test / SkyBarTest123!');
+console.log('Seed complete: admin@skybar.test');
 await pool.end();

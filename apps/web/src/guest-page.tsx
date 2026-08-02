@@ -10,7 +10,7 @@ import { isPermanentSyncConflict } from './offline';
 import type { Product, Tab } from './types';
 
 interface UndoEntry { id: string; productId: string; until: number; mutationId: string }
-interface PendingAddStore { sessionId: string; entries: [string,string,number?][] }
+interface PendingAddStore { sessionId: string; entries: [string,string,number?,number?][] }
 const pendingAddKey='skybar-guest-pending-adds';
 
 function loadPendingAdds(): PendingAddStore {
@@ -79,16 +79,17 @@ export function GuestPage() {
     return () => window.clearTimeout(timer);
   }, [undos,client]);
   const add = useMutation({
-    mutationFn: (product: Pick<Product,'id'|'priceCents'>) => {
+    mutationFn: (product: Pick<Product,'id'|'priceCents'|'version'>) => {
       const sessionId=me.data!.guest.sessionId;
       if(pendingAdds.current.sessionId!==sessionId)pendingAdds.current={sessionId,entries:[]};
       const existing=pendingAdds.current.entries.find(entry=>entry[0]===product.id);
       const mutationId=existing?.[1]??crypto.randomUUID();
       const expectedPriceCents=existing?.[2]??product.priceCents;
-      const entries=[...pendingAdds.current.entries.filter(entry=>entry[0]!==product.id),[product.id,mutationId,expectedPriceCents] as [string,string,number?]];
+      const expectedProductVersion=existing?.[3]??product.version;
+      const entries=[...pendingAdds.current.entries.filter(entry=>entry[0]!==product.id),[product.id,mutationId,expectedPriceCents,expectedProductVersion] as [string,string,number?,number?]];
       pendingAdds.current={sessionId,entries};
       persistPendingAdds(pendingAdds.current);
-      return api<{ id: string; provisionalUntil: string }>('/guest/items', { method: 'POST', body: json({ mutationId,productId:product.id,expectedPriceCents }) });
+      return api<{ id: string; provisionalUntil: string }>('/guest/items', { method: 'POST', body: json({ mutationId,productId:product.id,expectedPriceCents,expectedProductVersion }) });
     },
     onSuccess: (item,product) => {
       pendingAdds.current={...pendingAdds.current,entries:pendingAdds.current.entries.filter(entry=>entry[0]!==product.id)};

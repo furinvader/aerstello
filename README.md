@@ -24,10 +24,14 @@ Open `http://localhost:5173`. On first login the administrator is sent to Venue 
 For a populated local system instead of creating an administrator manually:
 
 ```bash
+read -rsp 'Development seed administrator password: ' SEED_ADMIN_PASSWORD
+printf '\n'
+export SEED_ADMIN_PASSWORD
 npm run db:seed -w @sky-bar/api
+unset SEED_ADMIN_PASSWORD
 ```
 
-The development seed is `admin@skybar.test` / `SkyBarTest123!` and must never be used in production.
+The development seed creates `admin@skybar.test`, requires an explicit password of at least 12 characters, and refuses to run when `NODE_ENV=production`.
 
 ## Commands
 

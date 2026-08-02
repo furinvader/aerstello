@@ -13,6 +13,12 @@ Feature: Venue operations configuration
     When the administrator submits an invalid room rename
     Then the room editor shows a validation error
 
+  Scenario: A stale room retry cannot overwrite a newer rename
+    Given an authenticated administrator
+    When a room rename response is lost before another administrator renames it
+    Then retrying the stale room rename is rejected
+    And the newer room name remains configured
+
   Scenario: An uncertain room creation is recovered idempotently
     Given an authenticated administrator
     When the administrator retries room creation after its first response is lost
@@ -31,6 +37,12 @@ Feature: Venue operations configuration
     Given an authenticated administrator
     When the host creates guest "Ada Test" in room "101"
     Then guest "Ada Test" is listed in room "101"
+
+  Scenario: A stale guest retry cannot overwrite a newer edit
+    Given an authenticated administrator
+    When a guest update response is lost before another host edits the guest
+    Then retrying the stale guest update is rejected
+    And the newer guest name remains configured
 
   Scenario: An uncertain guest creation is recovered idempotently
     Given an authenticated administrator
@@ -93,6 +105,11 @@ Feature: Venue operations configuration
     Given an authenticated administrator
     When the administrator archives a room with an active guest
     Then the room screen explains that active guests must be moved
+
+  Scenario: Concurrent room reorders lock rooms consistently
+    Given an authenticated administrator
+    When administrators submit conflicting room orders concurrently
+    Then every room reorder completes without a server error
 
   Scenario: Guest archival and new orders are serialized
     Given an authenticated administrator

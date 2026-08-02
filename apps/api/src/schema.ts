@@ -183,6 +183,7 @@ export const orderItems = pgTable('order_items', {
   provisionalUntil: timestamp('provisional_until', { withTimezone: true }),
   guestMutationId: uuid('guest_mutation_id').unique(),
   guestExpectedPriceCents: integer('guest_expected_price_cents'),
+  guestExpectedProductVersion: integer('guest_expected_product_version'),
   billId: uuid('bill_id').references(() => bills.id),
   voidedAt: timestamp('voided_at', { withTimezone: true }),
   voidedByHost: uuid('voided_by_host').references(() => hosts.id),

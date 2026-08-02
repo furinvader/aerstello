@@ -11,6 +11,7 @@ Production requires `DATABASE_URL`, an explicitly configured nondefault `SESSION
 - Liveness/readiness: `GET /api/v1/health` verifies database connectivity.
 - Build the API, then run `npm run db:migrate` before starting a newly deployed version. Production migration and administrator commands execute the compiled files included in the runtime image.
 - Migrations are recorded in `schema_migrations`, applied in lexical order, and serialized across concurrent runners with a PostgreSQL advisory lock.
+- When upgrading a database that contains bills from before `0007_bill_timezone.sql`, set `LEGACY_BILL_TIMEZONE` to the IANA timezone used when those bills were settled. The corrective migration refuses to proceed without this operator-supplied value, preventing the current venue timezone from silently changing historical bill dates.
 - Realtime invalidation records are trimmed as they are written, retaining only the latest 10,000 identity slots so sustained activity cannot grow the table without bound.
 
 ## Backup and restore

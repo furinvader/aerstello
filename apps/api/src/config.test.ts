@@ -19,4 +19,8 @@ describe('runtime configuration', () => {
       SESSION_SECRET: 'a-unique-production-session-secret-value',
     }).SESSION_SECRET).toBe('a-unique-production-session-secret-value');
   });
+
+  it('rejects an invalid legacy bill timezone', () => {
+    expect(() => parseConfig({ LEGACY_BILL_TIMEZONE: 'Europe/Definitely-Not-A-Zone' })).toThrow(/LEGACY_BILL_TIMEZONE/);
+  });
 });

@@ -108,6 +108,12 @@ Feature: Guest device access and self-service
     Then adding the stale self-service product is rejected without a charge
     And the guest can retry the refreshed self-service product
 
+  Scenario: A guest addition is bound to its displayed product version
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When a self-service product is renamed after the guest catalog is displayed
+    Then adding the stale product snapshot is rejected without a charge
+    And the guest catalog shows the renamed product after refresh
+
   Scenario: A legacy self-service addition recovers its displayed price
     Given an approved guest device for "Luca Rossi" in room "102"
     When the guest retries a legacy pending self-service addition

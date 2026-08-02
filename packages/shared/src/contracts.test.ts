@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isValidTimeZone, productCreateSchema, productUpdateSchema, settleTabSchema, venueSettingsSchema } from './contracts.js';
+import { guestUpdateSchema, isValidTimeZone, productCreateSchema, productUpdateSchema, roomUpdateSchema, settleTabSchema, venueSettingsSchema } from './contracts.js';
 
 describe('venue contracts', () => {
   it('accepts recognized IANA time zones', () => {
@@ -36,5 +36,16 @@ describe('venue contracts', () => {
     const product = { name: { de: 'Saft', it: '', en: '' }, priceCents: 300, categoryId: '00000000-0000-4000-8000-000000000002' };
     expect(productUpdateSchema.safeParse(product).success).toBe(false);
     expect(productUpdateSchema.safeParse({ ...product, expectedVersion: 1 }).success).toBe(true);
+  });
+
+  it('requires an expected version when updating a guest', () => {
+    const guest = { name: 'Ada', roomId: '00000000-0000-4000-8000-000000000002', language: 'de' };
+    expect(guestUpdateSchema.safeParse(guest).success).toBe(false);
+    expect(guestUpdateSchema.safeParse({ ...guest, expectedVersion: 1 }).success).toBe(true);
+  });
+
+  it('requires an expected version when updating a room', () => {
+    expect(roomUpdateSchema.safeParse({ name: '101' }).success).toBe(false);
+    expect(roomUpdateSchema.safeParse({ name: '101', expectedVersion: 1 }).success).toBe(true);
   });
 });

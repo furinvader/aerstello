@@ -8,14 +8,14 @@ import {
   accessRequestSchema,
   categoryCreateSchema,
   guestCreateSchema,
-  guestInputSchema,
+  guestUpdateSchema,
   languageSchema,
   loginSchema,
   orderBatchSchema,
   productCreateSchema,
   productUpdateSchema,
   roomCreateSchema,
-  roomInputSchema,
+  roomUpdateSchema,
   settleTabSchema,
   venueSettingsSchema,
   voidSchema,
@@ -471,16 +471,23 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.patch('/api/v1/rooms/:id', { preHandler: requireAdmin }, async (request) => {
-    const input = body(roomInputSchema, request);
-    const result = await pool.query('UPDATE rooms SET name=$1,version=version+1 WHERE id=$2 AND archived_at IS NULL RETURNING id,name,position,version', [input.name, id(request)]);
-    if (!result.rowCount) throw new HttpError(404, 'ROOM_NOT_FOUND', 'Room not found.');
+    const input = body(roomUpdateSchema, request);
+    const roomId=id(request);
+    const result = await pool.query('UPDATE rooms SET name=$1,version=version+1 WHERE id=$2 AND version=$3 AND archived_at IS NULL RETURNING id,name,position,version', [input.name, roomId, input.expectedVersion]);
+    if (!result.rowCount) {
+      const current=await pool.query('SELECT 1 FROM rooms WHERE id=$1 AND archived_at IS NULL',[roomId]);
+      if(!current.rowCount)throw new HttpError(404, 'ROOM_NOT_FOUND', 'Room not found.');
+      throw new HttpError(409,'ROOM_CHANGED','The room was changed by another administrator.');
+    }
     await emitEvent('rooms.changed', {});
     return result.rows[0];
   });
 
   app.put('/api/v1/rooms/order', { preHandler: requireAdmin }, async (request) => {
-    const ids = body(z.object({ ids: z.array(z.string().uuid()) }), request).ids;
+    const ids = body(z.object({ ids: z.array(z.string().uuid()).min(1).refine(values=>new Set(values).size===values.length) }), request).ids;
     await transaction(async (client) => {
+      const locked=await client.query('SELECT id FROM rooms WHERE id=ANY($1::uuid[]) AND archived_at IS NULL ORDER BY id FOR UPDATE',[ids]);
+      if(locked.rowCount!==ids.length)throw new HttpError(409,'ROOM_SET_CHANGED','The active room set changed. Reload the rooms and try again.');
       for (const [position, roomId] of ids.entries()) await client.query('UPDATE rooms SET position=$1 WHERE id=$2 AND archived_at IS NULL', [position, roomId]);
     });
     await emitEvent('rooms.changed', {});
@@ -542,17 +549,21 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.patch('/api/v1/guests/:id', { preHandler: requireHost }, async (request) => {
-    const input = body(guestInputSchema, request);
+    const input = body(guestUpdateSchema, request);
     const guestId = id(request);
     const result = await transaction(async (client) => {
       const room = await client.query('SELECT id FROM rooms WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [input.roomId]);
       if (!room.rowCount) throw new HttpError(404, 'ROOM_NOT_FOUND', 'Room not found.');
       return client.query(
-        'UPDATE guests SET name=$1,room_id=$2,language=$3,version=version+1 WHERE id=$4 AND archived_at IS NULL RETURNING id,name,room_id AS "roomId",language,version',
-        [input.name, input.roomId, input.language, guestId],
+        'UPDATE guests SET name=$1,room_id=$2,language=$3,version=version+1 WHERE id=$4 AND version=$5 AND archived_at IS NULL RETURNING id,name,room_id AS "roomId",language,version',
+        [input.name, input.roomId, input.language, guestId, input.expectedVersion],
       );
     });
-    if (!result.rowCount) throw new HttpError(404, 'GUEST_NOT_FOUND', 'Guest not found.');
+    if (!result.rowCount) {
+      const current=await pool.query('SELECT 1 FROM guests WHERE id=$1 AND archived_at IS NULL',[guestId]);
+      if(!current.rowCount)throw new HttpError(404, 'GUEST_NOT_FOUND', 'Guest not found.');
+      throw new HttpError(409,'GUEST_CHANGED','The guest was changed by another host.');
+    }
     await emitEvent('guests.changed', {});
     return result.rows[0];
   });
@@ -1167,7 +1178,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/v1/guest/tab', { preHandler: requireGuest }, async (request) => tabDetail(request.guestIdentity!.id));
   app.get('/api/v1/guest/catalog', { preHandler: requireGuest }, async () => {
     const result = await pool.query(
-      `SELECT p.id,p.name,p.description,p.price_cents AS "priceCents",p.category_id AS "categoryId",c.name AS "categoryName"
+      `SELECT p.id,p.name,p.description,p.price_cents AS "priceCents",p.category_id AS "categoryId",c.name AS "categoryName",p.version
          FROM products p JOIN categories c ON c.id=p.category_id
         WHERE p.archived_at IS NULL AND p.enabled=true AND p.self_service_only=true AND c.archived_at IS NULL
         ORDER BY c.position,p.position`,
@@ -1180,12 +1191,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       mutationId: z.string().uuid(),
       productId: z.string().uuid(),
       expectedPriceCents: z.number().int().min(0).max(10_000_000).optional(),
+      expectedProductVersion: z.number().int().positive().optional(),
     }), request);
     const item = await transaction(async (client) => {
       const replay = async () => {
-        const duplicate = await client.query<{ id: string; provisionalUntil: string; sessionId: string; productId: string; expectedPriceCents: number|null }>(
+        const duplicate = await client.query<{ id: string; provisionalUntil: string; sessionId: string; productId: string; expectedPriceCents: number|null; expectedProductVersion:number|null }>(
           `SELECT id,provisional_until AS "provisionalUntil",submitted_by_guest_session AS "sessionId",product_id AS "productId",
-                  guest_expected_price_cents AS "expectedPriceCents"
+                  guest_expected_price_cents AS "expectedPriceCents",guest_expected_product_version AS "expectedProductVersion"
              FROM order_items WHERE guest_mutation_id=$1`,
           [input.mutationId],
         );
@@ -1193,6 +1205,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         if (duplicate.rows[0].sessionId !== request.guestIdentity!.sessionId) throw new HttpError(403, 'GUEST_MISMATCH', 'This item belongs to another guest device.');
         if (duplicate.rows[0].productId !== input.productId) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another product.');
         if (duplicate.rows[0].expectedPriceCents !== null && duplicate.rows[0].expectedPriceCents !== input.expectedPriceCents) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another displayed price.');
+        if (duplicate.rows[0].expectedProductVersion !== null && duplicate.rows[0].expectedProductVersion !== input.expectedProductVersion) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another displayed product version.');
         return duplicate.rows[0];
       };
       const duplicate = await replay();
@@ -1202,20 +1215,21 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const serializedDuplicate = await replay();
       if (serializedDuplicate) return serializedDuplicate;
       if(input.expectedPriceCents===undefined) throw new HttpError(400,'EXPECTED_PRICE_REQUIRED','The displayed product price is required.');
-      const product = await client.query<{ name: Record<string, string>; priceCents: number }>(
-        `SELECT name,price_cents AS "priceCents" FROM products WHERE id=$1 AND enabled=true AND self_service_only=true AND archived_at IS NULL`,
+      if(input.expectedProductVersion===undefined) throw new HttpError(400,'EXPECTED_PRODUCT_VERSION_REQUIRED','The displayed product version is required.');
+      const product = await client.query<{ name: Record<string, string>; priceCents: number; version:number }>(
+        `SELECT name,price_cents AS "priceCents",version FROM products WHERE id=$1 AND enabled=true AND self_service_only=true AND archived_at IS NULL`,
         [input.productId],
       );
       const selected = product.rows[0];
       if (!selected) throw new HttpError(404, 'PRODUCT_NOT_AVAILABLE', 'This self-service product is unavailable.');
-      if(selected.priceCents!==input.expectedPriceCents) throw new HttpError(409,'CATALOG_CONFLICT','The displayed product price has changed. Refresh the catalog and try again.');
+      if(selected.priceCents!==input.expectedPriceCents||selected.version!==input.expectedProductVersion) throw new HttpError(409,'CATALOG_CONFLICT','The displayed product has changed. Refresh the catalog and try again.');
       const tabId = await activeTab(request.guestIdentity!.id, client);
       await ensureTabTotalWithinRange(tabId, BigInt(selected.priceCents), client);
       const result = await client.query(
-        `INSERT INTO order_items(tab_id,product_id,product_name,unit_price_cents,quantity,source,status,submitted_by_guest_session,provisional_until,guest_mutation_id,guest_expected_price_cents)
-         VALUES ($1,$2,$3,$4,1,'guest','provisional',$5,now()+interval '10 seconds',$6,$7)
+        `INSERT INTO order_items(tab_id,product_id,product_name,unit_price_cents,quantity,source,status,submitted_by_guest_session,provisional_until,guest_mutation_id,guest_expected_price_cents,guest_expected_product_version)
+         VALUES ($1,$2,$3,$4,1,'guest','provisional',$5,now()+interval '10 seconds',$6,$7,$8)
          RETURNING id,provisional_until AS "provisionalUntil"`,
-        [tabId,input.productId,JSON.stringify(selected.name),selected.priceCents,request.guestIdentity!.sessionId,input.mutationId,input.expectedPriceCents],
+        [tabId,input.productId,JSON.stringify(selected.name),selected.priceCents,request.guestIdentity!.sessionId,input.mutationId,input.expectedPriceCents,input.expectedProductVersion],
       );
       await audit('guest-item.submitted', 'order-item', result.rows[0].id, {}, { guestSessionId: request.guestIdentity!.sessionId }, client);
       return result.rows[0];
