@@ -25,3 +25,9 @@ Feature: Device grants and replay protection
     Given an authenticated administrator
     When the same item void mutation is submitted twice
     Then both item void responses succeed
+
+  Scenario: Replaying a bill void returns its prior success
+    Given an authenticated administrator
+    When the same bill void mutation is submitted twice
+    Then both bill void responses succeed
+    And the billed items are restored only once

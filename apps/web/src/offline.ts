@@ -1,5 +1,5 @@
 import Dexie, { type EntityTable } from 'dexie';
-import { api, json } from './api';
+import { ApiError, api, json } from './api';
 
 export interface QueuedMutation {
   id: string;
@@ -8,6 +8,8 @@ export interface QueuedMutation {
   method: 'POST';
   body: unknown;
   createdAt: string;
+  status?: 'pending' | 'conflict';
+  errorCode?: string;
   lastError?: string;
 }
 
@@ -16,6 +18,45 @@ db.version(1).stores({ mutations: 'id,createdAt' });
 db.version(2).stores({ mutations: 'id,hostId,[hostId+createdAt],createdAt' }).upgrade((transaction) =>
   transaction.table('mutations').clear(),
 );
+db.version(3).stores({ mutations: 'id,hostId,status,[hostId+status],[hostId+createdAt],createdAt' }).upgrade((transaction) =>
+  transaction.table('mutations').toCollection().modify((mutation: QueuedMutation) => { mutation.status = 'pending'; }),
+);
+
+export function isPermanentSyncConflict(error: unknown): error is ApiError {
+  return error instanceof ApiError
+    && error.status >= 400
+    && error.status < 500
+    && ![401, 408, 429].includes(error.status);
+}
+
+interface ReplayHandlers {
+  send: (mutation: QueuedMutation) => Promise<void>;
+  remove: (id: string) => Promise<void>;
+  update: (id: string, changes: Partial<QueuedMutation>) => Promise<void>;
+}
+
+export async function replayQueuedMutations(pending: QueuedMutation[], handlers: ReplayHandlers): Promise<number> {
+  let completed = 0;
+  for (const mutation of pending) {
+    try {
+      await handlers.send(mutation);
+      await handlers.remove(mutation.id);
+      completed += 1;
+    } catch (error) {
+      const failure = {
+        errorCode: error instanceof ApiError ? error.code : 'SYNC_FAILED',
+        lastError: error instanceof Error ? error.message : 'Sync failed',
+      };
+      if (isPermanentSyncConflict(error)) {
+        await handlers.update(mutation.id, { ...failure, status: 'conflict' });
+        continue;
+      }
+      await handlers.update(mutation.id, failure);
+      break;
+    }
+  }
+  return completed;
+}
 
 export async function submitOrQueue<T>(mutation: QueuedMutation): Promise<{ queued: boolean; data?: T }> {
   try {
@@ -23,26 +64,25 @@ export async function submitOrQueue<T>(mutation: QueuedMutation): Promise<{ queu
     return { queued: false, data };
   } catch (error) {
     if (navigator.onLine) throw error;
-    await db.mutations.put(mutation);
+    const { errorCode: _errorCode, lastError: _lastError, ...freshMutation } = mutation;
+    await db.mutations.put({ ...freshMutation, status: 'pending' });
     return { queued: true };
   }
 }
 
 export async function flushQueue(hostId: string): Promise<number> {
   if (!navigator.onLine) return 0;
-  const pending = await db.mutations.where('hostId').equals(hostId).sortBy('createdAt');
-  let completed = 0;
-  for (const mutation of pending) {
-    try {
-      await api(mutation.path, { method: mutation.method, body: json(mutation.body) });
-      await db.mutations.delete(mutation.id);
-      completed += 1;
-    } catch (error) {
-      await db.mutations.update(mutation.id, { lastError: error instanceof Error ? error.message : 'Sync failed' });
-      break;
-    }
-  }
-  return completed;
+  const pending = await db.mutations.where('[hostId+status]').equals([hostId, 'pending']).sortBy('createdAt');
+  return replayQueuedMutations(pending, {
+    send: async (mutation) => { await api(mutation.path, { method: mutation.method, body: json(mutation.body) }); },
+    remove: async (mutationId) => { await db.mutations.delete(mutationId); },
+    update: async (mutationId, changes) => { await db.mutations.update(mutationId, changes); },
+  });
 }
 
-export const pendingMutationCount = (hostId: string) => db.mutations.where('hostId').equals(hostId).count();
+export const pendingMutationCount = (hostId: string) => db.mutations.where('[hostId+status]').equals([hostId, 'pending']).count();
+export const mutationConflicts = (hostId: string) => db.mutations.where('[hostId+status]').equals([hostId, 'conflict']).sortBy('createdAt');
+export async function discardMutationConflict(id: string, hostId: string): Promise<void> {
+  const mutation = await db.mutations.get(id);
+  if (mutation?.hostId === hostId && mutation.status === 'conflict') await db.mutations.delete(id);
+}

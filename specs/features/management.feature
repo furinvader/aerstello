@@ -22,3 +22,8 @@ Feature: Venue operations configuration
     Given an authenticated administrator
     When the administrator tries to create product "Invalid price" priced "1.005"
     Then the product price is rejected before submission
+
+  Scenario: Guests cannot be assigned to an archived room
+    Given an authenticated administrator
+    When the host attempts to create a guest in an archived room
+    Then the archived room guest is rejected

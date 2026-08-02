@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import { boolean, index, integer, jsonb, pgEnum, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 
 export const role = pgEnum('host_role', ['admin', 'staff']);
@@ -94,7 +95,7 @@ export const orderTabs = pgTable('order_tabs', {
   status: text('status').notNull().default('open'),
   openedAt: timestamp('opened_at', { withTimezone: true }).notNull().defaultNow(),
   closedAt: timestamp('closed_at', { withTimezone: true }),
-}, (t) => [index('order_tabs_guest_idx').on(t.guestId)]);
+}, (t) => [uniqueIndex('one_open_tab_per_guest').on(t.guestId).where(sql`${t.status} = 'open'`)]);
 
 export const orderBatches = pgTable('order_batches', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -122,7 +123,11 @@ export const bills = pgTable('bills', {
   voidedAt: timestamp('voided_at', { withTimezone: true }),
   voidReason: text('void_reason'),
   voidedBy: uuid('voided_by').references(() => hosts.id),
-}, (t) => [index('bills_settled_idx').on(t.settledAt)]);
+  voidMutationId: uuid('void_mutation_id'),
+}, (t) => [
+  index('bills_settled_idx').on(t.settledAt),
+  uniqueIndex('bills_void_mutation_uq').on(t.voidMutationId).where(sql`${t.voidMutationId} IS NOT NULL`),
+]);
 
 export const orderItems = pgTable('order_items', {
   id: uuid('id').primaryKey().defaultRandom(),

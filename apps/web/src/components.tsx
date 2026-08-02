@@ -1,5 +1,6 @@
 import { useEffect, useState, type ButtonHTMLAttributes, type FormEvent, type ReactNode } from 'react';
 import { AlertCircle, CheckCircle2, X } from 'lucide-react';
+import { apiErrorMessage } from './api';
 import { useI18n } from './i18n';
 
 export function Button({ variant = 'primary', className = '', ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'primary'|'secondary'|'danger'|'ghost' }) {
@@ -40,12 +41,12 @@ export function Notice({ kind = 'success', children }: { kind?: 'success'|'error
 }
 
 export function ConfirmForm({ label, placeholder, onConfirm, onCancel }: { label: string; placeholder: string; onConfirm: (reason: string) => Promise<void>; onCancel: () => void }) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const [reason, setReason] = useState('');
   const [error, setError] = useState('');
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    try { await onConfirm(reason); } catch (caught) { setError(caught instanceof Error ? caught.message : 'Failed'); }
+    try { await onConfirm(reason); } catch (caught) { setError(apiErrorMessage(caught, language, t('requestFailed'))); }
   };
   return <form onSubmit={submit} className="stack"><Field label={label}><input value={reason} onChange={(e) => setReason(e.target.value)} placeholder={placeholder} required minLength={2} autoFocus /></Field>{error && <Notice kind="error">{error}</Notice>}<div className="form-actions"><Button type="button" variant="ghost" onClick={onCancel}>{t('cancel')}</Button><Button variant="danger" type="submit">{t('confirm')}</Button></div></form>;
 }

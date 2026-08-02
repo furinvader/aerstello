@@ -14,3 +14,8 @@ Feature: Venue identity
   Scenario: Administrators can return to venue settings
     Given an authenticated administrator
     Then venue settings is available in the primary navigation
+
+  Scenario: Venue time zones must be recognized IANA identifiers
+    Given an authenticated administrator
+    When the administrator submits an invalid venue time zone
+    Then the venue time zone is rejected without changing the settings

@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type pg from 'pg';
 import { z, type ZodType } from 'zod';
 import {
+  MAX_MONEY_CENTS,
   accessApprovalSchema,
   accessRequestSchema,
   categoryInputSchema,
@@ -68,6 +69,18 @@ async function activeTab(guestId: string, client: pg.Pool | pg.PoolClient = pool
   const tabId = result.rows[0]?.id;
   if (!tabId) throw new HttpError(500, 'TAB_ERROR', 'Could not open a tab.');
   return tabId;
+}
+
+async function ensureTabTotalWithinRange(tabId: string, additionalCents: bigint, client: pg.PoolClient): Promise<void> {
+  await client.query('SELECT id FROM order_tabs WHERE id=$1 FOR UPDATE', [tabId]);
+  const current = await client.query<{ totalCents: string }>(
+    `SELECT COALESCE(sum(unit_price_cents::bigint*quantity),0)::text AS "totalCents"
+       FROM order_items WHERE tab_id=$1 AND status IN ('open','provisional')`,
+    [tabId],
+  );
+  if (BigInt(current.rows[0]?.totalCents ?? '0') + additionalCents > BigInt(MAX_MONEY_CENTS)) {
+    throw new HttpError(409, 'TAB_TOTAL_LIMIT', 'The open tab has reached its maximum total.');
+  }
 }
 
 async function tabDetail(guestId: string) {
@@ -298,8 +311,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         (SELECT count(*)::int FROM rooms WHERE archived_at IS NULL) AS "activeRooms",
         (SELECT count(*)::int FROM guests WHERE archived_at IS NULL) AS "activeGuests",
         (SELECT count(*)::int FROM order_items WHERE status IN ('open','provisional')) AS "openItemCount",
-        (SELECT COALESCE(sum(unit_price_cents*quantity),0)::int FROM order_items WHERE status IN ('open','provisional')) AS "openValueCents",
-        (SELECT COALESCE(sum(b.total_cents),0)::int
+        (SELECT COALESCE(sum(unit_price_cents::bigint*quantity),0)::float8 FROM order_items WHERE status IN ('open','provisional')) AS "openValueCents",
+        (SELECT COALESCE(sum(b.total_cents::bigint),0)::float8
            FROM bills b CROSS JOIN venue_settings v
           WHERE b.settled_at >= (date_trunc('day',now() AT TIME ZONE v.timezone) AT TIME ZONE v.timezone)
             AND b.voided_at IS NULL) AS "todaySalesCents"`,
@@ -339,9 +352,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.delete('/api/v1/rooms/:id', { preHandler: requireAdmin }, async (request, reply) => {
     const roomId = id(request);
-    const active = await pool.query('SELECT 1 FROM guests WHERE room_id=$1 AND archived_at IS NULL LIMIT 1', [roomId]);
-    if (active.rowCount) throw new HttpError(409, 'ROOM_HAS_GUESTS', 'Move or archive active guests first.');
-    await pool.query('UPDATE rooms SET archived_at=now(),version=version+1 WHERE id=$1', [roomId]);
+    await transaction(async (client) => {
+      const room = await client.query('SELECT id FROM rooms WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [roomId]);
+      if (!room.rowCount) throw new HttpError(404, 'ROOM_NOT_FOUND', 'Room not found.');
+      const active = await client.query('SELECT 1 FROM guests WHERE room_id=$1 AND archived_at IS NULL LIMIT 1', [roomId]);
+      if (active.rowCount) throw new HttpError(409, 'ROOM_HAS_GUESTS', 'Move or archive active guests first.');
+      await client.query('UPDATE rooms SET archived_at=now(),version=version+1 WHERE id=$1', [roomId]);
+    });
     await emitEvent('rooms.changed', {});
     return reply.code(204).send();
   });
@@ -356,17 +373,26 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.post('/api/v1/guests', { preHandler: requireHost }, async (request, reply) => {
     const input = body(guestInputSchema, request);
-    const result = await pool.query('INSERT INTO guests(name,room_id,language) VALUES ($1,$2,$3) RETURNING id,name,room_id AS "roomId",language,version', [input.name, input.roomId, input.language]);
+    const result = await transaction(async (client) => {
+      const room = await client.query('SELECT id FROM rooms WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [input.roomId]);
+      if (!room.rowCount) throw new HttpError(404, 'ROOM_NOT_FOUND', 'Room not found.');
+      return client.query('INSERT INTO guests(name,room_id,language) VALUES ($1,$2,$3) RETURNING id,name,room_id AS "roomId",language,version', [input.name, input.roomId, input.language]);
+    });
     await emitEvent('guests.changed', {});
     return reply.code(201).send(result.rows[0]);
   });
 
   app.patch('/api/v1/guests/:id', { preHandler: requireHost }, async (request) => {
     const input = body(guestInputSchema, request);
-    const result = await pool.query(
-      'UPDATE guests SET name=$1,room_id=$2,language=$3,version=version+1 WHERE id=$4 AND archived_at IS NULL RETURNING id,name,room_id AS "roomId",language,version',
-      [input.name, input.roomId, input.language, id(request)],
-    );
+    const guestId = id(request);
+    const result = await transaction(async (client) => {
+      const room = await client.query('SELECT id FROM rooms WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [input.roomId]);
+      if (!room.rowCount) throw new HttpError(404, 'ROOM_NOT_FOUND', 'Room not found.');
+      return client.query(
+        'UPDATE guests SET name=$1,room_id=$2,language=$3,version=version+1 WHERE id=$4 AND archived_at IS NULL RETURNING id,name,room_id AS "roomId",language,version',
+        [input.name, input.roomId, input.language, guestId],
+      );
+    });
     if (!result.rowCount) throw new HttpError(404, 'GUEST_NOT_FOUND', 'Guest not found.');
     await emitEvent('guests.changed', {});
     return result.rows[0];
@@ -409,13 +435,19 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get('/api/v1/products', { preHandler: requireHost }, async () => {
-    const [settings, products] = await Promise.all([
-      pool.query('SELECT catalog_version AS "catalogVersion" FROM venue_settings WHERE id=1'),
-      pool.query(`SELECT p.id,p.category_id AS "categoryId",p.name,p.description,p.price_cents AS "priceCents",p.enabled,
-                         p.self_service_only AS "selfServiceOnly",p.position,p.version
-                    FROM products p WHERE p.archived_at IS NULL ORDER BY p.category_id,p.position`),
-    ]);
-    return { catalogVersion: settings.rows[0]?.catalogVersion ?? 1, data: products.rows };
+    const result = await pool.query<{ catalogVersion: number; data: unknown[] }>(
+      `SELECT v.catalog_version AS "catalogVersion",
+              COALESCE((
+                SELECT jsonb_agg(to_jsonb(catalog_product) ORDER BY catalog_product."categoryId",catalog_product.position)
+                  FROM (
+                    SELECT p.id,p.category_id AS "categoryId",p.name,p.description,p.price_cents AS "priceCents",p.enabled,
+                           p.self_service_only AS "selfServiceOnly",p.position,p.version
+                      FROM products p WHERE p.archived_at IS NULL
+                  ) catalog_product
+              ),'[]'::jsonb) AS data
+         FROM venue_settings v WHERE v.id=1`,
+    );
+    return result.rows[0] ?? { catalogVersion: 1, data: [] };
   });
 
   app.post('/api/v1/products', { preHandler: requireAdmin }, async (request, reply) => {
@@ -489,6 +521,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       );
       const access = pending.rows[0];
       if (!access) throw new HttpError(409, 'REQUEST_RESOLVED', 'This request is no longer pending.');
+      const room = await client.query('SELECT id FROM rooms WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [access.roomId]);
+      if (!room.rowCount) throw new HttpError(404, 'ROOM_NOT_FOUND', 'Room not found.');
       let guestId = input.guestId;
       if (guestId) {
         const guest = await client.query('SELECT id FROM guests WHERE id=$1 AND room_id=$2 AND archived_at IS NULL', [guestId, access.roomId]);
@@ -531,15 +565,16 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const input = body(orderBatchSchema, request);
     if(input.originHostId!==request.hostIdentity!.id) throw new HttpError(403,'HOST_MISMATCH','Queued orders can only be submitted by their originating host.');
     const result = await transaction(async (client) => {
-      const duplicate = await client.query('SELECT tab_id AS "tabId" FROM order_batches WHERE mutation_id=$1', [input.mutationId]);
-      if (duplicate.rows[0]) return duplicate.rows[0];
+      const duplicate = await client.query<{ tabId: string; hostId: string }>('SELECT tab_id AS "tabId",host_id AS "hostId" FROM order_batches WHERE mutation_id=$1', [input.mutationId]);
+      if (duplicate.rows[0]) {
+        if (duplicate.rows[0].hostId !== request.hostIdentity!.id) throw new HttpError(403, 'HOST_MISMATCH', 'This order belongs to another host.');
+        return { tabId: duplicate.rows[0].tabId };
+      }
       const guest = await client.query('SELECT id FROM guests WHERE id=$1 AND archived_at IS NULL', [input.guestId]);
       if (!guest.rowCount) throw new HttpError(404, 'GUEST_NOT_FOUND', 'Guest not found.');
       const tabId = await activeTab(input.guestId, client);
-      const batch = await client.query<{ id: string }>(
-        'INSERT INTO order_batches(mutation_id,tab_id,host_id,captured_at) VALUES ($1,$2,$3,$4) RETURNING id',
-        [input.mutationId, tabId, request.hostIdentity!.id, input.capturedAt],
-      );
+      const resolvedLines: { productId: string; quantity: number; name: Record<string, string>; priceCents: number }[] = [];
+      let additionalCents = 0n;
       for (const line of input.items) {
         const product = await client.query<{ name: Record<string, string>; priceCents: number; enabled:boolean; selfServiceOnly:boolean }>(
           `SELECT name,price_cents AS "priceCents",enabled,self_service_only AS "selfServiceOnly" FROM product_versions
@@ -548,10 +583,19 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         );
         const snapshot = product.rows[0];
         if (!snapshot||!snapshot.enabled||snapshot.selfServiceOnly) throw new HttpError(409, 'CATALOG_CONFLICT', 'A selected product is unavailable in the captured catalog.');
+        resolvedLines.push({ productId: line.productId, quantity: line.quantity, name: snapshot.name, priceCents: snapshot.priceCents });
+        additionalCents += BigInt(snapshot.priceCents) * BigInt(line.quantity);
+      }
+      await ensureTabTotalWithinRange(tabId, additionalCents, client);
+      const batch = await client.query<{ id: string }>(
+        'INSERT INTO order_batches(mutation_id,tab_id,host_id,captured_at) VALUES ($1,$2,$3,$4) RETURNING id',
+        [input.mutationId, tabId, request.hostIdentity!.id, input.capturedAt],
+      );
+      for (const line of resolvedLines) {
         await client.query(
           `INSERT INTO order_items(tab_id,batch_id,product_id,product_name,unit_price_cents,quantity,source,status,submitted_by_host)
            VALUES ($1,$2,$3,$4,$5,$6,'host','open',$7)`,
-          [tabId, batch.rows[0]!.id, line.productId, JSON.stringify(snapshot.name), snapshot.priceCents, line.quantity, request.hostIdentity!.id],
+          [tabId, batch.rows[0]!.id, line.productId, JSON.stringify(line.name), line.priceCents, line.quantity, request.hostIdentity!.id],
         );
       }
       await audit('order.batch-created', 'tab', tabId, { mutationId: input.mutationId }, { hostId: request.hostIdentity!.id }, client);
@@ -600,8 +644,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const tabId = id(request);
     const input = body(settleTabSchema, request);
     const bill = await transaction(async (client) => {
-      const duplicate = await client.query('SELECT id,number,guest_id AS "guestId" FROM bills WHERE mutation_id=$1', [input.mutationId]);
-      if (duplicate.rows[0]) return duplicate.rows[0];
+      const duplicate = await client.query<{ id: string; number: number; guestId: string; hostId: string; tabId: string }>(
+        'SELECT id,number,guest_id AS "guestId",host_id AS "hostId",tab_id AS "tabId" FROM bills WHERE mutation_id=$1',
+        [input.mutationId],
+      );
+      if (duplicate.rows[0]) {
+        if (duplicate.rows[0].hostId !== request.hostIdentity!.id) throw new HttpError(403, 'HOST_MISMATCH', 'This settlement belongs to another host.');
+        if (duplicate.rows[0].tabId !== tabId) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another tab.');
+        return duplicate.rows[0];
+      }
       const tab = await client.query<{
         guestId: string; guestName: string; roomName: string; venueName: string;
       }>(
@@ -624,7 +675,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         [tabId],
       );
       if (!items.rowCount) throw new HttpError(409, 'EMPTY_TAB', 'There are no open items to bill.');
-      const total = items.rows.reduce((sum, item) => sum + item.unitPriceCents * item.quantity, 0);
+      const exactTotal = items.rows.reduce((sum, item) => sum + BigInt(item.unitPriceCents) * BigInt(item.quantity), 0n);
+      if (exactTotal > BigInt(MAX_MONEY_CENTS)) throw new HttpError(409, 'TAB_TOTAL_LIMIT', 'The open tab exceeds the maximum bill total.');
+      const total = Number(exactTotal);
       const created = await client.query<{ id: string; number: number }>(
         `INSERT INTO bills(tab_id,guest_id,host_id,mutation_id,venue_name,guest_name,room_name,total_cents,payment_method,payment_note)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id,number`,
@@ -672,14 +725,37 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const billId = id(request);
     const input = body(voidSchema, request);
     const voided = await transaction(async (client) => {
-      const result = await client.query<{ tabId: string; guestId: string }>(
-        `UPDATE bills SET voided_at=now(),void_reason=$1,voided_by=$2 WHERE id=$3 AND voided_at IS NULL RETURNING tab_id AS "tabId",guest_id AS "guestId"`,
-        [input.reason, request.hostIdentity!.id, billId],
+      const duplicate = await client.query<{ billId: string; guestId: string; hostId: string }>(
+        `SELECT id AS "billId",guest_id AS "guestId",voided_by AS "hostId" FROM bills WHERE void_mutation_id=$1`,
+        [input.mutationId],
+      );
+      if (duplicate.rows[0]) {
+        if (duplicate.rows[0].billId !== billId) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another bill.');
+        if (duplicate.rows[0].hostId !== request.hostIdentity!.id) throw new HttpError(403, 'HOST_MISMATCH', 'This bill void belongs to another host.');
+        return { guestId: duplicate.rows[0].guestId };
+      }
+      const result = await client.query<{ tabId: string; guestId: string; totalCents: number }>(
+        `UPDATE bills SET voided_at=now(),void_reason=$1,voided_by=$2,void_mutation_id=$3
+          WHERE id=$4 AND voided_at IS NULL
+          RETURNING tab_id AS "tabId",guest_id AS "guestId",total_cents AS "totalCents"`,
+        [input.reason, request.hostIdentity!.id, input.mutationId, billId],
       );
       const bill = result.rows[0];
-      if (!bill) throw new HttpError(409, 'BILL_NOT_ACTIVE', 'The bill has already been voided.');
+      if (!bill) {
+        const replay = await client.query<{ billId: string; guestId: string; hostId: string }>(
+          `SELECT id AS "billId",guest_id AS "guestId",voided_by AS "hostId" FROM bills WHERE void_mutation_id=$1`,
+          [input.mutationId],
+        );
+        if (replay.rows[0]) {
+          if (replay.rows[0].billId !== billId) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another bill.');
+          if (replay.rows[0].hostId !== request.hostIdentity!.id) throw new HttpError(403, 'HOST_MISMATCH', 'This bill void belongs to another host.');
+          return { guestId: replay.rows[0].guestId };
+        }
+        throw new HttpError(409, 'BILL_NOT_ACTIVE', 'The bill has already been voided.');
+      }
       const open = await client.query<{ id: string }>(`SELECT id FROM order_tabs WHERE guest_id=$1 AND status='open' FOR UPDATE`, [bill.guestId]);
       const destination = open.rows[0]?.id ?? bill.tabId;
+      await ensureTabTotalWithinRange(destination, BigInt(bill.totalCents), client);
       if (!open.rows[0]) await client.query(`UPDATE order_tabs SET status='open',closed_at=NULL WHERE id=$1`, [bill.tabId]);
       await client.query(`UPDATE order_items SET tab_id=$1,status='open',bill_id=NULL WHERE bill_id=$2`, [destination, billId]);
       await audit('bill.voided', 'bill', billId, { reason: input.reason, mutationId: input.mutationId }, { hostId: request.hostIdentity!.id }, client);
@@ -739,8 +815,16 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/v1/guest/items', { preHandler: requireGuest }, async (request, reply) => {
     const input = body(z.object({ mutationId: z.string().uuid(), productId: z.string().uuid() }), request);
     const item = await transaction(async (client) => {
-      const duplicate = await client.query('SELECT id,provisional_until AS "provisionalUntil" FROM order_items WHERE guest_mutation_id=$1', [input.mutationId]);
-      if (duplicate.rows[0]) return duplicate.rows[0];
+      const duplicate = await client.query<{ id: string; provisionalUntil: string; sessionId: string; productId: string }>(
+        `SELECT id,provisional_until AS "provisionalUntil",submitted_by_guest_session AS "sessionId",product_id AS "productId"
+           FROM order_items WHERE guest_mutation_id=$1`,
+        [input.mutationId],
+      );
+      if (duplicate.rows[0]) {
+        if (duplicate.rows[0].sessionId !== request.guestIdentity!.sessionId) throw new HttpError(403, 'GUEST_MISMATCH', 'This item belongs to another guest device.');
+        if (duplicate.rows[0].productId !== input.productId) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another product.');
+        return duplicate.rows[0];
+      }
       const product = await client.query<{ name: Record<string, string>; priceCents: number }>(
         `SELECT name,price_cents AS "priceCents" FROM products WHERE id=$1 AND enabled=true AND self_service_only=true AND archived_at IS NULL`,
         [input.productId],
@@ -748,6 +832,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const selected = product.rows[0];
       if (!selected) throw new HttpError(404, 'PRODUCT_NOT_AVAILABLE', 'This self-service product is unavailable.');
       const tabId = await activeTab(request.guestIdentity!.id, client);
+      await ensureTabTotalWithinRange(tabId, BigInt(selected.priceCents), client);
       const result = await client.query(
         `INSERT INTO order_items(tab_id,product_id,product_name,unit_price_cents,quantity,source,status,submitted_by_guest_session,provisional_until,guest_mutation_id)
          VALUES ($1,$2,$3,$4,1,'guest','provisional',$5,now()+interval '10 seconds',$6)

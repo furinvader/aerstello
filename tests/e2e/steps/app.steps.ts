@@ -14,6 +14,19 @@ let crossRoomApprovalStatus = 0;
 let mismatchedHostOrderStatus = 0;
 let disabledCatalogOrderStatus = 0;
 let repeatedVoidStatuses: number[] = [];
+let repeatedBillVoidStatuses: number[] = [];
+let restoredBillItemCount = 0;
+let archivedRoomGuestStatus = 0;
+let invalidTimezoneStatus = 0;
+let venueTimezoneBefore = '';
+let venueTimezoneAfter = '';
+let recoveredDeviceStatus = 0;
+let retriedOrderMutationIds: string[] = [];
+let retriedSettlementMutationIds: string[] = [];
+let retriedOrderItemCount = 0;
+let excessiveOrderStatus = 0;
+let tabTotalBeforeExcess = 0;
+let tabTotalAfterExcess = 0;
 
 Before(async () => {
   execFileSync('npm',['run','db:seed','-w','@sky-bar/api'],{cwd:process.cwd(),env:{...process.env,E2E_RESET:'true'},stdio:'pipe'});
@@ -39,6 +52,11 @@ Then('the host dashboard shows the venue name {string}', async ({ page }, name:s
 Then('the page has no serious accessibility violations', async ({ page }) => { const result=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa']).analyze();expect(result.violations.filter(v=>['serious','critical'].includes(v.impact??''))).toEqual([]); });
 When('the host opens the account screen', async ({ page }) => { await page.goto('/app/account'); });
 Then('the current device is listed', async ({ page }) => { await expect(page.getByText(/Dieses Gerät|Questo dispositivo|This device/)).toBeVisible(); });
+When('the administrator credentials are recovered from the command line', async ({ page }) => {
+  execFileSync('npm',['run','admin:create:dev','-w','@sky-bar/api','--','--email','admin@skybar.test','--password','RecoveredAdmin123!','--name','Mira Host'],{cwd:process.cwd(),env:process.env,stdio:'pipe'});
+  recoveredDeviceStatus=(await page.context().request.get('/api/v1/auth/me')).status();
+});
+Then('the existing host device is signed out',async()=>{expect(recoveredDeviceStatus).toBe(401)});
 
 When('the administrator changes the venue name to {string}', async ({ page }, name:string) => { await page.goto('/app/settings');await page.getByLabel('Name des Betriebs').fill(name);await page.getByRole('button',{name:'Speichern'}).click(); });
 Then('the navigation shows the venue name {string}', async ({ page }, name:string) => { await expect(page.locator('.brand strong')).toHaveText(name); });
@@ -81,6 +99,8 @@ When('the administrator creates the self-service product {string} priced {string
 Then('product {string} is listed as self-service',async({page},name:string)=>{const row=page.locator('.product-admin-list>button').filter({hasText:name});await expect(row).toContainText('Selbstbedienung')});
 When('the administrator tries to create product {string} priced {string}',async({page},name:string,price:string)=>{await page.goto('/app/products');await page.getByRole('button',{name:/Hinzufügen/}).first().click();await page.getByLabel('Name · DE').fill(name);await page.getByLabel(/Preis · EUR|Prezzo · EUR|Price · EUR/).fill(price);await page.locator('.modal').getByRole('button',{name:'Speichern'}).click()});
 Then('the product price is rejected before submission',async({page})=>{const price=page.getByLabel(/Preis · EUR|Prezzo · EUR|Price · EUR/);await expect(price).toBeVisible();expect(await price.evaluate((input:HTMLInputElement)=>input.validity.valid)).toBe(false)});
+When('the host attempts to create a guest in an archived room',async({page})=>{const request=page.context().request;const room=await (await request.post('/api/v1/rooms',{headers:csrfHeaders,data:{name:'Archived room'}})).json() as {id:string};expect((await request.delete(`/api/v1/rooms/${room.id}`,{headers:csrfHeaders})).status()).toBe(204);archivedRoomGuestStatus=(await request.post('/api/v1/guests',{headers:csrfHeaders,data:{name:'Late guest',roomId:room.id,language:'de'}})).status()});
+Then('the archived room guest is rejected',async()=>{expect(archivedRoomGuestStatus).toBe(404)});
 
 When('the PWA manifest is requested',async({request})=>{const response=await request.get('/manifest.webmanifest');expect(response.ok()).toBeTruthy();manifestPayload=await response.json()});
 Then('it names the software {string} and provides application icons',async({},name:string)=>{expect(manifestPayload?.name).toBe(name);expect(manifestPayload?.icons?.length).toBeGreaterThanOrEqual(2)});
@@ -150,6 +170,44 @@ When('the host submits a product disabled in the captured catalog',async({page})
 });
 Then('the captured catalog order is rejected',async()=>{expect(disabledCatalogOrderStatus).toBe(409)});
 
+When('the host retries an order after its first response is lost',async({page})=>{
+  await chooseOrder(page,'Helles','Anna Berger','101');
+  await page.evaluate(() => {
+    const originalFetch=window.fetch.bind(window);let loseResponse=true;const ids:string[]=[];
+    Object.assign(window,{__skyBarOrderRetryIds:ids});
+    window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)};
+  });
+  await page.getByRole('button',{name:/Bestellung buchen/}).click();
+  await expect(page.locator('.notice--error')).toBeVisible();
+  await page.getByRole('button',{name:/Bestellung buchen/}).click();
+  await expect(page.getByText(/Bestellung hinzugefügt|Order added/)).toBeVisible();
+  retriedOrderMutationIds=await page.evaluate(()=>(window as unknown as {__skyBarOrderRetryIds:string[]}).__skyBarOrderRetryIds);
+  const {request,guests}=await operationalData(page);const guest=guests.data.find((item)=>item.name==='Anna Berger')!;retriedOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
+});
+Then('both order attempts use the same mutation identifier',async()=>{expect(retriedOrderMutationIds).toHaveLength(2);expect(new Set(retriedOrderMutationIds).size).toBe(1)});
+Then('the guest tab contains the order only once',async()=>{expect(retriedOrderItemCount).toBe(1)});
+
+When('the host retries settlement after its first response is lost',async({page})=>{
+  await chooseOrder(page,'Helles','Anna Berger','101');await page.getByRole('button',{name:/Bestellung buchen/}).click();await expect(page.locator('.tab-pill')).toContainText('1 Artikel');
+  await page.evaluate(() => {
+    const originalFetch=window.fetch.bind(window);let loseResponse=true;const ids:string[]=[];
+    Object.assign(window,{__skyBarSettlementRetryIds:ids});
+    window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(/\/api\/v1\/tabs\/[^/]+\/settle$/.test(url)&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)};
+  });
+  await page.getByRole('button',{name:/Abrechnen/}).click();await page.locator('.modal').getByRole('button',{name:'Abrechnen'}).click();await expect(page.locator('.modal .notice--error')).toBeVisible();await page.locator('.modal').getByRole('button',{name:'Abrechnen'}).click();await expect(page).toHaveURL(/\/app\/bills\//);
+  retriedSettlementMutationIds=await page.evaluate(()=>(window as unknown as {__skyBarSettlementRetryIds:string[]}).__skyBarSettlementRetryIds);
+});
+Then('both settlement attempts use the same mutation identifier',async()=>{expect(retriedSettlementMutationIds).toHaveLength(2);expect(new Set(retriedSettlementMutationIds).size).toBe(1)});
+Then('the host reaches the single resulting bill',async({page})=>{await expect(page.locator('.bill-sheet')).toBeVisible();const bills=await (await page.context().request.get('/api/v1/bills')).json() as {data:unknown[]};expect(bills.data).toHaveLength(1)});
+
+When('the host submits orders beyond the maximum tab total',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const categoryId=products.data[0]!.categoryId;
+  const created=await request.post('/api/v1/products',{headers:csrfHeaders,data:{name:{de:'Limitprodukt',it:'',en:''},priceCents:10_000_000,categoryId,enabled:true,selfServiceOnly:false}});expect(created.status()).toBe(201);const product=await created.json() as {id:string};const catalog=await (await request.get('/api/v1/products')).json() as {catalogVersion:number};
+  const submit=async(quantity:number)=>request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:catalog.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity}]}});
+  expect((await submit(99)).status()).toBe(201);expect((await submit(99)).status()).toBe(201);tabTotalBeforeExcess=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {totalCents:number}).totalCents;excessiveOrderStatus=(await submit(17)).status();tabTotalAfterExcess=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {totalCents:number}).totalCents;
+});
+Then('the excessive order is rejected without changing the tab',async()=>{expect(excessiveOrderStatus).toBe(409);expect(tabTotalBeforeExcess).toBe(1_980_000_000);expect(tabTotalAfterExcess).toBe(tabTotalBeforeExcess)});
+
 When('the same item void mutation is submitted twice',async({page})=>{
   const {request,me,guests,products}=await operationalData(page);
   const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const product=products.data.find((item)=>item.name.de==='Helles')!;
@@ -161,3 +219,15 @@ When('the same item void mutation is submitted twice',async({page})=>{
   repeatedVoidStatuses.push((await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:{mutationId,reason:'E2E correction'}})).status());
 });
 Then('both item void responses succeed',async()=>{expect(repeatedVoidStatuses).toEqual([200,200])});
+
+When('the same bill void mutation is submitted twice',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const product=products.data.find((item)=>item.name.de==='Helles')!;
+  const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};
+  const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),paymentMethod:'cash'}})).json() as {id:string};const mutationId=crypto.randomUUID();repeatedBillVoidStatuses=[];
+  repeatedBillVoidStatuses.push((await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId,reason:'E2E correction'}})).status());repeatedBillVoidStatuses.push((await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId,reason:'E2E correction'}})).status());restoredBillItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
+});
+Then('both bill void responses succeed',async()=>{expect(repeatedBillVoidStatuses).toEqual([200,200])});
+Then('the billed items are restored only once',async()=>{expect(restoredBillItemCount).toBe(1)});
+
+When('the administrator submits an invalid venue time zone',async({page})=>{const request=page.context().request;const before=await (await request.get('/api/v1/venue')).json() as {name:string;defaultLanguage:string;timezone:string};venueTimezoneBefore=before.timezone;invalidTimezoneStatus=(await request.put('/api/v1/venue',{headers:csrfHeaders,data:{name:before.name,language:before.defaultLanguage,timezone:'Europe/Definitely-Not-A-Zone'}})).status();venueTimezoneAfter=((await (await request.get('/api/v1/venue')).json()) as {timezone:string}).timezone});
+Then('the venue time zone is rejected without changing the settings',async()=>{expect(invalidTimezoneStatus).toBe(400);expect(venueTimezoneAfter).toBe(venueTimezoneBefore)});

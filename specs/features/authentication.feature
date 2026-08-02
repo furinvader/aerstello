@@ -11,3 +11,8 @@ Feature: Secure host accounts and devices
     Given an authenticated administrator
     When the host opens the account screen
     Then the current device is listed
+
+  Scenario: Administrator credential recovery revokes existing devices
+    Given an authenticated administrator
+    When the administrator credentials are recovered from the command line
+    Then the existing host device is signed out

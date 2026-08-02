@@ -1,5 +1,16 @@
 import { z } from 'zod';
 
+export const MAX_MONEY_CENTS = 2_147_483_647;
+
+export function isValidTimeZone(value: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: value }).format();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export const languageSchema = z.enum(['de', 'it', 'en']);
 export type Language = z.infer<typeof languageSchema>;
 
@@ -16,7 +27,7 @@ export type LocalizedText = z.infer<typeof localizedTextSchema>;
 export const venueSettingsSchema = z.object({
   name: z.string().trim().min(1).max(120),
   language: languageSchema.default('de'),
-  timezone: z.string().trim().min(1).default('Europe/Berlin'),
+  timezone: z.string().trim().min(1).refine(isValidTimeZone, 'Invalid IANA time zone.').default('Europe/Berlin'),
 });
 
 export const roomInputSchema = z.object({

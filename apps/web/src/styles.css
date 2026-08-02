@@ -78,6 +78,12 @@ h3 { font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; color: 
 .sync-state { display: flex; align-items: center; gap: .5rem; color: var(--muted); font-size: .75rem; }
 .sync-state>span { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); }
 .sync-state.offline>span { background: var(--amber); box-shadow: none; }
+.sync-conflict-banner { width: 100%; margin-bottom: 1rem; padding: .8rem 1rem; border: 1px solid rgba(255,198,92,.35); border-radius: 12px; color: var(--amber); background: rgba(255,198,92,.09); cursor: pointer; text-align: left; font-weight: 750; }
+.conflict-list { display: flex; flex-direction: column; }
+.conflict-list>div { min-height: 70px; padding: .65rem 0; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: .8rem; }
+.conflict-list>div:last-child { border-bottom: 0; }
+.conflict-list .grow { display: flex; flex-direction: column; gap: .25rem; }
+.conflict-list .grow span { color: var(--muted); font-size: .8rem; }
 
 .metric-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: .8rem; }
 .metric { position: relative; min-height: 145px; display: flex; flex-direction: column; justify-content: flex-end; overflow: hidden; }

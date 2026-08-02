@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Redirect } from 'wouter';
 import { Clock3, LogOut, Plus, ReceiptText } from 'lucide-react';
 import { formatMoney, localized, type LocalizedText } from '@sky-bar/shared';
-import { api, json } from './api';
+import { api, apiErrorMessage, json } from './api';
 import { Button, Card, Empty, Notice } from './components';
 import { useI18n } from './i18n';
 import type { Product, Tab } from './types';
@@ -16,6 +16,7 @@ export function GuestPage() {
   const catalog = useQuery<{ data: (Product & { categoryName: LocalizedText })[] }>({ queryKey: ['guest-catalog'], queryFn: () => api('/guest/catalog'), enabled: me.isSuccess });
   const [undo, setUndo] = useState<{ id: string; until: number } | null>(null);
   const [error, setError] = useState('');
+  const pendingAdd = useRef<{ productId: string; mutationId: string } | null>(null);
   useEffect(() => {
     if (!me.isSuccess) return;
     const events = new EventSource('/api/v1/events');
@@ -32,7 +33,7 @@ export function GuestPage() {
     }, Math.max(0, undo.until - Date.now()));
     return () => window.clearTimeout(timer);
   }, [undo]);
-  const add = useMutation({ mutationFn: (productId: string) => api<{ id: string; provisionalUntil: string }>('/guest/items', { method: 'POST', body: json({ mutationId: crypto.randomUUID(), productId }) }), onSuccess: (item) => { setUndo({ id: item.id, until: new Date(item.provisionalUntil).getTime() }); void client.invalidateQueries({ queryKey: ['guest-tab'] }); }, onError: (caught) => setError(caught.message) });
+  const add = useMutation({ mutationFn: (productId: string) => { if (pendingAdd.current?.productId !== productId) pendingAdd.current = { productId, mutationId: crypto.randomUUID() }; return api<{ id: string; provisionalUntil: string }>('/guest/items', { method: 'POST', body: json({ mutationId: pendingAdd.current.mutationId, productId }) }); }, onSuccess: (item) => { pendingAdd.current = null; setError(''); setUndo({ id: item.id, until: new Date(item.provisionalUntil).getTime() }); void client.invalidateQueries({ queryKey: ['guest-tab'] }); }, onError: (caught) => setError(apiErrorMessage(caught, language, t('requestFailed'))) });
   const undoItem = async () => { if (!undo) return; await api(`/guest/items/${undo.id}/undo`, { method: 'POST', body: json({}) }); setUndo(null); await client.invalidateQueries({ queryKey: ['guest-tab'] }); };
   if (me.isLoading) return <div className="splash">Sky Bar</div>;
   if (me.isError) return <Redirect to="/guest/request" />;
