@@ -194,6 +194,7 @@ h3 { font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; color: 
   .tab-card { flex-wrap: wrap; }.tab-card .button{width:100%}.bills-list .payment-tag{display:none}.receipt-number{min-width:55px}
   .request-card { align-items: flex-start; flex-wrap: wrap; }.request-actions{width:100%}.request-actions .button{flex:1}
   .catalog-admin { grid-template-columns: 1fr!important; }.product-admin-list .status-dot{display:none}.product-admin-list>button>strong{font-size:.8rem}
+  .section-heading+.card .table-row{flex-wrap:wrap}.section-heading+.card .table-row .grow{min-width:calc(100% - 52px)}.section-heading+.card .table-row .button{flex:1}
   .bill-meta { grid-template-columns:1fr }.choice-grid{grid-template-columns:1fr}.choice-grid button{min-height:50px;flex-direction:row}
 }
 

@@ -25,6 +25,7 @@ Feature: Secure host accounts and devices
     Then both host creation attempts use the same mutation identifier
     And the uncertain host fields stay locked for retry
     And only one recoverable host account exists
+    And host creation retains no retired password verifier
 
   Scenario: Host creation refreshes another open account directory
     Given an authenticated administrator

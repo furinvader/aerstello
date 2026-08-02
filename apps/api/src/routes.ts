@@ -224,16 +224,17 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }), request);
     const grant = await transaction(async (client) => {
       const result = await client.query<{
-        status: string; guestId: string | null; expiresAt: Date | null; statusTokenConsumedAt: Date | null; grantExchangeId: string | null;
+        status: string; guestId: string | null; expiresAt: Date | null; expired: boolean; statusTokenConsumedAt: Date | null; grantExchangeId: string | null;
       }>(
         `SELECT status,guest_id AS "guestId",expires_at AS "expiresAt",
+                COALESCE(expires_at<=clock_timestamp(),false) AS expired,
                 status_token_consumed_at AS "statusTokenConsumedAt",grant_exchange_id AS "grantExchangeId"
            FROM access_requests WHERE id=$1 AND status_token_hash=$2 FOR UPDATE`,
         [requestId, hashToken(token)],
       );
       const access = result.rows[0];
       if (!access) throw new HttpError(404, 'REQUEST_NOT_FOUND', 'Request not found.');
-      if (access.status === 'approved' && access.expiresAt && access.expiresAt.getTime() <= Date.now()) {
+      if (access.status === 'approved' && access.expired) {
         return { access: { ...access, status: 'expired' }, guestToken:undefined };
       }
       if (access.status === 'approved' && access.guestId) {
@@ -398,30 +399,32 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       role: z.enum(['admin','staff']),
       language: languageSchema.default('de'),
     }), request);
+    const commandHash=hashToken(`host-create-command:${JSON.stringify([
+      input.email,input.name,input.password,input.role,input.language,
+    ])}`);
     const result=await transaction(async(client)=>{
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[input.mutationId]);
       const replay=await client.query<{
         id:string;email:string;name:string;role:string;language:string;active:boolean;version:number;hostId:string;
-        commandEmail:string;commandName:string;commandPasswordHash:string;commandRole:string;commandLanguage:string;
+        commandEmail:string;commandName:string;commandHash:string|null;commandRole:string;commandLanguage:string;
       }>(
         `SELECT id,email,name,role,language,active,version,created_by_host AS "hostId",create_email AS "commandEmail",
-                create_name AS "commandName",create_password_hash AS "commandPasswordHash",create_role AS "commandRole",
+                create_name AS "commandName",create_command_hash AS "commandHash",create_role AS "commandRole",
                 create_language AS "commandLanguage" FROM hosts WHERE create_mutation_id=$1`,[input.mutationId],
       );
       if(replay.rows[0]){
         const prior=replay.rows[0];
         if(prior.hostId!==request.hostIdentity!.id) throw new HttpError(403,'HOST_MISMATCH','This account creation belongs to another host.');
-        const samePassword=await verifyPassword(prior.commandPasswordHash,input.password);
-        if(prior.commandEmail!==input.email||prior.commandName!==input.name||!samePassword||prior.commandRole!==input.role||prior.commandLanguage!==input.language){
+        if(prior.commandEmail!==input.email||prior.commandName!==input.name||prior.commandHash!==commandHash||prior.commandRole!==input.role||prior.commandLanguage!==input.language){
           throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to a different account command.');
         }
         return {host:{id:prior.id,email:prior.email,name:prior.name,role:prior.role,language:prior.language,active:prior.active,version:prior.version},event:undefined};
       }
       const passwordHash=await hashPassword(input.password);
       const result=await client.query(
-        `INSERT INTO hosts(email,name,password_hash,role,language,create_mutation_id,create_email,create_name,create_password_hash,create_role,create_language,created_by_host)
+        `INSERT INTO hosts(email,name,password_hash,role,language,create_mutation_id,create_email,create_name,create_command_hash,create_role,create_language,created_by_host)
          VALUES (lower($1),$2,$3,$4,$5,$6,$1,$2,$7,$4,$5,$8) RETURNING id,email,name,role,language,active,version`,
-        [input.email,input.name,passwordHash,input.role,input.language,input.mutationId,passwordHash,request.hostIdentity!.id],
+        [input.email,input.name,passwordHash,input.role,input.language,input.mutationId,commandHash,request.hostIdentity!.id],
       );
       await audit('host.created','host',result.rows[0].id,{email:input.email,role:input.role},{hostId:request.hostIdentity!.id},client);
       return {host:result.rows[0],event:await storeEvent('host-auth.changed',{hostId:result.rows[0].id},client)};
@@ -1122,8 +1125,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         throw new HttpError(409, 'TAB_CHANGED', 'The tab changed after settlement was opened. Review the current items and total.');
       }
       const created = await client.query<{ id: string; number: string }>(
-        `INSERT INTO bills(tab_id,guest_id,host_id,mutation_id,venue_name,venue_timezone,guest_name,room_name,host_name,total_cents,payment_method,payment_note)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id,number::text AS number`,
+        `INSERT INTO bills(tab_id,guest_id,host_id,mutation_id,venue_name,venue_timezone,guest_name,room_name,host_name,total_cents,payment_method,payment_note,settled_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,clock_timestamp()) RETURNING id,number::text AS number`,
         [tabId, current.guestId, request.hostIdentity!.id, input.mutationId, current.venueName, current.venueTimezone, current.guestName, current.roomName, current.hostName, total, input.paymentMethod, input.note ?? null],
       );
       const newBill = created.rows[0]!;
@@ -1134,7 +1137,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         );
       }
       await client.query(`UPDATE order_items SET status='billed',bill_id=$1 WHERE tab_id=$2 AND status='open'`, [newBill.id, tabId]);
-      await client.query(`UPDATE order_tabs SET status='billed',closed_at=now() WHERE id=$1`, [tabId]);
+      await client.query(`UPDATE order_tabs SET status='billed',closed_at=clock_timestamp() WHERE id=$1`, [tabId]);
       await audit('bill.settled', 'bill', newBill.id, { totalCents: total, paymentMethod: input.paymentMethod }, { hostId: request.hostIdentity!.id }, client);
       return { ...newBill, guestId: current.guestId, events:[
         await storeEvent('orders.changed',{guestId:current.guestId},client),

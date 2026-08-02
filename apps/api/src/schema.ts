@@ -30,7 +30,7 @@ export const hosts = pgTable('hosts', {
   createMutationId: uuid('create_mutation_id'),
   createEmail: text('create_email'),
   createName: text('create_name'),
-  createPasswordHash: text('create_password_hash'),
+  createCommandHash: text('create_command_hash'),
   createRole: role('create_role'),
   createLanguage: language('create_language'),
   createdByHost: uuid('created_by_host').references(():AnyPgColumn => hosts.id),

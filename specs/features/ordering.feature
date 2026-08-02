@@ -116,6 +116,11 @@ Feature: Host order entry and billing
     And settlement details were locked while the result was uncertain
     And the host reaches the single resulting bill
 
+  Scenario: Settlement timestamps begin after lock waits
+    Given an authenticated administrator
+    When settlement waits for a locked tab
+    Then the bill timestamp follows the lock release
+
   Scenario: A host cart respects order batch limits
     Given an authenticated administrator
     When the host adds the maximum quantity of "Helles" for "Anna Berger" in room "101"

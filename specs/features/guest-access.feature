@@ -74,6 +74,11 @@ Feature: Guest device access and self-service
     When an approved guest request expires before its grant exchange
     Then the expired exchange is not consumed or granted
 
+  Scenario: Grant expiry uses the database clock across replicas
+    Given an authenticated administrator
+    When a clock-skewed API replica exchanges a database-valid grant
+    Then the database-valid guest access is granted
+
   Scenario: A host revokes one guest device
     Given an approved guest device for "Luca Rossi" in room "102"
     When the host revokes Luca's device from the guest directory
@@ -113,6 +118,11 @@ Feature: Guest device access and self-service
     When the guest logs out and the committed response is lost
     Then the guest reaches access request without cached data
     And replaying guest logout for the revoked session succeeds
+
+  Scenario: A guest tab outage never appears as a zero balance
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When the guest tab service is unavailable
+    Then the guest sees an error without a zero balance or empty order
 
   Scenario: A guest addition is bound to its displayed price
     Given an approved guest device for "Luca Rossi" in room "102"
