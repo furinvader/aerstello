@@ -8,6 +8,7 @@ import {
   accessApprovalSchema,
   accessRequestSchema,
   categoryCreateSchema,
+  guestArchiveSchema,
   guestCreateSchema,
   guestUpdateSchema,
   languageSchema,
@@ -284,8 +285,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return { host: { id: current.id, email: current.email, name: current.name, role: current.role, language: current.language } };
   });
 
-  app.post('/api/v1/auth/logout', { preHandler: requireHost }, async (request, reply) => {
-    await pool.query('UPDATE host_sessions SET revoked_at=now() WHERE id=$1', [request.hostIdentity!.sessionId]);
+  app.post('/api/v1/auth/logout', async (request, reply) => {
+    const identity = await authenticateHost(request);
+    if (identity) await pool.query('UPDATE host_sessions SET revoked_at=now() WHERE id=$1 AND revoked_at IS NULL', [identity.sessionId]);
     clearHostCookie(reply);
     return reply.code(204).send();
   });
@@ -395,7 +397,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       role: z.enum(['admin','staff']),
       language: languageSchema.default('de'),
     }), request);
-    const host=await transaction(async(client)=>{
+    const result=await transaction(async(client)=>{
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[input.mutationId]);
       const replay=await client.query<{
         id:string;email:string;name:string;role:string;language:string;active:boolean;version:number;hostId:string;
@@ -412,7 +414,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         if(prior.commandEmail!==input.email||prior.commandName!==input.name||!samePassword||prior.commandRole!==input.role||prior.commandLanguage!==input.language){
           throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to a different account command.');
         }
-        return {id:prior.id,email:prior.email,name:prior.name,role:prior.role,language:prior.language,active:prior.active,version:prior.version};
+        return {host:{id:prior.id,email:prior.email,name:prior.name,role:prior.role,language:prior.language,active:prior.active,version:prior.version},event:undefined};
       }
       const passwordHash=await hashPassword(input.password);
       const result=await client.query(
@@ -421,9 +423,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         [input.email,input.name,passwordHash,input.role,input.language,input.mutationId,passwordHash,request.hostIdentity!.id],
       );
       await audit('host.created','host',result.rows[0].id,{email:input.email,role:input.role},{hostId:request.hostIdentity!.id},client);
-      return result.rows[0];
+      return {host:result.rows[0],event:await storeEvent('host-auth.changed',{hostId:result.rows[0].id},client)};
     });
-    return reply.code(201).send(host);
+    if(result.event){try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed host creation event')}}
+    return reply.code(201).send(result.host);
   });
 
   app.patch('/api/v1/hosts/:id', { preHandler: requireAdmin }, async (request) => {
@@ -638,17 +641,34 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.delete('/api/v1/guests/:id', { preHandler: requireHost }, async (request, reply) => {
+    const input = body(guestArchiveSchema, request);
     const guestId = id(request);
     const result=await transaction(async (client) => {
-      const guest = await client.query('SELECT id FROM guests WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [guestId]);
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[input.mutationId]);
+      const replay=await client.query<{id:string;hostId:string;expectedVersion:number}>(
+        `SELECT id,archived_by_host AS "hostId",archive_expected_version AS "expectedVersion"
+           FROM guests WHERE archive_mutation_id=$1`,[input.mutationId],
+      );
+      if(replay.rows[0]){
+        const prior=replay.rows[0];
+        if(prior.hostId!==request.hostIdentity!.id)throw new HttpError(403,'HOST_MISMATCH','This guest archival belongs to another host.');
+        if(prior.id!==guestId||prior.expectedVersion!==input.expectedVersion)throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to a different guest archival command.');
+        return {event:undefined};
+      }
+      const guest = await client.query<{version:number}>('SELECT version FROM guests WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [guestId]);
       if (!guest.rowCount) throw new HttpError(404, 'GUEST_NOT_FOUND', 'Guest not found.');
+      if(guest.rows[0]!.version!==input.expectedVersion)throw new HttpError(409,'GUEST_CHANGED','The guest was changed by another host.');
       const open = await client.query(`SELECT 1 FROM order_tabs t JOIN order_items i ON i.tab_id=t.id WHERE t.guest_id=$1 AND i.status IN ('open','provisional') LIMIT 1`, [guestId]);
       if (open.rowCount) throw new HttpError(409, 'GUEST_HAS_ORDERS', 'Settle or void open orders first.');
-      await client.query('UPDATE guests SET archived_at=now(),version=version+1 WHERE id=$1', [guestId]);
+      await client.query(
+        `UPDATE guests SET archived_at=now(),archive_mutation_id=$2,archive_expected_version=$3,
+                archived_by_host=$4,version=version+1 WHERE id=$1`,
+        [guestId,input.mutationId,input.expectedVersion,request.hostIdentity!.id],
+      );
       await client.query('UPDATE guest_sessions SET revoked_at=now() WHERE guest_id=$1 AND revoked_at IS NULL', [guestId]);
       return {event:await storeEvent('guests.changed',{},client)};
     });
-    try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed guest archival event')}
+    if(result.event){try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed guest archival event')}}
     return reply.code(204).send();
   });
 
@@ -1266,8 +1286,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get('/api/v1/guest/me', { preHandler: requireGuest }, async (request) => ({ guest: request.guestIdentity }));
-  app.post('/api/v1/guest/logout', { preHandler: requireGuest }, async (request, reply) => {
-    await pool.query('UPDATE guest_sessions SET revoked_at=now() WHERE id=$1', [request.guestIdentity!.sessionId]);
+  app.post('/api/v1/guest/logout', async (request, reply) => {
+    const identity=await authenticateGuest(request);
+    if(identity)await pool.query('UPDATE guest_sessions SET revoked_at=now() WHERE id=$1 AND revoked_at IS NULL',[identity.sessionId]);
     clearGuestCookie(reply);
     return reply.code(204).send();
   });

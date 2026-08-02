@@ -24,6 +24,7 @@ services:
       PORT: 3001
       SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET}
       TRUST_PROXY: ${TRUST_PROXY:-false}
+      LEGACY_BILL_TIMEZONE: ${LEGACY_BILL_TIMEZONE:-}
     ports:
       - "3001:3001"
     restart: unless-stopped

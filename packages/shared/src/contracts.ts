@@ -59,6 +59,11 @@ export const guestUpdateSchema = guestInputSchema.extend({
   expectedVersion: z.number().int().positive(),
 });
 
+export const guestArchiveSchema = z.object({
+  mutationId: z.string().uuid(),
+  expectedVersion: z.number().int().positive(),
+});
+
 export const categoryInputSchema = z.object({
   name: localizedTextSchema,
 });

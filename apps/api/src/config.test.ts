@@ -28,4 +28,9 @@ describe('runtime configuration', () => {
       SESSION_SECRET: 'a-unique-production-session-secret-value',
     }).SESSION_SECRET).toBe('a-unique-production-session-secret-value');
   });
+
+  it('treats the empty Compose legacy timezone default as unset', () => {
+    expect(parseConfig({ LEGACY_BILL_TIMEZONE: '' }).LEGACY_BILL_TIMEZONE).toBeUndefined();
+    expect(parseConfig({ LEGACY_BILL_TIMEZONE: 'Europe/Rome' }).LEGACY_BILL_TIMEZONE).toBe('Europe/Rome');
+  });
 });

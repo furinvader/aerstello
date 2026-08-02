@@ -20,16 +20,16 @@ export function Field({ label, children, hint }: { label: string; children: Reac
   return <label className="field"><span>{label}</span>{children}{hint && <small>{hint}</small>}</label>;
 }
 
-export function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
+export function Modal({ title, children, onClose, closeDisabled = false }: { title: string; children: ReactNode; onClose: () => void; closeDisabled?: boolean }) {
   const { t } = useI18n();
   useEffect(() => {
-    const close = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
+    const close = (event: KeyboardEvent) => { if (event.key === 'Escape' && !closeDisabled) onClose(); };
     window.addEventListener('keydown', close);
     return () => window.removeEventListener('keydown', close);
-  }, [onClose]);
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
+  }, [closeDisabled, onClose]);
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target && !closeDisabled) onClose(); }}>
     <section className="modal" role="dialog" aria-modal="true" aria-label={title}>
-      <header><h2>{title}</h2><button className="icon-button" onClick={onClose} aria-label={t('close')}><X /></button></header>
+      <header><h2>{title}</h2><button className="icon-button" onClick={onClose} aria-label={t('close')} disabled={closeDisabled}><X /></button></header>
       {children}
     </section>
   </div>;

@@ -15,7 +15,7 @@ const configSchema = z.object({
   LOG_LEVEL: z.string().default('info'),
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),
   ACCESS_STATUS_IP_LIMIT_MAX: z.coerce.number().int().positive().default(3000),
-  LEGACY_BILL_TIMEZONE: z.string().trim().min(1).optional(),
+  LEGACY_BILL_TIMEZONE: z.preprocess((value) => value === '' ? undefined : value, z.string().trim().min(1).optional()),
 }).superRefine((value, context) => {
   if (value.NODE_ENV === 'production' && insecureProductionSessionSecrets.has(value.SESSION_SECRET)) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ['SESSION_SECRET'], message: 'SESSION_SECRET must be explicitly configured in production.' });

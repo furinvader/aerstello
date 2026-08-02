@@ -20,6 +20,15 @@ describe('shared interface controls', () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it('keeps a modal open while an uncertain command is locked', () => {
+    const close = vi.fn();
+    const rendered=render(<I18nProvider><Modal title="Retry command" onClose={close} closeDisabled>Content</Modal></I18nProvider>);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.mouseDown(rendered.container.querySelector('.modal-backdrop')!);
+    fireEvent.click(rendered.container.querySelector('.icon-button')!);
+    expect(close).not.toHaveBeenCalled();
+  });
+
   it('freezes the submitted reason while a retry outcome is uncertain', async () => {
     const confirm = vi.fn().mockRejectedValue(new TypeError('Response lost'));
     render(<I18nProvider><ConfirmForm label="Reason" placeholder="Correction" onConfirm={confirm} onCancel={vi.fn()} /></I18nProvider>);

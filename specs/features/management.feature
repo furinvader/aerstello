@@ -54,6 +54,11 @@ Feature: Venue operations configuration
     And only one recoverable guest exists
     And changing the replayed guest creation is rejected
 
+  Scenario: An uncertain guest creation cannot be dismissed
+    Given an authenticated administrator
+    When the host tries to close a guest creation whose response was lost
+    Then the uncertain guest creation remains open for retry
+
   Scenario: A guest creation survives a committed HTTP timeout
     Given an authenticated administrator
     When the host retries guest creation after a committed HTTP timeout
@@ -69,6 +74,19 @@ Feature: Venue operations configuration
     Given an authenticated administrator
     When a guest receives an order while their archive confirmation is open
     Then the archive confirmation explains that the order must be settled
+
+  Scenario: An uncertain guest archival is recovered idempotently
+    Given an authenticated administrator
+    When the host retries guest archival after its response is lost
+    Then both guest archival attempts use the same mutation identifier
+    And the uncertain guest archival cannot be closed
+    And the guest is archived only once
+
+  Scenario: A stale guest archival cannot remove a newer edit
+    Given an authenticated administrator
+    When another host edits a guest before a stale archival arrives
+    Then the stale guest archival is rejected
+    And the guest's newer edit remains configured
 
   Scenario: An administrator creates a localized self-service product
     Given an authenticated administrator

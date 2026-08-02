@@ -73,11 +73,15 @@ export const guests = pgTable('guests', {
   createLanguage: language('create_language'),
   createdByHost: uuid('created_by_host').references(() => hosts.id),
   archivedAt: timestamp('archived_at', { withTimezone: true }),
+  archiveMutationId: uuid('archive_mutation_id'),
+  archiveExpectedVersion: integer('archive_expected_version'),
+  archivedByHost: uuid('archived_by_host').references(() => hosts.id),
   version: integer('version').notNull().default(1),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
   index('guests_room_idx').on(t.roomId),
   uniqueIndex('guests_create_mutation_uq').on(t.createMutationId).where(sql`${t.createMutationId} IS NOT NULL`),
+  uniqueIndex('guests_archive_mutation_uq').on(t.archiveMutationId).where(sql`${t.archiveMutationId} IS NOT NULL`),
 ]);
 
 export const categories = pgTable('categories', {

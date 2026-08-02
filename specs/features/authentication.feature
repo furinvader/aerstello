@@ -26,6 +26,11 @@ Feature: Secure host accounts and devices
     And the uncertain host fields stay locked for retry
     And only one recoverable host account exists
 
+  Scenario: Host creation refreshes another open account directory
+    Given an authenticated administrator
+    When another device creates a host while the account directory is open
+    Then the new host appears after the committed authorization event
+
   Scenario: Device timestamps follow the selected host language
     Given an authenticated administrator
     When the host selects Italian on an English-locale device
@@ -46,6 +51,12 @@ Feature: Secure host accounts and devices
     Given an authenticated administrator
     When the host revokes the current device from the account screen
     Then the host is redirected to login without cached venue data
+
+  Scenario: A lost logout response still clears authenticated UI
+    Given an authenticated administrator
+    When the host logs out and the committed response is lost
+    Then the host still reaches login without cached venue data
+    And replaying logout for the revoked session succeeds
 
   Scenario: Staff do not receive room-management controls
     Given an authenticated staff host
