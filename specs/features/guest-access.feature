@@ -14,6 +14,16 @@ Feature: Guest device access and self-service
     Then retrying the same grant exchange restores guest access
     And a different grant exchange receives no guest access
 
+  Scenario: An expired approval cannot be exchanged for guest access
+    Given an authenticated administrator
+    When an approved guest request expires before its grant exchange
+    Then the expired exchange is not consumed or granted
+
+  Scenario: A host revokes one guest device
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When the host revokes Luca's device from the guest directory
+    Then Luca's revoked device loses guest access
+
   Scenario: A guest can undo a self-service item for ten seconds
     Given an approved guest device for "Luca Rossi" in room "102"
     When the guest adds "Mineralwasser" from self-service

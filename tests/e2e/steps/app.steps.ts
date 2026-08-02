@@ -37,6 +37,12 @@ let recoveredGrantStatus = 0;
 let differentGrantStatus = 0;
 let billArchiveRaceStatuses: [number, number][] = [];
 let freshGuestPage: import('@playwright/test').Page | undefined;
+let expiredGrantResult: { status: string; granted: boolean } | undefined;
+let expiredGrantGuestStatus = 0;
+let guestRevokedStatus = 0;
+let approvalMoveRaceStatuses: [number, number][] = [];
+let concurrentOrderStatuses: number[] = [];
+let concurrentOrderItemCount = 0;
 
 Before(async () => {
   execFileSync('npm',['run','db:seed','-w','@sky-bar/api'],{cwd:process.cwd(),env:{...process.env,E2E_RESET:'true'},stdio:'pipe'});
@@ -81,6 +87,16 @@ Given('an authenticated staff host', async ({ page }) => {
 });
 Then('room management is absent from the navigation', async ({ page }) => { await expect(page.getByRole('link',{name:/^Zimmer$|^Camere$|^Rooms$/})).toHaveCount(0); });
 Then('opening the room-management URL shows no mutation controls', async ({ page }) => { await page.goto('/app/rooms');await expect(page.locator('.notice--error')).toBeVisible();await expect(page.locator('.inline-form,.sortable-list')).toHaveCount(0); });
+Then('opening the product-management URL shows no mutation controls', async ({ page }) => { await page.goto('/app/products');await expect(page.locator('.notice--error')).toBeVisible();await expect(page.locator('.inline-form,.product-admin-list')).toHaveCount(0); });
+When('the current host session is revoked from another administrator',async({page,browser})=>{
+  const request=page.context().request;
+  expect((await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{email:'remote-admin@skybar.test',name:'Remote Admin',password:'RemoteAdmin123!',role:'admin',language:'de'}})).status()).toBe(201);
+  const other=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(other);expect((await other.request.post('/api/v1/auth/login',{data:{email:'remote-admin@skybar.test',password:'RemoteAdmin123!'}})).status()).toBe(200);
+  await page.waitForTimeout(250);
+  execFileSync('npm',['run','admin:create:dev','-w','@sky-bar/api','--','--email','admin@skybar.test','--password','RemoteReset123!','--name','Mira Host'],{cwd:process.cwd(),env:process.env,stdio:'pipe'});
+  expect((await other.request.post('/api/v1/rooms',{headers:csrfHeaders,data:{name:'Remote logout signal'}})).status()).toBe(201);
+});
+Then('the remotely revoked host is redirected to login',async({page})=>{await expect(page).toHaveURL(/\/login$/,{timeout:10_000});await expect(page.getByText('Hotel Aurora',{exact:true})).toHaveCount(0)});
 When('invalid passwords are submitted for known and unknown host emails', async ({ page }) => {
   const request=page.context().request;
   const responses=await Promise.all([
@@ -172,6 +188,17 @@ When('an approved guest grant response is lost before its cookie is retained',as
 });
 Then('retrying the same grant exchange restores guest access',async()=>{expect(recoveredGrantStatus).toBe(200)});
 Then('a different grant exchange receives no guest access',async()=>{expect(differentGrantStatus).toBe(401)});
+When('an approved guest request expires before its grant exchange',async({page,browser})=>{
+  const request=page.context().request;const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};const room=bootstrap.rooms.find(item=>item.name==='102')!;
+  const created=await (await request.post('/api/v1/public/access-requests',{data:{name:'Expired grant',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
+  expect((await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{expiresAt:new Date(Date.now()+1500).toISOString()}})).status()).toBe(200);
+  await page.waitForTimeout(1800);
+  const context=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(context);const response=await context.request.get(`/api/v1/public/access-requests/${created.id}/status?token=${encodeURIComponent(created.statusToken)}&grantId=${crypto.randomUUID()}`);
+  expiredGrantResult=await response.json() as {status:string;granted:boolean};expiredGrantGuestStatus=(await context.request.get('/api/v1/guest/me')).status();
+});
+Then('the expired exchange is not consumed or granted',async()=>{expect(expiredGrantResult).toEqual(expect.objectContaining({status:'expired',granted:false}));expect(expiredGrantGuestStatus).toBe(401)});
+When("the host revokes Luca's device from the guest directory",async({page})=>{await page.goto('/app/guests');const row=page.locator('.table-row').filter({hasText:'Luca Rossi'});await row.getByRole('button',{name:/Angemeldete Geräte|Dispositivi connessi|Logged-in devices/}).click();await expect(page.locator('.modal .device-list')).toBeVisible();await page.locator('.modal').getByRole('button',{name:/Widerrufen|Revoca|Revoke/}).click();await expect(page.locator('.modal .device-list')).toHaveCount(0)});
+Then("Luca's revoked device loses guest access",async()=>{guestRevokedStatus=(await guestPage!.context().request.get('/api/v1/guest/me')).status();expect(guestRevokedStatus).toBe(401)});
 
 When('the administrator creates room {string}',async({page},name:string)=>{await page.goto('/app/rooms');await page.getByPlaceholder(/Zimmername|Nome camera|Room name/).fill(name);await page.locator('.inline-form').getByRole('button').click()});
 Then('room {string} is listed',async({page},name:string)=>{await expect(page.getByText(name,{exact:true})).toBeVisible()});
@@ -232,6 +259,12 @@ When('the host links a room {string} request to a guest in room {string}',async(
   crossRoomApprovalStatus=response.status();
 });
 Then('the cross-room approval is rejected',async()=>{expect(crossRoomApprovalStatus).toBe(404)});
+
+When('linked approval races with moving its guest to another room',async({page})=>{
+  const request=page.context().request;const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};const source=bootstrap.rooms.find(item=>item.name==='102')!;const target=bootstrap.rooms.find(item=>item.name==='101')!;approvalMoveRaceStatuses=[];
+  for(let attempt=0;attempt<8;attempt+=1){const guest=await (await request.post('/api/v1/guests',{headers:csrfHeaders,data:{name:`Approval race ${attempt}`,roomId:source.id,language:'de'}})).json() as {id:string};const access=await (await request.post('/api/v1/public/access-requests',{data:{name:`Approval race ${attempt}`,roomId:source.id,language:'de'}})).json() as {id:string};const [approval,move]=await Promise.all([request.post(`/api/v1/access-requests/${access.id}/approve`,{headers:csrfHeaders,data:{guestId:guest.id,expiresAt:new Date(Date.now()+86_400_000).toISOString()}}),request.patch(`/api/v1/guests/${guest.id}`,{headers:csrfHeaders,data:{name:`Approval race ${attempt}`,roomId:target.id,language:'de'}})]);approvalMoveRaceStatuses.push([approval.status(),move.status()])}
+});
+Then('approval either wins before the move or rejects the moved guest',async()=>{for(const statuses of approvalMoveRaceStatuses)expect([[200,200],[404,200]]).toContainEqual(statuses)});
 
 When("another host submits the administrator's queued order",async({page})=>{
   const {request,me,guests,products}=await operationalData(page);
@@ -310,6 +343,13 @@ When('the same item void mutation is submitted twice',async({page})=>{
 });
 Then('both item void responses succeed',async()=>{expect(repeatedVoidStatuses).toEqual([200,200])});
 
+When('the same order mutation is submitted concurrently',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const mutationId=crypto.randomUUID();const data={mutationId,originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]};
+  const responses=await Promise.all([request.post('/api/v1/order-batches',{headers:csrfHeaders,data}),request.post('/api/v1/order-batches',{headers:csrfHeaders,data})]);concurrentOrderStatuses=responses.map(response=>response.status());concurrentOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
+});
+Then('both concurrent order responses succeed',async()=>{expect(concurrentOrderStatuses).toEqual([201,201])});
+Then('the concurrent order is stored only once',async()=>{expect(concurrentOrderItemCount).toBe(1)});
+
 When('the same bill void mutation is submitted twice',async({page})=>{
   const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const product=products.data.find((item)=>item.name.de==='Helles')!;
   const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};
@@ -331,9 +371,12 @@ When('guest archival races with reversal of their bill',async({page})=>{
 });
 Then('either the archive or the bill reversal is rejected',async()=>{for(const statuses of billArchiveRaceStatuses)expect([[204,409],[409,200]]).toContainEqual(statuses)});
 
+When('the host opens a voided bill for printing',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),paymentMethod:'cash'}})).json() as {id:string};expect((await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Printed correction'}})).status()).toBe(200);await page.goto(`/app/bills/${bill.id}`);await page.emulateMedia({media:'print'})});
+Then('the printed bill shows its void reason',async({page})=>{await expect(page.locator('.bill-void-marker .notice')).toBeVisible();await expect(page.locator('.bill-void-marker')).toContainText('Printed correction')});
+
 When('the administrator session is revoked while its event stream is open',async({page,browser})=>{
-  await page.evaluate(()=>new Promise<void>((resolve,reject)=>{const events=new EventSource('/api/v1/events');Object.assign(window,{__skyBarRevokedEvents:0,__skyBarRevokedStream:events});events.addEventListener('rooms.changed',()=>{const state=window as unknown as {__skyBarRevokedEvents:number};state.__skyBarRevokedEvents+=1});events.addEventListener('open',()=>resolve(),{once:true});events.addEventListener('error',()=>{if(events.readyState===EventSource.CLOSED)reject(new Error('Event stream closed before opening'))},{once:true})}));
-  const request=page.context().request;await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{email:'realtime-admin@skybar.test',name:'Realtime Admin',password:'RealtimeAdmin123!',role:'admin',language:'de'}});const other=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(other);await other.request.post('/api/v1/auth/login',{data:{email:'realtime-admin@skybar.test',password:'RealtimeAdmin123!'}});execFileSync('npm',['run','admin:create:dev','-w','@sky-bar/api','--','--email','admin@skybar.test','--password','RecoveredAgain123!','--name','Mira Host'],{cwd:process.cwd(),env:process.env,stdio:'pipe'});expect((await other.request.post('/api/v1/rooms',{headers:csrfHeaders,data:{name:'After revocation'}})).status()).toBe(201);await page.waitForTimeout(500);revokedStreamEventCount=await page.evaluate(()=>(window as unknown as {__skyBarRevokedEvents:number}).__skyBarRevokedEvents);
+  await page.evaluate(()=>new Promise<void>((resolve,reject)=>{sessionStorage.setItem('__skyBarRevokedEvents','0');const events=new EventSource('/api/v1/events');Object.assign(window,{__skyBarRevokedStream:events});events.addEventListener('rooms.changed',()=>sessionStorage.setItem('__skyBarRevokedEvents',String(Number(sessionStorage.getItem('__skyBarRevokedEvents'))+1)));events.addEventListener('open',()=>resolve(),{once:true});events.addEventListener('error',()=>{if(events.readyState===EventSource.CLOSED)reject(new Error('Event stream closed before opening'))},{once:true})}));
+  const request=page.context().request;await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{email:'realtime-admin@skybar.test',name:'Realtime Admin',password:'RealtimeAdmin123!',role:'admin',language:'de'}});const other=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(other);await other.request.post('/api/v1/auth/login',{data:{email:'realtime-admin@skybar.test',password:'RealtimeAdmin123!'}});execFileSync('npm',['run','admin:create:dev','-w','@sky-bar/api','--','--email','admin@skybar.test','--password','RecoveredAgain123!','--name','Mira Host'],{cwd:process.cwd(),env:process.env,stdio:'pipe'});expect((await other.request.post('/api/v1/rooms',{headers:csrfHeaders,data:{name:'After revocation'}})).status()).toBe(201);await page.waitForTimeout(500);revokedStreamEventCount=await page.evaluate(()=>Number(sessionStorage.getItem('__skyBarRevokedEvents')));
 });
 Then('the revoked stream receives no later venue events',async()=>{expect(revokedStreamEventCount).toBe(0)});
 

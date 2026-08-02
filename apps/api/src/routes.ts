@@ -179,6 +179,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       );
       const access = result.rows[0];
       if (!access) throw new HttpError(404, 'REQUEST_NOT_FOUND', 'Request not found.');
+      if (access.status === 'approved' && access.expiresAt && access.expiresAt.getTime() <= Date.now()) {
+        return { access: { ...access, status: 'expired' }, guestToken:undefined };
+      }
       if (access.status === 'approved' && access.guestId && access.expiresAt && !access.statusTokenConsumedAt) {
         const guestToken=guestGrantToken(requestId, grantId);
         await client.query(
@@ -549,7 +552,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (!room.rowCount) throw new HttpError(404, 'ROOM_NOT_FOUND', 'Room not found.');
       let guestId = input.guestId;
       if (guestId) {
-        const guest = await client.query('SELECT id FROM guests WHERE id=$1 AND room_id=$2 AND archived_at IS NULL', [guestId, access.roomId]);
+        const guest = await client.query('SELECT id FROM guests WHERE id=$1 AND room_id=$2 AND archived_at IS NULL FOR UPDATE', [guestId, access.roomId]);
         if (!guest.rowCount) throw new HttpError(404, 'GUEST_NOT_FOUND', 'Guest not found.');
       } else {
         guestId = (await client.query<{ id: string }>('INSERT INTO guests(name,room_id,language) VALUES ($1,$2,$3) RETURNING id', [access.name, access.roomId, access.language])).rows[0]!.id;
@@ -590,13 +593,23 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const input = body(orderBatchSchema, request);
     if(input.originHostId!==request.hostIdentity!.id) throw new HttpError(403,'HOST_MISMATCH','Queued orders can only be submitted by their originating host.');
     const result = await transaction(async (client) => {
-      const duplicate = await client.query<{ tabId: string; hostId: string }>('SELECT tab_id AS "tabId",host_id AS "hostId" FROM order_batches WHERE mutation_id=$1', [input.mutationId]);
-      if (duplicate.rows[0]) {
+      const replay = async () => {
+        const duplicate = await client.query<{ tabId: string; hostId: string; guestId: string }>(
+          `SELECT b.tab_id AS "tabId",b.host_id AS "hostId",t.guest_id AS "guestId"
+             FROM order_batches b JOIN order_tabs t ON t.id=b.tab_id WHERE b.mutation_id=$1`,
+          [input.mutationId],
+        );
+        if (!duplicate.rows[0]) return undefined;
         if (duplicate.rows[0].hostId !== request.hostIdentity!.id) throw new HttpError(403, 'HOST_MISMATCH', 'This order belongs to another host.');
+        if (duplicate.rows[0].guestId !== input.guestId) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another guest.');
         return { tabId: duplicate.rows[0].tabId };
-      }
+      };
+      const duplicate = await replay();
+      if (duplicate) return duplicate;
       const guest = await client.query('SELECT id FROM guests WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [input.guestId]);
       if (!guest.rowCount) throw new HttpError(404, 'GUEST_NOT_FOUND', 'Guest not found.');
+      const serializedDuplicate = await replay();
+      if (serializedDuplicate) return serializedDuplicate;
       const tabId = await activeTab(input.guestId, client);
       const resolvedLines: { productId: string; quantity: number; name: Record<string, string>; priceCents: number }[] = [];
       let additionalCents = 0n;

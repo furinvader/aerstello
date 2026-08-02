@@ -66,6 +66,7 @@ export function RequestAccessPage() {
         setStatus(result.status);
         if (result.status === 'approved' && result.granted) { sessionStorage.removeItem('skybar-pending'); navigate('/guest'); }
         if (result.status === 'approved' && !result.granted) { setStatus('denied'); sessionStorage.removeItem('skybar-pending'); setPending(null); setError(t('requestFailed')); }
+        if (result.status === 'expired') { setStatus('denied'); sessionStorage.removeItem('skybar-pending'); }
       } catch { /* Keep polling across transient network errors. */ }
     };
     void poll(); const timer = window.setInterval(() => void poll(), 2500); return () => clearInterval(timer);

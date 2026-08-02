@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useLayoutEffect, useState, type R
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, Redirect, useLocation } from 'wouter';
 import { BedDouble, Boxes, Building2, ClipboardList, CreditCard, Gauge, GlassWater, LogOut, Settings, UserRound, UserRoundCheck } from 'lucide-react';
-import { api, apiErrorCodeMessage } from './api';
+import { ApiError, api, apiErrorCodeMessage } from './api';
 import { Button, Modal } from './components';
 import { useI18n } from './i18n';
 import { discardMutationConflict, flushQueue, mutationConflicts, pendingMutationCount, type QueuedMutation } from './offline';
@@ -47,7 +47,18 @@ export function HostShell({children}:{children:ReactNode}) {
     if (!me.isSuccess) return;
     const events = new EventSource('/api/v1/events');
     const refresh = () => void client.invalidateQueries();
+    const revalidateSession = async () => {
+      try { await api('/auth/me'); }
+      catch (caught) {
+        if (caught instanceof ApiError && caught.status === 401) {
+          events.close();
+          client.clear();
+          globalThis.location.assign('/login');
+        }
+      }
+    };
     events.addEventListener('open', refresh);
+    events.addEventListener('error', () => void revalidateSession());
     ['access-request.changed','orders.changed','bills.changed','rooms.changed','guests.changed','catalog.changed','venue.changed'].forEach((event) => events.addEventListener(event, refresh));
     return () => events.close();
   }, [me.isSuccess, client]);

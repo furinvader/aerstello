@@ -195,5 +195,5 @@ h3 { font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; color: 
 }
 
 @media print {
-  :root { color-scheme: light; }.sidebar,.page-header,.notice,.section-heading,.qr-card .button{display:none!important}.app-shell{padding:0}.app-content{padding:0}.bill-sheet{width:100%;box-shadow:none;padding:0}.qr-grid,.two-column{display:grid;grid-template-columns:repeat(2,1fr)}.qr-card{break-inside:avoid;background:#fff;color:#111;box-shadow:none;border:1px solid #ddd}.card:not(.qr-card){box-shadow:none}body{background:#fff}
+  :root { color-scheme: light; }.sidebar,.page-header,.notice,.section-heading,.qr-card .button{display:none!important}.bill-void-marker .notice{display:flex!important}.app-shell{padding:0}.app-content{padding:0}.bill-sheet{width:100%;box-shadow:none;padding:0}.qr-grid,.two-column{display:grid;grid-template-columns:repeat(2,1fr)}.qr-card{break-inside:avoid;background:#fff;color:#111;box-shadow:none;border:1px solid #ddd}.card:not(.qr-card){box-shadow:none}body{background:#fff}
 }

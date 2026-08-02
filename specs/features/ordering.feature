@@ -48,3 +48,8 @@ Feature: Host order entry and billing
     Given an authenticated administrator
     When the venue has more bills than one archive page
     Then the host can find the oldest bill by its number
+
+  Scenario: A voided bill keeps its correction when printed
+    Given an authenticated administrator
+    When the host opens a voided bill for printing
+    Then the printed bill shows its void reason

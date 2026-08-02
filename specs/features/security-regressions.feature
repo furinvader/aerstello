@@ -11,6 +11,11 @@ Feature: Device grants and replay protection
     When the host links a room "102" request to a guest in room "101"
     Then the cross-room approval is rejected
 
+  Scenario: Linked approval is serialized with guest changes
+    Given an authenticated administrator
+    When linked approval races with moving its guest to another room
+    Then approval either wins before the move or rejects the moved guest
+
   Scenario: An offline order remains bound to its originating host
     Given an authenticated administrator
     When another host submits the administrator's queued order
@@ -25,6 +30,12 @@ Feature: Device grants and replay protection
     Given an authenticated administrator
     When the same item void mutation is submitted twice
     Then both item void responses succeed
+
+  Scenario: Concurrent replay of an order returns its prior success
+    Given an authenticated administrator
+    When the same order mutation is submitted concurrently
+    Then both concurrent order responses succeed
+    And the concurrent order is stored only once
 
   Scenario: Replaying a bill void returns its prior success
     Given an authenticated administrator
