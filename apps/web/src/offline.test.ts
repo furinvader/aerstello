@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from './api';
-import { claimLegacyMutationForHost, isPermanentSyncConflict, migrateLegacyMutation, replayQueuedMutations, type QueuedMutation } from './offline';
+import { isPermanentSyncConflict, LEGACY_UNASSIGNED_HOST_ID, migrateLegacyMutation, replayQueuedMutations, type QueuedMutation } from './offline';
 
 const mutation = (id: string): QueuedMutation => ({
   id,
@@ -54,13 +54,26 @@ describe('offline mutation replay', () => {
     const migrated = migrateLegacyMutation(legacy);
     expect(migrated).toEqual(expect.objectContaining({
       id: legacy.id,
+      hostId: LEGACY_UNASSIGNED_HOST_ID,
       path: legacy.path,
       body: legacy.body,
       status: 'conflict',
       errorCode: 'LEGACY_MUTATION_REVIEW',
+      legacyOwnershipVerified: false,
     }));
-    const claimed = claimLegacyMutationForHost(migrated, 'host-a');
-    expect(claimed.hostId).toBe('host-a');
-    expect(claimed.body).toEqual(expect.objectContaining({ mutationId: 'legacy-order', originHostId: 'host-a' }));
+    expect(migrated.body).not.toEqual(expect.objectContaining({ originHostId: expect.anything() }));
+  });
+
+  it('preserves a legacy mutation ownership claim recorded by its command', () => {
+    const migrated = migrateLegacyMutation({
+      id: 'owned-order',
+      path: '/order-batches',
+      method: 'POST',
+      body: { mutationId: 'owned-order', originHostId: 'host-a' },
+      createdAt: '2026-08-02T00:00:00.000Z',
+    });
+
+    expect(migrated.hostId).toBe('host-a');
+    expect(migrated.legacyOwnershipVerified).toBe(true);
   });
 });

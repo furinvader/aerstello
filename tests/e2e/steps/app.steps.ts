@@ -74,6 +74,12 @@ let approvalDefaultLifetimeHours = 0;
 let reloadedOrderMutationIds: string[] = [];
 let reloadedOrderItemCount = 0;
 let roleChangedHostPage: import('@playwright/test').Page | undefined;
+let changedOrderReplayStatus = 0;
+let changedOrderReplayItemCount = 0;
+let dashboardOpenItemCount = 0;
+let currentDeviceAfterPasswordChangeStatus = 0;
+let otherDeviceAfterPasswordChangeStatus = 0;
+let newPasswordLoginStatus = 0;
 
 Before(async () => {
   execFileSync('npm',['run','db:seed','-w','@sky-bar/api'],{cwd:process.cwd(),env:{...process.env,E2E_RESET:'true'},stdio:'pipe'});
@@ -99,6 +105,17 @@ Then('the host dashboard shows the venue name {string}', async ({ page }, name:s
 Then('the page has no serious accessibility violations', async ({ page }) => { const result=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa']).analyze();expect(result.violations.filter(v=>['serious','critical'].includes(v.impact??''))).toEqual([]); });
 When('the host opens the account screen', async ({ page }) => { await page.goto('/app/account'); });
 Then('the current device is listed', async ({ page }) => { await expect(page.getByText(/Dieses Gerät|Questo dispositivo|This device/)).toBeVisible(); });
+When('the administrator changes the password with another device logged in',async({page,browser})=>{
+  const other=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(other);
+  expect((await other.request.post('/api/v1/auth/login',{data:{email:'admin@skybar.test',password:'SkyBarTest123!'}})).status()).toBe(200);
+  expect((await page.context().request.patch('/api/v1/account',{headers:csrfHeaders,data:{currentPassword:'SkyBarTest123!',newPassword:'ChangedPassword123!'}})).status()).toBe(200);
+  currentDeviceAfterPasswordChangeStatus=(await page.context().request.get('/api/v1/auth/me')).status();
+  otherDeviceAfterPasswordChangeStatus=(await other.request.get('/api/v1/auth/me')).status();
+  const fresh=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(fresh);
+  newPasswordLoginStatus=(await fresh.request.post('/api/v1/auth/login',{data:{email:'admin@skybar.test',password:'ChangedPassword123!'}})).status();
+});
+Then('the password change keeps the current device and revokes the other device',async()=>{expect(currentDeviceAfterPasswordChangeStatus).toBe(200);expect(otherDeviceAfterPasswordChangeStatus).toBe(401)});
+Then('the new password can be used to sign in',async()=>{expect(newPasswordLoginStatus).toBe(200)});
 When('the host revokes the current device from the account screen', async ({ page }) => {
   await page.goto('/app/account');
   const current=page.locator('.device-list>div').filter({hasText:/Dieses Gerät|Questo dispositivo|This device/});
@@ -217,7 +234,8 @@ Given('a version-one device database contains a queued financial mutation',async
   },{mutationId});
   await signIn(page);
 });
-Then('the queued financial mutation is preserved for review',async({page})=>{await expect(page.locator('.sync-conflict-banner')).toBeVisible({timeout:10_000});await page.locator('.sync-conflict-banner').click();await expect(page.locator('.modal')).toContainText('/order-batches');const stored=await page.evaluate(async()=>new Promise<{status:string;body:{mutationId:string;originHostId:string}}>((resolve,reject)=>{const request=indexedDB.open('sky-bar');request.onerror=()=>reject(request.error);request.onsuccess=()=>{const transaction=request.result.transaction('mutations');const all=transaction.objectStore('mutations').getAll();all.onsuccess=()=>{request.result.close();resolve(all.result[0] as {status:string;body:{mutationId:string;originHostId:string}})};all.onerror=()=>reject(all.error)}}));expect(stored.status).toBe('conflict');expect(stored.body.mutationId).toBeTruthy();expect(stored.body.originHostId).toBeTruthy()});
+Then('the queued financial mutation is preserved without assigning an owner',async({page})=>{await expect(page.locator('.sync-conflict-banner')).toBeVisible({timeout:10_000});await page.locator('.sync-conflict-banner').click();await expect(page.locator('.modal')).toContainText('/order-batches');const stored=await page.evaluate(async()=>new Promise<{hostId:string;status:string;body:{mutationId:string;originHostId?:string}}>((resolve,reject)=>{const request=indexedDB.open('sky-bar');request.onerror=()=>reject(request.error);request.onsuccess=()=>{const transaction=request.result.transaction('mutations');const all=transaction.objectStore('mutations').getAll();all.onsuccess=()=>{request.result.close();resolve(all.result[0] as {hostId:string;status:string;body:{mutationId:string;originHostId?:string}})};all.onerror=()=>reject(all.error)}}));expect(stored.hostId).toBe('00000000-0000-0000-0000-000000000000');expect(stored.status).toBe('conflict');expect(stored.body.mutationId).toBeTruthy();expect(stored.body.originHostId).toBeUndefined()});
+Then('the unowned mutation cannot be retried',async({page})=>{await page.locator('.modal').getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await page.waitForTimeout(100);const stored=await page.evaluate(async()=>new Promise<{hostId:string;status:string}>((resolve,reject)=>{const request=indexedDB.open('sky-bar');request.onerror=()=>reject(request.error);request.onsuccess=()=>{const transaction=request.result.transaction('mutations');const all=transaction.objectStore('mutations').getAll();all.onsuccess=()=>{request.result.close();resolve(all.result[0] as {hostId:string;status:string})};all.onerror=()=>reject(all.error)}}));expect(stored).toEqual(expect.objectContaining({hostId:'00000000-0000-0000-0000-000000000000',status:'conflict'}))});
 
 Given('an authenticated administrator and a separate guest device',async({page,browser})=>{await signIn(page);const context=await browser.newContext();guestPage=await context.newPage();});
 When('{string} requests access for room {string}',async({},name:string,room:string)=>{await guestPage!.goto('/guest/request');await guestPage!.locator('form select').nth(1).selectOption('de');await guestPage!.getByLabel('Name').fill(name);await guestPage!.locator('form select').first().selectOption({label:room});await guestPage!.locator('form button[type="submit"]').click()});
@@ -479,6 +497,23 @@ When('the host reloads after an order response is lost',async({page})=>{
 });
 Then('the restored order retry uses the original mutation identifier',async()=>{expect(reloadedOrderMutationIds).toHaveLength(2);expect(new Set(reloadedOrderMutationIds).size).toBe(1)});
 Then('the guest tab contains the restored order only once',async()=>{expect(reloadedOrderItemCount).toBe(1)});
+
+When('an order mutation is replayed with a changed quantity',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;
+  const command={mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]};
+  expect((await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:command})).status()).toBe(201);
+  changedOrderReplayStatus=(await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{...command,items:[{productId:product.id,quantity:2}]}})).status();
+  changedOrderReplayItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
+});
+Then('the changed order replay is rejected',async()=>{expect(changedOrderReplayStatus).toBe(409)});
+Then('the original order quantity remains unchanged',async()=>{expect(changedOrderReplayItemCount).toBe(1)});
+
+When('the host submits five items in one order line',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;
+  expect((await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:5}]}})).status()).toBe(201);
+  dashboardOpenItemCount=((await (await request.get('/api/v1/dashboard')).json()) as {openItemCount:number}).openItemCount;
+});
+Then('the dashboard reports five open items',async()=>{expect(dashboardOpenItemCount).toBe(5)});
 
 When('the host retries settlement after its first response is lost',async({page})=>{
   await chooseOrder(page,'Helles','Anna Berger','101');await page.getByRole('button',{name:/Bestellung buchen/}).click();await expect(page.locator('.tab-pill')).toContainText('1 Artikel');

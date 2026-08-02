@@ -115,6 +115,7 @@ export const orderBatches = pgTable('order_batches', {
   mutationId: uuid('mutation_id').notNull().unique(),
   tabId: uuid('tab_id').notNull().references(() => orderTabs.id),
   hostId: uuid('host_id').notNull().references(() => hosts.id),
+  command: jsonb('command').notNull(),
   capturedAt: timestamp('captured_at', { withTimezone: true }).notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });

@@ -12,6 +12,12 @@ Feature: Secure host accounts and devices
     When the host opens the account screen
     Then the current device is listed
 
+  Scenario: Changing a password revokes other devices
+    Given an authenticated administrator
+    When the administrator changes the password with another device logged in
+    Then the password change keeps the current device and revokes the other device
+    And the new password can be used to sign in
+
   Scenario: Revoking the current device signs out immediately
     Given an authenticated administrator
     When the host revokes the current device from the account screen

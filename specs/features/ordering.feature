@@ -24,7 +24,8 @@ Feature: Host order entry and billing
 
   Scenario: A version-one queued order survives the database upgrade
     Given a version-one device database contains a queued financial mutation
-    Then the queued financial mutation is preserved for review
+    Then the queued financial mutation is preserved without assigning an owner
+    And the unowned mutation cannot be retried
 
   Scenario: A host removes an incorrect item while offline
     Given an authenticated administrator
@@ -55,6 +56,17 @@ Feature: Host order entry and billing
     When the host reloads after an order response is lost
     Then the restored order retry uses the original mutation identifier
     And the guest tab contains the restored order only once
+
+  Scenario: Reusing an order mutation cannot change its command
+    Given an authenticated administrator
+    When an order mutation is replayed with a changed quantity
+    Then the changed order replay is rejected
+    And the original order quantity remains unchanged
+
+  Scenario: Dashboard item totals include line quantities
+    Given an authenticated administrator
+    When the host submits five items in one order line
+    Then the dashboard reports five open items
 
   Scenario: An uncertain settlement response is retried idempotently
     Given an authenticated administrator

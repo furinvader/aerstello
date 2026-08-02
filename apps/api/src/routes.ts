@@ -290,15 +290,34 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       newPassword: z.string().min(12).max(256).optional(),
     });
     const input = body(schema, request);
+    let expectedPasswordHash: string | undefined;
+    let newPasswordHash: string | undefined;
     if (input.newPassword) {
       const current = await pool.query<{ passwordHash: string }>('SELECT password_hash AS "passwordHash" FROM hosts WHERE id=$1', [request.hostIdentity!.id]);
       if (!input.currentPassword || !(await verifyPassword(current.rows[0]!.passwordHash, input.currentPassword))) {
         throw new HttpError(400, 'INVALID_PASSWORD', 'Current password is incorrect.');
       }
-      await pool.query('UPDATE hosts SET password_hash=$1 WHERE id=$2', [await hashPassword(input.newPassword), request.hostIdentity!.id]);
-      await pool.query('UPDATE host_sessions SET revoked_at=now() WHERE host_id=$1 AND id<>$2', [request.hostIdentity!.id, request.hostIdentity!.sessionId]);
+      expectedPasswordHash = current.rows[0]!.passwordHash;
+      newPasswordHash = await hashPassword(input.newPassword);
     }
-    await pool.query('UPDATE hosts SET name=COALESCE($1,name),language=COALESCE($2,language) WHERE id=$3', [input.name ?? null, input.language ?? null, request.hostIdentity!.id]);
+    const authEvent = await transaction(async (client) => {
+      let event: RealtimeEvent | undefined;
+      if (newPasswordHash) {
+        const updated = await client.query(
+          'UPDATE hosts SET password_hash=$1 WHERE id=$2 AND password_hash=$3',
+          [newPasswordHash, request.hostIdentity!.id, expectedPasswordHash],
+        );
+        if (!updated.rowCount) throw new HttpError(409, 'PASSWORD_CHANGED', 'The password changed in another session. Try again.');
+        await client.query('UPDATE host_sessions SET revoked_at=now() WHERE host_id=$1 AND id<>$2', [request.hostIdentity!.id, request.hostIdentity!.sessionId]);
+        event = await storeEvent('host-auth.changed', { hostId: request.hostIdentity!.id }, client);
+      }
+      await client.query('UPDATE hosts SET name=COALESCE($1,name),language=COALESCE($2,language) WHERE id=$3', [input.name ?? null, input.language ?? null, request.hostIdentity!.id]);
+      return event;
+    });
+    if (authEvent) {
+      try { publishEvent(authEvent); }
+      catch (error) { app.log.error(error, 'Could not publish committed host authorization event'); }
+    }
     return { ok: true };
   });
 
@@ -372,7 +391,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         (SELECT count(*)::int FROM access_requests WHERE status='pending') AS "pendingRequests",
         (SELECT count(*)::int FROM rooms WHERE archived_at IS NULL) AS "activeRooms",
         (SELECT count(*)::int FROM guests WHERE archived_at IS NULL) AS "activeGuests",
-        (SELECT count(*)::int FROM order_items WHERE status IN ('open','provisional')) AS "openItemCount",
+        (SELECT COALESCE(sum(quantity),0)::int FROM order_items WHERE status IN ('open','provisional')) AS "openItemCount",
         (SELECT COALESCE(sum(unit_price_cents::bigint*quantity),0)::float8 FROM order_items WHERE status IN ('open','provisional')) AS "openValueCents",
         (SELECT COALESCE(sum(b.total_cents::bigint),0)::float8
            FROM bills b CROSS JOIN venue_settings v
@@ -684,14 +703,17 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if(input.originHostId!==request.hostIdentity!.id) throw new HttpError(403,'HOST_MISMATCH','Queued orders can only be submitted by their originating host.');
     const result = await transaction(async (client) => {
       const replay = async () => {
-        const duplicate = await client.query<{ tabId: string; hostId: string; guestId: string }>(
-          `SELECT b.tab_id AS "tabId",b.host_id AS "hostId",t.guest_id AS "guestId"
+        const duplicate = await client.query<{ tabId: string; hostId: string; guestId: string; command: unknown }>(
+          `SELECT b.tab_id AS "tabId",b.host_id AS "hostId",t.guest_id AS "guestId",b.command
              FROM order_batches b JOIN order_tabs t ON t.id=b.tab_id WHERE b.mutation_id=$1`,
           [input.mutationId],
         );
         if (!duplicate.rows[0]) return undefined;
         if (duplicate.rows[0].hostId !== request.hostIdentity!.id) throw new HttpError(403, 'HOST_MISMATCH', 'This order belongs to another host.');
         if (duplicate.rows[0].guestId !== input.guestId) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another guest.');
+        if (!isDeepStrictEqual(duplicate.rows[0].command, input)) {
+          throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to a different order command.');
+        }
         return { tabId: duplicate.rows[0].tabId };
       };
       const duplicate = await replay();
@@ -716,8 +738,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       }
       await ensureTabTotalWithinRange(tabId, additionalCents, client);
       const batch = await client.query<{ id: string }>(
-        'INSERT INTO order_batches(mutation_id,tab_id,host_id,captured_at) VALUES ($1,$2,$3,$4) RETURNING id',
-        [input.mutationId, tabId, request.hostIdentity!.id, input.capturedAt],
+        'INSERT INTO order_batches(mutation_id,tab_id,host_id,command,captured_at) VALUES ($1,$2,$3,$4,$5) RETURNING id',
+        [input.mutationId, tabId, request.hostIdentity!.id, JSON.stringify(input), input.capturedAt],
       );
       for (const line of resolvedLines) {
         await client.query(
