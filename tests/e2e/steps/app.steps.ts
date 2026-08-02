@@ -157,6 +157,10 @@ let staleRoomOrderFinalIds: string[] = [];
 let expectedRoomOrderFinalIds: string[] = [];
 let staleRoomUpdateStatus = 0;
 let staleRoomFinalName = '';
+let retriedRoomArchiveMutationIds: string[] = [];
+let archivedRoomCount = 0;
+let staleRoomArchiveStatus = 0;
+let staleRoomArchiveFinalName = '';
 let staleHostUpdateStatus = 0;
 let staleHostFinalActive = false;
 let reopenedHostSessionStatus = 0;
@@ -179,6 +183,8 @@ let finalProfileName = '';
 let sharedReplicaRateStatuses: number[] = [];
 let malformedJsonResult: {status:number;code:string}|undefined;
 let replayedLogoutStatus = 0;
+let replayedGuestLogoutStatus = 0;
+let guestUndoRemainingMs = 0;
 
 Before(async () => {
   execFileSync('npm',['run','db:seed','-w','@sky-bar/api'],{cwd:process.cwd(),env:{...process.env,E2E_RESET:'true',SEED_ADMIN_PASSWORD:'SkyBarTest123!'},stdio:'pipe'});
@@ -502,6 +508,36 @@ Then('the undo action disappears after ten seconds',async()=>{await expect(guest
 Then('the expired item is no longer marked provisional',async()=>{const item=guestPage!.locator('.line-item').filter({hasText:'Mineralwasser'});await expect(item).not.toContainText('10s')});
 When('the guest uses undo',async()=>{await guestPage!.getByRole('button',{name:'Rückgängig'}).click()});
 Then('the guest tab has no open items',async()=>{await expect(guestPage!.getByText('Noch keine Einträge')).toBeVisible()});
+When('a self-service addition waits for a guest lock',async()=>{
+  const request=guestPage!.context().request;
+  const me=await (await request.get('/api/v1/guest/me')).json() as {guest:{id:string}};
+  const catalog=await (await request.get('/api/v1/guest/catalog')).json() as {data:{id:string;name:{de:string};priceCents:number;version:number}[]};
+  const product=catalog.data.find(item=>item.name.de==='Mineralwasser')!;
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});
+  await database.connect();let committed=false;
+  try{
+    await database.query('BEGIN');
+    await database.query('SELECT id FROM guests WHERE id=$1 FOR UPDATE',[me.guest.id]);
+    const holderXid=String((await database.query('SELECT pg_current_xact_id()::text AS xid')).rows[0].xid);
+    const addition=request.post('/api/v1/guest/items',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),productId:product.id,expectedPriceCents:product.priceCents,expectedProductVersion:product.version}});
+    await expect.poll(async()=>Number((await database.query(`SELECT count(*) FROM pg_locks WHERE locktype='transactionid' AND transactionid::text=$1 AND NOT granted`,[holderXid])).rows[0].count),{timeout:5_000,intervals:[10,20,50]}).toBeGreaterThan(0);
+    await new Promise(resolve=>setTimeout(resolve,2_000));
+    await database.query('COMMIT');committed=true;
+    const response=await addition;
+    expect(response.status()).toBe(201);
+    const item=await response.json() as {provisionalUntil:string};
+    guestUndoRemainingMs=new Date(item.provisionalUntil).getTime()-Date.now();
+  }finally{if(!committed)await database.query('ROLLBACK');await database.end()}
+});
+Then('the guest still receives a full undo window',async()=>{expect(guestUndoRemainingMs).toBeGreaterThan(9_000)});
+When('the guest logs out and the committed response is lost',async()=>{
+  await guestPage!.evaluate(()=>{const originalFetch=window.fetch.bind(window);window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guest/logout')&&init?.method==='POST'){await originalFetch(input,init);throw new TypeError('Simulated lost guest logout response')}return originalFetch(input,init)}});
+  await guestPage!.getByRole('button',{name:/Abmelden|Esci|Log out/}).click();
+  await expect(guestPage!).toHaveURL(/\/guest\/request$/);
+  replayedGuestLogoutStatus=(await guestPage!.context().request.post('/api/v1/guest/logout',{headers:csrfHeaders})).status();
+});
+Then('the guest reaches access request without cached data',async()=>{await expect(guestPage!).toHaveURL(/\/guest\/request$/);await expect(guestPage!.getByRole('heading',{name:'Luca Rossi'})).toHaveCount(0)});
+Then('replaying guest logout for the revoked session succeeds',async()=>{expect(replayedGuestLogoutStatus).toBe(204)});
 Then('the host has no empty open order for {string}',async({page},name:string)=>{await page.goto('/app/orders');await expect(page.locator('.tab-card').filter({hasText:name})).toHaveCount(0)});
 When('a self-service price changes after the guest catalog is displayed',async({page})=>{const guestRequest=guestPage!.context().request;const me=await (await guestRequest.get('/api/v1/guest/me')).json() as {guest:{sessionId:string}};const catalog=await (await guestRequest.get('/api/v1/guest/catalog')).json() as {data:{id:string;name:{de:string};priceCents:number}[]};const displayed=catalog.data.find(item=>item.name.de==='Mineralwasser')!;const staleMutationId=crypto.randomUUID();staleGuestMutationIds=[];guestPage!.on('request',request=>{if(request.url().endsWith('/api/v1/guest/items')&&request.method()==='POST')staleGuestMutationIds.push((request.postDataJSON() as {mutationId:string}).mutationId)});const request=page.context().request;const products=await (await request.get('/api/v1/products')).json() as {data:{id:string;name:{de:string;it:string;en:string};description?:{de:string;it:string;en:string};priceCents:number;categoryId:string;enabled:boolean;selfServiceOnly:boolean;version:number}[]};const product=products.data.find(item=>item.id===displayed.id)!;expect((await request.patch(`/api/v1/products/${product.id}`,{headers:csrfHeaders,data:{name:product.name,...(product.description?{description:product.description}:{}),priceCents:product.priceCents+100,categoryId:product.categoryId,enabled:product.enabled,selfServiceOnly:product.selfServiceOnly,expectedVersion:product.version}})).status()).toBe(200);await guestPage!.evaluate(({sessionId,productId,mutationId,expectedPriceCents})=>localStorage.setItem('skybar-guest-pending-adds',JSON.stringify({sessionId,entries:[[productId,mutationId,expectedPriceCents]]})),{sessionId:me.guest.sessionId,productId:product.id,mutationId:staleMutationId,expectedPriceCents:displayed.priceCents});await guestPage!.reload();await guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'}).click();await expect(guestPage!.locator('.notice--error')).toBeVisible();staleGuestPriceRejected=true;staleGuestPriceItemCount=((await (await guestRequest.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount;await guestPage!.reload();await guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'}).click();await expect.poll(async()=>((await (await guestRequest.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount).toBe(1)});
 Then('adding the stale self-service product is rejected without a charge',async()=>{expect(staleGuestPriceRejected).toBe(true);expect(staleGuestPriceItemCount).toBe(0)});
@@ -737,12 +773,39 @@ When('realtime event persistence fails during a guest edit',async({page})=>{cons
 Then('the guest edit is rolled back',async()=>{expect(transactionalGuestEditStatus).toBe(500);expect(transactionalGuestFinalName).toBe('Anna Berger')});
 When('the administrator tries to create product {string} priced {string}',async({page},name:string,price:string)=>{await page.goto('/app/products');await page.getByRole('button',{name:/Hinzufügen/}).first().click();await page.getByLabel('Name · DE').fill(name);await page.getByLabel(/Preis · EUR|Prezzo · EUR|Price · EUR/).fill(price);await page.locator('.modal').getByRole('button',{name:'Speichern'}).click()});
 Then('the product price is rejected before submission',async({page})=>{const price=page.getByLabel(/Preis · EUR|Prezzo · EUR|Price · EUR/);await expect(price).toBeVisible();expect(await price.evaluate((input:HTMLInputElement)=>input.validity.valid)).toBe(false)});
-When('the host attempts to create a guest in an archived room',async({page})=>{const request=page.context().request;const room=await (await request.post('/api/v1/rooms',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:'Archived room'}})).json() as {id:string};expect((await request.delete(`/api/v1/rooms/${room.id}`,{headers:csrfHeaders})).status()).toBe(204);archivedRoomGuestStatus=(await request.post('/api/v1/guests',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:'Late guest',roomId:room.id,language:'de'}})).status()});
+When('the host attempts to create a guest in an archived room',async({page})=>{const request=page.context().request;const room=await (await request.post('/api/v1/rooms',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:'Archived room'}})).json() as {id:string;version:number};expect((await request.delete(`/api/v1/rooms/${room.id}`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:room.version}})).status()).toBe(204);archivedRoomGuestStatus=(await request.post('/api/v1/guests',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:'Late guest',roomId:room.id,language:'de'}})).status()});
 Then('the archived room guest is rejected',async()=>{expect(archivedRoomGuestStatus).toBe(404)});
 When('the administrator archives a room with a pending access request',async({page})=>{const request=page.context().request;const room=await (await request.post('/api/v1/rooms',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:'Pending request room'}})).json() as {id:string};const pending=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Waiting guest',roomId:room.id,language:'de'}})).json() as {id:string};await page.goto('/app/rooms');const response=page.waitForResponse(candidate=>candidate.url().endsWith(`/api/v1/rooms/${room.id}`)&&candidate.request().method()==='DELETE');await page.getByRole('button',{name:/Pending request room/}).click();pendingRoomArchiveStatus=(await response).status();const requests=await (await request.get('/api/v1/access-requests')).json() as {data:{id:string}[]};pendingRoomRequestCount=requests.data.filter(item=>item.id===pending.id).length});
 Then('room archival is rejected and the request remains pending',async({page})=>{expect(pendingRoomArchiveStatus).toBe(409);expect(pendingRoomRequestCount).toBe(1);await expect(page.locator('.notice--error')).toContainText(/ausstehenden Zugangsanfragen|richieste di accesso in sospeso|pending access requests/)});
 When('the administrator archives a room with an active guest',async({page})=>{await page.goto('/app/rooms');const response=page.waitForResponse(candidate=>candidate.url().includes('/api/v1/rooms/')&&candidate.request().method()==='DELETE');await page.getByRole('button',{name:/101/}).click();expect((await response).status()).toBe(409)});
 Then('the room screen explains that active guests must be moved',async({page})=>{await expect(page.locator('.notice--error')).toContainText(/aktiven Gäste.*anderes Zimmer|ospiti attivi.*camera|active guests.*another room/)});
+When('the administrator retries room archival after its response is lost',async({page})=>{
+  const request=page.context().request;
+  const room=await (await request.post('/api/v1/rooms',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:'Recoverable archive room'}})).json() as {id:string;version:number};
+  await page.goto('/app/rooms');
+  await page.evaluate((roomId)=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarRoomArchiveCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith(`/api/v1/rooms/${roomId}`)&&init?.method==='DELETE'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}},room.id);
+  await page.getByRole('button',{name:/Archiv Recoverable archive room|Archivio Recoverable archive room|Archive Recoverable archive room/}).click();
+  const retry=page.getByRole('button',{name:/Erneut versuchen.*Recoverable archive room|Riprova.*Recoverable archive room|Retry.*Recoverable archive room/});
+  await expect(retry).toBeVisible();
+  await retry.click();
+  await expect(retry).toHaveCount(0);
+  const commands=await page.evaluate(()=>(window as unknown as {__skyBarRoomArchiveCommands:Array<Record<string,unknown>>}).__skyBarRoomArchiveCommands);
+  retriedRoomArchiveMutationIds=commands.map(command=>String(command.mutationId));
+  const rooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string}[]};
+  archivedRoomCount=rooms.data.filter(item=>item.id===room.id).length;
+});
+Then('both room archival attempts use the same mutation identifier',async()=>{expect(retriedRoomArchiveMutationIds).toHaveLength(2);expect(new Set(retriedRoomArchiveMutationIds).size).toBe(1)});
+Then('the room is archived only once',async()=>{expect(archivedRoomCount).toBe(0)});
+When('another administrator renames a room before a stale archival arrives',async({page})=>{
+  const request=page.context().request;
+  const room=await (await request.post('/api/v1/rooms',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:'Stale archive room'}})).json() as {id:string;version:number};
+  expect((await request.patch(`/api/v1/rooms/${room.id}`,{headers:csrfHeaders,data:{name:'Newer archive room',expectedVersion:room.version}})).status()).toBe(200);
+  staleRoomArchiveStatus=(await request.delete(`/api/v1/rooms/${room.id}`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:room.version}})).status();
+  const rooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;name:string}[]};
+  staleRoomArchiveFinalName=rooms.data.find(item=>item.id===room.id)?.name??'';
+});
+Then('the stale room archival is rejected',async()=>{expect(staleRoomArchiveStatus).toBe(409)});
+Then("the room's newer name remains configured",async()=>{expect(staleRoomArchiveFinalName).toBe('Newer archive room')});
 When('administrators submit conflicting room orders concurrently',async({page})=>{const request=page.context().request;concurrentRoomOrderStatuses=[];for(let attempt=0;attempt<8;attempt+=1){const current=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;version:number}[]};const [a,b,c]=current.data;const versions=new Map(current.data.map(room=>[room.id,room.version]));const command=(ids:string[])=>({rooms:ids.map(id=>({id,expectedVersion:versions.get(id)!}))});const responses=await Promise.all([request.put('/api/v1/rooms/order',{headers:csrfHeaders,data:command([b!.id,a!.id,c!.id])}),request.put('/api/v1/rooms/order',{headers:csrfHeaders,data:command([a!.id,c!.id,b!.id])})]);concurrentRoomOrderStatuses.push(...responses.map(response=>response.status()))}});
 Then('every room reorder completes without a server error',async()=>{expect(concurrentRoomOrderStatuses).toHaveLength(16);for(let index=0;index<concurrentRoomOrderStatuses.length;index+=2)expect(concurrentRoomOrderStatuses.slice(index,index+2).sort()).toEqual([200,409])});
 When('another API replica creates a room',async({page})=>{

@@ -145,6 +145,18 @@ Feature: Venue operations configuration
     When the administrator archives a room with an active guest
     Then the room screen explains that active guests must be moved
 
+  Scenario: An uncertain room archival is recovered idempotently
+    Given an authenticated administrator
+    When the administrator retries room archival after its response is lost
+    Then both room archival attempts use the same mutation identifier
+    And the room is archived only once
+
+  Scenario: A stale room archival cannot remove a newer change
+    Given an authenticated administrator
+    When another administrator renames a room before a stale archival arrives
+    Then the stale room archival is rejected
+    And the room's newer name remains configured
+
   Scenario: Concurrent room reorders lock rooms consistently
     Given an authenticated administrator
     When administrators submit conflicting room orders concurrently

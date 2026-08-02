@@ -45,6 +45,11 @@ export const roomUpdateSchema = roomInputSchema.extend({
   expectedVersion: z.number().int().positive(),
 });
 
+export const roomArchiveSchema = z.object({
+  mutationId: z.string().uuid(),
+  expectedVersion: z.number().int().positive(),
+});
+
 export const guestInputSchema = z.object({
   name: z.string().trim().min(1).max(120),
   roomId: z.string().uuid(),

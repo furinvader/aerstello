@@ -17,6 +17,7 @@ import {
   productCreateSchema,
   productArchiveSchema,
   productUpdateSchema,
+  roomArchiveSchema,
   roomCreateSchema,
   roomUpdateSchema,
   settleTabSchema,
@@ -565,18 +566,35 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.delete('/api/v1/rooms/:id', { preHandler: requireAdmin }, async (request, reply) => {
+    const input=body(roomArchiveSchema,request);
     const roomId = id(request);
     const result=await transaction(async (client) => {
-      const room = await client.query('SELECT id FROM rooms WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [roomId]);
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[input.mutationId]);
+      const replay=await client.query<{id:string;hostId:string;expectedVersion:number}>(
+        `SELECT id,archived_by_host AS "hostId",archive_expected_version AS "expectedVersion"
+           FROM rooms WHERE archive_mutation_id=$1`,[input.mutationId],
+      );
+      if(replay.rows[0]){
+        const prior=replay.rows[0];
+        if(prior.hostId!==request.hostIdentity!.id)throw new HttpError(403,'HOST_MISMATCH','This room archival belongs to another host.');
+        if(prior.id!==roomId||prior.expectedVersion!==input.expectedVersion)throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to a different room archival command.');
+        return {event:undefined};
+      }
+      const room = await client.query<{version:number}>('SELECT version FROM rooms WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [roomId]);
       if (!room.rowCount) throw new HttpError(404, 'ROOM_NOT_FOUND', 'Room not found.');
+      if(room.rows[0]!.version!==input.expectedVersion)throw new HttpError(409,'ROOM_CHANGED','The room was changed by another administrator.');
       const active = await client.query('SELECT 1 FROM guests WHERE room_id=$1 AND archived_at IS NULL LIMIT 1', [roomId]);
       if (active.rowCount) throw new HttpError(409, 'ROOM_HAS_GUESTS', 'Move or archive active guests first.');
       const pending = await client.query(`SELECT 1 FROM access_requests WHERE room_id=$1 AND status='pending' LIMIT 1`, [roomId]);
       if (pending.rowCount) throw new HttpError(409, 'ROOM_HAS_REQUESTS', 'Resolve pending access requests first.');
-      await client.query('UPDATE rooms SET archived_at=now(),version=version+1 WHERE id=$1', [roomId]);
+      await client.query(
+        `UPDATE rooms SET archived_at=now(),archive_mutation_id=$2,archive_expected_version=$3,
+                archived_by_host=$4,version=version+1 WHERE id=$1`,
+        [roomId,input.mutationId,input.expectedVersion,request.hostIdentity!.id],
+      );
       return {event:await storeEvent('rooms.changed',{},client)};
     });
-    try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed room archival event')}
+    if(result.event){try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed room archival event')}}
     return reply.code(204).send();
   });
 
@@ -1344,7 +1362,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       await ensureTabTotalWithinRange(tabId, BigInt(selected.priceCents), client);
       const result = await client.query(
         `INSERT INTO order_items(tab_id,product_id,product_name,unit_price_cents,quantity,source,status,submitted_by_guest_session,provisional_until,guest_mutation_id,guest_expected_price_cents,guest_expected_product_version)
-         VALUES ($1,$2,$3,$4,1,'guest','provisional',$5,now()+interval '10 seconds',$6,$7,$8)
+         VALUES ($1,$2,$3,$4,1,'guest','provisional',$5,clock_timestamp()+interval '10 seconds',$6,$7,$8)
          RETURNING id,provisional_until AS "provisionalUntil"`,
         [tabId,input.productId,JSON.stringify(selected.name),selected.priceCents,request.guestIdentity!.sessionId,input.mutationId,input.expectedPriceCents,input.expectedProductVersion],
       );

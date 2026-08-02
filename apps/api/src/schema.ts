@@ -59,8 +59,14 @@ export const rooms = pgTable('rooms', {
   createdByHost: uuid('created_by_host').references(() => hosts.id),
   position: integer('position').notNull().default(0),
   archivedAt: timestamp('archived_at', { withTimezone: true }),
+  archiveMutationId: uuid('archive_mutation_id'),
+  archiveExpectedVersion: integer('archive_expected_version'),
+  archivedByHost: uuid('archived_by_host').references(() => hosts.id),
   version: integer('version').notNull().default(1),
-}, (t) => [uniqueIndex('rooms_create_mutation_uq').on(t.createMutationId).where(sql`${t.createMutationId} IS NOT NULL`)]);
+}, (t) => [
+  uniqueIndex('rooms_create_mutation_uq').on(t.createMutationId).where(sql`${t.createMutationId} IS NOT NULL`),
+  uniqueIndex('rooms_archive_mutation_uq').on(t.archiveMutationId).where(sql`${t.archiveMutationId} IS NOT NULL`),
+]);
 
 export const guests = pgTable('guests', {
   id: uuid('id').primaryKey().defaultRandom(),

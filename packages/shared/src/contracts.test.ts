@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { guestArchiveSchema, guestUpdateSchema, isValidTimeZone, productCreateSchema, productUpdateSchema, roomUpdateSchema, settleTabSchema, venueSettingsSchema } from './contracts.js';
+import { guestArchiveSchema, guestUpdateSchema, isValidTimeZone, productCreateSchema, productUpdateSchema, roomArchiveSchema, roomUpdateSchema, settleTabSchema, venueSettingsSchema } from './contracts.js';
 
 describe('venue contracts', () => {
   it('accepts recognized IANA time zones', () => {
@@ -52,5 +52,10 @@ describe('venue contracts', () => {
   it('requires an expected version when updating a room', () => {
     expect(roomUpdateSchema.safeParse({ name: '101' }).success).toBe(false);
     expect(roomUpdateSchema.safeParse({ name: '101', expectedVersion: 1 }).success).toBe(true);
+  });
+
+  it('requires a mutation identifier and version when archiving a room', () => {
+    expect(roomArchiveSchema.safeParse({ mutationId: '00000000-0000-4000-8000-000000000005', expectedVersion: 1 }).success).toBe(true);
+    expect(roomArchiveSchema.safeParse({ expectedVersion: 1 }).success).toBe(false);
   });
 });

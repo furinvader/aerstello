@@ -103,6 +103,17 @@ Feature: Guest device access and self-service
     Then the guest tab has no open items
     And the host has no empty open order for "Luca Rossi"
 
+  Scenario: Lock waits do not shorten the guest undo window
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When a self-service addition waits for a guest lock
+    Then the guest still receives a full undo window
+
+  Scenario: A lost guest logout response clears cached guest data
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When the guest logs out and the committed response is lost
+    Then the guest reaches access request without cached data
+    And replaying guest logout for the revoked session succeeds
+
   Scenario: A guest addition is bound to its displayed price
     Given an approved guest device for "Luca Rossi" in room "102"
     When a self-service price changes after the guest catalog is displayed
