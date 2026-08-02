@@ -7,6 +7,7 @@ import {
   accessApprovalSchema,
   accessRequestSchema,
   categoryCreateSchema,
+  guestCreateSchema,
   guestInputSchema,
   languageSchema,
   loginSchema,
@@ -388,16 +389,20 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/v1/dashboard', { preHandler: requireHost }, async () => {
     const result = await pool.query(
-      `SELECT
+      `WITH active_orders AS (
+         SELECT COALESCE(sum(quantity),0)::int AS "openItemCount",
+                COALESCE(sum(unit_price_cents::bigint*quantity),0)::float8 AS "openValueCents"
+           FROM order_items WHERE status IN ('open','provisional')
+       ) SELECT
         (SELECT count(*)::int FROM access_requests WHERE status='pending') AS "pendingRequests",
         (SELECT count(*)::int FROM rooms WHERE archived_at IS NULL) AS "activeRooms",
         (SELECT count(*)::int FROM guests WHERE archived_at IS NULL) AS "activeGuests",
-        (SELECT COALESCE(sum(quantity),0)::int FROM order_items WHERE status IN ('open','provisional')) AS "openItemCount",
-        (SELECT COALESCE(sum(unit_price_cents::bigint*quantity),0)::float8 FROM order_items WHERE status IN ('open','provisional')) AS "openValueCents",
+        active_orders."openItemCount",active_orders."openValueCents",
         (SELECT COALESCE(sum(b.total_cents::bigint),0)::float8
            FROM bills b CROSS JOIN venue_settings v
           WHERE b.settled_at >= (date_trunc('day',now() AT TIME ZONE v.timezone) AT TIME ZONE v.timezone)
-            AND b.voided_at IS NULL) AS "todaySalesCents"`,
+            AND b.voided_at IS NULL) AS "todaySalesCents"
+        FROM active_orders`,
     );
     return result.rows[0];
   });
@@ -478,17 +483,34 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   )).rows));
 
   app.post('/api/v1/guests', { preHandler: requireHost }, async (request, reply) => {
-    const input = body(guestInputSchema, request);
+    const input = body(guestCreateSchema, request);
     const result = await transaction(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[input.mutationId]);
+      const replay = await client.query<{id:string;name:string;roomId:string;language:string;version:number;hostId:string;commandName:string;commandRoomId:string;commandLanguage:string}>(
+        `SELECT id,name,room_id AS "roomId",language,version,created_by_host AS "hostId",create_name AS "commandName",
+                create_room_id AS "commandRoomId",create_language AS "commandLanguage"
+           FROM guests WHERE create_mutation_id=$1`,[input.mutationId],
+      );
+      if(replay.rows[0]){
+        const prior=replay.rows[0];
+        if(prior.hostId!==request.hostIdentity!.id) throw new HttpError(403,'HOST_MISMATCH','This guest creation belongs to another host.');
+        if(prior.commandName!==input.name||prior.commandRoomId!==input.roomId||prior.commandLanguage!==input.language) throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to a different guest creation command.');
+        const {hostId:_hostId,commandName:_commandName,commandRoomId:_commandRoomId,commandLanguage:_commandLanguage,...guest}=prior;
+        return {guest,event:undefined};
+      }
       const room = await client.query('SELECT id FROM rooms WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [input.roomId]);
       if (!room.rowCount) throw new HttpError(404, 'ROOM_NOT_FOUND', 'Room not found.');
-      const created = await client.query('INSERT INTO guests(name,room_id,language) VALUES ($1,$2,$3) RETURNING id,name,room_id AS "roomId",language,version', [input.name, input.roomId, input.language]);
+      const created = await client.query<{id:string;name:string;roomId:string;language:string;version:number}>(
+        `INSERT INTO guests(name,room_id,language,create_mutation_id,create_name,create_room_id,create_language,created_by_host)
+         VALUES ($1,$2,$3,$4,$1,$2,$3,$5) RETURNING id,name,room_id AS "roomId",language,version`,
+        [input.name,input.roomId,input.language,input.mutationId,request.hostIdentity!.id],
+      );
       const event = await storeEvent('guests.changed', {}, client);
-      return { created, event };
+      return { guest:created.rows[0]!, event };
     });
-    try { publishEvent(result.event); }
-    catch (error) { app.log.error(error, 'Could not publish committed guest event'); }
-    return reply.code(201).send(result.created.rows[0]);
+    if(result.event){try { publishEvent(result.event); }
+    catch (error) { app.log.error(error, 'Could not publish committed guest event'); }}
+    return reply.code(201).send(result.guest);
   });
 
   app.patch('/api/v1/guests/:id', { preHandler: requireHost }, async (request) => {

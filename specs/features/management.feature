@@ -27,6 +27,14 @@ Feature: Venue operations configuration
     When the host creates guest "Ada Test" in room "101"
     Then guest "Ada Test" is listed in room "101"
 
+  Scenario: An uncertain guest creation is recovered idempotently
+    Given an authenticated administrator
+    When the host retries guest creation after its first response is lost
+    Then both guest creation attempts use the same mutation identifier
+    And the uncertain guest fields stay locked for retry
+    And only one recoverable guest exists
+    And changing the replayed guest creation is rejected
+
   Scenario: Committed guests are published to other devices
     Given an authenticated administrator
     When another device creates guest "Realtime Guest" in room "101"

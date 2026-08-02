@@ -12,6 +12,11 @@ Feature: Secure host accounts and devices
     When the host opens the account screen
     Then the current device is listed
 
+  Scenario: Device timestamps follow the selected host language
+    Given an authenticated administrator
+    When the host selects Italian on an English-locale device
+    Then the last-active timestamp uses Italian formatting
+
   Scenario: Changing a password revokes other devices
     Given an authenticated administrator
     When the administrator changes the password with another device logged in

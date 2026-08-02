@@ -80,6 +80,7 @@ Feature: Guest device access and self-service
     When the guest adds "Mineralwasser" from self-service
     Then an undo action is available
     And the undo action disappears after ten seconds
+    And the expired item is no longer marked provisional
 
   Scenario: Every provisional self-service item can be undone
     Given an approved guest device for "Luca Rossi" in room "102"

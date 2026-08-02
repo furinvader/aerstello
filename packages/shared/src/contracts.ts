@@ -46,6 +46,10 @@ export const guestInputSchema = z.object({
   language: languageSchema.default('de'),
 });
 
+export const guestCreateSchema = guestInputSchema.extend({
+  mutationId: z.string().uuid(),
+});
+
 export const categoryInputSchema = z.object({
   name: localizedTextSchema,
 });

@@ -56,10 +56,18 @@ export const guests = pgTable('guests', {
   name: text('name').notNull(),
   roomId: uuid('room_id').notNull().references(() => rooms.id),
   language: language('language').notNull().default('de'),
+  createMutationId: uuid('create_mutation_id'),
+  createName: text('create_name'),
+  createRoomId: uuid('create_room_id').references(() => rooms.id),
+  createLanguage: language('create_language'),
+  createdByHost: uuid('created_by_host').references(() => hosts.id),
   archivedAt: timestamp('archived_at', { withTimezone: true }),
   version: integer('version').notNull().default(1),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-}, (t) => [index('guests_room_idx').on(t.roomId)]);
+}, (t) => [
+  index('guests_room_idx').on(t.roomId),
+  uniqueIndex('guests_create_mutation_uq').on(t.createMutationId).where(sql`${t.createMutationId} IS NOT NULL`),
+]);
 
 export const categories = pgTable('categories', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -172,6 +180,7 @@ export const orderItems = pgTable('order_items', {
   guestUndoMutationId: uuid('guest_undo_mutation_id'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
+  index('order_items_active_status_idx').on(t.status).where(sql`${t.status} IN ('open','provisional')`),
   uniqueIndex('order_items_guest_undo_mutation_uq').on(t.guestUndoMutationId).where(sql`${t.guestUndoMutationId} IS NOT NULL`),
 ]);
 

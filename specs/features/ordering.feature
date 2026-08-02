@@ -74,6 +74,11 @@ Feature: Host order entry and billing
     When the host submits five items in one order line
     Then the dashboard reports five open items
 
+  Scenario: Dashboard open totals exclude billed history
+    Given an authenticated administrator
+    When the host has billed history and one current open item
+    Then the dashboard reports only the current item and value
+
   Scenario: An uncertain settlement response is retried idempotently
     Given an authenticated administrator
     When the host retries settlement after its first response is lost
