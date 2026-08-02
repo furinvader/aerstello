@@ -49,6 +49,12 @@ export function guestGrantToken(requestId: string, grantExchangeId: string): str
     .digest('base64url');
 }
 
+export function accessStatusToken(mutationId: string): string {
+  return createHmac('sha256', config.SESSION_SECRET)
+    .update(`access-status:${mutationId}`)
+    .digest('base64url');
+}
+
 export async function hashPassword(password: string): Promise<string> {
   return argon2.hash(password, { type: argon2.argon2id, memoryCost: 19_456, timeCost: 2, parallelism: 1 });
 }
@@ -93,6 +99,14 @@ export function clearGuestCookie(reply: FastifyReply): void {
   reply.clearCookie(guestCookie, { path: '/' });
 }
 
+export function recordHostSessionActivity(
+  sessionId: string,
+  log: { warn: (bindings: Record<string, unknown>, message: string) => void },
+  update: () => Promise<unknown> = () => pool.query('UPDATE host_sessions SET last_seen_at=now() WHERE id=$1 AND last_seen_at < now()-interval \'5 minutes\'', [sessionId]),
+): void {
+  void update().catch((error: unknown) => log.warn({ error, sessionId }, 'Could not update host session activity'));
+}
+
 export async function authenticateHost(request: FastifyRequest): Promise<HostIdentity | undefined> {
   const token = request.cookies[hostCookie];
   if (!token) return undefined;
@@ -105,7 +119,7 @@ export async function authenticateHost(request: FastifyRequest): Promise<HostIde
   const identity = result.rows[0];
   if (identity) {
     request.hostIdentity = identity;
-    void pool.query('UPDATE host_sessions SET last_seen_at=now() WHERE id=$1 AND last_seen_at < now()-interval \'5 minutes\'', [identity.sessionId]);
+    recordHostSessionActivity(identity.sessionId, request.log);
   }
   return identity;
 }

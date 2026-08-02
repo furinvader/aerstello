@@ -19,6 +19,7 @@ import {
 import { audit, emitEvent, eventBus, type RealtimeEvent } from './events.js';
 import { pool, transaction } from './db.js';
 import {
+  accessStatusToken,
   authenticateHost,
   authenticateGuest,
   clearGuestCookie,
@@ -66,8 +67,8 @@ function mapList<T>(rows: T[]) { return { data: rows }; }
 export function guestRealtimeEvent(event: RealtimeEvent, guestId: string): RealtimeEvent | undefined {
   const isOwnOrder=event.topic==='orders.changed'&&event.payload.guestId===guestId;
   const isOwnAccess=event.topic==='guest-access.changed'&&event.payload.guestId===guestId;
-  const isPublicCatalog=event.topic==='catalog.changed';
-  return isOwnOrder||isOwnAccess||isPublicCatalog?{...event,payload:{}}:undefined;
+  const isPublicInvalidation=['catalog.changed','guests.changed','rooms.changed'].includes(event.topic);
+  return isOwnOrder||isOwnAccess||isPublicInvalidation?{...event,payload:{}}:undefined;
 }
 
 async function activeTab(guestId: string, client: pg.Pool | pg.PoolClient = pool): Promise<string> {
@@ -150,17 +151,33 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.post('/api/v1/public/access-requests', async (request, reply) => {
     const input = body(accessRequestSchema, request);
-    const token = newToken();
+    const token = accessStatusToken(input.mutationId);
     const result = await transaction(async (client) => {
+      const findExisting=async()=> (await client.query<{ id: string; name: string; roomId: string; language: string }>(
+        `SELECT id,name,room_id AS "roomId",language FROM access_requests WHERE mutation_id=$1 FOR UPDATE`,
+        [input.mutationId],
+      )).rows[0];
+      const validate=(stored:{ id: string; name: string; roomId: string; language: string })=>{
+        if (stored.name !== input.name || stored.roomId !== input.roomId || stored.language !== input.language) {
+          throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another access request.');
+        }
+        return stored;
+      };
+      const existing=await findExisting();
+      if(existing)return validate(existing);
       const room = await client.query('SELECT id FROM rooms WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [input.roomId]);
       if (!room.rowCount) throw new HttpError(404, 'ROOM_NOT_FOUND', 'Room not found.');
-      return client.query<{ id: string }>(
-        `INSERT INTO access_requests(name,room_id,language,status_token_hash) VALUES ($1,$2,$3,$4) RETURNING id`,
-        [input.name, input.roomId, input.language, hashToken(token)],
+      const inserted = await client.query<{ id: string; name: string; roomId: string; language: string }>(
+        `INSERT INTO access_requests(mutation_id,name,room_id,language,status_token_hash)
+         VALUES ($1,$2,$3,$4,$5) ON CONFLICT (mutation_id) DO NOTHING
+         RETURNING id,name,room_id AS "roomId",language`,
+        [input.mutationId, input.name, input.roomId, input.language, hashToken(token)],
       );
+      const stored = inserted.rows[0] ?? await findExisting();
+      if (!stored) throw new HttpError(500, 'REQUEST_ERROR', 'Could not create the request.');
+      return validate(stored);
     });
-    const requestId = result.rows[0]?.id;
-    if (!requestId) throw new HttpError(500, 'REQUEST_ERROR', 'Could not create the request.');
+    const requestId = result.id;
     await emitEvent('access-request.changed', { id: requestId });
     return reply.code(201).send({ id: requestId, statusToken: token, status: 'pending' });
   });

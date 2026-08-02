@@ -67,7 +67,7 @@ export const orderBatchSchema = z.object({
 
 export const settleTabSchema = z.object({
   mutationId: z.string().uuid(),
-  expectedItemCount: z.number().int().min(1).max(9_900),
+  expectedItemCount: z.number().int().min(1),
   expectedTotalCents: z.number().int().min(0).max(MAX_MONEY_CENTS),
   paymentMethod: z.enum(['cash', 'card', 'other']),
   note: z.string().trim().max(240).optional(),
@@ -79,6 +79,7 @@ export const voidSchema = z.object({
 });
 
 export const accessRequestSchema = z.object({
+  mutationId: z.string().uuid(),
   name: z.string().trim().min(1).max(120),
   roomId: z.string().uuid(),
   language: languageSchema.default('de'),

@@ -13,5 +13,9 @@ describe('guest realtime event filtering', () => {
       .toEqual({ id: 3, topic: 'catalog.changed', payload: {} });
     expect(guestRealtimeEvent({ id: 4, topic: 'access-request.changed', payload: { id: 'request-a' } }, 'guest-a'))
       .toBeUndefined();
+    expect(guestRealtimeEvent({ id: 5, topic: 'guests.changed', payload: { guestId: 'guest-a' } }, 'guest-a'))
+      .toEqual({ id: 5, topic: 'guests.changed', payload: {} });
+    expect(guestRealtimeEvent({ id: 6, topic: 'rooms.changed', payload: { roomId: 'room-a' } }, 'guest-a'))
+      .toEqual({ id: 6, topic: 'rooms.changed', payload: {} });
   });
 });

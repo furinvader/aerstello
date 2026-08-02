@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { hashPassword, hashToken, verifyPassword } from './security.js';
+import { describe, expect, it, vi } from 'vitest';
+import { hashPassword, hashToken, recordHostSessionActivity, verifyPassword } from './security.js';
 
 describe('security primitives', () => {
   it('hashes opaque tokens deterministically without retaining the token', () => {
@@ -14,5 +14,14 @@ describe('security primitives', () => {
     expect(hash).not.toContain(password);
     await expect(verifyPassword(hash, password)).resolves.toBe(true);
     await expect(verifyPassword(hash, 'wrong-password')).resolves.toBe(false);
+  });
+
+  it('contains nonessential last-seen update failures', async () => {
+    const warn=vi.fn();
+    recordHostSessionActivity('session-a',{warn},()=>Promise.reject(new Error('database unavailable')));
+    await vi.waitFor(()=>expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({sessionId:'session-a'}),
+      'Could not update host session activity',
+    ));
   });
 });

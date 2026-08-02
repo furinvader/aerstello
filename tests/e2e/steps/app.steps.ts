@@ -52,6 +52,12 @@ let pendingRoomArchiveStatus = 0;
 let pendingRoomRequestCount = 0;
 let grantExchangeRequest: { method: string; url: string; body: unknown } | undefined;
 let archivedGrantGuestStatus = 0;
+let retriedAccessRequestMutationIds: string[] = [];
+let pendingAccessRequestCount = 0;
+let retriedGuestAddMutationIds: string[] = [];
+let uncertainGuestProductCounts: Record<string,number> = {};
+let switchedGuestTabCount = 0;
+let aggregateSettlementStatus = 0;
 
 Before(async () => {
   execFileSync('npm',['run','db:seed','-w','@sky-bar/api'],{cwd:process.cwd(),env:{...process.env,E2E_RESET:'true'},stdio:'pipe'});
@@ -135,6 +141,19 @@ Then("Anna's open tab contains one item",async({page})=>{await expect(page.locat
 When('the host settles the tab with cash',async({page})=>{await page.getByRole('button',{name:/Abrechnen/}).click();await page.locator('.choice-grid').getByRole('button',{name:/Bar/}).click();await page.locator('.modal').getByRole('button',{name:'Abrechnen'}).click()});
 Then('the bill shows the venue name {string}',async({page},name:string)=>{await expect(page.locator('.bill-sheet h1')).toHaveText(name)});
 Then('the bill offers printing',async({page})=>{await expect(page.getByRole('button',{name:/Drucken/})).toBeVisible()});
+When('the host stages an order for Anna and confirms a switch to Luca',async({page})=>{
+  const request=page.context().request;
+  const rooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;name:string}[]};
+  const room=rooms.data.find((item)=>item.name==='102')!;
+  const luca=await (await request.post('/api/v1/guests',{headers:csrfHeaders,data:{name:'Luca Rossi',roomId:room.id,language:'de'}})).json() as {id:string};
+  await chooseOrder(page,'Helles','Anna Berger','101');
+  page.once('dialog',(dialog)=>dialog.accept());
+  await page.locator('.room-chips').getByRole('button',{name:'102',exact:true}).click();
+  await page.locator('.guest-list').getByRole('button',{name:/Luca Rossi/}).click();
+  switchedGuestTabCount=((await (await request.get(`/api/v1/guests/${luca.id}/tab`)).json()) as {itemCount:number}).itemCount;
+});
+Then('the staged cart is cleared before Luca is selected',async({page})=>{await expect(page.locator('.catalog-toolbar')).toContainText('0 ausgewählt');await expect(page.getByRole('button',{name:/Bestellung buchen/})).toBeDisabled();await expect(page.locator('.page-header')).toContainText('Luca Rossi')});
+Then("Luca's tab is unchanged",async()=>{expect(switchedGuestTabCount).toBe(0)});
 Given('an authenticated administrator with the order catalog loaded',async({page})=>{await signIn(page);await page.goto('/app/orders/new');await expect(page.getByText('Helles',{exact:true})).toBeVisible()});
 When('the device goes offline and the host submits one {string} for {string} in room {string}',async({page,context},product:string,guest:string,room:string)=>{await page.locator('.room-chips').getByRole('button',{name:room,exact:true}).click();await page.locator('.guest-list').getByRole('button',{name:new RegExp(guest)}).click();await page.locator('.product-tile').getByText(product,{exact:true}).click();await context.setOffline(true);await page.getByRole('button',{name:/Bestellung buchen/}).click()});
 Then('the order is marked as queued for synchronization',async({page,context})=>{await expect(page.getByText(/Synchronisierung vorgemerkt|coda per la sincronizzazione|queued for sync/)).toBeVisible();await context.setOffline(false)});
@@ -161,6 +180,24 @@ When('{string} requests access for room {string}',async({},name:string,room:stri
 Then('the host sees the pending request for {string}',async({page},name:string)=>{await page.goto('/app/requests');await expect(page.getByText(name,{exact:true})).toBeVisible()});
 When('the host approves the request for one day',async({page})=>{await page.getByRole('button',{name:/Genehmigen|Approve/}).click();await page.locator('.modal').getByRole('button',{name:/Genehmigen|Approve/}).click()});
 Then("the guest device opens Luca's guest view without a password",async()=>{await expect(guestPage!).toHaveURL(/\/guest$/,{timeout:10000});await expect(guestPage!.getByRole('heading',{name:'Luca Rossi'})).toBeVisible()});
+When('the guest retries an access request after its first response is lost',async()=>{
+  await guestPage!.goto('/guest/request');
+  await guestPage!.locator('form select').nth(1).selectOption('de');
+  await guestPage!.getByLabel('Name').fill('Retry Guest');
+  await guestPage!.locator('form select').first().selectOption({label:'102'});
+  await guestPage!.evaluate(()=>{
+    const originalFetch=window.fetch.bind(window);let loseResponse=true;const ids:string[]=[];
+    Object.assign(window,{__skyBarAccessRequestRetryIds:ids});
+    window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/public/access-requests')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)};
+  });
+  await guestPage!.locator('form button[type="submit"]').click();
+  await expect(guestPage!.locator('.notice--error')).toBeVisible();
+  await guestPage!.locator('form button[type="submit"]').click();
+  await expect(guestPage!.locator('.request-wait')).toBeVisible();
+  retriedAccessRequestMutationIds=await guestPage!.evaluate(()=>(window as unknown as {__skyBarAccessRequestRetryIds:string[]}).__skyBarAccessRequestRetryIds);
+});
+Then('both access request attempts use the same mutation identifier',async()=>{expect(retriedAccessRequestMutationIds).toHaveLength(2);expect(new Set(retriedAccessRequestMutationIds).size).toBe(1)});
+Then('the host sees only one pending request from that guest',async({page})=>{const requests=await (await page.context().request.get('/api/v1/access-requests')).json() as {data:{name:string}[]};pendingAccessRequestCount=requests.data.filter((item)=>item.name==='Retry Guest').length;expect(pendingAccessRequestCount).toBe(1)});
 
 async function approveGuest(page:import('@playwright/test').Page,browser:import('@playwright/test').Browser,name:string,room:string){await signIn(page);const context=await browser.newContext();guestPage=await context.newPage();await guestPage.goto('/guest/request');await guestPage.locator('form select').nth(1).selectOption('de');await guestPage.getByLabel('Name').fill(name);await guestPage.locator('form select').first().selectOption({label:room});await guestPage.locator('form button[type="submit"]').click();await page.goto('/app/requests');await page.getByRole('button',{name:/Genehmigen|Approve/}).click();await page.locator('.modal').getByRole('button',{name:/Genehmigen|Approve/}).click();await expect(guestPage).toHaveURL(/\/guest$/,{timeout:10000})}
 Given('an approved guest device for {string} in room {string}',async({page,browser},name:string,room:string)=>approveGuest(page,browser,name,room));
@@ -187,7 +224,7 @@ When('an approved guest grant response is lost before its cookie is retained',as
   const request=page.context().request;
   const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
   const room=bootstrap.rooms.find(item=>item.name==='102')!;
-  const created=await (await request.post('/api/v1/public/access-requests',{data:{name:'Recoverable grant',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
+  const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Recoverable grant',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
   expect((await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{expiresAt:new Date(Date.now()+86_400_000).toISOString()}})).status()).toBe(200);
   const same=await browser.newContext({baseURL:e2eBaseURL});const different=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(same,different);
   const grantId=crypto.randomUUID();const statusPath=`/api/v1/public/access-requests/${created.id}/status`;const statusData={token:created.statusToken,grantId};
@@ -202,7 +239,7 @@ Then('retrying the same grant exchange restores guest access',async()=>{expect(r
 Then('a different grant exchange receives no guest access',async()=>{expect(differentGrantStatus).toBe(401)});
 When('an approved guest request expires before its grant exchange',async({page,browser})=>{
   const request=page.context().request;const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};const room=bootstrap.rooms.find(item=>item.name==='102')!;
-  const created=await (await request.post('/api/v1/public/access-requests',{data:{name:'Expired grant',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
+  const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Expired grant',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
   expect((await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{expiresAt:new Date(Date.now()+1500).toISOString()}})).status()).toBe(200);
   await page.waitForTimeout(1800);
   const context=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(context);const response=await context.request.post(`/api/v1/public/access-requests/${created.id}/status`,{data:{token:created.statusToken,grantId:crypto.randomUUID()}});
@@ -212,6 +249,26 @@ Then('the expired exchange is not consumed or granted',async()=>{expect(expiredG
 When("the host revokes Luca's device from the guest directory",async({page})=>{await page.goto('/app/guests');const row=page.locator('.table-row').filter({hasText:'Luca Rossi'});await row.getByRole('button',{name:/Angemeldete Geräte|Dispositivi connessi|Logged-in devices/}).click();await expect(page.locator('.modal .device-list')).toBeVisible();await page.locator('.modal').getByRole('button',{name:/Widerrufen|Revoca|Revoke/}).click();await expect(page.locator('.modal .device-list')).toHaveCount(0)});
 Then("Luca's revoked device loses guest access",async()=>{guestRevokedStatus=(await guestPage!.context().request.get('/api/v1/guest/me')).status();expect(guestRevokedStatus).toBe(401)});
 Then("Luca's open guest view returns to access request without cached data",async()=>{await expect(guestPage!).toHaveURL(/\/guest\/request$/,{timeout:10_000});await expect(guestPage!.getByText('Luca Rossi',{exact:true})).toHaveCount(0)});
+When('the host renames Luca to {string}',async({page},name:string)=>{const request=page.context().request;const guests=await (await request.get('/api/v1/guests')).json() as {data:{id:string;name:string;roomId:string;language:string}[]};const luca=guests.data.find((item)=>item.name==='Luca Rossi')!;expect((await request.patch(`/api/v1/guests/${luca.id}`,{headers:csrfHeaders,data:{name,roomId:luca.roomId,language:luca.language}})).status()).toBe(200)});
+Then("Luca's open guest view shows {string}",async({},name:string)=>{await expect(guestPage!.getByRole('heading',{name})).toBeVisible({timeout:10_000})});
+When('the guest adds two different self-service items',async()=>{await guestPage!.locator('.product-tile').getByText('Mineralwasser',{exact:true}).click();await expect(guestPage!.locator('.undo-toast')).toHaveCount(1);await guestPage!.locator('.product-tile').getByText('Hauskeks',{exact:true}).click()});
+Then('both provisional items offer their own undo action',async()=>{await expect(guestPage!.locator('.undo-toast')).toHaveCount(2);await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toHaveCount(2)});
+When('one guest addition loses its response before another product is added',async()=>{
+  await guestPage!.evaluate(()=>{
+    const originalFetch=window.fetch.bind(window);let loseResponse=true;const entries:{productId:string;mutationId:string}[]=[];
+    Object.assign(window,{__skyBarGuestAddRetryEntries:entries});
+    window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guest/items')&&init?.method==='POST'){const body=JSON.parse(String(init.body)) as {productId:string;mutationId:string};entries.push(body);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)};
+  });
+  await guestPage!.locator('.product-tile').getByText('Mineralwasser',{exact:true}).click();await expect(guestPage!.locator('.notice--error')).toBeVisible();await expect(guestPage!.locator('.undo-toast')).toHaveCount(1);
+  await guestPage!.locator('.product-tile').getByText('Hauskeks',{exact:true}).click();await expect(guestPage!.locator('.undo-toast')).toHaveCount(2);
+  await guestPage!.locator('.product-tile').getByText('Mineralwasser',{exact:true}).click();await expect(guestPage!.locator('.undo-toast')).toHaveCount(2);
+  const entries=await guestPage!.evaluate(()=>(window as unknown as {__skyBarGuestAddRetryEntries:{productId:string;mutationId:string}[]}).__skyBarGuestAddRetryEntries);
+  retriedGuestAddMutationIds=[entries[0]!.mutationId,entries[2]!.mutationId];
+  const tab=await (await guestPage!.context().request.get('/api/v1/guest/tab')).json() as {items:{productName:{de:string};quantity:number}[]};
+  uncertainGuestProductCounts=Object.fromEntries(tab.items.map((item)=>[item.productName.de,item.quantity]));
+});
+Then('retrying the uncertain product reuses its mutation identifier',async()=>{expect(retriedGuestAddMutationIds).toHaveLength(2);expect(new Set(retriedGuestAddMutationIds).size).toBe(1)});
+Then('each selected self-service product is stored once',async()=>{expect(uncertainGuestProductCounts).toEqual(expect.objectContaining({Mineralwasser:1,Hauskeks:1}))});
 
 When('the administrator creates room {string}',async({page},name:string)=>{await page.goto('/app/rooms');await page.getByPlaceholder(/Zimmername|Nome camera|Room name/).fill(name);await page.locator('.inline-form').getByRole('button').click()});
 Then('room {string} is listed',async({page},name:string)=>{await expect(page.getByText(name,{exact:true})).toBeVisible()});
@@ -224,7 +281,7 @@ When('the administrator tries to create product {string} priced {string}',async(
 Then('the product price is rejected before submission',async({page})=>{const price=page.getByLabel(/Preis · EUR|Prezzo · EUR|Price · EUR/);await expect(price).toBeVisible();expect(await price.evaluate((input:HTMLInputElement)=>input.validity.valid)).toBe(false)});
 When('the host attempts to create a guest in an archived room',async({page})=>{const request=page.context().request;const room=await (await request.post('/api/v1/rooms',{headers:csrfHeaders,data:{name:'Archived room'}})).json() as {id:string};expect((await request.delete(`/api/v1/rooms/${room.id}`,{headers:csrfHeaders})).status()).toBe(204);archivedRoomGuestStatus=(await request.post('/api/v1/guests',{headers:csrfHeaders,data:{name:'Late guest',roomId:room.id,language:'de'}})).status()});
 Then('the archived room guest is rejected',async()=>{expect(archivedRoomGuestStatus).toBe(404)});
-When('the administrator archives a room with a pending access request',async({page})=>{const request=page.context().request;const room=await (await request.post('/api/v1/rooms',{headers:csrfHeaders,data:{name:'Pending request room'}})).json() as {id:string};const pending=await (await request.post('/api/v1/public/access-requests',{data:{name:'Waiting guest',roomId:room.id,language:'de'}})).json() as {id:string};pendingRoomArchiveStatus=(await request.delete(`/api/v1/rooms/${room.id}`,{headers:csrfHeaders})).status();const requests=await (await request.get('/api/v1/access-requests')).json() as {data:{id:string}[]};pendingRoomRequestCount=requests.data.filter(item=>item.id===pending.id).length});
+When('the administrator archives a room with a pending access request',async({page})=>{const request=page.context().request;const room=await (await request.post('/api/v1/rooms',{headers:csrfHeaders,data:{name:'Pending request room'}})).json() as {id:string};const pending=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Waiting guest',roomId:room.id,language:'de'}})).json() as {id:string};pendingRoomArchiveStatus=(await request.delete(`/api/v1/rooms/${room.id}`,{headers:csrfHeaders})).status();const requests=await (await request.get('/api/v1/access-requests')).json() as {data:{id:string}[]};pendingRoomRequestCount=requests.data.filter(item=>item.id===pending.id).length});
 Then('room archival is rejected and the request remains pending',async()=>{expect(pendingRoomArchiveStatus).toBe(409);expect(pendingRoomRequestCount).toBe(1)});
 When('guest archival races with a new order',async({page})=>{const {request,me,products}=await operationalData(page);const rooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;name:string}[]};const product=products.data.find((item)=>item.name.de==='Helles')!;guestArchiveRaceStatuses=[];for(let attempt=0;attempt<8;attempt+=1){const guest=await (await request.post('/api/v1/guests',{headers:csrfHeaders,data:{name:`Race guest ${attempt}`,roomId:rooms.data.find((room)=>room.name==='102')!.id,language:'de'}})).json() as {id:string};const [archive,order]=await Promise.all([request.delete(`/api/v1/guests/${guest.id}`,{headers:csrfHeaders}),request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})]);guestArchiveRaceStatuses.push([archive.status(),order.status()])}});
 Then('either the archive or the order is rejected',async()=>{for(const [archive,order] of guestArchiveRaceStatuses){expect([[204,404],[409,201]]).toContainEqual([archive,order])}});
@@ -252,7 +309,7 @@ When('two devices exchange the same approved access request token',async({page,b
   const request=page.context().request;
   const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
   const room=bootstrap.rooms.find((item)=>item.name==='102')!;
-  const created=await (await request.post('/api/v1/public/access-requests',{data:{name:'One-time guest',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
+  const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'One-time guest',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
   await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{expiresAt:new Date(Date.now()+86_400_000).toISOString()}});
   const first=await browser.newContext({baseURL:e2eBaseURL});const second=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(first,second);
   await Promise.all([
@@ -268,7 +325,7 @@ When('an approved request is exchanged for a guest grant',async({page,browser})=
   const request=page.context().request;
   const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
   const room=bootstrap.rooms.find(item=>item.name==='102')!;
-  const created=await (await request.post('/api/v1/public/access-requests',{data:{name:'Body grant',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
+  const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Body grant',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
   expect((await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{expiresAt:new Date(Date.now()+86_400_000).toISOString()}})).status()).toBe(200);
   const context=await browser.newContext({baseURL:e2eBaseURL});
   extraContexts.push(context);
@@ -282,14 +339,14 @@ When('an approved request is exchanged for a guest grant',async({page,browser})=
 });
 Then('the grant token is sent in the request body',async()=>{expect(grantExchangeRequest?.method).toBe('POST');expect(new URL(grantExchangeRequest!.url).search).toBe('');expect(grantExchangeRequest?.body).toEqual(expect.objectContaining({token:expect.any(String),grantId:expect.any(String)}))});
 
-When('guest archival races with their first grant exchange',async({page,browser})=>{const request=page.context().request;const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};const room=bootstrap.rooms.find(item=>item.name==='102')!;const created=await (await request.post('/api/v1/public/access-requests',{data:{name:'Archived grant race',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};const approved=await (await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{expiresAt:new Date(Date.now()+86_400_000).toISOString()}})).json() as {guestId:string};const context=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(context);const [,exchange]=await Promise.all([request.delete(`/api/v1/guests/${approved.guestId}`,{headers:csrfHeaders}),context.request.post(`/api/v1/public/access-requests/${created.id}/status`,{data:{token:created.statusToken,grantId:crypto.randomUUID()}})]);expect(exchange.status()).toBe(200);archivedGrantGuestStatus=(await context.request.get('/api/v1/guest/me')).status()});
+When('guest archival races with their first grant exchange',async({page,browser})=>{const request=page.context().request;const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};const room=bootstrap.rooms.find(item=>item.name==='102')!;const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Archived grant race',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};const approved=await (await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{expiresAt:new Date(Date.now()+86_400_000).toISOString()}})).json() as {guestId:string};const context=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(context);const [,exchange]=await Promise.all([request.delete(`/api/v1/guests/${approved.guestId}`,{headers:csrfHeaders}),context.request.post(`/api/v1/public/access-requests/${created.id}/status`,{data:{token:created.statusToken,grantId:crypto.randomUUID()}})]);expect(exchange.status()).toBe(200);archivedGrantGuestStatus=(await context.request.get('/api/v1/guest/me')).status()});
 Then('no archived guest session remains active',async()=>{expect(archivedGrantGuestStatus).toBe(401)});
 
 When('the host links a room {string} request to a guest in room {string}',async({page},requestRoom:string,guestRoom:string)=>{
   const request=page.context().request;
   const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
   const rooms=bootstrap.rooms;
-  const created=await (await request.post('/api/v1/public/access-requests',{data:{name:'Room-bound guest',roomId:rooms.find((room)=>room.name===requestRoom)!.id,language:'de'}})).json() as {id:string};
+  const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Room-bound guest',roomId:rooms.find((room)=>room.name===requestRoom)!.id,language:'de'}})).json() as {id:string};
   const guests=await (await request.get('/api/v1/guests')).json() as {data:{id:string;roomName:string}[]};
   const response=await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{guestId:guests.data.find((guest)=>guest.roomName===guestRoom)!.id,expiresAt:new Date(Date.now()+86_400_000).toISOString()}});
   crossRoomApprovalStatus=response.status();
@@ -298,7 +355,7 @@ Then('the cross-room approval is rejected',async()=>{expect(crossRoomApprovalSta
 
 When('linked approval races with moving its guest to another room',async({page})=>{
   const request=page.context().request;const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};const source=bootstrap.rooms.find(item=>item.name==='102')!;const target=bootstrap.rooms.find(item=>item.name==='101')!;approvalMoveRaceStatuses=[];
-  for(let attempt=0;attempt<8;attempt+=1){const guest=await (await request.post('/api/v1/guests',{headers:csrfHeaders,data:{name:`Approval race ${attempt}`,roomId:source.id,language:'de'}})).json() as {id:string};const access=await (await request.post('/api/v1/public/access-requests',{data:{name:`Approval race ${attempt}`,roomId:source.id,language:'de'}})).json() as {id:string};const [approval,move]=await Promise.all([request.post(`/api/v1/access-requests/${access.id}/approve`,{headers:csrfHeaders,data:{guestId:guest.id,expiresAt:new Date(Date.now()+86_400_000).toISOString()}}),request.patch(`/api/v1/guests/${guest.id}`,{headers:csrfHeaders,data:{name:`Approval race ${attempt}`,roomId:target.id,language:'de'}})]);approvalMoveRaceStatuses.push([approval.status(),move.status()])}
+  for(let attempt=0;attempt<8;attempt+=1){const guest=await (await request.post('/api/v1/guests',{headers:csrfHeaders,data:{name:`Approval race ${attempt}`,roomId:source.id,language:'de'}})).json() as {id:string};const access=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:`Approval race ${attempt}`,roomId:source.id,language:'de'}})).json() as {id:string};const [approval,move]=await Promise.all([request.post(`/api/v1/access-requests/${access.id}/approve`,{headers:csrfHeaders,data:{guestId:guest.id,expiresAt:new Date(Date.now()+86_400_000).toISOString()}}),request.patch(`/api/v1/guests/${guest.id}`,{headers:csrfHeaders,data:{name:`Approval race ${attempt}`,roomId:target.id,language:'de'}})]);approvalMoveRaceStatuses.push([approval.status(),move.status()])}
 });
 Then('approval either wins before the move or rejects the moved guest',async()=>{for(const statuses of approvalMoveRaceStatuses)expect([[200,200],[404,200]]).toContainEqual(statuses)});
 
@@ -370,6 +427,14 @@ When('the host submits orders beyond the maximum tab total',async({page})=>{
   expect((await submit(99)).status()).toBe(201);expect((await submit(99)).status()).toBe(201);tabTotalBeforeExcess=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {totalCents:number}).totalCents;excessiveOrderStatus=(await submit(17)).status();tabTotalAfterExcess=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {totalCents:number}).totalCents;
 });
 Then('the excessive order is rejected without changing the tab',async()=>{expect(excessiveOrderStatus).toBe(409);expect(tabTotalBeforeExcess).toBe(1_980_000_000);expect(tabTotalAfterExcess).toBe(tabTotalBeforeExcess)});
+When('a tab accumulates more than 9900 zero-cost items across valid batches',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const categoryId=products.data[0]!.categoryId;
+  const product=await (await request.post('/api/v1/products',{headers:csrfHeaders,data:{name:{de:'Freiprodukt',it:'',en:''},priceCents:0,categoryId,enabled:true,selfServiceOnly:false}})).json() as {id:string};
+  const catalog=await (await request.get('/api/v1/products')).json() as {catalogVersion:number};let tabId='';
+  for(let index=0;index<101;index+=1){const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:catalog.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:99}]}})).json() as {tabId:string};tabId=order.tabId;}
+  aggregateSettlementStatus=(await request.post(`/api/v1/tabs/${tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:9_999,expectedTotalCents:0,paymentMethod:'cash'}})).status();
+});
+Then('the aggregate tab can still be settled',async()=>{expect(aggregateSettlementStatus).toBe(200)});
 
 When('the venue has more bills than one archive page',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const product=products.data.find((item)=>item.name.de==='Helles')!;for(let index=0;index<51;index+=1){const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {number:string};if(index===0)oldestBillNumber=Number(bill.number)}const firstPage=await (await request.get('/api/v1/bills?page=1&pageSize=50')).json() as {data:{number:number}[]};expect(firstPage.data.some((bill)=>bill.number===oldestBillNumber)).toBe(false)});
 Then('the host can find the oldest bill by its number',async({page})=>{await page.goto('/app/bills');const [response]=await Promise.all([page.waitForResponse((candidate)=>candidate.url().includes(`/api/v1/bills?search=${oldestBillNumber}&`)),page.getByPlaceholder(/Nach Gast|Cerca per|Search by/).fill(String(oldestBillNumber))]);const result=await response.json() as {data:{id:string;number:number}[]};expect(result.data.map((bill)=>bill.number)).toContain(oldestBillNumber);const found=result.data.find((bill)=>bill.number===oldestBillNumber)!;await expect(page.locator(`a[href="/app/bills/${found.id}"]`)).toBeVisible()});

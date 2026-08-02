@@ -166,6 +166,7 @@ export const billItems = pgTable('bill_items', {
 
 export const accessRequests = pgTable('access_requests', {
   id: uuid('id').primaryKey().defaultRandom(),
+  mutationId: uuid('mutation_id').notNull().unique(),
   name: text('name').notNull(),
   roomId: uuid('room_id').notNull().references(() => rooms.id),
   language: language('language').notNull().default('de'),

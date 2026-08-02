@@ -11,6 +11,12 @@ Feature: Host order entry and billing
     Then the bill shows the venue name "Hotel Aurora"
     And the bill offers printing
 
+  Scenario: Changing guests cannot transfer a staged cart
+    Given an authenticated administrator
+    When the host stages an order for Anna and confirms a switch to Luca
+    Then the staged cart is cleared before Luca is selected
+    And Luca's tab is unchanged
+
   Scenario: An offline host order is queued for synchronization
     Given an authenticated administrator with the order catalog loaded
     When the device goes offline and the host submits one "Helles" for "Anna Berger" in room "101"
@@ -55,6 +61,11 @@ Feature: Host order entry and billing
     Given an authenticated administrator
     When the host submits orders beyond the maximum tab total
     Then the excessive order is rejected without changing the tab
+
+  Scenario: Aggregate item counts remain billable across batches
+    Given an authenticated administrator
+    When a tab accumulates more than 9900 zero-cost items across valid batches
+    Then the aggregate tab can still be settled
 
   Scenario: Older bills remain discoverable
     Given an authenticated administrator

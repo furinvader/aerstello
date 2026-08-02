@@ -8,6 +8,12 @@ Feature: Guest device access and self-service
     When the host approves the request for one day
     Then the guest device opens Luca's guest view without a password
 
+  Scenario: An uncertain access request response is recoverable
+    Given an authenticated administrator and a separate guest device
+    When the guest retries an access request after its first response is lost
+    Then both access request attempts use the same mutation identifier
+    And the host sees only one pending request from that guest
+
   Scenario: A lost grant response can be recovered by the requesting device
     Given an authenticated administrator
     When an approved guest grant response is lost before its cookie is retained
@@ -29,6 +35,11 @@ Feature: Guest device access and self-service
     When the host revokes Luca's device from the guest directory
     Then Luca's open guest view returns to access request without cached data
 
+  Scenario: Guest identity changes update the open guest application
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When the host renames Luca to "Luca Nuovo"
+    Then Luca's open guest view shows "Luca Nuovo"
+
   Scenario: A guest can undo a self-service item for ten seconds
     Given an approved guest device for "Luca Rossi" in room "102"
     When the guest adds "Mineralwasser" from self-service
@@ -42,6 +53,17 @@ Feature: Guest device access and self-service
     When the guest adds "Mineralwasser" from self-service
     Then an undo action is available
     And the undo action disappears after ten seconds
+
+  Scenario: Every provisional self-service item can be undone
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When the guest adds two different self-service items
+    Then both provisional items offer their own undo action
+
+  Scenario: Uncertain self-service additions retain their mutation
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When one guest addition loses its response before another product is added
+    Then retrying the uncertain product reuses its mutation identifier
+    And each selected self-service product is stored once
 
   Scenario: An uncertain guest undo response is retried idempotently
     Given an approved guest device for "Luca Rossi" in room "102"

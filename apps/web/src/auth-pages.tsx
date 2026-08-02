@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Redirect, useLocation, useSearch } from 'wouter';
 import { api, apiErrorMessage, json } from './api';
@@ -32,13 +32,19 @@ export function LoginPage() {
 
 interface Bootstrap { venue: { name: string; defaultLanguage: Language }; rooms: Pick<Room, 'id'|'name'>[] }
 interface PendingAccess { id: string; token: string; grantId: string }
+interface AccessSubmission { key: string; mutationId: string; name: string; roomId: string; language: Language }
 export function RequestAccessPage() {
   const { t, language, setLanguage, applyDefaultLanguage } = useI18n();
   const search = useSearch();
   const params = new URLSearchParams(search);
   const bootstrap = useQuery<Bootstrap>({ queryKey: ['public-bootstrap'], queryFn: () => api('/public/bootstrap') });
-  const [name, setName] = useState('');
-  const [roomId, setRoomId] = useState(params.get('room') ?? '');
+  const submission = useRef<AccessSubmission | null>((() => {
+    const raw=sessionStorage.getItem('skybar-access-submission');
+    if(!raw)return null;
+    try{return JSON.parse(raw) as AccessSubmission;}catch{sessionStorage.removeItem('skybar-access-submission');return null;}
+  })());
+  const [name, setName] = useState(submission.current?.name ?? '');
+  const [roomId, setRoomId] = useState(submission.current?.roomId ?? params.get('room') ?? '');
   const [pending, setPending] = useState<PendingAccess | null>(() => {
     const raw = sessionStorage.getItem('skybar-pending');
     if (!raw) return null;
@@ -59,6 +65,9 @@ export function RequestAccessPage() {
     if (bootstrap.data?.venue.defaultLanguage) applyDefaultLanguage(bootstrap.data.venue.defaultLanguage);
   }, [applyDefaultLanguage, bootstrap.data?.venue.defaultLanguage]);
   useEffect(() => {
+    if (submission.current?.language) setLanguage(submission.current.language);
+  }, [setLanguage]);
+  useEffect(() => {
     if (!pending) return;
     const poll = async () => {
       try {
@@ -74,7 +83,11 @@ export function RequestAccessPage() {
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setError('');
     try {
-      const result = await api<{ id: string; statusToken: string }>('/public/access-requests', { method: 'POST', body: json({ name, roomId, language }) });
+      const key=JSON.stringify({name,roomId,language});
+      if(submission.current?.key!==key) submission.current={key,mutationId:crypto.randomUUID(),name,roomId,language};
+      sessionStorage.setItem('skybar-access-submission',JSON.stringify(submission.current));
+      const result = await api<{ id: string; statusToken: string }>('/public/access-requests', { method: 'POST', body: json({ mutationId:submission.current.mutationId,name,roomId,language }) });
+      sessionStorage.removeItem('skybar-access-submission');submission.current=null;
       const next = { id: result.id, token: result.statusToken, grantId: crypto.randomUUID() }; sessionStorage.setItem('skybar-pending', JSON.stringify(next)); setPending(next);
     } catch (caught) { setError(apiErrorMessage(caught, language, t('requestFailed'))); }
   };
