@@ -486,11 +486,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.put('/api/v1/rooms/order', { preHandler: requireAdmin }, async (request) => {
-    const ids = body(z.object({ ids: z.array(z.string().uuid()).min(1).refine(values=>new Set(values).size===values.length) }), request).ids;
+    const input = body(z.object({ rooms: z.array(z.object({id:z.string().uuid(),expectedVersion:z.number().int().positive()})).min(1)
+      .refine(values=>new Set(values.map(room=>room.id)).size===values.length) }), request);
     await transaction(async (client) => {
-      const locked=await client.query('SELECT id FROM rooms WHERE id=ANY($1::uuid[]) AND archived_at IS NULL ORDER BY id FOR UPDATE',[ids]);
-      if(locked.rowCount!==ids.length)throw new HttpError(409,'ROOM_SET_CHANGED','The active room set changed. Reload the rooms and try again.');
-      for (const [position, roomId] of ids.entries()) await client.query('UPDATE rooms SET position=$1 WHERE id=$2 AND archived_at IS NULL', [position, roomId]);
+      const locked=await client.query<{id:string;version:number}>('SELECT id,version FROM rooms WHERE archived_at IS NULL ORDER BY id FOR UPDATE');
+      const requested=new Map(input.rooms.map(room=>[room.id,room.expectedVersion]));
+      if(locked.rowCount!==input.rooms.length||locked.rows.some(room=>!requested.has(room.id)))throw new HttpError(409,'ROOM_SET_CHANGED','The active room set changed. Reload the rooms and try again.');
+      if(locked.rows.some(room=>requested.get(room.id)!==room.version))throw new HttpError(409,'ROOM_ORDER_CHANGED','The room order changed. Reload the rooms and try again.');
+      for (const [position, room] of input.rooms.entries()) await client.query('UPDATE rooms SET position=$1,version=version+1 WHERE id=$2 AND archived_at IS NULL', [position, room.id]);
     });
     await emitEvent('rooms.changed', {});
     return { ok: true };
@@ -963,12 +966,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const duplicate = await replay();
       if (duplicate) return duplicate;
       const tab = await client.query<{
-        guestId: string; guestName: string; roomName: string; venueName: string; venueTimezone: string;
+        guestId: string; guestName: string; roomName: string; venueName: string; venueTimezone: string; hostName: string;
       }>(
-        `SELECT t.guest_id AS "guestId",g.name AS "guestName",r.name AS "roomName",v.name AS "venueName",v.timezone AS "venueTimezone"
+        `SELECT t.guest_id AS "guestId",g.name AS "guestName",r.name AS "roomName",v.name AS "venueName",v.timezone AS "venueTimezone",h.name AS "hostName"
            FROM order_tabs t JOIN guests g ON g.id=t.guest_id JOIN rooms r ON r.id=g.room_id CROSS JOIN venue_settings v
+           JOIN hosts h ON h.id=$2
           WHERE t.id=$1 AND t.status='open' FOR UPDATE OF t`,
-        [tabId],
+        [tabId,request.hostIdentity!.id],
       );
       const current = tab.rows[0];
       if (!current) {
@@ -996,9 +1000,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         throw new HttpError(409, 'TAB_CHANGED', 'The tab changed after settlement was opened. Review the current items and total.');
       }
       const created = await client.query<{ id: string; number: string }>(
-        `INSERT INTO bills(tab_id,guest_id,host_id,mutation_id,venue_name,venue_timezone,guest_name,room_name,total_cents,payment_method,payment_note)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id,number::text AS number`,
-        [tabId, current.guestId, request.hostIdentity!.id, input.mutationId, current.venueName, current.venueTimezone, current.guestName, current.roomName, total, input.paymentMethod, input.note ?? null],
+        `INSERT INTO bills(tab_id,guest_id,host_id,mutation_id,venue_name,venue_timezone,guest_name,room_name,host_name,total_cents,payment_method,payment_note)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id,number::text AS number`,
+        [tabId, current.guestId, request.hostIdentity!.id, input.mutationId, current.venueName, current.venueTimezone, current.guestName, current.roomName, current.hostName, total, input.paymentMethod, input.note ?? null],
       );
       const newBill = created.rows[0]!;
       for (const item of items.rows) {
@@ -1059,8 +1063,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const bill = await pool.query(
       `SELECT b.id,b.number::text AS number,b.venue_name AS "venueName",b.venue_timezone AS "venueTimezone",b.guest_name AS "guestName",b.room_name AS "roomName",
               b.total_cents AS "totalCents",b.payment_method AS "paymentMethod",b.payment_note AS "paymentNote",
-              b.settled_at AS "settledAt",b.voided_at AS "voidedAt",b.void_reason AS "voidReason",h.name AS "hostName"
-         FROM bills b JOIN hosts h ON h.id=b.host_id WHERE b.id=$1`, [billId],
+              b.settled_at AS "settledAt",b.voided_at AS "voidedAt",b.void_reason AS "voidReason",b.host_name AS "hostName"
+         FROM bills b WHERE b.id=$1`, [billId],
     );
     if (!bill.rows[0]) throw new HttpError(404, 'BILL_NOT_FOUND', 'Bill not found.');
     const items = await pool.query(

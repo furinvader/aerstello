@@ -23,6 +23,7 @@ Feature: Venue operations configuration
     Given an authenticated administrator
     When the administrator retries room creation after its first response is lost
     Then both room creation attempts use the same mutation identifier
+    And the uncertain room name stays locked for retry
     And only one recoverable room exists
     And changing the replayed room creation is rejected
 
@@ -30,6 +31,7 @@ Feature: Venue operations configuration
     Given an authenticated administrator
     When the administrator retries category creation after its first response is lost
     Then both category creation attempts use the same mutation identifier
+    And the uncertain category name stays locked for retry
     And only one recoverable category exists
     And changing the replayed category creation is rejected
 
@@ -77,6 +79,7 @@ Feature: Venue operations configuration
     Given an authenticated administrator
     When the administrator retries product creation after its first response is lost
     Then both product creation attempts use the same mutation identifier
+    And the uncertain product fields stay locked for retry
     And only one recoverable product exists
     And changing the replayed product creation is rejected
 
@@ -110,6 +113,12 @@ Feature: Venue operations configuration
     Given an authenticated administrator
     When administrators submit conflicting room orders concurrently
     Then every room reorder completes without a server error
+
+  Scenario: A stale room reorder cannot overwrite a newer order
+    Given an authenticated administrator
+    When a room reorder response is lost before another administrator reorders rooms
+    Then retrying the stale room reorder is rejected
+    And the newer room order remains configured
 
   Scenario: Guest archival and new orders are serialized
     Given an authenticated administrator

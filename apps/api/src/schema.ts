@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { bigint, boolean, index, integer, jsonb, pgEnum, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid, type AnyPgColumn } from 'drizzle-orm/pg-core';
+import { bigint, boolean, check, index, integer, jsonb, pgEnum, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid, type AnyPgColumn } from 'drizzle-orm/pg-core';
 
 export const role = pgEnum('host_role', ['admin', 'staff']);
 export const language = pgEnum('language', ['de', 'it', 'en']);
@@ -16,7 +16,7 @@ export const venueSettings = pgTable('venue_settings', {
   catalogVersion: integer('catalog_version').notNull().default(1),
   version: integer('version').notNull().default(1),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => [check('venue_settings_id_check', sql`${t.id} = 1`)]);
 
 export const hosts = pgTable('hosts', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -43,7 +43,7 @@ export const hosts = pgTable('hosts', {
 export const hostSessions = pgTable('host_sessions', {
   id: uuid('id').primaryKey().defaultRandom(),
   hostId: uuid('host_id').notNull().references(() => hosts.id),
-  tokenHash: text('token_hash').notNull().unique(),
+  tokenHash: text('token_hash').notNull().unique('host_sessions_token_hash_key'),
   userAgent: text('user_agent').notNull().default('Unknown device'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
@@ -103,12 +103,12 @@ export const products = pgTable('products', {
   catalogVersion: integer('catalog_version').notNull(),
   archivedAt: timestamp('archived_at', { withTimezone: true }),
   version: integer('version').notNull().default(1),
-});
+}, (t) => [check('products_price_cents_check', sql`${t.priceCents} >= 0`)]);
 
 export const productCreateCommands = pgTable('product_create_commands', {
   mutationId: uuid('mutation_id').primaryKey(),
   hostId: uuid('host_id').notNull().references(() => hosts.id),
-  productId: uuid('product_id').unique().references(() => products.id),
+  productId: uuid('product_id').unique('product_create_commands_product_id_key').references(() => products.id),
   categoryId: uuid('category_id').notNull().references(() => categories.id),
   name: jsonb('name').notNull(),
   description: jsonb('description'),
@@ -137,7 +137,7 @@ export const orderTabs = pgTable('order_tabs', {
 
 export const orderBatches = pgTable('order_batches', {
   id: uuid('id').primaryKey().defaultRandom(),
-  mutationId: uuid('mutation_id').notNull().unique(),
+  mutationId: uuid('mutation_id').notNull().unique('order_batches_mutation_id_key'),
   tabId: uuid('tab_id').notNull().references(() => orderTabs.id),
   hostId: uuid('host_id').notNull().references(() => hosts.id),
   command: jsonb('command'),
@@ -147,15 +147,16 @@ export const orderBatches = pgTable('order_batches', {
 
 export const bills = pgTable('bills', {
   id: uuid('id').primaryKey().defaultRandom(),
-  number: bigint('number', { mode: 'bigint' }).generatedAlwaysAsIdentity(),
+  number: bigint('number', { mode: 'bigint' }).generatedAlwaysAsIdentity().unique('bills_number_key'),
   tabId: uuid('tab_id').notNull().references(() => orderTabs.id),
   guestId: uuid('guest_id').notNull().references(() => guests.id),
   hostId: uuid('host_id').notNull().references(() => hosts.id),
-  mutationId: uuid('mutation_id').notNull().unique(),
+  mutationId: uuid('mutation_id').notNull().unique('bills_mutation_id_key'),
   venueName: text('venue_name').notNull(),
   venueTimezone: text('venue_timezone').notNull(),
   guestName: text('guest_name').notNull(),
   roomName: text('room_name').notNull(),
+  hostName: text('host_name').notNull(),
   totalCents: integer('total_cents').notNull(),
   paymentMethod: paymentMethod('payment_method').notNull(),
   paymentNote: text('payment_note'),
@@ -180,20 +181,23 @@ export const orderItems = pgTable('order_items', {
   source: itemSource('source').notNull(),
   status: itemStatus('status').notNull().default('open'),
   submittedByHost: uuid('submitted_by_host').references(() => hosts.id),
-  submittedByGuestSession: uuid('submitted_by_guest_session'),
+  submittedByGuestSession: uuid('submitted_by_guest_session').references((): AnyPgColumn => guestSessions.id),
   provisionalUntil: timestamp('provisional_until', { withTimezone: true }),
-  guestMutationId: uuid('guest_mutation_id').unique(),
+  guestMutationId: uuid('guest_mutation_id').unique('order_items_guest_mutation_id_key'),
   guestExpectedPriceCents: integer('guest_expected_price_cents'),
   guestExpectedProductVersion: integer('guest_expected_product_version'),
   billId: uuid('bill_id').references(() => bills.id),
   voidedAt: timestamp('voided_at', { withTimezone: true }),
   voidedByHost: uuid('voided_by_host').references(() => hosts.id),
   voidReason: text('void_reason'),
-  hostVoidMutationId: uuid('host_void_mutation_id').unique(),
+  hostVoidMutationId: uuid('host_void_mutation_id'),
   guestUndoMutationId: uuid('guest_undo_mutation_id'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
+  check('order_items_quantity_check', sql`${t.quantity} > 0`),
+  index('order_items_tab_idx').on(t.tabId),
   index('order_items_active_status_idx').on(t.status).where(sql`${t.status} IN ('open','provisional')`),
+  uniqueIndex('order_items_host_void_mutation_uq').on(t.hostVoidMutationId).where(sql`${t.hostVoidMutationId} IS NOT NULL`),
   uniqueIndex('order_items_guest_undo_mutation_uq').on(t.guestUndoMutationId).where(sql`${t.guestUndoMutationId} IS NOT NULL`),
 ]);
 
@@ -205,16 +209,16 @@ export const billItems = pgTable('bill_items', {
   unitPriceCents: integer('unit_price_cents').notNull(),
   quantity: integer('quantity').notNull(),
   source: itemSource('source').notNull(),
-});
+}, (t) => [index('bill_items_bill_idx').on(t.billId)]);
 
 export const accessRequests = pgTable('access_requests', {
   id: uuid('id').primaryKey().defaultRandom(),
-  mutationId: uuid('mutation_id').notNull().unique(),
+  mutationId: uuid('mutation_id').notNull(),
   name: text('name').notNull(),
   roomId: uuid('room_id').notNull().references(() => rooms.id),
   language: language('language').notNull().default('de'),
   status: requestStatus('status').notNull().default('pending'),
-  statusTokenHash: text('status_token_hash').notNull().unique(),
+  statusTokenHash: text('status_token_hash').notNull().unique('access_requests_status_token_hash_key'),
   guestId: uuid('guest_id').references(() => guests.id),
   requestedAt: timestamp('requested_at', { withTimezone: true }).notNull().defaultNow(),
   resolvedAt: timestamp('resolved_at', { withTimezone: true }),
@@ -227,6 +231,7 @@ export const accessRequests = pgTable('access_requests', {
   statusTokenConsumedAt: timestamp('status_token_consumed_at', { withTimezone: true }),
   grantExchangeId: uuid('grant_exchange_id'),
 }, (t) => [
+  uniqueIndex('access_requests_mutation_id_uq').on(t.mutationId),
   uniqueIndex('access_requests_approval_mutation_uq').on(t.approvalMutationId).where(sql`${t.approvalMutationId} IS NOT NULL`),
   uniqueIndex('access_requests_denial_mutation_uq').on(t.denialMutationId).where(sql`${t.denialMutationId} IS NOT NULL`),
 ]);
@@ -235,7 +240,7 @@ export const guestSessions = pgTable('guest_sessions', {
   id: uuid('id').primaryKey().defaultRandom(),
   guestId: uuid('guest_id').notNull().references(() => guests.id),
   requestId: uuid('request_id').notNull().references(() => accessRequests.id),
-  tokenHash: text('token_hash').notNull().unique(),
+  tokenHash: text('token_hash').notNull().unique('guest_sessions_token_hash_key'),
   userAgent: text('user_agent').notNull().default('Unknown device'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),

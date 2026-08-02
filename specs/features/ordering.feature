@@ -160,6 +160,11 @@ Feature: Host order entry and billing
     When the venue timezone changes after a bill is settled
     Then the bill date uses its snapshotted venue timezone
 
+  Scenario: A bill keeps its settlement-time host name
+    Given an authenticated administrator
+    When the settling host changes their name after billing
+    Then the bill still shows the original host name
+
   Scenario: A voided bill keeps its correction when printed
     Given an authenticated administrator
     When the host opens a voided bill for printing
