@@ -100,7 +100,7 @@ async function ensureTabTotalWithinRange(tabId: string, additionalCents: bigint,
   }
 }
 
-async function tabDetail(guestId: string) {
+async function tabDetail(guestId: string, guestSessionId?: string) {
   const tab = await pool.query(
     `SELECT t.id,g.id AS "guestId",g.name AS "guestName",r.name AS "roomName",t.opened_at AS "openedAt"
        FROM order_tabs t JOIN guests g ON g.id=t.guest_id JOIN rooms r ON r.id=g.room_id
@@ -111,9 +111,10 @@ async function tabDetail(guestId: string) {
   await pool.query(`UPDATE order_items SET status='open' WHERE tab_id=$1 AND status='provisional' AND provisional_until<=now()`, [tab.rows[0].id]);
   const items = await pool.query(
     `SELECT id,product_id AS "productId",product_name AS "productName",unit_price_cents AS "unitPriceCents",quantity,
-            source,status,provisional_until AS "provisionalUntil",created_at AS "createdAt"
+            source,status,provisional_until AS "provisionalUntil",created_at AS "createdAt",
+            COALESCE(submitted_by_guest_session=$2 AND status='provisional' AND provisional_until>now(),false) AS "canUndo"
        FROM order_items WHERE tab_id=$1 AND status IN ('open','provisional') ORDER BY created_at`,
-    [tab.rows[0].id],
+    [tab.rows[0].id, guestSessionId ?? null],
   );
   const totalCents = items.rows.reduce((sum, item) => sum + Number(item.unitPriceCents) * Number(item.quantity), 0);
   const itemCount = items.rows.reduce((sum, item) => sum + Number(item.quantity), 0);
@@ -324,7 +325,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get('/api/v1/hosts', { preHandler: requireAdmin }, async () => mapList((await pool.query(
-    `SELECT id,email,name,role,language,active,created_at AS "createdAt" FROM hosts ORDER BY active DESC,name`,
+    `SELECT id,email,name,role,language,active,version,created_at AS "createdAt" FROM hosts ORDER BY active DESC,name`,
   )).rows));
 
   app.post('/api/v1/hosts', { preHandler: requireAdmin }, async (request, reply) => {
@@ -339,10 +340,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const host=await transaction(async(client)=>{
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[input.mutationId]);
       const replay=await client.query<{
-        id:string;email:string;name:string;role:string;language:string;active:boolean;hostId:string;
+        id:string;email:string;name:string;role:string;language:string;active:boolean;version:number;hostId:string;
         commandEmail:string;commandName:string;commandPasswordHash:string;commandRole:string;commandLanguage:string;
       }>(
-        `SELECT id,email,name,role,language,active,created_by_host AS "hostId",create_email AS "commandEmail",
+        `SELECT id,email,name,role,language,active,version,created_by_host AS "hostId",create_email AS "commandEmail",
                 create_name AS "commandName",create_password_hash AS "commandPasswordHash",create_role AS "commandRole",
                 create_language AS "commandLanguage" FROM hosts WHERE create_mutation_id=$1`,[input.mutationId],
       );
@@ -353,12 +354,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         if(prior.commandEmail!==input.email||prior.commandName!==input.name||!samePassword||prior.commandRole!==input.role||prior.commandLanguage!==input.language){
           throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to a different account command.');
         }
-        return {id:prior.id,email:prior.email,name:prior.name,role:prior.role,language:prior.language,active:prior.active};
+        return {id:prior.id,email:prior.email,name:prior.name,role:prior.role,language:prior.language,active:prior.active,version:prior.version};
       }
       const passwordHash=await hashPassword(input.password);
       const result=await client.query(
         `INSERT INTO hosts(email,name,password_hash,role,language,create_mutation_id,create_email,create_name,create_password_hash,create_role,create_language,created_by_host)
-         VALUES (lower($1),$2,$3,$4,$5,$6,$1,$2,$7,$4,$5,$8) RETURNING id,email,name,role,language,active`,
+         VALUES (lower($1),$2,$3,$4,$5,$6,$1,$2,$7,$4,$5,$8) RETURNING id,email,name,role,language,active,version`,
         [input.email,input.name,passwordHash,input.role,input.language,input.mutationId,passwordHash,request.hostIdentity!.id],
       );
       await audit('host.created','host',result.rows[0].id,{email:input.email,role:input.role},{hostId:request.hostIdentity!.id},client);
@@ -369,21 +370,22 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.patch('/api/v1/hosts/:id', { preHandler: requireAdmin }, async (request) => {
     const hostId=id(request);
-    const input=body(z.object({active:z.boolean().optional(),role:z.enum(['admin','staff']).optional()}),request);
+    const input=body(z.object({active:z.boolean().optional(),role:z.enum(['admin','staff']).optional(),expectedVersion:z.number().int().positive()}),request);
     if(hostId===request.hostIdentity!.id && input.active===false) throw new HttpError(409,'SELF_DISABLE','You cannot disable your own account.');
     const updated = await transaction(async (client) => {
       const admins=await client.query<{id:string}>(`SELECT id FROM hosts WHERE role='admin' AND active=true ORDER BY id FOR UPDATE`);
-      const target=await client.query<{role:'admin'|'staff';active:boolean}>('SELECT role,active FROM hosts WHERE id=$1 FOR UPDATE',[hostId]);
+      const target=await client.query<{role:'admin'|'staff';active:boolean;version:number}>('SELECT role,active,version FROM hosts WHERE id=$1 FOR UPDATE',[hostId]);
       const current=target.rows[0];
       if(!current) throw new HttpError(404,'HOST_NOT_FOUND','Host not found.');
+      if(current.version!==input.expectedVersion) throw new HttpError(409,'HOST_CHANGED','The host account was changed by another administrator.');
       const remainsActiveAdmin=(input.active??current.active)&&(input.role??current.role)==='admin';
       if(current.active&&current.role==='admin'&&!remainsActiveAdmin&&(admins.rowCount??0)<=1){
         throw new HttpError(409,'LAST_ADMIN','At least one active administrator is required.');
       }
       const result=await client.query(
-        `UPDATE hosts SET active=COALESCE($1,active),role=COALESCE($2,role) WHERE id=$3
-         RETURNING id,email,name,role,language,active`,[input.active??null,input.role??null,hostId]);
-      if(input.active===false) await client.query('UPDATE host_sessions SET revoked_at=now() WHERE host_id=$1 AND revoked_at IS NULL',[hostId]);
+        `UPDATE hosts SET active=COALESCE($1,active),role=COALESCE($2,role),version=version+1 WHERE id=$3
+         RETURNING id,email,name,role,language,active,version`,[input.active??null,input.role??null,hostId]);
+      if(current.active&&input.active===false) await client.query('UPDATE host_sessions SET revoked_at=now() WHERE host_id=$1 AND revoked_at IS NULL',[hostId]);
       await audit('host.updated','host',hostId,input,{hostId:request.hostIdentity!.id},client);
       const event=await storeEvent('host-auth.changed',{hostId},client);
       return {host:result.rows[0],event};
@@ -1175,7 +1177,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     clearGuestCookie(reply);
     return reply.code(204).send();
   });
-  app.get('/api/v1/guest/tab', { preHandler: requireGuest }, async (request) => tabDetail(request.guestIdentity!.id));
+  app.get('/api/v1/guest/tab', { preHandler: requireGuest }, async (request) => tabDetail(request.guestIdentity!.id, request.guestIdentity!.sessionId));
   app.get('/api/v1/guest/catalog', { preHandler: requireGuest }, async () => {
     const result = await pool.query(
       `SELECT p.id,p.name,p.description,p.price_cents AS "priceCents",p.category_id AS "categoryId",c.name AS "categoryName",p.version

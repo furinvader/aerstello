@@ -51,6 +51,12 @@ Feature: Secure host accounts and devices
     When another administrator demotes an open host session to staff
     Then administrator controls disappear from the affected session
 
+  Scenario: A stale account update cannot revoke a re-enabled host
+    Given an authenticated administrator
+    When a host disable response is lost before the account is re-enabled
+    Then retrying the stale host disable is rejected
+    And the re-enabled host remains active and signed in
+
   Scenario: Remote revocation clears the open host application
     Given an authenticated administrator
     When the current host session is revoked from another administrator

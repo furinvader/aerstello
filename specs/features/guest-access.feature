@@ -132,6 +132,16 @@ Feature: Guest device access and self-service
     When the guest adds two different self-service items
     Then both provisional items offer their own undo action
 
+  Scenario: Guest undo is limited to the device that added the item
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When another approved device for the same guest adds "Mineralwasser"
+    Then the original guest device sees the item without an undo action
+
+  Scenario: Localized category labels do not merge distinct categories
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When the host adds another self-service category named "Getränke"
+    Then both "Getränke" categories remain separate in the guest catalog
+
   Scenario: Uncertain self-service additions retain their mutation
     Given an approved guest device for "Luca Rossi" in room "102"
     When one guest addition loses its response before another product is added

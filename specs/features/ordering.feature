@@ -33,6 +33,13 @@ Feature: Host order entry and billing
     When the host removes the open item while offline
     Then the item removal is queued for synchronization
 
+  Scenario: An uncertain item removal keeps its submitted reason
+    Given an authenticated administrator
+    And an open "Helles" order for "Anna Berger" in room "101"
+    When the host retries item removal after its response is lost
+    Then the uncertain void reason is locked
+    And both item removal attempts use the same reason
+
   Scenario: An empty open tab cannot be offered for settlement
     Given an authenticated administrator
     And an open "Helles" order for "Anna Berger" in room "101"

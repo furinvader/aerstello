@@ -2,6 +2,7 @@ import { useEffect, useState, type ButtonHTMLAttributes, type FormEvent, type Re
 import { AlertCircle, CheckCircle2, X } from 'lucide-react';
 import { apiErrorMessage } from './api';
 import { useI18n } from './i18n';
+import { isPermanentSyncConflict } from './offline';
 
 export function Button({ variant = 'primary', className = '', ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'primary'|'secondary'|'danger'|'ghost' }) {
   return <button className={`button button--${variant} ${className}`} {...props} />;
@@ -40,13 +41,19 @@ export function Notice({ kind = 'success', children }: { kind?: 'success'|'error
   return <div className={`notice notice--${kind}`}>{kind === 'success' ? <CheckCircle2 /> : <AlertCircle />}<span>{children}</span></div>;
 }
 
-export function ConfirmForm({ label, placeholder, onConfirm, onCancel }: { label: string; placeholder: string; onConfirm: (reason: string) => Promise<void>; onCancel: () => void }) {
+export function ConfirmForm({ label, placeholder, onConfirm, onCancel, onDefinitiveFailure }: { label: string; placeholder: string; onConfirm: (reason: string) => Promise<void>; onCancel: () => void; onDefinitiveFailure?: () => void }) {
   const { t, language } = useI18n();
   const [reason, setReason] = useState('');
+  const [submittedReason, setSubmittedReason] = useState<string>();
   const [error, setError] = useState('');
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    try { await onConfirm(reason); } catch (caught) { setError(apiErrorMessage(caught, language, t('requestFailed'))); }
+    const frozenReason=submittedReason??reason;
+    setSubmittedReason(frozenReason);
+    try { await onConfirm(frozenReason); } catch (caught) {
+      if(isPermanentSyncConflict(caught)){setSubmittedReason(undefined);onDefinitiveFailure?.()}
+      setError(apiErrorMessage(caught, language, t('requestFailed')));
+    }
   };
-  return <form onSubmit={submit} className="stack"><Field label={label}><input value={reason} onChange={(e) => setReason(e.target.value)} placeholder={placeholder} required minLength={2} autoFocus /></Field>{error && <Notice kind="error">{error}</Notice>}<div className="form-actions"><Button type="button" variant="ghost" onClick={onCancel}>{t('cancel')}</Button><Button variant="danger" type="submit">{t('confirm')}</Button></div></form>;
+  return <form onSubmit={submit} className="stack"><Field label={label}><input value={reason} onChange={(e) => setReason(e.target.value)} placeholder={placeholder} required minLength={2} autoFocus disabled={submittedReason!==undefined}/></Field>{error && <Notice kind="error">{error}</Notice>}<div className="form-actions"><Button type="button" variant="ghost" onClick={onCancel}>{t('cancel')}</Button><Button variant="danger" type="submit">{submittedReason===undefined?t('confirm'):t('retry')}</Button></div></form>;
 }

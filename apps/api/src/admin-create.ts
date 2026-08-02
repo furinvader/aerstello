@@ -32,7 +32,7 @@ const passwordHash = await hashPassword(input.data.password);
 await transaction(async (client) => {
   const host = await client.query<{ id: string }>(
     `INSERT INTO hosts(email,name,password_hash,role) VALUES (lower($1),$2,$3,'admin')
-     ON CONFLICT ((lower(email))) DO UPDATE SET name=excluded.name,password_hash=excluded.password_hash,role='admin',active=true
+     ON CONFLICT ((lower(email))) DO UPDATE SET name=excluded.name,password_hash=excluded.password_hash,role='admin',active=true,version=hosts.version+1
      RETURNING id`,
     [input.data.email, input.data.name, passwordHash],
   );

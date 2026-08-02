@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { bigint, boolean, index, integer, jsonb, pgEnum, pgTable, text, timestamp, uniqueIndex, uuid, type AnyPgColumn } from 'drizzle-orm/pg-core';
+import { bigint, boolean, index, integer, jsonb, pgEnum, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid, type AnyPgColumn } from 'drizzle-orm/pg-core';
 
 export const role = pgEnum('host_role', ['admin', 'staff']);
 export const language = pgEnum('language', ['de', 'it', 'en']);
@@ -26,6 +26,7 @@ export const hosts = pgTable('hosts', {
   role: role('role').notNull().default('staff'),
   language: language('language').notNull().default('de'),
   active: boolean('active').notNull().default(true),
+  version: integer('version').notNull().default(1),
   createMutationId: uuid('create_mutation_id'),
   createEmail: text('create_email'),
   createName: text('create_name'),
@@ -124,7 +125,7 @@ export const productVersions = pgTable('product_versions', {
   priceCents: integer('price_cents').notNull(),
   enabled: boolean('enabled').notNull(),
   selfServiceOnly: boolean('self_service_only').notNull(),
-}, (t) => [uniqueIndex('product_versions_uq').on(t.productId, t.catalogVersion)]);
+}, (t) => [primaryKey({ columns: [t.productId, t.catalogVersion], name: 'product_versions_pkey' })]);
 
 export const orderTabs = pgTable('order_tabs', {
   id: uuid('id').primaryKey().defaultRandom(),

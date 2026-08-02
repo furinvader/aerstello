@@ -12,7 +12,7 @@ await transaction(async (client) => {
   const passwordHash = await hashPassword(administratorPassword);
   await client.query(
     `INSERT INTO hosts(email,name,password_hash,role,language) VALUES ('admin@skybar.test','Mira Host',$1,'admin','de')
-     ON CONFLICT ((lower(email))) DO UPDATE SET password_hash=excluded.password_hash,active=true,role='admin'`,
+     ON CONFLICT ((lower(email))) DO UPDATE SET password_hash=excluded.password_hash,active=true,role='admin',version=hosts.version+1`,
     [passwordHash],
   );
   await client.query(`UPDATE venue_settings SET name='Hotel Aurora',default_language='de',timezone='Europe/Berlin' WHERE id=1`);

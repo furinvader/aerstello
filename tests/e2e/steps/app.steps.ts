@@ -141,6 +141,11 @@ let staleGuestUpdateStatus = 0;
 let concurrentRoomOrderStatuses: number[] = [];
 let staleRoomUpdateStatus = 0;
 let staleRoomFinalName = '';
+let staleHostUpdateStatus = 0;
+let staleHostFinalActive = false;
+let reopenedHostSessionStatus = 0;
+let uncertainVoidReasonLocked = false;
+let retriedVoidReasons: string[] = [];
 
 Before(async () => {
   execFileSync('npm',['run','db:seed','-w','@sky-bar/api'],{cwd:process.cwd(),env:{...process.env,E2E_RESET:'true',SEED_ADMIN_PASSWORD:'SkyBarTest123!'},stdio:'pipe'});
@@ -205,8 +210,24 @@ Given('an authenticated staff host', async ({ page }) => {
 Then('room management is absent from the navigation', async ({ page }) => { await expect(page.getByRole('link',{name:/^Zimmer$|^Camere$|^Rooms$/})).toHaveCount(0); });
 Then('opening the room-management URL shows no mutation controls', async ({ page }) => { await page.goto('/app/rooms');await expect(page.locator('.notice--error')).toBeVisible();await expect(page.locator('.inline-form,.sortable-list')).toHaveCount(0); });
 Then('opening the product-management URL shows no mutation controls', async ({ page }) => { await page.goto('/app/products');await expect(page.locator('.notice--error')).toBeVisible();await expect(page.locator('.inline-form,.product-admin-list')).toHaveCount(0); });
-When('another administrator demotes an open host session to staff',async({page,browser})=>{const request=page.context().request;const created=await (await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'role-refresh@skybar.test',name:'Role Refresh',password:'RoleRefresh123!',role:'admin',language:'en'}})).json() as {id:string};const context=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(context);roleChangedHostPage=await context.newPage();await roleChangedHostPage.goto('/login');await roleChangedHostPage.getByLabel('Email').fill('role-refresh@skybar.test');await roleChangedHostPage.getByLabel('Password').fill('RoleRefresh123!');await roleChangedHostPage.getByRole('button',{name:'Sign in'}).click();await expect(roleChangedHostPage.getByRole('link',{name:'Rooms'})).toBeVisible();expect((await request.patch(`/api/v1/hosts/${created.id}`,{headers:csrfHeaders,data:{role:'staff'}})).status()).toBe(200)});
+When('another administrator demotes an open host session to staff',async({page,browser})=>{const request=page.context().request;const created=await (await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'role-refresh@skybar.test',name:'Role Refresh',password:'RoleRefresh123!',role:'admin',language:'en'}})).json() as {id:string;version:number};const context=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(context);roleChangedHostPage=await context.newPage();await roleChangedHostPage.goto('/login');await roleChangedHostPage.getByLabel('Email').fill('role-refresh@skybar.test');await roleChangedHostPage.getByLabel('Password').fill('RoleRefresh123!');await roleChangedHostPage.getByRole('button',{name:'Sign in'}).click();await expect(roleChangedHostPage.getByRole('link',{name:'Rooms'})).toBeVisible();expect((await request.patch(`/api/v1/hosts/${created.id}`,{headers:csrfHeaders,data:{role:'staff',expectedVersion:created.version}})).status()).toBe(200)});
 Then('administrator controls disappear from the affected session',async()=>{await expect(roleChangedHostPage!.getByRole('link',{name:'Rooms'})).toHaveCount(0,{timeout:10_000});expect(((await (await roleChangedHostPage!.context().request.get('/api/v1/auth/me')).json()) as {host:{role:string}}).host.role).toBe('staff')});
+When('a host disable response is lost before the account is re-enabled',async({page,browser})=>{
+  const request=page.context().request;
+  const created=await (await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'stale-host@skybar.test',name:'Stale Host',password:'StaleHostPassword123!',role:'staff',language:'de'}})).json() as {id:string;version:number};
+  const staleCommand={active:false,expectedVersion:created.version};
+  const disabled=await (await request.patch(`/api/v1/hosts/${created.id}`,{headers:csrfHeaders,data:staleCommand})).json() as {version:number};
+  const enabled=await request.patch(`/api/v1/hosts/${created.id}`,{headers:csrfHeaders,data:{active:true,expectedVersion:disabled.version}});
+  expect(enabled.status()).toBe(200);
+  const context=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(context);
+  expect((await context.request.post('/api/v1/auth/login',{data:{email:'stale-host@skybar.test',password:'StaleHostPassword123!'}})).status()).toBe(200);
+  staleHostUpdateStatus=(await request.patch(`/api/v1/hosts/${created.id}`,{headers:csrfHeaders,data:staleCommand})).status();
+  reopenedHostSessionStatus=(await context.request.get('/api/v1/auth/me')).status();
+  const hosts=await (await request.get('/api/v1/hosts')).json() as {data:{id:string;active:boolean}[]};
+  staleHostFinalActive=hosts.data.find(item=>item.id===created.id)!.active;
+});
+Then('retrying the stale host disable is rejected',async()=>{expect(staleHostUpdateStatus).toBe(409)});
+Then('the re-enabled host remains active and signed in',async()=>{expect(staleHostFinalActive).toBe(true);expect(reopenedHostSessionStatus).toBe(200)});
 When('the current host session is revoked from another administrator',async({page,browser})=>{
   const request=page.context().request;
   expect((await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'remote-admin@skybar.test',name:'Remote Admin',password:'RemoteAdmin123!',role:'admin',language:'de'}})).status()).toBe(201);
@@ -267,6 +288,24 @@ Then('the order is marked as queued for synchronization',async({page,context})=>
 Given('an open {string} order for {string} in room {string}',async({page},product:string,guest:string,room:string)=>{await chooseOrder(page,product,guest,room);await page.getByRole('button',{name:/Bestellung buchen/}).click();await expect(page.locator('.open-tab')).toContainText(product)});
 When('the host removes the open item while offline',async({page,context})=>{await context.setOffline(true);await page.locator('.open-tab').getByRole('button',{name:/Artikel entfernen|Rimuovi articolo|Remove item/}).click();await page.locator('.modal input').fill('Falscher Artikel');await page.locator('.modal').getByRole('button',{name:/Bestätigen|Conferma|Confirm/}).click()});
 Then('the item removal is queued for synchronization',async({page,context})=>{await expect(page.getByText(/Entfernen offline gespeichert|Rimozione salvata offline|Removal saved offline/)).toBeVisible();await context.setOffline(false)});
+When('the host retries item removal after its response is lost',async({page})=>{
+  await page.evaluate(()=>{
+    const originalFetch=window.fetch.bind(window);let loseResponse=true;const reasons:string[]=[];
+    Object.assign(window,{__skyBarVoidRetryReasons:reasons});
+    window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(/\/api\/v1\/order-items\/[^/]+\/void$/.test(url)&&init?.method==='POST'){reasons.push((JSON.parse(String(init.body)) as {reason:string}).reason);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)};
+  });
+  await page.locator('.open-tab').getByRole('button',{name:/Artikel entfernen|Rimuovi articolo|Remove item/}).click();
+  const modal=page.locator('.modal');const reason=modal.getByLabel(/Grund|Motivo|Reason/);
+  await reason.fill('Original correction');
+  await modal.getByRole('button',{name:/Bestätigen|Conferma|Confirm/}).click();
+  await expect(modal.locator('.notice--error')).toBeVisible();
+  uncertainVoidReasonLocked=await reason.isDisabled();
+  await modal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();
+  await expect(modal).toHaveCount(0);
+  retriedVoidReasons=await page.evaluate(()=>(window as unknown as {__skyBarVoidRetryReasons:string[]}).__skyBarVoidRetryReasons);
+});
+Then('the uncertain void reason is locked',async()=>{expect(uncertainVoidReasonLocked).toBe(true)});
+Then('both item removal attempts use the same reason',async()=>{expect(retriedVoidReasons).toEqual(['Original correction','Original correction'])});
 When('the host removes the only open item',async({page})=>{await page.locator('.open-tab').getByRole('button',{name:/Artikel entfernen|Rimuovi articolo|Remove item/}).click();await page.locator('.modal input').fill('Empty tab regression');await page.locator('.modal').getByRole('button',{name:/Bestätigen|Conferma|Confirm/}).click();await expect(page.locator('.open-tab')).toHaveCount(0)});
 Then('no settlement action is offered for the empty tab',async({page})=>{await expect(page.getByRole('button',{name:/Abrechnen|Incassa|Settle/})).toHaveCount(0)});
 When('a queued order encounters one transient synchronization failure',async({page,context})=>{
@@ -422,6 +461,33 @@ When('the host renames Luca to {string}',async({page},name:string)=>{const reque
 Then("Luca's open guest view shows {string}",async({},name:string)=>{await expect(guestPage!.getByRole('heading',{name})).toBeVisible({timeout:10_000})});
 When('the guest adds two different self-service items',async()=>{await guestPage!.locator('.product-tile').getByText('Mineralwasser',{exact:true}).click();await expect(guestPage!.locator('.undo-toast')).toHaveCount(1);await guestPage!.locator('.product-tile').getByText('Hauskeks',{exact:true}).click()});
 Then('both provisional items offer their own undo action',async()=>{await expect(guestPage!.locator('.undo-toast')).toHaveCount(2);await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toHaveCount(2)});
+When('another approved device for the same guest adds {string}',async({page,browser},productName:string)=>{
+  const hostRequest=page.context().request;
+  const guest=await (await guestPage!.context().request.get('/api/v1/guest/me')).json() as {guest:{id:string}};
+  const bootstrap=await (await hostRequest.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
+  const room=bootstrap.rooms.find(item=>item.name==='102')!;
+  const second=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(second);
+  const access=await (await second.request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Luca second device',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
+  expect((await hostRequest.post(`/api/v1/access-requests/${access.id}/approve`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),guestId:guest.guest.id,expiresAt:new Date(Date.now()+86_400_000).toISOString()}})).status()).toBe(200);
+  expect((await second.request.post(`/api/v1/public/access-requests/${access.id}/status`,{data:{token:access.statusToken,grantId:crypto.randomUUID()}})).status()).toBe(200);
+  const catalog=await (await second.request.get('/api/v1/guest/catalog')).json() as {data:{id:string;name:{de:string};priceCents:number;version:number}[]};
+  const product=catalog.data.find(item=>item.name.de===productName)!;
+  expect((await second.request.post('/api/v1/guest/items',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),productId:product.id,expectedPriceCents:product.priceCents,expectedProductVersion:product.version}})).status()).toBe(201);
+  await expect(guestPage!.locator('.line-item').filter({hasText:productName})).toBeVisible();
+});
+Then('the original guest device sees the item without an undo action',async()=>{await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toHaveCount(0)});
+When('the host adds another self-service category named {string}',async({page},categoryName:string)=>{
+  const request=page.context().request;
+  const category=await (await request.post('/api/v1/categories',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:{de:categoryName,it:'Bevande duplicate',en:'Duplicate drinks'}}})).json() as {id:string};
+  expect((await request.post('/api/v1/products',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:{de:'Getrenntes Wasser',it:'Acqua separata',en:'Separate water'},priceCents:275,categoryId:category.id,enabled:true,selfServiceOnly:true}})).status()).toBe(201);
+  await expect(guestPage!.getByText('Getrenntes Wasser',{exact:true})).toBeVisible();
+});
+Then('both {string} categories remain separate in the guest catalog',async({},categoryName:string)=>{
+  const headings=guestPage!.locator('.guest-tabs>section').first().locator('.catalog-group>h3').filter({hasText:categoryName});
+  await expect(headings).toHaveCount(2);
+  await expect(headings.nth(0).locator('..')).toContainText('Mineralwasser');
+  await expect(headings.nth(1).locator('..')).toContainText('Getrenntes Wasser');
+});
 When('one guest addition loses its response before another product is added',async()=>{
   await guestPage!.evaluate(()=>{
     const originalFetch=window.fetch.bind(window);let loseResponse=true;const entries:{productId:string;mutationId:string}[]=[];
