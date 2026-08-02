@@ -83,7 +83,7 @@ export function GuestPage() {
       if(pendingAdds.current.sessionId!==sessionId)pendingAdds.current={sessionId,entries:[]};
       const existing=pendingAdds.current.entries.find(entry=>entry[0]===product.id);
       const mutationId=existing?.[1]??crypto.randomUUID();
-      const expectedPriceCents=existing?existing[2]:product.priceCents;
+      const expectedPriceCents=existing?.[2]??product.priceCents;
       const entries=[...pendingAdds.current.entries.filter(entry=>entry[0]!==product.id),[product.id,mutationId,expectedPriceCents] as [string,string,number?]];
       pendingAdds.current={sessionId,entries};
       persistPendingAdds(pendingAdds.current);
@@ -95,7 +95,13 @@ export function GuestPage() {
       setUndos((current)=>[...current.filter((entry)=>entry.id!==item.id),{id:item.id,productId:product.id,until:new Date(item.provisionalUntil).getTime(),mutationId:crypto.randomUUID()}]);
       void client.invalidateQueries({ queryKey: ['guest-tab'] });
     },
-    onError: (caught) => setError(apiErrorMessage(caught, language, t('requestFailed'))),
+    onError: (caught,product) => {
+      if(caught instanceof ApiError&&caught.status>=400&&caught.status<500){
+        pendingAdds.current={...pendingAdds.current,entries:pendingAdds.current.entries.filter(entry=>entry[0]!==product.id)};
+        persistPendingAdds(pendingAdds.current);
+      }
+      setError(apiErrorMessage(caught, language, t('requestFailed')));
+    },
   });
   const undoItem = async (undo:UndoEntry) => { pendingUndos.current.add(undo.id);try { await api(`/guest/items/${undo.id}/undo`, { method: 'POST', body: json({ mutationId: undo.mutationId }) }); pendingUndos.current.delete(undo.id);setUndos((current)=>current.filter((entry)=>entry.id!==undo.id)); setError(''); await client.invalidateQueries({ queryKey: ['guest-tab'] }); } catch (caught) { setError(apiErrorMessage(caught, language, t('requestFailed'))); } };
   if (me.isLoading) return <div className="splash">Sky Bar</div>;

@@ -100,6 +100,13 @@ Feature: Guest device access and self-service
     Given an approved guest device for "Luca Rossi" in room "102"
     When a self-service price changes after the guest catalog is displayed
     Then adding the stale self-service product is rejected without a charge
+    And the guest can retry the refreshed self-service product
+
+  Scenario: A legacy self-service addition recovers its displayed price
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When the guest retries a legacy pending self-service addition
+    Then the legacy addition reuses its mutation with the displayed price
+    And the legacy self-service product is stored once
 
   Scenario: The guest undo control expires on time
     Given an approved guest device for "Luca Rossi" in room "102"

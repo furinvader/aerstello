@@ -1176,7 +1176,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         if (!duplicate.rows[0]) return undefined;
         if (duplicate.rows[0].sessionId !== request.guestIdentity!.sessionId) throw new HttpError(403, 'GUEST_MISMATCH', 'This item belongs to another guest device.');
         if (duplicate.rows[0].productId !== input.productId) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another product.');
-        if (duplicate.rows[0].expectedPriceCents !== (input.expectedPriceCents ?? null)) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another displayed price.');
+        if (duplicate.rows[0].expectedPriceCents !== null && duplicate.rows[0].expectedPriceCents !== input.expectedPriceCents) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another displayed price.');
         return duplicate.rows[0];
       };
       const duplicate = await replay();

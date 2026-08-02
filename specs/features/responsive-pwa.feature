@@ -6,6 +6,11 @@ Feature: Responsive installable application
     When the PWA manifest is requested
     Then it names the software "Sky Bar" and provides application icons
 
+  Scenario: An installed guest launch restores the active guest session
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When the guest launches the app from the manifest start URL
+    Then the launch opens Luca's active guest view
+
   Scenario: Primary ordering navigation remains prominent
     Given an authenticated administrator
     Then Take Orders navigation is visually prominent

@@ -12,6 +12,15 @@ function PublicFrame({ children }: { children: React.ReactNode }) {
   return <main className="public-shell"><header className="public-brand"><img src="/sky-bar.svg" alt=""/><span>Sky Bar</span><select aria-label={t('language')} value={language} onChange={(e) => setLanguage(e.target.value as Language)}><option value="de">DE</option><option value="it">IT</option><option value="en">EN</option></select></header>{children}</main>;
 }
 
+export function LaunchPage() {
+  const host = useQuery({ queryKey: ['me'], queryFn: () => api('/auth/me'), retry: false });
+  const guest = useQuery({ queryKey: ['guest-me'], queryFn: () => api('/guest/me'), retry: false });
+  if (host.isSuccess) return <Redirect to="/app" />;
+  if (guest.isSuccess) return <Redirect to="/guest" />;
+  if (host.isFetched && guest.isFetched) return <Redirect to="/login" />;
+  return <div className="splash">Sky Bar</div>;
+}
+
 export function LoginPage() {
   const [, navigate] = useLocation();
   const { t, language, setLanguage } = useI18n();

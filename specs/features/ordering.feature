@@ -119,6 +119,8 @@ Feature: Host order entry and billing
     When another order changes the tab while settlement is open
     Then settlement reports that the displayed tab changed
     And no bill is created for the stale confirmation
+    When the host retries settlement with the refreshed confirmation
+    Then one bill is created for the refreshed tab
 
   Scenario: An open tab cannot exceed the database money range
     Given an authenticated administrator

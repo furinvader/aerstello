@@ -1,12 +1,12 @@
 import { Redirect, Route, Switch } from 'wouter';
-import { LoginPage, RequestAccessPage } from './auth-pages';
+import { LaunchPage, LoginPage, RequestAccessPage } from './auth-pages';
 import { GuestPage } from './guest-page';
 import { HostShell } from './host-shell';
 import { AccountPage, BillDetailPage, BillsPage, DashboardPage, GuestsPage, OrdersPage, ProductsPage, RequestsPage, RoomsPage, SettingsPage, TakeOrdersPage } from './host-pages';
 
 export function App() {
   return <Switch>
-    <Route path="/"><Redirect to="/login"/></Route>
+    <Route path="/"><LaunchPage/></Route>
     <Route path="/login"><LoginPage/></Route>
     <Route path="/guest/request"><RequestAccessPage/></Route>
     <Route path="/guest"><GuestPage/></Route>
