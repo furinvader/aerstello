@@ -27,7 +27,7 @@ export const hosts = pgTable('hosts', {
   language: language('language').notNull().default('de'),
   active: boolean('active').notNull().default(true),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-}, (t) => [uniqueIndex('hosts_email_lower_uq').on(t.email)]);
+}, (t) => [uniqueIndex('hosts_email_lower_uq').on(sql`lower(${t.email})`)]);
 
 export const hostSessions = pgTable('host_sessions', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -148,8 +148,11 @@ export const orderItems = pgTable('order_items', {
   voidedByHost: uuid('voided_by_host').references(() => hosts.id),
   voidReason: text('void_reason'),
   hostVoidMutationId: uuid('host_void_mutation_id').unique(),
+  guestUndoMutationId: uuid('guest_undo_mutation_id'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => [
+  uniqueIndex('order_items_guest_undo_mutation_uq').on(t.guestUndoMutationId).where(sql`${t.guestUndoMutationId} IS NOT NULL`),
+]);
 
 export const billItems = pgTable('bill_items', {
   id: uuid('id').primaryKey().defaultRandom(),

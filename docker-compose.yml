@@ -23,7 +23,7 @@ services:
       DATABASE_URL: postgres://skybar:skybar@db:5432/skybar
       PORT: 3001
       SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET}
-      TRUST_PROXY: "true"
+      TRUST_PROXY: ${TRUST_PROXY:-false}
     ports:
       - "3001:3001"
     restart: unless-stopped

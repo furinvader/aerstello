@@ -10,6 +10,8 @@ The browser stores the application shell and explicitly non-identity-scoped boot
 
 Hosts authenticate with email and Argon2id-hashed passwords. Opaque session tokens are HMAC-hashed in PostgreSQL and sent only in Secure, HttpOnly, SameSite cookies. Admins manage configuration, venue identity, host accounts, and bill reversals; staff handle rooms/guests operationally, access requests, orders, and settlement.
 
+Long-lived event streams revalidate their bound host or guest session periodically and before sending an event. Revoked, expired, archived, or disabled identities have their streams closed.
+
 Command-line administrator credential recovery revokes every active session for that account in the same transaction as the password reset. The administrator must sign in again on every device after recovery.
 
 Public guest requests carry a one-time status token. Approval links or creates a guest in the requested room and assigns an expiry. The requesting browser atomically consumes approved status for one expiring device grant. Requests, live guest sessions, and realtime events reveal data only for their bound guest.
@@ -18,9 +20,11 @@ Public guest requests carry a one-time status token. Approval links or creates a
 
 Products have catalog versions. An offline order references the catalog version displayed during capture, allowing the API to snapshot the matching name and price rather than silently applying a later price.
 
-Host product selections are submitted as an atomic batch. Guest self-service selections create one provisional line with a server-enforced 10-second undo deadline. Open-tab totals include provisional items, but settlement rejects the tab until all undo deadlines pass. Each open tab is capped at PostgreSQL's signed 32-bit integer-cent range; writers lock the tab and reject additions that would exceed it.
+Host product selections are submitted as an atomic batch. Guest self-service selections create one provisional line with a server-enforced 10-second undo deadline. Submissions and undo commands retain UUID mutation keys until their outcomes are known. Open-tab totals include provisional items, but settlement rejects the tab until all undo deadlines pass. Each open tab is capped at PostgreSQL's signed 32-bit integer-cent range; writers lock the guest and tab and reject additions that would exceed it. Guest archival uses the same guest lock and cannot race past new financial items.
 
 Settlement locks the open tab and items, creates the bill and immutable bill lines, snapshots the current venue/guest/room identity, marks order items billed, and closes the tab in one transaction. A later venue rename only affects operational UI and new bills. Admin reversal voids the bill through an audit event and moves original order items into the guest's current tab.
+
+The bill archive is searched and paginated by the API rather than truncated in the browser, so older records remain discoverable by bill number, guest, or room.
 
 ## Offline and concurrency
 

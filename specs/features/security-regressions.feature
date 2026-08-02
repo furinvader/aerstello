@@ -31,3 +31,8 @@ Feature: Device grants and replay protection
     When the same bill void mutation is submitted twice
     Then both bill void responses succeed
     And the billed items are restored only once
+
+  Scenario: Revoked sessions stop receiving realtime events
+    Given an authenticated administrator
+    When the administrator session is revoked while its event stream is open
+    Then the revoked stream receives no later venue events

@@ -14,9 +14,16 @@ Feature: Guest device access and self-service
     Then an undo action is available
     When the guest uses undo
     Then the guest tab has no open items
+    And the host has no empty open order for "Luca Rossi"
 
   Scenario: The guest undo control expires on time
     Given an approved guest device for "Luca Rossi" in room "102"
     When the guest adds "Mineralwasser" from self-service
     Then an undo action is available
     And the undo action disappears after ten seconds
+
+  Scenario: An uncertain guest undo response is retried idempotently
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When the guest retries undo after its first response is lost
+    Then both guest undo attempts use the same mutation identifier
+    And the guest tab has no open items

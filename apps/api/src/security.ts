@@ -118,6 +118,24 @@ export async function authenticateGuest(request: FastifyRequest): Promise<GuestI
   return identity;
 }
 
+export async function hostSessionIsActive(sessionId: string): Promise<boolean> {
+  const result = await pool.query(
+    `SELECT 1 FROM host_sessions s JOIN hosts h ON h.id=s.host_id
+      WHERE s.id=$1 AND s.revoked_at IS NULL AND s.expires_at>now() AND h.active=true`,
+    [sessionId],
+  );
+  return Boolean(result.rowCount);
+}
+
+export async function guestSessionIsActive(sessionId: string): Promise<boolean> {
+  const result = await pool.query(
+    `SELECT 1 FROM guest_sessions s JOIN guests g ON g.id=s.guest_id
+      WHERE s.id=$1 AND s.revoked_at IS NULL AND s.expires_at>now() AND g.archived_at IS NULL`,
+    [sessionId],
+  );
+  return Boolean(result.rowCount);
+}
+
 export async function requireHost(request: FastifyRequest, reply: FastifyReply): Promise<void> {
   if (!(await authenticateHost(request))) {
     await reply.code(401).send({ error: { code: 'UNAUTHENTICATED', message: 'Host authentication required.' } });

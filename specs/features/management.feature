@@ -27,3 +27,8 @@ Feature: Venue operations configuration
     Given an authenticated administrator
     When the host attempts to create a guest in an archived room
     Then the archived room guest is rejected
+
+  Scenario: Guest archival and new orders are serialized
+    Given an authenticated administrator
+    When guest archival races with a new order
+    Then either the archive or the order is rejected

@@ -135,6 +135,7 @@ h3 { font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; color: 
 
 .card-grid { display: grid; gap: .8rem; }.tab-card{display:flex;align-items:center;gap:1rem}.tab-card h2{margin:0}.tab-card p{margin:.25rem 0;color:var(--muted);display:flex;align-items:center;gap:.35rem}.tab-card p svg{width:15px}.tab-card span{color:var(--muted);font-size:.75rem}
 .receipt-number { min-width: 72px; display: flex; align-items: center; gap: .35rem; color: var(--blue); font-weight: 800; }.receipt-number svg{width:17px}
+.pagination { margin-top: 1rem; display: flex; align-items: center; justify-content: center; gap: 1rem; color: var(--muted); }
 .bill-sheet { width: min(100%,800px); margin: 0 auto; padding: clamp(1.3rem,5vw,3rem); border-radius: var(--radius); background: #f7f9fb; color: #132131; box-shadow: var(--shadow); }
 .bill-sheet>header { text-align: center; border-bottom: 2px solid #d8e0e8; padding-bottom: 1.5rem; }.bill-sheet>header>div{display:flex;justify-content:center;align-items:center;gap:.4rem;color:#65788b;font-size:.7rem}.bill-sheet>header img{width:23px}.bill-sheet>header h1{margin:1rem 0 .25rem}.bill-sheet>header p{color:#65788b}
 .bill-meta { margin: 1.5rem 0; display: grid; grid-template-columns: repeat(2,1fr); gap: 1rem; }.bill-meta div{display:flex;flex-direction:column}.bill-meta span{color:#65788b;font-size:.7rem;text-transform:uppercase;letter-spacing:.07em}

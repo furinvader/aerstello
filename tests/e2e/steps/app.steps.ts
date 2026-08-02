@@ -27,6 +27,10 @@ let retriedOrderItemCount = 0;
 let excessiveOrderStatus = 0;
 let tabTotalBeforeExcess = 0;
 let tabTotalAfterExcess = 0;
+let guestArchiveRaceStatuses: [number, number][] = [];
+let retriedGuestUndoMutationIds: string[] = [];
+let oldestBillNumber = 0;
+let revokedStreamEventCount = 0;
 
 Before(async () => {
   execFileSync('npm',['run','db:seed','-w','@sky-bar/api'],{cwd:process.cwd(),env:{...process.env,E2E_RESET:'true'},stdio:'pipe'});
@@ -89,6 +93,16 @@ Then('an undo action is available',async()=>{await expect(guestPage!.getByRole('
 Then('the undo action disappears after ten seconds',async()=>{await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toBeHidden({timeout:12_000})});
 When('the guest uses undo',async()=>{await guestPage!.getByRole('button',{name:'Rückgängig'}).click()});
 Then('the guest tab has no open items',async()=>{await expect(guestPage!.getByText('Noch keine Einträge')).toBeVisible()});
+Then('the host has no empty open order for {string}',async({page},name:string)=>{await page.goto('/app/orders');await expect(page.locator('.tab-card').filter({hasText:name})).toHaveCount(0)});
+When('the guest retries undo after its first response is lost',async()=>{
+  await guestPage!.getByText('Mineralwasser',{exact:true}).click();await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toBeVisible();
+  await guestPage!.evaluate(() => {
+    const originalFetch=window.fetch.bind(window);let loseResponse=true;const ids:string[]=[];Object.assign(window,{__skyBarGuestUndoRetryIds:ids});
+    window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/guest/items/')&&url.endsWith('/undo')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)};
+  });
+  await guestPage!.getByRole('button',{name:'Rückgängig'}).click();await expect(guestPage!.locator('.notice--error')).toBeVisible();await guestPage!.getByRole('button',{name:'Rückgängig'}).click();retriedGuestUndoMutationIds=await guestPage!.evaluate(()=>(window as unknown as {__skyBarGuestUndoRetryIds:string[]}).__skyBarGuestUndoRetryIds);
+});
+Then('both guest undo attempts use the same mutation identifier',async()=>{expect(retriedGuestUndoMutationIds).toHaveLength(2);expect(new Set(retriedGuestUndoMutationIds).size).toBe(1)});
 
 When('the administrator creates room {string}',async({page},name:string)=>{await page.goto('/app/rooms');await page.getByPlaceholder(/Zimmername|Nome camera|Room name/).fill(name);await page.locator('.inline-form').getByRole('button').click()});
 Then('room {string} is listed',async({page},name:string)=>{await expect(page.getByText(name,{exact:true})).toBeVisible()});
@@ -101,6 +115,8 @@ When('the administrator tries to create product {string} priced {string}',async(
 Then('the product price is rejected before submission',async({page})=>{const price=page.getByLabel(/Preis · EUR|Prezzo · EUR|Price · EUR/);await expect(price).toBeVisible();expect(await price.evaluate((input:HTMLInputElement)=>input.validity.valid)).toBe(false)});
 When('the host attempts to create a guest in an archived room',async({page})=>{const request=page.context().request;const room=await (await request.post('/api/v1/rooms',{headers:csrfHeaders,data:{name:'Archived room'}})).json() as {id:string};expect((await request.delete(`/api/v1/rooms/${room.id}`,{headers:csrfHeaders})).status()).toBe(204);archivedRoomGuestStatus=(await request.post('/api/v1/guests',{headers:csrfHeaders,data:{name:'Late guest',roomId:room.id,language:'de'}})).status()});
 Then('the archived room guest is rejected',async()=>{expect(archivedRoomGuestStatus).toBe(404)});
+When('guest archival races with a new order',async({page})=>{const {request,me,products}=await operationalData(page);const rooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;name:string}[]};const product=products.data.find((item)=>item.name.de==='Helles')!;guestArchiveRaceStatuses=[];for(let attempt=0;attempt<8;attempt+=1){const guest=await (await request.post('/api/v1/guests',{headers:csrfHeaders,data:{name:`Race guest ${attempt}`,roomId:rooms.data.find((room)=>room.name==='102')!.id,language:'de'}})).json() as {id:string};const [archive,order]=await Promise.all([request.delete(`/api/v1/guests/${guest.id}`,{headers:csrfHeaders}),request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})]);guestArchiveRaceStatuses.push([archive.status(),order.status()])}});
+Then('either the archive or the order is rejected',async()=>{for(const [archive,order] of guestArchiveRaceStatuses){expect([[204,404],[409,201]]).toContainEqual([archive,order])}});
 
 When('the PWA manifest is requested',async({request})=>{const response=await request.get('/manifest.webmanifest');expect(response.ok()).toBeTruthy();manifestPayload=await response.json()});
 Then('it names the software {string} and provides application icons',async({},name:string)=>{expect(manifestPayload?.name).toBe(name);expect(manifestPayload?.icons?.length).toBeGreaterThanOrEqual(2)});
@@ -208,6 +224,9 @@ When('the host submits orders beyond the maximum tab total',async({page})=>{
 });
 Then('the excessive order is rejected without changing the tab',async()=>{expect(excessiveOrderStatus).toBe(409);expect(tabTotalBeforeExcess).toBe(1_980_000_000);expect(tabTotalAfterExcess).toBe(tabTotalBeforeExcess)});
 
+When('the venue has more bills than one archive page',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const product=products.data.find((item)=>item.name.de==='Helles')!;await page.goto('/manifest.webmanifest');for(let index=0;index<51;index+=1){const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),paymentMethod:'cash'}})).json() as {number:string};if(index===0)oldestBillNumber=Number(bill.number)}const firstPage=await (await request.get('/api/v1/bills?page=1&pageSize=50')).json() as {data:{number:number}[]};expect(firstPage.data.some((bill)=>bill.number===oldestBillNumber)).toBe(false)});
+Then('the host can find the oldest bill by its number',async({page})=>{await page.goto('/app/bills');const [response]=await Promise.all([page.waitForResponse((candidate)=>candidate.url().includes(`/api/v1/bills?search=${oldestBillNumber}&`)),page.getByPlaceholder(/Nach Gast|Cerca per|Search by/).fill(String(oldestBillNumber))]);const result=await response.json() as {data:{id:string;number:number}[]};expect(result.data.map((bill)=>bill.number)).toContain(oldestBillNumber);const found=result.data.find((bill)=>bill.number===oldestBillNumber)!;await expect(page.locator(`a[href="/app/bills/${found.id}"]`)).toBeVisible()});
+
 When('the same item void mutation is submitted twice',async({page})=>{
   const {request,me,guests,products}=await operationalData(page);
   const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const product=products.data.find((item)=>item.name.de==='Helles')!;
@@ -228,6 +247,12 @@ When('the same bill void mutation is submitted twice',async({page})=>{
 });
 Then('both bill void responses succeed',async()=>{expect(repeatedBillVoidStatuses).toEqual([200,200])});
 Then('the billed items are restored only once',async()=>{expect(restoredBillItemCount).toBe(1)});
+
+When('the administrator session is revoked while its event stream is open',async({page,browser})=>{
+  await page.evaluate(()=>new Promise<void>((resolve,reject)=>{const events=new EventSource('/api/v1/events');Object.assign(window,{__skyBarRevokedEvents:0,__skyBarRevokedStream:events});events.addEventListener('rooms.changed',()=>{const state=window as unknown as {__skyBarRevokedEvents:number};state.__skyBarRevokedEvents+=1});events.addEventListener('open',()=>resolve(),{once:true});events.addEventListener('error',()=>{if(events.readyState===EventSource.CLOSED)reject(new Error('Event stream closed before opening'))},{once:true})}));
+  const request=page.context().request;await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{email:'realtime-admin@skybar.test',name:'Realtime Admin',password:'RealtimeAdmin123!',role:'admin',language:'de'}});const other=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(other);await other.request.post('/api/v1/auth/login',{data:{email:'realtime-admin@skybar.test',password:'RealtimeAdmin123!'}});execFileSync('npm',['run','admin:create:dev','-w','@sky-bar/api','--','--email','admin@skybar.test','--password','RecoveredAgain123!','--name','Mira Host'],{cwd:process.cwd(),env:process.env,stdio:'pipe'});expect((await other.request.post('/api/v1/rooms',{headers:csrfHeaders,data:{name:'After revocation'}})).status()).toBe(201);await page.waitForTimeout(500);revokedStreamEventCount=await page.evaluate(()=>(window as unknown as {__skyBarRevokedEvents:number}).__skyBarRevokedEvents);
+});
+Then('the revoked stream receives no later venue events',async()=>{expect(revokedStreamEventCount).toBe(0)});
 
 When('the administrator submits an invalid venue time zone',async({page})=>{const request=page.context().request;const before=await (await request.get('/api/v1/venue')).json() as {name:string;defaultLanguage:string;timezone:string};venueTimezoneBefore=before.timezone;invalidTimezoneStatus=(await request.put('/api/v1/venue',{headers:csrfHeaders,data:{name:before.name,language:before.defaultLanguage,timezone:'Europe/Definitely-Not-A-Zone'}})).status();venueTimezoneAfter=((await (await request.get('/api/v1/venue')).json()) as {timezone:string}).timezone});
 Then('the venue time zone is rejected without changing the settings',async()=>{expect(invalidTimezoneStatus).toBe(400);expect(venueTimezoneAfter).toBe(venueTimezoneBefore)});

@@ -32,3 +32,8 @@ Feature: Host order entry and billing
     Given an authenticated administrator
     When the host submits orders beyond the maximum tab total
     Then the excessive order is rejected without changing the tab
+
+  Scenario: Older bills remain discoverable
+    Given an authenticated administrator
+    When the venue has more bills than one archive page
+    Then the host can find the oldest bill by its number

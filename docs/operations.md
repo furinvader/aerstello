@@ -2,7 +2,7 @@
 
 ## Configuration
 
-Production requires `DATABASE_URL`, `SESSION_SECRET`, and HTTPS. `TRUST_PROXY=true` is appropriate only behind a trusted reverse proxy. Keep PostgreSQL and the API on a private network and expose only the HTTPS proxy.
+Production requires `DATABASE_URL`, `SESSION_SECRET`, and HTTPS. The supplied Compose service publishes the app directly and therefore defaults `TRUST_PROXY` to `false`. Set `TRUST_PROXY=true` only when clients can reach the app exclusively through a trusted reverse proxy that replaces forwarded headers. Keep PostgreSQL and the API on a private network and expose only the HTTPS proxy.
 
 `RATE_LIMIT_MAX` controls the per-IP request ceiling in each one-minute window and defaults to `300`. Raise it only when a trusted reverse proxy is configured correctly and operational traffic requires it.
 
@@ -25,7 +25,7 @@ Store backups outside the application host. Back up before upgrades, retain mult
 
 ## Recovery
 
-- Recover administrator access with `npm run admin:create -- …`; this resets only that account's credentials.
+- Recover administrator access with `npm run admin:create -- …`; this resets that account's credentials and revokes all of its existing sessions.
 - Revoke a lost host device from Account or reset the password, which revokes other sessions.
 - Guest access can be revoked by archiving the guest or revoking their device sessions.
 - A mistaken settlement is corrected with an admin bill void; do not edit database bill rows manually.

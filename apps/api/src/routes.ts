@@ -24,8 +24,10 @@ import {
   clearGuestCookie,
   clearHostCookie,
   createHostSession,
+  guestSessionIsActive,
   hashPassword,
   hashToken,
+  hostSessionIsActive,
   newToken,
   requireAdmin,
   requireGuest,
@@ -43,6 +45,12 @@ class HttpError extends Error {
 function body<T>(schema: ZodType<T>, request: FastifyRequest): T {
   const result = schema.safeParse(request.body);
   if (!result.success) throw new HttpError(400, 'VALIDATION_ERROR', result.error.issues[0]?.message ?? 'Invalid request.');
+  return result.data;
+}
+
+function query<T>(schema: ZodType<T>, request: FastifyRequest): T {
+  const result = schema.safeParse(request.query);
+  if (!result.success) throw new HttpError(400, 'VALIDATION_ERROR', result.error.issues[0]?.message ?? 'Invalid query.');
   return result.data;
 }
 
@@ -400,9 +408,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.delete('/api/v1/guests/:id', { preHandler: requireHost }, async (request, reply) => {
     const guestId = id(request);
-    const open = await pool.query(`SELECT 1 FROM order_tabs t JOIN order_items i ON i.tab_id=t.id WHERE t.guest_id=$1 AND i.status IN ('open','provisional') LIMIT 1`, [guestId]);
-    if (open.rowCount) throw new HttpError(409, 'GUEST_HAS_ORDERS', 'Settle or void open orders first.');
     await transaction(async (client) => {
+      const guest = await client.query('SELECT id FROM guests WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [guestId]);
+      if (!guest.rowCount) throw new HttpError(404, 'GUEST_NOT_FOUND', 'Guest not found.');
+      const open = await client.query(`SELECT 1 FROM order_tabs t JOIN order_items i ON i.tab_id=t.id WHERE t.guest_id=$1 AND i.status IN ('open','provisional') LIMIT 1`, [guestId]);
+      if (open.rowCount) throw new HttpError(409, 'GUEST_HAS_ORDERS', 'Settle or void open orders first.');
       await client.query('UPDATE guests SET archived_at=now(),version=version+1 WHERE id=$1', [guestId]);
       await client.query('UPDATE guest_sessions SET revoked_at=now() WHERE guest_id=$1 AND revoked_at IS NULL', [guestId]);
     });
@@ -556,7 +566,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
             COALESCE(sum(CASE WHEN i.status IN ('open','provisional') THEN i.quantity ELSE 0 END),0)::int AS "itemCount",
             COALESCE(sum(CASE WHEN i.status IN ('open','provisional') THEN i.unit_price_cents*i.quantity ELSE 0 END),0)::int AS "totalCents"
        FROM order_tabs t JOIN guests g ON g.id=t.guest_id JOIN rooms r ON r.id=g.room_id
-       LEFT JOIN order_items i ON i.tab_id=t.id WHERE t.status='open' GROUP BY t.id,g.name,r.name HAVING count(i.id)>0 ORDER BY t.opened_at`,
+       LEFT JOIN order_items i ON i.tab_id=t.id WHERE t.status='open' GROUP BY t.id,g.name,r.name
+       HAVING count(i.id) FILTER (WHERE i.status IN ('open','provisional'))>0 ORDER BY t.opened_at`,
   )).rows));
 
   app.get('/api/v1/guests/:id/tab', { preHandler: requireHost }, async (request) => tabDetail(id(request)));
@@ -570,7 +581,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         if (duplicate.rows[0].hostId !== request.hostIdentity!.id) throw new HttpError(403, 'HOST_MISMATCH', 'This order belongs to another host.');
         return { tabId: duplicate.rows[0].tabId };
       }
-      const guest = await client.query('SELECT id FROM guests WHERE id=$1 AND archived_at IS NULL', [input.guestId]);
+      const guest = await client.query('SELECT id FROM guests WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [input.guestId]);
       if (!guest.rowCount) throw new HttpError(404, 'GUEST_NOT_FOUND', 'Guest not found.');
       const tabId = await activeTab(input.guestId, client);
       const resolvedLines: { productId: string; quantity: number; name: Record<string, string>; priceCents: number }[] = [];
@@ -700,11 +711,42 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return bill;
   });
 
-  app.get('/api/v1/bills', { preHandler: requireHost }, async () => mapList((await pool.query(
-    `SELECT id,number,venue_name AS "venueName",guest_name AS "guestName",room_name AS "roomName",total_cents AS "totalCents",
-            payment_method AS "paymentMethod",settled_at AS "settledAt",voided_at AS "voidedAt"
-       FROM bills ORDER BY settled_at DESC LIMIT 500`,
-  )).rows));
+  app.get('/api/v1/bills', { preHandler: requireHost }, async (request) => {
+    const input = query(z.object({
+      search: z.string().trim().max(120).default(''),
+      page: z.coerce.number().int().min(1).default(1),
+      pageSize: z.coerce.number().int().min(1).max(100).default(50),
+    }), request);
+    const search = input.search ?? '';
+    const requestedPage = input.page ?? 1;
+    const pageSize = input.pageSize ?? 50;
+    const offset = (requestedPage - 1) * pageSize;
+    const result = await pool.query<{ data: unknown[]; total: number }>(
+      `WITH filtered AS (
+         SELECT id,number,venue_name AS "venueName",guest_name AS "guestName",room_name AS "roomName",total_cents AS "totalCents",
+                payment_method AS "paymentMethod",settled_at AS "settledAt",voided_at AS "voidedAt",
+                CASE WHEN number::text=$1 THEN 0 ELSE 1 END AS search_rank
+           FROM bills
+          WHERE $1='' OR number::text ILIKE '%'||$1||'%' OR guest_name ILIKE '%'||$1||'%' OR room_name ILIKE '%'||$1||'%'
+       ), bill_page AS (
+         SELECT id,number,"venueName","guestName","roomName","totalCents","paymentMethod","settledAt","voidedAt"
+           FROM filtered ORDER BY search_rank,"settledAt" DESC,id DESC LIMIT $2 OFFSET $3
+       )
+       SELECT COALESCE((SELECT jsonb_agg(to_jsonb(bill_page) ORDER BY "settledAt" DESC,id DESC) FROM bill_page),'[]'::jsonb) AS data,
+              (SELECT count(*)::int FROM filtered) AS total`,
+      [search, pageSize, offset],
+    );
+    const page = result.rows[0] ?? { data: [], total: 0 };
+    return {
+      data: page.data,
+      pagination: {
+        page: requestedPage,
+        pageSize,
+        total: page.total,
+        totalPages: Math.max(1, Math.ceil(page.total / pageSize)),
+      },
+    };
+  });
 
   app.get('/api/v1/bills/:id', { preHandler: requireHost }, async (request) => {
     const billId = id(request);
@@ -778,21 +820,44 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
     reply.raw.setHeader('Connection', 'keep-alive');
     reply.raw.write('retry: 3000\n\n');
+    let closed = false;
+    const authorized = () => request.hostIdentity
+      ? hostSessionIsActive(request.hostIdentity.sessionId)
+      : guestSessionIsActive(request.guestIdentity!.sessionId);
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      clearInterval(keepAlive);
+      clearInterval(revalidate);
+      eventBus.off('event', listener);
+    };
+    const closeStream = () => {
+      cleanup();
+      if (!reply.raw.destroyed) reply.raw.end();
+    };
     const listener = (event: RealtimeEvent) => {
       if(request.guestIdentity){
         const visible=guestRealtimeEvent(event,request.guestIdentity.id);
         if(!visible) return;
-        reply.raw.write(`id: ${visible.id}\nevent: ${visible.topic}\ndata: ${JSON.stringify(visible.payload)}\n\n`);
+        void authorized().then((active) => {
+          if (!active) return closeStream();
+          if (!closed) reply.raw.write(`id: ${visible.id}\nevent: ${visible.topic}\ndata: ${JSON.stringify(visible.payload)}\n\n`);
+        }).catch(closeStream);
         return;
       }
-      reply.raw.write(`id: ${event.id}\nevent: ${event.topic}\ndata: ${JSON.stringify(event.payload)}\n\n`);
+      void authorized().then((active) => {
+        if (!active) return closeStream();
+        if (!closed) reply.raw.write(`id: ${event.id}\nevent: ${event.topic}\ndata: ${JSON.stringify(event.payload)}\n\n`);
+      }).catch(closeStream);
     };
-    const keepAlive = setInterval(() => reply.raw.write(': keepalive\n\n'), 20_000);
+    const keepAlive = setInterval(() => { if (!closed) reply.raw.write(': keepalive\n\n'); }, 20_000);
+    const revalidate = setInterval(() => {
+      void authorized().then((active) => { if (!active) closeStream(); }).catch(closeStream);
+    }, 15_000);
+    keepAlive.unref();
+    revalidate.unref();
     eventBus.on('event', listener);
-    request.raw.on('close', () => {
-      clearInterval(keepAlive);
-      eventBus.off('event', listener);
-    });
+    request.raw.on('close', cleanup);
   });
 
   app.get('/api/v1/guest/me', { preHandler: requireGuest }, async (request) => ({ guest: request.guestIdentity }));
@@ -825,6 +890,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         if (duplicate.rows[0].productId !== input.productId) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another product.');
         return duplicate.rows[0];
       }
+      const guest = await client.query('SELECT id FROM guests WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [request.guestIdentity!.id]);
+      if (!guest.rowCount) throw new HttpError(404, 'GUEST_NOT_FOUND', 'Guest not found.');
       const product = await client.query<{ name: Record<string, string>; priceCents: number }>(
         `SELECT name,price_cents AS "priceCents" FROM products WHERE id=$1 AND enabled=true AND self_service_only=true AND archived_at IS NULL`,
         [input.productId],
@@ -848,13 +915,36 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.post('/api/v1/guest/items/:id/undo', { preHandler: requireGuest }, async (request) => {
     const itemId = id(request);
-    const result = await pool.query(
-      `UPDATE order_items SET status='voided',voided_at=now(),void_reason='guest-undo'
-        WHERE id=$1 AND submitted_by_guest_session=$2 AND status='provisional' AND provisional_until>now() RETURNING tab_id AS "tabId"`,
-      [itemId, request.guestIdentity!.sessionId],
-    );
-    if (!result.rowCount) throw new HttpError(409, 'UNDO_EXPIRED', 'The undo window has expired.');
-    await audit('guest-item.undone', 'order-item', itemId, {}, { guestSessionId: request.guestIdentity!.sessionId });
+    const input = body(z.object({ mutationId: z.string().uuid() }), request);
+    await transaction(async (client) => {
+      const duplicate = await client.query<{ itemId: string; sessionId: string }>(
+        `SELECT id AS "itemId",submitted_by_guest_session AS "sessionId" FROM order_items WHERE guest_undo_mutation_id=$1`,
+        [input.mutationId],
+      );
+      if (duplicate.rows[0]) {
+        if (duplicate.rows[0].itemId !== itemId) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another item.');
+        if (duplicate.rows[0].sessionId !== request.guestIdentity!.sessionId) throw new HttpError(403, 'GUEST_MISMATCH', 'This undo belongs to another guest device.');
+        return;
+      }
+      const result = await client.query(
+        `UPDATE order_items SET status='voided',voided_at=now(),void_reason='guest-undo',guest_undo_mutation_id=$1
+          WHERE id=$2 AND submitted_by_guest_session=$3 AND status='provisional' AND provisional_until>now() RETURNING id`,
+        [input.mutationId, itemId, request.guestIdentity!.sessionId],
+      );
+      if (!result.rowCount) {
+        const replay = await client.query<{ itemId: string; sessionId: string }>(
+          `SELECT id AS "itemId",submitted_by_guest_session AS "sessionId" FROM order_items WHERE guest_undo_mutation_id=$1`,
+          [input.mutationId],
+        );
+        if (replay.rows[0]) {
+          if (replay.rows[0].itemId !== itemId) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another item.');
+          if (replay.rows[0].sessionId !== request.guestIdentity!.sessionId) throw new HttpError(403, 'GUEST_MISMATCH', 'This undo belongs to another guest device.');
+          return;
+        }
+        throw new HttpError(409, 'UNDO_EXPIRED', 'The undo window has expired.');
+      }
+      await audit('guest-item.undone', 'order-item', itemId, { mutationId: input.mutationId }, { guestSessionId: request.guestIdentity!.sessionId }, client);
+    });
     await emitEvent('orders.changed', { guestId: request.guestIdentity!.id });
     return { ok: true };
   });

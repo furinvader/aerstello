@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useLocation, useRoute } from 'wouter';
-import { ArrowDown, ArrowUp, BedDouble, Check, ChevronRight, CircleDollarSign, Clock3, CreditCard, Edit3, Euro, GlassWater, Minus, Plus, Printer, Receipt, Search, Trash2, UserPlus, UserRoundCheck, Users } from 'lucide-react';
+import { ArrowDown, ArrowUp, BedDouble, Check, ChevronLeft, ChevronRight, CircleDollarSign, Clock3, CreditCard, Edit3, Euro, GlassWater, Minus, Plus, Printer, Receipt, Search, Trash2, UserPlus, UserRoundCheck, Users } from 'lucide-react';
 import { formatMoney, localized, parseEuroCents, type Language, type LocalizedText } from '@sky-bar/shared';
 import { QRCodeSVG } from 'qrcode.react';
 import { api, apiErrorMessage, json } from './api';
@@ -85,10 +85,18 @@ export function OrdersPage(){
   return <><PageHeader eyebrow={t('live')} title={t('orders')} actions={<a className="button button--primary" href="/app/orders/new"><Plus/> {t('takeOrders')}</a>}/><div className="card-grid">{orders.data?.data.map(order=><Card key={order.id} className="tab-card"><div className="avatar large">{order.guestName.charAt(0)}</div><div className="grow"><h2>{order.guestName}</h2><p><BedDouble/> {order.roomName}</p><span>{order.itemCount} {t('items')}</span></div><strong>{formatMoney(order.totalCents,language)}</strong><a className="button button--secondary" href={`/app/orders/new?guest=${order.guestId}`}>{t('edit')} <ChevronRight/></a></Card>)}</div>{!orders.data?.data.length&&<Card><Empty>{t('empty')}</Empty></Card>}</>;
 }
 
+interface BillsResult { data: Bill[]; pagination: { page: number; pageSize: number; total: number; totalPages: number } }
 export function BillsPage(){
-  const {t,language}=useI18n();const [search,setSearch]=useState('');const bills=useQuery<{data:Bill[]}>({queryKey:['bills'],queryFn:()=>list('/bills')});
-  const visible=bills.data?.data.filter(bill=>`${bill.number} ${bill.guestName} ${bill.roomName}`.toLowerCase().includes(search.toLowerCase()))??[];
-  return <><PageHeader eyebrow={t('archive')} title={t('bills')}/><label className="search wide"><Search/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder={t('searchBills')}/></label><Card>{visible.length?<div className="table-list bills-list">{visible.map(bill=><a className={`table-row ${bill.voidedAt?'voided':''}`} href={`/app/bills/${bill.id}`} key={bill.id}><div className="receipt-number"><Receipt/>#{bill.number}</div><div className="grow"><strong>{bill.guestName}</strong><span>{bill.roomName} · {new Date(bill.settledAt).toLocaleString(language)}</span></div><span className="payment-tag">{t(bill.paymentMethod as 'cash'|'card'|'other')}</span><strong>{formatMoney(bill.totalCents,language)}</strong><ChevronRight/></a>)}</div>:<Empty>{t('empty')}</Empty>}</Card></>;
+  const {t,language}=useI18n();
+  const [search,setSearch]=useState('');
+  const [page,setPage]=useState(1);
+  const bills=useQuery<BillsResult>({
+    queryKey:['bills',search,page],
+    queryFn:()=>api(`/bills?search=${encodeURIComponent(search)}&page=${page}&pageSize=50`),
+  });
+  const visible=bills.data?.data??[];
+  const pagination=bills.data?.pagination;
+  return <><PageHeader eyebrow={t('archive')} title={t('bills')}/><label className="search wide"><Search/><input value={search} onChange={e=>{setSearch(e.target.value);setPage(1)}} placeholder={t('searchBills')}/></label><Card>{visible.length?<div className="table-list bills-list">{visible.map(bill=><a className={`table-row ${bill.voidedAt?'voided':''}`} href={`/app/bills/${bill.id}`} key={bill.id}><div className="receipt-number"><Receipt/>#{bill.number}</div><div className="grow"><strong>{bill.guestName}</strong><span>{bill.roomName} · {new Date(bill.settledAt).toLocaleString(language)}</span></div><span className="payment-tag">{t(bill.paymentMethod as 'cash'|'card'|'other')}</span><strong>{formatMoney(bill.totalCents,language)}</strong><ChevronRight/></a>)}</div>:<Empty>{t('empty')}</Empty>}</Card>{pagination&&pagination.totalPages>1&&<nav className="pagination" aria-label={t('bills')}><Button variant="secondary" disabled={page<=1} onClick={()=>setPage(current=>Math.max(1,current-1))}><ChevronLeft/>{t('previous')}</Button><span>{t('page')} {pagination.page} / {pagination.totalPages}</span><Button variant="secondary" disabled={page>=pagination.totalPages} onClick={()=>setPage(current=>current+1)}>{t('next')}<ChevronRight/></Button></nav>}</>;
 }
 
 interface BillDetail extends Bill { paymentNote?:string;voidReason?:string;hostName:string;items:{productName:LocalizedText;unitPriceCents:number;quantity:number;source:string}[] }

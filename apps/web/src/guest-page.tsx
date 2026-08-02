@@ -14,7 +14,7 @@ export function GuestPage() {
   const me = useQuery<{ guest: { id: string; name: string; roomName: string; expiresAt: string } }>({ queryKey: ['guest-me'], queryFn: () => api('/guest/me'), retry: false });
   const tab = useQuery<Tab>({ queryKey: ['guest-tab'], queryFn: () => api('/guest/tab'), enabled: me.isSuccess });
   const catalog = useQuery<{ data: (Product & { categoryName: LocalizedText })[] }>({ queryKey: ['guest-catalog'], queryFn: () => api('/guest/catalog'), enabled: me.isSuccess });
-  const [undo, setUndo] = useState<{ id: string; until: number } | null>(null);
+  const [undo, setUndo] = useState<{ id: string; until: number; mutationId: string } | null>(null);
   const [error, setError] = useState('');
   const pendingAdd = useRef<{ productId: string; mutationId: string } | null>(null);
   useEffect(() => {
@@ -33,8 +33,8 @@ export function GuestPage() {
     }, Math.max(0, undo.until - Date.now()));
     return () => window.clearTimeout(timer);
   }, [undo]);
-  const add = useMutation({ mutationFn: (productId: string) => { if (pendingAdd.current?.productId !== productId) pendingAdd.current = { productId, mutationId: crypto.randomUUID() }; return api<{ id: string; provisionalUntil: string }>('/guest/items', { method: 'POST', body: json({ mutationId: pendingAdd.current.mutationId, productId }) }); }, onSuccess: (item) => { pendingAdd.current = null; setError(''); setUndo({ id: item.id, until: new Date(item.provisionalUntil).getTime() }); void client.invalidateQueries({ queryKey: ['guest-tab'] }); }, onError: (caught) => setError(apiErrorMessage(caught, language, t('requestFailed'))) });
-  const undoItem = async () => { if (!undo) return; await api(`/guest/items/${undo.id}/undo`, { method: 'POST', body: json({}) }); setUndo(null); await client.invalidateQueries({ queryKey: ['guest-tab'] }); };
+  const add = useMutation({ mutationFn: (productId: string) => { if (pendingAdd.current?.productId !== productId) pendingAdd.current = { productId, mutationId: crypto.randomUUID() }; return api<{ id: string; provisionalUntil: string }>('/guest/items', { method: 'POST', body: json({ mutationId: pendingAdd.current.mutationId, productId }) }); }, onSuccess: (item) => { pendingAdd.current = null; setError(''); setUndo({ id: item.id, until: new Date(item.provisionalUntil).getTime(), mutationId: crypto.randomUUID() }); void client.invalidateQueries({ queryKey: ['guest-tab'] }); }, onError: (caught) => setError(apiErrorMessage(caught, language, t('requestFailed'))) });
+  const undoItem = async () => { if (!undo) return; try { await api(`/guest/items/${undo.id}/undo`, { method: 'POST', body: json({ mutationId: undo.mutationId }) }); setUndo(null); setError(''); await client.invalidateQueries({ queryKey: ['guest-tab'] }); } catch (caught) { setError(apiErrorMessage(caught, language, t('requestFailed'))); } };
   if (me.isLoading) return <div className="splash">Sky Bar</div>;
   if (me.isError) return <Redirect to="/guest/request" />;
   const guest = me.data!.guest;
