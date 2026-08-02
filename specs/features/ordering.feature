@@ -33,17 +33,30 @@ Feature: Host order entry and billing
     When a queued order encounters one transient synchronization failure
     Then the queued order is retried without another connectivity event
 
+  Scenario: A quarantined offline order can be reviewed and retried
+    Given an authenticated administrator with the order catalog loaded
+    When an offline order is quarantined as a synchronization conflict
+    Then the conflict shows its guest, room, products, and quantities
+    And the host can retry it without discarding it
+
   Scenario: An uncertain order response is retried idempotently
     Given an authenticated administrator
     When the host retries an order after its first response is lost
     Then both order attempts use the same mutation identifier
+    And order editing was locked while the result was uncertain
     And the guest tab contains the order only once
 
   Scenario: An uncertain settlement response is retried idempotently
     Given an authenticated administrator
     When the host retries settlement after its first response is lost
     Then both settlement attempts use the same mutation identifier
+    And settlement details were locked while the result was uncertain
     And the host reaches the single resulting bill
+
+  Scenario: A host cart respects order batch limits
+    Given an authenticated administrator
+    When the host adds the maximum quantity of "Helles" for "Anna Berger" in room "101"
+    Then that cart line cannot exceed the order batch quantity limit
 
   Scenario: Concurrent settlement replay returns one bill
     Given an authenticated administrator

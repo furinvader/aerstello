@@ -427,9 +427,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const result = await transaction(async (client) => {
       const room = await client.query('SELECT id FROM rooms WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [input.roomId]);
       if (!room.rowCount) throw new HttpError(404, 'ROOM_NOT_FOUND', 'Room not found.');
-      return client.query('INSERT INTO guests(name,room_id,language) VALUES ($1,$2,$3) RETURNING id,name,room_id AS "roomId",language,version', [input.name, input.roomId, input.language]);
+      const created = await client.query('INSERT INTO guests(name,room_id,language) VALUES ($1,$2,$3) RETURNING id,name,room_id AS "roomId",language,version', [input.name, input.roomId, input.language]);
+      await emitEvent('guests.changed', {}, client);
+      return created;
     });
-    await emitEvent('guests.changed', {});
     return reply.code(201).send(result.rows[0]);
   });
 
@@ -710,13 +711,22 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const input = body(settleTabSchema, request);
     const bill = await transaction(async (client) => {
       const replay = async () => {
-        const duplicate = await client.query<{ id: string; number: number; guestId: string; hostId: string; tabId: string }>(
-          'SELECT id,number,guest_id AS "guestId",host_id AS "hostId",tab_id AS "tabId" FROM bills WHERE mutation_id=$1',
+        const duplicate = await client.query<{ id: string; number: number; guestId: string; hostId: string; tabId: string; totalCents: number; itemCount: number; paymentMethod: string; paymentNote: string | null }>(
+          `SELECT b.id,b.number,b.guest_id AS "guestId",b.host_id AS "hostId",b.tab_id AS "tabId",
+                  b.total_cents AS "totalCents",b.payment_method AS "paymentMethod",b.payment_note AS "paymentNote",
+                  COALESCE((SELECT sum(bi.quantity)::int FROM bill_items bi WHERE bi.bill_id=b.id),0) AS "itemCount"
+             FROM bills b WHERE b.mutation_id=$1`,
           [input.mutationId],
         );
         if (!duplicate.rows[0]) return undefined;
         if (duplicate.rows[0].hostId !== request.hostIdentity!.id) throw new HttpError(403, 'HOST_MISMATCH', 'This settlement belongs to another host.');
         if (duplicate.rows[0].tabId !== tabId) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another tab.');
+        if (duplicate.rows[0].totalCents !== input.expectedTotalCents
+          || duplicate.rows[0].itemCount !== input.expectedItemCount
+          || duplicate.rows[0].paymentMethod !== input.paymentMethod
+          || duplicate.rows[0].paymentNote !== (input.note ?? null)) {
+          throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to a different settlement command.');
+        }
         return duplicate.rows[0];
       };
       const duplicate = await replay();

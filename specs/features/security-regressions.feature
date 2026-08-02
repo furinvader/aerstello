@@ -11,6 +11,11 @@ Feature: Device grants and replay protection
     When an approved request is exchanged for a guest grant
     Then the grant token is sent in the request body
 
+  Scenario: Guest access pollers behind one network do not block each other
+    Given an authenticated administrator
+    When thirteen guest devices poll pending access from one network
+    Then none of their valid status polls is rate limited
+
   Scenario: An archived guest cannot receive a pending grant
     Given an authenticated administrator
     When guest archival races with their first grant exchange
@@ -46,6 +51,11 @@ Feature: Device grants and replay protection
     When the same order mutation is submitted concurrently
     Then both concurrent order responses succeed
     And the concurrent order is stored only once
+
+  Scenario: A settlement replay cannot change payment details
+    Given an authenticated administrator
+    When a settlement mutation is replayed with another payment method
+    Then the changed settlement replay is rejected
 
   Scenario: Replaying a bill void returns its prior success
     Given an authenticated administrator

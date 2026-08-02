@@ -58,6 +58,11 @@ let retriedGuestAddMutationIds: string[] = [];
 let uncertainGuestProductCounts: Record<string,number> = {};
 let switchedGuestTabCount = 0;
 let aggregateSettlementStatus = 0;
+let uncertainOrderControlsLocked = false;
+let uncertainSettlementDetailsLocked = false;
+let changedSettlementReplayStatus = 0;
+let sharedNetworkPollStatuses: number[] = [];
+let conflictGuestId = '';
 
 Before(async () => {
   execFileSync('npm',['run','db:seed','-w','@sky-bar/api'],{cwd:process.cwd(),env:{...process.env,E2E_RESET:'true'},stdio:'pipe'});
@@ -174,6 +179,16 @@ When('a queued order encounters one transient synchronization failure',async({pa
   transientReplayAttempts=await page.evaluate(()=>(window as unknown as {__skyBarTransientReplayAttempts:number}).__skyBarTransientReplayAttempts);
 });
 Then('the queued order is retried without another connectivity event',async()=>{expect(transientReplayAttempts).toBeGreaterThanOrEqual(2)});
+
+When('an offline order is quarantined as a synchronization conflict',async({page})=>{
+  const {me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const mutationId=crypto.randomUUID();const capturedAt=new Date().toISOString();conflictGuestId=guest.id;
+  await page.evaluate(async({mutationId,capturedAt,hostId,guest,product,catalogVersion})=>new Promise<void>((resolve,reject)=>{
+    const request=indexedDB.open('sky-bar');request.onerror=()=>reject(request.error);request.onsuccess=()=>{const transaction=request.result.transaction('mutations','readwrite');transaction.objectStore('mutations').put({id:mutationId,hostId,path:'/order-batches',method:'POST',createdAt:capturedAt,status:'conflict',errorCode:'CATALOG_CONFLICT',body:{mutationId,originHostId:hostId,guestId:guest.id,catalogVersion,capturedAt,items:[{productId:product.id,quantity:2}]},display:{kind:'order',guestId:guest.id,guestName:guest.name,roomName:guest.roomName,items:[{productId:product.id,productName:product.name,quantity:2}]}});transaction.oncomplete=()=>resolve();transaction.onerror=()=>reject(transaction.error)};
+  }),{mutationId,capturedAt,hostId:me.host.id,guest,product,catalogVersion:products.catalogVersion});
+  await expect(page.locator('.sync-conflict-banner')).toBeVisible({timeout:10_000});await page.locator('.sync-conflict-banner').click();
+});
+Then('the conflict shows its guest, room, products, and quantities',async({page})=>{const modal=page.locator('.modal');await expect(modal).toContainText('Anna Berger');await expect(modal).toContainText('101');await expect(modal).toContainText('2 × Helles')});
+Then('the host can retry it without discarding it',async({page})=>{await page.locator('.modal').getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect.poll(async()=>((await (await page.context().request.get(`/api/v1/guests/${conflictGuestId}/tab`)).json()) as {itemCount:number}).itemCount,{timeout:10_000}).toBe(2)});
 
 Given('an authenticated administrator and a separate guest device',async({page,browser})=>{await signIn(page);const context=await browser.newContext();guestPage=await context.newPage();});
 When('{string} requests access for room {string}',async({},name:string,room:string)=>{await guestPage!.goto('/guest/request');await guestPage!.locator('form select').nth(1).selectOption('de');await guestPage!.getByLabel('Name').fill(name);await guestPage!.locator('form select').first().selectOption({label:room});await guestPage!.locator('form button[type="submit"]').click()});
@@ -339,6 +354,16 @@ When('an approved request is exchanged for a guest grant',async({page,browser})=
 });
 Then('the grant token is sent in the request body',async()=>{expect(grantExchangeRequest?.method).toBe('POST');expect(new URL(grantExchangeRequest!.url).search).toBe('');expect(grantExchangeRequest?.body).toEqual(expect.objectContaining({token:expect.any(String),grantId:expect.any(String)}))});
 
+When('thirteen guest devices poll pending access from one network',async({page})=>{
+  const request=page.context().request;const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string}[]};const room=bootstrap.rooms[0]!;
+  const pending=await Promise.all(Array.from({length:13},async(_,index)=>{
+    const response=await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:`Shared network guest ${index}`,roomId:room.id,language:'de'}});expect(response.status()).toBe(201);return response.json() as Promise<{id:string;statusToken:string}>;
+  }));
+  sharedNetworkPollStatuses=[];
+  for(let round=0;round<25;round+=1){const responses=await Promise.all(pending.map(item=>request.post(`/api/v1/public/access-requests/${item.id}/status`,{data:{token:item.statusToken,grantId:crypto.randomUUID()}})));sharedNetworkPollStatuses.push(...responses.map(response=>response.status()))}
+});
+Then('none of their valid status polls is rate limited',async()=>{expect(sharedNetworkPollStatuses).toHaveLength(325);expect(sharedNetworkPollStatuses).not.toContain(429);expect(new Set(sharedNetworkPollStatuses)).toEqual(new Set([200]))});
+
 When('guest archival races with their first grant exchange',async({page,browser})=>{const request=page.context().request;const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};const room=bootstrap.rooms.find(item=>item.name==='102')!;const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Archived grant race',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};const approved=await (await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{expiresAt:new Date(Date.now()+86_400_000).toISOString()}})).json() as {guestId:string};const context=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(context);const [,exchange]=await Promise.all([request.delete(`/api/v1/guests/${approved.guestId}`,{headers:csrfHeaders}),context.request.post(`/api/v1/public/access-requests/${created.id}/status`,{data:{token:created.statusToken,grantId:crypto.randomUUID()}})]);expect(exchange.status()).toBe(200);archivedGrantGuestStatus=(await context.request.get('/api/v1/guest/me')).status()});
 Then('no archived guest session remains active',async()=>{expect(archivedGrantGuestStatus).toBe(401)});
 
@@ -392,12 +417,14 @@ When('the host retries an order after its first response is lost',async({page})=
   });
   await page.getByRole('button',{name:/Bestellung buchen/}).click();
   await expect(page.locator('.notice--error')).toBeVisible();
-  await page.getByRole('button',{name:/Bestellung buchen/}).click();
+  uncertainOrderControlsLocked=await page.locator('.product-tile').filter({hasText:'Helles'}).isDisabled()&&await page.locator('.guest-list').getByRole('button',{name:/Anna Berger/}).isDisabled()&&await page.locator('.stepper button').last().isDisabled();
+  await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();
   await expect(page.getByText(/Bestellung hinzugefügt|Order added/)).toBeVisible();
   retriedOrderMutationIds=await page.evaluate(()=>(window as unknown as {__skyBarOrderRetryIds:string[]}).__skyBarOrderRetryIds);
   const {request,guests}=await operationalData(page);const guest=guests.data.find((item)=>item.name==='Anna Berger')!;retriedOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
 });
 Then('both order attempts use the same mutation identifier',async()=>{expect(retriedOrderMutationIds).toHaveLength(2);expect(new Set(retriedOrderMutationIds).size).toBe(1)});
+Then('order editing was locked while the result was uncertain',async()=>{expect(uncertainOrderControlsLocked).toBe(true)});
 Then('the guest tab contains the order only once',async()=>{expect(retriedOrderItemCount).toBe(1)});
 
 When('the host retries settlement after its first response is lost',async({page})=>{
@@ -407,15 +434,22 @@ When('the host retries settlement after its first response is lost',async({page}
     Object.assign(window,{__skyBarSettlementRetryIds:ids});
     window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(/\/api\/v1\/tabs\/[^/]+\/settle$/.test(url)&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)};
   });
-  await page.getByRole('button',{name:/Abrechnen/}).click();await page.locator('.modal').getByRole('button',{name:'Abrechnen'}).click();await expect(page.locator('.modal .notice--error')).toBeVisible();await page.locator('.modal').getByRole('button',{name:'Abrechnen'}).click();await expect(page).toHaveURL(/\/app\/bills\//);
+  await page.getByRole('button',{name:/Abrechnen/}).click();await page.locator('.modal').getByRole('button',{name:'Abrechnen'}).click();await expect(page.locator('.modal .notice--error')).toBeVisible();uncertainSettlementDetailsLocked=await page.locator('.choice-grid').getByRole('button',{name:/Bar/}).isDisabled()&&await page.locator('.choice-grid').getByRole('button',{name:/Karte/}).isDisabled();await page.locator('.modal').getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(page).toHaveURL(/\/app\/bills\//);
   retriedSettlementMutationIds=await page.evaluate(()=>(window as unknown as {__skyBarSettlementRetryIds:string[]}).__skyBarSettlementRetryIds);
 });
 Then('both settlement attempts use the same mutation identifier',async()=>{expect(retriedSettlementMutationIds).toHaveLength(2);expect(new Set(retriedSettlementMutationIds).size).toBe(1)});
+Then('settlement details were locked while the result was uncertain',async()=>{expect(uncertainSettlementDetailsLocked).toBe(true)});
 Then('the host reaches the single resulting bill',async({page})=>{await expect(page.locator('.bill-sheet')).toBeVisible();const bills=await (await page.context().request.get('/api/v1/bills')).json() as {data:unknown[]};expect(bills.data).toHaveLength(1)});
+
+When('the host adds the maximum quantity of {string} for {string} in room {string}',async({page},product:string,guest:string,room:string)=>{await chooseOrder(page,product,guest,room);await page.locator('.product-tile').filter({hasText:product}).click({clickCount:98})});
+Then('that cart line cannot exceed the order batch quantity limit',async({page})=>{await expect(page.locator('.product-tile').filter({hasText:'Helles'})).toBeDisabled();await expect(page.locator('.cart-lines .stepper b')).toHaveText('99')});
 
 When('the same settlement mutation is submitted concurrently',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const data={mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'};const responses=await Promise.all([request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data}),request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data})]);concurrentSettlementStatuses=responses.map(response=>response.status());concurrentSettlementBillCount=((await (await request.get('/api/v1/bills')).json()) as {data:unknown[]}).data.length});
 Then('both concurrent settlement responses succeed',async()=>{expect(concurrentSettlementStatuses).toEqual([200,200])});
 Then('concurrent settlement creates only one bill',async()=>{expect(concurrentSettlementBillCount).toBe(1)});
+
+When('a settlement mutation is replayed with another payment method',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const mutationId=crypto.randomUUID();const command={mutationId,expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'};expect((await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:command})).status()).toBe(200);changedSettlementReplayStatus=(await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{...command,paymentMethod:'card'}})).status()});
+Then('the changed settlement replay is rejected',async()=>{expect(changedSettlementReplayStatus).toBe(409)});
 When('another order changes the tab while settlement is open',async({page})=>{await chooseOrder(page,'Helles','Anna Berger','101');await page.getByRole('button',{name:/Bestellung buchen/}).click();await expect(page.locator('.tab-pill')).toContainText('1 Artikel');await page.getByRole('button',{name:/Abrechnen/}).click();const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;expect((await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).status()).toBe(201);await page.locator('.modal').getByRole('button',{name:'Abrechnen'}).click();await expect(page.locator('.modal .notice--error')).toBeVisible();staleSettlementBillCount=((await (await request.get('/api/v1/bills')).json()) as {data:unknown[]}).data.length});
 Then('settlement reports that the displayed tab changed',async({page})=>{await expect(page.locator('.modal')).toContainText(/Bestellung hat sich geändert|ordine è cambiato|order changed/i)});
 Then('no bill is created for the stale confirmation',async()=>{expect(staleSettlementBillCount).toBe(0)});

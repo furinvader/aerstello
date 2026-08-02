@@ -84,6 +84,9 @@ h3 { font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; color: 
 .conflict-list>div:last-child { border-bottom: 0; }
 .conflict-list .grow { display: flex; flex-direction: column; gap: .25rem; }
 .conflict-list .grow span { color: var(--muted); font-size: .8rem; }
+.conflict-list ul { margin: .25rem 0 0; padding-left: 1.15rem; }
+.conflict-list code { color: var(--muted); overflow-wrap: anywhere; }
+.conflict-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .45rem; }
 
 .metric-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: .8rem; }
 .metric { position: relative; min-height: 145px; display: flex; flex-direction: column; justify-content: flex-end; overflow: hidden; }

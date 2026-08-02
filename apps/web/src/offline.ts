@@ -1,5 +1,21 @@
 import Dexie, { type EntityTable } from 'dexie';
+import type { LocalizedText } from '@sky-bar/shared';
 import { ApiError, api, json } from './api';
+
+export type QueuedMutationDisplay = {
+  kind: 'order';
+  guestId: string;
+  guestName: string;
+  roomName: string;
+  items: { productId: string; productName: LocalizedText; quantity: number }[];
+} | {
+  kind: 'void';
+  guestId: string;
+  guestName: string;
+  roomName: string;
+  productName: LocalizedText;
+  quantity: number;
+};
 
 export interface QueuedMutation {
   id: string;
@@ -11,6 +27,7 @@ export interface QueuedMutation {
   status?: 'pending' | 'conflict';
   errorCode?: string;
   lastError?: string;
+  display?: QueuedMutationDisplay;
 }
 
 const db = new Dexie('sky-bar') as Dexie & { mutations: EntityTable<QueuedMutation, 'id'> };
@@ -85,4 +102,11 @@ export const mutationConflicts = (hostId: string) => db.mutations.where('[hostId
 export async function discardMutationConflict(id: string, hostId: string): Promise<void> {
   const mutation = await db.mutations.get(id);
   if (mutation?.hostId === hostId && mutation.status === 'conflict') await db.mutations.delete(id);
+}
+
+export async function retryMutationConflict(id: string, hostId: string): Promise<void> {
+  const mutation = await db.mutations.get(id);
+  if (mutation?.hostId === hostId && mutation.status === 'conflict') {
+    await db.mutations.update(id, { status: 'pending', errorCode: '', lastError: '' });
+  }
 }

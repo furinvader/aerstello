@@ -1,6 +1,8 @@
 import { z } from 'zod';
 
 export const MAX_MONEY_CENTS = 2_147_483_647;
+export const MAX_ORDER_BATCH_LINES = 100;
+export const MAX_ORDER_LINE_QUANTITY = 99;
 
 export function isValidTimeZone(value: string): boolean {
   try {
@@ -61,8 +63,8 @@ export const orderBatchSchema = z.object({
   capturedAt: z.string().datetime(),
   items: z.array(z.object({
     productId: z.string().uuid(),
-    quantity: z.number().int().min(1).max(99),
-  })).min(1).max(100),
+    quantity: z.number().int().min(1).max(MAX_ORDER_LINE_QUANTITY),
+  })).min(1).max(MAX_ORDER_BATCH_LINES),
 });
 
 export const settleTabSchema = z.object({

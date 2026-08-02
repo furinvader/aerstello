@@ -7,6 +7,7 @@ import fastifyStatic from '@fastify/static';
 import Fastify from 'fastify';
 import { config } from './config.js';
 import { migrate, pool } from './db.js';
+import { rateLimitKey } from './rate-limit.js';
 import { registerRoutes } from './routes.js';
 
 const app = Fastify({
@@ -23,7 +24,8 @@ await app.register(rateLimit, {
   global: true,
   max: config.RATE_LIMIT_MAX,
   timeWindow: '1 minute',
-  keyGenerator: (request) => request.ip,
+  hook: 'preHandler',
+  keyGenerator: rateLimitKey,
 });
 
 await registerRoutes(app);
