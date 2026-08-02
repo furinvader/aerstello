@@ -83,6 +83,13 @@ let newPasswordLoginStatus = 0;
 let retriedRoomMutationIds: string[] = [];
 let recoverableRoomCount = 0;
 let changedRoomCreationReplayStatus = 0;
+let retriedCategoryMutationIds: string[] = [];
+let recoverableCategoryCount = 0;
+let changedCategoryCreationReplayStatus = 0;
+let reopenedGuestAddMutationIds: string[] = [];
+let reopenedGuestAddItemCount = 0;
+let archivedGuestBillVoidStatus = 0;
+let archivedGuestRestoredItemCount = 0;
 
 Before(async () => {
   execFileSync('npm',['run','db:seed','-w','@sky-bar/api'],{cwd:process.cwd(),env:{...process.env,E2E_RESET:'true'},stdio:'pipe'});
@@ -347,6 +354,24 @@ When('one guest addition loses its response before another product is added',asy
 Then('retrying the uncertain product reuses its mutation identifier',async()=>{expect(retriedGuestAddMutationIds).toHaveLength(2);expect(new Set(retriedGuestAddMutationIds).size).toBe(1)});
 Then('each selected self-service product is stored once',async()=>{expect(uncertainGuestProductCounts).toEqual(expect.objectContaining({Mineralwasser:1,Hauskeks:1}))});
 
+When('the guest closes the app after a self-service response is lost',async()=>{
+  await guestPage!.evaluate(()=>{
+    const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__skyBarClosingGuestAddIds:ids});
+    window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guest/items')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);await originalFetch(input,init);throw new TypeError('Simulated lost response')}return originalFetch(input,init)};
+  });
+  await guestPage!.locator('.product-tile').getByText('Mineralwasser',{exact:true}).click();
+  await expect(guestPage!.locator('.notice--error')).toBeVisible();
+  reopenedGuestAddMutationIds=await guestPage!.evaluate(()=>(window as unknown as {__skyBarClosingGuestAddIds:string[]}).__skyBarClosingGuestAddIds);
+  const context=guestPage!.context();await guestPage!.close();guestPage=await context.newPage();await guestPage.goto('/guest');await expect(guestPage.getByRole('heading',{name:'Luca Rossi'})).toBeVisible();
+  await guestPage.evaluate(()=>{const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__skyBarReopenedGuestAddIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guest/items')&&init?.method==='POST')ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);return originalFetch(input,init)}});
+  await guestPage.locator('.product-tile').getByText('Mineralwasser',{exact:true}).click();
+  await expect(guestPage.getByRole('button',{name:'Rückgängig'})).toBeVisible();
+  reopenedGuestAddMutationIds.push(...await guestPage.evaluate(()=>(window as unknown as {__skyBarReopenedGuestAddIds:string[]}).__skyBarReopenedGuestAddIds));
+  reopenedGuestAddItemCount=((await (await guestPage.context().request.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount;
+});
+Then('reopening and retrying reuses the original item mutation identifier',async()=>{expect(reopenedGuestAddMutationIds).toHaveLength(2);expect(new Set(reopenedGuestAddMutationIds).size).toBe(1)});
+Then('the recovered self-service product is stored once',async()=>{expect(reopenedGuestAddItemCount).toBe(1)});
+
 When('the administrator creates room {string}',async({page},name:string)=>{await page.goto('/app/rooms');await page.getByPlaceholder(/Zimmername|Nome camera|Room name/).fill(name);await page.locator('.inline-form').getByRole('button').click()});
 Then('room {string} is listed',async({page},name:string)=>{await expect(page.getByText(name,{exact:true})).toBeVisible()});
 When('the administrator renames room {string} to {string}',async({page},oldName:string,newName:string)=>{const row=page.locator('.sortable-list>div').filter({hasText:oldName});await row.getByRole('button').nth(2).click();await page.locator('.modal input').fill(newName);await page.locator('.modal').getByRole('button',{name:'Speichern'}).click()});
@@ -354,6 +379,10 @@ When('the administrator retries room creation after its first response is lost',
 Then('both room creation attempts use the same mutation identifier',async()=>{expect(retriedRoomMutationIds).toHaveLength(2);expect(new Set(retriedRoomMutationIds).size).toBe(1)});
 Then('only one recoverable room exists',async()=>{expect(recoverableRoomCount).toBe(1)});
 Then('changing the replayed room creation is rejected',async()=>{expect(changedRoomCreationReplayStatus).toBe(409)});
+When('the administrator retries category creation after its first response is lost',async({page})=>{await page.goto('/app/products');await page.getByPlaceholder(/Deutscher Name|Nome tedesco|German name/).fill('Recoverable category');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarCategoryCreateCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/categories')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});const form=page.locator('.inline-form');await form.getByRole('button').click();await expect(page.locator('.notice--error')).toBeVisible();await form.getByRole('button').click();await expect(page.getByText('Recoverable category',{exact:true})).toBeVisible();const commands=await page.evaluate(()=>(window as unknown as {__skyBarCategoryCreateCommands:Array<Record<string,unknown>>}).__skyBarCategoryCreateCommands);retriedCategoryMutationIds=commands.map(command=>String(command.mutationId));const categories=await (await page.context().request.get('/api/v1/categories')).json() as {data:{name:{de:string}}[]};recoverableCategoryCount=categories.data.filter(category=>category.name.de==='Recoverable category').length;changedCategoryCreationReplayStatus=(await page.context().request.post('/api/v1/categories',{headers:csrfHeaders,data:{...commands[0]!,name:{de:'Changed recoverable category',it:'',en:''}}})).status()});
+Then('both category creation attempts use the same mutation identifier',async()=>{expect(retriedCategoryMutationIds).toHaveLength(2);expect(new Set(retriedCategoryMutationIds).size).toBe(1)});
+Then('only one recoverable category exists',async()=>{expect(recoverableCategoryCount).toBe(1)});
+Then('changing the replayed category creation is rejected',async()=>{expect(changedCategoryCreationReplayStatus).toBe(409)});
 When('the host creates guest {string} in room {string}',async({page},name:string,room:string)=>{await page.goto('/app/guests');await page.getByRole('button',{name:/Hinzufügen/}).click();await page.locator('.modal').getByLabel('Name').fill(name);await page.locator('.modal').getByLabel('Zimmer').selectOption({label:room});await page.locator('.modal').getByRole('button',{name:'Speichern'}).click()});
 Then('guest {string} is listed in room {string}',async({page},name:string,room:string)=>{const row=page.locator('.table-row').filter({hasText:name});await expect(row).toContainText(room)});
 When('another device creates guest {string} in room {string}',async({page},name:string,roomName:string)=>{await page.goto('/app/guests');await expect(page.getByText('Anna Berger',{exact:true})).toBeVisible();const request=page.context().request;const rooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;name:string}[]};const room=rooms.data.find(item=>item.name===roomName)!;expect((await request.post('/api/v1/guests',{headers:csrfHeaders,data:{name,roomId:room.id,language:'de'}})).status()).toBe(201)});
@@ -380,6 +409,8 @@ When('the host opens the bills screen',async({page})=>{await page.goto('/app/bil
 Then('only Bills is active in the primary navigation',async({page})=>{await expect(page.locator('.sidebar nav a.active')).toHaveCount(1);await expect(page.locator('.sidebar nav a.active')).toHaveAttribute('href','/app/bills')});
 When('the host changes their language to Italian',async({page})=>{await page.goto('/app/account');await page.getByLabel(/Sprache|Language/).selectOption('it');await page.getByRole('button',{name:/Speichern|Save/}).click()});
 Then('the navigation is shown in Italian',async({page})=>{await expect(page.getByText('Panoramica')).toBeVisible()});
+When('the host changes their language to Italian and opens the product editor',async({page})=>{await page.goto('/app/account');await page.getByLabel(/Sprache|Language/).selectOption('it');await page.getByRole('button',{name:/Speichern|Save/}).click();await expect(page.getByText('Panoramica')).toBeVisible();await page.goto('/app/products');await page.getByRole('button',{name:/Aggiungi/}).first().click()});
+Then('the product name label is shown in Italian',async({page})=>{await expect(page.getByLabel('Nome · DE')).toBeVisible()});
 When('the guest selects Italian',async()=>{await guestPage!.getByLabel(/Sprache|Lingua|Language/).selectOption('it')});
 Then('untranslated product content falls back to German',async()=>{await expect(guestPage!.getByText('Hauskeks',{exact:true})).toBeVisible()});
 When('the venue default language is Italian',async({page,browser})=>{const request=page.context().request;const venue=await (await request.get('/api/v1/venue')).json() as {name:string;timezone:string};expect((await request.put('/api/v1/venue',{headers:csrfHeaders,data:{name:venue.name,timezone:venue.timezone,language:'it'}})).status()).toBe(200);const context=await browser.newContext({baseURL:e2eBaseURL,locale:'en-US'});extraContexts.push(context);freshGuestPage=await context.newPage();await freshGuestPage.goto('/guest/request')});
@@ -618,7 +649,18 @@ When('guest archival races with reversal of their bill',async({page})=>{
     billArchiveRaceStatuses.push([archive.status(),reversal.status()]);
   }
 });
-Then('either the archive or the bill reversal is rejected',async()=>{for(const statuses of billArchiveRaceStatuses)expect([[204,409],[409,200]]).toContainEqual(statuses)});
+Then('the bill reversal succeeds before or after guest archival',async()=>{for(const statuses of billArchiveRaceStatuses)expect([[204,200],[409,200]]).toContainEqual(statuses)});
+
+When('the administrator reverses a bill for an archived guest',async({page})=>{
+  const {request,me,products}=await operationalData(page);const rooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;name:string}[]};const product=products.data.find(item=>item.name.de==='Helles')!;const room=rooms.data.find(item=>item.name==='102')!;
+  const guest=await (await request.post('/api/v1/guests',{headers:csrfHeaders,data:{name:'Archived correction guest',roomId:room.id,language:'de'}})).json() as {id:string};
+  const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};
+  const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};
+  expect((await request.delete(`/api/v1/guests/${guest.id}`,{headers:csrfHeaders})).status()).toBe(204);
+  archivedGuestBillVoidStatus=(await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Archived guest correction'}})).status();
+  archivedGuestRestoredItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
+});
+Then('the archived guest bill is voided and its item is restored',async()=>{expect(archivedGuestBillVoidStatus).toBe(200);expect(archivedGuestRestoredItemCount).toBe(1)});
 
 When('the host opens a voided bill for printing',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};expect((await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Printed correction'}})).status()).toBe(200);await page.goto(`/app/bills/${bill.id}`);await page.emulateMedia({media:'print'})});
 Then('the printed bill shows its void reason',async({page})=>{await expect(page.locator('.bill-void-marker .notice')).toBeVisible();await expect(page.locator('.bill-void-marker')).toContainText('Printed correction')});

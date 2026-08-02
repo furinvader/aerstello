@@ -92,6 +92,12 @@ Feature: Guest device access and self-service
     Then retrying the uncertain product reuses its mutation identifier
     And each selected self-service product is stored once
 
+  Scenario: An uncertain self-service addition survives closing the app
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When the guest closes the app after a self-service response is lost
+    Then reopening and retrying reuses the original item mutation identifier
+    And the recovered self-service product is stored once
+
   Scenario: An uncertain guest undo response is retried idempotently
     Given an approved guest device for "Luca Rossi" in room "102"
     When the guest retries undo after its first response is lost

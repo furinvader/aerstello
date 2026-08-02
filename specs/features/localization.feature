@@ -6,6 +6,11 @@ Feature: German, Italian, and English localization
     When the host changes their language to Italian
     Then the navigation is shown in Italian
 
+  Scenario: Product editor labels follow the host language
+    Given an authenticated administrator
+    When the host changes their language to Italian and opens the product editor
+    Then the product name label is shown in Italian
+
   Scenario: Missing product translation falls back to German
     Given an approved guest device for "Luca Rossi" in room "102"
     When the guest selects Italian

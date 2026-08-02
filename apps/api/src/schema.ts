@@ -64,10 +64,13 @@ export const guests = pgTable('guests', {
 export const categories = pgTable('categories', {
   id: uuid('id').primaryKey().defaultRandom(),
   name: jsonb('name').notNull(),
+  createMutationId: uuid('create_mutation_id'),
+  createName: jsonb('create_name'),
+  createdByHost: uuid('created_by_host').references(() => hosts.id),
   position: integer('position').notNull().default(0),
   archivedAt: timestamp('archived_at', { withTimezone: true }),
   version: integer('version').notNull().default(1),
-});
+}, (t) => [uniqueIndex('categories_create_mutation_uq').on(t.createMutationId).where(sql`${t.createMutationId} IS NOT NULL`)]);
 
 export const products = pgTable('products', {
   id: uuid('id').primaryKey().defaultRandom(),

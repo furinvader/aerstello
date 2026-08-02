@@ -10,6 +10,22 @@ import type { Product, Tab } from './types';
 
 interface UndoEntry { id: string; productId: string; until: number; mutationId: string }
 interface PendingAddStore { sessionId: string; entries: [string,string][] }
+const pendingAddKey='skybar-guest-pending-adds';
+
+function loadPendingAdds(): PendingAddStore {
+  const durable=localStorage.getItem(pendingAddKey);
+  const legacy=sessionStorage.getItem(pendingAddKey);
+  if(legacy)sessionStorage.removeItem(pendingAddKey);
+  if(!durable&&legacy)localStorage.setItem(pendingAddKey,legacy);
+  const raw=durable??legacy;
+  if(!raw)return {sessionId:'',entries:[]};
+  try{return JSON.parse(raw) as PendingAddStore}catch{localStorage.removeItem(pendingAddKey);return {sessionId:'',entries:[]}}
+}
+
+function persistPendingAdds(store: PendingAddStore): void {
+  if(store.entries.length)localStorage.setItem(pendingAddKey,JSON.stringify(store));
+  else localStorage.removeItem(pendingAddKey);
+}
 
 export function GuestPage() {
   const { t, language, setLanguage } = useI18n();
@@ -19,11 +35,7 @@ export function GuestPage() {
   const catalog = useQuery<{ data: (Product & { categoryName: LocalizedText })[] }>({ queryKey: ['guest-catalog'], queryFn: () => api('/guest/catalog'), enabled: me.isSuccess });
   const [undos, setUndos] = useState<UndoEntry[]>([]);
   const [error, setError] = useState('');
-  const pendingAdds = useRef<PendingAddStore>((() => {
-    const raw=sessionStorage.getItem('skybar-guest-pending-adds');
-    if(!raw)return {sessionId:'',entries:[]};
-    try{return JSON.parse(raw) as PendingAddStore;}catch{sessionStorage.removeItem('skybar-guest-pending-adds');return {sessionId:'',entries:[]};}
-  })());
+  const pendingAdds = useRef<PendingAddStore>(loadPendingAdds());
   const pendingUndos = useRef(new Set<string>());
   useEffect(() => {
     if (!me.isSuccess) return;
@@ -71,12 +83,12 @@ export function GuestPage() {
       const entries=new Map(pendingAdds.current.entries);
       const mutationId=entries.get(productId)??crypto.randomUUID();
       entries.set(productId,mutationId);pendingAdds.current={sessionId,entries:[...entries]};
-      sessionStorage.setItem('skybar-guest-pending-adds',JSON.stringify(pendingAdds.current));
+      persistPendingAdds(pendingAdds.current);
       return api<{ id: string; provisionalUntil: string }>('/guest/items', { method: 'POST', body: json({ mutationId, productId }) });
     },
     onSuccess: (item,productId) => {
       const entries=new Map(pendingAdds.current.entries);entries.delete(productId);pendingAdds.current={...pendingAdds.current,entries:[...entries]};
-      sessionStorage.setItem('skybar-guest-pending-adds',JSON.stringify(pendingAdds.current));setError('');
+      persistPendingAdds(pendingAdds.current);setError('');
       setUndos((current)=>[...current.filter((entry)=>entry.id!==item.id),{id:item.id,productId,until:new Date(item.provisionalUntil).getTime(),mutationId:crypto.randomUUID()}]);
       void client.invalidateQueries({ queryKey: ['guest-tab'] });
     },

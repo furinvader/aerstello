@@ -50,6 +50,10 @@ export const categoryInputSchema = z.object({
   name: localizedTextSchema,
 });
 
+export const categoryCreateSchema = categoryInputSchema.extend({
+  mutationId: z.string().uuid(),
+});
+
 export const productInputSchema = z.object({
   name: localizedTextSchema,
   description: localizedTextSchema.optional(),

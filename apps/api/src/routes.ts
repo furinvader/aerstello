@@ -6,7 +6,7 @@ import {
   MAX_MONEY_CENTS,
   accessApprovalSchema,
   accessRequestSchema,
-  categoryInputSchema,
+  categoryCreateSchema,
   guestInputSchema,
   languageSchema,
   loginSchema,
@@ -540,10 +540,28 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   )).rows));
 
   app.post('/api/v1/categories', { preHandler: requireAdmin }, async (request, reply) => {
-    const input = body(categoryInputSchema, request);
-    const result = await pool.query('INSERT INTO categories(name,position) VALUES ($1,(SELECT COALESCE(max(position),-1)+1 FROM categories)) RETURNING id,name,position,version', [JSON.stringify(input.name)]);
-    await emitEvent('catalog.changed', {});
-    return reply.code(201).send(result.rows[0]);
+    const input = body(categoryCreateSchema, request);
+    const created = await transaction(async (client) => {
+      await client.query('LOCK TABLE categories IN SHARE ROW EXCLUSIVE MODE');
+      const replay = await client.query<{id:string;name:Record<string,string>;position:number;version:number;hostId:string;commandName:Record<string,string>}>(
+        `SELECT id,name,position,version,created_by_host AS "hostId",create_name AS "commandName"
+           FROM categories WHERE create_mutation_id=$1`,[input.mutationId],
+      );
+      if(replay.rows[0]){
+        if(replay.rows[0].hostId!==request.hostIdentity!.id) throw new HttpError(403,'HOST_MISMATCH','This category creation belongs to another host.');
+        if(!isDeepStrictEqual(replay.rows[0].commandName,input.name)) throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to a different category creation command.');
+        const {hostId:_hostId,commandName:_commandName,...category}=replay.rows[0];
+        return {category,event:undefined};
+      }
+      const result=await client.query<{id:string;name:Record<string,string>;position:number;version:number}>(
+        `INSERT INTO categories(name,position,create_mutation_id,create_name,created_by_host)
+         VALUES ($1,(SELECT COALESCE(max(position),-1)+1 FROM categories),$2,$1,$3)
+         RETURNING id,name,position,version`,[JSON.stringify(input.name),input.mutationId,request.hostIdentity!.id],
+      );
+      return {category:result.rows[0]!,event:await storeEvent('catalog.changed',{},client)};
+    });
+    if(created.event){try{publishEvent(created.event)}catch(error){app.log.error(error,'Could not publish committed catalog event')}}
+    return reply.code(201).send(created.category);
   });
 
   app.get('/api/v1/products', { preHandler: requireHost }, async () => {
@@ -963,8 +981,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       }
       const owner = await client.query<{ guestId: string }>('SELECT guest_id AS "guestId" FROM bills WHERE id=$1', [billId]);
       if (!owner.rows[0]) throw new HttpError(404, 'BILL_NOT_FOUND', 'Bill not found.');
-      const activeGuest = await client.query('SELECT id FROM guests WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [owner.rows[0].guestId]);
-      if (!activeGuest.rowCount) throw new HttpError(409, 'GUEST_ARCHIVED', 'An archived guest cannot have a bill reopened.');
+      const guest = await client.query('SELECT id FROM guests WHERE id=$1 FOR UPDATE', [owner.rows[0].guestId]);
+      if (!guest.rowCount) throw new HttpError(404, 'GUEST_NOT_FOUND', 'Guest not found.');
       const result = await client.query<{ tabId: string; guestId: string; totalCents: number }>(
         `UPDATE bills SET voided_at=now(),void_reason=$1,voided_by=$2,void_mutation_id=$3
           WHERE id=$4 AND voided_at IS NULL

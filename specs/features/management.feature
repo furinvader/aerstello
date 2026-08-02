@@ -15,6 +15,13 @@ Feature: Venue operations configuration
     And only one recoverable room exists
     And changing the replayed room creation is rejected
 
+  Scenario: An uncertain category creation is recovered idempotently
+    Given an authenticated administrator
+    When the administrator retries category creation after its first response is lost
+    Then both category creation attempts use the same mutation identifier
+    And only one recoverable category exists
+    And changing the replayed category creation is rejected
+
   Scenario: A host creates and edits a guest
     Given an authenticated administrator
     When the host creates guest "Ada Test" in room "101"

@@ -68,7 +68,12 @@ Feature: Device grants and replay protection
   Scenario: Bill reversal and guest archival are serialized
     Given an authenticated administrator
     When guest archival races with reversal of their bill
-    Then either the archive or the bill reversal is rejected
+    Then the bill reversal succeeds before or after guest archival
+
+  Scenario: A bill can be corrected after its guest is archived
+    Given an authenticated administrator
+    When the administrator reverses a bill for an archived guest
+    Then the archived guest bill is voided and its item is restored
 
   Scenario: Revoked sessions stop receiving realtime events
     Given an authenticated administrator
