@@ -119,11 +119,15 @@ Then('the item removal is queued for synchronization',async({page,context})=>{aw
 When('a queued order encounters one transient synchronization failure',async({page,context})=>{
   await page.locator('.room-chips').getByRole('button',{name:'101',exact:true}).click();await page.locator('.guest-list').getByRole('button',{name:/Anna Berger/}).click();await page.locator('.product-tile').getByText('Helles',{exact:true}).click();
   await context.setOffline(true);await page.getByRole('button',{name:/Bestellung buchen/}).click();await expect(page.getByText(/Synchronisierung vorgemerkt|queued for sync/)).toBeVisible();
-  transientReplayAttempts=0;
-  await page.route('**/api/v1/order-batches',async route=>{transientReplayAttempts+=1;if(transientReplayAttempts===1)await route.abort('failed');else await route.continue()});
+  await page.evaluate(()=>{
+    const originalFetch=window.fetch.bind(window);let attempts=0;
+    Object.assign(window,{__skyBarTransientReplayAttempts:0});
+    window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'){attempts+=1;Object.assign(window,{__skyBarTransientReplayAttempts:attempts});if(attempts===1)throw new TypeError('Simulated transient sync failure')}return originalFetch(input,init)};
+  });
   await context.setOffline(false);
   const {request,guests}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;
   await expect.poll(async()=>((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount,{timeout:15_000}).toBe(1);
+  transientReplayAttempts=await page.evaluate(()=>(window as unknown as {__skyBarTransientReplayAttempts:number}).__skyBarTransientReplayAttempts);
 });
 Then('the queued order is retried without another connectivity event',async()=>{expect(transientReplayAttempts).toBeGreaterThanOrEqual(2)});
 
