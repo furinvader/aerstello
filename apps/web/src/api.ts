@@ -9,6 +9,8 @@ const localizedErrors: Partial<Record<string, Record<Language, string>>> = {
   VALIDATION_ERROR: { de: 'Bitte die Eingaben prüfen.', it: 'Controlla i dati inseriti.', en: 'Please check the entered information.' },
   INVALID_PASSWORD: { de: 'Das aktuelle Passwort ist falsch.', it: 'La password attuale non è corretta.', en: 'The current password is incorrect.' },
   ROOM_NOT_FOUND: { de: 'Das Zimmer ist nicht mehr verfügbar.', it: 'La camera non è più disponibile.', en: 'The room is no longer available.' },
+  ROOM_HAS_GUESTS: { de: 'Bitte zuerst alle aktiven Gäste in ein anderes Zimmer verschieben oder archivieren.', it: 'Sposta prima tutti gli ospiti attivi in un’altra camera o archiviali.', en: 'Move all active guests to another room or archive them first.' },
+  ROOM_HAS_REQUESTS: { de: 'Bitte zuerst alle ausstehenden Zugangsanfragen für dieses Zimmer bearbeiten.', it: 'Gestisci prima tutte le richieste di accesso in sospeso per questa camera.', en: 'Resolve all pending access requests for this room first.' },
   GUEST_NOT_FOUND: { de: 'Der Gast ist nicht mehr verfügbar.', it: 'L’ospite non è più disponibile.', en: 'The guest is no longer available.' },
   CATALOG_CONFLICT: { de: 'Der Produktkatalog hat sich geändert. Bitte die Bestellung prüfen.', it: 'Il catalogo è cambiato. Controlla l’ordine.', en: 'The product catalog changed. Please review the order.' },
   TAB_TOTAL_LIMIT: { de: 'Der offene Betrag hat die zulässige Höchstgrenze erreicht.', it: 'Il conto aperto ha raggiunto il limite massimo.', en: 'The open tab has reached its maximum total.' },

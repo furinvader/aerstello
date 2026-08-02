@@ -122,6 +122,11 @@ Feature: Host order entry and billing
     When the host retries settlement with the refreshed confirmation
     Then one bill is created for the refreshed tab
 
+  Scenario: Settlement closes when another device empties the tab
+    Given an authenticated administrator
+    When another device voids the last item while settlement is open
+    Then the empty settlement confirmation closes without a bill
+
   Scenario: An open tab cannot exceed the database money range
     Given an authenticated administrator
     When the host submits orders beyond the maximum tab total

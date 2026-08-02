@@ -67,6 +67,11 @@ Feature: Venue operations configuration
     When the administrator archives a room with a pending access request
     Then room archival is rejected and the request remains pending
 
+  Scenario: A room with active guests cannot be archived
+    Given an authenticated administrator
+    When the administrator archives a room with an active guest
+    Then the room screen explains that active guests must be moved
+
   Scenario: Guest archival and new orders are serialized
     Given an authenticated administrator
     When guest archival races with a new order
