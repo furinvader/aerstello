@@ -78,6 +78,12 @@ Feature: Guest device access and self-service
     When the host revokes Luca's device from the guest directory
     Then Luca's revoked device loses guest access
 
+  Scenario: Repeating guest-device revocation does not duplicate its audit
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When the host repeats revocation of Luca's device
+    Then both revocation requests succeed with one audit record
+    And the device cannot be revoked through another guest
+
   Scenario: Remote revocation clears the open guest application
     Given an approved guest device for "Luca Rossi" in room "102"
     When the host revokes Luca's device from the guest directory

@@ -8,7 +8,13 @@ describe('venue contracts', () => {
   });
 
   it('rejects unknown time zones', () => {
-    expect(venueSettingsSchema.safeParse({ name: 'Hotel Aurora', language: 'de', timezone: 'Europe/Definitely-Not-A-Zone' }).success).toBe(false);
+    expect(venueSettingsSchema.safeParse({ name: 'Hotel Aurora', language: 'de', timezone: 'Europe/Definitely-Not-A-Zone', expectedVersion: 1 }).success).toBe(false);
+  });
+
+  it('requires an expected version when updating venue settings', () => {
+    const venue = { name: 'Hotel Aurora', language: 'de', timezone: 'Europe/Berlin' };
+    expect(venueSettingsSchema.safeParse(venue).success).toBe(false);
+    expect(venueSettingsSchema.safeParse({ ...venue, expectedVersion: 1 }).success).toBe(true);
   });
 
   it('accepts aggregate settlement counts across multiple batches', () => {

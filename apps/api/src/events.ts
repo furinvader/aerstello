@@ -10,11 +10,16 @@ export interface RealtimeEvent {
 
 export const eventBus = new EventEmitter();
 eventBus.setMaxListeners(1000);
+export const realtimeEventRetention = 10_000;
 
 export async function storeEvent(topic: string, payload: Record<string, unknown>, client: pg.Pool | pg.PoolClient = pool): Promise<RealtimeEvent> {
   const result = await client.query<RealtimeEvent>(
-    'INSERT INTO realtime_events(topic,payload) VALUES ($1,$2) RETURNING id,topic,payload',
-    [topic, JSON.stringify(payload)],
+    `WITH inserted AS (
+       INSERT INTO realtime_events(topic,payload) VALUES ($1,$2) RETURNING id,topic,payload
+     ), pruned AS (
+       DELETE FROM realtime_events WHERE id <= (SELECT id FROM inserted)-$3::bigint
+     ) SELECT id::text AS id,topic,payload FROM inserted`,
+    [topic, JSON.stringify(payload), realtimeEventRetention],
   );
   const event = result.rows[0];
   if (!event) throw new Error('Could not persist realtime event');

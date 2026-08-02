@@ -40,6 +40,12 @@ Feature: Venue operations configuration
     And only one recoverable guest exists
     And changing the replayed guest creation is rejected
 
+  Scenario: A guest creation survives a committed HTTP timeout
+    Given an authenticated administrator
+    When the host retries guest creation after a committed HTTP timeout
+    Then both timed-out guest creations use the same mutation identifier
+    And only one timed-out guest exists
+
   Scenario: Committed guests are published to other devices
     Given an authenticated administrator
     When another device creates guest "Realtime Guest" in room "101"

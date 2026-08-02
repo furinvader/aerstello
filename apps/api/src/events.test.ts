@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { eventBus, publishEvent, storeEvent, type RealtimeEvent } from './events.js';
+import { eventBus, publishEvent, realtimeEventRetention, storeEvent, type RealtimeEvent } from './events.js';
 
 describe('realtime event publication', () => {
   it('can store an event in a transaction before publishing it after commit', async () => {
@@ -9,6 +9,7 @@ describe('realtime event publication', () => {
     eventBus.on('event', listener);
     try {
       await expect(storeEvent(event.topic, event.payload, client as never)).resolves.toEqual(event);
+      expect(client.query).toHaveBeenCalledWith(expect.stringContaining('DELETE FROM realtime_events'), [event.topic, '{}', realtimeEventRetention]);
       expect(listener).not.toHaveBeenCalled();
       publishEvent(event);
       expect(listener).toHaveBeenCalledWith(event);

@@ -30,6 +30,7 @@ export const venueSettingsSchema = z.object({
   name: z.string().trim().min(1).max(120),
   language: languageSchema.default('de'),
   timezone: z.string().trim().min(1).refine(isValidTimeZone, 'Invalid IANA time zone.').default('Europe/Berlin'),
+  expectedVersion: z.number().int().positive(),
 });
 
 export const roomInputSchema = z.object({

@@ -6,6 +6,7 @@ import { formatMoney, localized, type LocalizedText } from '@sky-bar/shared';
 import { ApiError, api, apiErrorMessage, json } from './api';
 import { Button, Card, Empty, Notice } from './components';
 import { useI18n } from './i18n';
+import { isPermanentSyncConflict } from './offline';
 import type { Product, Tab } from './types';
 
 interface UndoEntry { id: string; productId: string; until: number; mutationId: string }
@@ -96,7 +97,7 @@ export function GuestPage() {
       void client.invalidateQueries({ queryKey: ['guest-tab'] });
     },
     onError: (caught,product) => {
-      if(caught instanceof ApiError&&caught.status>=400&&caught.status<500&&caught.status!==408){
+      if(isPermanentSyncConflict(caught)){
         pendingAdds.current={...pendingAdds.current,entries:pendingAdds.current.entries.filter(entry=>entry[0]!==product.id)};
         persistPendingAdds(pendingAdds.current);
       }

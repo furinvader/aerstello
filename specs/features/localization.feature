@@ -25,3 +25,8 @@ Feature: German, Italian, and English localization
     Given the seeded Sky Bar venue
     When a fresh guest selects Italian on the access form
     Then the guest name field is labeled in Italian
+
+  Scenario: The first-time venue label follows the host language
+    Given an authenticated administrator
+    When an Italian administrator opens first-time venue setup
+    Then the empty venue label is shown in Italian

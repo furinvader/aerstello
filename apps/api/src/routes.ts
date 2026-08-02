@@ -399,15 +399,20 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.put('/api/v1/venue', { preHandler: requireAdmin }, async (request) => {
     const input = body(venueSettingsSchema, request);
-    const previous = await pool.query<{ name: string }>('SELECT name FROM venue_settings WHERE id=1');
-    const result = await pool.query(
-      `UPDATE venue_settings SET name=$1,default_language=$2,timezone=$3,version=version+1,updated_at=now()
-       WHERE id=1 RETURNING name,default_language AS "defaultLanguage",timezone,version`,
-      [input.name, input.language, input.timezone],
-    );
-    await audit('venue.updated', 'venue', '1', { oldName: previous.rows[0]?.name, newName: input.name }, { hostId: request.hostIdentity!.id });
-    await emitEvent('venue.changed', {});
-    return result.rows[0];
+    const updated = await transaction(async (client) => {
+      const previous = await client.query<{ name: string; version: number }>('SELECT name,version FROM venue_settings WHERE id=1 FOR UPDATE');
+      if (previous.rows[0]?.version !== input.expectedVersion) throw new HttpError(409, 'VENUE_CHANGED', 'The venue settings were changed by another administrator.');
+      const result = await client.query(
+        `UPDATE venue_settings SET name=$1,default_language=$2,timezone=$3,version=version+1,updated_at=now()
+         WHERE id=1 RETURNING name,default_language AS "defaultLanguage",timezone,version`,
+        [input.name, input.language, input.timezone],
+      );
+      await audit('venue.updated', 'venue', '1', { oldName: previous.rows[0].name, newName: input.name }, { hostId: request.hostIdentity!.id }, client);
+      return { venue: result.rows[0], event: await storeEvent('venue.changed', {}, client) };
+    });
+    try { publishEvent(updated.event); }
+    catch (error) { app.log.error(error, 'Could not publish committed venue event'); }
+    return updated.venue;
   });
 
   app.get('/api/v1/dashboard', { preHandler: requireHost }, async () => {
@@ -574,9 +579,17 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.delete('/api/v1/guests/:guestId/sessions/:id', { preHandler: requireHost }, async (request, reply) => {
     const params=request.params as {guestId:string;id:string};
     if(!z.string().uuid().safeParse(params.guestId).success||!z.string().uuid().safeParse(params.id).success) throw new HttpError(400,'INVALID_ID','A valid identifier is required.');
-    await pool.query('UPDATE guest_sessions SET revoked_at=now() WHERE id=$1 AND guest_id=$2',[params.id,params.guestId]);
-    await audit('guest-session.revoked','guest-session',params.id,{guestId:params.guestId},{hostId:request.hostIdentity!.id});
-    await emitEvent('guest-access.changed',{guestId:params.guestId});
+    const revoked=await transaction(async(client)=>{
+      const result=await client.query('UPDATE guest_sessions SET revoked_at=now() WHERE id=$1 AND guest_id=$2 AND revoked_at IS NULL RETURNING id',[params.id,params.guestId]);
+      if(!result.rowCount){
+        const existing=await client.query<{guestId:string}>('SELECT guest_id AS "guestId" FROM guest_sessions WHERE id=$1',[params.id]);
+        if(existing.rows[0]?.guestId===params.guestId)return {};
+        throw new HttpError(404,'GUEST_SESSION_NOT_FOUND','Guest session not found.');
+      }
+      await audit('guest-session.revoked','guest-session',params.id,{guestId:params.guestId},{hostId:request.hostIdentity!.id},client);
+      return {event:await storeEvent('guest-access.changed',{guestId:params.guestId},client)};
+    });
+    if(revoked.event){try{publishEvent(revoked.event)}catch(error){app.log.error(error,'Could not publish committed guest revocation event')}}
     return reply.code(204).send();
   });
 

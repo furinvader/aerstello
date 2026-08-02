@@ -24,6 +24,7 @@ const localizedErrors: Partial<Record<string, Record<Language, string>>> = {
   REQUEST_RESOLVED: { de: 'Diese Anfrage wurde bereits bearbeitet.', it: 'Questa richiesta è già stata elaborata.', en: 'This request has already been handled.' },
   PRODUCT_NOT_AVAILABLE: { de: 'Dieses Produkt ist nicht mehr verfügbar.', it: 'Questo prodotto non è più disponibile.', en: 'This product is no longer available.' },
   PRODUCT_CHANGED: { de: 'Das Produkt wurde zwischenzeitlich geändert. Bitte den Katalog neu laden.', it: 'Il prodotto è stato modificato nel frattempo. Ricarica il catalogo.', en: 'The product changed in the meantime. Reload the catalog.' },
+  VENUE_CHANGED: { de: 'Die Betriebseinstellungen wurden zwischenzeitlich geändert. Bitte die Seite neu laden.', it: 'Le impostazioni del locale sono state modificate nel frattempo. Ricarica la pagina.', en: 'The venue settings changed in the meantime. Reload the page.' },
   UNDO_EXPIRED: { de: 'Die Rückgängig-Frist ist abgelaufen.', it: 'Il periodo di annullamento è scaduto.', en: 'The undo window has expired.' },
 };
 

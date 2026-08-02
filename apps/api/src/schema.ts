@@ -252,7 +252,7 @@ export const auditEvents = pgTable('audit_events', {
 });
 
 export const realtimeEvents = pgTable('realtime_events', {
-  id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
+  id: bigint('id', { mode: 'bigint' }).primaryKey().generatedAlwaysAsIdentity(),
   topic: text('topic').notNull(),
   payload: jsonb('payload').notNull().default({}),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
