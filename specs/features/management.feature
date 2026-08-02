@@ -62,6 +62,12 @@ Feature: Venue operations configuration
     And only one recoverable product exists
     And changing the replayed product creation is rejected
 
+  Scenario: A stale product retry cannot overwrite a newer edit
+    Given an authenticated administrator
+    When a product update response is lost before another administrator edits it
+    Then retrying the stale product update is rejected
+    And the newer product price remains configured
+
   Scenario: Product prices require exact cents
     Given an authenticated administrator
     When the administrator tries to create product "Invalid price" priced "1.005"

@@ -23,6 +23,7 @@ const localizedErrors: Partial<Record<string, Record<Language, string>>> = {
   BILL_NOT_ACTIVE: { de: 'Diese Rechnung wurde bereits storniert.', it: 'Questo conto è già stato annullato.', en: 'This bill has already been voided.' },
   REQUEST_RESOLVED: { de: 'Diese Anfrage wurde bereits bearbeitet.', it: 'Questa richiesta è già stata elaborata.', en: 'This request has already been handled.' },
   PRODUCT_NOT_AVAILABLE: { de: 'Dieses Produkt ist nicht mehr verfügbar.', it: 'Questo prodotto non è più disponibile.', en: 'This product is no longer available.' },
+  PRODUCT_CHANGED: { de: 'Das Produkt wurde zwischenzeitlich geändert. Bitte den Katalog neu laden.', it: 'Il prodotto è stato modificato nel frattempo. Ricarica il catalogo.', en: 'The product changed in the meantime. Reload the catalog.' },
   UNDO_EXPIRED: { de: 'Die Rückgängig-Frist ist abgelaufen.', it: 'Il periodo di annullamento è scaduto.', en: 'The undo window has expired.' },
 };
 

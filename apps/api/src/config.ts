@@ -1,6 +1,8 @@
 import { z } from 'zod';
 
 const developmentSessionSecret = 'development-only-session-secret-change-me';
+const publishedSessionSecretPlaceholder = 'replace-with-at-least-32-random-characters';
+const insecureProductionSessionSecrets = new Set([developmentSessionSecret, publishedSessionSecretPlaceholder]);
 
 const configSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -13,7 +15,7 @@ const configSchema = z.object({
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),
   ACCESS_STATUS_IP_LIMIT_MAX: z.coerce.number().int().positive().default(3000),
 }).superRefine((value, context) => {
-  if (value.NODE_ENV === 'production' && value.SESSION_SECRET === developmentSessionSecret) {
+  if (value.NODE_ENV === 'production' && insecureProductionSessionSecrets.has(value.SESSION_SECRET)) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ['SESSION_SECRET'], message: 'SESSION_SECRET must be explicitly configured in production.' });
   }
 });

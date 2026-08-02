@@ -6,6 +6,13 @@ describe('runtime configuration', () => {
     expect(() => parseConfig({ NODE_ENV: 'production' })).toThrow(/SESSION_SECRET/);
   });
 
+  it('rejects the published session secret placeholder in production', () => {
+    expect(() => parseConfig({
+      NODE_ENV: 'production',
+      SESSION_SECRET: 'replace-with-at-least-32-random-characters',
+    })).toThrow(/SESSION_SECRET/);
+  });
+
   it('accepts an explicitly configured production session secret', () => {
     expect(parseConfig({
       NODE_ENV: 'production',

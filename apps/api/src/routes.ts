@@ -13,7 +13,7 @@ import {
   loginSchema,
   orderBatchSchema,
   productCreateSchema,
-  productInputSchema,
+  productUpdateSchema,
   roomCreateSchema,
   roomInputSchema,
   settleTabSchema,
@@ -499,7 +499,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/v1/guests', { preHandler: requireHost }, async () => mapList((await pool.query(
     `SELECT g.id,g.name,g.language,g.room_id AS "roomId",r.name AS "roomName",g.version,
-            COALESCE(sum(CASE WHEN oi.status IN ('open','provisional') THEN oi.unit_price_cents*oi.quantity ELSE 0 END),0)::int AS "totalCents",
+            COALESCE(sum(CASE WHEN oi.status IN ('open','provisional') THEN oi.unit_price_cents*oi.quantity ELSE 0 END),0)::float8 AS "totalCents",
             COALESCE(sum(CASE WHEN oi.status IN ('open','provisional') THEN oi.quantity ELSE 0 END),0)::int AS "itemCount"
        FROM guests g JOIN rooms r ON r.id=g.room_id LEFT JOIN order_tabs t ON t.guest_id=g.id AND t.status='open'
        LEFT JOIN order_items oi ON oi.tab_id=t.id WHERE g.archived_at IS NULL GROUP BY g.id,r.name,r.position ORDER BY r.position,g.name`,
@@ -693,16 +693,20 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.patch('/api/v1/products/:id', { preHandler: requireAdmin }, async (request) => {
     const productId = id(request);
-    const input = body(productInputSchema, request);
+    const input = body(productUpdateSchema, request);
     const result = await transaction(async (client) => {
       const version = (await client.query<{ catalogVersion: number }>('UPDATE venue_settings SET catalog_version=catalog_version+1 WHERE id=1 RETURNING catalog_version AS "catalogVersion"')).rows[0]!.catalogVersion;
       const productResult = await client.query(
         `UPDATE products SET category_id=$1,name=$2,description=$3,price_cents=$4,enabled=$5,self_service_only=$6,
-                catalog_version=$7,version=version+1 WHERE id=$8 AND archived_at IS NULL
+                catalog_version=$7,version=version+1 WHERE id=$8 AND version=$9 AND archived_at IS NULL
          RETURNING id,category_id AS "categoryId",name,description,price_cents AS "priceCents",enabled,self_service_only AS "selfServiceOnly",position,version`,
-        [input.categoryId, JSON.stringify(input.name), input.description ? JSON.stringify(input.description) : null, input.priceCents, input.enabled, input.selfServiceOnly, version, productId],
+        [input.categoryId, JSON.stringify(input.name), input.description ? JSON.stringify(input.description) : null, input.priceCents, input.enabled, input.selfServiceOnly, version, productId, input.expectedVersion],
       );
-      if (!productResult.rowCount) throw new HttpError(404, 'PRODUCT_NOT_FOUND', 'Product not found.');
+      if (!productResult.rowCount) {
+        const current = await client.query('SELECT 1 FROM products WHERE id=$1 AND archived_at IS NULL', [productId]);
+        if (!current.rowCount) throw new HttpError(404, 'PRODUCT_NOT_FOUND', 'Product not found.');
+        throw new HttpError(409, 'PRODUCT_CHANGED', 'The product was changed by another administrator.');
+      }
       await client.query('INSERT INTO product_versions(product_id,catalog_version,name,price_cents,enabled,self_service_only) VALUES ($1,$2,$3,$4,$5,$6)', [productId, version, JSON.stringify(input.name), input.priceCents, input.enabled, input.selfServiceOnly]);
       return productResult.rows[0];
     });
@@ -805,7 +809,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/v1/orders', { preHandler: requireHost }, async () => mapList((await pool.query(
     `SELECT t.id,t.guest_id AS "guestId",g.name AS "guestName",r.name AS "roomName",t.opened_at AS "openedAt",
             COALESCE(sum(CASE WHEN i.status IN ('open','provisional') THEN i.quantity ELSE 0 END),0)::int AS "itemCount",
-            COALESCE(sum(CASE WHEN i.status IN ('open','provisional') THEN i.unit_price_cents*i.quantity ELSE 0 END),0)::int AS "totalCents"
+            COALESCE(sum(CASE WHEN i.status IN ('open','provisional') THEN i.unit_price_cents*i.quantity ELSE 0 END),0)::float8 AS "totalCents"
        FROM order_tabs t JOIN guests g ON g.id=t.guest_id JOIN rooms r ON r.id=g.room_id
        LEFT JOIN order_items i ON i.tab_id=t.id WHERE t.status='open' GROUP BY t.id,g.name,r.name
        HAVING count(i.id) FILTER (WHERE i.status IN ('open','provisional'))>0 ORDER BY t.opened_at`,
@@ -1079,7 +1083,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       }
       const open = await client.query<{ id: string }>(`SELECT id FROM order_tabs WHERE guest_id=$1 AND status='open' FOR UPDATE`, [bill.guestId]);
       const destination = open.rows[0]?.id ?? bill.tabId;
-      await ensureTabTotalWithinRange(destination, BigInt(bill.totalCents), client);
       if (!open.rows[0]) await client.query(`UPDATE order_tabs SET status='open',closed_at=NULL WHERE id=$1`, [bill.tabId]);
       await client.query(`UPDATE order_items SET tab_id=$1,status='open',bill_id=NULL WHERE bill_id=$2`, [destination, billId]);
       await audit('bill.voided', 'bill', billId, { reason: input.reason, mutationId: input.mutationId }, { hostId: request.hostIdentity!.id }, client);

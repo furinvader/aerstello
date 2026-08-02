@@ -96,7 +96,7 @@ export function GuestPage() {
       void client.invalidateQueries({ queryKey: ['guest-tab'] });
     },
     onError: (caught,product) => {
-      if(caught instanceof ApiError&&caught.status>=400&&caught.status<500){
+      if(caught instanceof ApiError&&caught.status>=400&&caught.status<500&&caught.status!==408){
         pendingAdds.current={...pendingAdds.current,entries:pendingAdds.current.entries.filter(entry=>entry[0]!==product.id)};
         persistPendingAdds(pendingAdds.current);
       }

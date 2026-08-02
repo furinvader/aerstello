@@ -126,6 +126,12 @@ Feature: Guest device access and self-service
     Then retrying the uncertain product reuses its mutation identifier
     And each selected self-service product is stored once
 
+  Scenario: An HTTP timeout retains the guest addition mutation
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When the guest retries an addition after a committed HTTP timeout
+    Then both timed-out guest additions use the same mutation identifier
+    And the timed-out self-service product is stored once
+
   Scenario: An uncertain self-service addition survives closing the app
     Given an approved guest device for "Luca Rossi" in room "102"
     When the guest closes the app after a self-service response is lost

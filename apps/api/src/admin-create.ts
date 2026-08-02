@@ -8,14 +8,22 @@ function argument(name: string): string | undefined {
   return index >= 0 ? process.argv[index + 1] : undefined;
 }
 
+async function passwordFromStdin(): Promise<string | undefined> {
+  if (!process.argv.includes('--password-stdin') || process.stdin.isTTY) return undefined;
+  process.stdin.setEncoding('utf8');
+  let value = '';
+  for await (const chunk of process.stdin) value += chunk;
+  return value.split('\n', 1)[0]?.replace(/\r$/, '');
+}
+
 const input = z.object({
   email: z.string().email(),
   password: z.string().min(12),
   name: z.string().min(1),
-}).safeParse({ email: argument('email'), password: argument('password'), name: argument('name') });
+}).safeParse({ email: argument('email'), password: await passwordFromStdin(), name: argument('name') });
 
 if (!input.success) {
-  console.error('Usage: npm run admin:create -- --email admin@example.com --password "at-least-12-characters" --name "Admin"');
+  console.error('Usage: pipe the password on stdin, then run npm run admin:create -- --email admin@example.com --name "Admin" --password-stdin');
   process.exit(1);
 }
 

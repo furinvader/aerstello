@@ -71,6 +71,10 @@ export const productCreateSchema = productInputSchema.extend({
   mutationId: z.string().uuid(),
 });
 
+export const productUpdateSchema = productInputSchema.extend({
+  expectedVersion: z.number().int().positive(),
+});
+
 export const orderBatchSchema = z.object({
   mutationId: z.string().uuid(),
   originHostId: z.string().uuid(),

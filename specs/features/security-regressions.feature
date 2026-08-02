@@ -75,6 +75,12 @@ Feature: Device grants and replay protection
     When the administrator reverses a bill for an archived guest
     Then the archived guest bill is voided and its item is restored
 
+  Scenario: A bill correction remains available at the tab limit
+    Given an authenticated administrator
+    When the administrator reverses a bill onto a tab at the money limit
+    Then the correction succeeds and restores the billed item
+    And normal additions remain blocked while the corrected tab exceeds the limit
+
   Scenario: Revoked sessions stop receiving realtime events
     Given an authenticated administrator
     When the administrator session is revoked while its event stream is open

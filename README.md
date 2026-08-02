@@ -15,7 +15,7 @@ npm install
 npm run assets:generate
 npm run build
 npm run db:migrate
-npm run admin:create -- --email you@example.com --password "a-secure-12+-character-password" --name "Your name"
+printf '%s\n' "$SKY_BAR_ADMIN_PASSWORD" | npm run admin:create -- --email you@example.com --name "Your name" --password-stdin
 npm run dev
 ```
 
@@ -70,7 +70,7 @@ Set a unique `SESSION_SECRET` of at least 32 random characters and serve the app
 docker compose build
 docker compose up -d
 docker compose exec app npm run db:migrate
-docker compose exec app npm run admin:create -- --email admin@example.com --password "…" --name "…"
+printf '%s\n' "$SKY_BAR_ADMIN_PASSWORD" | docker compose exec -T app npm run admin:create -- --email admin@example.com --name "Admin" --password-stdin
 ```
 
 Back up the PostgreSQL volume before upgrades. See [docs/operations.md](./docs/operations.md) for backup, restore, health checks, and deployment constraints.
