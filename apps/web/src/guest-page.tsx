@@ -19,9 +19,19 @@ export function GuestPage() {
   useEffect(() => {
     if (!me.isSuccess) return;
     const events = new EventSource('/api/v1/events');
-    events.addEventListener('orders.changed', () => void client.invalidateQueries({ queryKey: ['guest-tab'] }));
+    const refresh = () => { void client.invalidateQueries({ queryKey: ['guest-tab'] }); void client.invalidateQueries({ queryKey: ['guest-catalog'] }); };
+    events.addEventListener('open', refresh);
+    events.addEventListener('orders.changed', refresh);
+    events.addEventListener('catalog.changed', refresh);
     return () => events.close();
   }, [me.isSuccess, client]);
+  useEffect(() => {
+    if (!undo) return;
+    const timer = window.setTimeout(() => {
+      setUndo((current) => current?.id === undo.id ? null : current);
+    }, Math.max(0, undo.until - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [undo]);
   const add = useMutation({ mutationFn: (productId: string) => api<{ id: string; provisionalUntil: string }>('/guest/items', { method: 'POST', body: json({ mutationId: crypto.randomUUID(), productId }) }), onSuccess: (item) => { setUndo({ id: item.id, until: new Date(item.provisionalUntil).getTime() }); void client.invalidateQueries({ queryKey: ['guest-tab'] }); }, onError: (caught) => setError(caught.message) });
   const undoItem = async () => { if (!undo) return; await api(`/guest/items/${undo.id}/undo`, { method: 'POST', body: json({}) }); setUndo(null); await client.invalidateQueries({ queryKey: ['guest-tab'] }); };
   if (me.isLoading) return <div className="splash">Sky Bar</div>;

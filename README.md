@@ -13,6 +13,7 @@ cp .env.example .env
 docker compose up -d db
 npm install
 npm run assets:generate
+npm run build
 npm run db:migrate
 npm run admin:create -- --email you@example.com --password "a-secure-12+-character-password" --name "Your name"
 npm run dev
@@ -39,6 +40,7 @@ The development seed is `admin@skybar.test` / `SkyBarTest123!` and must never be
 | `npm run lint:commit -- --last` | Validate the latest commit message |
 | `npm run db:migrate` | Apply pending PostgreSQL migrations |
 | `npm run admin:create -- …` | Create or recover the initial administrator |
+| `npm run db:migrate:dev -w @sky-bar/api` | Apply migrations directly from TypeScript during API development |
 | `npm run assets:generate` | Generate required 192px and 512px PWA icons |
 
 Before E2E tests, start PostgreSQL with `docker compose up -d db` and install the Playwright browsers with `npx playwright install`.

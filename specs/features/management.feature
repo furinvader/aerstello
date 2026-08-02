@@ -17,3 +17,8 @@ Feature: Venue operations configuration
     Given an authenticated administrator
     When the administrator creates the self-service product "Apfelsaft" priced "3.10"
     Then product "Apfelsaft" is listed as self-service
+
+  Scenario: Product prices require exact cents
+    Given an authenticated administrator
+    When the administrator tries to create product "Invalid price" priced "1.005"
+    Then the product price is rejected before submission

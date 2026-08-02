@@ -4,7 +4,7 @@ setup:
     npm install
     npm run assets:generate
     docker compose up -d db
-    npm run db:migrate
+    npm run db:migrate:dev -w @sky-bar/api
 
 dev:
     npm run dev

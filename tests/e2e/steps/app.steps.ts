@@ -6,12 +6,22 @@ import { createBdd } from 'playwright-bdd';
 const { Before, After, Given, When, Then } = createBdd();
 let guestPage: import('@playwright/test').Page | undefined;
 let manifestPayload: { name?: string; icons?: unknown[] } | undefined;
+const extraContexts: import('@playwright/test').BrowserContext[] = [];
+let firstGuestAccessStatus = 0;
+let secondGuestAccessStatus = 0;
+let crossRoomApprovalStatus = 0;
+let mismatchedHostOrderStatus = 0;
+let disabledCatalogOrderStatus = 0;
+let repeatedVoidStatuses: number[] = [];
 
 Before(async () => {
   execFileSync('npm',['run','db:seed','-w','@sky-bar/api'],{cwd:process.cwd(),env:{...process.env,E2E_RESET:'true'},stdio:'pipe'});
 });
 
-After(async () => { if (guestPage) { await guestPage.context().close(); guestPage=undefined; } });
+After(async () => {
+  if (guestPage) { await guestPage.context().close(); guestPage=undefined; }
+  await Promise.all(extraContexts.splice(0).map((context) => context.close()));
+});
 
 async function signIn(page: import('@playwright/test').Page) {
   await page.goto('/login');
@@ -33,6 +43,7 @@ When('the administrator changes the venue name to {string}', async ({ page }, na
 Then('the navigation shows the venue name {string}', async ({ page }, name:string) => { await expect(page.locator('.brand strong')).toHaveText(name); });
 When('the administrator opens venue settings', async ({ page }) => { await page.goto('/app/settings'); });
 Then('a venue QR code and room QR codes are shown', async ({ page }) => { await expect(page.locator('.qr-code')).toHaveCount(4); });
+Then('venue settings is available in the primary navigation', async ({ page }) => { await expect(page.getByRole('link',{name:'Betrieb'})).toBeVisible(); });
 
 async function chooseOrder(page: import('@playwright/test').Page, product:string, guest:string, room:string){await page.goto('/app/orders/new');await page.locator('.room-chips').getByRole('button',{name:room,exact:true}).click();await page.locator('.guest-list').getByRole('button',{name:new RegExp(guest)}).click();await page.locator('.product-tile').getByText(product,{exact:true}).click();}
 When('the host adds one {string} to {string} in room {string}',async({page},product:string,guest:string,room:string)=>chooseOrder(page,product,guest,room));
@@ -56,6 +67,7 @@ async function approveGuest(page:import('@playwright/test').Page,browser:import(
 Given('an approved guest device for {string} in room {string}',async({page,browser},name:string,room:string)=>approveGuest(page,browser,name,room));
 When('the guest adds {string} from self-service',async({},product:string)=>{await guestPage!.getByText(product,{exact:true}).click()});
 Then('an undo action is available',async()=>{await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toBeVisible()});
+Then('the undo action disappears after ten seconds',async()=>{await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toBeHidden({timeout:12_000})});
 When('the guest uses undo',async()=>{await guestPage!.getByRole('button',{name:'Rückgängig'}).click()});
 Then('the guest tab has no open items',async()=>{await expect(guestPage!.getByText('Noch keine Einträge')).toBeVisible()});
 
@@ -66,6 +78,8 @@ When('the host creates guest {string} in room {string}',async({page},name:string
 Then('guest {string} is listed in room {string}',async({page},name:string,room:string)=>{const row=page.locator('.table-row').filter({hasText:name});await expect(row).toContainText(room)});
 When('the administrator creates the self-service product {string} priced {string}',async({page},name:string,price:string)=>{await page.goto('/app/products');await page.getByRole('button',{name:/Hinzufügen/}).first().click();await page.getByLabel('Name · DE').fill(name);await page.getByLabel(/Preis · EUR|Prezzo · EUR|Price · EUR/).fill(price);await page.locator('.modal').getByText(/Selbstbedienung|Self-service/,{exact:true}).click();await page.locator('.modal').getByRole('button',{name:'Speichern'}).click()});
 Then('product {string} is listed as self-service',async({page},name:string)=>{const row=page.locator('.product-admin-list>button').filter({hasText:name});await expect(row).toContainText('Selbstbedienung')});
+When('the administrator tries to create product {string} priced {string}',async({page},name:string,price:string)=>{await page.goto('/app/products');await page.getByRole('button',{name:/Hinzufügen/}).first().click();await page.getByLabel('Name · DE').fill(name);await page.getByLabel(/Preis · EUR|Prezzo · EUR|Price · EUR/).fill(price);await page.locator('.modal').getByRole('button',{name:'Speichern'}).click()});
+Then('the product price is rejected before submission',async({page})=>{const price=page.getByLabel(/Preis · EUR|Prezzo · EUR|Price · EUR/);await expect(price).toBeVisible();expect(await price.evaluate((input:HTMLInputElement)=>input.validity.valid)).toBe(false)});
 
 When('the PWA manifest is requested',async({request})=>{const response=await request.get('/manifest.webmanifest');expect(response.ok()).toBeTruthy();manifestPayload=await response.json()});
 Then('it names the software {string} and provides application icons',async({},name:string)=>{expect(manifestPayload?.name).toBe(name);expect(manifestPayload?.icons?.length).toBeGreaterThanOrEqual(2)});
@@ -74,3 +88,75 @@ When('the host changes their language to Italian',async({page})=>{await page.got
 Then('the navigation is shown in Italian',async({page})=>{await expect(page.getByText('Panoramica')).toBeVisible()});
 When('the guest selects Italian',async()=>{await guestPage!.getByLabel(/Sprache|Lingua|Language/).selectOption('it')});
 Then('untranslated product content falls back to German',async()=>{await expect(guestPage!.getByText('Hauskeks',{exact:true})).toBeVisible()});
+
+const csrfHeaders = { 'x-skybar-csrf': '1' };
+async function operationalData(page: import('@playwright/test').Page) {
+  const request=page.context().request;
+  const me=await (await request.get('/api/v1/auth/me')).json() as {host:{id:string}};
+  const guests=await (await request.get('/api/v1/guests')).json() as {data:{id:string;name:string}[]};
+  const products=await (await request.get('/api/v1/products')).json() as {catalogVersion:number;data:{id:string;name:{de:string};description?:{de:string;it?:string;en?:string};priceCents:number;categoryId:string;enabled:boolean;selfServiceOnly:boolean}[]};
+  return {request,me,guests,products};
+}
+
+When('two devices exchange the same approved access request token',async({page,browser})=>{
+  const request=page.context().request;
+  const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
+  const room=bootstrap.rooms.find((item)=>item.name==='102')!;
+  const created=await (await request.post('/api/v1/public/access-requests',{data:{name:'One-time guest',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
+  await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{expiresAt:new Date(Date.now()+86_400_000).toISOString()}});
+  const first=await browser.newContext({baseURL:'http://127.0.0.1:5173'});const second=await browser.newContext({baseURL:'http://127.0.0.1:5173'});extraContexts.push(first,second);
+  await Promise.all([
+    first.request.get(`/api/v1/public/access-requests/${created.id}/status?token=${encodeURIComponent(created.statusToken)}`),
+    second.request.get(`/api/v1/public/access-requests/${created.id}/status?token=${encodeURIComponent(created.statusToken)}`),
+  ]);
+  firstGuestAccessStatus=(await first.request.get('/api/v1/guest/me')).status();
+  secondGuestAccessStatus=(await second.request.get('/api/v1/guest/me')).status();
+});
+Then('exactly one device receives guest access',async()=>{expect([firstGuestAccessStatus,secondGuestAccessStatus].sort()).toEqual([200,401])});
+
+When('the host links a room {string} request to a guest in room {string}',async({page},requestRoom:string,guestRoom:string)=>{
+  const request=page.context().request;
+  const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
+  const rooms=bootstrap.rooms;
+  const created=await (await request.post('/api/v1/public/access-requests',{data:{name:'Room-bound guest',roomId:rooms.find((room)=>room.name===requestRoom)!.id,language:'de'}})).json() as {id:string};
+  const guests=await (await request.get('/api/v1/guests')).json() as {data:{id:string;roomName:string}[]};
+  const response=await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{guestId:guests.data.find((guest)=>guest.roomName===guestRoom)!.id,expiresAt:new Date(Date.now()+86_400_000).toISOString()}});
+  crossRoomApprovalStatus=response.status();
+});
+Then('the cross-room approval is rejected',async()=>{expect(crossRoomApprovalStatus).toBe(404)});
+
+When("another host submits the administrator's queued order",async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);
+  await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{email:'staff@skybar.test',name:'Queue Staff',password:'QueueStaff123!',role:'staff',language:'de'}});
+  await request.post('/api/v1/auth/logout',{headers:csrfHeaders});
+  await request.post('/api/v1/auth/login',{data:{email:'staff@skybar.test',password:'QueueStaff123!'}});
+  const product=products.data.find((item)=>item.name.de==='Helles')!;
+  const guest=guests.data.find((item)=>item.name==='Anna Berger')!;
+  const response=await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}});
+  mismatchedHostOrderStatus=response.status();
+});
+Then('the queued order is rejected for the other host',async()=>{expect(mismatchedHostOrderStatus).toBe(403)});
+
+When('the host submits a product disabled in the captured catalog',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);
+  const product=products.data.find((item)=>item.name.de==='Helles')!;
+  const disabled=await request.patch(`/api/v1/products/${product.id}`,{headers:csrfHeaders,data:{name:product.name,...(product.description?{description:product.description}:{}),priceCents:product.priceCents,categoryId:product.categoryId,enabled:false,selfServiceOnly:product.selfServiceOnly}});
+  expect(disabled.status()).toBe(200);
+  const updated=await (await request.get('/api/v1/products')).json() as {catalogVersion:number;data:{id:string;enabled:boolean}[]};
+  expect(updated.data.find((item)=>item.id===product.id)?.enabled).toBe(false);
+  const response=await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guests.data.find((item)=>item.name==='Anna Berger')!.id,catalogVersion:updated.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}});
+  disabledCatalogOrderStatus=response.status();
+});
+Then('the captured catalog order is rejected',async()=>{expect(disabledCatalogOrderStatus).toBe(409)});
+
+When('the same item void mutation is submitted twice',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);
+  const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const product=products.data.find((item)=>item.name.de==='Helles')!;
+  await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}});
+  const tab=await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json() as {items:{id:string}[]};
+  const mutationId=crypto.randomUUID();
+  repeatedVoidStatuses=[];
+  repeatedVoidStatuses.push((await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:{mutationId,reason:'E2E correction'}})).status());
+  repeatedVoidStatuses.push((await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:{mutationId,reason:'E2E correction'}})).status());
+});
+Then('both item void responses succeed',async()=>{expect(repeatedVoidStatuses).toEqual([200,200])});

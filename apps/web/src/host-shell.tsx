@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, Redirect, useLocation } from 'wouter';
-import { BedDouble, Boxes, ClipboardList, CreditCard, Gauge, GlassWater, LogOut, Settings, UserRound, UserRoundCheck } from 'lucide-react';
+import { BedDouble, Boxes, Building2, ClipboardList, CreditCard, Gauge, GlassWater, LogOut, Settings, UserRound, UserRoundCheck } from 'lucide-react';
 import { api } from './api';
 import { Button } from './components';
 import { useI18n } from './i18n';
@@ -23,15 +23,18 @@ export function HostShell({children}:{children:ReactNode}) {
   const requests = useQuery<{ data: unknown[] }>({ queryKey: ['requests'], queryFn: () => api('/access-requests'), enabled: me.isSuccess });
   const [online, setOnline] = useState(navigator.onLine);
   const [queued, setQueued] = useState(0);
+  const hostId = me.data?.host.id;
   useEffect(() => {
-    const sync = async () => { setOnline(navigator.onLine); if (navigator.onLine) { await flushQueue(); await client.invalidateQueries(); } setQueued(await pendingMutationCount()); };
+    if (!hostId) { setQueued(0); return; }
+    const sync = async () => { setOnline(navigator.onLine); if (navigator.onLine) { await flushQueue(hostId); await client.invalidateQueries(); } setQueued(await pendingMutationCount(hostId)); };
     window.addEventListener('online', sync); window.addEventListener('offline', sync); void sync();
     return () => { window.removeEventListener('online', sync); window.removeEventListener('offline', sync); };
-  }, [client]);
+  }, [client, hostId]);
   useEffect(() => {
     if (!me.isSuccess) return;
     const events = new EventSource('/api/v1/events');
     const refresh = () => void client.invalidateQueries();
+    events.addEventListener('open', refresh);
     ['access-request.changed','orders.changed','bills.changed','rooms.changed','guests.changed','catalog.changed','venue.changed'].forEach((event) => events.addEventListener(event, refresh));
     return () => events.close();
   }, [me.isSuccess, client]);
@@ -49,6 +52,7 @@ export function HostShell({children}:{children:ReactNode}) {
     { to:'/app/rooms', label:t('rooms'), icon:BedDouble },
     { to:'/app/products', label:t('products'), icon:Boxes, admin:true },
     { to:'/app/requests', label:t('requests'), icon:UserRoundCheck, badge:requests.data?.data.length },
+    { to:'/app/settings', label:t('settings'), icon:Building2, admin:true },
     { to:'/app/account', label:t('account'), icon:Settings },
   ];
   return <HostContext.Provider value={{host:me.data!.host,venue:me.data!.venue}}><div className="app-shell"><aside className="sidebar"><div className="brand"><img src="/sky-bar.svg" alt=""/><div><strong>{me.data!.venue.name || 'Venue setup'}</strong><span>Sky Bar</span></div></div><nav aria-label="Primary">{nav.filter((item) => !item.admin || me.data!.host.role === 'admin').map(({ icon:Icon, ...item }) => {const active=currentPath===item.to||(item.to!=='/app/orders'&&currentPath.startsWith(`${item.to}/`));return <Link key={item.to} href={item.to} className={`${item.primary ? 'nav-primary ' : ''}${active ? 'active' : ''}`}><Icon/><span>{item.label}</span>{Boolean(item.badge) && <b className="badge">{item.badge}</b>}</Link>})}</nav><div className="sidebar-footer"><div className={`sync-state ${online ? '' : 'offline'}`}><span/>{online ? `${t('synced')}${queued ? ` · ${queued}`:''}` : t('offline')}</div><Button variant="ghost" onClick={() => void api('/auth/logout',{method:'POST'}).then(() => globalThis.location.assign('/login'))}><LogOut/> {t('logout')}</Button></div></aside><main className="app-content">{children}</main></div></HostContext.Provider>;

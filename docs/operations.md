@@ -9,7 +9,7 @@ Production requires `DATABASE_URL`, `SESSION_SECRET`, and HTTPS. `TRUST_PROXY=tr
 ## Health and migrations
 
 - Liveness/readiness: `GET /api/v1/health` verifies database connectivity.
-- Run `npm run db:migrate` before starting a newly deployed version.
+- Build the API, then run `npm run db:migrate` before starting a newly deployed version. Production migration and administrator commands execute the compiled files included in the runtime image.
 - Migrations are recorded in `schema_migrations` and applied exactly once.
 
 ## Backup and restore

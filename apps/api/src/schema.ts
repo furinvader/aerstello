@@ -142,6 +142,7 @@ export const orderItems = pgTable('order_items', {
   voidedAt: timestamp('voided_at', { withTimezone: true }),
   voidedByHost: uuid('voided_by_host').references(() => hosts.id),
   voidReason: text('void_reason'),
+  hostVoidMutationId: uuid('host_void_mutation_id').unique(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -167,6 +168,7 @@ export const accessRequests = pgTable('access_requests', {
   resolvedAt: timestamp('resolved_at', { withTimezone: true }),
   resolvedBy: uuid('resolved_by').references(() => hosts.id),
   expiresAt: timestamp('expires_at', { withTimezone: true }),
+  statusTokenConsumedAt: timestamp('status_token_consumed_at', { withTimezone: true }),
 });
 
 export const guestSessions = pgTable('guest_sessions', {

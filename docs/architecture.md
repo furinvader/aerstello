@@ -4,13 +4,13 @@
 
 The production container serves the built React PWA and Fastify API from one origin. PostgreSQL is the durable source of truth. Server-sent events are invalidation hints; clients always refetch authoritative REST resources after an event or reconnect.
 
-The browser stores the application shell and recently read operational data through Workbox. IndexedDB stores only replayable host mutations. Authentication remains cookie-based and is never persisted in application storage.
+The browser stores the application shell and explicitly non-identity-scoped bootstrap/catalog responses through Workbox. IndexedDB stores only replayable host mutations, partitioned by the originating host identity. Authentication remains cookie-based and is never persisted in application storage.
 
 ## Identity and authorization
 
 Hosts authenticate with email and Argon2id-hashed passwords. Opaque session tokens are HMAC-hashed in PostgreSQL and sent only in Secure, HttpOnly, SameSite cookies. Admins manage configuration, venue identity, host accounts, and bill reversals; staff handle rooms/guests operationally, access requests, orders, and settlement.
 
-Public guest requests carry a one-time status token. Approval links or creates a guest and assigns an expiry. The requesting browser exchanges approved status for an expiring device grant. Requests and live guest sessions reveal data only for their bound guest.
+Public guest requests carry a one-time status token. Approval links or creates a guest in the requested room and assigns an expiry. The requesting browser atomically consumes approved status for one expiring device grant. Requests, live guest sessions, and realtime events reveal data only for their bound guest.
 
 ## Order and bill lifecycle
 
@@ -22,7 +22,7 @@ Settlement locks the open tab and items, creates the bill and immutable bill lin
 
 ## Offline and concurrency
 
-The host PWA queues order batches and eligible item-void commands when `navigator.onLine` is false. UUID mutation keys make replay idempotent. If another device settles before a queued addition arrives, that addition creates a new tab. A queued void against a billed item is rejected and presented as a sync conflict.
+The host PWA queues order batches and eligible item-void commands when `navigator.onLine` is false. Each record is bound to its originating host, and the API rejects replay under another identity. UUID mutation keys make replay idempotent. If another device settles before a queued addition arrives, that addition creates a new tab. A queued void against a billed item is rejected and presented as a sync conflict.
 
 Billing, guest creation, access approval, catalog configuration, and venue settings are online-only. This boundary prevents duplicate settlement and unsafe configuration merges.
 

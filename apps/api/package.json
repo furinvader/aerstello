@@ -9,8 +9,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "db:migrate": "tsx src/migrate-cli.ts",
-    "admin:create": "tsx src/admin-create.ts",
+    "db:migrate": "node dist/migrate-cli.js",
+    "admin:create": "node dist/admin-create.js",
+    "db:migrate:dev": "tsx src/migrate-cli.ts",
+    "admin:create:dev": "tsx src/admin-create.ts",
     "db:seed": "tsx src/seed.ts"
   },
   "dependencies": {

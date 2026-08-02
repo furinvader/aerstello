@@ -44,6 +44,7 @@ export const productInputSchema = z.object({
 
 export const orderBatchSchema = z.object({
   mutationId: z.string().uuid(),
+  originHostId: z.string().uuid(),
   guestId: z.string().uuid(),
   catalogVersion: z.number().int().positive(),
   capturedAt: z.string().datetime(),

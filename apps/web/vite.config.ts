@@ -27,9 +27,12 @@ export default defineConfig({
       workbox: {
         navigateFallback: '/index.html',
         runtimeCaching: [{
-          urlPattern: ({ url }) => url.pathname.startsWith('/api/v1/') && !url.pathname.includes('/auth/'),
+          urlPattern: ({ url, request }) => request.method === 'GET' && [
+            '/api/v1/public/bootstrap',
+            '/api/v1/guest/catalog',
+          ].includes(url.pathname),
           handler: 'NetworkFirst',
-          options: { cacheName: 'sky-bar-api', networkTimeoutSeconds: 3, expiration: { maxEntries: 80, maxAgeSeconds: 86_400 } },
+          options: { cacheName: 'sky-bar-public-catalog', networkTimeoutSeconds: 3, expiration: { maxEntries: 10, maxAgeSeconds: 86_400 } },
         }],
       },
     }),
