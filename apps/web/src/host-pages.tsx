@@ -1,0 +1,346 @@
+import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useLocation, useRoute } from 'wouter';
+import { ArrowDown, ArrowUp, BedDouble, Check, ChevronLeft, ChevronRight, CircleDollarSign, Clock3, CreditCard, Edit3, Euro, GlassWater, Minus, Plus, Printer, Receipt, Search, Smartphone, Trash2, UserPlus, UserRoundCheck, Users } from 'lucide-react';
+import { formatMoney, localized, parseEuroCents, type Language, type LocalizedText } from '@sky-bar/shared';
+import { QRCodeSVG } from 'qrcode.react';
+import { ApiError, api, apiErrorMessage, json } from './api';
+import { canAddOrderProduct, resolveRecoveredOrderPrices, updateOrderCart } from './cart';
+import { Button, Card, ConfirmForm, Empty, Field, Modal, Notice, PageHeader } from './components';
+import { formatVenueDateTime, toLocalDateTimeInputValue } from './date';
+import { useI18n } from './i18n';
+import { isPermanentSyncConflict, submitOrQueue, type QueuedMutation } from './offline';
+import { loadPendingSettlement, persistPendingSettlement, type PendingSettlement } from './settlement-recovery';
+import { useHostContext } from './host-shell';
+import type { AccessRequest, Bill, Category, Guest, Host, OrderItem, Product, Room, Tab, TabSummary, Venue } from './types';
+
+const list = <T,>(path: string) => api<{ data: T[] }>(path);
+const uncertainOrderKey = (hostId: string) => `skybar-uncertain-order:${hostId}`;
+
+function loadUncertainOrder(hostId: string): QueuedMutation | null {
+  try {
+    const durable=localStorage.getItem(uncertainOrderKey(hostId));
+    const legacy=sessionStorage.getItem(uncertainOrderKey(hostId));
+    if(legacy)sessionStorage.removeItem(uncertainOrderKey(hostId));
+    if(!durable&&legacy)localStorage.setItem(uncertainOrderKey(hostId),legacy);
+    const raw = durable??legacy;
+    if (!raw) return null;
+    const mutation = JSON.parse(raw) as QueuedMutation;
+    if (mutation.hostId === hostId && mutation.path === '/order-batches' && mutation.display?.kind === 'order') return mutation;
+  } catch { /* Ignore and remove malformed recovery state below. */ }
+  localStorage.removeItem(uncertainOrderKey(hostId));sessionStorage.removeItem(uncertainOrderKey(hostId));
+  return null;
+}
+
+function persistUncertainOrder(hostId: string, mutation: QueuedMutation | null): void {
+  sessionStorage.removeItem(uncertainOrderKey(hostId));
+  if (mutation) localStorage.setItem(uncertainOrderKey(hostId), JSON.stringify(mutation));
+  else localStorage.removeItem(uncertainOrderKey(hostId));
+}
+
+export function DashboardPage() {
+  const { t, language } = useI18n();
+  const { venue } = useHostContext();
+  const stats = useQuery<{ pendingRequests:number;activeRooms:number;activeGuests:number;openItemCount:number;openValueCents:number;todaySalesCents:number }>({ queryKey:['dashboard'], queryFn:()=>api('/dashboard') });
+  const orders = useQuery<{data:TabSummary[]}>({queryKey:['orders'],queryFn:()=>list('/orders')});
+  const dashboardStats=stats.data;
+  const unavailableStats=stats.isError?t('requestFailed'):t('loading');
+  const cards = [
+    {label:t('requests'),value:dashboardStats?.pendingRequests ?? '–',icon:Clock3,tone:'violet'},
+    {label:t('guests'),value:dashboardStats?.activeGuests ?? '–',icon:Users,tone:'blue'},
+    {label:t('orders'),value:dashboardStats?formatMoney(dashboardStats.openValueCents,language):unavailableStats,detail:dashboardStats?`${dashboardStats.openItemCount} ${t('items')}`:undefined,icon:GlassWater,tone:'amber'},
+    {label:t('today'),value:dashboardStats?formatMoney(dashboardStats.todaySalesCents,language):unavailableStats,icon:CircleDollarSign,tone:'green'},
+  ];
+  const orderList=orders.isPending
+    ? <p className="muted">{t('loading')}</p>
+    : orders.isError
+      ? <Notice kind="error">{t('requestFailed')}</Notice>
+      : orders.data!.data.length
+        ? <div className="table-list">{orders.data!.data.slice(0,6).map(order=><a className="table-row" href={`/app/orders/new?guest=${order.guestId}`} key={order.id}><div className="avatar">{order.guestName.charAt(0)}</div><div className="grow"><strong>{order.guestName}</strong><span>{order.roomName} · {order.itemCount} {t('items')}</span></div><strong>{formatMoney(order.totalCents,language)}</strong><ChevronRight/></a>)}</div>
+        : <Empty>{t('empty')}</Empty>;
+  return <><PageHeader eyebrow={venue.name} title={`${t('welcome')}, ${venue.name}`} actions={<a className="button button--primary" href="/app/orders/new"><GlassWater/> {t('takeOrders')}</a>}/><div className="metric-grid">{cards.map(({icon:Icon,...card})=><Card key={card.label} className={`metric metric--${card.tone}`}><Icon/><span>{card.label}</span><strong>{card.value}</strong>{card.detail&&<small>{card.detail}</small>}</Card>)}</div><div className="section-heading"><h2>{t('orders')}</h2><a href="/app/orders">{t('viewAll')} <ChevronRight/></a></div><Card>{orderList}</Card></>;
+}
+
+export function TakeOrdersPage() {
+  const { t, language } = useI18n();
+  const { host } = useHostContext();
+  const client = useQueryClient();
+  const [,navigate] = useLocation();
+  const rooms = useQuery<{data:Room[]}>({queryKey:['rooms'],queryFn:()=>list('/rooms')});
+  const guests = useQuery<{data:Guest[]}>({queryKey:['guests'],queryFn:()=>list('/guests')});
+  const categories = useQuery<{data:Category[]}>({queryKey:['categories'],queryFn:()=>list('/categories')});
+  const products = useQuery<{data:Product[];catalogVersion:number}>({queryKey:['products'],queryFn:()=>api('/products')});
+  const [restoredSubmission]=useState(()=>loadUncertainOrder(host.id));
+  const [pendingSettlement,setPendingSettlement]=useState(()=>loadPendingSettlement(host.id));
+  const initialGuest = pendingSettlement?.guestId ?? (restoredSubmission?.display?.kind === 'order'
+    ? restoredSubmission.display.guestId
+    : new URLSearchParams(location.search).get('guest') ?? '');
+  const initialGuestData = guests.data?.data.find((guest)=>guest.id===initialGuest);
+  const [roomId,setRoomId]=useState(initialGuestData?.roomId ?? '');
+  const [guestId,setGuestId]=useState(initialGuest);
+  const [search,setSearch]=useState('');
+  const [cart,setCart]=useState<Record<string,number>>(()=>restoredSubmission?.display?.kind === 'order'
+    ? Object.fromEntries(restoredSubmission.display.items.map(item=>[item.productId,item.quantity]))
+    : {});
+  const [createGuest,setCreateGuest]=useState(false);
+  const [settleTab,setSettleTab]=useState<Tab|null>(null);
+  const [recoverSettlement,setRecoverSettlement]=useState(false);
+  const [settlementReview,setSettlementReview]=useState(false);
+  const [voidingItem,setVoidingItem]=useState<{item:OrderItem;mutationId:string;createdAt:string}|null>(null);
+  const [submitting,setSubmitting]=useState(false);
+  const [uncertainOrder,setUncertainOrder]=useState(Boolean(restoredSubmission));
+  const [message,setMessage]=useState<{kind:'success'|'error';text:string}|null>(()=>restoredSubmission?{kind:'error',text:t('uncertainOrderHelp')}:null);
+  const stagedSubmission=useRef<QueuedMutation|null>(restoredSubmission);
+  const tab=useQuery<Tab>({queryKey:['tab',guestId],queryFn:async()=>{const current=await api<Tab>(`/guests/${guestId}/tab`);return current.itemCount>0?current:{...current,id:null}},enabled:Boolean(guestId)});
+  const selectedGuest=guests.data?.data.find(guest=>guest.id===guestId);
+  const currentTab=tab.data;
+  const tabGuestSnapshot=currentTab?.guestId===guestId&&currentTab.guestName
+    ? {name:currentTab.guestName,roomName:currentTab.roomName??''}
+    : undefined;
+  const displayedGuest=selectedGuest??tabGuestSnapshot;
+  const eligibleProducts=products.data?.data.filter(product=>product.enabled&&!product.selfServiceOnly)??[];
+  const stagedDisplay=stagedSubmission.current?.display?.kind==='order'?stagedSubmission.current.display:undefined;
+  const recoveredPriceState=stagedDisplay
+    ? resolveRecoveredOrderPrices(stagedDisplay.items,stagedSubmission.current?.body,products.isError?null:products.data)
+    : {status:'ready' as const,unitPrices:[]};
+  const cartLines=stagedDisplay
+    ? stagedDisplay.items.map((item,index)=>({product:{id:item.productId,name:item.productName,priceCents:recoveredPriceState.status==='ready'?recoveredPriceState.unitPrices[index]!:null},quantity:item.quantity}))
+    : Object.entries(cart).flatMap(([productId,quantity])=>{const product=products.data?.data.find(item=>item.id===productId);return product?[{product,quantity}]:[]});
+  const cartTotal=cartLines.every(line=>line.product.priceCents!==null)
+    ? cartLines.reduce((sum,line)=>sum+line.product.priceCents!*line.quantity,0)
+    : null;
+  useEffect(()=>{const selected=guests.data?.data.find(guest=>guest.id===guestId);if(selected&&!roomId)setRoomId(selected.roomId)},[guestId,guests.data?.data,roomId]);
+  const selectGuest=(nextGuestId:string,nextRoomId:string)=>{
+    if(nextGuestId!==guestId&&uncertainOrder){setMessage({kind:'error',text:t('uncertainOrderHelp')});return}
+    if(nextGuestId!==guestId&&cartLines.length){
+      if(!globalThis.confirm(t('changeGuestCartWarning')))return;
+      setCart({});stagedSubmission.current=null;persistUncertainOrder(host.id,null);
+    }
+    setGuestId(nextGuestId);setRoomId(nextRoomId);
+  };
+  const add=(productId:string,change:number)=>{if(selectedGuest&&!uncertainOrder&&!submitting)setCart(current=>updateOrderCart(current,productId,change))};
+  const submit=async()=>{
+    if(stagedSubmission.current&&recoveredPriceState.status!=='ready')return;
+    if(!guestId||!products.data||(!selectedGuest&&!stagedSubmission.current)||(!stagedSubmission.current&&!cartLines.length))return;
+    setSubmitting(true);
+    if(!stagedSubmission.current){
+      const mutationId=crypto.randomUUID();const capturedAt=new Date().toISOString();const items=cartLines.map(line=>({productId:line.product.id,quantity:line.quantity}));
+      stagedSubmission.current={id:mutationId,hostId:host.id,path:'/order-batches',method:'POST',createdAt:capturedAt,body:{mutationId,originHostId:host.id,guestId,catalogVersion:products.data.catalogVersion,capturedAt,items},display:{kind:'order',guestId,guestName:selectedGuest?.name??guestId,roomName:selectedGuest?.roomName??'',items:cartLines.map(line=>({productId:line.product.id,productName:line.product.name,unitPriceCents:line.product.priceCents!,quantity:line.quantity}))}};
+      try { persistUncertainOrder(host.id,stagedSubmission.current); }
+      catch { stagedSubmission.current=null;setSubmitting(false);setMessage({kind:'error',text:t('requestFailed')});return; }
+    }
+    const submission=stagedSubmission.current;
+    if(!submission){setSubmitting(false);return}
+    try{const result=await submitOrQueue(submission);persistUncertainOrder(host.id,null);stagedSubmission.current=null;setUncertainOrder(false);setCart({});setMessage({kind:'success',text:result.queued?t('orderQueued'):t('orderAdded')});await client.invalidateQueries({queryKey:['tab',guestId]});}
+    catch(caught){const uncertain=!(caught instanceof ApiError)||caught.status===408||caught.status>=500;setUncertainOrder(uncertain);if(!uncertain){persistUncertainOrder(host.id,null);stagedSubmission.current=null}setMessage({kind:'error',text:uncertain?t('uncertainOrderHelp'):apiErrorMessage(caught,language,t('requestFailed'))});}
+    finally{setSubmitting(false)}
+  };
+  const voidItem=async(reason:string)=>{
+    if(!voidingItem||!guestId)return;
+    const result=await submitOrQueue({id:voidingItem.mutationId,hostId:host.id,path:`/order-items/${voidingItem.item.id}/void`,method:'POST',createdAt:voidingItem.createdAt,body:{mutationId:voidingItem.mutationId,reason,expectedBillingVersion:voidingItem.item.billingVersion},display:{kind:'void',guestId,guestName:displayedGuest?.name??guestId,roomName:displayedGuest?.roomName??'',productName:voidingItem.item.productName,quantity:voidingItem.item.quantity}});
+    setVoidingItem(null);
+    setMessage({kind:'success',text:result.queued?t('itemVoidQueued'):t('itemVoided')});
+    if(!result.queued)await Promise.all([client.invalidateQueries({queryKey:['tab',guestId]}),client.invalidateQueries({queryKey:['orders']}),client.invalidateQueries({queryKey:['guests']})]);
+  };
+  const visibleGuests=(guests.data?.data??[]).filter(guest=>(!roomId||guest.roomId===roomId)&&(!search||`${guest.name} ${guest.roomName}`.toLowerCase().includes(search.toLowerCase())));
+  const tabSummary=displayedGuest&&<div className="tab-pill">{tab.isError?<span>{t('requestFailed')}</span>:currentTab?<><span>{currentTab.itemCount} {t('items')}</span><strong>{formatMoney(currentTab.totalCents,language)}</strong></>:<span>{t('loading')}</span>}</div>;
+  const tabControls=displayedGuest&&(tab.isError
+    ? <Notice kind="error">{t('requestFailed')}</Notice>
+    : !currentTab
+      ? <p className="muted">{t('loading')}</p>
+      : <>{Boolean(currentTab.items.length)&&<div className="open-tab"><h3>{t('currentTab')}</h3>{currentTab.items.map(item=><div key={item.id}><div><strong>{item.quantity} × {localized(item.productName,language)}</strong><span>{formatMoney(item.unitPriceCents*item.quantity,language)}</span></div><Button variant="ghost" aria-label={`${t('voidItem')} ${localized(item.productName,language)}`} onClick={()=>setVoidingItem({item,mutationId:crypto.randomUUID(),createdAt:new Date().toISOString()})}><Trash2/></Button></div>)}</div>}{currentTab.id&&!pendingSettlement&&<Button variant="secondary" onClick={()=>{setSettlementReview(false);setSettleTab(currentTab)}} disabled={!navigator.onLine}><CreditCard/> {t('settle')} · {formatMoney(currentTab.totalCents,language)}</Button>}</>);
+  const closeSettlement=()=>{setSettleTab(null);setRecoverSettlement(false)};
+  const reviewSettlement=async()=>{setSettlementReview(true);await Promise.all([client.invalidateQueries({queryKey:['tab']}),client.invalidateQueries({queryKey:['orders']}),client.invalidateQueries({queryKey:['bills']})])};
+  return <><PageHeader eyebrow={t('takeOrders')} title={displayedGuest?.name??pendingSettlement?.guestName??t('selectGuest')} actions={tabSummary}/>{message&&<Notice kind={message.kind}>{message.text}</Notice>}{recoveredPriceState.status==='unavailable'&&<Notice kind="error">{t('recoveredOrderPriceUnavailable')} <a href="/app/orders">{t('review')}</a></Notice>}{pendingSettlement&&<Card><Notice kind="error">{t('settlementRecoveryHelp')}</Notice><div className="form-actions"><div className="grow"><strong>{pendingSettlement.guestName} · {pendingSettlement.roomName}</strong><p className="muted">{pendingSettlement.command.expectedItemCount} {t('items')} · {formatMoney(pendingSettlement.command.expectedTotalCents,language)} · {t(pendingSettlement.command.paymentMethod)}</p></div><Button onClick={()=>{setSettlementReview(false);setRecoverSettlement(true)}} disabled={!navigator.onLine}><Receipt/> {t('recoverSettlement')}</Button></div></Card>}{settlementReview&&<Notice kind="error">{t('settlementReviewHelp')} <a href="/app/bills">{t('bills')}</a></Notice>}<div className="order-workspace"><aside className="guest-picker"><div className="room-chips">{rooms.data?.data.map(room=><button className={room.id===roomId?'active':''} key={room.id} onClick={()=>selectGuest('',room.id)} disabled={submitting||uncertainOrder}>{room.name}</button>)}</div><label className="search"><Search/><input aria-label={t('searchGuests')} value={search} onChange={e=>setSearch(e.target.value)} placeholder={t('searchGuests')}/></label><div className="guest-list">{visibleGuests.map(guest=><button className={guest.id===guestId?'active':''} onClick={()=>selectGuest(guest.id,guest.roomId)} key={guest.id} disabled={submitting||uncertainOrder}><span className="avatar">{guest.name.charAt(0)}</span><span><strong>{guest.name}</strong><small>{guest.roomName} · {formatMoney(guest.totalCents,language)}</small></span><ChevronRight/></button>)}</div><Button variant="secondary" onClick={()=>setCreateGuest(true)} disabled={!navigator.onLine||submitting||uncertainOrder}><UserPlus/> {t('add')} {t('guests')}</Button></aside><section className="catalog"><div className="catalog-toolbar"><h2>{t('products')}</h2><span>{cartLines.reduce((sum,line)=>sum+line.quantity,0)} {t('selected')}</span></div>{categories.data?.data.map(category=>{const categoryProducts=eligibleProducts.filter(product=>product.categoryId===category.id);if(!categoryProducts.length)return null;return <div className="catalog-group" key={category.id}><h3>{localized(category.name,language)}</h3><div className="product-grid">{categoryProducts.map(product=><button className={`product-tile ${cart[product.id]?'selected':''}`} key={product.id} onClick={()=>add(product.id,1)} disabled={!selectedGuest||submitting||uncertainOrder||!canAddOrderProduct(cart,product.id)}><span>{localized(product.name,language)}</span><strong>{formatMoney(product.priceCents,language)}</strong>{cart[product.id]&&<b>{cart[product.id]}</b>}<Plus/></button>)}</div></div>})}</section><aside className="cart-panel"><h2>{t('orders')}</h2>{cartLines.length?<div className="cart-lines">{cartLines.map(({product,quantity})=><div key={product.id}><div><strong>{localized(product.name,language)}</strong><span>{product.priceCents===null?(recoveredPriceState.status==='loading'?t('loading'):t('priceUnavailable')):formatMoney(product.priceCents*quantity,language)}</span></div><div className="stepper"><button onClick={()=>add(product.id,-1)} disabled={!selectedGuest||submitting||uncertainOrder}><Minus/></button><b>{quantity}</b><button onClick={()=>add(product.id,1)} disabled={!selectedGuest||submitting||uncertainOrder||!canAddOrderProduct(cart,product.id)}><Plus/></button></div></div>)}</div>:<Empty>{t('selectProducts')}</Empty>}<div className="cart-total"><span>{t('total')}</span><strong>{cartTotal===null?(recoveredPriceState.status==='loading'?t('loading'):t('reviewRequired')):formatMoney(cartTotal,language)}</strong></div><Button onClick={()=>void submit()} disabled={submitting||recoveredPriceState.status!=='ready'||!guestId||(!selectedGuest&&!stagedSubmission.current)||(!cartLines.length&&!stagedSubmission.current)}><Check/> {submitting?'…':uncertainOrder?t('retry'):t('submitOrder')}</Button>{tabControls}</aside></div>{createGuest&&<NewGuestModal rooms={rooms.data?.data??[]} initialRoom={roomId} onClose={()=>setCreateGuest(false)} onCreated={async guest=>{await client.invalidateQueries({queryKey:['guests']});selectGuest(guest.id,guest.roomId);setCreateGuest(false)}}/>}{(settleTab||(recoverSettlement&&pendingSettlement))&&<SettleModal tab={settleTab} recovery={recoverSettlement?pendingSettlement:null} hostId={host.id} onClose={closeSettlement} onPendingChange={setPendingSettlement} onDefinitiveFailure={reviewSettlement} onSettled={(billId)=>navigate(`/app/bills/${billId}`)}/>} {voidingItem&&<Modal title={`${t('voidItem')} · ${localized(voidingItem.item.productName,language)}`} onClose={()=>setVoidingItem(null)}><ConfirmForm label={t('reason')} placeholder={t('voidItem')} onCancel={()=>setVoidingItem(null)} onConfirm={voidItem} onDefinitiveFailure={()=>setVoidingItem(current=>current?{...current,mutationId:crypto.randomUUID(),createdAt:new Date().toISOString()}:current)}/></Modal>}</>;
+}
+
+function NewGuestModal({rooms,initialRoom,onClose,onCreated}:{rooms:Room[];initialRoom:string;onClose:()=>void;onCreated:(guest:{id:string;roomId:string})=>void}){
+  const {t,language}=useI18n();const [name,setName]=useState('');const [roomId,setRoomId]=useState(initialRoom);const [error,setError]=useState('');const [pendingCommand,setPendingCommand]=useState<{mutationId:string;name:string;roomId:string;language:Language}>();
+  const submit=async(event:FormEvent)=>{event.preventDefault();const command=pendingCommand??{mutationId:crypto.randomUUID(),name:name.trim(),roomId,language};setPendingCommand(command);try{const guest=await api<{id:string;roomId:string}>('/guests',{method:'POST',body:json(command)});onCreated(guest)}catch(caught){if(isPermanentSyncConflict(caught))setPendingCommand(undefined);setError(apiErrorMessage(caught,language,t('requestFailed')))}};
+  return <Modal title={`${t('add')} ${t('guests')}`} onClose={onClose} closeDisabled={Boolean(pendingCommand)}><form className="stack" onSubmit={submit}><Field label={t('name')}><input value={name} onChange={e=>setName(e.target.value)} required autoFocus disabled={Boolean(pendingCommand)}/></Field><Field label={t('rooms')}><select value={roomId} onChange={e=>setRoomId(e.target.value)} required disabled={Boolean(pendingCommand)}><option value="">{t('selectRoom')}</option>{rooms.map(room=><option key={room.id} value={room.id}>{room.name}</option>)}</select></Field>{error&&<Notice kind="error">{error}</Notice>}<div className="form-actions"><Button variant="ghost" type="button" onClick={onClose} disabled={Boolean(pendingCommand)}>{t('cancel')}</Button><Button type="submit">{pendingCommand?t('retry'):t('save')}</Button></div></form></Modal>;
+}
+
+function SettleModal({tab,recovery,hostId,onClose,onPendingChange,onDefinitiveFailure,onSettled}:{tab:Tab|null;recovery:PendingSettlement|null;hostId:string;onClose:()=>void;onPendingChange:(settlement:PendingSettlement|null)=>void;onDefinitiveFailure:()=>Promise<void>;onSettled:(billId:string)=>void}){
+  const {t,language}=useI18n();
+  const [snapshot,setSnapshot]=useState<Tab>(()=>recovery?{id:recovery.tabId,guestId:recovery.guestId,guestName:recovery.guestName,roomName:recovery.roomName,items:[],itemCount:recovery.command.expectedItemCount,totalCents:recovery.command.expectedTotalCents}:tab!);
+  const [method,setMethod]=useState<'cash'|'card'|'other'>(()=>recovery?.command.paymentMethod??'cash');
+  const [note,setNote]=useState(()=>recovery?.command.note??'');
+  const [error,setError]=useState(()=>recovery?t('settlementRecoveryHelp'):'');
+  const [busy,setBusy]=useState(false);
+  const [frozen,setFrozen]=useState<PendingSettlement|null>(recovery);
+  const selectMethod=(nextMethod:'cash'|'card'|'other')=>{setMethod(nextMethod);if(nextMethod!=='other')setNote('')};
+  const submit=async(event:FormEvent)=>{
+    event.preventDefault();
+    if(!snapshot.id||!navigator.onLine)return;
+    setBusy(true);setError('');
+    const settlement=frozen??{storageVersion:1 as const,hostId,tabId:snapshot.id,guestId:snapshot.guestId,guestName:snapshot.guestName??snapshot.guestId,roomName:snapshot.roomName??'',createdAt:new Date().toISOString(),command:{mutationId:crypto.randomUUID(),expectedItemCount:snapshot.itemCount,expectedTotalCents:snapshot.totalCents,paymentMethod:method,...(method==='other'&&note?{note}: {})}};
+    if(!frozen){
+      try{persistPendingSettlement(hostId,settlement)}catch{setError(t('settlementStorageFailed'));setBusy(false);return}
+      setFrozen(settlement);onPendingChange(settlement);
+    }
+    try{
+      const bill=await api<{id:string}>(`/tabs/${settlement.tabId}/settle`,{method:'POST',body:json(settlement.command)});
+      persistPendingSettlement(hostId,null);setFrozen(null);onPendingChange(null);onSettled(bill.id);
+    }catch(caught){
+      if(isPermanentSyncConflict(caught)){
+        persistPendingSettlement(hostId,null);setFrozen(null);onPendingChange(null);await onDefinitiveFailure();
+        if(caught instanceof ApiError&&caught.code==='TAB_CHANGED'){
+          try{const refreshed=await api<Tab>(`/guests/${settlement.guestId}/tab`);if(!refreshed.id||refreshed.itemCount===0){onClose();return}setSnapshot(refreshed)}catch{onClose();return}
+        }else if(caught instanceof ApiError&&['EMPTY_TAB','TAB_NOT_OPEN'].includes(caught.code)){onClose();return}
+      }
+      setError(isPermanentSyncConflict(caught)?`${apiErrorMessage(caught,language,t('requestFailed'))} ${t('settlementReviewHelp')}`:t('settlementRecoveryHelp'));
+      setBusy(false);
+    }
+  };
+  return <Modal title={recovery?t('recoverSettlement'):t('settle')} onClose={onClose}><form className="stack" onSubmit={submit}><div className="settle-total"><span>{snapshot.itemCount} {t('items')}</span><strong>{formatMoney(snapshot.totalCents,language)}</strong></div><div className="choice-grid">{(['cash','card','other'] as const).map(value=><button type="button" className={method===value?'active':''} key={value} onClick={()=>selectMethod(value)} disabled={busy||Boolean(frozen)}>{value==='cash'?<Euro/>:<CreditCard/>}<span>{t(value)}</span></button>)}</div>{method==='other'&&<Field label={t('note')}><input value={note} onChange={e=>setNote(e.target.value)} maxLength={240} disabled={busy||Boolean(frozen)}/></Field>}{error&&<Notice kind="error">{error}</Notice>}<Button type="submit" disabled={busy||!navigator.onLine}>{busy?'…':frozen?t('retry'):t('settle')}</Button></form></Modal>;
+}
+
+export function OrdersPage(){
+  const {t,language}=useI18n();const orders=useQuery<{data:TabSummary[]}>({queryKey:['orders'],queryFn:()=>list('/orders')});
+  const orderCards=orders.isPending
+    ? <Card><p className="muted">{t('loading')}</p></Card>
+    : orders.isError
+      ? <Card><Notice kind="error">{t('requestFailed')}</Notice></Card>
+      : orders.data!.data.length
+        ? <div className="card-grid">{orders.data!.data.map(order=><Card key={order.id} className="tab-card"><div className="avatar large">{order.guestName.charAt(0)}</div><div className="grow"><h2>{order.guestName}</h2><p><BedDouble/> {order.roomName}</p><span>{order.itemCount} {t('items')}</span></div><strong>{formatMoney(order.totalCents,language)}</strong><a className="button button--secondary" href={`/app/orders/new?guest=${order.guestId}`}>{t('edit')} <ChevronRight/></a></Card>)}</div>
+        : <Card><Empty>{t('empty')}</Empty></Card>;
+  return <><PageHeader eyebrow={t('live')} title={t('orders')} actions={<a className="button button--primary" href="/app/orders/new"><Plus/> {t('takeOrders')}</a>}/>{orderCards}</>;
+}
+
+interface BillsResult { data: Bill[]; pagination: { page: number; pageSize: number; total: number; totalPages: number } }
+export function BillsPage(){
+  const {t,language}=useI18n();
+  const [search,setSearch]=useState('');
+  const [page,setPage]=useState(1);
+  const bills=useQuery<BillsResult>({
+    queryKey:['bills',search,page],
+    queryFn:()=>api(`/bills?search=${encodeURIComponent(search)}&page=${page}&pageSize=50`),
+  });
+  const visible=bills.data?.data??[];
+  const pagination=bills.data?.pagination;
+  const archive=bills.isPending
+    ? <p className="muted">{t('loading')}</p>
+    : bills.isError
+      ? <Notice kind="error">{t('requestFailed')}</Notice>
+      : visible.length
+        ? <div className="table-list bills-list">{visible.map(bill=><a className={`table-row ${bill.voidedAt?'voided':''}`} href={`/app/bills/${bill.id}`} key={bill.id}><div className="receipt-number"><Receipt/>#{bill.number}</div><div className="grow"><strong>{bill.guestName}</strong><span>{bill.roomName} · {formatVenueDateTime(bill.settledAt,language,bill.venueTimezone)}</span></div><span className="payment-tag">{t(bill.paymentMethod as 'cash'|'card'|'other')}</span><strong>{formatMoney(bill.totalCents,language)}</strong><ChevronRight/></a>)}</div>
+        : <Empty>{t('empty')}</Empty>;
+  return <><PageHeader eyebrow={t('archive')} title={t('bills')}/><label className="search wide"><Search/><input value={search} onChange={e=>{setSearch(e.target.value);setPage(1)}} placeholder={t('searchBills')}/></label><Card>{archive}</Card>{pagination&&pagination.totalPages>1&&<nav className="pagination" aria-label={t('bills')}><Button variant="secondary" disabled={page<=1} onClick={()=>setPage(current=>Math.max(1,current-1))}><ChevronLeft/>{t('previous')}</Button><span>{t('page')} {pagination.page} / {pagination.totalPages}</span><Button variant="secondary" disabled={page>=pagination.totalPages} onClick={()=>setPage(current=>current+1)}>{t('next')}<ChevronRight/></Button></nav>}</>;
+}
+
+interface BillDetail extends Bill { paymentNote?:string;voidReason?:string;hostName:string;hostNameKnown:boolean;items:{productName:LocalizedText;unitPriceCents:number;quantity:number;source:string}[] }
+export function BillDetailPage(){
+  const [,params]=useRoute('/app/bills/:id');const billId=params?.id;const {t,language}=useI18n();const {host}=useHostContext();const client=useQueryClient();const bill=useQuery<BillDetail>({queryKey:['bill',billId],queryFn:()=>api(`/bills/${billId}`),enabled:Boolean(billId)});const [voiding,setVoiding]=useState(false);const voidMutationId=useRef(crypto.randomUUID());
+  if(!bill.data)return <div className="splash">{t('loading')}</div>;
+  return <><PageHeader eyebrow={`${t('bills')} · #${bill.data.number}`} title={bill.data.venueName} actions={<><Button variant="secondary" onClick={()=>window.print()}><Printer/> {t('print')}</Button>{host.role==='admin'&&!bill.data.voidedAt&&<Button variant="danger" onClick={()=>setVoiding(true)}><Trash2/> {t('voidBill')}</Button>}</>}/><article className="bill-sheet"><header><div><img src="/sky-bar.svg" alt=""/><span>{t('poweredBy')}</span></div><h1>{bill.data.venueName}</h1><p>{t('bill')} #{bill.data.number}</p></header>{bill.data.voidedAt&&<div className="bill-void-marker"><Notice kind="error">{t('voided')} · {bill.data.voidReason}</Notice></div>}<div className="bill-meta"><div><span>{t('guest')}</span><strong>{bill.data.guestName}</strong></div><div><span>{t('rooms')}</span><strong>{bill.data.roomName}</strong></div><div><span>{t('date')}</span><strong>{formatVenueDateTime(bill.data.settledAt,language,bill.data.venueTimezone)}</strong></div><div><span>{t('host')}</span><strong>{bill.data.hostNameKnown?bill.data.hostName:t('unknownHost')}</strong></div></div><div className="bill-lines">{bill.data.items.map((item,index)=><div key={index}><span>{item.quantity} × {localized(item.productName,language)}{item.source==='guest'&&<small>{t('selfService')}</small>}</span><span>{formatMoney(item.unitPriceCents*item.quantity,language)}</span></div>)}</div><footer><div><span>{t('total')}</span><strong>{formatMoney(bill.data.totalCents,language)}</strong></div><p>{t(bill.data.paymentMethod as 'cash'|'card'|'other')}{bill.data.paymentNote&&` · ${bill.data.paymentNote}`}</p></footer></article>{voiding&&<Modal title={t('voidBill')} onClose={()=>setVoiding(false)}><ConfirmForm label={t('reason')} placeholder={t('reversalReason')} onCancel={()=>setVoiding(false)} onDefinitiveFailure={()=>{voidMutationId.current=crypto.randomUUID()}} onConfirm={async reason=>{await api(`/bills/${billId}/void`,{method:'POST',body:json({mutationId:voidMutationId.current,reason})});setVoiding(false);await client.invalidateQueries({queryKey:['bill',billId]})}}/></Modal>}</>;
+}
+
+export function GuestsPage(){
+  const {t,language}=useI18n();const client=useQueryClient();const guests=useQuery<{data:Guest[]}>({queryKey:['guests'],queryFn:()=>list('/guests')});const rooms=useQuery<{data:Room[]}>({queryKey:['rooms'],queryFn:()=>list('/rooms')});const [editing,setEditing]=useState<Guest|undefined>();const [creating,setCreating]=useState(false);const [removing,setRemoving]=useState<Guest|undefined>();const [pendingArchive,setPendingArchive]=useState<{mutationId:string;expectedVersion:number}>();const [removeError,setRemoveError]=useState('');const [devices,setDevices]=useState<Guest|undefined>();
+  const closeArchive=()=>{if(pendingArchive)return;setRemoving(undefined)};
+  const archiveGuest=async()=>{if(!removing)return;const command=pendingArchive??{mutationId:crypto.randomUUID(),expectedVersion:removing.version};setPendingArchive(command);setRemoveError('');try{await api(`/guests/${removing.id}`,{method:'DELETE',body:json(command)});setPendingArchive(undefined);setRemoving(undefined);await client.invalidateQueries({queryKey:['guests']})}catch(caught){if(isPermanentSyncConflict(caught))setPendingArchive(undefined);setRemoveError(apiErrorMessage(caught,language,t('requestFailed')))}};
+  return <><PageHeader eyebrow={t('directory')} title={t('guests')} actions={<Button onClick={()=>setCreating(true)}><UserPlus/> {t('add')}</Button>}/><Card>{guests.data?.data.length?<div className="table-list">{guests.data.data.map(guest=><div className="table-row" key={guest.id}><div className="avatar">{guest.name.charAt(0)}</div><div className="grow"><strong>{guest.name}</strong><span>{guest.roomName} · {guest.itemCount} {t('items')}</span></div><strong>{formatMoney(guest.totalCents,language)}</strong><Button variant="ghost" aria-label={`${t('loggedInDevices')} ${guest.name}`} onClick={()=>setDevices(guest)}><Smartphone/></Button><Button variant="ghost" aria-label={`${t('edit')} ${guest.name}`} onClick={()=>setEditing(guest)}><Edit3/></Button><Button variant="ghost" aria-label={`${t('remove')} ${guest.name}`} onClick={()=>{setRemoveError('');setPendingArchive(undefined);setRemoving(guest)}}><Trash2/></Button></div>)}</div>:<Empty>{t('empty')}</Empty>}</Card>{(creating||editing)&&<GuestEditor guest={editing} rooms={rooms.data?.data??[]} onClose={()=>{setCreating(false);setEditing(undefined)}} onSaved={async()=>{setCreating(false);setEditing(undefined);await client.invalidateQueries({queryKey:['guests']})}}/>}{devices&&<GuestDevicesModal guest={devices} onClose={()=>setDevices(undefined)}/>} {removing&&<Modal title={`${t('remove')} ${removing.name}`} onClose={closeArchive} closeDisabled={Boolean(pendingArchive)}><p className="muted">{t('guestArchiveWarning')}</p>{removeError&&<Notice kind="error">{removeError}</Notice>}<div className="form-actions"><Button variant="ghost" onClick={closeArchive} disabled={Boolean(pendingArchive)}>{t('cancel')}</Button><Button variant="danger" onClick={()=>void archiveGuest()}>{pendingArchive?t('retry'):t('remove')}</Button></div></Modal>}</>;
+}
+
+interface GuestDeviceSession{id:string;userAgent:string;createdAt:string;expiresAt:string}
+function GuestDevicesModal({guest,onClose}:{guest:Guest;onClose:()=>void}){
+  const {t,language}=useI18n();const client=useQueryClient();const sessions=useQuery<{data:GuestDeviceSession[]}>({queryKey:['guest-sessions',guest.id],queryFn:()=>list(`/guests/${guest.id}/sessions`)});
+  const revoke=async(sessionId:string)=>{await api(`/guests/${guest.id}/sessions/${sessionId}`,{method:'DELETE'});await client.invalidateQueries({queryKey:['guest-sessions',guest.id]})};
+  return <Modal title={`${guest.name} · ${t('loggedInDevices')}`} onClose={onClose}>{sessions.data?.data.length?<div className="device-list">{sessions.data.data.map(session=><div key={session.id}><div className="device-icon"><Smartphone/></div><div className="grow"><strong>{session.userAgent.slice(0,55)}</strong><span>{t('accessExpires')} {new Date(session.expiresAt).toLocaleString(language)}</span></div><Button variant="ghost" onClick={()=>void revoke(session.id)}>{t('revoke')}</Button></div>)}</div>:<Empty>{t('empty')}</Empty>}</Modal>;
+}
+
+function GuestEditor({guest,rooms,onClose,onSaved}:{guest:Guest|undefined;rooms:Room[];onClose:()=>void;onSaved:()=>void}){const {t,language:uiLanguage}=useI18n();const [name,setName]=useState(guest?.name??'');const [roomId,setRoomId]=useState(guest?.roomId??'');const [language,setLanguage]=useState<Language>(guest?.language??'de');const [error,setError]=useState('');const [pendingCommand,setPendingCommand]=useState<{mutationId:string;name:string;roomId:string;language:Language}>();const locked=!guest&&Boolean(pendingCommand);const submit=async(e:FormEvent)=>{e.preventDefault();const command=guest?{name:name.trim(),roomId,language,expectedVersion:guest.version}:pendingCommand??{mutationId:crypto.randomUUID(),name:name.trim(),roomId,language};if(!guest)setPendingCommand(command as typeof pendingCommand);try{await api(guest?`/guests/${guest.id}`:'/guests',{method:guest?'PATCH':'POST',body:json(command)});onSaved()}catch(caught){if(!guest&&isPermanentSyncConflict(caught))setPendingCommand(undefined);setError(apiErrorMessage(caught,uiLanguage,t('requestFailed')))}};return <Modal title={`${guest?t('edit'):t('add')} ${t('guests')}`} onClose={onClose} closeDisabled={locked}><form className="stack" onSubmit={submit}><Field label={t('name')}><input value={name} onChange={e=>setName(e.target.value)} required autoFocus disabled={locked}/></Field><Field label={t('rooms')}><select value={roomId} onChange={e=>setRoomId(e.target.value)} required disabled={locked}><option value="">{t('selectRoom')}</option>{rooms.map(room=><option key={room.id} value={room.id}>{room.name}</option>)}</select></Field><Field label={t('language')}><select value={language} onChange={e=>setLanguage(e.target.value as Language)} disabled={locked}><option value="de">Deutsch</option><option value="it">Italiano</option><option value="en">English</option></select></Field>{error&&<Notice kind="error">{error}</Notice>}<div className="form-actions"><Button variant="ghost" type="button" onClick={onClose} disabled={locked}>{t('cancel')}</Button><Button type="submit">{locked?t('retry'):t('save')}</Button></div></form></Modal>}
+
+export function RoomsPage(){
+  const {t,language}=useI18n();
+  const {host}=useHostContext();
+  const client=useQueryClient();
+  const rooms=useQuery<{data:Room[]}>({queryKey:['rooms'],queryFn:()=>list('/rooms'),enabled:host.role==='admin'});
+  const [name,setName]=useState('');
+  const [editing,setEditing]=useState<Room|undefined>();
+  const [createError,setCreateError]=useState('');
+  const [archiveError,setArchiveError]=useState('');
+  const [archiveCommand,setArchiveCommand]=useState<{roomId:string;roomName:string;mutationId:string;expectedVersion:number}>();
+  const [editError,setEditError]=useState('');
+  const [createCommand,setCreateCommand]=useState<{name:string;mutationId:string}>();
+  const [reorderError,setReorderError]=useState('');
+  const save=async(e:FormEvent)=>{
+    e.preventDefault();
+    const normalizedName=name.trim();
+    const command=createCommand??{name:normalizedName,mutationId:crypto.randomUUID()};
+    setCreateCommand(command);
+    setCreateError('');
+    try{
+      await api('/rooms',{method:'POST',body:json(command)});
+      setCreateCommand(undefined);setName('');await client.invalidateQueries({queryKey:['rooms']});
+    }catch(caught){if(isPermanentSyncConflict(caught))setCreateCommand(undefined);setCreateError(apiErrorMessage(caught,language,t('requestFailed')))}
+  };
+  const move=async(index:number,direction:number)=>{const ordered=[...rooms.data!.data];const target=index+direction;[ordered[index],ordered[target]]=[ordered[target]!,ordered[index]!];setReorderError('');try{await api('/rooms/order',{method:'PUT',body:json({rooms:ordered.map(room=>({id:room.id,expectedVersion:room.version}))})})}catch(caught){setReorderError(apiErrorMessage(caught,language,t('requestFailed')))}finally{await client.invalidateQueries({queryKey:['rooms']})}};
+  const archive=async(room:Pick<Room,'id'|'name'|'version'>)=>{const command=archiveCommand?.roomId===room.id?archiveCommand:{roomId:room.id,roomName:room.name,mutationId:crypto.randomUUID(),expectedVersion:room.version};setArchiveCommand(command);setArchiveError('');try{await api(`/rooms/${command.roomId}`,{method:'DELETE',body:json({mutationId:command.mutationId,expectedVersion:command.expectedVersion})});setArchiveCommand(undefined);await client.invalidateQueries({queryKey:['rooms']})}catch(caught){if(isPermanentSyncConflict(caught))setArchiveCommand(undefined);setArchiveError(apiErrorMessage(caught,language,t('requestFailed')))}};
+  const rename=async(e:FormEvent)=>{e.preventDefault();if(!editing)return;setEditError('');try{await api(`/rooms/${editing.id}`,{method:'PATCH',body:json({name:editing.name,expectedVersion:editing.version})});setEditing(undefined);await client.invalidateQueries({queryKey:['rooms']})}catch(caught){setEditError(apiErrorMessage(caught,language,t('requestFailed')))}};
+  if(host.role!=='admin')return <Card><Notice kind="error">{t('permissionRequired')}</Notice></Card>;
+  return <>
+    <PageHeader eyebrow={t('configuration')} title={t('rooms')}/>
+    {archiveError&&!archiveCommand&&<Notice kind="error">{archiveError}</Notice>}
+    {archiveCommand&&<Card><Notice kind="error">{archiveError||t('requestFailed')}</Notice><Button onClick={()=>void archive({id:archiveCommand.roomId,name:archiveCommand.roomName,version:archiveCommand.expectedVersion})}>{t('retry')} · {archiveCommand.roomName}</Button></Card>}
+    {reorderError&&<Notice kind="error">{reorderError}</Notice>}
+    <div className="two-column">
+      <Card><h2>{t('add')} {t('rooms')}</h2><form className="inline-form" onSubmit={save}><input value={name} onChange={e=>setName(e.target.value)} required placeholder={t('roomName')} disabled={Boolean(createCommand||archiveCommand)}/><Button type="submit" disabled={Boolean(archiveCommand)}><Plus/> {createCommand?t('retry'):t('add')}</Button></form>{createError&&<Notice kind="error">{createError}</Notice>}</Card>
+      <Card><h2>{t('displayOrder')}</h2><div className="sortable-list">{rooms.data?.data.map((room,index)=><div key={room.id}><span className="drag-index">{String(index+1).padStart(2,'0')}</span><div className="grow"><strong>{room.name}</strong><small>{room.guestCount??0} {t('guests')}</small></div><Button variant="ghost" disabled={Boolean(archiveCommand)||index===0} onClick={()=>void move(index,-1)}><ArrowUp/></Button><Button variant="ghost" disabled={Boolean(archiveCommand)||index===rooms.data!.data.length-1} onClick={()=>void move(index,1)}><ArrowDown/></Button><Button variant="ghost" disabled={Boolean(archiveCommand)} onClick={()=>{setEditError('');setEditing(room)}}><Edit3/></Button><Button variant="ghost" disabled={Boolean(archiveCommand)} aria-label={`${t('archive')} ${room.name}`} onClick={()=>void archive(room)}><Trash2/></Button></div>)}</div></Card>
+    </div>
+    {editing&&<Modal title={`${t('edit')} ${editing.name}`} onClose={()=>setEditing(undefined)}><form className="stack" onSubmit={rename}><Field label={t('name')}><input value={editing.name} onChange={e=>setEditing({...editing,name:e.target.value})} required maxLength={80} autoFocus/></Field>{editError&&<Notice kind="error">{editError}</Notice>}<Button type="submit">{t('save')}</Button></form></Modal>}
+  </>;
+}
+
+export function ProductsPage(){
+  const {t,language}=useI18n();const {host}=useHostContext();const client=useQueryClient();const products=useQuery<{data:Product[];catalogVersion:number}>({queryKey:['products'],queryFn:()=>api('/products'),enabled:host.role==='admin'});const categories=useQuery<{data:Category[]}>({queryKey:['categories'],queryFn:()=>list('/categories'),enabled:host.role==='admin'});const [editing,setEditing]=useState<Product|undefined>();const [creating,setCreating]=useState(false);const [categoryName,setCategoryName]=useState('');const [categoryError,setCategoryError]=useState('');const [categoryCommand,setCategoryCommand]=useState<{name:string;mutationId:string}>();
+  const addCategory=async(e:FormEvent)=>{e.preventDefault();const normalizedName=categoryName.trim();const command=categoryCommand??{name:normalizedName,mutationId:crypto.randomUUID()};setCategoryCommand(command);setCategoryError('');try{await api('/categories',{method:'POST',body:json({mutationId:command.mutationId,name:{de:command.name,it:'',en:''}})});setCategoryCommand(undefined);setCategoryName('');await client.invalidateQueries({queryKey:['categories']})}catch(caught){if(isPermanentSyncConflict(caught))setCategoryCommand(undefined);setCategoryError(apiErrorMessage(caught,language,t('requestFailed')))}};
+  if(host.role!=='admin')return <Card><Notice kind="error">{t('permissionRequired')}</Notice></Card>;
+  return <><PageHeader eyebrow={t('catalog')} title={t('products')} actions={<Button onClick={()=>setCreating(true)} disabled={!categories.data?.data.length}><Plus/> {t('add')}</Button>}/><div className="two-column catalog-admin"><Card><h2>{t('categories')}</h2><form className="inline-form" onSubmit={addCategory}><input value={categoryName} onChange={e=>setCategoryName(e.target.value)} placeholder={t('germanName')} required disabled={Boolean(categoryCommand)}/><Button type="submit">{categoryCommand?t('retry'):<Plus/>}</Button></form>{categoryError&&<Notice kind="error">{categoryError}</Notice>}<div className="category-list">{categories.data?.data.map(category=><div key={category.id}><strong>{localized(category.name,language)}</strong><span>{products.data?.data.filter(product=>product.categoryId===category.id).length??0}</span></div>)}</div></Card><Card><div className="product-admin-list">{products.data?.data.map(product=><button key={product.id} onClick={()=>setEditing(product)}><div className="product-mark"><GlassWater/></div><div className="grow"><strong>{localized(product.name,language)}</strong><span>{categories.data?.data.find(category=>category.id===product.categoryId)?localized(categories.data!.data.find(category=>category.id===product.categoryId)!.name,language):'—'} · {product.selfServiceOnly?t('selfService'):t('host')}</span></div><span className={`status-dot ${product.enabled?'enabled':''}`}>{product.enabled?t('enabled'):t('disabled')}</span><strong>{formatMoney(product.priceCents,language)}</strong><Edit3/></button>)}</div>{!products.data?.data.length&&<Empty>{t('empty')}</Empty>}</Card></div>{(creating||editing)&&<ProductEditor product={editing} categories={categories.data?.data??[]} onClose={()=>{setCreating(false);setEditing(undefined)}} onSaved={async()=>{setCreating(false);setEditing(undefined);await client.invalidateQueries({queryKey:['products']})}} onRemove={editing?async command=>{await api(`/products/${editing.id}`,{method:'DELETE',body:json(command)});setEditing(undefined);await client.invalidateQueries({queryKey:['products']})}:undefined}/>}</>;
+}
+
+function emptyText():LocalizedText{return {de:'',it:'',en:''}}
+interface ProductCreateCommand{mutationId:string;name:LocalizedText;description?:LocalizedText;priceCents:number;categoryId:string;enabled:boolean;selfServiceOnly:boolean}
+function ProductEditor({product,categories,onClose,onSaved,onRemove}:{product:Product|undefined;categories:Category[];onClose:()=>void;onSaved:()=>void;onRemove:((command:{mutationId:string;expectedVersion:number})=>Promise<void>)|undefined}){
+  const {t,language}=useI18n();const [name,setName]=useState<LocalizedText>(product?.name??emptyText());const [description,setDescription]=useState<LocalizedText>(product?.description??emptyText());const [price,setPrice]=useState(product?(product.priceCents/100).toFixed(2):'');const [categoryId,setCategoryId]=useState(product?.categoryId??categories[0]?.id??'');const [enabled,setEnabled]=useState(product?.enabled??true);const [selfServiceOnly,setSelfServiceOnly]=useState(product?.selfServiceOnly??false);const [error,setError]=useState('');const [pendingCreate,setPendingCreate]=useState<ProductCreateCommand>();const [pendingArchive,setPendingArchive]=useState<{mutationId:string;expectedVersion:number}>();const locked=Boolean(pendingArchive)||(!product&&Boolean(pendingCreate));const submit=async(e:FormEvent)=>{e.preventDefault();const priceCents=parseEuroCents(price);if(priceCents===undefined){setError(t('invalidPrice'));return}const hasDescription=Object.values(description).some(value=>value.trim().length>0);const productInput={name,description:hasDescription?description:undefined,priceCents,categoryId,enabled,selfServiceOnly};const command=product?{...productInput,expectedVersion:product.version}:pendingCreate??{...productInput,mutationId:crypto.randomUUID()};if(!product)setPendingCreate(command as ProductCreateCommand);try{await api(product?`/products/${product.id}`:'/products',{method:product?'PATCH':'POST',body:json(command)});onSaved()}catch(caught){if(!product&&isPermanentSyncConflict(caught))setPendingCreate(undefined);setError(apiErrorMessage(caught,language,t('requestFailed')))}};const archive=async()=>{if(!product||!onRemove)return;const command=pendingArchive??{mutationId:crypto.randomUUID(),expectedVersion:product.version};setPendingArchive(command);setError('');try{await onRemove(command)}catch(caught){if(isPermanentSyncConflict(caught))setPendingArchive(undefined);setError(apiErrorMessage(caught,language,t('requestFailed')))} };
+  return <Modal title={`${product?t('edit'):t('add')} ${t('products')}`} onClose={locked?()=>{}:onClose}><form className="stack" onSubmit={submit}><div className="translation-grid">{(['de','it','en'] as const).map(code=><Field key={code} label={`${t('name')} · ${code.toUpperCase()}`}><input value={name[code]} onChange={e=>setName({...name,[code]:e.target.value})} required={code==='de'} disabled={locked}/></Field>)}</div><div className="translation-grid">{(['de','it','en'] as const).map(code=><Field key={code} label={`${t('description')} · ${code.toUpperCase()}`}><input value={description[code]} onChange={e=>setDescription({...description,[code]:e.target.value})} disabled={locked}/></Field>)}</div><div className="form-grid"><Field label={`${t('price')} · EUR`}><input value={price} onChange={e=>setPrice(e.target.value)} inputMode="decimal" pattern="[0-9]+([.,][0-9]{1,2})?" required disabled={locked}/></Field><Field label={t('category')}><select value={categoryId} onChange={e=>setCategoryId(e.target.value)} required disabled={locked}>{categories.map(category=><option key={category.id} value={category.id}>{localized(category.name,language)}</option>)}</select></Field></div><label className="toggle"><input type="checkbox" checked={enabled} onChange={e=>setEnabled(e.target.checked)} disabled={locked}/><span/>{t('enabledForOrders')}</label><label className="toggle"><input type="checkbox" checked={selfServiceOnly} onChange={e=>setSelfServiceOnly(e.target.checked)} disabled={locked}/><span/>{t('selfService')}</label>{error&&<Notice kind="error">{error}</Notice>}<div className="form-actions">{onRemove&&<Button variant="danger" type="button" onClick={()=>void archive()}><Trash2/> {pendingArchive?t('retry'):t('archive')}</Button>}<span className="grow"/><Button variant="ghost" type="button" onClick={onClose} disabled={locked}>{t('cancel')}</Button><Button type="submit" disabled={Boolean(pendingArchive)}>{locked&&!product?t('retry'):t('save')}</Button></div></form></Modal>;
+}
+
+interface PendingDenial{hostId:string;requestId:string;requestName:string;mutationId:string}
+const pendingDenialKey=(hostId:string)=>`skybar-pending-denial:${hostId}`;
+function loadPendingDenial(hostId:string):PendingDenial|undefined{try{const raw=localStorage.getItem(pendingDenialKey(hostId));if(!raw)return;const pending=JSON.parse(raw) as PendingDenial;if(pending.hostId===hostId&&pending.requestId&&pending.mutationId)return pending}catch{/* Remove malformed recovery state below. */}localStorage.removeItem(pendingDenialKey(hostId));return}
+function persistPendingDenial(hostId:string,pending:PendingDenial|undefined){if(pending)localStorage.setItem(pendingDenialKey(hostId),JSON.stringify(pending));else localStorage.removeItem(pendingDenialKey(hostId))}
+
+export function RequestsPage(){
+  const {t,language}=useI18n();const {host}=useHostContext();const client=useQueryClient();const requests=useQuery<{data:AccessRequest[]}>({queryKey:['requests'],queryFn:()=>list('/access-requests')});const guests=useQuery<{data:Guest[]}>({queryKey:['guests'],queryFn:()=>list('/guests')});const [approving,setApproving]=useState<AccessRequest|undefined>();const [pendingDenial,setPendingDenial]=useState<PendingDenial|undefined>(()=>loadPendingDenial(host.id));const [denialError,setDenialError]=useState('');
+  const denyRequest=async(requestId:string,requestName:string)=>{const command=pendingDenial?.requestId===requestId?pendingDenial:{hostId:host.id,requestId,requestName,mutationId:crypto.randomUUID()};setPendingDenial(command);persistPendingDenial(host.id,command);setDenialError('');try{await api(`/access-requests/${requestId}/deny`,{method:'POST',body:json({mutationId:command.mutationId})});setPendingDenial(undefined);persistPendingDenial(host.id,undefined);await client.invalidateQueries({queryKey:['requests']})}catch(caught){if(isPermanentSyncConflict(caught)){setPendingDenial(undefined);persistPendingDenial(host.id,undefined)}setDenialError(apiErrorMessage(caught,language,t('requestFailed')))}};
+  return <><PageHeader eyebrow={t('liveQueue')} title={t('requests')} actions={requests.data?.data.length?<span className="live-pill"><span/>{requests.data.data.length} {t('pending')}</span>:undefined}/>{pendingDenial&&<Card><Notice kind="error">{denialError||t('requestFailed')}</Notice><Button onClick={()=>void denyRequest(pendingDenial.requestId,pendingDenial.requestName)}>{t('retry')} · {pendingDenial.requestName}</Button></Card>}{denialError&&!pendingDenial&&<Notice kind="error">{denialError}</Notice>}<div className="request-grid">{requests.data?.data.map(request=><Card key={request.id} className="request-card"><div className="request-avatar"><UserRoundCheck/></div><div className="grow"><h2>{request.name}</h2><p><BedDouble/> {request.roomName}</p><span>{new Date(request.requestedAt).toLocaleTimeString(language)} · {request.language.toUpperCase()}</span></div><div className="request-actions"><Button onClick={()=>setApproving(request)}><Check/> {t('approve')}</Button><Button variant="ghost" disabled={Boolean(pendingDenial&&pendingDenial.requestId!==request.id)} onClick={()=>void denyRequest(request.id,request.name)}>{pendingDenial?.requestId===request.id?t('retry'):t('deny')}</Button></div></Card>)}</div>{!requests.data?.data.length&&!pendingDenial&&<Card><Empty>{t('empty')}</Empty></Card>}{approving&&<ApproveRequestModal request={approving} guests={guests.data?.data??[]} onClose={()=>setApproving(undefined)} onApproved={async()=>{setApproving(undefined);await client.invalidateQueries()}}/>}</>;
+}
+
+function ApproveRequestModal({request,guests,onClose,onApproved}:{request:AccessRequest;guests:Guest[];onClose:()=>void;onApproved:()=>void}){
+  const {t,language}=useI18n();const matches=guests.filter(guest=>guest.roomId===request.roomId);const [guestId,setGuestId]=useState('new');const [expiresAt,setExpiresAt]=useState(()=>toLocalDateTimeInputValue(new Date(Date.now()+24*60*60*1000)));const [error,setError]=useState('');const [pendingCommand,setPendingCommand]=useState<{mutationId:string;guestId?:string;expiresAt:string}>();const submit=async(e:FormEvent)=>{e.preventDefault();const command=pendingCommand??{mutationId:crypto.randomUUID(),...(guestId==='new'?{}:{guestId}),expiresAt:new Date(expiresAt).toISOString()};setPendingCommand(command);try{await api(`/access-requests/${request.id}/approve`,{method:'POST',body:json(command)});onApproved()}catch(caught){if(isPermanentSyncConflict(caught))setPendingCommand(undefined);setError(apiErrorMessage(caught,language,t('requestFailed')))}};
+  return <Modal title={`${t('approve')} · ${request.name}`} onClose={onClose} closeDisabled={Boolean(pendingCommand)}><form className="stack" onSubmit={submit}><Field label={t('linkGuest')}><select value={guestId} onChange={e=>setGuestId(e.target.value)} disabled={Boolean(pendingCommand)}><option value="new">{t('createGuest')} · {request.name} · {request.roomName}</option>{matches.map(guest=><option key={guest.id} value={guest.id}>{t('linkTo')} {guest.name}</option>)}</select></Field><Field label={t('accessExpires')}><input type="datetime-local" value={expiresAt} onChange={e=>setExpiresAt(e.target.value)} required disabled={Boolean(pendingCommand)}/></Field>{error&&<Notice kind="error">{error}</Notice>}<Button type="submit"><Check/> {pendingCommand?t('retry'):t('approve')}</Button></form></Modal>;
+}
+
+interface DeviceSession{id:string;userAgent:string;createdAt:string;lastSeenAt:string;expiresAt:string;current:boolean}
+interface ManagedHost{id:string;name:string;email:string;role:'admin'|'staff';language:Language;active:boolean;version:number}
+interface AccountCommand{mutationId:string;expectedVersion:number;name:string;language:Language;currentPassword?:string;newPassword?:string}
+export function AccountPage(){
+  const {t,setLanguage}=useI18n();const {host}=useHostContext();const client=useQueryClient();const [,navigate]=useLocation();const sessions=useQuery<{data:DeviceSession[]}>({queryKey:['sessions'],queryFn:()=>list('/account/sessions')});const hosts=useQuery<{data:ManagedHost[]}>({queryKey:['hosts'],queryFn:()=>list('/hosts'),enabled:host.role==='admin'});const [name,setName]=useState(host.name);const [language,setLang]=useState<Language>(host.language);const [currentPassword,setCurrentPassword]=useState('');const [newPassword,setNewPassword]=useState('');const [message,setMessage]=useState<{kind:'success'|'error';text:string}|null>(null);const [addHost,setAddHost]=useState(false);const [pendingCommand,setPendingCommand]=useState<AccountCommand>();
+  useEffect(()=>{if(!pendingCommand){setName(host.name);setLang(host.language)}},[host.name,host.language,pendingCommand]);
+  const save=async(e:FormEvent)=>{e.preventDefault();setMessage(null);const command=pendingCommand??{mutationId:crypto.randomUUID(),expectedVersion:host.version,name,language,...(currentPassword?{currentPassword}:{}),...(newPassword?{newPassword}:{})};setPendingCommand(command);try{await api<Pick<Host,'name'|'language'|'version'>>('/account',{method:'PATCH',body:json(command)});setCurrentPassword('');setNewPassword('');setPendingCommand(undefined);await client.invalidateQueries({queryKey:['me']});const latest=client.getQueryData<{host:Host;venue:Venue}>(['me']);setLanguage(latest?.host.language??command.language);setMessage({kind:'success',text:t('accountUpdated')})}catch(caught){if(isPermanentSyncConflict(caught)){setPendingCommand(undefined);await client.invalidateQueries({queryKey:['me']})}setMessage({kind:'error',text:apiErrorMessage(caught,language,t('requestFailed'))})}};
+  const revokeSession=async(session:DeviceSession)=>{if(session.current){try{await api('/auth/logout',{method:'POST'})}catch{/* Clear sensitive local state even when the response is lost. */}finally{client.clear();navigate('/login',{replace:true});globalThis.location.assign('/login')}return}await api(`/account/sessions/${session.id}`,{method:'DELETE'});await client.invalidateQueries({queryKey:['sessions']})};
+  const toggleHost=async(item:ManagedHost)=>{setMessage(null);try{await api(`/hosts/${item.id}`,{method:'PATCH',body:json({active:!item.active,expectedVersion:item.version})})}catch(caught){setMessage({kind:'error',text:apiErrorMessage(caught,language,t('requestFailed'))})}finally{await client.invalidateQueries({queryKey:['hosts']})}};
+  return <><PageHeader eyebrow={host.email} title={t('account')}/>{message&&<Notice kind={message.kind}>{message.text}</Notice>}<div className="two-column"><Card><h2>{t('profileCredentials')}</h2><form className="stack" onSubmit={save}><Field label={t('name')}><input value={name} onChange={e=>setName(e.target.value)} required disabled={Boolean(pendingCommand)}/></Field><Field label={t('language')}><select value={language} onChange={e=>setLang(e.target.value as Language)} disabled={Boolean(pendingCommand)}><option value="de">Deutsch</option><option value="it">Italiano</option><option value="en">English</option></select></Field><hr/><Field label={t('currentPassword')}><input type="password" autoComplete="current-password" value={currentPassword} onChange={e=>setCurrentPassword(e.target.value)} disabled={Boolean(pendingCommand)}/></Field><Field label={t('newPassword')} hint={t('passwordHint')}><input type="password" autoComplete="new-password" minLength={12} value={newPassword} onChange={e=>setNewPassword(e.target.value)} disabled={Boolean(pendingCommand)}/></Field><Button type="submit">{pendingCommand?t('retry'):t('save')}</Button></form></Card><Card><h2>{t('loggedInDevices')}</h2><div className="device-list">{sessions.data?.data.map(session=><div key={session.id}><div className="device-icon">▣</div><div className="grow"><strong>{session.current?t('thisDevice'):session.userAgent.slice(0,55)}</strong><span>{t('lastActive')} {new Date(session.lastSeenAt).toLocaleString(language)}</span></div><Button variant="ghost" onClick={()=>void revokeSession(session)}>{session.current?t('logout'):t('revoke')}</Button></div>)}</div></Card></div>{host.role==='admin'&&<><div className="section-heading"><h2>{t('hostAccounts')}</h2><Button onClick={()=>setAddHost(true)}><UserPlus/> {t('add')}</Button></div><Card><div className="table-list">{hosts.data?.data.map(item=><div className="table-row" key={item.id}><div className="avatar">{item.name.charAt(0)}</div><div className="grow"><strong>{item.name}</strong><span>{item.email}</span></div><span className="payment-tag">{t(item.role)}</span><span className={`status-dot ${item.active?'enabled':''}`}>{item.active?t('active'):t('inactive')}</span>{item.id!==host.id&&<Button variant="ghost" onClick={()=>void toggleHost(item)}>{item.active?t('disable'):t('enable')}</Button>}</div>)}</div></Card></>}{addHost&&<NewHostModal onClose={()=>setAddHost(false)} onCreated={async()=>{setAddHost(false);await client.invalidateQueries({queryKey:['hosts']})}}/>}</>;
+}
+
+function NewHostModal({onClose,onCreated}:{onClose:()=>void;onCreated:()=>void}){const {t,language}=useI18n();const [name,setName]=useState('');const [email,setEmail]=useState('');const [password,setPassword]=useState('');const [role,setRole]=useState<'admin'|'staff'>('staff');const [error,setError]=useState('');const [pendingCommand,setPendingCommand]=useState<{mutationId:string;name:string;email:string;password:string;role:'admin'|'staff';language:'de'}>();const submit=async(e:FormEvent)=>{e.preventDefault();const command=pendingCommand??{mutationId:crypto.randomUUID(),name,email,password,role,language:'de'};setPendingCommand(command);try{await api('/hosts',{method:'POST',body:json(command)});onCreated()}catch(caught){if(isPermanentSyncConflict(caught))setPendingCommand(undefined);setError(apiErrorMessage(caught,language,t('requestFailed')))}};return <Modal title={t('addHost')} onClose={onClose} closeDisabled={Boolean(pendingCommand)}><form className="stack" onSubmit={submit}><Field label={t('name')}><input value={name} onChange={e=>setName(e.target.value)} required disabled={Boolean(pendingCommand)}/></Field><Field label={t('email')}><input type="email" value={email} onChange={e=>setEmail(e.target.value)} required disabled={Boolean(pendingCommand)}/></Field><Field label={t('temporaryPassword')}><input type="password" minLength={12} value={password} onChange={e=>setPassword(e.target.value)} required disabled={Boolean(pendingCommand)}/></Field><Field label={t('role')}><select value={role} onChange={e=>setRole(e.target.value as 'admin'|'staff')} disabled={Boolean(pendingCommand)}><option value="staff">{t('staff')}</option><option value="admin">{t('admin')}</option></select></Field>{error&&<Notice kind="error">{error}</Notice>}<Button type="submit">{pendingCommand?t('retry'):t('createAccount')}</Button></form></Modal>}
+
+export function SettingsPage(){
+  const {t,language:uiLanguage}=useI18n();const {host}=useHostContext();const client=useQueryClient();const venue=useQuery<Venue>({queryKey:['venue'],queryFn:()=>api('/venue')});const rooms=useQuery<{data:Room[]}>({queryKey:['rooms'],queryFn:()=>list('/rooms')});const [name,setName]=useState('');const [timezone,setTimezone]=useState('Europe/Berlin');const [language,setLanguage]=useState<Language>('de');const [initialized,setInitialized]=useState(false);const [saved,setSaved]=useState(false);const [error,setError]=useState('');const configuredName=name;const base=location.origin;
+  useEffect(()=>{if(!venue.data)return;setName(venue.data.name);setTimezone(venue.data.timezone);setLanguage(venue.data.defaultLanguage);setInitialized(true)},[venue.data?.name,venue.data?.timezone,venue.data?.defaultLanguage]);
+  const submit=async(e:FormEvent)=>{e.preventDefault();setSaved(false);setError('');try{const updated=await api<Venue>('/venue',{method:'PUT',body:json({name:configuredName,timezone:timezone||venue.data?.timezone||'Europe/Berlin',language,expectedVersion:venue.data!.version})});client.setQueryData(['venue'],updated);client.setQueryData<{host:Host;venue:Venue}>(['me'],current=>current?{...current,venue:updated}:current);setSaved(true)}catch(caught){setError(apiErrorMessage(caught,uiLanguage,t('requestFailed')))}};
+  if(host.role!=='admin')return <Card><Notice kind="error">{t('permissionRequired')}</Notice></Card>;
+  if(!initialized)return <div className="splash">{t('loading')}</div>;
+  return <><PageHeader eyebrow={`Sky Bar · ${t('configuration')}`} title={t('settings')}/>{saved&&<Notice>{t('venueSaved')}</Notice>}{error&&<Notice kind="error">{error}</Notice>}<div className="two-column"><Card><h2>{t('venueIdentity')}</h2><p className="muted">{t('venueIdentityHelp')}</p><form className="stack" onSubmit={submit}><Field label={t('venueName')}><input value={name} onChange={e=>setName(e.target.value)} required maxLength={120} placeholder={t('venueName')}/></Field><Field label={t('defaultLanguage')}><select value={language} onChange={e=>setLanguage(e.target.value as Language)}><option value="de">Deutsch</option><option value="it">Italiano</option><option value="en">English</option></select></Field><Field label={t('timezone')}><input value={timezone} onChange={e=>setTimezone(e.target.value)} required/></Field><Button type="submit">{t('save')}</Button></form></Card><Card className="qr-card"><h2>{t('venueGuestAccess')}</h2><QRCodeSVG className="qr-code" value={`${base}/guest/request`} size={190} bgColor="#ffffff" fgColor="#07101b" level="M" marginSize={2}/><code>{base}/guest/request</code><Button variant="secondary" onClick={()=>window.print()}><Printer/> {t('print')}</Button></Card></div><div className="section-heading"><h2>{t('roomQrCodes')}</h2></div><div className="qr-grid">{rooms.data?.data.map(room=><Card className="qr-card" key={room.id}><h3>{room.name}</h3><QRCodeSVG className="qr-code" value={`${base}/guest/request?room=${room.id}`} size={150} bgColor="#ffffff" fgColor="#07101b" level="M" marginSize={2}/><small>{t('roomPreselected')}</small></Card>)}</div></>;
+}

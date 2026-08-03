@@ -1,0 +1,2082 @@
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { once } from 'node:events';
+import argon2 from 'argon2';
+import pg from 'pg';
+import { expect } from '@playwright/test';
+import AxeBuilder from '@axe-core/playwright';
+import { createBdd } from 'playwright-bdd';
+
+const { Before, After, Given, When, Then } = createBdd();
+const e2eBaseURL = `http://127.0.0.1:${process.env.E2E_WEB_PORT ?? '5173'}`;
+let guestPage: import('@playwright/test').Page | undefined;
+let manifestPayload: { name?: string; icons?: unknown[]; start_url?: string } | undefined;
+const extraContexts: import('@playwright/test').BrowserContext[] = [];
+const extraApiProcesses: ChildProcess[] = [];
+let firstGuestAccessStatus = 0;
+let secondGuestAccessStatus = 0;
+let crossRoomApprovalStatus = 0;
+let mismatchedHostOrderStatus = 0;
+let disabledCatalogOrderStatus = 0;
+let repeatedVoidStatuses: number[] = [];
+let repeatedBillVoidStatuses: number[] = [];
+let restoredBillItemCount = 0;
+let archivedRoomGuestStatus = 0;
+let invalidTimezoneStatus = 0;
+let venueTimezoneBefore = '';
+let venueTimezoneAfter = '';
+let recoveredDeviceStatus = 0;
+let retriedOrderMutationIds: string[] = [];
+let retriedSettlementMutationIds: string[] = [];
+type SettlementRecoveryRecord = {
+  hostId:string;tabId:string;guestId:string;guestName:string;roomName:string;
+  command:{mutationId:string;expectedItemCount:number;expectedTotalCents:number;paymentMethod:string;note?:string};
+};
+let settlementRecoveryBeforeReload: SettlementRecoveryRecord | undefined;
+let settlementRecoveryAfterReload: SettlementRecoveryRecord | undefined;
+let reloadedSettlementRequests: {path:string;body:SettlementRecoveryRecord['command']}[] = [];
+let reloadedSettlementBillCount = 0;
+let reloadedSettlementStorageCount = 0;
+let retriedOrderItemCount = 0;
+let excessiveOrderStatus = 0;
+let tabTotalBeforeExcess = 0;
+let tabTotalAfterExcess = 0;
+let guestArchiveRaceStatuses: [number, number][] = [];
+let retriedGuestUndoMutationIds: string[] = [];
+let oldestBillNumber = '';
+let revokedStreamEventCount = 0;
+let transientReplayAttempts = 0;
+let loginFailureResults: { status: number; body: unknown }[] = [];
+let recoveredGrantStatus = 0;
+let differentGrantStatus = 0;
+let rotatedCapabilityPollResult: {statuses:number[];sameToken:boolean;states:string[]} | undefined;
+let rotatedGrantRecoveryStatus = 0;
+let rotatedHostSessionStatus = 0;
+let billArchiveRaceStatuses: [number, number][] = [];
+let freshGuestPage: import('@playwright/test').Page | undefined;
+let expiredGrantResult: { status: string; granted: boolean } | undefined;
+let expiredGrantGuestStatus = 0;
+let guestRevokedStatus = 0;
+let approvalMoveRaceStatuses: [number, number][] = [];
+let concurrentOrderStatuses: number[] = [];
+let concurrentOrderItemCount = 0;
+let concurrentSettlementStatuses: number[] = [];
+let concurrentSettlementBillCount = 0;
+let staleSettlementBillCount = 0;
+let concurrentGuestItemStatuses: number[] = [];
+let concurrentGuestItemCount = 0;
+let pendingRoomArchiveStatus = 0;
+let pendingRoomRequestCount = 0;
+let grantExchangeRequest: { method: string; url: string; body: unknown } | undefined;
+let archivedGrantGuestStatus = 0;
+let retriedAccessRequestMutationIds: string[] = [];
+let pendingAccessRequestCount = 0;
+let retriedGuestAddMutationIds: string[] = [];
+let uncertainGuestProductCounts: Record<string,number> = {};
+let switchedGuestTabCount = 0;
+let aggregateSettlementStatus = 0;
+let uncertainOrderControlsLocked = false;
+let uncertainSettlementDetailsLocked = false;
+let changedSettlementReplayStatus = 0;
+let sharedNetworkPollStatuses: number[] = [];
+let rotatingCapabilityStatuses: number[] = [];
+let conflictGuestId = '';
+let changedItemVoidReplayStatus = 0;
+let changedItemVoidVersionReplayStatus = 0;
+let itemBillingConflictResult: {status:number;code:string}|undefined;
+let correctedLifecycleItemCount = 0;
+let lifecycleGuestId = '';
+let refreshedLifecycleVoidStatus = 0;
+let legacyItemBillingConflictResult: {status:number;code:string}|undefined;
+let legacyLifecycleItemCount = 0;
+let legacyItemVoidReplayStatus = 0;
+let changedBillVoidReplayStatus = 0;
+let snapshottedBillDate = '';
+let retriedProductMutationIds: string[] = [];
+let recoverableProductCount = 0;
+let changedProductCreationReplayStatus = 0;
+let deniedPollCounts: [number, number] = [0, 0];
+let approvalDefaultLifetimeHours = 0;
+let reloadedOrderMutationIds: string[] = [];
+let reloadedOrderItemCount = 0;
+let roleChangedHostPage: import('@playwright/test').Page | undefined;
+let changedOrderReplayStatus = 0;
+let changedOrderReplayItemCount = 0;
+let dashboardOpenItemCount = 0;
+let currentDeviceAfterPasswordChangeStatus = 0;
+let otherDeviceAfterPasswordChangeStatus = 0;
+let newPasswordLoginStatus = 0;
+let retriedRoomMutationIds: string[] = [];
+let recoverableRoomCount = 0;
+let changedRoomCreationReplayStatus = 0;
+let uncertainRoomFieldsLocked = false;
+let retriedCategoryMutationIds: string[] = [];
+let recoverableCategoryCount = 0;
+let changedCategoryCreationReplayStatus = 0;
+let uncertainCategoryFieldsLocked = false;
+let reopenedGuestAddMutationIds: string[] = [];
+let reopenedGuestAddItemCount = 0;
+let archivedGuestBillVoidStatus = 0;
+let archivedGuestRestoredItemCount = 0;
+let archivedGuestCorrectionId = '';
+let archivedGuestCorrectionName = '';
+let retriedGuestCreationMutationIds: string[] = [];
+let uncertainGuestFieldsLocked = false;
+let uncertainGuestCreationStayedOpen = false;
+let recoverableGuestCount = 0;
+let changedGuestCreationReplayStatus = 0;
+let retriedGuestArchiveMutationIds: string[] = [];
+let uncertainGuestArchiveStayedOpen = false;
+let archivedGuestCount = 0;
+let staleGuestArchiveStatus = 0;
+let staleGuestArchiveFinalName = '';
+let expectedItalianSessionTimestamp = '';
+let dashboardCurrentItemCount = 0;
+let dashboardCurrentValueCents = 0;
+let dashboardExpectedValueCents = 0;
+let dashboardSnapshotSalesCents = 0;
+let dashboardExpectedSnapshotSalesCents = 0;
+let closedOrderMutationIds: string[] = [];
+let closedOrderPreReopenTransmissionCount = 0;
+let closedOrderItemCount = 0;
+let capturedUncertainTotal = '';
+let capturedOrderTabTotalCents = 0;
+let capturedExpectedTotalCents = 0;
+let legacyUnavailablePriceBody: Record<string,unknown> | undefined;
+let legacyUnavailablePricePostCount = 0;
+let legacyUnavailablePriceGuestId = '';
+let legacyOrderReplayStatuses: number[] = [];
+let legacyOrderItemCount = 0;
+let retriedApprovalMutationIds: string[] = [];
+let uncertainApprovalFieldsLocked = false;
+let approvedGuestIdentityCount = 0;
+let retriedHostCreationMutationIds: string[] = [];
+let uncertainHostFieldsLocked = false;
+let recoverableHostCount = 0;
+let retriedDenialMutationIds: string[] = [];
+let deniedRequestCount = 0;
+let staleGuestPriceRejected = false;
+let staleGuestPriceItemCount = 0;
+let staleGuestMutationIds: string[] = [];
+let legacyGuestMutationId = '';
+let legacyGuestRequest: {mutationId:string;expectedPriceCents?:number;expectedProductVersion?:number} | undefined;
+let legacyGuestItemCount = 0;
+let refreshedSettlementBillCount = 0;
+let refreshedSettlementItemCount = 0;
+let timeoutGuestItemCount = 0;
+let staleProductRetryRejected = false;
+let staleProductFinalPrice = 0;
+let uncertainProductFieldsLocked = false;
+let overflowBillVoidStatus = 0;
+let overflowBillTabItemCount = 0;
+let overflowPostCorrectionOrderStatus = 0;
+let overflowOverviewStatuses: number[] = [];
+let staleVenueUpdateStatus = 0;
+let staleVenueFinalName = '';
+let repeatedGuestSessionRevokeStatuses: number[] = [];
+let guestSessionRevokeAuditCount = 0;
+let mismatchedGuestSessionRevokeStatus = 0;
+let staleGuestSnapshotRejected = false;
+let staleGuestSnapshotItemCount = 0;
+let staleGuestFinalName = '';
+let staleGuestUpdateStatus = 0;
+let concurrentRoomOrderStatuses: number[] = [];
+let staleRoomOrderStatus = 0;
+let staleRoomOrderFinalIds: string[] = [];
+let expectedRoomOrderFinalIds: string[] = [];
+let staleRoomUpdateStatus = 0;
+let staleRoomFinalName = '';
+let retriedRoomArchiveMutationIds: string[] = [];
+let archivedRoomCount = 0;
+let staleRoomArchiveStatus = 0;
+let staleRoomArchiveFinalName = '';
+let staleHostUpdateStatus = 0;
+let staleHostFinalActive = false;
+let reopenedHostSessionStatus = 0;
+let uncertainVoidReasonLocked = false;
+let retriedVoidReasons: string[] = [];
+let reloadedVoidRequests: {mutationId:string;reason:string;expectedBillingVersion:number}[] = [];
+let reloadedVoidItemCount = 0;
+let reloadedVoidPendingCount = 0;
+let snapshottedBillHostName = '';
+let uncertainAccessRequestFieldsLocked = false;
+let credentialRaceLoginStatuses: number[] = [];
+let credentialRaceActiveSessions = 0;
+let retriedProductArchiveMutationIds: string[] = [];
+let uncertainProductArchiveFieldsLocked = false;
+let archivedProductCount = 0;
+let staleProductArchiveStatus = 0;
+let staleProductArchiveFinalPrice = 0;
+let transactionalGuestEditStatus = 0;
+let transactionalGuestFinalName = '';
+let retriedProfileMutationIds: string[] = [];
+let uncertainProfileFieldsLocked = false;
+let finalProfileName = '';
+let sharedReplicaRateStatuses: number[] = [];
+let malformedJsonResult: {status:number;code:string}|undefined;
+let replayedLogoutStatus = 0;
+let replayedGuestLogoutStatus = 0;
+let guestUndoRemainingMs = 0;
+let serializedGuestUndoResult: {startedBeforeExpiry:boolean;status:number;code:string;itemCount:number;itemStatus:string}|undefined;
+let settlementTimestampAgeMs = Number.POSITIVE_INFINITY;
+let billVoidLockTiming: {
+  releaseFloor: Date;
+  voidedAt: Date;
+  auditCreatedAt: Date;
+  auditCount: number;
+  billBefore: unknown;
+  billAfter: unknown;
+  linesBefore: unknown[];
+  linesAfter: unknown[];
+} | undefined;
+let databaseClockGrantResult: {granted:boolean;guestStatus:number}|undefined;
+let serializedGrantResult: {
+  status:string;granted:boolean;guestStatus:number;sessionCount:number;consumedAt:Date|null;
+}|undefined;
+let databaseClockApprovalResult: {
+  validStatus:number;validRequestStatus:string;expiredStatus:number;expiredCode:string;expiredRequestStatus:string;expiredGuestCount:number;
+}|undefined;
+let serializedApprovalResult: {status:number;code:string;requestStatus:string;guestCount:number}|undefined;
+let laterRealtimeInsertWaited = false;
+let commitOrderedRealtimeIds: string[] = [];
+let relayedCommitOrderedEvents: {id:string;marker:string}[] = [];
+let rollingDeployBillingVersions: number[] = [];
+let rollingDeployOldVoid: {errorCode:string;status:string;billingVersion:number}|undefined;
+let rollingDeployVoidConflict: {status:number;code:string}|undefined;
+
+Before(async () => {
+  execFileSync('npm',['run','db:seed','-w','@sky-bar/api'],{cwd:process.cwd(),env:{...process.env,E2E_RESET:'true',SEED_ADMIN_PASSWORD:'SkyBarTest123!'},stdio:'pipe'});
+});
+
+After(async () => {
+  if (guestPage) { await guestPage.context().close(); guestPage=undefined; }
+  await Promise.all(extraContexts.splice(0).map((context) => context.close()));
+  await Promise.all(extraApiProcesses.splice(0).map(async(child)=>{
+    if(child.exitCode!==null)return;
+    const exited=once(child,'exit');
+    child.kill('SIGTERM');
+    await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5_000))]);
+    if(child.exitCode===null)child.kill('SIGKILL');
+  }));
+});
+
+async function signIn(page: import('@playwright/test').Page) {
+  await page.goto('/login');
+  await page.getByLabel('Email').fill('admin@skybar.test');
+  await page.getByLabel('Password').fill('SkyBarTest123!');
+  await page.getByRole('button',{name:'Sign in'}).click();
+  await expect(page).toHaveURL(/\/app/);
+}
+
+async function startClockSkewedApi(port:number,offsetMs:number) {
+  const replica=spawn(process.execPath,['--import','./tests/e2e/fixtures/future-clock.mjs','apps/api/dist/index.js'],{
+    cwd:process.cwd(),
+    env:{...process.env,PORT:String(port),LOG_LEVEL:'warn',RATE_LIMIT_MAX:'5000',SKY_BAR_TEST_CLOCK_OFFSET_MS:String(offsetMs)},
+    stdio:'ignore',
+  });
+  extraApiProcesses.push(replica);
+  const baseURL=`http://127.0.0.1:${port}`;
+  await expect.poll(async()=>{try{return (await fetch(`${baseURL}/api/v1/health`)).status}catch{return 0}},{timeout:15_000}).toBe(200);
+  return baseURL;
+}
+
+Given('the seeded Sky Bar venue', async ({ page }) => { await page.goto('/login'); });
+When('the administrator signs in', async ({ page }) => { await signIn(page); });
+Given('an authenticated administrator', async ({ page }) => { await signIn(page); });
+Then('the host dashboard shows the venue name {string}', async ({ page }, name:string) => { await expect(page.locator('.page-header')).toContainText(name); });
+Then('the page has no serious accessibility violations', async ({ page }) => { const result=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa']).analyze();expect(result.violations.filter(v=>['serious','critical'].includes(v.impact??''))).toEqual([]); });
+When('the host opens the account screen', async ({ page }) => { await page.goto('/app/account'); });
+Then('the current device is listed', async ({ page }) => { await expect(page.getByText(/Dieses Gerät|Questo dispositivo|This device/)).toBeVisible(); });
+When('a profile save response is lost before another device edits the profile',async({page})=>{
+  await page.goto('/app/account');
+  await page.getByLabel(/Name|Nome/).first().fill('First profile save');
+  await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarProfileCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/account')&&init?.method==='PATCH'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});
+  await page.getByRole('button',{name:/Speichern|Salva|Save/}).first().click();
+  await expect(page.locator('.notice--error')).toBeVisible();
+  uncertainProfileFieldsLocked=await page.locator('form.stack').first().locator('input,select').evaluateAll(fields=>fields.every(field=>(field as HTMLInputElement).disabled));
+  const request=page.context().request;const current=await (await request.get('/api/v1/auth/me')).json() as {host:{version:number;language:string}};
+  expect((await request.patch('/api/v1/account',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:current.host.version,name:'Newer device profile',language:current.host.language}})).status()).toBe(200);
+  await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).first().click();
+  await expect(page.locator('.notice--success')).toBeVisible();
+  retriedProfileMutationIds=(await page.evaluate(()=>(window as unknown as {__skyBarProfileCommands:Array<Record<string,unknown>>}).__skyBarProfileCommands)).map(command=>String(command.mutationId));
+  finalProfileName=((await (await request.get('/api/v1/auth/me')).json()) as {host:{name:string}}).host.name;
+});
+Then('both profile save attempts use the same mutation identifier',async()=>{expect(retriedProfileMutationIds).toHaveLength(2);expect(new Set(retriedProfileMutationIds).size).toBe(1)});
+Then('the uncertain profile fields stay locked for retry',async()=>{expect(uncertainProfileFieldsLocked).toBe(true)});
+Then('the newer profile remains configured',async({page})=>{expect(finalProfileName).toBe('Newer device profile');await expect(page.getByLabel(/Name|Nome/).first()).toHaveValue('Newer device profile')});
+When('the administrator retries host creation after its response is lost',async({page})=>{await page.goto('/app/account');await page.getByRole('button',{name:/Hinzufügen|Aggiungi|Add/}).last().click();const modal=page.locator('.modal');await modal.getByLabel('Name').fill('Recoverable Host');await modal.getByLabel(/E-Mail/).fill('recoverable-host@skybar.test');await modal.getByLabel(/Temporäres Passwort|Password temporanea|Temporary password/).fill('RecoverableHost123!');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarHostCreateCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/hosts')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});await modal.getByRole('button',{name:/Konto erstellen|Crea account|Create account/}).click();await expect(modal.locator('.notice--error')).toBeVisible();uncertainHostFieldsLocked=await modal.locator('input,select').evaluateAll(fields=>fields.every(field=>(field as HTMLInputElement).disabled));await modal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(modal).toHaveCount(0);const commands=await page.evaluate(()=>(window as unknown as {__skyBarHostCreateCommands:Array<Record<string,unknown>>}).__skyBarHostCreateCommands);retriedHostCreationMutationIds=commands.map(command=>String(command.mutationId));const hosts=await (await page.context().request.get('/api/v1/hosts')).json() as {data:{email:string}[]};recoverableHostCount=hosts.data.filter(host=>host.email==='recoverable-host@skybar.test').length});
+Then('both host creation attempts use the same mutation identifier',async()=>{expect(retriedHostCreationMutationIds).toHaveLength(2);expect(new Set(retriedHostCreationMutationIds).size).toBe(1)});
+Then('the uncertain host fields stay locked for retry',async()=>{expect(uncertainHostFieldsLocked).toBe(true)});
+Then('only one recoverable host account exists',async()=>{expect(recoverableHostCount).toBe(1)});
+Then('host creation retains no retired password verifier',async()=>{const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();try{const host=(await database.query(`SELECT password_hash AS "passwordHash",create_command_hash AS "commandHash" FROM hosts WHERE email='recoverable-host@skybar.test'`)).rows[0] as {passwordHash:string;commandHash:string};expect(host.passwordHash).toMatch(/^\$argon2id\$/);expect(host.commandHash).toMatch(/^[0-9a-f]{64}$/);expect(Number((await database.query(`SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='hosts' AND column_name='create_password_hash'`)).rows[0].count)).toBe(0)}finally{await database.end()}});
+When('another device creates a host while the account directory is open',async({page})=>{
+  await page.setViewportSize({width:390,height:844});
+  await page.goto('/app/account');
+  await expect(page.locator('.page-header .eyebrow')).toHaveText('admin@skybar.test');
+  expect((await page.context().request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'realtime-host@skybar.test',name:'Realtime Host',password:'RealtimeHost123!',role:'staff',language:'de'}})).status()).toBe(201);
+});
+Then('the new host appears after the committed authorization event',async({page})=>{const row=page.locator('.section-heading+.card .table-row').filter({hasText:'realtime-host@skybar.test'});await expect(row).toBeVisible({timeout:10_000});await expect(row).toContainText('Realtime Host')});
+When('the host selects Italian on an English-locale device',async({page})=>{expect(await page.evaluate(()=>navigator.language)).toMatch(/^en/);await page.goto('/app/account');await expect(page.getByText('Dieses Gerät')).toBeVisible();const payload=await (await page.context().request.get('/api/v1/account/sessions')).json() as {data:{lastSeenAt:string;current:boolean}[]};const lastSeenAt=payload.data.find(session=>session.current)!.lastSeenAt;expectedItalianSessionTimestamp=await page.evaluate(value=>new Date(value).toLocaleString('it'),lastSeenAt);await page.getByLabel('Sprache').selectOption('it');await page.getByRole('button',{name:'Speichern'}).click()});
+Then('the last-active timestamp uses Italian formatting',async({page})=>{const current=page.locator('.device-list>div').filter({hasText:'Questo dispositivo'});await expect(current).toContainText(`Ultima attività ${expectedItalianSessionTimestamp}`)});
+When('the administrator changes the password with another device logged in',async({page,browser})=>{
+  const other=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(other);
+  expect((await other.request.post('/api/v1/auth/login',{data:{email:'admin@skybar.test',password:'SkyBarTest123!'}})).status()).toBe(200);
+  const me=await (await page.context().request.get('/api/v1/auth/me')).json() as {host:{version:number}};
+  expect((await page.context().request.patch('/api/v1/account',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:me.host.version,currentPassword:'SkyBarTest123!',newPassword:'ChangedPassword123!'}})).status()).toBe(200);
+  currentDeviceAfterPasswordChangeStatus=(await page.context().request.get('/api/v1/auth/me')).status();
+  otherDeviceAfterPasswordChangeStatus=(await other.request.get('/api/v1/auth/me')).status();
+  const fresh=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(fresh);
+  newPasswordLoginStatus=(await fresh.request.post('/api/v1/auth/login',{data:{email:'admin@skybar.test',password:'ChangedPassword123!'}})).status();
+});
+Then('the password change keeps the current device and revokes the other device',async()=>{expect(currentDeviceAfterPasswordChangeStatus).toBe(200);expect(otherDeviceAfterPasswordChangeStatus).toBe(401)});
+Then('the new password can be used to sign in',async()=>{expect(newPasswordLoginStatus).toBe(200)});
+When('the administrator submits an incorrect current password',async({page})=>{await page.goto('/app/account');await page.getByLabel(/Aktuelles Passwort|Password attuale|Current password/).fill('IncorrectPassword123!');await page.getByLabel(/Neues Passwort|Nuova password|New password/).fill('ReplacementPassword123!');await page.getByRole('button',{name:/Speichern|Salva|Save/}).click()});
+Then('the account screen shows the localized password error',async({page})=>{await expect(page.locator('.notice--error')).toContainText('Das aktuelle Passwort ist falsch.')});
+When('the host revokes the current device from the account screen', async ({ page }) => {
+  await page.goto('/app/account');
+  const current=page.locator('.device-list>div').filter({hasText:/Dieses Gerät|Questo dispositivo|This device/});
+  await current.getByRole('button').click();
+});
+Then('the host is redirected to login without cached venue data', async ({ page }) => {
+  await expect(page).toHaveURL(/\/login$/);
+  await expect(page.getByText('Hotel Aurora',{exact:true})).toHaveCount(0);
+});
+When('the host logs out and the committed response is lost',async({page})=>{
+  await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/auth/logout')&&init?.method==='POST'){await originalFetch(input,init);throw new TypeError('Simulated lost logout response')}return originalFetch(input,init)}});
+  await page.locator('.sidebar-footer button').evaluate((button:HTMLButtonElement)=>button.click());
+  await expect(page).toHaveURL(/\/login$/);
+  replayedLogoutStatus=(await page.context().request.post('/api/v1/auth/logout',{headers:csrfHeaders})).status();
+});
+Then('the host still reaches login without cached venue data',async({page})=>{await expect(page).toHaveURL(/\/login$/);await expect(page.getByText('Hotel Aurora',{exact:true})).toHaveCount(0)});
+Then('replaying logout for the revoked session succeeds',async()=>{expect(replayedLogoutStatus).toBe(204)});
+Given('an authenticated staff host', async ({ page }) => {
+  await signIn(page);
+  const request=page.context().request;
+  expect((await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'room-staff@skybar.test',name:'Room Staff',password:'RoomStaff123!',role:'staff',language:'de'}})).status()).toBe(201);
+  expect((await request.post('/api/v1/auth/logout',{headers:csrfHeaders})).status()).toBe(204);
+  expect((await request.post('/api/v1/auth/login',{data:{email:'room-staff@skybar.test',password:'RoomStaff123!'}})).status()).toBe(200);
+  await page.goto('/app');
+});
+Then('room management is absent from the navigation', async ({ page }) => { await expect(page.getByRole('link',{name:/^Zimmer$|^Camere$|^Rooms$/})).toHaveCount(0); });
+Then('opening the room-management URL shows no mutation controls', async ({ page }) => { await page.goto('/app/rooms');await expect(page.locator('.notice--error')).toBeVisible();await expect(page.locator('.inline-form,.sortable-list')).toHaveCount(0); });
+Then('opening the product-management URL shows no mutation controls', async ({ page }) => { await page.goto('/app/products');await expect(page.locator('.notice--error')).toBeVisible();await expect(page.locator('.inline-form,.product-admin-list')).toHaveCount(0); });
+When('another administrator demotes an open host session to staff',async({page,browser})=>{const request=page.context().request;const created=await (await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'role-refresh@skybar.test',name:'Role Refresh',password:'RoleRefresh123!',role:'admin',language:'en'}})).json() as {id:string;version:number};const context=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(context);roleChangedHostPage=await context.newPage();await roleChangedHostPage.goto('/login');await roleChangedHostPage.getByLabel('Email').fill('role-refresh@skybar.test');await roleChangedHostPage.getByLabel('Password').fill('RoleRefresh123!');await roleChangedHostPage.getByRole('button',{name:'Sign in'}).click();await expect(roleChangedHostPage.getByRole('link',{name:'Rooms'})).toBeVisible();expect((await request.patch(`/api/v1/hosts/${created.id}`,{headers:csrfHeaders,data:{role:'staff',expectedVersion:created.version}})).status()).toBe(200)});
+Then('administrator controls disappear from the affected session',async()=>{await expect(roleChangedHostPage!.getByRole('link',{name:'Rooms'})).toHaveCount(0,{timeout:10_000});expect(((await (await roleChangedHostPage!.context().request.get('/api/v1/auth/me')).json()) as {host:{role:string}}).host.role).toBe('staff')});
+When('a host disable response is lost before the account is re-enabled',async({page,browser})=>{
+  const request=page.context().request;
+  const created=await (await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'stale-host@skybar.test',name:'Stale Host',password:'StaleHostPassword123!',role:'staff',language:'de'}})).json() as {id:string;version:number};
+  const staleCommand={active:false,expectedVersion:created.version};
+  const disabled=await (await request.patch(`/api/v1/hosts/${created.id}`,{headers:csrfHeaders,data:staleCommand})).json() as {version:number};
+  const enabled=await request.patch(`/api/v1/hosts/${created.id}`,{headers:csrfHeaders,data:{active:true,expectedVersion:disabled.version}});
+  expect(enabled.status()).toBe(200);
+  const context=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(context);
+  expect((await context.request.post('/api/v1/auth/login',{data:{email:'stale-host@skybar.test',password:'StaleHostPassword123!'}})).status()).toBe(200);
+  staleHostUpdateStatus=(await request.patch(`/api/v1/hosts/${created.id}`,{headers:csrfHeaders,data:staleCommand})).status();
+  reopenedHostSessionStatus=(await context.request.get('/api/v1/auth/me')).status();
+  const hosts=await (await request.get('/api/v1/hosts')).json() as {data:{id:string;active:boolean}[]};
+  staleHostFinalActive=hosts.data.find(item=>item.id===created.id)!.active;
+});
+Then('retrying the stale host disable is rejected',async()=>{expect(staleHostUpdateStatus).toBe(409)});
+Then('the re-enabled host remains active and signed in',async()=>{expect(staleHostFinalActive).toBe(true);expect(reopenedHostSessionStatus).toBe(200)});
+When('the current host session is revoked from another administrator',async({page,browser})=>{
+  const request=page.context().request;
+  expect((await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'remote-admin@skybar.test',name:'Remote Admin',password:'RemoteAdmin123!',role:'admin',language:'de'}})).status()).toBe(201);
+  const other=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(other);expect((await other.request.post('/api/v1/auth/login',{data:{email:'remote-admin@skybar.test',password:'RemoteAdmin123!'}})).status()).toBe(200);
+  await page.waitForTimeout(250);
+  execFileSync('npm',['run','admin:create:dev','-w','@sky-bar/api','--','--email','admin@skybar.test','--name','Mira Host','--password-stdin'],{cwd:process.cwd(),env:process.env,stdio:'pipe',input:'RemoteReset123!\n'});
+  expect((await other.request.post('/api/v1/rooms',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:'Remote logout signal'}})).status()).toBe(201);
+});
+Then('the remotely revoked host is redirected to login',async({page})=>{await expect(page).toHaveURL(/\/login$/,{timeout:10_000});await expect(page.getByText('Hotel Aurora',{exact:true})).toHaveCount(0)});
+When('invalid passwords are submitted for known and unknown host emails', async ({ page }) => {
+  const request=page.context().request;
+  const responses=await Promise.all([
+    request.post('/api/v1/auth/login',{data:{email:'admin@skybar.test',password:'DefinitelyWrong123!'}}),
+    request.post('/api/v1/auth/login',{data:{email:'missing@skybar.test',password:'DefinitelyWrong123!'}}),
+  ]);
+  loginFailureResults=await Promise.all(responses.map(async response=>({status:response.status(),body:await response.json()})));
+});
+Then('both login attempts return the same credential error', async () => { expect(loginFailureResults).toHaveLength(2);expect(loginFailureResults[0]).toEqual(loginFailureResults[1]); });
+When('the administrator credentials are recovered from the command line', async ({ page }) => {
+  execFileSync('npm',['run','admin:create:dev','-w','@sky-bar/api','--','--email','admin@skybar.test','--name','Mira Host','--password-stdin'],{cwd:process.cwd(),env:process.env,stdio:'pipe',input:'RecoveredAdmin123!\n'});
+  recoveredDeviceStatus=(await page.context().request.get('/api/v1/auth/me')).status();
+});
+Then('the existing host device is signed out',async()=>{expect(recoveredDeviceStatus).toBe(401)});
+When('credential recovery completes while an old-password login is being verified',async({page})=>{
+  const oldPassword='RacingOldPassword123!';
+  const oldHash=await argon2.hash(oldPassword,{type:argon2.argon2id,memoryCost:19_456,timeCost:12,parallelism:1});
+  const newHash=await argon2.hash('RacingNewPassword123!',{type:argon2.argon2id,memoryCost:19_456,timeCost:2,parallelism:1});
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});
+  await database.connect();
+  try{
+    await database.query("UPDATE hosts SET password_hash=$1 WHERE lower(email)='admin@skybar.test'",[oldHash]);
+    await database.query("UPDATE host_sessions SET revoked_at=now() WHERE host_id=(SELECT id FROM hosts WHERE lower(email)='admin@skybar.test') AND revoked_at IS NULL");
+    const login=page.context().request.post('/api/v1/auth/login',{data:{email:'admin@skybar.test',password:oldPassword}});
+    await expect.poll(async()=>Number((await database.query(
+      `SELECT count(*) FROM pg_stat_activity
+        WHERE pid<>pg_backend_pid() AND state='idle'
+          AND query LIKE '%password_hash AS "passwordHash"%lower(email)=lower($1)%'`,
+    )).rows[0].count),{timeout:5_000,intervals:[10,20,50]}).toBeGreaterThan(0);
+    await database.query('BEGIN');
+    await database.query("UPDATE hosts SET password_hash=$1,version=version+1 WHERE lower(email)='admin@skybar.test'",[newHash]);
+    await database.query("UPDATE host_sessions SET revoked_at=now() WHERE host_id=(SELECT id FROM hosts WHERE lower(email)='admin@skybar.test') AND revoked_at IS NULL");
+    await database.query('COMMIT');
+    credentialRaceLoginStatuses=[(await login).status()];
+    credentialRaceActiveSessions=Number((await database.query(
+      "SELECT count(*) FROM host_sessions WHERE host_id=(SELECT id FROM hosts WHERE lower(email)='admin@skybar.test') AND revoked_at IS NULL AND expires_at>now()",
+    )).rows[0].count);
+  }finally{await database.end()}
+});
+Then('the old-password login is rejected without creating a session',async()=>{expect(credentialRaceLoginStatuses).toEqual([401]);expect(credentialRaceActiveSessions).toBe(0)});
+
+When('the administrator changes the venue name to {string}', async ({ page }, name:string) => { await page.goto('/app/settings');await page.getByLabel('Name des Betriebs').fill(name);await page.getByRole('button',{name:'Speichern'}).click(); });
+Then('the navigation shows the venue name {string}', async ({ page }, name:string) => { await expect(page.locator('.brand strong')).toHaveText(name); });
+When('the administrator opens venue settings', async ({ page }) => { await page.goto('/app/settings'); });
+Then('a venue QR code and room QR codes are shown', async ({ page }) => { await expect(page.locator('.qr-code')).toHaveCount(4); });
+Then('venue settings is available in the primary navigation', async ({ page }) => { await expect(page.getByRole('link',{name:'Betrieb'})).toBeVisible(); });
+When('a venue update response is lost before another administrator edits it',async({page})=>{const request=page.context().request;const original=await (await request.get('/api/v1/venue')).json() as {name:string;defaultLanguage:string;timezone:string;version:number};const command={name:'First venue update',language:original.defaultLanguage,timezone:original.timezone,expectedVersion:original.version};const committed=await (await request.put('/api/v1/venue',{headers:csrfHeaders,data:command})).json() as {version:number};expect((await request.put('/api/v1/venue',{headers:csrfHeaders,data:{...command,name:'Newer venue update',expectedVersion:committed.version}})).status()).toBe(200);staleVenueUpdateStatus=(await request.put('/api/v1/venue',{headers:csrfHeaders,data:command})).status();staleVenueFinalName=((await (await request.get('/api/v1/venue')).json()) as {name:string}).name});
+Then('retrying the stale venue update is rejected',async()=>{expect(staleVenueUpdateStatus).toBe(409)});
+Then('the newer venue name remains configured',async()=>{expect(staleVenueFinalName).toBe('Newer venue update')});
+
+async function chooseOrder(page: import('@playwright/test').Page, product:string, guest:string, room:string){await page.goto('/app/orders/new');await page.locator('.room-chips').getByRole('button',{name:room,exact:true}).click();await page.locator('.guest-list').getByRole('button',{name:new RegExp(guest)}).click();await page.locator('.product-tile').getByText(product,{exact:true}).click();}
+When('the host adds one {string} to {string} in room {string}',async({page},product:string,guest:string,room:string)=>chooseOrder(page,product,guest,room));
+Then('the staged cart total is {string}',async({page},total:string)=>{await expect(page.locator('.cart-total strong')).toHaveText(total)});
+When('the host submits the order',async({page})=>{await page.getByRole('button',{name:/Bestellung buchen/}).click()});
+Then("Anna's open tab contains one item",async({page})=>{await expect(page.locator('.tab-pill')).toContainText('1 Artikel')});
+When('the host settles the tab with cash',async({page})=>{await page.getByRole('button',{name:/Abrechnen/}).click();await page.locator('.choice-grid').getByRole('button',{name:/Bar/}).click();await page.locator('.modal').getByRole('button',{name:'Abrechnen'}).click()});
+Then('the bill shows the venue name {string}',async({page},name:string)=>{await expect(page.locator('.bill-sheet h1')).toHaveText(name)});
+Then('the bill offers printing',async({page})=>{await expect(page.getByRole('button',{name:/Drucken/})).toBeVisible()});
+When('the host enters an Other payment note and settles with cash',async({page})=>{const modal=page.locator('.modal');await page.getByRole('button',{name:/Abrechnen|Incassa|Settle/}).click();await modal.locator('.choice-grid').getByRole('button',{name:/Sonstiges|Altro|Other/}).click();await modal.getByLabel(/Notiz|Nota|Note/).fill('Hidden payment note');await modal.locator('.choice-grid').getByRole('button',{name:/Bar|Contanti|Cash/,exact:true}).click();await expect(modal.getByLabel(/Notiz|Nota|Note/)).toHaveCount(0);await modal.getByRole('button',{name:/Abrechnen|Incassa|Settle/,exact:true}).click();await expect(page).toHaveURL(/\/app\/bills\//)});
+Then('the cash bill has no payment note',async({page})=>{const billId=new URL(page.url()).pathname.split('/').at(-1)!;const bill=await (await page.context().request.get(`/api/v1/bills/${billId}`)).json() as {paymentMethod:string;paymentNote:string|null};expect(bill.paymentMethod).toBe('cash');expect(bill.paymentNote).toBeNull();await expect(page.locator('.bill-sheet footer')).not.toContainText('Hidden payment note')});
+When('the host stages an order for Anna and confirms a switch to Luca',async({page})=>{
+  const request=page.context().request;
+  const rooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;name:string}[]};
+  const room=rooms.data.find((item)=>item.name==='102')!;
+  const luca=await (await request.post('/api/v1/guests',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:'Luca Rossi',roomId:room.id,language:'de'}})).json() as {id:string};
+  await chooseOrder(page,'Helles','Anna Berger','101');
+  page.once('dialog',(dialog)=>dialog.accept());
+  await page.locator('.room-chips').getByRole('button',{name:'102',exact:true}).click();
+  await page.locator('.guest-list').getByRole('button',{name:/Luca Rossi/}).click();
+  switchedGuestTabCount=((await (await request.get(`/api/v1/guests/${luca.id}/tab`)).json()) as {itemCount:number}).itemCount;
+});
+Then('the staged cart is cleared before Luca is selected',async({page})=>{await expect(page.locator('.catalog-toolbar')).toContainText('0 ausgewählt');await expect(page.getByRole('button',{name:/Bestellung buchen/})).toBeDisabled();await expect(page.locator('.page-header')).toContainText('Luca Rossi')});
+Then("Luca's tab is unchanged",async()=>{expect(switchedGuestTabCount).toBe(0)});
+Given('an authenticated administrator with the order catalog loaded',async({page})=>{await signIn(page);await page.goto('/app/orders/new');await expect(page.getByText('Helles',{exact:true})).toBeVisible()});
+When('the device goes offline and the host submits one {string} for {string} in room {string}',async({page,context},product:string,guest:string,room:string)=>{await page.locator('.room-chips').getByRole('button',{name:room,exact:true}).click();await page.locator('.guest-list').getByRole('button',{name:new RegExp(guest)}).click();await page.locator('.product-tile').getByText(product,{exact:true}).click();await context.setOffline(true);await page.getByRole('button',{name:/Bestellung buchen/}).click()});
+Then('the order is marked as queued for synchronization',async({page,context})=>{await expect(page.getByText(/Synchronisierung vorgemerkt|coda per la sincronizzazione|queued for sync/)).toBeVisible();await context.setOffline(false)});
+Given('an open {string} order for {string} in room {string}',async({page},product:string,guest:string,room:string)=>{await chooseOrder(page,product,guest,room);await page.getByRole('button',{name:/Bestellung buchen/}).click();await expect(page.locator('.open-tab')).toContainText(product)});
+When('the host removes the open item while offline',async({page,context})=>{await context.setOffline(true);await page.locator('.open-tab').getByRole('button',{name:/Artikel entfernen|Rimuovi articolo|Remove item/}).click();await page.locator('.modal input').fill('Falscher Artikel');await page.locator('.modal').getByRole('button',{name:/Bestätigen|Conferma|Confirm/}).click()});
+Then('the item removal is queued for synchronization',async({page,context})=>{await expect(page.getByText(/Entfernen offline gespeichert|Rimozione salvata offline|Removal saved offline/)).toBeVisible();await context.setOffline(false)});
+When('an item removal command crosses settlement and bill reversal',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);
+  const guest=guests.data.find(item=>item.name==='Anna Berger')!;
+  const product=products.data.find(item=>item.name.de==='Helles')!;
+  lifecycleGuestId=guest.id;
+  const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};
+  const captured=await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json() as {items:{id:string;billingVersion:number}[]};
+  const item=captured.items[0]!;
+  const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};
+  expect((await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Lifecycle correction'}})).status()).toBe(200);
+  const stale=await request.post(`/api/v1/order-items/${item.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Queued before settlement',expectedBillingVersion:item.billingVersion}});
+  itemBillingConflictResult={status:stale.status(),code:((await stale.json()) as {error:{code:string}}).error.code};
+  correctedLifecycleItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
+});
+Then('the stale item removal is rejected as a billing conflict',async()=>{expect(itemBillingConflictResult).toEqual({status:409,code:'ITEM_BILLING_CONFLICT'})});
+Then('the corrected item remains on the open tab',async()=>{expect(correctedLifecycleItemCount).toBe(1)});
+When('the host submits a new removal from the refreshed tab',async({page})=>{
+  const request=page.context().request;
+  const current=await (await request.get(`/api/v1/guests/${lifecycleGuestId}/tab`)).json() as {items:{id:string;billingVersion:number}[]};
+  const item=current.items[0]!;
+  refreshedLifecycleVoidStatus=(await request.post(`/api/v1/order-items/${item.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Reviewed correction',expectedBillingVersion:item.billingVersion}})).status();
+});
+Then('the refreshed item removal succeeds',async()=>{expect(refreshedLifecycleVoidStatus).toBe(200)});
+When('an item removal without a billing version is submitted',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);
+  const guest=guests.data.find(item=>item.name==='Anna Berger')!;
+  const product=products.data.find(item=>item.name.de==='Helles')!;
+  await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}});
+  const tab=await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json() as {items:{id:string}[]};
+  const response=await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Legacy queued correction'}});
+  legacyItemBillingConflictResult={status:response.status(),code:((await response.json()) as {error:{code:string}}).error.code};
+  legacyLifecycleItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
+});
+Then('the legacy item removal is rejected as a billing conflict',async()=>{expect(legacyItemBillingConflictResult).toEqual({status:409,code:'ITEM_BILLING_CONFLICT'})});
+Then('the legacy item remains on the open tab',async()=>{expect(legacyLifecycleItemCount).toBe(1)});
+When('the host retries item removal after its response is lost',async({page})=>{
+  await page.evaluate(()=>{
+    const originalFetch=window.fetch.bind(window);let loseResponse=true;const reasons:string[]=[];
+    Object.assign(window,{__skyBarVoidRetryReasons:reasons});
+    window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(/\/api\/v1\/order-items\/[^/]+\/void$/.test(url)&&init?.method==='POST'){reasons.push((JSON.parse(String(init.body)) as {reason:string}).reason);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)};
+  });
+  await page.locator('.open-tab').getByRole('button',{name:/Artikel entfernen|Rimuovi articolo|Remove item/}).click();
+  const modal=page.locator('.modal');const reason=modal.getByLabel(/Grund|Motivo|Reason/);
+  await reason.fill('Original correction');
+  await modal.getByRole('button',{name:/Bestätigen|Conferma|Confirm/}).click();
+  await expect(modal.locator('.notice--error')).toBeVisible();
+  uncertainVoidReasonLocked=await reason.isDisabled();
+  await modal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();
+  await expect(modal).toHaveCount(0);
+  retriedVoidReasons=await page.evaluate(()=>(window as unknown as {__skyBarVoidRetryReasons:string[]}).__skyBarVoidRetryReasons);
+});
+Then('the uncertain void reason is locked',async()=>{expect(uncertainVoidReasonLocked).toBe(true)});
+Then('both item removal attempts use the same reason',async()=>{expect(retriedVoidReasons).toEqual(['Original correction','Original correction'])});
+When('the host reloads after an item removal response is lost',async({page})=>{
+  const installLostResponse=()=>{
+    const originalFetch=window.fetch.bind(window);
+    window.fetch=async(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(/\/api\/v1\/order-items\/[^/]+\/void$/.test(new URL(url,window.location.href).pathname)&&init?.method==='POST'){
+        const requests=JSON.parse(localStorage.getItem('__skyBarReloadVoidRequests')??'[]') as {mutationId:string;reason:string;expectedBillingVersion:number}[];
+        requests.push(JSON.parse(String(init.body)) as {mutationId:string;reason:string;expectedBillingVersion:number});
+        localStorage.setItem('__skyBarReloadVoidRequests',JSON.stringify(requests));
+        const response=await originalFetch(input,init);
+        if(requests.length===1)throw new TypeError('Simulated lost response');
+        return response;
+      }
+      return originalFetch(input,init);
+    };
+  };
+  await page.evaluate(()=>localStorage.setItem('__skyBarReloadVoidRequests','[]'));
+  await page.addInitScript(installLostResponse);
+  await page.evaluate(installLostResponse);
+  await page.locator('.open-tab').getByRole('button',{name:/Artikel entfernen|Rimuovi articolo|Remove item/}).click();
+  const modal=page.locator('.modal');await modal.getByLabel(/Grund|Motivo|Reason/).fill('Reload recovery');
+  await modal.getByRole('button',{name:/Bestätigen|Conferma|Confirm/}).click();
+  await expect.poll(async()=>page.evaluate(async()=>new Promise<number>((resolve,reject)=>{const open=indexedDB.open('sky-bar');open.onerror=()=>reject(open.error);open.onsuccess=()=>{const transaction=open.result.transaction('mutations');const count=transaction.objectStore('mutations').count();count.onsuccess=()=>{open.result.close();resolve(count.result)};count.onerror=()=>reject(count.error)}})),{timeout:10_000}).toBe(1);
+  const originalRequest=(await page.evaluate(()=>JSON.parse(localStorage.getItem('__skyBarReloadVoidRequests')??'[]') as {mutationId:string;reason:string;expectedBillingVersion:number}[]))[0]!;
+  const storedRequest=await page.evaluate(async()=>new Promise<{id:string;status:string;body:{mutationId:string;reason:string;expectedBillingVersion:number}}>((resolve,reject)=>{const open=indexedDB.open('sky-bar');open.onerror=()=>reject(open.error);open.onsuccess=()=>{const transaction=open.result.transaction('mutations');const all=transaction.objectStore('mutations').getAll();all.onsuccess=()=>{open.result.close();resolve(all.result[0] as {id:string;status:string;body:{mutationId:string;reason:string;expectedBillingVersion:number}})};all.onerror=()=>reject(all.error)}}));
+  expect(storedRequest).toEqual(expect.objectContaining({id:originalRequest.mutationId,status:'pending',body:originalRequest}));
+  await page.reload();
+  await expect.poll(async()=>page.evaluate(()=>((JSON.parse(localStorage.getItem('__skyBarReloadVoidRequests')??'[]')) as unknown[]).length),{timeout:10_000}).toBeGreaterThanOrEqual(2);
+  const {request,guests}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;
+  reloadedVoidItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
+  await expect.poll(async()=>page.evaluate(async()=>new Promise<number>((resolve,reject)=>{const open=indexedDB.open('sky-bar');open.onerror=()=>reject(open.error);open.onsuccess=()=>{const transaction=open.result.transaction('mutations');const count=transaction.objectStore('mutations').count();count.onsuccess=()=>{open.result.close();resolve(count.result)};count.onerror=()=>reject(count.error)}})),{timeout:10_000}).toBe(0);
+  reloadedVoidPendingCount=await page.evaluate(async()=>new Promise<number>((resolve,reject)=>{const open=indexedDB.open('sky-bar');open.onerror=()=>reject(open.error);open.onsuccess=()=>{const transaction=open.result.transaction('mutations');const count=transaction.objectStore('mutations').count();count.onsuccess=()=>{open.result.close();resolve(count.result)};count.onerror=()=>reject(count.error)}}));
+  reloadedVoidRequests=await page.evaluate(()=>JSON.parse(localStorage.getItem('__skyBarReloadVoidRequests')??'[]') as {mutationId:string;reason:string;expectedBillingVersion:number}[]);
+});
+Then('the restored item removal uses the original mutation identifier',async()=>{expect(reloadedVoidRequests.length).toBeGreaterThanOrEqual(2);expect(new Set(reloadedVoidRequests.map(request=>request.mutationId)).size).toBe(1);expect(reloadedVoidRequests[0]!.reason).toBe('Reload recovery');for(const request of reloadedVoidRequests.slice(1))expect(request).toEqual(reloadedVoidRequests[0])});
+Then('the restored item removal is applied and cleared from recovery',async()=>{expect(reloadedVoidItemCount).toBe(0);expect(reloadedVoidPendingCount).toBe(0)});
+When('the host removes the only open item',async({page})=>{await page.locator('.open-tab').getByRole('button',{name:/Artikel entfernen|Rimuovi articolo|Remove item/}).click();await page.locator('.modal input').fill('Empty tab regression');await page.locator('.modal').getByRole('button',{name:/Bestätigen|Conferma|Confirm/}).click();await expect(page.locator('.open-tab')).toHaveCount(0)});
+Then('no settlement action is offered for the empty tab',async({page})=>{await expect(page.getByRole('button',{name:/Abrechnen|Incassa|Settle/})).toHaveCount(0)});
+When('the selected guest tab service is unavailable',async({page})=>{
+  const guests=await (await page.context().request.get('/api/v1/guests')).json() as {data:{id:string;name:string}[]};
+  const anna=guests.data.find(guest=>guest.name==='Anna Berger')!;
+  await page.addInitScript(()=>{
+    const fetch=window.fetch.bind(window);
+    window.fetch=(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(/^\/api\/v1\/guests\/[^/]+\/tab$/.test(new URL(url,window.location.href).pathname))return new Promise((_,reject)=>setTimeout(()=>reject(new TypeError('Simulated host tab outage')),1_500));
+      return fetch(input,init);
+    };
+  });
+  await page.goto(`/app/orders/new?guest=${anna.id}`);
+});
+Then('the host sees tab loading without a zero balance',async({page})=>{const summary=page.locator('.tab-pill');await expect(summary).toContainText(/Wird geladen|Caricamento|Loading/);await expect(summary).not.toContainText(/0[,.]00\s*€/)});
+Then('the host sees a tab error without a zero balance or settlement action',async({page})=>{const summary=page.locator('.tab-pill');await expect(summary).toContainText(/Die Anfrage konnte nicht abgeschlossen werden|Impossibile completare la richiesta|The request could not be completed/,{timeout:10_000});await expect(summary).not.toContainText(/0[,.]00\s*€/);await expect(page.locator('.cart-panel .notice--error')).toBeVisible();await expect(page.getByRole('button',{name:/Abrechnen|Incassa|Settle/})).toHaveCount(0)});
+When('a queued order encounters one transient synchronization failure',async({page,context})=>{
+  await page.locator('.room-chips').getByRole('button',{name:'101',exact:true}).click();await page.locator('.guest-list').getByRole('button',{name:/Anna Berger/}).click();await page.locator('.product-tile').getByText('Helles',{exact:true}).click();
+  await context.setOffline(true);await page.getByRole('button',{name:/Bestellung buchen/}).click();await expect(page.getByText(/Synchronisierung vorgemerkt|queued for sync/)).toBeVisible();
+  await page.evaluate(()=>{
+    const originalFetch=window.fetch.bind(window);let attempts=0;
+    Object.assign(window,{__skyBarTransientReplayAttempts:0});
+    window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'){attempts+=1;Object.assign(window,{__skyBarTransientReplayAttempts:attempts});if(attempts===1)throw new TypeError('Simulated transient sync failure')}return originalFetch(input,init)};
+  });
+  await context.setOffline(false);
+  const {request,guests}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;
+  await expect.poll(async()=>((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount,{timeout:15_000}).toBe(1);
+  transientReplayAttempts=await page.evaluate(()=>(window as unknown as {__skyBarTransientReplayAttempts:number}).__skyBarTransientReplayAttempts);
+});
+Then('the queued order is retried without another connectivity event',async()=>{expect(transientReplayAttempts).toBeGreaterThanOrEqual(2)});
+
+When('an offline order is quarantined as a synchronization conflict',async({page})=>{
+  const {me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const mutationId=crypto.randomUUID();const capturedAt=new Date().toISOString();conflictGuestId=guest.id;
+  await page.evaluate(async({mutationId,capturedAt,hostId,guest,product,catalogVersion})=>new Promise<void>((resolve,reject)=>{
+    const request=indexedDB.open('sky-bar');request.onerror=()=>reject(request.error);request.onsuccess=()=>{const transaction=request.result.transaction('mutations','readwrite');transaction.objectStore('mutations').put({id:mutationId,hostId,path:'/order-batches',method:'POST',createdAt:capturedAt,status:'conflict',errorCode:'CATALOG_CONFLICT',body:{mutationId,originHostId:hostId,guestId:guest.id,catalogVersion,capturedAt,items:[{productId:product.id,quantity:2}]},display:{kind:'order',guestId:guest.id,guestName:guest.name,roomName:guest.roomName,items:[{productId:product.id,productName:product.name,quantity:2}]}});transaction.oncomplete=()=>resolve();transaction.onerror=()=>reject(transaction.error)};
+  }),{mutationId,capturedAt,hostId:me.host.id,guest,product,catalogVersion:products.catalogVersion});
+  await expect(page.locator('.sync-conflict-banner')).toBeVisible({timeout:10_000});await page.locator('.sync-conflict-banner').click();
+});
+Then('the conflict shows its guest, room, products, and quantities',async({page})=>{const modal=page.locator('.modal');await expect(modal).toContainText('Anna Berger');await expect(modal).toContainText('101');await expect(modal).toContainText('2 × Helles')});
+Then('the host can retry it without discarding it',async({page})=>{await page.locator('.modal').getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect.poll(async()=>((await (await page.context().request.get(`/api/v1/guests/${conflictGuestId}/tab`)).json()) as {itemCount:number}).itemCount,{timeout:10_000}).toBe(2)});
+
+Given('a version-one device database contains a queued financial mutation',async({page})=>{
+  await page.goto('/login');
+  const mutationId=crypto.randomUUID();
+  await page.evaluate(async({mutationId})=>{
+    await new Promise<void>((resolve,reject)=>{const request=indexedDB.deleteDatabase('sky-bar');request.onsuccess=()=>resolve();request.onerror=()=>reject(request.error);request.onblocked=()=>reject(new Error('Database deletion blocked'))});
+    await new Promise<void>((resolve,reject)=>{
+      const request=indexedDB.open('sky-bar',1);
+      request.onupgradeneeded=()=>{const store=request.result.createObjectStore('mutations',{keyPath:'id'});store.createIndex('createdAt','createdAt')};
+      request.onerror=()=>reject(request.error);
+      request.onsuccess=()=>{const transaction=request.result.transaction('mutations','readwrite');transaction.objectStore('mutations').put({id:mutationId,path:'/order-batches',method:'POST',createdAt:new Date().toISOString(),body:{mutationId,guestId:crypto.randomUUID(),catalogVersion:1,capturedAt:new Date().toISOString(),items:[{productId:crypto.randomUUID(),quantity:1}]}});transaction.oncomplete=()=>{request.result.close();resolve()};transaction.onerror=()=>reject(transaction.error)};
+    });
+  },{mutationId});
+  await signIn(page);
+});
+Then('the queued financial mutation is preserved without assigning an owner',async({page})=>{await expect(page.locator('.sync-conflict-banner')).toBeVisible({timeout:10_000});await page.locator('.sync-conflict-banner').click();await expect(page.locator('.modal')).toContainText('/order-batches');const stored=await page.evaluate(async()=>new Promise<{hostId:string;status:string;body:{mutationId:string;originHostId?:string}}>((resolve,reject)=>{const request=indexedDB.open('sky-bar');request.onerror=()=>reject(request.error);request.onsuccess=()=>{const transaction=request.result.transaction('mutations');const all=transaction.objectStore('mutations').getAll();all.onsuccess=()=>{request.result.close();resolve(all.result[0] as {hostId:string;status:string;body:{mutationId:string;originHostId?:string}})};all.onerror=()=>reject(all.error)}}));expect(stored.hostId).toBe('00000000-0000-0000-0000-000000000000');expect(stored.status).toBe('conflict');expect(stored.body.mutationId).toBeTruthy();expect(stored.body.originHostId).toBeUndefined()});
+Then('the unowned mutation cannot be retried',async({page})=>{await page.locator('.modal').getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await page.waitForTimeout(100);const stored=await page.evaluate(async()=>new Promise<{hostId:string;status:string}>((resolve,reject)=>{const request=indexedDB.open('sky-bar');request.onerror=()=>reject(request.error);request.onsuccess=()=>{const transaction=request.result.transaction('mutations');const all=transaction.objectStore('mutations').getAll();all.onsuccess=()=>{request.result.close();resolve(all.result[0] as {hostId:string;status:string})};all.onerror=()=>reject(all.error)}}));expect(stored).toEqual(expect.objectContaining({hostId:'00000000-0000-0000-0000-000000000000',status:'conflict'}))});
+
+Given('an authenticated administrator and a separate guest device',async({page,browser})=>{await signIn(page);const context=await browser.newContext();guestPage=await context.newPage();});
+When('{string} requests access for room {string}',async({},name:string,room:string)=>{await guestPage!.goto('/guest/request');await guestPage!.locator('form select').nth(1).selectOption('de');await guestPage!.getByLabel('Name').fill(name);await guestPage!.locator('form select').first().selectOption({label:room});await guestPage!.locator('form button[type="submit"]').click()});
+Then('the host sees the pending request for {string}',async({page},name:string)=>{await page.goto('/app/requests');await expect(page.getByText(name,{exact:true})).toBeVisible()});
+When('the host opens approval for {string}',async({page},name:string)=>{const card=page.locator('.request-card').filter({hasText:name});await card.getByRole('button',{name:/Genehmigen|Approva|Approve/}).click()});
+Then('creating a new guest is selected by default',async({page})=>{await expect(page.locator('.modal select').first()).toHaveValue('new')});
+When('the host retries an approval after its first response is lost',async({page})=>{await guestPage!.goto('/guest/request');await guestPage!.locator('form select').nth(1).selectOption('de');await guestPage!.getByLabel('Name').fill('Approval Retry');await guestPage!.locator('form select').first().selectOption({label:'102'});await guestPage!.locator('form button[type="submit"]').click();await page.goto('/app/requests');const card=page.locator('.request-card').filter({hasText:'Approval Retry'});await expect(card).toBeVisible();await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarApprovalRetryCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/access-requests/')&&url.endsWith('/approve')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});await card.getByRole('button',{name:/Genehmigen|Approva|Approve/}).click();const modal=page.locator('.modal');await modal.getByRole('button',{name:/Genehmigen|Approva|Approve/}).click();await expect(modal.locator('.notice--error')).toBeVisible();uncertainApprovalFieldsLocked=await modal.locator('input,select').evaluateAll(fields=>fields.every(field=>(field as HTMLInputElement).disabled));await modal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(modal).toHaveCount(0);const commands=await page.evaluate(()=>(window as unknown as {__skyBarApprovalRetryCommands:Array<Record<string,unknown>>}).__skyBarApprovalRetryCommands);retriedApprovalMutationIds=commands.map(command=>String(command.mutationId));const guests=await (await page.context().request.get('/api/v1/guests')).json() as {data:{name:string}[]};approvedGuestIdentityCount=guests.data.filter(guest=>guest.name==='Approval Retry').length});
+Then('both approval attempts use the same mutation identifier',async()=>{expect(retriedApprovalMutationIds).toHaveLength(2);expect(new Set(retriedApprovalMutationIds).size).toBe(1)});
+Then('approval fields stay locked while the result is uncertain',async()=>{expect(uncertainApprovalFieldsLocked).toBe(true)});
+Then('only one approved guest identity exists',async()=>{expect(approvedGuestIdentityCount).toBe(1)});
+Then('the guest device receives access',async()=>{await expect(guestPage!).toHaveURL(/\/guest$/,{timeout:10_000});await expect(guestPage!.getByRole('heading',{name:'Approval Retry'})).toBeVisible()});
+When('the host approves the request for one day',async({page})=>{await page.getByRole('button',{name:/Genehmigen|Approve/}).click();await page.locator('.modal').getByRole('button',{name:/Genehmigen|Approve/}).click()});
+Then("the guest device opens Luca's guest view without a password",async()=>{await expect(guestPage!).toHaveURL(/\/guest$/,{timeout:10000});await expect(guestPage!.getByRole('heading',{name:'Luca Rossi'})).toBeVisible()});
+When('the guest retries an access request after its first response is lost',async()=>{
+  await guestPage!.goto('/guest/request');
+  await guestPage!.locator('form select').nth(1).selectOption('de');
+  await guestPage!.getByLabel('Name').fill('Retry Guest');
+  await guestPage!.locator('form select').first().selectOption({label:'102'});
+  await guestPage!.evaluate(()=>{
+    const originalFetch=window.fetch.bind(window);let loseResponse=true;const ids:string[]=[];
+    Object.assign(window,{__skyBarAccessRequestRetryIds:ids});
+    window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/public/access-requests')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)};
+  });
+  await guestPage!.locator('form button[type="submit"]').click();
+  await expect(guestPage!.locator('.notice--error')).toBeVisible();
+  uncertainAccessRequestFieldsLocked=await guestPage!.locator('form input,form select').evaluateAll(fields=>fields.every(field=>(field as HTMLInputElement).disabled));
+  await guestPage!.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();
+  await expect(guestPage!.locator('.request-wait')).toBeVisible();
+  retriedAccessRequestMutationIds=await guestPage!.evaluate(()=>(window as unknown as {__skyBarAccessRequestRetryIds:string[]}).__skyBarAccessRequestRetryIds);
+});
+Then('both access request attempts use the same mutation identifier',async()=>{expect(retriedAccessRequestMutationIds).toHaveLength(2);expect(new Set(retriedAccessRequestMutationIds).size).toBe(1)});
+Then('the uncertain access request fields stay locked for retry',async()=>{expect(uncertainAccessRequestFieldsLocked).toBe(true)});
+Then('the host sees only one pending request from that guest',async({page})=>{const requests=await (await page.context().request.get('/api/v1/access-requests')).json() as {data:{name:string}[]};pendingAccessRequestCount=requests.data.filter((item)=>item.name==='Retry Guest').length;expect(pendingAccessRequestCount).toBe(1)});
+When('the guest closes the pending request page',async()=>{await guestPage!.close()});
+Then('reopening the request restores the approved guest access',async()=>{const context=guestPage!.context();guestPage=await context.newPage();await guestPage.goto('/guest/request');await expect(guestPage).toHaveURL(/\/guest$/,{timeout:10_000});await expect(guestPage.getByRole('heading',{name:'Persistent Guest'})).toBeVisible()});
+When('the host denies the request for {string}',async({page},name:string)=>{let polls=0;guestPage!.on('request',request=>{if(request.url().includes('/api/v1/public/access-requests/')&&request.url().endsWith('/status'))polls+=1});const card=page.locator('.request-card').filter({hasText:name});await card.getByRole('button',{name:/Ablehnen|Rifiuta|Deny/}).click();await expect(guestPage!.locator('.request-wait').getByRole('heading')).toHaveText(/Ablehnen|Rifiuta|Deny/,{timeout:10_000});await guestPage!.waitForTimeout(500);const terminalCount=polls;await guestPage!.waitForTimeout(3_000);deniedPollCounts=[terminalCount,polls]});
+Then('the denied guest device stops status polling',async()=>{expect(deniedPollCounts[1]).toBe(deniedPollCounts[0])});
+When('the host retries a denial after its first response is lost',async({page})=>{await guestPage!.goto('/guest/request');await guestPage!.locator('form select').nth(1).selectOption('de');await guestPage!.getByLabel('Name').fill('Denial Retry');await guestPage!.locator('form select').first().selectOption({label:'102'});await guestPage!.locator('form button[type="submit"]').click();await page.goto('/app/requests');const card=page.locator('.request-card').filter({hasText:'Denial Retry'});await expect(card).toBeVisible();await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarDenialRetryCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/access-requests/')&&url.endsWith('/deny')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});await card.getByRole('button',{name:/Ablehnen|Rifiuta|Deny/}).click();const retry=page.getByRole('button',{name:/Erneut versuchen.*Denial Retry|Riprova.*Denial Retry|Retry.*Denial Retry/});await expect(retry).toBeVisible();await retry.click();await expect(retry).toHaveCount(0);const commands=await page.evaluate(()=>(window as unknown as {__skyBarDenialRetryCommands:Array<Record<string,unknown>>}).__skyBarDenialRetryCommands);retriedDenialMutationIds=commands.map(command=>String(command.mutationId));const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();try{deniedRequestCount=Number((await database.query("SELECT count(*) FROM access_requests WHERE name='Denial Retry' AND status='denied'")).rows[0].count)}finally{await database.end()}});
+Then('both denial attempts use the same mutation identifier',async()=>{expect(retriedDenialMutationIds).toHaveLength(2);expect(new Set(retriedDenialMutationIds).size).toBe(1)});
+Then('the denied request remains resolved only once',async()=>{expect(deniedRequestCount).toBe(1)});
+When('approved guest access expires before the requesting page exchanges it',async({page})=>{await guestPage!.goto('/guest/request');await guestPage!.route('**/api/v1/public/access-requests/*/status',route=>route.fulfill({json:{status:'pending',granted:false}}));await guestPage!.locator('form select').nth(1).selectOption('de');await guestPage!.getByLabel('Name').fill('Expired UI');await guestPage!.locator('form select').first().selectOption({label:'102'});await guestPage!.locator('form button[type="submit"]').click();await expect(guestPage!.locator('.request-wait')).toBeVisible();const pending=await (await page.context().request.get('/api/v1/access-requests')).json() as {data:{id:string;name:string}[]};const access=pending.data.find(item=>item.name==='Expired UI')!;expect((await page.context().request.post(`/api/v1/access-requests/${access.id}/approve`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expiresAt:new Date(Date.now()+1_200).toISOString()}})).status()).toBe(200);await guestPage!.waitForTimeout(1_300);await guestPage!.unroute('**/api/v1/public/access-requests/*/status')});
+Then('the requesting page explains that access expired',async()=>{await expect(guestPage!.getByRole('heading',{name:'Zugang abgelaufen'})).toBeVisible({timeout:10_000});await expect(guestPage!.getByText('Der genehmigte Gastzugang ist abgelaufen.')).toBeVisible()});
+When('an approved linked guest is disabled before exchange',async({page})=>{await guestPage!.getByRole('button',{name:'Zugang anfragen'}).click();await guestPage!.route('**/api/v1/public/access-requests/*/status',route=>route.fulfill({json:{status:'pending',granted:false}}));await guestPage!.getByLabel('Name').fill('Disabled UI');await guestPage!.locator('form button[type="submit"]').click();await expect(guestPage!.locator('.request-wait')).toBeVisible();const request=page.context().request;const pending=await (await request.get('/api/v1/access-requests')).json() as {data:{id:string;name:string}[]};const access=pending.data.find(item=>item.name==='Disabled UI')!;const approved=await (await request.post(`/api/v1/access-requests/${access.id}/approve`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expiresAt:new Date(Date.now()+86_400_000).toISOString()}})).json() as {guestId:string};const guests=await (await request.get('/api/v1/guests')).json() as {data:{id:string;version:number}[]};const guest=guests.data.find(item=>item.id===approved.guestId)!;expect((await request.delete(`/api/v1/guests/${guest.id}`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:guest.version}})).status()).toBe(204);await guestPage!.unroute('**/api/v1/public/access-requests/*/status')});
+Then('the requesting page explains that access is disabled',async()=>{await expect(guestPage!.getByRole('heading',{name:'Zugang deaktiviert'})).toBeVisible({timeout:10_000});await expect(guestPage!.getByText('Der zugeordnete Gastzugang wurde deaktiviert.')).toBeVisible()});
+When('a host in a non-UTC timezone opens a guest approval',async({page,browser})=>{const request=page.context().request;const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};const room=bootstrap.rooms.find(item=>item.name==='102')!;expect((await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Local expiry guest',roomId:room.id,language:'de'}})).status()).toBe(201);const context=await browser.newContext({baseURL:e2eBaseURL,timezoneId:'Pacific/Kiritimati'});extraContexts.push(context);const localPage=await context.newPage();await signIn(localPage);await localPage.goto('/app/requests');const card=localPage.locator('.request-card').filter({hasText:'Local expiry guest'});await card.getByRole('button',{name:/Genehmigen|Approva|Approve/}).click();approvalDefaultLifetimeHours=await localPage.locator('input[type="datetime-local"]').evaluate((input:HTMLInputElement)=>(new Date(input.value).getTime()-Date.now())/3_600_000)});
+Then('the approval expiry is one local day from now',async()=>{expect(approvalDefaultLifetimeHours).toBeGreaterThan(23.9);expect(approvalDefaultLifetimeHours).toBeLessThan(24.1)});
+
+async function approveGuest(page:import('@playwright/test').Page,browser:import('@playwright/test').Browser,name:string,room:string){await signIn(page);const context=await browser.newContext();guestPage=await context.newPage();await guestPage.goto('/guest/request');await guestPage.locator('form select').nth(1).selectOption('de');await guestPage.getByLabel('Name').fill(name);await guestPage.locator('form select').first().selectOption({label:room});await guestPage.locator('form button[type="submit"]').click();await page.goto('/app/requests');await page.getByRole('button',{name:/Genehmigen|Approve/}).click();await page.locator('.modal').getByRole('button',{name:/Genehmigen|Approve/}).click();await expect(guestPage).toHaveURL(/\/guest$/,{timeout:10000})}
+Given('an approved guest device for {string} in room {string}',async({page,browser},name:string,room:string)=>approveGuest(page,browser,name,room));
+When('the guest adds {string} from self-service',async({},product:string)=>{await guestPage!.getByText(product,{exact:true}).click()});
+Then('an undo action is available',async()=>{await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toBeVisible()});
+Then('the undo action disappears after ten seconds',async()=>{await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toBeHidden({timeout:12_000})});
+Then('the expired item is no longer marked provisional',async()=>{const item=guestPage!.locator('.line-item').filter({hasText:'Mineralwasser'});await expect(item).not.toContainText('10s')});
+When('the guest uses undo',async()=>{await guestPage!.getByRole('button',{name:'Rückgängig'}).click()});
+Then('the guest tab has no open items',async()=>{await expect(guestPage!.getByText('Noch keine Einträge')).toBeVisible()});
+When('a self-service addition waits for a guest lock',async()=>{
+  const request=guestPage!.context().request;
+  const me=await (await request.get('/api/v1/guest/me')).json() as {guest:{id:string}};
+  const catalog=await (await request.get('/api/v1/guest/catalog')).json() as {data:{id:string;name:{de:string};priceCents:number;version:number}[]};
+  const product=catalog.data.find(item=>item.name.de==='Mineralwasser')!;
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});
+  await database.connect();let committed=false;
+  try{
+    await database.query('BEGIN');
+    await database.query('SELECT id FROM guests WHERE id=$1 FOR UPDATE',[me.guest.id]);
+    const holderXid=String((await database.query('SELECT pg_current_xact_id()::text AS xid')).rows[0].xid);
+    const addition=request.post('/api/v1/guest/items',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),productId:product.id,expectedPriceCents:product.priceCents,expectedProductVersion:product.version}});
+    await expect.poll(async()=>Number((await database.query(`SELECT count(*) FROM pg_locks WHERE locktype='transactionid' AND transactionid::text=$1 AND NOT granted`,[holderXid])).rows[0].count),{timeout:5_000,intervals:[10,20,50]}).toBeGreaterThan(0);
+    await new Promise(resolve=>setTimeout(resolve,2_000));
+    await database.query('COMMIT');committed=true;
+    const response=await addition;
+    expect(response.status()).toBe(201);
+    const item=await response.json() as {provisionalRemainingMs:number};
+    guestUndoRemainingMs=item.provisionalRemainingMs;
+  }finally{if(!committed)await database.query('ROLLBACK');await database.end()}
+});
+Then('the guest still receives a full undo window',async()=>{expect(guestUndoRemainingMs).toBeGreaterThan(9_000)});
+When('guest undo starts before expiry and waits behind a rolled-back item lock',async()=>{
+  await guestPage!.getByText('Mineralwasser',{exact:true}).click();
+  await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toBeVisible();
+  const request=guestPage!.context().request;
+  const tab=await (await request.get('/api/v1/guest/tab')).json() as {items:{id:string;provisionalUntil:string}[]};
+  const item=tab.items[0]!;
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});
+  await database.connect();let rolledBack=false;
+  try{
+    await database.query('BEGIN');
+    await database.query(`UPDATE order_items SET status='voided',voided_at=clock_timestamp(),void_reason='rolled-back host void' WHERE id=$1`,[item.id]);
+    const holderXid=String((await database.query('SELECT pg_current_xact_id()::text AS xid')).rows[0].xid);
+    const startedBeforeExpiry=Boolean((await database.query('SELECT clock_timestamp()<$1::timestamptz AS valid',[item.provisionalUntil])).rows[0].valid);
+    const undoResponse=guestPage!.waitForResponse(response=>response.url().endsWith(`/api/v1/guest/items/${item.id}/undo`)&&response.request().method()==='POST');
+    await guestPage!.getByRole('button',{name:'Rückgängig'}).click();
+    await expect.poll(async()=>Number((await database.query(
+      `SELECT count(*) FROM pg_locks WHERE locktype='transactionid' AND transactionid::text=$1 AND NOT granted`,[holderXid],
+    )).rows[0].count),{timeout:5_000,intervals:[10,20,50]}).toBeGreaterThan(0);
+    await expect.poll(async()=>Boolean((await database.query(
+      'SELECT clock_timestamp()>=$1::timestamptz AS expired',[item.provisionalUntil],
+    )).rows[0].expired),{timeout:12_000,intervals:[50,100,200]}).toBe(true);
+    await database.query('ROLLBACK');rolledBack=true;
+    const response=await undoResponse;
+    const responseBody=await response.json() as {error:{code:string}};
+    const current=await (await request.get('/api/v1/guest/tab')).json() as {itemCount:number;items:{id:string;status:string}[]};
+    serializedGuestUndoResult={
+      startedBeforeExpiry,status:response.status(),code:responseBody.error.code,itemCount:current.itemCount,
+      itemStatus:current.items.find(candidate=>candidate.id===item.id)?.status??'missing',
+    };
+  }finally{if(!rolledBack)await database.query('ROLLBACK');await database.end()}
+});
+Then('the expired guest undo is rejected',async()=>{
+  expect(serializedGuestUndoResult).toEqual(expect.objectContaining({startedBeforeExpiry:true,status:409,code:'UNDO_EXPIRED'}));
+  await expect(guestPage!.locator('.notice--error')).toContainText('Die Rückgängig-Frist ist abgelaufen.');
+});
+Then('the self-service item remains on the guest tab',async()=>{
+  expect(serializedGuestUndoResult).toEqual(expect.objectContaining({itemCount:1,itemStatus:'open'}));
+  await expect(guestPage!.locator('.line-item').filter({hasText:'Mineralwasser'})).toBeVisible();
+});
+When('the guest logs out and the committed response is lost',async()=>{
+  await guestPage!.evaluate(()=>{const originalFetch=window.fetch.bind(window);window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guest/logout')&&init?.method==='POST'){await originalFetch(input,init);throw new TypeError('Simulated lost guest logout response')}return originalFetch(input,init)}});
+  await guestPage!.getByRole('button',{name:/Abmelden|Esci|Log out/}).click();
+  await expect(guestPage!).toHaveURL(/\/guest\/request$/);
+  replayedGuestLogoutStatus=(await guestPage!.context().request.post('/api/v1/guest/logout',{headers:csrfHeaders})).status();
+});
+Then('the guest reaches access request without cached data',async()=>{await expect(guestPage!).toHaveURL(/\/guest\/request$/);await expect(guestPage!.getByRole('heading',{name:'Luca Rossi'})).toHaveCount(0)});
+Then('replaying guest logout for the revoked session succeeds',async()=>{expect(replayedGuestLogoutStatus).toBe(204)});
+When('the guest tab service is unavailable',async()=>{await guestPage!.addInitScript(()=>{const fetch=window.fetch.bind(window);window.fetch=(input,init)=>{const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);if(new URL(url,window.location.href).pathname==='/api/v1/guest/tab')return Promise.reject(new TypeError('Simulated guest tab outage'));return fetch(input,init)}});await guestPage!.reload();await expect(guestPage!.locator('.guest-total')).toContainText('Die Anfrage konnte nicht abgeschlossen werden.',{timeout:10_000})});
+Then('the guest sees an error without a zero balance or empty order',async()=>{await expect(guestPage!.locator('.guest-total')).not.toContainText(/0[,.]00\s*€/);const orders=guestPage!.locator('.guest-tabs>section').nth(1);await expect(orders.locator('.notice--error')).toBeVisible();await expect(orders.locator('.empty')).toHaveCount(0)});
+Then('the host has no empty open order for {string}',async({page},name:string)=>{await page.goto('/app/orders');await expect(page.locator('.tab-card').filter({hasText:name})).toHaveCount(0)});
+When('a self-service price changes after the guest catalog is displayed',async({page})=>{const guestRequest=guestPage!.context().request;const me=await (await guestRequest.get('/api/v1/guest/me')).json() as {guest:{sessionId:string}};const catalog=await (await guestRequest.get('/api/v1/guest/catalog')).json() as {data:{id:string;name:{de:string};priceCents:number}[]};const displayed=catalog.data.find(item=>item.name.de==='Mineralwasser')!;const staleMutationId=crypto.randomUUID();staleGuestMutationIds=[];guestPage!.on('request',request=>{if(request.url().endsWith('/api/v1/guest/items')&&request.method()==='POST')staleGuestMutationIds.push((request.postDataJSON() as {mutationId:string}).mutationId)});const request=page.context().request;const products=await (await request.get('/api/v1/products')).json() as {data:{id:string;name:{de:string;it:string;en:string};description?:{de:string;it:string;en:string};priceCents:number;categoryId:string;enabled:boolean;selfServiceOnly:boolean;version:number}[]};const product=products.data.find(item=>item.id===displayed.id)!;expect((await request.patch(`/api/v1/products/${product.id}`,{headers:csrfHeaders,data:{name:product.name,...(product.description?{description:product.description}:{}),priceCents:product.priceCents+100,categoryId:product.categoryId,enabled:product.enabled,selfServiceOnly:product.selfServiceOnly,expectedVersion:product.version}})).status()).toBe(200);await guestPage!.evaluate(({sessionId,productId,mutationId,expectedPriceCents})=>localStorage.setItem('skybar-guest-pending-adds',JSON.stringify({sessionId,entries:[[productId,mutationId,expectedPriceCents]]})),{sessionId:me.guest.sessionId,productId:product.id,mutationId:staleMutationId,expectedPriceCents:displayed.priceCents});await guestPage!.reload();await guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'}).click();await expect(guestPage!.locator('.notice--error')).toBeVisible();staleGuestPriceRejected=true;staleGuestPriceItemCount=((await (await guestRequest.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount;await guestPage!.reload();await guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'}).click();await expect.poll(async()=>((await (await guestRequest.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount).toBe(1)});
+Then('adding the stale self-service product is rejected without a charge',async()=>{expect(staleGuestPriceRejected).toBe(true);expect(staleGuestPriceItemCount).toBe(0)});
+Then('the guest can retry the refreshed self-service product',async()=>{expect(staleGuestMutationIds).toHaveLength(2);expect(staleGuestMutationIds[1]).not.toBe(staleGuestMutationIds[0])});
+When('a self-service product is renamed after the guest catalog is displayed',async({page})=>{await expect(guestPage!.getByText('Mineralwasser',{exact:true})).toBeVisible();await guestPage!.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseRequest=true;window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guest/items')&&init?.method==='POST'&&loseRequest){loseRequest=false;throw new TypeError('Simulated request loss')}return originalFetch(input,init)}});await guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'}).click();await expect(guestPage!.locator('.notice--error')).toBeVisible();const request=page.context().request;const products=await (await request.get('/api/v1/products')).json() as {data:{id:string;name:{de:string;it:string;en:string};description?:{de:string;it:string;en:string};priceCents:number;categoryId:string;enabled:boolean;selfServiceOnly:boolean;version:number}[]};const product=products.data.find(item=>item.name.de==='Mineralwasser')!;expect((await request.patch(`/api/v1/products/${product.id}`,{headers:csrfHeaders,data:{name:{de:'Quellwasser',it:'Acqua di fonte',en:'Spring water'},...(product.description?{description:product.description}:{}),priceCents:product.priceCents,categoryId:product.categoryId,enabled:product.enabled,selfServiceOnly:product.selfServiceOnly,expectedVersion:product.version}})).status()).toBe(200);await guestPage!.reload();await expect(guestPage!.getByText('Quellwasser',{exact:true})).toBeVisible();const response=guestPage!.waitForResponse(candidate=>candidate.url().endsWith('/api/v1/guest/items')&&candidate.request().method()==='POST');await guestPage!.locator('.product-tile').filter({hasText:'Quellwasser'}).click();staleGuestSnapshotRejected=(await response).status()===409;await expect(guestPage!.locator('.notice--error')).toBeVisible();staleGuestSnapshotItemCount=((await (await guestPage!.context().request.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount});
+Then('adding the stale product snapshot is rejected without a charge',async()=>{expect(staleGuestSnapshotRejected).toBe(true);expect(staleGuestSnapshotItemCount).toBe(0)});
+Then('the guest catalog shows the renamed product after refresh',async()=>{await expect(guestPage!.getByText('Quellwasser',{exact:true})).toBeVisible()});
+When('the guest retries a legacy pending self-service addition',async()=>{const request=guestPage!.context().request;const me=await (await request.get('/api/v1/guest/me')).json() as {guest:{sessionId:string}};const catalog=await (await request.get('/api/v1/guest/catalog')).json() as {data:{id:string;name:{de:string};priceCents:number;version:number}[]};const product=catalog.data.find(item=>item.name.de==='Mineralwasser')!;legacyGuestMutationId=crypto.randomUUID();expect((await request.post('/api/v1/guest/items',{headers:csrfHeaders,data:{mutationId:legacyGuestMutationId,productId:product.id,expectedPriceCents:product.priceCents,expectedProductVersion:product.version}})).status()).toBe(201);const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();try{await database.query('UPDATE order_items SET guest_expected_price_cents=NULL,guest_expected_product_version=NULL WHERE guest_mutation_id=$1',[legacyGuestMutationId])}finally{await database.end()}await guestPage!.evaluate(({sessionId,productId,mutationId})=>localStorage.setItem('skybar-guest-pending-adds',JSON.stringify({sessionId,entries:[[productId,mutationId]]})),{sessionId:me.guest.sessionId,productId:product.id,mutationId:legacyGuestMutationId});legacyGuestRequest=undefined;guestPage!.on('request',guestRequest=>{if(guestRequest.url().endsWith('/api/v1/guest/items')&&guestRequest.method()==='POST')legacyGuestRequest=guestRequest.postDataJSON() as {mutationId:string;expectedPriceCents?:number;expectedProductVersion?:number}});await guestPage!.reload();await guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'}).click();await expect.poll(()=>legacyGuestRequest).toBeTruthy();legacyGuestItemCount=((await (await request.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount;expect(legacyGuestRequest?.expectedPriceCents).toBe(product.priceCents)});
+Then('the legacy addition reuses its mutation with the displayed price',async()=>{expect(legacyGuestRequest).toEqual(expect.objectContaining({mutationId:legacyGuestMutationId,expectedPriceCents:expect.any(Number),expectedProductVersion:expect.any(Number)}))});
+Then('the legacy self-service product is stored once',async()=>{expect(legacyGuestItemCount).toBe(1)});
+When('the guest device clock is twelve hours fast',async()=>{
+  await guestPage!.addInitScript(()=>{const actualNow=Date.now.bind(Date);Date.now=()=>actualNow()+12*60*60*1000});
+  await guestPage!.reload();
+  await expect(guestPage!.getByRole('heading',{name:'Luca Rossi'})).toBeVisible();
+});
+When('the guest refreshes a provisional item with a device clock twelve hours slow',async()=>{
+  const request=guestPage!.context().request;
+  const catalog=await (await request.get('/api/v1/guest/catalog')).json() as {data:{id:string;name:{de:string};priceCents:number;version:number}[]};
+  const product=catalog.data.find(item=>item.name.de==='Mineralwasser')!;
+  expect((await request.post('/api/v1/guest/items',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),productId:product.id,expectedPriceCents:product.priceCents,expectedProductVersion:product.version}})).status()).toBe(201);
+  await guestPage!.addInitScript(()=>{const actualNow=Date.now.bind(Date);Date.now=()=>actualNow()-12*60*60*1000});
+  await guestPage!.reload();
+  await expect(guestPage!.getByRole('heading',{name:'Luca Rossi'})).toBeVisible();
+});
+When('the guest retries undo after its first response is lost',async()=>{
+  await guestPage!.getByText('Mineralwasser',{exact:true}).click();await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toBeVisible();
+  await guestPage!.evaluate(() => {
+    const originalFetch=window.fetch.bind(window);let loseResponse=true;const ids:string[]=[];Object.assign(window,{__skyBarGuestUndoRetryIds:ids});
+    window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/guest/items/')&&url.endsWith('/undo')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)};
+  });
+  await guestPage!.getByRole('button',{name:'Rückgängig'}).click();await expect(guestPage!.locator('.notice--error')).toBeVisible();await guestPage!.getByRole('button',{name:'Rückgängig'}).click();retriedGuestUndoMutationIds=await guestPage!.evaluate(()=>(window as unknown as {__skyBarGuestUndoRetryIds:string[]}).__skyBarGuestUndoRetryIds);
+});
+Then('both guest undo attempts use the same mutation identifier',async()=>{expect(retriedGuestUndoMutationIds).toHaveLength(2);expect(new Set(retriedGuestUndoMutationIds).size).toBe(1)});
+When('the same guest item mutation is submitted concurrently',async()=>{const request=guestPage!.context().request;const catalog=await (await request.get('/api/v1/guest/catalog')).json() as {data:{id:string;name:{de:string};priceCents:number;version:number}[]};const product=catalog.data.find(item=>item.name.de==='Mineralwasser')!;const data={mutationId:crypto.randomUUID(),productId:product.id,expectedPriceCents:product.priceCents,expectedProductVersion:product.version};const responses=await Promise.all([request.post('/api/v1/guest/items',{headers:csrfHeaders,data}),request.post('/api/v1/guest/items',{headers:csrfHeaders,data})]);concurrentGuestItemStatuses=responses.map(response=>response.status());concurrentGuestItemCount=((await (await request.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount});
+Then('both concurrent guest item responses succeed',async()=>{expect(concurrentGuestItemStatuses).toEqual([201,201])});
+Then('the concurrent guest item is stored only once',async()=>{expect(concurrentGuestItemCount).toBe(1)});
+
+When('an approved guest grant response is lost before its cookie is retained',async({page,browser})=>{
+  const request=page.context().request;
+  const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
+  const room=bootstrap.rooms.find(item=>item.name==='102')!;
+  const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Recoverable grant',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
+  expect((await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expiresAt:new Date(Date.now()+86_400_000).toISOString()}})).status()).toBe(200);
+  const same=await browser.newContext({baseURL:e2eBaseURL});const different=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(same,different);
+  const grantId=crypto.randomUUID();const statusPath=`/api/v1/public/access-requests/${created.id}/status`;const statusData={token:created.statusToken,grantId};
+  expect((await same.request.post(statusPath,{data:statusData})).status()).toBe(200);
+  await same.clearCookies();
+  expect((await same.request.post(statusPath,{data:statusData})).status()).toBe(200);
+  recoveredGrantStatus=(await same.request.get('/api/v1/guest/me')).status();
+  await different.request.post(statusPath,{data:{token:created.statusToken,grantId:crypto.randomUUID()}});
+  differentGrantStatus=(await different.request.get('/api/v1/guest/me')).status();
+});
+Then('retrying the same grant exchange restores guest access',async()=>{expect(recoveredGrantStatus).toBe(200)});
+Then('a different grant exchange receives no guest access',async()=>{expect(differentGrantStatus).toBe(401)});
+When('a pending guest request crosses a session-secret rotation',async({page,browser})=>{
+  const request=page.context().request;
+  const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
+  const room=bootstrap.rooms.find(item=>item.name==='102')!;
+  const mutationId=crypto.randomUUID();
+  const accessCommand={mutationId,name:'Rotation-safe guest',roomId:room.id,language:'de'};
+  const createdResponse=await request.post('/api/v1/public/access-requests',{data:accessCommand});
+  expect(createdResponse.status()).toBe(201);
+  const created=await createdResponse.json() as {id:string;statusToken:string};
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();
+  try{
+    // Model a request written before the key-id migration; its verifier is still usable
+    // because the first capability key deliberately matches the pre-upgrade session key.
+    await database.query('UPDATE access_requests SET status_token_key_id=NULL WHERE id=$1',[created.id]);
+  }finally{await database.end()}
+
+  const originalSessionSecret=process.env.SESSION_SECRET??'development-only-session-secret-change-me';
+  const capabilityKeys=process.env.ACCESS_CAPABILITY_KEYS??`development-v1:${originalSessionSecret}`;
+  const replicaPort=3204;
+  const replica=spawn(process.execPath,['apps/api/dist/index.js'],{
+    cwd:process.cwd(),
+    env:{
+      ...process.env,
+      PORT:String(replicaPort),
+      LOG_LEVEL:'warn',
+      RATE_LIMIT_MAX:'5000',
+      SESSION_SECRET:'rotated-host-session-secret-at-least-32-characters',
+      ACCESS_CAPABILITY_KEYS:capabilityKeys,
+    },
+    stdio:'ignore',
+  });
+  extraApiProcesses.push(replica);
+  const rotatedURL=`http://127.0.0.1:${replicaPort}`;
+  await expect.poll(async()=>{try{return (await fetch(`${rotatedURL}/api/v1/health`)).status}catch{return 0}},{timeout:15_000}).toBe(200);
+  rotatedHostSessionStatus=(await request.get(`${rotatedURL}/api/v1/auth/me`)).status();
+
+  const reissuedResponse=await request.post(`${rotatedURL}/api/v1/public/access-requests`,{data:accessCommand});
+  expect(reissuedResponse.status()).toBe(201);
+  const reissued=await reissuedResponse.json() as {id:string;statusToken:string};
+  const rotatedDevice=await browser.newContext({baseURL:rotatedURL});extraContexts.push(rotatedDevice);
+  const originalPoll=await rotatedDevice.request.post(`/api/v1/public/access-requests/${created.id}/status`,{
+    data:{token:created.statusToken,grantId:crypto.randomUUID()},
+  });
+  const reissuedPoll=await rotatedDevice.request.post(`/api/v1/public/access-requests/${created.id}/status`,{
+    data:{token:reissued.statusToken,grantId:crypto.randomUUID()},
+  });
+  rotatedCapabilityPollResult={
+    statuses:[originalPoll.status(),reissuedPoll.status()],
+    sameToken:created.id===reissued.id&&created.statusToken===reissued.statusToken,
+    states:[
+      String(((await originalPoll.json()) as {status:string}).status),
+      String(((await reissuedPoll.json()) as {status:string}).status),
+    ],
+  };
+
+  expect((await request.post(`/api/v1/access-requests/${created.id}/approve`,{
+    headers:csrfHeaders,
+    data:{mutationId:crypto.randomUUID(),expiresAt:new Date(Date.now()+86_400_000).toISOString()},
+  })).status()).toBe(200);
+  const grantId=crypto.randomUUID();
+  const originalDevice=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(originalDevice);
+  const exchangeData={token:created.statusToken,grantId};
+  expect((await originalDevice.request.post(`/api/v1/public/access-requests/${created.id}/status`,{data:exchangeData})).status()).toBe(200);
+  await originalDevice.clearCookies();
+  const recovered=await originalDevice.request.post(`${rotatedURL}/api/v1/public/access-requests/${created.id}/status`,{data:exchangeData});
+  expect(recovered.status()).toBe(200);
+  expect((await recovered.json()) as {granted:boolean}).toEqual(expect.objectContaining({granted:true}));
+  rotatedGrantRecoveryStatus=(await originalDevice.request.get(`${rotatedURL}/api/v1/guest/me`)).status();
+});
+Then('its original and idempotently reissued capabilities remain pollable',async()=>{
+  expect(rotatedCapabilityPollResult).toEqual({statuses:[200,200],sameToken:true,states:['pending','pending']});
+});
+Then('the bound grant exchange restores guest access after rotation',async()=>{expect(rotatedGrantRecoveryStatus).toBe(200)});
+Then('the rotated replica rejects the old host session',async()=>{expect(rotatedHostSessionStatus).toBe(401)});
+When('an approved guest request expires before its grant exchange',async({page,browser})=>{
+  const request=page.context().request;const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};const room=bootstrap.rooms.find(item=>item.name==='102')!;
+  const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Expired grant',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
+  expect((await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expiresAt:new Date(Date.now()+1500).toISOString()}})).status()).toBe(200);
+  await page.waitForTimeout(1800);
+  const context=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(context);const response=await context.request.post(`/api/v1/public/access-requests/${created.id}/status`,{data:{token:created.statusToken,grantId:crypto.randomUUID()}});
+  expiredGrantResult=await response.json() as {status:string;granted:boolean};expiredGrantGuestStatus=(await context.request.get('/api/v1/guest/me')).status();
+});
+Then('the expired exchange is not consumed or granted',async()=>{expect(expiredGrantResult).toEqual(expect.objectContaining({status:'expired',granted:false}));expect(expiredGrantGuestStatus).toBe(401)});
+When('a clock-skewed API replica exchanges a database-valid grant',async({page,browser})=>{
+  const request=page.context().request;const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};const room=bootstrap.rooms.find(item=>item.name==='102')!;
+  const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Database Clock Grant',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
+  expect((await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expiresAt:new Date(Date.now()+30*60*1000).toISOString()}})).status()).toBe(200);
+  const replicaURL=await startClockSkewedApi(3201,60*60*1000);
+  const context=await browser.newContext({baseURL:replicaURL});extraContexts.push(context);
+  const exchange=await context.request.post(`/api/v1/public/access-requests/${created.id}/status`,{data:{token:created.statusToken,grantId:crypto.randomUUID()}});
+  databaseClockGrantResult={granted:((await exchange.json()) as {granted:boolean}).granted,guestStatus:(await context.request.get('/api/v1/guest/me')).status()};
+});
+Then('the database-valid guest access is granted',async()=>{expect(databaseClockGrantResult).toEqual({granted:true,guestStatus:200})});
+When('an approved guest grant expires while waiting for its guest lock',async({page,browser})=>{
+  const request=page.context().request;
+  const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
+  const room=bootstrap.rooms.find(item=>item.name==='102')!;
+  const created=await (await request.post('/api/v1/public/access-requests',{
+    data:{mutationId:crypto.randomUUID(),name:'Serialized Expired Grant',roomId:room.id,language:'de'},
+  })).json() as {id:string;statusToken:string};
+  const context=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(context);
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();let rolledBack=false;
+  try{
+    const expiresAt=((await database.query<{expiresAt:Date}>(
+      `SELECT clock_timestamp()+interval '3 seconds' AS "expiresAt"`,
+    )).rows[0]!.expiresAt).toISOString();
+    const approval=await request.post(`/api/v1/access-requests/${created.id}/approve`,{
+      headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expiresAt},
+    });
+    expect(approval.status()).toBe(200);
+    const approved=await approval.json() as {guestId:string};
+    await database.query('BEGIN');
+    await database.query('SELECT id FROM guests WHERE id=$1 FOR UPDATE',[approved.guestId]);
+    const holderXid=String((await database.query('SELECT pg_current_xact_id()::text AS xid')).rows[0].xid);
+    const startsValid=Boolean((await database.query(
+      'SELECT expires_at>clock_timestamp() AS valid FROM access_requests WHERE id=$1',[created.id],
+    )).rows[0].valid);
+    expect(startsValid).toBe(true);
+    const exchange=context.request.post(`/api/v1/public/access-requests/${created.id}/status`,{
+      data:{token:created.statusToken,grantId:crypto.randomUUID()},
+    });
+    await expect.poll(async()=>Number((await database.query(
+      `SELECT count(*) FROM pg_locks WHERE locktype='transactionid' AND transactionid::text=$1 AND NOT granted`,[holderXid],
+    )).rows[0].count),{timeout:5_000,intervals:[10,20,50]}).toBeGreaterThan(0);
+    await expect.poll(async()=>Boolean((await database.query(
+      'SELECT clock_timestamp()>=expires_at AS expired FROM access_requests WHERE id=$1',[created.id],
+    )).rows[0].expired),{timeout:5_000,intervals:[25,50,100]}).toBe(true);
+    await database.query('ROLLBACK');rolledBack=true;
+    const response=await exchange;
+    const payload=await response.json() as {status:string;granted:boolean};
+    const accessState=(await database.query<{consumedAt:Date|null}>(
+      'SELECT status_token_consumed_at AS "consumedAt" FROM access_requests WHERE id=$1',[created.id],
+    )).rows[0]!;
+    serializedGrantResult={
+      status:payload.status,
+      granted:payload.granted,
+      guestStatus:(await context.request.get('/api/v1/guest/me')).status(),
+      sessionCount:Number((await database.query('SELECT count(*) FROM guest_sessions WHERE request_id=$1',[created.id])).rows[0].count),
+      consumedAt:accessState.consumedAt,
+    };
+  }finally{if(!rolledBack)await database.query('ROLLBACK');await database.end()}
+});
+Then('the serialized expired grant is not consumed or issued',async()=>{
+  expect(serializedGrantResult).toEqual({status:'expired',granted:false,guestStatus:401,sessionCount:0,consumedAt:null});
+});
+When('clock-skewed API replicas validate access approval expiries',async({page})=>{
+  const request=page.context().request;
+  const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
+  const room=bootstrap.rooms.find(item=>item.name==='102')!;
+  const valid=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Database Valid Approval',roomId:room.id,language:'de'}})).json() as {id:string};
+  const expired=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Database Expired Approval',roomId:room.id,language:'de'}})).json() as {id:string};
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();
+  try{
+    const times=(await database.query<{validExpiresAt:Date;expiredExpiresAt:Date}>(
+      `SELECT clock_timestamp()+interval '30 minutes' AS "validExpiresAt",
+              clock_timestamp()-interval '30 minutes' AS "expiredExpiresAt"`,
+    )).rows[0]!;
+    const futureReplica=await startClockSkewedApi(3202,60*60*1000);
+    const pastReplica=await startClockSkewedApi(3203,-60*60*1000);
+    const validResponse=await request.post(`${futureReplica}/api/v1/access-requests/${valid.id}/approve`,{
+      headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expiresAt:times.validExpiresAt.toISOString()},
+    });
+    const expiredResponse=await request.post(`${pastReplica}/api/v1/access-requests/${expired.id}/approve`,{
+      headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expiresAt:times.expiredExpiresAt.toISOString()},
+    });
+    const expiredBody=await expiredResponse.json() as {error:{code:string}};
+    const states=await database.query<{id:string;status:string}>('SELECT id,status FROM access_requests WHERE id=ANY($1::uuid[])',[ [valid.id,expired.id] ]);
+    databaseClockApprovalResult={
+      validStatus:validResponse.status(),
+      validRequestStatus:states.rows.find(row=>row.id===valid.id)!.status,
+      expiredStatus:expiredResponse.status(),
+      expiredCode:expiredBody.error.code,
+      expiredRequestStatus:states.rows.find(row=>row.id===expired.id)!.status,
+      expiredGuestCount:Number((await database.query(`SELECT count(*) FROM guests WHERE name='Database Expired Approval'`)).rows[0].count),
+    };
+  }finally{await database.end()}
+});
+Then('only the database-valid access approval is accepted',async()=>{
+  expect(databaseClockApprovalResult).toEqual({
+    validStatus:200,validRequestStatus:'approved',expiredStatus:400,expiredCode:'INVALID_EXPIRY',expiredRequestStatus:'pending',expiredGuestCount:0,
+  });
+});
+When('an access approval expires while waiting for its request lock',async({page})=>{
+  const request=page.context().request;
+  const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
+  const room=bootstrap.rooms.find(item=>item.name==='102')!;
+  const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Serialized Expired Approval',roomId:room.id,language:'de'}})).json() as {id:string};
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();let committed=false;
+  try{
+    await database.query('BEGIN');
+    await database.query('SELECT id FROM access_requests WHERE id=$1 FOR UPDATE',[created.id]);
+    const holderXid=String((await database.query('SELECT pg_current_xact_id()::text AS xid')).rows[0].xid);
+    const expiresAt=((await database.query<{expiresAt:Date}>(`SELECT clock_timestamp()+interval '2 seconds' AS "expiresAt"`)).rows[0]!.expiresAt).toISOString();
+    const approval=request.post(`/api/v1/access-requests/${created.id}/approve`,{
+      headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expiresAt},
+    });
+    await expect.poll(async()=>Number((await database.query(
+      `SELECT count(*) FROM pg_locks WHERE locktype='transactionid' AND transactionid::text=$1 AND NOT granted`,[holderXid],
+    )).rows[0].count),{timeout:5_000,intervals:[10,20,50]}).toBeGreaterThan(0);
+    await new Promise(resolve=>setTimeout(resolve,2_200));
+    await database.query('COMMIT');committed=true;
+    const response=await approval;
+    const responseBody=await response.json() as {error:{code:string}};
+    serializedApprovalResult={
+      status:response.status(),
+      code:responseBody.error.code,
+      requestStatus:String((await database.query('SELECT status FROM access_requests WHERE id=$1',[created.id])).rows[0].status),
+      guestCount:Number((await database.query(`SELECT count(*) FROM guests WHERE name='Serialized Expired Approval'`)).rows[0].count),
+    };
+  }finally{if(!committed)await database.query('ROLLBACK');await database.end()}
+});
+Then('the expired approval is rejected without resolving its request',async()=>{
+  expect(serializedApprovalResult).toEqual({status:400,code:'INVALID_EXPIRY',requestStatus:'pending',guestCount:0});
+});
+When("the host revokes Luca's device from the guest directory",async({page})=>{await page.goto('/app/guests');const row=page.locator('.table-row').filter({hasText:'Luca Rossi'});await row.getByRole('button',{name:/Angemeldete Geräte|Dispositivi connessi|Logged-in devices/}).click();await expect(page.locator('.modal .device-list')).toBeVisible();await page.locator('.modal').getByRole('button',{name:/Widerrufen|Revoca|Revoke/}).click();await expect(page.locator('.modal .device-list')).toHaveCount(0)});
+Then("Luca's revoked device loses guest access",async()=>{guestRevokedStatus=(await guestPage!.context().request.get('/api/v1/guest/me')).status();expect(guestRevokedStatus).toBe(401)});
+When("another host revokes Luca's device while the first host's device list is open",async({page,browser})=>{
+  await page.goto('/app/guests');
+  const row=page.locator('.table-row').filter({hasText:'Luca Rossi'});
+  await row.getByRole('button',{name:/Angemeldete Geräte|Dispositivi connessi|Logged-in devices/}).click();
+  await expect(page.locator('.modal .device-list')).toBeVisible();
+  const firstHost=page.context().request;
+  const guests=await (await firstHost.get('/api/v1/guests')).json() as {data:{id:string;name:string}[]};
+  const luca=guests.data.find(guest=>guest.name==='Luca Rossi')!;
+  const sessions=await (await firstHost.get(`/api/v1/guests/${luca.id}/sessions`)).json() as {data:{id:string}[]};
+  expect((await firstHost.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'guest-device-revoker@skybar.test',name:'Guest Device Revoker',password:'GuestDeviceRevoker123!',role:'staff',language:'de'}})).status()).toBe(201);
+  const other=await browser.newContext({baseURL:e2eBaseURL});
+  extraContexts.push(other);
+  expect((await other.request.post('/api/v1/auth/login',{data:{email:'guest-device-revoker@skybar.test',password:'GuestDeviceRevoker123!'}})).status()).toBe(200);
+  expect((await other.request.delete(`/api/v1/guests/${luca.id}/sessions/${sessions.data[0]!.id}`,{headers:csrfHeaders})).status()).toBe(204);
+});
+Then("the first host's open guest device list updates",async({page})=>{await expect(page.locator('.modal .device-list')).toHaveCount(0,{timeout:10_000})});
+When("the host repeats revocation of Luca's device",async({page})=>{const request=page.context().request;const guests=await (await request.get('/api/v1/guests')).json() as {data:{id:string;name:string}[]};const luca=guests.data.find(guest=>guest.name==='Luca Rossi')!;const other=guests.data.find(guest=>guest.id!==luca.id)!;const sessions=await (await request.get(`/api/v1/guests/${luca.id}/sessions`)).json() as {data:{id:string}[]};const sessionId=sessions.data[0]!.id;repeatedGuestSessionRevokeStatuses=[(await request.delete(`/api/v1/guests/${luca.id}/sessions/${sessionId}`,{headers:csrfHeaders})).status(),(await request.delete(`/api/v1/guests/${luca.id}/sessions/${sessionId}`,{headers:csrfHeaders})).status()];mismatchedGuestSessionRevokeStatus=(await request.delete(`/api/v1/guests/${other.id}/sessions/${sessionId}`,{headers:csrfHeaders})).status();const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();try{guestSessionRevokeAuditCount=Number((await database.query("SELECT count(*)::int AS count FROM audit_events WHERE action='guest-session.revoked' AND entity_id=$1",[sessionId])).rows[0]?.count??0)}finally{await database.end()}});
+Then('both revocation requests succeed with one audit record',async()=>{expect(repeatedGuestSessionRevokeStatuses).toEqual([204,204]);expect(guestSessionRevokeAuditCount).toBe(1)});
+Then('the device cannot be revoked through another guest',async()=>{expect(mismatchedGuestSessionRevokeStatus).toBe(404)});
+Then("Luca's open guest view returns to access request without cached data",async()=>{await expect(guestPage!).toHaveURL(/\/guest\/request$/,{timeout:10_000});await expect(guestPage!.getByText('Luca Rossi',{exact:true})).toHaveCount(0)});
+When('the host renames Luca to {string}',async({page},name:string)=>{const request=page.context().request;const guests=await (await request.get('/api/v1/guests')).json() as {data:{id:string;name:string;roomId:string;language:string;version:number}[]};const luca=guests.data.find((item)=>item.name==='Luca Rossi')!;expect((await request.patch(`/api/v1/guests/${luca.id}`,{headers:csrfHeaders,data:{name,roomId:luca.roomId,language:luca.language,expectedVersion:luca.version}})).status()).toBe(200)});
+Then("Luca's open guest view shows {string}",async({},name:string)=>{await expect(guestPage!.getByRole('heading',{name})).toBeVisible({timeout:10_000})});
+When('the guest adds two different self-service items',async()=>{await guestPage!.locator('.product-tile').getByText('Mineralwasser',{exact:true}).click();await expect(guestPage!.locator('.undo-toast')).toHaveCount(1);await guestPage!.locator('.product-tile').getByText('Hauskeks',{exact:true}).click()});
+Then('both provisional items offer their own undo action',async()=>{await expect(guestPage!.locator('.undo-toast')).toHaveCount(2);await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toHaveCount(2)});
+When('another approved device for the same guest adds {string}',async({page,browser},productName:string)=>{
+  const hostRequest=page.context().request;
+  const guest=await (await guestPage!.context().request.get('/api/v1/guest/me')).json() as {guest:{id:string}};
+  const bootstrap=await (await hostRequest.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
+  const room=bootstrap.rooms.find(item=>item.name==='102')!;
+  const second=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(second);
+  const access=await (await second.request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Luca second device',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
+  expect((await hostRequest.post(`/api/v1/access-requests/${access.id}/approve`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),guestId:guest.guest.id,expiresAt:new Date(Date.now()+86_400_000).toISOString()}})).status()).toBe(200);
+  expect((await second.request.post(`/api/v1/public/access-requests/${access.id}/status`,{data:{token:access.statusToken,grantId:crypto.randomUUID()}})).status()).toBe(200);
+  const catalog=await (await second.request.get('/api/v1/guest/catalog')).json() as {data:{id:string;name:{de:string};priceCents:number;version:number}[]};
+  const product=catalog.data.find(item=>item.name.de===productName)!;
+  expect((await second.request.post('/api/v1/guest/items',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),productId:product.id,expectedPriceCents:product.priceCents,expectedProductVersion:product.version}})).status()).toBe(201);
+  await expect(guestPage!.locator('.line-item').filter({hasText:productName})).toBeVisible();
+});
+Then('the original guest device sees the item without an undo action',async()=>{await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toHaveCount(0)});
+When('the host adds another self-service category named {string}',async({page},categoryName:string)=>{
+  const request=page.context().request;
+  const category=await (await request.post('/api/v1/categories',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:{de:categoryName,it:'Bevande duplicate',en:'Duplicate drinks'}}})).json() as {id:string};
+  expect((await request.post('/api/v1/products',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:{de:'Getrenntes Wasser',it:'Acqua separata',en:'Separate water'},priceCents:275,categoryId:category.id,enabled:true,selfServiceOnly:true}})).status()).toBe(201);
+  await expect(guestPage!.getByText('Getrenntes Wasser',{exact:true})).toBeVisible();
+});
+Then('both {string} categories remain separate in the guest catalog',async({},categoryName:string)=>{
+  const headings=guestPage!.locator('.guest-tabs>section').first().locator('.catalog-group>h3').filter({hasText:categoryName});
+  await expect(headings).toHaveCount(2);
+  await expect(headings.nth(0).locator('..')).toContainText('Mineralwasser');
+  await expect(headings.nth(1).locator('..')).toContainText('Getrenntes Wasser');
+});
+When('one guest addition loses its response before another product is added',async()=>{
+  await guestPage!.evaluate(()=>{
+    const originalFetch=window.fetch.bind(window);let loseResponse=true;const entries:{productId:string;mutationId:string}[]=[];
+    Object.assign(window,{__skyBarGuestAddRetryEntries:entries});
+    window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guest/items')&&init?.method==='POST'){const body=JSON.parse(String(init.body)) as {productId:string;mutationId:string};entries.push(body);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)};
+  });
+  await guestPage!.locator('.product-tile').getByText('Mineralwasser',{exact:true}).click();await expect(guestPage!.locator('.notice--error')).toBeVisible();await expect(guestPage!.locator('.undo-toast')).toHaveCount(1);
+  await guestPage!.locator('.product-tile').getByText('Hauskeks',{exact:true}).click();await expect(guestPage!.locator('.undo-toast')).toHaveCount(2);
+  await guestPage!.locator('.product-tile').getByText('Mineralwasser',{exact:true}).click();await expect(guestPage!.locator('.undo-toast')).toHaveCount(2);
+  const entries=await guestPage!.evaluate(()=>(window as unknown as {__skyBarGuestAddRetryEntries:{productId:string;mutationId:string}[]}).__skyBarGuestAddRetryEntries);
+  retriedGuestAddMutationIds=[entries[0]!.mutationId,entries[2]!.mutationId];
+  const tab=await (await guestPage!.context().request.get('/api/v1/guest/tab')).json() as {items:{productName:{de:string};quantity:number}[]};
+  uncertainGuestProductCounts=Object.fromEntries(tab.items.map((item)=>[item.productName.de,item.quantity]));
+});
+Then('retrying the uncertain product reuses its mutation identifier',async()=>{expect(retriedGuestAddMutationIds).toHaveLength(2);expect(new Set(retriedGuestAddMutationIds).size).toBe(1)});
+Then('each selected self-service product is stored once',async()=>{expect(uncertainGuestProductCounts).toEqual(expect.objectContaining({Mineralwasser:1,Hauskeks:1}))});
+When('the guest retries an addition after a committed HTTP timeout',async()=>{await guestPage!.evaluate(()=>{const originalFetch=window.fetch.bind(window);let returnTimeout=true;const ids:string[]=[];Object.assign(window,{__skyBarGuestAddRetryIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guest/items')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);const response=await originalFetch(input,init);if(returnTimeout){returnTimeout=false;return new Response(JSON.stringify({error:{code:'REQUEST_TIMEOUT',message:'The upstream response timed out.'}}),{status:408,headers:{'content-type':'application/json'}})}return response}return originalFetch(input,init)}});const product=guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'});await product.click();await expect(guestPage!.locator('.notice--error')).toBeVisible();await product.click();await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toBeVisible();retriedGuestAddMutationIds=await guestPage!.evaluate(()=>(window as unknown as {__skyBarGuestAddRetryIds:string[]}).__skyBarGuestAddRetryIds);timeoutGuestItemCount=((await (await guestPage!.context().request.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount});
+Then('both timed-out guest additions use the same mutation identifier',async()=>{expect(retriedGuestAddMutationIds).toHaveLength(2);expect(new Set(retriedGuestAddMutationIds).size).toBe(1)});
+Then('the timed-out self-service product is stored once',async()=>{expect(timeoutGuestItemCount).toBe(1)});
+
+When('the guest closes the app after a self-service response is lost',async()=>{
+  await guestPage!.evaluate(()=>{
+    const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__skyBarClosingGuestAddIds:ids});
+    window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guest/items')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);await originalFetch(input,init);throw new TypeError('Simulated lost response')}return originalFetch(input,init)};
+  });
+  await guestPage!.locator('.product-tile').getByText('Mineralwasser',{exact:true}).click();
+  await expect(guestPage!.locator('.notice--error')).toBeVisible();
+  reopenedGuestAddMutationIds=await guestPage!.evaluate(()=>(window as unknown as {__skyBarClosingGuestAddIds:string[]}).__skyBarClosingGuestAddIds);
+  const context=guestPage!.context();await guestPage!.close();guestPage=await context.newPage();await guestPage.goto('/guest');await expect(guestPage.getByRole('heading',{name:'Luca Rossi'})).toBeVisible();
+  await guestPage.evaluate(()=>{const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__skyBarReopenedGuestAddIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guest/items')&&init?.method==='POST')ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);return originalFetch(input,init)}});
+  await guestPage.locator('.product-tile').getByText('Mineralwasser',{exact:true}).click();
+  await expect(guestPage.getByRole('button',{name:'Rückgängig'})).toBeVisible();
+  reopenedGuestAddMutationIds.push(...await guestPage.evaluate(()=>(window as unknown as {__skyBarReopenedGuestAddIds:string[]}).__skyBarReopenedGuestAddIds));
+  reopenedGuestAddItemCount=((await (await guestPage.context().request.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount;
+});
+Then('reopening and retrying reuses the original item mutation identifier',async()=>{expect(reopenedGuestAddMutationIds).toHaveLength(2);expect(new Set(reopenedGuestAddMutationIds).size).toBe(1)});
+Then('the recovered self-service product is stored once',async()=>{expect(reopenedGuestAddItemCount).toBe(1)});
+
+When('the administrator creates room {string}',async({page},name:string)=>{await page.goto('/app/rooms');await page.getByPlaceholder(/Zimmername|Nome camera|Room name/).fill(name);await page.locator('.inline-form').getByRole('button').click()});
+Then('room {string} is listed',async({page},name:string)=>{await expect(page.getByText(name,{exact:true})).toBeVisible()});
+When('the administrator renames room {string} to {string}',async({page},oldName:string,newName:string)=>{const row=page.locator('.sortable-list>div').filter({hasText:oldName});await row.getByRole('button').nth(2).click();await page.locator('.modal input').fill(newName);await page.locator('.modal').getByRole('button',{name:'Speichern'}).click()});
+When('the administrator submits an invalid room rename',async({page})=>{await page.goto('/app/rooms');const row=page.locator('.sortable-list>div').filter({hasText:'101'});await row.getByRole('button').nth(2).click();await page.locator('.modal input').fill('   ');await page.locator('.modal').getByRole('button',{name:/Speichern|Salva|Save/}).click()});
+Then('the room editor shows a validation error',async({page})=>{await expect(page.locator('.modal .notice--error')).toContainText(/Eingaben prüfen|dati inseriti|entered information/)});
+When('a room rename response is lost before another administrator renames it',async({page})=>{const request=page.context().request;const rooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;name:string;version:number}[]};const original=rooms.data.find(room=>room.name==='101')!;const command={name:'First room rename',expectedVersion:original.version};const committed=await (await request.patch(`/api/v1/rooms/${original.id}`,{headers:csrfHeaders,data:command})).json() as {version:number};expect((await request.patch(`/api/v1/rooms/${original.id}`,{headers:csrfHeaders,data:{name:'Newer room rename',expectedVersion:committed.version}})).status()).toBe(200);staleRoomUpdateStatus=(await request.patch(`/api/v1/rooms/${original.id}`,{headers:csrfHeaders,data:command})).status();const finalRooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;name:string}[]};staleRoomFinalName=finalRooms.data.find(room=>room.id===original.id)!.name});
+Then('retrying the stale room rename is rejected',async()=>{expect(staleRoomUpdateStatus).toBe(409)});
+Then('the newer room name remains configured',async()=>{expect(staleRoomFinalName).toBe('Newer room rename')});
+When('the administrator retries room creation after its first response is lost',async({page})=>{await page.goto('/app/rooms');await page.getByPlaceholder(/Zimmername|Nome camera|Room name/).fill('Recoverable room');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarRoomCreateCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/rooms')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});await page.locator('.inline-form').getByRole('button').click();await expect(page.locator('.notice--error')).toBeVisible();uncertainRoomFieldsLocked=await page.getByPlaceholder(/Zimmername|Nome camera|Room name/).isDisabled();await page.locator('.inline-form').getByRole('button').click();await expect(page.getByText('Recoverable room',{exact:true})).toBeVisible();const commands=await page.evaluate(()=>(window as unknown as {__skyBarRoomCreateCommands:Array<Record<string,unknown>>}).__skyBarRoomCreateCommands);retriedRoomMutationIds=commands.map(command=>String(command.mutationId));const rooms=await (await page.context().request.get('/api/v1/rooms')).json() as {data:{name:string}[]};recoverableRoomCount=rooms.data.filter(room=>room.name==='Recoverable room').length;changedRoomCreationReplayStatus=(await page.context().request.post('/api/v1/rooms',{headers:csrfHeaders,data:{...commands[0]!,name:'Changed recoverable room'}})).status()});
+Then('both room creation attempts use the same mutation identifier',async()=>{expect(retriedRoomMutationIds).toHaveLength(2);expect(new Set(retriedRoomMutationIds).size).toBe(1)});
+Then('the uncertain room name stays locked for retry',async()=>{expect(uncertainRoomFieldsLocked).toBe(true)});
+Then('only one recoverable room exists',async()=>{expect(recoverableRoomCount).toBe(1)});
+Then('changing the replayed room creation is rejected',async()=>{expect(changedRoomCreationReplayStatus).toBe(409)});
+When('the administrator retries category creation after its first response is lost',async({page})=>{await page.goto('/app/products');await page.getByPlaceholder(/Deutscher Name|Nome tedesco|German name/).fill('Recoverable category');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarCategoryCreateCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/categories')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});const form=page.locator('.inline-form');await form.getByRole('button').click();await expect(page.locator('.notice--error')).toBeVisible();uncertainCategoryFieldsLocked=await form.locator('input').isDisabled();await form.getByRole('button').click();await expect(page.getByText('Recoverable category',{exact:true})).toBeVisible();const commands=await page.evaluate(()=>(window as unknown as {__skyBarCategoryCreateCommands:Array<Record<string,unknown>>}).__skyBarCategoryCreateCommands);retriedCategoryMutationIds=commands.map(command=>String(command.mutationId));const categories=await (await page.context().request.get('/api/v1/categories')).json() as {data:{name:{de:string}}[]};recoverableCategoryCount=categories.data.filter(category=>category.name.de==='Recoverable category').length;changedCategoryCreationReplayStatus=(await page.context().request.post('/api/v1/categories',{headers:csrfHeaders,data:{...commands[0]!,name:{de:'Changed recoverable category',it:'',en:''}}})).status()});
+Then('both category creation attempts use the same mutation identifier',async()=>{expect(retriedCategoryMutationIds).toHaveLength(2);expect(new Set(retriedCategoryMutationIds).size).toBe(1)});
+Then('the uncertain category name stays locked for retry',async()=>{expect(uncertainCategoryFieldsLocked).toBe(true)});
+Then('only one recoverable category exists',async()=>{expect(recoverableCategoryCount).toBe(1)});
+Then('changing the replayed category creation is rejected',async()=>{expect(changedCategoryCreationReplayStatus).toBe(409)});
+When('the host retries guest creation after its first response is lost',async({page})=>{await page.goto('/app/guests');await page.getByRole('button',{name:/Hinzufügen|Aggiungi|Add/}).first().click();const modal=page.locator('.modal');await modal.getByLabel('Name').fill('Recoverable guest');await modal.getByLabel(/Zimmer|Camere|Rooms/).selectOption({label:'101'});await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarGuestCreateCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guests')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});await modal.getByRole('button',{name:/Speichern|Salva|Save/}).click();await expect(modal.locator('.notice--error')).toBeVisible();uncertainGuestFieldsLocked=await modal.locator('input,select').evaluateAll(fields=>fields.every(field=>(field as HTMLInputElement).disabled));await modal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(modal).toHaveCount(0);const commands=await page.evaluate(()=>(window as unknown as {__skyBarGuestCreateCommands:Array<Record<string,unknown>>}).__skyBarGuestCreateCommands);retriedGuestCreationMutationIds=commands.map(command=>String(command.mutationId));const guests=await (await page.context().request.get('/api/v1/guests')).json() as {data:{name:string}[]};recoverableGuestCount=guests.data.filter(guest=>guest.name==='Recoverable guest').length;changedGuestCreationReplayStatus=(await page.context().request.post('/api/v1/guests',{headers:csrfHeaders,data:{...commands[0]!,name:'Changed recoverable guest'}})).status()});
+Then('both guest creation attempts use the same mutation identifier',async()=>{expect(retriedGuestCreationMutationIds).toHaveLength(2);expect(new Set(retriedGuestCreationMutationIds).size).toBe(1)});
+Then('the uncertain guest fields stay locked for retry',async()=>{expect(uncertainGuestFieldsLocked).toBe(true)});
+Then('only one recoverable guest exists',async()=>{expect(recoverableGuestCount).toBe(1)});
+Then('changing the replayed guest creation is rejected',async()=>{expect(changedGuestCreationReplayStatus).toBe(409)});
+When('the host tries to close a guest creation whose response was lost',async({page})=>{
+  await page.goto('/app/guests');
+  await page.getByRole('button',{name:/Hinzufügen|Aggiungi|Add/}).first().click();
+  const modal=page.locator('.modal');
+  await modal.getByLabel('Name').fill('Locked guest creation');
+  await modal.getByLabel(/Zimmer|Camere|Rooms/).selectOption({label:'101'});
+  await page.evaluate(()=>{
+    const originalFetch=window.fetch.bind(window);let loseResponse=true;
+    window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guests')&&init?.method==='POST'){const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)};
+  });
+  await modal.getByRole('button',{name:/Speichern|Salva|Save/}).click();
+  await expect(modal.locator('.notice--error')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(modal.locator('.icon-button')).toBeDisabled();
+  await expect(modal.getByRole('button',{name:/Abbrechen|Annulla|Cancel/})).toBeDisabled();
+  uncertainGuestCreationStayedOpen=await modal.isVisible();
+  await modal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();
+  await expect(modal).toHaveCount(0);
+});
+Then('the uncertain guest creation remains open for retry',async()=>{expect(uncertainGuestCreationStayedOpen).toBe(true)});
+When('the host retries guest creation after a committed HTTP timeout',async({page})=>{await page.goto('/app/guests');await page.getByRole('button',{name:/Hinzufügen|Aggiungi|Add/}).first().click();const modal=page.locator('.modal');await modal.getByLabel('Name').fill('Timed out guest');await modal.getByLabel(/Zimmer|Camere|Rooms/).selectOption({label:'101'});await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let returnTimeout=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarGuestCreateCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guests')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(returnTimeout){returnTimeout=false;return new Response(JSON.stringify({error:{code:'REQUEST_TIMEOUT',message:'The upstream response timed out.'}}),{status:408,headers:{'content-type':'application/json'}})}return response}return originalFetch(input,init)}});await modal.getByRole('button',{name:/Speichern|Salva|Save/}).click();await expect(modal.locator('.notice--error')).toBeVisible();await modal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(modal).toHaveCount(0);const commands=await page.evaluate(()=>(window as unknown as {__skyBarGuestCreateCommands:Array<Record<string,unknown>>}).__skyBarGuestCreateCommands);retriedGuestCreationMutationIds=commands.map(command=>String(command.mutationId));const guests=await (await page.context().request.get('/api/v1/guests')).json() as {data:{name:string}[]};recoverableGuestCount=guests.data.filter(guest=>guest.name==='Timed out guest').length});
+Then('both timed-out guest creations use the same mutation identifier',async()=>{expect(retriedGuestCreationMutationIds).toHaveLength(2);expect(new Set(retriedGuestCreationMutationIds).size).toBe(1)});
+Then('only one timed-out guest exists',async()=>{expect(recoverableGuestCount).toBe(1)});
+When('the host creates guest {string} in room {string}',async({page},name:string,room:string)=>{await page.goto('/app/guests');await page.getByRole('button',{name:/Hinzufügen/}).click();await page.locator('.modal').getByLabel('Name').fill(name);await page.locator('.modal').getByLabel('Zimmer').selectOption({label:room});await page.locator('.modal').getByRole('button',{name:'Speichern'}).click()});
+Then('guest {string} is listed in room {string}',async({page},name:string,room:string)=>{const row=page.locator('.table-row').filter({hasText:name});await expect(row).toContainText(room)});
+When('a guest update response is lost before another host edits the guest',async({page})=>{const request=page.context().request;const guests=await (await request.get('/api/v1/guests')).json() as {data:{id:string;name:string;roomId:string;language:string;version:number}[]};const original=guests.data.find(guest=>guest.name==='Anna Berger')!;const command={name:'First guest edit',roomId:original.roomId,language:original.language,expectedVersion:original.version};const committed=await (await request.patch(`/api/v1/guests/${original.id}`,{headers:csrfHeaders,data:command})).json() as {version:number};expect((await request.patch(`/api/v1/guests/${original.id}`,{headers:csrfHeaders,data:{...command,name:'Newer guest edit',expectedVersion:committed.version}})).status()).toBe(200);staleGuestUpdateStatus=(await request.patch(`/api/v1/guests/${original.id}`,{headers:csrfHeaders,data:command})).status();const finalGuests=await (await request.get('/api/v1/guests')).json() as {data:{id:string;name:string}[]};staleGuestFinalName=finalGuests.data.find(guest=>guest.id===original.id)!.name});
+Then('retrying the stale guest update is rejected',async()=>{expect(staleGuestUpdateStatus).toBe(409)});
+Then('the newer guest name remains configured',async()=>{expect(staleGuestFinalName).toBe('Newer guest edit')});
+When('another device creates guest {string} in room {string}',async({page},name:string,roomName:string)=>{await page.goto('/app/guests');await expect(page.getByText('Anna Berger',{exact:true})).toBeVisible();const request=page.context().request;const rooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;name:string}[]};const room=rooms.data.find(item=>item.name===roomName)!;expect((await request.post('/api/v1/guests',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name,roomId:room.id,language:'de'}})).status()).toBe(201)});
+Then('guest {string} appears after the committed event',async({page},name:string)=>{await expect(page.getByText(name,{exact:true})).toBeVisible({timeout:10_000})});
+When('a guest receives an order while their archive confirmation is open',async({page})=>{await page.goto('/app/guests');await page.getByRole('button',{name:/Entfernen Anna Berger|Rimuovi Anna Berger|Remove Anna Berger/}).click();const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;expect((await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).status()).toBe(201);await page.locator('.modal').getByRole('button',{name:/Entfernen|Rimuovi|Remove/}).click()});
+Then('the archive confirmation explains that the order must be settled',async({page})=>{await expect(page.locator('.modal .notice--error')).toContainText(/offene Bestellung|ordine aperto|open order/i)});
+When('the host retries guest archival after its response is lost',async({page})=>{
+  const request=page.context().request;
+  const rooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;name:string}[]};
+  const guest=await (await request.post('/api/v1/guests',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:'Recoverable archive guest',roomId:rooms.data.find(room=>room.name==='102')!.id,language:'de'}})).json() as {id:string;version:number};
+  await page.goto('/app/guests');
+  await page.getByRole('button',{name:/Entfernen Recoverable archive guest|Rimuovi Recoverable archive guest|Remove Recoverable archive guest/}).click();
+  await page.evaluate((guestId)=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarGuestArchiveCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith(`/api/v1/guests/${guestId}`)&&init?.method==='DELETE'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}},guest.id);
+  const modal=page.locator('.modal');
+  await modal.getByRole('button',{name:/Entfernen|Rimuovi|Remove/}).click();
+  await expect(modal.locator('.notice--error')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(modal.locator('.icon-button')).toBeDisabled();
+  await expect(modal.getByRole('button',{name:/Abbrechen|Annulla|Cancel/})).toBeDisabled();
+  uncertainGuestArchiveStayedOpen=await modal.isVisible();
+  await modal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();
+  await expect(modal).toHaveCount(0);
+  const commands=await page.evaluate(()=>(window as unknown as {__skyBarGuestArchiveCommands:Array<Record<string,unknown>>}).__skyBarGuestArchiveCommands);
+  retriedGuestArchiveMutationIds=commands.map(command=>String(command.mutationId));
+  const guests=await (await request.get('/api/v1/guests')).json() as {data:{id:string}[]};
+  archivedGuestCount=guests.data.filter(item=>item.id===guest.id).length;
+});
+Then('both guest archival attempts use the same mutation identifier',async()=>{expect(retriedGuestArchiveMutationIds).toHaveLength(2);expect(new Set(retriedGuestArchiveMutationIds).size).toBe(1)});
+Then('the uncertain guest archival cannot be closed',async()=>{expect(uncertainGuestArchiveStayedOpen).toBe(true)});
+Then('the guest is archived only once',async()=>{expect(archivedGuestCount).toBe(0)});
+When('another host edits a guest before a stale archival arrives',async({page})=>{
+  const request=page.context().request;
+  const rooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;name:string}[]};
+  const guest=await (await request.post('/api/v1/guests',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:'Stale archive guest',roomId:rooms.data.find(room=>room.name==='102')!.id,language:'de'}})).json() as {id:string;name:string;roomId:string;language:string;version:number};
+  expect((await request.patch(`/api/v1/guests/${guest.id}`,{headers:csrfHeaders,data:{name:'Newer archive guest',roomId:guest.roomId,language:guest.language,expectedVersion:guest.version}})).status()).toBe(200);
+  staleGuestArchiveStatus=(await request.delete(`/api/v1/guests/${guest.id}`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:guest.version}})).status();
+  const guests=await (await request.get('/api/v1/guests')).json() as {data:{id:string;name:string}[]};
+  staleGuestArchiveFinalName=guests.data.find(item=>item.id===guest.id)?.name??'';
+});
+Then('the stale guest archival is rejected',async()=>{expect(staleGuestArchiveStatus).toBe(409)});
+Then("the guest's newer edit remains configured",async()=>{expect(staleGuestArchiveFinalName).toBe('Newer archive guest')});
+When('the administrator creates the self-service product {string} priced {string}',async({page},name:string,price:string)=>{await page.goto('/app/products');await page.getByRole('button',{name:/Hinzufügen/}).first().click();await page.getByLabel('Name · DE').fill(name);await page.getByLabel(/Preis · EUR|Prezzo · EUR|Price · EUR/).fill(price);await page.locator('.modal').getByText(/Selbstbedienung|Self-service/,{exact:true}).click();await page.locator('.modal').getByRole('button',{name:'Speichern'}).click()});
+Then('product {string} is listed as self-service',async({page},name:string)=>{const row=page.locator('.product-admin-list>button').filter({hasText:name});await expect(row).toContainText('Selbstbedienung')});
+When('the administrator retries product creation after its first response is lost',async({page})=>{await page.goto('/app/products');await page.getByRole('button',{name:/Hinzufügen|Aggiungi|Add/}).first().click();await page.getByLabel('Name · DE').fill('Recoverable product');await page.getByLabel(/Preis · EUR|Prezzo · EUR|Price · EUR/).fill('4.20');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarProductCreateCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/products')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});await page.locator('.modal').getByRole('button',{name:/Speichern|Salva|Save/}).click();await expect(page.locator('.modal .notice--error')).toBeVisible();uncertainProductFieldsLocked=await page.locator('.modal input,.modal select').evaluateAll(fields=>fields.every(field=>(field as HTMLInputElement).disabled));await page.locator('.modal').getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(page.locator('.modal')).toHaveCount(0);const commands=await page.evaluate(()=>(window as unknown as {__skyBarProductCreateCommands:Array<Record<string,unknown>>}).__skyBarProductCreateCommands);retriedProductMutationIds=commands.map(command=>String(command.mutationId));const products=await (await page.context().request.get('/api/v1/products')).json() as {data:{name:{de:string}}[]};recoverableProductCount=products.data.filter(product=>product.name.de==='Recoverable product').length;changedProductCreationReplayStatus=(await page.context().request.post('/api/v1/products',{headers:csrfHeaders,data:{...commands[0]!,name:{de:'Changed recoverable product',it:'',en:''}}})).status()});
+Then('both product creation attempts use the same mutation identifier',async()=>{expect(retriedProductMutationIds).toHaveLength(2);expect(new Set(retriedProductMutationIds).size).toBe(1)});
+Then('the uncertain product fields stay locked for retry',async()=>{expect(uncertainProductFieldsLocked).toBe(true)});
+Then('only one recoverable product exists',async()=>{expect(recoverableProductCount).toBe(1)});
+Then('changing the replayed product creation is rejected',async()=>{expect(changedProductCreationReplayStatus).toBe(409)});
+When('a product update response is lost before another administrator edits it',async({page})=>{await page.goto('/app/products');await page.getByText('Helles',{exact:true}).click();const modal=page.locator('.modal');await modal.getByLabel(/Preis · EUR|Prezzo · EUR|Price · EUR/).fill('5.00');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/products/')&&init?.method==='PATCH'&&loseResponse){loseResponse=false;await originalFetch(input,init);throw new TypeError('Simulated lost response')}return originalFetch(input,init)}});await modal.getByRole('button',{name:/Speichern|Salva|Save/}).click();await expect(modal.locator('.notice--error')).toBeVisible();const request=page.context().request;const products=await (await request.get('/api/v1/products')).json() as {data:{id:string;name:{de:string;it:string;en:string};description?:{de:string;it:string;en:string};priceCents:number;categoryId:string;enabled:boolean;selfServiceOnly:boolean;version:number}[]};const current=products.data.find(item=>item.name.de==='Helles')!;staleProductFinalPrice=current.priceCents+321;expect((await request.patch(`/api/v1/products/${current.id}`,{headers:csrfHeaders,data:{name:current.name,...(current.description?{description:current.description}:{}),priceCents:staleProductFinalPrice,categoryId:current.categoryId,enabled:current.enabled,selfServiceOnly:current.selfServiceOnly,expectedVersion:current.version}})).status()).toBe(200);const response=page.waitForResponse(candidate=>candidate.url().endsWith(`/api/v1/products/${current.id}`)&&candidate.request().method()==='PATCH');await modal.getByRole('button',{name:/Speichern|Salva|Save/}).click();staleProductRetryRejected=(await response).status()===409;await expect(modal.locator('.notice--error')).toContainText(/zwischenzeitlich geändert|modificato nel frattempo|changed in the meantime/);const finalProducts=await (await request.get('/api/v1/products')).json() as {data:{id:string;priceCents:number}[]};staleProductFinalPrice=finalProducts.data.find(item=>item.id===current.id)!.priceCents});
+Then('retrying the stale product update is rejected',async()=>{expect(staleProductRetryRejected).toBe(true)});
+Then('the newer product price remains configured',async()=>{expect(staleProductFinalPrice).toBe(821)});
+When('the administrator retries product archival after its response is lost',async({page})=>{await page.goto('/app/products');await page.getByText('Hauskeks',{exact:true}).click();const modal=page.locator('.modal');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarProductArchiveCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/products/')&&init?.method==='DELETE'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});await modal.getByRole('button',{name:/Archiv|Archivia|Archive/}).click();await expect(modal.locator('.notice--error')).toBeVisible();uncertainProductArchiveFieldsLocked=await modal.locator('input,select').evaluateAll(fields=>fields.every(field=>(field as HTMLInputElement).disabled));await modal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(modal).toHaveCount(0);retriedProductArchiveMutationIds=(await page.evaluate(()=>(window as unknown as {__skyBarProductArchiveCommands:Array<Record<string,unknown>>}).__skyBarProductArchiveCommands)).map(command=>String(command.mutationId));const products=await (await page.context().request.get('/api/v1/products')).json() as {data:{name:{de:string}}[]};archivedProductCount=products.data.filter(product=>product.name.de==='Hauskeks').length});
+Then('both product archival attempts use the same mutation identifier',async()=>{expect(retriedProductArchiveMutationIds).toHaveLength(2);expect(new Set(retriedProductArchiveMutationIds).size).toBe(1)});
+Then('the uncertain product fields stay locked for archival retry',async()=>{expect(uncertainProductArchiveFieldsLocked).toBe(true)});
+Then('the product is archived only once',async()=>{expect(archivedProductCount).toBe(0)});
+When('another administrator edits a product before a stale archival arrives',async({page})=>{const request=page.context().request;const products=await (await request.get('/api/v1/products')).json() as {data:{id:string;name:{de:string;it:string;en:string};description?:{de:string;it:string;en:string};priceCents:number;categoryId:string;enabled:boolean;selfServiceOnly:boolean;version:number}[]};const product=products.data.find(item=>item.name.de==='Helles')!;staleProductArchiveFinalPrice=product.priceCents+77;expect((await request.patch(`/api/v1/products/${product.id}`,{headers:csrfHeaders,data:{name:product.name,...(product.description?{description:product.description}:{}),priceCents:staleProductArchiveFinalPrice,categoryId:product.categoryId,enabled:product.enabled,selfServiceOnly:product.selfServiceOnly,expectedVersion:product.version}})).status()).toBe(200);staleProductArchiveStatus=(await request.delete(`/api/v1/products/${product.id}`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:product.version}})).status();const final=await (await request.get('/api/v1/products')).json() as {data:{id:string;priceCents:number}[]};staleProductArchiveFinalPrice=final.data.find(item=>item.id===product.id)?.priceCents??-1});
+Then('the stale product archival is rejected',async()=>{expect(staleProductArchiveStatus).toBe(409)});
+Then("the product's newer edit remains configured",async()=>{expect(staleProductArchiveFinalPrice).toBe(497)});
+When('realtime event persistence fails during a guest edit',async({page})=>{const request=page.context().request;const guests=await (await request.get('/api/v1/guests')).json() as {data:{id:string;name:string;roomId:string;language:string;version:number}[]};const guest=guests.data.find(item=>item.name==='Anna Berger')!;const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();try{await database.query(`CREATE FUNCTION fail_guest_realtime_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.topic='guests.changed' THEN RAISE EXCEPTION 'simulated event failure'; END IF; RETURN NEW; END $$`);await database.query(`CREATE TRIGGER fail_guest_realtime_event BEFORE INSERT ON realtime_events FOR EACH ROW EXECUTE FUNCTION fail_guest_realtime_event()`);transactionalGuestEditStatus=(await request.patch(`/api/v1/guests/${guest.id}`,{headers:csrfHeaders,data:{name:'Uncommitted guest edit',roomId:guest.roomId,language:guest.language,expectedVersion:guest.version}})).status()}finally{await database.query('DROP TRIGGER IF EXISTS fail_guest_realtime_event ON realtime_events');await database.query('DROP FUNCTION IF EXISTS fail_guest_realtime_event()');await database.end()}const final=await (await request.get('/api/v1/guests')).json() as {data:{id:string;name:string}[]};transactionalGuestFinalName=final.data.find(item=>item.id===guest.id)!.name});
+Then('the guest edit is rolled back',async()=>{expect(transactionalGuestEditStatus).toBe(500);expect(transactionalGuestFinalName).toBe('Anna Berger')});
+When('the administrator tries to create product {string} priced {string}',async({page},name:string,price:string)=>{await page.goto('/app/products');await page.getByRole('button',{name:/Hinzufügen/}).first().click();await page.getByLabel('Name · DE').fill(name);await page.getByLabel(/Preis · EUR|Prezzo · EUR|Price · EUR/).fill(price);await page.locator('.modal').getByRole('button',{name:'Speichern'}).click()});
+Then('the product price is rejected before submission',async({page})=>{const price=page.getByLabel(/Preis · EUR|Prezzo · EUR|Price · EUR/);await expect(price).toBeVisible();expect(await price.evaluate((input:HTMLInputElement)=>input.validity.valid)).toBe(false)});
+When('the host attempts to create a guest in an archived room',async({page})=>{const request=page.context().request;const room=await (await request.post('/api/v1/rooms',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:'Archived room'}})).json() as {id:string;version:number};expect((await request.delete(`/api/v1/rooms/${room.id}`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:room.version}})).status()).toBe(204);archivedRoomGuestStatus=(await request.post('/api/v1/guests',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:'Late guest',roomId:room.id,language:'de'}})).status()});
+Then('the archived room guest is rejected',async()=>{expect(archivedRoomGuestStatus).toBe(404)});
+When('the administrator archives a room with a pending access request',async({page})=>{const request=page.context().request;const room=await (await request.post('/api/v1/rooms',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:'Pending request room'}})).json() as {id:string};const pending=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Waiting guest',roomId:room.id,language:'de'}})).json() as {id:string};await page.goto('/app/rooms');const response=page.waitForResponse(candidate=>candidate.url().endsWith(`/api/v1/rooms/${room.id}`)&&candidate.request().method()==='DELETE');await page.getByRole('button',{name:/Pending request room/}).click();pendingRoomArchiveStatus=(await response).status();const requests=await (await request.get('/api/v1/access-requests')).json() as {data:{id:string}[]};pendingRoomRequestCount=requests.data.filter(item=>item.id===pending.id).length});
+Then('room archival is rejected and the request remains pending',async({page})=>{expect(pendingRoomArchiveStatus).toBe(409);expect(pendingRoomRequestCount).toBe(1);await expect(page.locator('.notice--error')).toContainText(/ausstehenden Zugangsanfragen|richieste di accesso in sospeso|pending access requests/)});
+When('the administrator archives a room with an active guest',async({page})=>{await page.goto('/app/rooms');const response=page.waitForResponse(candidate=>candidate.url().includes('/api/v1/rooms/')&&candidate.request().method()==='DELETE');await page.getByRole('button',{name:/101/}).click();expect((await response).status()).toBe(409)});
+Then('the room screen explains that active guests must be moved',async({page})=>{await expect(page.locator('.notice--error')).toContainText(/aktiven Gäste.*anderes Zimmer|ospiti attivi.*camera|active guests.*another room/)});
+When('the administrator retries room archival after its response is lost',async({page})=>{
+  const request=page.context().request;
+  const room=await (await request.post('/api/v1/rooms',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:'Recoverable archive room'}})).json() as {id:string;version:number};
+  await page.goto('/app/rooms');
+  await page.evaluate((roomId)=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarRoomArchiveCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith(`/api/v1/rooms/${roomId}`)&&init?.method==='DELETE'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}},room.id);
+  await page.getByRole('button',{name:/Archiv Recoverable archive room|Archivio Recoverable archive room|Archive Recoverable archive room/}).click();
+  const retry=page.getByRole('button',{name:/Erneut versuchen.*Recoverable archive room|Riprova.*Recoverable archive room|Retry.*Recoverable archive room/});
+  await expect(retry).toBeVisible();
+  await retry.click();
+  await expect(retry).toHaveCount(0);
+  const commands=await page.evaluate(()=>(window as unknown as {__skyBarRoomArchiveCommands:Array<Record<string,unknown>>}).__skyBarRoomArchiveCommands);
+  retriedRoomArchiveMutationIds=commands.map(command=>String(command.mutationId));
+  const rooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string}[]};
+  archivedRoomCount=rooms.data.filter(item=>item.id===room.id).length;
+});
+Then('both room archival attempts use the same mutation identifier',async()=>{expect(retriedRoomArchiveMutationIds).toHaveLength(2);expect(new Set(retriedRoomArchiveMutationIds).size).toBe(1)});
+Then('the room is archived only once',async()=>{expect(archivedRoomCount).toBe(0)});
+When('another administrator renames a room before a stale archival arrives',async({page})=>{
+  const request=page.context().request;
+  const room=await (await request.post('/api/v1/rooms',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:'Stale archive room'}})).json() as {id:string;version:number};
+  expect((await request.patch(`/api/v1/rooms/${room.id}`,{headers:csrfHeaders,data:{name:'Newer archive room',expectedVersion:room.version}})).status()).toBe(200);
+  staleRoomArchiveStatus=(await request.delete(`/api/v1/rooms/${room.id}`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:room.version}})).status();
+  const rooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;name:string}[]};
+  staleRoomArchiveFinalName=rooms.data.find(item=>item.id===room.id)?.name??'';
+});
+Then('the stale room archival is rejected',async()=>{expect(staleRoomArchiveStatus).toBe(409)});
+Then("the room's newer name remains configured",async()=>{expect(staleRoomArchiveFinalName).toBe('Newer archive room')});
+When('administrators submit conflicting room orders concurrently',async({page})=>{const request=page.context().request;concurrentRoomOrderStatuses=[];for(let attempt=0;attempt<8;attempt+=1){const current=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;version:number}[]};const [a,b,c]=current.data;const versions=new Map(current.data.map(room=>[room.id,room.version]));const command=(ids:string[])=>({rooms:ids.map(id=>({id,expectedVersion:versions.get(id)!}))});const responses=await Promise.all([request.put('/api/v1/rooms/order',{headers:csrfHeaders,data:command([b!.id,a!.id,c!.id])}),request.put('/api/v1/rooms/order',{headers:csrfHeaders,data:command([a!.id,c!.id,b!.id])})]);concurrentRoomOrderStatuses.push(...responses.map(response=>response.status()))}});
+Then('every room reorder completes without a server error',async()=>{expect(concurrentRoomOrderStatuses).toHaveLength(16);for(let index=0;index<concurrentRoomOrderStatuses.length;index+=2)expect(concurrentRoomOrderStatuses.slice(index,index+2).sort()).toEqual([200,409])});
+When('another API replica creates a room',async({page})=>{
+  const replicaPort=3199;
+  const replica=spawn(process.execPath,['apps/api/dist/index.js'],{
+    cwd:process.cwd(),
+    env:{...process.env,PORT:String(replicaPort),LOG_LEVEL:'warn',RATE_LIMIT_MAX:'5000'},
+    stdio:'ignore',
+  });
+  extraApiProcesses.push(replica);
+  await expect.poll(async()=>{try{return (await fetch(`http://127.0.0.1:${replicaPort}/api/v1/health`)).status}catch{return 0}},{timeout:15_000}).toBe(200);
+  await page.evaluate(()=>new Promise<void>((resolve,reject)=>{
+    sessionStorage.setItem('__skyBarReplicaRoomEvent','0');
+    const events=new EventSource('/api/v1/events');
+    Object.assign(window,{__skyBarReplicaStream:events});
+    events.addEventListener('rooms.changed',()=>sessionStorage.setItem('__skyBarReplicaRoomEvent','1'));
+    events.addEventListener('open',()=>resolve(),{once:true});
+    events.addEventListener('error',()=>{if(events.readyState===EventSource.CLOSED)reject(new Error('Replica test stream closed before opening'))},{once:true});
+  }));
+  const cookie=(await page.context().cookies()).map(item=>`${item.name}=${item.value}`).join('; ');
+  const response=await fetch(`http://127.0.0.1:${replicaPort}/api/v1/rooms`,{
+    method:'POST',
+    headers:{cookie,'content-type':'application/json','x-skybar-csrf':'1'},
+    body:JSON.stringify({mutationId:crypto.randomUUID(),name:'Replica room'}),
+  });
+  expect(response.status).toBe(201);
+});
+Then('the connected host receives the other replica room event',async({page})=>{
+  await expect.poll(()=>page.evaluate(()=>sessionStorage.getItem('__skyBarReplicaRoomEvent')),{timeout:10_000}).toBe('1');
+  await page.evaluate(()=>((window as unknown as {__skyBarReplicaStream:EventSource}).__skyBarReplicaStream).close());
+});
+When('realtime events try to commit out of identity order',async({page})=>{
+  const testId=crypto.randomUUID();
+  laterRealtimeInsertWaited=false;
+  commitOrderedRealtimeIds=[];
+  relayedCommitOrderedEvents=[];
+  await page.evaluate((currentTestId)=>new Promise<void>((resolve,reject)=>{
+    sessionStorage.setItem('__skyBarCommitOrderedEvents','[]');
+    const events=new EventSource('/api/v1/events');
+    Object.assign(window,{__skyBarCommitOrderStream:events});
+    events.addEventListener('rooms.changed',(rawEvent)=>{
+      const event=rawEvent as MessageEvent<string>;
+      const payload=JSON.parse(event.data) as {commitOrderTest?:string;marker?:string};
+      if(payload.commitOrderTest!==currentTestId||!payload.marker)return;
+      const received=JSON.parse(sessionStorage.getItem('__skyBarCommitOrderedEvents')??'[]') as {id:string;marker:string}[];
+      received.push({id:event.lastEventId,marker:payload.marker});
+      sessionStorage.setItem('__skyBarCommitOrderedEvents',JSON.stringify(received));
+    });
+    events.addEventListener('open',()=>resolve(),{once:true});
+    events.addEventListener('error',()=>{if(events.readyState===EventSource.CLOSED)reject(new Error('Commit-order event stream closed before opening'))},{once:true});
+  }),testId);
+
+  const first=new pg.Client({connectionString:process.env.DATABASE_URL});
+  const second=new pg.Client({connectionString:process.env.DATABASE_URL});
+  await Promise.all([first.connect(),second.connect()]);
+  let firstCommitted=false;
+  let secondCommitted=false;
+  let laterInsert:ReturnType<typeof second.query<{id:string}>>|undefined;
+  try{
+    await first.query('BEGIN');
+    const earlier=await first.query<{id:string}>(
+      `INSERT INTO realtime_events(topic,payload) VALUES ('rooms.changed',$1::jsonb) RETURNING id::text AS id`,
+      [JSON.stringify({commitOrderTest:testId,marker:'earlier'})],
+    );
+    const holderXid=String((await first.query<{xid:string}>('SELECT pg_current_xact_id()::text AS xid')).rows[0]!.xid);
+    await second.query('BEGIN');
+    laterInsert=second.query<{id:string}>(
+      `INSERT INTO realtime_events(topic,payload) VALUES ('rooms.changed',$1::jsonb) RETURNING id::text AS id`,
+      [JSON.stringify({commitOrderTest:testId,marker:'later'})],
+    );
+    await expect.poll(async()=>Number((await first.query(
+      `SELECT count(*)::int AS count FROM pg_locks WHERE locktype='transactionid' AND transactionid::text=$1 AND NOT granted`,
+      [holderXid],
+    )).rows[0].count),{timeout:5_000,intervals:[10,20,50]}).toBeGreaterThan(0);
+    laterRealtimeInsertWaited=true;
+    await page.waitForTimeout(750);
+    await first.query('COMMIT');
+    firstCommitted=true;
+    const later=await laterInsert;
+    await second.query('COMMIT');
+    secondCommitted=true;
+    commitOrderedRealtimeIds=[earlier.rows[0]!.id,later.rows[0]!.id];
+    await expect.poll(()=>page.evaluate(()=>JSON.parse(sessionStorage.getItem('__skyBarCommitOrderedEvents')??'[]').length),{timeout:10_000}).toBe(2);
+    relayedCommitOrderedEvents=await page.evaluate(()=>JSON.parse(sessionStorage.getItem('__skyBarCommitOrderedEvents')??'[]') as {id:string;marker:string}[]);
+  }finally{
+    if(!firstCommitted)await first.query('ROLLBACK');
+    if(!secondCommitted){
+      await laterInsert?.catch(()=>undefined);
+      await second.query('ROLLBACK');
+    }
+    await Promise.all([first.end(),second.end()]);
+    await page.evaluate(()=>((window as unknown as {__skyBarCommitOrderStream:EventSource}).__skyBarCommitOrderStream).close());
+  }
+});
+Then('the later realtime insertion waits for the earlier transaction',async()=>{expect(laterRealtimeInsertWaited).toBe(true)});
+Then('the connected host receives both realtime events in commit order',async()=>{
+  expect(BigInt(commitOrderedRealtimeIds[0]!)).toBeLessThan(BigInt(commitOrderedRealtimeIds[1]!));
+  expect(relayedCommitOrderedEvents).toEqual([
+    {id:commitOrderedRealtimeIds[0]!,marker:'earlier'},
+    {id:commitOrderedRealtimeIds[1]!,marker:'later'},
+  ]);
+});
+When('a room reorder response is lost before another administrator reorders rooms',async({page})=>{const request=page.context().request;const original=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;version:number}[]};const [a,b,c]=original.data;const command=(ids:string[],rooms:{id:string;version:number}[])=>({rooms:ids.map(id=>({id,expectedVersion:rooms.find(room=>room.id===id)!.version}))});const staleCommand=command([b!.id,a!.id,c!.id],original.data);expect((await request.put('/api/v1/rooms/order',{headers:csrfHeaders,data:staleCommand})).status()).toBe(200);const afterFirst=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;version:number}[]};expectedRoomOrderFinalIds=[c!.id,b!.id,a!.id];expect((await request.put('/api/v1/rooms/order',{headers:csrfHeaders,data:command(expectedRoomOrderFinalIds,afterFirst.data)})).status()).toBe(200);staleRoomOrderStatus=(await request.put('/api/v1/rooms/order',{headers:csrfHeaders,data:staleCommand})).status();staleRoomOrderFinalIds=((await (await request.get('/api/v1/rooms')).json()) as {data:{id:string}[]}).data.map(room=>room.id)});
+Then('retrying the stale room reorder is rejected',async()=>{expect(staleRoomOrderStatus).toBe(409)});
+Then('the newer room order remains configured',async()=>{expect(staleRoomOrderFinalIds).toEqual(expectedRoomOrderFinalIds)});
+When('guest archival races with a new order',async({page})=>{const {request,me,products}=await operationalData(page);const rooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;name:string}[]};const product=products.data.find((item)=>item.name.de==='Helles')!;guestArchiveRaceStatuses=[];for(let attempt=0;attempt<8;attempt+=1){const guest=await (await request.post('/api/v1/guests',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:`Race guest ${attempt}`,roomId:rooms.data.find((room)=>room.name==='102')!.id,language:'de'}})).json() as {id:string;version:number};const [archive,order]=await Promise.all([request.delete(`/api/v1/guests/${guest.id}`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:guest.version}}),request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})]);guestArchiveRaceStatuses.push([archive.status(),order.status()])}});
+Then('either the archive or the order is rejected',async()=>{for(const [archive,order] of guestArchiveRaceStatuses){expect([[204,404],[409,201]]).toContainEqual([archive,order])}});
+
+When('the PWA manifest is requested',async({request})=>{const response=await request.get('/manifest.webmanifest');expect(response.ok()).toBeTruthy();manifestPayload=await response.json()});
+Then('it names the software {string} and provides application icons',async({},name:string)=>{expect(manifestPayload?.name).toBe(name);expect(manifestPayload?.icons?.length).toBeGreaterThanOrEqual(2)});
+When('the guest launches the app from the manifest start URL',async()=>{const manifest=await (await guestPage!.context().request.get('/manifest.webmanifest')).json() as {start_url:string};expect(manifest.start_url).toBe('/');await guestPage!.goto(manifest.start_url)});
+Then("the launch opens Luca's active guest view",async()=>{await expect(guestPage!).toHaveURL(/\/guest$/);await expect(guestPage!.getByRole('heading',{name:'Luca Rossi'})).toBeVisible()});
+Then('Take Orders navigation is visually prominent',async({page})=>{await expect(page.locator('.nav-primary')).toHaveCSS('background-color','rgb(66, 189, 255)')});
+When('the host opens the bills screen',async({page})=>{await page.goto('/app/bills')});
+Then('only Bills is active in the primary navigation',async({page})=>{await expect(page.locator('.sidebar nav a.active')).toHaveCount(1);await expect(page.locator('.sidebar nav a.active')).toHaveAttribute('href','/app/bills')});
+When('the host changes their language to Italian',async({page})=>{await page.goto('/app/account');await page.getByLabel(/Sprache|Language/).selectOption('it');await page.getByRole('button',{name:/Speichern|Save/}).click()});
+Then('the navigation is shown in Italian',async({page})=>{await expect(page.getByText('Panoramica')).toBeVisible()});
+When('the host changes their language to Italian and opens the product editor',async({page})=>{await page.goto('/app/account');await page.getByLabel(/Sprache|Language/).selectOption('it');await page.getByRole('button',{name:/Speichern|Save/}).click();await expect(page.getByText('Panoramica')).toBeVisible();await page.goto('/app/products');await page.getByRole('button',{name:/Aggiungi/}).first().click()});
+Then('the product name label is shown in Italian',async({page})=>{await expect(page.getByLabel('Nome · DE')).toBeVisible()});
+Then('the product category options are shown in Italian',async({page})=>{await expect(page.getByLabel('Categoria').locator('option').first()).toHaveText('Bevande')});
+When('the guest selects Italian',async()=>{await guestPage!.getByLabel(/Sprache|Lingua|Language/).selectOption('it')});
+Then('untranslated product content falls back to German',async()=>{await expect(guestPage!.getByText('Hauskeks',{exact:true})).toBeVisible()});
+When('the venue default language is Italian',async({page,browser})=>{const request=page.context().request;const venue=await (await request.get('/api/v1/venue')).json() as {name:string;timezone:string;version:number};expect((await request.put('/api/v1/venue',{headers:csrfHeaders,data:{name:venue.name,timezone:venue.timezone,language:'it',expectedVersion:venue.version}})).status()).toBe(200);const context=await browser.newContext({baseURL:e2eBaseURL,locale:'en-US'});extraContexts.push(context);freshGuestPage=await context.newPage();await freshGuestPage.goto('/guest/request')});
+Then('a fresh English guest device starts in Italian',async()=>{await expect(freshGuestPage!.getByRole('heading',{name:'Accesso ospite'})).toBeVisible()});
+When('a fresh guest selects Italian on the access form',async({page})=>{await page.goto('/guest/request');await page.locator('form select').nth(1).selectOption('it')});
+Then('the guest name field is labeled in Italian',async({page})=>{await expect(page.getByLabel('Nome')).toBeVisible()});
+When('an Italian administrator opens first-time venue setup',async({page})=>{const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();try{await database.query("UPDATE hosts SET language='it' WHERE lower(email)='admin@skybar.test'");await database.query("UPDATE venue_settings SET name='' WHERE id=1")}finally{await database.end()}await page.goto('/app/settings');await expect(page.getByRole('heading',{name:'Locale',exact:true})).toBeVisible()});
+Then('the empty venue label is shown in Italian',async({page})=>{await expect(page.locator('.brand strong')).toHaveText('Configura locale')});
+
+const csrfHeaders = { 'x-skybar-csrf': '1' };
+async function operationalData(page: import('@playwright/test').Page) {
+  const request=page.context().request;
+  const me=await (await request.get('/api/v1/auth/me')).json() as {host:{id:string;version:number}};
+  const guests=await (await request.get('/api/v1/guests')).json() as {data:{id:string;name:string}[]};
+  const products=await (await request.get('/api/v1/products')).json() as {catalogVersion:number;data:{id:string;name:{de:string};description?:{de:string;it?:string;en?:string};priceCents:number;categoryId:string;enabled:boolean;selfServiceOnly:boolean;version:number}[]};
+  return {request,me,guests,products};
+}
+
+When('two devices exchange the same approved access request token',async({page,browser})=>{
+  const request=page.context().request;
+  const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
+  const room=bootstrap.rooms.find((item)=>item.name==='102')!;
+  const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'One-time guest',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
+  await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expiresAt:new Date(Date.now()+86_400_000).toISOString()}});
+  const first=await browser.newContext({baseURL:e2eBaseURL});const second=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(first,second);
+  await Promise.all([
+    first.request.post(`/api/v1/public/access-requests/${created.id}/status`,{data:{token:created.statusToken,grantId:crypto.randomUUID()}}),
+    second.request.post(`/api/v1/public/access-requests/${created.id}/status`,{data:{token:created.statusToken,grantId:crypto.randomUUID()}}),
+  ]);
+  firstGuestAccessStatus=(await first.request.get('/api/v1/guest/me')).status();
+  secondGuestAccessStatus=(await second.request.get('/api/v1/guest/me')).status();
+});
+Then('exactly one device receives guest access',async()=>{expect([firstGuestAccessStatus,secondGuestAccessStatus].sort()).toEqual([200,401])});
+
+When('an approved request is exchanged for a guest grant',async({page,browser})=>{
+  const request=page.context().request;
+  const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
+  const room=bootstrap.rooms.find(item=>item.name==='102')!;
+  const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Body grant',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
+  expect((await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expiresAt:new Date(Date.now()+86_400_000).toISOString()}})).status()).toBe(200);
+  const context=await browser.newContext({baseURL:e2eBaseURL});
+  extraContexts.push(context);
+  const pending={id:created.id,token:created.statusToken,grantId:crypto.randomUUID()};
+  await context.addInitScript((value)=>sessionStorage.setItem('skybar-pending',JSON.stringify(value)),pending);
+  const device=await context.newPage();
+  const observed=device.waitForRequest(candidate=>candidate.url().includes(`/api/v1/public/access-requests/${created.id}/status`));
+  await device.goto('/guest/request');
+  const exchange=await observed;
+  grantExchangeRequest={method:exchange.method(),url:exchange.url(),body:exchange.postDataJSON()};
+});
+Then('the grant token is sent in the request body',async()=>{expect(grantExchangeRequest?.method).toBe('POST');expect(new URL(grantExchangeRequest!.url).search).toBe('');expect(grantExchangeRequest?.body).toEqual(expect.objectContaining({token:expect.any(String),grantId:expect.any(String)}))});
+
+When('thirteen guest devices poll pending access from one network',async({page})=>{
+  const request=page.context().request;const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string}[]};const room=bootstrap.rooms[0]!;
+  const pending=await Promise.all(Array.from({length:13},async(_,index)=>{
+    const response=await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:`Shared network guest ${index}`,roomId:room.id,language:'de'}});expect(response.status()).toBe(201);return response.json() as Promise<{id:string;statusToken:string}>;
+  }));
+  sharedNetworkPollStatuses=[];
+  for(let round=0;round<25;round+=1){const responses=await Promise.all(pending.map(item=>request.post(`/api/v1/public/access-requests/${item.id}/status`,{data:{token:item.statusToken,grantId:crypto.randomUUID()}})));sharedNetworkPollStatuses.push(...responses.map(response=>response.status()))}
+});
+Then('none of their valid status polls is rate limited',async()=>{expect(sharedNetworkPollStatuses).toHaveLength(325);expect(sharedNetworkPollStatuses).not.toContain(429);expect(new Set(sharedNetworkPollStatuses)).toEqual(new Set([200]))});
+
+When('one network rotates invalid access capabilities beyond its address limit',async()=>{
+  const replicaPort=3202;
+  const replica=spawn(process.execPath,['apps/api/dist/index.js'],{
+    cwd:process.cwd(),
+    env:{...process.env,PORT:String(replicaPort),LOG_LEVEL:'warn',TRUST_PROXY:'true',RATE_LIMIT_MAX:'50',ACCESS_STATUS_IP_LIMIT_MAX:'2'},
+    stdio:'ignore',
+  });
+  extraApiProcesses.push(replica);
+  await expect.poll(async()=>{try{return (await fetch(`http://127.0.0.1:${replicaPort}/api/v1/health`)).status}catch{return 0}},{timeout:15_000}).toBe(200);
+  const requestId=crypto.randomUUID();
+  rotatingCapabilityStatuses=[];
+  for(const token of ['invalid-capability-one','invalid-capability-two','invalid-capability-three']){
+    const response=await fetch(`http://127.0.0.1:${replicaPort}/api/v1/public/access-requests/${requestId}/status`,{
+      method:'POST',
+      headers:{'content-type':'application/json','x-forwarded-for':'198.51.100.27'},
+      body:JSON.stringify({token,grantId:crypto.randomUUID()}),
+    });
+    rotatingCapabilityStatuses.push(response.status);
+  }
+});
+Then('the access status address limit is enforced',async()=>{expect(rotatingCapabilityStatuses).toEqual([404,404,429])});
+
+When('requests at the address limit are split across API replicas',async({page})=>{const replicaPort=3200;const replica=spawn(process.execPath,['apps/api/dist/index.js'],{cwd:process.cwd(),env:{...process.env,PORT:String(replicaPort),LOG_LEVEL:'warn',RATE_LIMIT_MAX:'5000'},stdio:'ignore'});extraApiProcesses.push(replica);await expect.poll(async()=>{try{return (await fetch(`http://127.0.0.1:${replicaPort}/api/v1/health`)).status}catch{return 0}},{timeout:15_000}).toBe(200);const keyHash=createHash('sha256').update('ip:127.0.0.1').digest('base64url');const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();try{await database.query(`INSERT INTO rate_limit_counters(scope,key_hash,count,expires_at) VALUES ('global',$1,4999,now()+interval '1 minute') ON CONFLICT (scope,key_hash) DO UPDATE SET count=4999,expires_at=excluded.expires_at`,[keyHash])}finally{await database.end()}const first=await page.context().request.get('/api/v1/health');const second=await fetch(`http://127.0.0.1:${replicaPort}/api/v1/health`);sharedReplicaRateStatuses=[first.status(),second.status]});
+Then('the shared address limit is enforced once',async()=>{expect(sharedReplicaRateStatuses).toEqual([200,429])});
+
+When('a client submits malformed JSON',async()=>{const response=await fetch(`${e2eBaseURL}/api/v1/public/access-requests`,{method:'POST',headers:{'content-type':'application/json'},body:'{' });const payload=await response.json() as {error:{code:string}};malformedJsonResult={status:response.status,code:payload.error.code}});
+Then('the malformed request is rejected as a client error',async()=>{expect(malformedJsonResult).toEqual({status:400,code:'FST_ERR_CTP_INVALID_JSON_BODY'})});
+
+When('guest archival races with their first grant exchange',async({page,browser})=>{const request=page.context().request;const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};const room=bootstrap.rooms.find(item=>item.name==='102')!;const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Archived grant race',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};const approved=await (await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expiresAt:new Date(Date.now()+86_400_000).toISOString()}})).json() as {guestId:string};const guests=await (await request.get('/api/v1/guests')).json() as {data:{id:string;version:number}[]};const guest=guests.data.find(item=>item.id===approved.guestId)!;const context=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(context);const [,exchange]=await Promise.all([request.delete(`/api/v1/guests/${guest.id}`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:guest.version}}),context.request.post(`/api/v1/public/access-requests/${created.id}/status`,{data:{token:created.statusToken,grantId:crypto.randomUUID()}})]);expect(exchange.status()).toBe(200);archivedGrantGuestStatus=(await context.request.get('/api/v1/guest/me')).status()});
+Then('no archived guest session remains active',async()=>{expect(archivedGrantGuestStatus).toBe(401)});
+
+When('the host links a room {string} request to a guest in room {string}',async({page},requestRoom:string,guestRoom:string)=>{
+  const request=page.context().request;
+  const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
+  const rooms=bootstrap.rooms;
+  const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Room-bound guest',roomId:rooms.find((room)=>room.name===requestRoom)!.id,language:'de'}})).json() as {id:string};
+  const guests=await (await request.get('/api/v1/guests')).json() as {data:{id:string;roomName:string}[]};
+  const response=await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),guestId:guests.data.find((guest)=>guest.roomName===guestRoom)!.id,expiresAt:new Date(Date.now()+86_400_000).toISOString()}});
+  crossRoomApprovalStatus=response.status();
+});
+Then('the cross-room approval is rejected',async()=>{expect(crossRoomApprovalStatus).toBe(404)});
+
+When('linked approval races with moving its guest to another room',async({page})=>{
+  const request=page.context().request;const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};const source=bootstrap.rooms.find(item=>item.name==='102')!;const target=bootstrap.rooms.find(item=>item.name==='101')!;approvalMoveRaceStatuses=[];
+  for(let attempt=0;attempt<8;attempt+=1){const guest=await (await request.post('/api/v1/guests',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:`Approval race ${attempt}`,roomId:source.id,language:'de'}})).json() as {id:string;version:number};const access=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:`Approval race ${attempt}`,roomId:source.id,language:'de'}})).json() as {id:string};const [approval,move]=await Promise.all([request.post(`/api/v1/access-requests/${access.id}/approve`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),guestId:guest.id,expiresAt:new Date(Date.now()+86_400_000).toISOString()}}),request.patch(`/api/v1/guests/${guest.id}`,{headers:csrfHeaders,data:{name:`Approval race ${attempt}`,roomId:target.id,language:'de',expectedVersion:guest.version}})]);approvalMoveRaceStatuses.push([approval.status(),move.status()])}
+});
+Then('approval either wins before the move or rejects the moved guest',async()=>{for(const statuses of approvalMoveRaceStatuses)expect([[200,200],[404,200]]).toContainEqual(statuses)});
+
+When("another host submits the administrator's queued order",async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);
+  await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'staff@skybar.test',name:'Queue Staff',password:'QueueStaff123!',role:'staff',language:'de'}});
+  await request.post('/api/v1/auth/logout',{headers:csrfHeaders});
+  await request.post('/api/v1/auth/login',{data:{email:'staff@skybar.test',password:'QueueStaff123!'}});
+  const product=products.data.find((item)=>item.name.de==='Helles')!;
+  const guest=guests.data.find((item)=>item.name==='Anna Berger')!;
+  const response=await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}});
+  mismatchedHostOrderStatus=response.status();
+});
+Then('the queued order is rejected for the other host',async()=>{expect(mismatchedHostOrderStatus).toBe(403)});
+
+When('the host submits a product disabled in the captured catalog',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);
+  const product=products.data.find((item)=>item.name.de==='Helles')!;
+  const disabled=await request.patch(`/api/v1/products/${product.id}`,{headers:csrfHeaders,data:{name:product.name,...(product.description?{description:product.description}:{}),priceCents:product.priceCents,categoryId:product.categoryId,enabled:false,selfServiceOnly:product.selfServiceOnly,expectedVersion:product.version}});
+  expect(disabled.status()).toBe(200);
+  const updated=await (await request.get('/api/v1/products')).json() as {catalogVersion:number;data:{id:string;enabled:boolean}[]};
+  expect(updated.data.find((item)=>item.id===product.id)?.enabled).toBe(false);
+  const response=await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guests.data.find((item)=>item.name==='Anna Berger')!.id,catalogVersion:updated.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}});
+  disabledCatalogOrderStatus=response.status();
+});
+Then('the captured catalog order is rejected',async()=>{expect(disabledCatalogOrderStatus).toBe(409)});
+
+When('the host retries an order after its first response is lost',async({page})=>{
+  await chooseOrder(page,'Helles','Anna Berger','101');
+  await page.evaluate(() => {
+    const originalFetch=window.fetch.bind(window);let loseResponse=true;const ids:string[]=[];
+    Object.assign(window,{__skyBarOrderRetryIds:ids});
+    window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)};
+  });
+  await page.getByRole('button',{name:/Bestellung buchen/}).click();
+  await expect(page.locator('.notice--error')).toBeVisible();
+  uncertainOrderControlsLocked=await page.locator('.product-tile').filter({hasText:'Helles'}).isDisabled()&&await page.locator('.guest-list').getByRole('button',{name:/Anna Berger/}).isDisabled()&&await page.locator('.stepper button').last().isDisabled();
+  await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();
+  await expect(page.getByText(/Bestellung hinzugefügt|Order added/)).toBeVisible();
+  retriedOrderMutationIds=await page.evaluate(()=>(window as unknown as {__skyBarOrderRetryIds:string[]}).__skyBarOrderRetryIds);
+  const {request,guests}=await operationalData(page);const guest=guests.data.find((item)=>item.name==='Anna Berger')!;retriedOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
+});
+Then('both order attempts use the same mutation identifier',async()=>{expect(retriedOrderMutationIds).toHaveLength(2);expect(new Set(retriedOrderMutationIds).size).toBe(1)});
+Then('order editing was locked while the result was uncertain',async()=>{expect(uncertainOrderControlsLocked).toBe(true)});
+Then('the guest tab contains the order only once',async()=>{expect(retriedOrderItemCount).toBe(1)});
+
+When('the host retries an order after a committed HTTP timeout',async({page})=>{await chooseOrder(page,'Helles','Anna Berger','101');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let returnTimeout=true;const ids:string[]=[];Object.assign(window,{__skyBarOrderRetryIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);const response=await originalFetch(input,init);if(returnTimeout){returnTimeout=false;return new Response(JSON.stringify({error:{code:'REQUEST_TIMEOUT',message:'The upstream response timed out.'}}),{status:408,headers:{'content-type':'application/json'}})}return response}return originalFetch(input,init)}});await page.getByRole('button',{name:/Bestellung buchen|Invia ordine|Submit order/}).click();await expect(page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(page.getByText(/Bestellung hinzugefügt|Ordine aggiunto|Order added/)).toBeVisible();retriedOrderMutationIds=await page.evaluate(()=>(window as unknown as {__skyBarOrderRetryIds:string[]}).__skyBarOrderRetryIds);const {request,guests}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;retriedOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount});
+
+When('the host reloads after an order response is lost',async({page})=>{
+  await chooseOrder(page,'Helles','Anna Berger','101');
+  await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__skyBarReloadOrderIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);await originalFetch(input,init);throw new TypeError('Simulated lost response')}return originalFetch(input,init)}});
+  await page.getByRole('button',{name:/Bestellung buchen|Submit order/}).click();await expect(page.locator('.notice--error')).toBeVisible();const firstIds=await page.evaluate(()=>(window as unknown as {__skyBarReloadOrderIds:string[]}).__skyBarReloadOrderIds);await page.reload();await expect(page.locator('.cart-lines').getByText('Helles',{exact:true})).toBeVisible();await expect(page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__skyBarReloadOrderIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST')ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);return originalFetch(input,init)}});await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(page.getByText(/Bestellung hinzugefügt|Order added/)).toBeVisible();const secondIds=await page.evaluate(()=>(window as unknown as {__skyBarReloadOrderIds:string[]}).__skyBarReloadOrderIds);reloadedOrderMutationIds=[...firstIds,...secondIds];const {request,guests}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;reloadedOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
+});
+Then('the restored order retry uses the original mutation identifier',async()=>{expect(reloadedOrderMutationIds).toHaveLength(2);expect(new Set(reloadedOrderMutationIds).size).toBe(1)});
+Then('the guest tab contains the restored order only once',async()=>{expect(reloadedOrderItemCount).toBe(1)});
+
+When('the host closes the app after an order response is lost',async({page})=>{await chooseOrder(page,'Helles','Anna Berger','101');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__skyBarClosedOrderIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);await originalFetch(input,init);throw new TypeError('Simulated lost response')}return originalFetch(input,init)}});await page.getByRole('button',{name:/Bestellung buchen|Submit order/}).click();await expect(page.locator('.notice--error')).toBeVisible();closedOrderMutationIds=await page.evaluate(()=>(window as unknown as {__skyBarClosedOrderIds:string[]}).__skyBarClosedOrderIds);closedOrderPreReopenTransmissionCount=closedOrderMutationIds.length;const context=page.context();await page.close();const reopened=await context.newPage();await reopened.goto('/app/orders/new');await expect(reopened.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();await reopened.evaluate(()=>{const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__skyBarClosedOrderIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST')ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);return originalFetch(input,init)}});await reopened.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(reopened.getByText(/Bestellung hinzugefügt|Order added/)).toBeVisible();closedOrderMutationIds.push(...await reopened.evaluate(()=>(window as unknown as {__skyBarClosedOrderIds:string[]}).__skyBarClosedOrderIds));const {request,guests}=await operationalData(reopened);const guest=guests.data.find(item=>item.name==='Anna Berger')!;closedOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount});
+Then('reopening the order uses the original mutation identifier',async()=>{expect(closedOrderPreReopenTransmissionCount).toBeGreaterThan(0);expect(closedOrderMutationIds.length).toBeGreaterThan(closedOrderPreReopenTransmissionCount);expect(new Set(closedOrderMutationIds).size).toBe(1)});
+Then('the guest tab contains the reopened order only once',async()=>{expect(closedOrderItemCount).toBe(1)});
+
+When('a product price changes after its order response is lost',async({page})=>{await chooseOrder(page,'Helles','Anna Berger','101');capturedUncertainTotal=await page.locator('.cart-total strong').innerText();const {request,products}=await operationalData(page);const product=products.data.find(item=>item.name.de==='Helles')!;capturedExpectedTotalCents=product.priceCents;await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);Object.assign(window,{__skyBarLosePriceOrderResponse:true});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'&&(window as unknown as {__skyBarLosePriceOrderResponse:boolean}).__skyBarLosePriceOrderResponse){(window as unknown as {__skyBarLosePriceOrderResponse:boolean}).__skyBarLosePriceOrderResponse=false;await originalFetch(input,init);throw new TypeError('Simulated lost response')}return originalFetch(input,init)}});await page.getByRole('button',{name:/Bestellung buchen|Submit order/}).click();await expect(page.locator('.notice--error')).toBeVisible();const refreshed=page.waitForResponse(response=>response.url().endsWith('/api/v1/products')&&response.request().method()==='GET');expect((await request.patch(`/api/v1/products/${product.id}`,{headers:csrfHeaders,data:{name:product.name,...(product.description?{description:product.description}:{}),priceCents:product.priceCents+1000,categoryId:product.categoryId,enabled:product.enabled,selfServiceOnly:product.selfServiceOnly,expectedVersion:product.version}})).status()).toBe(200);await refreshed});
+Then('the uncertain cart still shows its captured total',async({page})=>{await expect(page.locator('.cart-total strong')).toHaveText(capturedUncertainTotal)});
+Then('retrying retains the captured charge',async({page})=>{await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(page.getByText(/Bestellung hinzugefügt|Order added/)).toBeVisible();const {request,guests}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;capturedOrderTabTotalCents=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {totalCents:number}).totalCents;expect(capturedOrderTabTotalCents).toBe(capturedExpectedTotalCents)});
+
+When('a pre-price-snapshot persisted order is restored after its products change',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);
+  const guest=guests.data.find(item=>item.name==='Anna Berger')!;
+  const existingProduct=products.data.find(item=>item.name.de==='Helles')!;
+  const createdResponse=await request.post('/api/v1/products',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:{de:'Historisches Preisprodukt',it:'Prodotto con prezzo storico',en:'Historical price product'},priceCents:250,categoryId:existingProduct.categoryId,enabled:true,selfServiceOnly:false}});
+  expect(createdResponse.status()).toBe(201);
+  const createdProduct=await createdResponse.json() as typeof existingProduct;
+  const capturedCatalog=await (await request.get('/api/v1/products')).json() as typeof products;
+  const changedProduct=capturedCatalog.data.find(item=>item.id===existingProduct.id)!;
+  const archivedProduct=capturedCatalog.data.find(item=>item.id===createdProduct.id)!;
+  const orderProducts=[changedProduct,archivedProduct];
+  const mutationId=crypto.randomUUID();const capturedAt=new Date().toISOString();
+  const body={mutationId,originHostId:me.host.id,guestId:guest.id,catalogVersion:capturedCatalog.catalogVersion,capturedAt,items:orderProducts.map(product=>({productId:product.id,quantity:1}))};
+  legacyUnavailablePriceBody=body;legacyUnavailablePriceGuestId=guest.id;legacyUnavailablePricePostCount=0;
+  await page.evaluate(({hostId,mutationId,capturedAt,guest,body,orderProducts})=>localStorage.setItem(`skybar-uncertain-order:${hostId}`,JSON.stringify({id:mutationId,hostId,path:'/order-batches',method:'POST',createdAt:capturedAt,body,display:{kind:'order',guestId:guest.id,guestName:guest.name,roomName:guest.roomName,items:orderProducts.map(product=>({productId:product.id,productName:product.name,quantity:1}))}})),{hostId:me.host.id,mutationId,capturedAt,guest,body,orderProducts});
+  expect((await request.patch(`/api/v1/products/${changedProduct.id}`,{headers:csrfHeaders,data:{name:changedProduct.name,...(changedProduct.description?{description:changedProduct.description}:{}),priceCents:changedProduct.priceCents+777,categoryId:changedProduct.categoryId,enabled:changedProduct.enabled,selfServiceOnly:changedProduct.selfServiceOnly,expectedVersion:changedProduct.version}})).status()).toBe(200);
+  expect((await request.delete(`/api/v1/products/${archivedProduct.id}`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:archivedProduct.version}})).status()).toBe(204);
+  page.on('request',candidate=>{if(candidate.url().endsWith('/api/v1/order-batches')&&candidate.method()==='POST')legacyUnavailablePricePostCount+=1});
+  await page.goto('/app/orders/new');
+});
+
+Then('the unavailable captured price is explained in German, Italian, and English',async({page})=>{
+  const assertions=[
+    {language:'de',notice:'Der erfasste Preis dieser gespeicherten Bestellung ist nicht verfügbar.',price:'Preis nicht verfügbar',total:'Prüfung erforderlich',retry:'Erneut versuchen'},
+    {language:'it',notice:'Il prezzo acquisito di questo ordine salvato non è disponibile.',price:'Prezzo non disponibile',total:'Controllo necessario',retry:'Riprova'},
+    {language:'en',notice:'The captured price for this saved order is unavailable.',price:'Price unavailable',total:'Review required',retry:'Retry'},
+  ] as const;
+  for(const assertion of assertions){
+    const current=await (await page.context().request.get('/api/v1/auth/me')).json() as {host:{version:number;language:string}};
+    if(current.host.language!==assertion.language){
+      expect((await page.context().request.patch('/api/v1/account',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:current.host.version,language:assertion.language}})).status()).toBe(200);
+      await page.reload();
+    }
+    await expect(page.locator('.notice--error').filter({hasText:assertion.notice})).toBeVisible();
+    await expect(page.locator('.cart-lines>div>div:first-child>span')).toHaveText([assertion.price,assertion.price]);
+    await expect(page.locator('.cart-total strong')).toHaveText(assertion.total);
+    await expect(page.getByRole('button',{name:assertion.retry,exact:true})).toBeDisabled();
+  }
+});
+
+Then('the legacy cart shows no zero or replacement price',async({page})=>{
+  await expect(page.locator('.cart-lines')).not.toContainText('0,00');
+  await expect(page.locator('.cart-lines>div>div:first-child>span')).toHaveText(['Price unavailable','Price unavailable']);
+  await expect(page.locator('.cart-total strong')).toHaveText('Review required');
+});
+
+Then('the unsafe legacy retry is blocked without changing its stored command',async({page})=>{
+  const retry=page.getByRole('button',{name:'Retry',exact:true});
+  await expect(retry).toBeDisabled();
+  await retry.evaluate(async(button)=>{(button as HTMLButtonElement).click();await new Promise<void>(resolve=>requestAnimationFrame(()=>resolve()))});
+  expect(legacyUnavailablePricePostCount).toBe(0);
+  const storedBody=await page.evaluate((hostId)=>JSON.parse(localStorage.getItem(`skybar-uncertain-order:${hostId}`)!).body,(await (await page.context().request.get('/api/v1/auth/me')).json() as {host:{id:string}}).host.id);
+  expect(storedBody).toEqual(legacyUnavailablePriceBody);
+  const tab=await (await page.context().request.get(`/api/v1/guests/${legacyUnavailablePriceGuestId}/tab`)).json() as {itemCount:number};
+  expect(tab.itemCount).toBe(0);
+});
+
+When('a legacy order batch with an unknown command is retried',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const command={mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]};legacyOrderReplayStatuses=[(await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:command})).status()];const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();try{await database.query('UPDATE order_batches SET command=NULL WHERE mutation_id=$1',[command.mutationId])}finally{await database.end()}legacyOrderReplayStatuses.push((await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:command})).status());legacyOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount});
+Then('the legacy order retry succeeds without another charge',async()=>{expect(legacyOrderReplayStatuses).toEqual([201,201]);expect(legacyOrderItemCount).toBe(1)});
+
+When('an order mutation is replayed with a changed quantity',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;
+  const command={mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]};
+  expect((await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:command})).status()).toBe(201);
+  changedOrderReplayStatus=(await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{...command,items:[{productId:product.id,quantity:2}]}})).status();
+  changedOrderReplayItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
+});
+Then('the changed order replay is rejected',async()=>{expect(changedOrderReplayStatus).toBe(409)});
+Then('the original order quantity remains unchanged',async()=>{expect(changedOrderReplayItemCount).toBe(1)});
+
+When('the host submits five items in one order line',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;
+  expect((await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:5}]}})).status()).toBe(201);
+  dashboardOpenItemCount=((await (await request.get('/api/v1/dashboard')).json()) as {openItemCount:number}).openItemCount;
+});
+Then('the dashboard reports five open items',async()=>{expect(dashboardOpenItemCount).toBe(5)});
+When('the host has billed history and one current open item',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const historical=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:3}]}})).json() as {tabId:string};expect((await request.post(`/api/v1/tabs/${historical.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:3,expectedTotalCents:product.priceCents*3,paymentMethod:'cash'}})).status()).toBe(200);expect((await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).status()).toBe(201);const dashboard=await (await request.get('/api/v1/dashboard')).json() as {openItemCount:number;openValueCents:number};dashboardCurrentItemCount=dashboard.openItemCount;dashboardCurrentValueCents=dashboard.openValueCents;dashboardExpectedValueCents=product.priceCents});
+Then('the dashboard reports only the current item and value',async()=>{expect(dashboardCurrentItemCount).toBe(1);expect(dashboardCurrentValueCents).toBe(dashboardExpectedValueCents)});
+
+When('the venue timezone changes after sales on adjacent snapshot days',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);
+  const guest=guests.data.find(item=>item.name==='Anna Berger')!;
+  const product=products.data.find(item=>item.name.de==='Helles')!;
+  const venue=await (await request.get('/api/v1/venue')).json() as {name:string;defaultLanguage:string;version:number};
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});
+  await database.connect();
+  try {
+    const zones=(await database.query<{snapshotTimezone:string;currentTimezone:string}>(
+      `WITH starts AS (
+         SELECT date_trunc('day',statement_timestamp() AT TIME ZONE 'Pacific/Kiritimati') AT TIME ZONE 'Pacific/Kiritimati' AS kiritimati,
+                date_trunc('day',statement_timestamp() AT TIME ZONE 'Pacific/Pago_Pago') AT TIME ZONE 'Pacific/Pago_Pago' AS pago_pago
+       ) SELECT CASE WHEN kiritimati<pago_pago THEN 'Pacific/Kiritimati' ELSE 'Pacific/Pago_Pago' END AS "snapshotTimezone",
+                CASE WHEN kiritimati<pago_pago THEN 'Pacific/Pago_Pago' ELSE 'Pacific/Kiritimati' END AS "currentTimezone"
+           FROM starts`,
+    )).rows[0]!;
+    const snapshotVenueResponse=await request.put('/api/v1/venue',{headers:csrfHeaders,data:{name:venue.name,language:venue.defaultLanguage,timezone:zones.snapshotTimezone,expectedVersion:venue.version}});
+    expect(snapshotVenueResponse.status()).toBe(200);
+    const snapshotVenue=await snapshotVenueResponse.json() as {version:number};
+    const settle=async(quantity:number)=>{
+      const orderResponse=await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity}]}});
+      expect(orderResponse.status()).toBe(201);
+      const order=await orderResponse.json() as {tabId:string};
+      const settlementResponse=await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:quantity,expectedTotalCents:product.priceCents*quantity,paymentMethod:'cash'}});
+      expect(settlementResponse.status()).toBe(200);
+      return await settlementResponse.json() as {id:string};
+    };
+    const currentDayBill=await settle(1);
+    const previousDayBill=await settle(2);
+    await database.query(
+      `UPDATE bills
+          SET settled_at=CASE WHEN id=$1
+                THEN date_trunc('day',statement_timestamp() AT TIME ZONE $3) AT TIME ZONE $3
+                ELSE (date_trunc('day',statement_timestamp() AT TIME ZONE $3)-interval '1 day') AT TIME ZONE $3
+              END
+        WHERE id=$1 OR id=$2`,
+      [currentDayBill.id,previousDayBill.id,zones.snapshotTimezone],
+    );
+    expect((await request.put('/api/v1/venue',{headers:csrfHeaders,data:{name:venue.name,language:venue.defaultLanguage,timezone:zones.currentTimezone,expectedVersion:snapshotVenue.version}})).status()).toBe(200);
+  } finally { await database.end(); }
+  const dashboard=await (await request.get('/api/v1/dashboard')).json() as {todaySalesCents:number};
+  dashboardSnapshotSalesCents=dashboard.todaySalesCents;
+  dashboardExpectedSnapshotSalesCents=product.priceCents;
+});
+Then('the dashboard reports sales from the current snapshotted day',async()=>{expect(dashboardSnapshotSalesCents).toBe(dashboardExpectedSnapshotSalesCents)});
+const emptyDashboardStats={pendingRequests:0,activeRooms:0,activeGuests:0,openItemCount:0,openValueCents:0,todaySalesCents:0};
+const dashboardMetric=(page:import('@playwright/test').Page,label:RegExp)=>page.locator('.metric-grid .metric').filter({hasText:label});
+const openOrdersMetric=(page:import('@playwright/test').Page)=>dashboardMetric(page,/Offene Bestellungen|Ordini aperti|Open orders/);
+const todayMetric=(page:import('@playwright/test').Page)=>dashboardMetric(page,/Heute|Oggi|Today/);
+When('the initial dashboard stats response is delayed',async({page})=>{
+  await page.addInitScript(()=>{
+    const fetch=window.fetch.bind(window);
+    window.fetch=(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(new URL(url,window.location.href).pathname==='/api/v1/dashboard')return new Promise<Response>(()=>{});
+      return fetch(input,init);
+    };
+  });
+  await page.reload();
+});
+Then('the dashboard financial cards show loading without zero totals',async({page})=>{
+  const openOrders=openOrdersMetric(page);const today=todayMetric(page);
+  await expect(openOrders).toContainText(/Wird geladen|Caricamento|Loading/);
+  await expect(today).toContainText(/Wird geladen|Caricamento|Loading/);
+  await expect(openOrders).not.toContainText(/0[,.]00\s*€|\b0\s+(Artikel|Articoli|Items)\b/);
+  await expect(today).not.toContainText(/0[,.]00\s*€/);
+});
+When('the initial dashboard stats request fails',async({page})=>{
+  await page.addInitScript(()=>{
+    const fetch=window.fetch.bind(window);
+    window.fetch=(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(new URL(url,window.location.href).pathname==='/api/v1/dashboard')return Promise.reject(new TypeError('Simulated dashboard outage'));
+      return fetch(input,init);
+    };
+  });
+  await page.reload();
+});
+Then('the dashboard financial cards show a request failure without zero totals',async({page})=>{
+  const unavailable=/Die Anfrage konnte nicht abgeschlossen werden|Impossibile completare la richiesta|The request could not be completed/;
+  const openOrders=openOrdersMetric(page);const today=todayMetric(page);
+  await expect(openOrders).toContainText(unavailable,{timeout:10_000});
+  await expect(today).toContainText(unavailable);
+  await expect(openOrders).not.toContainText(/0[,.]00\s*€|\b0\s+(Artikel|Articoli|Items)\b/);
+  await expect(today).not.toContainText(/0[,.]00\s*€/);
+});
+When('the dashboard stats successfully report no activity',async({page})=>{
+  await page.addInitScript((stats)=>{
+    const fetch=window.fetch.bind(window);
+    window.fetch=(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(new URL(url,window.location.href).pathname==='/api/v1/dashboard')return Promise.resolve(new Response(JSON.stringify(stats),{headers:{'Content-Type':'application/json'}}));
+      return fetch(input,init);
+    };
+  },emptyDashboardStats);
+  await page.reload();
+});
+Then('the dashboard financial cards show zero totals and zero open items',async({page})=>{
+  const openOrders=openOrdersMetric(page);const today=todayMetric(page);
+  await expect(openOrders).toContainText(/0[,.]00\s*€/);
+  await expect(openOrders).toContainText(/\b0\s+(Artikel|Articoli|Items)\b/);
+  await expect(today).toContainText(/0[,.]00\s*€/);
+});
+
+When('the host retries settlement after its first response is lost',async({page})=>{
+  await chooseOrder(page,'Helles','Anna Berger','101');await page.getByRole('button',{name:/Bestellung buchen/}).click();await expect(page.locator('.tab-pill')).toContainText('1 Artikel');
+  await page.evaluate(() => {
+    const originalFetch=window.fetch.bind(window);let loseResponse=true;const ids:string[]=[];
+    Object.assign(window,{__skyBarSettlementRetryIds:ids});
+    window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(/\/api\/v1\/tabs\/[^/]+\/settle$/.test(url)&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)};
+  });
+  await page.getByRole('button',{name:/Abrechnen/}).click();await page.locator('.modal').getByRole('button',{name:'Abrechnen'}).click();await expect(page.locator('.modal .notice--error')).toBeVisible();uncertainSettlementDetailsLocked=await page.locator('.choice-grid').getByRole('button',{name:/Bar/}).isDisabled()&&await page.locator('.choice-grid').getByRole('button',{name:/Karte/}).isDisabled();await page.locator('.modal').getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(page).toHaveURL(/\/app\/bills\//);
+  retriedSettlementMutationIds=await page.evaluate(()=>(window as unknown as {__skyBarSettlementRetryIds:string[]}).__skyBarSettlementRetryIds);
+});
+Then('both settlement attempts use the same mutation identifier',async()=>{expect(retriedSettlementMutationIds).toHaveLength(2);expect(new Set(retriedSettlementMutationIds).size).toBe(1)});
+Then('settlement details were locked while the result was uncertain',async()=>{expect(uncertainSettlementDetailsLocked).toBe(true)});
+Then('the host reaches the single resulting bill',async({page})=>{await expect(page.locator('.bill-sheet')).toBeVisible();const bills=await (await page.context().request.get('/api/v1/bills')).json() as {data:unknown[]};expect(bills.data).toHaveLength(1)});
+When('a committed settlement response is lost before modal close and reload',async({page})=>{
+  await chooseOrder(page,'Helles','Anna Berger','101');
+  await page.getByRole('button',{name:/Bestellung buchen|Invia ordine|Submit order/}).click();
+  await expect(page.locator('.tab-pill')).toContainText(/1 Artikel|1 articolo|1 item/);
+  const instrumentSettlementFetch=()=>{
+    const marker='__skyBarSettlementFetchInstrumented';
+    if((window as unknown as Record<string,unknown>)[marker])return;
+    (window as unknown as Record<string,unknown>)[marker]=true;
+    const originalFetch=window.fetch.bind(window);
+    window.fetch=async(input,init)=>{
+      const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;
+      if(/\/api\/v1\/tabs\/[^/]+\/settle$/.test(url)&&init?.method==='POST'){
+        const requests=JSON.parse(localStorage.getItem('__skyBarReloadSettlementRequests')??'[]') as {path:string;body:unknown}[];
+        requests.push({path:new URL(url,location.href).pathname,body:JSON.parse(String(init.body))});
+        localStorage.setItem('__skyBarReloadSettlementRequests',JSON.stringify(requests));
+        const response=await originalFetch(input,init);
+        if(localStorage.getItem('__skyBarLoseSettlementResponse')==='true'){
+          localStorage.setItem('__skyBarLoseSettlementResponse','false');
+          throw new TypeError('Simulated committed settlement response loss');
+        }
+        return response;
+      }
+      return originalFetch(input,init);
+    };
+  };
+  await page.addInitScript(instrumentSettlementFetch);
+  await page.evaluate(()=>{localStorage.setItem('__skyBarReloadSettlementRequests','[]');localStorage.setItem('__skyBarLoseSettlementResponse','true')});
+  await page.evaluate(instrumentSettlementFetch);
+  await page.getByRole('button',{name:/Abrechnen|Incassa|Settle/}).click();
+  const modal=page.locator('.modal');
+  await modal.locator('.choice-grid').getByRole('button',{name:/Sonstiges|Altro|Other/}).click();
+  await modal.getByLabel(/Notiz|Nota|Note/).fill('Recovery voucher');
+  await modal.getByRole('button',{name:/Abrechnen|Incassa|Settle/,exact:true}).click();
+  await expect(modal.locator('.notice--error')).toBeVisible();
+  settlementRecoveryBeforeReload=await page.evaluate(()=>{
+    const key=Object.keys(localStorage).find(item=>item.startsWith('skybar-pending-settlement:'));
+    return key?JSON.parse(localStorage.getItem(key)!) as SettlementRecoveryRecord:undefined;
+  });
+  await modal.getByRole('button',{name:/Schließen|Chiudi|Close/}).click();
+  await expect(page.getByRole('button',{name:/Abrechnung wiederherstellen|Recupera incasso|Recover settlement/})).toBeVisible();
+  await page.reload();
+  const recoveryButton=page.getByRole('button',{name:/Abrechnung wiederherstellen|Recupera incasso|Recover settlement/});
+  await expect(recoveryButton).toBeVisible();
+  settlementRecoveryAfterReload=await page.evaluate(()=>{
+    const key=Object.keys(localStorage).find(item=>item.startsWith('skybar-pending-settlement:'));
+    return key?JSON.parse(localStorage.getItem(key)!) as SettlementRecoveryRecord:undefined;
+  });
+  await recoveryButton.click();
+  const recoveryModal=page.locator('.modal');
+  await expect(recoveryModal.locator('.choice-grid').getByRole('button',{name:/Sonstiges|Altro|Other/})).toBeDisabled();
+  await expect(recoveryModal.getByLabel(/Notiz|Nota|Note/)).toHaveValue('Recovery voucher');
+  await expect(recoveryModal.getByLabel(/Notiz|Nota|Note/)).toBeDisabled();
+  await recoveryModal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();
+  await expect(page).toHaveURL(/\/app\/bills\//);
+  reloadedSettlementRequests=await page.evaluate(()=>JSON.parse(localStorage.getItem('__skyBarReloadSettlementRequests')??'[]') as {path:string;body:SettlementRecoveryRecord['command']}[]);
+  reloadedSettlementStorageCount=await page.evaluate(()=>Object.keys(localStorage).filter(key=>key.startsWith('skybar-pending-settlement:')).length);
+  reloadedSettlementBillCount=((await (await page.context().request.get('/api/v1/bills')).json()) as {data:unknown[]}).data.length;
+});
+Then('settlement recovery replays the original frozen command',async()=>{
+  expect(settlementRecoveryBeforeReload).toBeDefined();
+  expect(settlementRecoveryAfterReload).toEqual(settlementRecoveryBeforeReload);
+  expect(settlementRecoveryBeforeReload).toEqual(expect.objectContaining({guestName:'Anna Berger',roomName:'101',command:{mutationId:expect.any(String),expectedItemCount:1,expectedTotalCents:420,paymentMethod:'other',note:'Recovery voucher'}}));
+  expect(reloadedSettlementRequests).toHaveLength(2);
+  expect(reloadedSettlementRequests[0]).toEqual(reloadedSettlementRequests[1]);
+  expect(reloadedSettlementRequests[0]!.body).toEqual(settlementRecoveryBeforeReload!.command);
+  expect(reloadedSettlementRequests[0]!.path).toBe(`/api/v1/tabs/${settlementRecoveryBeforeReload!.tabId}/settle`);
+});
+Then('the reload reaches the single recovered bill exactly once',async({page})=>{expect(reloadedSettlementBillCount).toBe(1);await expect(page.locator('.bill-sheet')).toBeVisible()});
+Then('the recovered settlement command is cleared',async()=>{expect(reloadedSettlementStorageCount).toBe(0)});
+When('settlement waits for a locked tab',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;
+  const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();let committed=false;
+  try{
+    await database.query('BEGIN');await database.query('SELECT id FROM order_tabs WHERE id=$1 FOR UPDATE',[order.tabId]);const holderXid=String((await database.query('SELECT pg_current_xact_id()::text AS xid')).rows[0].xid);
+    const settlement=request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}});
+    await expect.poll(async()=>Number((await database.query(`SELECT count(*) FROM pg_locks WHERE locktype='transactionid' AND transactionid::text=$1 AND NOT granted`,[holderXid])).rows[0].count),{timeout:5_000,intervals:[10,20,50]}).toBeGreaterThan(0);
+    await new Promise(resolve=>setTimeout(resolve,2_000));await database.query('COMMIT');committed=true;
+    const response=await settlement;expect(response.status()).toBe(200);const bill=await response.json() as {id:string};settlementTimestampAgeMs=Number((await database.query(`SELECT extract(epoch FROM (clock_timestamp()-settled_at))*1000 AS "ageMs" FROM bills WHERE id=$1`,[bill.id])).rows[0].ageMs);
+  }finally{if(!committed)await database.query('ROLLBACK');await database.end()}
+});
+Then('the bill timestamp follows the lock release',async()=>{expect(settlementTimestampAgeMs).toBeLessThan(1_000)});
+When('bill reversal waits for a locked guest',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;
+  const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};
+  const settlement=await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}});expect(settlement.status()).toBe(200);const bill=await settlement.json() as {id:string};
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();let committed=false;
+  try{
+    const snapshotSql=`SELECT settled_at,venue_name,venue_timezone,guest_name,room_name,host_name,host_name_known,total_cents,payment_method,payment_note FROM bills WHERE id=$1`;
+    const linesSql=`SELECT original_order_item_id,product_name,unit_price_cents,quantity,source FROM bill_items WHERE bill_id=$1 ORDER BY id`;
+    const billBefore=(await database.query(snapshotSql,[bill.id])).rows[0];const linesBefore=(await database.query(linesSql,[bill.id])).rows;
+    await database.query('BEGIN');await database.query('SELECT id FROM guests WHERE id=$1 FOR UPDATE',[guest.id]);const holderXid=String((await database.query('SELECT pg_current_xact_id()::text AS xid')).rows[0].xid);
+    const reversal=request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Lock wait correction'}});
+    await expect.poll(async()=>Number((await database.query(`SELECT count(*) FROM pg_locks WHERE locktype='transactionid' AND transactionid::text=$1 AND NOT granted`,[holderXid])).rows[0].count),{timeout:5_000,intervals:[10,20,50]}).toBeGreaterThan(0);
+    const releaseFloor=(await database.query<{timestamp:Date}>('SELECT clock_timestamp() AS timestamp')).rows[0]!.timestamp;await database.query('COMMIT');committed=true;
+    const response=await reversal;expect(response.status()).toBe(200);
+    const current=(await database.query<{voidedAt:Date}>(`SELECT voided_at AS "voidedAt" FROM bills WHERE id=$1`,[bill.id])).rows[0]!;
+    const auditRow=(await database.query<{createdAt:Date|null;count:number}>(`SELECT min(created_at) AS "createdAt",count(*)::int AS count FROM audit_events WHERE action='bill.voided' AND entity_type='bill' AND entity_id=$1`,[bill.id])).rows[0]!;
+    expect(current.voidedAt).toBeInstanceOf(Date);expect(auditRow.createdAt).toBeInstanceOf(Date);
+    billVoidLockTiming={releaseFloor,voidedAt:current.voidedAt,auditCreatedAt:auditRow.createdAt!,auditCount:auditRow.count,billBefore,billAfter:(await database.query(snapshotSql,[bill.id])).rows[0],linesBefore,linesAfter:(await database.query(linesSql,[bill.id])).rows};
+  }finally{if(!committed)await database.query('ROLLBACK');await database.end()}
+});
+Then('the bill void and audit timestamps follow the lock release',async()=>{expect(billVoidLockTiming).toBeDefined();expect(billVoidLockTiming!.voidedAt.getTime()).toBeGreaterThanOrEqual(billVoidLockTiming!.releaseFloor.getTime());expect(billVoidLockTiming!.auditCreatedAt.getTime()).toBeGreaterThanOrEqual(billVoidLockTiming!.releaseFloor.getTime());expect(billVoidLockTiming!.auditCreatedAt.getTime()).toBeGreaterThanOrEqual(billVoidLockTiming!.voidedAt.getTime());expect(billVoidLockTiming!.auditCount).toBe(1)});
+Then('reversal leaves the original bill history unchanged',async()=>{expect(billVoidLockTiming).toBeDefined();expect(billVoidLockTiming!.billAfter).toEqual(billVoidLockTiming!.billBefore);expect(billVoidLockTiming!.linesAfter).toEqual(billVoidLockTiming!.linesBefore)});
+
+When('the host adds the maximum quantity of {string} for {string} in room {string}',async({page},product:string,guest:string,room:string)=>{await chooseOrder(page,product,guest,room);await page.locator('.product-tile').filter({hasText:product}).click({clickCount:98})});
+Then('that cart line cannot exceed the order batch quantity limit',async({page})=>{await expect(page.locator('.product-tile').filter({hasText:'Helles'})).toBeDisabled();await expect(page.locator('.cart-lines .stepper b')).toHaveText('99')});
+
+When('the same settlement mutation is submitted concurrently',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const data={mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'};const responses=await Promise.all([request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data}),request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data})]);concurrentSettlementStatuses=responses.map(response=>response.status());concurrentSettlementBillCount=((await (await request.get('/api/v1/bills')).json()) as {data:unknown[]}).data.length});
+Then('both concurrent settlement responses succeed',async()=>{expect(concurrentSettlementStatuses).toEqual([200,200])});
+Then('concurrent settlement creates only one bill',async()=>{expect(concurrentSettlementBillCount).toBe(1)});
+
+When('a settlement mutation is replayed with another payment method',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const mutationId=crypto.randomUUID();const command={mutationId,expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'};expect((await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:command})).status()).toBe(200);changedSettlementReplayStatus=(await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{...command,paymentMethod:'card'}})).status()});
+Then('the changed settlement replay is rejected',async()=>{expect(changedSettlementReplayStatus).toBe(409)});
+When('another order changes the tab while settlement is open',async({page})=>{await chooseOrder(page,'Helles','Anna Berger','101');await page.getByRole('button',{name:/Bestellung buchen/}).click();await expect(page.locator('.tab-pill')).toContainText('1 Artikel');await page.getByRole('button',{name:/Abrechnen/}).click();const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;expect((await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).status()).toBe(201);await page.locator('.modal').getByRole('button',{name:'Abrechnen'}).click();await expect(page.locator('.modal .notice--error')).toBeVisible();staleSettlementBillCount=((await (await request.get('/api/v1/bills')).json()) as {data:unknown[]}).data.length});
+Then('settlement reports that the displayed tab changed',async({page})=>{await expect(page.locator('.modal')).toContainText(/Bestellung hat sich geändert|ordine è cambiato|order changed/i)});
+Then('no bill is created for the stale confirmation',async()=>{expect(staleSettlementBillCount).toBe(0)});
+When('the host retries settlement with the refreshed confirmation',async({page})=>{await page.locator('.modal').getByRole('button',{name:/Abrechnen|Incassa|Settle/}).click();await expect(page).toHaveURL(/\/app\/bills\//);const request=page.context().request;const bills=await (await request.get('/api/v1/bills')).json() as {data:{id:string}[]};refreshedSettlementBillCount=bills.data.length;const bill=await (await request.get(`/api/v1/bills/${bills.data[0]!.id}`)).json() as {items:{quantity:number}[]};refreshedSettlementItemCount=bill.items.reduce((sum,item)=>sum+item.quantity,0)});
+Then('one bill is created for the refreshed tab',async()=>{expect(refreshedSettlementBillCount).toBe(1);expect(refreshedSettlementItemCount).toBe(2)});
+When('another device voids the last item while settlement is open',async({page})=>{await chooseOrder(page,'Helles','Anna Berger','101');await page.getByRole('button',{name:/Bestellung buchen|Invia ordine|Submit order/}).click();await expect(page.locator('.tab-pill')).toContainText(/1 Artikel|1 articolo|1 item/);await page.getByRole('button',{name:/Abrechnen|Incassa|Settle/}).click();const {request,guests}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const tab=await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json() as {items:{id:string;billingVersion:number}[]};expect((await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Removed on another device',expectedBillingVersion:tab.items[0]!.billingVersion}})).status()).toBe(200);await page.locator('.modal').getByRole('button',{name:/Abrechnen|Incassa|Settle/}).click();await expect(page.locator('.modal')).toHaveCount(0);staleSettlementBillCount=((await (await request.get('/api/v1/bills')).json()) as {data:unknown[]}).data.length});
+Then('the empty settlement confirmation closes without a bill',async({page})=>{expect(staleSettlementBillCount).toBe(0);await expect(page.getByRole('button',{name:/Abrechnen|Incassa|Settle/})).toHaveCount(0)});
+
+When('the host submits orders beyond the maximum tab total',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const categoryId=products.data[0]!.categoryId;
+  const created=await request.post('/api/v1/products',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:{de:'Limitprodukt',it:'',en:''},priceCents:10_000_000,categoryId,enabled:true,selfServiceOnly:false}});expect(created.status()).toBe(201);const product=await created.json() as {id:string};const catalog=await (await request.get('/api/v1/products')).json() as {catalogVersion:number};
+  const submit=async(quantity:number)=>request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:catalog.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity}]}});
+  expect((await submit(99)).status()).toBe(201);expect((await submit(99)).status()).toBe(201);tabTotalBeforeExcess=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {totalCents:number}).totalCents;excessiveOrderStatus=(await submit(17)).status();tabTotalAfterExcess=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {totalCents:number}).totalCents;
+});
+Then('the excessive order is rejected without changing the tab',async()=>{expect(excessiveOrderStatus).toBe(409);expect(tabTotalBeforeExcess).toBe(1_980_000_000);expect(tabTotalAfterExcess).toBe(tabTotalBeforeExcess)});
+When('a tab accumulates more than 9900 zero-cost items across valid batches',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const categoryId=products.data[0]!.categoryId;
+  const product=await (await request.post('/api/v1/products',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:{de:'Freiprodukt',it:'',en:''},priceCents:0,categoryId,enabled:true,selfServiceOnly:false}})).json() as {id:string};
+  const catalog=await (await request.get('/api/v1/products')).json() as {catalogVersion:number};let tabId='';
+  for(let index=0;index<101;index+=1){const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:catalog.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:99}]}})).json() as {tabId:string};tabId=order.tabId;}
+  aggregateSettlementStatus=(await request.post(`/api/v1/tabs/${tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:9_999,expectedTotalCents:0,paymentMethod:'cash'}})).status();
+});
+Then('the aggregate tab can still be settled',async()=>{expect(aggregateSettlementStatus).toBe(200)});
+
+When('the venue has more bills than one archive page',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const product=products.data.find((item)=>item.name.de==='Helles')!;for(let index=0;index<51;index+=1){const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {number:string};if(index===0)oldestBillNumber=bill.number}const firstPage=await (await request.get('/api/v1/bills?page=1&pageSize=50')).json() as {data:{number:string}[]};expect(firstPage.data.some((bill)=>bill.number===oldestBillNumber)).toBe(false)});
+Then('the host can find the oldest bill by its number',async({page})=>{await page.goto('/app/bills');const [response]=await Promise.all([page.waitForResponse((candidate)=>candidate.url().includes(`/api/v1/bills?search=${oldestBillNumber}&`)),page.getByPlaceholder(/Nach Gast|Cerca per|Search by/).fill(oldestBillNumber)]);const result=await response.json() as {data:{id:string;number:string}[]};expect(result.data.map((bill)=>bill.number)).toContain(oldestBillNumber);const found=result.data.find((bill)=>bill.number===oldestBillNumber)!;await expect(page.locator(`a[href="/app/bills/${found.id}"]`)).toBeVisible()});
+
+When('the initial bill archive request is delayed and fails',async({page})=>{
+  await page.addInitScript(()=>{
+    const originalFetch=window.fetch.bind(window);
+    window.fetch=async(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(new URL(url,window.location.href).pathname==='/api/v1/bills'){
+        await new Promise(resolve=>setTimeout(resolve,1_500));
+        throw new TypeError('Simulated bill archive outage');
+      }
+      return originalFetch(input,init);
+    };
+  });
+  await page.goto('/app/bills');
+});
+Then('the bill archive shows loading without a successful empty state',async({page})=>{const archive=page.locator('.app-content>.card');await expect(archive).toContainText(/Wird geladen|Caricamento|Loading/);await expect(archive.locator('.empty')).toHaveCount(0)});
+Then('the bill archive shows failure without a successful empty state',async({page})=>{const archive=page.locator('.app-content>.card');await expect(archive.locator('.notice--error')).toContainText(/Die Anfrage konnte nicht abgeschlossen werden|Impossibile completare la richiesta|The request could not be completed/,{timeout:10_000});await expect(archive.locator('.empty')).toHaveCount(0)});
+When('the host opens a successfully empty bill archive',async({page})=>{const response=page.waitForResponse(candidate=>new URL(candidate.url()).pathname==='/api/v1/bills');await page.goto('/app/bills');expect((await response).ok()).toBe(true)});
+Then('the bill archive shows its successful empty state',async({page})=>{const archive=page.locator('.app-content>.card');await expect(archive.locator('.empty')).toContainText(/Noch keine Einträge|Nessun elemento|Nothing here yet/)});
+
+const requestFailedMessage=/Die Anfrage konnte nicht abgeschlossen werden|Impossibile completare la richiesta|The request could not be completed/;
+const openOrdersPageCard=(page:import('@playwright/test').Page)=>page.locator('.app-content>.card');
+const dashboardOrderList=(page:import('@playwright/test').Page)=>page.locator('.section-heading+.card');
+When('the initial open order list request is delayed and fails',async({page})=>{
+  await page.addInitScript(()=>{
+    const originalFetch=window.fetch.bind(window);
+    window.fetch=async(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(new URL(url,window.location.href).pathname==='/api/v1/orders'){
+        await new Promise(resolve=>setTimeout(resolve,1_500));
+        throw new TypeError('Simulated open orders outage');
+      }
+      return originalFetch(input,init);
+    };
+  });
+  await page.goto('/app/orders');
+});
+Then('the open orders page shows loading without a successful empty state',async({page})=>{const orders=openOrdersPageCard(page);await expect(orders).toContainText(/Wird geladen|Caricamento|Loading/);await expect(orders.locator('.empty')).toHaveCount(0)});
+Then('the open orders page shows failure without a successful empty state',async({page})=>{const orders=openOrdersPageCard(page);await expect(orders.locator('.notice--error')).toContainText(requestFailedMessage,{timeout:10_000});await expect(orders.locator('.empty')).toHaveCount(0)});
+When('the host opens the dashboard with a failed open order list',async({page})=>{await page.goto('/app')});
+Then('the dashboard open order list shows loading without a successful empty state',async({page})=>{const orders=dashboardOrderList(page);await expect(orders).toContainText(/Wird geladen|Caricamento|Loading/);await expect(orders.locator('.empty')).toHaveCount(0)});
+Then('the dashboard open order list shows failure without a successful empty state',async({page})=>{const orders=dashboardOrderList(page);await expect(orders.locator('.notice--error')).toContainText(requestFailedMessage,{timeout:10_000});await expect(orders.locator('.empty')).toHaveCount(0)});
+When('the host opens a successfully empty open order list',async({page})=>{const response=page.waitForResponse(candidate=>new URL(candidate.url()).pathname==='/api/v1/orders');await page.goto('/app/orders');expect((await response).ok()).toBe(true)});
+Then('the open orders page shows its successful empty state',async({page})=>{await expect(openOrdersPageCard(page).locator('.empty')).toContainText(/Noch keine Einträge|Nessun elemento|Nothing here yet/)});
+When('the host opens the dashboard with a successful empty open order list',async({page})=>{const response=page.waitForResponse(candidate=>new URL(candidate.url()).pathname==='/api/v1/orders');await page.goto('/app');expect((await response).ok()).toBe(true)});
+Then('the dashboard open order list shows its successful empty state',async({page})=>{await expect(dashboardOrderList(page).locator('.empty')).toContainText(/Noch keine Einträge|Nessun elemento|Nothing here yet/)});
+
+When('the venue timezone changes after a bill is settled',async({page})=>{const {request,me,guests,products}=await operationalData(page);const venue=await (await request.get('/api/v1/venue')).json() as {name:string;defaultLanguage:string;version:number};const firstVenue=await (await request.put('/api/v1/venue',{headers:csrfHeaders,data:{name:venue.name,language:venue.defaultLanguage,timezone:'Pacific/Kiritimati',expectedVersion:venue.version}})).json() as {version:number};const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const settled=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};const bill=await (await request.get(`/api/v1/bills/${settled.id}`)).json() as {settledAt:string;venueTimezone:string};expect(bill.venueTimezone).toBe('Pacific/Kiritimati');snapshottedBillDate=new Date(bill.settledAt).toLocaleDateString('de',{timeZone:bill.venueTimezone});expect((await request.put('/api/v1/venue',{headers:csrfHeaders,data:{name:venue.name,language:venue.defaultLanguage,timezone:'Pacific/Honolulu',expectedVersion:firstVenue.version}})).status()).toBe(200);await page.goto(`/app/bills/${settled.id}`)});
+Then('the bill date uses its snapshotted venue timezone',async({page})=>{await expect(page.locator('.bill-meta')).toContainText(snapshottedBillDate)});
+When('the settling host changes their name after billing',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const settled=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};expect((await request.patch('/api/v1/account',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:me.host.version,name:'Renamed Host'}})).status()).toBe(200);const bill=await (await request.get(`/api/v1/bills/${settled.id}`)).json() as {hostName:string};snapshottedBillHostName=bill.hostName;await page.goto(`/app/bills/${settled.id}`)});
+Then('the bill still shows the original host name',async({page})=>{expect(snapshottedBillHostName).toBe('Mira Host');await expect(page.locator('.bill-meta')).toContainText('Mira Host');await expect(page.locator('.bill-meta')).not.toContainText('Renamed Host')});
+When('the host opens a legacy bill without trustworthy host attribution',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);
+  const guest=guests.data.find(item=>item.name==='Anna Berger')!;
+  const product=products.data.find(item=>item.name.de==='Helles')!;
+  const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};
+  const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});
+  await database.connect();
+  try{await database.query("UPDATE bills SET host_name='',host_name_known=false WHERE id=$1",[bill.id])}finally{await database.end()}
+  await page.goto(`/app/bills/${bill.id}`);
+});
+Then('the bill explains that the historical host is unavailable',async({page})=>{await expect(page.locator('.bill-meta')).toContainText('Historischer Host nicht verfügbar');await expect(page.locator('.bill-meta')).not.toContainText('Mira Host')});
+
+When('the same item void mutation is submitted twice',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);
+  const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const product=products.data.find((item)=>item.name.de==='Helles')!;
+  await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}});
+  const tab=await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json() as {items:{id:string;billingVersion:number}[]};
+  const mutationId=crypto.randomUUID();
+  const command={mutationId,reason:'E2E correction',expectedBillingVersion:tab.items[0]!.billingVersion};
+  repeatedVoidStatuses=[];
+  repeatedVoidStatuses.push((await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:command})).status());
+  repeatedVoidStatuses.push((await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:command})).status());
+  changedItemVoidReplayStatus=(await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:{...command,reason:'Changed correction'}})).status();
+  changedItemVoidVersionReplayStatus=(await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:{...command,expectedBillingVersion:command.expectedBillingVersion+1}})).status();
+});
+Then('both item void responses succeed',async()=>{expect(repeatedVoidStatuses).toEqual([200,200])});
+Then('changing the replayed item void reason is rejected',async()=>{expect(changedItemVoidReplayStatus).toBe(409)});
+Then('changing the replayed item billing version is rejected',async()=>{expect(changedItemVoidVersionReplayStatus).toBe(409)});
+
+When('a committed item void without a billing version is replayed',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);
+  const guest=guests.data.find(item=>item.name==='Anna Berger')!;
+  const product=products.data.find(item=>item.name.de==='Helles')!;
+  await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}});
+  const tab=await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json() as {items:{id:string}[]};
+  const mutationId=crypto.randomUUID();const reason='Legacy committed correction';
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();
+  try{await database.query(`UPDATE order_items SET status='voided',voided_at=clock_timestamp(),voided_by_host=$1,void_reason=$2,host_void_mutation_id=$3,host_void_expected_billing_version=NULL WHERE id=$4`,[me.host.id,reason,mutationId,tab.items[0]!.id])}finally{await database.end()}
+  legacyItemVoidReplayStatus=(await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:{mutationId,reason}})).status();
+});
+Then('the legacy item void replay succeeds',async()=>{expect(legacyItemVoidReplayStatus).toBe(200)});
+
+When('old and current API writers cross an item billing boundary',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);
+  const guest=guests.data.find(item=>item.name==='Anna Berger')!;
+  const product=products.data.find(item=>item.name.de==='Helles')!;
+  await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}});
+  const tab=await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json() as {items:{id:string;billingVersion:number}[]};
+  const item=tab.items[0]!;
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();
+  try{
+    const oldWriter=await database.query<{billingVersion:number}>(`UPDATE order_items SET status='billed' WHERE id=$1 RETURNING billing_version AS "billingVersion"`,[item.id]);
+    const reversed=await database.query<{billingVersion:number}>(`UPDATE order_items SET status='open' WHERE id=$1 RETURNING billing_version AS "billingVersion"`,[item.id]);
+    rollingDeployBillingVersions=[oldWriter.rows[0]!.billingVersion,reversed.rows[0]!.billingVersion];
+    let errorCode='';
+    try{
+      await database.query(`UPDATE order_items SET status='voided',voided_at=clock_timestamp(),voided_by_host=$1,void_reason=$2,host_void_mutation_id=$3 WHERE id=$4`,[me.host.id,'Pre-upgrade removal after reversal',crypto.randomUUID(),item.id]);
+    }catch(caught){errorCode=(caught as {code?:string}).code??''}
+    const reopened=await database.query<{status:string;billingVersion:number}>(`SELECT status,billing_version AS "billingVersion" FROM order_items WHERE id=$1`,[item.id]);
+    rollingDeployOldVoid={errorCode,status:reopened.rows[0]!.status,billingVersion:reopened.rows[0]!.billingVersion};
+  }finally{await database.end()}
+  const stale=await request.post(`/api/v1/order-items/${item.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Captured before rolling settlement',expectedBillingVersion:item.billingVersion}});
+  rollingDeployVoidConflict={status:stale.status(),code:((await stale.json()) as {error:{code:string}}).error.code};
+  const verification=new pg.Client({connectionString:process.env.DATABASE_URL});await verification.connect();
+  try{
+    const currentWriter=await verification.query<{billingVersion:number}>(`UPDATE order_items SET status='billed',billing_version=billing_version+1 WHERE id=$1 RETURNING billing_version AS "billingVersion"`,[item.id]);
+    rollingDeployBillingVersions.push(currentWriter.rows[0]!.billingVersion);
+  }finally{await verification.end()}
+});
+Then('the old item removal is rejected after reversal',async()=>{expect(rollingDeployOldVoid?.errorCode).toBe('P0001')});
+Then('the reopened item remains open for current writers',async()=>{expect(rollingDeployOldVoid).toEqual({errorCode:'P0001',status:'open',billingVersion:1})});
+Then('the database advances the billing version once per crossing',async()=>{expect(rollingDeployBillingVersions).toEqual([1,1,2])});
+Then('the pre-settlement item removal remains a billing conflict',async()=>{expect(rollingDeployVoidConflict).toEqual({status:409,code:'ITEM_BILLING_CONFLICT'})});
+
+When('the same order mutation is submitted concurrently',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const mutationId=crypto.randomUUID();const data={mutationId,originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]};
+  const responses=await Promise.all([request.post('/api/v1/order-batches',{headers:csrfHeaders,data}),request.post('/api/v1/order-batches',{headers:csrfHeaders,data})]);concurrentOrderStatuses=responses.map(response=>response.status());concurrentOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
+});
+Then('both concurrent order responses succeed',async()=>{expect(concurrentOrderStatuses).toEqual([201,201])});
+Then('the concurrent order is stored only once',async()=>{expect(concurrentOrderItemCount).toBe(1)});
+
+When('the same bill void mutation is submitted twice',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const product=products.data.find((item)=>item.name.de==='Helles')!;
+  const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};
+  const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};const mutationId=crypto.randomUUID();repeatedBillVoidStatuses=[];
+  repeatedBillVoidStatuses.push((await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId,reason:'E2E correction'}})).status());repeatedBillVoidStatuses.push((await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId,reason:'E2E correction'}})).status());changedBillVoidReplayStatus=(await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId,reason:'Changed correction'}})).status();restoredBillItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
+});
+Then('both bill void responses succeed',async()=>{expect(repeatedBillVoidStatuses).toEqual([200,200])});
+Then('the billed items are restored only once',async()=>{expect(restoredBillItemCount).toBe(1)});
+Then('changing the replayed bill void reason is rejected',async()=>{expect(changedBillVoidReplayStatus).toBe(409)});
+
+When('guest archival races with reversal of their bill',async({page})=>{
+  const {request,me,products}=await operationalData(page);const rooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;name:string}[]};const product=products.data.find(item=>item.name.de==='Helles')!;const room=rooms.data.find(item=>item.name==='102')!;billArchiveRaceStatuses=[];
+  for(let attempt=0;attempt<8;attempt+=1){
+    const guest=await (await request.post('/api/v1/guests',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:`Bill race guest ${attempt}`,roomId:room.id,language:'de'}})).json() as {id:string;version:number};
+    const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};
+    const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};
+    const [archive,reversal]=await Promise.all([request.delete(`/api/v1/guests/${guest.id}`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:guest.version}}),request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Race correction'}})]);
+    billArchiveRaceStatuses.push([archive.status(),reversal.status()]);
+  }
+});
+Then('the bill reversal succeeds before or after guest archival',async()=>{for(const statuses of billArchiveRaceStatuses)expect([[204,200],[409,200]]).toContainEqual(statuses)});
+
+When('the administrator reverses a bill for an archived guest',async({page})=>{
+  const {request,me,products}=await operationalData(page);const rooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;name:string}[]};const product=products.data.find(item=>item.name.de==='Helles')!;const room=rooms.data.find(item=>item.name==='102')!;
+  archivedGuestCorrectionName='Archived correction guest';
+  const guest=await (await request.post('/api/v1/guests',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:archivedGuestCorrectionName,roomId:room.id,language:'de'}})).json() as {id:string;version:number};
+  archivedGuestCorrectionId=guest.id;
+  const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};
+  const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};
+  expect((await request.delete(`/api/v1/guests/${guest.id}`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:guest.version}})).status()).toBe(204);
+  archivedGuestBillVoidStatus=(await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Archived guest correction'}})).status();
+  archivedGuestRestoredItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
+});
+Then('the archived guest bill is voided and its item is restored',async()=>{expect(archivedGuestBillVoidStatus).toBe(200);expect(archivedGuestRestoredItemCount).toBe(1)});
+Then('the corrected archived guest tab opens from host orders without enabling new orders',async({page})=>{
+  const request=page.context().request;
+  const activeGuests=await (await request.get('/api/v1/guests')).json() as {data:{id:string}[]};
+  expect(activeGuests.data.some(guest=>guest.id===archivedGuestCorrectionId)).toBe(false);
+  await page.goto('/app/orders');
+  const corrected=page.locator('.tab-card').filter({hasText:archivedGuestCorrectionName});
+  await expect(corrected).toContainText('102');
+  await corrected.getByRole('link',{name:/Bearbeiten|Modifica|Edit/}).click();
+  await expect(page).toHaveURL(new RegExp(`/app/orders/new\\?guest=${archivedGuestCorrectionId}$`));
+  await expect(page.locator('.page-header h1')).toHaveText(archivedGuestCorrectionName);
+  await expect(page.locator('.open-tab')).toContainText('Helles');
+  await expect(page.locator('.tab-pill')).toContainText(/1 Artikel|1 articolo|1 item/);
+  await expect(page.locator('.product-tile').filter({hasText:'Helles'})).toBeDisabled();
+  await expect(page.getByRole('button',{name:/Bestellung buchen|Registra ordine|Submit order/})).toBeDisabled();
+  await expect(page.getByRole('button',{name:/Abrechnen|Incassa|Settle/})).toBeEnabled();
+});
+When('the host settles the corrected archived guest tab',async({page})=>{
+  await page.getByRole('button',{name:/Abrechnen|Incassa|Settle/}).click();
+  const modal=page.locator('.modal');
+  await modal.locator('.choice-grid').getByRole('button',{name:/Bar|Contanti|Cash/}).click();
+  await modal.getByRole('button',{name:/Abrechnen|Incassa|Settle/,exact:true}).click();
+});
+Then('the host reaches its corrected bill',async({page})=>{
+  await expect(page).toHaveURL(/\/app\/bills\//);
+  await expect(page.locator('.bill-meta')).toContainText(archivedGuestCorrectionName);
+  await expect(page.locator('.bill-void-marker')).toHaveCount(0);
+  const tab=await (await page.context().request.get(`/api/v1/guests/${archivedGuestCorrectionId}/tab`)).json() as {itemCount:number};
+  expect(tab.itemCount).toBe(0);
+});
+When('the administrator reverses a bill onto a tab at the money limit',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const billedOrder=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const bill=await (await request.post(`/api/v1/tabs/${billedOrder.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};const openOrder=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();try{await database.query('UPDATE order_items SET unit_price_cents=2147483647 WHERE tab_id=$1 AND status IN (\'open\',\'provisional\')',[openOrder.tabId])}finally{await database.end()}overflowBillVoidStatus=(await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Required correction at limit'}})).status();overflowBillTabItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;overflowOverviewStatuses=[(await request.get('/api/v1/orders')).status(),(await request.get('/api/v1/guests')).status()];overflowPostCorrectionOrderStatus=(await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).status()});
+Then('the correction succeeds and restores the billed item',async()=>{expect(overflowBillVoidStatus).toBe(200);expect(overflowBillTabItemCount).toBe(2)});
+Then('normal additions remain blocked while the corrected tab exceeds the limit',async()=>{expect(overflowOverviewStatuses).toEqual([200,200]);expect(overflowPostCorrectionOrderStatus).toBe(409)});
+
+When('the host opens a voided bill for printing',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};expect((await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Printed correction'}})).status()).toBe(200);await page.goto(`/app/bills/${bill.id}`);await page.emulateMedia({media:'print'})});
+Then('the printed bill shows its void reason',async({page})=>{await expect(page.locator('.bill-void-marker .notice')).toBeVisible();await expect(page.locator('.bill-void-marker')).toContainText('Printed correction')});
+
+When('the administrator session is revoked while its event stream is open',async({page,browser})=>{
+  await page.evaluate(()=>new Promise<void>((resolve,reject)=>{sessionStorage.setItem('__skyBarRevokedEvents','0');const events=new EventSource('/api/v1/events');Object.assign(window,{__skyBarRevokedStream:events});events.addEventListener('rooms.changed',()=>sessionStorage.setItem('__skyBarRevokedEvents',String(Number(sessionStorage.getItem('__skyBarRevokedEvents'))+1)));events.addEventListener('open',()=>resolve(),{once:true});events.addEventListener('error',()=>{if(events.readyState===EventSource.CLOSED)reject(new Error('Event stream closed before opening'))},{once:true})}));
+  const request=page.context().request;await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'realtime-admin@skybar.test',name:'Realtime Admin',password:'RealtimeAdmin123!',role:'admin',language:'de'}});const other=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(other);await other.request.post('/api/v1/auth/login',{data:{email:'realtime-admin@skybar.test',password:'RealtimeAdmin123!'}});execFileSync('npm',['run','admin:create:dev','-w','@sky-bar/api','--','--email','admin@skybar.test','--name','Mira Host','--password-stdin'],{cwd:process.cwd(),env:process.env,stdio:'pipe',input:'RecoveredAgain123!\n'});expect((await other.request.post('/api/v1/rooms',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:'After revocation'}})).status()).toBe(201);await page.waitForTimeout(500);revokedStreamEventCount=await page.evaluate(()=>Number(sessionStorage.getItem('__skyBarRevokedEvents')));
+});
+Then('the revoked stream receives no later venue events',async()=>{expect(revokedStreamEventCount).toBe(0)});
+
+When('the administrator submits an invalid venue time zone',async({page})=>{const request=page.context().request;const before=await (await request.get('/api/v1/venue')).json() as {name:string;defaultLanguage:string;timezone:string};venueTimezoneBefore=before.timezone;await page.goto('/app/settings');await page.getByLabel(/Zeitzone|Fuso orario|Time zone/).fill('Europe/Definitely-Not-A-Zone');const response=page.waitForResponse(candidate=>candidate.url().endsWith('/api/v1/venue')&&candidate.request().method()==='PUT');await page.getByRole('button',{name:/Speichern|Salva|Save/,exact:true}).click();invalidTimezoneStatus=(await response).status();await expect(page.locator('.notice--error')).toBeVisible();venueTimezoneAfter=((await (await request.get('/api/v1/venue')).json()) as {timezone:string}).timezone});
+Then('the venue time zone is rejected without changing the settings',async({page})=>{expect(invalidTimezoneStatus).toBe(400);expect(venueTimezoneAfter).toBe(venueTimezoneBefore);await expect(page.locator('.notice--error')).toContainText(/Eingaben prüfen|dati inseriti|entered information/)});
