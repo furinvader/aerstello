@@ -109,14 +109,31 @@ export async function replayQueuedMutations(pending: QueuedMutation[], handlers:
   return completed;
 }
 
-export async function submitOrQueue<T>(mutation: QueuedMutation): Promise<{ queued: boolean; data?: T }> {
+export interface SubmitOrQueueHandlers<T> {
+  send: (mutation: QueuedMutation) => Promise<T>;
+  put: (mutation: QueuedMutation) => Promise<void>;
+  remove: (id: string) => Promise<void>;
+  isOnline: () => boolean;
+}
+
+export async function submitOrQueue<T>(
+  mutation: QueuedMutation,
+  handlers: SubmitOrQueueHandlers<T> = {
+    send: (entry) => api<T>(entry.path, { method: entry.method, body: json(entry.body) }),
+    put: async (entry) => { await db.mutations.put(entry); },
+    remove: async (id) => { await db.mutations.delete(id); },
+    isOnline: () => navigator.onLine,
+  },
+): Promise<{ queued: boolean; data?: T }> {
   try {
-    const data = await api<T>(mutation.path, { method: mutation.method, body: json(mutation.body) });
+    const data = await handlers.send(mutation);
+    await handlers.remove(mutation.id);
     return { queued: false, data };
   } catch (error) {
-    if (navigator.onLine) throw error;
+    if (isPermanentSyncConflict(error)) throw error;
     const { errorCode: _errorCode, lastError: _lastError, ...freshMutation } = mutation;
-    await db.mutations.put({ ...freshMutation, status: 'pending' });
+    await handlers.put({ ...freshMutation, status: 'pending' });
+    if (handlers.isOnline()) throw error;
     return { queued: true };
   }
 }

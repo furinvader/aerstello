@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from './api';
-import { isPermanentSyncConflict, LEGACY_UNASSIGNED_HOST_ID, migrateLegacyMutation, replayQueuedMutations, type QueuedMutation } from './offline';
+import { isPermanentSyncConflict, LEGACY_UNASSIGNED_HOST_ID, migrateLegacyMutation, replayQueuedMutations, submitOrQueue, type QueuedMutation } from './offline';
 
 const mutation = (id: string): QueuedMutation => ({
   id,
@@ -13,6 +13,61 @@ const mutation = (id: string): QueuedMutation => ({
 });
 
 describe('offline mutation replay', () => {
+  it('persists an online transient failure before preserving its uncertain result', async () => {
+    const transient = new TypeError('Response lost');
+    const body = { mutationId: 'mutation-1', reason: 'Original correction', expectedBillingVersion: 3 };
+    const entry = { ...mutation('1'), path: '/order-items/item-1/void', body };
+    const put = vi.fn(async () => undefined);
+    const remove = vi.fn(async () => undefined);
+
+    await expect(submitOrQueue(entry, {
+      send: async () => { throw transient; },
+      put,
+      remove,
+      isOnline: () => true,
+    })).rejects.toBe(transient);
+
+    expect(put).toHaveBeenCalledWith(expect.objectContaining({
+      id: entry.id,
+      hostId: entry.hostId,
+      path: entry.path,
+      body,
+      status: 'pending',
+    }));
+    expect(remove).not.toHaveBeenCalled();
+  });
+
+  it('removes durable recovery after the original command succeeds', async () => {
+    const put = vi.fn(async () => undefined);
+    const remove = vi.fn(async () => undefined);
+
+    await expect(submitOrQueue(mutation('1'), {
+      send: async () => ({ recovered: true }),
+      put,
+      remove,
+      isOnline: () => true,
+    })).resolves.toEqual({ queued: false, data: { recovered: true } });
+
+    expect(remove).toHaveBeenCalledWith('1');
+    expect(put).not.toHaveBeenCalled();
+  });
+
+  it('does not persist a definitive submission rejection', async () => {
+    const conflict = new ApiError('ITEM_BILLING_CONFLICT', 'Review the tab', 409);
+    const put = vi.fn(async () => undefined);
+    const remove = vi.fn(async () => undefined);
+
+    await expect(submitOrQueue(mutation('1'), {
+      send: async () => { throw conflict; },
+      put,
+      remove,
+      isOnline: () => true,
+    })).rejects.toBe(conflict);
+
+    expect(put).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+  });
+
   it('quarantines permanent conflicts and continues later mutations', async () => {
     const remove = vi.fn(async () => undefined);
     const update = vi.fn(async () => undefined);

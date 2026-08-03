@@ -60,11 +60,25 @@ Feature: Host order entry and billing
     Then the uncertain void reason is locked
     And both item removal attempts use the same reason
 
+  Scenario: An uncertain item removal survives a page reload
+    Given an authenticated administrator
+    And an open "Helles" order for "Anna Berger" in room "101"
+    When the host reloads after an item removal response is lost
+    Then the restored item removal uses the original mutation identifier
+    And the restored item removal is applied and cleared from recovery
+
   Scenario: An empty open tab cannot be offered for settlement
     Given an authenticated administrator
     And an open "Helles" order for "Anna Berger" in room "101"
     When the host removes the only open item
     Then no settlement action is offered for the empty tab
+
+  Scenario: A host tab outage never appears as a zero balance
+    Given an authenticated administrator
+    And an open "Helles" order for "Anna Berger" in room "101"
+    When the selected guest tab service is unavailable
+    Then the host sees tab loading without a zero balance
+    And the host sees a tab error without a zero balance or settlement action
 
   Scenario: A transient synchronization failure is retried
     Given an authenticated administrator with the order catalog loaded
