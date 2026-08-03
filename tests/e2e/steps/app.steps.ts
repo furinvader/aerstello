@@ -123,6 +123,7 @@ let dashboardExpectedValueCents = 0;
 let dashboardSnapshotSalesCents = 0;
 let dashboardExpectedSnapshotSalesCents = 0;
 let closedOrderMutationIds: string[] = [];
+let closedOrderPreReopenTransmissionCount = 0;
 let closedOrderItemCount = 0;
 let capturedUncertainTotal = '';
 let capturedOrderTabTotalCents = 0;
@@ -177,7 +178,7 @@ let staleHostFinalActive = false;
 let reopenedHostSessionStatus = 0;
 let uncertainVoidReasonLocked = false;
 let retriedVoidReasons: string[] = [];
-let reloadedVoidMutationIds: string[] = [];
+let reloadedVoidRequests: {mutationId:string;reason:string;expectedBillingVersion:number}[] = [];
 let reloadedVoidItemCount = 0;
 let reloadedVoidPendingCount = 0;
 let snapshottedBillHostName = '';
@@ -498,26 +499,40 @@ When('the host retries item removal after its response is lost',async({page})=>{
 Then('the uncertain void reason is locked',async()=>{expect(uncertainVoidReasonLocked).toBe(true)});
 Then('both item removal attempts use the same reason',async()=>{expect(retriedVoidReasons).toEqual(['Original correction','Original correction'])});
 When('the host reloads after an item removal response is lost',async({page})=>{
-  const mutationIds:string[]=[];let loseResponse=true;
-  await page.route(/\/api\/v1\/order-items\/[^/]+\/void$/,async(route)=>{
-    mutationIds.push((route.request().postDataJSON() as {mutationId:string}).mutationId);
-    const response=await route.fetch();
-    if(loseResponse){loseResponse=false;await route.abort('failed');return}
-    await route.fulfill({response});
-  });
+  const installLostResponse=()=>{
+    const originalFetch=window.fetch.bind(window);
+    window.fetch=async(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(/\/api\/v1\/order-items\/[^/]+\/void$/.test(new URL(url,window.location.href).pathname)&&init?.method==='POST'){
+        const requests=JSON.parse(localStorage.getItem('__skyBarReloadVoidRequests')??'[]') as {mutationId:string;reason:string;expectedBillingVersion:number}[];
+        requests.push(JSON.parse(String(init.body)) as {mutationId:string;reason:string;expectedBillingVersion:number});
+        localStorage.setItem('__skyBarReloadVoidRequests',JSON.stringify(requests));
+        const response=await originalFetch(input,init);
+        if(requests.length===1)throw new TypeError('Simulated lost response');
+        return response;
+      }
+      return originalFetch(input,init);
+    };
+  };
+  await page.evaluate(()=>localStorage.setItem('__skyBarReloadVoidRequests','[]'));
+  await page.addInitScript(installLostResponse);
+  await page.evaluate(installLostResponse);
   await page.locator('.open-tab').getByRole('button',{name:/Artikel entfernen|Rimuovi articolo|Remove item/}).click();
   const modal=page.locator('.modal');await modal.getByLabel(/Grund|Motivo|Reason/).fill('Reload recovery');
   await modal.getByRole('button',{name:/Bestätigen|Conferma|Confirm/}).click();
-  await expect(modal.locator('.notice--error')).toBeVisible();
+  await expect.poll(async()=>page.evaluate(async()=>new Promise<number>((resolve,reject)=>{const open=indexedDB.open('sky-bar');open.onerror=()=>reject(open.error);open.onsuccess=()=>{const transaction=open.result.transaction('mutations');const count=transaction.objectStore('mutations').count();count.onsuccess=()=>{open.result.close();resolve(count.result)};count.onerror=()=>reject(count.error)}})),{timeout:10_000}).toBe(1);
+  const originalRequest=(await page.evaluate(()=>JSON.parse(localStorage.getItem('__skyBarReloadVoidRequests')??'[]') as {mutationId:string;reason:string;expectedBillingVersion:number}[]))[0]!;
+  const storedRequest=await page.evaluate(async()=>new Promise<{id:string;status:string;body:{mutationId:string;reason:string;expectedBillingVersion:number}}>((resolve,reject)=>{const open=indexedDB.open('sky-bar');open.onerror=()=>reject(open.error);open.onsuccess=()=>{const transaction=open.result.transaction('mutations');const all=transaction.objectStore('mutations').getAll();all.onsuccess=()=>{open.result.close();resolve(all.result[0] as {id:string;status:string;body:{mutationId:string;reason:string;expectedBillingVersion:number}})};all.onerror=()=>reject(all.error)}}));
+  expect(storedRequest).toEqual(expect.objectContaining({id:originalRequest.mutationId,status:'pending',body:originalRequest}));
   await page.reload();
-  await expect.poll(()=>mutationIds.length,{timeout:10_000}).toBeGreaterThanOrEqual(2);
+  await expect.poll(async()=>page.evaluate(()=>((JSON.parse(localStorage.getItem('__skyBarReloadVoidRequests')??'[]')) as unknown[]).length),{timeout:10_000}).toBeGreaterThanOrEqual(2);
   const {request,guests}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;
   reloadedVoidItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
   await expect.poll(async()=>page.evaluate(async()=>new Promise<number>((resolve,reject)=>{const open=indexedDB.open('sky-bar');open.onerror=()=>reject(open.error);open.onsuccess=()=>{const transaction=open.result.transaction('mutations');const count=transaction.objectStore('mutations').count();count.onsuccess=()=>{open.result.close();resolve(count.result)};count.onerror=()=>reject(count.error)}})),{timeout:10_000}).toBe(0);
   reloadedVoidPendingCount=await page.evaluate(async()=>new Promise<number>((resolve,reject)=>{const open=indexedDB.open('sky-bar');open.onerror=()=>reject(open.error);open.onsuccess=()=>{const transaction=open.result.transaction('mutations');const count=transaction.objectStore('mutations').count();count.onsuccess=()=>{open.result.close();resolve(count.result)};count.onerror=()=>reject(count.error)}}));
-  reloadedVoidMutationIds=mutationIds;
+  reloadedVoidRequests=await page.evaluate(()=>JSON.parse(localStorage.getItem('__skyBarReloadVoidRequests')??'[]') as {mutationId:string;reason:string;expectedBillingVersion:number}[]);
 });
-Then('the restored item removal uses the original mutation identifier',async()=>{expect(reloadedVoidMutationIds.length).toBeGreaterThanOrEqual(2);expect(new Set(reloadedVoidMutationIds).size).toBe(1)});
+Then('the restored item removal uses the original mutation identifier',async()=>{expect(reloadedVoidRequests.length).toBeGreaterThanOrEqual(2);expect(new Set(reloadedVoidRequests.map(request=>request.mutationId)).size).toBe(1);expect(reloadedVoidRequests[0]!.reason).toBe('Reload recovery');for(const request of reloadedVoidRequests.slice(1))expect(request).toEqual(reloadedVoidRequests[0])});
 Then('the restored item removal is applied and cleared from recovery',async()=>{expect(reloadedVoidItemCount).toBe(0);expect(reloadedVoidPendingCount).toBe(0)});
 When('the host removes the only open item',async({page})=>{await page.locator('.open-tab').getByRole('button',{name:/Artikel entfernen|Rimuovi articolo|Remove item/}).click();await page.locator('.modal input').fill('Empty tab regression');await page.locator('.modal').getByRole('button',{name:/Bestätigen|Conferma|Confirm/}).click();await expect(page.locator('.open-tab')).toHaveCount(0)});
 Then('no settlement action is offered for the empty tab',async({page})=>{await expect(page.getByRole('button',{name:/Abrechnen|Incassa|Settle/})).toHaveCount(0)});
@@ -1310,8 +1325,8 @@ When('the host reloads after an order response is lost',async({page})=>{
 Then('the restored order retry uses the original mutation identifier',async()=>{expect(reloadedOrderMutationIds).toHaveLength(2);expect(new Set(reloadedOrderMutationIds).size).toBe(1)});
 Then('the guest tab contains the restored order only once',async()=>{expect(reloadedOrderItemCount).toBe(1)});
 
-When('the host closes the app after an order response is lost',async({page})=>{await chooseOrder(page,'Helles','Anna Berger','101');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__skyBarClosedOrderIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);await originalFetch(input,init);throw new TypeError('Simulated lost response')}return originalFetch(input,init)}});await page.getByRole('button',{name:/Bestellung buchen|Submit order/}).click();await expect(page.locator('.notice--error')).toBeVisible();closedOrderMutationIds=await page.evaluate(()=>(window as unknown as {__skyBarClosedOrderIds:string[]}).__skyBarClosedOrderIds);const context=page.context();await page.close();const reopened=await context.newPage();await reopened.goto('/app/orders/new');await expect(reopened.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();await reopened.evaluate(()=>{const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__skyBarClosedOrderIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST')ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);return originalFetch(input,init)}});await reopened.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(reopened.getByText(/Bestellung hinzugefügt|Order added/)).toBeVisible();closedOrderMutationIds.push(...await reopened.evaluate(()=>(window as unknown as {__skyBarClosedOrderIds:string[]}).__skyBarClosedOrderIds));const {request,guests}=await operationalData(reopened);const guest=guests.data.find(item=>item.name==='Anna Berger')!;closedOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount});
-Then('reopening the order uses the original mutation identifier',async()=>{expect(closedOrderMutationIds).toHaveLength(2);expect(new Set(closedOrderMutationIds).size).toBe(1)});
+When('the host closes the app after an order response is lost',async({page})=>{await chooseOrder(page,'Helles','Anna Berger','101');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__skyBarClosedOrderIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);await originalFetch(input,init);throw new TypeError('Simulated lost response')}return originalFetch(input,init)}});await page.getByRole('button',{name:/Bestellung buchen|Submit order/}).click();await expect(page.locator('.notice--error')).toBeVisible();closedOrderMutationIds=await page.evaluate(()=>(window as unknown as {__skyBarClosedOrderIds:string[]}).__skyBarClosedOrderIds);closedOrderPreReopenTransmissionCount=closedOrderMutationIds.length;const context=page.context();await page.close();const reopened=await context.newPage();await reopened.goto('/app/orders/new');await expect(reopened.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();await reopened.evaluate(()=>{const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__skyBarClosedOrderIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST')ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);return originalFetch(input,init)}});await reopened.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(reopened.getByText(/Bestellung hinzugefügt|Order added/)).toBeVisible();closedOrderMutationIds.push(...await reopened.evaluate(()=>(window as unknown as {__skyBarClosedOrderIds:string[]}).__skyBarClosedOrderIds));const {request,guests}=await operationalData(reopened);const guest=guests.data.find(item=>item.name==='Anna Berger')!;closedOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount});
+Then('reopening the order uses the original mutation identifier',async()=>{expect(closedOrderPreReopenTransmissionCount).toBeGreaterThan(0);expect(closedOrderMutationIds.length).toBeGreaterThan(closedOrderPreReopenTransmissionCount);expect(new Set(closedOrderMutationIds).size).toBe(1)});
 Then('the guest tab contains the reopened order only once',async()=>{expect(closedOrderItemCount).toBe(1)});
 
 When('a product price changes after its order response is lost',async({page})=>{await chooseOrder(page,'Helles','Anna Berger','101');capturedUncertainTotal=await page.locator('.cart-total strong').innerText();const {request,products}=await operationalData(page);const product=products.data.find(item=>item.name.de==='Helles')!;capturedExpectedTotalCents=product.priceCents;await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);Object.assign(window,{__skyBarLosePriceOrderResponse:true});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'&&(window as unknown as {__skyBarLosePriceOrderResponse:boolean}).__skyBarLosePriceOrderResponse){(window as unknown as {__skyBarLosePriceOrderResponse:boolean}).__skyBarLosePriceOrderResponse=false;await originalFetch(input,init);throw new TypeError('Simulated lost response')}return originalFetch(input,init)}});await page.getByRole('button',{name:/Bestellung buchen|Submit order/}).click();await expect(page.locator('.notice--error')).toBeVisible();const refreshed=page.waitForResponse(response=>response.url().endsWith('/api/v1/products')&&response.request().method()==='GET');expect((await request.patch(`/api/v1/products/${product.id}`,{headers:csrfHeaders,data:{name:product.name,...(product.description?{description:product.description}:{}),priceCents:product.priceCents+1000,categoryId:product.categoryId,enabled:product.enabled,selfServiceOnly:product.selfServiceOnly,expectedVersion:product.version}})).status()).toBe(200);await refreshed});
