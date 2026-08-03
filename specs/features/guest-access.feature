@@ -86,6 +86,11 @@ Feature: Guest device access and self-service
     When a clock-skewed API replica exchanges a database-valid grant
     Then the database-valid guest access is granted
 
+  Scenario: Grant expiry is checked after guest serialization
+    Given an authenticated administrator
+    When an approved guest grant expires while waiting for its guest lock
+    Then the serialized expired grant is not consumed or issued
+
   Scenario: Approval expiry uses the database clock across replicas
     Given an authenticated administrator
     When clock-skewed API replicas validate access approval expiries

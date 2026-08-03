@@ -290,6 +290,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (access.status === 'approved' && access.guestId) {
         const activeGuest = await client.query('SELECT id FROM guests WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [access.guestId]);
         if (!activeGuest.rowCount) return { access: { ...access, status: 'disabled' }, guestToken:undefined };
+        const expiry = await client.query<{ expired: boolean }>(
+          'SELECT COALESCE(expires_at<=clock_timestamp(),false) AS expired FROM access_requests WHERE id=$1',
+          [requestId],
+        );
+        if (expiry.rows[0]?.expired) {
+          return { access: { ...access, status: 'expired' }, guestToken:undefined };
+        }
       }
       if (access.status === 'approved' && access.guestId && access.expiresAt && !access.statusTokenConsumedAt) {
         const guestToken=guestGrantToken(requestId, grantId);

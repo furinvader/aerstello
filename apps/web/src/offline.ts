@@ -7,7 +7,7 @@ export type QueuedMutationDisplay = {
   guestId: string;
   guestName: string;
   roomName: string;
-  items: { productId: string; productName: LocalizedText; unitPriceCents: number; quantity: number }[];
+  items: { productId: string; productName: LocalizedText; unitPriceCents?: number; quantity: number }[];
 } | {
   kind: 'void';
   guestId: string;

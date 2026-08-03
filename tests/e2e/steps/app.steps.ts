@@ -142,6 +142,9 @@ let closedOrderItemCount = 0;
 let capturedUncertainTotal = '';
 let capturedOrderTabTotalCents = 0;
 let capturedExpectedTotalCents = 0;
+let legacyUnavailablePriceBody: Record<string,unknown> | undefined;
+let legacyUnavailablePricePostCount = 0;
+let legacyUnavailablePriceGuestId = '';
 let legacyOrderReplayStatuses: number[] = [];
 let legacyOrderItemCount = 0;
 let retriedApprovalMutationIds: string[] = [];
@@ -227,6 +230,9 @@ let billVoidLockTiming: {
   linesAfter: unknown[];
 } | undefined;
 let databaseClockGrantResult: {granted:boolean;guestStatus:number}|undefined;
+let serializedGrantResult: {
+  status:string;granted:boolean;guestStatus:number;sessionCount:number;consumedAt:Date|null;
+}|undefined;
 let databaseClockApprovalResult: {
   validStatus:number;validRequestStatus:string;expiredStatus:number;expiredCode:string;expiredRequestStatus:string;expiredGuestCount:number;
 }|undefined;
@@ -880,6 +886,58 @@ When('a clock-skewed API replica exchanges a database-valid grant',async({page,b
   databaseClockGrantResult={granted:((await exchange.json()) as {granted:boolean}).granted,guestStatus:(await context.request.get('/api/v1/guest/me')).status()};
 });
 Then('the database-valid guest access is granted',async()=>{expect(databaseClockGrantResult).toEqual({granted:true,guestStatus:200})});
+When('an approved guest grant expires while waiting for its guest lock',async({page,browser})=>{
+  const request=page.context().request;
+  const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
+  const room=bootstrap.rooms.find(item=>item.name==='102')!;
+  const created=await (await request.post('/api/v1/public/access-requests',{
+    data:{mutationId:crypto.randomUUID(),name:'Serialized Expired Grant',roomId:room.id,language:'de'},
+  })).json() as {id:string;statusToken:string};
+  const context=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(context);
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();let rolledBack=false;
+  try{
+    const expiresAt=((await database.query<{expiresAt:Date}>(
+      `SELECT clock_timestamp()+interval '3 seconds' AS "expiresAt"`,
+    )).rows[0]!.expiresAt).toISOString();
+    const approval=await request.post(`/api/v1/access-requests/${created.id}/approve`,{
+      headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expiresAt},
+    });
+    expect(approval.status()).toBe(200);
+    const approved=await approval.json() as {guestId:string};
+    await database.query('BEGIN');
+    await database.query('SELECT id FROM guests WHERE id=$1 FOR UPDATE',[approved.guestId]);
+    const holderXid=String((await database.query('SELECT pg_current_xact_id()::text AS xid')).rows[0].xid);
+    const startsValid=Boolean((await database.query(
+      'SELECT expires_at>clock_timestamp() AS valid FROM access_requests WHERE id=$1',[created.id],
+    )).rows[0].valid);
+    expect(startsValid).toBe(true);
+    const exchange=context.request.post(`/api/v1/public/access-requests/${created.id}/status`,{
+      data:{token:created.statusToken,grantId:crypto.randomUUID()},
+    });
+    await expect.poll(async()=>Number((await database.query(
+      `SELECT count(*) FROM pg_locks WHERE locktype='transactionid' AND transactionid::text=$1 AND NOT granted`,[holderXid],
+    )).rows[0].count),{timeout:5_000,intervals:[10,20,50]}).toBeGreaterThan(0);
+    await expect.poll(async()=>Boolean((await database.query(
+      'SELECT clock_timestamp()>=expires_at AS expired FROM access_requests WHERE id=$1',[created.id],
+    )).rows[0].expired),{timeout:5_000,intervals:[25,50,100]}).toBe(true);
+    await database.query('ROLLBACK');rolledBack=true;
+    const response=await exchange;
+    const payload=await response.json() as {status:string;granted:boolean};
+    const accessState=(await database.query<{consumedAt:Date|null}>(
+      'SELECT status_token_consumed_at AS "consumedAt" FROM access_requests WHERE id=$1',[created.id],
+    )).rows[0]!;
+    serializedGrantResult={
+      status:payload.status,
+      granted:payload.granted,
+      guestStatus:(await context.request.get('/api/v1/guest/me')).status(),
+      sessionCount:Number((await database.query('SELECT count(*) FROM guest_sessions WHERE request_id=$1',[created.id])).rows[0].count),
+      consumedAt:accessState.consumedAt,
+    };
+  }finally{if(!rolledBack)await database.query('ROLLBACK');await database.end()}
+});
+Then('the serialized expired grant is not consumed or issued',async()=>{
+  expect(serializedGrantResult).toEqual({status:'expired',granted:false,guestStatus:401,sessionCount:0,consumedAt:null});
+});
 When('clock-skewed API replicas validate access approval expiries',async({page})=>{
   const request=page.context().request;
   const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
@@ -1475,6 +1533,63 @@ When('a product price changes after its order response is lost',async({page})=>{
 Then('the uncertain cart still shows its captured total',async({page})=>{await expect(page.locator('.cart-total strong')).toHaveText(capturedUncertainTotal)});
 Then('retrying retains the captured charge',async({page})=>{await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(page.getByText(/Bestellung hinzugefügt|Order added/)).toBeVisible();const {request,guests}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;capturedOrderTabTotalCents=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {totalCents:number}).totalCents;expect(capturedOrderTabTotalCents).toBe(capturedExpectedTotalCents)});
 
+When('a pre-price-snapshot persisted order is restored after its products change',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);
+  const guest=guests.data.find(item=>item.name==='Anna Berger')!;
+  const existingProduct=products.data.find(item=>item.name.de==='Helles')!;
+  const createdResponse=await request.post('/api/v1/products',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:{de:'Historisches Preisprodukt',it:'Prodotto con prezzo storico',en:'Historical price product'},priceCents:250,categoryId:existingProduct.categoryId,enabled:true,selfServiceOnly:false}});
+  expect(createdResponse.status()).toBe(201);
+  const createdProduct=await createdResponse.json() as typeof existingProduct;
+  const capturedCatalog=await (await request.get('/api/v1/products')).json() as typeof products;
+  const changedProduct=capturedCatalog.data.find(item=>item.id===existingProduct.id)!;
+  const archivedProduct=capturedCatalog.data.find(item=>item.id===createdProduct.id)!;
+  const orderProducts=[changedProduct,archivedProduct];
+  const mutationId=crypto.randomUUID();const capturedAt=new Date().toISOString();
+  const body={mutationId,originHostId:me.host.id,guestId:guest.id,catalogVersion:capturedCatalog.catalogVersion,capturedAt,items:orderProducts.map(product=>({productId:product.id,quantity:1}))};
+  legacyUnavailablePriceBody=body;legacyUnavailablePriceGuestId=guest.id;legacyUnavailablePricePostCount=0;
+  await page.evaluate(({hostId,mutationId,capturedAt,guest,body,orderProducts})=>localStorage.setItem(`skybar-uncertain-order:${hostId}`,JSON.stringify({id:mutationId,hostId,path:'/order-batches',method:'POST',createdAt:capturedAt,body,display:{kind:'order',guestId:guest.id,guestName:guest.name,roomName:guest.roomName,items:orderProducts.map(product=>({productId:product.id,productName:product.name,quantity:1}))}})),{hostId:me.host.id,mutationId,capturedAt,guest,body,orderProducts});
+  expect((await request.patch(`/api/v1/products/${changedProduct.id}`,{headers:csrfHeaders,data:{name:changedProduct.name,...(changedProduct.description?{description:changedProduct.description}:{}),priceCents:changedProduct.priceCents+777,categoryId:changedProduct.categoryId,enabled:changedProduct.enabled,selfServiceOnly:changedProduct.selfServiceOnly,expectedVersion:changedProduct.version}})).status()).toBe(200);
+  expect((await request.delete(`/api/v1/products/${archivedProduct.id}`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:archivedProduct.version}})).status()).toBe(204);
+  page.on('request',candidate=>{if(candidate.url().endsWith('/api/v1/order-batches')&&candidate.method()==='POST')legacyUnavailablePricePostCount+=1});
+  await page.goto('/app/orders/new');
+});
+
+Then('the unavailable captured price is explained in German, Italian, and English',async({page})=>{
+  const assertions=[
+    {language:'de',notice:'Der erfasste Preis dieser gespeicherten Bestellung ist nicht verfügbar.',price:'Preis nicht verfügbar',total:'Prüfung erforderlich',retry:'Erneut versuchen'},
+    {language:'it',notice:'Il prezzo acquisito di questo ordine salvato non è disponibile.',price:'Prezzo non disponibile',total:'Controllo necessario',retry:'Riprova'},
+    {language:'en',notice:'The captured price for this saved order is unavailable.',price:'Price unavailable',total:'Review required',retry:'Retry'},
+  ] as const;
+  for(const assertion of assertions){
+    const current=await (await page.context().request.get('/api/v1/auth/me')).json() as {host:{version:number;language:string}};
+    if(current.host.language!==assertion.language){
+      expect((await page.context().request.patch('/api/v1/account',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:current.host.version,language:assertion.language}})).status()).toBe(200);
+      await page.reload();
+    }
+    await expect(page.locator('.notice--error').filter({hasText:assertion.notice})).toBeVisible();
+    await expect(page.locator('.cart-lines>div>div:first-child>span')).toHaveText([assertion.price,assertion.price]);
+    await expect(page.locator('.cart-total strong')).toHaveText(assertion.total);
+    await expect(page.getByRole('button',{name:assertion.retry,exact:true})).toBeDisabled();
+  }
+});
+
+Then('the legacy cart shows no zero or replacement price',async({page})=>{
+  await expect(page.locator('.cart-lines')).not.toContainText('0,00');
+  await expect(page.locator('.cart-lines>div>div:first-child>span')).toHaveText(['Price unavailable','Price unavailable']);
+  await expect(page.locator('.cart-total strong')).toHaveText('Review required');
+});
+
+Then('the unsafe legacy retry is blocked without changing its stored command',async({page})=>{
+  const retry=page.getByRole('button',{name:'Retry',exact:true});
+  await expect(retry).toBeDisabled();
+  await retry.evaluate(async(button)=>{(button as HTMLButtonElement).click();await new Promise<void>(resolve=>requestAnimationFrame(()=>resolve()))});
+  expect(legacyUnavailablePricePostCount).toBe(0);
+  const storedBody=await page.evaluate((hostId)=>JSON.parse(localStorage.getItem(`skybar-uncertain-order:${hostId}`)!).body,(await (await page.context().request.get('/api/v1/auth/me')).json() as {host:{id:string}}).host.id);
+  expect(storedBody).toEqual(legacyUnavailablePriceBody);
+  const tab=await (await page.context().request.get(`/api/v1/guests/${legacyUnavailablePriceGuestId}/tab`)).json() as {itemCount:number};
+  expect(tab.itemCount).toBe(0);
+});
+
 When('a legacy order batch with an unknown command is retried',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const command={mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]};legacyOrderReplayStatuses=[(await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:command})).status()];const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();try{await database.query('UPDATE order_batches SET command=NULL WHERE mutation_id=$1',[command.mutationId])}finally{await database.end()}legacyOrderReplayStatuses.push((await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:command})).status());legacyOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount});
 Then('the legacy order retry succeeds without another charge',async()=>{expect(legacyOrderReplayStatuses).toEqual([201,201]);expect(legacyOrderItemCount).toBe(1)});
 
@@ -1773,6 +1888,33 @@ Then('the bill archive shows loading without a successful empty state',async({pa
 Then('the bill archive shows failure without a successful empty state',async({page})=>{const archive=page.locator('.app-content>.card');await expect(archive.locator('.notice--error')).toContainText(/Die Anfrage konnte nicht abgeschlossen werden|Impossibile completare la richiesta|The request could not be completed/,{timeout:10_000});await expect(archive.locator('.empty')).toHaveCount(0)});
 When('the host opens a successfully empty bill archive',async({page})=>{const response=page.waitForResponse(candidate=>new URL(candidate.url()).pathname==='/api/v1/bills');await page.goto('/app/bills');expect((await response).ok()).toBe(true)});
 Then('the bill archive shows its successful empty state',async({page})=>{const archive=page.locator('.app-content>.card');await expect(archive.locator('.empty')).toContainText(/Noch keine Einträge|Nessun elemento|Nothing here yet/)});
+
+const requestFailedMessage=/Die Anfrage konnte nicht abgeschlossen werden|Impossibile completare la richiesta|The request could not be completed/;
+const openOrdersPageCard=(page:import('@playwright/test').Page)=>page.locator('.app-content>.card');
+const dashboardOrderList=(page:import('@playwright/test').Page)=>page.locator('.section-heading+.card');
+When('the initial open order list request is delayed and fails',async({page})=>{
+  await page.addInitScript(()=>{
+    const originalFetch=window.fetch.bind(window);
+    window.fetch=async(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(new URL(url,window.location.href).pathname==='/api/v1/orders'){
+        await new Promise(resolve=>setTimeout(resolve,1_500));
+        throw new TypeError('Simulated open orders outage');
+      }
+      return originalFetch(input,init);
+    };
+  });
+  await page.goto('/app/orders');
+});
+Then('the open orders page shows loading without a successful empty state',async({page})=>{const orders=openOrdersPageCard(page);await expect(orders).toContainText(/Wird geladen|Caricamento|Loading/);await expect(orders.locator('.empty')).toHaveCount(0)});
+Then('the open orders page shows failure without a successful empty state',async({page})=>{const orders=openOrdersPageCard(page);await expect(orders.locator('.notice--error')).toContainText(requestFailedMessage,{timeout:10_000});await expect(orders.locator('.empty')).toHaveCount(0)});
+When('the host opens the dashboard with a failed open order list',async({page})=>{await page.goto('/app')});
+Then('the dashboard open order list shows loading without a successful empty state',async({page})=>{const orders=dashboardOrderList(page);await expect(orders).toContainText(/Wird geladen|Caricamento|Loading/);await expect(orders.locator('.empty')).toHaveCount(0)});
+Then('the dashboard open order list shows failure without a successful empty state',async({page})=>{const orders=dashboardOrderList(page);await expect(orders.locator('.notice--error')).toContainText(requestFailedMessage,{timeout:10_000});await expect(orders.locator('.empty')).toHaveCount(0)});
+When('the host opens a successfully empty open order list',async({page})=>{const response=page.waitForResponse(candidate=>new URL(candidate.url()).pathname==='/api/v1/orders');await page.goto('/app/orders');expect((await response).ok()).toBe(true)});
+Then('the open orders page shows its successful empty state',async({page})=>{await expect(openOrdersPageCard(page).locator('.empty')).toContainText(/Noch keine Einträge|Nessun elemento|Nothing here yet/)});
+When('the host opens the dashboard with a successful empty open order list',async({page})=>{const response=page.waitForResponse(candidate=>new URL(candidate.url()).pathname==='/api/v1/orders');await page.goto('/app');expect((await response).ok()).toBe(true)});
+Then('the dashboard open order list shows its successful empty state',async({page})=>{await expect(dashboardOrderList(page).locator('.empty')).toContainText(/Noch keine Einträge|Nessun elemento|Nothing here yet/)});
 
 When('the venue timezone changes after a bill is settled',async({page})=>{const {request,me,guests,products}=await operationalData(page);const venue=await (await request.get('/api/v1/venue')).json() as {name:string;defaultLanguage:string;version:number};const firstVenue=await (await request.put('/api/v1/venue',{headers:csrfHeaders,data:{name:venue.name,language:venue.defaultLanguage,timezone:'Pacific/Kiritimati',expectedVersion:venue.version}})).json() as {version:number};const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const settled=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};const bill=await (await request.get(`/api/v1/bills/${settled.id}`)).json() as {settledAt:string;venueTimezone:string};expect(bill.venueTimezone).toBe('Pacific/Kiritimati');snapshottedBillDate=new Date(bill.settledAt).toLocaleDateString('de',{timeZone:bill.venueTimezone});expect((await request.put('/api/v1/venue',{headers:csrfHeaders,data:{name:venue.name,language:venue.defaultLanguage,timezone:'Pacific/Honolulu',expectedVersion:firstVenue.version}})).status()).toBe(200);await page.goto(`/app/bills/${settled.id}`)});
 Then('the bill date uses its snapshotted venue timezone',async({page})=>{await expect(page.locator('.bill-meta')).toContainText(snapshottedBillDate)});

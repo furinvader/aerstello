@@ -122,6 +122,13 @@ Feature: Host order entry and billing
     Then the uncertain cart still shows its captured total
     And retrying retains the captured charge
 
+  Scenario: A legacy uncertain order with an unavailable price requires review
+    Given an authenticated administrator
+    When a pre-price-snapshot persisted order is restored after its products change
+    Then the unavailable captured price is explained in German, Italian, and English
+    And the legacy cart shows no zero or replacement price
+    And the unsafe legacy retry is blocked without changing its stored command
+
   Scenario: A pre-command-snapshot order remains replayable
     Given an authenticated administrator
     When a legacy order batch with an unknown command is retried
@@ -237,6 +244,22 @@ Feature: Host order entry and billing
     Given an authenticated administrator
     When the host opens a successfully empty bill archive
     Then the bill archive shows its successful empty state
+
+  Scenario: An unavailable open order list never appears empty
+    Given an authenticated administrator
+    When the initial open order list request is delayed and fails
+    Then the open orders page shows loading without a successful empty state
+    And the open orders page shows failure without a successful empty state
+    When the host opens the dashboard with a failed open order list
+    Then the dashboard open order list shows loading without a successful empty state
+    And the dashboard open order list shows failure without a successful empty state
+
+  Scenario: A successful empty open order list appears empty
+    Given an authenticated administrator
+    When the host opens a successfully empty open order list
+    Then the open orders page shows its successful empty state
+    When the host opens the dashboard with a successful empty open order list
+    Then the dashboard open order list shows its successful empty state
 
   Scenario: A bill keeps its settlement-time venue timezone
     Given an authenticated administrator
