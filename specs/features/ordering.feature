@@ -11,6 +11,12 @@ Feature: Host order entry and billing
     Then the bill shows the venue name "Hotel Aurora"
     And the bill offers printing
 
+  Scenario: Switching payment methods drops a hidden note
+    Given an authenticated administrator
+    And an open "Helles" order for "Anna Berger" in room "101"
+    When the host enters an Other payment note and settles with cash
+    Then the cash bill has no payment note
+
   Scenario: Changing guests cannot transfer a staged cart
     Given an authenticated administrator
     When the host stages an order for Anna and confirms a switch to Luca

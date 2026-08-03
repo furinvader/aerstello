@@ -67,6 +67,7 @@ let uncertainOrderControlsLocked = false;
 let uncertainSettlementDetailsLocked = false;
 let changedSettlementReplayStatus = 0;
 let sharedNetworkPollStatuses: number[] = [];
+let rotatingCapabilityStatuses: number[] = [];
 let conflictGuestId = '';
 let changedItemVoidReplayStatus = 0;
 let changedBillVoidReplayStatus = 0;
@@ -377,6 +378,8 @@ Then("Anna's open tab contains one item",async({page})=>{await expect(page.locat
 When('the host settles the tab with cash',async({page})=>{await page.getByRole('button',{name:/Abrechnen/}).click();await page.locator('.choice-grid').getByRole('button',{name:/Bar/}).click();await page.locator('.modal').getByRole('button',{name:'Abrechnen'}).click()});
 Then('the bill shows the venue name {string}',async({page},name:string)=>{await expect(page.locator('.bill-sheet h1')).toHaveText(name)});
 Then('the bill offers printing',async({page})=>{await expect(page.getByRole('button',{name:/Drucken/})).toBeVisible()});
+When('the host enters an Other payment note and settles with cash',async({page})=>{const modal=page.locator('.modal');await page.getByRole('button',{name:/Abrechnen|Incassa|Settle/}).click();await modal.locator('.choice-grid').getByRole('button',{name:/Sonstiges|Altro|Other/}).click();await modal.getByLabel(/Notiz|Nota|Note/).fill('Hidden payment note');await modal.locator('.choice-grid').getByRole('button',{name:/Bar|Contanti|Cash/,exact:true}).click();await expect(modal.getByLabel(/Notiz|Nota|Note/)).toHaveCount(0);await modal.getByRole('button',{name:/Abrechnen|Incassa|Settle/,exact:true}).click();await expect(page).toHaveURL(/\/app\/bills\//)});
+Then('the cash bill has no payment note',async({page})=>{const billId=new URL(page.url()).pathname.split('/').at(-1)!;const bill=await (await page.context().request.get(`/api/v1/bills/${billId}`)).json() as {paymentMethod:string;paymentNote:string|null};expect(bill.paymentMethod).toBe('cash');expect(bill.paymentNote).toBeNull();await expect(page.locator('.bill-sheet footer')).not.toContainText('Hidden payment note')});
 When('the host stages an order for Anna and confirms a switch to Luca',async({page})=>{
   const request=page.context().request;
   const rooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;name:string}[]};
@@ -542,7 +545,7 @@ When('the guest logs out and the committed response is lost',async()=>{
 });
 Then('the guest reaches access request without cached data',async()=>{await expect(guestPage!).toHaveURL(/\/guest\/request$/);await expect(guestPage!.getByRole('heading',{name:'Luca Rossi'})).toHaveCount(0)});
 Then('replaying guest logout for the revoked session succeeds',async()=>{expect(replayedGuestLogoutStatus).toBe(204)});
-When('the guest tab service is unavailable',async()=>{await guestPage!.route('**/api/v1/guest/tab',route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:{code:'TAB_UNAVAILABLE',message:'Tab unavailable'}})}));await guestPage!.reload();await expect(guestPage!.locator('.guest-total')).toContainText('Die Anfrage konnte nicht abgeschlossen werden.',{timeout:10_000})});
+When('the guest tab service is unavailable',async()=>{await guestPage!.addInitScript(()=>{const fetch=window.fetch.bind(window);window.fetch=(input,init)=>{const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);if(new URL(url,window.location.href).pathname==='/api/v1/guest/tab')return Promise.reject(new TypeError('Simulated guest tab outage'));return fetch(input,init)}});await guestPage!.reload();await expect(guestPage!.locator('.guest-total')).toContainText('Die Anfrage konnte nicht abgeschlossen werden.',{timeout:10_000})});
 Then('the guest sees an error without a zero balance or empty order',async()=>{await expect(guestPage!.locator('.guest-total')).not.toContainText(/0[,.]00\s*€/);const orders=guestPage!.locator('.guest-tabs>section').nth(1);await expect(orders.locator('.notice--error')).toBeVisible();await expect(orders.locator('.empty')).toHaveCount(0)});
 Then('the host has no empty open order for {string}',async({page},name:string)=>{await page.goto('/app/orders');await expect(page.locator('.tab-card').filter({hasText:name})).toHaveCount(0)});
 When('a self-service price changes after the guest catalog is displayed',async({page})=>{const guestRequest=guestPage!.context().request;const me=await (await guestRequest.get('/api/v1/guest/me')).json() as {guest:{sessionId:string}};const catalog=await (await guestRequest.get('/api/v1/guest/catalog')).json() as {data:{id:string;name:{de:string};priceCents:number}[]};const displayed=catalog.data.find(item=>item.name.de==='Mineralwasser')!;const staleMutationId=crypto.randomUUID();staleGuestMutationIds=[];guestPage!.on('request',request=>{if(request.url().endsWith('/api/v1/guest/items')&&request.method()==='POST')staleGuestMutationIds.push((request.postDataJSON() as {mutationId:string}).mutationId)});const request=page.context().request;const products=await (await request.get('/api/v1/products')).json() as {data:{id:string;name:{de:string;it:string;en:string};description?:{de:string;it:string;en:string};priceCents:number;categoryId:string;enabled:boolean;selfServiceOnly:boolean;version:number}[]};const product=products.data.find(item=>item.id===displayed.id)!;expect((await request.patch(`/api/v1/products/${product.id}`,{headers:csrfHeaders,data:{name:product.name,...(product.description?{description:product.description}:{}),priceCents:product.priceCents+100,categoryId:product.categoryId,enabled:product.enabled,selfServiceOnly:product.selfServiceOnly,expectedVersion:product.version}})).status()).toBe(200);await guestPage!.evaluate(({sessionId,productId,mutationId,expectedPriceCents})=>localStorage.setItem('skybar-guest-pending-adds',JSON.stringify({sessionId,entries:[[productId,mutationId,expectedPriceCents]]})),{sessionId:me.guest.sessionId,productId:product.id,mutationId:staleMutationId,expectedPriceCents:displayed.priceCents});await guestPage!.reload();await guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'}).click();await expect(guestPage!.locator('.notice--error')).toBeVisible();staleGuestPriceRejected=true;staleGuestPriceItemCount=((await (await guestRequest.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount;await guestPage!.reload();await guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'}).click();await expect.poll(async()=>((await (await guestRequest.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount).toBe(1)});
@@ -606,6 +609,22 @@ When('a clock-skewed API replica exchanges a database-valid grant',async({page,b
 Then('the database-valid guest access is granted',async()=>{expect(databaseClockGrantResult).toEqual({granted:true,guestStatus:200})});
 When("the host revokes Luca's device from the guest directory",async({page})=>{await page.goto('/app/guests');const row=page.locator('.table-row').filter({hasText:'Luca Rossi'});await row.getByRole('button',{name:/Angemeldete Geräte|Dispositivi connessi|Logged-in devices/}).click();await expect(page.locator('.modal .device-list')).toBeVisible();await page.locator('.modal').getByRole('button',{name:/Widerrufen|Revoca|Revoke/}).click();await expect(page.locator('.modal .device-list')).toHaveCount(0)});
 Then("Luca's revoked device loses guest access",async()=>{guestRevokedStatus=(await guestPage!.context().request.get('/api/v1/guest/me')).status();expect(guestRevokedStatus).toBe(401)});
+When("another host revokes Luca's device while the first host's device list is open",async({page,browser})=>{
+  await page.goto('/app/guests');
+  const row=page.locator('.table-row').filter({hasText:'Luca Rossi'});
+  await row.getByRole('button',{name:/Angemeldete Geräte|Dispositivi connessi|Logged-in devices/}).click();
+  await expect(page.locator('.modal .device-list')).toBeVisible();
+  const firstHost=page.context().request;
+  const guests=await (await firstHost.get('/api/v1/guests')).json() as {data:{id:string;name:string}[]};
+  const luca=guests.data.find(guest=>guest.name==='Luca Rossi')!;
+  const sessions=await (await firstHost.get(`/api/v1/guests/${luca.id}/sessions`)).json() as {data:{id:string}[]};
+  expect((await firstHost.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'guest-device-revoker@skybar.test',name:'Guest Device Revoker',password:'GuestDeviceRevoker123!',role:'staff',language:'de'}})).status()).toBe(201);
+  const other=await browser.newContext({baseURL:e2eBaseURL});
+  extraContexts.push(other);
+  expect((await other.request.post('/api/v1/auth/login',{data:{email:'guest-device-revoker@skybar.test',password:'GuestDeviceRevoker123!'}})).status()).toBe(200);
+  expect((await other.request.delete(`/api/v1/guests/${luca.id}/sessions/${sessions.data[0]!.id}`,{headers:csrfHeaders})).status()).toBe(204);
+});
+Then("the first host's open guest device list updates",async({page})=>{await expect(page.locator('.modal .device-list')).toHaveCount(0,{timeout:10_000})});
 When("the host repeats revocation of Luca's device",async({page})=>{const request=page.context().request;const guests=await (await request.get('/api/v1/guests')).json() as {data:{id:string;name:string}[]};const luca=guests.data.find(guest=>guest.name==='Luca Rossi')!;const other=guests.data.find(guest=>guest.id!==luca.id)!;const sessions=await (await request.get(`/api/v1/guests/${luca.id}/sessions`)).json() as {data:{id:string}[]};const sessionId=sessions.data[0]!.id;repeatedGuestSessionRevokeStatuses=[(await request.delete(`/api/v1/guests/${luca.id}/sessions/${sessionId}`,{headers:csrfHeaders})).status(),(await request.delete(`/api/v1/guests/${luca.id}/sessions/${sessionId}`,{headers:csrfHeaders})).status()];mismatchedGuestSessionRevokeStatus=(await request.delete(`/api/v1/guests/${other.id}/sessions/${sessionId}`,{headers:csrfHeaders})).status();const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();try{guestSessionRevokeAuditCount=Number((await database.query("SELECT count(*)::int AS count FROM audit_events WHERE action='guest-session.revoked' AND entity_id=$1",[sessionId])).rows[0]?.count??0)}finally{await database.end()}});
 Then('both revocation requests succeed with one audit record',async()=>{expect(repeatedGuestSessionRevokeStatuses).toEqual([204,204]);expect(guestSessionRevokeAuditCount).toBe(1)});
 Then('the device cannot be revoked through another guest',async()=>{expect(mismatchedGuestSessionRevokeStatus).toBe(404)});
@@ -933,6 +952,28 @@ When('thirteen guest devices poll pending access from one network',async({page})
   for(let round=0;round<25;round+=1){const responses=await Promise.all(pending.map(item=>request.post(`/api/v1/public/access-requests/${item.id}/status`,{data:{token:item.statusToken,grantId:crypto.randomUUID()}})));sharedNetworkPollStatuses.push(...responses.map(response=>response.status()))}
 });
 Then('none of their valid status polls is rate limited',async()=>{expect(sharedNetworkPollStatuses).toHaveLength(325);expect(sharedNetworkPollStatuses).not.toContain(429);expect(new Set(sharedNetworkPollStatuses)).toEqual(new Set([200]))});
+
+When('one network rotates invalid access capabilities beyond its address limit',async()=>{
+  const replicaPort=3202;
+  const replica=spawn(process.execPath,['apps/api/dist/index.js'],{
+    cwd:process.cwd(),
+    env:{...process.env,PORT:String(replicaPort),LOG_LEVEL:'warn',TRUST_PROXY:'true',RATE_LIMIT_MAX:'50',ACCESS_STATUS_IP_LIMIT_MAX:'2'},
+    stdio:'ignore',
+  });
+  extraApiProcesses.push(replica);
+  await expect.poll(async()=>{try{return (await fetch(`http://127.0.0.1:${replicaPort}/api/v1/health`)).status}catch{return 0}},{timeout:15_000}).toBe(200);
+  const requestId=crypto.randomUUID();
+  rotatingCapabilityStatuses=[];
+  for(const token of ['invalid-capability-one','invalid-capability-two','invalid-capability-three']){
+    const response=await fetch(`http://127.0.0.1:${replicaPort}/api/v1/public/access-requests/${requestId}/status`,{
+      method:'POST',
+      headers:{'content-type':'application/json','x-forwarded-for':'198.51.100.27'},
+      body:JSON.stringify({token,grantId:crypto.randomUUID()}),
+    });
+    rotatingCapabilityStatuses.push(response.status);
+  }
+});
+Then('the access status address limit is enforced',async()=>{expect(rotatingCapabilityStatuses).toEqual([404,404,429])});
 
 When('requests at the address limit are split across API replicas',async({page})=>{const replicaPort=3200;const replica=spawn(process.execPath,['apps/api/dist/index.js'],{cwd:process.cwd(),env:{...process.env,PORT:String(replicaPort),LOG_LEVEL:'warn',RATE_LIMIT_MAX:'5000'},stdio:'ignore'});extraApiProcesses.push(replica);await expect.poll(async()=>{try{return (await fetch(`http://127.0.0.1:${replicaPort}/api/v1/health`)).status}catch{return 0}},{timeout:15_000}).toBe(200);const keyHash=createHash('sha256').update('ip:127.0.0.1').digest('base64url');const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();try{await database.query(`INSERT INTO rate_limit_counters(scope,key_hash,count,expires_at) VALUES ('global',$1,4999,now()+interval '1 minute') ON CONFLICT (scope,key_hash) DO UPDATE SET count=4999,expires_at=excluded.expires_at`,[keyHash])}finally{await database.end()}const first=await page.context().request.get('/api/v1/health');const second=await fetch(`http://127.0.0.1:${replicaPort}/api/v1/health`);sharedReplicaRateStatuses=[first.status(),second.status]});
 Then('the shared address limit is enforced once',async()=>{expect(sharedReplicaRateStatuses).toEqual([200,429])});

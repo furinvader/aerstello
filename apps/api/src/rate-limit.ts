@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { FastifyRateLimitOptions, FastifyRateLimitStore } from '@fastify/rate-limit';
-import type { RouteOptions } from 'fastify';
+import type { FastifyInstance, RouteOptions, preHandlerAsyncHookHandler } from 'fastify';
 import type pg from 'pg';
 import { pool } from './db.js';
 
@@ -36,6 +36,23 @@ export function rateLimitKey(request: RateLimitRequest): string {
     return `access-status:${request.ip}:${capability}`;
   }
   return ipRateLimitKey(request);
+}
+
+type RateLimitCheck = ReturnType<FastifyInstance['createRateLimit']>;
+
+export function createRateLimitPreHandler(check: RateLimitCheck): preHandlerAsyncHookHandler {
+  return async (request, reply) => {
+    const limit = await check(request);
+    if (limit.isAllowed || !limit.isExceeded) return;
+
+    reply.header('x-ratelimit-limit', limit.max);
+    reply.header('x-ratelimit-remaining', 0);
+    reply.header('x-ratelimit-reset', limit.ttlInSeconds);
+    reply.header('retry-after', limit.ttlInSeconds);
+    const error = new Error(`Rate limit exceeded, retry in ${limit.ttlInSeconds} seconds.`) as Error & { statusCode: number };
+    error.statusCode = 429;
+    throw error;
+  };
 }
 
 type RateLimitDatabase = Pick<pg.Pool, 'query'>;

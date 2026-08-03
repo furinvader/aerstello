@@ -27,7 +27,7 @@ import {
 import { audit, eventBus, publishEvent, storeEvent, type RealtimeEvent } from './events.js';
 import { pool, transaction } from './db.js';
 import { config } from './config.js';
-import { rateLimitKey } from './rate-limit.js';
+import { createRateLimitPreHandler, rateLimitKey } from './rate-limit.js';
 import {
   accessStatusToken,
   authenticateHost,
@@ -140,6 +140,13 @@ async function tabDetail(guestId: string, guestSessionId?: string) {
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   const dummyPasswordHash = await hashPassword(newToken());
+  // The manual capability check leaves the plugin's global per-IP hook eligible
+  // to run afterward, so rotating tokens cannot escape the broader IP ceiling.
+  const accessStatusCapabilityLimit = createRateLimitPreHandler(app.createRateLimit({
+    max: config.RATE_LIMIT_MAX,
+    timeWindow: '1 minute',
+    keyGenerator: rateLimitKey,
+  }));
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof HttpError) {
@@ -211,12 +218,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(201).send({ id: requestId, statusToken: token, status: 'pending' });
   });
 
-  app.post('/api/v1/public/access-requests/:id/status', { preHandler: app.rateLimit({
-    max: config.RATE_LIMIT_MAX,
-    timeWindow: '1 minute',
-    groupId: 'access-status-capability',
-    keyGenerator: rateLimitKey,
-  }) }, async (request, reply) => {
+  app.post('/api/v1/public/access-requests/:id/status', { preHandler: accessStatusCapabilityLimit }, async (request, reply) => {
     const requestId = id(request);
     const { token, grantId } = body(z.object({
       token: z.string().min(1).max(256),

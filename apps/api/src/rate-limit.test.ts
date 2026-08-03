@@ -1,5 +1,7 @@
+import rateLimit from '@fastify/rate-limit';
+import Fastify from 'fastify';
 import { describe, expect, it } from 'vitest';
-import { incrementRateLimitCounter, ipRateLimitKey, ipRateLimitMax, isAccessStatusRequest, rateLimitKey } from './rate-limit.js';
+import { createRateLimitPreHandler, incrementRateLimitCounter, ipRateLimitKey, ipRateLimitMax, isAccessStatusRequest, rateLimitKey } from './rate-limit.js';
 
 describe('rate limit keys', () => {
   const url = '/api/v1/public/access-requests/0198b529-e428-7000-8000-000000000001/status';
@@ -17,6 +19,32 @@ describe('rate limit keys', () => {
   it('keeps ordinary requests in the shared address bucket', () => {
     expect(rateLimitKey({ ip: '192.0.2.1', method: 'POST', url: '/api/v1/auth/login' }))
       .toBe('ip:192.0.2.1');
+  });
+
+  it('applies the address ceiling after checking distinct capabilities', async () => {
+    const app = Fastify();
+    await app.register(rateLimit, {
+      global: true,
+      max: 2,
+      timeWindow: '1 minute',
+      hook: 'preHandler',
+      keyGenerator: ipRateLimitKey,
+    });
+    const capabilityLimit = createRateLimitPreHandler(app.createRateLimit({
+      max: 10,
+      timeWindow: '1 minute',
+      keyGenerator: rateLimitKey,
+    }));
+    app.post(url, { preHandler: capabilityLimit }, async () => ({ ok: true }));
+
+    const statuses = [];
+    for (const token of ['first', 'second', 'third']) {
+      const response = await app.inject({ method: 'POST', url, payload: { token } });
+      statuses.push(response.statusCode);
+    }
+    await app.close();
+
+    expect(statuses).toEqual([200, 200, 429]);
   });
 
   it('increments a durable hashed counter shared by replicas', async () => {

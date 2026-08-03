@@ -16,6 +16,11 @@ Feature: Device grants and replay protection
     When thirteen guest devices poll pending access from one network
     Then none of their valid status polls is rate limited
 
+  Scenario: Rotating access capabilities cannot bypass the network limit
+    Given an authenticated administrator
+    When one network rotates invalid access capabilities beyond its address limit
+    Then the access status address limit is enforced
+
   Scenario: Rate limits are shared by API replicas
     Given an authenticated administrator
     When requests at the address limit are split across API replicas
