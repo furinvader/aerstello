@@ -39,11 +39,19 @@ export function rateLimitKey(request: RateLimitRequest): string {
 }
 
 type RateLimitCheck = ReturnType<FastifyInstance['createRateLimit']>;
+type RateLimitResult = Awaited<ReturnType<RateLimitCheck>>;
+type AppliedRateLimit = Extract<RateLimitResult, { isAllowed: false }>;
 
-export function createRateLimitPreHandler(check: RateLimitCheck): preHandlerAsyncHookHandler {
+function exceededRateLimit(result: RateLimitResult): result is AppliedRateLimit {
+  return !result.isAllowed && result.isExceeded;
+}
+
+export function createRateLimitPreHandler(...checks: RateLimitCheck[]): preHandlerAsyncHookHandler {
   return async (request, reply) => {
-    const limit = await check(request);
-    if (limit.isAllowed || !limit.isExceeded) return;
+    const limits = [];
+    for (const check of checks) limits.push(await check(request));
+    const limit = limits.find(exceededRateLimit);
+    if (!limit) return;
 
     reply.header('x-ratelimit-limit', limit.max);
     reply.header('x-ratelimit-remaining', 0);

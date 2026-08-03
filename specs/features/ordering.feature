@@ -39,6 +39,20 @@ Feature: Host order entry and billing
     When the host removes the open item while offline
     Then the item removal is queued for synchronization
 
+  Scenario: A queued item removal cannot cross billing and correction
+    Given an authenticated administrator
+    When an item removal command crosses settlement and bill reversal
+    Then the stale item removal is rejected as a billing conflict
+    And the corrected item remains on the open tab
+    When the host submits a new removal from the refreshed tab
+    Then the refreshed item removal succeeds
+
+  Scenario: A legacy unapplied item removal requires review
+    Given an authenticated administrator
+    When an item removal without a billing version is submitted
+    Then the legacy item removal is rejected as a billing conflict
+    And the legacy item remains on the open tab
+
   Scenario: An uncertain item removal keeps its submitted reason
     Given an authenticated administrator
     And an open "Helles" order for "Anna Berger" in room "101"
@@ -131,6 +145,12 @@ Feature: Host order entry and billing
     Given an authenticated administrator
     When settlement waits for a locked tab
     Then the bill timestamp follows the lock release
+
+  Scenario: Bill reversal timestamps begin after lock waits
+    Given an authenticated administrator
+    When bill reversal waits for a locked guest
+    Then the bill void and audit timestamps follow the lock release
+    And reversal leaves the original bill history unchanged
 
   Scenario: A host cart respects order batch limits
     Given an authenticated administrator

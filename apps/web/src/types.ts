@@ -6,7 +6,7 @@ export interface Room { id: string; name: string; position: number; guestCount?:
 export interface Guest { id: string; name: string; roomId: string; roomName: string; language: Language; itemCount: number; totalCents: number; version: number }
 export interface Category { id: string; name: LocalizedText; position: number; version: number }
 export interface Product { id: string; categoryId: string; name: LocalizedText; description?: LocalizedText; priceCents: number; enabled: boolean; selfServiceOnly: boolean; position: number; version: number }
-export interface OrderItem { id: string; productId: string; productName: LocalizedText; unitPriceCents: number; quantity: number; source: 'host' | 'guest'; status: 'provisional' | 'open'; provisionalUntil?: string; canUndo?: boolean; createdAt: string }
+export interface OrderItem { id: string; productId: string; productName: LocalizedText; unitPriceCents: number; quantity: number; source: 'host' | 'guest'; status: 'provisional' | 'open'; billingVersion: number; provisionalUntil?: string; canUndo?: boolean; createdAt: string }
 export interface Tab { id: string | null; guestId: string; guestName?: string; roomName?: string; items: OrderItem[]; itemCount: number; totalCents: number }
 export interface TabSummary { id: string; guestId: string; guestName: string; roomName: string; itemCount: number; totalCents: number; openedAt: string }
 export interface Bill { id: string; number: string; venueName: string; venueTimezone: string; guestName: string; roomName: string; totalCents: number; paymentMethod: string; settledAt: string; voidedAt?: string }

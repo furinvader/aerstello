@@ -30,12 +30,11 @@ describe('rate limit keys', () => {
       hook: 'preHandler',
       keyGenerator: ipRateLimitKey,
     });
-    const capabilityLimit = createRateLimitPreHandler(app.createRateLimit({
-      max: 10,
-      timeWindow: '1 minute',
-      keyGenerator: rateLimitKey,
-    }));
-    app.post(url, { preHandler: capabilityLimit }, async () => ({ ok: true }));
+    const limits = createRateLimitPreHandler(
+      app.createRateLimit({ max: 2, timeWindow: '1 minute', keyGenerator: ipRateLimitKey }),
+      app.createRateLimit({ max: 10, timeWindow: '1 minute', keyGenerator: rateLimitKey }),
+    );
+    app.post(url, { config: { rateLimit: false }, preHandler: limits }, async () => ({ ok: true }));
 
     const statuses = [];
     for (const token of ['first', 'second', 'third']) {
@@ -45,6 +44,30 @@ describe('rate limit keys', () => {
     await app.close();
 
     expect(statuses).toEqual([200, 200, 429]);
+  });
+
+  it('counts capability-rejected attempts toward the address ceiling', async () => {
+    const app = Fastify();
+    await app.register(rateLimit, {
+      global: true,
+      max: 99,
+      timeWindow: '1 minute',
+      hook: 'preHandler',
+      keyGenerator: ipRateLimitKey,
+    });
+    const limits = createRateLimitPreHandler(
+      app.createRateLimit({ max: 3, timeWindow: '1 minute', keyGenerator: ipRateLimitKey }),
+      app.createRateLimit({ max: 1, timeWindow: '1 minute', keyGenerator: rateLimitKey }),
+    );
+    app.post(url, { config: { rateLimit: false }, preHandler: limits }, async () => ({ ok: true }));
+
+    const statuses = [];
+    for (const token of ['same', 'same', 'rotated', 'another']) {
+      statuses.push((await app.inject({ method: 'POST', url, payload: { token } })).statusCode);
+    }
+    await app.close();
+
+    expect(statuses).toEqual([200, 429, 200, 429]);
   });
 
   it('increments a durable hashed counter shared by replicas', async () => {

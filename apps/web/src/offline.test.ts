@@ -26,6 +26,16 @@ describe('offline mutation replay', () => {
     expect(remove).toHaveBeenCalledWith('2');
   });
 
+  it('quarantines an item command that crossed billing', async () => {
+    const remove = vi.fn(async () => undefined);
+    const update = vi.fn(async () => undefined);
+    const send = vi.fn(async () => { throw new ApiError('ITEM_BILLING_CONFLICT', 'Review the tab', 409); });
+
+    await expect(replayQueuedMutations([mutation('1')], { send, remove, update })).resolves.toBe(0);
+    expect(update).toHaveBeenCalledWith('1', expect.objectContaining({ status: 'conflict', errorCode: 'ITEM_BILLING_CONFLICT' }));
+    expect(remove).not.toHaveBeenCalled();
+  });
+
   it('keeps transient failures pending and stops replay', async () => {
     const remove = vi.fn(async () => undefined);
     const update = vi.fn(async () => undefined);

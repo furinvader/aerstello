@@ -61,6 +61,12 @@ Feature: Device grants and replay protection
     When the same item void mutation is submitted twice
     Then both item void responses succeed
     And changing the replayed item void reason is rejected
+    And changing the replayed item billing version is rejected
+
+  Scenario: A committed legacy item void remains replayable
+    Given an authenticated administrator
+    When a committed item void without a billing version is replayed
+    Then the legacy item void replay succeeds
 
   Scenario: Concurrent replay of an order returns its prior success
     Given an authenticated administrator

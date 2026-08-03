@@ -111,7 +111,7 @@ export function TakeOrdersPage() {
   };
   const voidItem=async(reason:string)=>{
     if(!voidingItem||!guestId)return;
-    const result=await submitOrQueue({id:voidingItem.mutationId,hostId:host.id,path:`/order-items/${voidingItem.item.id}/void`,method:'POST',createdAt:voidingItem.createdAt,body:{mutationId:voidingItem.mutationId,reason},display:{kind:'void',guestId,guestName:selectedGuest?.name??guestId,roomName:selectedGuest?.roomName??'',productName:voidingItem.item.productName,quantity:voidingItem.item.quantity}});
+    const result=await submitOrQueue({id:voidingItem.mutationId,hostId:host.id,path:`/order-items/${voidingItem.item.id}/void`,method:'POST',createdAt:voidingItem.createdAt,body:{mutationId:voidingItem.mutationId,reason,expectedBillingVersion:voidingItem.item.billingVersion},display:{kind:'void',guestId,guestName:selectedGuest?.name??guestId,roomName:selectedGuest?.roomName??'',productName:voidingItem.item.productName,quantity:voidingItem.item.quantity}});
     setVoidingItem(null);
     setMessage({kind:'success',text:result.queued?t('itemVoidQueued'):t('itemVoided')});
     if(!result.queued)await Promise.all([client.invalidateQueries({queryKey:['tab',guestId]}),client.invalidateQueries({queryKey:['orders']}),client.invalidateQueries({queryKey:['guests']})]);

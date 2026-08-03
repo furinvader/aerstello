@@ -6,7 +6,11 @@ const administratorPassword = seedPassword(process.env);
 await migrate();
 await transaction(async (client) => {
   if (process.env.E2E_RESET === 'true') {
-    await client.query(`TRUNCATE rate_limit_counters,host_account_commands,product_create_commands,audit_events,realtime_events,bill_items,order_items,bills,order_batches,order_tabs,guest_sessions,access_requests,product_versions,products,categories,guests,rooms,host_sessions,hosts RESTART IDENTITY CASCADE`);
+    // The API relay keeps its cursor across E2E scenarios, just as it does
+    // across production mutations. Clear persisted events without rewinding
+    // their identity sequence so the test reset cannot manufacture reused IDs.
+    await client.query('DELETE FROM realtime_events');
+    await client.query(`TRUNCATE rate_limit_counters,host_account_commands,product_create_commands,audit_events,bill_items,order_items,bills,order_batches,order_tabs,guest_sessions,access_requests,product_versions,products,categories,guests,rooms,host_sessions,hosts RESTART IDENTITY CASCADE`);
     await client.query(`UPDATE venue_settings SET name='',default_language='de',timezone='Europe/Berlin',catalog_version=1,version=1`);
   }
   const passwordHash = await hashPassword(administratorPassword);

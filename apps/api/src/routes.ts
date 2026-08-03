@@ -11,6 +11,7 @@ import {
   guestArchiveSchema,
   guestCreateSchema,
   guestUpdateSchema,
+  itemVoidSchema,
   languageSchema,
   loginSchema,
   orderBatchSchema,
@@ -24,10 +25,10 @@ import {
   venueSettingsSchema,
   voidSchema,
 } from '@sky-bar/shared';
-import { audit, eventBus, publishEvent, storeEvent, type RealtimeEvent } from './events.js';
+import { audit, eventBus, requestRealtimeRelay, storeEvent, type RealtimeEvent } from './events.js';
 import { pool, transaction } from './db.js';
 import { config } from './config.js';
-import { createRateLimitPreHandler, rateLimitKey } from './rate-limit.js';
+import { createRateLimitPreHandler, ipRateLimitKey, rateLimitKey } from './rate-limit.js';
 import {
   accessStatusToken,
   authenticateHost,
@@ -128,7 +129,7 @@ async function tabDetail(guestId: string, guestSessionId?: string) {
   await pool.query(`UPDATE order_items SET status='open' WHERE tab_id=$1 AND status='provisional' AND provisional_until<=now()`, [tab.rows[0].id]);
   const items = await pool.query(
     `SELECT id,product_id AS "productId",product_name AS "productName",unit_price_cents AS "unitPriceCents",quantity,
-            source,status,provisional_until AS "provisionalUntil",created_at AS "createdAt",
+            source,status,billing_version AS "billingVersion",provisional_until AS "provisionalUntil",created_at AS "createdAt",
             COALESCE(submitted_by_guest_session=$2 AND status='provisional' AND provisional_until>now(),false) AS "canUndo"
        FROM order_items WHERE tab_id=$1 AND status IN ('open','provisional') ORDER BY created_at`,
     [tab.rows[0].id, guestSessionId ?? null],
@@ -140,13 +141,21 @@ async function tabDetail(guestId: string, guestSessionId?: string) {
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   const dummyPasswordHash = await hashPassword(newToken());
-  // The manual capability check leaves the plugin's global per-IP hook eligible
-  // to run afterward, so rotating tokens cannot escape the broader IP ceiling.
-  const accessStatusCapabilityLimit = createRateLimitPreHandler(app.createRateLimit({
-    max: config.RATE_LIMIT_MAX,
-    timeWindow: '1 minute',
-    keyGenerator: rateLimitKey,
-  }));
+  // Run both durable counters before rejecting either one. The plugin's global
+  // hook is disabled on this route so a capability rejection cannot skip the IP
+  // counter and an accepted request cannot increment the IP counter twice.
+  const accessStatusLimits = createRateLimitPreHandler(
+    app.createRateLimit({
+      max: config.ACCESS_STATUS_IP_LIMIT_MAX,
+      timeWindow: '1 minute',
+      keyGenerator: ipRateLimitKey,
+    }),
+    app.createRateLimit({
+      max: config.RATE_LIMIT_MAX,
+      timeWindow: '1 minute',
+      keyGenerator: rateLimitKey,
+    }),
+  );
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof HttpError) {
@@ -214,11 +223,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       return {access,event:inserted.rows[0]?await storeEvent('access-request.changed',{id:access.id},client):undefined};
     });
     const requestId = result.access.id;
-    if(result.event){try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed access-request event')}}
+    if(result.event)requestRealtimeRelay();
     return reply.code(201).send({ id: requestId, statusToken: token, status: 'pending' });
   });
 
-  app.post('/api/v1/public/access-requests/:id/status', { preHandler: accessStatusCapabilityLimit }, async (request, reply) => {
+  app.post('/api/v1/public/access-requests/:id/status', { config: { rateLimit: false }, preHandler: accessStatusLimits }, async (request, reply) => {
     const requestId = id(request);
     const { token, grantId } = body(z.object({
       token: z.string().min(1).max(256),
@@ -381,10 +390,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       );
       return { host, event: await storeEvent('host-auth.changed', { hostId: request.hostIdentity!.id }, client) };
     });
-    if (result.event) {
-      try { publishEvent(result.event); }
-      catch (error) { app.log.error(error, 'Could not publish committed host authorization event'); }
-    }
+    if(result.event)requestRealtimeRelay();
     return result.host;
   });
 
@@ -431,7 +437,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       await audit('host.created','host',result.rows[0].id,{email:input.email,role:input.role},{hostId:request.hostIdentity!.id},client);
       return {host:result.rows[0],event:await storeEvent('host-auth.changed',{hostId:result.rows[0].id},client)};
     });
-    if(result.event){try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed host creation event')}}
+    if(result.event)requestRealtimeRelay();
     return reply.code(201).send(result.host);
   });
 
@@ -457,8 +463,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const event=await storeEvent('host-auth.changed',{hostId},client);
       return {host:result.rows[0],event};
     });
-    try { publishEvent(updated.event); }
-    catch (error) { app.log.error(error, 'Could not publish committed host authorization event'); }
+    requestRealtimeRelay();
     return updated.host;
   });
 
@@ -479,8 +484,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       await audit('venue.updated', 'venue', '1', { oldName: previous.rows[0].name, newName: input.name }, { hostId: request.hostIdentity!.id }, client);
       return { venue: result.rows[0], event: await storeEvent('venue.changed', {}, client) };
     });
-    try { publishEvent(updated.event); }
-    catch (error) { app.log.error(error, 'Could not publish committed venue event'); }
+    requestRealtimeRelay();
     return updated.venue;
   });
 
@@ -533,10 +537,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       );
       return { room: result.rows[0]!, event: await storeEvent('rooms.changed', {}, client) };
     });
-    if (created.event) {
-      try { publishEvent(created.event); }
-      catch (error) { app.log.error(error, 'Could not publish committed room event'); }
-    }
+    if(created.event)requestRealtimeRelay();
     return reply.code(201).send(created.room);
   });
 
@@ -552,7 +553,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       }
       return {room:updated.rows[0],event:await storeEvent('rooms.changed',{},client)};
     });
-    try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed room update event')}
+    requestRealtimeRelay();
     return result.room;
   });
 
@@ -567,7 +568,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       for (const [position, room] of input.rooms.entries()) await client.query('UPDATE rooms SET position=$1,version=version+1 WHERE id=$2 AND archived_at IS NULL', [position, room.id]);
       return {event:await storeEvent('rooms.changed',{},client)};
     });
-    try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed room-order event')}
+    requestRealtimeRelay();
     return { ok: true };
   });
 
@@ -600,7 +601,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       );
       return {event:await storeEvent('rooms.changed',{},client)};
     });
-    if(result.event){try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed room archival event')}}
+    if(result.event)requestRealtimeRelay();
     return reply.code(204).send();
   });
 
@@ -638,8 +639,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const event = await storeEvent('guests.changed', {}, client);
       return { guest:created.rows[0]!, event };
     });
-    if(result.event){try { publishEvent(result.event); }
-    catch (error) { app.log.error(error, 'Could not publish committed guest event'); }}
+    if(result.event)requestRealtimeRelay();
     return reply.code(201).send(result.guest);
   });
 
@@ -660,7 +660,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       }
       return {guest:updated.rows[0],event:await storeEvent('guests.changed',{},client)};
     });
-    try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed guest update event')}
+    requestRealtimeRelay();
     return result.guest;
   });
 
@@ -692,7 +692,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       await client.query('UPDATE guest_sessions SET revoked_at=now() WHERE guest_id=$1 AND revoked_at IS NULL', [guestId]);
       return {event:await storeEvent('guests.changed',{},client)};
     });
-    if(result.event){try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed guest archival event')}}
+    if(result.event)requestRealtimeRelay();
     return reply.code(204).send();
   });
 
@@ -714,7 +714,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       await audit('guest-session.revoked','guest-session',params.id,{guestId:params.guestId},{hostId:request.hostIdentity!.id},client);
       return {event:await storeEvent('guest-access.changed',{guestId:params.guestId},client)};
     });
-    if(revoked.event){try{publishEvent(revoked.event)}catch(error){app.log.error(error,'Could not publish committed guest revocation event')}}
+    if(revoked.event)requestRealtimeRelay();
     return reply.code(204).send();
   });
 
@@ -743,7 +743,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       );
       return {category:result.rows[0]!,event:await storeEvent('catalog.changed',{},client)};
     });
-    if(created.event){try{publishEvent(created.event)}catch(error){app.log.error(error,'Could not publish committed catalog event')}}
+    if(created.event)requestRealtimeRelay();
     return reply.code(201).send(created.category);
   });
 
@@ -822,10 +822,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const event = await storeEvent('catalog.changed', {}, client);
       return { product, event };
     });
-    if (result.event) {
-      try { publishEvent(result.event); }
-      catch (error) { app.log.error(error, 'Could not publish committed catalog event'); }
-    }
+    if(result.event)requestRealtimeRelay();
     return reply.code(201).send(result.product);
   });
 
@@ -848,7 +845,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       await client.query('INSERT INTO product_versions(product_id,catalog_version,name,price_cents,enabled,self_service_only) VALUES ($1,$2,$3,$4,$5,$6)', [productId, version, JSON.stringify(input.name), input.priceCents, input.enabled, input.selfServiceOnly]);
       return {product:productResult.rows[0],event:await storeEvent('catalog.changed',{},client)};
     });
-    try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed product update event')}
+    requestRealtimeRelay();
     return result.product;
   });
 
@@ -884,7 +881,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         [productId,version,JSON.stringify(archived.name),archived.priceCents,archived.selfServiceOnly]);
       return {event:await storeEvent('catalog.changed',{},client)};
     });
-    if(result.event){try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed product archival event')}}
+    if(result.event)requestRealtimeRelay();
     return reply.code(204).send();
   });
 
@@ -934,7 +931,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const events=[await storeEvent('access-request.changed',{id:requestId},client),await storeEvent('guests.changed',{},client)];
       return { guestId,events };
     });
-    for(const event of result.events){try{publishEvent(event)}catch(error){app.log.error(error,'Could not publish committed access approval event')}}
+    if(result.events.length)requestRealtimeRelay();
     return {guestId:result.guestId};
   });
 
@@ -959,7 +956,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       await audit('access.denied','access-request',requestId,{}, {hostId:request.hostIdentity!.id},client);
       return storeEvent('access-request.changed',{id:requestId},client);
     });
-    if(event){try{publishEvent(event)}catch(error){app.log.error(error,'Could not publish committed access denial event')}}
+    if(event)requestRealtimeRelay();
     return { ok: true };
   });
 
@@ -1027,45 +1024,54 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       await audit('order.batch-created', 'tab', tabId, { mutationId: input.mutationId }, { hostId: request.hostIdentity!.id }, client);
       return {tabId,event:await storeEvent('orders.changed',{guestId:input.guestId},client)};
     });
-    if(result.event){try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed order event')}}
+    if(result.event)requestRealtimeRelay();
     return reply.code(201).send({tabId:result.tabId});
   });
 
   app.post('/api/v1/order-items/:id/void', { preHandler: requireHost }, async (request) => {
     const itemId = id(request);
-    const input = body(voidSchema, request);
+    const input = body(itemVoidSchema, request);
     const result = await transaction(async (client) => {
-      const duplicate=await client.query<{itemId:string;tabId:string;guestId:string;hostId:string;reason:string}>(
-        `SELECT i.id AS "itemId",i.tab_id AS "tabId",t.guest_id AS "guestId",i.voided_by_host AS "hostId",i.void_reason AS reason FROM order_items i JOIN order_tabs t ON t.id=i.tab_id
-          WHERE i.host_void_mutation_id=$1`,[input.mutationId]);
-      if(duplicate.rows[0]){
-        if(duplicate.rows[0].itemId!==itemId) throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to another item.');
-        if(duplicate.rows[0].hostId!==request.hostIdentity!.id) throw new HttpError(403,'HOST_MISMATCH','This void belongs to another host.');
-        if(duplicate.rows[0].reason!==input.reason) throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to a different void command.');
-        return {...duplicate.rows[0],event:undefined};
+      type ItemVoidReplay = {itemId:string;tabId:string;guestId:string;hostId:string;reason:string;expectedBillingVersion:number|null};
+      const expectedBillingVersion=input.expectedBillingVersion??null;
+      const replay=async()=>{
+        const duplicate=await client.query<ItemVoidReplay>(
+          `SELECT i.id AS "itemId",i.tab_id AS "tabId",t.guest_id AS "guestId",i.voided_by_host AS "hostId",i.void_reason AS reason,
+                  i.host_void_expected_billing_version AS "expectedBillingVersion"
+             FROM order_items i JOIN order_tabs t ON t.id=i.tab_id WHERE i.host_void_mutation_id=$1`,[input.mutationId]);
+        const prior=duplicate.rows[0];
+        if(!prior)return undefined;
+        if(prior.itemId!==itemId) throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to another item.');
+        if(prior.hostId!==request.hostIdentity!.id) throw new HttpError(403,'HOST_MISMATCH','This void belongs to another host.');
+        if(prior.reason!==input.reason||prior.expectedBillingVersion!==expectedBillingVersion) throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to a different void command.');
+        return prior;
+      };
+      const duplicate=await replay();
+      if(duplicate)return {...duplicate,event:undefined};
+      if(input.expectedBillingVersion===undefined){
+        throw new HttpError(409,'ITEM_BILLING_CONFLICT','This item was captured without a billing version. Review the current tab before removing it.');
       }
       const updated=await client.query<{tabId:string}>(
-        `UPDATE order_items SET status='voided',voided_at=now(),voided_by_host=$1,void_reason=$2,host_void_mutation_id=$3
-          WHERE id=$4 AND status IN ('open','provisional') RETURNING tab_id AS "tabId"`,
-        [request.hostIdentity!.id,input.reason,input.mutationId,itemId]);
+        `UPDATE order_items
+            SET status='voided',voided_at=now(),voided_by_host=$1,void_reason=$2,host_void_mutation_id=$3,
+                host_void_expected_billing_version=$4
+          WHERE id=$5 AND status IN ('open','provisional') AND billing_version=$4 RETURNING tab_id AS "tabId"`,
+        [request.hostIdentity!.id,input.reason,input.mutationId,input.expectedBillingVersion,itemId]);
       if(!updated.rowCount){
-        const replay=await client.query<{itemId:string;tabId:string;guestId:string;hostId:string;reason:string}>(
-          `SELECT i.id AS "itemId",i.tab_id AS "tabId",t.guest_id AS "guestId",i.voided_by_host AS "hostId",i.void_reason AS reason FROM order_items i JOIN order_tabs t ON t.id=i.tab_id
-            WHERE i.host_void_mutation_id=$1`,[input.mutationId]);
-        if(replay.rows[0]){
-          if(replay.rows[0].itemId!==itemId) throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to another item.');
-          if(replay.rows[0].hostId!==request.hostIdentity!.id) throw new HttpError(403,'HOST_MISMATCH','This void belongs to another host.');
-          if(replay.rows[0].reason!==input.reason) throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to a different void command.');
-          return {...replay.rows[0],event:undefined};
+        const serializedReplay=await replay();
+        if(serializedReplay)return {...serializedReplay,event:undefined};
+        const current=await client.query<{billingVersion:number}>('SELECT billing_version AS "billingVersion" FROM order_items WHERE id=$1',[itemId]);
+        if(current.rows[0]&&current.rows[0].billingVersion!==input.expectedBillingVersion){
+          throw new HttpError(409,'ITEM_BILLING_CONFLICT','The item crossed a billing lifecycle. Review the current tab before removing it.');
         }
         throw new HttpError(409,'ITEM_NOT_OPEN','The item is no longer open.');
       }
       const tab=await client.query<{guestId:string}>('SELECT guest_id AS "guestId" FROM order_tabs WHERE id=$1',[updated.rows[0]!.tabId]);
-      await audit('order-item.voided','order-item',itemId,{reason:input.reason,mutationId:input.mutationId},{hostId:request.hostIdentity!.id},client);
+      await audit('order-item.voided','order-item',itemId,{reason:input.reason,mutationId:input.mutationId,expectedBillingVersion:input.expectedBillingVersion},{hostId:request.hostIdentity!.id},client);
       const guestId=tab.rows[0]!.guestId;
       return {tabId:updated.rows[0]!.tabId,guestId,event:await storeEvent('orders.changed',{guestId},client)};
     });
-    if(result.event){try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed item-void event')}}
+    if(result.event)requestRealtimeRelay();
     return { ok: true };
   });
 
@@ -1140,7 +1146,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           [newBill.id, item.id, JSON.stringify(item.productName), item.unitPriceCents, item.quantity, item.source],
         );
       }
-      await client.query(`UPDATE order_items SET status='billed',bill_id=$1 WHERE tab_id=$2 AND status='open'`, [newBill.id, tabId]);
+      await client.query(`UPDATE order_items SET status='billed',bill_id=$1,billing_version=billing_version+1 WHERE tab_id=$2 AND status='open'`, [newBill.id, tabId]);
       await client.query(`UPDATE order_tabs SET status='billed',closed_at=clock_timestamp() WHERE id=$1`, [tabId]);
       await audit('bill.settled', 'bill', newBill.id, { totalCents: total, paymentMethod: input.paymentMethod }, { hostId: request.hostIdentity!.id }, client);
       return { ...newBill, guestId: current.guestId, events:[
@@ -1148,7 +1154,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         await storeEvent('bills.changed',{id:newBill.id},client),
       ] };
     });
-    for(const event of bill.events){try{publishEvent(event)}catch(error){app.log.error(error,'Could not publish committed settlement event')}}
+    if(bill.events.length)requestRealtimeRelay();
     const {events:_events,...response}=bill;
     return response;
   });
@@ -1225,7 +1231,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const guest = await client.query('SELECT id FROM guests WHERE id=$1 FOR UPDATE', [owner.rows[0].guestId]);
       if (!guest.rowCount) throw new HttpError(404, 'GUEST_NOT_FOUND', 'Guest not found.');
       const result = await client.query<{ tabId: string; guestId: string; totalCents: number }>(
-        `UPDATE bills SET voided_at=now(),void_reason=$1,voided_by=$2,void_mutation_id=$3
+        `UPDATE bills SET voided_at=clock_timestamp(),void_reason=$1,voided_by=$2,void_mutation_id=$3
           WHERE id=$4 AND voided_at IS NULL
           RETURNING tab_id AS "tabId",guest_id AS "guestId",total_cents AS "totalCents"`,
         [input.reason, request.hostIdentity!.id, input.mutationId, billId],
@@ -1254,7 +1260,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         await storeEvent('orders.changed',{guestId:bill.guestId},client),
       ] };
     });
-    for(const event of voided.events){try{publishEvent(event)}catch(error){app.log.error(error,'Could not publish committed bill-void event')}}
+    if(voided.events.length)requestRealtimeRelay();
     return { ok: true };
   });
 
@@ -1285,19 +1291,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       cleanup();
       if (!reply.raw.destroyed) reply.raw.end();
     };
+    let deliveryQueue = Promise.resolve();
     const listener = (event: RealtimeEvent) => {
-      if(request.guestIdentity){
-        const visible=guestRealtimeEvent(event,request.guestIdentity.id);
-        if(!visible) return;
-        void authorized().then((active) => {
-          if (!active) return closeStream();
-          if (!closed) reply.raw.write(`id: ${visible.id}\nevent: ${visible.topic}\ndata: ${JSON.stringify(visible.payload)}\n\n`);
-        }).catch(closeStream);
-        return;
-      }
-      void authorized().then((active) => {
-        if (!active) return closeStream();
-        if (!closed) reply.raw.write(`id: ${event.id}\nevent: ${event.topic}\ndata: ${JSON.stringify(event.payload)}\n\n`);
+      const visible=request.guestIdentity?guestRealtimeEvent(event,request.guestIdentity.id):event;
+      if(!visible)return;
+      deliveryQueue=deliveryQueue.then(async()=>{
+        if(closed)return;
+        if(!await authorized())return closeStream();
+        if(!closed)reply.raw.write(`id: ${visible.id}\nevent: ${visible.topic}\ndata: ${JSON.stringify(visible.payload)}\n\n`);
       }).catch(closeStream);
     };
     const keepAlive = setInterval(() => { if (!closed) reply.raw.write(': keepalive\n\n'); }, 20_000);
@@ -1376,7 +1377,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       await audit('guest-item.submitted', 'order-item', result.rows[0].id, {}, { guestSessionId: request.guestIdentity!.sessionId }, client);
       return {...result.rows[0],event:await storeEvent('orders.changed',{guestId:request.guestIdentity!.id},client)};
     });
-    if(item.event){try{publishEvent(item.event)}catch(error){app.log.error(error,'Could not publish committed guest-item event')}}
+    if(item.event)requestRealtimeRelay();
     const {event:_event,...response}=item;
     return reply.code(201).send(response);
   });
@@ -1414,7 +1415,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       await audit('guest-item.undone', 'order-item', itemId, { mutationId: input.mutationId }, { guestSessionId: request.guestIdentity!.sessionId }, client);
       return {event:await storeEvent('orders.changed',{guestId:request.guestIdentity!.id},client)};
     });
-    if(result.event){try{publishEvent(result.event)}catch(error){app.log.error(error,'Could not publish committed guest-undo event')}}
+    if(result.event)requestRealtimeRelay();
     return { ok: true };
   });
 }

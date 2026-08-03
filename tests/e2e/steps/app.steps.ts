@@ -70,6 +70,14 @@ let sharedNetworkPollStatuses: number[] = [];
 let rotatingCapabilityStatuses: number[] = [];
 let conflictGuestId = '';
 let changedItemVoidReplayStatus = 0;
+let changedItemVoidVersionReplayStatus = 0;
+let itemBillingConflictResult: {status:number;code:string}|undefined;
+let correctedLifecycleItemCount = 0;
+let lifecycleGuestId = '';
+let refreshedLifecycleVoidStatus = 0;
+let legacyItemBillingConflictResult: {status:number;code:string}|undefined;
+let legacyLifecycleItemCount = 0;
+let legacyItemVoidReplayStatus = 0;
 let changedBillVoidReplayStatus = 0;
 let snapshottedBillDate = '';
 let retriedProductMutationIds: string[] = [];
@@ -189,6 +197,16 @@ let replayedLogoutStatus = 0;
 let replayedGuestLogoutStatus = 0;
 let guestUndoRemainingMs = 0;
 let settlementTimestampAgeMs = Number.POSITIVE_INFINITY;
+let billVoidLockTiming: {
+  releaseFloor: Date;
+  voidedAt: Date;
+  auditCreatedAt: Date;
+  auditCount: number;
+  billBefore: unknown;
+  billAfter: unknown;
+  linesBefore: unknown[];
+  linesAfter: unknown[];
+} | undefined;
 let databaseClockGrantResult: {granted:boolean;guestStatus:number}|undefined;
 let databaseClockApprovalResult: {
   validStatus:number;validRequestStatus:string;expiredStatus:number;expiredCode:string;expiredRequestStatus:string;expiredGuestCount:number;
@@ -420,6 +438,41 @@ Then('the order is marked as queued for synchronization',async({page,context})=>
 Given('an open {string} order for {string} in room {string}',async({page},product:string,guest:string,room:string)=>{await chooseOrder(page,product,guest,room);await page.getByRole('button',{name:/Bestellung buchen/}).click();await expect(page.locator('.open-tab')).toContainText(product)});
 When('the host removes the open item while offline',async({page,context})=>{await context.setOffline(true);await page.locator('.open-tab').getByRole('button',{name:/Artikel entfernen|Rimuovi articolo|Remove item/}).click();await page.locator('.modal input').fill('Falscher Artikel');await page.locator('.modal').getByRole('button',{name:/Bestätigen|Conferma|Confirm/}).click()});
 Then('the item removal is queued for synchronization',async({page,context})=>{await expect(page.getByText(/Entfernen offline gespeichert|Rimozione salvata offline|Removal saved offline/)).toBeVisible();await context.setOffline(false)});
+When('an item removal command crosses settlement and bill reversal',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);
+  const guest=guests.data.find(item=>item.name==='Anna Berger')!;
+  const product=products.data.find(item=>item.name.de==='Helles')!;
+  lifecycleGuestId=guest.id;
+  const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};
+  const captured=await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json() as {items:{id:string;billingVersion:number}[]};
+  const item=captured.items[0]!;
+  const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};
+  expect((await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Lifecycle correction'}})).status()).toBe(200);
+  const stale=await request.post(`/api/v1/order-items/${item.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Queued before settlement',expectedBillingVersion:item.billingVersion}});
+  itemBillingConflictResult={status:stale.status(),code:((await stale.json()) as {error:{code:string}}).error.code};
+  correctedLifecycleItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
+});
+Then('the stale item removal is rejected as a billing conflict',async()=>{expect(itemBillingConflictResult).toEqual({status:409,code:'ITEM_BILLING_CONFLICT'})});
+Then('the corrected item remains on the open tab',async()=>{expect(correctedLifecycleItemCount).toBe(1)});
+When('the host submits a new removal from the refreshed tab',async({page})=>{
+  const request=page.context().request;
+  const current=await (await request.get(`/api/v1/guests/${lifecycleGuestId}/tab`)).json() as {items:{id:string;billingVersion:number}[]};
+  const item=current.items[0]!;
+  refreshedLifecycleVoidStatus=(await request.post(`/api/v1/order-items/${item.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Reviewed correction',expectedBillingVersion:item.billingVersion}})).status();
+});
+Then('the refreshed item removal succeeds',async()=>{expect(refreshedLifecycleVoidStatus).toBe(200)});
+When('an item removal without a billing version is submitted',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);
+  const guest=guests.data.find(item=>item.name==='Anna Berger')!;
+  const product=products.data.find(item=>item.name.de==='Helles')!;
+  await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}});
+  const tab=await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json() as {items:{id:string}[]};
+  const response=await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Legacy queued correction'}});
+  legacyItemBillingConflictResult={status:response.status(),code:((await response.json()) as {error:{code:string}}).error.code};
+  legacyLifecycleItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
+});
+Then('the legacy item removal is rejected as a billing conflict',async()=>{expect(legacyItemBillingConflictResult).toEqual({status:409,code:'ITEM_BILLING_CONFLICT'})});
+Then('the legacy item remains on the open tab',async()=>{expect(legacyLifecycleItemCount).toBe(1)});
 When('the host retries item removal after its response is lost',async({page})=>{
   await page.evaluate(()=>{
     const originalFetch=window.fetch.bind(window);let loseResponse=true;const reasons:string[]=[];
@@ -1316,6 +1369,28 @@ When('settlement waits for a locked tab',async({page})=>{
   }finally{if(!committed)await database.query('ROLLBACK');await database.end()}
 });
 Then('the bill timestamp follows the lock release',async()=>{expect(settlementTimestampAgeMs).toBeLessThan(1_000)});
+When('bill reversal waits for a locked guest',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;
+  const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};
+  const settlement=await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}});expect(settlement.status()).toBe(200);const bill=await settlement.json() as {id:string};
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();let committed=false;
+  try{
+    const snapshotSql=`SELECT settled_at,venue_name,venue_timezone,guest_name,room_name,host_name,host_name_known,total_cents,payment_method,payment_note FROM bills WHERE id=$1`;
+    const linesSql=`SELECT original_order_item_id,product_name,unit_price_cents,quantity,source FROM bill_items WHERE bill_id=$1 ORDER BY id`;
+    const billBefore=(await database.query(snapshotSql,[bill.id])).rows[0];const linesBefore=(await database.query(linesSql,[bill.id])).rows;
+    await database.query('BEGIN');await database.query('SELECT id FROM guests WHERE id=$1 FOR UPDATE',[guest.id]);const holderXid=String((await database.query('SELECT pg_current_xact_id()::text AS xid')).rows[0].xid);
+    const reversal=request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Lock wait correction'}});
+    await expect.poll(async()=>Number((await database.query(`SELECT count(*) FROM pg_locks WHERE locktype='transactionid' AND transactionid::text=$1 AND NOT granted`,[holderXid])).rows[0].count),{timeout:5_000,intervals:[10,20,50]}).toBeGreaterThan(0);
+    const releaseFloor=(await database.query<{timestamp:Date}>('SELECT clock_timestamp() AS timestamp')).rows[0]!.timestamp;await database.query('COMMIT');committed=true;
+    const response=await reversal;expect(response.status()).toBe(200);
+    const current=(await database.query<{voidedAt:Date}>(`SELECT voided_at AS "voidedAt" FROM bills WHERE id=$1`,[bill.id])).rows[0]!;
+    const auditRow=(await database.query<{createdAt:Date|null;count:number}>(`SELECT min(created_at) AS "createdAt",count(*)::int AS count FROM audit_events WHERE action='bill.voided' AND entity_type='bill' AND entity_id=$1`,[bill.id])).rows[0]!;
+    expect(current.voidedAt).toBeInstanceOf(Date);expect(auditRow.createdAt).toBeInstanceOf(Date);
+    billVoidLockTiming={releaseFloor,voidedAt:current.voidedAt,auditCreatedAt:auditRow.createdAt!,auditCount:auditRow.count,billBefore,billAfter:(await database.query(snapshotSql,[bill.id])).rows[0],linesBefore,linesAfter:(await database.query(linesSql,[bill.id])).rows};
+  }finally{if(!committed)await database.query('ROLLBACK');await database.end()}
+});
+Then('the bill void and audit timestamps follow the lock release',async()=>{expect(billVoidLockTiming).toBeDefined();expect(billVoidLockTiming!.voidedAt.getTime()).toBeGreaterThanOrEqual(billVoidLockTiming!.releaseFloor.getTime());expect(billVoidLockTiming!.auditCreatedAt.getTime()).toBeGreaterThanOrEqual(billVoidLockTiming!.releaseFloor.getTime());expect(billVoidLockTiming!.auditCreatedAt.getTime()).toBeGreaterThanOrEqual(billVoidLockTiming!.voidedAt.getTime());expect(billVoidLockTiming!.auditCount).toBe(1)});
+Then('reversal leaves the original bill history unchanged',async()=>{expect(billVoidLockTiming).toBeDefined();expect(billVoidLockTiming!.billAfter).toEqual(billVoidLockTiming!.billBefore);expect(billVoidLockTiming!.linesAfter).toEqual(billVoidLockTiming!.linesBefore)});
 
 When('the host adds the maximum quantity of {string} for {string} in room {string}',async({page},product:string,guest:string,room:string)=>{await chooseOrder(page,product,guest,room);await page.locator('.product-tile').filter({hasText:product}).click({clickCount:98})});
 Then('that cart line cannot exceed the order batch quantity limit',async({page})=>{await expect(page.locator('.product-tile').filter({hasText:'Helles'})).toBeDisabled();await expect(page.locator('.cart-lines .stepper b')).toHaveText('99')});
@@ -1331,7 +1406,7 @@ Then('settlement reports that the displayed tab changed',async({page})=>{await e
 Then('no bill is created for the stale confirmation',async()=>{expect(staleSettlementBillCount).toBe(0)});
 When('the host retries settlement with the refreshed confirmation',async({page})=>{await page.locator('.modal').getByRole('button',{name:/Abrechnen|Incassa|Settle/}).click();await expect(page).toHaveURL(/\/app\/bills\//);const request=page.context().request;const bills=await (await request.get('/api/v1/bills')).json() as {data:{id:string}[]};refreshedSettlementBillCount=bills.data.length;const bill=await (await request.get(`/api/v1/bills/${bills.data[0]!.id}`)).json() as {items:{quantity:number}[]};refreshedSettlementItemCount=bill.items.reduce((sum,item)=>sum+item.quantity,0)});
 Then('one bill is created for the refreshed tab',async()=>{expect(refreshedSettlementBillCount).toBe(1);expect(refreshedSettlementItemCount).toBe(2)});
-When('another device voids the last item while settlement is open',async({page})=>{await chooseOrder(page,'Helles','Anna Berger','101');await page.getByRole('button',{name:/Bestellung buchen|Invia ordine|Submit order/}).click();await expect(page.locator('.tab-pill')).toContainText(/1 Artikel|1 articolo|1 item/);await page.getByRole('button',{name:/Abrechnen|Incassa|Settle/}).click();const {request,guests}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const tab=await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json() as {items:{id:string}[]};expect((await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Removed on another device'}})).status()).toBe(200);await page.locator('.modal').getByRole('button',{name:/Abrechnen|Incassa|Settle/}).click();await expect(page.locator('.modal')).toHaveCount(0);staleSettlementBillCount=((await (await request.get('/api/v1/bills')).json()) as {data:unknown[]}).data.length});
+When('another device voids the last item while settlement is open',async({page})=>{await chooseOrder(page,'Helles','Anna Berger','101');await page.getByRole('button',{name:/Bestellung buchen|Invia ordine|Submit order/}).click();await expect(page.locator('.tab-pill')).toContainText(/1 Artikel|1 articolo|1 item/);await page.getByRole('button',{name:/Abrechnen|Incassa|Settle/}).click();const {request,guests}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const tab=await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json() as {items:{id:string;billingVersion:number}[]};expect((await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Removed on another device',expectedBillingVersion:tab.items[0]!.billingVersion}})).status()).toBe(200);await page.locator('.modal').getByRole('button',{name:/Abrechnen|Incassa|Settle/}).click();await expect(page.locator('.modal')).toHaveCount(0);staleSettlementBillCount=((await (await request.get('/api/v1/bills')).json()) as {data:unknown[]}).data.length});
 Then('the empty settlement confirmation closes without a bill',async({page})=>{expect(staleSettlementBillCount).toBe(0);await expect(page.getByRole('button',{name:/Abrechnen|Incassa|Settle/})).toHaveCount(0)});
 
 When('the host submits orders beyond the maximum tab total',async({page})=>{
@@ -1374,15 +1449,31 @@ When('the same item void mutation is submitted twice',async({page})=>{
   const {request,me,guests,products}=await operationalData(page);
   const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const product=products.data.find((item)=>item.name.de==='Helles')!;
   await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}});
-  const tab=await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json() as {items:{id:string}[]};
+  const tab=await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json() as {items:{id:string;billingVersion:number}[]};
   const mutationId=crypto.randomUUID();
+  const command={mutationId,reason:'E2E correction',expectedBillingVersion:tab.items[0]!.billingVersion};
   repeatedVoidStatuses=[];
-  repeatedVoidStatuses.push((await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:{mutationId,reason:'E2E correction'}})).status());
-  repeatedVoidStatuses.push((await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:{mutationId,reason:'E2E correction'}})).status());
-  changedItemVoidReplayStatus=(await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:{mutationId,reason:'Changed correction'}})).status();
+  repeatedVoidStatuses.push((await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:command})).status());
+  repeatedVoidStatuses.push((await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:command})).status());
+  changedItemVoidReplayStatus=(await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:{...command,reason:'Changed correction'}})).status();
+  changedItemVoidVersionReplayStatus=(await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:{...command,expectedBillingVersion:command.expectedBillingVersion+1}})).status();
 });
 Then('both item void responses succeed',async()=>{expect(repeatedVoidStatuses).toEqual([200,200])});
 Then('changing the replayed item void reason is rejected',async()=>{expect(changedItemVoidReplayStatus).toBe(409)});
+Then('changing the replayed item billing version is rejected',async()=>{expect(changedItemVoidVersionReplayStatus).toBe(409)});
+
+When('a committed item void without a billing version is replayed',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);
+  const guest=guests.data.find(item=>item.name==='Anna Berger')!;
+  const product=products.data.find(item=>item.name.de==='Helles')!;
+  await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}});
+  const tab=await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json() as {items:{id:string}[]};
+  const mutationId=crypto.randomUUID();const reason='Legacy committed correction';
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();
+  try{await database.query(`UPDATE order_items SET status='voided',voided_at=clock_timestamp(),voided_by_host=$1,void_reason=$2,host_void_mutation_id=$3,host_void_expected_billing_version=NULL WHERE id=$4`,[me.host.id,reason,mutationId,tab.items[0]!.id])}finally{await database.end()}
+  legacyItemVoidReplayStatus=(await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:{mutationId,reason}})).status();
+});
+Then('the legacy item void replay succeeds',async()=>{expect(legacyItemVoidReplayStatus).toBe(200)});
 
 When('the same order mutation is submitted concurrently',async({page})=>{
   const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const mutationId=crypto.randomUUID();const data={mutationId,originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]};

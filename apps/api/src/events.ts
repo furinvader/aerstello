@@ -11,6 +11,7 @@ export interface RealtimeEvent {
 
 export const eventBus = new EventEmitter();
 eventBus.setMaxListeners(1000);
+const realtimeRelayWakeBus = new EventEmitter();
 export const realtimeEventRetention = 10_000;
 export const realtimeRelayBatchSize = 1_000;
 const publishedEventKeys = new Set<string>();
@@ -63,6 +64,10 @@ export async function relayEventsAfter(cursor: string, client: EventDatabase = p
   return result.rows.at(-1)?.id??cursor;
 }
 
+export function requestRealtimeRelay(): void {
+  realtimeRelayWakeBus.emit('wake');
+}
+
 export async function startRealtimeRelay(
   log: { warn: (bindings: Record<string, unknown>, message: string) => void },
   client: EventDatabase = pool,
@@ -70,20 +75,27 @@ export async function startRealtimeRelay(
 ): Promise<() => void> {
   let cursor=await latestRealtimeEventId(client);
   let polling=false;
+  let pending=false;
   const poll=async()=>{
-    if(polling)return;
+    if(polling){pending=true;return}
     polling=true;
-    try{cursor=await relayEventsAfter(cursor,client)}
-    catch(error){log.warn({error},'Could not relay persisted realtime events')}
+    try{
+      do{
+        pending=false;
+        try{cursor=await relayEventsAfter(cursor,client)}
+        catch(error){log.warn({error},'Could not relay persisted realtime events')}
+      }while(pending)
+    }
     finally{polling=false}
   };
+  const wake=()=>void poll();
+  realtimeRelayWakeBus.on('wake',wake);
   const timer=setInterval(()=>void poll(),intervalMs);
   timer.unref();
-  return ()=>clearInterval(timer);
-}
-
-export async function emitEvent(topic: string, payload: Record<string, unknown>, client: pg.Pool | pg.PoolClient = pool): Promise<void> {
-  publishEvent(await storeEvent(topic, payload, client));
+  return ()=>{
+    clearInterval(timer);
+    realtimeRelayWakeBus.off('wake',wake);
+  };
 }
 
 export async function audit(
@@ -95,8 +107,8 @@ export async function audit(
   client: pg.Pool | pg.PoolClient = pool,
 ): Promise<void> {
   await client.query(
-    `INSERT INTO audit_events(actor_host_id,actor_guest_session_id,action,entity_type,entity_id,detail)
-     VALUES ($1,$2,$3,$4,$5,$6)`,
+    `INSERT INTO audit_events(actor_host_id,actor_guest_session_id,action,entity_type,entity_id,detail,created_at)
+     VALUES ($1,$2,$3,$4,$5,$6,clock_timestamp())`,
     [actor.hostId ?? null, actor.guestSessionId ?? null, action, entityType, entityId, JSON.stringify(detail)],
   );
 }

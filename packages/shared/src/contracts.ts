@@ -133,6 +133,13 @@ export const voidSchema = z.object({
   reason: z.string().trim().min(2).max(240),
 });
 
+export const itemVoidSchema = voidSchema.extend({
+  // Optional only so an already-committed pre-upgrade command can still be
+  // recognized as an idempotent replay. New commands without this value are
+  // rejected by the API before they can change an item.
+  expectedBillingVersion: z.number().int().min(0).optional(),
+});
+
 export const accessRequestSchema = z.object({
   mutationId: z.string().uuid(),
   name: z.string().trim().min(1).max(120),
