@@ -25,12 +25,13 @@ import {
   venueSettingsSchema,
   voidSchema,
 } from '@sky-bar/shared';
+import type { GuestItemCreated, OrderItem, Tab } from '@sky-bar/shared';
 import { audit, eventBus, requestRealtimeRelay, storeEvent, type RealtimeEvent } from './events.js';
 import { pool, transaction } from './db.js';
 import { config } from './config.js';
 import { createRateLimitPreHandler, ipRateLimitKey, rateLimitKey } from './rate-limit.js';
 import {
-  accessStatusToken,
+  accessStatusVerifierCandidates,
   authenticateHost,
   authenticateGuest,
   clearGuestCookie,
@@ -41,8 +42,10 @@ import {
   hashPassword,
   hashToken,
   hostSessionIsActive,
+  issueAccessStatusCapability,
   lockVerifiedHostLogin,
   newToken,
+  recoverAccessStatusCapability,
   requireAdmin,
   requireGuest,
   requireHost,
@@ -118,7 +121,7 @@ async function ensureTabTotalWithinRange(tabId: string, additionalCents: bigint,
   }
 }
 
-async function tabDetail(guestId: string, guestSessionId?: string) {
+async function tabDetail(guestId: string, guestSessionId?: string): Promise<Tab> {
   const tab = await pool.query(
     `SELECT t.id,g.id AS "guestId",g.name AS "guestName",r.name AS "roomName",t.opened_at AS "openedAt"
        FROM order_tabs t JOIN guests g ON g.id=t.guest_id JOIN rooms r ON r.id=g.room_id
@@ -127,10 +130,13 @@ async function tabDetail(guestId: string, guestSessionId?: string) {
   );
   if (!tab.rows[0]) return { id: null, guestId, items: [], itemCount: 0, totalCents: 0 };
   await pool.query(`UPDATE order_items SET status='open' WHERE tab_id=$1 AND status='provisional' AND provisional_until<=now()`, [tab.rows[0].id]);
-  const items = await pool.query(
+  const items = await pool.query<OrderItem>(
     `SELECT id,product_id AS "productId",product_name AS "productName",unit_price_cents AS "unitPriceCents",quantity,
             source,status,billing_version AS "billingVersion",provisional_until AS "provisionalUntil",created_at AS "createdAt",
-            COALESCE(submitted_by_guest_session=$2 AND status='provisional' AND provisional_until>now(),false) AS "canUndo"
+            COALESCE(submitted_by_guest_session=$2 AND status='provisional' AND provisional_until>statement_timestamp(),false) AS "canUndo",
+            CASE WHEN status='provisional' AND provisional_until>statement_timestamp()
+              THEN GREATEST(0,floor(extract(epoch FROM (provisional_until-statement_timestamp()))*1000)::int)
+              ELSE 0 END AS "provisionalRemainingMs"
        FROM order_items WHERE tab_id=$1 AND status IN ('open','provisional') ORDER BY created_at`,
     [tab.rows[0].id, guestSessionId ?? null],
   );
@@ -195,36 +201,56 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.post('/api/v1/public/access-requests', async (request, reply) => {
     const input = body(accessRequestSchema, request);
-    const token = accessStatusToken(input.mutationId);
+    const issuedCapability = issueAccessStatusCapability(input.mutationId);
     const result = await transaction(async (client) => {
-      const findExisting=async()=> (await client.query<{ id: string; name: string; roomId: string; language: string }>(
-        `SELECT id,name,room_id AS "roomId",language FROM access_requests WHERE mutation_id=$1 FOR UPDATE`,
+      type StoredAccessRequest = {
+        id: string; name: string; roomId: string; language: string; statusTokenHash: string; statusTokenKeyId: string | null;
+      };
+      const findExisting=async()=> (await client.query<StoredAccessRequest>(
+        `SELECT id,name,room_id AS "roomId",language,status_token_hash AS "statusTokenHash",
+                status_token_key_id AS "statusTokenKeyId"
+           FROM access_requests WHERE mutation_id=$1 FOR UPDATE`,
         [input.mutationId],
       )).rows[0];
-      const validate=(stored:{ id: string; name: string; roomId: string; language: string })=>{
+      const validate=async(stored:StoredAccessRequest)=>{
         if (stored.name !== input.name || stored.roomId !== input.roomId || stored.language !== input.language) {
           throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another access request.');
         }
-        return stored;
+        const capability = recoverAccessStatusCapability(
+          input.mutationId,
+          stored.statusTokenHash,
+          stored.statusTokenKeyId,
+        );
+        if (!capability) {
+          throw new HttpError(503, 'CAPABILITY_KEY_UNAVAILABLE', 'The access request capability key is unavailable.');
+        }
+        if (!stored.statusTokenKeyId) {
+          await client.query(
+            'UPDATE access_requests SET status_token_key_id=$2 WHERE id=$1 AND status_token_key_id IS NULL',
+            [stored.id, capability.keyId],
+          );
+        }
+        return { access: stored, capability };
       };
       const existing=await findExisting();
-      if(existing)return {access:validate(existing),event:undefined};
+      if(existing)return { ...await validate(existing), event:undefined };
       const room = await client.query('SELECT id FROM rooms WHERE id=$1 AND archived_at IS NULL FOR UPDATE', [input.roomId]);
       if (!room.rowCount) throw new HttpError(404, 'ROOM_NOT_FOUND', 'Room not found.');
-      const inserted = await client.query<{ id: string; name: string; roomId: string; language: string }>(
-        `INSERT INTO access_requests(mutation_id,name,room_id,language,status_token_hash)
-         VALUES ($1,$2,$3,$4,$5) ON CONFLICT (mutation_id) DO NOTHING
-         RETURNING id,name,room_id AS "roomId",language`,
-        [input.mutationId, input.name, input.roomId, input.language, hashToken(token)],
+      const inserted = await client.query<StoredAccessRequest>(
+        `INSERT INTO access_requests(mutation_id,name,room_id,language,status_token_hash,status_token_key_id)
+         VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (mutation_id) DO NOTHING
+         RETURNING id,name,room_id AS "roomId",language,status_token_hash AS "statusTokenHash",
+                   status_token_key_id AS "statusTokenKeyId"`,
+        [input.mutationId, input.name, input.roomId, input.language, issuedCapability.verifier, issuedCapability.keyId],
       );
       const stored = inserted.rows[0] ?? await findExisting();
       if (!stored) throw new HttpError(500, 'REQUEST_ERROR', 'Could not create the request.');
-      const access=validate(stored);
-      return {access,event:inserted.rows[0]?await storeEvent('access-request.changed',{id:access.id},client):undefined};
+      const validated=await validate(stored);
+      return { ...validated, event:inserted.rows[0]?await storeEvent('access-request.changed',{id:validated.access.id},client):undefined };
     });
     const requestId = result.access.id;
     if(result.event)requestRealtimeRelay();
-    return reply.code(201).send({ id: requestId, statusToken: token, status: 'pending' });
+    return reply.code(201).send({ id: requestId, statusToken: result.capability.token, status: 'pending' });
   });
 
   app.post('/api/v1/public/access-requests/:id/status', { config: { rateLimit: false }, preHandler: accessStatusLimits }, async (request, reply) => {
@@ -233,18 +259,31 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       token: z.string().min(1).max(256),
       grantId: z.string().uuid(),
     }), request);
+    const capabilityCandidates = accessStatusVerifierCandidates(token);
     const grant = await transaction(async (client) => {
       const result = await client.query<{
-        status: string; guestId: string | null; expiresAt: Date | null; expired: boolean; statusTokenConsumedAt: Date | null; grantExchangeId: string | null;
+        status: string; guestId: string | null; expiresAt: Date | null; expired: boolean; statusTokenConsumedAt: Date | null;
+        grantExchangeId: string | null; statusTokenHash: string; statusTokenKeyId: string | null;
       }>(
         `SELECT status,guest_id AS "guestId",expires_at AS "expiresAt",
                 COALESCE(expires_at<=clock_timestamp(),false) AS expired,
-                status_token_consumed_at AS "statusTokenConsumedAt",grant_exchange_id AS "grantExchangeId"
-           FROM access_requests WHERE id=$1 AND status_token_hash=$2 FOR UPDATE`,
-        [requestId, hashToken(token)],
+                status_token_consumed_at AS "statusTokenConsumedAt",grant_exchange_id AS "grantExchangeId",
+                status_token_hash AS "statusTokenHash",status_token_key_id AS "statusTokenKeyId"
+           FROM access_requests WHERE id=$1 AND status_token_hash=ANY($2::text[]) FOR UPDATE`,
+        [requestId, capabilityCandidates.map((candidate) => candidate.verifier)],
       );
       const access = result.rows[0];
       if (!access) throw new HttpError(404, 'REQUEST_NOT_FOUND', 'Request not found.');
+      const matchingCapability = capabilityCandidates.find((candidate) => candidate.verifier === access.statusTokenHash);
+      if (!matchingCapability || (access.statusTokenKeyId && access.statusTokenKeyId !== matchingCapability.keyId)) {
+        throw new HttpError(404, 'REQUEST_NOT_FOUND', 'Request not found.');
+      }
+      if (!access.statusTokenKeyId) {
+        await client.query(
+          'UPDATE access_requests SET status_token_key_id=$2 WHERE id=$1 AND status_token_key_id IS NULL',
+          [requestId, matchingCapability.keyId],
+        );
+      }
       if (access.status === 'approved' && access.expired) {
         return { access: { ...access, status: 'expired' }, guestToken:undefined };
       }
@@ -263,11 +302,16 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       }
       if (access.status === 'approved' && access.guestId && access.expiresAt && access.grantExchangeId === grantId) {
         const guestToken=guestGrantToken(requestId, grantId);
-        const session = await client.query(
-          `SELECT 1 FROM guest_sessions WHERE request_id=$1 AND token_hash=$2 AND revoked_at IS NULL AND expires_at>now()`,
-          [requestId, hashToken(guestToken)],
+        const session = await client.query<{ id: string }>(
+          `SELECT id FROM guest_sessions
+            WHERE request_id=$1 AND guest_id=$2 AND revoked_at IS NULL AND expires_at>clock_timestamp()
+            FOR UPDATE`,
+          [requestId, access.guestId],
         );
-        if (session.rowCount) return { access, guestToken };
+        if (session.rows[0]) {
+          await client.query('UPDATE guest_sessions SET token_hash=$2 WHERE id=$1', [session.rows[0].id, hashToken(guestToken)]);
+          return { access, guestToken };
+        }
       }
       return { access, guestToken:undefined };
     });
@@ -1338,9 +1382,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }), request);
     const item = await transaction(async (client) => {
       const replay = async () => {
-        const duplicate = await client.query<{ id: string; provisionalUntil: string; sessionId: string; productId: string; expectedPriceCents: number|null; expectedProductVersion:number|null }>(
+        const duplicate = await client.query<GuestItemCreated & { sessionId: string; productId: string; expectedPriceCents: number|null; expectedProductVersion:number|null }>(
           `SELECT id,provisional_until AS "provisionalUntil",submitted_by_guest_session AS "sessionId",product_id AS "productId",
-                  guest_expected_price_cents AS "expectedPriceCents",guest_expected_product_version AS "expectedProductVersion"
+                  guest_expected_price_cents AS "expectedPriceCents",guest_expected_product_version AS "expectedProductVersion",
+                  CASE WHEN status='provisional' AND provisional_until>statement_timestamp()
+                    THEN GREATEST(0,floor(extract(epoch FROM (provisional_until-statement_timestamp()))*1000)::int)
+                    ELSE 0 END AS "provisionalRemainingMs"
              FROM order_items WHERE guest_mutation_id=$1`,
           [input.mutationId],
         );
@@ -1368,14 +1415,25 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if(selected.priceCents!==input.expectedPriceCents||selected.version!==input.expectedProductVersion) throw new HttpError(409,'CATALOG_CONFLICT','The displayed product has changed. Refresh the catalog and try again.');
       const tabId = await activeTab(request.guestIdentity!.id, client);
       await ensureTabTotalWithinRange(tabId, BigInt(selected.priceCents), client);
-      const result = await client.query(
+      const result = await client.query<{id:string;provisionalUntil:string}>(
         `INSERT INTO order_items(tab_id,product_id,product_name,unit_price_cents,quantity,source,status,submitted_by_guest_session,provisional_until,guest_mutation_id,guest_expected_price_cents,guest_expected_product_version)
          VALUES ($1,$2,$3,$4,1,'guest','provisional',$5,clock_timestamp()+interval '10 seconds',$6,$7,$8)
          RETURNING id,provisional_until AS "provisionalUntil"`,
         [tabId,input.productId,JSON.stringify(selected.name),selected.priceCents,request.guestIdentity!.sessionId,input.mutationId,input.expectedPriceCents,input.expectedProductVersion],
       );
-      await audit('guest-item.submitted', 'order-item', result.rows[0].id, {}, { guestSessionId: request.guestIdentity!.sessionId }, client);
-      return {...result.rows[0],event:await storeEvent('orders.changed',{guestId:request.guestIdentity!.id},client)};
+      const created=result.rows[0];
+      if(!created)throw new Error('The provisional guest item was not returned.');
+      await audit('guest-item.submitted', 'order-item', created.id, {}, { guestSessionId: request.guestIdentity!.sessionId }, client);
+      const event=await storeEvent('orders.changed',{guestId:request.guestIdentity!.id},client);
+      const timing=await client.query<GuestItemCreated>(
+        `SELECT id,provisional_until AS "provisionalUntil",
+                GREATEST(0,floor(extract(epoch FROM (provisional_until-clock_timestamp()))*1000)::int) AS "provisionalRemainingMs"
+           FROM order_items WHERE id=$1`,
+        [created.id],
+      );
+      const createdTiming=timing.rows[0];
+      if(!createdTiming)throw new Error('The provisional guest item timing was not returned.');
+      return {...createdTiming,event};
     });
     if(item.event)requestRealtimeRelay();
     const {event:_event,...response}=item;
@@ -1395,9 +1453,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         if (duplicate.rows[0].sessionId !== request.guestIdentity!.sessionId) throw new HttpError(403, 'GUEST_MISMATCH', 'This undo belongs to another guest device.');
         return {event:undefined};
       }
+      await client.query('SELECT id FROM order_items WHERE id=$1 FOR UPDATE', [itemId]);
       const result = await client.query(
         `UPDATE order_items SET status='voided',voided_at=now(),void_reason='guest-undo',guest_undo_mutation_id=$1
-          WHERE id=$2 AND submitted_by_guest_session=$3 AND status='provisional' AND provisional_until>now() RETURNING id`,
+          WHERE id=$2 AND submitted_by_guest_session=$3 AND status='provisional' AND provisional_until>clock_timestamp() RETURNING id`,
         [input.mutationId, itemId, request.guestIdentity!.sessionId],
       );
       if (!result.rowCount) {

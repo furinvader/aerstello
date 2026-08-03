@@ -165,3 +165,34 @@ export const apiErrorSchema = z.object({
 export interface ApiErrorBody {
   error: { code: string; message: string };
 }
+
+export interface OrderItem {
+  id: string;
+  productId: string;
+  productName: LocalizedText;
+  unitPriceCents: number;
+  quantity: number;
+  source: 'host' | 'guest';
+  status: 'provisional' | 'open';
+  billingVersion: number;
+  provisionalUntil: string | null;
+  provisionalRemainingMs: number;
+  canUndo: boolean;
+  createdAt: string;
+}
+
+export interface Tab {
+  id: string | null;
+  guestId: string;
+  guestName?: string;
+  roomName?: string;
+  items: OrderItem[];
+  itemCount: number;
+  totalCents: number;
+}
+
+export interface GuestItemCreated {
+  id: string;
+  provisionalUntil: string;
+  provisionalRemainingMs: number;
+}

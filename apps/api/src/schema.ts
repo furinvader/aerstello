@@ -250,6 +250,7 @@ export const accessRequests = pgTable('access_requests', {
   language: language('language').notNull().default('de'),
   status: requestStatus('status').notNull().default('pending'),
   statusTokenHash: text('status_token_hash').notNull().unique('access_requests_status_token_hash_key'),
+  statusTokenKeyId: text('status_token_key_id'),
   guestId: uuid('guest_id').references(() => guests.id),
   requestedAt: timestamp('requested_at', { withTimezone: true }).notNull().defaultNow(),
   resolvedAt: timestamp('resolved_at', { withTimezone: true }),
@@ -276,7 +277,7 @@ export const guestSessions = pgTable('guest_sessions', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
   revokedAt: timestamp('revoked_at', { withTimezone: true }),
-});
+}, (t) => [uniqueIndex('guest_sessions_request_id_uq').on(t.requestId)]);
 
 export const auditEvents = pgTable('audit_events', {
   id: uuid('id').primaryKey().defaultRandom(),

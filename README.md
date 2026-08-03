@@ -68,7 +68,9 @@ scope guidance, and examples.
 
 ## Production
 
-Set a unique `SESSION_SECRET` of at least 32 random characters and serve the app through HTTPS. Then:
+Set a unique `SESSION_SECRET` and an `ACCESS_CAPABILITY_KEYS` keyring as described in
+[the operations guide](./docs/operations.md); each secret must have at least 32 random
+characters. Serve the app through HTTPS. Then:
 
 ```bash
 docker compose build

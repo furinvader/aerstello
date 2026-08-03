@@ -69,6 +69,13 @@ Feature: Guest device access and self-service
     Then retrying the same grant exchange restores guest access
     And a different grant exchange receives no guest access
 
+  Scenario: A pending access request survives session-secret rotation
+    Given an authenticated administrator
+    When a pending guest request crosses a session-secret rotation
+    Then its original and idempotently reissued capabilities remain pollable
+    And the bound grant exchange restores guest access after rotation
+    And the rotated replica rejects the old host session
+
   Scenario: An expired approval cannot be exchanged for guest access
     Given an authenticated administrator
     When an approved guest request expires before its grant exchange
@@ -128,6 +135,12 @@ Feature: Guest device access and self-service
     When a self-service addition waits for a guest lock
     Then the guest still receives a full undo window
 
+  Scenario: Lock waits cannot extend the guest undo window
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When guest undo starts before expiry and waits behind a rolled-back item lock
+    Then the expired guest undo is rejected
+    And the self-service item remains on the guest tab
+
   Scenario: A lost guest logout response clears cached guest data
     Given an approved guest device for "Luca Rossi" in room "102"
     When the guest logs out and the committed response is lost
@@ -160,6 +173,20 @@ Feature: Guest device access and self-service
   Scenario: The guest undo control expires on time
     Given an approved guest device for "Luca Rossi" in room "102"
     When the guest adds "Mineralwasser" from self-service
+    Then an undo action is available
+    And the undo action disappears after ten seconds
+    And the expired item is no longer marked provisional
+
+  Scenario: A fast device clock does not shorten a new guest undo window
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When the guest device clock is twelve hours fast
+    And the guest adds "Mineralwasser" from self-service
+    Then an undo action is available
+    And the undo action disappears after ten seconds
+
+  Scenario: A slow device clock does not extend a refreshed guest undo window
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When the guest refreshes a provisional item with a device clock twelve hours slow
     Then an undo action is available
     And the undo action disappears after ten seconds
     And the expired item is no longer marked provisional

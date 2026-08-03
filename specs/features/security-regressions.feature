@@ -99,10 +99,13 @@ Feature: Device grants and replay protection
     When guest archival races with reversal of their bill
     Then the bill reversal succeeds before or after guest archival
 
-  Scenario: A bill can be corrected after its guest is archived
+  Scenario: A corrected archived-guest tab stays operable
     Given an authenticated administrator
     When the administrator reverses a bill for an archived guest
     Then the archived guest bill is voided and its item is restored
+    And the corrected archived guest tab opens from host orders without enabling new orders
+    When the host settles the corrected archived guest tab
+    Then the host reaches its corrected bill
 
   Scenario: A bill correction remains available at the tab limit
     Given an authenticated administrator

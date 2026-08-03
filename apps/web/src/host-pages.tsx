@@ -10,6 +10,7 @@ import { Button, Card, ConfirmForm, Empty, Field, Modal, Notice, PageHeader } fr
 import { formatVenueDateTime, toLocalDateTimeInputValue } from './date';
 import { useI18n } from './i18n';
 import { isPermanentSyncConflict, submitOrQueue, type QueuedMutation } from './offline';
+import { loadPendingSettlement, persistPendingSettlement, type PendingSettlement } from './settlement-recovery';
 import { useHostContext } from './host-shell';
 import type { AccessRequest, Bill, Category, Guest, Host, OrderItem, Product, Room, Tab, TabSummary, Venue } from './types';
 
@@ -42,11 +43,13 @@ export function DashboardPage() {
   const { venue } = useHostContext();
   const stats = useQuery<{ pendingRequests:number;activeRooms:number;activeGuests:number;openItemCount:number;openValueCents:number;todaySalesCents:number }>({ queryKey:['dashboard'], queryFn:()=>api('/dashboard') });
   const orders = useQuery<{data:TabSummary[]}>({queryKey:['orders'],queryFn:()=>list('/orders')});
+  const dashboardStats=stats.data;
+  const unavailableStats=stats.isError?t('requestFailed'):t('loading');
   const cards = [
-    {label:t('requests'),value:stats.data?.pendingRequests ?? '–',icon:Clock3,tone:'violet'},
-    {label:t('guests'),value:stats.data?.activeGuests ?? '–',icon:Users,tone:'blue'},
-    {label:t('orders'),value:formatMoney(stats.data?.openValueCents ?? 0,language),detail:`${stats.data?.openItemCount ?? 0} ${t('items')}`,icon:GlassWater,tone:'amber'},
-    {label:t('today'),value:formatMoney(stats.data?.todaySalesCents ?? 0,language),icon:CircleDollarSign,tone:'green'},
+    {label:t('requests'),value:dashboardStats?.pendingRequests ?? '–',icon:Clock3,tone:'violet'},
+    {label:t('guests'),value:dashboardStats?.activeGuests ?? '–',icon:Users,tone:'blue'},
+    {label:t('orders'),value:dashboardStats?formatMoney(dashboardStats.openValueCents,language):unavailableStats,detail:dashboardStats?`${dashboardStats.openItemCount} ${t('items')}`:undefined,icon:GlassWater,tone:'amber'},
+    {label:t('today'),value:dashboardStats?formatMoney(dashboardStats.todaySalesCents,language):unavailableStats,icon:CircleDollarSign,tone:'green'},
   ];
   return <><PageHeader eyebrow={venue.name} title={`${t('welcome')}, ${venue.name}`} actions={<a className="button button--primary" href="/app/orders/new"><GlassWater/> {t('takeOrders')}</a>}/><div className="metric-grid">{cards.map(({icon:Icon,...card})=><Card key={card.label} className={`metric metric--${card.tone}`}><Icon/><span>{card.label}</span><strong>{card.value}</strong>{card.detail&&<small>{card.detail}</small>}</Card>)}</div><div className="section-heading"><h2>{t('orders')}</h2><a href="/app/orders">{t('viewAll')} <ChevronRight/></a></div><Card>{orders.data?.data.length?<div className="table-list">{orders.data.data.slice(0,6).map(order=><a className="table-row" href={`/app/orders/new?guest=${order.guestId}`} key={order.id}><div className="avatar">{order.guestName.charAt(0)}</div><div className="grow"><strong>{order.guestName}</strong><span>{order.roomName} · {order.itemCount} {t('items')}</span></div><strong>{formatMoney(order.totalCents,language)}</strong><ChevronRight/></a>)}</div>:<Empty>{t('empty')}</Empty>}</Card></>;
 }
@@ -61,9 +64,10 @@ export function TakeOrdersPage() {
   const categories = useQuery<{data:Category[]}>({queryKey:['categories'],queryFn:()=>list('/categories')});
   const products = useQuery<{data:Product[];catalogVersion:number}>({queryKey:['products'],queryFn:()=>api('/products')});
   const [restoredSubmission]=useState(()=>loadUncertainOrder(host.id));
-  const initialGuest = restoredSubmission?.display?.kind === 'order'
+  const [pendingSettlement,setPendingSettlement]=useState(()=>loadPendingSettlement(host.id));
+  const initialGuest = pendingSettlement?.guestId ?? (restoredSubmission?.display?.kind === 'order'
     ? restoredSubmission.display.guestId
-    : new URLSearchParams(location.search).get('guest') ?? '';
+    : new URLSearchParams(location.search).get('guest') ?? '');
   const initialGuestData = guests.data?.data.find((guest)=>guest.id===initialGuest);
   const [roomId,setRoomId]=useState(initialGuestData?.roomId ?? '');
   const [guestId,setGuestId]=useState(initialGuest);
@@ -73,6 +77,8 @@ export function TakeOrdersPage() {
     : {});
   const [createGuest,setCreateGuest]=useState(false);
   const [settleTab,setSettleTab]=useState<Tab|null>(null);
+  const [recoverSettlement,setRecoverSettlement]=useState(false);
+  const [settlementReview,setSettlementReview]=useState(false);
   const [voidingItem,setVoidingItem]=useState<{item:OrderItem;mutationId:string;createdAt:string}|null>(null);
   const [submitting,setSubmitting]=useState(false);
   const [uncertainOrder,setUncertainOrder]=useState(Boolean(restoredSubmission));
@@ -80,6 +86,11 @@ export function TakeOrdersPage() {
   const stagedSubmission=useRef<QueuedMutation|null>(restoredSubmission);
   const tab=useQuery<Tab>({queryKey:['tab',guestId],queryFn:async()=>{const current=await api<Tab>(`/guests/${guestId}/tab`);return current.itemCount>0?current:{...current,id:null}},enabled:Boolean(guestId)});
   const selectedGuest=guests.data?.data.find(guest=>guest.id===guestId);
+  const currentTab=tab.data;
+  const tabGuestSnapshot=currentTab?.guestId===guestId&&currentTab.guestName
+    ? {name:currentTab.guestName,roomName:currentTab.roomName??''}
+    : undefined;
+  const displayedGuest=selectedGuest??tabGuestSnapshot;
   const eligibleProducts=products.data?.data.filter(product=>product.enabled&&!product.selfServiceOnly)??[];
   const stagedDisplay=stagedSubmission.current?.display?.kind==='order'?stagedSubmission.current.display:undefined;
   const cartLines=stagedDisplay
@@ -95,9 +106,9 @@ export function TakeOrdersPage() {
     }
     setGuestId(nextGuestId);setRoomId(nextRoomId);
   };
-  const add=(productId:string,change:number)=>{if(!uncertainOrder&&!submitting)setCart(current=>updateOrderCart(current,productId,change))};
+  const add=(productId:string,change:number)=>{if(selectedGuest&&!uncertainOrder&&!submitting)setCart(current=>updateOrderCart(current,productId,change))};
   const submit=async()=>{
-    if(!guestId||!products.data||(!stagedSubmission.current&&!cartLines.length))return;
+    if(!guestId||!products.data||(!selectedGuest&&!stagedSubmission.current)||(!stagedSubmission.current&&!cartLines.length))return;
     setSubmitting(true);
     if(!stagedSubmission.current){
       const mutationId=crypto.randomUUID();const capturedAt=new Date().toISOString();const items=cartLines.map(line=>({productId:line.product.id,quantity:line.quantity}));
@@ -111,20 +122,21 @@ export function TakeOrdersPage() {
   };
   const voidItem=async(reason:string)=>{
     if(!voidingItem||!guestId)return;
-    const result=await submitOrQueue({id:voidingItem.mutationId,hostId:host.id,path:`/order-items/${voidingItem.item.id}/void`,method:'POST',createdAt:voidingItem.createdAt,body:{mutationId:voidingItem.mutationId,reason,expectedBillingVersion:voidingItem.item.billingVersion},display:{kind:'void',guestId,guestName:selectedGuest?.name??guestId,roomName:selectedGuest?.roomName??'',productName:voidingItem.item.productName,quantity:voidingItem.item.quantity}});
+    const result=await submitOrQueue({id:voidingItem.mutationId,hostId:host.id,path:`/order-items/${voidingItem.item.id}/void`,method:'POST',createdAt:voidingItem.createdAt,body:{mutationId:voidingItem.mutationId,reason,expectedBillingVersion:voidingItem.item.billingVersion},display:{kind:'void',guestId,guestName:displayedGuest?.name??guestId,roomName:displayedGuest?.roomName??'',productName:voidingItem.item.productName,quantity:voidingItem.item.quantity}});
     setVoidingItem(null);
     setMessage({kind:'success',text:result.queued?t('itemVoidQueued'):t('itemVoided')});
     if(!result.queued)await Promise.all([client.invalidateQueries({queryKey:['tab',guestId]}),client.invalidateQueries({queryKey:['orders']}),client.invalidateQueries({queryKey:['guests']})]);
   };
   const visibleGuests=(guests.data?.data??[]).filter(guest=>(!roomId||guest.roomId===roomId)&&(!search||`${guest.name} ${guest.roomName}`.toLowerCase().includes(search.toLowerCase())));
-  const currentTab=tab.data;
-  const tabSummary=selectedGuest&&<div className="tab-pill">{tab.isError?<span>{t('requestFailed')}</span>:currentTab?<><span>{currentTab.itemCount} {t('items')}</span><strong>{formatMoney(currentTab.totalCents,language)}</strong></>:<span>{t('loading')}</span>}</div>;
-  const tabControls=selectedGuest&&(tab.isError
+  const tabSummary=displayedGuest&&<div className="tab-pill">{tab.isError?<span>{t('requestFailed')}</span>:currentTab?<><span>{currentTab.itemCount} {t('items')}</span><strong>{formatMoney(currentTab.totalCents,language)}</strong></>:<span>{t('loading')}</span>}</div>;
+  const tabControls=displayedGuest&&(tab.isError
     ? <Notice kind="error">{t('requestFailed')}</Notice>
     : !currentTab
       ? <p className="muted">{t('loading')}</p>
-      : <>{Boolean(currentTab.items.length)&&<div className="open-tab"><h3>{t('currentTab')}</h3>{currentTab.items.map(item=><div key={item.id}><div><strong>{item.quantity} × {localized(item.productName,language)}</strong><span>{formatMoney(item.unitPriceCents*item.quantity,language)}</span></div><Button variant="ghost" aria-label={`${t('voidItem')} ${localized(item.productName,language)}`} onClick={()=>setVoidingItem({item,mutationId:crypto.randomUUID(),createdAt:new Date().toISOString()})}><Trash2/></Button></div>)}</div>}{currentTab.id&&<Button variant="secondary" onClick={()=>setSettleTab(currentTab)} disabled={!navigator.onLine}><CreditCard/> {t('settle')} · {formatMoney(currentTab.totalCents,language)}</Button>}</>);
-  return <><PageHeader eyebrow={t('takeOrders')} title={selectedGuest?selectedGuest.name:t('selectGuest')} actions={tabSummary}/>{message&&<Notice kind={message.kind}>{message.text}</Notice>}<div className="order-workspace"><aside className="guest-picker"><div className="room-chips">{rooms.data?.data.map(room=><button className={room.id===roomId?'active':''} key={room.id} onClick={()=>selectGuest('',room.id)} disabled={submitting||uncertainOrder}>{room.name}</button>)}</div><label className="search"><Search/><input aria-label={t('searchGuests')} value={search} onChange={e=>setSearch(e.target.value)} placeholder={t('searchGuests')}/></label><div className="guest-list">{visibleGuests.map(guest=><button className={guest.id===guestId?'active':''} onClick={()=>selectGuest(guest.id,guest.roomId)} key={guest.id} disabled={submitting||uncertainOrder}><span className="avatar">{guest.name.charAt(0)}</span><span><strong>{guest.name}</strong><small>{guest.roomName} · {formatMoney(guest.totalCents,language)}</small></span><ChevronRight/></button>)}</div><Button variant="secondary" onClick={()=>setCreateGuest(true)} disabled={!navigator.onLine||submitting||uncertainOrder}><UserPlus/> {t('add')} {t('guests')}</Button></aside><section className="catalog"><div className="catalog-toolbar"><h2>{t('products')}</h2><span>{cartLines.reduce((sum,line)=>sum+line.quantity,0)} {t('selected')}</span></div>{categories.data?.data.map(category=>{const categoryProducts=eligibleProducts.filter(product=>product.categoryId===category.id);if(!categoryProducts.length)return null;return <div className="catalog-group" key={category.id}><h3>{localized(category.name,language)}</h3><div className="product-grid">{categoryProducts.map(product=><button className={`product-tile ${cart[product.id]?'selected':''}`} key={product.id} onClick={()=>add(product.id,1)} disabled={!guestId||submitting||uncertainOrder||!canAddOrderProduct(cart,product.id)}><span>{localized(product.name,language)}</span><strong>{formatMoney(product.priceCents,language)}</strong>{cart[product.id]&&<b>{cart[product.id]}</b>}<Plus/></button>)}</div></div>})}</section><aside className="cart-panel"><h2>{t('orders')}</h2>{cartLines.length?<div className="cart-lines">{cartLines.map(({product,quantity})=><div key={product.id}><div><strong>{localized(product.name,language)}</strong><span>{formatMoney(product.priceCents*quantity,language)}</span></div><div className="stepper"><button onClick={()=>add(product.id,-1)} disabled={submitting||uncertainOrder}><Minus/></button><b>{quantity}</b><button onClick={()=>add(product.id,1)} disabled={submitting||uncertainOrder||!canAddOrderProduct(cart,product.id)}><Plus/></button></div></div>)}</div>:<Empty>{t('selectProducts')}</Empty>}<div className="cart-total"><span>{t('total')}</span><strong>{formatMoney(cartTotal,language)}</strong></div><Button onClick={()=>void submit()} disabled={submitting||!guestId||(!cartLines.length&&!stagedSubmission.current)}><Check/> {submitting?'…':uncertainOrder?t('retry'):t('submitOrder')}</Button>{tabControls}</aside></div>{createGuest&&<NewGuestModal rooms={rooms.data?.data??[]} initialRoom={roomId} onClose={()=>setCreateGuest(false)} onCreated={async guest=>{await client.invalidateQueries({queryKey:['guests']});selectGuest(guest.id,guest.roomId);setCreateGuest(false)}}/>}{settleTab&&<SettleModal tab={settleTab} onClose={()=>setSettleTab(null)} onSettled={(billId)=>navigate(`/app/bills/${billId}`)}/>} {voidingItem&&<Modal title={`${t('voidItem')} · ${localized(voidingItem.item.productName,language)}`} onClose={()=>setVoidingItem(null)}><ConfirmForm label={t('reason')} placeholder={t('voidItem')} onCancel={()=>setVoidingItem(null)} onConfirm={voidItem} onDefinitiveFailure={()=>setVoidingItem(current=>current?{...current,mutationId:crypto.randomUUID(),createdAt:new Date().toISOString()}:current)}/></Modal>}</>;
+      : <>{Boolean(currentTab.items.length)&&<div className="open-tab"><h3>{t('currentTab')}</h3>{currentTab.items.map(item=><div key={item.id}><div><strong>{item.quantity} × {localized(item.productName,language)}</strong><span>{formatMoney(item.unitPriceCents*item.quantity,language)}</span></div><Button variant="ghost" aria-label={`${t('voidItem')} ${localized(item.productName,language)}`} onClick={()=>setVoidingItem({item,mutationId:crypto.randomUUID(),createdAt:new Date().toISOString()})}><Trash2/></Button></div>)}</div>}{currentTab.id&&!pendingSettlement&&<Button variant="secondary" onClick={()=>{setSettlementReview(false);setSettleTab(currentTab)}} disabled={!navigator.onLine}><CreditCard/> {t('settle')} · {formatMoney(currentTab.totalCents,language)}</Button>}</>);
+  const closeSettlement=()=>{setSettleTab(null);setRecoverSettlement(false)};
+  const reviewSettlement=async()=>{setSettlementReview(true);await Promise.all([client.invalidateQueries({queryKey:['tab']}),client.invalidateQueries({queryKey:['orders']}),client.invalidateQueries({queryKey:['bills']})])};
+  return <><PageHeader eyebrow={t('takeOrders')} title={displayedGuest?.name??pendingSettlement?.guestName??t('selectGuest')} actions={tabSummary}/>{message&&<Notice kind={message.kind}>{message.text}</Notice>}{pendingSettlement&&<Card><Notice kind="error">{t('settlementRecoveryHelp')}</Notice><div className="form-actions"><div className="grow"><strong>{pendingSettlement.guestName} · {pendingSettlement.roomName}</strong><p className="muted">{pendingSettlement.command.expectedItemCount} {t('items')} · {formatMoney(pendingSettlement.command.expectedTotalCents,language)} · {t(pendingSettlement.command.paymentMethod)}</p></div><Button onClick={()=>{setSettlementReview(false);setRecoverSettlement(true)}} disabled={!navigator.onLine}><Receipt/> {t('recoverSettlement')}</Button></div></Card>}{settlementReview&&<Notice kind="error">{t('settlementReviewHelp')} <a href="/app/bills">{t('bills')}</a></Notice>}<div className="order-workspace"><aside className="guest-picker"><div className="room-chips">{rooms.data?.data.map(room=><button className={room.id===roomId?'active':''} key={room.id} onClick={()=>selectGuest('',room.id)} disabled={submitting||uncertainOrder}>{room.name}</button>)}</div><label className="search"><Search/><input aria-label={t('searchGuests')} value={search} onChange={e=>setSearch(e.target.value)} placeholder={t('searchGuests')}/></label><div className="guest-list">{visibleGuests.map(guest=><button className={guest.id===guestId?'active':''} onClick={()=>selectGuest(guest.id,guest.roomId)} key={guest.id} disabled={submitting||uncertainOrder}><span className="avatar">{guest.name.charAt(0)}</span><span><strong>{guest.name}</strong><small>{guest.roomName} · {formatMoney(guest.totalCents,language)}</small></span><ChevronRight/></button>)}</div><Button variant="secondary" onClick={()=>setCreateGuest(true)} disabled={!navigator.onLine||submitting||uncertainOrder}><UserPlus/> {t('add')} {t('guests')}</Button></aside><section className="catalog"><div className="catalog-toolbar"><h2>{t('products')}</h2><span>{cartLines.reduce((sum,line)=>sum+line.quantity,0)} {t('selected')}</span></div>{categories.data?.data.map(category=>{const categoryProducts=eligibleProducts.filter(product=>product.categoryId===category.id);if(!categoryProducts.length)return null;return <div className="catalog-group" key={category.id}><h3>{localized(category.name,language)}</h3><div className="product-grid">{categoryProducts.map(product=><button className={`product-tile ${cart[product.id]?'selected':''}`} key={product.id} onClick={()=>add(product.id,1)} disabled={!selectedGuest||submitting||uncertainOrder||!canAddOrderProduct(cart,product.id)}><span>{localized(product.name,language)}</span><strong>{formatMoney(product.priceCents,language)}</strong>{cart[product.id]&&<b>{cart[product.id]}</b>}<Plus/></button>)}</div></div>})}</section><aside className="cart-panel"><h2>{t('orders')}</h2>{cartLines.length?<div className="cart-lines">{cartLines.map(({product,quantity})=><div key={product.id}><div><strong>{localized(product.name,language)}</strong><span>{formatMoney(product.priceCents*quantity,language)}</span></div><div className="stepper"><button onClick={()=>add(product.id,-1)} disabled={!selectedGuest||submitting||uncertainOrder}><Minus/></button><b>{quantity}</b><button onClick={()=>add(product.id,1)} disabled={!selectedGuest||submitting||uncertainOrder||!canAddOrderProduct(cart,product.id)}><Plus/></button></div></div>)}</div>:<Empty>{t('selectProducts')}</Empty>}<div className="cart-total"><span>{t('total')}</span><strong>{formatMoney(cartTotal,language)}</strong></div><Button onClick={()=>void submit()} disabled={submitting||!guestId||(!selectedGuest&&!stagedSubmission.current)||(!cartLines.length&&!stagedSubmission.current)}><Check/> {submitting?'…':uncertainOrder?t('retry'):t('submitOrder')}</Button>{tabControls}</aside></div>{createGuest&&<NewGuestModal rooms={rooms.data?.data??[]} initialRoom={roomId} onClose={()=>setCreateGuest(false)} onCreated={async guest=>{await client.invalidateQueries({queryKey:['guests']});selectGuest(guest.id,guest.roomId);setCreateGuest(false)}}/>}{(settleTab||(recoverSettlement&&pendingSettlement))&&<SettleModal tab={settleTab} recovery={recoverSettlement?pendingSettlement:null} hostId={host.id} onClose={closeSettlement} onPendingChange={setPendingSettlement} onDefinitiveFailure={reviewSettlement} onSettled={(billId)=>navigate(`/app/bills/${billId}`)}/>} {voidingItem&&<Modal title={`${t('voidItem')} · ${localized(voidingItem.item.productName,language)}`} onClose={()=>setVoidingItem(null)}><ConfirmForm label={t('reason')} placeholder={t('voidItem')} onCancel={()=>setVoidingItem(null)} onConfirm={voidItem} onDefinitiveFailure={()=>setVoidingItem(current=>current?{...current,mutationId:crypto.randomUUID(),createdAt:new Date().toISOString()}:current)}/></Modal>}</>;
 }
 
 function NewGuestModal({rooms,initialRoom,onClose,onCreated}:{rooms:Room[];initialRoom:string;onClose:()=>void;onCreated:(guest:{id:string;roomId:string})=>void}){
@@ -133,11 +145,39 @@ function NewGuestModal({rooms,initialRoom,onClose,onCreated}:{rooms:Room[];initi
   return <Modal title={`${t('add')} ${t('guests')}`} onClose={onClose} closeDisabled={Boolean(pendingCommand)}><form className="stack" onSubmit={submit}><Field label={t('name')}><input value={name} onChange={e=>setName(e.target.value)} required autoFocus disabled={Boolean(pendingCommand)}/></Field><Field label={t('rooms')}><select value={roomId} onChange={e=>setRoomId(e.target.value)} required disabled={Boolean(pendingCommand)}><option value="">{t('selectRoom')}</option>{rooms.map(room=><option key={room.id} value={room.id}>{room.name}</option>)}</select></Field>{error&&<Notice kind="error">{error}</Notice>}<div className="form-actions"><Button variant="ghost" type="button" onClick={onClose} disabled={Boolean(pendingCommand)}>{t('cancel')}</Button><Button type="submit">{pendingCommand?t('retry'):t('save')}</Button></div></form></Modal>;
 }
 
-function SettleModal({tab,onClose,onSettled}:{tab:Tab;onClose:()=>void;onSettled:(billId:string)=>void}){
-  const {t,language}=useI18n();const [snapshot,setSnapshot]=useState(tab);const [method,setMethod]=useState<'cash'|'card'|'other'>('cash');const [note,setNote]=useState('');const [error,setError]=useState('');const [busy,setBusy]=useState(false);const [mutationId,setMutationId]=useState(()=>crypto.randomUUID());const [command,setCommand]=useState<{paymentMethod:'cash'|'card'|'other';note?:string}|null>(null);
+function SettleModal({tab,recovery,hostId,onClose,onPendingChange,onDefinitiveFailure,onSettled}:{tab:Tab|null;recovery:PendingSettlement|null;hostId:string;onClose:()=>void;onPendingChange:(settlement:PendingSettlement|null)=>void;onDefinitiveFailure:()=>Promise<void>;onSettled:(billId:string)=>void}){
+  const {t,language}=useI18n();
+  const [snapshot,setSnapshot]=useState<Tab>(()=>recovery?{id:recovery.tabId,guestId:recovery.guestId,guestName:recovery.guestName,roomName:recovery.roomName,items:[],itemCount:recovery.command.expectedItemCount,totalCents:recovery.command.expectedTotalCents}:tab!);
+  const [method,setMethod]=useState<'cash'|'card'|'other'>(()=>recovery?.command.paymentMethod??'cash');
+  const [note,setNote]=useState(()=>recovery?.command.note??'');
+  const [error,setError]=useState(()=>recovery?t('settlementRecoveryHelp'):'');
+  const [busy,setBusy]=useState(false);
+  const [frozen,setFrozen]=useState<PendingSettlement|null>(recovery);
   const selectMethod=(nextMethod:'cash'|'card'|'other')=>{setMethod(nextMethod);if(nextMethod!=='other')setNote('')};
-  const submit=async(event:FormEvent)=>{event.preventDefault();setBusy(true);const frozen=command??{paymentMethod:method,...(method==='other'&&note?{note}: {})};setCommand(frozen);try{const bill=await api<{id:string}>(`/tabs/${snapshot.id}/settle`,{method:'POST',body:json({mutationId,expectedItemCount:snapshot.itemCount,expectedTotalCents:snapshot.totalCents,...frozen})});onSettled(bill.id)}catch(caught){if(caught instanceof ApiError&&caught.code==='EMPTY_TAB'){onClose();return}if(caught instanceof ApiError&&caught.code==='TAB_CHANGED'){try{const refreshed=await api<Tab>(`/guests/${snapshot.guestId}/tab`);if(!refreshed.id||refreshed.itemCount===0){onClose();return}setSnapshot(refreshed);setMutationId(crypto.randomUUID())}catch{onClose();return}}if(isPermanentSyncConflict(caught))setCommand(null);setError(apiErrorMessage(caught,language,t('requestFailed')));setBusy(false)}};
-  return <Modal title={t('settle')} onClose={onClose} closeDisabled={Boolean(command)}><form className="stack" onSubmit={submit}><div className="settle-total"><span>{snapshot.itemCount} {t('items')}</span><strong>{formatMoney(snapshot.totalCents,language)}</strong></div><div className="choice-grid">{(['cash','card','other'] as const).map(value=><button type="button" className={method===value?'active':''} key={value} onClick={()=>selectMethod(value)} disabled={busy||Boolean(command)}>{value==='cash'?<Euro/>:<CreditCard/>}<span>{t(value)}</span></button>)}</div>{method==='other'&&<Field label={t('note')}><input value={note} onChange={e=>setNote(e.target.value)} maxLength={240} disabled={busy||Boolean(command)}/></Field>}{error&&<Notice kind="error">{error}</Notice>}<Button type="submit" disabled={busy}>{busy?'…':command?t('retry'):t('settle')}</Button></form></Modal>;
+  const submit=async(event:FormEvent)=>{
+    event.preventDefault();
+    if(!snapshot.id||!navigator.onLine)return;
+    setBusy(true);setError('');
+    const settlement=frozen??{storageVersion:1 as const,hostId,tabId:snapshot.id,guestId:snapshot.guestId,guestName:snapshot.guestName??snapshot.guestId,roomName:snapshot.roomName??'',createdAt:new Date().toISOString(),command:{mutationId:crypto.randomUUID(),expectedItemCount:snapshot.itemCount,expectedTotalCents:snapshot.totalCents,paymentMethod:method,...(method==='other'&&note?{note}: {})}};
+    if(!frozen){
+      try{persistPendingSettlement(hostId,settlement)}catch{setError(t('settlementStorageFailed'));setBusy(false);return}
+      setFrozen(settlement);onPendingChange(settlement);
+    }
+    try{
+      const bill=await api<{id:string}>(`/tabs/${settlement.tabId}/settle`,{method:'POST',body:json(settlement.command)});
+      persistPendingSettlement(hostId,null);setFrozen(null);onPendingChange(null);onSettled(bill.id);
+    }catch(caught){
+      if(isPermanentSyncConflict(caught)){
+        persistPendingSettlement(hostId,null);setFrozen(null);onPendingChange(null);await onDefinitiveFailure();
+        if(caught instanceof ApiError&&caught.code==='TAB_CHANGED'){
+          try{const refreshed=await api<Tab>(`/guests/${settlement.guestId}/tab`);if(!refreshed.id||refreshed.itemCount===0){onClose();return}setSnapshot(refreshed)}catch{onClose();return}
+        }else if(caught instanceof ApiError&&['EMPTY_TAB','TAB_NOT_OPEN'].includes(caught.code)){onClose();return}
+      }
+      setError(isPermanentSyncConflict(caught)?`${apiErrorMessage(caught,language,t('requestFailed'))} ${t('settlementReviewHelp')}`:t('settlementRecoveryHelp'));
+      setBusy(false);
+    }
+  };
+  return <Modal title={recovery?t('recoverSettlement'):t('settle')} onClose={onClose}><form className="stack" onSubmit={submit}><div className="settle-total"><span>{snapshot.itemCount} {t('items')}</span><strong>{formatMoney(snapshot.totalCents,language)}</strong></div><div className="choice-grid">{(['cash','card','other'] as const).map(value=><button type="button" className={method===value?'active':''} key={value} onClick={()=>selectMethod(value)} disabled={busy||Boolean(frozen)}>{value==='cash'?<Euro/>:<CreditCard/>}<span>{t(value)}</span></button>)}</div>{method==='other'&&<Field label={t('note')}><input value={note} onChange={e=>setNote(e.target.value)} maxLength={240} disabled={busy||Boolean(frozen)}/></Field>}{error&&<Notice kind="error">{error}</Notice>}<Button type="submit" disabled={busy||!navigator.onLine}>{busy?'…':frozen?t('retry'):t('settle')}</Button></form></Modal>;
 }
 
 export function OrdersPage(){
@@ -156,7 +196,14 @@ export function BillsPage(){
   });
   const visible=bills.data?.data??[];
   const pagination=bills.data?.pagination;
-  return <><PageHeader eyebrow={t('archive')} title={t('bills')}/><label className="search wide"><Search/><input value={search} onChange={e=>{setSearch(e.target.value);setPage(1)}} placeholder={t('searchBills')}/></label><Card>{visible.length?<div className="table-list bills-list">{visible.map(bill=><a className={`table-row ${bill.voidedAt?'voided':''}`} href={`/app/bills/${bill.id}`} key={bill.id}><div className="receipt-number"><Receipt/>#{bill.number}</div><div className="grow"><strong>{bill.guestName}</strong><span>{bill.roomName} · {formatVenueDateTime(bill.settledAt,language,bill.venueTimezone)}</span></div><span className="payment-tag">{t(bill.paymentMethod as 'cash'|'card'|'other')}</span><strong>{formatMoney(bill.totalCents,language)}</strong><ChevronRight/></a>)}</div>:<Empty>{t('empty')}</Empty>}</Card>{pagination&&pagination.totalPages>1&&<nav className="pagination" aria-label={t('bills')}><Button variant="secondary" disabled={page<=1} onClick={()=>setPage(current=>Math.max(1,current-1))}><ChevronLeft/>{t('previous')}</Button><span>{t('page')} {pagination.page} / {pagination.totalPages}</span><Button variant="secondary" disabled={page>=pagination.totalPages} onClick={()=>setPage(current=>current+1)}>{t('next')}<ChevronRight/></Button></nav>}</>;
+  const archive=bills.isPending
+    ? <p className="muted">{t('loading')}</p>
+    : bills.isError
+      ? <Notice kind="error">{t('requestFailed')}</Notice>
+      : visible.length
+        ? <div className="table-list bills-list">{visible.map(bill=><a className={`table-row ${bill.voidedAt?'voided':''}`} href={`/app/bills/${bill.id}`} key={bill.id}><div className="receipt-number"><Receipt/>#{bill.number}</div><div className="grow"><strong>{bill.guestName}</strong><span>{bill.roomName} · {formatVenueDateTime(bill.settledAt,language,bill.venueTimezone)}</span></div><span className="payment-tag">{t(bill.paymentMethod as 'cash'|'card'|'other')}</span><strong>{formatMoney(bill.totalCents,language)}</strong><ChevronRight/></a>)}</div>
+        : <Empty>{t('empty')}</Empty>;
+  return <><PageHeader eyebrow={t('archive')} title={t('bills')}/><label className="search wide"><Search/><input value={search} onChange={e=>{setSearch(e.target.value);setPage(1)}} placeholder={t('searchBills')}/></label><Card>{archive}</Card>{pagination&&pagination.totalPages>1&&<nav className="pagination" aria-label={t('bills')}><Button variant="secondary" disabled={page<=1} onClick={()=>setPage(current=>Math.max(1,current-1))}><ChevronLeft/>{t('previous')}</Button><span>{t('page')} {pagination.page} / {pagination.totalPages}</span><Button variant="secondary" disabled={page>=pagination.totalPages} onClick={()=>setPage(current=>current+1)}>{t('next')}<ChevronRight/></Button></nav>}</>;
 }
 
 interface BillDetail extends Bill { paymentNote?:string;voidReason?:string;hostName:string;hostNameKnown:boolean;items:{productName:LocalizedText;unitPriceCents:number;quantity:number;source:string}[] }

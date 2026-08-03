@@ -1,8 +1,8 @@
-import { createHmac, randomBytes } from 'node:crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import argon2 from 'argon2';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type pg from 'pg';
-import { config } from './config.js';
+import { config, type AccessCapabilityKey } from './config.js';
 import { pool } from './db.js';
 
 export interface HostIdentity {
@@ -44,8 +44,8 @@ declare module 'fastify' {
 const hostCookie = 'skybar_host';
 const guestCookie = 'skybar_guest';
 
-export function hashToken(token: string): string {
-  return createHmac('sha256', config.SESSION_SECRET).update(token).digest('hex');
+export function hashToken(token: string, secret = config.SESSION_SECRET): string {
+  return createHmac('sha256', secret).update(token).digest('hex');
 }
 
 export function newToken(): string {
@@ -58,10 +58,62 @@ export function guestGrantToken(requestId: string, grantExchangeId: string): str
     .digest('base64url');
 }
 
-export function accessStatusToken(mutationId: string): string {
-  return createHmac('sha256', config.SESSION_SECRET)
+export function accessStatusToken(mutationId: string, key = config.ACCESS_CAPABILITY_KEYS[0]!): string {
+  return createHmac('sha256', key.secret)
     .update(`access-status:${mutationId}`)
     .digest('base64url');
+}
+
+export interface AccessStatusCapability {
+  keyId: string;
+  token: string;
+  verifier: string;
+}
+
+function accessStatusVerifier(token: string, key: AccessCapabilityKey): string {
+  // This intentionally matches the historical SESSION_SECRET verifier when the
+  // first rollout key uses that same value, allowing old and new replicas to overlap.
+  return hashToken(token, key.secret);
+}
+
+function sameVerifier(left: string, right: string): boolean {
+  const leftBytes = Buffer.from(left, 'hex');
+  const rightBytes = Buffer.from(right, 'hex');
+  return leftBytes.length === rightBytes.length && leftBytes.length > 0 && timingSafeEqual(leftBytes, rightBytes);
+}
+
+export function issueAccessStatusCapability(
+  mutationId: string,
+  keys: readonly AccessCapabilityKey[] = config.ACCESS_CAPABILITY_KEYS,
+): AccessStatusCapability {
+  const key = keys[0];
+  if (!key) throw new Error('No access capability key is configured.');
+  const token = accessStatusToken(mutationId, key);
+  return { keyId: key.id, token, verifier: accessStatusVerifier(token, key) };
+}
+
+export function accessStatusVerifierCandidates(
+  token: string,
+  keys: readonly AccessCapabilityKey[] = config.ACCESS_CAPABILITY_KEYS,
+): Array<{ keyId: string; verifier: string }> {
+  return keys.map((key) => ({ keyId: key.id, verifier: accessStatusVerifier(token, key) }));
+}
+
+export function recoverAccessStatusCapability(
+  mutationId: string,
+  storedVerifier: string,
+  storedKeyId: string | null,
+  keys: readonly AccessCapabilityKey[] = config.ACCESS_CAPABILITY_KEYS,
+): AccessStatusCapability | undefined {
+  const preferred = storedKeyId ? keys.find((key) => key.id === storedKeyId) : undefined;
+  if (storedKeyId && !preferred) return undefined;
+  const candidates = preferred ? [preferred] : keys;
+  for (const key of candidates) {
+    const token = accessStatusToken(mutationId, key);
+    const verifier = accessStatusVerifier(token, key);
+    if (sameVerifier(verifier, storedVerifier)) return { keyId: key.id, token, verifier };
+  }
+  return undefined;
 }
 
 export async function hashPassword(password: string): Promise<string> {

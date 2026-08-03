@@ -28,6 +28,15 @@ let venueTimezoneAfter = '';
 let recoveredDeviceStatus = 0;
 let retriedOrderMutationIds: string[] = [];
 let retriedSettlementMutationIds: string[] = [];
+type SettlementRecoveryRecord = {
+  hostId:string;tabId:string;guestId:string;guestName:string;roomName:string;
+  command:{mutationId:string;expectedItemCount:number;expectedTotalCents:number;paymentMethod:string;note?:string};
+};
+let settlementRecoveryBeforeReload: SettlementRecoveryRecord | undefined;
+let settlementRecoveryAfterReload: SettlementRecoveryRecord | undefined;
+let reloadedSettlementRequests: {path:string;body:SettlementRecoveryRecord['command']}[] = [];
+let reloadedSettlementBillCount = 0;
+let reloadedSettlementStorageCount = 0;
 let retriedOrderItemCount = 0;
 let excessiveOrderStatus = 0;
 let tabTotalBeforeExcess = 0;
@@ -40,6 +49,9 @@ let transientReplayAttempts = 0;
 let loginFailureResults: { status: number; body: unknown }[] = [];
 let recoveredGrantStatus = 0;
 let differentGrantStatus = 0;
+let rotatedCapabilityPollResult: {statuses:number[];sameToken:boolean;states:string[]} | undefined;
+let rotatedGrantRecoveryStatus = 0;
+let rotatedHostSessionStatus = 0;
 let billArchiveRaceStatuses: [number, number][] = [];
 let freshGuestPage: import('@playwright/test').Page | undefined;
 let expiredGrantResult: { status: string; granted: boolean } | undefined;
@@ -106,6 +118,8 @@ let reopenedGuestAddMutationIds: string[] = [];
 let reopenedGuestAddItemCount = 0;
 let archivedGuestBillVoidStatus = 0;
 let archivedGuestRestoredItemCount = 0;
+let archivedGuestCorrectionId = '';
+let archivedGuestCorrectionName = '';
 let retriedGuestCreationMutationIds: string[] = [];
 let uncertainGuestFieldsLocked = false;
 let uncertainGuestCreationStayedOpen = false;
@@ -200,6 +214,7 @@ let malformedJsonResult: {status:number;code:string}|undefined;
 let replayedLogoutStatus = 0;
 let replayedGuestLogoutStatus = 0;
 let guestUndoRemainingMs = 0;
+let serializedGuestUndoResult: {startedBeforeExpiry:boolean;status:number;code:string;itemCount:number;itemStatus:string}|undefined;
 let settlementTimestampAgeMs = Number.POSITIVE_INFINITY;
 let billVoidLockTiming: {
   releaseFloor: Date;
@@ -664,11 +679,50 @@ When('a self-service addition waits for a guest lock',async()=>{
     await database.query('COMMIT');committed=true;
     const response=await addition;
     expect(response.status()).toBe(201);
-    const item=await response.json() as {provisionalUntil:string};
-    guestUndoRemainingMs=new Date(item.provisionalUntil).getTime()-Date.now();
+    const item=await response.json() as {provisionalRemainingMs:number};
+    guestUndoRemainingMs=item.provisionalRemainingMs;
   }finally{if(!committed)await database.query('ROLLBACK');await database.end()}
 });
 Then('the guest still receives a full undo window',async()=>{expect(guestUndoRemainingMs).toBeGreaterThan(9_000)});
+When('guest undo starts before expiry and waits behind a rolled-back item lock',async()=>{
+  await guestPage!.getByText('Mineralwasser',{exact:true}).click();
+  await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toBeVisible();
+  const request=guestPage!.context().request;
+  const tab=await (await request.get('/api/v1/guest/tab')).json() as {items:{id:string;provisionalUntil:string}[]};
+  const item=tab.items[0]!;
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});
+  await database.connect();let rolledBack=false;
+  try{
+    await database.query('BEGIN');
+    await database.query(`UPDATE order_items SET status='voided',voided_at=clock_timestamp(),void_reason='rolled-back host void' WHERE id=$1`,[item.id]);
+    const holderXid=String((await database.query('SELECT pg_current_xact_id()::text AS xid')).rows[0].xid);
+    const startedBeforeExpiry=Boolean((await database.query('SELECT clock_timestamp()<$1::timestamptz AS valid',[item.provisionalUntil])).rows[0].valid);
+    const undoResponse=guestPage!.waitForResponse(response=>response.url().endsWith(`/api/v1/guest/items/${item.id}/undo`)&&response.request().method()==='POST');
+    await guestPage!.getByRole('button',{name:'Rückgängig'}).click();
+    await expect.poll(async()=>Number((await database.query(
+      `SELECT count(*) FROM pg_locks WHERE locktype='transactionid' AND transactionid::text=$1 AND NOT granted`,[holderXid],
+    )).rows[0].count),{timeout:5_000,intervals:[10,20,50]}).toBeGreaterThan(0);
+    await expect.poll(async()=>Boolean((await database.query(
+      'SELECT clock_timestamp()>=$1::timestamptz AS expired',[item.provisionalUntil],
+    )).rows[0].expired),{timeout:12_000,intervals:[50,100,200]}).toBe(true);
+    await database.query('ROLLBACK');rolledBack=true;
+    const response=await undoResponse;
+    const responseBody=await response.json() as {error:{code:string}};
+    const current=await (await request.get('/api/v1/guest/tab')).json() as {itemCount:number;items:{id:string;status:string}[]};
+    serializedGuestUndoResult={
+      startedBeforeExpiry,status:response.status(),code:responseBody.error.code,itemCount:current.itemCount,
+      itemStatus:current.items.find(candidate=>candidate.id===item.id)?.status??'missing',
+    };
+  }finally{if(!rolledBack)await database.query('ROLLBACK');await database.end()}
+});
+Then('the expired guest undo is rejected',async()=>{
+  expect(serializedGuestUndoResult).toEqual(expect.objectContaining({startedBeforeExpiry:true,status:409,code:'UNDO_EXPIRED'}));
+  await expect(guestPage!.locator('.notice--error')).toContainText('Die Rückgängig-Frist ist abgelaufen.');
+});
+Then('the self-service item remains on the guest tab',async()=>{
+  expect(serializedGuestUndoResult).toEqual(expect.objectContaining({itemCount:1,itemStatus:'open'}));
+  await expect(guestPage!.locator('.line-item').filter({hasText:'Mineralwasser'})).toBeVisible();
+});
 When('the guest logs out and the committed response is lost',async()=>{
   await guestPage!.evaluate(()=>{const originalFetch=window.fetch.bind(window);window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guest/logout')&&init?.method==='POST'){await originalFetch(input,init);throw new TypeError('Simulated lost guest logout response')}return originalFetch(input,init)}});
   await guestPage!.getByRole('button',{name:/Abmelden|Esci|Log out/}).click();
@@ -689,6 +743,20 @@ Then('the guest catalog shows the renamed product after refresh',async()=>{await
 When('the guest retries a legacy pending self-service addition',async()=>{const request=guestPage!.context().request;const me=await (await request.get('/api/v1/guest/me')).json() as {guest:{sessionId:string}};const catalog=await (await request.get('/api/v1/guest/catalog')).json() as {data:{id:string;name:{de:string};priceCents:number;version:number}[]};const product=catalog.data.find(item=>item.name.de==='Mineralwasser')!;legacyGuestMutationId=crypto.randomUUID();expect((await request.post('/api/v1/guest/items',{headers:csrfHeaders,data:{mutationId:legacyGuestMutationId,productId:product.id,expectedPriceCents:product.priceCents,expectedProductVersion:product.version}})).status()).toBe(201);const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();try{await database.query('UPDATE order_items SET guest_expected_price_cents=NULL,guest_expected_product_version=NULL WHERE guest_mutation_id=$1',[legacyGuestMutationId])}finally{await database.end()}await guestPage!.evaluate(({sessionId,productId,mutationId})=>localStorage.setItem('skybar-guest-pending-adds',JSON.stringify({sessionId,entries:[[productId,mutationId]]})),{sessionId:me.guest.sessionId,productId:product.id,mutationId:legacyGuestMutationId});legacyGuestRequest=undefined;guestPage!.on('request',guestRequest=>{if(guestRequest.url().endsWith('/api/v1/guest/items')&&guestRequest.method()==='POST')legacyGuestRequest=guestRequest.postDataJSON() as {mutationId:string;expectedPriceCents?:number;expectedProductVersion?:number}});await guestPage!.reload();await guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'}).click();await expect.poll(()=>legacyGuestRequest).toBeTruthy();legacyGuestItemCount=((await (await request.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount;expect(legacyGuestRequest?.expectedPriceCents).toBe(product.priceCents)});
 Then('the legacy addition reuses its mutation with the displayed price',async()=>{expect(legacyGuestRequest).toEqual(expect.objectContaining({mutationId:legacyGuestMutationId,expectedPriceCents:expect.any(Number),expectedProductVersion:expect.any(Number)}))});
 Then('the legacy self-service product is stored once',async()=>{expect(legacyGuestItemCount).toBe(1)});
+When('the guest device clock is twelve hours fast',async()=>{
+  await guestPage!.addInitScript(()=>{const actualNow=Date.now.bind(Date);Date.now=()=>actualNow()+12*60*60*1000});
+  await guestPage!.reload();
+  await expect(guestPage!.getByRole('heading',{name:'Luca Rossi'})).toBeVisible();
+});
+When('the guest refreshes a provisional item with a device clock twelve hours slow',async()=>{
+  const request=guestPage!.context().request;
+  const catalog=await (await request.get('/api/v1/guest/catalog')).json() as {data:{id:string;name:{de:string};priceCents:number;version:number}[]};
+  const product=catalog.data.find(item=>item.name.de==='Mineralwasser')!;
+  expect((await request.post('/api/v1/guest/items',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),productId:product.id,expectedPriceCents:product.priceCents,expectedProductVersion:product.version}})).status()).toBe(201);
+  await guestPage!.addInitScript(()=>{const actualNow=Date.now.bind(Date);Date.now=()=>actualNow()-12*60*60*1000});
+  await guestPage!.reload();
+  await expect(guestPage!.getByRole('heading',{name:'Luca Rossi'})).toBeVisible();
+});
 When('the guest retries undo after its first response is lost',async()=>{
   await guestPage!.getByText('Mineralwasser',{exact:true}).click();await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toBeVisible();
   await guestPage!.evaluate(() => {
@@ -719,6 +787,80 @@ When('an approved guest grant response is lost before its cookie is retained',as
 });
 Then('retrying the same grant exchange restores guest access',async()=>{expect(recoveredGrantStatus).toBe(200)});
 Then('a different grant exchange receives no guest access',async()=>{expect(differentGrantStatus).toBe(401)});
+When('a pending guest request crosses a session-secret rotation',async({page,browser})=>{
+  const request=page.context().request;
+  const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
+  const room=bootstrap.rooms.find(item=>item.name==='102')!;
+  const mutationId=crypto.randomUUID();
+  const accessCommand={mutationId,name:'Rotation-safe guest',roomId:room.id,language:'de'};
+  const createdResponse=await request.post('/api/v1/public/access-requests',{data:accessCommand});
+  expect(createdResponse.status()).toBe(201);
+  const created=await createdResponse.json() as {id:string;statusToken:string};
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();
+  try{
+    // Model a request written before the key-id migration; its verifier is still usable
+    // because the first capability key deliberately matches the pre-upgrade session key.
+    await database.query('UPDATE access_requests SET status_token_key_id=NULL WHERE id=$1',[created.id]);
+  }finally{await database.end()}
+
+  const originalSessionSecret=process.env.SESSION_SECRET??'development-only-session-secret-change-me';
+  const capabilityKeys=process.env.ACCESS_CAPABILITY_KEYS??`development-v1:${originalSessionSecret}`;
+  const replicaPort=3204;
+  const replica=spawn(process.execPath,['apps/api/dist/index.js'],{
+    cwd:process.cwd(),
+    env:{
+      ...process.env,
+      PORT:String(replicaPort),
+      LOG_LEVEL:'warn',
+      RATE_LIMIT_MAX:'5000',
+      SESSION_SECRET:'rotated-host-session-secret-at-least-32-characters',
+      ACCESS_CAPABILITY_KEYS:capabilityKeys,
+    },
+    stdio:'ignore',
+  });
+  extraApiProcesses.push(replica);
+  const rotatedURL=`http://127.0.0.1:${replicaPort}`;
+  await expect.poll(async()=>{try{return (await fetch(`${rotatedURL}/api/v1/health`)).status}catch{return 0}},{timeout:15_000}).toBe(200);
+  rotatedHostSessionStatus=(await request.get(`${rotatedURL}/api/v1/auth/me`)).status();
+
+  const reissuedResponse=await request.post(`${rotatedURL}/api/v1/public/access-requests`,{data:accessCommand});
+  expect(reissuedResponse.status()).toBe(201);
+  const reissued=await reissuedResponse.json() as {id:string;statusToken:string};
+  const rotatedDevice=await browser.newContext({baseURL:rotatedURL});extraContexts.push(rotatedDevice);
+  const originalPoll=await rotatedDevice.request.post(`/api/v1/public/access-requests/${created.id}/status`,{
+    data:{token:created.statusToken,grantId:crypto.randomUUID()},
+  });
+  const reissuedPoll=await rotatedDevice.request.post(`/api/v1/public/access-requests/${created.id}/status`,{
+    data:{token:reissued.statusToken,grantId:crypto.randomUUID()},
+  });
+  rotatedCapabilityPollResult={
+    statuses:[originalPoll.status(),reissuedPoll.status()],
+    sameToken:created.id===reissued.id&&created.statusToken===reissued.statusToken,
+    states:[
+      String(((await originalPoll.json()) as {status:string}).status),
+      String(((await reissuedPoll.json()) as {status:string}).status),
+    ],
+  };
+
+  expect((await request.post(`/api/v1/access-requests/${created.id}/approve`,{
+    headers:csrfHeaders,
+    data:{mutationId:crypto.randomUUID(),expiresAt:new Date(Date.now()+86_400_000).toISOString()},
+  })).status()).toBe(200);
+  const grantId=crypto.randomUUID();
+  const originalDevice=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(originalDevice);
+  const exchangeData={token:created.statusToken,grantId};
+  expect((await originalDevice.request.post(`/api/v1/public/access-requests/${created.id}/status`,{data:exchangeData})).status()).toBe(200);
+  await originalDevice.clearCookies();
+  const recovered=await originalDevice.request.post(`${rotatedURL}/api/v1/public/access-requests/${created.id}/status`,{data:exchangeData});
+  expect(recovered.status()).toBe(200);
+  expect((await recovered.json()) as {granted:boolean}).toEqual(expect.objectContaining({granted:true}));
+  rotatedGrantRecoveryStatus=(await originalDevice.request.get(`${rotatedURL}/api/v1/guest/me`)).status();
+});
+Then('its original and idempotently reissued capabilities remain pollable',async()=>{
+  expect(rotatedCapabilityPollResult).toEqual({statuses:[200,200],sameToken:true,states:['pending','pending']});
+});
+Then('the bound grant exchange restores guest access after rotation',async()=>{expect(rotatedGrantRecoveryStatus).toBe(200)});
+Then('the rotated replica rejects the old host session',async()=>{expect(rotatedHostSessionStatus).toBe(401)});
 When('an approved guest request expires before its grant exchange',async({page,browser})=>{
   const request=page.context().request;const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};const room=bootstrap.rooms.find(item=>item.name==='102')!;
   const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Expired grant',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
@@ -1400,6 +1542,64 @@ When('the venue timezone changes after sales on adjacent snapshot days',async({p
   dashboardExpectedSnapshotSalesCents=product.priceCents;
 });
 Then('the dashboard reports sales from the current snapshotted day',async()=>{expect(dashboardSnapshotSalesCents).toBe(dashboardExpectedSnapshotSalesCents)});
+const emptyDashboardStats={pendingRequests:0,activeRooms:0,activeGuests:0,openItemCount:0,openValueCents:0,todaySalesCents:0};
+const dashboardMetric=(page:import('@playwright/test').Page,label:RegExp)=>page.locator('.metric-grid .metric').filter({hasText:label});
+const openOrdersMetric=(page:import('@playwright/test').Page)=>dashboardMetric(page,/Offene Bestellungen|Ordini aperti|Open orders/);
+const todayMetric=(page:import('@playwright/test').Page)=>dashboardMetric(page,/Heute|Oggi|Today/);
+When('the initial dashboard stats response is delayed',async({page})=>{
+  await page.addInitScript(()=>{
+    const fetch=window.fetch.bind(window);
+    window.fetch=(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(new URL(url,window.location.href).pathname==='/api/v1/dashboard')return new Promise<Response>(()=>{});
+      return fetch(input,init);
+    };
+  });
+  await page.reload();
+});
+Then('the dashboard financial cards show loading without zero totals',async({page})=>{
+  const openOrders=openOrdersMetric(page);const today=todayMetric(page);
+  await expect(openOrders).toContainText(/Wird geladen|Caricamento|Loading/);
+  await expect(today).toContainText(/Wird geladen|Caricamento|Loading/);
+  await expect(openOrders).not.toContainText(/0[,.]00\s*€|\b0\s+(Artikel|Articoli|Items)\b/);
+  await expect(today).not.toContainText(/0[,.]00\s*€/);
+});
+When('the initial dashboard stats request fails',async({page})=>{
+  await page.addInitScript(()=>{
+    const fetch=window.fetch.bind(window);
+    window.fetch=(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(new URL(url,window.location.href).pathname==='/api/v1/dashboard')return Promise.reject(new TypeError('Simulated dashboard outage'));
+      return fetch(input,init);
+    };
+  });
+  await page.reload();
+});
+Then('the dashboard financial cards show a request failure without zero totals',async({page})=>{
+  const unavailable=/Die Anfrage konnte nicht abgeschlossen werden|Impossibile completare la richiesta|The request could not be completed/;
+  const openOrders=openOrdersMetric(page);const today=todayMetric(page);
+  await expect(openOrders).toContainText(unavailable,{timeout:10_000});
+  await expect(today).toContainText(unavailable);
+  await expect(openOrders).not.toContainText(/0[,.]00\s*€|\b0\s+(Artikel|Articoli|Items)\b/);
+  await expect(today).not.toContainText(/0[,.]00\s*€/);
+});
+When('the dashboard stats successfully report no activity',async({page})=>{
+  await page.addInitScript((stats)=>{
+    const fetch=window.fetch.bind(window);
+    window.fetch=(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(new URL(url,window.location.href).pathname==='/api/v1/dashboard')return Promise.resolve(new Response(JSON.stringify(stats),{headers:{'Content-Type':'application/json'}}));
+      return fetch(input,init);
+    };
+  },emptyDashboardStats);
+  await page.reload();
+});
+Then('the dashboard financial cards show zero totals and zero open items',async({page})=>{
+  const openOrders=openOrdersMetric(page);const today=todayMetric(page);
+  await expect(openOrders).toContainText(/0[,.]00\s*€/);
+  await expect(openOrders).toContainText(/\b0\s+(Artikel|Articoli|Items)\b/);
+  await expect(today).toContainText(/0[,.]00\s*€/);
+});
 
 When('the host retries settlement after its first response is lost',async({page})=>{
   await chooseOrder(page,'Helles','Anna Berger','101');await page.getByRole('button',{name:/Bestellung buchen/}).click();await expect(page.locator('.tab-pill')).toContainText('1 Artikel');
@@ -1414,6 +1614,75 @@ When('the host retries settlement after its first response is lost',async({page}
 Then('both settlement attempts use the same mutation identifier',async()=>{expect(retriedSettlementMutationIds).toHaveLength(2);expect(new Set(retriedSettlementMutationIds).size).toBe(1)});
 Then('settlement details were locked while the result was uncertain',async()=>{expect(uncertainSettlementDetailsLocked).toBe(true)});
 Then('the host reaches the single resulting bill',async({page})=>{await expect(page.locator('.bill-sheet')).toBeVisible();const bills=await (await page.context().request.get('/api/v1/bills')).json() as {data:unknown[]};expect(bills.data).toHaveLength(1)});
+When('a committed settlement response is lost before modal close and reload',async({page})=>{
+  await chooseOrder(page,'Helles','Anna Berger','101');
+  await page.getByRole('button',{name:/Bestellung buchen|Invia ordine|Submit order/}).click();
+  await expect(page.locator('.tab-pill')).toContainText(/1 Artikel|1 articolo|1 item/);
+  const instrumentSettlementFetch=()=>{
+    const marker='__skyBarSettlementFetchInstrumented';
+    if((window as unknown as Record<string,unknown>)[marker])return;
+    (window as unknown as Record<string,unknown>)[marker]=true;
+    const originalFetch=window.fetch.bind(window);
+    window.fetch=async(input,init)=>{
+      const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;
+      if(/\/api\/v1\/tabs\/[^/]+\/settle$/.test(url)&&init?.method==='POST'){
+        const requests=JSON.parse(localStorage.getItem('__skyBarReloadSettlementRequests')??'[]') as {path:string;body:unknown}[];
+        requests.push({path:new URL(url,location.href).pathname,body:JSON.parse(String(init.body))});
+        localStorage.setItem('__skyBarReloadSettlementRequests',JSON.stringify(requests));
+        const response=await originalFetch(input,init);
+        if(localStorage.getItem('__skyBarLoseSettlementResponse')==='true'){
+          localStorage.setItem('__skyBarLoseSettlementResponse','false');
+          throw new TypeError('Simulated committed settlement response loss');
+        }
+        return response;
+      }
+      return originalFetch(input,init);
+    };
+  };
+  await page.addInitScript(instrumentSettlementFetch);
+  await page.evaluate(()=>{localStorage.setItem('__skyBarReloadSettlementRequests','[]');localStorage.setItem('__skyBarLoseSettlementResponse','true')});
+  await page.evaluate(instrumentSettlementFetch);
+  await page.getByRole('button',{name:/Abrechnen|Incassa|Settle/}).click();
+  const modal=page.locator('.modal');
+  await modal.locator('.choice-grid').getByRole('button',{name:/Sonstiges|Altro|Other/}).click();
+  await modal.getByLabel(/Notiz|Nota|Note/).fill('Recovery voucher');
+  await modal.getByRole('button',{name:/Abrechnen|Incassa|Settle/,exact:true}).click();
+  await expect(modal.locator('.notice--error')).toBeVisible();
+  settlementRecoveryBeforeReload=await page.evaluate(()=>{
+    const key=Object.keys(localStorage).find(item=>item.startsWith('skybar-pending-settlement:'));
+    return key?JSON.parse(localStorage.getItem(key)!) as SettlementRecoveryRecord:undefined;
+  });
+  await modal.getByRole('button',{name:/Schließen|Chiudi|Close/}).click();
+  await expect(page.getByRole('button',{name:/Abrechnung wiederherstellen|Recupera incasso|Recover settlement/})).toBeVisible();
+  await page.reload();
+  const recoveryButton=page.getByRole('button',{name:/Abrechnung wiederherstellen|Recupera incasso|Recover settlement/});
+  await expect(recoveryButton).toBeVisible();
+  settlementRecoveryAfterReload=await page.evaluate(()=>{
+    const key=Object.keys(localStorage).find(item=>item.startsWith('skybar-pending-settlement:'));
+    return key?JSON.parse(localStorage.getItem(key)!) as SettlementRecoveryRecord:undefined;
+  });
+  await recoveryButton.click();
+  const recoveryModal=page.locator('.modal');
+  await expect(recoveryModal.locator('.choice-grid').getByRole('button',{name:/Sonstiges|Altro|Other/})).toBeDisabled();
+  await expect(recoveryModal.getByLabel(/Notiz|Nota|Note/)).toHaveValue('Recovery voucher');
+  await expect(recoveryModal.getByLabel(/Notiz|Nota|Note/)).toBeDisabled();
+  await recoveryModal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();
+  await expect(page).toHaveURL(/\/app\/bills\//);
+  reloadedSettlementRequests=await page.evaluate(()=>JSON.parse(localStorage.getItem('__skyBarReloadSettlementRequests')??'[]') as {path:string;body:SettlementRecoveryRecord['command']}[]);
+  reloadedSettlementStorageCount=await page.evaluate(()=>Object.keys(localStorage).filter(key=>key.startsWith('skybar-pending-settlement:')).length);
+  reloadedSettlementBillCount=((await (await page.context().request.get('/api/v1/bills')).json()) as {data:unknown[]}).data.length;
+});
+Then('settlement recovery replays the original frozen command',async()=>{
+  expect(settlementRecoveryBeforeReload).toBeDefined();
+  expect(settlementRecoveryAfterReload).toEqual(settlementRecoveryBeforeReload);
+  expect(settlementRecoveryBeforeReload).toEqual(expect.objectContaining({guestName:'Anna Berger',roomName:'101',command:{mutationId:expect.any(String),expectedItemCount:1,expectedTotalCents:420,paymentMethod:'other',note:'Recovery voucher'}}));
+  expect(reloadedSettlementRequests).toHaveLength(2);
+  expect(reloadedSettlementRequests[0]).toEqual(reloadedSettlementRequests[1]);
+  expect(reloadedSettlementRequests[0]!.body).toEqual(settlementRecoveryBeforeReload!.command);
+  expect(reloadedSettlementRequests[0]!.path).toBe(`/api/v1/tabs/${settlementRecoveryBeforeReload!.tabId}/settle`);
+});
+Then('the reload reaches the single recovered bill exactly once',async({page})=>{expect(reloadedSettlementBillCount).toBe(1);await expect(page.locator('.bill-sheet')).toBeVisible()});
+Then('the recovered settlement command is cleared',async()=>{expect(reloadedSettlementStorageCount).toBe(0)});
 When('settlement waits for a locked tab',async({page})=>{
   const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;
   const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};
@@ -1485,6 +1754,25 @@ Then('the aggregate tab can still be settled',async()=>{expect(aggregateSettleme
 
 When('the venue has more bills than one archive page',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const product=products.data.find((item)=>item.name.de==='Helles')!;for(let index=0;index<51;index+=1){const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {number:string};if(index===0)oldestBillNumber=bill.number}const firstPage=await (await request.get('/api/v1/bills?page=1&pageSize=50')).json() as {data:{number:string}[]};expect(firstPage.data.some((bill)=>bill.number===oldestBillNumber)).toBe(false)});
 Then('the host can find the oldest bill by its number',async({page})=>{await page.goto('/app/bills');const [response]=await Promise.all([page.waitForResponse((candidate)=>candidate.url().includes(`/api/v1/bills?search=${oldestBillNumber}&`)),page.getByPlaceholder(/Nach Gast|Cerca per|Search by/).fill(oldestBillNumber)]);const result=await response.json() as {data:{id:string;number:string}[]};expect(result.data.map((bill)=>bill.number)).toContain(oldestBillNumber);const found=result.data.find((bill)=>bill.number===oldestBillNumber)!;await expect(page.locator(`a[href="/app/bills/${found.id}"]`)).toBeVisible()});
+
+When('the initial bill archive request is delayed and fails',async({page})=>{
+  await page.addInitScript(()=>{
+    const originalFetch=window.fetch.bind(window);
+    window.fetch=async(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(new URL(url,window.location.href).pathname==='/api/v1/bills'){
+        await new Promise(resolve=>setTimeout(resolve,1_500));
+        throw new TypeError('Simulated bill archive outage');
+      }
+      return originalFetch(input,init);
+    };
+  });
+  await page.goto('/app/bills');
+});
+Then('the bill archive shows loading without a successful empty state',async({page})=>{const archive=page.locator('.app-content>.card');await expect(archive).toContainText(/Wird geladen|Caricamento|Loading/);await expect(archive.locator('.empty')).toHaveCount(0)});
+Then('the bill archive shows failure without a successful empty state',async({page})=>{const archive=page.locator('.app-content>.card');await expect(archive.locator('.notice--error')).toContainText(/Die Anfrage konnte nicht abgeschlossen werden|Impossibile completare la richiesta|The request could not be completed/,{timeout:10_000});await expect(archive.locator('.empty')).toHaveCount(0)});
+When('the host opens a successfully empty bill archive',async({page})=>{const response=page.waitForResponse(candidate=>new URL(candidate.url()).pathname==='/api/v1/bills');await page.goto('/app/bills');expect((await response).ok()).toBe(true)});
+Then('the bill archive shows its successful empty state',async({page})=>{const archive=page.locator('.app-content>.card');await expect(archive.locator('.empty')).toContainText(/Noch keine Einträge|Nessun elemento|Nothing here yet/)});
 
 When('the venue timezone changes after a bill is settled',async({page})=>{const {request,me,guests,products}=await operationalData(page);const venue=await (await request.get('/api/v1/venue')).json() as {name:string;defaultLanguage:string;version:number};const firstVenue=await (await request.put('/api/v1/venue',{headers:csrfHeaders,data:{name:venue.name,language:venue.defaultLanguage,timezone:'Pacific/Kiritimati',expectedVersion:venue.version}})).json() as {version:number};const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const settled=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};const bill=await (await request.get(`/api/v1/bills/${settled.id}`)).json() as {settledAt:string;venueTimezone:string};expect(bill.venueTimezone).toBe('Pacific/Kiritimati');snapshottedBillDate=new Date(bill.settledAt).toLocaleDateString('de',{timeZone:bill.venueTimezone});expect((await request.put('/api/v1/venue',{headers:csrfHeaders,data:{name:venue.name,language:venue.defaultLanguage,timezone:'Pacific/Honolulu',expectedVersion:firstVenue.version}})).status()).toBe(200);await page.goto(`/app/bills/${settled.id}`)});
 Then('the bill date uses its snapshotted venue timezone',async({page})=>{await expect(page.locator('.bill-meta')).toContainText(snapshottedBillDate)});
@@ -1596,7 +1884,9 @@ Then('the bill reversal succeeds before or after guest archival',async()=>{for(c
 
 When('the administrator reverses a bill for an archived guest',async({page})=>{
   const {request,me,products}=await operationalData(page);const rooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;name:string}[]};const product=products.data.find(item=>item.name.de==='Helles')!;const room=rooms.data.find(item=>item.name==='102')!;
-  const guest=await (await request.post('/api/v1/guests',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:'Archived correction guest',roomId:room.id,language:'de'}})).json() as {id:string;version:number};
+  archivedGuestCorrectionName='Archived correction guest';
+  const guest=await (await request.post('/api/v1/guests',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:archivedGuestCorrectionName,roomId:room.id,language:'de'}})).json() as {id:string;version:number};
+  archivedGuestCorrectionId=guest.id;
   const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};
   const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};
   expect((await request.delete(`/api/v1/guests/${guest.id}`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:guest.version}})).status()).toBe(204);
@@ -1604,6 +1894,35 @@ When('the administrator reverses a bill for an archived guest',async({page})=>{
   archivedGuestRestoredItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
 });
 Then('the archived guest bill is voided and its item is restored',async()=>{expect(archivedGuestBillVoidStatus).toBe(200);expect(archivedGuestRestoredItemCount).toBe(1)});
+Then('the corrected archived guest tab opens from host orders without enabling new orders',async({page})=>{
+  const request=page.context().request;
+  const activeGuests=await (await request.get('/api/v1/guests')).json() as {data:{id:string}[]};
+  expect(activeGuests.data.some(guest=>guest.id===archivedGuestCorrectionId)).toBe(false);
+  await page.goto('/app/orders');
+  const corrected=page.locator('.tab-card').filter({hasText:archivedGuestCorrectionName});
+  await expect(corrected).toContainText('102');
+  await corrected.getByRole('link',{name:/Bearbeiten|Modifica|Edit/}).click();
+  await expect(page).toHaveURL(new RegExp(`/app/orders/new\\?guest=${archivedGuestCorrectionId}$`));
+  await expect(page.locator('.page-header h1')).toHaveText(archivedGuestCorrectionName);
+  await expect(page.locator('.open-tab')).toContainText('Helles');
+  await expect(page.locator('.tab-pill')).toContainText(/1 Artikel|1 articolo|1 item/);
+  await expect(page.locator('.product-tile').filter({hasText:'Helles'})).toBeDisabled();
+  await expect(page.getByRole('button',{name:/Bestellung buchen|Registra ordine|Submit order/})).toBeDisabled();
+  await expect(page.getByRole('button',{name:/Abrechnen|Incassa|Settle/})).toBeEnabled();
+});
+When('the host settles the corrected archived guest tab',async({page})=>{
+  await page.getByRole('button',{name:/Abrechnen|Incassa|Settle/}).click();
+  const modal=page.locator('.modal');
+  await modal.locator('.choice-grid').getByRole('button',{name:/Bar|Contanti|Cash/}).click();
+  await modal.getByRole('button',{name:/Abrechnen|Incassa|Settle/,exact:true}).click();
+});
+Then('the host reaches its corrected bill',async({page})=>{
+  await expect(page).toHaveURL(/\/app\/bills\//);
+  await expect(page.locator('.bill-meta')).toContainText(archivedGuestCorrectionName);
+  await expect(page.locator('.bill-void-marker')).toHaveCount(0);
+  const tab=await (await page.context().request.get(`/api/v1/guests/${archivedGuestCorrectionId}/tab`)).json() as {itemCount:number};
+  expect(tab.itemCount).toBe(0);
+});
 When('the administrator reverses a bill onto a tab at the money limit',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const billedOrder=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const bill=await (await request.post(`/api/v1/tabs/${billedOrder.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};const openOrder=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();try{await database.query('UPDATE order_items SET unit_price_cents=2147483647 WHERE tab_id=$1 AND status IN (\'open\',\'provisional\')',[openOrder.tabId])}finally{await database.end()}overflowBillVoidStatus=(await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Required correction at limit'}})).status();overflowBillTabItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;overflowOverviewStatuses=[(await request.get('/api/v1/orders')).status(),(await request.get('/api/v1/guests')).status()];overflowPostCorrectionOrderStatus=(await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).status()});
 Then('the correction succeeds and restores the billed item',async()=>{expect(overflowBillVoidStatus).toBe(200);expect(overflowBillTabItemCount).toBe(2)});
 Then('normal additions remain blocked while the corrected tab exceeds the limit',async()=>{expect(overflowOverviewStatuses).toEqual([200,200]);expect(overflowPostCorrectionOrderStatus).toBe(409)});

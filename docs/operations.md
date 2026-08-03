@@ -2,7 +2,18 @@
 
 ## Configuration
 
-Production requires `DATABASE_URL`, an explicitly configured nondefault `SESSION_SECRET`, and HTTPS. Startup fails when production uses either the development database URL or a shipped placeholder secret. The supplied Compose service publishes the app directly and therefore defaults `TRUST_PROXY` to `false`. Set `TRUST_PROXY=true` only when clients can reach the app exclusively through a trusted reverse proxy that replaces forwarded headers. Keep PostgreSQL and the API on a private network and expose only the HTTPS proxy.
+Production requires `DATABASE_URL`, an explicitly configured nondefault `SESSION_SECRET`, an explicit `ACCESS_CAPABILITY_KEYS` keyring, and HTTPS. Startup fails when production uses the development database URL, omits either secret setting, or uses a shipped placeholder. The supplied Compose service publishes the app directly and therefore defaults `TRUST_PROXY` to `false`. Set `TRUST_PROXY=true` only when clients can reach the app exclusively through a trusted reverse proxy that replaces forwarded headers. Keep PostgreSQL and the API on a private network and expose only the HTTPS proxy.
+
+`ACCESS_CAPABILITY_KEYS` is a comma-separated, active-first list of up to eight `key-id:secret` entries, for example `v2:<current>,v1:<previous>`. Key identifiers are immutable labels of at most 32 letters, digits, underscores, or hyphens; each secret must be unique, contain at least 32 non-whitespace characters, and come from a secret manager. These values never belong in API payloads or logs. The first key issues new and idempotently replayed guest-access status capabilities. Retained prior keys verify and reissue requests created under those versions.
+
+Use this sequence for the first rolling upgrade from a release that derived access capabilities from `SESSION_SECRET`:
+
+1. Back up the database and run migrations while leaving `SESSION_SECRET` unchanged.
+2. Set the first key, such as `v1`, to exactly the current `SESSION_SECRET` value and deploy the new release to every replica. This makes capability tokens and verifiers byte-for-byte compatible with old replicas during the overlap.
+3. Drain every old replica. Keep `ACCESS_CAPABILITY_KEYS` pinned, then rotate `SESSION_SECRET` and restart the new replicas. Host and ordinary guest cookies signed under the old session secret stop authenticating, while pending access capabilities remain recoverable.
+4. To rotate access capabilities later, prepend a new identifier and secret, deploy it everywhere, and retain each prior entry until no pending request or lost grant exchange can still reference it. Remove old entries only after that recovery window. Never reuse an identifier for different key material.
+
+If an idempotent access-request replay returns `CAPABILITY_KEY_UNAVAILABLE`, restore the removed key under its original identifier before retrying; issuing a replacement token would violate mutation recovery. A same-device grant retry after session rotation is authorized only by the original status capability plus its already-bound grant UUID and rekeys only that one guest session.
 
 `RATE_LIMIT_MAX` controls the ordinary per-IP request ceiling in each one-minute window and defaults to `300`. Guest access-status polling also applies this ceiling per access capability while `ACCESS_STATUS_IP_LIMIT_MAX` provides a broader per-IP ceiling, defaulting to `3000`, so many legitimate guests can poll behind one shared address without allowing rotating invalid tokens to bypass an address-level limit. Counters are stored in PostgreSQL and shared by every API replica. Raise either value only when a trusted reverse proxy is configured correctly and operational traffic requires it.
 

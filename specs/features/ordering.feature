@@ -148,12 +148,34 @@ Feature: Host order entry and billing
     When the venue timezone changes after sales on adjacent snapshot days
     Then the dashboard reports sales from the current snapshotted day
 
+  Scenario: Dashboard financial totals remain unavailable while stats load
+    Given an authenticated administrator
+    When the initial dashboard stats response is delayed
+    Then the dashboard financial cards show loading without zero totals
+
+  Scenario: A dashboard stats outage never appears as zero activity
+    Given an authenticated administrator
+    When the initial dashboard stats request fails
+    Then the dashboard financial cards show a request failure without zero totals
+
+  Scenario: A successful dashboard response can report real zero activity
+    Given an authenticated administrator
+    When the dashboard stats successfully report no activity
+    Then the dashboard financial cards show zero totals and zero open items
+
   Scenario: An uncertain settlement response is retried idempotently
     Given an authenticated administrator
     When the host retries settlement after its first response is lost
     Then both settlement attempts use the same mutation identifier
     And settlement details were locked while the result was uncertain
     And the host reaches the single resulting bill
+
+  Scenario: A committed settlement survives closing and reload
+    Given an authenticated administrator
+    When a committed settlement response is lost before modal close and reload
+    Then settlement recovery replays the original frozen command
+    And the reload reaches the single recovered bill exactly once
+    And the recovered settlement command is cleared
 
   Scenario: Settlement timestamps begin after lock waits
     Given an authenticated administrator
@@ -204,6 +226,17 @@ Feature: Host order entry and billing
     Given an authenticated administrator
     When the venue has more bills than one archive page
     Then the host can find the oldest bill by its number
+
+  Scenario: An unavailable bill archive never appears empty
+    Given an authenticated administrator
+    When the initial bill archive request is delayed and fails
+    Then the bill archive shows loading without a successful empty state
+    And the bill archive shows failure without a successful empty state
+
+  Scenario: A successful empty bill archive appears empty
+    Given an authenticated administrator
+    When the host opens a successfully empty bill archive
+    Then the bill archive shows its successful empty state
 
   Scenario: A bill keeps its settlement-time venue timezone
     Given an authenticated administrator

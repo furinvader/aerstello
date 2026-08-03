@@ -1,11 +1,44 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createHostSession, hashPassword, hashToken, lockVerifiedHostLogin, recordHostSessionActivity, verifyPassword } from './security.js';
+import {
+  accessStatusVerifierCandidates,
+  createHostSession,
+  hashPassword,
+  hashToken,
+  issueAccessStatusCapability,
+  lockVerifiedHostLogin,
+  recordHostSessionActivity,
+  recoverAccessStatusCapability,
+  verifyPassword,
+} from './security.js';
 
 describe('security primitives', () => {
   it('hashes opaque tokens deterministically without retaining the token', () => {
     const token = 'a-private-device-session-token';
     expect(hashToken(token)).toBe(hashToken(token));
     expect(hashToken(token)).not.toContain(token);
+  });
+
+  it('keeps initial capability issuance compatible with overlapping legacy replicas', () => {
+    const sharedSecret = 'the-initial-shared-rollout-secret-value';
+    const capability = issueAccessStatusCapability('mutation-a', [{ id: 'v1', secret: sharedSecret }]);
+    expect(capability.verifier).toBe(hashToken(capability.token, sharedSecret));
+    expect(capability.token).not.toContain(sharedSecret);
+    expect(capability.verifier).not.toContain(sharedSecret);
+  });
+
+  it('recovers existing capabilities from retained key versions after rotation', () => {
+    const previous = { id: 'v1', secret: 'the-previous-access-capability-secret' };
+    const current = { id: 'v2', secret: 'the-current-access-capability-secret-value' };
+    const original = issueAccessStatusCapability('mutation-a', [previous]);
+    const rotatedKeys = [current, previous];
+
+    expect(recoverAccessStatusCapability('mutation-a', original.verifier, 'v1', rotatedKeys)).toEqual(original);
+    expect(accessStatusVerifierCandidates(original.token, rotatedKeys)).toContainEqual({
+      keyId: 'v1',
+      verifier: original.verifier,
+    });
+    expect(issueAccessStatusCapability('mutation-a', rotatedKeys).keyId).toBe('v2');
+    expect(recoverAccessStatusCapability('mutation-a', original.verifier, 'v1', [current])).toBeUndefined();
   });
 
   it('uses a one-way password hash', async () => {
