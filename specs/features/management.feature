@@ -167,6 +167,12 @@ Feature: Venue operations configuration
     When another API replica creates a room
     Then the connected host receives the other replica room event
 
+  Scenario: Realtime events remain ordered across concurrent commits
+    Given an authenticated administrator
+    When realtime events try to commit out of identity order
+    Then the later realtime insertion waits for the earlier transaction
+    And the connected host receives both realtime events in commit order
+
   Scenario: A stale room reorder cannot overwrite a newer order
     Given an authenticated administrator
     When a room reorder response is lost before another administrator reorders rooms

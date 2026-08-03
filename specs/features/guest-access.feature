@@ -79,6 +79,16 @@ Feature: Guest device access and self-service
     When a clock-skewed API replica exchanges a database-valid grant
     Then the database-valid guest access is granted
 
+  Scenario: Approval expiry uses the database clock across replicas
+    Given an authenticated administrator
+    When clock-skewed API replicas validate access approval expiries
+    Then only the database-valid access approval is accepted
+
+  Scenario: Approval expiry is checked after serialization
+    Given an authenticated administrator
+    When an access approval expires while waiting for its request lock
+    Then the expired approval is rejected without resolving its request
+
   Scenario: A host revokes one guest device
     Given an approved guest device for "Luca Rossi" in room "102"
     When the host revokes Luca's device from the guest directory

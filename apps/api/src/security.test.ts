@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { hashPassword, hashToken, lockVerifiedHostLogin, recordHostSessionActivity, verifyPassword } from './security.js';
+import { createHostSession, hashPassword, hashToken, lockVerifiedHostLogin, recordHostSessionActivity, verifyPassword } from './security.js';
 
 describe('security primitives', () => {
   it('hashes opaque tokens deterministically without retaining the token', () => {
@@ -14,6 +14,39 @@ describe('security primitives', () => {
     expect(hash).not.toContain(password);
     await expect(verifyPassword(hash, password)).resolves.toBe(true);
     await expect(verifyPassword(hash, 'wrong-password')).resolves.toBe(false);
+  });
+
+  it.each([
+    { skew: 'ahead', applicationNow: new Date('2026-08-03T14:00:00.000Z') },
+    { skew: 'behind', applicationNow: new Date('2026-08-03T10:00:00.000Z') },
+  ])('uses the database expiry when the application clock is $skew', async ({ applicationNow }) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(applicationNow);
+    try {
+      const databaseExpiry = new Date('2026-09-02T12:00:00.000Z');
+      const query = vi.fn(async (_sql: string, _parameters: unknown[]) => ({ rows: [{ expiresAt: databaseExpiry }] }));
+      const setCookie = vi.fn((_name: string, _token: string, _options: { expires: Date }) => undefined);
+
+      await createHostSession(
+        { query } as never,
+        'host-a',
+        { headers: { 'user-agent': 'Clock skew test agent' } } as never,
+        { setCookie } as never,
+      );
+
+      expect(query).toHaveBeenCalledWith(
+        expect.stringMatching(/now\(\)\+interval '30 days'[\s\S]*RETURNING expires_at AS "expiresAt"/),
+        ['host-a', expect.stringMatching(/^[0-9a-f]{64}$/), 'Clock skew test agent'],
+      );
+      expect(setCookie).toHaveBeenCalledWith(
+        'skybar_host',
+        expect.any(String),
+        expect.objectContaining({ expires: databaseExpiry }),
+      );
+      expect(setCookie.mock.calls[0]![2].expires).toBe(databaseExpiry);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('contains nonessential last-seen update failures', async () => {

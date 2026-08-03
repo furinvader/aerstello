@@ -285,6 +285,10 @@ export const auditEvents = pgTable('audit_events', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+export const realtimeEventCommitLock = pgTable('realtime_event_commit_lock', {
+  singleton: boolean('singleton').primaryKey().default(true),
+}, (t) => [check('realtime_event_commit_lock_singleton_check', sql`${t.singleton}`)]);
+
 export const realtimeEvents = pgTable('realtime_events', {
   id: bigint('id', { mode: 'bigint' }).primaryKey().generatedAlwaysAsIdentity(),
   topic: text('topic').notNull(),

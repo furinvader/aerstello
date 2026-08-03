@@ -496,8 +496,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         (SELECT count(*)::int FROM guests WHERE archived_at IS NULL) AS "activeGuests",
         active_orders."openItemCount",active_orders."openValueCents",
         (SELECT COALESCE(sum(b.total_cents::bigint),0)::float8
-           FROM bills b CROSS JOIN venue_settings v
-          WHERE b.settled_at >= (date_trunc('day',now() AT TIME ZONE v.timezone) AT TIME ZONE v.timezone)
+           FROM bills b
+          WHERE (b.settled_at AT TIME ZONE b.venue_timezone)::date
+                = (statement_timestamp() AT TIME ZONE b.venue_timezone)::date
             AND b.voided_at IS NULL) AS "todaySalesCents"
         FROM active_orders`,
     );
@@ -908,7 +909,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         if(prior.commandGuestId!==(input.guestId??null)||prior.commandExpiresAt.getTime()!==new Date(input.expiresAt).getTime()) throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to a different access approval command.');
         return {guestId:prior.guestId,events:[] as RealtimeEvent[]};
       }
-      if (new Date(input.expiresAt) <= new Date()) throw new HttpError(400, 'INVALID_EXPIRY', 'Expiry must be in the future.');
       const pending = await client.query<{ name: string; roomId: string; language: string }>(
         `SELECT name,room_id AS "roomId",language FROM access_requests WHERE id=$1 AND status='pending' FOR UPDATE`, [requestId],
       );
@@ -923,11 +923,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       } else {
         guestId = (await client.query<{ id: string }>('INSERT INTO guests(name,room_id,language) VALUES ($1,$2,$3) RETURNING id', [access.name, access.roomId, access.language])).rows[0]!.id;
       }
-      await client.query(
+      const approved = await client.query(
         `UPDATE access_requests SET status='approved',guest_id=$1,expires_at=$2,resolved_at=now(),resolved_by=$3,
-                approval_mutation_id=$4,approval_linked_guest_id=$5,approval_expires_at=$2 WHERE id=$6`,
+                approval_mutation_id=$4,approval_linked_guest_id=$5,approval_expires_at=$2
+          WHERE id=$6 AND status='pending' AND $2::timestamptz>clock_timestamp() RETURNING id`,
         [guestId,input.expiresAt,request.hostIdentity!.id,input.mutationId,input.guestId??null,requestId],
       );
+      if (!approved.rowCount) throw new HttpError(400, 'INVALID_EXPIRY', 'Expiry must be in the future.');
       await audit('access.approved', 'access-request', requestId, { guestId, expiresAt: input.expiresAt }, { hostId: request.hostIdentity!.id }, client);
       const events=[await storeEvent('access-request.changed',{id:requestId},client),await storeEvent('guests.changed',{},client)];
       return { guestId,events };

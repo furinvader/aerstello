@@ -43,7 +43,6 @@ declare module 'fastify' {
 
 const hostCookie = 'skybar_host';
 const guestCookie = 'skybar_guest';
-const thirtyDays = 30 * 24 * 60 * 60 * 1000;
 
 export function hashToken(token: string): string {
   return createHmac('sha256', config.SESSION_SECRET).update(token).digest('hex');
@@ -89,11 +88,13 @@ function cookieOptions(expires: Date) {
 
 export async function createHostSession(client: pg.Pool | pg.PoolClient, hostId: string, request: FastifyRequest, reply: FastifyReply): Promise<void> {
   const token = newToken();
-  const expires = new Date(Date.now() + thirtyDays);
-  await client.query(
-    'INSERT INTO host_sessions(host_id, token_hash, user_agent, expires_at) VALUES ($1,$2,$3,$4)',
-    [hostId, hashToken(token), request.headers['user-agent']?.slice(0, 300) ?? 'Unknown device', expires],
+  const result = await client.query<{ expiresAt: Date }>(
+    `INSERT INTO host_sessions(host_id, token_hash, user_agent, expires_at)
+     VALUES ($1,$2,$3,now()+interval '30 days')
+     RETURNING expires_at AS "expiresAt"`,
+    [hostId, hashToken(token), request.headers['user-agent']?.slice(0, 300) ?? 'Unknown device'],
   );
+  const expires = result.rows[0]!.expiresAt;
   reply.setCookie(hostCookie, token, cookieOptions(expires));
 }
 

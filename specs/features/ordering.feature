@@ -115,6 +115,11 @@ Feature: Host order entry and billing
     When the host has billed history and one current open item
     Then the dashboard reports only the current item and value
 
+  Scenario: Dashboard sales keep settlement-time sales days
+    Given an authenticated administrator
+    When the venue timezone changes after sales on adjacent snapshot days
+    Then the dashboard reports sales from the current snapshotted day
+
   Scenario: An uncertain settlement response is retried idempotently
     Given an authenticated administrator
     When the host retries settlement after its first response is lost

@@ -112,6 +112,8 @@ let expectedItalianSessionTimestamp = '';
 let dashboardCurrentItemCount = 0;
 let dashboardCurrentValueCents = 0;
 let dashboardExpectedValueCents = 0;
+let dashboardSnapshotSalesCents = 0;
+let dashboardExpectedSnapshotSalesCents = 0;
 let closedOrderMutationIds: string[] = [];
 let closedOrderItemCount = 0;
 let capturedUncertainTotal = '';
@@ -188,6 +190,13 @@ let replayedGuestLogoutStatus = 0;
 let guestUndoRemainingMs = 0;
 let settlementTimestampAgeMs = Number.POSITIVE_INFINITY;
 let databaseClockGrantResult: {granted:boolean;guestStatus:number}|undefined;
+let databaseClockApprovalResult: {
+  validStatus:number;validRequestStatus:string;expiredStatus:number;expiredCode:string;expiredRequestStatus:string;expiredGuestCount:number;
+}|undefined;
+let serializedApprovalResult: {status:number;code:string;requestStatus:string;guestCount:number}|undefined;
+let laterRealtimeInsertWaited = false;
+let commitOrderedRealtimeIds: string[] = [];
+let relayedCommitOrderedEvents: {id:string;marker:string}[] = [];
 
 Before(async () => {
   execFileSync('npm',['run','db:seed','-w','@sky-bar/api'],{cwd:process.cwd(),env:{...process.env,E2E_RESET:'true',SEED_ADMIN_PASSWORD:'SkyBarTest123!'},stdio:'pipe'});
@@ -211,6 +220,18 @@ async function signIn(page: import('@playwright/test').Page) {
   await page.getByLabel('Password').fill('SkyBarTest123!');
   await page.getByRole('button',{name:'Sign in'}).click();
   await expect(page).toHaveURL(/\/app/);
+}
+
+async function startClockSkewedApi(port:number,offsetMs:number) {
+  const replica=spawn(process.execPath,['--import','./tests/e2e/fixtures/future-clock.mjs','apps/api/dist/index.js'],{
+    cwd:process.cwd(),
+    env:{...process.env,PORT:String(port),LOG_LEVEL:'warn',RATE_LIMIT_MAX:'5000',SKY_BAR_TEST_CLOCK_OFFSET_MS:String(offsetMs)},
+    stdio:'ignore',
+  });
+  extraApiProcesses.push(replica);
+  const baseURL=`http://127.0.0.1:${port}`;
+  await expect.poll(async()=>{try{return (await fetch(`${baseURL}/api/v1/health`)).status}catch{return 0}},{timeout:15_000}).toBe(200);
+  return baseURL;
 }
 
 Given('the seeded Sky Bar venue', async ({ page }) => { await page.goto('/login'); });
@@ -600,13 +621,81 @@ When('a clock-skewed API replica exchanges a database-valid grant',async({page,b
   const request=page.context().request;const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};const room=bootstrap.rooms.find(item=>item.name==='102')!;
   const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Database Clock Grant',roomId:room.id,language:'de'}})).json() as {id:string;statusToken:string};
   expect((await request.post(`/api/v1/access-requests/${created.id}/approve`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expiresAt:new Date(Date.now()+30*60*1000).toISOString()}})).status()).toBe(200);
-  const replicaPort=3201;const replica=spawn(process.execPath,['--import','./tests/e2e/fixtures/future-clock.mjs','apps/api/dist/index.js'],{cwd:process.cwd(),env:{...process.env,PORT:String(replicaPort),LOG_LEVEL:'warn',RATE_LIMIT_MAX:'5000'},stdio:'ignore'});extraApiProcesses.push(replica);
-  await expect.poll(async()=>{try{return (await fetch(`http://127.0.0.1:${replicaPort}/api/v1/health`)).status}catch{return 0}},{timeout:15_000}).toBe(200);
-  const context=await browser.newContext({baseURL:`http://127.0.0.1:${replicaPort}`});extraContexts.push(context);
+  const replicaURL=await startClockSkewedApi(3201,60*60*1000);
+  const context=await browser.newContext({baseURL:replicaURL});extraContexts.push(context);
   const exchange=await context.request.post(`/api/v1/public/access-requests/${created.id}/status`,{data:{token:created.statusToken,grantId:crypto.randomUUID()}});
   databaseClockGrantResult={granted:((await exchange.json()) as {granted:boolean}).granted,guestStatus:(await context.request.get('/api/v1/guest/me')).status()};
 });
 Then('the database-valid guest access is granted',async()=>{expect(databaseClockGrantResult).toEqual({granted:true,guestStatus:200})});
+When('clock-skewed API replicas validate access approval expiries',async({page})=>{
+  const request=page.context().request;
+  const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
+  const room=bootstrap.rooms.find(item=>item.name==='102')!;
+  const valid=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Database Valid Approval',roomId:room.id,language:'de'}})).json() as {id:string};
+  const expired=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Database Expired Approval',roomId:room.id,language:'de'}})).json() as {id:string};
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();
+  try{
+    const times=(await database.query<{validExpiresAt:Date;expiredExpiresAt:Date}>(
+      `SELECT clock_timestamp()+interval '30 minutes' AS "validExpiresAt",
+              clock_timestamp()-interval '30 minutes' AS "expiredExpiresAt"`,
+    )).rows[0]!;
+    const futureReplica=await startClockSkewedApi(3202,60*60*1000);
+    const pastReplica=await startClockSkewedApi(3203,-60*60*1000);
+    const validResponse=await request.post(`${futureReplica}/api/v1/access-requests/${valid.id}/approve`,{
+      headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expiresAt:times.validExpiresAt.toISOString()},
+    });
+    const expiredResponse=await request.post(`${pastReplica}/api/v1/access-requests/${expired.id}/approve`,{
+      headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expiresAt:times.expiredExpiresAt.toISOString()},
+    });
+    const expiredBody=await expiredResponse.json() as {error:{code:string}};
+    const states=await database.query<{id:string;status:string}>('SELECT id,status FROM access_requests WHERE id=ANY($1::uuid[])',[ [valid.id,expired.id] ]);
+    databaseClockApprovalResult={
+      validStatus:validResponse.status(),
+      validRequestStatus:states.rows.find(row=>row.id===valid.id)!.status,
+      expiredStatus:expiredResponse.status(),
+      expiredCode:expiredBody.error.code,
+      expiredRequestStatus:states.rows.find(row=>row.id===expired.id)!.status,
+      expiredGuestCount:Number((await database.query(`SELECT count(*) FROM guests WHERE name='Database Expired Approval'`)).rows[0].count),
+    };
+  }finally{await database.end()}
+});
+Then('only the database-valid access approval is accepted',async()=>{
+  expect(databaseClockApprovalResult).toEqual({
+    validStatus:200,validRequestStatus:'approved',expiredStatus:400,expiredCode:'INVALID_EXPIRY',expiredRequestStatus:'pending',expiredGuestCount:0,
+  });
+});
+When('an access approval expires while waiting for its request lock',async({page})=>{
+  const request=page.context().request;
+  const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
+  const room=bootstrap.rooms.find(item=>item.name==='102')!;
+  const created=await (await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Serialized Expired Approval',roomId:room.id,language:'de'}})).json() as {id:string};
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();let committed=false;
+  try{
+    await database.query('BEGIN');
+    await database.query('SELECT id FROM access_requests WHERE id=$1 FOR UPDATE',[created.id]);
+    const holderXid=String((await database.query('SELECT pg_current_xact_id()::text AS xid')).rows[0].xid);
+    const expiresAt=((await database.query<{expiresAt:Date}>(`SELECT clock_timestamp()+interval '2 seconds' AS "expiresAt"`)).rows[0]!.expiresAt).toISOString();
+    const approval=request.post(`/api/v1/access-requests/${created.id}/approve`,{
+      headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expiresAt},
+    });
+    await expect.poll(async()=>Number((await database.query(
+      `SELECT count(*) FROM pg_locks WHERE locktype='transactionid' AND transactionid::text=$1 AND NOT granted`,[holderXid],
+    )).rows[0].count),{timeout:5_000,intervals:[10,20,50]}).toBeGreaterThan(0);
+    await new Promise(resolve=>setTimeout(resolve,2_200));
+    await database.query('COMMIT');committed=true;
+    const response=await approval;
+    const responseBody=await response.json() as {error:{code:string}};
+    serializedApprovalResult={
+      status:response.status(),
+      code:responseBody.error.code,
+      requestStatus:String((await database.query('SELECT status FROM access_requests WHERE id=$1',[created.id])).rows[0].status),
+      guestCount:Number((await database.query(`SELECT count(*) FROM guests WHERE name='Serialized Expired Approval'`)).rows[0].count),
+    };
+  }finally{if(!committed)await database.query('ROLLBACK');await database.end()}
+});
+Then('the expired approval is rejected without resolving its request',async()=>{
+  expect(serializedApprovalResult).toEqual({status:400,code:'INVALID_EXPIRY',requestStatus:'pending',guestCount:0});
+});
 When("the host revokes Luca's device from the guest directory",async({page})=>{await page.goto('/app/guests');const row=page.locator('.table-row').filter({hasText:'Luca Rossi'});await row.getByRole('button',{name:/Angemeldete Geräte|Dispositivi connessi|Logged-in devices/}).click();await expect(page.locator('.modal .device-list')).toBeVisible();await page.locator('.modal').getByRole('button',{name:/Widerrufen|Revoca|Revoke/}).click();await expect(page.locator('.modal .device-list')).toHaveCount(0)});
 Then("Luca's revoked device loses guest access",async()=>{guestRevokedStatus=(await guestPage!.context().request.get('/api/v1/guest/me')).status();expect(guestRevokedStatus).toBe(401)});
 When("another host revokes Luca's device while the first host's device list is open",async({page,browser})=>{
@@ -873,6 +962,77 @@ Then('the connected host receives the other replica room event',async({page})=>{
   await expect.poll(()=>page.evaluate(()=>sessionStorage.getItem('__skyBarReplicaRoomEvent')),{timeout:10_000}).toBe('1');
   await page.evaluate(()=>((window as unknown as {__skyBarReplicaStream:EventSource}).__skyBarReplicaStream).close());
 });
+When('realtime events try to commit out of identity order',async({page})=>{
+  const testId=crypto.randomUUID();
+  laterRealtimeInsertWaited=false;
+  commitOrderedRealtimeIds=[];
+  relayedCommitOrderedEvents=[];
+  await page.evaluate((currentTestId)=>new Promise<void>((resolve,reject)=>{
+    sessionStorage.setItem('__skyBarCommitOrderedEvents','[]');
+    const events=new EventSource('/api/v1/events');
+    Object.assign(window,{__skyBarCommitOrderStream:events});
+    events.addEventListener('rooms.changed',(rawEvent)=>{
+      const event=rawEvent as MessageEvent<string>;
+      const payload=JSON.parse(event.data) as {commitOrderTest?:string;marker?:string};
+      if(payload.commitOrderTest!==currentTestId||!payload.marker)return;
+      const received=JSON.parse(sessionStorage.getItem('__skyBarCommitOrderedEvents')??'[]') as {id:string;marker:string}[];
+      received.push({id:event.lastEventId,marker:payload.marker});
+      sessionStorage.setItem('__skyBarCommitOrderedEvents',JSON.stringify(received));
+    });
+    events.addEventListener('open',()=>resolve(),{once:true});
+    events.addEventListener('error',()=>{if(events.readyState===EventSource.CLOSED)reject(new Error('Commit-order event stream closed before opening'))},{once:true});
+  }),testId);
+
+  const first=new pg.Client({connectionString:process.env.DATABASE_URL});
+  const second=new pg.Client({connectionString:process.env.DATABASE_URL});
+  await Promise.all([first.connect(),second.connect()]);
+  let firstCommitted=false;
+  let secondCommitted=false;
+  let laterInsert:ReturnType<typeof second.query<{id:string}>>|undefined;
+  try{
+    await first.query('BEGIN');
+    const earlier=await first.query<{id:string}>(
+      `INSERT INTO realtime_events(topic,payload) VALUES ('rooms.changed',$1::jsonb) RETURNING id::text AS id`,
+      [JSON.stringify({commitOrderTest:testId,marker:'earlier'})],
+    );
+    const holderXid=String((await first.query<{xid:string}>('SELECT pg_current_xact_id()::text AS xid')).rows[0]!.xid);
+    await second.query('BEGIN');
+    laterInsert=second.query<{id:string}>(
+      `INSERT INTO realtime_events(topic,payload) VALUES ('rooms.changed',$1::jsonb) RETURNING id::text AS id`,
+      [JSON.stringify({commitOrderTest:testId,marker:'later'})],
+    );
+    await expect.poll(async()=>Number((await first.query(
+      `SELECT count(*)::int AS count FROM pg_locks WHERE locktype='transactionid' AND transactionid::text=$1 AND NOT granted`,
+      [holderXid],
+    )).rows[0].count),{timeout:5_000,intervals:[10,20,50]}).toBeGreaterThan(0);
+    laterRealtimeInsertWaited=true;
+    await page.waitForTimeout(750);
+    await first.query('COMMIT');
+    firstCommitted=true;
+    const later=await laterInsert;
+    await second.query('COMMIT');
+    secondCommitted=true;
+    commitOrderedRealtimeIds=[earlier.rows[0]!.id,later.rows[0]!.id];
+    await expect.poll(()=>page.evaluate(()=>JSON.parse(sessionStorage.getItem('__skyBarCommitOrderedEvents')??'[]').length),{timeout:10_000}).toBe(2);
+    relayedCommitOrderedEvents=await page.evaluate(()=>JSON.parse(sessionStorage.getItem('__skyBarCommitOrderedEvents')??'[]') as {id:string;marker:string}[]);
+  }finally{
+    if(!firstCommitted)await first.query('ROLLBACK');
+    if(!secondCommitted){
+      await laterInsert?.catch(()=>undefined);
+      await second.query('ROLLBACK');
+    }
+    await Promise.all([first.end(),second.end()]);
+    await page.evaluate(()=>((window as unknown as {__skyBarCommitOrderStream:EventSource}).__skyBarCommitOrderStream).close());
+  }
+});
+Then('the later realtime insertion waits for the earlier transaction',async()=>{expect(laterRealtimeInsertWaited).toBe(true)});
+Then('the connected host receives both realtime events in commit order',async()=>{
+  expect(BigInt(commitOrderedRealtimeIds[0]!)).toBeLessThan(BigInt(commitOrderedRealtimeIds[1]!));
+  expect(relayedCommitOrderedEvents).toEqual([
+    {id:commitOrderedRealtimeIds[0]!,marker:'earlier'},
+    {id:commitOrderedRealtimeIds[1]!,marker:'later'},
+  ]);
+});
 When('a room reorder response is lost before another administrator reorders rooms',async({page})=>{const request=page.context().request;const original=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;version:number}[]};const [a,b,c]=original.data;const command=(ids:string[],rooms:{id:string;version:number}[])=>({rooms:ids.map(id=>({id,expectedVersion:rooms.find(room=>room.id===id)!.version}))});const staleCommand=command([b!.id,a!.id,c!.id],original.data);expect((await request.put('/api/v1/rooms/order',{headers:csrfHeaders,data:staleCommand})).status()).toBe(200);const afterFirst=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;version:number}[]};expectedRoomOrderFinalIds=[c!.id,b!.id,a!.id];expect((await request.put('/api/v1/rooms/order',{headers:csrfHeaders,data:command(expectedRoomOrderFinalIds,afterFirst.data)})).status()).toBe(200);staleRoomOrderStatus=(await request.put('/api/v1/rooms/order',{headers:csrfHeaders,data:staleCommand})).status();staleRoomOrderFinalIds=((await (await request.get('/api/v1/rooms')).json()) as {data:{id:string}[]}).data.map(room=>room.id)});
 Then('retrying the stale room reorder is rejected',async()=>{expect(staleRoomOrderStatus).toBe(409)});
 Then('the newer room order remains configured',async()=>{expect(staleRoomOrderFinalIds).toEqual(expectedRoomOrderFinalIds)});
@@ -1083,6 +1243,52 @@ When('the host submits five items in one order line',async({page})=>{
 Then('the dashboard reports five open items',async()=>{expect(dashboardOpenItemCount).toBe(5)});
 When('the host has billed history and one current open item',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const historical=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:3}]}})).json() as {tabId:string};expect((await request.post(`/api/v1/tabs/${historical.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:3,expectedTotalCents:product.priceCents*3,paymentMethod:'cash'}})).status()).toBe(200);expect((await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).status()).toBe(201);const dashboard=await (await request.get('/api/v1/dashboard')).json() as {openItemCount:number;openValueCents:number};dashboardCurrentItemCount=dashboard.openItemCount;dashboardCurrentValueCents=dashboard.openValueCents;dashboardExpectedValueCents=product.priceCents});
 Then('the dashboard reports only the current item and value',async()=>{expect(dashboardCurrentItemCount).toBe(1);expect(dashboardCurrentValueCents).toBe(dashboardExpectedValueCents)});
+
+When('the venue timezone changes after sales on adjacent snapshot days',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);
+  const guest=guests.data.find(item=>item.name==='Anna Berger')!;
+  const product=products.data.find(item=>item.name.de==='Helles')!;
+  const venue=await (await request.get('/api/v1/venue')).json() as {name:string;defaultLanguage:string;version:number};
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});
+  await database.connect();
+  try {
+    const zones=(await database.query<{snapshotTimezone:string;currentTimezone:string}>(
+      `WITH starts AS (
+         SELECT date_trunc('day',statement_timestamp() AT TIME ZONE 'Pacific/Kiritimati') AT TIME ZONE 'Pacific/Kiritimati' AS kiritimati,
+                date_trunc('day',statement_timestamp() AT TIME ZONE 'Pacific/Pago_Pago') AT TIME ZONE 'Pacific/Pago_Pago' AS pago_pago
+       ) SELECT CASE WHEN kiritimati<pago_pago THEN 'Pacific/Kiritimati' ELSE 'Pacific/Pago_Pago' END AS "snapshotTimezone",
+                CASE WHEN kiritimati<pago_pago THEN 'Pacific/Pago_Pago' ELSE 'Pacific/Kiritimati' END AS "currentTimezone"
+           FROM starts`,
+    )).rows[0]!;
+    const snapshotVenueResponse=await request.put('/api/v1/venue',{headers:csrfHeaders,data:{name:venue.name,language:venue.defaultLanguage,timezone:zones.snapshotTimezone,expectedVersion:venue.version}});
+    expect(snapshotVenueResponse.status()).toBe(200);
+    const snapshotVenue=await snapshotVenueResponse.json() as {version:number};
+    const settle=async(quantity:number)=>{
+      const orderResponse=await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity}]}});
+      expect(orderResponse.status()).toBe(201);
+      const order=await orderResponse.json() as {tabId:string};
+      const settlementResponse=await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:quantity,expectedTotalCents:product.priceCents*quantity,paymentMethod:'cash'}});
+      expect(settlementResponse.status()).toBe(200);
+      return await settlementResponse.json() as {id:string};
+    };
+    const currentDayBill=await settle(1);
+    const previousDayBill=await settle(2);
+    await database.query(
+      `UPDATE bills
+          SET settled_at=CASE WHEN id=$1
+                THEN date_trunc('day',statement_timestamp() AT TIME ZONE $3) AT TIME ZONE $3
+                ELSE (date_trunc('day',statement_timestamp() AT TIME ZONE $3)-interval '1 day') AT TIME ZONE $3
+              END
+        WHERE id=$1 OR id=$2`,
+      [currentDayBill.id,previousDayBill.id,zones.snapshotTimezone],
+    );
+    expect((await request.put('/api/v1/venue',{headers:csrfHeaders,data:{name:venue.name,language:venue.defaultLanguage,timezone:zones.currentTimezone,expectedVersion:snapshotVenue.version}})).status()).toBe(200);
+  } finally { await database.end(); }
+  const dashboard=await (await request.get('/api/v1/dashboard')).json() as {todaySalesCents:number};
+  dashboardSnapshotSalesCents=dashboard.todaySalesCents;
+  dashboardExpectedSnapshotSalesCents=product.priceCents;
+});
+Then('the dashboard reports sales from the current snapshotted day',async()=>{expect(dashboardSnapshotSalesCents).toBe(dashboardExpectedSnapshotSalesCents)});
 
 When('the host retries settlement after its first response is lost',async({page})=>{
   await chooseOrder(page,'Helles','Anna Berger','101');await page.getByRole('button',{name:/Bestellung buchen/}).click();await expect(page.locator('.tab-pill')).toContainText('1 Artikel');
