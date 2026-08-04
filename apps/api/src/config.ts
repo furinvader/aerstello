@@ -1,13 +1,25 @@
 import { z } from 'zod';
 
 const developmentSessionSecret = 'development-only-session-secret-change-me';
+const developmentAccessCapabilitySecret = 'development-only-access-capability-secret';
 const publishedSessionSecretPlaceholder = 'replace-with-at-least-32-random-characters';
-const publishedAccessCapabilityPlaceholder = `v1:${publishedSessionSecretPlaceholder}`;
+const publishedAccessCapabilitySecret = 'replace-with-distinct-access-capability-secret';
+const publishedAccessCapabilityPlaceholder = `v1:${publishedAccessCapabilitySecret}`;
 const developmentDatabaseUrl = 'postgres://skybar:skybar@localhost:5432/skybar';
 const insecureProductionSessionSecrets = new Set([developmentSessionSecret, publishedSessionSecretPlaceholder]);
+const insecureProductionCapabilitySecrets = new Set([
+  developmentAccessCapabilitySecret,
+  publishedAccessCapabilitySecret,
+  developmentSessionSecret,
+  publishedSessionSecretPlaceholder,
+]);
 
-function containsPublishedCapabilitySecret(value: string | undefined): boolean {
-  return Boolean(value?.split(',').some((entry) => insecureProductionSessionSecrets.has(entry.slice(entry.indexOf(':') + 1))));
+function containsInsecureCapabilitySecret(value: string | undefined): boolean {
+  return Boolean(value?.split(',').some((entry) => insecureProductionCapabilitySecrets.has(entry.slice(entry.indexOf(':') + 1))));
+}
+
+function containsCapabilitySecret(value: string | undefined, secret: string): boolean {
+  return Boolean(value?.split(',').some((entry) => entry.slice(entry.indexOf(':') + 1) === secret));
 }
 
 export interface AccessCapabilityKey {
@@ -26,7 +38,6 @@ const configSchema = z.object({
   LOG_LEVEL: z.string().default('info'),
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),
   ACCESS_STATUS_IP_LIMIT_MAX: z.coerce.number().int().positive().default(3000),
-  LEGACY_BILL_TIMEZONE: z.preprocess((value) => value === '' ? undefined : value, z.string().trim().min(1).optional()),
 }).superRefine((value, context) => {
   if (value.NODE_ENV === 'production' && insecureProductionSessionSecrets.has(value.SESSION_SECRET)) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ['SESSION_SECRET'], message: 'SESSION_SECRET must be explicitly configured in production.' });
@@ -34,7 +45,8 @@ const configSchema = z.object({
   if (value.NODE_ENV === 'production' && (
     !value.ACCESS_CAPABILITY_KEYS
     || value.ACCESS_CAPABILITY_KEYS === publishedAccessCapabilityPlaceholder
-    || containsPublishedCapabilitySecret(value.ACCESS_CAPABILITY_KEYS)
+    || containsInsecureCapabilitySecret(value.ACCESS_CAPABILITY_KEYS)
+    || containsCapabilitySecret(value.ACCESS_CAPABILITY_KEYS, value.SESSION_SECRET)
   )) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
@@ -72,7 +84,7 @@ export const parseConfig = (environment: NodeJS.ProcessEnv) => {
   const { ACCESS_CAPABILITY_KEYS: configuredKeys, ...values } = parsed;
   return {
     ...values,
-    ACCESS_CAPABILITY_KEYS: parseAccessCapabilityKeys(configuredKeys ?? `development-v1:${parsed.SESSION_SECRET}`),
+    ACCESS_CAPABILITY_KEYS: parseAccessCapabilityKeys(configuredKeys ?? `development-v1:${developmentAccessCapabilitySecret}`),
   };
 };
 export const config = parseConfig(process.env);

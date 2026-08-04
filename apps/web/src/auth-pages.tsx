@@ -45,12 +45,10 @@ interface PendingAccess { id: string; token: string; grantId: string }
 interface AccessSubmission { mutationId: string; name: string; roomId: string; language: Language }
 
 function loadDurableRecovery(key: string): string | null {
-  const durable = localStorage.getItem(key);
-  const legacy = sessionStorage.getItem(key);
-  if (legacy) sessionStorage.removeItem(key);
-  if (!durable && legacy) localStorage.setItem(key, legacy);
-  return durable ?? legacy;
+  return localStorage.getItem(key);
 }
+
+const isLanguage = (value: unknown): value is Language => value === 'de' || value === 'it' || value === 'en';
 
 export function RequestAccessPage() {
   const { t, language, setLanguage, applyDefaultLanguage } = useI18n();
@@ -60,7 +58,14 @@ export function RequestAccessPage() {
   const [submission, setSubmission] = useState<AccessSubmission | null>(() => {
     const raw=loadDurableRecovery('skybar-access-submission');
     if(!raw)return null;
-    try{return JSON.parse(raw) as AccessSubmission;}catch{localStorage.removeItem('skybar-access-submission');return null;}
+    try {
+      const stored: unknown = JSON.parse(raw);
+      if (typeof stored === 'object' && stored !== null && !Array.isArray(stored)) {
+        const command = stored as AccessSubmission;
+        if (typeof command.mutationId === 'string' && typeof command.name === 'string' && typeof command.roomId === 'string' && isLanguage(command.language)) return command;
+      }
+    } catch { /* Remove malformed recovery state below. */ }
+    localStorage.removeItem('skybar-access-submission');return null;
   });
   const [name, setName] = useState(submission?.name ?? '');
   const [roomId, setRoomId] = useState(submission?.roomId ?? params.get('room') ?? '');
@@ -68,10 +73,12 @@ export function RequestAccessPage() {
     const raw = loadDurableRecovery('skybar-pending');
     if (!raw) return null;
     try {
-      const stored = JSON.parse(raw) as Omit<PendingAccess, 'grantId'> & { grantId?: string };
-      const next = { ...stored, grantId: stored.grantId ?? crypto.randomUUID() };
-      localStorage.setItem('skybar-pending', JSON.stringify(next));
-      return next;
+      const stored: unknown = JSON.parse(raw);
+      if (typeof stored === 'object' && stored !== null && !Array.isArray(stored)) {
+        const pendingAccess = stored as PendingAccess;
+        if (typeof pendingAccess.id === 'string' && typeof pendingAccess.token === 'string' && typeof pendingAccess.grantId === 'string') return pendingAccess;
+      }
+      throw new Error('Invalid pending access recovery state.');
     } catch {
       localStorage.removeItem('skybar-pending');
       return null;

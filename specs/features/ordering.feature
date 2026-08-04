@@ -28,11 +28,6 @@ Feature: Host order entry and billing
     When the device goes offline and the host submits one "Helles" for "Anna Berger" in room "101"
     Then the order is marked as queued for synchronization
 
-  Scenario: A version-one queued order survives the database upgrade
-    Given a version-one device database contains a queued financial mutation
-    Then the queued financial mutation is preserved without assigning an owner
-    And the unowned mutation cannot be retried
-
   Scenario: A host removes an incorrect item while offline
     Given an authenticated administrator
     And an open "Helles" order for "Anna Berger" in room "101"
@@ -46,12 +41,6 @@ Feature: Host order entry and billing
     And the corrected item remains on the open tab
     When the host submits a new removal from the refreshed tab
     Then the refreshed item removal succeeds
-
-  Scenario: A legacy unapplied item removal requires review
-    Given an authenticated administrator
-    When an item removal without a billing version is submitted
-    Then the legacy item removal is rejected as a billing conflict
-    And the legacy item remains on the open tab
 
   Scenario: An uncertain item removal keeps its submitted reason
     Given an authenticated administrator
@@ -121,18 +110,6 @@ Feature: Host order entry and billing
     When a product price changes after its order response is lost
     Then the uncertain cart still shows its captured total
     And retrying retains the captured charge
-
-  Scenario: A legacy uncertain order with an unavailable price requires review
-    Given an authenticated administrator
-    When a pre-price-snapshot persisted order is restored after its products change
-    Then the unavailable captured price is explained in German, Italian, and English
-    And the legacy cart shows no zero or replacement price
-    And the unsafe legacy retry is blocked without changing its stored command
-
-  Scenario: A pre-command-snapshot order remains replayable
-    Given an authenticated administrator
-    When a legacy order batch with an unknown command is retried
-    Then the legacy order retry succeeds without another charge
 
   Scenario: Reusing an order mutation cannot change its command
     Given an authenticated administrator
@@ -270,11 +247,6 @@ Feature: Host order entry and billing
     Given an authenticated administrator
     When the settling host changes their name after billing
     Then the bill still shows the original host name
-
-  Scenario: A legacy bill does not invent historical host attribution
-    Given an authenticated administrator
-    When the host opens a legacy bill without trustworthy host attribution
-    Then the bill explains that the historical host is unavailable
 
   Scenario: A voided bill keeps its correction when printed
     Given an authenticated administrator

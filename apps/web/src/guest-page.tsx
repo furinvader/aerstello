@@ -13,17 +13,29 @@ interface TimedTab extends Tab { receivedAtMonotonic: number }
 interface TimedGuestItem extends GuestItemCreated { receivedAtMonotonic: number }
 interface ProvisionalEntry { id: string; expiresAtMonotonic: number }
 interface UndoEntry extends ProvisionalEntry { productId: string; mutationId: string }
-interface PendingAddStore { sessionId: string; entries: [string,string,number?,number?][] }
+interface PendingAddStore { sessionId: string; entries: [string,string,number,number][] }
 const pendingAddKey='skybar-guest-pending-adds';
 
 function loadPendingAdds(): PendingAddStore {
-  const durable=localStorage.getItem(pendingAddKey);
-  const legacy=sessionStorage.getItem(pendingAddKey);
-  if(legacy)sessionStorage.removeItem(pendingAddKey);
-  if(!durable&&legacy)localStorage.setItem(pendingAddKey,legacy);
-  const raw=durable??legacy;
+  const raw=localStorage.getItem(pendingAddKey);
   if(!raw)return {sessionId:'',entries:[]};
-  try{return JSON.parse(raw) as PendingAddStore}catch{localStorage.removeItem(pendingAddKey);return {sessionId:'',entries:[]}}
+  try {
+    const stored: unknown = JSON.parse(raw);
+    if (typeof stored === 'object' && stored !== null && !Array.isArray(stored)) {
+      const pending = stored as PendingAddStore;
+      if (typeof pending.sessionId === 'string' && Array.isArray(pending.entries) && pending.entries.every((entry) =>
+        Array.isArray(entry)
+        && entry.length === 4
+        && typeof entry[0] === 'string'
+        && typeof entry[1] === 'string'
+        && Number.isSafeInteger(entry[2])
+        && entry[2] >= 0
+        && Number.isSafeInteger(entry[3])
+        && entry[3] > 0
+      )) return pending;
+    }
+  } catch { /* Remove malformed recovery state below. */ }
+  localStorage.removeItem(pendingAddKey);return {sessionId:'',entries:[]};
 }
 
 function persistPendingAdds(store: PendingAddStore): void {
@@ -103,7 +115,7 @@ export function GuestPage() {
       const mutationId=existing?.[1]??crypto.randomUUID();
       const expectedPriceCents=existing?.[2]??product.priceCents;
       const expectedProductVersion=existing?.[3]??product.version;
-      const entries=[...pendingAdds.current.entries.filter(entry=>entry[0]!==product.id),[product.id,mutationId,expectedPriceCents,expectedProductVersion] as [string,string,number?,number?]];
+      const entries=[...pendingAdds.current.entries.filter(entry=>entry[0]!==product.id),[product.id,mutationId,expectedPriceCents,expectedProductVersion] as [string,string,number,number]];
       pendingAdds.current={sessionId,entries};
       persistPendingAdds(pendingAdds.current);
       const item=await api<GuestItemCreated>('/guest/items', { method: 'POST', body: json({ mutationId,productId:product.id,expectedPriceCents,expectedProductVersion }) });

@@ -26,10 +26,10 @@ describe('venue contracts', () => {
     }).success).toBe(true);
   });
 
-  it('accepts a non-negative item billing version and preserves the legacy replay shape', () => {
+  it('requires a non-negative item billing version', () => {
     const command = { mutationId: '00000000-0000-4000-8000-000000000001', reason: 'Wrong item' };
     expect(itemVoidSchema.safeParse({ ...command, expectedBillingVersion: 0 }).success).toBe(true);
-    expect(itemVoidSchema.safeParse(command).success).toBe(true);
+    expect(itemVoidSchema.safeParse(command).success).toBe(false);
     expect(itemVoidSchema.safeParse({ ...command, expectedBillingVersion: -1 }).success).toBe(false);
   });
 

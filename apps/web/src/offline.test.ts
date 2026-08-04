@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from './api';
-import { isPermanentSyncConflict, LEGACY_UNASSIGNED_HOST_ID, migrateLegacyMutation, replayQueuedMutations, submitOrQueue, type QueuedMutation } from './offline';
+import { isPermanentSyncConflict, replayQueuedMutations, submitOrQueue, type QueuedMutation } from './offline';
 
 const mutation = (id: string): QueuedMutation => ({
   id,
@@ -107,38 +107,4 @@ describe('offline mutation replay', () => {
     expect(isPermanentSyncConflict(new ApiError('RATE_LIMITED', 'Slow down', 429))).toBe(false);
   });
 
-  it('quarantines version-one mutations without deleting their command', () => {
-    const legacy = {
-      id: 'legacy-order',
-      path: '/order-batches',
-      method: 'POST' as const,
-      body: { mutationId: 'legacy-order', guestId: 'guest-a', items: [{ productId: 'product-a', quantity: 1 }] },
-      createdAt: '2026-08-02T00:00:00.000Z',
-    };
-
-    const migrated = migrateLegacyMutation(legacy);
-    expect(migrated).toEqual(expect.objectContaining({
-      id: legacy.id,
-      hostId: LEGACY_UNASSIGNED_HOST_ID,
-      path: legacy.path,
-      body: legacy.body,
-      status: 'conflict',
-      errorCode: 'LEGACY_MUTATION_REVIEW',
-      legacyOwnershipVerified: false,
-    }));
-    expect(migrated.body).not.toEqual(expect.objectContaining({ originHostId: expect.anything() }));
-  });
-
-  it('preserves a legacy mutation ownership claim recorded by its command', () => {
-    const migrated = migrateLegacyMutation({
-      id: 'owned-order',
-      path: '/order-batches',
-      method: 'POST',
-      body: { mutationId: 'owned-order', originHostId: 'host-a' },
-      createdAt: '2026-08-02T00:00:00.000Z',
-    });
-
-    expect(migrated.hostId).toBe('host-a');
-    expect(migrated.legacyOwnershipVerified).toBe(true);
-  });
 });

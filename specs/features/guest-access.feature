@@ -169,12 +169,6 @@ Feature: Guest device access and self-service
     Then adding the stale product snapshot is rejected without a charge
     And the guest catalog shows the renamed product after refresh
 
-  Scenario: A legacy self-service addition recovers its displayed price
-    Given an approved guest device for "Luca Rossi" in room "102"
-    When the guest retries a legacy pending self-service addition
-    Then the legacy addition reuses its mutation with the displayed price
-    And the legacy self-service product is stored once
-
   Scenario: The guest undo control expires on time
     Given an approved guest device for "Luca Rossi" in room "102"
     When the guest adds "Mineralwasser" from self-service

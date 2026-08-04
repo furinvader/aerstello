@@ -51,9 +51,6 @@ export async function migrate(database: MigrationDatabase = pool): Promise<void>
       const sql = await readFile(resolve(directory, file), 'utf8');
       await client.query('BEGIN');
       try {
-        if (file === '0018_legacy_bill_timezone.sql' && config.LEGACY_BILL_TIMEZONE) {
-          await client.query(`SELECT set_config('sky_bar.legacy_bill_timezone',$1,true)`, [config.LEGACY_BILL_TIMEZONE]);
-        }
         await client.query(sql);
         await client.query('INSERT INTO schema_migrations(name) VALUES ($1)', [file]);
         await client.query('COMMIT');

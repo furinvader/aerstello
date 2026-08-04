@@ -87,9 +87,6 @@ let itemBillingConflictResult: {status:number;code:string}|undefined;
 let correctedLifecycleItemCount = 0;
 let lifecycleGuestId = '';
 let refreshedLifecycleVoidStatus = 0;
-let legacyItemBillingConflictResult: {status:number;code:string}|undefined;
-let legacyLifecycleItemCount = 0;
-let legacyItemVoidReplayStatus = 0;
 let changedBillVoidReplayStatus = 0;
 let snapshottedBillDate = '';
 let retriedProductMutationIds: string[] = [];
@@ -142,11 +139,6 @@ let closedOrderItemCount = 0;
 let capturedUncertainTotal = '';
 let capturedOrderTabTotalCents = 0;
 let capturedExpectedTotalCents = 0;
-let legacyUnavailablePriceBody: Record<string,unknown> | undefined;
-let legacyUnavailablePricePostCount = 0;
-let legacyUnavailablePriceGuestId = '';
-let legacyOrderReplayStatuses: number[] = [];
-let legacyOrderItemCount = 0;
 let retriedApprovalMutationIds: string[] = [];
 let uncertainApprovalFieldsLocked = false;
 let approvedGuestIdentityCount = 0;
@@ -158,9 +150,6 @@ let deniedRequestCount = 0;
 let staleGuestPriceRejected = false;
 let staleGuestPriceItemCount = 0;
 let staleGuestMutationIds: string[] = [];
-let legacyGuestMutationId = '';
-let legacyGuestRequest: {mutationId:string;expectedPriceCents?:number;expectedProductVersion?:number} | undefined;
-let legacyGuestItemCount = 0;
 let refreshedSettlementBillCount = 0;
 let refreshedSettlementItemCount = 0;
 let timeoutGuestItemCount = 0;
@@ -240,9 +229,10 @@ let serializedApprovalResult: {status:number;code:string;requestStatus:string;gu
 let laterRealtimeInsertWaited = false;
 let commitOrderedRealtimeIds: string[] = [];
 let relayedCommitOrderedEvents: {id:string;marker:string}[] = [];
-let rollingDeployBillingVersions: number[] = [];
-let rollingDeployOldVoid: {errorCode:string;status:string;billingVersion:number}|undefined;
-let rollingDeployVoidConflict: {status:number;code:string}|undefined;
+let strictBillingVersions: number[] = [];
+let missingBillingIncrementError = '';
+let invalidBillingVersionChangeError = '';
+let strictBillingVoidConflict: {status:number;code:string}|undefined;
 
 Before(async () => {
   execFileSync('npm',['run','db:seed','-w','@sky-bar/api'],{cwd:process.cwd(),env:{...process.env,E2E_RESET:'true',SEED_ADMIN_PASSWORD:'SkyBarTest123!'},stdio:'pipe'});
@@ -489,18 +479,6 @@ When('the host submits a new removal from the refreshed tab',async({page})=>{
   refreshedLifecycleVoidStatus=(await request.post(`/api/v1/order-items/${item.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Reviewed correction',expectedBillingVersion:item.billingVersion}})).status();
 });
 Then('the refreshed item removal succeeds',async()=>{expect(refreshedLifecycleVoidStatus).toBe(200)});
-When('an item removal without a billing version is submitted',async({page})=>{
-  const {request,me,guests,products}=await operationalData(page);
-  const guest=guests.data.find(item=>item.name==='Anna Berger')!;
-  const product=products.data.find(item=>item.name.de==='Helles')!;
-  await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}});
-  const tab=await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json() as {items:{id:string}[]};
-  const response=await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Legacy queued correction'}});
-  legacyItemBillingConflictResult={status:response.status(),code:((await response.json()) as {error:{code:string}}).error.code};
-  legacyLifecycleItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
-});
-Then('the legacy item removal is rejected as a billing conflict',async()=>{expect(legacyItemBillingConflictResult).toEqual({status:409,code:'ITEM_BILLING_CONFLICT'})});
-Then('the legacy item remains on the open tab',async()=>{expect(legacyLifecycleItemCount).toBe(1)});
 When('the host retries item removal after its response is lost',async({page})=>{
   await page.evaluate(()=>{
     const originalFetch=window.fetch.bind(window);let loseResponse=true;const reasons:string[]=[];
@@ -590,29 +568,12 @@ Then('the queued order is retried without another connectivity event',async()=>{
 When('an offline order is quarantined as a synchronization conflict',async({page})=>{
   const {me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const mutationId=crypto.randomUUID();const capturedAt=new Date().toISOString();conflictGuestId=guest.id;
   await page.evaluate(async({mutationId,capturedAt,hostId,guest,product,catalogVersion})=>new Promise<void>((resolve,reject)=>{
-    const request=indexedDB.open('sky-bar');request.onerror=()=>reject(request.error);request.onsuccess=()=>{const transaction=request.result.transaction('mutations','readwrite');transaction.objectStore('mutations').put({id:mutationId,hostId,path:'/order-batches',method:'POST',createdAt:capturedAt,status:'conflict',errorCode:'CATALOG_CONFLICT',body:{mutationId,originHostId:hostId,guestId:guest.id,catalogVersion,capturedAt,items:[{productId:product.id,quantity:2}]},display:{kind:'order',guestId:guest.id,guestName:guest.name,roomName:guest.roomName,items:[{productId:product.id,productName:product.name,quantity:2}]}});transaction.oncomplete=()=>resolve();transaction.onerror=()=>reject(transaction.error)};
+    const request=indexedDB.open('sky-bar');request.onerror=()=>reject(request.error);request.onsuccess=()=>{const transaction=request.result.transaction('mutations','readwrite');transaction.objectStore('mutations').put({id:mutationId,hostId,path:'/order-batches',method:'POST',createdAt:capturedAt,status:'conflict',errorCode:'CATALOG_CONFLICT',body:{mutationId,originHostId:hostId,guestId:guest.id,catalogVersion,capturedAt,items:[{productId:product.id,quantity:2}]},display:{kind:'order',guestId:guest.id,guestName:guest.name,roomName:guest.roomName,items:[{productId:product.id,productName:product.name,unitPriceCents:product.priceCents,quantity:2}]}});transaction.oncomplete=()=>resolve();transaction.onerror=()=>reject(transaction.error)};
   }),{mutationId,capturedAt,hostId:me.host.id,guest,product,catalogVersion:products.catalogVersion});
   await expect(page.locator('.sync-conflict-banner')).toBeVisible({timeout:10_000});await page.locator('.sync-conflict-banner').click();
 });
 Then('the conflict shows its guest, room, products, and quantities',async({page})=>{const modal=page.locator('.modal');await expect(modal).toContainText('Anna Berger');await expect(modal).toContainText('101');await expect(modal).toContainText('2 × Helles')});
 Then('the host can retry it without discarding it',async({page})=>{await page.locator('.modal').getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect.poll(async()=>((await (await page.context().request.get(`/api/v1/guests/${conflictGuestId}/tab`)).json()) as {itemCount:number}).itemCount,{timeout:10_000}).toBe(2)});
-
-Given('a version-one device database contains a queued financial mutation',async({page})=>{
-  await page.goto('/login');
-  const mutationId=crypto.randomUUID();
-  await page.evaluate(async({mutationId})=>{
-    await new Promise<void>((resolve,reject)=>{const request=indexedDB.deleteDatabase('sky-bar');request.onsuccess=()=>resolve();request.onerror=()=>reject(request.error);request.onblocked=()=>reject(new Error('Database deletion blocked'))});
-    await new Promise<void>((resolve,reject)=>{
-      const request=indexedDB.open('sky-bar',1);
-      request.onupgradeneeded=()=>{const store=request.result.createObjectStore('mutations',{keyPath:'id'});store.createIndex('createdAt','createdAt')};
-      request.onerror=()=>reject(request.error);
-      request.onsuccess=()=>{const transaction=request.result.transaction('mutations','readwrite');transaction.objectStore('mutations').put({id:mutationId,path:'/order-batches',method:'POST',createdAt:new Date().toISOString(),body:{mutationId,guestId:crypto.randomUUID(),catalogVersion:1,capturedAt:new Date().toISOString(),items:[{productId:crypto.randomUUID(),quantity:1}]}});transaction.oncomplete=()=>{request.result.close();resolve()};transaction.onerror=()=>reject(transaction.error)};
-    });
-  },{mutationId});
-  await signIn(page);
-});
-Then('the queued financial mutation is preserved without assigning an owner',async({page})=>{await expect(page.locator('.sync-conflict-banner')).toBeVisible({timeout:10_000});await page.locator('.sync-conflict-banner').click();await expect(page.locator('.modal')).toContainText('/order-batches');const stored=await page.evaluate(async()=>new Promise<{hostId:string;status:string;body:{mutationId:string;originHostId?:string}}>((resolve,reject)=>{const request=indexedDB.open('sky-bar');request.onerror=()=>reject(request.error);request.onsuccess=()=>{const transaction=request.result.transaction('mutations');const all=transaction.objectStore('mutations').getAll();all.onsuccess=()=>{request.result.close();resolve(all.result[0] as {hostId:string;status:string;body:{mutationId:string;originHostId?:string}})};all.onerror=()=>reject(all.error)}}));expect(stored.hostId).toBe('00000000-0000-0000-0000-000000000000');expect(stored.status).toBe('conflict');expect(stored.body.mutationId).toBeTruthy();expect(stored.body.originHostId).toBeUndefined()});
-Then('the unowned mutation cannot be retried',async({page})=>{await page.locator('.modal').getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await page.waitForTimeout(100);const stored=await page.evaluate(async()=>new Promise<{hostId:string;status:string}>((resolve,reject)=>{const request=indexedDB.open('sky-bar');request.onerror=()=>reject(request.error);request.onsuccess=()=>{const transaction=request.result.transaction('mutations');const all=transaction.objectStore('mutations').getAll();all.onsuccess=()=>{request.result.close();resolve(all.result[0] as {hostId:string;status:string})};all.onerror=()=>reject(all.error)}}));expect(stored).toEqual(expect.objectContaining({hostId:'00000000-0000-0000-0000-000000000000',status:'conflict'}))});
 
 Given('an authenticated administrator and a separate guest device',async({page,browser})=>{await signIn(page);const context=await browser.newContext();guestPage=await context.newPage();});
 When('{string} requests access for room {string}',async({},name:string,room:string)=>{await guestPage!.goto('/guest/request');await guestPage!.locator('form select').nth(1).selectOption('de');await guestPage!.getByLabel('Name').fill(name);await guestPage!.locator('form select').first().selectOption({label:room});await guestPage!.locator('form button[type="submit"]').click()});
@@ -740,15 +701,12 @@ Then('replaying guest logout for the revoked session succeeds',async()=>{expect(
 When('the guest tab service is unavailable',async()=>{await guestPage!.addInitScript(()=>{const fetch=window.fetch.bind(window);window.fetch=(input,init)=>{const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);if(new URL(url,window.location.href).pathname==='/api/v1/guest/tab')return Promise.reject(new TypeError('Simulated guest tab outage'));return fetch(input,init)}});await guestPage!.reload();await expect(guestPage!.locator('.guest-total')).toContainText('Die Anfrage konnte nicht abgeschlossen werden.',{timeout:10_000})});
 Then('the guest sees an error without a zero balance or empty order',async()=>{await expect(guestPage!.locator('.guest-total')).not.toContainText(/0[,.]00\s*€/);const orders=guestPage!.locator('.guest-tabs>section').nth(1);await expect(orders.locator('.notice--error')).toBeVisible();await expect(orders.locator('.empty')).toHaveCount(0)});
 Then('the host has no empty open order for {string}',async({page},name:string)=>{await page.goto('/app/orders');await expect(page.locator('.tab-card').filter({hasText:name})).toHaveCount(0)});
-When('a self-service price changes after the guest catalog is displayed',async({page})=>{const guestRequest=guestPage!.context().request;const me=await (await guestRequest.get('/api/v1/guest/me')).json() as {guest:{sessionId:string}};const catalog=await (await guestRequest.get('/api/v1/guest/catalog')).json() as {data:{id:string;name:{de:string};priceCents:number}[]};const displayed=catalog.data.find(item=>item.name.de==='Mineralwasser')!;const staleMutationId=crypto.randomUUID();staleGuestMutationIds=[];guestPage!.on('request',request=>{if(request.url().endsWith('/api/v1/guest/items')&&request.method()==='POST')staleGuestMutationIds.push((request.postDataJSON() as {mutationId:string}).mutationId)});const request=page.context().request;const products=await (await request.get('/api/v1/products')).json() as {data:{id:string;name:{de:string;it:string;en:string};description?:{de:string;it:string;en:string};priceCents:number;categoryId:string;enabled:boolean;selfServiceOnly:boolean;version:number}[]};const product=products.data.find(item=>item.id===displayed.id)!;expect((await request.patch(`/api/v1/products/${product.id}`,{headers:csrfHeaders,data:{name:product.name,...(product.description?{description:product.description}:{}),priceCents:product.priceCents+100,categoryId:product.categoryId,enabled:product.enabled,selfServiceOnly:product.selfServiceOnly,expectedVersion:product.version}})).status()).toBe(200);await guestPage!.evaluate(({sessionId,productId,mutationId,expectedPriceCents})=>localStorage.setItem('skybar-guest-pending-adds',JSON.stringify({sessionId,entries:[[productId,mutationId,expectedPriceCents]]})),{sessionId:me.guest.sessionId,productId:product.id,mutationId:staleMutationId,expectedPriceCents:displayed.priceCents});await guestPage!.reload();await guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'}).click();await expect(guestPage!.locator('.notice--error')).toBeVisible();staleGuestPriceRejected=true;staleGuestPriceItemCount=((await (await guestRequest.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount;await guestPage!.reload();await guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'}).click();await expect.poll(async()=>((await (await guestRequest.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount).toBe(1)});
+When('a self-service price changes after the guest catalog is displayed',async({page})=>{const guestRequest=guestPage!.context().request;const me=await (await guestRequest.get('/api/v1/guest/me')).json() as {guest:{sessionId:string}};const catalog=await (await guestRequest.get('/api/v1/guest/catalog')).json() as {data:{id:string;name:{de:string};priceCents:number;version:number}[]};const displayed=catalog.data.find(item=>item.name.de==='Mineralwasser')!;const staleMutationId=crypto.randomUUID();staleGuestMutationIds=[];guestPage!.on('request',request=>{if(request.url().endsWith('/api/v1/guest/items')&&request.method()==='POST')staleGuestMutationIds.push((request.postDataJSON() as {mutationId:string}).mutationId)});const request=page.context().request;const products=await (await request.get('/api/v1/products')).json() as {data:{id:string;name:{de:string;it:string;en:string};description?:{de:string;it:string;en:string};priceCents:number;categoryId:string;enabled:boolean;selfServiceOnly:boolean;version:number}[]};const product=products.data.find(item=>item.id===displayed.id)!;expect((await request.patch(`/api/v1/products/${product.id}`,{headers:csrfHeaders,data:{name:product.name,...(product.description?{description:product.description}:{}),priceCents:product.priceCents+100,categoryId:product.categoryId,enabled:product.enabled,selfServiceOnly:product.selfServiceOnly,expectedVersion:product.version}})).status()).toBe(200);await guestPage!.evaluate(({sessionId,productId,mutationId,expectedPriceCents,expectedProductVersion})=>localStorage.setItem('skybar-guest-pending-adds',JSON.stringify({sessionId,entries:[[productId,mutationId,expectedPriceCents,expectedProductVersion]]})),{sessionId:me.guest.sessionId,productId:product.id,mutationId:staleMutationId,expectedPriceCents:displayed.priceCents,expectedProductVersion:displayed.version});await guestPage!.reload();await guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'}).click();await expect(guestPage!.locator('.notice--error')).toBeVisible();staleGuestPriceRejected=true;staleGuestPriceItemCount=((await (await guestRequest.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount;await guestPage!.reload();await guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'}).click();await expect.poll(async()=>((await (await guestRequest.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount).toBe(1)});
 Then('adding the stale self-service product is rejected without a charge',async()=>{expect(staleGuestPriceRejected).toBe(true);expect(staleGuestPriceItemCount).toBe(0)});
 Then('the guest can retry the refreshed self-service product',async()=>{expect(staleGuestMutationIds).toHaveLength(2);expect(staleGuestMutationIds[1]).not.toBe(staleGuestMutationIds[0])});
 When('a self-service product is renamed after the guest catalog is displayed',async({page})=>{await expect(guestPage!.getByText('Mineralwasser',{exact:true})).toBeVisible();await guestPage!.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseRequest=true;window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guest/items')&&init?.method==='POST'&&loseRequest){loseRequest=false;throw new TypeError('Simulated request loss')}return originalFetch(input,init)}});await guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'}).click();await expect(guestPage!.locator('.notice--error')).toBeVisible();const request=page.context().request;const products=await (await request.get('/api/v1/products')).json() as {data:{id:string;name:{de:string;it:string;en:string};description?:{de:string;it:string;en:string};priceCents:number;categoryId:string;enabled:boolean;selfServiceOnly:boolean;version:number}[]};const product=products.data.find(item=>item.name.de==='Mineralwasser')!;expect((await request.patch(`/api/v1/products/${product.id}`,{headers:csrfHeaders,data:{name:{de:'Quellwasser',it:'Acqua di fonte',en:'Spring water'},...(product.description?{description:product.description}:{}),priceCents:product.priceCents,categoryId:product.categoryId,enabled:product.enabled,selfServiceOnly:product.selfServiceOnly,expectedVersion:product.version}})).status()).toBe(200);await guestPage!.reload();await expect(guestPage!.getByText('Quellwasser',{exact:true})).toBeVisible();const response=guestPage!.waitForResponse(candidate=>candidate.url().endsWith('/api/v1/guest/items')&&candidate.request().method()==='POST');await guestPage!.locator('.product-tile').filter({hasText:'Quellwasser'}).click();staleGuestSnapshotRejected=(await response).status()===409;await expect(guestPage!.locator('.notice--error')).toBeVisible();staleGuestSnapshotItemCount=((await (await guestPage!.context().request.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount});
 Then('adding the stale product snapshot is rejected without a charge',async()=>{expect(staleGuestSnapshotRejected).toBe(true);expect(staleGuestSnapshotItemCount).toBe(0)});
 Then('the guest catalog shows the renamed product after refresh',async()=>{await expect(guestPage!.getByText('Quellwasser',{exact:true})).toBeVisible()});
-When('the guest retries a legacy pending self-service addition',async()=>{const request=guestPage!.context().request;const me=await (await request.get('/api/v1/guest/me')).json() as {guest:{sessionId:string}};const catalog=await (await request.get('/api/v1/guest/catalog')).json() as {data:{id:string;name:{de:string};priceCents:number;version:number}[]};const product=catalog.data.find(item=>item.name.de==='Mineralwasser')!;legacyGuestMutationId=crypto.randomUUID();expect((await request.post('/api/v1/guest/items',{headers:csrfHeaders,data:{mutationId:legacyGuestMutationId,productId:product.id,expectedPriceCents:product.priceCents,expectedProductVersion:product.version}})).status()).toBe(201);const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();try{await database.query('UPDATE order_items SET guest_expected_price_cents=NULL,guest_expected_product_version=NULL WHERE guest_mutation_id=$1',[legacyGuestMutationId])}finally{await database.end()}await guestPage!.evaluate(({sessionId,productId,mutationId})=>localStorage.setItem('skybar-guest-pending-adds',JSON.stringify({sessionId,entries:[[productId,mutationId]]})),{sessionId:me.guest.sessionId,productId:product.id,mutationId:legacyGuestMutationId});legacyGuestRequest=undefined;guestPage!.on('request',guestRequest=>{if(guestRequest.url().endsWith('/api/v1/guest/items')&&guestRequest.method()==='POST')legacyGuestRequest=guestRequest.postDataJSON() as {mutationId:string;expectedPriceCents?:number;expectedProductVersion?:number}});await guestPage!.reload();await guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'}).click();await expect.poll(()=>legacyGuestRequest).toBeTruthy();legacyGuestItemCount=((await (await request.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount;expect(legacyGuestRequest?.expectedPriceCents).toBe(product.priceCents)});
-Then('the legacy addition reuses its mutation with the displayed price',async()=>{expect(legacyGuestRequest).toEqual(expect.objectContaining({mutationId:legacyGuestMutationId,expectedPriceCents:expect.any(Number),expectedProductVersion:expect.any(Number)}))});
-Then('the legacy self-service product is stored once',async()=>{expect(legacyGuestItemCount).toBe(1)});
 When('the guest device clock is twelve hours fast',async()=>{
   await guestPage!.addInitScript(()=>{const actualNow=Date.now.bind(Date);Date.now=()=>actualNow()+12*60*60*1000});
   await guestPage!.reload();
@@ -802,15 +760,7 @@ When('a pending guest request crosses a session-secret rotation',async({page,bro
   const createdResponse=await request.post('/api/v1/public/access-requests',{data:accessCommand});
   expect(createdResponse.status()).toBe(201);
   const created=await createdResponse.json() as {id:string;statusToken:string};
-  const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();
-  try{
-    // Model a request written before the key-id migration; its verifier is still usable
-    // because the first capability key deliberately matches the pre-upgrade session key.
-    await database.query('UPDATE access_requests SET status_token_key_id=NULL WHERE id=$1',[created.id]);
-  }finally{await database.end()}
-
-  const originalSessionSecret=process.env.SESSION_SECRET??'development-only-session-secret-change-me';
-  const capabilityKeys=process.env.ACCESS_CAPABILITY_KEYS??`development-v1:${originalSessionSecret}`;
+  const capabilityKeys=process.env.ACCESS_CAPABILITY_KEYS??'development-v1:development-only-access-capability-secret';
   const replicaPort=3204;
   const replica=spawn(process.execPath,['apps/api/dist/index.js'],{
     cwd:process.cwd(),
@@ -1405,7 +1355,7 @@ When('an approved request is exchanged for a guest grant',async({page,browser})=
   const context=await browser.newContext({baseURL:e2eBaseURL});
   extraContexts.push(context);
   const pending={id:created.id,token:created.statusToken,grantId:crypto.randomUUID()};
-  await context.addInitScript((value)=>sessionStorage.setItem('skybar-pending',JSON.stringify(value)),pending);
+  await context.addInitScript((value)=>localStorage.setItem('skybar-pending',JSON.stringify(value)),pending);
   const device=await context.newPage();
   const observed=device.waitForRequest(candidate=>candidate.url().includes(`/api/v1/public/access-requests/${created.id}/status`));
   await device.goto('/guest/request');
@@ -1532,66 +1482,6 @@ Then('the guest tab contains the reopened order only once',async()=>{expect(clos
 When('a product price changes after its order response is lost',async({page})=>{await chooseOrder(page,'Helles','Anna Berger','101');capturedUncertainTotal=await page.locator('.cart-total strong').innerText();const {request,products}=await operationalData(page);const product=products.data.find(item=>item.name.de==='Helles')!;capturedExpectedTotalCents=product.priceCents;await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);Object.assign(window,{__skyBarLosePriceOrderResponse:true});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'&&(window as unknown as {__skyBarLosePriceOrderResponse:boolean}).__skyBarLosePriceOrderResponse){(window as unknown as {__skyBarLosePriceOrderResponse:boolean}).__skyBarLosePriceOrderResponse=false;await originalFetch(input,init);throw new TypeError('Simulated lost response')}return originalFetch(input,init)}});await page.getByRole('button',{name:/Bestellung buchen|Submit order/}).click();await expect(page.locator('.notice--error')).toBeVisible();const refreshed=page.waitForResponse(response=>response.url().endsWith('/api/v1/products')&&response.request().method()==='GET');expect((await request.patch(`/api/v1/products/${product.id}`,{headers:csrfHeaders,data:{name:product.name,...(product.description?{description:product.description}:{}),priceCents:product.priceCents+1000,categoryId:product.categoryId,enabled:product.enabled,selfServiceOnly:product.selfServiceOnly,expectedVersion:product.version}})).status()).toBe(200);await refreshed});
 Then('the uncertain cart still shows its captured total',async({page})=>{await expect(page.locator('.cart-total strong')).toHaveText(capturedUncertainTotal)});
 Then('retrying retains the captured charge',async({page})=>{await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(page.getByText(/Bestellung hinzugefügt|Order added/)).toBeVisible();const {request,guests}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;capturedOrderTabTotalCents=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {totalCents:number}).totalCents;expect(capturedOrderTabTotalCents).toBe(capturedExpectedTotalCents)});
-
-When('a pre-price-snapshot persisted order is restored after its products change',async({page})=>{
-  const {request,me,guests,products}=await operationalData(page);
-  const guest=guests.data.find(item=>item.name==='Anna Berger')!;
-  const existingProduct=products.data.find(item=>item.name.de==='Helles')!;
-  const createdResponse=await request.post('/api/v1/products',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:{de:'Historisches Preisprodukt',it:'Prodotto con prezzo storico',en:'Historical price product'},priceCents:250,categoryId:existingProduct.categoryId,enabled:true,selfServiceOnly:false}});
-  expect(createdResponse.status()).toBe(201);
-  const createdProduct=await createdResponse.json() as typeof existingProduct;
-  const capturedCatalog=await (await request.get('/api/v1/products')).json() as typeof products;
-  const changedProduct=capturedCatalog.data.find(item=>item.id===existingProduct.id)!;
-  const archivedProduct=capturedCatalog.data.find(item=>item.id===createdProduct.id)!;
-  const orderProducts=[changedProduct,archivedProduct];
-  const mutationId=crypto.randomUUID();const capturedAt=new Date().toISOString();
-  const body={mutationId,originHostId:me.host.id,guestId:guest.id,catalogVersion:capturedCatalog.catalogVersion,capturedAt,items:orderProducts.map(product=>({productId:product.id,quantity:1}))};
-  legacyUnavailablePriceBody=body;legacyUnavailablePriceGuestId=guest.id;legacyUnavailablePricePostCount=0;
-  await page.evaluate(({hostId,mutationId,capturedAt,guest,body,orderProducts})=>localStorage.setItem(`skybar-uncertain-order:${hostId}`,JSON.stringify({id:mutationId,hostId,path:'/order-batches',method:'POST',createdAt:capturedAt,body,display:{kind:'order',guestId:guest.id,guestName:guest.name,roomName:guest.roomName,items:orderProducts.map(product=>({productId:product.id,productName:product.name,quantity:1}))}})),{hostId:me.host.id,mutationId,capturedAt,guest,body,orderProducts});
-  expect((await request.patch(`/api/v1/products/${changedProduct.id}`,{headers:csrfHeaders,data:{name:changedProduct.name,...(changedProduct.description?{description:changedProduct.description}:{}),priceCents:changedProduct.priceCents+777,categoryId:changedProduct.categoryId,enabled:changedProduct.enabled,selfServiceOnly:changedProduct.selfServiceOnly,expectedVersion:changedProduct.version}})).status()).toBe(200);
-  expect((await request.delete(`/api/v1/products/${archivedProduct.id}`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:archivedProduct.version}})).status()).toBe(204);
-  page.on('request',candidate=>{if(candidate.url().endsWith('/api/v1/order-batches')&&candidate.method()==='POST')legacyUnavailablePricePostCount+=1});
-  await page.goto('/app/orders/new');
-});
-
-Then('the unavailable captured price is explained in German, Italian, and English',async({page})=>{
-  const assertions=[
-    {language:'de',notice:'Der erfasste Preis dieser gespeicherten Bestellung ist nicht verfügbar.',price:'Preis nicht verfügbar',total:'Prüfung erforderlich',retry:'Erneut versuchen'},
-    {language:'it',notice:'Il prezzo acquisito di questo ordine salvato non è disponibile.',price:'Prezzo non disponibile',total:'Controllo necessario',retry:'Riprova'},
-    {language:'en',notice:'The captured price for this saved order is unavailable.',price:'Price unavailable',total:'Review required',retry:'Retry'},
-  ] as const;
-  for(const assertion of assertions){
-    const current=await (await page.context().request.get('/api/v1/auth/me')).json() as {host:{version:number;language:string}};
-    if(current.host.language!==assertion.language){
-      expect((await page.context().request.patch('/api/v1/account',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:current.host.version,language:assertion.language}})).status()).toBe(200);
-      await page.reload();
-    }
-    await expect(page.locator('.notice--error').filter({hasText:assertion.notice})).toBeVisible();
-    await expect(page.locator('.cart-lines>div>div:first-child>span')).toHaveText([assertion.price,assertion.price]);
-    await expect(page.locator('.cart-total strong')).toHaveText(assertion.total);
-    await expect(page.getByRole('button',{name:assertion.retry,exact:true})).toBeDisabled();
-  }
-});
-
-Then('the legacy cart shows no zero or replacement price',async({page})=>{
-  await expect(page.locator('.cart-lines')).not.toContainText('0,00');
-  await expect(page.locator('.cart-lines>div>div:first-child>span')).toHaveText(['Price unavailable','Price unavailable']);
-  await expect(page.locator('.cart-total strong')).toHaveText('Review required');
-});
-
-Then('the unsafe legacy retry is blocked without changing its stored command',async({page})=>{
-  const retry=page.getByRole('button',{name:'Retry',exact:true});
-  await expect(retry).toBeDisabled();
-  await retry.evaluate(async(button)=>{(button as HTMLButtonElement).click();await new Promise<void>(resolve=>requestAnimationFrame(()=>resolve()))});
-  expect(legacyUnavailablePricePostCount).toBe(0);
-  const storedBody=await page.evaluate((hostId)=>JSON.parse(localStorage.getItem(`skybar-uncertain-order:${hostId}`)!).body,(await (await page.context().request.get('/api/v1/auth/me')).json() as {host:{id:string}}).host.id);
-  expect(storedBody).toEqual(legacyUnavailablePriceBody);
-  const tab=await (await page.context().request.get(`/api/v1/guests/${legacyUnavailablePriceGuestId}/tab`)).json() as {itemCount:number};
-  expect(tab.itemCount).toBe(0);
-});
-
-When('a legacy order batch with an unknown command is retried',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const command={mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]};legacyOrderReplayStatuses=[(await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:command})).status()];const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();try{await database.query('UPDATE order_batches SET command=NULL WHERE mutation_id=$1',[command.mutationId])}finally{await database.end()}legacyOrderReplayStatuses.push((await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:command})).status());legacyOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount});
-Then('the legacy order retry succeeds without another charge',async()=>{expect(legacyOrderReplayStatuses).toEqual([201,201]);expect(legacyOrderItemCount).toBe(1)});
 
 When('an order mutation is replayed with a changed quantity',async({page})=>{
   const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;
@@ -1817,7 +1707,7 @@ When('bill reversal waits for a locked guest',async({page})=>{
   const settlement=await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}});expect(settlement.status()).toBe(200);const bill=await settlement.json() as {id:string};
   const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();let committed=false;
   try{
-    const snapshotSql=`SELECT settled_at,venue_name,venue_timezone,guest_name,room_name,host_name,host_name_known,total_cents,payment_method,payment_note FROM bills WHERE id=$1`;
+    const snapshotSql=`SELECT settled_at,venue_name,venue_timezone,guest_name,room_name,host_name,total_cents,payment_method,payment_note FROM bills WHERE id=$1`;
     const linesSql=`SELECT original_order_item_id,product_name,unit_price_cents,quantity,source FROM bill_items WHERE bill_id=$1 ORDER BY id`;
     const billBefore=(await database.query(snapshotSql,[bill.id])).rows[0];const linesBefore=(await database.query(linesSql,[bill.id])).rows;
     await database.query('BEGIN');await database.query('SELECT id FROM guests WHERE id=$1 FOR UPDATE',[guest.id]);const holderXid=String((await database.query('SELECT pg_current_xact_id()::text AS xid')).rows[0].xid);
@@ -1920,19 +1810,6 @@ When('the venue timezone changes after a bill is settled',async({page})=>{const 
 Then('the bill date uses its snapshotted venue timezone',async({page})=>{await expect(page.locator('.bill-meta')).toContainText(snapshottedBillDate)});
 When('the settling host changes their name after billing',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const settled=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};expect((await request.patch('/api/v1/account',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:me.host.version,name:'Renamed Host'}})).status()).toBe(200);const bill=await (await request.get(`/api/v1/bills/${settled.id}`)).json() as {hostName:string};snapshottedBillHostName=bill.hostName;await page.goto(`/app/bills/${settled.id}`)});
 Then('the bill still shows the original host name',async({page})=>{expect(snapshottedBillHostName).toBe('Mira Host');await expect(page.locator('.bill-meta')).toContainText('Mira Host');await expect(page.locator('.bill-meta')).not.toContainText('Renamed Host')});
-When('the host opens a legacy bill without trustworthy host attribution',async({page})=>{
-  const {request,me,guests,products}=await operationalData(page);
-  const guest=guests.data.find(item=>item.name==='Anna Berger')!;
-  const product=products.data.find(item=>item.name.de==='Helles')!;
-  const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};
-  const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};
-  const database=new pg.Client({connectionString:process.env.DATABASE_URL});
-  await database.connect();
-  try{await database.query("UPDATE bills SET host_name='',host_name_known=false WHERE id=$1",[bill.id])}finally{await database.end()}
-  await page.goto(`/app/bills/${bill.id}`);
-});
-Then('the bill explains that the historical host is unavailable',async({page})=>{await expect(page.locator('.bill-meta')).toContainText('Historischer Host nicht verfügbar');await expect(page.locator('.bill-meta')).not.toContainText('Mira Host')});
-
 When('the same item void mutation is submitted twice',async({page})=>{
   const {request,me,guests,products}=await operationalData(page);
   const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const product=products.data.find((item)=>item.name.de==='Helles')!;
@@ -1950,20 +1827,7 @@ Then('both item void responses succeed',async()=>{expect(repeatedVoidStatuses).t
 Then('changing the replayed item void reason is rejected',async()=>{expect(changedItemVoidReplayStatus).toBe(409)});
 Then('changing the replayed item billing version is rejected',async()=>{expect(changedItemVoidVersionReplayStatus).toBe(409)});
 
-When('a committed item void without a billing version is replayed',async({page})=>{
-  const {request,me,guests,products}=await operationalData(page);
-  const guest=guests.data.find(item=>item.name==='Anna Berger')!;
-  const product=products.data.find(item=>item.name.de==='Helles')!;
-  await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}});
-  const tab=await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json() as {items:{id:string}[]};
-  const mutationId=crypto.randomUUID();const reason='Legacy committed correction';
-  const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();
-  try{await database.query(`UPDATE order_items SET status='voided',voided_at=clock_timestamp(),voided_by_host=$1,void_reason=$2,host_void_mutation_id=$3,host_void_expected_billing_version=NULL WHERE id=$4`,[me.host.id,reason,mutationId,tab.items[0]!.id])}finally{await database.end()}
-  legacyItemVoidReplayStatus=(await request.post(`/api/v1/order-items/${tab.items[0]!.id}/void`,{headers:csrfHeaders,data:{mutationId,reason}})).status();
-});
-Then('the legacy item void replay succeeds',async()=>{expect(legacyItemVoidReplayStatus).toBe(200)});
-
-When('old and current API writers cross an item billing boundary',async({page})=>{
+When('database writers cross an item billing boundary',async({page})=>{
   const {request,me,guests,products}=await operationalData(page);
   const guest=guests.data.find(item=>item.name==='Anna Berger')!;
   const product=products.data.find(item=>item.name.de==='Helles')!;
@@ -1972,29 +1836,26 @@ When('old and current API writers cross an item billing boundary',async({page})=
   const item=tab.items[0]!;
   const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();
   try{
-    const oldWriter=await database.query<{billingVersion:number}>(`UPDATE order_items SET status='billed' WHERE id=$1 RETURNING billing_version AS "billingVersion"`,[item.id]);
+    missingBillingIncrementError='';
+    try{await database.query(`UPDATE order_items SET status='billed' WHERE id=$1`,[item.id])}catch(caught){missingBillingIncrementError=(caught as {code?:string}).code??''}
+    const billed=await database.query<{billingVersion:number}>(`UPDATE order_items SET status='billed',billing_version=billing_version+1 WHERE id=$1 RETURNING billing_version AS "billingVersion"`,[item.id]);
     const reversed=await database.query<{billingVersion:number}>(`UPDATE order_items SET status='open' WHERE id=$1 RETURNING billing_version AS "billingVersion"`,[item.id]);
-    rollingDeployBillingVersions=[oldWriter.rows[0]!.billingVersion,reversed.rows[0]!.billingVersion];
-    let errorCode='';
-    try{
-      await database.query(`UPDATE order_items SET status='voided',voided_at=clock_timestamp(),voided_by_host=$1,void_reason=$2,host_void_mutation_id=$3 WHERE id=$4`,[me.host.id,'Pre-upgrade removal after reversal',crypto.randomUUID(),item.id]);
-    }catch(caught){errorCode=(caught as {code?:string}).code??''}
-    const reopened=await database.query<{status:string;billingVersion:number}>(`SELECT status,billing_version AS "billingVersion" FROM order_items WHERE id=$1`,[item.id]);
-    rollingDeployOldVoid={errorCode,status:reopened.rows[0]!.status,billingVersion:reopened.rows[0]!.billingVersion};
+    strictBillingVersions=[billed.rows[0]!.billingVersion,reversed.rows[0]!.billingVersion];
+    invalidBillingVersionChangeError='';
+    try{await database.query(`UPDATE order_items SET billing_version=billing_version+1 WHERE id=$1`,[item.id])}catch(caught){invalidBillingVersionChangeError=(caught as {code?:string}).code??''}
   }finally{await database.end()}
-  const stale=await request.post(`/api/v1/order-items/${item.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Captured before rolling settlement',expectedBillingVersion:item.billingVersion}});
-  rollingDeployVoidConflict={status:stale.status(),code:((await stale.json()) as {error:{code:string}}).error.code};
+  const stale=await request.post(`/api/v1/order-items/${item.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Captured before billing',expectedBillingVersion:item.billingVersion}});
+  strictBillingVoidConflict={status:stale.status(),code:((await stale.json()) as {error:{code:string}}).error.code};
   const verification=new pg.Client({connectionString:process.env.DATABASE_URL});await verification.connect();
   try{
-    const currentWriter=await verification.query<{billingVersion:number}>(`UPDATE order_items SET status='billed',billing_version=billing_version+1 WHERE id=$1 RETURNING billing_version AS "billingVersion"`,[item.id]);
-    rollingDeployBillingVersions.push(currentWriter.rows[0]!.billingVersion);
+    const billedAgain=await verification.query<{billingVersion:number}>(`UPDATE order_items SET status='billed',billing_version=billing_version+1 WHERE id=$1 RETURNING billing_version AS "billingVersion"`,[item.id]);
+    strictBillingVersions.push(billedAgain.rows[0]!.billingVersion);
   }finally{await verification.end()}
 });
-Then('the old item removal is rejected after reversal',async()=>{expect(rollingDeployOldVoid?.errorCode).toBe('P0001')});
-Then('the reopened item remains open for current writers',async()=>{expect(rollingDeployOldVoid).toEqual({errorCode:'P0001',status:'open',billingVersion:1})});
-Then('the database advances the billing version once per crossing',async()=>{expect(rollingDeployBillingVersions).toEqual([1,1,2])});
-Then('the pre-settlement item removal remains a billing conflict',async()=>{expect(rollingDeployVoidConflict).toEqual({status:409,code:'ITEM_BILLING_CONFLICT'})});
-
+Then('billing without an explicit version increment is rejected',async()=>{expect(missingBillingIncrementError).toBe('P0001')});
+Then('the database advances the billing version exactly once',async()=>{expect(strictBillingVersions).toEqual([1,1,2])});
+Then('billing version changes outside billing are rejected',async()=>{expect(invalidBillingVersionChangeError).toBe('P0001')});
+Then('the stale item removal remains a billing conflict',async()=>{expect(strictBillingVoidConflict).toEqual({status:409,code:'ITEM_BILLING_CONFLICT'})});
 When('the same order mutation is submitted concurrently',async({page})=>{
   const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const mutationId=crypto.randomUUID();const data={mutationId,originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]};
   const responses=await Promise.all([request.post('/api/v1/order-batches',{headers:csrfHeaders,data}),request.post('/api/v1/order-batches',{headers:csrfHeaders,data})]);concurrentOrderStatuses=responses.map(response=>response.status());concurrentOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;

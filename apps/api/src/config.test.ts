@@ -40,6 +40,10 @@ describe('runtime configuration', () => {
       ...productionEnvironment,
       ACCESS_CAPABILITY_KEYS: 'v2:a-valid-new-access-capability-secret,v1:replace-with-at-least-32-random-characters',
     })).toThrow(/ACCESS_CAPABILITY_KEYS/);
+    expect(() => parseConfig({
+      ...productionEnvironment,
+      ACCESS_CAPABILITY_KEYS: `v1:${productionEnvironment.SESSION_SECRET}`,
+    })).toThrow(/ACCESS_CAPABILITY_KEYS/);
   });
 
   it('accepts an ordered, versioned production capability keyring', () => {
@@ -75,8 +79,8 @@ describe('runtime configuration', () => {
     expect(redactedError).not.toContain('too-short-and-sensitive');
   });
 
-  it('treats the empty Compose legacy timezone default as unset', () => {
-    expect(parseConfig({ LEGACY_BILL_TIMEZONE: '' }).LEGACY_BILL_TIMEZONE).toBeUndefined();
-    expect(parseConfig({ LEGACY_BILL_TIMEZONE: 'Europe/Rome' }).LEGACY_BILL_TIMEZONE).toBe('Europe/Rome');
+  it('uses distinct development session and access-capability secrets', () => {
+    const parsed = parseConfig({});
+    expect(parsed.ACCESS_CAPABILITY_KEYS[0]!.secret).not.toBe(parsed.SESSION_SECRET);
   });
 });

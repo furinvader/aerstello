@@ -134,10 +134,7 @@ export const voidSchema = z.object({
 });
 
 export const itemVoidSchema = voidSchema.extend({
-  // Optional only so an already-committed pre-upgrade command can still be
-  // recognized as an idempotent replay. New commands without this value are
-  // rejected by the API before they can change an item.
-  expectedBillingVersion: z.number().int().min(0).optional(),
+  expectedBillingVersion: z.number().int().min(0),
 });
 
 export const accessRequestSchema = z.object({

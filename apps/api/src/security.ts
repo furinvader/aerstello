@@ -71,8 +71,6 @@ export interface AccessStatusCapability {
 }
 
 function accessStatusVerifier(token: string, key: AccessCapabilityKey): string {
-  // This intentionally matches the historical SESSION_SECRET verifier when the
-  // first rollout key uses that same value, allowing old and new replicas to overlap.
   return hashToken(token, key.secret);
 }
 
@@ -102,18 +100,14 @@ export function accessStatusVerifierCandidates(
 export function recoverAccessStatusCapability(
   mutationId: string,
   storedVerifier: string,
-  storedKeyId: string | null,
+  storedKeyId: string,
   keys: readonly AccessCapabilityKey[] = config.ACCESS_CAPABILITY_KEYS,
 ): AccessStatusCapability | undefined {
-  const preferred = storedKeyId ? keys.find((key) => key.id === storedKeyId) : undefined;
-  if (storedKeyId && !preferred) return undefined;
-  const candidates = preferred ? [preferred] : keys;
-  for (const key of candidates) {
-    const token = accessStatusToken(mutationId, key);
-    const verifier = accessStatusVerifier(token, key);
-    if (sameVerifier(verifier, storedVerifier)) return { keyId: key.id, token, verifier };
-  }
-  return undefined;
+  const key = keys.find((candidate) => candidate.id === storedKeyId);
+  if (!key) return undefined;
+  const token = accessStatusToken(mutationId, key);
+  const verifier = accessStatusVerifier(token, key);
+  return sameVerifier(verifier, storedVerifier) ? { keyId: key.id, token, verifier } : undefined;
 }
 
 export async function hashPassword(password: string): Promise<string> {

@@ -18,12 +18,14 @@ describe('security primitives', () => {
     expect(hashToken(token)).not.toContain(token);
   });
 
-  it('keeps initial capability issuance compatible with overlapping legacy replicas', () => {
-    const sharedSecret = 'the-initial-shared-rollout-secret-value';
-    const capability = issueAccessStatusCapability('mutation-a', [{ id: 'v1', secret: sharedSecret }]);
-    expect(capability.verifier).toBe(hashToken(capability.token, sharedSecret));
-    expect(capability.token).not.toContain(sharedSecret);
-    expect(capability.verifier).not.toContain(sharedSecret);
+  it('binds capability issuance to its independent configured key', () => {
+    const firstKey = { id: 'v1', secret: 'the-first-access-capability-secret-value' };
+    const secondKey = { id: 'v2', secret: 'the-second-access-capability-secret-value' };
+    const capability = issueAccessStatusCapability('mutation-a', [firstKey]);
+    expect(capability.verifier).toBe(hashToken(capability.token, firstKey.secret));
+    expect(issueAccessStatusCapability('mutation-a', [secondKey]).verifier).not.toBe(capability.verifier);
+    expect(capability.token).not.toContain(firstKey.secret);
+    expect(capability.verifier).not.toContain(firstKey.secret);
   });
 
   it('recovers existing capabilities from retained key versions after rotation', () => {

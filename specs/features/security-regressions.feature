@@ -63,18 +63,13 @@ Feature: Device grants and replay protection
     And changing the replayed item void reason is rejected
     And changing the replayed item billing version is rejected
 
-  Scenario: A committed legacy item void remains replayable
+  Scenario: Billing versions enforce strict item lifecycle transitions
     Given an authenticated administrator
-    When a committed item void without a billing version is replayed
-    Then the legacy item void replay succeeds
-
-  Scenario: Billing versions survive a rolling API deployment
-    Given an authenticated administrator
-    When old and current API writers cross an item billing boundary
-    Then the old item removal is rejected after reversal
-    And the reopened item remains open for current writers
-    And the database advances the billing version once per crossing
-    And the pre-settlement item removal remains a billing conflict
+    When database writers cross an item billing boundary
+    Then billing without an explicit version increment is rejected
+    And the database advances the billing version exactly once
+    And billing version changes outside billing are rejected
+    And the stale item removal remains a billing conflict
 
   Scenario: Concurrent replay of an order returns its prior success
     Given an authenticated administrator

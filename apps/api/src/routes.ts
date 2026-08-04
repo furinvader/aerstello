@@ -204,7 +204,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const issuedCapability = issueAccessStatusCapability(input.mutationId);
     const result = await transaction(async (client) => {
       type StoredAccessRequest = {
-        id: string; name: string; roomId: string; language: string; statusTokenHash: string; statusTokenKeyId: string | null;
+        id: string; name: string; roomId: string; language: string; statusTokenHash: string; statusTokenKeyId: string;
       };
       const findExisting=async()=> (await client.query<StoredAccessRequest>(
         `SELECT id,name,room_id AS "roomId",language,status_token_hash AS "statusTokenHash",
@@ -223,12 +223,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         );
         if (!capability) {
           throw new HttpError(503, 'CAPABILITY_KEY_UNAVAILABLE', 'The access request capability key is unavailable.');
-        }
-        if (!stored.statusTokenKeyId) {
-          await client.query(
-            'UPDATE access_requests SET status_token_key_id=$2 WHERE id=$1 AND status_token_key_id IS NULL',
-            [stored.id, capability.keyId],
-          );
         }
         return { access: stored, capability };
       };
@@ -263,7 +257,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const grant = await transaction(async (client) => {
       const result = await client.query<{
         status: string; guestId: string | null; expiresAt: Date | null; expired: boolean; statusTokenConsumedAt: Date | null;
-        grantExchangeId: string | null; statusTokenHash: string; statusTokenKeyId: string | null;
+        grantExchangeId: string | null; statusTokenHash: string; statusTokenKeyId: string;
       }>(
         `SELECT status,guest_id AS "guestId",expires_at AS "expiresAt",
                 COALESCE(expires_at<=clock_timestamp(),false) AS expired,
@@ -275,14 +269,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const access = result.rows[0];
       if (!access) throw new HttpError(404, 'REQUEST_NOT_FOUND', 'Request not found.');
       const matchingCapability = capabilityCandidates.find((candidate) => candidate.verifier === access.statusTokenHash);
-      if (!matchingCapability || (access.statusTokenKeyId && access.statusTokenKeyId !== matchingCapability.keyId)) {
+      if (!matchingCapability || access.statusTokenKeyId !== matchingCapability.keyId) {
         throw new HttpError(404, 'REQUEST_NOT_FOUND', 'Request not found.');
-      }
-      if (!access.statusTokenKeyId) {
-        await client.query(
-          'UPDATE access_requests SET status_token_key_id=$2 WHERE id=$1 AND status_token_key_id IS NULL',
-          [requestId, matchingCapability.keyId],
-        );
       }
       if (access.status === 'approved' && access.expired) {
         return { access: { ...access, status: 'expired' }, guestToken:undefined };
@@ -1035,7 +1023,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         if (!duplicate.rows[0]) return undefined;
         if (duplicate.rows[0].hostId !== request.hostIdentity!.id) throw new HttpError(403, 'HOST_MISMATCH', 'This order belongs to another host.');
         if (duplicate.rows[0].guestId !== input.guestId) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another guest.');
-        if (duplicate.rows[0].command!==null&&!isDeepStrictEqual(duplicate.rows[0].command, input)) {
+        if (!isDeepStrictEqual(duplicate.rows[0].command, input)) {
           throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to a different order command.');
         }
         return { tabId: duplicate.rows[0].tabId, event: undefined };
@@ -1083,8 +1071,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const itemId = id(request);
     const input = body(itemVoidSchema, request);
     const result = await transaction(async (client) => {
-      type ItemVoidReplay = {itemId:string;tabId:string;guestId:string;hostId:string;reason:string;expectedBillingVersion:number|null};
-      const expectedBillingVersion=input.expectedBillingVersion??null;
+      type ItemVoidReplay = {itemId:string;tabId:string;guestId:string;hostId:string;reason:string;expectedBillingVersion:number};
       const replay=async()=>{
         const duplicate=await client.query<ItemVoidReplay>(
           `SELECT i.id AS "itemId",i.tab_id AS "tabId",t.guest_id AS "guestId",i.voided_by_host AS "hostId",i.void_reason AS reason,
@@ -1094,14 +1081,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         if(!prior)return undefined;
         if(prior.itemId!==itemId) throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to another item.');
         if(prior.hostId!==request.hostIdentity!.id) throw new HttpError(403,'HOST_MISMATCH','This void belongs to another host.');
-        if(prior.reason!==input.reason||prior.expectedBillingVersion!==expectedBillingVersion) throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to a different void command.');
+        if(prior.reason!==input.reason||prior.expectedBillingVersion!==input.expectedBillingVersion) throw new HttpError(409,'MUTATION_REUSED','This mutation identifier belongs to a different void command.');
         return prior;
       };
       const duplicate=await replay();
       if(duplicate)return {...duplicate,event:undefined};
-      if(input.expectedBillingVersion===undefined){
-        throw new HttpError(409,'ITEM_BILLING_CONFLICT','This item was captured without a billing version. Review the current tab before removing it.');
-      }
       const updated=await client.query<{tabId:string}>(
         `UPDATE order_items
             SET status='voided',voided_at=now(),voided_by_host=$1,void_reason=$2,host_void_mutation_id=$3,
@@ -1253,7 +1237,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       `SELECT b.id,b.number::text AS number,b.venue_name AS "venueName",b.venue_timezone AS "venueTimezone",b.guest_name AS "guestName",b.room_name AS "roomName",
               b.total_cents AS "totalCents",b.payment_method AS "paymentMethod",b.payment_note AS "paymentNote",
               b.settled_at AS "settledAt",b.voided_at AS "voidedAt",b.void_reason AS "voidReason",
-              b.host_name AS "hostName",b.host_name_known AS "hostNameKnown"
+              b.host_name AS "hostName"
          FROM bills b WHERE b.id=$1`, [billId],
     );
     if (!bill.rows[0]) throw new HttpError(404, 'BILL_NOT_FOUND', 'Bill not found.');
@@ -1384,12 +1368,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const input = body(z.object({
       mutationId: z.string().uuid(),
       productId: z.string().uuid(),
-      expectedPriceCents: z.number().int().min(0).max(10_000_000).optional(),
-      expectedProductVersion: z.number().int().positive().optional(),
+      expectedPriceCents: z.number().int().min(0).max(10_000_000),
+      expectedProductVersion: z.number().int().positive(),
     }), request);
     const item = await transaction(async (client) => {
       const replay = async () => {
-        const duplicate = await client.query<GuestItemCreated & { sessionId: string; productId: string; expectedPriceCents: number|null; expectedProductVersion:number|null }>(
+        const duplicate = await client.query<GuestItemCreated & { sessionId: string; productId: string; expectedPriceCents: number; expectedProductVersion:number }>(
           `SELECT id,provisional_until AS "provisionalUntil",submitted_by_guest_session AS "sessionId",product_id AS "productId",
                   guest_expected_price_cents AS "expectedPriceCents",guest_expected_product_version AS "expectedProductVersion",
                   CASE WHEN status='provisional' AND provisional_until>statement_timestamp()
@@ -1401,8 +1385,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         if (!duplicate.rows[0]) return undefined;
         if (duplicate.rows[0].sessionId !== request.guestIdentity!.sessionId) throw new HttpError(403, 'GUEST_MISMATCH', 'This item belongs to another guest device.');
         if (duplicate.rows[0].productId !== input.productId) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another product.');
-        if (duplicate.rows[0].expectedPriceCents !== null && duplicate.rows[0].expectedPriceCents !== input.expectedPriceCents) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another displayed price.');
-        if (duplicate.rows[0].expectedProductVersion !== null && duplicate.rows[0].expectedProductVersion !== input.expectedProductVersion) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another displayed product version.');
+        if (duplicate.rows[0].expectedPriceCents !== input.expectedPriceCents) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another displayed price.');
+        if (duplicate.rows[0].expectedProductVersion !== input.expectedProductVersion) throw new HttpError(409, 'MUTATION_REUSED', 'This mutation identifier belongs to another displayed product version.');
         return {...duplicate.rows[0],event:undefined};
       };
       const duplicate = await replay();
@@ -1411,8 +1395,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (!guest.rowCount) throw new HttpError(404, 'GUEST_NOT_FOUND', 'Guest not found.');
       const serializedDuplicate = await replay();
       if (serializedDuplicate) return serializedDuplicate;
-      if(input.expectedPriceCents===undefined) throw new HttpError(400,'EXPECTED_PRICE_REQUIRED','The displayed product price is required.');
-      if(input.expectedProductVersion===undefined) throw new HttpError(400,'EXPECTED_PRODUCT_VERSION_REQUIRED','The displayed product version is required.');
       const product = await client.query<{ name: Record<string, string>; priceCents: number; version:number }>(
         `SELECT name,price_cents AS "priceCents",version FROM products WHERE id=$1 AND enabled=true AND self_service_only=true AND archived_at IS NULL`,
         [input.productId],

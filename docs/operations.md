@@ -6,12 +6,7 @@ Production requires `DATABASE_URL`, an explicitly configured nondefault `SESSION
 
 `ACCESS_CAPABILITY_KEYS` is a comma-separated, active-first list of up to eight `key-id:secret` entries, for example `v2:<current>,v1:<previous>`. Key identifiers are immutable labels of at most 32 letters, digits, underscores, or hyphens; each secret must be unique, contain at least 32 non-whitespace characters, and come from a secret manager. These values never belong in API payloads or logs. The first key issues new and idempotently replayed guest-access status capabilities. Retained prior keys verify and reissue requests created under those versions.
 
-Use this sequence for the first rolling upgrade from a release that derived access capabilities from `SESSION_SECRET`:
-
-1. Back up the database and run migrations while leaving `SESSION_SECRET` unchanged.
-2. Set the first key, such as `v1`, to exactly the current `SESSION_SECRET` value and deploy the new release to every replica. This makes capability tokens and verifiers byte-for-byte compatible with old replicas during the overlap.
-3. Drain every old replica. Keep `ACCESS_CAPABILITY_KEYS` pinned, then rotate `SESSION_SECRET` and restart the new replicas. Host and ordinary guest cookies signed under the old session secret stop authenticating, while pending access capabilities remain recoverable.
-4. To rotate access capabilities later, prepend a new identifier and secret, deploy it everywhere, and retain each prior entry until no pending request or lost grant exchange can still reference it. Remove old entries only after that recovery window. Never reuse an identifier for different key material.
+Keep access-capability secrets distinct from `SESSION_SECRET`. To rotate access capabilities, prepend a new identifier and secret, deploy the same ordered keyring to every replica, and retain each prior entry until no pending request or lost grant exchange can still reference it. Remove old entries only after that recovery window. Never reuse an identifier for different key material. Session-secret rotation is independent: it revokes cookies without invalidating retained access capabilities.
 
 If an idempotent access-request replay returns `CAPABILITY_KEY_UNAVAILABLE`, restore the removed key under its original identifier before retrying; issuing a replacement token would violate mutation recovery. A same-device grant retry after session rotation is authorized only by the original status capability plus its already-bound grant UUID and rekeys only that one guest session.
 
@@ -20,9 +15,8 @@ If an idempotent access-request replay returns `CAPABILITY_KEY_UNAVAILABLE`, res
 ## Health and migrations
 
 - Liveness/readiness: `GET /api/v1/health` verifies database connectivity.
-- Build the API, then run `npm run db:migrate` before starting a newly deployed version. Production migration and administrator commands execute the compiled files included in the runtime image.
-- Migrations are recorded in `schema_migrations`, applied in lexical order, and serialized across concurrent runners with a PostgreSQL advisory lock.
-- When upgrading a database that contains bills from before `0007_bill_timezone.sql`, set `LEGACY_BILL_TIMEZONE` to the IANA timezone used when those bills were settled. Compose forwards this host variable into the app container; when it is not needed, the empty Compose default is treated as unset. The corrective migration refuses to proceed without an operator-supplied value for affected data, preventing the current venue timezone from silently changing historical bill dates.
+- Build the API, then run `npm run db:migrate` before starting it. Production migration and administrator commands execute the compiled files included in the runtime image.
+- The sole initial migration is recorded in `schema_migrations` and concurrent runners are serialized with a PostgreSQL advisory lock. While the project lifecycle remains pre-release, schema changes are consolidated into that initial migration and disposable development and test databases are recreated.
 - Realtime invalidation records are trimmed as they are written, retaining only the latest 10,000 identity slots so sustained activity cannot grow the table without bound.
 
 ## Backup and restore

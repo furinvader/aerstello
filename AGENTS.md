@@ -4,6 +4,12 @@
 
 Sky Bar is a TypeScript npm-workspace application. Preserve the distinction between the **Sky Bar software name** and the **administrator-configured venue name**. Financial history must never be rewritten by later venue, guest, room, or product edits.
 
+## Project lifecycle status
+
+Sky Bar is a **pre-release initial implementation**. It has never held production data and has no released API, database, migration, or browser-storage formats. Treat the project as greenfield until the owner explicitly changes this section.
+
+While this status remains in effect, consolidate schema changes directly into `apps/api/migrations/0001_initial.sql` and keep `schema.ts` aligned. Rewrite the initial migration instead of adding numbered follow-up migrations, and recreate disposable development and test databases and browser state after format changes. Do not add compatibility paths, backfills, or upgrade machinery for earlier development-only formats.
+
 Before editing:
 
 1. Read the relevant scenario in `specs/features`.
@@ -38,5 +44,3 @@ For cross-device, PWA, offline, or billing changes also run:
 docker compose up -d db
 npm run test:e2e
 ```
-
-Do not rewrite migrations already deployed. Add a numbered migration and update `schema.ts` together.

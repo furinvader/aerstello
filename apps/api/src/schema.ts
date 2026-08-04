@@ -166,7 +166,7 @@ export const orderBatches = pgTable('order_batches', {
   mutationId: uuid('mutation_id').notNull().unique('order_batches_mutation_id_key'),
   tabId: uuid('tab_id').notNull().references(() => orderTabs.id),
   hostId: uuid('host_id').notNull().references(() => hosts.id),
-  command: jsonb('command'),
+  command: jsonb('command').notNull(),
   capturedAt: timestamp('captured_at', { withTimezone: true }).notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
@@ -183,7 +183,6 @@ export const bills = pgTable('bills', {
   guestName: text('guest_name').notNull(),
   roomName: text('room_name').notNull(),
   hostName: text('host_name').notNull(),
-  hostNameKnown: boolean('host_name_known').notNull().default(true),
   totalCents: integer('total_cents').notNull(),
   paymentMethod: paymentMethod('payment_method').notNull(),
   paymentNote: text('payment_note'),
@@ -225,6 +224,7 @@ export const orderItems = pgTable('order_items', {
 }, (t) => [
   check('order_items_quantity_check', sql`${t.quantity} > 0`),
   check('order_items_billing_version_check', sql`${t.billingVersion} >= 0`),
+  check('order_items_guest_snapshot_check', sql`${t.source} <> 'guest' OR (${t.guestExpectedPriceCents} IS NOT NULL AND ${t.guestExpectedPriceCents} >= 0 AND ${t.guestExpectedProductVersion} IS NOT NULL AND ${t.guestExpectedProductVersion} > 0)`),
   check('order_items_host_void_expected_billing_version_check', sql`${t.hostVoidExpectedBillingVersion} IS NULL OR ${t.hostVoidExpectedBillingVersion} >= 0`),
   index('order_items_tab_idx').on(t.tabId),
   index('order_items_active_status_idx').on(t.status).where(sql`${t.status} IN ('open','provisional')`),
@@ -250,7 +250,7 @@ export const accessRequests = pgTable('access_requests', {
   language: language('language').notNull().default('de'),
   status: requestStatus('status').notNull().default('pending'),
   statusTokenHash: text('status_token_hash').notNull().unique('access_requests_status_token_hash_key'),
-  statusTokenKeyId: text('status_token_key_id'),
+  statusTokenKeyId: text('status_token_key_id').notNull(),
   guestId: uuid('guest_id').references(() => guests.id),
   requestedAt: timestamp('requested_at', { withTimezone: true }).notNull().defaultNow(),
   resolvedAt: timestamp('resolved_at', { withTimezone: true }),
