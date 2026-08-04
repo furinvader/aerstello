@@ -1151,7 +1151,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         throw new HttpError(409, 'TAB_NOT_OPEN', 'The tab is no longer open.');
       }
       if (!current.venueName.trim()) throw new HttpError(409, 'VENUE_REQUIRED', 'Set the venue name before billing.');
-      const provisional = await client.query(`SELECT 1 FROM order_items WHERE tab_id=$1 AND status='provisional' AND provisional_until>now() LIMIT 1`, [tabId]);
+      const provisional = await client.query(`SELECT 1 FROM order_items WHERE tab_id=$1 AND status='provisional' AND provisional_until>clock_timestamp() LIMIT 1`, [tabId]);
       if (provisional.rowCount) throw new HttpError(409, 'UNDO_PENDING', 'Wait for the guest undo window to finish.');
       await client.query(`UPDATE order_items SET status='open' WHERE tab_id=$1 AND status='provisional'`, [tabId]);
       const items = await client.query<{

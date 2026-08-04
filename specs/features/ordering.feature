@@ -166,6 +166,13 @@ Feature: Host order entry and billing
     When settlement waits for a locked tab
     Then the bill timestamp follows the lock release
 
+  Scenario: Settlement uses the current undo deadline after lock waits
+    Given an authenticated administrator
+    When settlement starts during an active guest undo window and waits for a locked tab
+    Then immediate settlement is rejected while the undo deadline is active
+    And settlement succeeds after the undo deadline passes during the lock wait
+    And the expired provisional item is billed exactly once
+
   Scenario: Bill reversal timestamps begin after lock waits
     Given an authenticated administrator
     When bill reversal waits for a locked guest

@@ -221,6 +221,16 @@ let replayedGuestLogoutStatus = 0;
 let guestUndoRemainingMs = 0;
 let serializedGuestUndoResult: {startedBeforeExpiry:boolean;status:number;code:string;itemCount:number;itemStatus:string}|undefined;
 let settlementTimestampAgeMs = Number.POSITIVE_INFINITY;
+let settlementUndoClockResult: {
+  immediateStatus:number;
+  immediateCode:string;
+  startedBeforeExpiry:boolean;
+  expiredBeforeRelease:boolean;
+  settlementStatus:number;
+  billLineCount:number;
+  billCount:number;
+  itemStatus:string;
+} | undefined;
 let billVoidLockTiming: {
   releaseFloor: Date;
   voidedAt: Date;
@@ -1887,6 +1897,97 @@ When('settlement waits for a locked tab',async({page})=>{
   }finally{if(!committed)await database.query('ROLLBACK');await database.end()}
 });
 Then('the bill timestamp follows the lock release',async()=>{expect(settlementTimestampAgeMs).toBeLessThan(1_000)});
+When('settlement starts during an active guest undo window and waits for a locked tab',async({page,browser})=>{
+  const hostRequest=page.context().request;
+  const bootstrap=await (await hostRequest.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
+  const room=bootstrap.rooms.find(item=>item.name==='102')!;
+  const access=await (await hostRequest.post('/api/v1/public/access-requests',{
+    data:{mutationId:crypto.randomUUID(),name:'Settlement deadline guest',roomId:room.id,language:'de'},
+  })).json() as {id:string;statusToken:string};
+  expect((await hostRequest.post(`/api/v1/access-requests/${access.id}/approve`,{
+    headers:csrfHeaders,
+    data:{mutationId:crypto.randomUUID(),expiresAt:new Date(Date.now()+86_400_000).toISOString()},
+  })).status()).toBe(200);
+  const guestContext=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(guestContext);
+  const exchange=await guestContext.request.post(`/api/v1/public/access-requests/${access.id}/status`,{
+    data:{token:access.statusToken,grantId:crypto.randomUUID()},
+  });
+  expect(exchange.status()).toBe(200);
+  expect((await exchange.json()) as {granted:boolean}).toEqual(expect.objectContaining({granted:true}));
+  const catalog=await (await guestContext.request.get('/api/v1/guest/catalog')).json() as {
+    data:{id:string;name:{de:string};priceCents:number;version:number}[];
+  };
+  const product=catalog.data.find(item=>item.name.de==='Mineralwasser')!;
+  const addition=await guestContext.request.post('/api/v1/guest/items',{
+    headers:csrfHeaders,
+    data:{mutationId:crypto.randomUUID(),productId:product.id,expectedPriceCents:product.priceCents,expectedProductVersion:product.version},
+  });
+  expect(addition.status()).toBe(201);
+  const item=await addition.json() as {id:string};
+  const tab=await (await guestContext.request.get('/api/v1/guest/tab')).json() as {id:string};
+  const settlementCommand=()=>({
+    mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash',
+  });
+  const immediate=await hostRequest.post(`/api/v1/tabs/${tab.id}/settle`,{
+    headers:csrfHeaders,data:settlementCommand(),
+  });
+  const immediateBody=await immediate.json() as {error:{code:string}};
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();let committed=false;
+  try{
+    await database.query(
+      `UPDATE order_items SET provisional_until=clock_timestamp()+interval '3 seconds' WHERE id=$1`,[item.id],
+    );
+    await database.query('BEGIN');
+    await database.query('SELECT id FROM order_tabs WHERE id=$1 FOR UPDATE',[tab.id]);
+    const holderXid=String((await database.query('SELECT pg_current_xact_id()::text AS xid')).rows[0].xid);
+    const settlement=hostRequest.post(`/api/v1/tabs/${tab.id}/settle`,{
+      headers:csrfHeaders,data:settlementCommand(),
+    });
+    await expect.poll(async()=>Number((await database.query(
+      `SELECT count(*) FROM pg_locks WHERE locktype='transactionid' AND transactionid::text=$1 AND NOT granted`,[holderXid],
+    )).rows[0].count),{timeout:5_000,intervals:[10,20,50]}).toBeGreaterThan(0);
+    const startedBeforeExpiry=Boolean((await database.query(
+      'SELECT provisional_until>clock_timestamp() AS active FROM order_items WHERE id=$1',[item.id],
+    )).rows[0].active);
+    await expect.poll(async()=>Boolean((await database.query(
+      'SELECT provisional_until<=clock_timestamp() AS expired FROM order_items WHERE id=$1',[item.id],
+    )).rows[0].expired),{timeout:5_000,intervals:[25,50,100]}).toBe(true);
+    const expiredBeforeRelease=Boolean((await database.query(
+      'SELECT provisional_until<=clock_timestamp() AS expired FROM order_items WHERE id=$1',[item.id],
+    )).rows[0].expired);
+    await database.query('COMMIT');committed=true;
+    const settlementResponse=await settlement;
+    const stored=(await database.query<{
+      billLineCount:string;billCount:string;itemStatus:string;
+    }>(
+      `SELECT (SELECT count(*) FROM bill_items WHERE original_order_item_id=$1)::text AS "billLineCount",
+              (SELECT count(*) FROM bills WHERE tab_id=$2)::text AS "billCount",
+              (SELECT status::text FROM order_items WHERE id=$1) AS "itemStatus"`,
+      [item.id,tab.id],
+    )).rows[0]!;
+    settlementUndoClockResult={
+      immediateStatus:immediate.status(),
+      immediateCode:immediateBody.error.code,
+      startedBeforeExpiry,
+      expiredBeforeRelease,
+      settlementStatus:settlementResponse.status(),
+      billLineCount:Number(stored.billLineCount),
+      billCount:Number(stored.billCount),
+      itemStatus:stored.itemStatus,
+    };
+  }finally{if(!committed)await database.query('ROLLBACK');await database.end()}
+});
+Then('immediate settlement is rejected while the undo deadline is active',async()=>{
+  expect(settlementUndoClockResult).toEqual(expect.objectContaining({immediateStatus:409,immediateCode:'UNDO_PENDING'}));
+});
+Then('settlement succeeds after the undo deadline passes during the lock wait',async()=>{
+  expect(settlementUndoClockResult).toEqual(expect.objectContaining({
+    startedBeforeExpiry:true,expiredBeforeRelease:true,settlementStatus:200,
+  }));
+});
+Then('the expired provisional item is billed exactly once',async()=>{
+  expect(settlementUndoClockResult).toEqual(expect.objectContaining({billLineCount:1,billCount:1,itemStatus:'billed'}));
+});
 When('bill reversal waits for a locked guest',async({page})=>{
   const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;
   const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};
