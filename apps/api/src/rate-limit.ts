@@ -13,6 +13,8 @@ interface RateLimitRequest {
 
 const accessStatusPath = /^\/api\/v1\/public\/access-requests\/[0-9a-f-]+\/status(?:\?|$)/i;
 
+export const accessStatusIpRateLimitGroup = 'access-status-ip';
+
 export function isAccessStatusRequest(request: Pick<RateLimitRequest, 'method'|'url'>): boolean {
   return request.method === 'POST' && accessStatusPath.test(request.url);
 }
@@ -41,6 +43,11 @@ export function rateLimitKey(request: RateLimitRequest): string {
 type RateLimitCheck = ReturnType<FastifyInstance['createRateLimit']>;
 type RateLimitResult = Awaited<ReturnType<RateLimitCheck>>;
 type AppliedRateLimit = Extract<RateLimitResult, { isAllowed: false }>;
+type GroupedRateLimitOptions = NonNullable<Parameters<FastifyInstance['createRateLimit']>[0]> & { groupId: string };
+
+export function createGroupedRateLimit(app: FastifyInstance, options: GroupedRateLimitOptions): RateLimitCheck {
+  return app.createRateLimit(options);
+}
 
 function exceededRateLimit(result: RateLimitResult): result is AppliedRateLimit {
   return !result.isAllowed && result.isExceeded;

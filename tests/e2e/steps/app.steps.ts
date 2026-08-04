@@ -92,6 +92,7 @@ let uncertainSettlementDetailsLocked = false;
 let changedSettlementReplayStatus = 0;
 let sharedNetworkPollStatuses: number[] = [];
 let rotatingCapabilityStatuses: number[] = [];
+let independentAddressRateStatuses: {statusFirst:number[];ordinary:number[];statusLast:number[]}|undefined;
 let conflictGuestId = '';
 let changedItemVoidReplayStatus = 0;
 let changedItemVoidVersionReplayStatus = 0;
@@ -1591,6 +1592,30 @@ When('one network rotates invalid access capabilities beyond its address limit',
   }
 });
 Then('the access status address limit is enforced',async()=>{expect(rotatingCapabilityStatuses).toEqual([404,404,429])});
+
+When('status polling and ordinary traffic reach their limits from one forwarded address',async()=>{
+  const replicaPort=3203;
+  const replica=spawn(process.execPath,['apps/api/dist/index.js'],{
+    cwd:process.cwd(),
+    env:{...process.env,PORT:String(replicaPort),LOG_LEVEL:'warn',TRUST_PROXY:'true',RATE_LIMIT_MAX:'4',ACCESS_STATUS_IP_LIMIT_MAX:'4'},
+    stdio:'ignore',
+  });
+  extraApiProcesses.push(replica);
+  const baseURL=`http://127.0.0.1:${replicaPort}`;
+  await expect.poll(async()=>{try{return (await fetch(`${baseURL}/api/v1/health`)).status}catch{return 0}},{timeout:15_000}).toBe(200);
+  const forwardedAddress='198.51.100.28';
+  const headers={'content-type':'application/json','x-forwarded-for':forwardedAddress};
+  const requestId=crypto.randomUUID();
+  const poll=async(index:number)=>(await fetch(`${baseURL}/api/v1/public/access-requests/${requestId}/status`,{
+    method:'POST',headers,body:JSON.stringify({token:`independent-capability-${index}`,grantId:crypto.randomUUID()}),
+  })).status;
+  const ordinary=async()=>(await fetch(`${baseURL}/api/v1/health`,{headers:{'x-forwarded-for':forwardedAddress}})).status;
+  const statusFirst=[];for(let index=0;index<2;index+=1)statusFirst.push(await poll(index));
+  const ordinaryStatuses=[];for(let index=0;index<5;index+=1)ordinaryStatuses.push(await ordinary());
+  const statusLast=[];for(let index=2;index<5;index+=1)statusLast.push(await poll(index));
+  independentAddressRateStatuses={statusFirst,ordinary:ordinaryStatuses,statusLast};
+});
+Then('neither address budget consumes the other',async()=>{expect(independentAddressRateStatuses).toEqual({statusFirst:[404,404],ordinary:[200,200,200,200,429],statusLast:[404,404,429]})});
 
 When('requests at the address limit are split across API replicas',async({page})=>{const replicaPort=3200;const replica=spawn(process.execPath,['apps/api/dist/index.js'],{cwd:process.cwd(),env:{...process.env,PORT:String(replicaPort),LOG_LEVEL:'warn',RATE_LIMIT_MAX:'5000'},stdio:'ignore'});extraApiProcesses.push(replica);await expect.poll(async()=>{try{return (await fetch(`http://127.0.0.1:${replicaPort}/api/v1/health`)).status}catch{return 0}},{timeout:15_000}).toBe(200);const keyHash=createHash('sha256').update('ip:127.0.0.1').digest('base64url');const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();try{await database.query(`INSERT INTO rate_limit_counters(scope,key_hash,count,expires_at) VALUES ('global',$1,4999,now()+interval '1 minute') ON CONFLICT (scope,key_hash) DO UPDATE SET count=4999,expires_at=excluded.expires_at`,[keyHash])}finally{await database.end()}const first=await page.context().request.get('/api/v1/health');const second=await fetch(`http://127.0.0.1:${replicaPort}/api/v1/health`);sharedReplicaRateStatuses=[first.status(),second.status]});
 Then('the shared address limit is enforced once',async()=>{expect(sharedReplicaRateStatuses).toEqual([200,429])});

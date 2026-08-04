@@ -29,7 +29,7 @@ import type { GuestItemCreated, OrderItem, Tab } from '@sky-bar/shared';
 import { audit, eventBus, requestRealtimeRelay, storeEvent, type RealtimeEvent } from './events.js';
 import { pool, transaction } from './db.js';
 import { config } from './config.js';
-import { createRateLimitPreHandler, ipRateLimitKey, rateLimitKey } from './rate-limit.js';
+import { accessStatusIpRateLimitGroup, createGroupedRateLimit, createRateLimitPreHandler, ipRateLimitKey, rateLimitKey } from './rate-limit.js';
 import {
   accessStatusVerifierCandidates,
   authenticateHost,
@@ -151,7 +151,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // hook is disabled on this route so a capability rejection cannot skip the IP
   // counter and an accepted request cannot increment the IP counter twice.
   const accessStatusLimits = createRateLimitPreHandler(
-    app.createRateLimit({
+    createGroupedRateLimit(app, {
+      groupId: accessStatusIpRateLimitGroup,
       max: config.ACCESS_STATUS_IP_LIMIT_MAX,
       timeWindow: '1 minute',
       keyGenerator: ipRateLimitKey,

@@ -21,6 +21,11 @@ Feature: Device grants and replay protection
     When one network rotates invalid access capabilities beyond its address limit
     Then the access status address limit is enforced
 
+  Scenario: Access status polling has an independent network budget
+    Given an authenticated administrator
+    When status polling and ordinary traffic reach their limits from one forwarded address
+    Then neither address budget consumes the other
+
   Scenario: Rate limits are shared by API replicas
     Given an authenticated administrator
     When requests at the address limit are split across API replicas
