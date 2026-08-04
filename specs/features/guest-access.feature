@@ -122,6 +122,13 @@ Feature: Guest device access and self-service
     When the host revokes Luca's device from the guest directory
     Then Luca's open guest view returns to access request without cached data
 
+  Scenario: Transient guest identity outage remains retryable
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When a transient guest identity outage occurs during app launch
+    Then the guest remains on the guest page with a retry action
+    When the guest retries the identity request
+    Then Luca's guest application opens with persisted guest state intact
+
   Scenario: Guest identity changes update the open guest application
     Given an approved guest device for "Luca Rossi" in room "102"
     When the host renames Luca to "Luca Nuovo"

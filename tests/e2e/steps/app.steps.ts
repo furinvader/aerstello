@@ -187,6 +187,8 @@ let retriedVoidReasons: string[] = [];
 let reloadedVoidRequests: {mutationId:string;reason:string;expectedBillingVersion:number}[] = [];
 let reloadedVoidItemCount = 0;
 let reloadedVoidPendingCount = 0;
+let transientGuestIdentityRequests = 0;
+let transientGuestPendingState = '';
 let snapshottedBillHostName = '';
 let uncertainAccessRequestFieldsLocked = false;
 let credentialRaceLoginStatuses: number[] = [];
@@ -623,6 +625,33 @@ Then('the approval expiry is one local day from now',async()=>{expect(approvalDe
 
 async function approveGuest(page:import('@playwright/test').Page,browser:import('@playwright/test').Browser,name:string,room:string){await signIn(page);const context=await browser.newContext();guestPage=await context.newPage();await guestPage.goto('/guest/request');await guestPage.locator('form select').nth(1).selectOption('de');await guestPage.getByLabel('Name').fill(name);await guestPage.locator('form select').first().selectOption({label:room});await guestPage.locator('form button[type="submit"]').click();await page.goto('/app/requests');await page.getByRole('button',{name:/Genehmigen|Approve/}).click();await page.locator('.modal').getByRole('button',{name:/Genehmigen|Approve/}).click();await expect(guestPage).toHaveURL(/\/guest$/,{timeout:10000})}
 Given('an approved guest device for {string} in room {string}',async({page,browser},name:string,room:string)=>approveGuest(page,browser,name,room));
+When('a transient guest identity outage occurs during app launch',async()=>{
+  const request=guestPage!.context().request;
+  const identity=await (await request.get('/api/v1/guest/me')).json() as {guest:{sessionId:string}};
+  const catalog=await (await request.get('/api/v1/guest/catalog')).json() as {data:{id:string;priceCents:number;version:number}[]};
+  const product=catalog.data[0]!;
+  transientGuestPendingState=JSON.stringify({sessionId:identity.guest.sessionId,entries:[[product.id,crypto.randomUUID(),product.priceCents,product.version]]});
+  await guestPage!.evaluate((pending)=>localStorage.setItem('skybar-guest-pending-adds',pending),transientGuestPendingState);
+  transientGuestIdentityRequests=0;
+  await guestPage!.route('**/api/v1/guest/me',async(route)=>{
+    transientGuestIdentityRequests+=1;
+    if(transientGuestIdentityRequests===1){await route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated guest identity outage'}})});return}
+    await route.continue();
+  });
+  await guestPage!.reload();
+});
+Then('the guest remains on the guest page with a retry action',async()=>{
+  await expect(guestPage!).toHaveURL(/\/guest$/);
+  await expect(guestPage!.locator('.notice--error')).toContainText('Die Anfrage konnte nicht abgeschlossen werden.');
+  await expect(guestPage!.getByRole('button',{name:'Erneut versuchen'})).toBeVisible();
+  expect(await guestPage!.evaluate(()=>localStorage.getItem('skybar-guest-pending-adds'))).toBe(transientGuestPendingState);
+});
+When('the guest retries the identity request',async()=>{await guestPage!.getByRole('button',{name:'Erneut versuchen'}).click()});
+Then("Luca's guest application opens with persisted guest state intact",async()=>{
+  await expect(guestPage!.getByRole('heading',{name:'Luca Rossi'})).toBeVisible();
+  expect(transientGuestIdentityRequests).toBe(2);
+  expect(await guestPage!.evaluate(()=>localStorage.getItem('skybar-guest-pending-adds'))).toBe(transientGuestPendingState);
+});
 When('the guest adds {string} from self-service',async({},product:string)=>{await guestPage!.getByText(product,{exact:true}).click()});
 Then('an undo action is available',async()=>{await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toBeVisible()});
 Then('the undo action disappears after ten seconds',async()=>{await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toBeHidden({timeout:12_000})});

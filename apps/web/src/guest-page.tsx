@@ -142,7 +142,10 @@ export function GuestPage() {
   const undoItem = async (undo:UndoEntry) => { pendingUndos.current.add(undo.id);try { await api(`/guest/items/${undo.id}/undo`, { method: 'POST', body: json({ mutationId: undo.mutationId }) }); pendingUndos.current.delete(undo.id);setUndos((current)=>current.filter((entry)=>entry.id!==undo.id)); setError(''); await client.invalidateQueries({ queryKey: ['guest-tab'] }); } catch (caught) { setError(apiErrorMessage(caught, language, t('requestFailed'))); } };
   const logout=async()=>{try{await api('/guest/logout',{method:'POST'})}catch{/* Clear cached guest data after an uncertain response. */}finally{client.clear();globalThis.location.assign('/guest/request')}};
   if (me.isLoading) return <div className="splash">Sky Bar</div>;
-  if (me.isError) return <Redirect to="/guest/request" />;
+  if (me.isError) {
+    if (me.error instanceof ApiError && me.error.status === 401) return <Redirect to="/guest/request" />;
+    return <main className="guest-shell"><Card><Notice kind="error">{t('requestFailed')}</Notice><Button onClick={() => void me.refetch()}>{t('retry')}</Button></Card></main>;
+  }
   const guest = me.data!.guest;
   const categories = [...new Map((catalog.data?.data??[]).map((product)=>[product.categoryId,product.categoryName])).entries()];
   const activeProvisionalIds=new Set(provisionals.map((entry)=>entry.id));
