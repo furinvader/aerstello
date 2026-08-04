@@ -6,9 +6,29 @@ Sky Bar is a TypeScript npm-workspace application. Preserve the distinction betw
 
 ## Project lifecycle status
 
-Sky Bar is a **pre-release initial implementation**. It has never held production data and has no released API, database, migration, or browser-storage formats. Treat the project as greenfield until the owner explicitly changes this section.
+Sky Bar is currently a **pre-release initial implementation** because no valid
+production release marker-and-tag pair exists. Release status is derived from
+Git history by `npm run release:state`, never from `package.json`, a migration
+number, or an earlier commit or PR revision.
 
-While this status remains in effect, consolidate schema changes directly into `apps/api/migrations/0001_initial.sql` and keep `schema.ts` aligned. Rewrite the initial migration instead of adding numbered follow-up migrations, and recreate disposable development and test databases and browser state after format changes. Do not add compatibility paths, backfills, or upgrade machinery for earlier development-only formats.
+A valid production release is an annotated Git tag named
+`vMAJOR.MINOR.PATCH`. Its commit must be reachable from the protected release
+branch, currently `main`, and contain the matching
+`.release/markers/vMAJOR.MINOR.PATCH.json`. The marker must identify product
+`sky-bar`, the same stable version and tag, channel `production`, and a valid
+release timestamp. A marker without its tag is pending preparation, not release
+evidence. A release-like tag without a valid matching marker is inconsistent
+and must be reported rather than guessed around.
+
+A migration becomes released and immutable only after it appears in a valid
+production release. Unreleased migrations may be edited, renamed, reordered,
+squashed, replaced, or deleted. Before the first valid release, consolidate
+schema changes directly into `apps/api/migrations/0001_initial.sql`, keep
+`apps/api/src/schema.ts` aligned, and recreate disposable development/test
+databases and browser state after format changes. After releases exist, preserve
+every migration that appeared in any valid release and add forward migrations
+for changes to released schema. Never add compatibility paths, backfills,
+legacy shims, or extra migrations solely for earlier development or PR states.
 
 Before editing:
 
@@ -29,6 +49,25 @@ Before editing:
 - Host sessions and guest device grants stay in Secure, HttpOnly cookies. Never expose session tokens through application JSON.
 - Add every new user-visible behavior to a `.feature` file and bind it to Playwright-BDD steps.
 - User-facing UI must work in DE/IT/EN, with German as the fallback. Product DE text is required.
+
+## Code Review Rules
+
+### Release and migration compatibility
+
+- Evaluate compatibility against valid production marker-and-tag pairs, not
+  intermediate commits. Edits to unreleased migrations are allowed; report any
+  modification or deletion of a migration that appeared in a valid release.
+- Do not recommend shims, backfills, legacy paths, or extra migrations solely
+  for an earlier revision of the same PR.
+
+### PR review cycle
+
+- The main orchestrator alone requests GitHub reviews and integrates fixes.
+  Accept a review only when its commit equals the recorded requested SHA and
+  current PR head; otherwise it is stale.
+- Fix workers must stay within their task ownership and return structured
+  results. Parallel writers require isolated worktrees and non-overlapping write
+  sets.
 
 ## Validation
 

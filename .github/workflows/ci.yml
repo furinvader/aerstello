@@ -36,6 +36,40 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
+      - name: Fetch protected release history and tags
+        run: |
+          git fetch --force origin main:refs/remotes/origin/main
+          git fetch --tags origin
+      - name: Check pull request release and migration policy
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          npm run check:release-state -- --base "$PR_BASE_SHA" --head "$PR_HEAD_SHA" --release-ref origin/main
+          npm run check:released-migrations -- --base "$PR_BASE_SHA" --head "$PR_HEAD_SHA" --release-ref origin/main
+      - name: Check branch release and migration policy
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
+        env:
+          PUSH_HEAD_SHA: ${{ github.sha }}
+        run: |
+          npm run check:release-state -- --base origin/main --head "$PUSH_HEAD_SHA" --release-ref origin/main
+          npm run check:released-migrations -- --base origin/main --head "$PUSH_HEAD_SHA" --release-ref origin/main
+      - name: Check production tag release and migration policy
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          RELEASE_HEAD_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          npm run check:release-state -- --base origin/main --head "$RELEASE_HEAD_SHA" --release-ref origin/main --require-tag "$RELEASE_TAG"
+          npm run check:released-migrations -- --base origin/main --head "$RELEASE_HEAD_SHA" --release-ref origin/main --require-tag "$RELEASE_TAG"
+      - name: Check non-production tag release and migration policy
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG_HEAD_SHA: ${{ github.sha }}
+        run: |
+          npm run check:release-state -- --base origin/main --head "$TAG_HEAD_SHA" --release-ref origin/main
+          npm run check:released-migrations -- --base origin/main --head "$TAG_HEAD_SHA" --release-ref origin/main
       - run: npm ci
       - name: Validate pushed commit message
         if: github.event_name == 'push'

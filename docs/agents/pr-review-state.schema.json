@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sky-bar.local/schemas/pr-review-state.schema.json",
+  "title": "Sky Bar active PR review state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "revision",
+    "repository",
+    "prNumber",
+    "phase",
+    "baseSha",
+    "requestedHeadSha",
+    "reviewedHeadSha",
+    "currentIntegrationHeadSha",
+    "reviewRound",
+    "releaseBaseline",
+    "decisions",
+    "tasks",
+    "reviewRequest",
+    "reviewSubmission",
+    "blockedReasons",
+    "validationStatus",
+    "nextAction",
+    "integrationWorktree",
+    "orchestratorSessionId",
+    "git",
+    "updatedAt"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "revision": { "type": "integer", "minimum": 0 },
+    "repository": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$", "maxLength": 256 },
+    "prNumber": { "type": "integer", "minimum": 1 },
+    "phase": {
+      "enum": [
+        "recovering",
+        "ready-for-review",
+        "awaiting-review",
+        "triaging",
+        "implementing",
+        "integrating",
+        "verifying",
+        "validating",
+        "blocked",
+        "complete"
+      ]
+    },
+    "baseSha": { "$ref": "#/$defs/sha" },
+    "requestedHeadSha": { "$ref": "#/$defs/nullableSha" },
+    "reviewedHeadSha": { "$ref": "#/$defs/nullableSha" },
+    "currentIntegrationHeadSha": { "$ref": "#/$defs/sha" },
+    "reviewRound": { "type": "integer", "minimum": 0, "maximum": 3 },
+    "releaseBaseline": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "tag", "commit", "releasedAt"],
+          "properties": {
+            "version": { "type": "string" },
+            "tag": { "type": "string" },
+            "commit": { "$ref": "#/$defs/sha" },
+            "releasedAt": { "type": "string", "format": "date-time" }
+          }
+        }
+      ]
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "summary"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 1000 }
+        }
+      }
+    },
+    "tasks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/task" }
+    },
+    "reviewRequest": { "$ref": "#/$defs/reviewMetadata" },
+    "reviewSubmission": { "$ref": "#/$defs/reviewMetadata" },
+    "blockedReasons": { "$ref": "#/$defs/stringList" },
+    "validationStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "headSha", "checks", "updatedAt"],
+      "properties": {
+        "status": { "enum": ["not-run", "passed", "failed"] },
+        "headSha": { "$ref": "#/$defs/nullableSha" },
+        "checks": { "$ref": "#/$defs/stringList" },
+        "updatedAt": {
+          "oneOf": [{ "type": "null" }, { "type": "string", "format": "date-time" }]
+        }
+      }
+    },
+    "nextAction": { "type": "string", "minLength": 1, "maxLength": 1000 },
+    "integrationWorktree": { "type": "string", "pattern": "^/", "maxLength": 4096 },
+    "orchestratorSessionId": {
+      "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1, "maxLength": 256 }]
+    },
+    "git": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["branch", "headSha", "dirty"],
+      "properties": {
+        "branch": { "oneOf": [{ "type": "null" }, { "type": "string" }] },
+        "headSha": { "$ref": "#/$defs/sha" },
+        "dirty": { "type": "boolean" }
+      }
+    },
+    "updatedAt": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+    "nullableSha": { "oneOf": [{ "$ref": "#/$defs/sha" }, { "type": "null" }] },
+    "stringList": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+    },
+    "reviewMetadata": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "databaseId", "url", "headSha", "at"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "databaseId": { "oneOf": [{ "type": "integer" }, { "type": "null" }] },
+            "url": { "type": "string", "format": "uri" },
+            "headSha": { "$ref": "#/$defs/sha" },
+            "at": { "type": "string", "format": "date-time" }
+          }
+        }
+      ]
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "sourceIds", "fingerprint", "summary", "severity", "disposition", "status",
+        "dependencies", "ownedPaths", "worker", "branch", "worktree", "commitSha",
+        "validationSummaries", "lastError"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "sourceIds": { "$ref": "#/$defs/stringList" },
+        "fingerprint": { "type": "string", "minLength": 8, "maxLength": 256 },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "severity": { "enum": ["P0", "P1", "P2", "P3"] },
+        "disposition": {
+          "enum": [
+            "actionable", "duplicate", "already-fixed", "stale", "invalid",
+            "policy-conflict", "out-of-scope", "needs-human-decision"
+          ]
+        },
+        "status": {
+          "enum": [
+            "proposed", "queued", "running", "implemented", "integrated", "completed",
+            "blocked", "not-applicable", "failed"
+          ]
+        },
+        "dependencies": { "$ref": "#/$defs/stringList" },
+        "ownedPaths": { "$ref": "#/$defs/stringList" },
+        "worker": { "$ref": "#/$defs/nullableString" },
+        "branch": { "$ref": "#/$defs/nullableString" },
+        "worktree": { "$ref": "#/$defs/nullableString" },
+        "commitSha": { "$ref": "#/$defs/nullableSha" },
+        "validationSummaries": { "$ref": "#/$defs/stringList" },
+        "lastError": { "$ref": "#/$defs/nullableString" }
+      }
+    },
+    "nullableString": {
+      "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1, "maxLength": 1000 }]
+    }
+  }
+}

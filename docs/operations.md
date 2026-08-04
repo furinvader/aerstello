@@ -16,8 +16,18 @@ If an idempotent access-request replay returns `CAPABILITY_KEY_UNAVAILABLE`, res
 
 - Liveness/readiness: `GET /api/v1/health` verifies database connectivity.
 - Build the API, then run `npm run db:migrate` before starting it. Production migration and administrator commands execute the compiled files included in the runtime image.
-- The sole initial migration is recorded in `schema_migrations` and concurrent runners are serialized with a PostgreSQL advisory lock. While the project lifecycle remains pre-release, schema changes are consolidated into that initial migration and disposable development and test databases are recreated.
+- The sole initial migration is recorded in `schema_migrations` and concurrent runners are serialized with a PostgreSQL advisory lock. While no valid production release marker-and-tag pair exists, schema changes are consolidated into that initial migration and disposable development and test databases are recreated. Once released, every migration blob that appeared in a valid release is immutable; run `npm run check:released-migrations` before deployment.
 - Realtime invalidation records are trimmed as they are written, retaining only the latest 10,000 identity slots so sustained activity cannot grow the table without bound.
+
+## Production releases
+
+Production release status comes from an annotated `vMAJOR.MINOR.PATCH` tag on
+the protected `main` history plus a valid matching marker in the tagged commit.
+A marker alone remains pending and does not freeze migrations. Follow the
+[release marker procedure](../.release/README.md), including the local
+release-candidate review, final clean GitHub `@codex review`, tag creation, and
+post-tag policy checks. Protect stable release tags from update and deletion in
+GitHub. Never use the package version as release evidence.
 
 ## Backup and restore
 

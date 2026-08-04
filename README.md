@@ -46,6 +46,9 @@ The development seed creates `admin@skybar.test`, requires an explicit password 
 | `npm run admin:create -- …` | Create or recover the initial administrator |
 | `npm run db:migrate:dev -w @sky-bar/api` | Apply migrations directly from TypeScript during API development |
 | `npm run assets:generate` | Generate required 192px and 512px PWA icons |
+| `npm run release:state` | Inspect production marker/tag state as JSON |
+| `npm run check:release-state` | Fail on stale or inconsistent release metadata |
+| `npm run check:released-migrations` | Enforce immutable released migration blobs |
 
 Before E2E tests, start PostgreSQL with `docker compose up -d db` and install the Playwright browsers with `npx playwright install`.
 
@@ -59,6 +62,11 @@ Before E2E tests, start PostgreSQL with `docker compose up -d db` and install th
 - `docs`: architecture, operations, and product/test conventions.
 
 Read [AGENTS.md](./AGENTS.md) before making automated changes and [docs/architecture.md](./docs/architecture.md) before changing financial, authentication, or offline behavior.
+
+For long-running pull-request review remediation, use the repository
+`$pr-review-cycle` skill and follow the
+[PR review-cycle guide](./docs/agents/pr-review-cycle.md). Production releases
+follow the [marker-and-annotated-tag contract](./.release/README.md).
 
 ## Contributing
 

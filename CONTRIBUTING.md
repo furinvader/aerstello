@@ -64,3 +64,8 @@ Commit messages are checked in CI. To validate a commit locally, run:
 ```bash
 npm run lint:commit -- --last --verbose
 ```
+
+Long-running pull-request remediation uses the repository-local Codex workflow
+documented in [docs/agents/pr-review-cycle.md](./docs/agents/pr-review-cycle.md).
+The main orchestrator owns GitHub review requests and integration; fix workers
+operate only from immutable task packets in isolated worktrees.
