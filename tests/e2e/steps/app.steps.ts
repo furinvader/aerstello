@@ -1602,7 +1602,11 @@ When('status polling and ordinary traffic reach their limits from one forwarded 
   });
   extraApiProcesses.push(replica);
   const baseURL=`http://127.0.0.1:${replicaPort}`;
-  await expect.poll(async()=>{try{return (await fetch(`${baseURL}/api/v1/health`)).status}catch{return 0}},{timeout:15_000}).toBe(200);
+  let readinessProbe=0;
+  await expect.poll(async()=>{try{
+    readinessProbe+=1;
+    return (await fetch(`${baseURL}/api/v1/health`,{headers:{'x-forwarded-for':`203.0.113.${(readinessProbe%250)+1}`}})).status;
+  }catch{return 0}},{timeout:15_000}).toBe(200);
   const forwardedAddress='198.51.100.28';
   const headers={'content-type':'application/json','x-forwarded-for':forwardedAddress};
   const requestId=crypto.randomUUID();
