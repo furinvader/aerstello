@@ -6,11 +6,14 @@ import { createRateLimitPreHandler, incrementRateLimitCounter, ipRateLimitKey, i
 describe('rate limit keys', () => {
   const url = '/api/v1/public/access-requests/0198b529-e428-7000-8000-000000000001/status';
 
-  it('separates access-status pollers behind the same address by capability', () => {
+  it('keys access-status pollers by capability independently of address', () => {
     const first = rateLimitKey({ ip: '192.0.2.1', method: 'POST', url, body: { token: 'first-capability' } });
+    const firstFromAnotherAddress = rateLimitKey({ ip: '198.51.100.2', method: 'POST', url, body: { token: 'first-capability' } });
     const second = rateLimitKey({ ip: '192.0.2.1', method: 'POST', url, body: { token: 'second-capability' } });
+    expect(first).toBe(firstFromAnotherAddress);
     expect(first).not.toBe(second);
     expect(first).not.toContain('first-capability');
+    expect(second).not.toContain('second-capability');
     expect(ipRateLimitKey({ ip: '192.0.2.1' })).toBe('ip:192.0.2.1');
     expect(isAccessStatusRequest({ method: 'POST', url })).toBe(true);
     expect(ipRateLimitMax({ method: 'POST', url }, 300, 3000)).toBe(3000);
@@ -19,6 +22,28 @@ describe('rate limit keys', () => {
   it('keeps ordinary requests in the shared address bucket', () => {
     expect(rateLimitKey({ ip: '192.0.2.1', method: 'POST', url: '/api/v1/auth/login' }))
       .toBe('ip:192.0.2.1');
+  });
+
+  it('shares the capability ceiling across addresses', async () => {
+    const app = Fastify();
+    await app.register(rateLimit, {
+      global: true,
+      max: 99,
+      timeWindow: '1 minute',
+      hook: 'preHandler',
+      keyGenerator: ipRateLimitKey,
+    });
+    const limits = createRateLimitPreHandler(
+      app.createRateLimit({ max: 10, timeWindow: '1 minute', keyGenerator: ipRateLimitKey }),
+      app.createRateLimit({ max: 1, timeWindow: '1 minute', keyGenerator: rateLimitKey }),
+    );
+    app.post(url, { config: { rateLimit: false }, preHandler: limits }, async () => ({ ok: true }));
+
+    const first = await app.inject({ method: 'POST', url, remoteAddress: '192.0.2.1', payload: { token: 'shared' } });
+    const second = await app.inject({ method: 'POST', url, remoteAddress: '198.51.100.2', payload: { token: 'shared' } });
+    await app.close();
+
+    expect([first.statusCode, second.statusCode]).toEqual([200, 429]);
   });
 
   it('applies the address ceiling after checking distinct capabilities', async () => {

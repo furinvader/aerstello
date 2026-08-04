@@ -33,7 +33,7 @@ export function rateLimitKey(request: RateLimitRequest): string {
     const capability = typeof token === 'string' && token.length > 0
       ? createHash('sha256').update(token).digest('base64url')
       : 'missing';
-    return `access-status:${request.ip}:${capability}`;
+    return `access-status:${capability}`;
   }
   return ipRateLimitKey(request);
 }
