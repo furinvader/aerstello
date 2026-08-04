@@ -4,7 +4,7 @@ import { localized } from '@sky-bar/shared';
 import { Link, Redirect, useLocation } from 'wouter';
 import { BedDouble, Boxes, Building2, ClipboardList, CreditCard, Gauge, GlassWater, LogOut, Settings, UserRound, UserRoundCheck } from 'lucide-react';
 import { ApiError, api, apiErrorCodeMessage } from './api';
-import { Button, Modal } from './components';
+import { Button, Card, Modal, Notice } from './components';
 import { useI18n } from './i18n';
 import { discardMutationConflict, flushQueue, mutationConflicts, pendingMutationCount, retryMutationConflict, type QueuedMutation } from './offline';
 import type { Host, Venue } from './types';
@@ -65,7 +65,10 @@ export function HostShell({children}:{children:ReactNode}) {
   }, [me.isSuccess, client]);
   useLayoutEffect(() => { if (me.data?.host.language && language !== me.data.host.language) setLanguage(me.data.host.language); }, [me.data?.host.language, language, setLanguage]);
   if (me.isLoading) return <div className="splash"><img src="/sky-bar.svg" alt=""/><span>Sky Bar</span></div>;
-  if (me.isError) return <Redirect to="/login" />;
+  if (me.isError) {
+    if (me.error instanceof ApiError && me.error.status === 401) return <Redirect to="/login" />;
+    return <main className="app-content"><Card><Notice kind="error">{t('requestFailed')}</Notice><Button onClick={() => void me.refetch()}>{t('retry')}</Button></Card></main>;
+  }
   if (language !== me.data!.host.language) return <div className="splash"><img src="/sky-bar.svg" alt=""/><span>Sky Bar</span></div>;
   if (!me.data!.venue.name && currentPath !== '/app/settings') return <Redirect to="/app/settings" />;
   const discardConflict=async(mutationId:string)=>{await discardMutationConflict(mutationId,hostId!);const remaining=await mutationConflicts(hostId!);setConflicts(remaining);if(!remaining.length)setShowConflicts(false)};
