@@ -257,17 +257,32 @@ let strictBillingVersions: number[] = [];
 let missingBillingIncrementError = '';
 let invalidBillingVersionChangeError = '';
 let strictBillingVoidConflict: {status:number;code:string}|undefined;
-let immutableBillLineResult: {
-  updateError:string;
-  deleteError:string;
+let immutableFinancialResult: {
+  billUpdateError:string;
+  billDeleteError:string;
+  incompleteBillVoidError:string;
+  unauditedBillVoidError:string;
+  mismatchedBillVoidAuditError:string;
+  mismatchedBillVoidAuditReachedCommit:boolean;
+  repeatedBillVoidError:string;
+  orderItemUpdateError:string;
+  orderItemDeleteError:string;
+  orderItemReopenError:string;
+  billLineUpdateError:string;
+  billLineDeleteError:string;
   truncateError:string;
   truncateTriggerEnabled:boolean;
-  before:unknown;
-  after:unknown;
+  billBefore:unknown;
+  billAfter:unknown;
+  orderItemBefore:unknown;
+  orderItemAfter:unknown;
+  billLineBefore:unknown;
+  billLineAfter:unknown;
   settlementStatus:number;
   voidStatus:number;
   voidAuditCount:number;
   restoredItemCount:number;
+  restoredOrderItemState:{status:string;billId:string|null;billingVersion:number};
 } | undefined;
 
 Before(async () => {
@@ -1746,25 +1761,26 @@ When('the venue timezone changes after sales on adjacent snapshot days',async({p
     const snapshotVenueResponse=await request.put('/api/v1/venue',{headers:csrfHeaders,data:{name:venue.name,language:venue.defaultLanguage,timezone:zones.snapshotTimezone,expectedVersion:venue.version}});
     expect(snapshotVenueResponse.status()).toBe(200);
     const snapshotVenue=await snapshotVenueResponse.json() as {version:number};
-    const settle=async(quantity:number)=>{
-      const orderResponse=await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity}]}});
-      expect(orderResponse.status()).toBe(201);
-      const order=await orderResponse.json() as {tabId:string};
-      const settlementResponse=await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:quantity,expectedTotalCents:product.priceCents*quantity,paymentMethod:'cash'}});
-      expect(settlementResponse.status()).toBe(200);
-      return await settlementResponse.json() as {id:string};
+    const insertHistoricalBill=async(quantity:number,dayOffset:number)=>{
+      await database.query(
+        `WITH historical_tab AS (
+           INSERT INTO order_tabs(guest_id,status,closed_at)
+           VALUES ($1,'billed',clock_timestamp())
+           RETURNING id
+         )
+         INSERT INTO bills(tab_id,guest_id,host_id,mutation_id,venue_name,venue_timezone,guest_name,room_name,host_name,total_cents,payment_method,settled_at)
+         SELECT historical_tab.id,g.id,h.id,$3,v.name,v.timezone,g.name,r.name,h.name,$4,'cash',
+                (date_trunc('day',statement_timestamp() AT TIME ZONE $5)-$6::integer*interval '1 day') AT TIME ZONE $5
+           FROM historical_tab
+           JOIN guests g ON g.id=$1
+           JOIN rooms r ON r.id=g.room_id
+           JOIN hosts h ON h.id=$2
+          CROSS JOIN venue_settings v`,
+        [guest.id,me.host.id,crypto.randomUUID(),product.priceCents*quantity,zones.snapshotTimezone,dayOffset],
+      );
     };
-    const currentDayBill=await settle(1);
-    const previousDayBill=await settle(2);
-    await database.query(
-      `UPDATE bills
-          SET settled_at=CASE WHEN id=$1
-                THEN date_trunc('day',statement_timestamp() AT TIME ZONE $3) AT TIME ZONE $3
-                ELSE (date_trunc('day',statement_timestamp() AT TIME ZONE $3)-interval '1 day') AT TIME ZONE $3
-              END
-        WHERE id=$1 OR id=$2`,
-      [currentDayBill.id,previousDayBill.id,zones.snapshotTimezone],
-    );
+    await insertHistoricalBill(1,0);
+    await insertHistoricalBill(2,1);
     expect((await request.put('/api/v1/venue',{headers:csrfHeaders,data:{name:venue.name,language:venue.defaultLanguage,timezone:zones.currentTimezone,expectedVersion:snapshotVenue.version}})).status()).toBe(200);
   } finally { await database.end(); }
   const dashboard=await (await request.get('/api/v1/dashboard')).json() as {todaySalesCents:number};
@@ -2199,24 +2215,35 @@ When('database writers cross an item billing boundary',async({page})=>{
   const {request,me,guests,products}=await operationalData(page);
   const guest=guests.data.find(item=>item.name==='Anna Berger')!;
   const product=products.data.find(item=>item.name.de==='Helles')!;
-  await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}});
+  const orderResponse=await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}});
+  expect(orderResponse.status()).toBe(201);
+  const order=await orderResponse.json() as {tabId:string};
   const tab=await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json() as {items:{id:string;billingVersion:number}[]};
   const item=tab.items[0]!;
   const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();
   try{
     missingBillingIncrementError='';
     try{await database.query(`UPDATE order_items SET status='billed' WHERE id=$1`,[item.id])}catch(caught){missingBillingIncrementError=(caught as {code?:string}).code??''}
-    const billed=await database.query<{billingVersion:number}>(`UPDATE order_items SET status='billed',billing_version=billing_version+1 WHERE id=$1 RETURNING billing_version AS "billingVersion"`,[item.id]);
-    const reversed=await database.query<{billingVersion:number}>(`UPDATE order_items SET status='open' WHERE id=$1 RETURNING billing_version AS "billingVersion"`,[item.id]);
-    strictBillingVersions=[billed.rows[0]!.billingVersion,reversed.rows[0]!.billingVersion];
     invalidBillingVersionChangeError='';
     try{await database.query(`UPDATE order_items SET billing_version=billing_version+1 WHERE id=$1`,[item.id])}catch(caught){invalidBillingVersionChangeError=(caught as {code?:string}).code??''}
   }finally{await database.end()}
+  const settlement=await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}});
+  expect(settlement.status()).toBe(200);
+  const bill=await settlement.json() as {id:string};
+  const billedDatabase=new pg.Client({connectionString:process.env.DATABASE_URL});await billedDatabase.connect();
+  let billedVersion=0;
+  try{billedVersion=Number((await billedDatabase.query(`SELECT billing_version FROM order_items WHERE id=$1`,[item.id])).rows[0].billing_version)}finally{await billedDatabase.end()}
+  const reversal=await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Billing version regression'}});
+  expect(reversal.status()).toBe(200);
+  const reopenedTab=await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json() as {id:string;items:{id:string;billingVersion:number}[]};
+  strictBillingVersions=[billedVersion,reopenedTab.items[0]!.billingVersion];
   const stale=await request.post(`/api/v1/order-items/${item.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Captured before billing',expectedBillingVersion:item.billingVersion}});
   strictBillingVoidConflict={status:stale.status(),code:((await stale.json()) as {error:{code:string}}).error.code};
+  const secondSettlement=await request.post(`/api/v1/tabs/${reopenedTab.id}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}});
+  expect(secondSettlement.status()).toBe(200);
   const verification=new pg.Client({connectionString:process.env.DATABASE_URL});await verification.connect();
   try{
-    const billedAgain=await verification.query<{billingVersion:number}>(`UPDATE order_items SET status='billed',billing_version=billing_version+1 WHERE id=$1 RETURNING billing_version AS "billingVersion"`,[item.id]);
+    const billedAgain=await verification.query<{billingVersion:number}>(`SELECT billing_version AS "billingVersion" FROM order_items WHERE id=$1`,[item.id]);
     strictBillingVersions.push(billedAgain.rows[0]!.billingVersion);
   }finally{await verification.end()}
 });
@@ -2224,37 +2251,74 @@ Then('billing without an explicit version increment is rejected',async()=>{expec
 Then('the database advances the billing version exactly once',async()=>{expect(strictBillingVersions).toEqual([1,1,2])});
 Then('billing version changes outside billing are rejected',async()=>{expect(invalidBillingVersionChangeError).toBe('P0001')});
 Then('the stale item removal remains a billing conflict',async()=>{expect(strictBillingVoidConflict).toEqual({status:409,code:'ITEM_BILLING_CONFLICT'})});
-When('database writers attempt to rewrite a settled bill line',async({page})=>{
+When('database writers attempt to rewrite settled financial records',async({page})=>{
   const {request,me,guests,products}=await operationalData(page);
   const guest=guests.data.find(item=>item.name==='Anna Berger')!;
   const product=products.data.find(item=>item.name.de==='Helles')!;
   const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};
   const settlement=await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}});
+  expect(settlement.status()).toBe(200);
   const bill=await settlement.json() as {id:string};
   const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();
-  let updateError='';let deleteError='';let truncateError='';let truncateTriggerEnabled=false;let before:unknown;let after:unknown;
+  const billSnapshot=`SELECT id,number::text,tab_id,guest_id,host_id,mutation_id,venue_name,venue_timezone,guest_name,room_name,host_name,total_cents,payment_method,payment_note,settled_at FROM bills WHERE id=$1`;
+  const orderItemSnapshot=`SELECT id,batch_id,product_id,product_name,unit_price_cents,quantity,source,submitted_by_host,submitted_by_guest_session,provisional_until,guest_mutation_id,guest_expected_price_cents,guest_expected_product_version,billing_version,voided_at,voided_by_host,void_reason,host_void_mutation_id,host_void_expected_billing_version,guest_undo_mutation_id,created_at FROM order_items WHERE id=$1`;
+  const billLineSnapshot=`SELECT id,bill_id,original_order_item_id,product_name,unit_price_cents,quantity,source FROM bill_items WHERE bill_id=$1`;
+  let billUpdateError='';let billDeleteError='';let incompleteBillVoidError='';let unauditedBillVoidError='';let mismatchedBillVoidAuditError='';let mismatchedBillVoidAuditReachedCommit=false;let orderItemUpdateError='';let orderItemDeleteError='';let orderItemReopenError='';let billLineUpdateError='';let billLineDeleteError='';let truncateError='';let truncateTriggerEnabled=false;let billBefore:unknown;let orderItemBefore:unknown;let billLineBefore:unknown;let orderItemId='';
   try{
-    const snapshot=`SELECT id,bill_id AS "billId",original_order_item_id AS "originalOrderItemId",product_name AS "productName",unit_price_cents AS "unitPriceCents",quantity,source FROM bill_items WHERE bill_id=$1`;
-    before=(await database.query(snapshot,[bill.id])).rows[0];
-    try{await database.query('UPDATE bill_items SET quantity=quantity+1 WHERE bill_id=$1',[bill.id])}catch(caught){updateError=(caught as {code?:string}).code??''}
-    try{await database.query('DELETE FROM bill_items WHERE bill_id=$1',[bill.id])}catch(caught){deleteError=(caught as {code?:string}).code??''}
+    billBefore=(await database.query(billSnapshot,[bill.id])).rows[0];
+    orderItemId=String((await database.query(`SELECT id FROM order_items WHERE bill_id=$1`,[bill.id])).rows[0].id);
+    orderItemBefore=(await database.query(orderItemSnapshot,[orderItemId])).rows[0];
+    billLineBefore=(await database.query(billLineSnapshot,[bill.id])).rows[0];
+    try{await database.query(`UPDATE bills SET guest_name=guest_name||' rewritten' WHERE id=$1`,[bill.id])}catch(caught){billUpdateError=(caught as {code?:string}).code??''}
+    try{await database.query('DELETE FROM bills WHERE id=$1',[bill.id])}catch(caught){billDeleteError=(caught as {code?:string}).code??''}
+    try{await database.query('UPDATE bills SET voided_at=clock_timestamp() WHERE id=$1',[bill.id])}catch(caught){incompleteBillVoidError=(caught as {code?:string}).code??''}
+    try{await database.query(`UPDATE bills SET voided_at=clock_timestamp(),void_reason='Missing audit',voided_by=$1,void_mutation_id=$2 WHERE id=$3`,[me.host.id,crypto.randomUUID(),bill.id])}catch(caught){unauditedBillVoidError=(caught as {code?:string}).code??''}
+    const mismatchedMutationId=crypto.randomUUID();
+    try{
+      await database.query('BEGIN');
+      await database.query(`UPDATE bills SET voided_at=clock_timestamp(),void_reason='Mismatched audit',voided_by=$1,void_mutation_id=$2 WHERE id=$3`,[me.host.id,mismatchedMutationId,bill.id]);
+      await database.query(`INSERT INTO audit_events(actor_host_id,action,entity_type,entity_id,detail,created_at) VALUES (NULL,'bill.voided','bill',$1,$2,clock_timestamp())`,[bill.id,JSON.stringify({reason:'Mismatched audit',mutationId:mismatchedMutationId})]);
+      mismatchedBillVoidAuditReachedCommit=true;
+      await database.query('COMMIT');
+    }catch(caught){mismatchedBillVoidAuditError=(caught as {code?:string}).code??'';await database.query('ROLLBACK')}
+    try{await database.query('UPDATE order_items SET unit_price_cents=unit_price_cents+1 WHERE id=$1',[orderItemId])}catch(caught){orderItemUpdateError=(caught as {code?:string}).code??''}
+    try{await database.query('DELETE FROM order_items WHERE id=$1',[orderItemId])}catch(caught){orderItemDeleteError=(caught as {code?:string}).code??''}
+    try{await database.query(`UPDATE order_items SET status='open',bill_id=NULL WHERE id=$1`,[orderItemId])}catch(caught){orderItemReopenError=(caught as {code?:string}).code??''}
+    try{await database.query('UPDATE bill_items SET quantity=quantity+1 WHERE bill_id=$1',[bill.id])}catch(caught){billLineUpdateError=(caught as {code?:string}).code??''}
+    try{await database.query('DELETE FROM bill_items WHERE bill_id=$1',[bill.id])}catch(caught){billLineDeleteError=(caught as {code?:string}).code??''}
     try{await database.query('TRUNCATE bill_items')}catch(caught){truncateError=(caught as {code?:string}).code??''}
     truncateTriggerEnabled=(await database.query<{enabled:boolean}>(`SELECT tgenabled='O' AS enabled FROM pg_trigger WHERE tgrelid='bill_items'::regclass AND tgname='bill_items_reject_truncate'`)).rows[0]?.enabled??false;
-    after=(await database.query(snapshot,[bill.id])).rows[0];
   }finally{await database.end()}
-  const voidResponse=await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Verified immutable bill line'}});
+  const voidResponse=await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Verified immutable financial record'}});
+  expect(voidResponse.status()).toBe(200);
   const verification=new pg.Client({connectionString:process.env.DATABASE_URL});await verification.connect();
-  let voidAuditCount=0;
-  try{voidAuditCount=Number((await verification.query("SELECT count(*) FROM audit_events WHERE action='bill.voided' AND entity_type='bill' AND entity_id=$1",[bill.id])).rows[0].count)}finally{await verification.end()}
+  let voidAuditCount=0;let repeatedBillVoidError='';let billAfter:unknown;let orderItemAfter:unknown;let billLineAfter:unknown;let restoredOrderItemState={status:'',billId:null as string|null,billingVersion:-1};
+  try{
+    voidAuditCount=Number((await verification.query("SELECT count(*) FROM audit_events WHERE action='bill.voided' AND entity_type='bill' AND entity_id=$1",[bill.id])).rows[0].count);
+    try{await verification.query(`UPDATE bills SET voided_at=clock_timestamp(),void_reason='Repeated void',voided_by=$1,void_mutation_id=$2 WHERE id=$3`,[me.host.id,crypto.randomUUID(),bill.id])}catch(caught){repeatedBillVoidError=(caught as {code?:string}).code??''}
+    billAfter=(await verification.query(billSnapshot,[bill.id])).rows[0];
+    orderItemAfter=(await verification.query(orderItemSnapshot,[orderItemId])).rows[0];
+    billLineAfter=(await verification.query(billLineSnapshot,[bill.id])).rows[0];
+    restoredOrderItemState=(await verification.query<{status:string;billId:string|null;billingVersion:number}>(`SELECT status,bill_id AS "billId",billing_version AS "billingVersion" FROM order_items WHERE id=$1`,[orderItemId])).rows[0]!;
+  }finally{await verification.end()}
   const restoredItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
-  immutableBillLineResult={updateError,deleteError,truncateError,truncateTriggerEnabled,before,after,settlementStatus:settlement.status(),voidStatus:voidResponse.status(),voidAuditCount,restoredItemCount};
+  immutableFinancialResult={billUpdateError,billDeleteError,incompleteBillVoidError,unauditedBillVoidError,mismatchedBillVoidAuditError,mismatchedBillVoidAuditReachedCommit,repeatedBillVoidError,orderItemUpdateError,orderItemDeleteError,orderItemReopenError,billLineUpdateError,billLineDeleteError,truncateError,truncateTriggerEnabled,billBefore,billAfter,orderItemBefore,orderItemAfter,billLineBefore,billLineAfter,settlementStatus:settlement.status(),voidStatus:voidResponse.status(),voidAuditCount,restoredItemCount,restoredOrderItemState};
 });
-Then('direct bill line updates are rejected',async()=>{expect(immutableBillLineResult?.updateError).toBe('P0001')});
-Then('direct bill line deletes are rejected',async()=>{expect(immutableBillLineResult?.deleteError).toBe('P0001')});
-Then('direct bill line truncation is rejected',async()=>{expect(immutableBillLineResult?.truncateError).toBe('P0001')});
-Then('the bill line truncate trigger remains enabled after reset',async()=>{expect(immutableBillLineResult?.truncateTriggerEnabled).toBe(true)});
-Then('the original settled bill line remains unchanged',async()=>{expect(immutableBillLineResult?.before).toBeDefined();expect(immutableBillLineResult?.after).toEqual(immutableBillLineResult?.before)});
-Then('normal settlement and audited bill reversal remain valid',async()=>{expect(immutableBillLineResult).toMatchObject({settlementStatus:200,voidStatus:200,voidAuditCount:1,restoredItemCount:1})});
+Then('direct bill header updates are rejected',async()=>{expect(immutableFinancialResult?.billUpdateError).toBe('P0001')});
+Then('direct bill header deletes are rejected',async()=>{expect(immutableFinancialResult?.billDeleteError).toBe('P0001')});
+Then('incomplete bill void transitions are rejected',async()=>{expect(immutableFinancialResult?.incompleteBillVoidError).toBe('P0001')});
+Then('unaudited bill void transitions are rejected',async()=>{expect(immutableFinancialResult?.unauditedBillVoidError).toBe('P0001')});
+Then('mismatched bill void audits are rejected at commit',async()=>{expect(immutableFinancialResult).toMatchObject({mismatchedBillVoidAuditReachedCommit:true,mismatchedBillVoidAuditError:'P0001'})});
+Then('repeated bill void transitions are rejected',async()=>{expect(immutableFinancialResult?.repeatedBillVoidError).toBe('P0001')});
+Then('direct billed order item updates are rejected',async()=>{expect(immutableFinancialResult?.orderItemUpdateError).toBe('P0001')});
+Then('direct billed order item deletes are rejected',async()=>{expect(immutableFinancialResult?.orderItemDeleteError).toBe('P0001')});
+Then('direct billed order item reopening is rejected',async()=>{expect(immutableFinancialResult?.orderItemReopenError).toBe('P0001')});
+Then('direct bill line updates are rejected',async()=>{expect(immutableFinancialResult?.billLineUpdateError).toBe('P0001')});
+Then('direct bill line deletes are rejected',async()=>{expect(immutableFinancialResult?.billLineDeleteError).toBe('P0001')});
+Then('direct bill line truncation is rejected',async()=>{expect(immutableFinancialResult?.truncateError).toBe('P0001')});
+Then('the bill line truncate trigger remains enabled after reset',async()=>{expect(immutableFinancialResult?.truncateTriggerEnabled).toBe(true)});
+Then('the original settled financial snapshots remain unchanged',async()=>{expect(immutableFinancialResult?.billBefore).toBeDefined();expect(immutableFinancialResult?.billAfter).toEqual(immutableFinancialResult?.billBefore);expect(immutableFinancialResult?.orderItemAfter).toEqual(immutableFinancialResult?.orderItemBefore);expect(immutableFinancialResult?.billLineAfter).toEqual(immutableFinancialResult?.billLineBefore)});
+Then('normal settlement and audited bill reversal remain valid',async()=>{expect(immutableFinancialResult).toMatchObject({settlementStatus:200,voidStatus:200,voidAuditCount:1,restoredItemCount:1,restoredOrderItemState:{status:'open',billId:null,billingVersion:1}})});
 When('the same order mutation is submitted concurrently',async({page})=>{
   const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const mutationId=crypto.randomUUID();const data={mutationId,originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]};
   const responses=await Promise.all([request.post('/api/v1/order-batches',{headers:csrfHeaders,data}),request.post('/api/v1/order-batches',{headers:csrfHeaders,data})]);concurrentOrderStatuses=responses.map(response=>response.status());concurrentOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;

@@ -373,11 +373,110 @@ BEFORE TRUNCATE ON bill_items
 FOR EACH STATEMENT
 EXECUTE FUNCTION reject_bill_items_truncate();
 
+CREATE FUNCTION enforce_bill_immutability()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'Bills are immutable and cannot be deleted';
+  END IF;
+
+  IF OLD.voided_at IS NULL
+     AND OLD.void_reason IS NULL
+     AND OLD.voided_by IS NULL
+     AND OLD.void_mutation_id IS NULL
+     AND NEW.voided_at IS NOT NULL
+     AND NEW.void_reason IS NOT NULL
+     AND NEW.voided_by IS NOT NULL
+     AND NEW.void_mutation_id IS NOT NULL
+     AND to_jsonb(NEW) - ARRAY['voided_at', 'void_reason', 'voided_by', 'void_mutation_id']
+         = to_jsonb(OLD) - ARRAY['voided_at', 'void_reason', 'voided_by', 'void_mutation_id'] THEN
+    RETURN NEW;
+  END IF;
+
+  RAISE EXCEPTION 'Bills are immutable except for the complete audited void transition';
+END;
+$$;
+
+CREATE TRIGGER bills_enforce_immutability
+BEFORE UPDATE OR DELETE ON bills
+FOR EACH ROW
+EXECUTE FUNCTION enforce_bill_immutability();
+
+CREATE FUNCTION verify_bill_void_audit_event()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF (SELECT count(*)
+        FROM audit_events
+       WHERE action = 'bill.voided'
+         AND entity_type = 'bill'
+         AND entity_id = NEW.id::text) <> 1
+     OR NOT EXISTS (
+       SELECT 1
+         FROM audit_events
+        WHERE action = 'bill.voided'
+          AND entity_type = 'bill'
+          AND entity_id = NEW.id::text
+          AND actor_host_id = NEW.voided_by
+          AND detail->>'reason' = NEW.void_reason
+          AND detail->>'mutationId' = NEW.void_mutation_id::text
+     ) THEN
+    RAISE EXCEPTION 'A bill void requires exactly one matching audit event';
+  END IF;
+
+  RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER bills_verify_void_audit_event
+AFTER UPDATE ON bills
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION verify_bill_void_audit_event();
+
 CREATE FUNCTION enforce_order_item_billing_version()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF OLD.status = 'billed' THEN
+      RAISE EXCEPTION 'Billed order items are immutable and cannot be deleted';
+    END IF;
+
+    RETURN OLD;
+  END IF;
+
+  IF OLD.status = 'billed' THEN
+    IF OLD.bill_id IS NULL
+       OR NEW.status <> 'open'
+       OR NEW.bill_id IS NOT NULL
+       OR to_jsonb(NEW) - ARRAY['tab_id', 'status', 'bill_id']
+          <> to_jsonb(OLD) - ARRAY['tab_id', 'status', 'bill_id'] THEN
+      RAISE EXCEPTION 'Billed order items are immutable except during audited bill reversal';
+    END IF;
+
+    PERFORM 1
+      FROM bills b
+      JOIN order_tabs t ON t.id = NEW.tab_id
+     WHERE b.id = OLD.bill_id
+       AND b.voided_at IS NOT NULL
+       AND b.void_reason IS NOT NULL
+       AND b.voided_by IS NOT NULL
+       AND b.void_mutation_id IS NOT NULL
+       AND t.status = 'open'
+       AND t.guest_id = b.guest_id;
+
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'Billed order items may reopen only onto their guest''s open tab after bill reversal';
+    END IF;
+
+    RETURN NEW;
+  END IF;
+
   IF OLD.status IN ('open', 'provisional')
      AND NEW.status = 'voided'
      AND NEW.host_void_mutation_id IS NOT NULL
@@ -398,6 +497,6 @@ END;
 $$;
 
 CREATE TRIGGER order_items_enforce_billing_version
-BEFORE UPDATE OF status, billing_version ON order_items
+BEFORE UPDATE OR DELETE ON order_items
 FOR EACH ROW
 EXECUTE FUNCTION enforce_order_item_billing_version();
