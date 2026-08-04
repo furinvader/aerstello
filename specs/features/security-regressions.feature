@@ -71,6 +71,14 @@ Feature: Device grants and replay protection
     And billing version changes outside billing are rejected
     And the stale item removal remains a billing conflict
 
+  Scenario: Settled bill lines reject direct mutation
+    Given an authenticated administrator
+    When database writers attempt to rewrite a settled bill line
+    Then direct bill line updates are rejected
+    And direct bill line deletes are rejected
+    And the original settled bill line remains unchanged
+    And normal settlement and audited bill reversal remain valid
+
   Scenario: Concurrent replay of an order returns its prior success
     Given an authenticated administrator
     When the same order mutation is submitted concurrently

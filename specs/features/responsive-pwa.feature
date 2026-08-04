@@ -19,3 +19,8 @@ Feature: Responsive installable application
     Given an authenticated administrator
     When the host opens the bills screen
     Then only Bills is active in the primary navigation
+
+  Scenario: Order quantity controls meet mobile touch targets
+    Given an authenticated administrator
+    When the host stages a mobile order for "Anna Berger"
+    Then both quantity stepper buttons are at least 44 by 44 pixels

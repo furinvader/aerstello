@@ -12,6 +12,14 @@ Feature: Secure host accounts and devices
     When the host opens the account screen
     Then the current device is listed
 
+  Scenario: A transient host identity outage preserves the requested route
+    Given an authenticated administrator
+    When the initial host identity request fails transiently on the bills route
+    Then the bills route shows a localized identity failure with retry
+    And the host is not redirected to login
+    When the host retries the initial identity request
+    Then the requested bills route opens after identity recovery
+
   Scenario: An uncertain profile save cannot overwrite a newer device
     Given an authenticated administrator
     When a profile save response is lost before another device edits the profile

@@ -44,6 +44,9 @@ let tabTotalAfterExcess = 0;
 let guestArchiveRaceStatuses: [number, number][] = [];
 let retriedGuestUndoMutationIds: string[] = [];
 let oldestBillNumber = '';
+let oldestBillSearchId = '';
+let recoverableBillId = '';
+let recoverableBillNumber = '';
 let revokedStreamEventCount = 0;
 let transientReplayAttempts = 0;
 let loginFailureResults: { status: number; body: unknown }[] = [];
@@ -243,6 +246,16 @@ let strictBillingVersions: number[] = [];
 let missingBillingIncrementError = '';
 let invalidBillingVersionChangeError = '';
 let strictBillingVoidConflict: {status:number;code:string}|undefined;
+let immutableBillLineResult: {
+  updateError:string;
+  deleteError:string;
+  before:unknown;
+  after:unknown;
+  settlementStatus:number;
+  voidStatus:number;
+  voidAuditCount:number;
+  restoredItemCount:number;
+} | undefined;
 
 Before(async () => {
   execFileSync('npm',['run','db:seed','-w','@sky-bar/api'],{cwd:process.cwd(),env:{...process.env,E2E_RESET:'true',SEED_ADMIN_PASSWORD:'SkyBarTest123!'},stdio:'pipe'});
@@ -287,6 +300,33 @@ Then('the host dashboard shows the venue name {string}', async ({ page }, name:s
 Then('the page has no serious accessibility violations', async ({ page }) => { const result=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa']).analyze();expect(result.violations.filter(v=>['serious','critical'].includes(v.impact??''))).toEqual([]); });
 When('the host opens the account screen', async ({ page }) => { await page.goto('/app/account'); });
 Then('the current device is listed', async ({ page }) => { await expect(page.getByText(/Dieses Gerät|Questo dispositivo|This device/)).toBeVisible(); });
+When('the initial host identity request fails transiently on the bills route',async({page})=>{
+  await page.addInitScript(()=>{
+    const originalFetch=window.fetch.bind(window);
+    const state=window as unknown as {__skyBarTransientHostIdentityRequests:number};
+    state.__skyBarTransientHostIdentityRequests=0;
+    window.fetch=async(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(new URL(url,window.location.href).pathname==='/api/v1/auth/me'){
+        state.__skyBarTransientHostIdentityRequests+=1;
+        if(state.__skyBarTransientHostIdentityRequests===1)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated host identity outage'}}),{status:503,headers:{'content-type':'application/json'}});
+      }
+      return originalFetch(input,init);
+    };
+  });
+  await page.goto('/app/bills');
+});
+Then('the bills route shows a localized identity failure with retry',async({page})=>{
+  await expect(page.locator('.notice--error')).toContainText(/Die Anfrage konnte nicht abgeschlossen werden|Impossibile completare la richiesta|The request could not be completed/);
+  await expect(page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();
+});
+Then('the host is not redirected to login',async({page})=>{await expect(page).toHaveURL(/\/app\/bills$/);await expect(page).not.toHaveURL(/\/login$/)});
+When('the host retries the initial identity request',async({page})=>{await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click()});
+Then('the requested bills route opens after identity recovery',async({page})=>{
+  await expect(page).toHaveURL(/\/app\/bills$/);
+  await expect(page.getByRole('heading',{name:/Rechnungen|Conti|Bills/})).toBeVisible();
+  expect(await page.evaluate(()=>(window as unknown as {__skyBarTransientHostIdentityRequests:number}).__skyBarTransientHostIdentityRequests)).toBe(2);
+});
 When('a profile save response is lost before another device edits the profile',async({page})=>{
   await page.goto('/app/account');
   await page.getByLabel(/Name|Nome/).first().fill('First profile save');
@@ -1444,6 +1484,13 @@ Then("the launch opens Luca's active guest view",async()=>{await expect(guestPag
 Then('Take Orders navigation is visually prominent',async({page})=>{await expect(page.locator('.nav-primary')).toHaveCSS('background-color','rgb(66, 189, 255)')});
 When('the host opens the bills screen',async({page})=>{await page.goto('/app/bills')});
 Then('only Bills is active in the primary navigation',async({page})=>{await expect(page.locator('.sidebar nav a.active')).toHaveCount(1);await expect(page.locator('.sidebar nav a.active')).toHaveAttribute('href','/app/bills')});
+When('the host stages a mobile order for {string}',async({page},guest:string)=>{await page.setViewportSize({width:390,height:844});await chooseOrder(page,'Helles',guest,'101')});
+Then('both quantity stepper buttons are at least 44 by 44 pixels',async({page})=>{
+  const buttons=page.locator('.cart-lines .stepper button');
+  await expect(buttons).toHaveCount(2);
+  const sizes=await buttons.evaluateAll(elements=>elements.map(element=>{const box=element.getBoundingClientRect();return {width:box.width,height:box.height}}));
+  for(const size of sizes){expect(size.width).toBeGreaterThanOrEqual(44);expect(size.height).toBeGreaterThanOrEqual(44)}
+});
 When('the host changes their language to Italian',async({page})=>{await page.goto('/app/account');await page.getByLabel(/Sprache|Language/).selectOption('it');await page.getByRole('button',{name:/Speichern|Save/}).click()});
 Then('the navigation is shown in Italian',async({page})=>{await expect(page.getByText('Panoramica')).toBeVisible()});
 When('the host changes their language to Italian and opens the product editor',async({page})=>{await page.goto('/app/account');await page.getByLabel(/Sprache|Language/).selectOption('it');await page.getByRole('button',{name:/Speichern|Save/}).click();await expect(page.getByText('Panoramica')).toBeVisible();await page.goto('/app/products');await page.getByRole('button',{name:/Aggiungi/}).first().click()});
@@ -1895,7 +1942,59 @@ When('a tab accumulates more than 9900 zero-cost items across valid batches',asy
 Then('the aggregate tab can still be settled',async()=>{expect(aggregateSettlementStatus).toBe(200)});
 
 When('the venue has more bills than one archive page',async({page})=>{const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find((item)=>item.name==='Anna Berger')!;const product=products.data.find((item)=>item.name.de==='Helles')!;for(let index=0;index<51;index+=1){const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {number:string};if(index===0)oldestBillNumber=bill.number}const firstPage=await (await request.get('/api/v1/bills?page=1&pageSize=50')).json() as {data:{number:string}[]};expect(firstPage.data.some((bill)=>bill.number===oldestBillNumber)).toBe(false)});
-Then('the host can find the oldest bill by its number',async({page})=>{await page.goto('/app/bills');const [response]=await Promise.all([page.waitForResponse((candidate)=>candidate.url().includes(`/api/v1/bills?search=${oldestBillNumber}&`)),page.getByPlaceholder(/Nach Gast|Cerca per|Search by/).fill(oldestBillNumber)]);const result=await response.json() as {data:{id:string;number:string}[]};expect(result.data.map((bill)=>bill.number)).toContain(oldestBillNumber);const found=result.data.find((bill)=>bill.number===oldestBillNumber)!;await expect(page.locator(`a[href="/app/bills/${found.id}"]`)).toBeVisible()});
+Then('the oldest exact bill is the first API result without internal ranking data',async({page})=>{
+  await page.goto('/app/bills');
+  const [response]=await Promise.all([
+    page.waitForResponse(candidate=>candidate.url().includes(`/api/v1/bills?search=${oldestBillNumber}&`)),
+    page.getByPlaceholder(/Nach Gast|Cerca per|Search by/).fill(oldestBillNumber),
+  ]);
+  const result=await response.json() as {data:Array<{id:string;number:string;[key:string]:unknown}>};
+  expect(result.data[0]?.number).toBe(oldestBillNumber);
+  expect(result.data.slice(1).some(bill=>bill.number.includes(oldestBillNumber)&&BigInt(bill.number)>BigInt(oldestBillNumber))).toBe(true);
+  for(const bill of result.data)expect(bill).not.toHaveProperty('search_rank');
+  oldestBillSearchId=result.data[0]!.id;
+});
+Then('the oldest exact bill is the first rendered archive row',async({page})=>{
+  const firstRow=page.locator('.bills-list .table-row').first();
+  await expect(firstRow).toHaveAttribute('href',`/app/bills/${oldestBillSearchId}`);
+  await expect(firstRow).toContainText(`#${oldestBillNumber}`);
+});
+
+When('the host opens a bill while its detail service is unavailable',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);
+  const guest=guests.data.find(item=>item.name==='Anna Berger')!;
+  const product=products.data.find(item=>item.name.de==='Helles')!;
+  const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};
+  const settlement=await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}});
+  expect(settlement.status()).toBe(200);
+  const bill=await settlement.json() as {id:string;number:string};
+  recoverableBillId=bill.id;recoverableBillNumber=bill.number;
+  await page.addInitScript(({billId})=>{
+    const originalFetch=window.fetch.bind(window);
+    const state={billId,active:true,attempts:0};
+    Object.assign(window,{__skyBarBillDetailOutage:state});
+    window.fetch=async(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(new URL(url,window.location.href).pathname===`/api/v1/bills/${state.billId}`){
+        state.attempts+=1;
+        if(state.active){await new Promise(resolve=>setTimeout(resolve,1_500));return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated bill detail outage'}}),{status:503,headers:{'content-type':'application/json'}})}
+      }
+      return originalFetch(input,init);
+    };
+  },{billId:recoverableBillId});
+  await page.goto(`/app/bills/${recoverableBillId}`);
+});
+Then('bill detail shows loading without fabricated bill content',async({page})=>{await expect(page.locator('.splash')).toContainText(/Wird geladen|Caricamento|Loading/);await expect(page.locator('.bill-sheet')).toHaveCount(0)});
+Then('bill detail shows localized failure and retry without fabricated bill content',async({page})=>{
+  await expect(page.locator('.notice--error')).toContainText(/Die Anfrage konnte nicht abgeschlossen werden|Impossibile completare la richiesta|The request could not be completed/,{timeout:10_000});
+  await expect(page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();
+  await expect(page.locator('.bill-sheet')).toHaveCount(0);
+});
+When('the host retries the bill detail request after recovery',async({page})=>{
+  await page.evaluate(()=>{(window as unknown as {__skyBarBillDetailOutage:{active:boolean}}).__skyBarBillDetailOutage.active=false});
+  await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();
+});
+Then('the same bill detail is rendered',async({page})=>{await expect(page).toHaveURL(new RegExp(`/app/bills/${recoverableBillId}$`));await expect(page.locator('.bill-sheet h1')).toHaveText('Hotel Aurora');await expect(page.locator('.bill-sheet header')).toContainText(`#${recoverableBillNumber}`)});
 
 When('the initial bill archive request is delayed and fails',async({page})=>{
   await page.addInitScript(()=>{
@@ -1993,6 +2092,33 @@ Then('billing without an explicit version increment is rejected',async()=>{expec
 Then('the database advances the billing version exactly once',async()=>{expect(strictBillingVersions).toEqual([1,1,2])});
 Then('billing version changes outside billing are rejected',async()=>{expect(invalidBillingVersionChangeError).toBe('P0001')});
 Then('the stale item removal remains a billing conflict',async()=>{expect(strictBillingVoidConflict).toEqual({status:409,code:'ITEM_BILLING_CONFLICT'})});
+When('database writers attempt to rewrite a settled bill line',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);
+  const guest=guests.data.find(item=>item.name==='Anna Berger')!;
+  const product=products.data.find(item=>item.name.de==='Helles')!;
+  const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};
+  const settlement=await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}});
+  const bill=await settlement.json() as {id:string};
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();
+  let updateError='';let deleteError='';let before:unknown;let after:unknown;
+  try{
+    const snapshot=`SELECT id,bill_id AS "billId",original_order_item_id AS "originalOrderItemId",product_name AS "productName",unit_price_cents AS "unitPriceCents",quantity,source FROM bill_items WHERE bill_id=$1`;
+    before=(await database.query(snapshot,[bill.id])).rows[0];
+    try{await database.query('UPDATE bill_items SET quantity=quantity+1 WHERE bill_id=$1',[bill.id])}catch(caught){updateError=(caught as {code?:string}).code??''}
+    try{await database.query('DELETE FROM bill_items WHERE bill_id=$1',[bill.id])}catch(caught){deleteError=(caught as {code?:string}).code??''}
+    after=(await database.query(snapshot,[bill.id])).rows[0];
+  }finally{await database.end()}
+  const voidResponse=await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Verified immutable bill line'}});
+  const verification=new pg.Client({connectionString:process.env.DATABASE_URL});await verification.connect();
+  let voidAuditCount=0;
+  try{voidAuditCount=Number((await verification.query("SELECT count(*) FROM audit_events WHERE action='bill.voided' AND entity_type='bill' AND entity_id=$1",[bill.id])).rows[0].count)}finally{await verification.end()}
+  const restoredItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
+  immutableBillLineResult={updateError,deleteError,before,after,settlementStatus:settlement.status(),voidStatus:voidResponse.status(),voidAuditCount,restoredItemCount};
+});
+Then('direct bill line updates are rejected',async()=>{expect(immutableBillLineResult?.updateError).toBe('P0001')});
+Then('direct bill line deletes are rejected',async()=>{expect(immutableBillLineResult?.deleteError).toBe('P0001')});
+Then('the original settled bill line remains unchanged',async()=>{expect(immutableBillLineResult?.before).toBeDefined();expect(immutableBillLineResult?.after).toEqual(immutableBillLineResult?.before)});
+Then('normal settlement and audited bill reversal remain valid',async()=>{expect(immutableBillLineResult).toMatchObject({settlementStatus:200,voidStatus:200,voidAuditCount:1,restoredItemCount:1})});
 When('the same order mutation is submitted concurrently',async({page})=>{
   const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const mutationId=crypto.randomUUID();const data={mutationId,originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]};
   const responses=await Promise.all([request.post('/api/v1/order-batches',{headers:csrfHeaders,data}),request.post('/api/v1/order-batches',{headers:csrfHeaders,data})]);concurrentOrderStatuses=responses.map(response=>response.status());concurrentOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;

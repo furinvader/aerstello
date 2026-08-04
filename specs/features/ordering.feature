@@ -209,7 +209,16 @@ Feature: Host order entry and billing
   Scenario: Older bills remain discoverable
     Given an authenticated administrator
     When the venue has more bills than one archive page
-    Then the host can find the oldest bill by its number
+    Then the oldest exact bill is the first API result without internal ranking data
+    And the oldest exact bill is the first rendered archive row
+
+  Scenario: A bill detail outage can be retried
+    Given an authenticated administrator
+    When the host opens a bill while its detail service is unavailable
+    Then bill detail shows loading without fabricated bill content
+    And bill detail shows localized failure and retry without fabricated bill content
+    When the host retries the bill detail request after recovery
+    Then the same bill detail is rendered
 
   Scenario: An unavailable bill archive never appears empty
     Given an authenticated administrator
