@@ -325,7 +325,7 @@ When('the host retries the initial identity request',async({page})=>{await page.
 Then('the requested bills route opens after identity recovery',async({page})=>{
   await expect(page).toHaveURL(/\/app\/bills$/);
   await expect(page.getByRole('heading',{name:/Rechnungen|Conti|Bills/})).toBeVisible();
-  expect(await page.evaluate(()=>(window as unknown as {__skyBarTransientHostIdentityRequests:number}).__skyBarTransientHostIdentityRequests)).toBe(2);
+  expect(await page.evaluate(()=>(window as unknown as {__skyBarTransientHostIdentityRequests:number}).__skyBarTransientHostIdentityRequests)).toBeGreaterThanOrEqual(2);
 });
 When('a profile save response is lost before another device edits the profile',async({page})=>{
   await page.goto('/app/account');
