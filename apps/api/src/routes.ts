@@ -1212,10 +1212,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
            FROM bills
           WHERE $1='' OR number::text ILIKE '%'||$1||'%' OR guest_name ILIKE '%'||$1||'%' OR room_name ILIKE '%'||$1||'%'
        ), bill_page AS (
-         SELECT id,number,"venueName","venueTimezone","guestName","roomName","totalCents","paymentMethod","settledAt","voidedAt"
+         SELECT id,number,"venueName","venueTimezone","guestName","roomName","totalCents","paymentMethod","settledAt","voidedAt",search_rank
            FROM filtered ORDER BY search_rank,"settledAt" DESC,id DESC LIMIT $2 OFFSET $3
        )
-       SELECT COALESCE((SELECT jsonb_agg(to_jsonb(bill_page) ORDER BY "settledAt" DESC,id DESC) FROM bill_page),'[]'::jsonb) AS data,
+       SELECT COALESCE((SELECT jsonb_agg(to_jsonb(bill_page)-'search_rank' ORDER BY search_rank,"settledAt" DESC,id DESC) FROM bill_page),'[]'::jsonb) AS data,
               (SELECT count(*)::int FROM filtered) AS total`,
       [search, pageSize, offset],
     );
