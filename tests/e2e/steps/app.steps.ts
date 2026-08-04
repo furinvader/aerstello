@@ -73,6 +73,15 @@ let retriedAccessRequestMutationIds: string[] = [];
 let pendingAccessRequestCount = 0;
 let retriedGuestAddMutationIds: string[] = [];
 let uncertainGuestProductCounts: Record<string,number> = {};
+let pendingGuestAddResult: {
+  secondStartedBeforeFirstRelease:boolean;
+  firstDisabledWhilePending:boolean;
+  secondEnabledBeforeStart:boolean;
+  bothDisabled:boolean;
+  firstDisabledAfterSecondSettled:boolean;
+  secondEnabledAfterOwnSettle:boolean;
+  firstEnabledAfterOwnSettle:boolean;
+} | undefined;
 let switchedGuestTabCount = 0;
 let aggregateSettlementStatus = 0;
 let uncertainOrderControlsLocked = false;
@@ -1039,6 +1048,50 @@ Then('both {string} categories remain separate in the guest catalog',async({},ca
   await expect(headings.nth(0).locator('..')).toContainText('Mineralwasser');
   await expect(headings.nth(1).locator('..')).toContainText('Getrenntes Wasser');
 });
+When('one self-service addition remains pending while another product is added',async()=>{
+  await guestPage!.evaluate(()=>{
+    const originalFetch=window.fetch.bind(window);
+    const control:{requestCount:number;firstReleased:boolean;secondStartedBeforeFirstRelease:boolean;releaseFirst?:()=>void;releaseSecond?:()=>void}={requestCount:0,firstReleased:false,secondStartedBeforeFirstRelease:false};
+    Object.assign(window,{__skyBarPendingGuestAddControl:control});
+    window.fetch=async(input,init)=>{
+      const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;
+      if(url.endsWith('/api/v1/guest/items')&&init?.method==='POST'){
+        const requestIndex=++control.requestCount;
+        if(requestIndex===2)control.secondStartedBeforeFirstRelease=!control.firstReleased;
+        const response=await originalFetch(input,init);
+        await new Promise<void>((resolve)=>{
+          const release=()=>{if(requestIndex===1)control.firstReleased=true;resolve()};
+          if(requestIndex===1)control.releaseFirst=release;
+          if(requestIndex===2)control.releaseSecond=release;
+        });
+        return response;
+      }
+      return originalFetch(input,init);
+    };
+  });
+  const first=guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'});
+  const second=guestPage!.locator('.product-tile').filter({hasText:'Hauskeks'});
+  await first.click();
+  await expect.poll(()=>guestPage!.evaluate(()=>(window as unknown as {__skyBarPendingGuestAddControl:{requestCount:number}}).__skyBarPendingGuestAddControl.requestCount)).toBe(1);
+  await expect(first).toBeDisabled();
+  const firstDisabledWhilePending=await first.isDisabled();
+  const secondEnabledBeforeStart=await second.isEnabled();
+  await second.click();
+  await expect.poll(()=>guestPage!.evaluate(()=>(window as unknown as {__skyBarPendingGuestAddControl:{requestCount:number}}).__skyBarPendingGuestAddControl.requestCount)).toBe(2);
+  await expect(first).toBeDisabled();await expect(second).toBeDisabled();
+  const bothDisabled=await first.isDisabled()&&await second.isDisabled();
+  await expect.poll(()=>guestPage!.evaluate(()=>(window as unknown as {__skyBarPendingGuestAddControl:{releaseSecond?:()=>void}}).__skyBarPendingGuestAddControl.releaseSecond!==undefined)).toBe(true);
+  const secondStartedBeforeFirstRelease=await guestPage!.evaluate(()=>(window as unknown as {__skyBarPendingGuestAddControl:{secondStartedBeforeFirstRelease:boolean}}).__skyBarPendingGuestAddControl.secondStartedBeforeFirstRelease);
+  await guestPage!.evaluate(()=>(window as unknown as {__skyBarPendingGuestAddControl:{releaseSecond:()=>void}}).__skyBarPendingGuestAddControl.releaseSecond());
+  await expect(second).toBeEnabled();await expect(first).toBeDisabled();
+  const secondEnabledAfterOwnSettle=await second.isEnabled();
+  const firstDisabledAfterSecondSettled=await first.isDisabled();
+  await guestPage!.evaluate(()=>(window as unknown as {__skyBarPendingGuestAddControl:{releaseFirst:()=>void}}).__skyBarPendingGuestAddControl.releaseFirst());
+  await expect(first).toBeEnabled();
+  pendingGuestAddResult={secondStartedBeforeFirstRelease,firstDisabledWhilePending,secondEnabledBeforeStart,bothDisabled,firstDisabledAfterSecondSettled,secondEnabledAfterOwnSettle,firstEnabledAfterOwnSettle:await first.isEnabled()};
+});
+Then('the other product request begins before the first response is released',async()=>{expect(pendingGuestAddResult?.secondStartedBeforeFirstRelease).toBe(true)});
+Then('each product is disabled only while its own addition is pending',async()=>{expect(pendingGuestAddResult).toEqual({secondStartedBeforeFirstRelease:true,firstDisabledWhilePending:true,secondEnabledBeforeStart:true,bothDisabled:true,firstDisabledAfterSecondSettled:true,secondEnabledAfterOwnSettle:true,firstEnabledAfterOwnSettle:true})});
 When('one guest addition loses its response before another product is added',async()=>{
   await guestPage!.evaluate(()=>{
     const originalFetch=window.fetch.bind(window);let loseResponse=true;const entries:{productId:string;mutationId:string}[]=[];

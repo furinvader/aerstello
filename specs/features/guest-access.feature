@@ -212,6 +212,12 @@ Feature: Guest device access and self-service
     When the host adds another self-service category named "Getränke"
     Then both "Getränke" categories remain separate in the guest catalog
 
+  Scenario: Pending self-service addition does not block another product
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When one self-service addition remains pending while another product is added
+    Then the other product request begins before the first response is released
+    And each product is disabled only while its own addition is pending
+
   Scenario: Uncertain self-service additions retain their mutation
     Given an approved guest device for "Luca Rossi" in room "102"
     When one guest addition loses its response before another product is added

@@ -53,6 +53,8 @@ export function GuestPage() {
   const [undos, setUndos] = useState<UndoEntry[]>([]);
   const [error, setError] = useState('');
   const pendingAdds = useRef<PendingAddStore>(loadPendingAdds());
+  const pendingAddProductIds = useRef(new Set<string>());
+  const [pendingAddProducts, setPendingAddProducts] = useState<Set<string>>(() => new Set());
   const pendingUndos = useRef(new Set<string>());
   useEffect(() => {
     if (!me.isSuccess) return;
@@ -138,7 +140,17 @@ export function GuestPage() {
       }
       setError(apiErrorMessage(caught, language, t('requestFailed')));
     },
+    onSettled: (_item,_caught,product) => {
+      pendingAddProductIds.current.delete(product.id);
+      setPendingAddProducts(new Set(pendingAddProductIds.current));
+    },
   });
+  const addProduct = (product: Pick<Product,'id'|'priceCents'|'version'>) => {
+    if(pendingAddProductIds.current.has(product.id))return;
+    pendingAddProductIds.current.add(product.id);
+    setPendingAddProducts(new Set(pendingAddProductIds.current));
+    add.mutate(product);
+  };
   const undoItem = async (undo:UndoEntry) => { pendingUndos.current.add(undo.id);try { await api(`/guest/items/${undo.id}/undo`, { method: 'POST', body: json({ mutationId: undo.mutationId }) }); pendingUndos.current.delete(undo.id);setUndos((current)=>current.filter((entry)=>entry.id!==undo.id)); setError(''); await client.invalidateQueries({ queryKey: ['guest-tab'] }); } catch (caught) { setError(apiErrorMessage(caught, language, t('requestFailed'))); } };
   const logout=async()=>{try{await api('/guest/logout',{method:'POST'})}catch{/* Clear cached guest data after an uncertain response. */}finally{client.clear();globalThis.location.assign('/guest/request')}};
   if (me.isLoading) return <div className="splash">Sky Bar</div>;
@@ -154,7 +166,7 @@ export function GuestPage() {
     <section className="guest-total"><ReceiptText/>{tab.isError?<div><span>{t('requestFailed')}</span></div>:tab.data?<div><span>{tab.data.itemCount} {t('items')}</span><strong>{formatMoney(tab.data.totalCents, language)}</strong></div>:<div><span>{t('loading')}</span></div>}</section>
     {error && <Notice kind="error">{error}</Notice>}
     <div className="guest-tabs">
-      <section><h2>{t('selfService')}</h2>{categories.map(([categoryId,categoryName]) => <div key={categoryId} className="catalog-group"><h3>{localized(categoryName,language)}</h3><div className="product-grid">{catalog.data?.data.filter((product) => product.categoryId===categoryId).map((product) => <button className="product-tile" key={product.id} onClick={() => add.mutate(product)} disabled={add.isPending}><span>{localized(product.name, language)}</span><strong>{formatMoney(product.priceCents, language)}</strong><Plus/></button>)}</div></div>)}</section>
+      <section><h2>{t('selfService')}</h2>{categories.map(([categoryId,categoryName]) => <div key={categoryId} className="catalog-group"><h3>{localized(categoryName,language)}</h3><div className="product-grid">{catalog.data?.data.filter((product) => product.categoryId===categoryId).map((product) => <button className="product-tile" key={product.id} onClick={() => addProduct(product)} disabled={pendingAddProducts.has(product.id)}><span>{localized(product.name, language)}</span><strong>{formatMoney(product.priceCents, language)}</strong><Plus/></button>)}</div></div>)}</section>
       <section><h2>{t('orders')}</h2><Card>{tab.isError?<Notice kind="error">{t('requestFailed')}</Notice>:!tab.data?<p className="muted">{t('loading')}</p>:tab.data.items.length ? <div className="line-list">{tab.data.items.map((item) => <div className="line-item" key={item.id}><div><strong>{item.quantity} × {localized(item.productName, language)}</strong><span>{item.source === 'guest' ? t('selfService') : t('host')}{activeProvisionalIds.has(item.id) && <> · <Clock3 size={13}/> 10s</>}</span></div><strong>{formatMoney(item.unitPriceCents * item.quantity, language)}</strong></div>)}</div> : <Empty>{t('empty')}</Empty>}</Card></section>
     </div>
     {undos.length>0&&<div className="undo-stack">{undos.map((undo)=>{const product=catalog.data?.data.find((item)=>item.id===undo.productId);return <div className="undo-toast" key={undo.id}><span>{t('itemAdded')}{product?` · ${localized(product.name,language)}`:''}</span><Button variant="secondary" onClick={() => void undoItem(undo)}>{t('undo')}</Button></div>})}</div>}
