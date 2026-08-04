@@ -14,6 +14,7 @@ interface TimedGuestItem extends GuestItemCreated { receivedAtMonotonic: number 
 interface ProvisionalEntry { id: string; expiresAtMonotonic: number }
 interface UndoEntry extends ProvisionalEntry { productId: string; mutationId: string }
 interface PendingAddStore { sessionId: string; entries: [string,string,number,number][] }
+interface GuestMutationError { owner: string; message: string }
 const pendingAddKey='skybar-guest-pending-adds';
 
 function loadPendingAdds(): PendingAddStore {
@@ -51,7 +52,7 @@ export function GuestPage() {
   const catalog = useQuery<{ data: (Product & { categoryName: LocalizedText })[] }>({ queryKey: ['guest-catalog'], queryFn: () => api('/guest/catalog'), enabled: me.isSuccess });
   const [provisionals, setProvisionals] = useState<ProvisionalEntry[]>([]);
   const [undos, setUndos] = useState<UndoEntry[]>([]);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<GuestMutationError | null>(null);
   const pendingAdds = useRef<PendingAddStore>(loadPendingAdds());
   const pendingAddProductIds = useRef(new Set<string>());
   const [pendingAddProducts, setPendingAddProducts] = useState<Set<string>>(() => new Set());
@@ -125,7 +126,9 @@ export function GuestPage() {
     },
     onSuccess: (item,product) => {
       pendingAdds.current={...pendingAdds.current,entries:pendingAdds.current.entries.filter(entry=>entry[0]!==product.id)};
-      persistPendingAdds(pendingAdds.current);setError('');
+      persistPendingAdds(pendingAdds.current);
+      const errorOwner=`add:${product.id}`;
+      setError((current)=>current?.owner===errorOwner?null:current);
       if(item.provisionalRemainingMs>0){
         const expiresAtMonotonic=item.receivedAtMonotonic+item.provisionalRemainingMs;
         setProvisionals((current)=>[...current.filter((entry)=>entry.id!==item.id),{id:item.id,expiresAtMonotonic}]);
@@ -138,7 +141,7 @@ export function GuestPage() {
         pendingAdds.current={...pendingAdds.current,entries:pendingAdds.current.entries.filter(entry=>entry[0]!==product.id)};
         persistPendingAdds(pendingAdds.current);
       }
-      setError(apiErrorMessage(caught, language, t('requestFailed')));
+      setError({owner:`add:${product.id}`,message:apiErrorMessage(caught, language, t('requestFailed'))});
     },
     onSettled: (_item,_caught,product) => {
       pendingAddProductIds.current.delete(product.id);
@@ -151,7 +154,19 @@ export function GuestPage() {
     setPendingAddProducts(new Set(pendingAddProductIds.current));
     add.mutate(product);
   };
-  const undoItem = async (undo:UndoEntry) => { pendingUndos.current.add(undo.id);try { await api(`/guest/items/${undo.id}/undo`, { method: 'POST', body: json({ mutationId: undo.mutationId }) }); pendingUndos.current.delete(undo.id);setUndos((current)=>current.filter((entry)=>entry.id!==undo.id)); setError(''); await client.invalidateQueries({ queryKey: ['guest-tab'] }); } catch (caught) { setError(apiErrorMessage(caught, language, t('requestFailed'))); } };
+  const undoItem = async (undo:UndoEntry) => {
+    const errorOwner=`undo:${undo.id}`;
+    pendingUndos.current.add(undo.id);
+    try {
+      await api(`/guest/items/${undo.id}/undo`, { method: 'POST', body: json({ mutationId: undo.mutationId }) });
+      pendingUndos.current.delete(undo.id);
+      setUndos((current)=>current.filter((entry)=>entry.id!==undo.id));
+      setError((current)=>current?.owner===errorOwner?null:current);
+      await client.invalidateQueries({ queryKey: ['guest-tab'] });
+    } catch (caught) {
+      setError({owner:errorOwner,message:apiErrorMessage(caught, language, t('requestFailed'))});
+    }
+  };
   const logout=async()=>{try{await api('/guest/logout',{method:'POST'})}catch{/* Clear cached guest data after an uncertain response. */}finally{client.clear();globalThis.location.assign('/guest/request')}};
   if (me.isLoading) return <div className="splash">Sky Bar</div>;
   if (me.isError) {
@@ -164,7 +179,7 @@ export function GuestPage() {
   return <main className="guest-shell">
     <header className="guest-header"><div><p className="eyebrow">{guest.roomName}</p><h1>{guest.name}</h1></div><div className="guest-header-actions"><select aria-label={t('language')} value={language} onChange={(event)=>setLanguage(event.target.value as 'de'|'it'|'en')}><option value="de">DE</option><option value="it">IT</option><option value="en">EN</option></select><Button variant="ghost" aria-label={t('logout')} onClick={() => void logout()}><LogOut/></Button></div></header>
     <section className="guest-total"><ReceiptText/>{tab.isError?<div><span>{t('requestFailed')}</span></div>:tab.data?<div><span>{tab.data.itemCount} {t('items')}</span><strong>{formatMoney(tab.data.totalCents, language)}</strong></div>:<div><span>{t('loading')}</span></div>}</section>
-    {error && <Notice kind="error">{error}</Notice>}
+    {error && <Notice kind="error">{error.message}</Notice>}
     <div className="guest-tabs">
       <section><h2>{t('selfService')}</h2>{categories.map(([categoryId,categoryName]) => <div key={categoryId} className="catalog-group"><h3>{localized(categoryName,language)}</h3><div className="product-grid">{catalog.data?.data.filter((product) => product.categoryId===categoryId).map((product) => <button className="product-tile" key={product.id} onClick={() => addProduct(product)} disabled={pendingAddProducts.has(product.id)}><span>{localized(product.name, language)}</span><strong>{formatMoney(product.priceCents, language)}</strong><Plus/></button>)}</div></div>)}</section>
       <section><h2>{t('orders')}</h2><Card>{tab.isError?<Notice kind="error">{t('requestFailed')}</Notice>:!tab.data?<p className="muted">{t('loading')}</p>:tab.data.items.length ? <div className="line-list">{tab.data.items.map((item) => <div className="line-item" key={item.id}><div><strong>{item.quantity} × {localized(item.productName, language)}</strong><span>{item.source === 'guest' ? t('selfService') : t('host')}{activeProvisionalIds.has(item.id) && <> · <Clock3 size={13}/> 10s</>}</span></div><strong>{formatMoney(item.unitPriceCents * item.quantity, language)}</strong></div>)}</div> : <Empty>{t('empty')}</Empty>}</Card></section>

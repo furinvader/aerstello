@@ -1092,6 +1092,55 @@ When('one self-service addition remains pending while another product is added',
 });
 Then('the other product request begins before the first response is released',async()=>{expect(pendingGuestAddResult?.secondStartedBeforeFirstRelease).toBe(true)});
 Then('each product is disabled only while its own addition is pending',async()=>{expect(pendingGuestAddResult).toEqual({secondStartedBeforeFirstRelease:true,firstDisabledWhilePending:true,secondEnabledBeforeStart:true,bothDisabled:true,firstDisabledAfterSecondSettled:true,secondEnabledAfterOwnSettle:true,firstEnabledAfterOwnSettle:true})});
+When('one guest product fails while another product remains pending',async()=>{
+  await guestPage!.evaluate(()=>{
+    const originalFetch=window.fetch.bind(window);
+    const control:{requestCount:number;failureReleased:boolean;successReleased:boolean;failureMessage?:string;releaseFailure?:()=>void;releaseSuccess?:()=>void}={requestCount:0,failureReleased:false,successReleased:false};
+    Object.assign(window,{__skyBarGuestAddErrorControl:control});
+    window.fetch=async(input,init)=>{
+      const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;
+      if(url.endsWith('/api/v1/guest/items')&&init?.method==='POST'){
+        const requestIndex=++control.requestCount;
+        const response=await originalFetch(input,init);
+        await new Promise<void>((resolve)=>{
+          if(requestIndex===1)control.releaseFailure=resolve;
+          if(requestIndex===2)control.releaseSuccess=resolve;
+        });
+        if(requestIndex===1){control.failureReleased=true;throw new TypeError('Simulated lost response')}
+        control.successReleased=true;
+        return response;
+      }
+      return originalFetch(input,init);
+    };
+  });
+  const failed=guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'});
+  const pending=guestPage!.locator('.product-tile').filter({hasText:'Hauskeks'});
+  await failed.click();
+  await expect.poll(()=>guestPage!.evaluate(()=>(window as unknown as {__skyBarGuestAddErrorControl:{releaseFailure?:()=>void}}).__skyBarGuestAddErrorControl.releaseFailure!==undefined)).toBe(true);
+  await pending.click();
+  await expect.poll(()=>guestPage!.evaluate(()=>(window as unknown as {__skyBarGuestAddErrorControl:{releaseSuccess?:()=>void}}).__skyBarGuestAddErrorControl.releaseSuccess!==undefined)).toBe(true);
+  await guestPage!.evaluate(()=>(window as unknown as {__skyBarGuestAddErrorControl:{releaseFailure:()=>void}}).__skyBarGuestAddErrorControl.releaseFailure());
+  await expect(guestPage!.locator('.notice--error')).toBeVisible();
+  await expect(failed).toBeEnabled();
+  await expect(pending).toBeDisabled();
+  const failureMessage=await guestPage!.locator('.notice--error').innerText();
+  await guestPage!.evaluate((message)=>{(window as unknown as {__skyBarGuestAddErrorControl:{failureMessage:string}}).__skyBarGuestAddErrorControl.failureMessage=message},failureMessage);
+});
+Then('the guest product failure is visible before the other product settles',async()=>{
+  const state=await guestPage!.evaluate(()=>{const control=(window as unknown as {__skyBarGuestAddErrorControl:{failureReleased:boolean;successReleased:boolean;failureMessage:string}}).__skyBarGuestAddErrorControl;return {failureReleased:control.failureReleased,successReleased:control.successReleased,failureMessage:control.failureMessage}});
+  expect(state).toMatchObject({failureReleased:true,successReleased:false});
+  await expect(guestPage!.locator('.notice--error')).toHaveText(state.failureMessage);
+});
+When('the pending guest product succeeds',async()=>{
+  await guestPage!.evaluate(()=>(window as unknown as {__skyBarGuestAddErrorControl:{releaseSuccess:()=>void}}).__skyBarGuestAddErrorControl.releaseSuccess());
+  await expect(guestPage!.locator('.product-tile').filter({hasText:'Hauskeks'})).toBeEnabled();
+  await expect(guestPage!.locator('.undo-toast').filter({hasText:'Hauskeks'})).toBeVisible();
+});
+Then('the guest product failure remains visible',async()=>{
+  const state=await guestPage!.evaluate(()=>{const control=(window as unknown as {__skyBarGuestAddErrorControl:{successReleased:boolean;failureMessage:string}}).__skyBarGuestAddErrorControl;return {successReleased:control.successReleased,failureMessage:control.failureMessage}});
+  expect(state.successReleased).toBe(true);
+  await expect(guestPage!.locator('.notice--error')).toHaveText(state.failureMessage);
+});
 When('one guest addition loses its response before another product is added',async()=>{
   await guestPage!.evaluate(()=>{
     const originalFetch=window.fetch.bind(window);let loseResponse=true;const entries:{productId:string;mutationId:string}[]=[];

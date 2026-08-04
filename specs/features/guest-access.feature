@@ -218,6 +218,13 @@ Feature: Guest device access and self-service
     Then the other product request begins before the first response is released
     And each product is disabled only while its own addition is pending
 
+  Scenario: Concurrent guest success preserves another product failure
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When one guest product fails while another product remains pending
+    Then the guest product failure is visible before the other product settles
+    When the pending guest product succeeds
+    Then the guest product failure remains visible
+
   Scenario: Uncertain self-service additions retain their mutation
     Given an approved guest device for "Luca Rossi" in room "102"
     When one guest addition loses its response before another product is added
