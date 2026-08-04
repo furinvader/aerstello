@@ -196,7 +196,6 @@ let retriedVoidReasons: string[] = [];
 let reloadedVoidRequests: {mutationId:string;reason:string;expectedBillingVersion:number}[] = [];
 let reloadedVoidItemCount = 0;
 let reloadedVoidPendingCount = 0;
-let transientGuestIdentityRequests = 0;
 let transientGuestPendingState = '';
 let snapshottedBillHostName = '';
 let uncertainAccessRequestFieldsLocked = false;
@@ -641,11 +640,18 @@ When('a transient guest identity outage occurs during app launch',async()=>{
   const product=catalog.data[0]!;
   transientGuestPendingState=JSON.stringify({sessionId:identity.guest.sessionId,entries:[[product.id,crypto.randomUUID(),product.priceCents,product.version]]});
   await guestPage!.evaluate((pending)=>localStorage.setItem('skybar-guest-pending-adds',pending),transientGuestPendingState);
-  transientGuestIdentityRequests=0;
-  await guestPage!.route('**/api/v1/guest/me',async(route)=>{
-    transientGuestIdentityRequests+=1;
-    if(transientGuestIdentityRequests===1){await route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated guest identity outage'}})});return}
-    await route.continue();
+  await guestPage!.addInitScript(()=>{
+    const originalFetch=window.fetch.bind(window);
+    const state=window as unknown as {__skyBarTransientGuestIdentityRequests:number};
+    state.__skyBarTransientGuestIdentityRequests=0;
+    window.fetch=async(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(new URL(url,window.location.href).pathname==='/api/v1/guest/me'){
+        state.__skyBarTransientGuestIdentityRequests+=1;
+        if(state.__skyBarTransientGuestIdentityRequests===1)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated guest identity outage'}}),{status:503,headers:{'content-type':'application/json'}});
+      }
+      return originalFetch(input,init);
+    };
   });
   await guestPage!.reload();
 });
@@ -658,7 +664,7 @@ Then('the guest remains on the guest page with a retry action',async()=>{
 When('the guest retries the identity request',async()=>{await guestPage!.getByRole('button',{name:'Erneut versuchen'}).click()});
 Then("Luca's guest application opens with persisted guest state intact",async()=>{
   await expect(guestPage!.getByRole('heading',{name:'Luca Rossi'})).toBeVisible();
-  expect(transientGuestIdentityRequests).toBe(2);
+  expect(await guestPage!.evaluate(()=>(window as unknown as {__skyBarTransientGuestIdentityRequests:number}).__skyBarTransientGuestIdentityRequests)).toBe(2);
   expect(await guestPage!.evaluate(()=>localStorage.getItem('skybar-guest-pending-adds'))).toBe(transientGuestPendingState);
 });
 When('the guest adds {string} from self-service',async({},product:string)=>{await guestPage!.getByText(product,{exact:true}).click()});
