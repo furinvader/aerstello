@@ -345,6 +345,20 @@ BEFORE INSERT ON realtime_events
 FOR EACH STATEMENT
 EXECUTE FUNCTION serialize_realtime_event_inserts();
 
+CREATE FUNCTION enforce_bill_item_immutability()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'Bill items are immutable and cannot be updated or deleted';
+END;
+$$;
+
+CREATE TRIGGER bill_items_enforce_immutability
+BEFORE UPDATE OR DELETE ON bill_items
+FOR EACH ROW
+EXECUTE FUNCTION enforce_bill_item_immutability();
+
 CREATE FUNCTION enforce_order_item_billing_version()
 RETURNS trigger
 LANGUAGE plpgsql
