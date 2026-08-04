@@ -359,6 +359,20 @@ BEFORE UPDATE OR DELETE ON bill_items
 FOR EACH ROW
 EXECUTE FUNCTION enforce_bill_item_immutability();
 
+CREATE FUNCTION reject_bill_items_truncate()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'Bill items are immutable and cannot be truncated';
+END;
+$$;
+
+CREATE TRIGGER bill_items_reject_truncate
+BEFORE TRUNCATE ON bill_items
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_bill_items_truncate();
+
 CREATE FUNCTION enforce_order_item_billing_version()
 RETURNS trigger
 LANGUAGE plpgsql

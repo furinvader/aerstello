@@ -76,6 +76,8 @@ Feature: Device grants and replay protection
     When database writers attempt to rewrite a settled bill line
     Then direct bill line updates are rejected
     And direct bill line deletes are rejected
+    And direct bill line truncation is rejected
+    And the bill line truncate trigger remains enabled after reset
     And the original settled bill line remains unchanged
     And normal settlement and audited bill reversal remain valid
 

@@ -249,6 +249,8 @@ let strictBillingVoidConflict: {status:number;code:string}|undefined;
 let immutableBillLineResult: {
   updateError:string;
   deleteError:string;
+  truncateError:string;
+  truncateTriggerEnabled:boolean;
   before:unknown;
   after:unknown;
   settlementStatus:number;
@@ -2100,12 +2102,14 @@ When('database writers attempt to rewrite a settled bill line',async({page})=>{
   const settlement=await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}});
   const bill=await settlement.json() as {id:string};
   const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();
-  let updateError='';let deleteError='';let before:unknown;let after:unknown;
+  let updateError='';let deleteError='';let truncateError='';let truncateTriggerEnabled=false;let before:unknown;let after:unknown;
   try{
     const snapshot=`SELECT id,bill_id AS "billId",original_order_item_id AS "originalOrderItemId",product_name AS "productName",unit_price_cents AS "unitPriceCents",quantity,source FROM bill_items WHERE bill_id=$1`;
     before=(await database.query(snapshot,[bill.id])).rows[0];
     try{await database.query('UPDATE bill_items SET quantity=quantity+1 WHERE bill_id=$1',[bill.id])}catch(caught){updateError=(caught as {code?:string}).code??''}
     try{await database.query('DELETE FROM bill_items WHERE bill_id=$1',[bill.id])}catch(caught){deleteError=(caught as {code?:string}).code??''}
+    try{await database.query('TRUNCATE bill_items')}catch(caught){truncateError=(caught as {code?:string}).code??''}
+    truncateTriggerEnabled=(await database.query<{enabled:boolean}>(`SELECT tgenabled='O' AS enabled FROM pg_trigger WHERE tgrelid='bill_items'::regclass AND tgname='bill_items_reject_truncate'`)).rows[0]?.enabled??false;
     after=(await database.query(snapshot,[bill.id])).rows[0];
   }finally{await database.end()}
   const voidResponse=await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Verified immutable bill line'}});
@@ -2113,10 +2117,12 @@ When('database writers attempt to rewrite a settled bill line',async({page})=>{
   let voidAuditCount=0;
   try{voidAuditCount=Number((await verification.query("SELECT count(*) FROM audit_events WHERE action='bill.voided' AND entity_type='bill' AND entity_id=$1",[bill.id])).rows[0].count)}finally{await verification.end()}
   const restoredItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
-  immutableBillLineResult={updateError,deleteError,before,after,settlementStatus:settlement.status(),voidStatus:voidResponse.status(),voidAuditCount,restoredItemCount};
+  immutableBillLineResult={updateError,deleteError,truncateError,truncateTriggerEnabled,before,after,settlementStatus:settlement.status(),voidStatus:voidResponse.status(),voidAuditCount,restoredItemCount};
 });
 Then('direct bill line updates are rejected',async()=>{expect(immutableBillLineResult?.updateError).toBe('P0001')});
 Then('direct bill line deletes are rejected',async()=>{expect(immutableBillLineResult?.deleteError).toBe('P0001')});
+Then('direct bill line truncation is rejected',async()=>{expect(immutableBillLineResult?.truncateError).toBe('P0001')});
+Then('the bill line truncate trigger remains enabled after reset',async()=>{expect(immutableBillLineResult?.truncateTriggerEnabled).toBe(true)});
 Then('the original settled bill line remains unchanged',async()=>{expect(immutableBillLineResult?.before).toBeDefined();expect(immutableBillLineResult?.after).toEqual(immutableBillLineResult?.before)});
 Then('normal settlement and audited bill reversal remain valid',async()=>{expect(immutableBillLineResult).toMatchObject({settlementStatus:200,voidStatus:200,voidAuditCount:1,restoredItemCount:1})});
 When('the same order mutation is submitted concurrently',async({page})=>{
