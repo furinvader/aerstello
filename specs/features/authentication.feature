@@ -19,6 +19,15 @@ Feature: Secure host accounts and devices
     When the host opens the account screen
     Then the current device is listed
 
+  Scenario: A host device directory failure preserves profile controls
+    Given an authenticated administrator
+    When the host device directory remains pending
+    Then device loading is localized without an empty list and profile stays usable
+    When the pending host device directory fails
+    Then device failure and retry are localized without an empty list
+    When the host retries the device directory
+    Then the current device reappears without a reload
+
   Scenario: A transient host identity outage preserves the requested route
     Given an authenticated administrator
     When the initial host identity request fails transiently on the bills route

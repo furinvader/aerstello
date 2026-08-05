@@ -292,6 +292,20 @@ let immutableFinancialResult: {
   restoredItemCount:number;
   restoredOrderItemState:{status:string;billId:string|null;billingVersion:number};
 } | undefined;
+let historicalEvidenceResult: {
+  errors:Record<string,string>;
+  auditBefore:unknown;
+  auditAfter:unknown;
+  productVersionBefore:unknown;
+  productVersionAfter:unknown;
+  auditTruncateTriggerEnabled:boolean;
+  productVersionsTruncateTriggerEnabled:boolean;
+  voidStatus:number;
+  voidAuditCount:number;
+  productUpdateStatus:number;
+  productVersionCountBefore:number;
+  productVersionCountAfter:number;
+} | undefined;
 
 Before(async () => {
   execFileSync('npm',['run','db:seed','-w','@sky-bar/api'],{cwd:process.cwd(),env:{...process.env,E2E_RESET:'true',SEED_ADMIN_PASSWORD:'SkyBarTest123!'},stdio:'pipe'});
@@ -315,6 +329,49 @@ async function signIn(page: import('@playwright/test').Page) {
   await page.getByLabel('Password').fill('SkyBarTest123!');
   await page.getByRole('button',{name:'Sign in'}).click();
   await expect(page).toHaveURL(/\/app/);
+}
+
+async function installQueryOutage(page:import('@playwright/test').Page,paths:string[]) {
+  await page.addInitScript((targetPaths)=>{
+    const originalFetch=window.fetch.bind(window);
+    let release!:()=>void;
+    const pending=new Promise<void>((resolve)=>{release=resolve});
+    const state={active:true,attempts:0,release,restore:()=>{window.fetch=originalFetch}};
+    Object.assign(window,{__skyBarQueryOutage:state});
+    window.fetch=async(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(targetPaths.includes(new URL(url,window.location.href).pathname)){
+        state.attempts+=1;
+        if(state.active){
+          await pending;
+          return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated query outage'}}),{status:503,headers:{'content-type':'application/json'}});
+        }
+      }
+      return originalFetch(input,init);
+    };
+  },paths);
+}
+
+async function releaseQueryOutage(page:import('@playwright/test').Page) {
+  await page.evaluate(()=>{
+    const state=(window as unknown as {__skyBarQueryOutage:{release:()=>void}}).__skyBarQueryOutage;
+    state.release();
+  });
+}
+
+async function retryQueryOutage(page:import('@playwright/test').Page,retry:import('@playwright/test').Locator) {
+  await retry.evaluate((button)=>button.addEventListener('click',()=>{
+    (window as unknown as {__skyBarQueryOutage:{active:boolean}}).__skyBarQueryOutage.active=false;
+  },{capture:true,once:true}));
+  await retry.click();
+}
+
+async function restoreQueryOutage(page:import('@playwright/test').Page) {
+  await page.evaluate(()=>{
+    const state=(window as unknown as {__skyBarQueryOutage:{restore:()=>void}}).__skyBarQueryOutage;
+    state.restore();
+    delete (window as unknown as {__skyBarQueryOutage?:unknown}).__skyBarQueryOutage;
+  });
 }
 
 async function startClockSkewedApi(port:number,offsetMs:number) {
@@ -416,6 +473,34 @@ Then('the access form appears after bootstrap recovery',async({page})=>{
 });
 When('the host opens the account screen', async ({ page }) => { await page.goto('/app/account'); });
 Then('the current device is listed', async ({ page }) => { await expect(page.getByText(/Dieses Gerät|Questo dispositivo|This device/)).toBeVisible(); });
+When('the host device directory remains pending',async({page})=>{
+  await installQueryOutage(page,['/api/v1/account/sessions']);
+  await page.goto('/app/account');
+});
+Then('device loading is localized without an empty list and profile stays usable',async({page})=>{
+  const devices=page.locator('.card').filter({has:page.getByRole('heading',{name:/Angemeldete Geräte|Dispositivi connessi|Logged-in devices/})});
+  await expect(devices.getByText(/Wird geladen|Caricamento|Loading/)).toBeVisible();
+  await expect(devices.locator('.empty,.device-list')).toHaveCount(0);
+  await expect(page.getByLabel(/Name|Nome/).first()).toBeEnabled();
+  await expect(page.getByRole('button',{name:/Speichern|Salva|Save/}).first()).toBeEnabled();
+});
+When('the pending host device directory fails',async({page})=>{await releaseQueryOutage(page)});
+Then('device failure and retry are localized without an empty list',async({page})=>{
+  const devices=page.locator('.card').filter({has:page.getByRole('heading',{name:/Angemeldete Geräte|Dispositivi connessi|Logged-in devices/})});
+  await expect(devices.locator('.notice--error')).toContainText(/Die Anfrage konnte nicht abgeschlossen werden|Impossibile completare la richiesta|The request could not be completed/);
+  await expect(devices.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();
+  await expect(devices.locator('.empty,.device-list')).toHaveCount(0);
+  await expect(page.getByLabel(/Name|Nome/).first()).toBeEnabled();
+});
+When('the host retries the device directory',async({page})=>{
+  const devices=page.locator('.card').filter({has:page.getByRole('heading',{name:/Angemeldete Geräte|Dispositivi connessi|Logged-in devices/})});
+  await retryQueryOutage(page,devices.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}));
+});
+Then('the current device reappears without a reload',async({page})=>{
+  await expect(page.getByText(/Dieses Gerät|Questo dispositivo|This device/)).toBeVisible();
+  expect(await page.evaluate(()=>(window as unknown as {__skyBarQueryOutage:{attempts:number}}).__skyBarQueryOutage.attempts)).toBeGreaterThanOrEqual(3);
+  await restoreQueryOutage(page);
+});
 When('the initial host identity request fails transiently on the bills route',async({page})=>{
   await page.addInitScript(()=>{
     const originalFetch=window.fetch.bind(window);
@@ -974,6 +1059,31 @@ Then('replaying guest logout for the revoked session succeeds',async()=>{expect(
 When('the guest tab service is unavailable',async()=>{await guestPage!.addInitScript(()=>{const fetch=window.fetch.bind(window);window.fetch=(input,init)=>{const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);if(new URL(url,window.location.href).pathname==='/api/v1/guest/tab')return Promise.reject(new TypeError('Simulated guest tab outage'));return fetch(input,init)}});await guestPage!.reload();await expect(guestPage!.locator('.guest-total')).toContainText('Die Anfrage konnte nicht abgeschlossen werden.',{timeout:10_000})});
 Then('the guest sees an error without a zero balance or empty order',async()=>{await expect(guestPage!.locator('.guest-total')).not.toContainText(/0[,.]00\s*€/);const orders=guestPage!.locator('.guest-tabs>section').nth(1);await expect(orders.locator('.notice--error')).toBeVisible();await expect(orders.locator('.empty')).toHaveCount(0)});
 Then('the host has no empty open order for {string}',async({page},name:string)=>{await page.goto('/app/orders');await expect(page.locator('.tab-card').filter({hasText:name})).toHaveCount(0)});
+When('the guest catalog request remains pending',async()=>{
+  await installQueryOutage(guestPage!,['/api/v1/guest/catalog']);
+  await guestPage!.reload();
+});
+Then('guest catalog loading is localized without empty or product state',async()=>{
+  const catalog=guestPage!.locator('.guest-tabs>section').first();
+  await expect(catalog.getByText(/Wird geladen|Caricamento|Loading/)).toBeVisible();
+  await expect(catalog.locator('.empty,.product-tile')).toHaveCount(0);
+});
+When('the pending guest catalog request fails',async()=>{await releaseQueryOutage(guestPage!)});
+Then('guest catalog failure and retry are localized without empty state',async()=>{
+  const catalog=guestPage!.locator('.guest-tabs>section').first();
+  await expect(catalog.locator('.notice--error')).toContainText(/Die Anfrage konnte nicht abgeschlossen werden|Impossibile completare la richiesta|The request could not be completed/);
+  await expect(catalog.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();
+  await expect(catalog.locator('.empty,.product-tile')).toHaveCount(0);
+});
+When('the guest retries the catalog request',async()=>{
+  const catalog=guestPage!.locator('.guest-tabs>section').first();
+  await retryQueryOutage(guestPage!,catalog.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}));
+});
+Then('recovered self-service products appear without a reload',async()=>{
+  await expect(guestPage!.getByText('Mineralwasser',{exact:true})).toBeVisible();
+  expect(await guestPage!.evaluate(()=>(window as unknown as {__skyBarQueryOutage:{attempts:number}}).__skyBarQueryOutage.attempts)).toBeGreaterThanOrEqual(3);
+  await restoreQueryOutage(guestPage!);
+});
 When('a self-service price changes after the guest catalog is displayed',async({page})=>{const guestRequest=guestPage!.context().request;const me=await (await guestRequest.get('/api/v1/guest/me')).json() as {guest:{sessionId:string}};const catalog=await (await guestRequest.get('/api/v1/guest/catalog')).json() as {data:{id:string;name:{de:string};priceCents:number;version:number}[]};const displayed=catalog.data.find(item=>item.name.de==='Mineralwasser')!;const staleMutationId=crypto.randomUUID();staleGuestMutationIds=[];guestPage!.on('request',request=>{if(request.url().endsWith('/api/v1/guest/items')&&request.method()==='POST')staleGuestMutationIds.push((request.postDataJSON() as {mutationId:string}).mutationId)});const request=page.context().request;const products=await (await request.get('/api/v1/products')).json() as {data:{id:string;name:{de:string;it:string;en:string};description?:{de:string;it:string;en:string};priceCents:number;categoryId:string;enabled:boolean;selfServiceOnly:boolean;version:number}[]};const product=products.data.find(item=>item.id===displayed.id)!;expect((await request.patch(`/api/v1/products/${product.id}`,{headers:csrfHeaders,data:{name:product.name,...(product.description?{description:product.description}:{}),priceCents:product.priceCents+100,categoryId:product.categoryId,enabled:product.enabled,selfServiceOnly:product.selfServiceOnly,expectedVersion:product.version}})).status()).toBe(200);await guestPage!.evaluate(({sessionId,productId,mutationId,expectedPriceCents,expectedProductVersion})=>localStorage.setItem('skybar-guest-pending-adds',JSON.stringify({sessionId,entries:[[productId,mutationId,expectedPriceCents,expectedProductVersion]]})),{sessionId:me.guest.sessionId,productId:product.id,mutationId:staleMutationId,expectedPriceCents:displayed.priceCents,expectedProductVersion:displayed.version});await guestPage!.reload();await guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'}).click();await expect(guestPage!.locator('.notice--error')).toBeVisible();staleGuestPriceRejected=true;staleGuestPriceItemCount=((await (await guestRequest.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount;await guestPage!.reload();await guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'}).click();await expect.poll(async()=>((await (await guestRequest.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount).toBe(1)});
 Then('adding the stale self-service product is rejected without a charge',async()=>{expect(staleGuestPriceRejected).toBe(true);expect(staleGuestPriceItemCount).toBe(0)});
 Then('the guest can retry the refreshed self-service product',async()=>{expect(staleGuestMutationIds).toHaveLength(2);expect(staleGuestMutationIds[1]).not.toBe(staleGuestMutationIds[0])});
@@ -1523,6 +1633,60 @@ When('the guest closes the app after a self-service response is lost',async()=>{
 });
 Then('reopening and retrying reuses the original item mutation identifier',async()=>{expect(reopenedGuestAddMutationIds).toHaveLength(2);expect(new Set(reopenedGuestAddMutationIds).size).toBe(1)});
 Then('the recovered self-service product is stored once',async()=>{expect(reopenedGuestAddItemCount).toBe(1)});
+
+When('catalog administration remains pending',async({page})=>{
+  await installQueryOutage(page,['/api/v1/products','/api/v1/categories']);
+  await page.goto('/app/products');
+});
+Then('catalog loading hides empty and mutation controls',async({page})=>{
+  await expect(page.getByText(/Wird geladen|Caricamento|Loading/)).toBeVisible();
+  await expect(page.locator('.empty,.catalog-admin,.inline-form,.product-admin-list')).toHaveCount(0);
+  await expect(page.getByRole('button',{name:/Hinzufügen|Aggiungi|Add/})).toHaveCount(0);
+});
+When('the pending catalog administration request fails',async({page})=>{await releaseQueryOutage(page)});
+Then('catalog failure and retry are localized without mutation controls',async({page})=>{
+  await expect(page.locator('.notice--error')).toContainText(/Die Anfrage konnte nicht abgeschlossen werden|Impossibile completare la richiesta|The request could not be completed/);
+  await expect(page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();
+  await expect(page.locator('.empty,.catalog-admin,.inline-form,.product-admin-list')).toHaveCount(0);
+});
+When('the administrator retries catalog administration',async({page})=>{
+  await retryQueryOutage(page,page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}));
+});
+Then('recovered catalog names, counts, rows, and creation controls appear',async({page})=>{
+  await expect(page.getByText('Helles',{exact:true})).toBeVisible();
+  const category=page.locator('.category-list>div').filter({hasText:'Getränke'});
+  await expect(category).toBeVisible();
+  await expect(category.locator('span')).toHaveText('2');
+  await expect(page.getByPlaceholder(/Deutscher Name|Nome tedesco|German name/)).toBeEnabled();
+  await expect(page.getByRole('button',{name:/Hinzufügen|Aggiungi|Add/})).toBeEnabled();
+  await restoreQueryOutage(page);
+});
+
+When('room management remains pending',async({page})=>{
+  await installQueryOutage(page,['/api/v1/rooms']);
+  await page.goto('/app/rooms');
+});
+Then('room loading hides empty and mutation controls',async({page})=>{
+  await expect(page.getByText(/Wird geladen|Caricamento|Loading/)).toBeVisible();
+  await expect(page.locator('.empty,.two-column,.inline-form,.sortable-list')).toHaveCount(0);
+  await expect(page.getByPlaceholder(/Zimmername|Nome camera|Room name/)).toHaveCount(0);
+});
+When('the pending room directory request fails',async({page})=>{await releaseQueryOutage(page)});
+Then('room failure and retry are localized without mutation controls',async({page})=>{
+  await expect(page.locator('.notice--error')).toContainText(/Die Anfrage konnte nicht abgeschlossen werden|Impossibile completare la richiesta|The request could not be completed/);
+  await expect(page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();
+  await expect(page.locator('.empty,.two-column,.inline-form,.sortable-list')).toHaveCount(0);
+});
+When('the administrator retries the room directory',async({page})=>{
+  await retryQueryOutage(page,page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}));
+});
+Then('recovered rooms and room mutation controls appear',async({page})=>{
+  await expect(page.getByText('101',{exact:true})).toBeVisible();
+  await expect(page.getByPlaceholder(/Zimmername|Nome camera|Room name/)).toBeEnabled();
+  await expect(page.locator('.sortable-list')).toBeVisible();
+  await expect(page.getByRole('button',{name:/Archiv.*101|Archivia.*101|Archive.*101/})).toBeVisible();
+  await restoreQueryOutage(page);
+});
 
 When('the administrator creates room {string}',async({page},name:string)=>{await page.goto('/app/rooms');await page.getByPlaceholder(/Zimmername|Nome camera|Room name/).fill(name);await page.locator('.inline-form').getByRole('button').click()});
 Then('room {string} is listed',async({page},name:string)=>{await expect(page.getByText(name,{exact:true})).toBeVisible()});
@@ -2648,6 +2812,71 @@ Then('direct bill line truncation is rejected',async()=>{expect(immutableFinanci
 Then('all financial truncate triggers remain enabled after reset',async()=>{expect(immutableFinancialResult).toMatchObject({billsTruncateTriggerEnabled:true,orderItemsTruncateTriggerEnabled:true,billItemsTruncateTriggerEnabled:true})});
 Then('the original settled financial snapshots remain unchanged',async()=>{expect(immutableFinancialResult?.billBefore).toBeDefined();expect(immutableFinancialResult?.billAfter).toEqual(immutableFinancialResult?.billBefore);expect(immutableFinancialResult?.orderItemAfter).toEqual(immutableFinancialResult?.orderItemBefore);expect(immutableFinancialResult?.billLineAfter).toEqual(immutableFinancialResult?.billLineBefore)});
 Then('normal settlement and audited bill reversal remain valid',async()=>{expect(immutableFinancialResult).toMatchObject({settlementStatus:200,voidStatus:200,voidAuditCount:1,restoredItemCount:1,restoredOrderItemState:{status:'open',billId:null,billingVersion:1}})});
+
+When('direct database writers target committed historical evidence',async({page})=>{
+  const {request,me,guests,products}=await operationalData(page);
+  const guest=guests.data.find(item=>item.name==='Anna Berger')!;
+  const product=products.data.find(item=>item.name.de==='Helles')!;
+  const order=await (await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}})).json() as {tabId:string};
+  const bill=await (await request.post(`/api/v1/tabs/${order.tabId}/settle`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedItemCount:1,expectedTotalCents:product.priceCents,paymentMethod:'cash'}})).json() as {id:string};
+  const voidResponse=await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Append-only evidence regression'}});
+  expect(voidResponse.status()).toBe(200);
+
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});
+  await database.connect();
+  const errors:Record<string,string>={};
+  let auditBefore:unknown;let auditAfter:unknown;let productVersionBefore:unknown;let productVersionAfter:unknown;
+  let auditTruncateTriggerEnabled=false;let productVersionsTruncateTriggerEnabled=false;let productVersionCountBefore=0;let rolledBack=false;
+  try{
+    await database.query('BEGIN');
+    auditBefore=(await database.query(`SELECT id,actor_host_id,action,entity_type,entity_id,detail,created_at FROM audit_events WHERE action='bill.voided' AND entity_id=$1`,[bill.id])).rows[0];
+    productVersionBefore=(await database.query(`SELECT product_id,catalog_version,name,price_cents,enabled,self_service_only FROM product_versions WHERE product_id=$1 ORDER BY catalog_version DESC LIMIT 1`,[product.id])).rows[0];
+    productVersionCountBefore=Number((await database.query(`SELECT count(*) FROM product_versions WHERE product_id=$1`,[product.id])).rows[0].count);
+    const reject=async(name:string,statement:string,parameters:unknown[]=[])=>{
+      await database.query(`SAVEPOINT ${name}`);
+      try{await database.query(statement,parameters);errors[name]=''}catch(caught){errors[name]=(caught as {code?:string}).code??'';await database.query(`ROLLBACK TO SAVEPOINT ${name}`)}
+      await database.query(`RELEASE SAVEPOINT ${name}`);
+    };
+    await reject('audit_update',`UPDATE audit_events SET detail='{}'::jsonb WHERE action='bill.voided' AND entity_id=$1`,[bill.id]);
+    await reject('audit_delete',`DELETE FROM audit_events WHERE action='bill.voided' AND entity_id=$1`,[bill.id]);
+    await reject('audit_truncate','TRUNCATE audit_events');
+    await reject('product_version_update',`UPDATE product_versions SET price_cents=price_cents+1 WHERE product_id=$1`,[product.id]);
+    await reject('product_version_delete',`DELETE FROM product_versions WHERE product_id=$1`,[product.id]);
+    await reject('product_version_truncate','TRUNCATE product_versions');
+    auditAfter=(await database.query(`SELECT id,actor_host_id,action,entity_type,entity_id,detail,created_at FROM audit_events WHERE action='bill.voided' AND entity_id=$1`,[bill.id])).rows[0];
+    productVersionAfter=(await database.query(`SELECT product_id,catalog_version,name,price_cents,enabled,self_service_only FROM product_versions WHERE product_id=$1 ORDER BY catalog_version DESC LIMIT 1`,[product.id])).rows[0];
+    const triggers=await database.query<{triggerName:string;enabled:boolean}>(
+      `SELECT trg.tgname AS "triggerName",trg.tgenabled='O' AS enabled FROM pg_trigger trg WHERE trg.tgname IN ('audit_events_reject_truncate','product_versions_reject_truncate')`,
+    );
+    const enabled=new Map(triggers.rows.map(trigger=>[trigger.triggerName,trigger.enabled]));
+    auditTruncateTriggerEnabled=enabled.get('audit_events_reject_truncate')??false;
+    productVersionsTruncateTriggerEnabled=enabled.get('product_versions_reject_truncate')??false;
+    await database.query('ROLLBACK');rolledBack=true;
+  }finally{if(!rolledBack)await database.query('ROLLBACK');await database.end()}
+
+  const productUpdate=await request.patch(`/api/v1/products/${product.id}`,{headers:csrfHeaders,data:{name:product.name,...(product.description?{description:product.description}:{}),priceCents:product.priceCents+1,categoryId:product.categoryId,enabled:product.enabled,selfServiceOnly:product.selfServiceOnly,expectedVersion:product.version}});
+  const verification=new pg.Client({connectionString:process.env.DATABASE_URL});await verification.connect();
+  let voidAuditCount=0;let productVersionCountAfter=0;
+  try{
+    voidAuditCount=Number((await verification.query(`SELECT count(*) FROM audit_events WHERE action='bill.voided' AND entity_id=$1`,[bill.id])).rows[0].count);
+    productVersionCountAfter=Number((await verification.query(`SELECT count(*) FROM product_versions WHERE product_id=$1`,[product.id])).rows[0].count);
+  }finally{await verification.end()}
+  historicalEvidenceResult={errors,auditBefore,auditAfter,productVersionBefore,productVersionAfter,auditTruncateTriggerEnabled,productVersionsTruncateTriggerEnabled,voidStatus:voidResponse.status(),voidAuditCount,productUpdateStatus:productUpdate.status(),productVersionCountBefore,productVersionCountAfter};
+});
+Then('audit and catalog history reject updates, deletes, and truncation',async()=>{
+  expect(historicalEvidenceResult?.errors).toEqual({audit_update:'P0001',audit_delete:'P0001',audit_truncate:'P0001',product_version_update:'P0001',product_version_delete:'P0001',product_version_truncate:'P0001'});
+});
+Then('the original historical evidence remains unchanged',async()=>{
+  expect(historicalEvidenceResult?.auditBefore).toBeDefined();
+  expect(historicalEvidenceResult?.auditAfter).toEqual(historicalEvidenceResult?.auditBefore);
+  expect(historicalEvidenceResult?.productVersionBefore).toBeDefined();
+  expect(historicalEvidenceResult?.productVersionAfter).toEqual(historicalEvidenceResult?.productVersionBefore);
+});
+Then('historical truncate guards remain enabled after reset',async()=>{expect(historicalEvidenceResult).toMatchObject({auditTruncateTriggerEnabled:true,productVersionsTruncateTriggerEnabled:true})});
+Then('normal audited voids and catalog history insertion remain valid',async()=>{
+  expect(historicalEvidenceResult).toMatchObject({voidStatus:200,voidAuditCount:1,productUpdateStatus:200});
+  expect(historicalEvidenceResult!.productVersionCountAfter).toBe(historicalEvidenceResult!.productVersionCountBefore+1);
+});
 When('the same order mutation is submitted concurrently',async({page})=>{
   const {request,me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const mutationId=crypto.randomUUID();const data={mutationId,originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]};
   const responses=await Promise.all([request.post('/api/v1/order-batches',{headers:csrfHeaders,data}),request.post('/api/v1/order-batches',{headers:csrfHeaders,data})]);concurrentOrderStatuses=responses.map(response=>response.status());concurrentOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;

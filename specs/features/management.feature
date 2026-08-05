@@ -100,6 +100,15 @@ Feature: Venue operations configuration
     When the administrator creates the self-service product "Apfelsaft" priced "3.10"
     Then product "Apfelsaft" is listed as self-service
 
+  Scenario: A catalog administration failure recovers authoritative data
+    Given an authenticated administrator
+    When catalog administration remains pending
+    Then catalog loading hides empty and mutation controls
+    When the pending catalog administration request fails
+    Then catalog failure and retry are localized without mutation controls
+    When the administrator retries catalog administration
+    Then recovered catalog names, counts, rows, and creation controls appear
+
   Scenario: An uncertain product creation is recovered idempotently
     Given an authenticated administrator
     When the administrator retries product creation after its first response is lost
@@ -151,6 +160,15 @@ Feature: Venue operations configuration
     Given an authenticated administrator
     When the administrator archives a room with an active guest
     Then the room screen explains that active guests must be moved
+
+  Scenario: A room directory failure recovers authoritative controls
+    Given an authenticated administrator
+    When room management remains pending
+    Then room loading hides empty and mutation controls
+    When the pending room directory request fails
+    Then room failure and retry are localized without mutation controls
+    When the administrator retries the room directory
+    Then recovered rooms and room mutation controls appear
 
   Scenario: An uncertain room archival is recovered idempotently
     Given an authenticated administrator

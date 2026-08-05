@@ -199,6 +199,15 @@ Feature: Guest device access and self-service
     When the guest tab service is unavailable
     Then the guest sees an error without a zero balance or empty order
 
+  Scenario: A guest catalog failure recovers without reload
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When the guest catalog request remains pending
+    Then guest catalog loading is localized without empty or product state
+    When the pending guest catalog request fails
+    Then guest catalog failure and retry are localized without empty state
+    When the guest retries the catalog request
+    Then recovered self-service products appear without a reload
+
   Scenario: A guest addition is bound to its displayed price
     Given an approved guest device for "Luca Rossi" in room "102"
     When a self-service price changes after the guest catalog is displayed

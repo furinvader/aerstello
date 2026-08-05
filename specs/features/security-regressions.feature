@@ -99,6 +99,14 @@ Feature: Device grants and replay protection
     And the original settled financial snapshots remain unchanged
     And normal settlement and audited bill reversal remain valid
 
+  Scenario: Committed historical evidence remains append-only
+    Given an authenticated administrator
+    When direct database writers target committed historical evidence
+    Then audit and catalog history reject updates, deletes, and truncation
+    And the original historical evidence remains unchanged
+    And historical truncate guards remain enabled after reset
+    And normal audited voids and catalog history insertion remain valid
+
   Scenario: Concurrent replay of an order returns its prior success
     Given an authenticated administrator
     When the same order mutation is submitted concurrently
