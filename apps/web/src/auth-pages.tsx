@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Redirect, useLocation, useSearch } from 'wouter';
-import { api, apiErrorMessage, json } from './api';
+import { ApiError, api, apiErrorMessage, json } from './api';
 import { Button, Card, Field, Notice } from './components';
 import { useI18n } from './i18n';
 import { isPermanentSyncConflict } from './offline';
@@ -14,11 +14,16 @@ function PublicFrame({ children, languageLocked = false }: { children: React.Rea
 }
 
 export function LaunchPage() {
+  const { t } = useI18n();
   const host = useQuery({ queryKey: ['me'], queryFn: () => api('/auth/me'), retry: false });
   const guest = useQuery({ queryKey: ['guest-me'], queryFn: () => api('/guest/me'), retry: false });
   if (host.isSuccess) return <Redirect to="/app" />;
   if (guest.isSuccess) return <Redirect to="/guest" />;
-  if (host.isFetched && guest.isFetched) return <Redirect to="/login" />;
+  const hostUnauthenticated=host.isError&&host.error instanceof ApiError&&host.error.status===401;
+  const guestUnauthenticated=guest.isError&&guest.error instanceof ApiError&&guest.error.status===401;
+  if (hostUnauthenticated&&guestUnauthenticated) return <Redirect to="/login" />;
+  if (host.isFetching||guest.isFetching) return <div className="splash">Sky Bar</div>;
+  if (host.isError||guest.isError) return <PublicFrame><Card className="auth-card"><Notice kind="error">{t('requestFailed')}</Notice><Button onClick={() => void Promise.all([host.refetch(),guest.refetch()])}>{t('retry')}</Button></Card></PublicFrame>;
   return <div className="splash">Sky Bar</div>;
 }
 
@@ -54,7 +59,7 @@ export function RequestAccessPage() {
   const { t, language, setLanguage, applyDefaultLanguage } = useI18n();
   const search = useSearch();
   const params = new URLSearchParams(search);
-  const bootstrap = useQuery<Bootstrap>({ queryKey: ['public-bootstrap'], queryFn: () => api('/public/bootstrap') });
+  const bootstrap = useQuery<Bootstrap>({ queryKey: ['public-bootstrap'], queryFn: () => api('/public/bootstrap'), retry: false });
   const [submission, setSubmission] = useState<AccessSubmission | null>(() => {
     const raw=loadDurableRecovery('skybar-access-submission');
     if(!raw)return null;
@@ -124,5 +129,7 @@ export function RequestAccessPage() {
   };
   const terminalTitle=terminalStatus==='expired'?t('accessExpired'):terminalStatus==='disabled'?t('accessDisabled'):t('deny');
   const terminalMessage=terminalStatus==='expired'?t('requestExpired'):terminalStatus==='disabled'?t('requestDisabled'):t('requestDenied');
+  if (bootstrap.isPending) return <PublicFrame><Card className="auth-card"><p>{t('loading')}</p></Card></PublicFrame>;
+  if (bootstrap.isError) return <PublicFrame><Card className="auth-card"><Notice kind="error">{t('requestFailed')}</Notice><Button onClick={() => void bootstrap.refetch()}>{t('retry')}</Button></Card></PublicFrame>;
   return <PublicFrame languageLocked={Boolean(submission)}><Card className="auth-card"><p className="eyebrow">{bootstrap.data?.venue.name || 'Sky Bar'}</p><h1>{t('guestAccess')}</h1>{pending || terminalStatus ? <div className="request-wait"><div className="pulse-orb"/><h2>{terminalStatus ? terminalTitle : t('pending')}</h2><p className="muted">{terminalStatus ? terminalMessage : t('requestWaiting')}</p>{terminalStatus && <Button onClick={() => { setTerminalStatus(null); setError(''); }}>{t('requestAccess')}</Button>}</div> : <form onSubmit={submit} className="stack"><Field label={t('name')}><input value={name} onChange={(e) => setName(e.target.value)} required autoFocus disabled={Boolean(submission)}/></Field><Field label={t('rooms')}><select value={roomId} onChange={(e) => setRoomId(e.target.value)} required disabled={Boolean(submission)}><option value="">{t('selectRoom')}</option>{bootstrap.data?.rooms.map((room) => <option value={room.id} key={room.id}>{room.name}</option>)}</select></Field><Field label={t('language')}><select value={language} onChange={(e) => setLanguage(e.target.value as Language)} disabled={Boolean(submission)}><option value="de">Deutsch</option><option value="it">Italiano</option><option value="en">English</option></select></Field>{error && <Notice kind="error">{error}</Notice>}<Button type="submit">{submission?t('retry'):t('requestAccess')}</Button></form>}<a className="text-link" href="/login">{t('hostLogin')} →</a></Card></PublicFrame>;
 }
