@@ -269,6 +269,9 @@ let immutableFinancialResult: {
   orderItemUpdateError:string;
   orderItemDeleteError:string;
   orderItemReopenError:string;
+  settledTabReopenError:string;
+  incompleteAuditedVoidError:string;
+  incompleteAuditedVoidReachedCommit:boolean;
   billLineUpdateError:string;
   billLineDeleteError:string;
   billsTruncateError:string;
@@ -331,6 +334,86 @@ When('the administrator signs in', async ({ page }) => { await signIn(page); });
 Given('an authenticated administrator', async ({ page }) => { await signIn(page); });
 Then('the host dashboard shows the venue name {string}', async ({ page }, name:string) => { await expect(page.locator('.page-header')).toContainText(name); });
 Then('the page has no serious accessibility violations', async ({ page }) => { const result=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa']).analyze();expect(result.violations.filter(v=>['serious','critical'].includes(v.impact??''))).toEqual([]); });
+When('a public launch identity check fails transiently',async({page})=>{
+  await page.addInitScript(()=>{
+    const originalFetch=window.fetch.bind(window);
+    const state=window as unknown as {__skyBarLaunchIdentityOutage:{active:boolean;attempts:number}};
+    state.__skyBarLaunchIdentityOutage={active:true,attempts:0};
+    window.fetch=async(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(new URL(url,window.location.href).pathname==='/api/v1/auth/me'){
+        state.__skyBarLaunchIdentityOutage.attempts+=1;
+        if(state.__skyBarLaunchIdentityOutage.active)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated launch identity outage'}}),{status:503,headers:{'content-type':'application/json'}});
+      }
+      return originalFetch(input,init);
+    };
+  });
+  await page.goto('/');
+});
+Then('public launch shows a localized failure with retry',async({page})=>{
+  await expect(page.locator('.notice--error')).toContainText(/Die Anfrage konnte nicht abgeschlossen werden|Impossibile completare la richiesta|The request could not be completed/);
+  await expect(page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();
+  await expect(page).toHaveURL(/\/$/);
+});
+When('the visitor retries the launch identity checks',async({page})=>{
+  const retry=page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/});
+  await retry.evaluate((button)=>button.addEventListener('click',()=>{
+    (window as unknown as {__skyBarLaunchIdentityOutage:{active:boolean}}).__skyBarLaunchIdentityOutage.active=false;
+  },{capture:true,once:true}));
+  await retry.click();
+});
+Then('public entry opens after launch identity recovery',async({page})=>{
+  await expect(page).toHaveURL(/\/login$/);
+  await expect(page.getByLabel(/E-Mail|Email/)).toBeVisible();
+  expect(await page.evaluate(()=>(window as unknown as {__skyBarLaunchIdentityOutage:{attempts:number}}).__skyBarLaunchIdentityOutage.attempts)).toBeGreaterThanOrEqual(2);
+});
+When('the public bootstrap request remains pending',async({page})=>{
+  await page.addInitScript(()=>{
+    const originalFetch=window.fetch.bind(window);
+    const state=window as unknown as {__skyBarBootstrapOutage:{active:boolean;attempts:number;release?:()=>void}};
+    state.__skyBarBootstrapOutage={active:true,attempts:0};
+    window.fetch=async(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(new URL(url,window.location.href).pathname==='/api/v1/public/bootstrap'&&state.__skyBarBootstrapOutage.active){
+        state.__skyBarBootstrapOutage.attempts+=1;
+        await new Promise<void>((resolve)=>{state.__skyBarBootstrapOutage.release=resolve});
+        return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated bootstrap outage'}}),{status:503,headers:{'content-type':'application/json'}});
+      }
+      if(new URL(url,window.location.href).pathname==='/api/v1/public/bootstrap')state.__skyBarBootstrapOutage.attempts+=1;
+      return originalFetch(input,init);
+    };
+  });
+  await page.goto('/guest/request');
+});
+Then('bootstrap loading is shown without the access form',async({page})=>{
+  await expect(page.getByText(/Wird geladen|Caricamento|Loading/)).toBeVisible();
+  await expect(page.getByLabel(/Name|Nome/)).toHaveCount(0);
+  await expect(page.getByRole('button',{name:/Zugang anfragen|Richiedi accesso|Request access/})).toHaveCount(0);
+});
+When('the public bootstrap request fails',async({page})=>{
+  await page.evaluate(()=>{
+    const release=(window as unknown as {__skyBarBootstrapOutage:{release?:()=>void}}).__skyBarBootstrapOutage.release;
+    if(!release)throw new Error('Bootstrap request was not pending');
+    release();
+  });
+});
+Then('bootstrap failure is localized and still hides the access form',async({page})=>{
+  await expect(page.locator('.notice--error')).toContainText(/Die Anfrage konnte nicht abgeschlossen werden|Impossibile completare la richiesta|The request could not be completed/);
+  await expect(page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();
+  await expect(page.getByLabel(/Name|Nome/)).toHaveCount(0);
+});
+When('the guest retries public bootstrap',async({page})=>{
+  const retry=page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/});
+  await retry.evaluate((button)=>button.addEventListener('click',()=>{
+    (window as unknown as {__skyBarBootstrapOutage:{active:boolean}}).__skyBarBootstrapOutage.active=false;
+  },{capture:true,once:true}));
+  await retry.click();
+});
+Then('the access form appears after bootstrap recovery',async({page})=>{
+  await expect(page.getByLabel(/Name|Nome/)).toBeVisible();
+  await expect(page.getByRole('button',{name:/Zugang anfragen|Richiedi accesso|Request access/})).toBeEnabled();
+  expect(await page.evaluate(()=>(window as unknown as {__skyBarBootstrapOutage:{attempts:number}}).__skyBarBootstrapOutage.attempts)).toBe(2);
+});
 When('the host opens the account screen', async ({ page }) => { await page.goto('/app/account'); });
 Then('the current device is listed', async ({ page }) => { await expect(page.getByText(/Dieses Gerät|Questo dispositivo|This device/)).toBeVisible(); });
 When('the initial host identity request fails transiently on the bills route',async({page})=>{
@@ -696,6 +779,46 @@ When('{string} requests access for room {string}',async({},name:string,room:stri
 Then('the host sees the pending request for {string}',async({page},name:string)=>{await page.goto('/app/requests');await expect(page.getByText(name,{exact:true})).toBeVisible()});
 When('the host opens approval for {string}',async({page},name:string)=>{const card=page.locator('.request-card').filter({hasText:name});await card.getByRole('button',{name:/Genehmigen|Approva|Approve/}).click()});
 Then('creating a new guest is selected by default',async({page})=>{await expect(page.locator('.modal select').first()).toHaveValue('new')});
+When('approval guest directory data remains loading',async({page})=>{
+  const request=page.context().request;
+  const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
+  const room=bootstrap.rooms.find(item=>item.name==='102')!;
+  expect((await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Approval Directory Guest',roomId:room.id,language:'de'}})).status()).toBe(201);
+  await page.addInitScript(()=>{
+    const originalFetch=window.fetch.bind(window);
+    const state=window as unknown as {__skyBarApprovalGuestDirectory:{release?:()=>void;attempts:number}};
+    state.__skyBarApprovalGuestDirectory={attempts:0};
+    window.fetch=async(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(new URL(url,window.location.href).pathname==='/api/v1/guests'&&state.__skyBarApprovalGuestDirectory.attempts===0){
+        state.__skyBarApprovalGuestDirectory.attempts+=1;
+        await new Promise<void>((resolve)=>{state.__skyBarApprovalGuestDirectory.release=resolve});
+      }
+      return originalFetch(input,init);
+    };
+  });
+  await page.goto('/app/requests');
+});
+Then('approval is unavailable before the guest directory loads',async({page})=>{
+  const card=page.locator('.request-card').filter({hasText:'Approval Directory Guest'});
+  await expect(card).toBeVisible();
+  const approve=card.getByRole('button',{name:/Genehmigen|Approva|Approve/});
+  await expect(approve).toBeDisabled();
+  await expect(page.locator('.modal')).toHaveCount(0);
+});
+When('the approval guest directory finishes loading',async({page})=>{
+  await page.evaluate(()=>{
+    const release=(window as unknown as {__skyBarApprovalGuestDirectory:{release?:()=>void}}).__skyBarApprovalGuestDirectory.release;
+    if(!release)throw new Error('Approval guest directory was not pending');
+    release();
+  });
+});
+Then('the host can open approval with the loaded guest directory',async({page})=>{
+  const approve=page.locator('.request-card').filter({hasText:'Approval Directory Guest'}).getByRole('button',{name:/Genehmigen|Approva|Approve/});
+  await expect(approve).toBeEnabled();
+  await approve.click();
+  await expect(page.locator('.modal select').first()).toHaveValue('new');
+});
 When('the host retries an approval after its first response is lost',async({page})=>{await guestPage!.goto('/guest/request');await guestPage!.locator('form select').nth(1).selectOption('de');await guestPage!.getByLabel('Name').fill('Approval Retry');await guestPage!.locator('form select').first().selectOption({label:'102'});await guestPage!.locator('form button[type="submit"]').click();await page.goto('/app/requests');const card=page.locator('.request-card').filter({hasText:'Approval Retry'});await expect(card).toBeVisible();await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarApprovalRetryCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/access-requests/')&&url.endsWith('/approve')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});await card.getByRole('button',{name:/Genehmigen|Approva|Approve/}).click();const modal=page.locator('.modal');await modal.getByRole('button',{name:/Genehmigen|Approva|Approve/}).click();await expect(modal.locator('.notice--error')).toBeVisible();uncertainApprovalFieldsLocked=await modal.locator('input,select').evaluateAll(fields=>fields.every(field=>(field as HTMLInputElement).disabled));await modal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(modal).toHaveCount(0);const commands=await page.evaluate(()=>(window as unknown as {__skyBarApprovalRetryCommands:Array<Record<string,unknown>>}).__skyBarApprovalRetryCommands);retriedApprovalMutationIds=commands.map(command=>String(command.mutationId));const guests=await (await page.context().request.get('/api/v1/guests')).json() as {data:{name:string}[]};approvedGuestIdentityCount=guests.data.filter(guest=>guest.name==='Approval Retry').length});
 Then('both approval attempts use the same mutation identifier',async()=>{expect(retriedApprovalMutationIds).toHaveLength(2);expect(new Set(retriedApprovalMutationIds).size).toBe(1)});
 Then('approval fields stay locked while the result is uncertain',async()=>{expect(uncertainApprovalFieldsLocked).toBe(true)});
@@ -1109,6 +1232,44 @@ Then('the expired approval is rejected without resolving its request',async()=>{
 });
 When("the host revokes Luca's device from the guest directory",async({page})=>{await page.goto('/app/guests');const row=page.locator('.table-row').filter({hasText:'Luca Rossi'});await row.getByRole('button',{name:/Angemeldete Geräte|Dispositivi connessi|Logged-in devices/}).click();await expect(page.locator('.modal .device-list')).toBeVisible();await page.locator('.modal').getByRole('button',{name:/Widerrufen|Revoca|Revoke/}).click();await expect(page.locator('.modal .device-list')).toHaveCount(0)});
 Then("Luca's revoked device loses guest access",async()=>{guestRevokedStatus=(await guestPage!.context().request.get('/api/v1/guest/me')).status();expect(guestRevokedStatus).toBe(401)});
+When('the guest device directory fails to load',async({page})=>{
+  await page.addInitScript(()=>{
+    const originalFetch=window.fetch.bind(window);
+    const state=window as unknown as {__skyBarGuestDeviceOutage:{active:boolean;attempts:number}};
+    state.__skyBarGuestDeviceOutage={active:true,attempts:0};
+    window.fetch=async(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(/^\/api\/v1\/guests\/[^/]+\/sessions$/.test(new URL(url,window.location.href).pathname)){
+        state.__skyBarGuestDeviceOutage.attempts+=1;
+        if(state.__skyBarGuestDeviceOutage.active)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated guest device outage'}}),{status:503,headers:{'content-type':'application/json'}});
+      }
+      return originalFetch(input,init);
+    };
+  });
+  await page.goto('/app/guests');
+  const row=page.locator('.table-row').filter({hasText:'Luca Rossi'});
+  await row.getByRole('button',{name:/Angemeldete Geräte|Dispositivi connessi|Logged-in devices/}).click();
+});
+Then('the guest device failure is localized instead of empty',async({page})=>{
+  const modal=page.locator('.modal');
+  await expect(modal.locator('.notice--error')).toContainText(/Die Anfrage konnte nicht abgeschlossen werden|Impossibile completare la richiesta|The request could not be completed/);
+  await expect(modal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();
+  await expect(modal.locator('.empty')).toHaveCount(0);
+  await expect(modal.locator('.device-list')).toHaveCount(0);
+});
+When('the host retries the guest device directory',async({page})=>{
+  const retry=page.locator('.modal').getByRole('button',{name:/Erneut versuchen|Riprova|Retry/});
+  await retry.evaluate((button)=>button.addEventListener('click',()=>{
+    (window as unknown as {__skyBarGuestDeviceOutage:{active:boolean}}).__skyBarGuestDeviceOutage.active=false;
+  },{capture:true,once:true}));
+  await retry.click();
+});
+Then("Luca's device appears after guest device recovery",async({page})=>{
+  const modal=page.locator('.modal');
+  await expect(modal.locator('.device-list')).toBeVisible();
+  await expect(modal.getByRole('button',{name:/Widerrufen|Revoca|Revoke/})).toBeVisible();
+  expect(await page.evaluate(()=>(window as unknown as {__skyBarGuestDeviceOutage:{attempts:number}}).__skyBarGuestDeviceOutage.attempts)).toBeGreaterThanOrEqual(2);
+});
 When("another host revokes Luca's device while the first host's device list is open",async({page,browser})=>{
   await page.goto('/app/guests');
   const row=page.locator('.table-row').filter({hasText:'Luca Rossi'});
@@ -1411,6 +1572,39 @@ Then('both timed-out guest creations use the same mutation identifier',async()=>
 Then('only one timed-out guest exists',async()=>{expect(recoverableGuestCount).toBe(1)});
 When('the host creates guest {string} in room {string}',async({page},name:string,room:string)=>{await page.goto('/app/guests');await page.getByRole('button',{name:/Hinzufügen/}).click();await page.locator('.modal').getByLabel('Name').fill(name);await page.locator('.modal').getByLabel('Zimmer').selectOption({label:room});await page.locator('.modal').getByRole('button',{name:'Speichern'}).click()});
 Then('guest {string} is listed in room {string}',async({page},name:string,room:string)=>{const row=page.locator('.table-row').filter({hasText:name});await expect(row).toContainText(room)});
+When('the guest directory fails to load',async({page})=>{
+  await page.addInitScript(()=>{
+    const originalFetch=window.fetch.bind(window);
+    const state=window as unknown as {__skyBarGuestDirectoryOutage:{active:boolean;attempts:number}};
+    state.__skyBarGuestDirectoryOutage={active:true,attempts:0};
+    window.fetch=async(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(new URL(url,window.location.href).pathname==='/api/v1/guests'){
+        state.__skyBarGuestDirectoryOutage.attempts+=1;
+        if(state.__skyBarGuestDirectoryOutage.active)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated guest directory outage'}}),{status:503,headers:{'content-type':'application/json'}});
+      }
+      return originalFetch(input,init);
+    };
+  });
+  await page.goto('/app/guests');
+});
+Then('the guest directory failure is localized instead of empty',async({page})=>{
+  await expect(page.locator('.notice--error')).toContainText(/Die Anfrage konnte nicht abgeschlossen werden|Impossibile completare la richiesta|The request could not be completed/);
+  await expect(page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();
+  await expect(page.locator('.empty')).toHaveCount(0);
+  await expect(page.locator('.table-row')).toHaveCount(0);
+});
+When('the host retries the guest directory',async({page})=>{
+  const retry=page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/});
+  await retry.evaluate((button)=>button.addEventListener('click',()=>{
+    (window as unknown as {__skyBarGuestDirectoryOutage:{active:boolean}}).__skyBarGuestDirectoryOutage.active=false;
+  },{capture:true,once:true}));
+  await retry.click();
+});
+Then('existing guests appear after guest directory recovery',async({page})=>{
+  await expect(page.locator('.table-row').filter({hasText:'Anna Berger'})).toBeVisible();
+  expect(await page.evaluate(()=>(window as unknown as {__skyBarGuestDirectoryOutage:{attempts:number}}).__skyBarGuestDirectoryOutage.attempts)).toBeGreaterThanOrEqual(2);
+});
 When('a guest update response is lost before another host edits the guest',async({page})=>{const request=page.context().request;const guests=await (await request.get('/api/v1/guests')).json() as {data:{id:string;name:string;roomId:string;language:string;version:number}[]};const original=guests.data.find(guest=>guest.name==='Anna Berger')!;const command={name:'First guest edit',roomId:original.roomId,language:original.language,expectedVersion:original.version};const committed=await (await request.patch(`/api/v1/guests/${original.id}`,{headers:csrfHeaders,data:command})).json() as {version:number};expect((await request.patch(`/api/v1/guests/${original.id}`,{headers:csrfHeaders,data:{...command,name:'Newer guest edit',expectedVersion:committed.version}})).status()).toBe(200);staleGuestUpdateStatus=(await request.patch(`/api/v1/guests/${original.id}`,{headers:csrfHeaders,data:command})).status();const finalGuests=await (await request.get('/api/v1/guests')).json() as {data:{id:string;name:string}[]};staleGuestFinalName=finalGuests.data.find(guest=>guest.id===original.id)!.name});
 Then('retrying the stale guest update is rejected',async()=>{expect(staleGuestUpdateStatus).toBe(409)});
 Then('the newer guest name remains configured',async()=>{expect(staleGuestFinalName).toBe('Newer guest edit')});
@@ -2373,16 +2567,26 @@ When('database writers attempt to rewrite settled financial records',async({page
   const billSnapshot=`SELECT id,number::text,tab_id,guest_id,host_id,mutation_id,venue_name,venue_timezone,guest_name,room_name,host_name,total_cents,payment_method,payment_note,settled_at FROM bills WHERE id=$1`;
   const orderItemSnapshot=`SELECT id,batch_id,product_id,product_name,unit_price_cents,quantity,source,submitted_by_host,submitted_by_guest_session,provisional_until,guest_mutation_id,guest_expected_price_cents,guest_expected_product_version,billing_version,voided_at,voided_by_host,void_reason,host_void_mutation_id,host_void_expected_billing_version,guest_undo_mutation_id,created_at FROM order_items WHERE id=$1`;
   const billLineSnapshot=`SELECT id,bill_id,original_order_item_id,product_name,unit_price_cents,quantity,source FROM bill_items WHERE bill_id=$1`;
-  let billUpdateError='';let billDeleteError='';let incompleteBillVoidError='';let unauditedBillVoidError='';let mismatchedBillVoidAuditError='';let mismatchedBillVoidAuditReachedCommit=false;let orderItemUpdateError='';let orderItemDeleteError='';let orderItemReopenError='';let billLineUpdateError='';let billLineDeleteError='';let billsTruncateError='';let orderItemsTruncateError='';let billItemsTruncateError='';let billsTruncateTriggerEnabled=false;let orderItemsTruncateTriggerEnabled=false;let billItemsTruncateTriggerEnabled=false;let billBefore:unknown;let orderItemBefore:unknown;let billLineBefore:unknown;let orderItemId='';
+  let billUpdateError='';let billDeleteError='';let incompleteBillVoidError='';let unauditedBillVoidError='';let mismatchedBillVoidAuditError='';let mismatchedBillVoidAuditReachedCommit=false;let orderItemUpdateError='';let orderItemDeleteError='';let orderItemReopenError='';let settledTabReopenError='';let incompleteAuditedVoidError='';let incompleteAuditedVoidReachedCommit=false;let billLineUpdateError='';let billLineDeleteError='';let billsTruncateError='';let orderItemsTruncateError='';let billItemsTruncateError='';let billsTruncateTriggerEnabled=false;let orderItemsTruncateTriggerEnabled=false;let billItemsTruncateTriggerEnabled=false;let billBefore:unknown;let orderItemBefore:unknown;let billLineBefore:unknown;let orderItemId='';
   try{
     billBefore=(await database.query(billSnapshot,[bill.id])).rows[0];
     orderItemId=String((await database.query(`SELECT id FROM order_items WHERE bill_id=$1`,[bill.id])).rows[0].id);
     orderItemBefore=(await database.query(orderItemSnapshot,[orderItemId])).rows[0];
     billLineBefore=(await database.query(billLineSnapshot,[bill.id])).rows[0];
+    try{await database.query(`UPDATE order_tabs SET status='open',closed_at=NULL WHERE id=$1`,[order.tabId])}catch(caught){settledTabReopenError=(caught as {code?:string}).code??''}
     try{await database.query(`UPDATE bills SET guest_name=guest_name||' rewritten' WHERE id=$1`,[bill.id])}catch(caught){billUpdateError=(caught as {code?:string}).code??''}
     try{await database.query('DELETE FROM bills WHERE id=$1',[bill.id])}catch(caught){billDeleteError=(caught as {code?:string}).code??''}
     try{await database.query('UPDATE bills SET voided_at=clock_timestamp() WHERE id=$1',[bill.id])}catch(caught){incompleteBillVoidError=(caught as {code?:string}).code??''}
     try{await database.query(`UPDATE bills SET voided_at=clock_timestamp(),void_reason='Missing audit',voided_by=$1,void_mutation_id=$2 WHERE id=$3`,[me.host.id,crypto.randomUUID(),bill.id])}catch(caught){unauditedBillVoidError=(caught as {code?:string}).code??''}
+    const incompleteMutationId=crypto.randomUUID();
+    const incompleteReason='Audited but still billed';
+    try{
+      await database.query('BEGIN');
+      await database.query(`UPDATE bills SET voided_at=clock_timestamp(),void_reason=$1,voided_by=$2,void_mutation_id=$3 WHERE id=$4`,[incompleteReason,me.host.id,incompleteMutationId,bill.id]);
+      await database.query(`INSERT INTO audit_events(actor_host_id,action,entity_type,entity_id,detail,created_at) VALUES ($1,'bill.voided','bill',$2,$3,clock_timestamp())`,[me.host.id,bill.id,JSON.stringify({reason:incompleteReason,mutationId:incompleteMutationId})]);
+      incompleteAuditedVoidReachedCommit=true;
+      await database.query('COMMIT');
+    }catch(caught){incompleteAuditedVoidError=(caught as {code?:string}).code??'';await database.query('ROLLBACK')}
     const mismatchedMutationId=crypto.randomUUID();
     try{
       await database.query('BEGIN');
@@ -2423,7 +2627,7 @@ When('database writers attempt to rewrite settled financial records',async({page
     restoredOrderItemState=(await verification.query<{status:string;billId:string|null;billingVersion:number}>(`SELECT status,bill_id AS "billId",billing_version AS "billingVersion" FROM order_items WHERE id=$1`,[orderItemId])).rows[0]!;
   }finally{await verification.end()}
   const restoredItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
-  immutableFinancialResult={billUpdateError,billDeleteError,incompleteBillVoidError,unauditedBillVoidError,mismatchedBillVoidAuditError,mismatchedBillVoidAuditReachedCommit,repeatedBillVoidError,orderItemUpdateError,orderItemDeleteError,orderItemReopenError,billLineUpdateError,billLineDeleteError,billsTruncateError,orderItemsTruncateError,billItemsTruncateError,billsTruncateTriggerEnabled,orderItemsTruncateTriggerEnabled,billItemsTruncateTriggerEnabled,billBefore,billAfter,orderItemBefore,orderItemAfter,billLineBefore,billLineAfter,settlementStatus:settlement.status(),voidStatus:voidResponse.status(),voidAuditCount,restoredItemCount,restoredOrderItemState};
+  immutableFinancialResult={billUpdateError,billDeleteError,incompleteBillVoidError,unauditedBillVoidError,mismatchedBillVoidAuditError,mismatchedBillVoidAuditReachedCommit,repeatedBillVoidError,orderItemUpdateError,orderItemDeleteError,orderItemReopenError,settledTabReopenError,incompleteAuditedVoidError,incompleteAuditedVoidReachedCommit,billLineUpdateError,billLineDeleteError,billsTruncateError,orderItemsTruncateError,billItemsTruncateError,billsTruncateTriggerEnabled,orderItemsTruncateTriggerEnabled,billItemsTruncateTriggerEnabled,billBefore,billAfter,orderItemBefore,orderItemAfter,billLineBefore,billLineAfter,settlementStatus:settlement.status(),voidStatus:voidResponse.status(),voidAuditCount,restoredItemCount,restoredOrderItemState};
 });
 Then('direct bill header updates are rejected',async()=>{expect(immutableFinancialResult?.billUpdateError).toBe('P0001')});
 Then('direct bill header deletes are rejected',async()=>{expect(immutableFinancialResult?.billDeleteError).toBe('P0001')});
@@ -2434,6 +2638,8 @@ Then('repeated bill void transitions are rejected',async()=>{expect(immutableFin
 Then('direct billed order item updates are rejected',async()=>{expect(immutableFinancialResult?.orderItemUpdateError).toBe('P0001')});
 Then('direct billed order item deletes are rejected',async()=>{expect(immutableFinancialResult?.orderItemDeleteError).toBe('P0001')});
 Then('direct billed order item reopening is rejected',async()=>{expect(immutableFinancialResult?.orderItemReopenError).toBe('P0001')});
+Then('direct settled non-voided tab reopening is rejected',async()=>{expect(immutableFinancialResult?.settledTabReopenError).toBe('P0001')});
+Then('audited bill voids retaining billed items are rejected at commit',async()=>{expect(immutableFinancialResult).toMatchObject({incompleteAuditedVoidReachedCommit:true,incompleteAuditedVoidError:'P0001'})});
 Then('direct bill line updates are rejected',async()=>{expect(immutableFinancialResult?.billLineUpdateError).toBe('P0001')});
 Then('direct bill line deletes are rejected',async()=>{expect(immutableFinancialResult?.billLineDeleteError).toBe('P0001')});
 Then('direct bill header truncation is rejected',async()=>{expect(immutableFinancialResult?.billsTruncateError).toBe('P0001')});

@@ -40,6 +40,13 @@ Feature: Venue operations configuration
     When the host creates guest "Ada Test" in room "101"
     Then guest "Ada Test" is listed in room "101"
 
+  Scenario: A guest directory failure can be retried
+    Given an authenticated administrator
+    When the guest directory fails to load
+    Then the guest directory failure is localized instead of empty
+    When the host retries the guest directory
+    Then existing guests appear after guest directory recovery
+
   Scenario: A stale guest retry cannot overwrite a newer edit
     Given an authenticated administrator
     When a guest update response is lost before another host edits the guest

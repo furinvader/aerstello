@@ -7,6 +7,13 @@ Feature: Secure host accounts and devices
     Then the host dashboard shows the venue name "Hotel Aurora"
     And the page has no serious accessibility violations
 
+  Scenario: A public launch identity outage can be retried
+    Given the seeded Sky Bar venue
+    When a public launch identity check fails transiently
+    Then public launch shows a localized failure with retry
+    When the visitor retries the launch identity checks
+    Then public entry opens after launch identity recovery
+
   Scenario: A host can inspect logged-in devices
     Given an authenticated administrator
     When the host opens the account screen

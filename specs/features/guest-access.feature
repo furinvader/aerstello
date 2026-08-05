@@ -1,6 +1,15 @@
 Feature: Guest device access and self-service
   Guests request a device-bound login and self-report items from the self-service bar.
 
+  Scenario: Public bootstrap loading and failure hide the access form
+    Given the seeded Sky Bar venue
+    When the public bootstrap request remains pending
+    Then bootstrap loading is shown without the access form
+    When the public bootstrap request fails
+    Then bootstrap failure is localized and still hides the access form
+    When the guest retries public bootstrap
+    Then the access form appears after bootstrap recovery
+
   Scenario: A guest request updates the host and can be approved
     Given an authenticated administrator and a separate guest device
     When "Luca Rossi" requests access for room "102"
@@ -14,6 +23,13 @@ Feature: Guest device access and self-service
     Then the host sees the pending request for "New Roommate"
     When the host opens approval for "New Roommate"
     Then creating a new guest is selected by default
+
+  Scenario: Host approval guest directory loading blocks approval
+    Given an authenticated administrator
+    When approval guest directory data remains loading
+    Then approval is unavailable before the guest directory loads
+    When the approval guest directory finishes loading
+    Then the host can open approval with the loaded guest directory
 
   Scenario: An uncertain access approval is recovered idempotently
     Given an authenticated administrator and a separate guest device
@@ -105,6 +121,13 @@ Feature: Guest device access and self-service
     Given an approved guest device for "Luca Rossi" in room "102"
     When the host revokes Luca's device from the guest directory
     Then Luca's revoked device loses guest access
+
+  Scenario: A guest device failure can be retried
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When the guest device directory fails to load
+    Then the guest device failure is localized instead of empty
+    When the host retries the guest device directory
+    Then Luca's device appears after guest device recovery
 
   Scenario: Guest-device revocation refreshes another open host client
     Given an approved guest device for "Luca Rossi" in room "102"

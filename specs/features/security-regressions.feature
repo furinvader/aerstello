@@ -76,7 +76,7 @@ Feature: Device grants and replay protection
     And billing version changes outside billing are rejected
     And the stale item removal remains a billing conflict
 
-  Scenario: Settled financial records reject direct mutation
+  Scenario: Database settled financial records reject direct mutation
     Given an authenticated administrator
     When database writers attempt to rewrite settled financial records
     Then direct bill header updates are rejected
@@ -88,6 +88,8 @@ Feature: Device grants and replay protection
     And direct billed order item updates are rejected
     And direct billed order item deletes are rejected
     And direct billed order item reopening is rejected
+    And direct settled non-voided tab reopening is rejected
+    And audited bill voids retaining billed items are rejected at commit
     And direct bill line updates are rejected
     And direct bill line deletes are rejected
     And direct bill header truncation is rejected
