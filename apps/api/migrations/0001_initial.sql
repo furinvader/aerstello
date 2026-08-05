@@ -404,6 +404,20 @@ BEFORE UPDATE OR DELETE ON bills
 FOR EACH ROW
 EXECUTE FUNCTION enforce_bill_immutability();
 
+CREATE FUNCTION reject_bills_truncate()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'Bills are immutable and cannot be truncated';
+END;
+$$;
+
+CREATE TRIGGER bills_reject_truncate
+BEFORE TRUNCATE ON bills
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_bills_truncate();
+
 CREATE FUNCTION verify_bill_void_audit_event()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -500,3 +514,17 @@ CREATE TRIGGER order_items_enforce_billing_version
 BEFORE UPDATE OR DELETE ON order_items
 FOR EACH ROW
 EXECUTE FUNCTION enforce_order_item_billing_version();
+
+CREATE FUNCTION reject_order_items_truncate()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'Order items with financial history are immutable and cannot be truncated';
+END;
+$$;
+
+CREATE TRIGGER order_items_reject_truncate
+BEFORE TRUNCATE ON order_items
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_order_items_truncate();

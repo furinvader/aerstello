@@ -11,7 +11,11 @@ await transaction(async (client) => {
     // their identity sequence so the test reset cannot manufacture reused IDs.
     await client.query('DELETE FROM realtime_events');
     await client.query('ALTER TABLE bill_items DISABLE TRIGGER bill_items_reject_truncate');
+    await client.query('ALTER TABLE order_items DISABLE TRIGGER order_items_reject_truncate');
+    await client.query('ALTER TABLE bills DISABLE TRIGGER bills_reject_truncate');
     await client.query(`TRUNCATE rate_limit_counters,host_account_commands,product_create_commands,audit_events,bill_items,order_items,bills,order_batches,order_tabs,guest_sessions,access_requests,product_versions,products,categories,guests,rooms,host_sessions,hosts RESTART IDENTITY CASCADE`);
+    await client.query('ALTER TABLE bills ENABLE TRIGGER bills_reject_truncate');
+    await client.query('ALTER TABLE order_items ENABLE TRIGGER order_items_reject_truncate');
     await client.query('ALTER TABLE bill_items ENABLE TRIGGER bill_items_reject_truncate');
     await client.query(`UPDATE venue_settings SET name='',default_language='de',timezone='Europe/Berlin',catalog_version=1,version=1`);
   }
