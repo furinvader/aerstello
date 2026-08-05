@@ -194,6 +194,7 @@ let staleRoomArchiveStatus = 0;
 let staleRoomArchiveFinalName = '';
 let staleHostUpdateStatus = 0;
 let staleHostFinalActive = false;
+let hostSessionRequestsBeforeDirectoryRetry = 0;
 let reopenedHostSessionStatus = 0;
 let uncertainVoidReasonLocked = false;
 let retriedVoidReasons: string[] = [];
@@ -561,6 +562,7 @@ Then('host account failure and retry hide empty and host mutation actions',async
 When('the administrator retries the host account directory',async({page})=>{
   const heading=page.getByRole('heading',{name:/Host-Konten|Account host|Host accounts/});
   const directory=heading.locator('xpath=../following-sibling::*[1]');
+  hostSessionRequestsBeforeDirectoryRetry=await page.evaluate(()=>(window as unknown as {__skyBarQueryOutage:{observed:Record<string,number>}}).__skyBarQueryOutage.observed['/api/v1/account/sessions']??0);
   await retryQueryOutage(page,directory.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}));
 });
 Then('host account rows and mutation actions recover independently',async({page})=>{
@@ -571,7 +573,7 @@ Then('host account rows and mutation actions recover independently',async({page}
   await expect(directory.getByRole('button',{name:/Deaktivieren|Disabilita|Disable/})).toBeEnabled();
   const state=await page.evaluate(()=>(window as unknown as {__skyBarQueryOutage:{attempts:number;observed:Record<string,number>}}).__skyBarQueryOutage);
   expect(state.attempts).toBeGreaterThanOrEqual(3);
-  expect(state.observed['/api/v1/account/sessions']).toBe(1);
+  expect(state.observed['/api/v1/account/sessions']??0).toBe(hostSessionRequestsBeforeDirectoryRetry);
   await restoreQueryOutage(page);
 });
 When('the initial host identity request fails transiently on the bills route',async({page})=>{
@@ -2199,7 +2201,7 @@ When('the saved guest language conflicts with local language on launch',async({p
     const state=window as unknown as {__skyBarFirstGuestShellLanguage?:string};
     new MutationObserver(()=>{
       if(!state.__skyBarFirstGuestShellLanguage&&document.querySelector('.guest-shell'))state.__skyBarFirstGuestShellLanguage=document.documentElement.lang;
-    }).observe(document.documentElement,{childList:true,subtree:true});
+    }).observe(document,{childList:true,subtree:true});
   });
   await guestPage!.reload();
 });
