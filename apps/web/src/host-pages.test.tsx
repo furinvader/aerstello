@@ -12,7 +12,7 @@ vi.mock('./api', async () => {
 });
 vi.mock('./host-shell', () => ({ useHostContext: hostContextMock }));
 
-import { BillDetailPage, BillsPage, DashboardPage, OrdersPage, RequestsPage, SettingsPage } from './host-pages';
+import { BillDetailPage, BillsPage, DashboardPage, GuestsPage, OrdersPage, RequestsPage, SettingsPage } from './host-pages';
 
 function renderBillsPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -37,6 +37,11 @@ function renderDashboardPage() {
 function renderRequestsPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(<QueryClientProvider client={client}><I18nProvider><RequestsPage/></I18nProvider></QueryClientProvider>);
+}
+
+function renderGuestsPage() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(<QueryClientProvider client={client}><I18nProvider><GuestsPage/></I18nProvider></QueryClientProvider>);
 }
 
 function renderSettingsPage() {
@@ -161,7 +166,7 @@ describe('access request query states', () => {
 
     renderRequestsPage();
 
-    expect(screen.getByText('Loading…')).toBeVisible();
+    expect(screen.getAllByText('Loading…')).toHaveLength(2);
     expect(screen.queryByText('Nothing here yet')).not.toBeInTheDocument();
 
     resolveRequests({ data: [] });
@@ -185,6 +190,122 @@ describe('access request query states', () => {
     expect(await screen.findByText('Luca Rossi')).toBeVisible();
     expect(screen.getByText(/102/)).toBeVisible();
     expect(apiMock.mock.calls.filter(([path])=>path==='/access-requests')).toHaveLength(2);
+  });
+
+  it('blocks approval until the failed guest directory recovers', async () => {
+    const request={id:'request-1',name:'Luca Rossi',roomId:'room-102',roomName:'102',language:'it',status:'pending',requestedAt:'2026-08-05T10:00:00.000Z'};
+    const guest={id:'guest-1',name:'Existing Luca',roomId:'room-102',roomName:'102',language:'it',itemCount:0,totalCents:0,version:1};
+    let rejectGuests!: (reason: unknown) => void;
+    apiMock.mockImplementation((path:string) => {
+      if(path==='/access-requests')return Promise.resolve({ data: [request] });
+      if(path==='/guests')return apiMock.mock.calls.filter(([calledPath])=>calledPath==='/guests').length===1
+        ? new Promise((_,reject) => { rejectGuests=reject; })
+        : Promise.resolve({ data: [guest] });
+      return Promise.reject(new Error(`Unexpected API path ${path}`));
+    });
+
+    renderRequestsPage();
+
+    const approve=await screen.findByRole('button',{name:'Approve'});
+    expect(approve).toBeDisabled();
+    expect(screen.getByText('Loading…')).toBeVisible();
+    fireEvent.click(approve);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(apiMock.mock.calls.some(([path])=>path==='/access-requests/request-1/approve')).toBe(false);
+
+    rejectGuests(new TypeError('Simulated guest directory outage'));
+    expect(await screen.findByText('The request could not be completed.')).toBeVisible();
+    expect(approve).toBeDisabled();
+    fireEvent.click(screen.getByRole('button',{name:'Retry'}));
+
+    await waitFor(()=>expect(approve).toBeEnabled());
+    fireEvent.click(approve);
+    expect(await screen.findByRole('option',{name:'Link to Existing Luca'})).toBeInTheDocument();
+  });
+});
+
+const directoryGuest={id:'guest-1',name:'Luca Rossi',roomId:'room-102',roomName:'102',language:'it',itemCount:0,totalCents:0,version:1};
+
+describe('guest directory query states', () => {
+  beforeEach(() => {
+    apiMock.mockReset();
+    localStorage.setItem('skybar-language', 'en');
+  });
+  afterEach(cleanup);
+
+  it('shows loading until a successful empty response arrives', async () => {
+    let resolveGuests!: (value: unknown) => void;
+    apiMock.mockImplementation((path:string) => path==='/guests'
+      ? new Promise(resolve => { resolveGuests=resolve; })
+      : Promise.resolve({ data: [] }));
+
+    renderGuestsPage();
+
+    expect(screen.getByText('Loading…')).toBeVisible();
+    expect(screen.queryByText('Nothing here yet')).not.toBeInTheDocument();
+    resolveGuests({ data: [] });
+    expect(await screen.findByText('Nothing here yet')).toBeVisible();
+  });
+
+  it('retries a failed response and renders recovered guests', async () => {
+    apiMock.mockImplementation((path:string) => path==='/guests'
+      ? apiMock.mock.calls.filter(([calledPath])=>calledPath==='/guests').length===1
+        ? Promise.reject(new TypeError('Simulated guest directory outage'))
+        : Promise.resolve({ data: [directoryGuest] })
+      : Promise.resolve({ data: [] }));
+
+    renderGuestsPage();
+
+    expect(await screen.findByText('The request could not be completed.')).toBeVisible();
+    expect(screen.queryByText('Nothing here yet')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button',{name:'Retry'}));
+    expect(await screen.findByText('Luca Rossi')).toBeVisible();
+  });
+});
+
+describe('guest device query states', () => {
+  beforeEach(() => {
+    apiMock.mockReset();
+    localStorage.setItem('skybar-language', 'en');
+  });
+  afterEach(cleanup);
+
+  it('shows loading until a successful empty response arrives', async () => {
+    let resolveSessions!: (value: unknown) => void;
+    apiMock.mockImplementation((path:string) => {
+      if(path==='/guests')return Promise.resolve({ data: [directoryGuest] });
+      if(path==='/guests/guest-1/sessions')return new Promise(resolve => { resolveSessions=resolve; });
+      return Promise.resolve({ data: [] });
+    });
+
+    renderGuestsPage();
+    fireEvent.click(await screen.findByRole('button',{name:'Logged-in devices Luca Rossi'}));
+    const modal=within(screen.getByRole('dialog',{name:'Luca Rossi · Logged-in devices'}));
+
+    expect(modal.getByText('Loading…')).toBeVisible();
+    expect(modal.queryByText('Nothing here yet')).not.toBeInTheDocument();
+    resolveSessions({ data: [] });
+    expect(await modal.findByText('Nothing here yet')).toBeVisible();
+  });
+
+  it('retries a failed response and renders recovered devices', async () => {
+    const session={id:'session-1',userAgent:'Luca Phone',createdAt:'2026-08-05T09:00:00.000Z',expiresAt:'2026-08-06T09:00:00.000Z'};
+    apiMock.mockImplementation((path:string) => {
+      if(path==='/guests')return Promise.resolve({ data: [directoryGuest] });
+      if(path==='/guests/guest-1/sessions')return apiMock.mock.calls.filter(([calledPath])=>calledPath==='/guests/guest-1/sessions').length===1
+        ? Promise.reject(new TypeError('Simulated guest device outage'))
+        : Promise.resolve({ data: [session] });
+      return Promise.resolve({ data: [] });
+    });
+
+    renderGuestsPage();
+    fireEvent.click(await screen.findByRole('button',{name:'Logged-in devices Luca Rossi'}));
+    const modal=within(screen.getByRole('dialog',{name:'Luca Rossi · Logged-in devices'}));
+
+    expect(await modal.findByText('The request could not be completed.')).toBeVisible();
+    expect(modal.queryByText('Nothing here yet')).not.toBeInTheDocument();
+    fireEvent.click(modal.getByRole('button',{name:'Retry'}));
+    expect(await modal.findByText('Luca Phone')).toBeVisible();
   });
 });
 
