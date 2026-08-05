@@ -345,6 +345,54 @@ BEFORE INSERT ON realtime_events
 FOR EACH STATEMENT
 EXECUTE FUNCTION serialize_realtime_event_inserts();
 
+CREATE FUNCTION enforce_billed_order_tab_immutability()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF OLD.status <> 'billed' THEN
+    IF TG_OP = 'DELETE' THEN
+      RETURN OLD;
+    END IF;
+
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'UPDATE'
+     AND NEW.status = 'open'
+     AND NEW.closed_at IS NULL
+     AND to_jsonb(NEW) - ARRAY['status', 'closed_at']
+         = to_jsonb(OLD) - ARRAY['status', 'closed_at']
+     AND NOT EXISTS (
+       SELECT 1
+         FROM bills b
+        WHERE b.tab_id = OLD.id
+          AND b.voided_at IS NULL
+     )
+     AND EXISTS (
+       SELECT 1
+         FROM order_items i
+         JOIN bills b ON b.id = i.bill_id
+        WHERE i.tab_id = OLD.id
+          AND i.status = 'billed'
+          AND b.tab_id = OLD.id
+          AND b.voided_at IS NOT NULL
+          AND b.void_reason IS NOT NULL
+          AND b.voided_by IS NOT NULL
+          AND b.void_mutation_id IS NOT NULL
+     ) THEN
+    RETURN NEW;
+  END IF;
+
+  RAISE EXCEPTION 'Billed order tabs are immutable except during complete audited bill reversal';
+END;
+$$;
+
+CREATE TRIGGER order_tabs_enforce_billed_immutability
+BEFORE UPDATE OR DELETE ON order_tabs
+FOR EACH ROW
+EXECUTE FUNCTION enforce_billed_order_tab_immutability();
+
 CREATE FUNCTION enforce_bill_item_immutability()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -439,6 +487,15 @@ BEGIN
           AND detail->>'mutationId' = NEW.void_mutation_id::text
      ) THEN
     RAISE EXCEPTION 'A bill void requires exactly one matching audit event';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+      FROM order_items
+     WHERE bill_id = NEW.id
+       AND status = 'billed'
+  ) THEN
+    RAISE EXCEPTION 'A bill void must reopen every billed order item';
   END IF;
 
   RETURN NULL;
