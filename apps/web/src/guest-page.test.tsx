@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GuestPage } from './guest-page';
 import { I18nProvider } from './i18n';
@@ -14,6 +14,7 @@ vi.mock('./api', async () => {
 
 describe('guest realtime events', () => {
   beforeEach(() => {
+    apiMock.mockReset();
     eventSourceUrls.length = 0;
     localStorage.setItem('skybar-language', 'en');
     apiMock.mockImplementation((path: string) => {
@@ -39,6 +40,56 @@ describe('guest realtime events', () => {
     render(<QueryClientProvider client={client}><I18nProvider><GuestPage /></I18nProvider></QueryClientProvider>);
 
     expect(await screen.findByRole('heading', { name: 'Grace' })).toBeVisible();
+    const selfService = screen.getByRole('heading', { name: 'Self-service' }).closest('section')!;
+    expect(await within(selfService).findByText('Nothing here yet')).toBeVisible();
     expect(eventSourceUrls).toEqual(['/api/v1/events?scope=guest']);
+  });
+
+  it('shows catalog loading without a successful empty state', async () => {
+    apiMock.mockImplementation((path: string) => {
+      if (path === '/guest/me') return Promise.resolve({ guest: { id: 'guest-1', name: 'Grace', roomName: '12', sessionId: 'session-1', expiresAt: '2099-01-01T00:00:00.000Z' } });
+      if (path === '/guest/tab') return Promise.resolve({ id: 'tab-1', guestId: 'guest-1', status: 'open', items: [], itemCount: 0, totalCents: 0 });
+      if (path === '/guest/catalog') return new Promise(() => undefined);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><I18nProvider><GuestPage /></I18nProvider></QueryClientProvider>);
+
+    expect(await screen.findByRole('heading', { name: 'Grace' })).toBeVisible();
+    const selfService = screen.getByRole('heading', { name: 'Self-service' }).closest('section')!;
+    expect(within(selfService).getByText('Loading…')).toBeVisible();
+    expect(within(selfService).queryByText('Nothing here yet')).not.toBeInTheDocument();
+  });
+
+  it('retries a failed catalog and renders recovered products', async () => {
+    let catalogAttempts = 0;
+    apiMock.mockImplementation((path: string) => {
+      if (path === '/guest/me') return Promise.resolve({ guest: { id: 'guest-1', name: 'Grace', roomName: '12', sessionId: 'session-1', expiresAt: '2099-01-01T00:00:00.000Z' } });
+      if (path === '/guest/tab') return Promise.resolve({ id: 'tab-1', guestId: 'guest-1', status: 'open', items: [], itemCount: 0, totalCents: 0 });
+      if (path === '/guest/catalog') {
+        catalogAttempts += 1;
+        return catalogAttempts === 1
+          ? Promise.reject(new TypeError('Network unavailable'))
+          : Promise.resolve({ data: [{ id: 'product-1', categoryId: 'category-1', categoryName: { de: 'Getränke', it: 'Bevande', en: 'Drinks' }, name: { de: 'Mineralwasser', it: 'Acqua minerale', en: 'Mineral water' }, priceCents: 260, enabled: true, selfServiceOnly: true, position: 0, version: 3 }] });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><I18nProvider><GuestPage /></I18nProvider></QueryClientProvider>);
+
+    const selfService = (await screen.findByRole('heading', { name: 'Self-service' })).closest('section')!;
+    expect(await within(selfService).findByText('The request could not be completed.')).toBeVisible();
+    expect(within(selfService).queryByText('Nothing here yet')).not.toBeInTheDocument();
+    fireEvent.click(within(selfService).getByRole('button', { name: 'Retry' }));
+
+    expect(await within(selfService).findByRole('heading', { name: 'Drinks' })).toBeVisible();
+    expect(within(selfService).getByText('Mineral water')).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Grace' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Open orders' })).toBeVisible();
+    expect(catalogAttempts).toBe(2);
+    expect(apiMock.mock.calls.filter(([path]) => path === '/guest/me')).toHaveLength(1);
+    expect(apiMock.mock.calls.filter(([path]) => path === '/guest/tab')).toHaveLength(1);
   });
 });
