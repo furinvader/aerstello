@@ -62,9 +62,17 @@ Before editing:
 
 ### PR review cycle
 
-- The main orchestrator alone requests GitHub reviews and integrates fixes.
-  Accept a review only when its commit equals the recorded requested SHA and
-  current PR head; otherwise it is stale.
+- The main orchestrator alone writes durable review state, integrates fixes,
+  posts evidence replies, resolves review threads, and requests GitHub reviews.
+  Fix workers and the integration verifier never write to GitHub.
+- Accept a review only when its commit equals the recorded requested SHA and
+  current PR head; otherwise it is stale. A Codex thumbs-up on the recorded
+  request may represent a clean result only while that request SHA still equals
+  the current PR head.
+- Treat `integrated` as code landed centrally, `completed` as its source finding
+  resolved with evidence (or successful threadless verification), and
+  `complete` as the exact-head cycle terminal state. Re-query live threads after
+  resolving them; local mutation success is not zero-unresolved proof.
 - Fix workers must stay within their task ownership and return structured
   results. Parallel writers require isolated worktrees and non-overlapping write
   sets.

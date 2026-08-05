@@ -5,10 +5,11 @@ description: Orchestrate and resume Sky Bar pull-request review remediation with
 
 # Resolve a PR review cycle
 
-Keep the primary Codex agent as the sole orchestrator and logical state writer.
-Use GitHub `@codex review` as the canonical independent reviewer. Use local
-workers only for accepted, bounded fixes and use the local integration verifier
-only after integration.
+Keep the primary Codex agent as the sole orchestrator, logical state writer,
+central integrator, GitHub review requester, evidence replier, and review-thread
+resolver. Workers and the verifier never write to GitHub. Use GitHub
+`@codex review` as the canonical independent reviewer, bounded workers for
+accepted fixes, and the local verifier only after integration.
 
 Read these repository contracts when their phase becomes relevant:
 
@@ -23,6 +24,9 @@ Read these repository contracts when their phase becomes relevant:
 
 - Read root `AGENTS.md`, this skill, and active state from
   `node scripts/pr-review-state.mjs show`.
+- Explicitly migrate schema-v1 state before continuing; migration must create a
+  backup and preserve dispositions and stable identities. Never migrate state
+  silently during an unrelated command.
 - Resolve the repository, explicit PR number, base SHA, local HEAD, pushed PR
   head, and `npm run release:state -- --json`. Reconcile them with recorded
   state. Never guess a PR, SHA, release, or review result.
@@ -38,20 +42,23 @@ condition below:
 
 - No implementation worker is active.
 - Every accepted worker commit is integrated.
+- Every prior task is completed; none is queued, running, or blocked.
 - The integration checkout is clean.
 - Required validation passed for the current SHA, including release policy.
 - The branch is pushed, local HEAD equals the GitHub PR head, and the state
   checkpoint records that exact SHA.
+- A live thread query proves there are zero unresolved canonical review threads.
 
 Post exactly `@codex review` through the authenticated GitHub connector or
-`gh`. Record the request comment ID/URL, requested SHA, and timestamp. Never use
-`@codex address that feedback` or ask workers to post GitHub comments.
+`gh`. Record the request kind, comment ID/URL, requested SHA, and timestamp.
+Never use `@codex address that feedback` or ask workers to post GitHub comments.
 
 ## 3. Collect and triage the review
 
-- Read the standard GitHub review and structured commit ID. Accept it only when
-  `review commit == requested head == current PR head`; otherwise record it as
-  stale and do not implement it.
+- Read structured GitHub review data. A standard review is applicable only when
+  `review commit == requested head == current PR head`. A clean result may also
+  be the canonical Codex thumbs-up on the recorded request comment, but only
+  while `request head == current PR head`. Otherwise record it as stale.
 - Record a clean applicable review as a completed round with no findings.
 - Classify every finding as `actionable`, `duplicate`, `already-fixed`, `stale`,
   `invalid`, `policy-conflict`, `out-of-scope`, or `needs-human-decision`.
@@ -92,9 +99,10 @@ Post exactly `@codex review` through the authenticated GitHub connector or
   task ID, commit SHA, ownership, required validation, or scope is wrong.
 - Require workers to report unexpected dependencies instead of absorbing them.
 - Inspect accepted commits and cherry-pick them centrally in dependency order.
-  Resolve conflicts only in the integration checkout. Run narrow checks after
-  each dependency cluster and checkpoint state after every successful
-  integration.
+  Resolve conflicts only in the integration checkout. Marking a task
+  `integrated` means only that its code landed; its finding remains open. Run
+  narrow checks after each dependency cluster and checkpoint state after every
+  successful integration.
 - Remove generated worktrees only after their commits are integrated or
   intentionally discarded. Never force-remove a dirty or unknown path.
 
@@ -107,23 +115,32 @@ Post exactly `@codex review` through the authenticated GitHub connector or
 - Convert valid verifier findings into ordinary tasks. The verifier never edits
   or requests GitHub review.
 
-## 8. Validate, push, and loop safely
+## 8. Validate, resolve, and loop safely
 
 - Workers run narrow tests only. The orchestrator runs the integrated gate once
   per batch: `npm run check`, release-state and migration checks, and database/
   E2E validation when the changed area requires it.
-- Push the stable integration head, verify local HEAD equals PR head, checkpoint
-  the exact SHA, then request the next canonical review.
+- After verifier approval, validate and push the stable integration head, prove
+  local HEAD equals PR head, and checkpoint that SHA. Then reply to every source
+  thread with concise fix and validation evidence, resolve it, and re-query live
+  threads until zero unresolved canonical threads are proven. Only then request
+  the next canonical review.
+- A task becomes `completed` only after its source thread is resolved with that
+  evidence, or after successful threadless verification. The cycle becomes
+  `complete` only after a clean exact-head outcome and every completion gate.
 - If one semantic finding recurs in two consecutive rounds, perform focused
-  root-cause escalation instead of repeating the patch. After three automatic
-  review rounds, stop with a consolidated human-decision report.
+  root-cause escalation instead of repeating the patch. Allow at most three
+  discovery reviews. If fixes follow the third, one additional exact-head
+  verification review is authorized. A stale verification outcome or any new
+  verification finding moves the cycle to `awaiting-human-decision`; do not
+  request another review automatically.
 
 ## 9. Finish or pause truthfully
 
-- Finish only when the latest review applies to the integration head, every
-  finding has a disposition, no task is queued/running/blocked, validation
-  passes, and no actionable finding remains.
-- Archive completed or intentionally abandoned state with
-  `scripts/pr-review-state.mjs archive`.
+- Finish only when the clean outcome applies to the integration head, every
+  finding has a disposition, every task is completed, validation and exact-head
+  thread proof pass, and no actionable or human-decision finding remains.
+- Archive complete state normally. Archive any other phase only with an explicit
+  abandonment reason that is recorded durably.
 - If the run must end earlier, atomically checkpoint concise state and report
   the exact next action. Never imply that work will continue asynchronously.
