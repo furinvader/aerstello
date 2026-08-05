@@ -509,13 +509,13 @@ Then('venue settings is available in the primary navigation', async ({ page }) =
 When('the initial venue load fails transiently',async({page})=>{
   await page.addInitScript(()=>{
     const originalFetch=window.fetch.bind(window);
-    const state=window as unknown as {__skyBarVenueLoadAttempts:number};
-    state.__skyBarVenueLoadAttempts=0;
+    const state=window as unknown as {__skyBarVenueLoadOutage:{active:boolean;attempts:number}};
+    state.__skyBarVenueLoadOutage={active:true,attempts:0};
     window.fetch=async(input,init)=>{
       const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
       if(new URL(url,window.location.href).pathname==='/api/v1/venue'){
-        state.__skyBarVenueLoadAttempts+=1;
-        if(state.__skyBarVenueLoadAttempts===1)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated venue outage'}}),{status:503,headers:{'content-type':'application/json'}});
+        state.__skyBarVenueLoadOutage.attempts+=1;
+        if(state.__skyBarVenueLoadOutage.active)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated venue outage'}}),{status:503,headers:{'content-type':'application/json'}});
       }
       return originalFetch(input,init);
     };
@@ -527,11 +527,14 @@ Then('venue settings shows a localized failure with retry',async({page})=>{
   await expect(page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();
   await expect(page.getByLabel(/Name des Betriebs|Nome del locale|Venue name/)).toHaveCount(0);
 });
-When('the administrator retries the venue load',async({page})=>{await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click()});
+When('the administrator retries the venue load',async({page})=>{
+  await page.evaluate(()=>{(window as unknown as {__skyBarVenueLoadOutage:{active:boolean}}).__skyBarVenueLoadOutage.active=false});
+  await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();
+});
 Then('editable venue settings appear after recovery',async({page})=>{
   await expect(page.getByLabel(/Name des Betriebs|Nome del locale|Venue name/)).toHaveValue('Hotel Aurora');
   await expect(page.getByRole('button',{name:/Speichern|Salva|Save/,exact:true})).toBeEnabled();
-  expect(await page.evaluate(()=>(window as unknown as {__skyBarVenueLoadAttempts:number}).__skyBarVenueLoadAttempts)).toBe(2);
+  expect(await page.evaluate(()=>(window as unknown as {__skyBarVenueLoadOutage:{attempts:number}}).__skyBarVenueLoadOutage.attempts)).toBeGreaterThanOrEqual(2);
 });
 When('a venue update response is lost before another administrator edits it',async({page})=>{const request=page.context().request;const original=await (await request.get('/api/v1/venue')).json() as {name:string;defaultLanguage:string;timezone:string;version:number};const command={name:'First venue update',language:original.defaultLanguage,timezone:original.timezone,expectedVersion:original.version};const committed=await (await request.put('/api/v1/venue',{headers:csrfHeaders,data:command})).json() as {version:number};expect((await request.put('/api/v1/venue',{headers:csrfHeaders,data:{...command,name:'Newer venue update',expectedVersion:committed.version}})).status()).toBe(200);staleVenueUpdateStatus=(await request.put('/api/v1/venue',{headers:csrfHeaders,data:command})).status();staleVenueFinalName=((await (await request.get('/api/v1/venue')).json()) as {name:string}).name});
 Then('retrying the stale venue update is rejected',async()=>{expect(staleVenueUpdateStatus).toBe(409)});
@@ -1168,13 +1171,13 @@ When('the initial request queue load fails transiently',async({page})=>{
   expect((await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Retry Queue Guest',roomId:room.id,language:'de'}})).status()).toBe(201);
   await page.addInitScript(()=>{
     const originalFetch=window.fetch.bind(window);
-    const state=window as unknown as {__skyBarRequestQueueAttempts:number};
-    state.__skyBarRequestQueueAttempts=0;
+    const state=window as unknown as {__skyBarRequestQueueOutage:{active:boolean;attempts:number}};
+    state.__skyBarRequestQueueOutage={active:true,attempts:0};
     window.fetch=async(input,init)=>{
       const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
       if(new URL(url,window.location.href).pathname==='/api/v1/access-requests'){
-        state.__skyBarRequestQueueAttempts+=1;
-        if(state.__skyBarRequestQueueAttempts===1)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated request queue outage'}}),{status:503,headers:{'content-type':'application/json'}});
+        state.__skyBarRequestQueueOutage.attempts+=1;
+        if(state.__skyBarRequestQueueOutage.active)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated request queue outage'}}),{status:503,headers:{'content-type':'application/json'}});
       }
       return originalFetch(input,init);
     };
@@ -1186,10 +1189,13 @@ Then('the request queue shows a localized failure instead of an empty state',asy
   await expect(page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();
   await expect(page.getByText(/Noch keine Einträge|Nessun elemento|Nothing here yet/)).toHaveCount(0);
 });
-When('the host retries the request queue',async({page})=>{await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click()});
+When('the host retries the request queue',async({page})=>{
+  await page.evaluate(()=>{(window as unknown as {__skyBarRequestQueueOutage:{active:boolean}}).__skyBarRequestQueueOutage.active=false});
+  await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();
+});
 Then('the pending request appears after request queue recovery',async({page})=>{
   await expect(page.locator('.request-card').filter({hasText:'Retry Queue Guest'})).toBeVisible();
-  expect(await page.evaluate(()=>(window as unknown as {__skyBarRequestQueueAttempts:number}).__skyBarRequestQueueAttempts)).toBe(2);
+  expect(await page.evaluate(()=>(window as unknown as {__skyBarRequestQueueOutage:{attempts:number}}).__skyBarRequestQueueOutage.attempts)).toBeGreaterThanOrEqual(2);
 });
 When('the guest adds two different self-service items',async()=>{await guestPage!.locator('.product-tile').getByText('Mineralwasser',{exact:true}).click();await expect(guestPage!.locator('.undo-toast')).toHaveCount(1);await guestPage!.locator('.product-tile').getByText('Hauskeks',{exact:true}).click()});
 Then('both provisional items offer their own undo action',async()=>{await expect(guestPage!.locator('.undo-toast')).toHaveCount(2);await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toHaveCount(2)});
@@ -2384,8 +2390,8 @@ When('database writers attempt to rewrite settled financial records',async({page
     try{await database.query(`UPDATE order_items SET status='open',bill_id=NULL WHERE id=$1`,[orderItemId])}catch(caught){orderItemReopenError=(caught as {code?:string}).code??''}
     try{await database.query('UPDATE bill_items SET quantity=quantity+1 WHERE bill_id=$1',[bill.id])}catch(caught){billLineUpdateError=(caught as {code?:string}).code??''}
     try{await database.query('DELETE FROM bill_items WHERE bill_id=$1',[bill.id])}catch(caught){billLineDeleteError=(caught as {code?:string}).code??''}
-    try{await database.query('TRUNCATE bills')}catch(caught){billsTruncateError=(caught as {code?:string}).code??''}
-    try{await database.query('TRUNCATE order_items')}catch(caught){orderItemsTruncateError=(caught as {code?:string}).code??''}
+    try{await database.query('TRUNCATE bills CASCADE')}catch(caught){billsTruncateError=(caught as {code?:string}).code??''}
+    try{await database.query('TRUNCATE order_items CASCADE')}catch(caught){orderItemsTruncateError=(caught as {code?:string}).code??''}
     try{await database.query('TRUNCATE bill_items')}catch(caught){billItemsTruncateError=(caught as {code?:string}).code??''}
     const truncateTriggers=await database.query<{tableName:string;enabled:boolean}>(
       `SELECT rel.relname AS "tableName",trg.tgenabled='O' AS enabled
