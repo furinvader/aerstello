@@ -27,7 +27,7 @@ import {
 
 export { completionGate, reviewRequestGate } from './contracts.mjs';
 
-export const ACTIVE_STATE_LIMIT_BYTES = 30 * 1024;
+export const ACTIVE_STATE_LIMIT_BYTES = 64 * 1024;
 const DEFAULT_LOCK_TIMEOUT_MS = 5000;
 const DEFAULT_STALE_LOCK_MS = 5 * 60 * 1000;
 const TRANSITION_AUTHORIZATION = Symbol('guarded PR review transition');

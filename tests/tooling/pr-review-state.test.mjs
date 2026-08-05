@@ -355,6 +355,59 @@ test('explicit migration cannot hijack a different active pointer', () => {
   assert.throws(() => migrateState({ cwd, prNumber: 18 }), { code: 'ACTIVE_POINTER_CONFLICT' });
 });
 
+test('large v2 state survives the clean lifecycle and rejects documents beyond 64 KiB', () => {
+  const cwd = repo();
+  const initialized = init(cwd);
+  const head = initialized.currentIntegrationHeadSha;
+  const tasks = [];
+  let prepared = ready(initialized, tasks);
+  while (Buffer.byteLength(`${JSON.stringify(prepared)}\n`) < 48 * 1024) {
+    const index = tasks.length;
+    tasks.push(task(head, {
+      id: `large-state-task-${index}`,
+      sourceIds: [`local:large-state-audit-${index}`],
+      fingerprint: `large-state-fingerprint-${String(index).padStart(4, '0')}`,
+      summary: `Durable finding ${index}: ${'s'.repeat(650)}`,
+      resolutionSummary: `Integrated and verified with focused evidence ${index}: ${'e'.repeat(350)}`,
+    }));
+    prepared = ready(initialized, tasks);
+  }
+  const preparedBytes = Buffer.byteLength(`${JSON.stringify(prepared)}\n`);
+  assert.ok(preparedBytes > 30 * 1024);
+  assert.ok(preparedBytes < ACTIVE_STATE_LIMIT_BYTES);
+  writeFileSync(statePath(cwd, 17), `${JSON.stringify(prepared)}\n`);
+
+  const requested = checkpointReviewRequest({
+    cwd, request: request(prepared, 'large-state-request'),
+    pushedHeadSha: head, prHeadSha: head, expectedRevision: prepared.revision,
+  });
+  assert.equal(requested.phase, 'awaiting-review');
+  assert.ok(Buffer.byteLength(readFileSync(statePath(cwd, 17))) < ACTIVE_STATE_LIMIT_BYTES);
+
+  const collected = checkpointReviewOutcome({
+    cwd, outcome: outcome(requested), expectedRevision: requested.revision,
+  });
+  assert.equal(collected.reviewOutcome.outcome, 'clean');
+  assert.ok(Buffer.byteLength(readFileSync(statePath(cwd, 17))) < ACTIVE_STATE_LIMIT_BYTES);
+
+  const completed = checkpointCompletion({
+    cwd, pushedHeadSha: head, prHeadSha: head, expectedRevision: collected.revision,
+  });
+  assert.equal(completed.phase, 'complete');
+
+  const oversized = structuredClone(completed);
+  while (Buffer.byteLength(`${JSON.stringify(oversized)}\n`) <= ACTIVE_STATE_LIMIT_BYTES) {
+    const index = oversized.decisions.length;
+    oversized.decisions.push({ id: `oversized-${index}`, summary: 'x'.repeat(1000) });
+  }
+  assert.throws(
+    () => checkpointState({ cwd, nextState: oversized, expectedRevision: completed.revision }),
+    { code: 'STATE_TOO_LARGE' },
+  );
+  writeFileSync(statePath(cwd, 17), `${JSON.stringify(oversized)}\n`);
+  assert.throws(() => loadState(cwd), { code: 'STATE_TOO_LARGE' });
+});
+
 test('review request gate requires ready phase, fresh three-way heads, and real ancestry', () => {
   const cwd = repo();
   const state = ready(init(cwd));

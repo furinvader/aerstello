@@ -95,7 +95,7 @@ State is stored outside tracked files under:
 
 An active pointer, concise `events.ndjson`, lock files, a compaction backup, and
 archived cycles live under the same repository-specific directory. Updates are
-schema-validated, revision-checked, locked, limited to 30 KB, and written by
+schema-validated, revision-checked, locked, limited to 64 KiB, and written by
 temporary-file rename. State never contains raw logs, complete diffs, stack
 traces, or full review transcripts.
 

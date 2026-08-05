@@ -23,7 +23,7 @@ Mutable state is repository-scoped and outside the tracked worktree:
 ```
 
 Only the primary orchestrator is the logical writer. Writes are revisioned,
-locked, validated, limited to 30 KB, and committed with temporary-file rename.
+locked, validated, limited to 64 KiB, and committed with temporary-file rename.
 Keep raw logs, complete diffs, stack traces, and transcripts out of state and
 events.
 
