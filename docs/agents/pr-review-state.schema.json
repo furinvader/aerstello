@@ -8,7 +8,7 @@
     "schemaVersion", "revision", "repository", "prNumber", "phase", "baseSha",
     "requestedHeadSha", "reviewedHeadSha", "currentIntegrationHeadSha", "reviewRound",
     "verificationReviewUsed", "legacyReviewProvenance", "releaseBaseline", "decisions", "tasks", "reviewRequest",
-    "reviewOutcome", "reviewHistory", "threadResolutionStatus", "blockedReasons",
+    "reviewOutcome", "reviewHistory", "verificationEscalation", "threadResolutionStatus", "blockedReasons",
     "validationStatus", "nextAction", "integrationWorktree", "orchestratorSessionId",
     "abandonmentReason", "git", "updatedAt"
   ],
@@ -81,6 +81,7 @@
         }
       }
     },
+    "verificationEscalation": { "$ref": "#/$defs/nullableVerificationEscalation" },
     "threadResolutionStatus": { "$ref": "#/$defs/threadResolutionStatus" },
     "blockedReasons": { "$ref": "#/$defs/stringList" },
     "validationStatus": { "$ref": "#/$defs/proofStatus" },
@@ -121,7 +122,8 @@
           "reviewRequest": { "$ref": "#/$defs/reviewRequest" },
           "reviewOutcome": {
             "allOf": [{ "$ref": "#/$defs/reviewOutcome" }, { "type": "object", "properties": { "outcome": { "const": "clean" } } }]
-          }
+          },
+          "verificationEscalation": { "type": "null" }
         }
       }
     },
@@ -136,6 +138,19 @@
         "required": ["reviewOutcome"]
       },
       "then": { "properties": { "phase": { "const": "awaiting-human-decision" } } }
+    },
+    {
+      "if": { "properties": { "verificationEscalation": { "type": "object" } }, "required": ["verificationEscalation"] },
+      "then": {
+        "properties": {
+          "phase": { "const": "awaiting-human-decision" },
+          "verificationReviewUsed": { "const": true },
+          "reviewRequest": {
+            "allOf": [{ "$ref": "#/$defs/reviewRequest" }, { "type": "object", "properties": { "kind": { "const": "verification" } } }]
+          },
+          "reviewOutcome": { "type": "null" }
+        }
+      }
     }
   ],
   "$defs": {
@@ -207,6 +222,35 @@
       ]
     },
     "nullableReviewOutcome": { "oneOf": [{ "$ref": "#/$defs/reviewOutcome" }, { "type": "null" }] },
+    "verificationEscalation": {
+      "type": "object", "additionalProperties": false,
+      "$comment": "The manual validator binds requestId and requestHeadSha to the current pending verification request because Draft 2020-12 cannot compare sibling property values.",
+      "required": ["requestId", "requestHeadSha", "observedPrHeadSha", "headRelation", "evidenceIds", "reason", "at"],
+      "properties": {
+        "requestId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "requestHeadSha": { "$ref": "#/$defs/sha" },
+        "observedPrHeadSha": { "$ref": "#/$defs/sha" },
+        "headRelation": { "enum": ["same", "changed"] },
+        "evidenceIds": {
+          "type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+        },
+        "reason": {
+          "enum": ["stale-canonical-evidence", "ambiguous-canonical-evidence", "request-head-drift"]
+        },
+        "at": { "type": "string", "format": "date-time" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "reason": { "const": "request-head-drift" } }, "required": ["reason"] },
+          "then": { "properties": { "headRelation": { "const": "changed" } } },
+          "else": { "properties": { "headRelation": { "const": "same" } } }
+        }
+      ]
+    },
+    "nullableVerificationEscalation": {
+      "oneOf": [{ "$ref": "#/$defs/verificationEscalation" }, { "type": "null" }]
+    },
     "proofStatus": {
       "type": "object", "additionalProperties": false,
       "required": ["status", "headSha", "checks", "updatedAt"],

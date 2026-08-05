@@ -342,6 +342,7 @@ export function initializeState({
       reviewRequest: null,
       reviewOutcome: null,
       reviewHistory: [],
+      verificationEscalation: null,
       threadResolutionStatus: emptyThreadProof(),
       blockedReasons: [],
       validationStatus: { status: 'not-run', headSha: null, checks: [], updatedAt: null },
@@ -471,6 +472,7 @@ export function migratePrReviewStateV1(legacyState, {
     reviewRequest: null,
     reviewOutcome: null,
     reviewHistory: [],
+    verificationEscalation: null,
     threadResolutionStatus: emptyThreadProof(),
     blockedReasons: unique(legacyState.blockedReasons),
     validationStatus: migrateValidationProof(legacyState.validationStatus, legacyState.currentIntegrationHeadSha),
@@ -636,7 +638,7 @@ function assertCheckpointProvenance(current, next, authorization) {
   if (guardedKind === null) {
     for (const field of [
       'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
-      'reviewRequest', 'reviewOutcome', 'reviewHistory',
+      'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
     ]) assertImmutableValue(current[field], next[field], field);
   } else if (guardedKind === 'review-request') {
     if (next.reviewHistory.length !== current.reviewHistory.length + 1) {
@@ -645,6 +647,7 @@ function assertCheckpointProvenance(current, next, authorization) {
     current.reviewHistory.forEach((entry, index) => assertImmutableValue(
       entry, next.reviewHistory[index], `reviewHistory[${index}]`,
     ));
+    assertImmutableValue(current.verificationEscalation, next.verificationEscalation, 'verificationEscalation');
   } else if (guardedKind === 'review-outcome') {
     if (next.reviewHistory.length !== current.reviewHistory.length) {
       throw new StateError('Review outcomes cannot resize review history', 'IMMUTABLE_STATE_PROVENANCE');
@@ -656,10 +659,19 @@ function assertCheckpointProvenance(current, next, authorization) {
     if (current.reviewHistory.at(-1)?.outcome !== null) {
       assertImmutableValue(current.reviewHistory.at(-1)?.outcome, next.reviewHistory.at(-1)?.outcome, 'review outcome');
     }
-  } else {
+    assertImmutableValue(current.verificationEscalation, next.verificationEscalation, 'verificationEscalation');
+  } else if (guardedKind === 'verification-escalation') {
+    if (current.verificationEscalation !== null || next.verificationEscalation === null) {
+      throw new StateError('Verification escalation may be recorded exactly once', 'IMMUTABLE_STATE_PROVENANCE');
+    }
     for (const field of [
       'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
       'reviewRequest', 'reviewOutcome', 'reviewHistory',
+    ]) assertImmutableValue(current[field], next[field], field);
+  } else {
+    for (const field of [
+      'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
+      'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
     ]) assertImmutableValue(current[field], next[field], field);
   }
   if (current.phase !== 'complete' && next.phase === 'complete' && guardedKind !== 'cycle-completion') {
@@ -825,6 +837,36 @@ export function buildReviewOutcomeTransition(state, outcome) {
   return next;
 }
 
+export function buildVerificationEscalationTransition(state, escalation) {
+  if (state.verificationEscalation !== null) {
+    if (!sameEvidence(state.verificationEscalation, escalation)) {
+      throw new StateError('Verification escalation is append-only evidence', 'REVIEW_EVIDENCE_CONFLICT');
+    }
+    return state;
+  }
+  const request = state.reviewRequest;
+  const latest = state.reviewHistory.at(-1);
+  if (!['awaiting-review', 'awaiting-human-decision'].includes(state.phase)
+      || request?.kind !== 'verification' || state.verificationReviewUsed !== true
+      || state.reviewOutcome !== null || latest?.request?.id !== request.id || latest?.outcome !== null) {
+    throw new StateError('No pending canonical verification collection to escalate', 'VERIFICATION_ESCALATION_NOT_EXPECTED');
+  }
+  if (escalation?.requestId !== request.id || escalation?.requestHeadSha !== request.headSha) {
+    throw new StateError('Verification escalation must bind to the pending request and exact SHA', 'INVALID_VERIFICATION_ESCALATION');
+  }
+  const next = {
+    ...state,
+    phase: 'awaiting-human-decision',
+    verificationEscalation: escalation,
+    nextAction: 'Present the canonical verification collection escalation and evidence to a human.',
+  };
+  const errors = validatePrReviewState(next);
+  if (errors.length > 0) {
+    throw new StateError(`Invalid verification escalation transition:\n- ${errors.join('\n- ')}`, 'INVALID_VERIFICATION_ESCALATION');
+  }
+  return next;
+}
+
 export function buildCompletionTransition(state, external) {
   assertCompletionAllowed(state, external);
   const next = { ...state, phase: 'complete', nextAction: 'Archive the completed review cycle.' };
@@ -879,6 +921,19 @@ export function checkpointReviewOutcome({
   return checkpointState({
     cwd, prNumber: current.prNumber, nextState, expectedRevision,
     event, transitionAuthorization: protectedTransition(nextState, 'review-outcome'),
+  });
+}
+
+export function checkpointVerificationEscalation({
+  cwd = process.cwd(), prNumber, escalation, expectedRevision, event,
+} = {}) {
+  const current = loadState(cwd, prNumber);
+  if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  const nextState = buildVerificationEscalationTransition(current, escalation);
+  if (nextState === current) return current;
+  return checkpointState({
+    cwd, prNumber: current.prNumber, nextState, expectedRevision,
+    event, transitionAuthorization: protectedTransition(nextState, 'verification-escalation'),
   });
 }
 
@@ -1001,6 +1056,9 @@ export function renderRecoverySummary({ cwd = process.cwd(), prNumber, maxCharac
     `Release baseline: ${release}`,
     `Base: ${state.baseSha}`,
     `Requested/reviewed: ${state.requestedHeadSha ?? 'none'} / ${state.reviewedHeadSha ?? 'none'}`,
+    `Verification escalation: ${state.verificationEscalation
+      ? `${state.verificationEscalation.reason} at PR ${state.verificationEscalation.observedPrHeadSha}`
+      : 'none'}`,
     `Integration HEAD: ${state.currentIntegrationHeadSha}`,
     'Tasks:',
     ...(taskLines.length > 0 ? taskLines : ['- none']),

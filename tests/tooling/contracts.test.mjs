@@ -20,7 +20,7 @@ function stateFixture(overrides = {}) {
     schemaVersion: 2, revision: 0, repository: 'example/sky-bar', prNumber: 17, phase: 'recovering',
     baseSha: head, requestedHeadSha: null, reviewedHeadSha: null, currentIntegrationHeadSha: head,
     reviewRound: 0, verificationReviewUsed: false, legacyReviewProvenance: null, releaseBaseline: null,
-    decisions: [], tasks: [], reviewRequest: null, reviewOutcome: null, reviewHistory: [],
+    decisions: [], tasks: [], reviewRequest: null, reviewOutcome: null, reviewHistory: [], verificationEscalation: null,
     threadResolutionStatus: {
       status: 'not-run', headSha: null, threads: [],
       threadlessVerification: { status: 'not-run', headSha: null, taskIds: [], updatedAt: null },
@@ -40,6 +40,25 @@ function threadFixture(overrides = {}) {
     replyUrl: 'https://github.com/example/sky-bar/pull/17#discussion_r9', isResolved: true,
     resolvedAt: AT, resolvedBy: 'maintainer', observedHeadSha: 'a'.repeat(40), ...overrides,
   };
+}
+
+function escalatedStateFixture(overrides = {}) {
+  const head = 'a'.repeat(40);
+  const request = {
+    id: 'verification-request', databaseId: 101,
+    url: 'https://github.com/example/sky-bar/pull/17#issuecomment-101', headSha: head, at: AT,
+    kind: 'verification', body: '@codex review', authorLogin: 'maintainer', authorNodeId: 'USER_maintainer',
+  };
+  return stateFixture({
+    phase: 'awaiting-human-decision', requestedHeadSha: head, reviewRound: 3, verificationReviewUsed: true,
+    legacyReviewProvenance: { schemaVersion: 1, discoveryRounds: 3, migratedAt: AT },
+    reviewRequest: request, reviewHistory: [{ request, outcome: null }],
+    verificationEscalation: {
+      requestId: request.id, requestHeadSha: head, observedPrHeadSha: head, headRelation: 'same',
+      evidenceIds: ['review:PRR_stale'], reason: 'stale-canonical-evidence', at: AT,
+    },
+    ...overrides,
+  });
 }
 
 test('checked-in JSON contracts parse and declare Draft 2020-12', () => {
@@ -71,10 +90,29 @@ test('state JSON Schema compiles with Ajv and shares representative fixtures wit
   const valid = stateFixture();
   assert.equal(validateSchema(valid), true, JSON.stringify(validateSchema.errors));
   assert.deepEqual(validatePrReviewState(valid), []);
+  const validEscalation = escalatedStateFixture();
+  assert.equal(validateSchema(validEscalation), true, JSON.stringify(validateSchema.errors));
+  assert.deepEqual(validatePrReviewState(validEscalation), []);
 
   const invalidFixtures = [
     stateFixture({ repository: 'not-a-repository' }),
     stateFixture({ validationStatus: { status: 'passed', headSha: null, checks: [], updatedAt: null } }),
+    escalatedStateFixture({ phase: 'recovering' }),
+    escalatedStateFixture({
+      verificationEscalation: {
+        ...validEscalation.verificationEscalation, evidenceIds: [],
+      },
+    }),
+    ...['stale-canonical-evidence', 'ambiguous-canonical-evidence'].map((reason) => escalatedStateFixture({
+      verificationEscalation: {
+        ...validEscalation.verificationEscalation, observedPrHeadSha: 'b'.repeat(40),
+        headRelation: 'changed', reason,
+      },
+    })),
+    escalatedStateFixture({
+      reviewRequest: { ...validEscalation.reviewRequest, kind: 'discovery' },
+      reviewHistory: [{ request: { ...validEscalation.reviewRequest, kind: 'discovery' }, outcome: null }],
+    }),
     stateFixture({
       tasks: [{
         id: 'task', sourceIds: ['local'], sourceType: 'local', fingerprint: 'fingerprint', summary: 'Queued.',
@@ -141,6 +179,22 @@ test('state JSON Schema compiles with Ajv and shares representative fixtures wit
   for (const fixture of invalidFixtures) {
     assert.equal(validateSchema(fixture), false, 'schema should reject shared invalid fixture');
     assert.notDeepEqual(validatePrReviewState(fixture), [], 'manual validator should reject shared invalid fixture');
+  }
+});
+
+test('manual escalation binding rejects a mismatched pending request identity or SHA', () => {
+  const valid = escalatedStateFixture();
+  for (const verificationEscalation of [
+    { ...valid.verificationEscalation, requestId: 'other-request' },
+    { ...valid.verificationEscalation, requestHeadSha: 'b'.repeat(40) },
+    {
+      ...valid.verificationEscalation, reason: 'request-head-drift',
+      headRelation: 'changed', observedPrHeadSha: valid.verificationEscalation.requestHeadSha,
+    },
+  ]) {
+    assert.ok(validatePrReviewState({ ...valid, verificationEscalation }).some(
+      (error) => error.includes('verificationEscalation'),
+    ));
   }
 });
 

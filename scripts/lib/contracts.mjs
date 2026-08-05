@@ -346,6 +346,40 @@ function validateReviewOutcome(value, path, errors) {
   }
 }
 
+function validateVerificationEscalation(value, request, errors) {
+  const path = '$.verificationEscalation';
+  if (value === null) return;
+  const fields = ['requestId', 'requestHeadSha', 'observedPrHeadSha', 'headRelation', 'evidenceIds', 'reason', 'at'];
+  if (!requireFields(value, fields, path, errors)) return;
+  rejectUnknownFields(value, fields, path, errors);
+  if (!isString(value.requestId, { min: 1, max: 256 })) errors.push(`${path}.requestId is invalid`);
+  for (const field of ['requestHeadSha', 'observedPrHeadSha']) {
+    if (!isSha(value[field])) errors.push(`${path}.${field} is invalid`);
+  }
+  validateStringList(value.evidenceIds, `${path}.evidenceIds`, errors);
+  if (!Array.isArray(value.evidenceIds) || value.evidenceIds.length < 1 || value.evidenceIds.length > 8
+      || value.evidenceIds.some((id) => !isString(id, { min: 1, max: 256 }))) {
+    errors.push(`${path}.evidenceIds must contain 1-8 concise identifiers`);
+  }
+  if (!['stale-canonical-evidence', 'ambiguous-canonical-evidence', 'request-head-drift'].includes(value.reason)) {
+    errors.push(`${path}.reason is invalid`);
+  }
+  if (!['same', 'changed'].includes(value.headRelation)) errors.push(`${path}.headRelation is invalid`);
+  if (!isDateTime(value.at)) errors.push(`${path}.at is invalid`);
+  if (request?.kind !== 'verification') errors.push(`${path} requires the current verification request`);
+  if (value.requestId !== request?.id || value.requestHeadSha !== request?.headSha) {
+    errors.push(`${path} must bind to the current pending request and exact SHA`);
+  }
+  const expectedRelation = value.reason === 'request-head-drift' ? 'changed' : 'same';
+  if (value.headRelation !== expectedRelation) {
+    errors.push(`${path}.headRelation must be ${expectedRelation} for ${value.reason}`);
+  }
+  const actualRelation = value.observedPrHeadSha === value.requestHeadSha ? 'same' : 'changed';
+  if (value.headRelation !== actualRelation) {
+    errors.push(`${path}.headRelation contradicts the request and observed PR HEADs`);
+  }
+}
+
 function validateExecution(value, path, errors) {
   const fields = [
     'dependencies', 'ownedPaths', 'worker', 'branch', 'worktree', 'workerCommitSha',
@@ -572,6 +606,7 @@ function reviewRequestStateGate(state) {
   if (state?.threadResolutionStatus?.status !== 'passed') reasons.push('thread resolution proof must have passed');
   if (state?.threadResolutionStatus?.threads?.some((thread) => !thread.isResolved)) reasons.push('all canonical threads must be resolved');
   if (state?.git?.dirty !== false) reasons.push('integration checkout must be clean');
+  if (state?.verificationEscalation !== null) reasons.push('verification collection escalation requires human decision');
   if (!Array.isArray(state?.tasks) || state.tasks.some((task) => task.status !== 'completed')) reasons.push('all prior tasks must be completed');
   if (state?.tasks?.some((task) => task.disposition === 'needs-human-decision')) reasons.push('needs-human-decision findings require a human');
   if ((state?.blockedReasons?.length ?? 0) !== 0) reasons.push('blocked reasons must be cleared');
@@ -634,6 +669,7 @@ function completionStateGate(state) {
   }
   if (state?.validationStatus?.status !== 'passed') reasons.push('validation must have passed');
   if (state?.threadResolutionStatus?.status !== 'passed') reasons.push('thread proof must have passed');
+  if (state?.verificationEscalation !== null) reasons.push('verification collection escalation requires human decision');
   if (state?.git?.dirty !== false) reasons.push('integration checkout must be clean');
   if (!Array.isArray(state?.tasks) || state.tasks.some((task) => task.status !== 'completed')) reasons.push('all tasks must be completed');
   if ((state?.blockedReasons?.length ?? 0) !== 0) reasons.push('blocked reasons must be cleared');
@@ -678,7 +714,7 @@ export function validatePrReviewState(value) {
   const fields = [
     'schemaVersion', 'revision', 'repository', 'prNumber', 'phase', 'baseSha', 'requestedHeadSha',
     'reviewedHeadSha', 'currentIntegrationHeadSha', 'reviewRound', 'verificationReviewUsed', 'legacyReviewProvenance',
-    'releaseBaseline', 'decisions', 'tasks', 'reviewRequest', 'reviewOutcome', 'reviewHistory',
+    'releaseBaseline', 'decisions', 'tasks', 'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
     'threadResolutionStatus', 'blockedReasons', 'validationStatus', 'nextAction',
     'integrationWorktree', 'orchestratorSessionId', 'abandonmentReason', 'git', 'updatedAt',
   ];
@@ -723,6 +759,7 @@ export function validatePrReviewState(value) {
   else value.tasks.forEach((task, index) => validateTaskV2(task, index, errors));
   if (value.reviewRequest !== null) validateReviewRequest(value.reviewRequest, '$.reviewRequest', errors);
   if (value.reviewOutcome !== null) validateReviewOutcome(value.reviewOutcome, '$.reviewOutcome', errors);
+  validateVerificationEscalation(value.verificationEscalation, value.reviewRequest, errors);
   validateReviewHistory(value.reviewHistory, value.currentIntegrationHeadSha, errors);
   const latest = Array.isArray(value.reviewHistory) ? value.reviewHistory.at(-1) : null;
   if ((latest?.request ?? null)?.id !== value.reviewRequest?.id) errors.push('$.reviewRequest must equal the latest history request');
@@ -741,6 +778,13 @@ export function validatePrReviewState(value) {
   }
   if (value.reviewRequest && value.requestedHeadSha !== value.reviewRequest.headSha) errors.push('$.requestedHeadSha must equal request HEAD');
   if (value.reviewOutcome && value.reviewedHeadSha !== value.reviewOutcome.headSha) errors.push('$.reviewedHeadSha must equal outcome HEAD');
+  if (value.verificationEscalation !== null) {
+    if (value.phase !== 'awaiting-human-decision') errors.push('$.verificationEscalation requires awaiting-human-decision');
+    if (value.verificationReviewUsed !== true) errors.push('$.verificationEscalation requires the consumed verification allowance');
+    if (value.reviewOutcome !== null || latest?.outcome !== null) {
+      errors.push('$.verificationEscalation requires a pending review collection');
+    }
+  }
   validateStringList(value.blockedReasons, '$.blockedReasons', errors);
   validateProof(value.validationStatus, '$.validationStatus', errors);
   validateThreadStatus(value.threadResolutionStatus, value.tasks, errors);
@@ -769,7 +813,8 @@ export function validatePrReviewState(value) {
     const allowedPhase = value.phase === 'awaiting-review'
       || (stale && latest.request.kind === 'discovery' && value.phase === 'recovering')
       || (stale && latest.request.kind === 'discovery' && value.phase === 'ready-for-review')
-      || (stale && latest.request.kind === 'verification' && value.phase === 'awaiting-human-decision');
+      || (latest.request.kind === 'verification' && value.phase === 'awaiting-human-decision'
+        && (stale || value.verificationEscalation !== null));
     if (!allowedPhase) errors.push('$.phase is invalid for the pending current or stale review request');
   }
   if (value.reviewOutcome?.kind === 'verification' && value.reviewOutcome.outcome === 'findings'

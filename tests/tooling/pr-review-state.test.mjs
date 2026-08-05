@@ -10,12 +10,15 @@ import {
   buildCompletionTransition,
   buildReviewOutcomeTransition,
   buildReviewRequestTransition,
+  buildVerificationEscalationTransition,
   checkpointCompletion,
   checkpointGitMetadata,
   checkpointReviewOutcome,
   checkpointReviewRequest,
   checkpointState,
   checkpointTaskCompletion,
+  checkpointVerificationEscalation,
+  completionGate,
   completeIntegratedTasks,
   gitAwareGateContext,
   gitCommonDirectory,
@@ -124,6 +127,7 @@ function legacyState(state, overrides = {}) {
     legacyReviewProvenance: _legacyReviewProvenance,
     reviewOutcome,
     reviewHistory: _reviewHistory,
+    verificationEscalation: _verificationEscalation,
     threadResolutionStatus: _threadResolutionStatus,
     abandonmentReason: _abandonmentReason,
     ...legacy
@@ -505,6 +509,106 @@ test('verification is consumed once after three migrated discovery rounds and fi
   const stopped = buildReviewOutcomeTransition(requested, outcome(requested, { outcome: 'findings' }));
   assert.equal(stopped.phase, 'awaiting-human-decision');
   assert.equal(reviewRequestGate({ ...state, verificationReviewUsed: true }, external(cwd, state)).allowed, false);
+});
+
+test('verification collection escalation is guarded, append-only, request-bound, and terminal', () => {
+  const cwd = repo();
+  const initialized = init(cwd);
+  const migrated = migratePrReviewStateV1(legacyState(initialized, { reviewRound: 3 }), { migratedAt: AT });
+  writeFileSync(statePath(cwd, 17), JSON.stringify(migrated));
+  const proofed = checkpointTaskCompletion({
+    cwd, expectedRevision: migrated.revision, threadResolutionStatus: ready(migrated, []).threadResolutionStatus,
+  });
+  const prepared = checkpointState({ cwd, expectedRevision: proofed.revision, nextState: ready(proofed, []) });
+  const requested = checkpointReviewRequest({
+    cwd, expectedRevision: prepared.revision,
+    request: request(prepared, 'verification-escalation', 'verification'),
+    pushedHeadSha: prepared.currentIntegrationHeadSha, prHeadSha: prepared.currentIntegrationHeadSha,
+  });
+  const escalation = {
+    requestId: requested.reviewRequest.id,
+    requestHeadSha: requested.reviewRequest.headSha,
+    observedPrHeadSha: requested.reviewRequest.headSha,
+    headRelation: 'same',
+    evidenceIds: ['review:PRR_stale', 'reaction:R_stale'],
+    reason: 'ambiguous-canonical-evidence',
+    at: AT,
+  };
+  for (const reason of ['stale-canonical-evidence', 'ambiguous-canonical-evidence']) {
+    assert.throws(() => buildVerificationEscalationTransition(requested, {
+      ...escalation, reason, observedPrHeadSha: 'f'.repeat(40), headRelation: 'same',
+    }), { code: 'INVALID_VERIFICATION_ESCALATION' });
+  }
+  const built = buildVerificationEscalationTransition(requested, escalation);
+  assert.equal(built.phase, 'awaiting-human-decision');
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: requested.revision, nextState: built,
+  }), { code: 'IMMUTABLE_STATE_PROVENANCE' });
+  const escalated = checkpointVerificationEscalation({
+    cwd, expectedRevision: requested.revision, escalation,
+  });
+  assert.equal(escalated.verificationReviewUsed, true);
+  assert.deepEqual(escalated.reviewHistory, requested.reviewHistory);
+  assert.ok(reviewRequestGate(escalated, external(cwd, escalated)).reasons.some(
+    (reason) => reason.includes('verification collection escalation'),
+  ));
+  assert.ok(completionGate(escalated, external(cwd, escalated)).reasons.some(
+    (reason) => reason.includes('verification collection escalation'),
+  ));
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: escalated.revision,
+    nextState: { ...escalated, verificationEscalation: null },
+  }), { code: 'IMMUTABLE_STATE_PROVENANCE' });
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: escalated.revision,
+    nextState: {
+      ...escalated,
+      verificationEscalation: { ...escalation, evidenceIds: ['review:rewritten'] },
+    },
+  }), { code: 'IMMUTABLE_STATE_PROVENANCE' });
+  assert.deepEqual(checkpointVerificationEscalation({
+    cwd, expectedRevision: escalated.revision, escalation,
+  }), escalated);
+
+  const discovery = {
+    ...requested, reviewRound: 2, verificationReviewUsed: false,
+    reviewRequest: { ...requested.reviewRequest, kind: 'discovery' },
+    reviewHistory: [{ request: { ...requested.reviewRequest, kind: 'discovery' }, outcome: null }],
+  };
+  assert.throws(
+    () => buildVerificationEscalationTransition(discovery, escalation),
+    { code: 'VERIFICATION_ESCALATION_NOT_EXPECTED' },
+  );
+});
+
+test('stale verification HEAD drift accepts truthful guarded collection escalation', () => {
+  const cwd = repo();
+  const initialized = init(cwd);
+  const migrated = migratePrReviewStateV1(legacyState(initialized, { reviewRound: 3 }), { migratedAt: AT });
+  writeFileSync(statePath(cwd, 17), JSON.stringify(migrated));
+  const proofed = checkpointTaskCompletion({
+    cwd, expectedRevision: migrated.revision, threadResolutionStatus: ready(migrated, []).threadResolutionStatus,
+  });
+  const prepared = checkpointState({ cwd, expectedRevision: proofed.revision, nextState: ready(proofed, []) });
+  const requested = checkpointReviewRequest({
+    cwd, expectedRevision: prepared.revision,
+    request: request(prepared, 'verification-head-drift', 'verification'),
+    pushedHeadSha: prepared.currentIntegrationHeadSha, prHeadSha: prepared.currentIntegrationHeadSha,
+  });
+  const requestHead = requested.reviewRequest.headSha;
+  const observedPrHead = commit(cwd, { 'escalation-drift.txt': 'drift\n' }, 'escalation drift');
+  const drifted = checkpointGitMetadata({ cwd }).state;
+  const escalated = checkpointVerificationEscalation({
+    cwd, expectedRevision: drifted.revision,
+    escalation: {
+      requestId: requested.reviewRequest.id, requestHeadSha: requestHead, observedPrHeadSha: observedPrHead,
+      headRelation: 'changed', evidenceIds: [`request:${requested.reviewRequest.id}`],
+      reason: 'request-head-drift', at: AT,
+    },
+  });
+  assert.equal(escalated.phase, 'awaiting-human-decision');
+  assert.equal(escalated.verificationReviewUsed, true);
+  assert.equal(escalated.reviewHistory.at(-1).outcome, null);
 });
 
 test('structured canonical thread proof covers multiple tasks with one reply and completes them once', () => {
