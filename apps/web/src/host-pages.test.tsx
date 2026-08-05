@@ -12,7 +12,7 @@ vi.mock('./api', async () => {
 });
 vi.mock('./host-shell', () => ({ useHostContext: hostContextMock }));
 
-import { BillDetailPage, BillsPage, DashboardPage, GuestsPage, OrdersPage, RequestsPage, SettingsPage } from './host-pages';
+import { AccountPage, BillDetailPage, BillsPage, DashboardPage, GuestsPage, OrdersPage, ProductsPage, RequestsPage, RoomsPage, SettingsPage } from './host-pages';
 
 function renderBillsPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -47,6 +47,21 @@ function renderGuestsPage() {
 function renderSettingsPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(<QueryClientProvider client={client}><I18nProvider><SettingsPage/></I18nProvider></QueryClientProvider>);
+}
+
+function renderProductsPage() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(<QueryClientProvider client={client}><I18nProvider><ProductsPage/></I18nProvider></QueryClientProvider>);
+}
+
+function renderRoomsPage() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(<QueryClientProvider client={client}><I18nProvider><RoomsPage/></I18nProvider></QueryClientProvider>);
+}
+
+function renderAccountPage() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(<QueryClientProvider client={client}><I18nProvider><AccountPage/></I18nProvider></QueryClientProvider>);
 }
 
 describe('bill archive query states', () => {
@@ -337,5 +352,160 @@ describe('venue settings query states', () => {
     expect(screen.getByDisplayValue('Europe/Rome')).toBeVisible();
     expect(screen.getByRole('combobox',{name:'Default language'})).toHaveValue('it');
     expect(apiMock.mock.calls.filter(([path])=>path==='/venue')).toHaveLength(2);
+  });
+});
+
+const administrator={id:'host-1',email:'admin@skybar.test',name:'Mira Host',role:'admin' as const,language:'en' as const,version:1};
+
+describe('catalog administration query states', () => {
+  beforeEach(() => {
+    apiMock.mockReset();
+    hostContextMock.mockReturnValue({ host: administrator });
+    localStorage.setItem('skybar-language', 'en');
+  });
+  afterEach(cleanup);
+
+  it('withholds catalog controls until both queries succeed', async () => {
+    let resolveCategories!: (value: unknown) => void;
+    apiMock.mockImplementation((path:string) => path==='/products'
+      ? Promise.resolve({ data: [], catalogVersion: 1 })
+      : path==='/categories'
+        ? new Promise(resolve => { resolveCategories=resolve; })
+        : Promise.reject(new Error(`Unexpected API path: ${path}`)));
+
+    renderProductsPage();
+
+    expect(screen.getByText('Loading…')).toBeVisible();
+    expect(screen.queryByPlaceholderText('German name')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button',{name:'Add'})).not.toBeInTheDocument();
+
+    resolveCategories({ data: [] });
+    expect(await screen.findByPlaceholderText('German name')).toBeVisible();
+    expect(screen.getByRole('button',{name:'Add'})).toBeDisabled();
+    expect(screen.getByText('Nothing here yet')).toBeVisible();
+  });
+
+  it('retries both catalog queries and renders coupled recovered data', async () => {
+    const category={id:'category-1',name:{de:'Getränke',it:'Bevande',en:'Drinks'},position:0,version:1};
+    const product={id:'product-1',categoryId:'category-1',name:{de:'Helles',it:'Bionda',en:'Lager'},priceCents:420,enabled:true,selfServiceOnly:false,position:0,version:2};
+    apiMock.mockImplementation((path:string) => {
+      if(path==='/products')return apiMock.mock.calls.filter(([calledPath])=>calledPath==='/products').length===1
+        ? Promise.reject(new TypeError('Simulated product outage'))
+        : Promise.resolve({ data: [product], catalogVersion: 2 });
+      if(path==='/categories')return Promise.resolve({ data: [category] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    renderProductsPage();
+
+    expect(await screen.findByText('The request could not be completed.')).toBeVisible();
+    expect(screen.queryByPlaceholderText('German name')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button',{name:'Retry'}));
+
+    expect(await screen.findByText('Lager')).toBeVisible();
+    const categories=screen.getByRole('heading',{name:'Categories'}).closest('section')!;
+    expect(within(categories).getByText('Drinks')).toBeVisible();
+    expect(within(categories).getByText('1')).toBeVisible();
+    expect(screen.getByPlaceholderText('German name')).toBeVisible();
+    expect(screen.getByRole('button',{name:'Add'})).toBeEnabled();
+    expect(apiMock.mock.calls.filter(([path])=>path==='/products')).toHaveLength(2);
+    expect(apiMock.mock.calls.filter(([path])=>path==='/categories')).toHaveLength(2);
+  });
+});
+
+describe('account session query states', () => {
+  beforeEach(() => {
+    apiMock.mockReset();
+    hostContextMock.mockReturnValue({ host: administrator });
+    localStorage.setItem('skybar-language', 'en');
+  });
+  afterEach(cleanup);
+
+  it('shows session loading while profile controls remain usable', async () => {
+    let resolveSessions!: (value: unknown) => void;
+    apiMock.mockImplementation((path:string) => path==='/account/sessions'
+      ? new Promise(resolve => { resolveSessions=resolve; })
+      : path==='/hosts' ? Promise.resolve({ data: [] }) : Promise.reject(new Error(`Unexpected API path: ${path}`)));
+
+    renderAccountPage();
+    const devices=within(screen.getByRole('heading',{name:'Logged-in devices'}).closest('section')!);
+
+    expect(devices.getByText('Loading…')).toBeVisible();
+    expect(devices.queryByText('Nothing here yet')).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox',{name:'Name'})).toBeEnabled();
+
+    resolveSessions({ data: [] });
+    expect(await devices.findByText('Nothing here yet')).toBeVisible();
+  });
+
+  it('retries failed sessions and renders the recovered device', async () => {
+    const session={id:'session-1',userAgent:'Firefox',createdAt:'2026-08-05T09:00:00.000Z',lastSeenAt:'2026-08-05T10:00:00.000Z',expiresAt:'2026-08-06T09:00:00.000Z',current:true};
+    apiMock.mockImplementation((path:string) => {
+      if(path==='/account/sessions')return apiMock.mock.calls.filter(([calledPath])=>calledPath==='/account/sessions').length===1
+        ? Promise.reject(new TypeError('Simulated session outage'))
+        : Promise.resolve({ data: [session] });
+      if(path==='/hosts')return Promise.resolve({ data: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    renderAccountPage();
+    const devices=within(screen.getByRole('heading',{name:'Logged-in devices'}).closest('section')!);
+
+    expect(await devices.findByText('The request could not be completed.')).toBeVisible();
+    expect(screen.getByRole('textbox',{name:'Name'})).toBeEnabled();
+    fireEvent.click(devices.getByRole('button',{name:'Retry'}));
+
+    expect(await devices.findByText('This device')).toBeVisible();
+    expect(devices.getByRole('button',{name:'Log out'})).toBeVisible();
+    expect(apiMock.mock.calls.filter(([path])=>path==='/account/sessions')).toHaveLength(2);
+  });
+});
+
+describe('room management query states', () => {
+  beforeEach(() => {
+    apiMock.mockReset();
+    hostContextMock.mockReturnValue({ host: administrator });
+    localStorage.setItem('skybar-language', 'en');
+  });
+  afterEach(cleanup);
+
+  it('withholds room mutation controls until loading succeeds', async () => {
+    let resolveRooms!: (value: unknown) => void;
+    apiMock.mockImplementation((path:string) => path==='/rooms'
+      ? new Promise(resolve => { resolveRooms=resolve; })
+      : Promise.reject(new Error(`Unexpected API path: ${path}`)));
+
+    renderRoomsPage();
+
+    expect(screen.getByText('Loading…')).toBeVisible();
+    expect(screen.queryByPlaceholderText('Room name')).not.toBeInTheDocument();
+    expect(screen.queryByText('Display order')).not.toBeInTheDocument();
+
+    resolveRooms({ data: [] });
+    expect(await screen.findByPlaceholderText('Room name')).toBeVisible();
+    expect(screen.getByText('Display order')).toBeVisible();
+    expect(screen.getByText('Nothing here yet')).toBeVisible();
+  });
+
+  it('retries a failed room directory and renders recovered controls', async () => {
+    const room={id:'room-1',name:'101',position:0,guestCount:2,version:1};
+    apiMock.mockImplementation((path:string) => path==='/rooms'
+      ? apiMock.mock.calls.filter(([calledPath])=>calledPath==='/rooms').length===1
+        ? Promise.reject(new TypeError('Simulated room outage'))
+        : Promise.resolve({ data: [room] })
+      : Promise.reject(new Error(`Unexpected API path: ${path}`)));
+
+    renderRoomsPage();
+
+    expect(await screen.findByText('The request could not be completed.')).toBeVisible();
+    expect(screen.queryByPlaceholderText('Room name')).not.toBeInTheDocument();
+    expect(screen.queryByText('Display order')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button',{name:'Retry'}));
+
+    expect(await screen.findByText('101')).toBeVisible();
+    expect(screen.getByText('2 Guests')).toBeVisible();
+    expect(screen.getByPlaceholderText('Room name')).toBeVisible();
+    expect(screen.getByRole('button',{name:'Archive 101'})).toBeVisible();
+    expect(apiMock.mock.calls.filter(([path])=>path==='/rooms')).toHaveLength(2);
   });
 });
