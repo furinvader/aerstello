@@ -322,6 +322,44 @@ CREATE TABLE rate_limit_counters (
 );
 CREATE INDEX rate_limit_counters_expiry_idx ON rate_limit_counters(expires_at);
 
+CREATE FUNCTION reject_append_only_row_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION '% is append-only and cannot be updated or deleted', TG_TABLE_NAME;
+END;
+$$;
+
+CREATE TRIGGER product_versions_enforce_append_only
+BEFORE UPDATE OR DELETE ON product_versions
+FOR EACH ROW
+EXECUTE FUNCTION reject_append_only_row_mutation();
+
+CREATE TRIGGER audit_events_enforce_append_only
+BEFORE UPDATE OR DELETE ON audit_events
+FOR EACH ROW
+EXECUTE FUNCTION reject_append_only_row_mutation();
+
+CREATE FUNCTION reject_append_only_truncate()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION '% is append-only and cannot be truncated', TG_TABLE_NAME;
+END;
+$$;
+
+CREATE TRIGGER product_versions_reject_truncate
+BEFORE TRUNCATE ON product_versions
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_append_only_truncate();
+
+CREATE TRIGGER audit_events_reject_truncate
+BEFORE TRUNCATE ON audit_events
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_append_only_truncate();
+
 CREATE FUNCTION serialize_realtime_event_inserts()
 RETURNS trigger
 LANGUAGE plpgsql
