@@ -528,8 +528,11 @@ Then('venue settings shows a localized failure with retry',async({page})=>{
   await expect(page.getByLabel(/Name des Betriebs|Nome del locale|Venue name/)).toHaveCount(0);
 });
 When('the administrator retries the venue load',async({page})=>{
-  await page.evaluate(()=>{(window as unknown as {__skyBarVenueLoadOutage:{active:boolean}}).__skyBarVenueLoadOutage.active=false});
-  await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();
+  const retry=page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/});
+  await retry.evaluate((button)=>button.addEventListener('click',()=>{
+    (window as unknown as {__skyBarVenueLoadOutage:{active:boolean}}).__skyBarVenueLoadOutage.active=false;
+  },{capture:true,once:true}));
+  await retry.click();
 });
 Then('editable venue settings appear after recovery',async({page})=>{
   await expect(page.getByLabel(/Name des Betriebs|Nome del locale|Venue name/)).toHaveValue('Hotel Aurora');
@@ -1190,8 +1193,11 @@ Then('the request queue shows a localized failure instead of an empty state',asy
   await expect(page.getByText(/Noch keine Einträge|Nessun elemento|Nothing here yet/)).toHaveCount(0);
 });
 When('the host retries the request queue',async({page})=>{
-  await page.evaluate(()=>{(window as unknown as {__skyBarRequestQueueOutage:{active:boolean}}).__skyBarRequestQueueOutage.active=false});
-  await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();
+  const retry=page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/});
+  await retry.evaluate((button)=>button.addEventListener('click',()=>{
+    (window as unknown as {__skyBarRequestQueueOutage:{active:boolean}}).__skyBarRequestQueueOutage.active=false;
+  },{capture:true,once:true}));
+  await retry.click();
 });
 Then('the pending request appears after request queue recovery',async({page})=>{
   await expect(page.locator('.request-card').filter({hasText:'Retry Queue Guest'})).toBeVisible();
