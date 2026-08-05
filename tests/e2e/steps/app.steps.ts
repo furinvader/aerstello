@@ -786,7 +786,16 @@ Then('room QR cards recover and printing is enabled',async({page})=>{
 });
 When('venue settings loads a successful empty room QR directory',async({page})=>{
   await page.addInitScript(()=>{Object.assign(window,{__skyBarPrintCount:0});window.print=()=>{(window as unknown as {__skyBarPrintCount:number}).__skyBarPrintCount+=1}});
-  await page.route('**/api/v1/rooms',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({data:[]})}));
+  await page.addInitScript(()=>{
+    const originalFetch=window.fetch.bind(window);
+    const state={restore:()=>{window.fetch=originalFetch}};
+    Object.assign(window,{__skyBarEmptyRooms:state});
+    window.fetch=async(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(new URL(url,window.location.href).pathname==='/api/v1/rooms')return new Response(JSON.stringify({data:[]}),{status:200,headers:{'content-type':'application/json'}});
+      return originalFetch(input,init);
+    };
+  });
   await page.goto('/app/settings');
 });
 Then('the room QR empty state appears without failure and printing is enabled',async({page})=>{
@@ -797,7 +806,11 @@ Then('the room QR empty state appears without failure and printing is enabled',a
   await expect(print).toBeEnabled();
   await print.click();
   expect(await page.evaluate(()=>(window as unknown as {__skyBarPrintCount:number}).__skyBarPrintCount)).toBe(1);
-  await page.unroute('**/api/v1/rooms');
+  await page.evaluate(()=>{
+    const state=(window as unknown as {__skyBarEmptyRooms:{restore:()=>void}}).__skyBarEmptyRooms;
+    state.restore();
+    delete (window as unknown as {__skyBarEmptyRooms?:unknown}).__skyBarEmptyRooms;
+  });
 });
 Then('venue settings is available in the primary navigation', async ({ page }) => { await expect(page.getByRole('link',{name:'Betrieb'})).toBeVisible(); });
 When('the initial venue load fails transiently',async({page})=>{
