@@ -12,7 +12,7 @@ vi.mock('./api', async () => {
 });
 vi.mock('./host-shell', () => ({ useHostContext: hostContextMock }));
 
-import { AccountPage, BillDetailPage, BillsPage, DashboardPage, GuestsPage, OrdersPage, ProductsPage, RequestsPage, RoomsPage, SettingsPage } from './host-pages';
+import { AccountPage, BillDetailPage, BillsPage, DashboardPage, GuestsPage, OrdersPage, ProductsPage, RequestsPage, RoomsPage, SettingsPage, TakeOrdersPage } from './host-pages';
 
 function renderBillsPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -62,6 +62,10 @@ function renderRoomsPage() {
 function renderAccountPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(<QueryClientProvider client={client}><I18nProvider><AccountPage/></I18nProvider></QueryClientProvider>);
+}
+
+function renderTakeOrdersPage(client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
+  return render(<QueryClientProvider client={client}><I18nProvider><TakeOrdersPage/></I18nProvider></QueryClientProvider>);
 }
 
 describe('bill archive query states', () => {
@@ -507,5 +511,262 @@ describe('room management query states', () => {
     expect(screen.getByPlaceholderText('Room name')).toBeVisible();
     expect(screen.getByRole('button',{name:'Archive 101'})).toBeVisible();
     expect(apiMock.mock.calls.filter(([path])=>path==='/rooms')).toHaveLength(2);
+  });
+});
+
+const orderHost={...administrator,id:'00000000-0000-4000-8000-000000000001'};
+const orderRoom={id:'00000000-0000-4000-8000-000000000002',name:'101',position:0,version:1};
+const orderGuest={id:'00000000-0000-4000-8000-000000000003',name:'Anna Berger',roomId:orderRoom.id,roomName:'101',language:'de' as const,itemCount:0,totalCents:0,version:1};
+const orderCategory={id:'00000000-0000-4000-8000-000000000004',name:{de:'Getränke',it:'Bevande',en:'Drinks'},position:0,version:1};
+const orderProduct={id:'00000000-0000-4000-8000-000000000005',categoryId:orderCategory.id,name:{de:'Helles',it:'Bionda',en:'Lager'},priceCents:420,enabled:true,selfServiceOnly:false,position:0,version:1};
+
+describe('take orders operational query states', () => {
+  beforeEach(() => {
+    apiMock.mockReset();
+    hostContextMock.mockReturnValue({ host: orderHost });
+    localStorage.clear();
+    localStorage.setItem('skybar-language', 'en');
+    window.history.replaceState({}, '', '/app/orders/new');
+  });
+  afterEach(cleanup);
+
+  it('gates the guest picker through pending and successful-empty states', async () => {
+    let resolveGuests!: (value: unknown) => void;
+    apiMock.mockImplementation((path:string) => {
+      if(path==='/guests')return new Promise(resolve => { resolveGuests=resolve; });
+      if(path==='/rooms')return Promise.resolve({ data: [orderRoom] });
+      if(path==='/categories')return Promise.resolve({ data: [] });
+      if(path==='/products')return Promise.resolve({ data: [], catalogVersion: 1 });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    const rendered=renderTakeOrdersPage();
+    const picker=within(rendered.container.querySelector<HTMLElement>('.guest-picker')!);
+
+    expect(picker.getByText('Loading…')).toBeVisible();
+    expect(picker.queryByText('Nothing here yet')).not.toBeInTheDocument();
+    expect(picker.queryByRole('button',{name:'Add Guests'})).not.toBeInTheDocument();
+    expect(picker.queryByLabelText('Search guests…')).not.toBeInTheDocument();
+
+    resolveGuests({ data: [] });
+    expect(await picker.findByText('Nothing here yet')).toBeVisible();
+    expect(picker.getByRole('button',{name:'Add Guests'})).toBeEnabled();
+  });
+
+  it('retries a failed guest directory without disturbing recovered catalog UI', async () => {
+    apiMock.mockImplementation((path:string) => {
+      if(path==='/guests')return apiMock.mock.calls.filter(([calledPath])=>calledPath==='/guests').length===1
+        ? Promise.reject(new TypeError('Simulated guest outage'))
+        : Promise.resolve({ data: [orderGuest] });
+      if(path==='/rooms')return Promise.resolve({ data: [orderRoom] });
+      if(path==='/categories')return Promise.resolve({ data: [orderCategory] });
+      if(path==='/products')return Promise.resolve({ data: [orderProduct], catalogVersion: 1 });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    const rendered=renderTakeOrdersPage();
+    const picker=within(rendered.container.querySelector<HTMLElement>('.guest-picker')!);
+
+    expect(await picker.findByText('The request could not be completed.')).toBeVisible();
+    expect(picker.queryByRole('button',{name:'Add Guests'})).not.toBeInTheDocument();
+    expect(screen.getByRole('button',{name:/Lager/})).toBeDisabled();
+    fireEvent.click(picker.getByRole('button',{name:'Retry'}));
+
+    expect(await picker.findByText('Anna Berger')).toBeVisible();
+    expect(picker.getByRole('button',{name:'Add Guests'})).toBeEnabled();
+    expect(apiMock.mock.calls.filter(([path])=>path==='/guests')).toHaveLength(2);
+  });
+
+  it('gates the coupled catalog and retries both prerequisites', async () => {
+    let resolveCategories!: (value: unknown) => void;
+    apiMock.mockImplementation((path:string) => {
+      if(path==='/guests')return Promise.resolve({ data: [orderGuest] });
+      if(path==='/rooms')return Promise.resolve({ data: [orderRoom] });
+      if(path==='/categories')return apiMock.mock.calls.filter(([calledPath])=>calledPath==='/categories').length===1
+        ? new Promise(resolve => { resolveCategories=resolve; })
+        : Promise.resolve({ data: [orderCategory] });
+      if(path==='/products')return apiMock.mock.calls.filter(([calledPath])=>calledPath==='/products').length===1
+        ? Promise.resolve({ data: [], catalogVersion: 1 })
+        : Promise.resolve({ data: [orderProduct], catalogVersion: 2 });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    const rendered=renderTakeOrdersPage();
+    const catalog=within(rendered.container.querySelector<HTMLElement>('.catalog')!);
+
+    expect(catalog.getByText('Loading…')).toBeVisible();
+    expect(catalog.queryByText('Nothing here yet')).not.toBeInTheDocument();
+    resolveCategories({ data: [] });
+    expect(await catalog.findByText('Nothing here yet')).toBeVisible();
+
+    const productCalls=apiMock.mock.calls.filter(([path])=>path==='/products').length;
+    const categoryCalls=apiMock.mock.calls.filter(([path])=>path==='/categories').length;
+    apiMock.mockImplementation((path:string) => {
+      if(path==='/guests')return Promise.resolve({ data: [orderGuest] });
+      if(path==='/rooms')return Promise.resolve({ data: [orderRoom] });
+      if(path==='/categories')return Promise.resolve({ data: [orderCategory] });
+      if(path==='/products')return Promise.reject(new TypeError('Simulated product outage'));
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    const client=new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    cleanup();
+    const failed=renderTakeOrdersPage(client);
+    const failedCatalog=within(failed.container.querySelector<HTMLElement>('.catalog')!);
+    expect(await failedCatalog.findByText('The request could not be completed.')).toBeVisible();
+    apiMock.mockImplementation((path:string) => path==='/products'
+      ? Promise.resolve({ data: [orderProduct], catalogVersion: 2 })
+      : path==='/categories' ? Promise.resolve({ data: [orderCategory] })
+        : path==='/guests' ? Promise.resolve({ data: [orderGuest] })
+          : path==='/rooms' ? Promise.resolve({ data: [orderRoom] })
+            : Promise.reject(new Error(`Unexpected API path: ${path}`)));
+    fireEvent.click(failedCatalog.getByRole('button',{name:'Retry'}));
+
+    expect(await failedCatalog.findByRole('button',{name:/Lager/})).toBeVisible();
+    expect(apiMock.mock.calls.filter(([path])=>path==='/products').length).toBe(productCalls+2);
+    expect(apiMock.mock.calls.filter(([path])=>path==='/categories').length).toBe(categoryCalls+2);
+  });
+
+  it('keeps cached ordering data and frozen uncertain snapshots usable during outages', async () => {
+    const client=new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(['rooms'],{data:[orderRoom]});
+    client.setQueryData(['guests'],{data:[orderGuest]});
+    client.setQueryData(['categories'],{data:[orderCategory]});
+    client.setQueryData(['products'],{data:[orderProduct],catalogVersion:1});
+    apiMock.mockRejectedValue(new TypeError('Simulated background outage'));
+
+    renderTakeOrdersPage(client);
+    fireEvent.click(screen.getByRole('button',{name:/Anna Berger/}));
+    fireEvent.click(screen.getByRole('button',{name:/Lager/}));
+    expect(screen.getByRole('button',{name:'Submit order'})).toBeEnabled();
+    expect(screen.getAllByText('Lager')).toHaveLength(2);
+
+    cleanup();
+    localStorage.setItem(`skybar-uncertain-order:${orderHost.id}`,JSON.stringify({id:'00000000-0000-4000-8000-000000000006',hostId:orderHost.id,path:'/order-batches',method:'POST',createdAt:'2026-08-05T10:00:00.000Z',body:{mutationId:'00000000-0000-4000-8000-000000000006',originHostId:orderHost.id,guestId:orderGuest.id,catalogVersion:1,capturedAt:'2026-08-05T10:00:00.000Z',items:[{productId:orderProduct.id,quantity:1}]},display:{kind:'order',guestId:orderGuest.id,guestName:'Anna Berger',roomName:'101',items:[{productId:orderProduct.id,productName:{de:'Gesichertes Helles',it:'Bionda acquisita',en:'Captured Lager'},unitPriceCents:420,quantity:1}]}}));
+    const emptyClient=new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    renderTakeOrdersPage(emptyClient);
+
+    expect(await screen.findByText('The result is still uncertain. The staged order stays locked until the same command is retried.')).toBeVisible();
+    expect(screen.getByText('Captured Lager')).toBeVisible();
+    const cart=within(document.querySelector<HTMLElement>('.cart-panel')!);
+    expect(cart.getByRole('button',{name:'Retry'})).toBeEnabled();
+  });
+});
+
+describe('settings room QR query states', () => {
+  beforeEach(() => {
+    apiMock.mockReset();
+    hostContextMock.mockReturnValue({ host: administrator });
+    localStorage.setItem('skybar-language', 'en');
+  });
+  afterEach(cleanup);
+
+  it('preserves venue controls while rooms load, then enables successful-empty printing', async () => {
+    let resolveRooms!: (value: unknown) => void;
+    apiMock.mockImplementation((path:string) => path==='/venue'
+      ? Promise.resolve({name:'Hotel Aurora',defaultLanguage:'en',timezone:'Europe/Berlin',version:1})
+      : path==='/rooms' ? new Promise(resolve => { resolveRooms=resolve; })
+        : Promise.reject(new Error(`Unexpected API path: ${path}`)));
+    const print=vi.spyOn(window,'print').mockImplementation(()=>{});
+
+    renderSettingsPage();
+    expect(await screen.findByDisplayValue('Hotel Aurora')).toBeEnabled();
+    const roomHeading=screen.getByRole('heading',{name:'Room QR codes'});
+    expect(screen.getByText('Loading…')).toBeVisible();
+    expect(screen.queryByText('Nothing here yet')).not.toBeInTheDocument();
+    expect(screen.getByRole('button',{name:'Print'})).toBeDisabled();
+    fireEvent.click(screen.getByRole('button',{name:'Print'}));
+    expect(print).not.toHaveBeenCalled();
+
+    resolveRooms({ data: [] });
+    expect(await screen.findByText('Nothing here yet')).toBeVisible();
+    expect(roomHeading).toBeVisible();
+    expect(screen.getByRole('button',{name:'Print'})).toBeEnabled();
+    fireEvent.click(screen.getByRole('button',{name:'Print'}));
+    expect(print).toHaveBeenCalledOnce();
+    print.mockRestore();
+  });
+
+  it('retries a failed room directory and renders recovered QR cards', async () => {
+    apiMock.mockImplementation((path:string) => {
+      if(path==='/venue')return Promise.resolve({name:'Hotel Aurora',defaultLanguage:'en',timezone:'Europe/Berlin',version:1});
+      if(path==='/rooms')return apiMock.mock.calls.filter(([calledPath])=>calledPath==='/rooms').length===1
+        ? Promise.reject(new TypeError('Simulated room QR outage'))
+        : Promise.resolve({ data: [orderRoom] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    renderSettingsPage();
+    expect(await screen.findByText('The request could not be completed.')).toBeVisible();
+    expect(screen.getByRole('textbox',{name:'Venue name'})).toBeEnabled();
+    expect(screen.getByRole('button',{name:'Print'})).toBeDisabled();
+    expect(screen.queryByRole('heading',{name:'101'})).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button',{name:'Retry'}));
+
+    expect(await screen.findByRole('heading',{name:'101'})).toBeVisible();
+    expect(screen.getByRole('button',{name:'Print'})).toBeEnabled();
+  });
+});
+
+describe('administrator host directory query states', () => {
+  beforeEach(() => {
+    apiMock.mockReset();
+    hostContextMock.mockReturnValue({ host: administrator });
+    localStorage.setItem('skybar-language', 'en');
+  });
+  afterEach(cleanup);
+
+  it('preserves profile and device controls while hosts load, then shows successful empty', async () => {
+    let resolveHosts!: (value: unknown) => void;
+    apiMock.mockImplementation((path:string) => path==='/account/sessions'
+      ? Promise.resolve({ data: [] })
+      : path==='/hosts' ? new Promise(resolve => { resolveHosts=resolve; })
+        : Promise.reject(new Error(`Unexpected API path: ${path}`)));
+
+    renderAccountPage();
+    const hostCard=within(screen.getByRole('heading',{name:'Host accounts'}).parentElement!.nextElementSibling as HTMLElement);
+    expect(hostCard.getByText('Loading…')).toBeVisible();
+    expect(hostCard.queryByText('Nothing here yet')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button',{name:'Add'})).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox',{name:'Name'})).toBeEnabled();
+    expect(await screen.findAllByText('Nothing here yet')).toHaveLength(1);
+
+    resolveHosts({ data: [] });
+    expect(await hostCard.findByText('Nothing here yet')).toBeVisible();
+    expect(screen.getByRole('button',{name:'Add'})).toBeEnabled();
+  });
+
+  it('retries host failures before exposing host mutation actions', async () => {
+    const managed={id:'host-2',name:'Pat Staff',email:'pat@example.test',role:'staff' as const,language:'en' as const,active:true,version:1};
+    apiMock.mockImplementation((path:string) => {
+      if(path==='/account/sessions')return Promise.resolve({ data: [] });
+      if(path==='/hosts')return apiMock.mock.calls.filter(([calledPath])=>calledPath==='/hosts').length===1
+        ? Promise.reject(new TypeError('Simulated host directory outage'))
+        : Promise.resolve({ data: [managed] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    renderAccountPage();
+    const hostCard=within(screen.getByRole('heading',{name:'Host accounts'}).parentElement!.nextElementSibling as HTMLElement);
+    expect(await hostCard.findByText('The request could not be completed.')).toBeVisible();
+    expect(screen.queryByRole('button',{name:'Add'})).not.toBeInTheDocument();
+    expect(screen.queryByRole('button',{name:'Disable'})).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox',{name:'Name'})).toBeEnabled();
+    fireEvent.click(hostCard.getByRole('button',{name:'Retry'}));
+
+    expect(await hostCard.findByText('Pat Staff')).toBeVisible();
+    expect(screen.getByRole('button',{name:'Add'})).toBeEnabled();
+    expect(hostCard.getByRole('button',{name:'Disable'})).toBeEnabled();
+  });
+
+  it('does not query or render host administration for staff', async () => {
+    hostContextMock.mockReturnValue({ host: {...administrator,role:'staff'} });
+    apiMock.mockImplementation((path:string) => path==='/account/sessions'
+      ? Promise.resolve({ data: [] })
+      : Promise.reject(new Error(`Unexpected API path: ${path}`)));
+
+    renderAccountPage();
+    expect(await screen.findByText('Nothing here yet')).toBeVisible();
+    expect(screen.queryByRole('heading',{name:'Host accounts'})).not.toBeInTheDocument();
+    expect(apiMock.mock.calls.some(([path])=>path==='/hosts')).toBe(false);
   });
 });
