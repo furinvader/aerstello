@@ -98,6 +98,26 @@ export function guestRealtimeEvent(event: RealtimeEvent, guestId: string): Realt
   return isOwnOrder||isOwnAccess||isPublicInvalidation?{...event,payload:{}}:undefined;
 }
 
+const realtimeScopeSchema = z.object({ scope: z.enum(['host', 'guest']) }).strict();
+export type RealtimeScope = z.infer<typeof realtimeScopeSchema>['scope'];
+
+export function parseRealtimeScope(value: unknown): RealtimeScope {
+  const result = realtimeScopeSchema.safeParse(value);
+  if (!result.success) throw new HttpError(400, 'INVALID_EVENT_SCOPE', 'Exactly one host or guest event scope is required.');
+  return result.data.scope;
+}
+
+export async function authenticateRealtimeRequest(
+  scope: RealtimeScope,
+  request: FastifyRequest,
+  authenticators: Record<RealtimeScope, (candidate: FastifyRequest) => Promise<unknown>> = {
+    host: authenticateHost,
+    guest: authenticateGuest,
+  },
+): Promise<boolean> {
+  return Boolean(await authenticators[scope](request));
+}
+
 async function activeTab(guestId: string, client: pg.Pool | pg.PoolClient = pool): Promise<string> {
   const result = await client.query<{ id: string }>(
     `INSERT INTO order_tabs(guest_id,status) VALUES ($1,'open')
@@ -1301,10 +1321,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get('/api/v1/events', { preHandler: async (request,reply)=>{
-    if(await authenticateHost(request)) return;
-    if(await authenticateGuest(request)) return;
+    const scope=parseRealtimeScope(request.query);
+    if(await authenticateRealtimeRequest(scope,request)) return;
     await reply.code(401).send({error:{code:'UNAUTHENTICATED',message:'Authentication required.'}});
   } }, async (request, reply) => {
+    const scope=parseRealtimeScope(request.query);
     reply.hijack();
     const origin = request.headers.origin;
     if (origin) reply.raw.setHeader('Access-Control-Allow-Origin', origin);
@@ -1313,8 +1334,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     reply.raw.setHeader('Connection', 'keep-alive');
     reply.raw.write('retry: 3000\n\n');
     let closed = false;
-    const authorized = () => request.hostIdentity
-      ? hostSessionIsActive(request.hostIdentity.sessionId)
+    const authorized = () => scope==='host'
+      ? hostSessionIsActive(request.hostIdentity!.sessionId)
       : guestSessionIsActive(request.guestIdentity!.sessionId);
     const cleanup = () => {
       if (closed) return;
@@ -1329,7 +1350,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     };
     let deliveryQueue = Promise.resolve();
     const listener = (event: RealtimeEvent) => {
-      const visible=request.guestIdentity?guestRealtimeEvent(event,request.guestIdentity.id):event;
+      const visible=scope==='guest'?guestRealtimeEvent(event,request.guestIdentity!.id):event;
       if(!visible)return;
       deliveryQueue=deliveryQueue.then(async()=>{
         if(closed)return;

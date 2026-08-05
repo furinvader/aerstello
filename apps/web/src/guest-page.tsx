@@ -59,7 +59,7 @@ export function GuestPage() {
   const pendingUndos = useRef(new Set<string>());
   useEffect(() => {
     if (!me.isSuccess) return;
-    const events = new EventSource('/api/v1/events');
+    const events = new EventSource('/api/v1/events?scope=guest');
     const refresh = () => { void client.invalidateQueries({ queryKey: ['guest-tab'] }); void client.invalidateQueries({ queryKey: ['guest-catalog'] }); };
     const refreshIdentity = () => { void client.invalidateQueries({ queryKey: ['guest-me'] }); };
     const revalidateSession = async () => {

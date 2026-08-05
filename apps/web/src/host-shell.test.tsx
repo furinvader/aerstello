@@ -7,7 +7,7 @@ import { ApiError } from './api';
 import { HostShell } from './host-shell';
 import { I18nProvider } from './i18n';
 
-const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
+const { apiMock, eventSourceUrls } = vi.hoisted(() => ({ apiMock: vi.fn(), eventSourceUrls: [] as string[] }));
 vi.mock('./api', async () => {
   const actual = await vi.importActual<typeof import('./api')>('./api');
   return { ...actual, api: apiMock };
@@ -35,9 +35,11 @@ function renderHostShell() {
 describe('host identity query failures', () => {
   beforeEach(() => {
     apiMock.mockReset();
+    eventSourceUrls.length = 0;
     localStorage.setItem('skybar-language', 'en');
     window.history.replaceState({}, '', '/app/bills/42');
     vi.stubGlobal('EventSource', class {
+      constructor(url: string) { eventSourceUrls.push(url); }
       addEventListener() {}
       close() {}
     });
@@ -81,6 +83,7 @@ describe('host identity query failures', () => {
     expect(window.location.pathname).toBe('/app/bills/42');
     expect(identityAttempts).toBe(2);
     expect(screen.getByText('Hotel Aurora')).toBeVisible();
+    expect(eventSourceUrls).toEqual(['/api/v1/events?scope=host']);
   });
 
   it('redirects an unauthenticated host to login', async () => {

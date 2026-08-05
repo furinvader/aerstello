@@ -46,7 +46,7 @@ export function HostShell({children}:{children:ReactNode}) {
   }, [client, hostId]);
   useEffect(() => {
     if (!me.isSuccess) return;
-    const events = new EventSource('/api/v1/events');
+    const events = new EventSource('/api/v1/events?scope=host');
     const refresh = () => void client.invalidateQueries();
     const revalidateSession = async () => {
       try { await api('/auth/me'); }
