@@ -26,6 +26,7 @@ import {
   loadState,
   migratePrReviewStateV1,
   migrateState,
+  renderRecoverySummary,
   reviewRequestGate,
   reviewRoot,
   stateDirectory,
@@ -158,6 +159,23 @@ test('initialization writes the v2 identity and empty durable ledgers', () => {
   assert.deepEqual(state.reviewHistory, []);
   assert.deepEqual(state.threadResolutionStatus.threads, []);
   assert.equal(statePath(cwd, 17), join(gitCommonDirectory(cwd), 'codex', 'pr-review', 'pr-17', 'state.json'));
+});
+
+test('load upgrades the prior v2 shape in memory and the next checkpoint writes canonical state', () => {
+  const cwd = repo();
+  const initialized = init(cwd);
+  const { verificationEscalation: _verificationEscalation, ...priorV2 } = initialized;
+  writeFileSync(statePath(cwd, 17), JSON.stringify(priorV2));
+  assert.equal(Object.hasOwn(JSON.parse(readFileSync(statePath(cwd, 17), 'utf8')), 'verificationEscalation'), false);
+
+  const loaded = loadState(cwd);
+  assert.equal(loaded.verificationEscalation, null);
+  assert.match(renderRecoverySummary({ cwd }), /Verification escalation: none/u);
+  const checkpointed = checkpointGitMetadata({ cwd }).state;
+  assert.equal(checkpointed.verificationEscalation, null);
+  const persisted = JSON.parse(readFileSync(statePath(cwd, 17), 'utf8'));
+  assert.equal(Object.hasOwn(persisted, 'verificationEscalation'), true);
+  assert.equal(persisted.verificationEscalation, null);
 });
 
 test('migration keeps worker and central cherry-pick SHAs distinct and preserves three-round provenance', () => {

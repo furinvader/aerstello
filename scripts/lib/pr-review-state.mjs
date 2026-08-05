@@ -240,8 +240,17 @@ function readStateDocument(path) {
   }
 }
 
+function upgradeLoadedStateV2Shape(state) {
+  if (state?.schemaVersion === 2
+      && !Object.prototype.hasOwnProperty.call(state, 'verificationEscalation')) {
+    return { ...state, verificationEscalation: null };
+  }
+  return state;
+}
+
 function parseState(path) {
-  const state = readStateDocument(path);
+  const document = readStateDocument(path);
+  const state = upgradeLoadedStateV2Shape(document);
   if (state?.schemaVersion === 1) {
     const legacyErrors = validatePrReviewStateV1(state);
     if (legacyErrors.length > 0) {

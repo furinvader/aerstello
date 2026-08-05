@@ -94,7 +94,9 @@ test('state JSON Schema compiles with Ajv and shares representative fixtures wit
   assert.equal(validateSchema(validEscalation), true, JSON.stringify(validateSchema.errors));
   assert.deepEqual(validatePrReviewState(validEscalation), []);
 
+  const { verificationEscalation: _verificationEscalation, ...noncanonicalPriorV2 } = valid;
   const invalidFixtures = [
+    noncanonicalPriorV2,
     stateFixture({ repository: 'not-a-repository' }),
     stateFixture({ validationStatus: { status: 'passed', headSha: null, checks: [], updatedAt: null } }),
     escalatedStateFixture({ phase: 'recovering' }),
