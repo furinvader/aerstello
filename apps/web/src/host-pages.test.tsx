@@ -12,7 +12,7 @@ vi.mock('./api', async () => {
 });
 vi.mock('./host-shell', () => ({ useHostContext: hostContextMock }));
 
-import { BillDetailPage, BillsPage, DashboardPage, OrdersPage } from './host-pages';
+import { BillDetailPage, BillsPage, DashboardPage, OrdersPage, RequestsPage, SettingsPage } from './host-pages';
 
 function renderBillsPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -32,6 +32,16 @@ function renderOrdersPage() {
 function renderDashboardPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(<QueryClientProvider client={client}><I18nProvider><DashboardPage/></I18nProvider></QueryClientProvider>);
+}
+
+function renderRequestsPage() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(<QueryClientProvider client={client}><I18nProvider><RequestsPage/></I18nProvider></QueryClientProvider>);
+}
+
+function renderSettingsPage() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(<QueryClientProvider client={client}><I18nProvider><SettingsPage/></I18nProvider></QueryClientProvider>);
 }
 
 describe('bill archive query states', () => {
@@ -132,5 +142,79 @@ describe.each(openOrderSurfaces)('$name query states',({render:renderOpenOrders,
 
     expect(await orders.findByText('The request could not be completed.')).toBeVisible();
     expect(orders.queryByText('Nothing here yet')).not.toBeInTheDocument();
+  });
+});
+
+describe('access request query states', () => {
+  beforeEach(() => {
+    apiMock.mockReset();
+    hostContextMock.mockReturnValue({ host: { id: 'host-1', role: 'admin' } });
+    localStorage.setItem('skybar-language', 'en');
+  });
+  afterEach(cleanup);
+
+  it('shows loading until a successful empty response arrives', async () => {
+    let resolveRequests!: (value: unknown) => void;
+    apiMock.mockImplementation((path:string) => path==='/access-requests'
+      ? new Promise(resolve => { resolveRequests=resolve; })
+      : Promise.resolve({ data: [] }));
+
+    renderRequestsPage();
+
+    expect(screen.getByText('Loading…')).toBeVisible();
+    expect(screen.queryByText('Nothing here yet')).not.toBeInTheDocument();
+
+    resolveRequests({ data: [] });
+    expect(await screen.findByText('Nothing here yet')).toBeVisible();
+  });
+
+  it('retries a failed response and renders recovered request cards', async () => {
+    const request={id:'request-1',name:'Luca Rossi',roomId:'room-102',roomName:'102',language:'it',status:'pending',requestedAt:'2026-08-05T10:00:00.000Z'};
+    apiMock.mockImplementation((path:string) => path==='/access-requests'
+      ? apiMock.mock.calls.filter(([calledPath])=>calledPath==='/access-requests').length===1
+        ? Promise.reject(new TypeError('Simulated access request outage'))
+        : Promise.resolve({ data: [request] })
+      : Promise.resolve({ data: [] }));
+
+    renderRequestsPage();
+
+    expect(await screen.findByText('The request could not be completed.')).toBeVisible();
+    expect(screen.queryByText('Nothing here yet')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button',{name:'Retry'}));
+
+    expect(await screen.findByText('Luca Rossi')).toBeVisible();
+    expect(screen.getByText(/102/)).toBeVisible();
+    expect(apiMock.mock.calls.filter(([path])=>path==='/access-requests')).toHaveLength(2);
+  });
+});
+
+describe('venue settings query states', () => {
+  beforeEach(() => {
+    apiMock.mockReset();
+    hostContextMock.mockReturnValue({ host: { role: 'admin' } });
+    localStorage.setItem('skybar-language', 'en');
+  });
+  afterEach(cleanup);
+
+  it('retries an initial failure and initializes the recovered settings form', async () => {
+    const venue={name:'Hotel Aurora',defaultLanguage:'it',timezone:'Europe/Rome',version:3};
+    apiMock.mockImplementation((path:string) => {
+      if(path==='/rooms')return Promise.resolve({ data: [] });
+      return apiMock.mock.calls.filter(([calledPath])=>calledPath==='/venue').length===1
+        ? Promise.reject(new TypeError('Simulated venue outage'))
+        : Promise.resolve(venue);
+    });
+
+    renderSettingsPage();
+
+    expect(screen.getByText('Loading…')).toBeVisible();
+    expect(await screen.findByText('The request could not be completed.')).toBeVisible();
+    expect(screen.queryByRole('textbox',{name:'Venue name'})).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button',{name:'Retry'}));
+
+    expect(await screen.findByDisplayValue('Hotel Aurora')).toBeVisible();
+    expect(screen.getByDisplayValue('Europe/Rome')).toBeVisible();
+    expect(screen.getByRole('combobox',{name:'Default language'})).toHaveValue('it');
+    expect(apiMock.mock.calls.filter(([path])=>path==='/venue')).toHaveLength(2);
   });
 });
