@@ -201,6 +201,7 @@ let reloadedVoidRequests: {mutationId:string;reason:string;expectedBillingVersio
 let reloadedVoidItemCount = 0;
 let reloadedVoidPendingCount = 0;
 let transientGuestPendingState = '';
+let guestScopedEvents: {topic:string;payload:unknown}[] = [];
 let snapshottedBillHostName = '';
 let uncertainAccessRequestFieldsLocked = false;
 let credentialRaceLoginStatuses: number[] = [];
@@ -270,8 +271,12 @@ let immutableFinancialResult: {
   orderItemReopenError:string;
   billLineUpdateError:string;
   billLineDeleteError:string;
-  truncateError:string;
-  truncateTriggerEnabled:boolean;
+  billsTruncateError:string;
+  orderItemsTruncateError:string;
+  billItemsTruncateError:string;
+  billsTruncateTriggerEnabled:boolean;
+  orderItemsTruncateTriggerEnabled:boolean;
+  billItemsTruncateTriggerEnabled:boolean;
   billBefore:unknown;
   billAfter:unknown;
   orderItemBefore:unknown;
@@ -501,6 +506,33 @@ Then('the navigation shows the venue name {string}', async ({ page }, name:strin
 When('the administrator opens venue settings', async ({ page }) => { await page.goto('/app/settings'); });
 Then('a venue QR code and room QR codes are shown', async ({ page }) => { await expect(page.locator('.qr-code')).toHaveCount(4); });
 Then('venue settings is available in the primary navigation', async ({ page }) => { await expect(page.getByRole('link',{name:'Betrieb'})).toBeVisible(); });
+When('the initial venue load fails transiently',async({page})=>{
+  await page.addInitScript(()=>{
+    const originalFetch=window.fetch.bind(window);
+    const state=window as unknown as {__skyBarVenueLoadAttempts:number};
+    state.__skyBarVenueLoadAttempts=0;
+    window.fetch=async(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(new URL(url,window.location.href).pathname==='/api/v1/venue'){
+        state.__skyBarVenueLoadAttempts+=1;
+        if(state.__skyBarVenueLoadAttempts===1)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated venue outage'}}),{status:503,headers:{'content-type':'application/json'}});
+      }
+      return originalFetch(input,init);
+    };
+  });
+  await page.goto('/app/settings');
+});
+Then('venue settings shows a localized failure with retry',async({page})=>{
+  await expect(page.locator('.notice--error')).toContainText(/Die Anfrage konnte nicht abgeschlossen werden|Impossibile completare la richiesta|The request could not be completed/);
+  await expect(page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();
+  await expect(page.getByLabel(/Name des Betriebs|Nome del locale|Venue name/)).toHaveCount(0);
+});
+When('the administrator retries the venue load',async({page})=>{await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click()});
+Then('editable venue settings appear after recovery',async({page})=>{
+  await expect(page.getByLabel(/Name des Betriebs|Nome del locale|Venue name/)).toHaveValue('Hotel Aurora');
+  await expect(page.getByRole('button',{name:/Speichern|Salva|Save/,exact:true})).toBeEnabled();
+  expect(await page.evaluate(()=>(window as unknown as {__skyBarVenueLoadAttempts:number}).__skyBarVenueLoadAttempts)).toBe(2);
+});
 When('a venue update response is lost before another administrator edits it',async({page})=>{const request=page.context().request;const original=await (await request.get('/api/v1/venue')).json() as {name:string;defaultLanguage:string;timezone:string;version:number};const command={name:'First venue update',language:original.defaultLanguage,timezone:original.timezone,expectedVersion:original.version};const committed=await (await request.put('/api/v1/venue',{headers:csrfHeaders,data:command})).json() as {version:number};expect((await request.put('/api/v1/venue',{headers:csrfHeaders,data:{...command,name:'Newer venue update',expectedVersion:committed.version}})).status()).toBe(200);staleVenueUpdateStatus=(await request.put('/api/v1/venue',{headers:csrfHeaders,data:command})).status();staleVenueFinalName=((await (await request.get('/api/v1/venue')).json()) as {name:string}).name});
 Then('retrying the stale venue update is rejected',async()=>{expect(staleVenueUpdateStatus).toBe(409)});
 Then('the newer venue name remains configured',async()=>{expect(staleVenueFinalName).toBe('Newer venue update')});
@@ -1093,6 +1125,72 @@ Then('the device cannot be revoked through another guest',async()=>{expect(misma
 Then("Luca's open guest view returns to access request without cached data",async()=>{await expect(guestPage!).toHaveURL(/\/guest\/request$/,{timeout:10_000});await expect(guestPage!.getByText('Luca Rossi',{exact:true})).toHaveCount(0)});
 When('the host renames Luca to {string}',async({page},name:string)=>{const request=page.context().request;const guests=await (await request.get('/api/v1/guests')).json() as {data:{id:string;name:string;roomId:string;language:string;version:number}[]};const luca=guests.data.find((item)=>item.name==='Luca Rossi')!;expect((await request.patch(`/api/v1/guests/${luca.id}`,{headers:csrfHeaders,data:{name,roomId:luca.roomId,language:luca.language,expectedVersion:luca.version}})).status()).toBe(200)});
 Then("Luca's open guest view shows {string}",async({},name:string)=>{await expect(guestPage!.getByRole('heading',{name})).toBeVisible({timeout:10_000})});
+When('the guest opens a guest-scoped event stream while also authenticated as a host',async({page})=>{
+  expect((await guestPage!.context().request.post('/api/v1/auth/login',{data:{email:'admin@skybar.test',password:'SkyBarTest123!'}})).status()).toBe(200);
+  await guestPage!.evaluate(()=>new Promise<void>((resolve,reject)=>{
+    const received:{topic:string;payload:unknown}[]=[];
+    Object.assign(window,{__skyBarGuestScopedEvents:received});
+    const events=new EventSource('/api/v1/events?scope=guest');
+    Object.assign(window,{__skyBarGuestScopedStream:events});
+    for(const topic of ['orders.changed','bills.changed'])events.addEventListener(topic,(rawEvent)=>{
+      const event=rawEvent as MessageEvent<string>;
+      received.push({topic,payload:JSON.parse(event.data) as unknown});
+    });
+    events.addEventListener('open',()=>resolve(),{once:true});
+    events.addEventListener('error',()=>{if(events.readyState===EventSource.CLOSED)reject(new Error('Guest-scoped test stream closed before opening'))},{once:true});
+  }));
+  const hostRequest=page.context().request;
+  const ownGuest=await (await guestPage!.context().request.get('/api/v1/guest/me')).json() as {guest:{id:string}};
+  const guests=await (await hostRequest.get('/api/v1/guests')).json() as {data:{id:string;name:string}[]};
+  const otherGuest=guests.data.find(guest=>guest.id!==ownGuest.guest.id)!;
+  const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();
+  try{
+    await database.query(
+      `INSERT INTO realtime_events(topic,payload) VALUES
+       ('orders.changed',$1),('orders.changed',$2),('bills.changed',$3)`,
+      [JSON.stringify({guestId:ownGuest.guest.id,marker:'own'}),JSON.stringify({guestId:otherGuest.id,marker:'other'}),JSON.stringify({marker:'host-only'})],
+    );
+  }finally{await database.end()}
+  await expect.poll(()=>guestPage!.evaluate(()=>(window as unknown as {__skyBarGuestScopedEvents:unknown[]}).__skyBarGuestScopedEvents.length),{timeout:5_000}).toBe(1);
+  await guestPage!.waitForTimeout(500);
+  guestScopedEvents=await guestPage!.evaluate(()=>{
+    const state=window as unknown as {__skyBarGuestScopedEvents:{topic:string;payload:unknown}[];__skyBarGuestScopedStream:EventSource};
+    state.__skyBarGuestScopedStream.close();
+    return state.__skyBarGuestScopedEvents;
+  });
+});
+Then('the guest stream receives only its own payload-free order event',async()=>{expect(guestScopedEvents).toEqual([{topic:'orders.changed',payload:{}}])});
+
+When('the initial request queue load fails transiently',async({page})=>{
+  const request=page.context().request;
+  const bootstrap=await (await request.get('/api/v1/public/bootstrap')).json() as {rooms:{id:string;name:string}[]};
+  const room=bootstrap.rooms.find(item=>item.name==='102')!;
+  expect((await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Retry Queue Guest',roomId:room.id,language:'de'}})).status()).toBe(201);
+  await page.addInitScript(()=>{
+    const originalFetch=window.fetch.bind(window);
+    const state=window as unknown as {__skyBarRequestQueueAttempts:number};
+    state.__skyBarRequestQueueAttempts=0;
+    window.fetch=async(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(new URL(url,window.location.href).pathname==='/api/v1/access-requests'){
+        state.__skyBarRequestQueueAttempts+=1;
+        if(state.__skyBarRequestQueueAttempts===1)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated request queue outage'}}),{status:503,headers:{'content-type':'application/json'}});
+      }
+      return originalFetch(input,init);
+    };
+  });
+  await page.goto('/app/requests');
+});
+Then('the request queue shows a localized failure instead of an empty state',async({page})=>{
+  await expect(page.locator('.notice--error')).toContainText(/Die Anfrage konnte nicht abgeschlossen werden|Impossibile completare la richiesta|The request could not be completed/);
+  await expect(page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();
+  await expect(page.getByText(/Noch keine Einträge|Nessun elemento|Nothing here yet/)).toHaveCount(0);
+});
+When('the host retries the request queue',async({page})=>{await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click()});
+Then('the pending request appears after request queue recovery',async({page})=>{
+  await expect(page.locator('.request-card').filter({hasText:'Retry Queue Guest'})).toBeVisible();
+  expect(await page.evaluate(()=>(window as unknown as {__skyBarRequestQueueAttempts:number}).__skyBarRequestQueueAttempts)).toBe(2);
+});
 When('the guest adds two different self-service items',async()=>{await guestPage!.locator('.product-tile').getByText('Mineralwasser',{exact:true}).click();await expect(guestPage!.locator('.undo-toast')).toHaveCount(1);await guestPage!.locator('.product-tile').getByText('Hauskeks',{exact:true}).click()});
 Then('both provisional items offer their own undo action',async()=>{await expect(guestPage!.locator('.undo-toast')).toHaveCount(2);await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toHaveCount(2)});
 When('another approved device for the same guest adds {string}',async({page,browser},productName:string)=>{
@@ -1410,7 +1508,7 @@ When('another API replica creates a room',async({page})=>{
   await expect.poll(async()=>{try{return (await fetch(`http://127.0.0.1:${replicaPort}/api/v1/health`)).status}catch{return 0}},{timeout:15_000}).toBe(200);
   await page.evaluate(()=>new Promise<void>((resolve,reject)=>{
     sessionStorage.setItem('__skyBarReplicaRoomEvent','0');
-    const events=new EventSource('/api/v1/events');
+    const events=new EventSource('/api/v1/events?scope=host');
     Object.assign(window,{__skyBarReplicaStream:events});
     events.addEventListener('rooms.changed',()=>sessionStorage.setItem('__skyBarReplicaRoomEvent','1'));
     events.addEventListener('open',()=>resolve(),{once:true});
@@ -1435,7 +1533,7 @@ When('realtime events try to commit out of identity order',async({page})=>{
   relayedCommitOrderedEvents=[];
   await page.evaluate((currentTestId)=>new Promise<void>((resolve,reject)=>{
     sessionStorage.setItem('__skyBarCommitOrderedEvents','[]');
-    const events=new EventSource('/api/v1/events');
+    const events=new EventSource('/api/v1/events?scope=host');
     Object.assign(window,{__skyBarCommitOrderStream:events});
     events.addEventListener('rooms.changed',(rawEvent)=>{
       const event=rawEvent as MessageEvent<string>;
@@ -2263,7 +2361,7 @@ When('database writers attempt to rewrite settled financial records',async({page
   const billSnapshot=`SELECT id,number::text,tab_id,guest_id,host_id,mutation_id,venue_name,venue_timezone,guest_name,room_name,host_name,total_cents,payment_method,payment_note,settled_at FROM bills WHERE id=$1`;
   const orderItemSnapshot=`SELECT id,batch_id,product_id,product_name,unit_price_cents,quantity,source,submitted_by_host,submitted_by_guest_session,provisional_until,guest_mutation_id,guest_expected_price_cents,guest_expected_product_version,billing_version,voided_at,voided_by_host,void_reason,host_void_mutation_id,host_void_expected_billing_version,guest_undo_mutation_id,created_at FROM order_items WHERE id=$1`;
   const billLineSnapshot=`SELECT id,bill_id,original_order_item_id,product_name,unit_price_cents,quantity,source FROM bill_items WHERE bill_id=$1`;
-  let billUpdateError='';let billDeleteError='';let incompleteBillVoidError='';let unauditedBillVoidError='';let mismatchedBillVoidAuditError='';let mismatchedBillVoidAuditReachedCommit=false;let orderItemUpdateError='';let orderItemDeleteError='';let orderItemReopenError='';let billLineUpdateError='';let billLineDeleteError='';let truncateError='';let truncateTriggerEnabled=false;let billBefore:unknown;let orderItemBefore:unknown;let billLineBefore:unknown;let orderItemId='';
+  let billUpdateError='';let billDeleteError='';let incompleteBillVoidError='';let unauditedBillVoidError='';let mismatchedBillVoidAuditError='';let mismatchedBillVoidAuditReachedCommit=false;let orderItemUpdateError='';let orderItemDeleteError='';let orderItemReopenError='';let billLineUpdateError='';let billLineDeleteError='';let billsTruncateError='';let orderItemsTruncateError='';let billItemsTruncateError='';let billsTruncateTriggerEnabled=false;let orderItemsTruncateTriggerEnabled=false;let billItemsTruncateTriggerEnabled=false;let billBefore:unknown;let orderItemBefore:unknown;let billLineBefore:unknown;let orderItemId='';
   try{
     billBefore=(await database.query(billSnapshot,[bill.id])).rows[0];
     orderItemId=String((await database.query(`SELECT id FROM order_items WHERE bill_id=$1`,[bill.id])).rows[0].id);
@@ -2286,8 +2384,19 @@ When('database writers attempt to rewrite settled financial records',async({page
     try{await database.query(`UPDATE order_items SET status='open',bill_id=NULL WHERE id=$1`,[orderItemId])}catch(caught){orderItemReopenError=(caught as {code?:string}).code??''}
     try{await database.query('UPDATE bill_items SET quantity=quantity+1 WHERE bill_id=$1',[bill.id])}catch(caught){billLineUpdateError=(caught as {code?:string}).code??''}
     try{await database.query('DELETE FROM bill_items WHERE bill_id=$1',[bill.id])}catch(caught){billLineDeleteError=(caught as {code?:string}).code??''}
-    try{await database.query('TRUNCATE bill_items')}catch(caught){truncateError=(caught as {code?:string}).code??''}
-    truncateTriggerEnabled=(await database.query<{enabled:boolean}>(`SELECT tgenabled='O' AS enabled FROM pg_trigger WHERE tgrelid='bill_items'::regclass AND tgname='bill_items_reject_truncate'`)).rows[0]?.enabled??false;
+    try{await database.query('TRUNCATE bills')}catch(caught){billsTruncateError=(caught as {code?:string}).code??''}
+    try{await database.query('TRUNCATE order_items')}catch(caught){orderItemsTruncateError=(caught as {code?:string}).code??''}
+    try{await database.query('TRUNCATE bill_items')}catch(caught){billItemsTruncateError=(caught as {code?:string}).code??''}
+    const truncateTriggers=await database.query<{tableName:string;enabled:boolean}>(
+      `SELECT rel.relname AS "tableName",trg.tgenabled='O' AS enabled
+         FROM pg_trigger trg
+         JOIN pg_class rel ON rel.oid=trg.tgrelid
+        WHERE trg.tgname IN ('bills_reject_truncate','order_items_reject_truncate','bill_items_reject_truncate')`,
+    );
+    const truncateTriggerEnabled=new Map(truncateTriggers.rows.map(trigger=>[trigger.tableName,trigger.enabled]));
+    billsTruncateTriggerEnabled=truncateTriggerEnabled.get('bills')??false;
+    orderItemsTruncateTriggerEnabled=truncateTriggerEnabled.get('order_items')??false;
+    billItemsTruncateTriggerEnabled=truncateTriggerEnabled.get('bill_items')??false;
   }finally{await database.end()}
   const voidResponse=await request.post(`/api/v1/bills/${bill.id}/void`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),reason:'Verified immutable financial record'}});
   expect(voidResponse.status()).toBe(200);
@@ -2302,7 +2411,7 @@ When('database writers attempt to rewrite settled financial records',async({page
     restoredOrderItemState=(await verification.query<{status:string;billId:string|null;billingVersion:number}>(`SELECT status,bill_id AS "billId",billing_version AS "billingVersion" FROM order_items WHERE id=$1`,[orderItemId])).rows[0]!;
   }finally{await verification.end()}
   const restoredItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
-  immutableFinancialResult={billUpdateError,billDeleteError,incompleteBillVoidError,unauditedBillVoidError,mismatchedBillVoidAuditError,mismatchedBillVoidAuditReachedCommit,repeatedBillVoidError,orderItemUpdateError,orderItemDeleteError,orderItemReopenError,billLineUpdateError,billLineDeleteError,truncateError,truncateTriggerEnabled,billBefore,billAfter,orderItemBefore,orderItemAfter,billLineBefore,billLineAfter,settlementStatus:settlement.status(),voidStatus:voidResponse.status(),voidAuditCount,restoredItemCount,restoredOrderItemState};
+  immutableFinancialResult={billUpdateError,billDeleteError,incompleteBillVoidError,unauditedBillVoidError,mismatchedBillVoidAuditError,mismatchedBillVoidAuditReachedCommit,repeatedBillVoidError,orderItemUpdateError,orderItemDeleteError,orderItemReopenError,billLineUpdateError,billLineDeleteError,billsTruncateError,orderItemsTruncateError,billItemsTruncateError,billsTruncateTriggerEnabled,orderItemsTruncateTriggerEnabled,billItemsTruncateTriggerEnabled,billBefore,billAfter,orderItemBefore,orderItemAfter,billLineBefore,billLineAfter,settlementStatus:settlement.status(),voidStatus:voidResponse.status(),voidAuditCount,restoredItemCount,restoredOrderItemState};
 });
 Then('direct bill header updates are rejected',async()=>{expect(immutableFinancialResult?.billUpdateError).toBe('P0001')});
 Then('direct bill header deletes are rejected',async()=>{expect(immutableFinancialResult?.billDeleteError).toBe('P0001')});
@@ -2315,8 +2424,10 @@ Then('direct billed order item deletes are rejected',async()=>{expect(immutableF
 Then('direct billed order item reopening is rejected',async()=>{expect(immutableFinancialResult?.orderItemReopenError).toBe('P0001')});
 Then('direct bill line updates are rejected',async()=>{expect(immutableFinancialResult?.billLineUpdateError).toBe('P0001')});
 Then('direct bill line deletes are rejected',async()=>{expect(immutableFinancialResult?.billLineDeleteError).toBe('P0001')});
-Then('direct bill line truncation is rejected',async()=>{expect(immutableFinancialResult?.truncateError).toBe('P0001')});
-Then('the bill line truncate trigger remains enabled after reset',async()=>{expect(immutableFinancialResult?.truncateTriggerEnabled).toBe(true)});
+Then('direct bill header truncation is rejected',async()=>{expect(immutableFinancialResult?.billsTruncateError).toBe('P0001')});
+Then('direct billed order item truncation is rejected',async()=>{expect(immutableFinancialResult?.orderItemsTruncateError).toBe('P0001')});
+Then('direct bill line truncation is rejected',async()=>{expect(immutableFinancialResult?.billItemsTruncateError).toBe('P0001')});
+Then('all financial truncate triggers remain enabled after reset',async()=>{expect(immutableFinancialResult).toMatchObject({billsTruncateTriggerEnabled:true,orderItemsTruncateTriggerEnabled:true,billItemsTruncateTriggerEnabled:true})});
 Then('the original settled financial snapshots remain unchanged',async()=>{expect(immutableFinancialResult?.billBefore).toBeDefined();expect(immutableFinancialResult?.billAfter).toEqual(immutableFinancialResult?.billBefore);expect(immutableFinancialResult?.orderItemAfter).toEqual(immutableFinancialResult?.orderItemBefore);expect(immutableFinancialResult?.billLineAfter).toEqual(immutableFinancialResult?.billLineBefore)});
 Then('normal settlement and audited bill reversal remain valid',async()=>{expect(immutableFinancialResult).toMatchObject({settlementStatus:200,voidStatus:200,voidAuditCount:1,restoredItemCount:1,restoredOrderItemState:{status:'open',billId:null,billingVersion:1}})});
 When('the same order mutation is submitted concurrently',async({page})=>{
@@ -2397,7 +2508,7 @@ When('the host opens a voided bill for printing',async({page})=>{const {request,
 Then('the printed bill shows its void reason',async({page})=>{await expect(page.locator('.bill-void-marker .notice')).toBeVisible();await expect(page.locator('.bill-void-marker')).toContainText('Printed correction')});
 
 When('the administrator session is revoked while its event stream is open',async({page,browser})=>{
-  await page.evaluate(()=>new Promise<void>((resolve,reject)=>{sessionStorage.setItem('__skyBarRevokedEvents','0');const events=new EventSource('/api/v1/events');Object.assign(window,{__skyBarRevokedStream:events});events.addEventListener('rooms.changed',()=>sessionStorage.setItem('__skyBarRevokedEvents',String(Number(sessionStorage.getItem('__skyBarRevokedEvents'))+1)));events.addEventListener('open',()=>resolve(),{once:true});events.addEventListener('error',()=>{if(events.readyState===EventSource.CLOSED)reject(new Error('Event stream closed before opening'))},{once:true})}));
+  await page.evaluate(()=>new Promise<void>((resolve,reject)=>{sessionStorage.setItem('__skyBarRevokedEvents','0');const events=new EventSource('/api/v1/events?scope=host');Object.assign(window,{__skyBarRevokedStream:events});events.addEventListener('rooms.changed',()=>sessionStorage.setItem('__skyBarRevokedEvents',String(Number(sessionStorage.getItem('__skyBarRevokedEvents'))+1)));events.addEventListener('open',()=>resolve(),{once:true});events.addEventListener('error',()=>{if(events.readyState===EventSource.CLOSED)reject(new Error('Event stream closed before opening'))},{once:true})}));
   const request=page.context().request;await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'realtime-admin@skybar.test',name:'Realtime Admin',password:'RealtimeAdmin123!',role:'admin',language:'de'}});const other=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(other);await other.request.post('/api/v1/auth/login',{data:{email:'realtime-admin@skybar.test',password:'RealtimeAdmin123!'}});execFileSync('npm',['run','admin:create:dev','-w','@sky-bar/api','--','--email','admin@skybar.test','--name','Mira Host','--password-stdin'],{cwd:process.cwd(),env:process.env,stdio:'pipe',input:'RecoveredAgain123!\n'});expect((await other.request.post('/api/v1/rooms',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:'After revocation'}})).status()).toBe(201);await page.waitForTimeout(500);revokedStreamEventCount=await page.evaluate(()=>Number(sessionStorage.getItem('__skyBarRevokedEvents')));
 });
 Then('the revoked stream receives no later venue events',async()=>{expect(revokedStreamEventCount).toBe(0)});

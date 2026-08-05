@@ -15,6 +15,13 @@ Feature: Venue identity
     Given an authenticated administrator
     Then venue settings is available in the primary navigation
 
+  Scenario: A venue load failure can be retried
+    Given an authenticated administrator
+    When the initial venue load fails transiently
+    Then venue settings shows a localized failure with retry
+    When the administrator retries the venue load
+    Then editable venue settings appear after recovery
+
   Scenario: Venue time zones must be recognized IANA identifiers
     Given an authenticated administrator
     When the administrator submits an invalid venue time zone

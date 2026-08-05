@@ -90,8 +90,10 @@ Feature: Device grants and replay protection
     And direct billed order item reopening is rejected
     And direct bill line updates are rejected
     And direct bill line deletes are rejected
+    And direct bill header truncation is rejected
+    And direct billed order item truncation is rejected
     And direct bill line truncation is rejected
-    And the bill line truncate trigger remains enabled after reset
+    And all financial truncate triggers remain enabled after reset
     And the original settled financial snapshots remain unchanged
     And normal settlement and audited bill reversal remain valid
 

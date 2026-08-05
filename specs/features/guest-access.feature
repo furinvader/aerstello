@@ -134,6 +134,18 @@ Feature: Guest device access and self-service
     When the host renames Luca to "Luca Nuovo"
     Then Luca's open guest view shows "Luca Nuovo"
 
+  Scenario: Dual-cookie guest event stream stays isolated
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When the guest opens a guest-scoped event stream while also authenticated as a host
+    Then the guest stream receives only its own payload-free order event
+
+  Scenario: A request queue failure can be retried
+    Given an authenticated administrator
+    When the initial request queue load fails transiently
+    Then the request queue shows a localized failure instead of an empty state
+    When the host retries the request queue
+    Then the pending request appears after request queue recovery
+
   Scenario: A guest can undo a self-service item for ten seconds
     Given an approved guest device for "Luca Rossi" in room "102"
     When the guest adds "Mineralwasser" from self-service
