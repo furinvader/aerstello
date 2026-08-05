@@ -25,14 +25,29 @@ function gitText(cwd, args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
-function defaultClient() {
+export function buildGhGraphqlArgs(query, variables) {
+  if (typeof query !== 'string') {
+    throw new GitHubWorkflowError('GraphQL query must be a string', 'INVALID_GRAPHQL_VARIABLE');
+  }
+  const args = ['api', 'graphql', '-f', `query=${query}`];
+  for (const [key, value] of Object.entries(variables)) {
+    if (value === null || value === undefined) continue;
+    if (typeof value === 'string') {
+      args.push('-f', `${key}=${value}`);
+    } else if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) {
+      args.push('-F', `${key}=${value}`);
+    } else {
+      throw new GitHubWorkflowError(`GraphQL variable ${key} has an unsupported value`, 'INVALID_GRAPHQL_VARIABLE');
+    }
+  }
+  return args;
+}
+
+export function createDefaultGitHubClient(exec = execFileSync) {
   return {
     async graphql({ query, variables }) {
-      const args = ['api', 'graphql', '-f', `query=${query}`];
-      for (const [key, value] of Object.entries(variables)) {
-        if (value !== null && value !== undefined) args.push('-F', `${key}=${value}`);
-      }
-      return JSON.parse(execFileSync('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
+      const args = buildGhGraphqlArgs(query, variables);
+      return JSON.parse(exec('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
     },
   };
 }
@@ -99,7 +114,7 @@ function parsePr(value) {
 }
 
 export async function runCli(argv, {
-  cwd = process.cwd(), client = defaultClient(), state, git = defaultGit(), clock = { now: () => new Date().toISOString() },
+  cwd = process.cwd(), client = createDefaultGitHubClient(), state, git = defaultGit(), clock = { now: () => new Date().toISOString() },
   journal,
 } = {}) {
   const [command, ...args] = argv;

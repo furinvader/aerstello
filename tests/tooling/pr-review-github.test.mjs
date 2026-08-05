@@ -8,7 +8,12 @@ import {
   githubReviewConstants,
   readTopLevelComments,
 } from '../../scripts/lib/pr-review-github.mjs';
-import { runCli, usage } from '../../scripts/pr-review-github.mjs';
+import {
+  buildGhGraphqlArgs,
+  createDefaultGitHubClient,
+  runCli,
+  usage,
+} from '../../scripts/pr-review-github.mjs';
 
 const HEAD = 'a'.repeat(40);
 const OTHER_HEAD = 'b'.repeat(40);
@@ -675,6 +680,47 @@ test('CLI exposes exactly the documented explicit-PR command surface and JSON-re
     client, state, git: fakeGit(), clock: { now: () => AT }, journal: fakeJournal(),
   });
   assert.equal(result.prNumber, 2);
+});
+
+test('default gh GraphQL transport preserves literal strings and typed scalar variables', async () => {
+  const calls = [];
+  const client = createDefaultGitHubClient((command, args, options) => {
+    calls.push({ command, args, options });
+    return JSON.stringify({ data: { ok: true } });
+  });
+  const result = await client.graphql({
+    query: 'mutation($body:String!,$pr:Int!,$enabled:Boolean!){example}',
+    variables: {
+      body: '@codex review', owner: 'openai/sky-bar', pr: 2, enabled: true,
+      cursor: null, absent: undefined,
+    },
+  });
+  assert.deepEqual(result, { data: { ok: true } });
+  assert.deepEqual(calls[0].args, [
+    'api', 'graphql',
+    '-f', 'query=mutation($body:String!,$pr:Int!,$enabled:Boolean!){example}',
+    '-f', 'body=@codex review',
+    '-f', 'owner=openai/sky-bar',
+    '-F', 'pr=2',
+    '-F', 'enabled=true',
+  ]);
+  assert.equal(calls[0].args.includes('codex review'), false, 'the literal body remains one raw-field argument');
+});
+
+test('default gh GraphQL transport rejects unsupported values before invoking gh', async () => {
+  let invocations = 0;
+  const client = createDefaultGitHubClient(() => {
+    invocations += 1;
+    return '{}';
+  });
+  for (const value of [Number.NaN, Number.POSITIVE_INFINITY, {}, [], 1n]) {
+    await assert.rejects(() => client.graphql({ query: 'query{viewer{login}}', variables: { value } }), {
+      code: 'INVALID_GRAPHQL_VARIABLE',
+    });
+  }
+  assert.equal(invocations, 0);
+  assert.deepEqual(buildGhGraphqlArgs('query{viewer{login}}', { nullable: null, missing: undefined }),
+    ['api', 'graphql', '-f', 'query=query{viewer{login}}']);
 });
 
 test('reply-resolve validates the full task plan before any mutation', async () => {
