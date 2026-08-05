@@ -5,46 +5,22 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schemaVersion",
-    "revision",
-    "repository",
-    "prNumber",
-    "phase",
-    "baseSha",
-    "requestedHeadSha",
-    "reviewedHeadSha",
-    "currentIntegrationHeadSha",
-    "reviewRound",
-    "releaseBaseline",
-    "decisions",
-    "tasks",
-    "reviewRequest",
-    "reviewSubmission",
-    "blockedReasons",
-    "validationStatus",
-    "nextAction",
-    "integrationWorktree",
-    "orchestratorSessionId",
-    "git",
-    "updatedAt"
+    "schemaVersion", "revision", "repository", "prNumber", "phase", "baseSha",
+    "requestedHeadSha", "reviewedHeadSha", "currentIntegrationHeadSha", "reviewRound",
+    "verificationReviewUsed", "legacyReviewProvenance", "releaseBaseline", "decisions", "tasks", "reviewRequest",
+    "reviewOutcome", "reviewHistory", "threadResolutionStatus", "blockedReasons",
+    "validationStatus", "nextAction", "integrationWorktree", "orchestratorSessionId",
+    "abandonmentReason", "git", "updatedAt"
   ],
   "properties": {
-    "schemaVersion": { "const": 1 },
+    "schemaVersion": { "const": 2 },
     "revision": { "type": "integer", "minimum": 0 },
     "repository": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$", "maxLength": 256 },
     "prNumber": { "type": "integer", "minimum": 1 },
     "phase": {
       "enum": [
-        "recovering",
-        "ready-for-review",
-        "awaiting-review",
-        "triaging",
-        "implementing",
-        "integrating",
-        "verifying",
-        "validating",
-        "blocked",
-        "complete"
+        "recovering", "ready-for-review", "awaiting-review", "triaging", "implementing",
+        "integrating", "verifying", "validating", "awaiting-human-decision", "blocked", "complete"
       ]
     },
     "baseSha": { "$ref": "#/$defs/sha" },
@@ -52,16 +28,30 @@
     "reviewedHeadSha": { "$ref": "#/$defs/nullableSha" },
     "currentIntegrationHeadSha": { "$ref": "#/$defs/sha" },
     "reviewRound": { "type": "integer", "minimum": 0, "maximum": 3 },
+    "verificationReviewUsed": { "type": "boolean" },
+    "legacyReviewProvenance": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["schemaVersion", "discoveryRounds", "migratedAt"],
+          "properties": {
+            "schemaVersion": { "const": 1 },
+            "discoveryRounds": { "type": "integer", "minimum": 0, "maximum": 3 },
+            "migratedAt": { "type": "string", "format": "date-time" }
+          }
+        }
+      ]
+    },
     "releaseBaseline": {
       "oneOf": [
         { "type": "null" },
         {
-          "type": "object",
-          "additionalProperties": false,
+          "type": "object", "additionalProperties": false,
           "required": ["version", "tag", "commit", "releasedAt"],
           "properties": {
-            "version": { "type": "string" },
-            "tag": { "type": "string" },
+            "version": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "tag": { "type": "string", "minLength": 1, "maxLength": 128 },
             "commit": { "$ref": "#/$defs/sha" },
             "releasedAt": { "type": "string", "format": "date-time" }
           }
@@ -69,96 +59,318 @@
       ]
     },
     "decisions": {
-      "type": "array",
+      "type": "array", "uniqueItems": true,
       "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["id", "summary"],
+        "type": "object", "additionalProperties": false, "required": ["id", "summary"],
         "properties": {
           "id": { "type": "string", "minLength": 1, "maxLength": 128 },
           "summary": { "type": "string", "minLength": 1, "maxLength": 1000 }
         }
       }
     },
-    "tasks": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/task" }
-    },
-    "reviewRequest": { "$ref": "#/$defs/reviewMetadata" },
-    "reviewSubmission": { "$ref": "#/$defs/reviewMetadata" },
-    "blockedReasons": { "$ref": "#/$defs/stringList" },
-    "validationStatus": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["status", "headSha", "checks", "updatedAt"],
-      "properties": {
-        "status": { "enum": ["not-run", "passed", "failed"] },
-        "headSha": { "$ref": "#/$defs/nullableSha" },
-        "checks": { "$ref": "#/$defs/stringList" },
-        "updatedAt": {
-          "oneOf": [{ "type": "null" }, { "type": "string", "format": "date-time" }]
+    "tasks": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/task" } },
+    "reviewRequest": { "$ref": "#/$defs/nullableReviewRequest" },
+    "reviewOutcome": { "$ref": "#/$defs/nullableReviewOutcome" },
+    "reviewHistory": {
+      "type": "array", "maxItems": 4, "uniqueItems": true,
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["request", "outcome"],
+        "properties": {
+          "request": { "$ref": "#/$defs/reviewRequest" },
+          "outcome": { "$ref": "#/$defs/nullableReviewOutcome" }
         }
       }
     },
+    "threadResolutionStatus": { "$ref": "#/$defs/threadResolutionStatus" },
+    "blockedReasons": { "$ref": "#/$defs/stringList" },
+    "validationStatus": { "$ref": "#/$defs/proofStatus" },
     "nextAction": { "type": "string", "minLength": 1, "maxLength": 1000 },
     "integrationWorktree": { "type": "string", "pattern": "^/", "maxLength": 4096 },
-    "orchestratorSessionId": {
-      "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1, "maxLength": 256 }]
-    },
+    "orchestratorSessionId": { "$ref": "#/$defs/nullableString" },
+    "abandonmentReason": { "$ref": "#/$defs/nullableString" },
     "git": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["branch", "headSha", "dirty"],
+      "type": "object", "additionalProperties": false, "required": ["branch", "headSha", "dirty"],
       "properties": {
-        "branch": { "oneOf": [{ "type": "null" }, { "type": "string" }] },
+        "branch": { "$ref": "#/$defs/nullableString" },
         "headSha": { "$ref": "#/$defs/sha" },
         "dirty": { "type": "boolean" }
       }
     },
     "updatedAt": { "type": "string", "format": "date-time" }
   },
+  "allOf": [
+    {
+      "if": { "properties": { "verificationReviewUsed": { "const": true } }, "required": ["verificationReviewUsed"] },
+      "then": { "properties": { "reviewRound": { "const": 3 } } }
+    },
+    {
+      "if": { "properties": { "phase": { "const": "awaiting-review" } }, "required": ["phase"] },
+      "then": {
+        "properties": {
+          "reviewRequest": { "$ref": "#/$defs/reviewRequest" },
+          "reviewOutcome": { "type": "null" },
+          "reviewHistory": { "type": "array", "minItems": 1 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "phase": { "const": "complete" } }, "required": ["phase"] },
+      "then": {
+        "properties": {
+          "reviewRound": { "type": "integer", "minimum": 1 },
+          "reviewRequest": { "$ref": "#/$defs/reviewRequest" },
+          "reviewOutcome": {
+            "allOf": [{ "$ref": "#/$defs/reviewOutcome" }, { "type": "object", "properties": { "outcome": { "const": "clean" } } }]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reviewOutcome": {
+            "type": "object", "required": ["kind", "outcome"],
+            "properties": { "kind": { "const": "verification" }, "outcome": { "const": "findings" } }
+          }
+        },
+        "required": ["reviewOutcome"]
+      },
+      "then": { "properties": { "phase": { "const": "awaiting-human-decision" } } }
+    }
+  ],
   "$defs": {
     "sha": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
     "nullableSha": { "oneOf": [{ "$ref": "#/$defs/sha" }, { "type": "null" }] },
+    "nullableString": {
+      "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1, "maxLength": 1000 }]
+    },
     "stringList": {
-      "type": "array",
+      "type": "array", "uniqueItems": true,
       "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
     },
-    "reviewMetadata": {
-      "oneOf": [
-        { "type": "null" },
+    "reviewRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "id", "databaseId", "url", "headSha", "at", "kind", "body", "authorLogin", "authorNodeId"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "databaseId": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
+        "url": { "type": "string", "format": "uri", "pattern": "^https://", "maxLength": 2000 },
+        "headSha": { "$ref": "#/$defs/sha" },
+        "at": { "type": "string", "format": "date-time" },
+        "kind": { "enum": ["discovery", "verification"] },
+        "body": { "const": "@codex review" },
+        "authorLogin": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "authorNodeId": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    },
+    "nullableReviewRequest": { "oneOf": [{ "$ref": "#/$defs/reviewRequest" }, { "type": "null" }] },
+    "reviewOutcome": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "id", "databaseId", "url", "headSha", "at", "requestId", "kind", "outcome",
+        "evidenceType", "reviewerLogin", "reviewerNodeId", "reviewerType", "reviewerUrl",
+        "reactionContent", "reactionCommentId"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "databaseId": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
+        "url": { "type": "string", "format": "uri", "pattern": "^https://", "maxLength": 2000 },
+        "headSha": { "$ref": "#/$defs/sha" },
+        "at": { "type": "string", "format": "date-time" },
+        "requestId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "kind": { "enum": ["discovery", "verification"] },
+        "outcome": { "enum": ["clean", "findings"] },
+        "evidenceType": { "enum": ["review-submission", "request-reaction"] },
+        "reviewerLogin": { "const": "chatgpt-codex-connector" },
+        "reviewerNodeId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "reviewerType": { "const": "Bot" },
+        "reviewerUrl": { "const": "https://github.com/apps/chatgpt-codex-connector" },
+        "reactionContent": { "oneOf": [{ "const": "THUMBS_UP" }, { "type": "null" }] },
+        "reactionCommentId": { "$ref": "#/$defs/nullableString" }
+      },
+      "allOf": [
         {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["id", "databaseId", "url", "headSha", "at"],
-          "properties": {
-            "id": { "type": "string", "minLength": 1 },
-            "databaseId": { "oneOf": [{ "type": "integer" }, { "type": "null" }] },
-            "url": { "type": "string", "format": "uri" },
-            "headSha": { "$ref": "#/$defs/sha" },
-            "at": { "type": "string", "format": "date-time" }
+          "if": { "properties": { "evidenceType": { "const": "request-reaction" } }, "required": ["evidenceType"] },
+          "then": {
+            "properties": {
+              "outcome": { "const": "clean" },
+              "reactionContent": { "const": "THUMBS_UP" },
+              "reactionCommentId": { "type": "string", "minLength": 1, "maxLength": 256 }
+            }
+          },
+          "else": {
+            "properties": { "reactionContent": { "type": "null" }, "reactionCommentId": { "type": "null" } }
           }
         }
       ]
     },
-    "task": {
-      "type": "object",
-      "additionalProperties": false,
+    "nullableReviewOutcome": { "oneOf": [{ "$ref": "#/$defs/reviewOutcome" }, { "type": "null" }] },
+    "proofStatus": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "headSha", "checks", "updatedAt"],
+      "properties": {
+        "status": { "enum": ["not-run", "passed", "failed"] },
+        "headSha": { "$ref": "#/$defs/nullableSha" },
+        "checks": { "$ref": "#/$defs/stringList" },
+        "updatedAt": { "oneOf": [{ "type": "null" }, { "type": "string", "format": "date-time" }] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "not-run" } }, "required": ["status"] },
+          "then": {
+            "properties": {
+              "headSha": { "type": "null" }, "checks": { "type": "array", "maxItems": 0 }, "updatedAt": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "status": { "const": "passed" } }, "required": ["status"] },
+          "then": {
+            "properties": {
+              "headSha": { "$ref": "#/$defs/sha" }, "checks": { "type": "array", "minItems": 1 },
+              "updatedAt": { "type": "string", "format": "date-time" }
+            }
+          }
+        }
+      ]
+    },
+    "threadRecord": {
+      "type": "object", "additionalProperties": false,
       "required": [
-        "id", "sourceIds", "fingerprint", "summary", "severity", "disposition", "status",
-        "dependencies", "ownedPaths", "worker", "branch", "worktree", "commitSha",
+        "threadNodeId", "rootCommentNodeId", "rootCommentDatabaseId", "taskIds", "disposition", "replyId", "replyUrl",
+        "isResolved", "resolvedAt", "resolvedBy", "observedHeadSha"
+      ],
+      "properties": {
+        "threadNodeId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "rootCommentNodeId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "rootCommentDatabaseId": { "type": "integer", "minimum": 1 },
+        "taskIds": { "$ref": "#/$defs/stringList" },
+        "disposition": {
+          "enum": ["fixed", "duplicate", "already-fixed", "stale", "invalid", "policy-conflict", "out-of-scope"]
+        },
+        "replyId": { "$ref": "#/$defs/nullableString" },
+        "replyUrl": { "oneOf": [{ "type": "null" }, { "type": "string", "format": "uri", "pattern": "^https://", "maxLength": 2000 }] },
+        "isResolved": { "type": "boolean" },
+        "resolvedAt": { "oneOf": [{ "type": "null" }, { "type": "string", "format": "date-time" }] },
+        "resolvedBy": { "$ref": "#/$defs/nullableString" },
+        "observedHeadSha": { "$ref": "#/$defs/sha" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "isResolved": { "const": true } }, "required": ["isResolved"] },
+          "then": {
+            "properties": {
+              "resolvedAt": { "type": "string", "format": "date-time" },
+              "resolvedBy": { "type": "string", "minLength": 1, "maxLength": 1000 },
+              "replyId": { "type": "string", "minLength": 1, "maxLength": 1000 },
+              "replyUrl": { "type": "string", "format": "uri", "pattern": "^https://", "maxLength": 2000 }
+            }
+          },
+          "else": { "properties": { "resolvedAt": { "type": "null" }, "resolvedBy": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "replyId": { "type": "null" } }, "required": ["replyId"] },
+          "then": { "properties": { "replyUrl": { "type": "null" } } },
+          "else": {
+            "properties": {
+              "replyId": { "type": "string", "minLength": 1, "maxLength": 1000 },
+              "replyUrl": { "type": "string", "format": "uri", "pattern": "^https://", "maxLength": 2000 }
+            }
+          }
+        }
+      ]
+    },
+    "threadlessVerification": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "headSha", "taskIds", "updatedAt"],
+      "properties": {
+        "status": { "enum": ["not-run", "passed", "failed"] },
+        "headSha": { "$ref": "#/$defs/nullableSha" },
+        "taskIds": { "$ref": "#/$defs/stringList" },
+        "updatedAt": { "oneOf": [{ "type": "null" }, { "type": "string", "format": "date-time" }] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "not-run" } }, "required": ["status"] },
+          "then": { "properties": { "headSha": { "type": "null" }, "taskIds": { "type": "array", "maxItems": 0 }, "updatedAt": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "status": { "const": "passed" } }, "required": ["status"] },
+          "then": { "properties": { "headSha": { "$ref": "#/$defs/sha" }, "updatedAt": { "type": "string", "format": "date-time" } } }
+        }
+      ]
+    },
+    "threadResolutionStatus": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "headSha", "threads", "threadlessVerification", "updatedAt"],
+      "properties": {
+        "status": { "enum": ["not-run", "passed", "failed"] },
+        "headSha": { "$ref": "#/$defs/nullableSha" },
+        "threads": {
+          "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/threadRecord" },
+          "$comment": "The manual validator additionally enforces unique threadNodeId, rootCommentNodeId, rootCommentDatabaseId, and non-null replyId keys; Draft 2020-12 uniqueItems only rejects identical records."
+        },
+        "threadlessVerification": { "$ref": "#/$defs/threadlessVerification" },
+        "updatedAt": { "oneOf": [{ "type": "null" }, { "type": "string", "format": "date-time" }] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "not-run" } }, "required": ["status"] },
+          "then": {
+            "properties": {
+              "headSha": { "type": "null" },
+              "updatedAt": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "status": { "const": "passed" } }, "required": ["status"] },
+          "then": {
+            "properties": {
+              "headSha": { "$ref": "#/$defs/sha" },
+              "threads": { "type": "array", "items": { "allOf": [{ "$ref": "#/$defs/threadRecord" }, { "type": "object", "properties": { "isResolved": { "const": true } } }] } },
+              "updatedAt": { "type": "string", "format": "date-time" }
+            }
+          }
+        }
+      ]
+    },
+    "execution": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "dependencies", "ownedPaths", "worker", "branch", "worktree", "workerCommitSha",
         "validationSummaries", "lastError"
+      ],
+      "properties": {
+        "dependencies": { "$ref": "#/$defs/stringList" },
+        "ownedPaths": { "$ref": "#/$defs/stringList" },
+        "worker": { "$ref": "#/$defs/nullableString" },
+        "branch": { "$ref": "#/$defs/nullableString" },
+        "worktree": { "$ref": "#/$defs/nullableString" },
+        "workerCommitSha": { "$ref": "#/$defs/nullableSha" },
+        "validationSummaries": { "$ref": "#/$defs/stringList" },
+        "lastError": { "$ref": "#/$defs/nullableString" }
+      }
+    },
+    "task": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "id", "sourceIds", "sourceType", "fingerprint", "summary", "severity", "disposition",
+        "status", "integratedCommitSha", "resolutionSummary"
       ],
       "properties": {
         "id": { "type": "string", "minLength": 1, "maxLength": 128 },
         "sourceIds": { "$ref": "#/$defs/stringList" },
+        "sourceType": { "enum": ["github-thread", "github-threadless", "local"] },
         "fingerprint": { "type": "string", "minLength": 8, "maxLength": 256 },
         "summary": { "type": "string", "minLength": 1, "maxLength": 1000 },
         "severity": { "enum": ["P0", "P1", "P2", "P3"] },
         "disposition": {
           "enum": [
-            "actionable", "duplicate", "already-fixed", "stale", "invalid",
-            "policy-conflict", "out-of-scope", "needs-human-decision"
+            "actionable", "duplicate", "already-fixed", "stale", "invalid", "policy-conflict",
+            "out-of-scope", "needs-human-decision"
           ]
         },
         "status": {
@@ -167,18 +379,34 @@
             "blocked", "not-applicable", "failed"
           ]
         },
-        "dependencies": { "$ref": "#/$defs/stringList" },
-        "ownedPaths": { "$ref": "#/$defs/stringList" },
-        "worker": { "$ref": "#/$defs/nullableString" },
-        "branch": { "$ref": "#/$defs/nullableString" },
-        "worktree": { "$ref": "#/$defs/nullableString" },
-        "commitSha": { "$ref": "#/$defs/nullableSha" },
-        "validationSummaries": { "$ref": "#/$defs/stringList" },
-        "lastError": { "$ref": "#/$defs/nullableString" }
-      }
-    },
-    "nullableString": {
-      "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1, "maxLength": 1000 }]
+        "integratedCommitSha": { "$ref": "#/$defs/nullableSha" },
+        "resolutionSummary": { "$ref": "#/$defs/nullableString" },
+        "execution": { "$ref": "#/$defs/execution" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "status": { "enum": ["proposed", "queued", "running", "implemented", "blocked", "failed"] } },
+            "required": ["status"]
+          },
+          "then": {
+            "required": ["execution"],
+            "properties": { "execution": { "$ref": "#/$defs/execution" }, "integratedCommitSha": { "type": "null" } }
+          },
+          "else": { "properties": { "execution": false } }
+        },
+        {
+          "if": { "properties": { "status": { "enum": ["integrated", "completed", "not-applicable"] } }, "required": ["status"] },
+          "then": { "properties": { "resolutionSummary": { "type": "string", "minLength": 1, "maxLength": 1000 } } }
+        },
+        {
+          "if": {
+            "properties": { "status": { "enum": ["integrated", "completed"] }, "disposition": { "const": "actionable" } },
+            "required": ["status", "disposition"]
+          },
+          "then": { "properties": { "integratedCommitSha": { "$ref": "#/$defs/sha" } } }
+        }
+      ]
     }
   }
 }
