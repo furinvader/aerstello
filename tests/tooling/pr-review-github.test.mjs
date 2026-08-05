@@ -132,8 +132,8 @@ class FakeClient {
     };
   }
 
-  async graphql({ name, variables }) {
-    this.calls.push({ name, variables });
+  async graphql({ name, query, variables }) {
+    this.calls.push({ name, query, variables });
     if (this.graphqlErrors.has(name)) return { errors: [{ message: 'boom' }] };
     if (name === 'PullRequestMetadata') {
       return this.result({ viewer: this.metadata.viewer, repository: { pullRequest: { ...this.metadata, viewer: undefined } } });
@@ -312,6 +312,51 @@ test('status uses split fully paginated reads and filters canonical roots', asyn
   assert.ok(client.calls.filter((call) => call.name === 'PullRequestThreads').length >= 2);
   assert.equal(client.calls.filter((call) => call.name === 'ReviewThreadComments').length, 2);
   assert.equal(result.statePhase, 'recovering');
+});
+
+test('Actor author queries select node IDs only through Bot and User fragments', async () => {
+  const client = new FakeClient();
+  addThread(client);
+  await workflow(stateFixture(), client).api.status(2);
+  for (const name of ['PullRequestComments', 'PullRequestReviews', 'ReviewThreadComments']) {
+    const query = client.calls.find((call) => call.name === name)?.query;
+    assert.equal(typeof query, 'string', `${name} query was captured`);
+    assert.doesNotMatch(query, /author\{__typename login url id/u, `${name} must not select Actor.id directly`);
+    assert.match(query, /author\{__typename login url \.\.\. on Bot\{id\} \.\.\. on User\{id\}\}/u,
+      `${name} must populate a uniform id through concrete actor fragments`);
+  }
+});
+
+test('canonical Bot root without a concrete node ID throws fail-closed', async () => {
+  const client = new FakeClient();
+  addThread(client, { root: rootComment('THREAD_1', { author: { ...BOT, id: undefined } }) });
+  await assert.rejects(() => workflow(stateFixture(), client).api.status(2), {
+    code: 'CANONICAL_ACTOR_INCOMPLETE',
+  });
+});
+
+test('canonical review, reaction, and matching viewer actors without node IDs throw fail-closed', async () => {
+  const reviewClient = new FakeClient();
+  reviewClient.reviews.push({ id: 'PRR_missing', databaseId: 1, url: 'https://x/review', body: '',
+    state: 'COMMENTED', submittedAt: AT, commit: { oid: HEAD }, author: { ...BOT, id: undefined } });
+  await assert.rejects(() => workflow(pendingState('discovery'), reviewClient).api.collect(2), {
+    code: 'CANONICAL_ACTOR_INCOMPLETE',
+  });
+
+  const reactionClient = new FakeClient();
+  reactionClient.reactions.set('IC_request', [{ id: 'REACTION_missing', content: 'THUMBS_UP',
+    createdAt: AT, user: { ...BOT, id: undefined } }]);
+  await assert.rejects(() => workflow(pendingState('discovery'), reactionClient).api.collect(2), {
+    code: 'CANONICAL_ACTOR_INCOMPLETE',
+  });
+
+  const viewerClient = new FakeClient();
+  viewerClient.comments.push({ id: 'IC_missing', databaseId: 2, url: 'https://x/request',
+    body: '@codex review', createdAt: AT, author: { ...VIEWER, id: undefined } });
+  await assert.rejects(() => workflow(readyState(), viewerClient).api.request(2, 'discovery'), {
+    code: 'CANONICAL_ACTOR_INCOMPLETE',
+  });
+  assert.equal(viewerClient.events.length, 0);
 });
 
 test('GraphQL reads fail closed on errors, unsafe cost, and truncated pagination', async () => {

@@ -12,10 +12,10 @@ const MIN_GRAPHQL_REMAINING = 10;
 
 const OPERATIONS = {
   PullRequestMetadata: `query PullRequestMetadata($owner:String!,$repo:String!,$pr:Int!){rateLimit{cost remaining} viewer{login id} repository(owner:$owner,name:$repo){pullRequest(number:$pr){id number url headRefOid}}}`,
-  PullRequestComments: `query PullRequestComments($owner:String!,$repo:String!,$pr:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){pullRequest(number:$pr){comments(first:50,after:$cursor){nodes{id databaseId url body createdAt author{__typename login url id}} pageInfo{hasNextPage endCursor}}}}}`,
-  PullRequestReviews: `query PullRequestReviews($owner:String!,$repo:String!,$pr:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviews(first:50,after:$cursor){nodes{id databaseId url body state submittedAt commit{oid} author{__typename login url id}} pageInfo{hasNextPage endCursor}}}}}`,
+  PullRequestComments: `query PullRequestComments($owner:String!,$repo:String!,$pr:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){pullRequest(number:$pr){comments(first:50,after:$cursor){nodes{id databaseId url body createdAt author{__typename login url ... on Bot{id} ... on User{id}}} pageInfo{hasNextPage endCursor}}}}}`,
+  PullRequestReviews: `query PullRequestReviews($owner:String!,$repo:String!,$pr:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviews(first:50,after:$cursor){nodes{id databaseId url body state submittedAt commit{oid} author{__typename login url ... on Bot{id} ... on User{id}}} pageInfo{hasNextPage endCursor}}}}}`,
   PullRequestThreads: `query PullRequestThreads($owner:String!,$repo:String!,$pr:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:50,after:$cursor){nodes{id isResolved} pageInfo{hasNextPage endCursor}}}}}`,
-  ReviewThreadComments: `query ReviewThreadComments($threadId:ID!,$cursor:String){rateLimit{cost remaining} node(id:$threadId){... on PullRequestReviewThread{comments(first:50,after:$cursor){nodes{id databaseId url body createdAt author{__typename login url id} replyTo{id} pullRequestReview{id}} pageInfo{hasNextPage endCursor}}}}}`,
+  ReviewThreadComments: `query ReviewThreadComments($threadId:ID!,$cursor:String){rateLimit{cost remaining} node(id:$threadId){... on PullRequestReviewThread{comments(first:50,after:$cursor){nodes{id databaseId url body createdAt author{__typename login url ... on Bot{id} ... on User{id}} replyTo{id} pullRequestReview{id}} pageInfo{hasNextPage endCursor}}}}}`,
   RequestReactions: `query RequestReactions($commentId:ID!,$cursor:String){rateLimit{cost remaining} node(id:$commentId){... on IssueComment{reactions(first:50,after:$cursor){nodes{id content createdAt user{__typename login url id}} pageInfo{hasNextPage endCursor}}}}}`,
   AddReviewRequest: `mutation AddReviewRequest($subjectId:ID!,$body:String!,$clientMutationId:String!){addComment(input:{subjectId:$subjectId,body:$body,clientMutationId:$clientMutationId}){clientMutationId}}`,
   AddThreadReply: `mutation AddThreadReply($threadId:ID!,$body:String!,$clientMutationId:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body,clientMutationId:$clientMutationId}){clientMutationId}}`,
@@ -37,7 +37,20 @@ function splitRepository(repository) {
 }
 
 function isCanonicalActor(actor) {
-  return actor?.__typename === 'Bot' && actor?.login === CANONICAL_LOGIN && actor?.url === CANONICAL_URL;
+  const matches = actor?.__typename === 'Bot'
+    && actor?.login === CANONICAL_LOGIN && actor?.url === CANONICAL_URL;
+  if (matches && !actor.id) {
+    throw new GitHubWorkflowError('Canonical Bot actor has no node ID', 'CANONICAL_ACTOR_INCOMPLETE');
+  }
+  return matches;
+}
+
+function isViewerActor(actor, viewer) {
+  const matches = actor?.login === viewer.login;
+  if (matches && !actor.id) {
+    throw new GitHubWorkflowError('Viewer actor has no node ID', 'CANONICAL_ACTOR_INCOMPLETE');
+  }
+  return matches && actor.id === viewer.id;
 }
 
 function assertGraphqlResult(result, operation) {
@@ -225,8 +238,7 @@ function sameTimestamp(left, right) {
 function exactViewerRequestCandidates(comments, viewer, intent, excludedIds = new Set()) {
   return comments.filter((comment) => comment.body === REQUEST_BODY
     && !excludedIds.has(comment.id)
-    && comment.author?.login === viewer.login
-    && comment.author?.id === viewer.id
+    && isViewerActor(comment.author, viewer)
     && requestRecoveryAtOrAfter(comment.createdAt, intent.at));
 }
 
@@ -327,12 +339,12 @@ function exactRepliesFor(state, live, entry) {
   for (const reply of replies.filter((comment) => markerPattern.test(comment.body ?? ''))) {
     if (!reply.body.includes(marker)) throw new GitHubWorkflowError('Prior-head idempotency reply is present', 'REPLY_AMBIGUOUS');
     if (reply.body !== body) throw new GitHubWorkflowError('Current reply marker has altered content', 'REPLY_AMBIGUOUS');
-    if (reply.author?.login !== live.metadata.viewer.login || reply.author?.id !== live.metadata.viewer.id) {
+    if (!isViewerActor(reply.author, live.metadata.viewer)) {
       throw new GitHubWorkflowError('Current reply was authored by a foreign viewer', 'REPLY_AMBIGUOUS');
     }
   }
   const exact = replies.filter((reply) => reply.body === body
-    && reply.author?.login === live.metadata.viewer.login && reply.author?.id === live.metadata.viewer.id);
+    && isViewerActor(reply.author, live.metadata.viewer));
   if (exact.length > 1) throw new GitHubWorkflowError('Existing idempotency reply is ambiguous', 'REPLY_AMBIGUOUS');
   return { body, exact };
 }
@@ -347,7 +359,10 @@ function assertRecordedReply(state, live, entry, proof) {
   const markers = [...String(reply.body ?? '').matchAll(/<!-- sky-bar-review:[0-9a-f]{24} -->/gu)].map((match) => match[0]);
   const authorMatches = proof.isResolved
     ? reply.author?.login === proof.resolvedBy
-    : reply.author?.login === live.metadata.viewer.login && reply.author?.id === live.metadata.viewer.id;
+    : isViewerActor(reply.author, live.metadata.viewer);
+  if (proof.isResolved && authorMatches && !reply.author?.id) {
+    throw new GitHubWorkflowError('Recorded reply actor has no node ID', 'CANONICAL_ACTOR_INCOMPLETE');
+  }
   if (reply.url !== proof.replyUrl || reply.replyTo?.id !== entry.thread.root.id
       || !authorMatches || !replyHeadSha || markers.length !== 1
       || (!proof.isResolved && replyHeadSha !== state.currentIntegrationHeadSha)
@@ -459,7 +474,7 @@ function assertRecordedRequestComment(state, live) {
   if (comment.body !== request.body || comment.url !== request.url
       || (comment.databaseId ?? null) !== request.databaseId
       || comment.author?.login !== request.authorLogin || comment.author?.id !== request.authorNodeId
-      || comment.author?.login !== live.metadata.viewer.login || comment.author?.id !== live.metadata.viewer.id
+      || !isViewerActor(comment.author, live.metadata.viewer)
       || !sameTimestamp(comment.createdAt, request.at)) {
     throw new GitHubWorkflowError('Recorded request comment differs from live evidence', 'REQUEST_PROOF_STALE');
   }
@@ -534,7 +549,7 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     const priorRequestIds = new Set(active.reviewHistory.map((entry) => entry.request.id));
     const intendedAt = clock.now();
     const baselineComments = live.comments.filter((comment) => comment.body === REQUEST_BODY
-      && comment.author?.login === live.metadata.viewer.login && comment.author?.id === live.metadata.viewer.id);
+      && isViewerActor(comment.author, live.metadata.viewer));
     const excludedCommentIds = [...new Set(baselineComments.map((comment) => comment.id))].sort();
     if (excludedCommentIds.length > MAX_NODES) {
       throw new GitHubWorkflowError('Request comment baseline exceeded the node limit', 'GRAPHQL_TRUNCATED');
