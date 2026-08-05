@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Redirect } from 'wouter';
 import { Clock3, LogOut, Plus, ReceiptText } from 'lucide-react';
-import { formatMoney, localized, type GuestItemCreated, type LocalizedText, type Tab } from '@sky-bar/shared';
+import { formatMoney, localized, type GuestItemCreated, type Language, type LocalizedText, type Tab } from '@sky-bar/shared';
 import { ApiError, api, apiErrorMessage, json } from './api';
 import { Button, Card, Empty, Notice } from './components';
 import { useI18n } from './i18n';
@@ -47,7 +47,7 @@ function persistPendingAdds(store: PendingAddStore): void {
 export function GuestPage() {
   const { t, language, setLanguage } = useI18n();
   const client = useQueryClient();
-  const me = useQuery<{ guest: { id: string; name: string; roomName: string; sessionId: string; expiresAt: string } }>({ queryKey: ['guest-me'], queryFn: () => api('/guest/me'), retry: false });
+  const me = useQuery<{ guest: { id: string; name: string; roomId: string; roomName: string; language: Language; sessionId: string; expiresAt: string } }>({ queryKey: ['guest-me'], queryFn: () => api('/guest/me'), retry: false });
   const tab = useQuery<TimedTab>({ queryKey: ['guest-tab'], queryFn: async () => ({...await api<Tab>('/guest/tab'),receivedAtMonotonic:performance.now()}), enabled: me.isSuccess });
   const catalog = useQuery<{ data: (Product & { categoryName: LocalizedText })[] }>({ queryKey: ['guest-catalog'], queryFn: () => api('/guest/catalog'), enabled: me.isSuccess });
   const [provisionals, setProvisionals] = useState<ProvisionalEntry[]>([]);
@@ -57,6 +57,14 @@ export function GuestPage() {
   const pendingAddProductIds = useRef(new Set<string>());
   const [pendingAddProducts, setPendingAddProducts] = useState<Set<string>>(() => new Set());
   const pendingUndos = useRef(new Set<string>());
+  const restoredLanguageKey = useRef('');
+  const identityLanguageKey=me.data?`${me.data.guest.sessionId}:${me.data.guest.language}`:'';
+  const restoringLanguage=Boolean(me.data&&language!==me.data.guest.language&&restoredLanguageKey.current!==identityLanguageKey);
+  useLayoutEffect(() => {
+    if(!me.data||restoredLanguageKey.current===identityLanguageKey)return;
+    restoredLanguageKey.current=identityLanguageKey;
+    if(language!==me.data.guest.language)setLanguage(me.data.guest.language);
+  },[identityLanguageKey,language,me.data,setLanguage]);
   useEffect(() => {
     if (!me.isSuccess) return;
     const events = new EventSource('/api/v1/events?scope=guest');
@@ -168,7 +176,7 @@ export function GuestPage() {
     }
   };
   const logout=async()=>{try{await api('/guest/logout',{method:'POST'})}catch{/* Clear cached guest data after an uncertain response. */}finally{client.clear();globalThis.location.assign('/guest/request')}};
-  if (me.isLoading) return <div className="splash">Sky Bar</div>;
+  if (me.isLoading||restoringLanguage) return <div className="splash">Sky Bar</div>;
   if (me.isError) {
     if (me.error instanceof ApiError && me.error.status === 401) return <Redirect to="/guest/request" />;
     return <main className="guest-shell"><Card><Notice kind="error">{t('requestFailed')}</Notice><Button onClick={() => void me.refetch()}>{t('retry')}</Button></Card></main>;
