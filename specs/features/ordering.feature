@@ -23,6 +23,26 @@ Feature: Host order entry and billing
     Then the staged cart is cleared before Luca is selected
     And Luca's tab is unchanged
 
+  Scenario: Take Orders guest-directory failure recovers authoritative guests
+    Given an authenticated administrator
+    When the Take Orders guest directory remains pending
+    Then Take Orders shows guest loading without empty or guest actions
+    When the pending Take Orders guest directory fails
+    Then Take Orders shows guest failure and retry without empty or guest actions
+    When the host retries the Take Orders guest directory
+    Then authoritative guest selection and creation recover without reload
+
+  Scenario: Take Orders catalog failure recovers and preserves cached ordering
+    Given an authenticated administrator
+    When the Take Orders catalog remains pending
+    Then Take Orders shows catalog loading without empty or product actions
+    When the pending Take Orders catalog fails
+    Then Take Orders shows catalog failure and retry without empty or product actions
+    When the host retries the Take Orders catalog
+    Then authoritative catalog products recover without reload
+    When the recovered Take Orders catalog fails during background refresh
+    Then cached catalog ordering remains usable
+
   Scenario: An offline host order is queued for synchronization
     Given an authenticated administrator with the order catalog loaded
     When the device goes offline and the host submits one "Helles" for "Anna Berger" in room "101"

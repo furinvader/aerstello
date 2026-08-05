@@ -28,6 +28,16 @@ Feature: Secure host accounts and devices
     When the host retries the device directory
     Then the current device reappears without a reload
 
+  Scenario: An administrator host account directory failure preserves independent controls
+    Given an authenticated administrator
+    When the host account directory remains pending
+    Then host account loading hides empty and host mutation actions
+    And profile and device controls remain usable
+    When the pending host account directory fails
+    Then host account failure and retry hide empty and host mutation actions
+    When the administrator retries the host account directory
+    Then host account rows and mutation actions recover independently
+
   Scenario: A transient host identity outage preserves the requested route
     Given an authenticated administrator
     When the initial host identity request fails transiently on the bills route

@@ -11,6 +11,20 @@ Feature: Venue identity
     When the administrator opens venue settings
     Then a venue QR code and room QR codes are shown
 
+  Scenario: A room QR directory failure preserves venue settings and print safety
+    Given an authenticated administrator
+    When the room QR directory remains pending
+    Then room QR loading hides empty cards and disables printing
+    When the pending room QR directory fails
+    Then room QR failure and retry preserve venue controls and disable printing
+    When the administrator retries the room QR directory
+    Then room QR cards recover and printing is enabled
+
+  Scenario: A successful empty room QR directory is explicit and printable
+    Given an authenticated administrator
+    When venue settings loads a successful empty room QR directory
+    Then the room QR empty state appears without failure and printing is enabled
+
   Scenario: Administrators can return to venue settings
     Given an authenticated administrator
     Then venue settings is available in the primary navigation

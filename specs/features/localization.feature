@@ -17,6 +17,13 @@ Feature: German, Italian, and English localization
     When the guest selects Italian
     Then untranslated product content falls back to German
 
+  Scenario: A saved guest language overrides stale local language once
+    Given an approved guest device for "Luca Rossi" in room "102"
+    When the saved guest language conflicts with local language on launch
+    Then the authenticated guest shell uses the saved language
+    When the guest manually changes language before an unchanged identity refetch
+    Then the manual guest language remains selected
+
   Scenario: A fresh guest device uses the venue default language
     Given an authenticated administrator
     When the venue default language is Italian

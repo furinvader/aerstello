@@ -336,11 +336,13 @@ async function installQueryOutage(page:import('@playwright/test').Page,paths:str
     const originalFetch=window.fetch.bind(window);
     let release!:()=>void;
     const pending=new Promise<void>((resolve)=>{release=resolve});
-    const state={active:true,attempts:0,release,restore:()=>{window.fetch=originalFetch}};
+    const state={active:true,attempts:0,observed:{} as Record<string,number>,release,restore:()=>{window.fetch=originalFetch}};
     Object.assign(window,{__skyBarQueryOutage:state});
     window.fetch=async(input,init)=>{
       const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
-      if(targetPaths.includes(new URL(url,window.location.href).pathname)){
+      const path=new URL(url,window.location.href).pathname;
+      state.observed[path]=(state.observed[path]??0)+1;
+      if(targetPaths.includes(path)){
         state.attempts+=1;
         if(state.active){
           await pending;
@@ -371,6 +373,30 @@ async function restoreQueryOutage(page:import('@playwright/test').Page) {
     const state=(window as unknown as {__skyBarQueryOutage:{restore:()=>void}}).__skyBarQueryOutage;
     state.restore();
     delete (window as unknown as {__skyBarQueryOutage?:unknown}).__skyBarQueryOutage;
+  });
+}
+
+async function installLiveQueryFailure(page:import('@playwright/test').Page,paths:string[]) {
+  await page.evaluate((targetPaths)=>{
+    const originalFetch=window.fetch.bind(window);
+    const state={attempts:0,restore:()=>{window.fetch=originalFetch}};
+    Object.assign(window,{__skyBarLiveQueryFailure:state});
+    window.fetch=async(input,init)=>{
+      const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
+      if(targetPaths.includes(new URL(url,window.location.href).pathname)){
+        state.attempts+=1;
+        return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated background query outage'}}),{status:503,headers:{'content-type':'application/json'}});
+      }
+      return originalFetch(input,init);
+    };
+  },paths);
+}
+
+async function restoreLiveQueryFailure(page:import('@playwright/test').Page) {
+  await page.evaluate(()=>{
+    const state=(window as unknown as {__skyBarLiveQueryFailure:{restore:()=>void}}).__skyBarLiveQueryFailure;
+    state.restore();
+    delete (window as unknown as {__skyBarLiveQueryFailure?:unknown}).__skyBarLiveQueryFailure;
   });
 }
 
@@ -499,6 +525,53 @@ When('the host retries the device directory',async({page})=>{
 Then('the current device reappears without a reload',async({page})=>{
   await expect(page.getByText(/Dieses Gerät|Questo dispositivo|This device/)).toBeVisible();
   expect(await page.evaluate(()=>(window as unknown as {__skyBarQueryOutage:{attempts:number}}).__skyBarQueryOutage.attempts)).toBeGreaterThanOrEqual(3);
+  await restoreQueryOutage(page);
+});
+When('the host account directory remains pending',async({page})=>{
+  const request=page.context().request;
+  expect((await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'directory-staff@skybar.test',name:'Directory Staff',password:'DirectoryStaff123!',role:'staff',language:'de'}})).status()).toBe(201);
+  await installQueryOutage(page,['/api/v1/hosts']);
+  await page.goto('/app/account');
+});
+Then('host account loading hides empty and host mutation actions',async({page})=>{
+  const heading=page.getByRole('heading',{name:/Host-Konten|Account host|Host accounts/});
+  const directory=heading.locator('xpath=../following-sibling::*[1]');
+  await expect(directory.getByText(/Wird geladen|Caricamento|Loading/)).toBeVisible();
+  await expect(directory.locator('.empty,.table-list')).toHaveCount(0);
+  await expect(page.getByRole('button',{name:/^Hinzufügen$|^Aggiungi$|^Add$/})).toHaveCount(0);
+  await expect(directory.getByRole('button',{name:/Aktivieren|Deaktivieren|Abilita|Disabilita|Enable|Disable/})).toHaveCount(0);
+});
+Then('profile and device controls remain usable',async({page})=>{
+  await expect(page.getByLabel(/Name|Nome/).first()).toBeEnabled();
+  await expect(page.getByRole('button',{name:/Speichern|Salva|Save/,exact:true})).toBeEnabled();
+  await expect(page.getByText(/Dieses Gerät|Questo dispositivo|This device/)).toBeVisible();
+});
+When('the pending host account directory fails',async({page})=>{await releaseQueryOutage(page)});
+Then('host account failure and retry hide empty and host mutation actions',async({page})=>{
+  const heading=page.getByRole('heading',{name:/Host-Konten|Account host|Host accounts/});
+  const directory=heading.locator('xpath=../following-sibling::*[1]');
+  await expect(directory.locator('.notice--error')).toContainText(/Die Anfrage konnte nicht abgeschlossen werden|Impossibile completare la richiesta|The request could not be completed/);
+  await expect(directory.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();
+  await expect(directory.locator('.empty,.table-list')).toHaveCount(0);
+  await expect(page.getByRole('button',{name:/^Hinzufügen$|^Aggiungi$|^Add$/})).toHaveCount(0);
+  await expect(directory.getByRole('button',{name:/Aktivieren|Deaktivieren|Abilita|Disabilita|Enable|Disable/})).toHaveCount(0);
+  await expect(page.getByLabel(/Name|Nome/).first()).toBeEnabled();
+  await expect(page.getByText(/Dieses Gerät|Questo dispositivo|This device/)).toBeVisible();
+});
+When('the administrator retries the host account directory',async({page})=>{
+  const heading=page.getByRole('heading',{name:/Host-Konten|Account host|Host accounts/});
+  const directory=heading.locator('xpath=../following-sibling::*[1]');
+  await retryQueryOutage(page,directory.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}));
+});
+Then('host account rows and mutation actions recover independently',async({page})=>{
+  const heading=page.getByRole('heading',{name:/Host-Konten|Account host|Host accounts/});
+  const directory=heading.locator('xpath=../following-sibling::*[1]');
+  await expect(directory.getByText('Directory Staff',{exact:true})).toBeVisible();
+  await expect(page.getByRole('button',{name:/^Hinzufügen$|^Aggiungi$|^Add$/})).toBeEnabled();
+  await expect(directory.getByRole('button',{name:/Deaktivieren|Disabilita|Disable/})).toBeEnabled();
+  const state=await page.evaluate(()=>(window as unknown as {__skyBarQueryOutage:{attempts:number;observed:Record<string,number>}}).__skyBarQueryOutage);
+  expect(state.attempts).toBeGreaterThanOrEqual(3);
+  expect(state.observed['/api/v1/account/sessions']).toBe(1);
   await restoreQueryOutage(page);
 });
 When('the initial host identity request fails transiently on the bills route',async({page})=>{
@@ -673,6 +746,57 @@ When('the administrator changes the venue name to {string}', async ({ page }, na
 Then('the navigation shows the venue name {string}', async ({ page }, name:string) => { await expect(page.locator('.brand strong')).toHaveText(name); });
 When('the administrator opens venue settings', async ({ page }) => { await page.goto('/app/settings'); });
 Then('a venue QR code and room QR codes are shown', async ({ page }) => { await expect(page.locator('.qr-code')).toHaveCount(4); });
+When('the room QR directory remains pending',async({page})=>{
+  await page.addInitScript(()=>{Object.assign(window,{__skyBarPrintCount:0});window.print=()=>{(window as unknown as {__skyBarPrintCount:number}).__skyBarPrintCount+=1}});
+  await installQueryOutage(page,['/api/v1/rooms']);
+  await page.goto('/app/settings');
+});
+Then('room QR loading hides empty cards and disables printing',async({page})=>{
+  await expect(page.getByRole('heading',{name:/Zimmer-QR-Codes|Codici QR delle camere|Room QR codes/})).toBeVisible();
+  await expect(page.getByText(/Wird geladen|Caricamento|Loading/)).toBeVisible();
+  await expect(page.locator('.qr-code')).toHaveCount(1);
+  await expect(page.locator('.empty')).toHaveCount(0);
+  await expect(page.getByRole('button',{name:/Drucken|Stampa|Print/})).toBeDisabled();
+  await page.getByRole('button',{name:/Drucken|Stampa|Print/}).click({force:true});
+  expect(await page.evaluate(()=>(window as unknown as {__skyBarPrintCount:number}).__skyBarPrintCount)).toBe(0);
+});
+When('the pending room QR directory fails',async({page})=>{await releaseQueryOutage(page)});
+Then('room QR failure and retry preserve venue controls and disable printing',async({page})=>{
+  await expect(page.locator('.notice--error')).toContainText(/Die Anfrage konnte nicht abgeschlossen werden|Impossibile completare la richiesta|The request could not be completed/);
+  await expect(page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();
+  await expect(page.getByLabel(/Name des Betriebs|Nome del locale|Venue name/)).toBeEnabled();
+  await expect(page.getByRole('button',{name:/Speichern|Salva|Save/,exact:true})).toBeEnabled();
+  await expect(page.locator('.qr-code')).toHaveCount(1);
+  await expect(page.locator('.empty')).toHaveCount(0);
+  await expect(page.getByRole('button',{name:/Drucken|Stampa|Print/})).toBeDisabled();
+});
+When('the administrator retries the room QR directory',async({page})=>{
+  await retryQueryOutage(page,page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}));
+});
+Then('room QR cards recover and printing is enabled',async({page})=>{
+  await expect(page.locator('.qr-code')).toHaveCount(4);
+  await expect(page.getByRole('heading',{name:'101'})).toBeVisible();
+  const print=page.getByRole('button',{name:/Drucken|Stampa|Print/});
+  await expect(print).toBeEnabled();
+  await print.click();
+  expect(await page.evaluate(()=>(window as unknown as {__skyBarPrintCount:number}).__skyBarPrintCount)).toBe(1);
+  await restoreQueryOutage(page);
+});
+When('venue settings loads a successful empty room QR directory',async({page})=>{
+  await page.addInitScript(()=>{Object.assign(window,{__skyBarPrintCount:0});window.print=()=>{(window as unknown as {__skyBarPrintCount:number}).__skyBarPrintCount+=1}});
+  await page.route('**/api/v1/rooms',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({data:[]})}));
+  await page.goto('/app/settings');
+});
+Then('the room QR empty state appears without failure and printing is enabled',async({page})=>{
+  await expect(page.locator('.empty')).toContainText(/Noch keine Einträge|Nessun elemento|Nothing here yet/);
+  await expect(page.locator('.notice--error')).toHaveCount(0);
+  await expect(page.locator('.qr-code')).toHaveCount(1);
+  const print=page.getByRole('button',{name:/Drucken|Stampa|Print/});
+  await expect(print).toBeEnabled();
+  await print.click();
+  expect(await page.evaluate(()=>(window as unknown as {__skyBarPrintCount:number}).__skyBarPrintCount)).toBe(1);
+  await page.unroute('**/api/v1/rooms');
+});
 Then('venue settings is available in the primary navigation', async ({ page }) => { await expect(page.getByRole('link',{name:'Betrieb'})).toBeVisible(); });
 When('the initial venue load fails transiently',async({page})=>{
   await page.addInitScript(()=>{
@@ -712,6 +836,77 @@ Then('retrying the stale venue update is rejected',async()=>{expect(staleVenueUp
 Then('the newer venue name remains configured',async()=>{expect(staleVenueFinalName).toBe('Newer venue update')});
 
 async function chooseOrder(page: import('@playwright/test').Page, product:string, guest:string, room:string){await page.goto('/app/orders/new');await page.locator('.room-chips').getByRole('button',{name:room,exact:true}).click();await page.locator('.guest-list').getByRole('button',{name:new RegExp(guest)}).click();await page.locator('.product-tile').getByText(product,{exact:true}).click();}
+When('the Take Orders guest directory remains pending',async({page})=>{
+  await installQueryOutage(page,['/api/v1/guests']);
+  await page.goto('/app/orders/new');
+});
+Then('Take Orders shows guest loading without empty or guest actions',async({page})=>{
+  const picker=page.locator('.guest-picker');
+  await expect(picker.getByText(/Wird geladen|Caricamento|Loading/)).toBeVisible();
+  await expect(picker.locator('.empty,.guest-list,.search')).toHaveCount(0);
+  await expect(picker.getByRole('button',{name:/Hinzufügen.*Gäste|Aggiungi.*Ospiti|Add.*Guests/})).toHaveCount(0);
+});
+When('the pending Take Orders guest directory fails',async({page})=>{await releaseQueryOutage(page)});
+Then('Take Orders shows guest failure and retry without empty or guest actions',async({page})=>{
+  const picker=page.locator('.guest-picker');
+  await expect(picker.locator('.notice--error')).toContainText(/Die Anfrage konnte nicht abgeschlossen werden|Impossibile completare la richiesta|The request could not be completed/);
+  await expect(picker.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();
+  await expect(picker.locator('.empty,.guest-list,.search')).toHaveCount(0);
+  await expect(picker.getByRole('button',{name:/Hinzufügen.*Gäste|Aggiungi.*Ospiti|Add.*Guests/})).toHaveCount(0);
+});
+When('the host retries the Take Orders guest directory',async({page})=>{
+  const picker=page.locator('.guest-picker');
+  await retryQueryOutage(page,picker.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}));
+});
+Then('authoritative guest selection and creation recover without reload',async({page})=>{
+  const picker=page.locator('.guest-picker');
+  await expect(picker.getByRole('button',{name:/Anna Berger/})).toBeVisible();
+  await expect(picker.getByRole('button',{name:/Hinzufügen.*Gäste|Aggiungi.*Ospiti|Add.*Guests/})).toBeEnabled();
+  expect(await page.evaluate(()=>(window as unknown as {__skyBarQueryOutage:{attempts:number}}).__skyBarQueryOutage.attempts)).toBeGreaterThanOrEqual(3);
+  await restoreQueryOutage(page);
+});
+
+When('the Take Orders catalog remains pending',async({page})=>{
+  await installQueryOutage(page,['/api/v1/products','/api/v1/categories']);
+  await page.goto('/app/orders/new');
+});
+Then('Take Orders shows catalog loading without empty or product actions',async({page})=>{
+  const catalog=page.locator('.catalog');
+  await expect(catalog.getByText(/Wird geladen|Caricamento|Loading/)).toBeVisible();
+  await expect(catalog.locator('.empty,.catalog-group,.product-tile')).toHaveCount(0);
+});
+When('the pending Take Orders catalog fails',async({page})=>{await releaseQueryOutage(page)});
+Then('Take Orders shows catalog failure and retry without empty or product actions',async({page})=>{
+  const catalog=page.locator('.catalog');
+  await expect(catalog.locator('.notice--error')).toContainText(/Die Anfrage konnte nicht abgeschlossen werden|Impossibile completare la richiesta|The request could not be completed/);
+  await expect(catalog.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();
+  await expect(catalog.locator('.empty,.catalog-group,.product-tile')).toHaveCount(0);
+});
+When('the host retries the Take Orders catalog',async({page})=>{
+  const catalog=page.locator('.catalog');
+  await retryQueryOutage(page,catalog.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}));
+});
+Then('authoritative catalog products recover without reload',async({page})=>{
+  await expect(page.locator('.product-tile').filter({hasText:'Helles'})).toBeVisible();
+  await page.locator('.guest-list').getByRole('button',{name:/Anna Berger/}).click();
+  await page.locator('.product-tile').filter({hasText:'Helles'}).click();
+  await expect(page.getByRole('button',{name:/Bestellung buchen|Registra ordine|Submit order/})).toBeEnabled();
+  await restoreQueryOutage(page);
+});
+When('the recovered Take Orders catalog fails during background refresh',async({page})=>{
+  await installLiveQueryFailure(page,['/api/v1/products','/api/v1/categories']);
+  const request=page.context().request;
+  const products=await (await request.get('/api/v1/products')).json() as {data:{id:string;name:{de:string;it:string;en:string};description?:{de:string;it:string;en:string};priceCents:number;categoryId:string;enabled:boolean;selfServiceOnly:boolean;version:number}[]};
+  const product=products.data.find(item=>item.name.de==='Helles')!;
+  expect((await request.patch(`/api/v1/products/${product.id}`,{headers:csrfHeaders,data:{name:product.name,...(product.description?{description:product.description}:{}),priceCents:product.priceCents+1,categoryId:product.categoryId,enabled:product.enabled,selfServiceOnly:product.selfServiceOnly,expectedVersion:product.version}})).status()).toBe(200);
+  await expect.poll(()=>page.evaluate(()=>(window as unknown as {__skyBarLiveQueryFailure:{attempts:number}}).__skyBarLiveQueryFailure.attempts),{timeout:10_000}).toBeGreaterThan(0);
+});
+Then('cached catalog ordering remains usable',async({page})=>{
+  await expect(page.locator('.product-tile').filter({hasText:'Helles'})).toBeVisible();
+  await expect(page.locator('.cart-lines').getByText('Helles',{exact:true})).toBeVisible();
+  await expect(page.getByRole('button',{name:/Bestellung buchen|Registra ordine|Submit order/})).toBeEnabled();
+  await restoreLiveQueryFailure(page);
+});
 When('the host adds one {string} to {string} in room {string}',async({page},product:string,guest:string,room:string)=>chooseOrder(page,product,guest,room));
 Then('the staged cart total is {string}',async({page},total:string)=>{await expect(page.locator('.cart-total strong')).toHaveText(total)});
 When('the host submits the order',async({page})=>{await page.getByRole('button',{name:/Bestellung buchen/}).click()});
@@ -1994,6 +2189,43 @@ Then('the product name label is shown in Italian',async({page})=>{await expect(p
 Then('the product category options are shown in Italian',async({page})=>{await expect(page.getByLabel('Categoria').locator('option').first()).toHaveText('Bevande')});
 When('the guest selects Italian',async()=>{await guestPage!.getByLabel(/Sprache|Lingua|Language/).selectOption('it')});
 Then('untranslated product content falls back to German',async()=>{await expect(guestPage!.getByText('Hauskeks',{exact:true})).toBeVisible()});
+When('the saved guest language conflicts with local language on launch',async({page})=>{
+  const request=page.context().request;
+  const guests=await (await request.get('/api/v1/guests')).json() as {data:{id:string;name:string;roomId:string;language:string;version:number}[]};
+  const guest=guests.data.find(item=>item.name==='Luca Rossi')!;
+  expect((await request.patch(`/api/v1/guests/${guest.id}`,{headers:csrfHeaders,data:{name:guest.name,roomId:guest.roomId,language:'it',expectedVersion:guest.version}})).status()).toBe(200);
+  await guestPage!.addInitScript(()=>{
+    localStorage.setItem('skybar-language','en');
+    const state=window as unknown as {__skyBarFirstGuestShellLanguage?:string};
+    new MutationObserver(()=>{
+      if(!state.__skyBarFirstGuestShellLanguage&&document.querySelector('.guest-shell'))state.__skyBarFirstGuestShellLanguage=document.documentElement.lang;
+    }).observe(document.documentElement,{childList:true,subtree:true});
+  });
+  await guestPage!.reload();
+});
+Then('the authenticated guest shell uses the saved language',async()=>{
+  await expect(guestPage!.getByLabel('Lingua')).toHaveValue('it');
+  await expect(guestPage!.getByRole('heading',{name:'Ordini aperti'})).toBeVisible();
+  expect(await guestPage!.evaluate(()=>localStorage.getItem('skybar-language'))).toBe('it');
+  expect(await guestPage!.evaluate(()=>document.documentElement.lang)).toBe('it');
+  expect(await guestPage!.evaluate(()=>(window as unknown as {__skyBarFirstGuestShellLanguage?:string}).__skyBarFirstGuestShellLanguage)).toBe('it');
+});
+When('the guest manually changes language before an unchanged identity refetch',async({page})=>{
+  await guestPage!.getByLabel('Lingua').selectOption('en');
+  const identityRefetch=guestPage!.waitForResponse(response=>response.url().endsWith('/api/v1/guest/me')&&response.request().method()==='GET');
+  const request=page.context().request;
+  const guests=await (await request.get('/api/v1/guests')).json() as {data:{id:string;name:string;roomId:string;language:string;version:number}[]};
+  const guest=guests.data.find(item=>item.name==='Luca Rossi')!;
+  expect(guest.language).toBe('it');
+  expect((await request.patch(`/api/v1/guests/${guest.id}`,{headers:csrfHeaders,data:{name:guest.name,roomId:guest.roomId,language:guest.language,expectedVersion:guest.version}})).status()).toBe(200);
+  await identityRefetch;
+});
+Then('the manual guest language remains selected',async()=>{
+  await expect(guestPage!.getByLabel('Language')).toHaveValue('en');
+  await expect(guestPage!.getByRole('heading',{name:'Open orders'})).toBeVisible();
+  expect(await guestPage!.evaluate(()=>localStorage.getItem('skybar-language'))).toBe('en');
+  expect(await guestPage!.evaluate(()=>document.documentElement.lang)).toBe('en');
+});
 When('the venue default language is Italian',async({page,browser})=>{const request=page.context().request;const venue=await (await request.get('/api/v1/venue')).json() as {name:string;timezone:string;version:number};expect((await request.put('/api/v1/venue',{headers:csrfHeaders,data:{name:venue.name,timezone:venue.timezone,language:'it',expectedVersion:venue.version}})).status()).toBe(200);const context=await browser.newContext({baseURL:e2eBaseURL,locale:'en-US'});extraContexts.push(context);freshGuestPage=await context.newPage();await freshGuestPage.goto('/guest/request')});
 Then('a fresh English guest device starts in Italian',async()=>{await expect(freshGuestPage!.getByRole('heading',{name:'Accesso ospite'})).toBeVisible()});
 When('a fresh guest selects Italian on the access form',async({page})=>{await page.goto('/guest/request');await page.locator('form select').nth(1).selectOption('it')});
