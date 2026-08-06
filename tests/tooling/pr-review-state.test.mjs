@@ -1557,7 +1557,7 @@ test('exact bound packet survives null-review central integration HEAD advance o
   }), { code: 'TASK_PACKET_CONFLICT' });
 });
 
-test('bound packet rejects unrelated or missing central integration ancestry without validation proof', () => {
+test('bound packet rejects rollback, unrelated, or missing central integration ancestry without validation proof', () => {
   const cwd = repo();
   const initial = init(cwd);
   const proposedTask = task(initial.currentIntegrationHeadSha, {
@@ -1588,8 +1588,35 @@ test('bound packet rejects unrelated or missing central integration ancestry wit
   });
   assert.equal(integrated.tasks[0].taskPacketDigest, bound.tasks[0].taskPacketDigest);
 
+  git(cwd, ['switch', '--detach', packet.reviewedHeadSha]);
+  const rollback = checkpointGitMetadata({ cwd }).state;
+  assert.equal(rollback.currentIntegrationHeadSha, packet.reviewedHeadSha);
+  assert.throws(() => assertTaskPacketBound(rollback, packet), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+  assert.throws(() => buildTargetedValidationPlan({ cwd, taskPackets: [packet], now: () => AT }), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+  assert.equal(existsSync(validationPlanPath(cwd, rollback.prNumber)), false);
+  assert.equal(loadState(cwd).validationStatus.status, 'not-run');
+
   const tree = git(cwd, ['rev-parse', `${integratedHead}^{tree}`]);
   const unrelatedHead = git(cwd, ['commit-tree', tree, '-m', 'unrelated integration history']);
+  const unrelatedCommitState = {
+    ...rollback,
+    tasks: rollback.tasks.map((item) => ({ ...item, integratedCommitSha: unrelatedHead })),
+  };
+  assert.throws(() => assertTaskPacketBound(unrelatedCommitState, packet), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+  const missingCommitState = {
+    ...rollback,
+    tasks: rollback.tasks.map((item) => ({ ...item, integratedCommitSha: 'f'.repeat(40) })),
+  };
+  assert.throws(() => assertTaskPacketBound(missingCommitState, packet), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+
   git(cwd, ['switch', '--detach', unrelatedHead]);
   const unrelated = checkpointGitMetadata({ cwd }).state;
   assert.equal(unrelated.currentIntegrationHeadSha, unrelatedHead);
@@ -1601,14 +1628,6 @@ test('bound packet rejects unrelated or missing central integration ancestry wit
   });
   assert.equal(existsSync(validationPlanPath(cwd, unrelated.prNumber)), false);
   assert.equal(loadState(cwd).validationStatus.status, 'not-run');
-
-  const missingCommitState = {
-    ...unrelated,
-    tasks: unrelated.tasks.map((item) => ({ ...item, integratedCommitSha: 'f'.repeat(40) })),
-  };
-  assert.throws(() => assertTaskPacketBound(missingCommitState, packet), {
-    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
-  });
 });
 
 test('worker-result acceptance requires the exact durably bound task packet', () => {
