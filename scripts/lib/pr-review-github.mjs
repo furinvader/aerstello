@@ -418,6 +418,25 @@ async function lookupJournalIntent(journal, operationId) {
   return intent ?? null;
 }
 
+async function lookupRequestJournalIntent(journal, operationId) {
+  if (!journal?.lookupIntent) throw new GitHubWorkflowError('A durable intent journal lookup is required', 'JOURNAL_REQUIRED');
+  const intent = await journal.lookupIntent(operationId);
+  if (intent === null || intent === undefined) return null;
+  const expected = intentFor('request', operationId, intent.at);
+  if (intent.type !== 'request' || intent.operationId !== operationId
+      || intent.clientMutationId !== expected.clientMutationId || !intent.at) {
+    throw new GitHubWorkflowError('Mutation intent journal returned invalid correlation', 'JOURNAL_FAILED');
+  }
+  parsedTime(intent.at, 'Request intent');
+  const ids = intent.excludedCommentIds;
+  if (!Array.isArray(ids) || ids.length > MAX_NODES
+      || ids.some((id) => typeof id !== 'string' || id.length === 0)
+      || new Set(ids).size !== ids.length) {
+    throw new GitHubWorkflowError('Request intent has an invalid comment baseline', 'JOURNAL_FAILED');
+  }
+  return { ...intent, isNew: false };
+}
+
 function dispositionForTask(task) {
   return task.disposition === 'actionable' ? 'fixed' : task.disposition;
 }
@@ -792,22 +811,28 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     if (excludedCommentIds.length > MAX_NODES) {
       throw new GitHubWorkflowError('Request comment baseline exceeded the node limit', 'GRAPHQL_TRUNCATED');
     }
-    const intended = await journalIntent(journal, {
-      ...intentFor('request', operationId, intendedAt), excludedCommentIds,
-    });
+    const pendingIntent = { ...intentFor('request', operationId, intendedAt), excludedCommentIds };
+    const priorIntent = await lookupRequestJournalIntent(journal, operationId);
+    let intended = priorIntent ?? pendingIntent;
     const excludedIds = new Set(intended.excludedCommentIds);
-    if (intended.isNew !== false && baselineComments.some((comment) => !priorRequestIds.has(comment.id)
+    if (!priorIntent && baselineComments.some((comment) => !priorRequestIds.has(comment.id)
       && requestRecoveryAtOrAfter(comment.createdAt, intended.at))) {
       throw new GitHubWorkflowError('Fresh request window contains an unrecorded viewer comment', 'REQUEST_BASELINE_COLLISION');
     }
     live = await readLiveSnapshot(client, active);
     await assertMutationReady({ state: active, git }, live);
-    let candidates = intended.isNew === false
+    if (live.threads.some((thread) => thread.canonical && !thread.isResolved)) {
+      throw new GitHubWorkflowError('Canonical review threads remain unresolved', 'REQUEST_NOT_READY');
+    }
+    assertLiveThreadProof(active, live);
+    await assertCurrent(active);
+    if (!priorIntent) intended = await journalIntent(journal, pendingIntent);
+    let candidates = priorIntent
       ? exactViewerRequestCandidates(live.comments, live.metadata.viewer, intended, excludedIds) : [];
     if (candidates.length > 1) throw new GitHubWorkflowError('Request recovery is ambiguous', 'REQUEST_RECOVERY_AMBIGUOUS');
     const recovered = candidates.length === 1;
     if (candidates.length === 0) {
-      if (intended.isNew === false) throw new GitHubWorkflowError('Prior request intent has no unique live result', 'REQUEST_RECOVERY_MISSING');
+      if (priorIntent) throw new GitHubWorkflowError('Prior request intent has no unique live result', 'REQUEST_RECOVERY_MISSING');
       await assertCurrent(active);
       await executeMutation(client, 'AddReviewRequest', {
         subjectId: live.metadata.id, body: REQUEST_BODY, clientMutationId: intended.clientMutationId,

@@ -771,6 +771,65 @@ test('request journals before exact mutation, proves live result, and checkpoint
   assert.equal(state.calls.at(-1).name, 'checkpointReviewRequest');
 });
 
+test('request revalidates canonical thread proof before journaling or mutation and retries after resolution', async () => {
+  class ThreadBetweenSnapshotsClient extends FakeClient {
+    constructor(events) {
+      super({ events });
+      this.threadReads = 0;
+      this.injectRoot = true;
+    }
+
+    async graphql(input) {
+      if (input.name === 'PullRequestThreads') {
+        this.threadReads += 1;
+        if (this.injectRoot && this.threadReads === 2) addThread(this);
+      }
+      return super.graphql(input);
+    }
+  }
+
+  const events = [];
+  const client = new ThreadBetweenSnapshotsClient(events);
+  const journal = fakeJournal(events);
+  const first = workflow(readyState(), client, { journal });
+  await assert.rejects(() => first.api.request(2, 'discovery'), { code: 'REQUEST_NOT_READY' });
+  assert.equal(journal.intents.size, 0);
+  assert.equal(client.calls.some((call) => call.name === 'AddReviewRequest'), false);
+  assert.equal(first.state.calls.some((call) => call.name === 'checkpointReviewRequest'), false);
+
+  client.injectRoot = false;
+  client.threads[0].isResolved = true;
+  const replyOperation = `reply:2:THREAD_1:${HEAD}`;
+  const reply = {
+    id: 'REPLY_resolved', databaseId: 901, url: 'https://x/reply', createdAt: AT, author: VIEWER,
+    replyTo: { id: 'ROOT_THREAD_1' }, pullRequestReview: null,
+    body: `Sky Bar review resolution at ${HEAD}.\nTasks:\n- task-thread: ${HEAD}\nValidation: npm run check.\n${markerFor(replyOperation)}`,
+  };
+  client.threadComments.get('THREAD_1').push(reply);
+  const resolvedState = readyState({
+    tasks: [{
+      id: 'task-thread', sourceIds: ['thread:THREAD_1'], sourceType: 'github-thread', fingerprint: 'fp-thread',
+      summary: 'Fix canonical finding.', severity: 'P1', disposition: 'actionable', status: 'completed',
+      integratedCommitSha: HEAD, resolutionSummary: 'Fixed the finding.',
+    }],
+    threadResolutionStatus: {
+      status: 'passed', headSha: HEAD,
+      threads: [{
+        threadNodeId: 'THREAD_1', rootCommentNodeId: 'ROOT_THREAD_1', rootCommentDatabaseId: 41,
+        taskIds: ['task-thread'], disposition: 'fixed', replyId: reply.id, replyUrl: reply.url,
+        isResolved: true, resolvedAt: AT, resolvedBy: VIEWER.login, observedHeadSha: HEAD,
+      }],
+      threadlessVerification: proof('not-run').threadlessVerification,
+      updatedAt: AT,
+    },
+  });
+  const retry = workflow(resolvedState, client, { journal });
+  const result = await retry.api.request(2, 'discovery');
+  assert.equal(result.request.body, '@codex review');
+  assert.deepEqual(events, ['intent:request', 'mutation:AddReviewRequest']);
+  assert.equal(retry.state.calls.at(-1).name, 'checkpointReviewRequest');
+});
+
 test('mutation correlation is required in addition to live proof', async () => {
   const client = new FakeClient();
   const graphql = client.graphql.bind(client);
@@ -1355,7 +1414,8 @@ test('fresh request intent never adopts an earlier same-head viewer comment', as
   const journal = fakeJournal();
   const setup = workflow(readyState(), client, { journal });
   await assert.rejects(() => setup.api.request(2, 'discovery'), { code: 'REQUEST_BASELINE_COLLISION' });
-  await assert.rejects(() => setup.api.request(2, 'discovery'), { code: 'REQUEST_RECOVERY_MISSING' });
+  await assert.rejects(() => setup.api.request(2, 'discovery'), { code: 'REQUEST_BASELINE_COLLISION' });
+  assert.equal(journal.intents.size, 0);
   assert.equal(client.calls.filter((call) => call.name === 'AddReviewRequest').length, 0);
   assert.equal(setup.state.calls.length, 0);
 });
