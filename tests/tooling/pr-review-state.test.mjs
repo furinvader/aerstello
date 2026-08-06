@@ -1494,6 +1494,64 @@ test('accepted task packet identity is canonical, guarded, persistent, and requi
   }), { code: 'IMMUTABLE_STATE_PROVENANCE' });
 });
 
+test('exact bound packet survives null-review central integration HEAD advance only after integration', () => {
+  const cwd = repo();
+  const initial = init(cwd);
+  const proposedTask = task(initial.currentIntegrationHeadSha, {
+    id: 'post-integration-packet', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [proposedTask] },
+  });
+  const packet = taskPacket(proposed.currentIntegrationHeadSha, proposedTask.id, {
+    affectedAreas: ['workflow'], command: 'npm run check:workflow',
+  });
+  const bound = checkpointTaskPacketBinding({
+    cwd, packet, expectedRevision: proposed.revision,
+  });
+  assert.equal(bound.reviewedHeadSha, null);
+  assert.equal(bound.tasks[0].taskPacketDigest, taskPacketDigest(packet));
+
+  const integratedHead = commit(cwd, { 'scripts/integrated-task.mjs': 'export const integrated = true;\n' }, 'integrate task');
+  const advanced = checkpointGitMetadata({ cwd }).state;
+  assert.equal(advanced.currentIntegrationHeadSha, integratedHead);
+  assert.throws(() => assertTaskPacketBound(advanced, packet), { code: 'TASK_PACKET_HEAD_MISMATCH' });
+
+  const { execution: _execution, ...boundTask } = advanced.tasks[0];
+  const integrated = checkpointState({
+    cwd,
+    expectedRevision: advanced.revision,
+    nextState: {
+      ...advanced,
+      tasks: [{
+        ...boundTask,
+        status: 'integrated',
+        integratedCommitSha: integratedHead,
+        resolutionSummary: 'Integrated centrally; targeted validation remains.',
+      }],
+    },
+  });
+  assert.equal(checkpointTaskPacketBinding({
+    cwd, packet, expectedRevision: integrated.revision,
+  }).revision, integrated.revision);
+  const plan = buildTargetedValidationPlan({ cwd, taskPackets: [packet], now: () => AT });
+  assert.deepEqual(plan.taskIds, [packet.taskId]);
+  assert.equal(plan.headSha, integratedHead);
+  assert.equal(plan.stateRevision, integrated.revision);
+
+  const substituted = { ...packet, evidence: 'Substituted packet evidence.' };
+  assert.throws(() => assertTaskPacketBound(integrated, substituted), {
+    code: 'TASK_PACKET_CONFLICT',
+  });
+  const canonicalReviewedState = { ...integrated, reviewedHeadSha: integratedHead };
+  assert.throws(() => assertTaskPacketBound(canonicalReviewedState, packet), {
+    code: 'TASK_PACKET_HEAD_MISMATCH',
+  });
+  assert.throws(() => assertTaskPacketBound(canonicalReviewedState, {
+    ...packet, reviewedHeadSha: integratedHead,
+  }), { code: 'TASK_PACKET_CONFLICT' });
+});
+
 test('worker-result acceptance requires the exact durably bound task packet', () => {
   const cwd = repo();
   let state = integratedTasks(cwd, ['task-a']);

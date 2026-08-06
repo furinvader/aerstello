@@ -335,19 +335,37 @@ function isCleanTasklessReviewValidationRecovery(state, expectedIds) {
     && request.headSha === headSha && outcome.headSha === headSha;
 }
 
+function assertTaskPacketHead(state, task, packet, digest) {
+  if (state.reviewedHeadSha !== null) {
+    if (packet.reviewedHeadSha !== state.reviewedHeadSha) {
+      throw new StateError(`Task packet ${packet.taskId} does not match the exact reviewed HEAD`, 'TASK_PACKET_HEAD_MISMATCH');
+    }
+    return;
+  }
+  if (packet.reviewedHeadSha === state.currentIntegrationHeadSha) return;
+  const boundIntegratedTask = task.status === 'integrated'
+    && typeof task.integratedCommitSha === 'string' && task.integratedCommitSha.length > 0
+    && typeof task.taskPacketDigest === 'string';
+  if (boundIntegratedTask) {
+    if (task.taskPacketDigest !== digest) {
+      throw new StateError(`Task packet ${packet.taskId} differs from the accepted packet`, 'TASK_PACKET_CONFLICT');
+    }
+    return;
+  }
+  throw new StateError(`Task packet ${packet.taskId} does not match the exact reviewed HEAD`, 'TASK_PACKET_HEAD_MISMATCH');
+}
+
 function assertBoundTaskPacket(state, packet) {
   const task = state.tasks.find((candidate) => candidate.id === packet.taskId);
   if (!task || task.disposition !== 'actionable') {
     throw new StateError(`Task packet ${packet.taskId} does not match an actionable durable task`, 'TASK_PACKET_NOT_BOUND');
   }
-  const expectedReviewedHead = state.reviewedHeadSha ?? state.currentIntegrationHeadSha;
-  if (packet.reviewedHeadSha !== expectedReviewedHead) {
-    throw new StateError(`Task packet ${packet.taskId} does not match the exact reviewed HEAD`, 'TASK_PACKET_HEAD_MISMATCH');
-  }
+  const digest = taskPacketDigest(packet);
+  assertTaskPacketHead(state, task, packet, digest);
   if (!task.taskPacketDigest) {
     throw new StateError(`Task packet ${packet.taskId} has not been durably bound`, 'TASK_PACKET_NOT_BOUND');
   }
-  if (task.taskPacketDigest !== taskPacketDigest(packet)) {
+  if (task.taskPacketDigest !== digest) {
     throw new StateError(`Task packet ${packet.taskId} differs from the accepted packet`, 'TASK_PACKET_CONFLICT');
   }
   return task;
@@ -1550,11 +1568,8 @@ export function checkpointTaskPacketBinding({
   if (!task || task.disposition !== 'actionable') {
     throw new StateError('Task packet must match an actionable durable task', 'TASK_PACKET_NOT_BOUND');
   }
-  const expectedReviewedHead = current.reviewedHeadSha ?? current.currentIntegrationHeadSha;
-  if (packet.reviewedHeadSha !== expectedReviewedHead) {
-    throw new StateError('Task packet does not match the exact reviewed HEAD', 'TASK_PACKET_HEAD_MISMATCH');
-  }
   const digest = taskPacketDigest(packet);
+  assertTaskPacketHead(current, task, packet, digest);
   if (task.taskPacketDigest) {
     if (task.taskPacketDigest !== digest) {
       throw new StateError('Task packet differs from the accepted packet', 'TASK_PACKET_CONFLICT');
