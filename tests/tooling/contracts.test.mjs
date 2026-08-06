@@ -489,7 +489,7 @@ test('worker result validator rejects raw artifact fields', () => {
   assert.equal(validateSchema(result), false);
 });
 
-test('worker result must pass every exact task command and cannot add commands', () => {
+test('worker result enforces exact commands and status-aware validation outcomes', () => {
   const packet = {
     schemaVersion: 2, taskId: 'task-1', reviewedHeadSha: 'a'.repeat(40), finding: 'Finding.', evidence: 'Evidence.',
     affectedAreas: ['workflow'], decisionIds: [], allowedPaths: ['scripts/**'], forbiddenPaths: [], dependencies: [],
@@ -522,6 +522,24 @@ test('worker result must pass every exact task command and cannot add commands',
   assert.ok(validateWorkerResultAgainstTask(packet, {
     ...result, validation: [{ ...result.validation[0], result: 'skipped' }],
   }, ['scripts/a.mjs']).some((error) => error.includes('did not pass')));
+  assert.ok(validateWorkerResultAgainstTask(packet, {
+    ...result, validation: [],
+  }, ['scripts/a.mjs']).some((error) => error.includes('was not reported')));
+  for (const status of ['blocked', 'failed', 'not-applicable']) {
+    for (const outcome of ['passed', 'failed', 'skipped']) {
+      const terminalResult = {
+        ...result,
+        status,
+        commitSha: null,
+        changedPaths: [],
+        validation: [{ ...result.validation[0], result: outcome }],
+      };
+      assert.deepEqual(validateWorkerResultAgainstTask(packet, terminalResult), []);
+    }
+    assert.ok(validateWorkerResultAgainstTask(packet, {
+      ...result, status, commitSha: null, changedPaths: [], validation: [],
+    }).some((error) => error.includes('was not reported')));
+  }
   assert.ok(validateWorkerResultAgainstTask(packet, {
     ...result, changedPaths: ['apps/api/src/outside.ts'],
   }, ['apps/api/src/outside.ts']).some((error) => error.includes('outside allowedPaths')));
@@ -572,7 +590,7 @@ test('validate-result CLI enforces the exact task validation commands', () => {
     ], { cwd: directory, encoding: 'utf8' });
     assert.equal(cli.status, 1, cli.stderr);
     assert.match(cli.stderr, /undeclared command/u);
-    assert.match(cli.stderr, /required validation did not pass/u);
+    assert.match(cli.stderr, /required validation was not reported/u);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

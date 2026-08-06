@@ -474,7 +474,10 @@ export function validateWorkerResultAgainstTask(packet, result, actualChangedPat
     }
   }
   for (const command of declared) {
-    if (reported.get(command) !== 'passed') errors.push(`required validation did not pass: ${command}`);
+    if (!reported.has(command)) errors.push(`required validation was not reported: ${command}`);
+    else if (result.status === 'implemented' && reported.get(command) !== 'passed') {
+      errors.push(`required validation did not pass: ${command}`);
+    }
   }
   return errors;
 }
