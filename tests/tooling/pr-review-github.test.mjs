@@ -571,6 +571,50 @@ test('taskless thread refresh fails closed across task, root, validation, Git, a
   await assert.rejects(() => createGitHubReviewWorkflow({
     client: new FakeClient(), state: raced, git: fakeGit(), clock: { now: () => AT }, journal: null,
   }).refreshThreads(2), { code: 'STATE_REVISION_CHANGED' });
+
+  class DriftingRefreshClient extends FakeClient {
+    async graphql(input) {
+      const result = await super.graphql(input);
+      if (input.name === 'PullRequestThreads') this.metadata.headRefOid = OTHER_HEAD;
+      return result;
+    }
+  }
+  const drifted = workflow(validated, new DriftingRefreshClient());
+  await assert.rejects(() => drifted.api.refreshThreads(2), { code: 'MUTATION_NOT_READY' });
+  assert.equal(drifted.state.calls.some((call) => call.name === 'checkpointTaskCompletion'), false);
+});
+
+test('taskless thread refresh rejects every prior-review lifecycle while allowing pristine repetition', async () => {
+  const validated = stateFixture({
+    validationStatus: {
+      source: 'orchestrator', scope: 'targeted', status: 'passed', headSha: HEAD,
+      checks: ['npm run check:workflow'], updatedAt: AT,
+    },
+  });
+  const priorPending = pendingState('discovery', { validationStatus: validated.validationStatus });
+  const priorCompleted = completedState({
+    phase: 'recovering',
+    validationStatus: validated.validationStatus,
+    threadResolutionStatus: proof('not-run'),
+    nextAction: 'Recover prior review evidence.',
+  });
+  for (const [label, state] of [
+    ['non-recovering phase', { ...validated, phase: 'validating' }],
+    ['pending discovery provenance', priorPending],
+    ['completed review provenance', priorCompleted],
+  ]) {
+    await assert.rejects(() => workflow(state).api.refreshThreads(2), {
+      code: 'TASKLESS_REFRESH_NOT_ALLOWED',
+    }, label);
+  }
+
+  const setup = workflow(validated);
+  await setup.api.refreshThreads(2);
+  const firstRevision = setup.state.current.revision;
+  await setup.api.refreshThreads(2);
+  assert.equal(setup.state.current.revision, firstRevision + 1);
+  assert.equal(setup.state.current.reviewRound, 0);
+  assert.deepEqual(setup.state.current.reviewHistory, []);
 });
 
 test('collect-ci classifies the selected Full validation run independently of the aggregate rollup', async () => {

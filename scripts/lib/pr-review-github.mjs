@@ -730,8 +730,18 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
 
   async function refreshThreads(prNumber) {
     let active = await load(prNumber);
-    if (active.tasks.length !== 0) {
-      throw new GitHubWorkflowError('Empty-thread refresh is only available before durable tasks exist', 'TASKLESS_REFRESH_NOT_ALLOWED');
+    const pristine = active.phase === 'recovering'
+      && active.tasks.length === 0
+      && active.reviewRound === 0
+      && active.requestedHeadSha === null
+      && active.reviewedHeadSha === null
+      && active.reviewRequest === null
+      && active.reviewOutcome === null
+      && active.reviewHistory.length === 0
+      && active.verificationReviewUsed === false
+      && active.verificationEscalation === null;
+    if (!pristine) {
+      throw new GitHubWorkflowError('Empty-thread refresh requires a pristine taskless first-review cycle', 'TASKLESS_REFRESH_NOT_ALLOWED');
     }
     if (!stateAdapter.checkpointTaskCompletion) {
       throw new GitHubWorkflowError('The guarded thread-proof checkpoint is unavailable', 'INVALID_ADAPTERS');
@@ -742,7 +752,6 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     if (plan.length !== 0 || live.threads.some((thread) => thread.canonical)) {
       throw new GitHubWorkflowError('Canonical Codex roots exist; triage them before refreshing empty proof', 'TASKLESS_THREADS_NOT_EMPTY');
     }
-    await assertCurrent(active);
     const threadResolutionStatus = {
       status: 'passed',
       headSha: active.currentIntegrationHeadSha,
@@ -750,6 +759,11 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       threadlessVerification: active.threadResolutionStatus.threadlessVerification,
       updatedAt: clock.now(),
     };
+    await assertCurrent(active);
+    const finalMetadata = await readPullRequestMetadata(client, active.repository, active.prNumber);
+    if (finalMetadata.headRefOid !== active.currentIntegrationHeadSha) {
+      throw new GitHubWorkflowError('Live PR HEAD changed while refreshing empty thread proof', 'MUTATION_NOT_READY');
+    }
     active = await stateAdapter.checkpointTaskCompletion({
       prNumber: active.prNumber, expectedRevision: active.revision, threadResolutionStatus,
     });
