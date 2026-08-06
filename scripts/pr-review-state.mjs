@@ -133,11 +133,11 @@ try {
     if (structuralErrors.length > 0) {
       throw new StateError(`Worker result does not satisfy task packet:\n- ${structuralErrors.join('\n- ')}`, 'INVALID_WORKER_RESULT');
     }
-    const errors = validateWorkerResultAgainstTask(packet, result, actualWorkerChangedPaths(packet, result));
-    if (errors.length > 0) throw new StateError(`Worker result does not satisfy task packet:\n- ${errors.join('\n- ')}`, 'INVALID_WORKER_RESULT');
     const active = loadState(process.cwd(), options.pr);
     if (!active) throw new StateError('No active PR state for worker-result acceptance', 'STATE_NOT_FOUND');
     assertTaskPacketBound(active, packet);
+    const errors = validateWorkerResultAgainstTask(packet, result, actualWorkerChangedPaths(packet, result));
+    if (errors.length > 0) throw new StateError(`Worker result does not satisfy task packet:\n- ${errors.join('\n- ')}`, 'INVALID_WORKER_RESULT');
     writeJson({ valid: true, taskId: packet.taskId });
   } else if (command === 'validation-plan') {
     if (options['initial-selection'] && options._.length > 0) {

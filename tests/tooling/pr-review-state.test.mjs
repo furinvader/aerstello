@@ -1240,6 +1240,39 @@ test('pristine taskless cycles run an explicit initial targeted validation selec
   }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
 });
 
+test('pending initial validation plans require an exact immutable definition match', () => {
+  const cwd = repo();
+  const state = init(cwd);
+  const selection = initialSelection(state.currentIntegrationHeadSha);
+  const plan = buildTargetedValidationPlan({ cwd, initialSelection: selection, now: () => AT });
+  assert.deepEqual(buildTargetedValidationPlan({ cwd, initialSelection: selection }), plan);
+
+  const changedAreas = {
+    ...selection,
+    affectedAreas: ['workflow', 'documentation'],
+  };
+  assert.throws(() => buildTargetedValidationPlan({ cwd, initialSelection: changedAreas }), {
+    code: 'VALIDATION_PLAN_REPLACE_REQUIRED',
+  });
+  const changedReason = initialSelection(state.currentIntegrationHeadSha, {
+    requiredValidation: {
+      unit: [{ command: 'npm run check:workflow', reason: 'Revised workflow rationale.' }],
+      system: [],
+    },
+  });
+  assert.throws(() => buildTargetedValidationPlan({ cwd, initialSelection: changedReason }), {
+    code: 'VALIDATION_PLAN_REPLACE_REQUIRED',
+  });
+
+  const replacementSelection = { ...changedReason, affectedAreas: changedAreas.affectedAreas };
+  const replacement = buildTargetedValidationPlan({
+    cwd, initialSelection: replacementSelection, replace: true, now: () => AT,
+  });
+  assert.deepEqual(replacement.affectedAreas, ['documentation', 'workflow']);
+  assert.equal(replacement.commands[0].reason, 'Revised workflow rationale.');
+  assert.deepEqual(buildTargetedValidationPlan({ cwd, initialSelection: replacementSelection }), replacement);
+});
+
 test('accepted task packet identity is canonical, guarded, persistent, and required by consumers', () => {
   const cwd = repo();
   let state = integratedTasks(cwd, ['task-a']);
@@ -1324,7 +1357,13 @@ test('worker-result acceptance requires the exact durably bound task packet', ()
   const packetPath = join(stateDirectory(cwd, state.prNumber), 'accepted-task.json');
   const resultPath = join(stateDirectory(cwd, state.prNumber), 'worker-result.json');
   writeFileSync(packetPath, `${JSON.stringify(packet)}\n`);
-  writeFileSync(resultPath, `${JSON.stringify(result)}\n`);
+  const invalidResult = {
+    ...result,
+    commitSha: 'f'.repeat(40),
+    changedPaths: ['apps/outside-ownership.ts'],
+    validation: [{ command: 'npm run check:web', result: 'passed', summary: 'Wrong check.' }],
+  };
+  writeFileSync(resultPath, `${JSON.stringify(invalidResult)}\n`);
   const runValidation = () => spawnSync(process.execPath, [
     STATE_CLI, 'validate-result', '--pr', '17', '--task-packet', packetPath, '--worker-result', resultPath,
   ], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -1332,6 +1371,12 @@ test('worker-result acceptance requires the exact durably bound task packet', ()
   assert.equal(unbound.status, 1);
   assert.match(unbound.stderr, /TASK_PACKET_NOT_BOUND/u);
   state = checkpointTaskPacketBinding({ cwd, packet, expectedRevision: state.revision });
+  writeFileSync(packetPath, `${JSON.stringify({ ...packet, evidence: 'Conflicting review evidence.' })}\n`);
+  const conflicting = runValidation();
+  assert.equal(conflicting.status, 1);
+  assert.match(conflicting.stderr, /TASK_PACKET_CONFLICT/u);
+  writeFileSync(packetPath, `${JSON.stringify(packet)}\n`);
+  writeFileSync(resultPath, `${JSON.stringify(result)}\n`);
   const accepted = runValidation();
   assert.equal(accepted.status, 0, accepted.stderr);
   assert.deepEqual(JSON.parse(accepted.stdout), { valid: true, taskId: 'task-a' });

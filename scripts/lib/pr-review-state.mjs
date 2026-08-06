@@ -404,6 +404,18 @@ function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, initi
     ...validationUnion.system.map((entry) => ({ ...entry, kind: 'system' })),
   ];
   if (commands.length === 0) throw new StateError('Targeted validation union must not be empty', 'INVALID_VALIDATION_PLAN');
+  const affectedAreas = [...new Set(validationInputs.flatMap((input) => input.affectedAreas))].sort();
+  const plannedCommands = commands.map((entry) => ({
+    ...entry, argv: parseTargetedValidationCommand(entry.command),
+  }));
+  const immutableCommandDefinition = (entry) => ({
+    command: entry.command,
+    reason: entry.reason,
+    kind: entry.kind,
+    selectors: entry.selectors,
+    projects: entry.projects,
+    argv: entry.argv,
+  });
   const path = validationPlanPath(cwd, state.prNumber);
   if (existsSync(path)) {
     let existing;
@@ -423,8 +435,15 @@ function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, initi
         throw new StateError(`Invalid targeted validation plan:\n- ${historicalErrors.join('\n- ')}`, 'INVALID_VALIDATION_PLAN');
       }
     }
-    const sameDefinition = JSON.stringify(existing.taskIds) === JSON.stringify(packetIds)
-      && JSON.stringify(existing.commands.map((entry) => entry.command)) === JSON.stringify(commands.map((entry) => entry.command));
+    const sameDefinition = JSON.stringify({
+      taskIds: existing.taskIds,
+      affectedAreas: existing.affectedAreas,
+      commands: existing.commands.map(immutableCommandDefinition),
+    }) === JSON.stringify({
+      taskIds: packetIds,
+      affectedAreas,
+      commands: plannedCommands.map(immutableCommandDefinition),
+    });
     if (!replace && sameDefinition && existing.commands.every((entry) => entry.status === 'pending')) return existing;
     if (!replace) throw new StateError('A saved validation plan already exists; use --replace to start a fresh plan', 'VALIDATION_PLAN_REPLACE_REQUIRED');
   }
@@ -435,9 +454,9 @@ function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, initi
     stateRevision: state.revision,
     headSha: state.currentIntegrationHeadSha,
     taskIds: packetIds,
-    affectedAreas: [...new Set(validationInputs.flatMap((input) => input.affectedAreas))].sort(),
-    commands: commands.map((entry) => ({
-      ...entry, argv: parseTargetedValidationCommand(entry.command), status: 'pending', exitCode: null, summary: null, completedAt: null,
+    affectedAreas,
+    commands: plannedCommands.map((entry) => ({
+      ...entry, status: 'pending', exitCode: null, summary: null, completedAt: null,
     })),
     createdAt: timestamp,
     updatedAt: timestamp,
