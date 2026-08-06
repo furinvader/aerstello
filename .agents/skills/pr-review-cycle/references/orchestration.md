@@ -20,6 +20,16 @@ The instructions are fixed after delegation. If a related command, selector, or
 project cannot be determined, stop and repair the plan. Neither a worker nor the
 orchestrator may substitute a full local test run.
 
+Bind each accepted packet before delegation:
+
+```bash
+node scripts/pr-review-state.mjs bind-task-packet --task-packet /tmp/task-a.json --expected-revision 4
+```
+
+The guarded binding is the durable identity used by worker-result acceptance
+and integrated validation. Do not delegate, validate a result, or build a
+remediation plan from an unbound or changed packet.
+
 ## Separate tasks safely
 
 Tasks cannot run together when they overlap anticipated writes, change and use
@@ -86,6 +96,19 @@ Save that operational union before running it:
 node scripts/pr-review-state.mjs validation-plan /tmp/task-a.json /tmp/task-b.json
 node scripts/pr-review-state.mjs run-validation
 ```
+
+Before the first discovery review, a pristine cycle has no remediation tasks.
+Provide its explicitly selected checks without inventing one:
+
+```bash
+node scripts/pr-review-state.mjs validation-plan --initial-selection /tmp/initial-validation.json
+node scripts/pr-review-state.mjs run-validation
+```
+
+The selection document has schema version 1 plus `headSha`, `affectedAreas`,
+and `requiredValidation`. It must select at least one exact targeted command and
+match the clean integration HEAD. Initial-selection mode is unavailable after
+any durable task or review evidence exists.
 
 The packet list must exactly cover the current actionable Integrated tasks. The
 saved plan is tied to the clean integration commit, records each command as it

@@ -9,8 +9,10 @@ import {
 } from './lib/contracts.mjs';
 import {
   archiveState,
+  assertTaskPacketBound,
   buildTargetedValidationPlan,
   checkpointState,
+  checkpointTaskPacketBinding,
   executeTargetedValidationPlan,
   initializeState,
   loadState,
@@ -22,7 +24,7 @@ import {
 } from './lib/pr-review-state.mjs';
 
 function usage() {
-  return `Usage: node scripts/pr-review-state.mjs <command> [options]\n\nCommands:\n  init             Start durable state for a PR review cycle\n  path             Print the active state path\n  validate         Check state against the integration checkout\n  validate-result  Check a worker result against its fixed task instructions\n  validation-plan  Save and print the combined targeted checks\n  run-validation   Run pending checks from the saved plan and record the result\n  show             Print active state JSON\n  checkpoint       Replace ordinary operational state from --input\n  migrate          Explicitly migrate active schema v1 or v2 state to v3\n  recover          Print compact recovery context\n  archive          Archive a Done or explicitly abandoned cycle\n\nCommon options:\n  --pr <number>\n  --help\n\nValidation-plan arguments:\n  <task-packet.json> [...]  One file for every actionable Integrated task\n  --replace                 Start a fresh plan after a failure or commit change\n\nValidate-result options:\n  --task-packet <file>\n  --worker-result <file>\n\nCheckpoint options:\n  --expected-revision <number>\n\nMigrate options:\n  --integration-map <file>  JSON task-ID to central integration SHA map (v1 only)\n\nArchive options:\n  --abandon-reason <reason>\n\nReview, CI, task-resolution, targeted-validation, and Done transitions use guarded helpers that verify their evidence before saving.\n`;
+  return `Usage: node scripts/pr-review-state.mjs <command> [options]\n\nCommands:\n  init              Start durable state for a PR review cycle\n  path              Print the active state path\n  validate          Check state against the integration checkout\n  bind-task-packet  Bind accepted fixed instructions to a durable task\n  validate-result   Check a worker result against its bound fixed instructions\n  validation-plan   Save and print the combined targeted checks\n  run-validation    Run pending checks from the saved plan and record the result\n  show              Print active state JSON\n  checkpoint        Replace ordinary operational state from --input\n  migrate           Explicitly migrate active schema v1 or v2 state to v3\n  recover           Print compact recovery context\n  archive           Archive a Done or explicitly abandoned cycle\n\nCommon options:\n  --pr <number>\n  --help\n\nBind-task-packet options:\n  --task-packet <file>\n  --expected-revision <number>\n\nValidation-plan arguments:\n  <task-packet.json> [...]       One bound file for every actionable Integrated task\n  --initial-selection <file>     Explicit taskless first-discovery validation selection\n  --replace                      Start a fresh plan after a failure or commit change\n\nValidate-result options:\n  --task-packet <file>\n  --worker-result <file>\n\nCheckpoint options:\n  --expected-revision <number>\n\nMigrate options:\n  --integration-map <file>  JSON task-ID to central integration SHA map (v1 only)\n\nArchive options:\n  --abandon-reason <reason>\n\nReview, CI, task-resolution, targeted-validation, and Done transitions use guarded helpers that verify their evidence before saving.\n`;
 }
 
 function optionsFor(command, argv) {
@@ -33,10 +35,11 @@ function optionsFor(command, argv) {
     common.values.push('input', 'event-type', 'event-summary');
   } else if (command === 'migrate') {
     common.values.push('integration-map');
-  } else if (command === 'validate-result') {
+  } else if (['bind-task-packet', 'validate-result'].includes(command)) {
     common.values.push('task-packet', 'worker-result');
   } else if (command === 'validation-plan') {
     common.booleans.push('replace');
+    common.values.push('initial-selection');
   } else if (command === 'archive') {
     common.values.push('abandon-reason');
   }
@@ -71,7 +74,7 @@ try {
     process.stdout.write(usage());
     process.exit(0);
   }
-  if (!['init', 'path', 'validate', 'validate-result', 'validation-plan', 'run-validation', 'show', 'checkpoint', 'migrate', 'recover', 'archive'].includes(command)) {
+  if (!['init', 'path', 'validate', 'bind-task-packet', 'validate-result', 'validation-plan', 'run-validation', 'show', 'checkpoint', 'migrate', 'recover', 'archive'].includes(command)) {
     throw new UsageError(`Unknown command ${command}`);
   }
   const options = optionsFor(command, argv);
@@ -111,6 +114,12 @@ try {
     const state = loadState(process.cwd(), options.pr);
     if (!state) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
     writeJson(state);
+  } else if (command === 'bind-task-packet') {
+    if (!options['task-packet']) throw new UsageError('bind-task-packet requires --task-packet');
+    const packet = JSON.parse(readFileSync(options['task-packet'], 'utf8'));
+    writeJson(checkpointTaskPacketBinding({
+      prNumber: options.pr, packet, expectedRevision: parsedExpectedRevision,
+    }));
   } else if (command === 'validate-result') {
     if (!options['task-packet'] || !options['worker-result']) {
       throw new UsageError('validate-result requires --task-packet and --worker-result');
@@ -126,11 +135,24 @@ try {
     }
     const errors = validateWorkerResultAgainstTask(packet, result, actualWorkerChangedPaths(packet, result));
     if (errors.length > 0) throw new StateError(`Worker result does not satisfy task packet:\n- ${errors.join('\n- ')}`, 'INVALID_WORKER_RESULT');
+    const active = loadState(process.cwd(), options.pr);
+    if (!active) throw new StateError('No active PR state for worker-result acceptance', 'STATE_NOT_FOUND');
+    assertTaskPacketBound(active, packet);
     writeJson({ valid: true, taskId: packet.taskId });
   } else if (command === 'validation-plan') {
-    if (options._.length === 0) throw new UsageError('validation-plan requires one or more task-packet JSON files');
+    if (options['initial-selection'] && options._.length > 0) {
+      throw new UsageError('--initial-selection cannot be combined with task-packet files');
+    }
+    if (!options['initial-selection'] && options._.length === 0) {
+      throw new UsageError('validation-plan requires task-packet files or --initial-selection');
+    }
     const taskPackets = options._.map((path) => JSON.parse(readFileSync(path, 'utf8')));
-    writeJson(buildTargetedValidationPlan({ prNumber: options.pr, taskPackets, replace: options.replace === true }));
+    const initialSelection = options['initial-selection']
+      ? JSON.parse(readFileSync(options['initial-selection'], 'utf8'))
+      : undefined;
+    writeJson(buildTargetedValidationPlan({
+      prNumber: options.pr, taskPackets, initialSelection, replace: options.replace === true,
+    }));
   } else if (command === 'run-validation') {
     const result = executeTargetedValidationPlan({ prNumber: options.pr });
     writeJson({

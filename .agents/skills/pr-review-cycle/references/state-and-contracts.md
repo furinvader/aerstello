@@ -28,7 +28,9 @@ rename. Keep raw logs, full diffs, stack traces, and transcripts out of state.
 node scripts/pr-review-state.mjs init --pr 123 --base origin/main --head HEAD
 node scripts/pr-review-state.mjs path
 node scripts/pr-review-state.mjs validate
+node scripts/pr-review-state.mjs bind-task-packet --task-packet /tmp/task.json --expected-revision 4
 node scripts/pr-review-state.mjs validate-result --task-packet /tmp/task.json --worker-result /tmp/result.json
+node scripts/pr-review-state.mjs validation-plan --initial-selection /tmp/initial-validation.json
 node scripts/pr-review-state.mjs validation-plan /tmp/task-a.json /tmp/task-b.json
 node scripts/pr-review-state.mjs validation-plan --replace /tmp/task-a.json /tmp/task-b.json
 node scripts/pr-review-state.mjs run-validation
@@ -50,6 +52,14 @@ exact versioned backup and must preserve stable finding/task identities, source
 IDs, finding keys, and outcomes. Never let an unrelated read silently migrate
 state.
 
+Before delegation, `bind-task-packet` records the canonical SHA-256 identity of
+the complete accepted schema-v2 packet on its actionable task. Object key order
+does not affect the digest; array order and every packet value do. A binding is
+guarded, immutable, and retained after execution metadata is removed. Recovery
+for a task accepted before this capability requires one explicit bind from the
+original packet. Worker-result acceptance and remediation planning fail closed
+for missing, stale, or mismatched bindings.
+
 `targeted-validation-plan.json` is a resumable sidecar, not trusted input to a
 generic checkpoint. `validation-plan` derives its deterministic, de-duplicated
 commands from fixed task packets and requires those packet IDs to exactly match
@@ -60,6 +70,11 @@ executes the saved argv directly without a shell, records each attempted command
 atomically, and holds the same PR lock until a guarded transition turns the
 finished plan into targeted validation proof. Recovery output reports plan progress.
 Old or migrated states have no plan and must be validated again before review.
+For the first discovery review of a pristine taskless cycle, use
+`--initial-selection` with a schema-v1 document containing the exact integration
+HEAD, nonempty affected areas, and nonempty targeted validation. This creates a
+plan with no remediation task IDs; it cannot be combined with task packets or
+used after any task or review evidence exists.
 
 ## What state must preserve
 

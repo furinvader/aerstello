@@ -9,6 +9,7 @@ import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import {
   parseTargetedValidationCommand,
+  validateInitialValidationSelection,
   validatePrReviewState,
   validateTaskPacket,
   validateWorkerResultAgainstTask,
@@ -150,6 +151,24 @@ test('state JSON Schema compiles with Ajv and shares representative fixtures wit
   const validEscalation = escalatedStateFixture();
   assert.equal(validateSchema(validEscalation), true, JSON.stringify(validateSchema.errors));
   assert.deepEqual(validatePrReviewState(validEscalation), []);
+  const validUnboundTask = stateFixture({
+    tasks: [{
+      id: 'legacy-task', sourceIds: ['local'], sourceType: 'local', fingerprint: 'fingerprint', summary: 'Done.',
+      severity: 'P1', disposition: 'actionable', status: 'completed', integratedCommitSha: 'a'.repeat(40),
+      resolutionSummary: 'Done.',
+    }],
+  });
+  assert.equal(validateSchema(validUnboundTask), true, JSON.stringify(validateSchema.errors));
+  assert.deepEqual(validatePrReviewState(validUnboundTask), []);
+  const validBoundTask = stateFixture({
+    tasks: [{
+      id: 'task', sourceIds: ['local'], sourceType: 'local', fingerprint: 'fingerprint', summary: 'Done.',
+      severity: 'P1', disposition: 'actionable', status: 'completed', integratedCommitSha: 'a'.repeat(40),
+      resolutionSummary: 'Done.', taskPacketDigest: 'b'.repeat(64),
+    }],
+  });
+  assert.equal(validateSchema(validBoundTask), true, JSON.stringify(validateSchema.errors));
+  assert.deepEqual(validatePrReviewState(validBoundTask), []);
 
   const { verificationEscalation: _verificationEscalation, ...noncanonicalPriorV2 } = valid;
   const invalidFixtures = [
@@ -181,6 +200,13 @@ test('state JSON Schema compiles with Ajv and shares representative fixtures wit
         id: 'task', sourceIds: ['local'], sourceType: 'local', fingerprint: 'fingerprint', summary: 'Queued.',
         severity: 'P1', disposition: 'actionable', status: 'queued', integratedCommitSha: null,
         resolutionSummary: null,
+      }],
+    }),
+    stateFixture({
+      tasks: [{
+        id: 'task', sourceIds: ['local'], sourceType: 'local', fingerprint: 'fingerprint', summary: 'Done.',
+        severity: 'P1', disposition: 'actionable', status: 'completed', integratedCommitSha: 'a'.repeat(40),
+        resolutionSummary: 'Done.', taskPacketDigest: 'not-a-digest',
       }],
     }),
     stateFixture({
@@ -342,6 +368,25 @@ test('manual state validation rejects every ambiguous canonical thread identifie
     });
     assert.ok(validatePrReviewState(state).some((error) => error.includes('contains duplicate')), field);
   }
+});
+
+test('initial validation selections require an exact head and nonempty targeted union', () => {
+  const selection = {
+    schemaVersion: 1,
+    headSha: 'a'.repeat(40),
+    affectedAreas: ['workflow'],
+    requiredValidation: {
+      unit: [{ command: 'npm run check:workflow', reason: 'Initial workflow scope.' }],
+      system: [],
+    },
+  };
+  assert.deepEqual(validateInitialValidationSelection(selection), []);
+  for (const invalid of [
+    { ...selection, headSha: 'bad' },
+    { ...selection, affectedAreas: [] },
+    { ...selection, requiredValidation: { unit: [], system: [] } },
+    { ...selection, extra: true },
+  ]) assert.notDeepEqual(validateInitialValidationSelection(invalid), []);
 });
 
 test('task packet validator accepts the documented contract', () => {

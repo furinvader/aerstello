@@ -8,6 +8,7 @@ import {
   ACTIVE_STATE_LIMIT_BYTES,
   activePointerPath,
   archiveState,
+  assertTaskPacketBound,
   buildCompletionTransition,
   buildCiValidationTransition,
   buildTargetedValidationPlan,
@@ -20,6 +21,7 @@ import {
   checkpointReviewOutcome,
   checkpointReviewRequest,
   checkpointState,
+  checkpointTaskPacketBinding,
   checkpointTaskCompletion,
   checkpointTargetedValidation,
   checkpointVerificationEscalation,
@@ -39,6 +41,7 @@ import {
   stateDirectory,
   statePath,
   StateError,
+  taskPacketDigest,
   validationPlanPath,
   withStateLock,
 } from '../../scripts/lib/pr-review-state.mjs';
@@ -212,6 +215,19 @@ function taskPacket(head, taskId, { affectedAreas = ['api'], command = 'npm run 
   };
 }
 
+function initialSelection(head, overrides = {}) {
+  return {
+    schemaVersion: 1,
+    headSha: head,
+    affectedAreas: ['workflow'],
+    requiredValidation: {
+      unit: [{ command: 'npm run check:workflow', reason: 'Initial workflow selection.' }],
+      system: [],
+    },
+    ...overrides,
+  };
+}
+
 function integratedTasks(cwd, ids) {
   const initial = init(cwd);
   const proposedTasks = ids.map((id) => task(initial.currentIntegrationHeadSha, {
@@ -226,6 +242,12 @@ function integratedTasks(cwd, ids) {
     };
   });
   return checkpointState({ cwd, nextState: { ...proposed, tasks: integrated }, expectedRevision: proposed.revision });
+}
+
+function bindPackets(cwd, state, packets) {
+  return packets.reduce((current, packet) => checkpointTaskPacketBinding({
+    cwd, packet, expectedRevision: current.revision,
+  }), state);
 }
 
 afterEach(() => {
@@ -1179,13 +1201,150 @@ test('generic checkpoint cannot forge zero-thread or threadless successful proof
   assert.equal(threadlessRefreshed.threadResolutionStatus.threadlessVerification.headSha, threadlessHeadB);
 });
 
+test('pristine taskless cycles run an explicit initial targeted validation selection', () => {
+  const cwd = repo();
+  const state = init(cwd);
+  const selection = initialSelection(state.currentIntegrationHeadSha);
+  const plan = buildTargetedValidationPlan({ cwd, initialSelection: selection, now: () => AT });
+  assert.deepEqual(plan.taskIds, []);
+  assert.deepEqual(plan.affectedAreas, ['workflow']);
+  assert.deepEqual(plan.commands.map((entry) => entry.command), ['npm run check:workflow']);
+  const result = executeTargetedValidationPlan({ cwd, runCommand: () => ({ status: 0 }), now: () => AT });
+  assert.equal(result.state.validationStatus.status, 'passed');
+  assert.equal(result.state.validationStatus.headSha, state.currentIntegrationHeadSha);
+
+  const laterCwd = repo();
+  const later = init(laterCwd);
+  const packet = taskPacket(later.currentIntegrationHeadSha, 'task-a');
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: laterCwd, taskPackets: [packet], initialSelection: initialSelection(later.currentIntegrationHeadSha),
+  }), { code: 'INVALID_VALIDATION_PLAN' });
+  assert.throws(() => buildTargetedValidationPlan({ cwd: laterCwd, taskPackets: [] }), {
+    code: 'INVALID_VALIDATION_PLAN',
+  });
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: laterCwd, initialSelection: initialSelection('f'.repeat(40)),
+  }), { code: 'VALIDATION_PLAN_STALE' });
+  const withTask = checkpointState({
+    cwd: laterCwd,
+    nextState: {
+      ...later,
+      tasks: [task(later.currentIntegrationHeadSha, {
+        id: 'task-a', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+      })],
+    },
+    expectedRevision: later.revision,
+  });
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: laterCwd, initialSelection: initialSelection(withTask.currentIntegrationHeadSha),
+  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
+});
+
+test('accepted task packet identity is canonical, guarded, persistent, and required by consumers', () => {
+  const cwd = repo();
+  let state = integratedTasks(cwd, ['task-a']);
+  const packet = taskPacket(state.currentIntegrationHeadSha, 'task-a');
+  const reordered = Object.fromEntries(Object.entries(packet).reverse());
+  assert.equal(taskPacketDigest(reordered), taskPacketDigest(packet));
+  assert.notEqual(taskPacketDigest({
+    ...packet,
+    affectedAreas: ['documentation', 'api'],
+  }), taskPacketDigest({
+    ...packet,
+    affectedAreas: ['api', 'documentation'],
+  }));
+  assert.throws(() => checkpointState({
+    cwd,
+    nextState: {
+      ...state,
+      tasks: state.tasks.map((item) => ({ ...item, taskPacketDigest: taskPacketDigest(packet) })),
+    },
+    expectedRevision: state.revision,
+  }), { code: 'PROTECTED_TRANSITION_REQUIRED' });
+  assert.throws(() => buildTargetedValidationPlan({ cwd, taskPackets: [packet] }), {
+    code: 'TASK_PACKET_NOT_BOUND',
+  });
+  assert.throws(() => assertTaskPacketBound(state, { ...packet, taskId: 'missing-task' }), {
+    code: 'TASK_PACKET_NOT_BOUND',
+  });
+  assert.throws(() => assertTaskPacketBound(state, { ...packet, reviewedHeadSha: 'f'.repeat(40) }), {
+    code: 'TASK_PACKET_HEAD_MISMATCH',
+  });
+  state = checkpointTaskPacketBinding({ cwd, packet, expectedRevision: state.revision });
+  const boundRevision = state.revision;
+  assert.equal(state.tasks[0].taskPacketDigest, taskPacketDigest(packet));
+  assert.equal(checkpointTaskPacketBinding({
+    cwd, packet: reordered, expectedRevision: state.revision,
+  }).revision, boundRevision);
+  const weakened = {
+    ...packet,
+    affectedAreas: ['documentation'],
+    requiredValidation: {
+      unit: [{ command: 'node --test tests/tooling/contracts.test.mjs', reason: 'Weakened selection.' }],
+      system: [],
+    },
+  };
+  assert.throws(() => checkpointTaskPacketBinding({
+    cwd, packet: weakened, expectedRevision: state.revision,
+  }), { code: 'TASK_PACKET_CONFLICT' });
+  assert.throws(() => buildTargetedValidationPlan({ cwd, taskPackets: [weakened] }), {
+    code: 'TASK_PACKET_CONFLICT',
+  });
+  const completed = checkpointTaskCompletion({
+    cwd, expectedRevision: state.revision,
+    threadResolutionStatus: {
+      status: 'passed', headSha: state.currentIntegrationHeadSha, threads: [],
+      threadlessVerification: emptyThreadless(), updatedAt: AT,
+    },
+  });
+  assert.equal(completed.tasks[0].taskPacketDigest, taskPacketDigest(packet));
+  assert.throws(() => checkpointState({
+    cwd,
+    nextState: { ...completed, tasks: completed.tasks.map(({ taskPacketDigest: _digest, ...item }) => item) },
+    expectedRevision: completed.revision,
+  }), { code: 'IMMUTABLE_STATE_PROVENANCE' });
+});
+
+test('worker-result acceptance requires the exact durably bound task packet', () => {
+  const cwd = repo();
+  let state = integratedTasks(cwd, ['task-a']);
+  const packet = taskPacket(state.currentIntegrationHeadSha, 'task-a');
+  const workerCommit = commit(cwd, { 'scripts/worker-result.mjs': 'export const fixed = true;\n' }, 'worker result');
+  const result = {
+    schemaVersion: 2,
+    taskId: 'task-a',
+    status: 'implemented',
+    commitSha: workerCommit,
+    changedPaths: ['scripts/worker-result.mjs'],
+    validation: [{ command: 'npm run check:api', result: 'passed', summary: 'Passed.' }],
+    resolutionSummary: 'Implemented the accepted task.',
+    residualRisks: [],
+    unexpectedDependencies: [],
+  };
+  const packetPath = join(stateDirectory(cwd, state.prNumber), 'accepted-task.json');
+  const resultPath = join(stateDirectory(cwd, state.prNumber), 'worker-result.json');
+  writeFileSync(packetPath, `${JSON.stringify(packet)}\n`);
+  writeFileSync(resultPath, `${JSON.stringify(result)}\n`);
+  const runValidation = () => spawnSync(process.execPath, [
+    STATE_CLI, 'validate-result', '--pr', '17', '--task-packet', packetPath, '--worker-result', resultPath,
+  ], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const unbound = runValidation();
+  assert.equal(unbound.status, 1);
+  assert.match(unbound.stderr, /TASK_PACKET_NOT_BOUND/u);
+  state = checkpointTaskPacketBinding({ cwd, packet, expectedRevision: state.revision });
+  const accepted = runValidation();
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.deepEqual(JSON.parse(accepted.stdout), { valid: true, taskId: 'task-a' });
+});
+
 test('targeted validation plan durably de-duplicates the integrated task union and is resumable', () => {
   const cwd = repo();
-  const state = integratedTasks(cwd, ['task-a', 'task-b']);
+  let state = integratedTasks(cwd, ['task-a', 'task-b']);
   const packets = [
     taskPacket(state.currentIntegrationHeadSha, 'task-a'),
     taskPacket(state.currentIntegrationHeadSha, 'task-b', { affectedAreas: ['shared'] }),
   ];
+  state = bindPackets(cwd, state, packets);
   const plan = buildTargetedValidationPlan({ cwd, taskPackets: packets, now: () => AT });
   assert.deepEqual(plan.commands.map((entry) => entry.command), [
     'npm run check:api', 'npm run check:shared', 'npm run check:web',
@@ -1228,6 +1387,13 @@ test('targeted validation CLI saves and executes the exact durable plan', () => 
   const packetPath = join(stateDirectory(cwd, state.prNumber), 'task-a.json');
   writeFileSync(packetPath, `${JSON.stringify(packet)}\n`);
 
+  const bound = spawnSync(process.execPath, [
+    STATE_CLI, 'bind-task-packet', '--pr', '17', '--expected-revision', String(state.revision),
+    '--task-packet', packetPath,
+  ], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  assert.equal(bound.status, 0, bound.stderr);
+  assert.equal(JSON.parse(bound.stdout).tasks[0].taskPacketDigest, taskPacketDigest(packet));
+
   const planned = spawnSync(process.execPath, [STATE_CLI, 'validation-plan', '--pr', '17', packetPath], {
     cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -1246,8 +1412,10 @@ test('targeted validation CLI saves and executes the exact durable plan', () => 
 
 test('targeted validation records concise failure and generic checkpoint cannot forge passing proof', () => {
   const cwd = repo();
-  const state = integratedTasks(cwd, ['task-a']);
-  buildTargetedValidationPlan({ cwd, taskPackets: [taskPacket(state.currentIntegrationHeadSha, 'task-a')], now: () => AT });
+  let state = integratedTasks(cwd, ['task-a']);
+  const packet = taskPacket(state.currentIntegrationHeadSha, 'task-a');
+  state = bindPackets(cwd, state, [packet]);
+  buildTargetedValidationPlan({ cwd, taskPackets: [packet], now: () => AT });
   const result = executeTargetedValidationPlan({ cwd, runCommand: () => ({ status: 7 }), now: () => AT });
   assert.equal(result.state.validationStatus.status, 'failed');
   assert.deepEqual(result.plan.commands.map((entry) => entry.summary), ['Failed with exit code 7.']);
@@ -1260,11 +1428,11 @@ test('targeted validation records concise failure and generic checkpoint cannot 
     { code: 'IMMUTABLE_STATE_PROVENANCE' },
   );
   assert.throws(
-    () => buildTargetedValidationPlan({ cwd, taskPackets: [taskPacket(state.currentIntegrationHeadSha, 'task-a')] }),
+    () => buildTargetedValidationPlan({ cwd, taskPackets: [packet] }),
     { code: 'VALIDATION_PLAN_REPLACE_REQUIRED' },
   );
   const replacement = buildTargetedValidationPlan({
-    cwd, replace: true, taskPackets: [taskPacket(state.currentIntegrationHeadSha, 'task-a')], now: () => AT,
+    cwd, replace: true, taskPackets: [packet], now: () => AT,
   });
   assert.ok(replacement.commands.every((entry) => entry.status === 'pending'));
   assert.equal(loadState(cwd).validationStatus.status, 'not-run');
@@ -1274,8 +1442,9 @@ test('targeted validation records concise failure and generic checkpoint cannot 
 
 test('replacing a same-head passed plan closes the review gate until the replacement runs', () => {
   const cwd = repo();
-  const state = integratedTasks(cwd, ['task-a']);
+  let state = integratedTasks(cwd, ['task-a']);
   const packet = taskPacket(state.currentIntegrationHeadSha, 'task-a');
+  state = bindPackets(cwd, state, [packet]);
   buildTargetedValidationPlan({ cwd, taskPackets: [packet], now: () => AT });
   const passed = executeTargetedValidationPlan({ cwd, runCommand: () => ({ status: 0 }), now: () => AT }).state;
   assert.equal(passed.validationStatus.status, 'passed');
@@ -1286,8 +1455,10 @@ test('replacing a same-head passed plan closes the review gate until the replace
 
 test('execution refuses changed task coverage before invoking a command', () => {
   const cwd = repo();
-  const state = integratedTasks(cwd, ['task-a']);
-  buildTargetedValidationPlan({ cwd, taskPackets: [taskPacket(state.currentIntegrationHeadSha, 'task-a')], now: () => AT });
+  let state = integratedTasks(cwd, ['task-a']);
+  const packet = taskPacket(state.currentIntegrationHeadSha, 'task-a');
+  state = bindPackets(cwd, state, [packet]);
+  buildTargetedValidationPlan({ cwd, taskPackets: [packet], now: () => AT });
   checkpointTaskCompletion({
     cwd, expectedRevision: state.revision,
     threadResolutionStatus: { status: 'not-run', headSha: null, threads: [], threadlessVerification: emptyThreadless(), updatedAt: null },
@@ -1301,13 +1472,14 @@ test('execution refuses changed task coverage before invoking a command', () => 
 
 test('targeted validation rejects incomplete coverage, dirty worktrees, and head drift', () => {
   const cwd = repo();
-  const state = integratedTasks(cwd, ['task-a', 'task-b']);
+  let state = integratedTasks(cwd, ['task-a', 'task-b']);
   const packetA = taskPacket(state.currentIntegrationHeadSha, 'task-a');
+  const packetB = taskPacket(state.currentIntegrationHeadSha, 'task-b');
+  state = bindPackets(cwd, state, [packetA, packetB]);
   assert.throws(
     () => buildTargetedValidationPlan({ cwd, taskPackets: [packetA] }),
     { code: 'VALIDATION_TASK_COVERAGE_MISMATCH' },
   );
-  const packetB = taskPacket(state.currentIntegrationHeadSha, 'task-b');
   buildTargetedValidationPlan({ cwd, taskPackets: [packetA, packetB], now: () => AT });
   commit(cwd, { 'head-drift.txt': 'drift\n' }, 'head drift');
   assert.throws(() => executeTargetedValidationPlan({ cwd, runCommand: () => ({ status: 0 }) }), {

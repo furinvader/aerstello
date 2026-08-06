@@ -14,7 +14,7 @@ import {
 } from 'node:fs';
 import { hostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { gitText, resolveCommit, runGit } from './git.mjs';
 import { inspectReleaseState } from './release-state.mjs';
@@ -24,6 +24,7 @@ import {
   reviewRequestGate,
   taskHasCanonicalThreadCoverage,
   unionRequiredValidation,
+  validateInitialValidationSelection,
   validateTaskPacket,
   validatePrReviewState,
   validatePrReviewStateV1,
@@ -180,6 +181,20 @@ const VALIDATION_PLAN_LIMIT_BYTES = 64 * 1024;
 const VALIDATION_AREAS = new Set(['api', 'web', 'shared', 'workflow', 'documentation', 'release', 'migration']);
 const VALIDATION_PLANNING_PHASES = new Set(['recovering', 'ready-for-review', 'integrating', 'verifying', 'validating']);
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalJson(value[key])]));
+  }
+  return value;
+}
+
+export function taskPacketDigest(packet) {
+  const errors = validateTaskPacket(packet);
+  if (errors.length > 0) throw new StateError(`Invalid task packet:\n- ${errors.join('\n- ')}`, 'INVALID_TASK_PACKET');
+  return createHash('sha256').update(JSON.stringify(canonicalJson(packet))).digest('hex');
+}
+
 function relatedE2EMetadata(argv) {
   if (argv.slice(0, 4).join(' ') !== 'npm run test:e2e:related --') return null;
   const selectors = [];
@@ -301,7 +316,31 @@ function actionableIntegratedTaskIds(state) {
     .map((task) => task.id).sort();
 }
 
-function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, replace, now }) {
+function assertBoundTaskPacket(state, packet) {
+  const task = state.tasks.find((candidate) => candidate.id === packet.taskId);
+  if (!task || task.disposition !== 'actionable') {
+    throw new StateError(`Task packet ${packet.taskId} does not match an actionable durable task`, 'TASK_PACKET_NOT_BOUND');
+  }
+  const expectedReviewedHead = state.reviewedHeadSha ?? state.currentIntegrationHeadSha;
+  if (packet.reviewedHeadSha !== expectedReviewedHead) {
+    throw new StateError(`Task packet ${packet.taskId} does not match the exact reviewed HEAD`, 'TASK_PACKET_HEAD_MISMATCH');
+  }
+  if (!task.taskPacketDigest) {
+    throw new StateError(`Task packet ${packet.taskId} has not been durably bound`, 'TASK_PACKET_NOT_BOUND');
+  }
+  if (task.taskPacketDigest !== taskPacketDigest(packet)) {
+    throw new StateError(`Task packet ${packet.taskId} differs from the accepted packet`, 'TASK_PACKET_CONFLICT');
+  }
+  return task;
+}
+
+export function assertTaskPacketBound(state, packet) {
+  const errors = validateTaskPacket(packet);
+  if (errors.length > 0) throw new StateError(`Invalid task packet:\n- ${errors.join('\n- ')}`, 'INVALID_TASK_PACKET');
+  return assertBoundTaskPacket(state, packet);
+}
+
+function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, initialSelection, replace, now }) {
   const state = loadState(cwd, prNumber);
   if (!state) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
   if (!VALIDATION_PLANNING_PHASES.has(state.phase)) {
@@ -311,18 +350,55 @@ function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, repla
     throw new StateError('Targeted validation proof must be reset before planning', 'TARGETED_VALIDATION_RESET_REQUIRED');
   }
   assertCleanExactIntegrationHead(state);
-  if (!Array.isArray(taskPackets) || taskPackets.length === 0) {
-    throw new StateError('At least one task packet is required', 'INVALID_VALIDATION_PLAN');
-  }
-  const packetErrors = taskPackets.flatMap((packet, index) => validateTaskPacket(packet).map((error) => `packet ${index}: ${error}`));
-  if (packetErrors.length > 0) throw new StateError(`Invalid task packets:\n- ${packetErrors.join('\n- ')}`, 'INVALID_VALIDATION_PLAN');
-  const sortedPackets = [...taskPackets].sort((left, right) => left.taskId.localeCompare(right.taskId));
-  const packetIds = sortedPackets.map((packet) => packet.taskId);
   const expectedIds = actionableIntegratedTaskIds(state);
-  if (new Set(packetIds).size !== packetIds.length || JSON.stringify(packetIds) !== JSON.stringify(expectedIds)) {
-    throw new StateError('Task packets must exactly cover current actionable integrated tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
+  const initialMode = initialSelection !== undefined && initialSelection !== null;
+  if (initialMode && Array.isArray(taskPackets) && taskPackets.length > 0) {
+    throw new StateError('Initial selection and task packets are mutually exclusive', 'INVALID_VALIDATION_PLAN');
   }
-  const validationUnion = unionRequiredValidation(sortedPackets);
+  let validationInputs;
+  let packetIds;
+  if (initialMode) {
+    const selectionErrors = validateInitialValidationSelection(initialSelection);
+    if (selectionErrors.length > 0) {
+      throw new StateError(`Invalid initial validation selection:\n- ${selectionErrors.join('\n- ')}`, 'INVALID_VALIDATION_PLAN');
+    }
+    if (state.reviewRound !== 0 || state.reviewRequest !== null || state.reviewHistory.length !== 0
+        || state.tasks.length !== 0 || expectedIds.length !== 0) {
+      throw new StateError('Initial validation selection requires a pristine taskless first-discovery cycle', 'INITIAL_VALIDATION_NOT_ALLOWED');
+    }
+    if (initialSelection.headSha !== state.currentIntegrationHeadSha) {
+      throw new StateError('Initial validation selection does not match the integration HEAD', 'VALIDATION_PLAN_STALE');
+    }
+    validationInputs = [{
+      schemaVersion: 2,
+      taskId: 'initial-validation-selection',
+      reviewedHeadSha: initialSelection.headSha,
+      finding: 'Initial pull-request validation selection.',
+      evidence: 'Explicit orchestrator-selected validation before the first discovery review.',
+      affectedAreas: initialSelection.affectedAreas,
+      decisionIds: [],
+      allowedPaths: ['scripts/**'],
+      forbiddenPaths: [],
+      dependencies: [],
+      acceptanceCriteria: ['The selected initial checks pass.'],
+      requiredValidation: initialSelection.requiredValidation,
+    }];
+    packetIds = [];
+  } else {
+    if (!Array.isArray(taskPackets) || taskPackets.length === 0) {
+      throw new StateError('At least one task packet is required', 'INVALID_VALIDATION_PLAN');
+    }
+    const packetErrors = taskPackets.flatMap((packet, index) => validateTaskPacket(packet).map((error) => `packet ${index}: ${error}`));
+    if (packetErrors.length > 0) throw new StateError(`Invalid task packets:\n- ${packetErrors.join('\n- ')}`, 'INVALID_VALIDATION_PLAN');
+    const sortedPackets = [...taskPackets].sort((left, right) => left.taskId.localeCompare(right.taskId));
+    packetIds = sortedPackets.map((packet) => packet.taskId);
+    if (new Set(packetIds).size !== packetIds.length || JSON.stringify(packetIds) !== JSON.stringify(expectedIds)) {
+      throw new StateError('Task packets must exactly cover current actionable integrated tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
+    }
+    sortedPackets.forEach((packet) => assertBoundTaskPacket(state, packet));
+    validationInputs = sortedPackets;
+  }
+  const validationUnion = unionRequiredValidation(validationInputs);
   const commands = [
     ...validationUnion.unit.map((entry) => ({ ...entry, kind: 'unit', selectors: [], projects: [] })),
     ...validationUnion.system.map((entry) => ({ ...entry, kind: 'system' })),
@@ -359,7 +435,7 @@ function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, repla
     stateRevision: state.revision,
     headSha: state.currentIntegrationHeadSha,
     taskIds: packetIds,
-    affectedAreas: [...new Set(sortedPackets.flatMap((packet) => packet.affectedAreas))].sort(),
+    affectedAreas: [...new Set(validationInputs.flatMap((input) => input.affectedAreas))].sort(),
     commands: commands.map((entry) => ({
       ...entry, argv: parseTargetedValidationCommand(entry.command), status: 'pending', exitCode: null, summary: null, completedAt: null,
     })),
@@ -376,7 +452,9 @@ function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, repla
   return plan;
 }
 
-export function buildTargetedValidationPlan({ cwd = process.cwd(), prNumber, taskPackets, replace = false, now = utcNow } = {}) {
+export function buildTargetedValidationPlan({
+  cwd = process.cwd(), prNumber, taskPackets, initialSelection, replace = false, now = utcNow,
+} = {}) {
   const selectedPr = prNumber ?? activePrNumber(cwd);
   if (selectedPr === null || selectedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
   const current = loadState(cwd, selectedPr);
@@ -390,7 +468,7 @@ export function buildTargetedValidationPlan({ cwd = process.cwd(), prNumber, tas
     checkpointTargetedValidationReset({ cwd, prNumber: selectedPr, expectedRevision: current.revision });
   }
   return withStateLock(cwd, selectedPr, () => buildTargetedValidationPlanUnlocked({
-    cwd, prNumber: selectedPr, taskPackets, replace, now,
+    cwd, prNumber: selectedPr, taskPackets, initialSelection, replace, now,
   }));
 }
 
@@ -1036,12 +1114,20 @@ function assertCheckpointProvenance(current, next, authorization) {
     if (!currentTaskIds.has(task.id) && task.status !== 'proposed') {
       throw new StateError(`New task ${task.id} must begin as proposed`, 'IMMUTABLE_STATE_PROVENANCE');
     }
+    if (!currentTaskIds.has(task.id) && task.taskPacketDigest) {
+      throw new StateError(`New task ${task.id} packet binding requires a guarded transition`, 'PROTECTED_TRANSITION_REQUIRED');
+    }
   }
   for (const task of current.tasks) {
     const updated = nextTasks.get(task.id);
     if (!updated) throw new StateError(`Task ${task.id} cannot be deleted`, 'IMMUTABLE_STATE_PROVENANCE');
     for (const field of ['id', 'sourceIds', 'sourceType', 'fingerprint', 'summary', 'severity', 'disposition']) {
       assertImmutableValue(task[field], updated[field], `task ${task.id} ${field}`);
+    }
+    if (task.taskPacketDigest) {
+      assertImmutableValue(task.taskPacketDigest, updated.taskPacketDigest, `task ${task.id} taskPacketDigest`);
+    } else if (updated.taskPacketDigest && guardedKind !== 'task-packet-binding') {
+      throw new StateError(`Task ${task.id} packet binding requires a guarded transition`, 'PROTECTED_TRANSITION_REQUIRED');
     }
     if (task.integratedCommitSha !== null) {
       assertImmutableValue(task.integratedCommitSha, updated.integratedCommitSha, `task ${task.id} integratedCommitSha`);
@@ -1387,6 +1473,41 @@ export function completeIntegratedTasks(state, { threadResolutionStatus }) {
   const errors = validatePrReviewState(next);
   if (errors.length > 0) throw new StateError(`Invalid integrated-to-completed transition:\n- ${errors.join('\n- ')}`, 'INVALID_TASK_COMPLETION');
   return next;
+}
+
+export function checkpointTaskPacketBinding({
+  cwd = process.cwd(), prNumber, packet, expectedRevision, event,
+} = {}) {
+  const errors = validateTaskPacket(packet);
+  if (errors.length > 0) throw new StateError(`Invalid task packet:\n- ${errors.join('\n- ')}`, 'INVALID_TASK_PACKET');
+  const current = loadState(cwd, prNumber);
+  if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  const task = current.tasks.find((candidate) => candidate.id === packet.taskId);
+  if (!task || task.disposition !== 'actionable') {
+    throw new StateError('Task packet must match an actionable durable task', 'TASK_PACKET_NOT_BOUND');
+  }
+  const expectedReviewedHead = current.reviewedHeadSha ?? current.currentIntegrationHeadSha;
+  if (packet.reviewedHeadSha !== expectedReviewedHead) {
+    throw new StateError('Task packet does not match the exact reviewed HEAD', 'TASK_PACKET_HEAD_MISMATCH');
+  }
+  const digest = taskPacketDigest(packet);
+  if (task.taskPacketDigest) {
+    if (task.taskPacketDigest !== digest) {
+      throw new StateError('Task packet differs from the accepted packet', 'TASK_PACKET_CONFLICT');
+    }
+    return current;
+  }
+  const nextState = {
+    ...current,
+    tasks: current.tasks.map((candidate) => candidate.id === packet.taskId
+      ? { ...candidate, taskPacketDigest: digest }
+      : candidate),
+  };
+  return checkpointState({
+    cwd, prNumber: current.prNumber, nextState, expectedRevision,
+    event: event ?? { type: 'task-packet-bound', summary: `Bound accepted packet for task ${packet.taskId}` },
+    transitionAuthorization: protectedTransition(nextState, 'task-packet-binding'),
+  });
 }
 
 export function checkpointReviewRequest({

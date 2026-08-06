@@ -348,6 +348,34 @@ export function validateTaskPacket(value) {
   return errors;
 }
 
+export function validateInitialValidationSelection(value) {
+  const errors = [];
+  const fields = ['schemaVersion', 'headSha', 'affectedAreas', 'requiredValidation'];
+  if (!requireFields(value, fields, '$', errors)) return errors;
+  rejectUnknownFields(value, fields, '$', errors);
+  if (value.schemaVersion !== 1) errors.push('$.schemaVersion must equal 1');
+  if (!isSha(value.headSha)) errors.push('$.headSha must be a full Git SHA');
+  if ((value.requiredValidation?.unit?.length ?? 0) + (value.requiredValidation?.system?.length ?? 0) === 0) {
+    errors.push('$.requiredValidation must select at least one targeted command');
+  }
+  const packetErrors = validateTaskPacket({
+    schemaVersion: 2,
+    taskId: 'initial-validation-selection',
+    reviewedHeadSha: value.headSha,
+    finding: 'Initial pull-request validation selection.',
+    evidence: 'Explicit orchestrator-selected validation before the first discovery review.',
+    affectedAreas: value.affectedAreas,
+    decisionIds: [],
+    allowedPaths: ['scripts/**'],
+    forbiddenPaths: [],
+    dependencies: [],
+    acceptanceCriteria: ['The selected initial checks pass.'],
+    requiredValidation: value.requiredValidation,
+  });
+  errors.push(...packetErrors.map((error) => `$.selection ${error}`));
+  return errors;
+}
+
 function validateRequiredValidation(value, path, errors) {
   const fields = ['unit', 'system'];
   if (!requireFields(value, fields, path, errors)) return;
@@ -753,9 +781,9 @@ function validateTaskV2(task, index, errors) {
   const path = `$.tasks[${index}]`;
   const fields = [
     'id', 'sourceIds', 'sourceType', 'fingerprint', 'summary', 'severity', 'disposition', 'status',
-    'integratedCommitSha', 'resolutionSummary', 'execution',
+    'integratedCommitSha', 'resolutionSummary', 'taskPacketDigest', 'execution',
   ];
-  if (!requireFields(task, fields.filter((field) => field !== 'execution'), path, errors)) return;
+  if (!requireFields(task, fields.filter((field) => !['execution', 'taskPacketDigest'].includes(field)), path, errors)) return;
   rejectUnknownFields(task, fields, path, errors);
   if (!isString(task.id, { min: 1, max: 128 })) errors.push(`${path}.id is invalid`);
   validateStringList(task.sourceIds, `${path}.sourceIds`, errors);
@@ -768,6 +796,10 @@ function validateTaskV2(task, index, errors) {
   if (!isSha(task.integratedCommitSha, true)) errors.push(`${path}.integratedCommitSha is invalid`);
   if (!(task.resolutionSummary === null || isString(task.resolutionSummary, { min: 1, max: 1000 }))) {
     errors.push(`${path}.resolutionSummary is invalid`);
+  }
+  if (!(task.taskPacketDigest === undefined || task.taskPacketDigest === null
+      || /^[0-9a-f]{64}$/u.test(task.taskPacketDigest))) {
+    errors.push(`${path}.taskPacketDigest is invalid`);
   }
   if (EXECUTION_STATUSES.has(task.status)) {
     if (task.execution === undefined) errors.push(`${path}.execution is required for ${task.status}`);
