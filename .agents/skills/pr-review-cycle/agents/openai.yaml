@@ -1,0 +1,7 @@
+interface:
+  display_name: "PR Review Cycle"
+  short_description: "Resolve and resume Sky Bar PR review cycles"
+  default_prompt: "Use $pr-review-cycle to resolve the current PR review cycle."
+
+policy:
+  allow_implicit_invocation: true

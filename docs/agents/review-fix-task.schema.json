@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sky-bar.local/schemas/review-fix-task.schema.json",
+  "title": "Sky Bar review-fix task packet",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "taskId",
+    "reviewedHeadSha",
+    "finding",
+    "evidence",
+    "decisionIds",
+    "allowedPaths",
+    "forbiddenPaths",
+    "dependencies",
+    "acceptanceCriteria",
+    "requiredValidation"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "taskId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "reviewedHeadSha": { "$ref": "#/$defs/sha" },
+    "finding": { "type": "string", "minLength": 1, "maxLength": 2000 },
+    "evidence": { "type": "string", "minLength": 1, "maxLength": 3000 },
+    "decisionIds": { "$ref": "#/$defs/stringList" },
+    "allowedPaths": {
+      "allOf": [{ "$ref": "#/$defs/stringList" }],
+      "minItems": 1
+    },
+    "forbiddenPaths": { "$ref": "#/$defs/stringList" },
+    "dependencies": { "$ref": "#/$defs/stringList" },
+    "acceptanceCriteria": { "$ref": "#/$defs/stringList" },
+    "requiredValidation": { "$ref": "#/$defs/stringList" }
+  },
+  "$defs": {
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+    "stringList": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 1000 },
+      "uniqueItems": true
+    }
+  }
+}

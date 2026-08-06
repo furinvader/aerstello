@@ -1,0 +1,41 @@
+{
+  "name": "sky-bar",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c blue,cyan \"npm run dev -w @sky-bar/api\" \"npm run dev -w @sky-bar/web\"",
+    "start:e2e:ci": "npm run build && concurrently -k -s first -n api,web -c blue,cyan \"npm run start -w @sky-bar/api\" \"npm run preview:e2e -w @sky-bar/web\"",
+    "build": "npm run build -w @sky-bar/shared && npm run build -w @sky-bar/api && npm run build -w @sky-bar/web",
+    "typecheck": "npm run build -w @sky-bar/shared && npm run typecheck -w @sky-bar/api && npm run typecheck -w @sky-bar/web",
+    "test": "npm run test:tooling && npm run test --workspaces --if-present",
+    "test:tooling": "node --test tests/tooling/*.test.mjs",
+    "test:coverage": "npm run test:coverage --workspaces --if-present",
+    "test:e2e": "bddgen && playwright test",
+    "test:e2e:ui": "bddgen && playwright test --ui",
+    "lint:commit": "commitlint",
+    "assets:generate": "node scripts/generate-icons.mjs",
+    "release:state": "node scripts/release-state.mjs --json",
+    "check:release-state": "node scripts/release-state.mjs --check",
+    "check:released-migrations": "node scripts/check-released-migrations.mjs",
+    "check": "npm run typecheck && npm run test && npm run build",
+    "db:migrate": "npm run db:migrate -w @sky-bar/api",
+    "admin:create": "npm run admin:create -w @sky-bar/api --"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.10.2",
+    "@commitlint/cli": "21.2.1",
+    "@commitlint/config-conventional": "21.2.0",
+    "@playwright/test": "1.59.1",
+    "concurrently": "^9.2.0",
+    "playwright-bdd": "9.2.0",
+    "sharp": "0.35.3",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}

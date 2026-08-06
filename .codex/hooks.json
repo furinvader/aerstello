@@ -1,0 +1,45 @@
+{
+  "description": "Durable Sky Bar PR-review recovery and worker-result validation.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "^(startup|resume|compact)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/.codex/hooks/session-start.mjs\"",
+            "timeout": 10,
+            "statusMessage": "Recovering PR review state",
+            "additionalContextLimit": 2500
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "^(manual|auto)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/.codex/hooks/pre-compact.mjs\"",
+            "timeout": 10,
+            "statusMessage": "Checkpointing PR review state"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "^review_fix_worker$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/.codex/hooks/subagent-stop.mjs\"",
+            "timeout": 10,
+            "statusMessage": "Validating review worker result"
+          }
+        ]
+      }
+    ]
+  }
+}

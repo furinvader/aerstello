@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sky-bar.local/schemas/release-marker.schema.json",
+  "title": "Sky Bar production release marker",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "product",
+    "version",
+    "tag",
+    "channel",
+    "releasedAt"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "product": { "const": "sky-bar" },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "tag": {
+      "type": "string",
+      "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "channel": { "const": "production" },
+    "releasedAt": { "type": "string", "format": "date-time" }
+  }
+}

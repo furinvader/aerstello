@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sky-bar.local/schemas/review-fix-result.schema.json",
+  "title": "Sky Bar review-fix worker result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "taskId",
+    "status",
+    "commitSha",
+    "changedPaths",
+    "validation",
+    "resolutionSummary",
+    "residualRisks",
+    "unexpectedDependencies"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "taskId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "status": {
+      "enum": ["implemented", "blocked", "not-applicable", "failed"]
+    },
+    "commitSha": {
+      "oneOf": [
+        { "$ref": "#/$defs/sha" },
+        { "type": "null" }
+      ]
+    },
+    "changedPaths": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 500 },
+      "uniqueItems": true
+    },
+    "validation": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/validation" }
+    },
+    "resolutionSummary": { "type": "string", "minLength": 1, "maxLength": 2000 },
+    "residualRisks": { "$ref": "#/$defs/stringList" },
+    "unexpectedDependencies": { "$ref": "#/$defs/stringList" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "implemented" } } },
+      "then": { "properties": { "commitSha": { "$ref": "#/$defs/sha" } } }
+    }
+  ],
+  "$defs": {
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+    "stringList": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "result", "summary"],
+      "properties": {
+        "command": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "result": { "enum": ["passed", "failed", "skipped"] },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 1000 }
+      }
+    }
+  }
+}

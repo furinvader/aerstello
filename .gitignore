@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.local
+playwright-report/
+test-results/
+.features-gen/
+apps/web/public/sw.js
+apps/web/public/workbox-*.js
+apps/web/dev-dist/
+*.tsbuildinfo
+.DS_Store
+postgres-data/
