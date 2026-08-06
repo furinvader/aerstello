@@ -1531,25 +1531,84 @@ test('exact bound packet survives null-review central integration HEAD advance o
       }],
     },
   });
+  assert.equal(assertTaskPacketBound(integrated, packet).id, packet.taskId);
+  const descendantHead = commit(cwd, { 'scripts/later-integration.mjs': 'export const later = true;\n' }, 'later integration');
+  const descendant = checkpointGitMetadata({ cwd }).state;
+  assert.equal(descendant.currentIntegrationHeadSha, descendantHead);
+  assert.equal(assertTaskPacketBound(descendant, packet).id, packet.taskId);
   assert.equal(checkpointTaskPacketBinding({
-    cwd, packet, expectedRevision: integrated.revision,
-  }).revision, integrated.revision);
+    cwd, packet, expectedRevision: descendant.revision,
+  }).revision, descendant.revision);
   const plan = buildTargetedValidationPlan({ cwd, taskPackets: [packet], now: () => AT });
   assert.deepEqual(plan.taskIds, [packet.taskId]);
-  assert.equal(plan.headSha, integratedHead);
-  assert.equal(plan.stateRevision, integrated.revision);
+  assert.equal(plan.headSha, descendantHead);
+  assert.equal(plan.stateRevision, descendant.revision);
 
   const substituted = { ...packet, evidence: 'Substituted packet evidence.' };
-  assert.throws(() => assertTaskPacketBound(integrated, substituted), {
+  assert.throws(() => assertTaskPacketBound(descendant, substituted), {
     code: 'TASK_PACKET_CONFLICT',
   });
-  const canonicalReviewedState = { ...integrated, reviewedHeadSha: integratedHead };
+  const canonicalReviewedState = { ...descendant, reviewedHeadSha: descendantHead };
   assert.throws(() => assertTaskPacketBound(canonicalReviewedState, packet), {
     code: 'TASK_PACKET_HEAD_MISMATCH',
   });
   assert.throws(() => assertTaskPacketBound(canonicalReviewedState, {
-    ...packet, reviewedHeadSha: integratedHead,
+    ...packet, reviewedHeadSha: descendantHead,
   }), { code: 'TASK_PACKET_CONFLICT' });
+});
+
+test('bound packet rejects unrelated or missing central integration ancestry without validation proof', () => {
+  const cwd = repo();
+  const initial = init(cwd);
+  const proposedTask = task(initial.currentIntegrationHeadSha, {
+    id: 'ancestry-guard', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [proposedTask] },
+  });
+  const packet = taskPacket(proposed.currentIntegrationHeadSha, proposedTask.id, {
+    affectedAreas: ['workflow'], command: 'npm run check:workflow',
+  });
+  const bound = checkpointTaskPacketBinding({ cwd, packet, expectedRevision: proposed.revision });
+  const integratedHead = commit(cwd, { 'scripts/ancestry-task.mjs': 'export const integrated = true;\n' }, 'integrate ancestry task');
+  const advanced = checkpointGitMetadata({ cwd }).state;
+  const { execution: _execution, ...boundTask } = advanced.tasks[0];
+  const integrated = checkpointState({
+    cwd,
+    expectedRevision: advanced.revision,
+    nextState: {
+      ...advanced,
+      tasks: [{
+        ...boundTask,
+        status: 'integrated',
+        integratedCommitSha: integratedHead,
+        resolutionSummary: 'Integrated centrally; targeted validation remains.',
+      }],
+    },
+  });
+  assert.equal(integrated.tasks[0].taskPacketDigest, bound.tasks[0].taskPacketDigest);
+
+  const tree = git(cwd, ['rev-parse', `${integratedHead}^{tree}`]);
+  const unrelatedHead = git(cwd, ['commit-tree', tree, '-m', 'unrelated integration history']);
+  git(cwd, ['switch', '--detach', unrelatedHead]);
+  const unrelated = checkpointGitMetadata({ cwd }).state;
+  assert.equal(unrelated.currentIntegrationHeadSha, unrelatedHead);
+  assert.throws(() => assertTaskPacketBound(unrelated, packet), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+  assert.throws(() => buildTargetedValidationPlan({ cwd, taskPackets: [packet], now: () => AT }), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+  assert.equal(existsSync(validationPlanPath(cwd, unrelated.prNumber)), false);
+  assert.equal(loadState(cwd).validationStatus.status, 'not-run');
+
+  const missingCommitState = {
+    ...unrelated,
+    tasks: unrelated.tasks.map((item) => ({ ...item, integratedCommitSha: 'f'.repeat(40) })),
+  };
+  assert.throws(() => assertTaskPacketBound(missingCommitState, packet), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
 });
 
 test('worker-result acceptance requires the exact durably bound task packet', () => {

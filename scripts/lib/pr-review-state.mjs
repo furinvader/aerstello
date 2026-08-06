@@ -344,11 +344,34 @@ function assertTaskPacketHead(state, task, packet, digest) {
   }
   if (packet.reviewedHeadSha === state.currentIntegrationHeadSha) return;
   const boundIntegratedTask = task.status === 'integrated'
-    && typeof task.integratedCommitSha === 'string' && task.integratedCommitSha.length > 0
     && typeof task.taskPacketDigest === 'string';
   if (boundIntegratedTask) {
     if (task.taskPacketDigest !== digest) {
       throw new StateError(`Task packet ${packet.taskId} differs from the accepted packet`, 'TASK_PACKET_CONFLICT');
+    }
+    if (typeof task.integratedCommitSha !== 'string' || task.integratedCommitSha.length === 0) {
+      throw new StateError(
+        `Task ${task.id} integration commit is not proven in the current integration history`,
+        'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+      );
+    }
+    let ancestry;
+    try {
+      ancestry = runGit(
+        ['merge-base', '--is-ancestor', task.integratedCommitSha, state.currentIntegrationHeadSha],
+        { cwd: state.integrationWorktree, allowFailure: true },
+      );
+    } catch {
+      throw new StateError(
+        `Task ${task.id} integration ancestry could not be verified`,
+        'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+      );
+    }
+    if (ancestry.status !== 0) {
+      throw new StateError(
+        `Task ${task.id} integration commit is not an ancestor of the current integration HEAD`,
+        'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+      );
     }
     return;
   }
