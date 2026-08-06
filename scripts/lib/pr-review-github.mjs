@@ -230,14 +230,16 @@ function ciEvidenceFromRollup(snapshot) {
   if (completed.length === 0) {
     throw new GitHubWorkflowError('Full validation is still pending', 'CI_VALIDATION_PENDING');
   }
+  if (authoritative.some((check) => check.status !== 'COMPLETED')) {
+    throw new GitHubWorkflowError('Full validation is still pending', 'CI_VALIDATION_PENDING');
+  }
   completed.sort((left, right) => Date.parse(right.completedAt) - Date.parse(left.completedAt)
     || (right.checkSuite?.workflowRun?.databaseId ?? -1) - (left.checkSuite?.workflowRun?.databaseId ?? -1));
   const latestTime = Date.parse(completed[0].completedAt);
   const latestRunId = completed[0].checkSuite?.workflowRun?.databaseId;
   const latest = completed.filter((check) => Date.parse(check.completedAt) === latestTime
     && check.checkSuite?.workflowRun?.databaseId === latestRunId);
-  if (latest.length !== 1 || (authoritative.some((check) => check.status !== 'COMPLETED')
-      && snapshot.rollupState === 'SUCCESS')) {
+  if (latest.length !== 1) {
     throw new GitHubWorkflowError('Latest Full validation evidence is ambiguous', 'CI_EVIDENCE_AMBIGUOUS');
   }
   const selected = latest[0];
@@ -245,19 +247,26 @@ function ciEvidenceFromRollup(snapshot) {
   if (!Number.isInteger(workflowRun?.databaseId) || workflowRun.databaseId < 1 || !httpsUrl(workflowRun.url)) {
     throw new GitHubWorkflowError('Full validation lacks an authoritative workflow run URL', 'CI_EVIDENCE_INCOMPLETE');
   }
-  if (snapshot.rollupState === 'SUCCESS' && selected.conclusion !== 'SUCCESS') {
-    throw new GitHubWorkflowError('Full validation conflicts with the successful commit rollup', 'CI_EVIDENCE_AMBIGUOUS');
-  }
-  const passed = snapshot.rollupState === 'SUCCESS' && selected.conclusion === 'SUCCESS';
-  if (!passed && snapshot.rollupState !== 'FAILURE' && snapshot.rollupState !== 'ERROR') {
-    throw new GitHubWorkflowError('The current commit check rollup is not complete', 'CI_VALIDATION_PENDING');
-  }
+  const passed = selected.conclusion === 'SUCCESS';
   return {
     source: 'github-actions', scope: 'full', status: passed ? 'passed' : 'failed',
     headSha: snapshot.headSha, checks: namedChecks,
     workflowRunId: workflowRun.databaseId, workflowRunUrl: workflowRun.url,
     updatedAt: selected.completedAt,
   };
+}
+
+function codexReviewStatus(state, liveHeadSha) {
+  const request = state.reviewRequest;
+  if (!request) return 'not-requested';
+  const requestIsCurrent = request.headSha === state.currentIntegrationHeadSha
+    && request.headSha === liveHeadSha;
+  if (!requestIsCurrent) return 'stale';
+  const outcome = state.reviewOutcome;
+  if (!outcome) return 'awaiting';
+  const outcomeIsCurrent = outcome.headSha === state.currentIntegrationHeadSha
+    && outcome.headSha === liveHeadSha;
+  return outcomeIsCurrent ? outcome.outcome : 'stale';
 }
 
 function sameCiEvidence(left, right) {
@@ -672,7 +681,7 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       })),
       reviewCount: live.reviews.length,
       requestReactionCount: live.reactions.length,
-      codexReview: active.reviewOutcome?.outcome ?? (active.reviewRequest ? 'awaiting' : 'not-requested'),
+      codexReview: codexReviewStatus(active, live.metadata.headRefOid),
       taskStatus: {
         resolved: active.tasks.filter((task) => task.status === 'completed').length,
         pending: active.tasks.filter((task) => task.status !== 'completed').length,

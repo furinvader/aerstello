@@ -95,6 +95,13 @@ function completedState(overrides = {}) {
   });
 }
 
+function findingsState(overrides = {}) {
+  const state = completedState({ phase: 'triaging', nextAction: 'Triage findings.', ...overrides });
+  state.reviewOutcome = { ...state.reviewOutcome, outcome: 'findings' };
+  state.reviewHistory = [{ request: state.reviewRequest, outcome: state.reviewOutcome }];
+  return state;
+}
+
 function rootComment(threadId = 'THREAD_1', overrides = {}) {
   return {
     id: `ROOT_${threadId}`, databaseId: threadId === 'THREAD_1' ? 41 : 42,
@@ -364,6 +371,38 @@ test('status uses split fully paginated reads and filters canonical roots', asyn
   assert.equal(result.liveCiValidation.status, 'passed');
 });
 
+test('status marks preserved review evidence stale after both recorded and live HEAD advance', async () => {
+  const drift = {
+    phase: 'recovering', currentIntegrationHeadSha: OTHER_HEAD,
+    git: { branch: 'main', headSha: OTHER_HEAD, dirty: false },
+    validationStatus: {
+      source: 'orchestrator', scope: 'targeted', status: 'not-run', headSha: null,
+      checks: [], updatedAt: null,
+    },
+    threadResolutionStatus: proof('not-run'),
+    nextAction: 'Reconcile the changed integration checkout.',
+  };
+  for (const state of [completedState(drift), findingsState(drift), pendingState('discovery', drift)]) {
+    const client = new FakeClient();
+    client.metadata.headRefOid = OTHER_HEAD;
+    const result = await workflow(state, client).api.status(2);
+    assert.equal(result.codexReview, 'stale');
+    assert.match(renderHumanStatus(result), /Codex review: Stale review evidence \(commit mismatch\)/u);
+  }
+});
+
+test('status preserves exact-head review states', async () => {
+  for (const [state, expected] of [
+    [stateFixture(), 'not-requested'],
+    [pendingState('discovery'), 'awaiting'],
+    [completedState(), 'clean'],
+    [findingsState(), 'findings'],
+  ]) {
+    const result = await workflow(state).api.status(2);
+    assert.equal(result.codexReview, expected);
+  }
+});
+
 test('Actor author queries select node IDs only through Bot and User fragments', async () => {
   const client = new FakeClient();
   addThread(client);
@@ -423,6 +462,41 @@ test('collect-ci records a completed failed full run but rejects pending, stale,
         file: { path: '.github/workflows/ci.yml' }, workflow: { name: 'CI' } } } }),
   ] });
   await assert.rejects(() => workflow(stateFixture(), ambiguous).api.collectCi(2), { code: 'CI_EVIDENCE_AMBIGUOUS' });
+});
+
+test('collect-ci classifies the selected Full validation run independently of the aggregate rollup', async () => {
+  for (const [rollupState, conclusion, expected] of [
+    ['FAILURE', 'SUCCESS', 'passed'],
+    ['PENDING', 'SUCCESS', 'passed'],
+    ['SUCCESS', 'FAILURE', 'failed'],
+  ]) {
+    const client = new FakeClient({
+      rollupState,
+      ciContexts: [
+        fullValidationCheck({ conclusion }),
+        { __typename: 'StatusContext', id: `STATUS_${rollupState}`, context: 'unrelated',
+          state: rollupState, targetUrl: 'https://github.com/example/sky-bar' },
+      ],
+    });
+    const result = await workflow(stateFixture(), client).api.collectCi(2);
+    assert.equal(result.evidence.status, expected);
+  }
+});
+
+test('collect-ci waits when another authoritative Full validation run is incomplete', async () => {
+  const client = new FakeClient({ rollupState: 'FAILURE', ciContexts: [
+    fullValidationCheck(),
+    fullValidationCheck({
+      id: 'CHECK_pending', status: 'IN_PROGRESS', conclusion: null, completedAt: null,
+      checkSuite: { app: { slug: 'github-actions' }, workflowRun: {
+        databaseId: 702, url: 'https://github.com/example/sky-bar/actions/runs/702',
+        file: { path: '.github/workflows/ci.yml' }, workflow: { name: 'CI' },
+      } },
+    }),
+  ] });
+  await assert.rejects(() => workflow(stateFixture(), client).api.collectCi(2), {
+    code: 'CI_VALIDATION_PENDING',
+  });
 });
 
 test('collect-ci rejects same-named jobs from another workflow and incomplete workflow identity', async () => {

@@ -32,7 +32,8 @@ export function renderHumanStatus(status) {
   const review = !headMatches && status.codexReview === 'clean' ? 'Stale clean evidence (commit mismatch)'
     : status.codexReview === 'clean' ? 'Clean'
     : status.codexReview === 'findings' ? 'Findings need resolution'
-      : status.codexReview === 'awaiting' ? 'Awaiting Codex' : 'Not requested';
+      : status.codexReview === 'awaiting' ? 'Awaiting Codex'
+        : status.codexReview === 'stale' ? 'Stale review evidence (commit mismatch)' : 'Not requested';
   const tasks = status.statePhase === 'complete' && headMatches ? 'Done'
     : `${status.taskStatus.resolved} Resolved, ${status.taskStatus.pending} pending`;
   const taskRows = status.taskStatus.items.map((task) => {
