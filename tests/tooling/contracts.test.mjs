@@ -16,6 +16,11 @@ import {
   validateWorkerResult,
   unionRequiredValidation,
 } from '../../scripts/lib/contracts.mjs';
+import {
+  checkpointState,
+  checkpointTaskPacketBinding,
+  initializeState,
+} from '../../scripts/lib/pr-review-state.mjs';
 
 const root = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..');
 const AT = '2026-08-05T00:00:00Z';
@@ -609,10 +614,6 @@ test('validate-result CLI enforces the exact task validation commands', () => {
     assert.equal(spawnSync('git', ['add', 'scripts/a.mjs'], { cwd: directory }).status, 0);
     assert.equal(spawnSync('git', ['commit', '-q', '-m', 'base'], { cwd: directory }).status, 0);
     const reviewedHeadSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: directory, encoding: 'utf8' }).stdout.trim();
-    writeFileSync(join(directory, 'scripts/a.mjs'), 'export const value = 2;\n');
-    assert.equal(spawnSync('git', ['add', 'scripts/a.mjs'], { cwd: directory }).status, 0);
-    assert.equal(spawnSync('git', ['commit', '-q', '-m', 'worker'], { cwd: directory }).status, 0);
-    const commitSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: directory, encoding: 'utf8' }).stdout.trim();
     const packet = {
       schemaVersion: 2, taskId: 'task-1', reviewedHeadSha, finding: 'Finding.', evidence: 'Evidence.',
       affectedAreas: ['workflow'], decisionIds: [], allowedPaths: ['scripts/**'], forbiddenPaths: [], dependencies: [],
@@ -620,6 +621,30 @@ test('validate-result CLI enforces the exact task validation commands', () => {
         unit: [{ command: 'npm run check:workflow', reason: 'Covers workflow tooling.' }], system: [],
       },
     };
+    let state = initializeState({
+      cwd: directory, prNumber: 17, repository: 'example/sky-bar', base: 'HEAD', head: 'HEAD', releaseRef: 'HEAD',
+    });
+    state = checkpointState({
+      cwd: directory,
+      expectedRevision: state.revision,
+      nextState: {
+        ...state,
+        tasks: [{
+          id: 'task-1', sourceIds: ['local:fixture'], sourceType: 'local', fingerprint: 'fixture-fingerprint',
+          summary: 'Exercise exact validation commands.', severity: 'P2', disposition: 'actionable', status: 'proposed',
+          integratedCommitSha: null, resolutionSummary: null,
+          execution: {
+            dependencies: [], ownedPaths: ['scripts/a.mjs'], worker: 'review_fix_worker', branch: null,
+            worktree: null, workerCommitSha: null, validationSummaries: [], lastError: null,
+          },
+        }],
+      },
+    });
+    checkpointTaskPacketBinding({ cwd: directory, packet, expectedRevision: state.revision });
+    writeFileSync(join(directory, 'scripts/a.mjs'), 'export const value = 2;\n');
+    assert.equal(spawnSync('git', ['add', 'scripts/a.mjs'], { cwd: directory }).status, 0);
+    assert.equal(spawnSync('git', ['commit', '-q', '-m', 'worker'], { cwd: directory }).status, 0);
+    const commitSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: directory, encoding: 'utf8' }).stdout.trim();
     const result = {
       schemaVersion: 2, taskId: 'task-1', status: 'implemented', commitSha, changedPaths: ['scripts/a.mjs'],
       validation: [{ command: 'npm run check:full', result: 'passed', summary: 'Broad command.' }],
