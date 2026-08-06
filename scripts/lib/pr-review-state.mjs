@@ -1620,8 +1620,9 @@ export function renderRecoverySummary({ cwd = process.cwd(), prNumber, maxCharac
 }
 
 export function archiveState({ cwd = process.cwd(), prNumber, abandonmentReason, onArchiveStep } = {}) {
-  const selectedPr = prNumber ?? activePrNumber(cwd);
-  if (selectedPr === null || selectedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  const requestedPr = prNumber ?? activePrNumber(cwd);
+  if (requestedPr === null || requestedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  const selectedPr = parsePrNumber(requestedPr);
   return withStateLock(cwd, selectedPr, () => {
     const current = loadState(cwd, selectedPr);
     const reason = typeof abandonmentReason === 'string' ? abandonmentReason.trim() : '';

@@ -1328,6 +1328,16 @@ test('archive interruption after pointer clear is recoverable with explicit PR r
   assert.ok(existsSync(join(archived, 'state.json')));
 });
 
+test('archive normalizes an explicit string PR number before clearing the active pointer', () => {
+  const cwd = repo();
+  init(cwd);
+
+  archiveState({ cwd, prNumber: '17', abandonmentReason: 'Superseded by a new pull request.' });
+
+  assert.equal(existsSync(activePointerPath(cwd)), false);
+  assert.equal(existsSync(stateDirectory(cwd, 17)), false);
+});
+
 test('concurrent lock attempts time out', async () => {
   const cwd = repo();
   init(cwd);
