@@ -107,8 +107,16 @@ node scripts/pr-review-state.mjs run-validation
 
 The selection document has schema version 1 plus `headSha`, `affectedAreas`,
 and `requiredValidation`. It must select at least one exact targeted command and
-match the clean integration HEAD. Initial-selection mode is unavailable after
-any durable task or review evidence exists.
+match the clean integration HEAD. Initial-selection mode is otherwise
+unavailable after durable task or review evidence exists, with one narrow
+recovery: a taskless schema-v2 migration may preserve a pending exact-head
+review while discarding legacy targeted-validation proof. After that review is
+collected as clean, the same explicit selection may rebuild validation only
+when the current request, outcome, and latest history entry are identical and
+all review SHAs match the clean integration HEAD. Findings, pending or stale
+reviews, tasks, and inconsistent history remain ineligible, and the applicable
+clean review is not repeated. An ordinary taskless clean review with existing
+passing validation cannot use this mode to replace that proof.
 
 The packet list must exactly cover the current actionable Integrated tasks. The
 saved plan is tied to the clean integration commit, records each command as it

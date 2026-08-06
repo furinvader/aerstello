@@ -316,6 +316,25 @@ function actionableIntegratedTaskIds(state) {
     .map((task) => task.id).sort();
 }
 
+function isPristineTasklessValidationSelection(state, expectedIds) {
+  return state.reviewRound === 0 && state.reviewRequest === null && state.reviewHistory.length === 0
+    && state.tasks.length === 0 && expectedIds.length === 0;
+}
+
+function isCleanTasklessReviewValidationRecovery(state, expectedIds) {
+  const request = state.reviewRequest;
+  const outcome = state.reviewOutcome;
+  const latest = state.reviewHistory.at(-1);
+  const headSha = state.currentIntegrationHeadSha;
+  return state.phase === 'validating'
+    && state.tasks.length === 0 && expectedIds.length === 0
+    && request !== null && outcome?.outcome === 'clean' && latest !== undefined
+    && sameEvidence(latest.request, request) && sameEvidence(latest.outcome, outcome)
+    && outcome.requestId === request.id && outcome.kind === request.kind
+    && state.requestedHeadSha === headSha && state.reviewedHeadSha === headSha
+    && request.headSha === headSha && outcome.headSha === headSha;
+}
+
 function assertBoundTaskPacket(state, packet) {
   const task = state.tasks.find((candidate) => candidate.id === packet.taskId);
   if (!task || task.disposition !== 'actionable') {
@@ -362,25 +381,35 @@ function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, initi
     if (selectionErrors.length > 0) {
       throw new StateError(`Invalid initial validation selection:\n- ${selectionErrors.join('\n- ')}`, 'INVALID_VALIDATION_PLAN');
     }
-    if (state.reviewRound !== 0 || state.reviewRequest !== null || state.reviewHistory.length !== 0
-        || state.tasks.length !== 0 || expectedIds.length !== 0) {
-      throw new StateError('Initial validation selection requires a pristine taskless first-discovery cycle', 'INITIAL_VALIDATION_NOT_ALLOWED');
+    const pristineSelection = isPristineTasklessValidationSelection(state, expectedIds);
+    const cleanReviewRecovery = isCleanTasklessReviewValidationRecovery(state, expectedIds);
+    if (!pristineSelection && !cleanReviewRecovery) {
+      throw new StateError(
+        'Taskless validation selection requires either a pristine first-discovery cycle or a clean exact-head review recovery',
+        'INITIAL_VALIDATION_NOT_ALLOWED',
+      );
     }
     if (initialSelection.headSha !== state.currentIntegrationHeadSha) {
       throw new StateError('Initial validation selection does not match the integration HEAD', 'VALIDATION_PLAN_STALE');
     }
     validationInputs = [{
       schemaVersion: 2,
-      taskId: 'initial-validation-selection',
+      taskId: cleanReviewRecovery ? 'taskless-clean-review-validation-recovery' : 'initial-validation-selection',
       reviewedHeadSha: initialSelection.headSha,
-      finding: 'Initial pull-request validation selection.',
-      evidence: 'Explicit orchestrator-selected validation before the first discovery review.',
+      finding: cleanReviewRecovery
+        ? 'Taskless targeted-validation recovery after a clean exact-head review.'
+        : 'Initial pull-request validation selection.',
+      evidence: cleanReviewRecovery
+        ? 'Explicit orchestrator-selected validation for the preserved clean exact-head review.'
+        : 'Explicit orchestrator-selected validation before the first discovery review.',
       affectedAreas: initialSelection.affectedAreas,
       decisionIds: [],
       allowedPaths: ['scripts/**'],
       forbiddenPaths: [],
       dependencies: [],
-      acceptanceCriteria: ['The selected initial checks pass.'],
+      acceptanceCriteria: [cleanReviewRecovery
+        ? 'The selected taskless recovery checks pass.'
+        : 'The selected initial checks pass.'],
       requiredValidation: initialSelection.requiredValidation,
     }];
     packetIds = [];
@@ -479,6 +508,14 @@ export function buildTargetedValidationPlan({
   const current = loadState(cwd, selectedPr);
   if (!VALIDATION_PLANNING_PHASES.has(current.phase)) {
     throw new StateError(`Cannot plan targeted validation while phase is ${current.phase}`, 'VALIDATION_PLAN_PHASE_BLOCKED');
+  }
+  if (initialSelection !== undefined && initialSelection !== null
+      && current.validationStatus.status === 'passed'
+      && isCleanTasklessReviewValidationRecovery(current, actionableIntegratedTaskIds(current))) {
+    throw new StateError(
+      'Clean taskless review recovery cannot replace existing targeted-validation proof',
+      'INITIAL_VALIDATION_NOT_ALLOWED',
+    );
   }
   if (current.validationStatus.status !== 'not-run' && !replace) {
     throw new StateError('Targeted validation proof already exists; use --replace to start a fresh plan', 'VALIDATION_PLAN_REPLACE_REQUIRED');
@@ -1383,6 +1420,13 @@ export function checkpointTargetedValidationReset({ cwd = process.cwd(), prNumbe
   const current = loadState(cwd, prNumber);
   if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
   if (current.validationStatus.status === 'not-run') return current;
+  if (current.validationStatus.status === 'passed'
+      && isCleanTasklessReviewValidationRecovery(current, actionableIntegratedTaskIds(current))) {
+    throw new StateError(
+      'Clean taskless review recovery cannot discard existing targeted-validation proof',
+      'INITIAL_VALIDATION_NOT_ALLOWED',
+    );
+  }
   const nextState = {
     ...current,
     validationStatus: emptyTargetedValidation(),

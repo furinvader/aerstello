@@ -74,7 +74,14 @@ For the first discovery review of a pristine taskless cycle, use
 `--initial-selection` with a schema-v1 document containing the exact integration
 HEAD, nonempty affected areas, and nonempty targeted validation. This creates a
 plan with no remediation task IDs; it cannot be combined with task packets or
-used after any task or review evidence exists.
+used after arbitrary task or review evidence exists. The same explicit selection
+is narrowly available after a migrated taskless pending review is collected as
+a clean exact-head outcome while validation remains `not-run`. That recovery
+requires no tasks, exact current request/outcome/history identity and kind, and
+requested, reviewed, request, outcome, and integration SHAs that all match. It
+does not reconstruct or trust a missing legacy plan and does not repeat the
+still-applicable review. It cannot replace an existing passing proof after an
+ordinary taskless review.
 
 ## What state must preserve
 

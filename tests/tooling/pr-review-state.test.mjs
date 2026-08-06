@@ -192,6 +192,24 @@ function legacyState(state, overrides = {}) {
   };
 }
 
+function schemaV2State(state) {
+  const {
+    ciValidationStatus: _ciValidationStatus,
+    ciValidationHistory: _ciValidationHistory,
+    validationStatus,
+    ...currentFields
+  } = state;
+  const { source: _source, scope: _scope, ...legacyValidationStatus } = validationStatus;
+  return { ...currentFields, schemaVersion: 2, validationStatus: legacyValidationStatus };
+}
+
+function migrateTasklessPendingReview(cwd) {
+  const prepared = ready(init(cwd), []);
+  const requested = buildReviewRequestTransition(prepared, request(prepared), external(cwd, prepared));
+  writeFileSync(statePath(cwd, requested.prNumber), `${JSON.stringify(schemaV2State(requested))}\n`);
+  return migrateState({ cwd }).state;
+}
+
 function legacyTask(workerCommitSha, overrides = {}) {
   return {
     id: 'legacy-task', sourceIds: ['review:9', 'discussion:99', 'discussion:99'],
@@ -318,6 +336,134 @@ test('v2 migration preserves a pending exact-head review while resetting targete
   assert.deepEqual(migrated.ciValidationHistory, []);
   assert.match(migrated.nextAction, /Collect the pending exact-head review/u);
   assert.equal(buildReviewOutcomeTransition(migrated, outcome(migrated)).reviewOutcome.outcome, 'clean');
+});
+
+test('migrated taskless clean review rebuilds and runs exact-head targeted validation without repeating review', () => {
+  const cwd = repo();
+  const migrated = migrateTasklessPendingReview(cwd);
+  const collected = checkpointReviewOutcome({
+    cwd, outcome: outcome(migrated), expectedRevision: migrated.revision,
+  });
+  const reviewEvidence = {
+    reviewRequest: structuredClone(collected.reviewRequest),
+    reviewOutcome: structuredClone(collected.reviewOutcome),
+    reviewHistory: structuredClone(collected.reviewHistory),
+  };
+  const selection = initialSelection(collected.currentIntegrationHeadSha, {
+    affectedAreas: ['workflow', 'documentation'],
+    requiredValidation: {
+      unit: [{ command: 'npm run check:workflow', reason: 'Rebuild discarded schema-v2 validation proof.' }],
+      system: [],
+    },
+  });
+
+  const plan = buildTargetedValidationPlan({ cwd, initialSelection: selection, now: () => AT });
+  assert.deepEqual(plan.taskIds, []);
+  assert.deepEqual(plan.affectedAreas, ['documentation', 'workflow']);
+  assert.equal(plan.stateRevision, collected.revision);
+  assert.equal(plan.headSha, collected.currentIntegrationHeadSha);
+  assert.deepEqual(plan.commands.map(({ command, reason }) => ({ command, reason })), [{
+    command: 'npm run check:workflow', reason: 'Rebuild discarded schema-v2 validation proof.',
+  }]);
+
+  const result = executeTargetedValidationPlan({
+    cwd, runCommand: () => ({ status: 0 }), now: () => AT,
+  });
+  assert.equal(result.state.phase, 'validating');
+  assert.equal(result.state.validationStatus.status, 'passed');
+  assert.equal(result.state.validationStatus.headSha, collected.currentIntegrationHeadSha);
+  assert.deepEqual({
+    reviewRequest: result.state.reviewRequest,
+    reviewOutcome: result.state.reviewOutcome,
+    reviewHistory: result.state.reviewHistory,
+  }, reviewEvidence);
+});
+
+test('taskless post-review validation recovery rejects pending, findings, tasks, dirty state, and inconsistent proof', () => {
+  const pendingCwd = repo();
+  const pending = migrateTasklessPendingReview(pendingCwd);
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: pendingCwd, initialSelection: initialSelection(pending.currentIntegrationHeadSha),
+  }), { code: 'VALIDATION_PLAN_PHASE_BLOCKED' });
+
+  const findingsCwd = repo();
+  const findingsMigrated = migrateTasklessPendingReview(findingsCwd);
+  const findings = checkpointReviewOutcome({
+    cwd: findingsCwd,
+    outcome: outcome(findingsMigrated, { outcome: 'findings' }),
+    expectedRevision: findingsMigrated.revision,
+  });
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: findingsCwd, initialSelection: initialSelection(findings.currentIntegrationHeadSha),
+  }), { code: 'VALIDATION_PLAN_PHASE_BLOCKED' });
+
+  const taskCwd = repo();
+  const taskMigrated = migrateTasklessPendingReview(taskCwd);
+  const taskCollected = checkpointReviewOutcome({
+    cwd: taskCwd, outcome: outcome(taskMigrated), expectedRevision: taskMigrated.revision,
+  });
+  const withTask = checkpointState({
+    cwd: taskCwd, expectedRevision: taskCollected.revision,
+    nextState: {
+      ...taskCollected,
+      tasks: [task(taskCollected.currentIntegrationHeadSha, {
+        id: 'unexpected-task', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+      })],
+    },
+  });
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: taskCwd, initialSelection: initialSelection(withTask.currentIntegrationHeadSha),
+  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
+
+  const dirtyCwd = repo();
+  const dirtyMigrated = migrateTasklessPendingReview(dirtyCwd);
+  const dirtyCollected = checkpointReviewOutcome({
+    cwd: dirtyCwd, outcome: outcome(dirtyMigrated), expectedRevision: dirtyMigrated.revision,
+  });
+  writeFileSync(join(dirtyCwd, 'dirty.txt'), 'dirty\n');
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: dirtyCwd, initialSelection: initialSelection(dirtyCollected.currentIntegrationHeadSha),
+  }), { code: 'VALIDATION_CHECKOUT_DIRTY' });
+
+  const ordinaryCwd = repo();
+  const ordinaryInitial = init(ordinaryCwd);
+  const ordinaryProofed = checkpointTaskCompletion({
+    cwd: ordinaryCwd,
+    expectedRevision: ordinaryInitial.revision,
+    threadResolutionStatus: ready(ordinaryInitial, []).threadResolutionStatus,
+  });
+  const ordinaryReady = persistReady(ordinaryCwd, ordinaryProofed, []);
+  const ordinaryRequested = checkpointReviewRequest({
+    cwd: ordinaryCwd,
+    request: request(ordinaryReady),
+    pushedHeadSha: ordinaryReady.currentIntegrationHeadSha,
+    prHeadSha: ordinaryReady.currentIntegrationHeadSha,
+    expectedRevision: ordinaryReady.revision,
+  });
+  const ordinaryCollected = checkpointReviewOutcome({
+    cwd: ordinaryCwd, outcome: outcome(ordinaryRequested), expectedRevision: ordinaryRequested.revision,
+  });
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: ordinaryCwd,
+    initialSelection: initialSelection(ordinaryCollected.currentIntegrationHeadSha),
+    replace: true,
+  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
+  assert.equal(loadState(ordinaryCwd).validationStatus.status, 'passed');
+
+  const inconsistentCwd = repo();
+  const inconsistentMigrated = migrateTasklessPendingReview(inconsistentCwd);
+  const inconsistent = checkpointReviewOutcome({
+    cwd: inconsistentCwd, outcome: outcome(inconsistentMigrated), expectedRevision: inconsistentMigrated.revision,
+  });
+  writeFileSync(statePath(inconsistentCwd, inconsistent.prNumber), `${JSON.stringify({
+    ...inconsistent,
+    reviewHistory: inconsistent.reviewHistory.map((entry, index) => index === inconsistent.reviewHistory.length - 1
+      ? { ...entry, outcome: { ...entry.outcome, id: 'inconsistent-outcome' } }
+      : entry),
+  })}\n`);
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: inconsistentCwd, initialSelection: initialSelection(inconsistent.currentIntegrationHeadSha),
+  }), StateError);
 });
 
 test('migration keeps worker and central cherry-pick SHAs distinct and preserves three-round provenance', () => {

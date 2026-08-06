@@ -74,6 +74,16 @@ exact-head proof that the fully paginated canonical Codex thread set is empty.
 This read-only GitHub operation fails closed if any canonical root exists and
 does not verify later threadless remediation tasks.
 
+A schema-v2 migration may preserve a taskless pending review for the exact
+integration HEAD while deliberately clearing legacy targeted-validation proof.
+After that preserved review is collected as clean, `validation-plan
+--initial-selection <file>` may rebuild the explicit nonempty selection without
+requesting the review again. This exception requires no tasks and exact matching
+current request, outcome, latest history entry, kind, and requested/reviewed
+SHAs. It rejects pending, finding, stale, dirty, or inconsistent states and does
+not infer checks from a missing legacy plan or replace an existing passing proof
+after an ordinary taskless review.
+
 Done is stricter. A clean Codex review, full green CI, full E2E, the current PR
 head, and the no-open-thread check must all refer to the same Review commit.
 
