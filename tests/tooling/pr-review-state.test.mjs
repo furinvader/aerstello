@@ -269,6 +269,35 @@ test('v2 loading requires explicit migration and writes an exact versioned backu
   assert.match(migrated.backupPath, /state\.v2\.backup\.json$/u);
 });
 
+test('v2 migration preserves a pending exact-head review while resetting targeted validation', () => {
+  const cwd = repo();
+  const prepared = ready(init(cwd), []);
+  const requested = buildReviewRequestTransition(prepared, request(prepared), external(cwd, prepared));
+  const {
+    ciValidationStatus: _ciValidationStatus,
+    ciValidationHistory: _ciValidationHistory,
+    validationStatus,
+    ...currentFields
+  } = requested;
+  const { source: _source, scope: _scope, ...legacyValidationStatus } = validationStatus;
+  const priorV2 = {
+    ...currentFields,
+    schemaVersion: 2,
+    validationStatus: legacyValidationStatus,
+  };
+
+  const migrated = migratePrReviewStateV2(priorV2, { migratedAt: AT });
+
+  assert.equal(migrated.phase, 'awaiting-review');
+  assert.equal(migrated.reviewRequest.id, requested.reviewRequest.id);
+  assert.equal(migrated.reviewHistory.at(-1).outcome, null);
+  assert.equal(migrated.validationStatus.status, 'not-run');
+  assert.equal(migrated.ciValidationStatus.status, 'not-run');
+  assert.deepEqual(migrated.ciValidationHistory, []);
+  assert.match(migrated.nextAction, /Collect the pending exact-head review/u);
+  assert.equal(buildReviewOutcomeTransition(migrated, outcome(migrated)).reviewOutcome.outcome, 'clean');
+});
+
 test('migration keeps worker and central cherry-pick SHAs distinct and preserves three-round provenance', () => {
   const cwd = repo();
   const initial = init(cwd);

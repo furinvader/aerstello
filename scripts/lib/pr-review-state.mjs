@@ -697,6 +697,13 @@ export function migratePrReviewStateV2(legacyState, { migratedAt = utcNow() } = 
   }
   const wasComplete = normalized.phase === 'complete';
   const validationMustBeRebuilt = normalized.validationStatus?.status === 'passed';
+  const latestReview = normalized.reviewHistory?.at(-1);
+  const pendingReviewMustBePreserved = normalized.phase === 'awaiting-review'
+    && normalized.reviewOutcome === null
+    && latestReview?.outcome === null
+    && normalized.reviewRequest?.id === latestReview.request?.id
+    && latestReview.request?.headSha === normalized.currentIntegrationHeadSha;
+  const mustRecover = wasComplete || (validationMustBeRebuilt && !pendingReviewMustBePreserved);
   const migrated = {
     ...normalized,
     schemaVersion: 3,
@@ -704,10 +711,12 @@ export function migratePrReviewStateV2(legacyState, { migratedAt = utcNow() } = 
     validationStatus: emptyTargetedValidation(),
     ciValidationStatus: emptyCiValidation(),
     ciValidationHistory: [],
-    nextAction: wasComplete || validationMustBeRebuilt
-      ? 'Reconfirm targeted validation, full GitHub Actions, and the exact review commit after schema v3 migration.'
+    nextAction: pendingReviewMustBePreserved
+      ? 'Collect the pending exact-head review, then reconfirm targeted validation and full GitHub Actions.'
+      : wasComplete || validationMustBeRebuilt
+        ? 'Reconfirm targeted validation, full GitHub Actions, and the exact review commit after schema v3 migration.'
       : normalized.nextAction,
-    phase: wasComplete || validationMustBeRebuilt ? 'recovering' : normalized.phase,
+    phase: mustRecover ? 'recovering' : normalized.phase,
     updatedAt: migratedAt,
   };
   const legacyCompletionPlaceholder = {
