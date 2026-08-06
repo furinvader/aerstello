@@ -11,6 +11,7 @@ import {
 import {
   buildGhGraphqlArgs,
   createDefaultGitHubClient,
+  renderHumanStatus,
   runCli,
   usage,
 } from '../../scripts/pr-review-github.mjs';
@@ -34,12 +35,15 @@ function proof(status = 'passed', headSha = HEAD) {
 
 function stateFixture(overrides = {}) {
   return {
-    schemaVersion: 2, revision: 1, repository: 'example/sky-bar', prNumber: 2, phase: 'recovering',
+    schemaVersion: 3, revision: 1, repository: 'example/sky-bar', prNumber: 2, phase: 'recovering',
     baseSha: HEAD, requestedHeadSha: null, reviewedHeadSha: null, currentIntegrationHeadSha: HEAD,
     reviewRound: 0, verificationReviewUsed: false, legacyReviewProvenance: null, releaseBaseline: null,
     decisions: [], tasks: [], reviewRequest: null, reviewOutcome: null, reviewHistory: [],
     verificationEscalation: null, threadResolutionStatus: proof('not-run'), blockedReasons: [],
-    validationStatus: { status: 'not-run', headSha: null, checks: [], updatedAt: null },
+    validationStatus: { source: 'orchestrator', scope: 'targeted', status: 'not-run', headSha: null, checks: [], updatedAt: null },
+    ciValidationStatus: { source: 'github-actions', scope: 'full', status: 'not-run', headSha: null,
+      checks: [], workflowRunId: null, workflowRunUrl: null, updatedAt: null },
+    ciValidationHistory: [],
     nextAction: 'Recover.', integrationWorktree: '/tmp/integration', orchestratorSessionId: null,
     abandonmentReason: null, git: { branch: 'main', headSha: HEAD, dirty: false }, updatedAt: AT,
     ...overrides,
@@ -49,7 +53,7 @@ function stateFixture(overrides = {}) {
 function readyState(overrides = {}) {
   return stateFixture({
     phase: 'ready-for-review',
-    validationStatus: { status: 'passed', headSha: HEAD, checks: ['npm run check'], updatedAt: AT },
+    validationStatus: { source: 'orchestrator', scope: 'targeted', status: 'passed', headSha: HEAD, checks: ['npm run check'], updatedAt: AT },
     threadResolutionStatus: proof(), nextAction: 'Request review.',
     ...overrides,
   });
@@ -110,6 +114,22 @@ function connection(nodes, cursor, pageSize = 1) {
   };
 }
 
+function fullValidationCheck(overrides = {}) {
+  return {
+    __typename: 'CheckRun', id: 'CHECK_full', databaseId: 301, name: 'Full validation',
+    status: 'COMPLETED', conclusion: 'SUCCESS', completedAt: AT,
+    detailsUrl: 'https://github.com/example/sky-bar/actions/runs/701/job/301',
+    checkSuite: {
+      app: { slug: 'github-actions' },
+      workflowRun: {
+        databaseId: 701, url: 'https://github.com/example/sky-bar/actions/runs/701',
+        file: { path: '.github/workflows/ci.yml' }, workflow: { name: 'CI' },
+      },
+    },
+    ...overrides,
+  };
+}
+
 class FakeClient {
   constructor(overrides = {}) {
     this.metadata = {
@@ -121,6 +141,9 @@ class FakeClient {
     this.threads = [];
     this.threadComments = new Map();
     this.reactions = new Map();
+    this.ciContexts = [fullValidationCheck()];
+    this.rollupState = 'SUCCESS';
+    this.checkHeadSha = null;
     this.calls = [];
     this.events = overrides.events ?? [];
     this.pageSize = overrides.pageSize ?? 1;
@@ -157,6 +180,16 @@ class FakeClient {
     }
     if (name === 'RequestReactions') {
       return this.result({ node: { reactions: connection(this.reactions.get(variables.commentId) ?? [], variables.cursor, this.pageSize) } });
+    }
+    if (name === 'PullRequestChecks') {
+      const headSha = this.checkHeadSha ?? this.metadata.headRefOid;
+      return this.result({ repository: { pullRequest: {
+        number: this.metadata.number, headRefOid: this.metadata.headRefOid,
+        commits: { nodes: [{ commit: { oid: headSha, statusCheckRollup: {
+          state: this.rollupState,
+          contexts: connection(this.ciContexts, variables.cursor, this.pageSize),
+        } } }] },
+      } } });
     }
     this.events.push(`mutation:${name}`);
     if (name === 'AddReviewRequest' && !this.noEffect.has(name)) {
@@ -224,6 +257,16 @@ function fakeState(initial) {
         reviewRequest: request, reviewOutcome: null,
         reviewHistory: [...current.reviewHistory, { request, outcome: null }],
       };
+      return structuredClone(current);
+    },
+    async checkpointCiValidation(input) {
+      calls.push({ name: 'checkpointCiValidation', input });
+      const duplicate = current.ciValidationHistory.find((entry) => entry.workflowRunId === input.evidence.workflowRunId);
+      if (!duplicate) {
+        current = { ...current, revision: current.revision + 1,
+          ciValidationStatus: input.evidence,
+          ciValidationHistory: [...current.ciValidationHistory, input.evidence] };
+      }
       return structuredClone(current);
     },
     async checkpointReviewOutcome(input) {
@@ -316,7 +359,9 @@ test('status uses split fully paginated reads and filters canonical roots', asyn
   assert.ok(client.calls.filter((call) => call.name === 'PullRequestReviews').length >= 2);
   assert.ok(client.calls.filter((call) => call.name === 'PullRequestThreads').length >= 2);
   assert.equal(client.calls.filter((call) => call.name === 'ReviewThreadComments').length, 2);
+  assert.equal(client.calls.filter((call) => call.name === 'PullRequestChecks').length, 1);
   assert.equal(result.statePhase, 'recovering');
+  assert.equal(result.liveCiValidation.status, 'passed');
 });
 
 test('Actor author queries select node IDs only through Bot and User fragments', async () => {
@@ -330,6 +375,90 @@ test('Actor author queries select node IDs only through Bot and User fragments',
     assert.match(query, /author\{__typename login url \.\.\. on Bot\{id\} \.\.\. on User\{id\}\}/u,
       `${name} must populate a uniform id through concrete actor fragments`);
   }
+});
+
+test('collect-ci paginates the exact-head rollup and records the latest authoritative workflow run', async () => {
+  const client = new FakeClient({ pageSize: 1 });
+  client.ciContexts = [
+    { __typename: 'StatusContext', id: 'STATUS_lint', context: 'lint', state: 'SUCCESS', targetUrl: 'https://github.com/example/sky-bar' },
+    fullValidationCheck({ id: 'CHECK_old', completedAt: '2026-08-04T23:00:00Z',
+      checkSuite: { app: { slug: 'github-actions' }, workflowRun: { databaseId: 700,
+        url: 'https://github.com/example/sky-bar/actions/runs/700',
+        file: { path: '.github/workflows/ci.yml' }, workflow: { name: 'CI' } } } }),
+    fullValidationCheck(),
+  ];
+  const setup = workflow(stateFixture(), client);
+  const result = await setup.api.collectCi(2);
+  assert.deepEqual(result.evidence, {
+    source: 'github-actions', scope: 'full', status: 'passed', headSha: HEAD,
+    checks: ['Full validation', 'lint'], workflowRunId: 701,
+    workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/701', updatedAt: AT,
+  });
+  assert.ok(client.calls.filter((call) => call.name === 'PullRequestChecks').length >= 3);
+  assert.match(client.calls.find((call) => call.name === 'PullRequestChecks').query,
+    /workflowRun\{databaseId url file\{path\} workflow\{name\}\}/u);
+  assert.equal(setup.state.calls.at(-1).name, 'checkpointCiValidation');
+});
+
+test('collect-ci records a completed failed full run but rejects pending, stale, missing, and ambiguous evidence', async () => {
+  const failed = new FakeClient({ rollupState: 'FAILURE',
+    ciContexts: [fullValidationCheck({ conclusion: 'FAILURE' })] });
+  const failedSetup = workflow(stateFixture(), failed);
+  assert.equal((await failedSetup.api.collectCi(2)).evidence.status, 'failed');
+
+  const pending = new FakeClient({ rollupState: 'PENDING',
+    ciContexts: [fullValidationCheck({ status: 'IN_PROGRESS', conclusion: null, completedAt: null })] });
+  await assert.rejects(() => workflow(stateFixture(), pending).api.collectCi(2), { code: 'CI_VALIDATION_PENDING' });
+
+  const stale = new FakeClient({ checkHeadSha: OTHER_HEAD });
+  await assert.rejects(() => workflow(stateFixture(), stale).api.collectCi(2), { code: 'CI_HEAD_MISMATCH' });
+
+  const missing = new FakeClient({ ciContexts: [fullValidationCheck({ name: 'another check' })] });
+  await assert.rejects(() => workflow(stateFixture(), missing).api.collectCi(2), { code: 'CI_CHECK_MISSING' });
+
+  const ambiguous = new FakeClient({ ciContexts: [
+    fullValidationCheck(),
+    fullValidationCheck({ id: 'CHECK_other', checkSuite: { app: { slug: 'github-actions' },
+      workflowRun: { databaseId: 701, url: 'https://github.com/example/sky-bar/actions/runs/701',
+        file: { path: '.github/workflows/ci.yml' }, workflow: { name: 'CI' } } } }),
+  ] });
+  await assert.rejects(() => workflow(stateFixture(), ambiguous).api.collectCi(2), { code: 'CI_EVIDENCE_AMBIGUOUS' });
+});
+
+test('collect-ci rejects same-named jobs from another workflow and incomplete workflow identity', async () => {
+  const wrongWorkflow = new FakeClient({ ciContexts: [fullValidationCheck({ checkSuite: {
+    app: { slug: 'github-actions' },
+    workflowRun: { databaseId: 701, url: 'https://github.com/example/sky-bar/actions/runs/701',
+      file: { path: '.github/workflows/other.yml' }, workflow: { name: 'CI' } },
+  } })] });
+  await assert.rejects(() => workflow(stateFixture(), wrongWorkflow).api.collectCi(2), {
+    code: 'CI_WORKFLOW_MISMATCH',
+  });
+
+  const missingWorkflow = new FakeClient({ ciContexts: [fullValidationCheck({ checkSuite: {
+    app: { slug: 'github-actions' },
+    workflowRun: { databaseId: 701, url: 'https://github.com/example/sky-bar/actions/runs/701' },
+  } })] });
+  await assert.rejects(() => workflow(stateFixture(), missingWorkflow).api.collectCi(2), {
+    code: 'CI_EVIDENCE_INCOMPLETE',
+  });
+
+  const truncatedWorkflow = new FakeClient({ ciContexts: [fullValidationCheck({ checkSuite: {
+    app: { slug: 'github-actions' },
+    workflowRun: { databaseId: 701, url: 'https://github.com/example/sky-bar/actions/runs/701',
+      file: { path: null }, workflow: { name: 'CI' } },
+  } })] });
+  await assert.rejects(() => workflow(stateFixture(), truncatedWorkflow).api.collectCi(2), {
+    code: 'CI_EVIDENCE_INCOMPLETE',
+  });
+});
+
+test('check rollup reads fail closed on GraphQL errors and repeated pagination cursors', async () => {
+  const graphqlError = new FakeClient({ graphqlErrors: new Set(['PullRequestChecks']) });
+  await assert.rejects(() => workflow(stateFixture(), graphqlError).api.collectCi(2), { code: 'GRAPHQL_READ_FAILED' });
+
+  const truncated = new FakeClient({ pageSize: 0 });
+  await assert.rejects(() => workflow(stateFixture(), truncated).api.collectCi(2), { code: 'GRAPHQL_TRUNCATED' });
 });
 
 test('canonical Bot root without a concrete node ID throws fail-closed', async () => {
@@ -644,6 +773,7 @@ test('complete performs fresh live proof and uses guarded completion only when e
   const result = await good.api.complete(2);
   assert.equal(result.phase, 'complete');
   assert.equal(good.state.calls.at(-1).name, 'checkpointCompletion');
+  assert.equal(good.state.calls.at(-2).name, 'checkpointCiValidation');
 
   const unresolvedClient = new FakeClient();
   addThread(unresolvedClient);
@@ -669,9 +799,107 @@ test('complete performs fresh live proof and uses guarded completion only when e
   });
 });
 
+test('complete reruns review and thread proof after checkpointing CI', async () => {
+  class FinalSnapshotMutationClient extends FakeClient {
+    constructor(mutate) {
+      super();
+      this.mutate = mutate;
+      this.metadataReads = 0;
+    }
+
+    async graphql(input) {
+      if (input.name === 'PullRequestMetadata') {
+        this.metadataReads += 1;
+        if (this.metadataReads === 2) this.mutate(this);
+      }
+      return super.graphql(input);
+    }
+  }
+
+  for (const { mutate, code } of [
+    {
+      mutate(client) { addThread(client, { id: 'THREAD_late' }); },
+      code: 'COMPLETION_NOT_READY',
+    },
+    {
+      mutate(client) { client.reviews.length = 0; },
+      code: 'COMPLETION_NOT_READY',
+    },
+    {
+      mutate(client) { client.comments.length = 0; },
+      code: 'REQUEST_PROOF_STALE',
+    },
+  ]) {
+    const client = new FinalSnapshotMutationClient(mutate);
+    client.reviews.push({
+      id: 'PRR_clean', databaseId: 201, url: 'https://x/clean', body: '', state: 'COMMENTED',
+      submittedAt: AT, commit: { oid: HEAD }, author: BOT,
+    });
+    const setup = workflow(completedState(), client);
+    await assert.rejects(() => setup.api.complete(2), { code });
+    assert.equal(setup.state.calls.at(-1).name, 'checkpointCiValidation');
+    assert.equal(setup.state.calls.some((call) => call.name === 'checkpointCompletion'), false);
+  }
+});
+
+test('complete rechecks that the same successful workflow evidence is still authoritative', async () => {
+  class FinalCiMutationClient extends FakeClient {
+    constructor(mutate) {
+      super();
+      this.mutate = mutate;
+      this.checkReads = 0;
+    }
+
+    async graphql(input) {
+      if (input.name === 'PullRequestChecks') {
+        this.checkReads += 1;
+        if (this.checkReads === 2) this.mutate(this);
+      }
+      return super.graphql(input);
+    }
+  }
+
+  for (const { mutate, code } of [
+    {
+      mutate(client) {
+        client.rollupState = 'PENDING';
+        client.ciContexts = [fullValidationCheck({ status: 'IN_PROGRESS', conclusion: null, completedAt: null })];
+      },
+      code: 'CI_VALIDATION_PENDING',
+    },
+    {
+      mutate(client) {
+        client.rollupState = 'FAILURE';
+        client.ciContexts = [fullValidationCheck({ conclusion: 'FAILURE' })];
+      },
+      code: 'COMPLETION_NOT_READY',
+    },
+    {
+      mutate(client) {
+        client.ciContexts = [fullValidationCheck({ completedAt: '2026-08-05T00:01:00Z', checkSuite: {
+          app: { slug: 'github-actions' },
+          workflowRun: { databaseId: 702, url: 'https://github.com/example/sky-bar/actions/runs/702',
+            file: { path: '.github/workflows/ci.yml' }, workflow: { name: 'CI' } },
+        } })];
+      },
+      code: 'COMPLETION_NOT_READY',
+    },
+  ]) {
+    const client = new FinalCiMutationClient(mutate);
+    client.reviews.push({
+      id: 'PRR_clean', databaseId: 201, url: 'https://x/clean', body: '', state: 'COMMENTED',
+      submittedAt: AT, commit: { oid: HEAD }, author: BOT,
+    });
+    const setup = workflow(completedState(), client);
+    await assert.rejects(() => setup.api.complete(2), { code });
+    assert.equal(setup.state.calls.at(-1).name, 'checkpointCiValidation');
+    assert.equal(setup.state.calls.some((call) => call.name === 'checkpointCompletion'), false);
+  }
+});
+
 test('CLI exposes exactly the documented explicit-PR command surface and JSON-ready results', async () => {
-  assert.match(usage(), /status[\s\S]*reply-resolve[\s\S]*request[\s\S]*collect[\s\S]*complete/u);
-  await assert.rejects(() => runCli(['status'], {}), /--pr/u);
+  assert.match(usage(), /status[\s\S]*reply-resolve[\s\S]*request[\s\S]*collect[\s\S]*collect-ci[\s\S]*complete/u);
+  await assert.rejects(() => runCli(['collect'], {}), /--pr/u);
   await assert.rejects(() => runCli(['unknown', '--pr', '2'], {}), /Unknown command/u);
   await assert.rejects(() => runCli(['request', '--pr', '2', '--kind', 'other'], {}), /discovery\|verification/u);
   const client = new FakeClient();
@@ -680,6 +908,38 @@ test('CLI exposes exactly the documented explicit-PR command surface and JSON-re
     client, state, git: fakeGit(), clock: { now: () => AT }, journal: fakeJournal(),
   });
   assert.equal(result.prNumber, 2);
+  const human = await runCli(['status', '--human'], {
+    client, state, git: fakeGit(), clock: { now: () => AT },
+  });
+  assert.match(human.human, /PR: #2[\s\S]*Current commit:[\s\S]*Codex review:[\s\S]*Tasks:[\s\S]*Full CI: Passed[\s\S]*Open Codex threads: 0[\s\S]*Next action:/u);
+  const done = renderHumanStatus({ ...result, statePhase: 'complete', taskStatus: {
+    resolved: 1, pending: 0, display: 'Done',
+    items: [{ id: 'finding-a', summary: 'Preserve exact SHA evidence.', status: 'Done' }],
+  } });
+  assert.match(done, /Phase: Done[\s\S]*Tasks: Done[\s\S]*finding-a: Done — Preserve exact SHA evidence\./u);
+
+  const stale = renderHumanStatus({
+    ...result,
+    statePhase: 'complete',
+    liveHeadSha: OTHER_HEAD,
+    codexReview: 'clean',
+    targetedValidation: {
+      source: 'orchestrator', scope: 'targeted', status: 'passed', headSha: HEAD,
+      checks: ['npm run check:workflow'], updatedAt: AT,
+    },
+    nextAction: 'Archive the completed cycle.',
+    taskStatus: {
+      resolved: 1, pending: 0, display: 'Done',
+      items: [{ id: 'finding-a', summary: 'Preserve exact SHA evidence.', status: 'Done' }],
+    },
+  });
+  assert.match(stale, new RegExp(`Current commit: ${HEAD} \\(DOES NOT MATCH PR head ${OTHER_HEAD}\\)`, 'u'));
+  assert.match(stale, /Phase: Stale \(recorded Done; PR head changed\)/u);
+  assert.match(stale, /Codex review: Stale clean evidence \(commit mismatch\)/u);
+  assert.doesNotMatch(stale, /Phase: Done|Codex review: Clean|Tasks: Done/u);
+  assert.match(stale, /Targeted local tests: Passed .* for the recorded commit; PR head differs/u);
+  assert.match(stale, /Full CI: Passed .*live PR head differs from the recorded commit/u);
+  assert.match(stale, new RegExp(`Next action: Reconcile recorded commit with live PR head ${OTHER_HEAD}`, 'u'));
 });
 
 test('default gh GraphQL transport preserves literal strings and typed scalar variables', async () => {
@@ -938,7 +1198,7 @@ test('historical resolved proof survives a later-head validation, request, colle
   const historical = readyState({
     currentIntegrationHeadSha: OTHER_HEAD,
     git: { branch: 'main', headSha: OTHER_HEAD, dirty: false },
-    validationStatus: { status: 'passed', headSha: OTHER_HEAD, checks: ['new validation'], updatedAt: AT },
+    validationStatus: { source: 'orchestrator', scope: 'targeted', status: 'passed', headSha: OTHER_HEAD, checks: ['new validation'], updatedAt: AT },
     tasks: [task],
     threadResolutionStatus: {
       status: 'passed', headSha: OTHER_HEAD, updatedAt: AT,
@@ -987,7 +1247,7 @@ test('unresolved head-A provenance is preserved when reply and resolution occur 
   const state = integratedThreadState();
   state.currentIntegrationHeadSha = OTHER_HEAD;
   state.git = { branch: 'main', headSha: OTHER_HEAD, dirty: false };
-  state.validationStatus = { status: 'passed', headSha: OTHER_HEAD, checks: ['head-B check'], updatedAt: AT };
+  state.validationStatus = { source: 'orchestrator', scope: 'targeted', status: 'passed', headSha: OTHER_HEAD, checks: ['head-B check'], updatedAt: AT };
   state.threadResolutionStatus = { status: 'failed', headSha: OTHER_HEAD, updatedAt: AT,
     threadlessVerification: proof().threadlessVerification,
     threads: [{ threadNodeId: 'THREAD_1', rootCommentNodeId: root.id, rootCommentDatabaseId: root.databaseId,
@@ -1020,7 +1280,7 @@ test('paired unresolved recorded reply is reused and resolved without posting an
   const state = integratedThreadState();
   state.currentIntegrationHeadSha = OTHER_HEAD;
   state.git = { branch: 'main', headSha: OTHER_HEAD, dirty: false };
-  state.validationStatus = { status: 'passed', headSha: OTHER_HEAD, checks: ['head-B check'], updatedAt: AT };
+  state.validationStatus = { source: 'orchestrator', scope: 'targeted', status: 'passed', headSha: OTHER_HEAD, checks: ['head-B check'], updatedAt: AT };
   state.threadResolutionStatus = { status: 'failed', headSha: OTHER_HEAD, updatedAt: AT,
     threadlessVerification: proof().threadlessVerification,
     threads: [{ threadNodeId: 'THREAD_1', rootCommentNodeId: root.id, rootCommentDatabaseId: root.databaseId,
@@ -1044,7 +1304,7 @@ test('paired unresolved reply from a prior head fails before journal or GitHub m
   const state = integratedThreadState();
   state.currentIntegrationHeadSha = OTHER_HEAD;
   state.git = { branch: 'main', headSha: OTHER_HEAD, dirty: false };
-  state.validationStatus = { status: 'passed', headSha: OTHER_HEAD, checks: ['head-B check'], updatedAt: AT };
+  state.validationStatus = { source: 'orchestrator', scope: 'targeted', status: 'passed', headSha: OTHER_HEAD, checks: ['head-B check'], updatedAt: AT };
   state.threadResolutionStatus = { status: 'failed', headSha: OTHER_HEAD, updatedAt: AT,
     threadlessVerification: proof().threadlessVerification,
     threads: [{ threadNodeId: 'THREAD_1', rootCommentNodeId: root.id, rootCommentDatabaseId: root.databaseId,

@@ -1,9 +1,17 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { parseOptions, UsageError, writeJson } from './lib/cli.mjs';
 import {
+  validateTaskPacket,
+  validateWorkerResult,
+  validateWorkerResultAgainstTask,
+} from './lib/contracts.mjs';
+import {
   archiveState,
+  buildTargetedValidationPlan,
   checkpointState,
+  executeTargetedValidationPlan,
   initializeState,
   loadState,
   locateState,
@@ -14,7 +22,7 @@ import {
 } from './lib/pr-review-state.mjs';
 
 function usage() {
-  return `Usage: node scripts/pr-review-state.mjs <command> [options]\n\nCommands:\n  init        Initialize a durable PR cycle\n  path        Print the active state path\n  validate    Validate state and reconcile Git metadata\n  show        Print active state JSON\n  checkpoint  Replace unprotected operational state from --input\n  migrate     Explicitly migrate active schema v1 state to v2\n  recover     Render compact recovery context\n  archive     Archive a complete or explicitly abandoned cycle\n\nCommon options:\n  --pr <number>\n  --help\n\nCheckpoint options:\n  --expected-revision <number>\n\nMigrate options:\n  --integration-map <file>  JSON task-ID to true central integration SHA map\n\nArchive options:\n  --abandon-reason <reason>\n\nProtected review, task-proof, and completion transitions are library-only so a GitHub evidence helper can verify live data before persistence.\n`;
+  return `Usage: node scripts/pr-review-state.mjs <command> [options]\n\nCommands:\n  init             Start durable state for a PR review cycle\n  path             Print the active state path\n  validate         Check state against the integration checkout\n  validate-result  Check a worker result against its fixed task instructions\n  validation-plan  Save and print the combined targeted checks\n  run-validation   Run pending checks from the saved plan and record the result\n  show             Print active state JSON\n  checkpoint       Replace ordinary operational state from --input\n  migrate          Explicitly migrate active schema v1 or v2 state to v3\n  recover          Print compact recovery context\n  archive          Archive a Done or explicitly abandoned cycle\n\nCommon options:\n  --pr <number>\n  --help\n\nValidation-plan arguments:\n  <task-packet.json> [...]  One file for every actionable Integrated task\n  --replace                 Start a fresh plan after a failure or commit change\n\nValidate-result options:\n  --task-packet <file>\n  --worker-result <file>\n\nCheckpoint options:\n  --expected-revision <number>\n\nMigrate options:\n  --integration-map <file>  JSON task-ID to central integration SHA map (v1 only)\n\nArchive options:\n  --abandon-reason <reason>\n\nReview, CI, task-resolution, targeted-validation, and Done transitions use guarded helpers that verify their evidence before saving.\n`;
 }
 
 function optionsFor(command, argv) {
@@ -25,10 +33,36 @@ function optionsFor(command, argv) {
     common.values.push('input', 'event-type', 'event-summary');
   } else if (command === 'migrate') {
     common.values.push('integration-map');
+  } else if (command === 'validate-result') {
+    common.values.push('task-packet', 'worker-result');
+  } else if (command === 'validation-plan') {
+    common.booleans.push('replace');
   } else if (command === 'archive') {
     common.values.push('abandon-reason');
   }
   return parseOptions(argv, common);
+}
+
+function actualWorkerChangedPaths(packet, result) {
+  if (result.status !== 'implemented') return undefined;
+  for (const [label, sha] of [['reviewed HEAD', packet.reviewedHeadSha], ['worker commit', result.commitSha]]) {
+    try {
+      execFileSync('git', ['cat-file', '-e', `${sha}^{commit}`], { cwd: process.cwd(), stdio: 'ignore' });
+    } catch {
+      throw new StateError(`${label} does not name an existing Git commit: ${sha}`, 'INVALID_WORKER_RESULT');
+    }
+  }
+  try {
+    execFileSync('git', ['merge-base', '--is-ancestor', packet.reviewedHeadSha, result.commitSha], {
+      cwd: process.cwd(), stdio: 'ignore',
+    });
+  } catch {
+    throw new StateError('Worker commit must descend from the task packet reviewedHeadSha', 'INVALID_WORKER_RESULT');
+  }
+  const output = execFileSync('git', [
+    'diff', '--name-only', '--no-renames', '-z', packet.reviewedHeadSha, result.commitSha, '--',
+  ], { cwd: process.cwd() });
+  return output.toString('utf8').split('\0').filter((path) => path !== '');
 }
 
 try {
@@ -37,7 +71,7 @@ try {
     process.stdout.write(usage());
     process.exit(0);
   }
-  if (!['init', 'path', 'validate', 'show', 'checkpoint', 'migrate', 'recover', 'archive'].includes(command)) {
+  if (!['init', 'path', 'validate', 'validate-result', 'validation-plan', 'run-validation', 'show', 'checkpoint', 'migrate', 'recover', 'archive'].includes(command)) {
     throw new UsageError(`Unknown command ${command}`);
   }
   const options = optionsFor(command, argv);
@@ -45,7 +79,7 @@ try {
     process.stdout.write(usage());
     process.exit(0);
   }
-  if (options._.length > 0) throw new UsageError(`Unexpected argument ${options._[0]}`);
+  if (command !== 'validation-plan' && options._.length > 0) throw new UsageError(`Unexpected argument ${options._[0]}`);
   const parsedExpectedRevision = options['expected-revision'] === undefined
     ? undefined
     : Number(options['expected-revision']);
@@ -77,6 +111,36 @@ try {
     const state = loadState(process.cwd(), options.pr);
     if (!state) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
     writeJson(state);
+  } else if (command === 'validate-result') {
+    if (!options['task-packet'] || !options['worker-result']) {
+      throw new UsageError('validate-result requires --task-packet and --worker-result');
+    }
+    const packet = JSON.parse(readFileSync(options['task-packet'], 'utf8'));
+    const result = JSON.parse(readFileSync(options['worker-result'], 'utf8'));
+    const structuralErrors = [
+      ...validateTaskPacket(packet).map((error) => `task packet: ${error}`),
+      ...validateWorkerResult(result).map((error) => `worker result: ${error}`),
+    ];
+    if (structuralErrors.length > 0) {
+      throw new StateError(`Worker result does not satisfy task packet:\n- ${structuralErrors.join('\n- ')}`, 'INVALID_WORKER_RESULT');
+    }
+    const errors = validateWorkerResultAgainstTask(packet, result, actualWorkerChangedPaths(packet, result));
+    if (errors.length > 0) throw new StateError(`Worker result does not satisfy task packet:\n- ${errors.join('\n- ')}`, 'INVALID_WORKER_RESULT');
+    writeJson({ valid: true, taskId: packet.taskId });
+  } else if (command === 'validation-plan') {
+    if (options._.length === 0) throw new UsageError('validation-plan requires one or more task-packet JSON files');
+    const taskPackets = options._.map((path) => JSON.parse(readFileSync(path, 'utf8')));
+    writeJson(buildTargetedValidationPlan({ prNumber: options.pr, taskPackets, replace: options.replace === true }));
+  } else if (command === 'run-validation') {
+    const result = executeTargetedValidationPlan({ prNumber: options.pr });
+    writeJson({
+      status: result.state.validationStatus.status,
+      headSha: result.state.validationStatus.headSha,
+      checks: result.plan.commands.map(({ command: exactCommand, status, exitCode, summary }) => ({
+        command: exactCommand, status, exitCode, summary,
+      })),
+    });
+    if (result.state.validationStatus.status === 'failed') process.exitCode = 1;
   } else if (command === 'checkpoint') {
     if (!options.input) throw new UsageError('checkpoint requires --input');
     const nextState = JSON.parse(readFileSync(options.input, 'utf8'));

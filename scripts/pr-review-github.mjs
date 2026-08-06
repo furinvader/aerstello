@@ -8,6 +8,7 @@ import { parseOptions, UsageError, writeJson } from './lib/cli.mjs';
 import { createGitHubReviewWorkflow, GitHubWorkflowError } from './lib/pr-review-github.mjs';
 import {
   appendEvent,
+  checkpointCiValidation,
   checkpointCompletion,
   checkpointReviewOutcome,
   checkpointReviewRequest,
@@ -18,7 +19,49 @@ import {
 } from './lib/pr-review-state.mjs';
 
 export function usage() {
-  return `Usage: node scripts/pr-review-github.mjs <command> --pr <number> [options]\n\nCommands:\n  status                         Read live review status\n  reply-resolve --task <id>      Reply to and resolve one task's canonical roots\n  request --kind <kind>          Request discovery or verification review\n  collect                        Collect canonical exact-SHA review evidence\n  complete                       Complete the exact-head review cycle\n\nRequired options:\n  --pr <number>\n\nRequest options:\n  --kind discovery|verification\n\nReply-resolve options:\n  --task <task-id>\n\nAll successful commands write JSON to stdout.\n`;
+  return `Usage: node scripts/pr-review-github.mjs <command> [--pr <number>] [options]\n\nCommands:\n  status [--human]               Read live review and CI status (active PR by default)\n  reply-resolve --task <id>      Reply to and close one task's Codex review threads\n  request --kind <kind>          Request discovery or verification review\n  collect                        Collect official review evidence for the Review commit\n  collect-ci                     Collect full GitHub Actions evidence for the Review commit\n  complete                       Reconfirm every gate and mark the cycle Done\n\nRequired options:\n  --pr <number>                  Required except for status with an active state\n\nRequest options:\n  --kind discovery|verification\n\nReply-resolve options:\n  --task <task-id>\n\nSuccessful commands write JSON, except status --human which writes plain English.\n`;
+}
+
+function titleCase(value) {
+  return String(value ?? 'unknown').split('-').map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
+}
+
+export function renderHumanStatus(status) {
+  const headMatches = status.stateHeadSha === status.liveHeadSha;
+  const headRelation = headMatches ? 'matches PR head' : `DOES NOT MATCH PR head ${status.liveHeadSha}`;
+  const review = !headMatches && status.codexReview === 'clean' ? 'Stale clean evidence (commit mismatch)'
+    : status.codexReview === 'clean' ? 'Clean'
+    : status.codexReview === 'findings' ? 'Findings need resolution'
+      : status.codexReview === 'awaiting' ? 'Awaiting Codex' : 'Not requested';
+  const tasks = status.statePhase === 'complete' && headMatches ? 'Done'
+    : `${status.taskStatus.resolved} Resolved, ${status.taskStatus.pending} pending`;
+  const taskRows = status.taskStatus.items.map((task) => {
+    const taskStatus = !headMatches && task.status === 'Done' ? 'Resolved (stale head)' : task.status;
+    return `  - ${task.id}: ${taskStatus} — ${task.summary}`;
+  });
+  const targeted = status.targetedValidation?.status === 'passed'
+    ? `Passed (${status.targetedValidation.checks.join(', ')})${headMatches ? '' : ' for the recorded commit; PR head differs'}`
+    : titleCase(status.targetedValidation?.status);
+  const ci = status.liveCiValidation?.status === 'passed'
+    ? `Passed (${status.liveCiValidation.checks.join(', ')}) — ${status.liveCiValidation.workflowRunUrl}${headMatches ? '' : ' (live PR head differs from the recorded commit)'}`
+    : status.liveCiValidation?.status === 'failed'
+      ? `Failed — ${status.liveCiValidation.workflowRunUrl}`
+      : titleCase(status.liveCiValidation?.status);
+  return [
+    `PR: #${status.prNumber}`,
+    `Current commit: ${status.stateHeadSha} (${headRelation})`,
+    `Phase: ${status.statePhase === 'complete' && headMatches ? 'Done'
+      : status.statePhase === 'complete' ? 'Stale (recorded Done; PR head changed)'
+        : titleCase(status.statePhase)}`,
+    `Codex review: ${review}`,
+    `Tasks: ${tasks}`,
+    ...taskRows,
+    `Targeted local tests: ${targeted}`,
+    `Full CI: ${ci}`,
+    `Open Codex threads: ${status.openCodexThreads}`,
+    `Next action: ${headMatches ? status.nextAction
+      : `Reconcile recorded commit with live PR head ${status.liveHeadSha}. Recorded next action: ${status.nextAction}`}`,
+  ].join('\n');
 }
 
 function gitText(cwd, args) {
@@ -55,6 +98,7 @@ export function createDefaultGitHubClient(exec = execFileSync) {
 function defaultState(cwd) {
   return {
     load: (prNumber) => loadState(cwd, prNumber),
+    checkpointCiValidation: (input) => checkpointCiValidation({ cwd, ...input }),
     checkpointReviewRequest: (input) => checkpointReviewRequest({ cwd, ...input }),
     checkpointReviewOutcome: (input) => checkpointReviewOutcome({ cwd, ...input }),
     checkpointVerificationEscalation: (input) => checkpointVerificationEscalation({ cwd, ...input }),
@@ -119,13 +163,14 @@ export async function runCli(argv, {
 } = {}) {
   const [command, ...args] = argv;
   if (!command || command === 'help' || command === '--help') return { help: usage() };
-  if (!['status', 'reply-resolve', 'request', 'collect', 'complete'].includes(command)) {
+  if (!['status', 'reply-resolve', 'request', 'collect', 'collect-ci', 'complete'].includes(command)) {
     throw new UsageError(`Unknown command ${command}`);
   }
-  const options = parseOptions(args, { booleans: ['help'], values: ['pr', 'task', 'kind'] });
+  const options = parseOptions(args, { booleans: ['help', 'human'], values: ['pr', 'task', 'kind'] });
   if (options.help) return { help: usage() };
   if (options._.length > 0) throw new UsageError(`Unexpected argument ${options._[0]}`);
-  const prNumber = parsePr(options.pr);
+  const prNumber = options.pr === undefined && command === 'status' ? undefined : parsePr(options.pr);
+  if (command !== 'status' && options.human) throw new UsageError('--human is only valid for status');
   if (command === 'reply-resolve' && !options.task) throw new UsageError('reply-resolve requires --task');
   if (command !== 'reply-resolve' && options.task !== undefined) throw new UsageError('--task is only valid for reply-resolve');
   if (command === 'request' && !['discovery', 'verification'].includes(options.kind)) {
@@ -137,12 +182,16 @@ export async function runCli(argv, {
     state: state ?? defaultState(cwd),
     git,
     clock,
-    journal: journal ?? defaultJournal(cwd, prNumber),
+    journal: journal ?? (command === 'status' ? null : defaultJournal(cwd, prNumber)),
   });
-  if (command === 'status') return workflow.status(prNumber);
+  if (command === 'status') {
+    const result = await workflow.status(prNumber);
+    return options.human ? { human: renderHumanStatus(result) } : result;
+  }
   if (command === 'reply-resolve') return workflow.replyResolve(prNumber, options.task);
   if (command === 'request') return workflow.request(prNumber, options.kind);
   if (command === 'collect') return workflow.collect(prNumber);
+  if (command === 'collect-ci') return workflow.collectCi(prNumber);
   return workflow.complete(prNumber);
 }
 
@@ -150,6 +199,7 @@ async function main() {
   try {
     const result = await runCli(process.argv.slice(2));
     if (result.help) process.stdout.write(result.help);
+    else if (result.human) process.stdout.write(`${result.human}\n`);
     else writeJson(result);
   } catch (error) {
     if (error instanceof UsageError) {

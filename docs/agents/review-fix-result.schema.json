@@ -16,7 +16,7 @@
     "unexpectedDependencies"
   ],
   "properties": {
-    "schemaVersion": { "const": 1 },
+    "schemaVersion": { "const": 2 },
     "taskId": { "type": "string", "minLength": 1, "maxLength": 128 },
     "status": {
       "enum": ["implemented", "blocked", "not-applicable", "failed"]
@@ -29,7 +29,8 @@
     },
     "changedPaths": {
       "type": "array",
-      "items": { "type": "string", "minLength": 1, "maxLength": 500 },
+      "$comment": "The cross-document manual validator requires every changed path to match an allowedPaths ownership rule and no forbiddenPaths rule from the task packet; JSON Schema cannot compare separate documents.",
+      "items": { "$ref": "#/$defs/repositoryPath" },
       "uniqueItems": true
     },
     "validation": {
@@ -48,6 +49,10 @@
   ],
   "$defs": {
     "sha": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+    "repositoryPath": {
+      "type": "string", "minLength": 1, "maxLength": 500,
+      "pattern": "^(?!/)(?!.*//)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))[^/*?\\[\\]{}]+(?:/[^/*?\\[\\]{}]+)*$"
+    },
     "stringList": {
       "type": "array",
       "items": { "type": "string", "minLength": 1, "maxLength": 1000 }

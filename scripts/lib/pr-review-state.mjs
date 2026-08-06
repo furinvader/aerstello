@@ -15,12 +15,16 @@ import {
 import { hostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { gitText, resolveCommit, runGit } from './git.mjs';
 import { inspectReleaseState } from './release-state.mjs';
 import {
   completionGate,
+  parseTargetedValidationCommand,
   reviewRequestGate,
   taskHasCanonicalThreadCoverage,
+  unionRequiredValidation,
+  validateTaskPacket,
   validatePrReviewState,
   validatePrReviewStateV1,
 } from './contracts.mjs';
@@ -84,6 +88,20 @@ function emptyThreadProof() {
   };
 }
 
+function emptyTargetedValidation() {
+  return {
+    source: 'orchestrator', scope: 'targeted', status: 'not-run',
+    headSha: null, checks: [], updatedAt: null,
+  };
+}
+
+function emptyCiValidation() {
+  return {
+    source: 'github-actions', scope: 'full', status: 'not-run', headSha: null,
+    checks: [], workflowRunId: null, workflowRunUrl: null, updatedAt: null,
+  };
+}
+
 function sleep(milliseconds) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
 }
@@ -106,6 +124,10 @@ export function stateDirectory(cwd, prNumber) {
 
 export function statePath(cwd, prNumber) {
   return join(stateDirectory(cwd, prNumber), 'state.json');
+}
+
+export function validationPlanPath(cwd, prNumber) {
+  return join(stateDirectory(cwd, prNumber), 'targeted-validation-plan.json');
 }
 
 export function activePointerPath(cwd = process.cwd()) {
@@ -152,6 +174,224 @@ function atomicWriteText(path, data) {
 
 export function atomicWriteJson(path, value) {
   atomicWriteText(path, serializeJson(value));
+}
+
+const VALIDATION_PLAN_LIMIT_BYTES = 64 * 1024;
+const VALIDATION_AREAS = new Set(['api', 'web', 'shared', 'workflow', 'documentation', 'release', 'migration']);
+const VALIDATION_PLANNING_PHASES = new Set(['recovering', 'ready-for-review', 'integrating', 'verifying', 'validating']);
+
+function relatedE2EMetadata(argv) {
+  if (argv.slice(0, 4).join(' ') !== 'npm run test:e2e:related --') return null;
+  const selectors = [];
+  const projects = [];
+  for (let index = 4; index < argv.length; index += 1) {
+    const [option, inlineValue] = argv[index].split('=', 2);
+    const value = inlineValue ?? argv[++index];
+    if (option === '--project') projects.push(value);
+    else if (option === '--id') {
+      const normalized = value.replace(/^@/u, '');
+      selectors.push(normalized.startsWith('id-') ? normalized : `id-${normalized}`);
+    } else if (option === '--tag') selectors.push(value.replace(/^@/u, ''));
+  }
+  return { selectors, projects: projects.length > 0 ? projects : ['tablet-chromium'] };
+}
+
+function validateValidationPlan(plan, state) {
+  const errors = [];
+  const fields = ['schemaVersion', 'prNumber', 'stateRevision', 'headSha', 'taskIds', 'affectedAreas', 'commands', 'createdAt', 'updatedAt'];
+  if (!plan || typeof plan !== 'object' || Array.isArray(plan)) return ['plan must be a JSON object'];
+  for (const field of fields) if (!Object.prototype.hasOwnProperty.call(plan, field)) errors.push(`plan.${field} is required`);
+  for (const field of Object.keys(plan)) if (!fields.includes(field)) errors.push(`plan.${field} is not allowed`);
+  if (plan.schemaVersion !== 1) errors.push('plan.schemaVersion must be 1');
+  if (plan.prNumber !== state.prNumber) errors.push('plan.prNumber must match active state');
+  if (plan.stateRevision !== state.revision) errors.push('plan.stateRevision is stale');
+  if (plan.headSha !== state.currentIntegrationHeadSha) errors.push('plan.headSha is stale');
+  if (!Array.isArray(plan.taskIds)
+      || plan.taskIds.some((id) => typeof id !== 'string' || id.length === 0)
+      || new Set(plan.taskIds).size !== plan.taskIds.length) errors.push('plan.taskIds must be unique nonempty strings');
+  if (!Array.isArray(plan.affectedAreas) || plan.affectedAreas.some((area) => !VALIDATION_AREAS.has(area))
+      || new Set(plan.affectedAreas).size !== plan.affectedAreas.length) errors.push('plan.affectedAreas must be unique strings');
+  if (!Array.isArray(plan.commands) || plan.commands.length === 0) errors.push('plan.commands must not be empty');
+  else {
+    const seen = new Set();
+    for (const [index, entry] of plan.commands.entries()) {
+      const prefix = `plan.commands[${index}]`;
+      const entryFields = ['kind', 'command', 'reason', 'selectors', 'projects', 'argv', 'status', 'exitCode', 'summary', 'completedAt'];
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+        errors.push(`${prefix} must be an object`);
+        continue;
+      }
+      for (const field of entryFields) if (!Object.prototype.hasOwnProperty.call(entry, field)) errors.push(`${prefix}.${field} is required`);
+      for (const field of Object.keys(entry)) if (!entryFields.includes(field)) errors.push(`${prefix}.${field} is not allowed`);
+      const parsed = parseTargetedValidationCommand(entry.command);
+      if (!parsed || JSON.stringify(parsed) !== JSON.stringify(entry.argv)) errors.push(`${prefix} is not a supported exact command`);
+      if (!['unit', 'system'].includes(entry.kind)) errors.push(`${prefix}.kind is invalid`);
+      if (typeof entry.reason !== 'string' || entry.reason.length < 1 || entry.reason.length > 1000) errors.push(`${prefix}.reason is invalid`);
+      for (const field of ['selectors', 'projects']) {
+        if (!Array.isArray(entry[field]) || entry[field].some((item) => typeof item !== 'string')
+            || new Set(entry[field]).size !== entry[field].length) errors.push(`${prefix}.${field} is invalid`);
+      }
+      const e2eMetadata = parsed ? relatedE2EMetadata(parsed) : null;
+      if (entry.kind === 'unit' && (entry.selectors?.length > 0 || entry.projects?.length > 0)) errors.push(`${prefix} unit metadata must be empty`);
+      if (entry.kind === 'system' && e2eMetadata === null && (entry.selectors?.length > 0 || entry.projects?.length > 0)) errors.push(`${prefix} non-E2E metadata must be empty`);
+      if (entry.kind === 'system' && e2eMetadata !== null
+          && (JSON.stringify(entry.selectors) !== JSON.stringify(e2eMetadata.selectors)
+            || JSON.stringify(entry.projects) !== JSON.stringify(e2eMetadata.projects))) errors.push(`${prefix} E2E metadata must match command scope`);
+      if (seen.has(entry.command)) errors.push(`${prefix}.command is duplicated`);
+      seen.add(entry.command);
+      if (!['pending', 'passed', 'failed'].includes(entry.status)) errors.push(`${prefix}.status is invalid`);
+      if (entry.status === 'pending') {
+        if (entry.exitCode !== null || entry.summary !== null || entry.completedAt !== null) errors.push(`${prefix} pending result must be empty`);
+      } else {
+        if (!Number.isInteger(entry.exitCode) || entry.exitCode < 0) errors.push(`${prefix}.exitCode is invalid`);
+        if (typeof entry.summary !== 'string' || entry.summary.length < 1 || entry.summary.length > 500) errors.push(`${prefix}.summary is invalid`);
+        if (typeof entry.completedAt !== 'string' || !Number.isFinite(Date.parse(entry.completedAt))) errors.push(`${prefix}.completedAt is invalid`);
+        if ((entry.status === 'passed') !== (entry.exitCode === 0)) errors.push(`${prefix}.status contradicts exitCode`);
+      }
+    }
+  }
+  for (const field of ['createdAt', 'updatedAt']) {
+    if (typeof plan[field] !== 'string' || !Number.isFinite(Date.parse(plan[field]))) errors.push(`plan.${field} is invalid`);
+  }
+  if (Array.isArray(plan.commands) && Array.isArray(plan.affectedAreas)) {
+    const contractErrors = validateTaskPacket({
+      schemaVersion: 2, taskId: 'saved-validation-plan', reviewedHeadSha: plan.headSha,
+      finding: 'Saved integrated targeted-validation union.', evidence: 'Durable orchestrator plan.',
+      affectedAreas: plan.affectedAreas, decisionIds: [], allowedPaths: ['scripts/**'], forbiddenPaths: [],
+      dependencies: [], acceptanceCriteria: ['All saved checks complete.'],
+      requiredValidation: {
+        unit: plan.commands.filter((entry) => entry?.kind === 'unit').map((entry) => ({ command: entry.command, reason: entry.reason })),
+        system: plan.commands.filter((entry) => entry?.kind === 'system').map((entry) => ({
+          command: entry.command, reason: entry.reason, selectors: entry.selectors, projects: entry.projects,
+        })),
+      },
+    });
+    errors.push(...contractErrors.map((error) => `plan command contract: ${error}`));
+  }
+  return errors;
+}
+
+function readValidationPlan(cwd, state) {
+  const path = validationPlanPath(cwd, state.prNumber);
+  if (!existsSync(path)) throw new StateError(`No saved targeted validation plan at ${path}`, 'VALIDATION_PLAN_NOT_FOUND');
+  let plan;
+  try {
+    const source = readFileSync(path, 'utf8');
+    if (Buffer.byteLength(source, 'utf8') > VALIDATION_PLAN_LIMIT_BYTES) throw new Error('plan exceeds 64 KiB');
+    plan = JSON.parse(source);
+  } catch (error) {
+    throw new StateError(`Unable to read targeted validation plan: ${error.message}`, 'INVALID_VALIDATION_PLAN');
+  }
+  const errors = validateValidationPlan(plan, state);
+  if (errors.length > 0) throw new StateError(`Invalid targeted validation plan:\n- ${errors.join('\n- ')}`, 'INVALID_VALIDATION_PLAN');
+  return plan;
+}
+
+function assertCleanExactIntegrationHead(state) {
+  const actual = gitSnapshot(state.integrationWorktree);
+  if (actual.headSha !== state.currentIntegrationHeadSha) {
+    throw new StateError('Integration HEAD differs from active state; checkpoint Git metadata first', 'VALIDATION_PLAN_STALE');
+  }
+  if (actual.dirty) throw new StateError('Integration checkout must be clean for targeted validation', 'VALIDATION_CHECKOUT_DIRTY');
+  return actual;
+}
+
+function actionableIntegratedTaskIds(state) {
+  return state.tasks.filter((task) => task.disposition === 'actionable' && task.status === 'integrated')
+    .map((task) => task.id).sort();
+}
+
+function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, replace, now }) {
+  const state = loadState(cwd, prNumber);
+  if (!state) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  if (!VALIDATION_PLANNING_PHASES.has(state.phase)) {
+    throw new StateError(`Cannot plan targeted validation while phase is ${state.phase}`, 'VALIDATION_PLAN_PHASE_BLOCKED');
+  }
+  if (state.validationStatus.status !== 'not-run') {
+    throw new StateError('Targeted validation proof must be reset before planning', 'TARGETED_VALIDATION_RESET_REQUIRED');
+  }
+  assertCleanExactIntegrationHead(state);
+  if (!Array.isArray(taskPackets) || taskPackets.length === 0) {
+    throw new StateError('At least one task packet is required', 'INVALID_VALIDATION_PLAN');
+  }
+  const packetErrors = taskPackets.flatMap((packet, index) => validateTaskPacket(packet).map((error) => `packet ${index}: ${error}`));
+  if (packetErrors.length > 0) throw new StateError(`Invalid task packets:\n- ${packetErrors.join('\n- ')}`, 'INVALID_VALIDATION_PLAN');
+  const sortedPackets = [...taskPackets].sort((left, right) => left.taskId.localeCompare(right.taskId));
+  const packetIds = sortedPackets.map((packet) => packet.taskId);
+  const expectedIds = actionableIntegratedTaskIds(state);
+  if (new Set(packetIds).size !== packetIds.length || JSON.stringify(packetIds) !== JSON.stringify(expectedIds)) {
+    throw new StateError('Task packets must exactly cover current actionable integrated tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
+  }
+  const validationUnion = unionRequiredValidation(sortedPackets);
+  const commands = [
+    ...validationUnion.unit.map((entry) => ({ ...entry, kind: 'unit', selectors: [], projects: [] })),
+    ...validationUnion.system.map((entry) => ({ ...entry, kind: 'system' })),
+  ];
+  if (commands.length === 0) throw new StateError('Targeted validation union must not be empty', 'INVALID_VALIDATION_PLAN');
+  const path = validationPlanPath(cwd, state.prNumber);
+  if (existsSync(path)) {
+    let existing;
+    try {
+      existing = readValidationPlan(cwd, state);
+    } catch (error) {
+      if (error.code !== 'INVALID_VALIDATION_PLAN') throw error;
+      try {
+        existing = JSON.parse(readFileSync(path, 'utf8'));
+      } catch (parseError) {
+        throw new StateError(`Unable to read targeted validation plan: ${parseError.message}`, 'INVALID_VALIDATION_PLAN');
+      }
+      const historicalErrors = validateValidationPlan(existing, {
+        ...state, revision: existing?.stateRevision, currentIntegrationHeadSha: existing?.headSha,
+      });
+      if (historicalErrors.length > 0) {
+        throw new StateError(`Invalid targeted validation plan:\n- ${historicalErrors.join('\n- ')}`, 'INVALID_VALIDATION_PLAN');
+      }
+    }
+    const sameDefinition = JSON.stringify(existing.taskIds) === JSON.stringify(packetIds)
+      && JSON.stringify(existing.commands.map((entry) => entry.command)) === JSON.stringify(commands.map((entry) => entry.command));
+    if (!replace && sameDefinition && existing.commands.every((entry) => entry.status === 'pending')) return existing;
+    if (!replace) throw new StateError('A saved validation plan already exists; use --replace to start a fresh plan', 'VALIDATION_PLAN_REPLACE_REQUIRED');
+  }
+  const timestamp = now();
+  const plan = {
+    schemaVersion: 1,
+    prNumber: state.prNumber,
+    stateRevision: state.revision,
+    headSha: state.currentIntegrationHeadSha,
+    taskIds: packetIds,
+    affectedAreas: [...new Set(sortedPackets.flatMap((packet) => packet.affectedAreas))].sort(),
+    commands: commands.map((entry) => ({
+      ...entry, argv: parseTargetedValidationCommand(entry.command), status: 'pending', exitCode: null, summary: null, completedAt: null,
+    })),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  const errors = validateValidationPlan(plan, state);
+  if (errors.length > 0) throw new StateError(`Invalid targeted validation plan:\n- ${errors.join('\n- ')}`, 'INVALID_VALIDATION_PLAN');
+  if (Buffer.byteLength(serializeJson(plan), 'utf8') > VALIDATION_PLAN_LIMIT_BYTES) {
+    throw new StateError('Targeted validation plan exceeds 64 KiB', 'VALIDATION_PLAN_TOO_LARGE');
+  }
+  atomicWriteJson(path, plan);
+  appendEvent(cwd, state.prNumber, { type: 'targeted-validation-planned', summary: `Saved ${commands.length} targeted checks for ${state.currentIntegrationHeadSha}` });
+  return plan;
+}
+
+export function buildTargetedValidationPlan({ cwd = process.cwd(), prNumber, taskPackets, replace = false, now = utcNow } = {}) {
+  const selectedPr = prNumber ?? activePrNumber(cwd);
+  if (selectedPr === null || selectedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  const current = loadState(cwd, selectedPr);
+  if (!VALIDATION_PLANNING_PHASES.has(current.phase)) {
+    throw new StateError(`Cannot plan targeted validation while phase is ${current.phase}`, 'VALIDATION_PLAN_PHASE_BLOCKED');
+  }
+  if (current.validationStatus.status !== 'not-run' && !replace) {
+    throw new StateError('Targeted validation proof already exists; use --replace to start a fresh plan', 'VALIDATION_PLAN_REPLACE_REQUIRED');
+  }
+  if (current.validationStatus.status !== 'not-run') {
+    checkpointTargetedValidationReset({ cwd, prNumber: selectedPr, expectedRevision: current.revision });
+  }
+  return withStateLock(cwd, selectedPr, () => buildTargetedValidationPlanUnlocked({
+    cwd, prNumber: selectedPr, taskPackets, replace, now,
+  }));
 }
 
 function processExists(pid) {
@@ -240,17 +480,9 @@ function readStateDocument(path) {
   }
 }
 
-function upgradeLoadedStateV2Shape(state) {
-  if (state?.schemaVersion === 2
-      && !Object.prototype.hasOwnProperty.call(state, 'verificationEscalation')) {
-    return { ...state, verificationEscalation: null };
-  }
-  return state;
-}
-
 function parseState(path) {
   const document = readStateDocument(path);
-  const state = upgradeLoadedStateV2Shape(document);
+  const state = document;
   if (state?.schemaVersion === 1) {
     const legacyErrors = validatePrReviewStateV1(state);
     if (legacyErrors.length > 0) {
@@ -258,6 +490,16 @@ function parseState(path) {
     }
     throw new StateError(
       `State at ${path} uses schema v1; run the explicit migrate command`,
+      'STATE_MIGRATION_REQUIRED',
+    );
+  }
+  if (state?.schemaVersion === 2) {
+    try { migratePrReviewStateV2(state); } catch (error) {
+      if (error instanceof StateError) throw error;
+      throw new StateError(`Invalid state at ${path}: ${error.message}`, 'INVALID_STATE');
+    }
+    throw new StateError(
+      `State at ${path} uses schema v2; run the explicit migrate command`,
       'STATE_MIGRATION_REQUIRED',
     );
   }
@@ -333,7 +575,7 @@ export function initializeState({
     const path = statePath(cwd, selectedPr);
     if (existsSync(path)) throw new StateError(`State already exists for PR ${selectedPr}`, 'STATE_EXISTS');
     const state = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       revision: 0,
       repository: repo,
       prNumber: selectedPr,
@@ -354,7 +596,9 @@ export function initializeState({
       verificationEscalation: null,
       threadResolutionStatus: emptyThreadProof(),
       blockedReasons: [],
-      validationStatus: { status: 'not-run', headSha: null, checks: [], updatedAt: null },
+      validationStatus: emptyTargetedValidation(),
+      ciValidationStatus: emptyCiValidation(),
+      ciValidationHistory: [],
       nextAction: 'Resolve the PR and pushed head metadata before requesting review.',
       integrationWorktree: root,
       orchestratorSessionId,
@@ -364,7 +608,7 @@ export function initializeState({
     };
     validateStateForWrite(state);
     atomicWriteJson(path, state);
-    atomicWriteJson(activePointerPath(cwd), { schemaVersion: 2, prNumber: selectedPr });
+    atomicWriteJson(activePointerPath(cwd), { schemaVersion: 3, prNumber: selectedPr });
     appendEvent(cwd, selectedPr, { type: 'initialized', summary: `Initialized PR ${selectedPr}` });
     return state;
   });
@@ -432,12 +676,57 @@ function migrateTaskV1(task, integrationMap) {
 
 function migrateValidationProof(proof, head) {
   if (proof.status === 'passed' && proof.headSha === head && proof.checks.length > 0 && proof.updatedAt !== null) {
-    return { ...proof, checks: unique(proof.checks) };
+    return { source: 'orchestrator', scope: 'targeted', ...proof, checks: unique(proof.checks) };
   }
   if (proof.status === 'failed' && proof.headSha !== null && proof.updatedAt !== null) {
-    return { ...proof, checks: unique(proof.checks) };
+    return { source: 'orchestrator', scope: 'targeted', ...proof, checks: unique(proof.checks) };
   }
-  return { status: 'not-run', headSha: null, checks: [], updatedAt: null };
+  return emptyTargetedValidation();
+}
+
+export function migratePrReviewStateV2(legacyState, { migratedAt = utcNow() } = {}) {
+  if (!legacyState || legacyState.schemaVersion !== 2) {
+    throw new StateError('Expected schema v2 state', 'INVALID_STATE');
+  }
+  const normalized = Object.prototype.hasOwnProperty.call(legacyState, 'verificationEscalation')
+    ? legacyState : { ...legacyState, verificationEscalation: null };
+  for (const field of ['ciValidationStatus', 'ciValidationHistory']) {
+    if (Object.prototype.hasOwnProperty.call(normalized, field)) {
+      throw new StateError(`Schema v2 state cannot contain ${field}`, 'INVALID_STATE');
+    }
+  }
+  const wasComplete = normalized.phase === 'complete';
+  const validationMustBeRebuilt = normalized.validationStatus?.status === 'passed';
+  const migrated = {
+    ...normalized,
+    schemaVersion: 3,
+    revision: normalized.revision + 1,
+    validationStatus: emptyTargetedValidation(),
+    ciValidationStatus: emptyCiValidation(),
+    ciValidationHistory: [],
+    nextAction: wasComplete || validationMustBeRebuilt
+      ? 'Reconfirm targeted validation, full GitHub Actions, and the exact review commit after schema v3 migration.'
+      : normalized.nextAction,
+    phase: wasComplete || validationMustBeRebuilt ? 'recovering' : normalized.phase,
+    updatedAt: migratedAt,
+  };
+  const legacyCompletionPlaceholder = {
+    source: 'github-actions', scope: 'full', status: 'passed', headSha: normalized.currentIntegrationHeadSha,
+    checks: ['schema-v2 completion invariant validation only'], workflowRunId: 1,
+    workflowRunUrl: 'https://github.com/sky-bar/schema-v2-migration-placeholder', updatedAt: migratedAt,
+  };
+  const validationCandidate = wasComplete ? {
+    ...migrated,
+    phase: 'complete',
+    validationStatus: migrateValidationProof(normalized.validationStatus, normalized.currentIntegrationHeadSha),
+    ciValidationStatus: legacyCompletionPlaceholder,
+    ciValidationHistory: [legacyCompletionPlaceholder],
+  } : migrated;
+  const errors = validatePrReviewState(validationCandidate);
+  if (errors.length > 0) {
+    throw new StateError(`Unable to migrate schema v2 state:\n- ${errors.join('\n- ')}`, 'STATE_MIGRATION_FAILED');
+  }
+  return migrated;
 }
 
 export function migratePrReviewStateV1(legacyState, {
@@ -458,7 +747,7 @@ export function migratePrReviewStateV1(legacyState, {
       }
     }
   }
-  const migrated = {
+  const schemaV2 = {
     schemaVersion: 2,
     revision: legacyState.revision + 1,
     repository: legacyState.repository,
@@ -492,11 +781,7 @@ export function migratePrReviewStateV1(legacyState, {
     git: legacyState.git,
     updatedAt: migratedAt,
   };
-  const errors = validatePrReviewState(migrated);
-  if (errors.length > 0) {
-    throw new StateError(`Unable to migrate schema v1 state:\n- ${errors.join('\n- ')}`, 'STATE_MIGRATION_FAILED');
-  }
-  return migrated;
+  return migratePrReviewStateV2(schemaV2, { migratedAt });
 }
 
 export function migrateState({ cwd = process.cwd(), prNumber, integrationMap } = {}) {
@@ -515,31 +800,33 @@ export function migrateState({ cwd = process.cwd(), prNumber, integrationMap } =
     if (!existsSync(path)) throw new StateError(`No state file at ${path}`, 'STATE_NOT_FOUND');
     const legacySource = readFileSync(path, 'utf8');
     const legacy = readStateDocument(path);
-    if (legacy.schemaVersion === 2) throw new StateError('State already uses schema v2', 'STATE_ALREADY_MIGRATED');
-    const state = migratePrReviewStateV1(legacy, {
-      integrationMap,
-      isAncestor: (ancestor, descendant) => runGit(
-        ['merge-base', '--is-ancestor', ancestor, descendant],
-        { cwd: legacy.integrationWorktree, allowFailure: true },
-      ).status === 0,
-    });
+    if (legacy.schemaVersion === 3) throw new StateError('State already uses schema v3', 'STATE_ALREADY_MIGRATED');
+    const state = legacy.schemaVersion === 1
+      ? migratePrReviewStateV1(legacy, {
+          integrationMap,
+          isAncestor: (ancestor, descendant) => runGit(
+            ['merge-base', '--is-ancestor', ancestor, descendant],
+            { cwd: legacy.integrationWorktree, allowFailure: true },
+          ).status === 0,
+        })
+      : migratePrReviewStateV2(legacy);
     validateStateForWrite(state);
-    const backupPath = join(stateDirectory(cwd, selectedPr), 'state.v1.backup.json');
+    const backupPath = join(stateDirectory(cwd, selectedPr), `state.v${legacy.schemaVersion}.backup.json`);
     if (existsSync(backupPath)) {
       const existingSource = readFileSync(backupPath, 'utf8');
       let semanticallyEqual = false;
       try { semanticallyEqual = JSON.stringify(JSON.parse(existingSource)) === JSON.stringify(legacy); } catch { /* fail closed */ }
       if (existingSource !== legacySource && !semanticallyEqual) {
-        throw new StateError(`Migration backup differs from current v1 state at ${backupPath}`, 'MIGRATION_BACKUP_CONFLICT');
+        throw new StateError(`Migration backup differs from current v${legacy.schemaVersion} state at ${backupPath}`, 'MIGRATION_BACKUP_CONFLICT');
       }
     } else {
       atomicWriteText(backupPath, legacySource);
     }
     atomicWriteJson(path, state);
-    atomicWriteJson(activePointerPath(cwd), { schemaVersion: 2, prNumber: selectedPr });
+    atomicWriteJson(activePointerPath(cwd), { schemaVersion: 3, prNumber: selectedPr });
     appendEvent(cwd, selectedPr, {
       type: 'state-migrated',
-      summary: `Migrated PR ${selectedPr} state from schema v1 to v2`,
+      summary: `Migrated PR ${selectedPr} state from schema v${legacy.schemaVersion} to v3`,
     });
     return { state, backupPath };
   });
@@ -570,57 +857,63 @@ export function appendEvent(cwd, prNumber, input = {}) {
   atomicWriteText(path, `${existing}${JSON.stringify(event)}\n`);
 }
 
+function checkpointStateUnlocked({
+  cwd, selectedPr, nextState, expectedRevision, event, eventWriter, transitionAuthorization,
+}) {
+  if (event) prepareEvent(event);
+  const current = loadState(cwd, selectedPr);
+  const expected = expectedRevision ?? nextState?.revision;
+  if (expected !== current.revision) {
+    throw new StateError(`State revision changed: expected ${expected}, found ${current.revision}`, 'STATE_REVISION_CONFLICT');
+  }
+  const immutable = ['repository', 'prNumber', 'baseSha', 'integrationWorktree'];
+  for (const field of immutable) {
+    if (nextState[field] !== current[field]) {
+      throw new StateError(`${field} is immutable`, 'IMMUTABLE_STATE_IDENTITY');
+    }
+  }
+  if (JSON.stringify(nextState.releaseBaseline) !== JSON.stringify(current.releaseBaseline)) {
+    throw new StateError('releaseBaseline is immutable', 'IMMUTABLE_STATE_IDENTITY');
+  }
+  if (JSON.stringify(nextState.legacyReviewProvenance) !== JSON.stringify(current.legacyReviewProvenance)) {
+    throw new StateError('legacyReviewProvenance is immutable', 'IMMUTABLE_STATE_IDENTITY');
+  }
+  if (nextState.reviewRound < current.reviewRound) {
+    throw new StateError('reviewRound cannot decrease', 'INVALID_LIFECYCLE_TRANSITION');
+  }
+  if (current.verificationReviewUsed && !nextState.verificationReviewUsed) {
+    throw new StateError('verificationReviewUsed is sticky', 'INVALID_LIFECYCLE_TRANSITION');
+  }
+  if (nextState.abandonmentReason !== null) {
+    throw new StateError('abandonmentReason must remain null in active state', 'INVALID_LIFECYCLE_TRANSITION');
+  }
+  assertCheckpointProvenance(current, nextState, transitionAuthorization);
+  const state = { ...nextState, revision: current.revision + 1, updatedAt: utcNow() };
+  validateStateForWrite(state);
+  atomicWriteJson(statePath(cwd, selectedPr), state);
+  if (event) {
+    try {
+      eventWriter(cwd, selectedPr, event);
+    } catch (error) {
+      atomicWriteJson(statePath(cwd, selectedPr), current);
+      throw new StateError(
+        `Checkpoint event failed; state was rolled back: ${error.message}`,
+        'CHECKPOINT_EVENT_FAILED',
+      );
+    }
+  }
+  return state;
+}
+
 export function checkpointState({
   cwd = process.cwd(), prNumber, nextState, expectedRevision, event, eventWriter = appendEvent,
   transitionAuthorization,
 } = {}) {
   const selectedPr = prNumber ?? nextState?.prNumber ?? activePrNumber(cwd);
   if (selectedPr === null || selectedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
-  if (event) prepareEvent(event);
-  return withStateLock(cwd, selectedPr, () => {
-    const current = loadState(cwd, selectedPr);
-    const expected = expectedRevision ?? nextState?.revision;
-    if (expected !== current.revision) {
-      throw new StateError(`State revision changed: expected ${expected}, found ${current.revision}`, 'STATE_REVISION_CONFLICT');
-    }
-    const immutable = ['repository', 'prNumber', 'baseSha', 'integrationWorktree'];
-    for (const field of immutable) {
-      if (nextState[field] !== current[field]) {
-        throw new StateError(`${field} is immutable`, 'IMMUTABLE_STATE_IDENTITY');
-      }
-    }
-    if (JSON.stringify(nextState.releaseBaseline) !== JSON.stringify(current.releaseBaseline)) {
-      throw new StateError('releaseBaseline is immutable', 'IMMUTABLE_STATE_IDENTITY');
-    }
-    if (JSON.stringify(nextState.legacyReviewProvenance) !== JSON.stringify(current.legacyReviewProvenance)) {
-      throw new StateError('legacyReviewProvenance is immutable', 'IMMUTABLE_STATE_IDENTITY');
-    }
-    if (nextState.reviewRound < current.reviewRound) {
-      throw new StateError('reviewRound cannot decrease', 'INVALID_LIFECYCLE_TRANSITION');
-    }
-    if (current.verificationReviewUsed && !nextState.verificationReviewUsed) {
-      throw new StateError('verificationReviewUsed is sticky', 'INVALID_LIFECYCLE_TRANSITION');
-    }
-    if (nextState.abandonmentReason !== null) {
-      throw new StateError('abandonmentReason must remain null in active state', 'INVALID_LIFECYCLE_TRANSITION');
-    }
-    assertCheckpointProvenance(current, nextState, transitionAuthorization);
-    const state = { ...nextState, revision: current.revision + 1, updatedAt: utcNow() };
-    validateStateForWrite(state);
-    atomicWriteJson(statePath(cwd, selectedPr), state);
-    if (event) {
-      try {
-        eventWriter(cwd, selectedPr, event);
-      } catch (error) {
-        atomicWriteJson(statePath(cwd, selectedPr), current);
-        throw new StateError(
-          `Checkpoint event failed; state was rolled back: ${error.message}`,
-          'CHECKPOINT_EVENT_FAILED',
-        );
-      }
-    }
-    return state;
-  });
+  return withStateLock(cwd, selectedPr, () => checkpointStateUnlocked({
+    cwd, selectedPr, nextState, expectedRevision, event, eventWriter, transitionAuthorization,
+  }));
 }
 
 function sameEvidence(left, right) {
@@ -649,6 +942,9 @@ function assertCheckpointProvenance(current, next, authorization) {
       'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
       'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
     ]) assertImmutableValue(current[field], next[field], field);
+    assertImmutableValue(current.ciValidationStatus, next.ciValidationStatus, 'ciValidationStatus');
+    assertImmutableValue(current.ciValidationHistory, next.ciValidationHistory, 'ciValidationHistory');
+    assertImmutableValue(current.validationStatus, next.validationStatus, 'validationStatus');
   } else if (guardedKind === 'review-request') {
     if (next.reviewHistory.length !== current.reviewHistory.length + 1) {
       throw new StateError('Review requests must append exactly one history entry', 'IMMUTABLE_STATE_PROVENANCE');
@@ -677,11 +973,40 @@ function assertCheckpointProvenance(current, next, authorization) {
       'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
       'reviewRequest', 'reviewOutcome', 'reviewHistory',
     ]) assertImmutableValue(current[field], next[field], field);
+  } else if (guardedKind === 'ci-validation') {
+    for (const field of [
+      'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
+      'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
+    ]) assertImmutableValue(current[field], next[field], field);
+    if (next.ciValidationHistory.length !== current.ciValidationHistory.length + 1) {
+      throw new StateError('CI validation must append exactly one workflow-run record', 'IMMUTABLE_STATE_PROVENANCE');
+    }
+    current.ciValidationHistory.forEach((entry, index) => assertImmutableValue(
+      entry, next.ciValidationHistory[index], `ciValidationHistory[${index}]`,
+    ));
+  } else if (guardedKind === 'targeted-validation') {
+    for (const field of [
+      'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
+      'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
+    ]) assertImmutableValue(current[field], next[field], field);
+    assertImmutableValue(current.ciValidationStatus, next.ciValidationStatus, 'ciValidationStatus');
+    assertImmutableValue(current.ciValidationHistory, next.ciValidationHistory, 'ciValidationHistory');
+  } else if (guardedKind === 'git-metadata') {
+    assertImmutableValue(current.ciValidationHistory, next.ciValidationHistory, 'ciValidationHistory');
+    if (!sameEvidence(current.ciValidationStatus, next.ciValidationStatus)) {
+      assertImmutableValue(emptyCiValidation(), next.ciValidationStatus, 'invalidated ciValidationStatus');
+    }
+    if (!sameEvidence(current.validationStatus, next.validationStatus)) {
+      assertImmutableValue(emptyTargetedValidation(), next.validationStatus, 'invalidated validationStatus');
+    }
   } else {
     for (const field of [
       'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
       'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
     ]) assertImmutableValue(current[field], next[field], field);
+  }
+  if (!['targeted-validation', 'git-metadata'].includes(guardedKind)) {
+    assertImmutableValue(current.validationStatus, next.validationStatus, 'validationStatus');
   }
   if (current.phase !== 'complete' && next.phase === 'complete' && guardedKind !== 'cycle-completion') {
     throw new StateError('Only the guarded completion checkpoint may enter complete', 'PROTECTED_TRANSITION_REQUIRED');
@@ -884,6 +1209,154 @@ export function buildCompletionTransition(state, external) {
   return next;
 }
 
+export function buildCiValidationTransition(state, evidence) {
+  const existing = state.ciValidationHistory.find((entry) => entry.workflowRunId === evidence?.workflowRunId);
+  if (existing) {
+    if (!sameEvidence(existing, evidence)) {
+      throw new StateError('GitHub Actions workflow run ID was reused with different evidence', 'CI_EVIDENCE_CONFLICT');
+    }
+    return state;
+  }
+  if (evidence?.source !== 'github-actions' || evidence?.scope !== 'full'
+      || !['passed', 'failed'].includes(evidence?.status)
+      || evidence?.headSha !== state.currentIntegrationHeadSha) {
+    throw new StateError('CI evidence must be full GitHub Actions validation for the current integration HEAD', 'INVALID_CI_VALIDATION');
+  }
+  const next = {
+    ...state,
+    ciValidationStatus: evidence,
+    ciValidationHistory: [...state.ciValidationHistory, evidence],
+    nextAction: evidence.status === 'passed'
+      ? state.nextAction
+      : 'Inspect the failed full GitHub Actions run, then record a new run for the same review commit.',
+  };
+  const errors = validatePrReviewState(next);
+  if (errors.length > 0) throw new StateError(`Invalid CI validation transition:\n- ${errors.join('\n- ')}`, 'INVALID_CI_VALIDATION');
+  return next;
+}
+
+function buildTargetedValidationTransition(state, plan, timestamp = utcNow()) {
+  const errors = validateValidationPlan(plan, state);
+  if (errors.length > 0) throw new StateError(`Invalid targeted validation plan:\n- ${errors.join('\n- ')}`, 'INVALID_VALIDATION_PLAN');
+  if (plan.commands.some((entry) => entry.status === 'pending')) {
+    throw new StateError('Targeted validation plan still has pending commands', 'VALIDATION_PLAN_INCOMPLETE');
+  }
+  if (JSON.stringify([...plan.taskIds].sort()) !== JSON.stringify(actionableIntegratedTaskIds(state))) {
+    throw new StateError('Targeted validation plan no longer covers current actionable integrated tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
+  }
+  const status = plan.commands.every((entry) => entry.status === 'passed') ? 'passed' : 'failed';
+  const next = {
+    ...state,
+    validationStatus: {
+      source: 'orchestrator', scope: 'targeted', status, headSha: plan.headSha,
+      checks: plan.commands.map((entry) => entry.command), updatedAt: timestamp,
+    },
+    nextAction: status === 'passed'
+      ? state.nextAction
+      : 'Fix the failed targeted check, rebuild the validation plan, and run it again.',
+  };
+  const stateErrors = validatePrReviewState(next);
+  if (stateErrors.length > 0) throw new StateError(`Invalid targeted validation transition:\n- ${stateErrors.join('\n- ')}`, 'INVALID_TARGETED_VALIDATION');
+  return next;
+}
+
+export function checkpointTargetedValidationReset({ cwd = process.cwd(), prNumber, expectedRevision } = {}) {
+  const current = loadState(cwd, prNumber);
+  if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  if (current.validationStatus.status === 'not-run') return current;
+  const nextState = {
+    ...current,
+    validationStatus: emptyTargetedValidation(),
+    ...(current.phase === 'ready-for-review' ? {
+      phase: 'recovering', nextAction: 'Run the saved targeted validation plan before requesting review.',
+    } : {}),
+  };
+  return checkpointState({
+    cwd, prNumber: current.prNumber, nextState, expectedRevision,
+    event: { type: 'targeted-validation-reset', summary: 'Reset targeted validation before creating a new plan' },
+    transitionAuthorization: protectedTransition(nextState, 'targeted-validation'),
+  });
+}
+
+function checkpointTargetedValidationUnlocked({ cwd, selectedPr, expectedRevision }) {
+  const current = loadState(cwd, selectedPr);
+  if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  assertCleanExactIntegrationHead(current);
+  const plan = readValidationPlan(cwd, current);
+  const nextState = buildTargetedValidationTransition(current, plan);
+  return checkpointStateUnlocked({
+    cwd, selectedPr: current.prNumber, nextState, expectedRevision, eventWriter: appendEvent,
+    event: {
+      type: 'targeted-validation-recorded',
+      summary: `Recorded ${nextState.validationStatus.status} targeted validation for ${current.currentIntegrationHeadSha}`,
+    },
+    transitionAuthorization: protectedTransition(nextState, 'targeted-validation'),
+  });
+}
+
+export function checkpointTargetedValidation({ cwd = process.cwd(), prNumber, expectedRevision } = {}) {
+  const selectedPr = prNumber ?? activePrNumber(cwd);
+  if (selectedPr === null || selectedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  return withStateLock(cwd, selectedPr, () => checkpointTargetedValidationUnlocked({
+    cwd, selectedPr, expectedRevision,
+  }));
+}
+
+export function executeTargetedValidationPlan({
+  cwd = process.cwd(), prNumber, runCommand = (argv, commandCwd) => spawnSync(argv[0], argv.slice(1), {
+    cwd: commandCwd, stdio: 'inherit', shell: false,
+  }), now = utcNow, onCommandRecorded, onProofCheckpointed,
+} = {}) {
+  const selectedPr = prNumber ?? activePrNumber(cwd);
+  if (selectedPr === null || selectedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  return withStateLock(cwd, selectedPr, () => {
+    let state = loadState(cwd, selectedPr);
+    if (!state) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+    assertCleanExactIntegrationHead(state);
+    let plan = readValidationPlan(cwd, state);
+    if (JSON.stringify([...plan.taskIds].sort()) !== JSON.stringify(actionableIntegratedTaskIds(state))) {
+      throw new StateError('Targeted validation plan no longer covers current actionable integrated tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
+    }
+    for (let index = 0; index < plan.commands.length; index += 1) {
+      const entry = plan.commands[index];
+      if (entry.status !== 'pending') continue;
+      state = loadState(cwd, state.prNumber);
+      assertCleanExactIntegrationHead(state);
+      if (state.currentIntegrationHeadSha !== plan.headSha || state.revision !== plan.stateRevision) {
+        throw new StateError('Targeted validation plan is stale', 'VALIDATION_PLAN_STALE');
+      }
+      if (JSON.stringify([...plan.taskIds].sort()) !== JSON.stringify(actionableIntegratedTaskIds(state))) {
+        throw new StateError('Targeted validation plan no longer covers current actionable integrated tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
+      }
+      let result;
+      try {
+        result = runCommand([...entry.argv], state.integrationWorktree);
+      } catch (error) {
+        result = { status: 1, error };
+      }
+      const exitCode = Number.isInteger(result?.status) && result.status >= 0 ? result.status : 1;
+      const completedAt = now();
+      const summary = exitCode === 0
+        ? 'Passed.'
+        : `Failed with exit code ${exitCode}${result?.error?.message ? `: ${String(result.error.message).slice(0, 400)}` : '.'}`;
+      plan = {
+        ...plan,
+        commands: plan.commands.map((item, itemIndex) => itemIndex === index ? {
+          ...item, status: exitCode === 0 ? 'passed' : 'failed', exitCode, summary, completedAt,
+        } : item),
+        updatedAt: completedAt,
+      };
+      atomicWriteJson(validationPlanPath(cwd, state.prNumber), plan);
+      onCommandRecorded?.(entry.command, plan);
+    }
+    const checkpointed = checkpointTargetedValidationUnlocked({
+      cwd, selectedPr: state.prNumber, expectedRevision: state.revision,
+    });
+    onProofCheckpointed?.(checkpointed, plan);
+    return { plan, state: checkpointed };
+  });
+}
+
 export function completeIntegratedTasks(state, { threadResolutionStatus }) {
   const tasks = state.tasks.map((task) => {
     const eligibleNotApplicable = task.status === 'not-applicable'
@@ -961,6 +1434,19 @@ export function checkpointCompletion({
   });
 }
 
+export function checkpointCiValidation({
+  cwd = process.cwd(), prNumber, evidence, expectedRevision, event,
+} = {}) {
+  const current = loadState(cwd, prNumber);
+  if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  const nextState = buildCiValidationTransition(current, evidence);
+  if (nextState === current) return current;
+  return checkpointState({
+    cwd, prNumber: current.prNumber, nextState, expectedRevision,
+    event, transitionAuthorization: protectedTransition(nextState, 'ci-validation'),
+  });
+}
+
 export function checkpointTaskCompletion({
   cwd = process.cwd(), prNumber, threadResolutionStatus, expectedRevision, event,
 } = {}) {
@@ -1017,7 +1503,8 @@ export function checkpointGitMetadata({ cwd = process.cwd(), sessionId, backup =
     currentIntegrationHeadSha: git.headSha,
     git,
     ...(proofInvalidated ? {
-      validationStatus: { status: 'not-run', headSha: null, checks: [], updatedAt: null },
+      validationStatus: emptyTargetedValidation(),
+      ciValidationStatus: emptyCiValidation(),
       threadResolutionStatus: {
         ...state.threadResolutionStatus,
         status: 'not-run',
@@ -1041,12 +1528,54 @@ export function checkpointGitMetadata({ cwd = process.cwd(), sessionId, backup =
     nextState,
     expectedRevision: state.revision,
     event: { type: 'git-checkpoint', summary: `Checkpointed integration HEAD ${git.headSha}` },
+    transitionAuthorization: protectedTransition(nextState, 'git-metadata'),
   });
   return { state: updated, checkpointed: true, warning: git.dirty ? 'Integration checkout is dirty' : null };
 }
 
 function truncate(text, max) {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+function validationPlanRecoverySummary(cwd, state) {
+  const path = validationPlanPath(cwd, state.prNumber);
+  if (!existsSync(path)) return 'missing';
+  try {
+    const plan = readValidationPlan(cwd, state);
+    const counts = Object.fromEntries(['pending', 'passed', 'failed'].map((status) => [
+      status, plan.commands.filter((entry) => entry.status === status).length,
+    ]));
+    return `${plan.headSha}; pending ${counts.pending}, passed ${counts.passed}, failed ${counts.failed}`;
+  } catch (error) {
+    if (error.code !== 'INVALID_VALIDATION_PLAN') return `unavailable (${error.code ?? 'error'})`;
+    try {
+      const source = readFileSync(path, 'utf8');
+      if (Buffer.byteLength(source, 'utf8') > VALIDATION_PLAN_LIMIT_BYTES) return 'invalid';
+      const plan = JSON.parse(source);
+      const historicalErrors = validateValidationPlan(plan, {
+        ...state, revision: plan?.stateRevision, currentIntegrationHeadSha: plan?.headSha,
+      });
+      if (historicalErrors.length > 0) return 'invalid';
+      const counts = Object.fromEntries(['pending', 'passed', 'failed'].map((status) => [
+        status, plan.commands.filter((entry) => entry.status === status).length,
+      ]));
+      const countSummary = `pending ${counts.pending}, passed ${counts.passed}, failed ${counts.failed}`;
+      if (plan.headSha !== state.currentIntegrationHeadSha) {
+        return `historical for ${plan.headSha}; ${countSummary}; current HEAD is ${state.currentIntegrationHeadSha}`;
+      }
+      const recordedStatus = plan.commands.every((entry) => entry.status === 'passed') ? 'passed' : 'failed';
+      const proofMatches = counts.pending === 0
+        && state.validationStatus.source === 'orchestrator'
+        && state.validationStatus.scope === 'targeted'
+        && state.validationStatus.status === recordedStatus
+        && state.validationStatus.headSha === plan.headSha
+        && JSON.stringify(state.validationStatus.checks) === JSON.stringify(plan.commands.map((entry) => entry.command));
+      if (proofMatches) return `${plan.headSha}; completed; ${countSummary}; recorded proof ${recordedStatus}`;
+      return `${plan.headSha}; historical; ${countSummary}; current proof not recorded`;
+    } catch {
+      return 'invalid';
+    }
+  }
 }
 
 export function renderRecoverySummary({ cwd = process.cwd(), prNumber, maxCharacters = 9000 } = {}) {
@@ -1069,6 +1598,7 @@ export function renderRecoverySummary({ cwd = process.cwd(), prNumber, maxCharac
       ? `${state.verificationEscalation.reason} at PR ${state.verificationEscalation.observedPrHeadSha}`
       : 'none'}`,
     `Integration HEAD: ${state.currentIntegrationHeadSha}`,
+    `Targeted validation plan: ${validationPlanRecoverySummary(cwd, state)}`,
     'Tasks:',
     ...(taskLines.length > 0 ? taskLines : ['- none']),
     'Decisions:',

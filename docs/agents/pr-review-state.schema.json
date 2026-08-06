@@ -9,11 +9,11 @@
     "requestedHeadSha", "reviewedHeadSha", "currentIntegrationHeadSha", "reviewRound",
     "verificationReviewUsed", "legacyReviewProvenance", "releaseBaseline", "decisions", "tasks", "reviewRequest",
     "reviewOutcome", "reviewHistory", "verificationEscalation", "threadResolutionStatus", "blockedReasons",
-    "validationStatus", "nextAction", "integrationWorktree", "orchestratorSessionId",
+    "validationStatus", "ciValidationStatus", "ciValidationHistory", "nextAction", "integrationWorktree", "orchestratorSessionId",
     "abandonmentReason", "git", "updatedAt"
   ],
   "properties": {
-    "schemaVersion": { "const": 2 },
+    "schemaVersion": { "const": 3 },
     "revision": { "type": "integer", "minimum": 0 },
     "repository": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$", "maxLength": 256 },
     "prNumber": { "type": "integer", "minimum": 1 },
@@ -84,7 +84,17 @@
     "verificationEscalation": { "$ref": "#/$defs/nullableVerificationEscalation" },
     "threadResolutionStatus": { "$ref": "#/$defs/threadResolutionStatus" },
     "blockedReasons": { "$ref": "#/$defs/stringList" },
-    "validationStatus": { "$ref": "#/$defs/proofStatus" },
+    "validationStatus": { "$ref": "#/$defs/targetedProofStatus" },
+    "ciValidationStatus": { "$ref": "#/$defs/ciProofStatus" },
+    "ciValidationHistory": {
+      "type": "array",
+      "items": {
+        "allOf": [
+          { "$ref": "#/$defs/ciProofStatus" },
+          { "type": "object", "properties": { "status": { "enum": ["passed", "failed"] } } }
+        ]
+      }
+    },
     "nextAction": { "type": "string", "minLength": 1, "maxLength": 1000 },
     "integrationWorktree": { "type": "string", "pattern": "^/", "maxLength": 4096 },
     "orchestratorSessionId": { "$ref": "#/$defs/nullableString" },
@@ -115,16 +125,86 @@
       }
     },
     {
+      "if": { "properties": { "phase": { "const": "ready-for-review" } }, "required": ["phase"] },
+      "then": {
+        "$comment": "The manual validator remains authoritative for equality of validation, thread-proof, and Git HEADs with currentIntegrationHeadSha because Draft 2020-12 cannot compare sibling values.",
+        "properties": {
+          "reviewRound": { "type": "integer", "maximum": 3 },
+          "verificationEscalation": { "type": "null" },
+          "validationStatus": {
+            "allOf": [{ "$ref": "#/$defs/targetedProofStatus" }, { "type": "object", "properties": { "status": { "const": "passed" } } }]
+          },
+          "threadResolutionStatus": {
+            "allOf": [{ "$ref": "#/$defs/threadResolutionStatus" }, { "type": "object", "properties": { "status": { "const": "passed" } } }]
+          },
+          "blockedReasons": { "type": "array", "maxItems": 0 },
+          "git": {
+            "type": "object",
+            "properties": { "dirty": { "const": false } }
+          },
+          "tasks": {
+            "type": "array",
+            "items": {
+              "allOf": [
+                { "$ref": "#/$defs/task" },
+                { "type": "object", "properties": { "status": { "const": "completed" }, "disposition": { "not": { "const": "needs-human-decision" } } } }
+              ]
+            }
+          }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "reviewRound": { "const": 3 } }, "required": ["reviewRound"] },
+            "then": { "properties": { "verificationReviewUsed": { "const": false } } }
+          }
+        ]
+      }
+    },
+    {
       "if": { "properties": { "phase": { "const": "complete" } }, "required": ["phase"] },
       "then": {
+        "$comment": "The manual validator remains authoritative for equality among requested, reviewed, request, outcome, targeted-validation, thread-proof, CI, Git, and integration HEADs, and for request/outcome identity binding, because Draft 2020-12 cannot compare sibling values.",
         "properties": {
           "reviewRound": { "type": "integer", "minimum": 1 },
+          "requestedHeadSha": { "$ref": "#/$defs/sha" },
+          "reviewedHeadSha": { "$ref": "#/$defs/sha" },
           "reviewRequest": { "$ref": "#/$defs/reviewRequest" },
           "reviewOutcome": {
             "allOf": [{ "$ref": "#/$defs/reviewOutcome" }, { "type": "object", "properties": { "outcome": { "const": "clean" } } }]
           },
-          "verificationEscalation": { "type": "null" }
-        }
+          "verificationEscalation": { "type": "null" },
+          "validationStatus": {
+            "allOf": [{ "$ref": "#/$defs/targetedProofStatus" }, { "type": "object", "properties": { "status": { "const": "passed" } } }]
+          },
+          "ciValidationStatus": {
+            "allOf": [{ "$ref": "#/$defs/ciProofStatus" }, { "type": "object", "properties": { "status": { "const": "passed" } } }]
+          },
+          "ciValidationHistory": { "type": "array", "minItems": 1 },
+          "reviewHistory": { "type": "array", "minItems": 1 },
+          "threadResolutionStatus": {
+            "allOf": [{ "$ref": "#/$defs/threadResolutionStatus" }, { "type": "object", "properties": { "status": { "const": "passed" } } }]
+          },
+          "blockedReasons": { "type": "array", "maxItems": 0 },
+          "git": {
+            "type": "object",
+            "properties": { "dirty": { "const": false } }
+          },
+          "tasks": {
+            "type": "array",
+            "items": {
+              "allOf": [
+                { "$ref": "#/$defs/task" },
+                { "type": "object", "properties": { "status": { "const": "completed" }, "disposition": { "not": { "const": "needs-human-decision" } } } }
+              ]
+            }
+          }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "reviewRequest": { "type": "object", "properties": { "kind": { "const": "verification" } } } }, "required": ["reviewRequest"] },
+            "then": { "properties": { "reviewRound": { "const": 3 }, "verificationReviewUsed": { "const": true } } }
+          }
+        ]
       }
     },
     {
@@ -251,10 +331,12 @@
     "nullableVerificationEscalation": {
       "oneOf": [{ "$ref": "#/$defs/verificationEscalation" }, { "type": "null" }]
     },
-    "proofStatus": {
+    "targetedProofStatus": {
       "type": "object", "additionalProperties": false,
-      "required": ["status", "headSha", "checks", "updatedAt"],
+      "required": ["source", "scope", "status", "headSha", "checks", "updatedAt"],
       "properties": {
+        "source": { "const": "orchestrator" },
+        "scope": { "const": "targeted" },
         "status": { "enum": ["not-run", "passed", "failed"] },
         "headSha": { "$ref": "#/$defs/nullableSha" },
         "checks": { "$ref": "#/$defs/stringList" },
@@ -274,6 +356,47 @@
           "then": {
             "properties": {
               "headSha": { "$ref": "#/$defs/sha" }, "checks": { "type": "array", "minItems": 1 },
+              "updatedAt": { "type": "string", "format": "date-time" }
+            }
+          }
+        }
+      ]
+    },
+    "ciProofStatus": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "source", "scope", "status", "headSha", "checks", "workflowRunId", "workflowRunUrl", "updatedAt"
+      ],
+      "properties": {
+        "source": { "const": "github-actions" },
+        "scope": { "const": "full" },
+        "status": { "enum": ["not-run", "passed", "failed"] },
+        "headSha": { "$ref": "#/$defs/nullableSha" },
+        "checks": { "$ref": "#/$defs/stringList" },
+        "workflowRunId": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
+        "workflowRunUrl": {
+          "oneOf": [
+            { "type": "string", "format": "uri", "pattern": "^https://", "maxLength": 2000 },
+            { "type": "null" }
+          ]
+        },
+        "updatedAt": { "oneOf": [{ "type": "null" }, { "type": "string", "format": "date-time" }] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "not-run" } }, "required": ["status"] },
+          "then": {
+            "properties": {
+              "headSha": { "type": "null" }, "checks": { "type": "array", "maxItems": 0 },
+              "workflowRunId": { "type": "null" }, "workflowRunUrl": { "type": "null" },
+              "updatedAt": { "type": "null" }
+            }
+          },
+          "else": {
+            "properties": {
+              "headSha": { "$ref": "#/$defs/sha" }, "checks": { "type": "array", "minItems": 1 },
+              "workflowRunId": { "type": "integer", "minimum": 1 },
+              "workflowRunUrl": { "type": "string", "format": "uri", "pattern": "^https://", "maxLength": 2000 },
               "updatedAt": { "type": "string", "format": "date-time" }
             }
           }

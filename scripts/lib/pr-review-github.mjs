@@ -9,12 +9,17 @@ const PAGE_SIZE = 50;
 const MAX_PAGES = 100;
 const MAX_NODES = 10_000;
 const MIN_GRAPHQL_REMAINING = 10;
+const FULL_VALIDATION_CHECK = 'Full validation';
+const GITHUB_ACTIONS_APP = 'github-actions';
+const FULL_VALIDATION_WORKFLOW = 'CI';
+const FULL_VALIDATION_WORKFLOW_PATH = '.github/workflows/ci.yml';
 
 const OPERATIONS = {
   PullRequestMetadata: `query PullRequestMetadata($owner:String!,$repo:String!,$pr:Int!){rateLimit{cost remaining} viewer{login id} repository(owner:$owner,name:$repo){pullRequest(number:$pr){id number url headRefOid}}}`,
   PullRequestComments: `query PullRequestComments($owner:String!,$repo:String!,$pr:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){pullRequest(number:$pr){comments(first:50,after:$cursor){nodes{id databaseId url body createdAt author{__typename login url ... on Bot{id} ... on User{id}}} pageInfo{hasNextPage endCursor}}}}}`,
   PullRequestReviews: `query PullRequestReviews($owner:String!,$repo:String!,$pr:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviews(first:50,after:$cursor){nodes{id databaseId url body state submittedAt commit{oid} author{__typename login url ... on Bot{id} ... on User{id}}} pageInfo{hasNextPage endCursor}}}}}`,
   PullRequestThreads: `query PullRequestThreads($owner:String!,$repo:String!,$pr:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:50,after:$cursor){nodes{id isResolved} pageInfo{hasNextPage endCursor}}}}}`,
+  PullRequestChecks: `query PullRequestChecks($owner:String!,$repo:String!,$pr:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){pullRequest(number:$pr){number headRefOid commits(last:1){nodes{commit{oid statusCheckRollup{state contexts(first:50,after:$cursor){nodes{__typename ... on CheckRun{id databaseId name status conclusion completedAt detailsUrl checkSuite{workflowRun{databaseId url file{path} workflow{name}} app{slug}}} ... on StatusContext{id context state targetUrl}} pageInfo{hasNextPage endCursor}}}}}}}}}`,
   ReviewThreadComments: `query ReviewThreadComments($threadId:ID!,$cursor:String){rateLimit{cost remaining} node(id:$threadId){... on PullRequestReviewThread{comments(first:50,after:$cursor){nodes{id databaseId url body createdAt author{__typename login url ... on Bot{id} ... on User{id}} replyTo{id} pullRequestReview{id}} pageInfo{hasNextPage endCursor}}}}}`,
   RequestReactions: `query RequestReactions($commentId:ID!,$cursor:String){rateLimit{cost remaining} node(id:$commentId){... on IssueComment{reactions(first:50,after:$cursor){nodes{id content createdAt user{__typename login url id}} pageInfo{hasNextPage endCursor}}}}}`,
   AddReviewRequest: `mutation AddReviewRequest($subjectId:ID!,$body:String!,$clientMutationId:String!){addComment(input:{subjectId:$subjectId,body:$body,clientMutationId:$clientMutationId}){clientMutationId}}`,
@@ -140,10 +145,136 @@ export function readRequestReactions(client, commentId) {
   return paginate(client, 'RequestReactions', { commentId }, (data) => data.node?.reactions);
 }
 
+export async function readPullRequestChecks(client, repository, prNumber, expectedHeadSha) {
+  const variables = { ...splitRepository(repository), pr: prNumber };
+  const contexts = [];
+  let cursor = null;
+  let rollupState = null;
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const data = await execute(client, 'PullRequestChecks', { ...variables, cursor });
+    const pr = data.repository?.pullRequest;
+    const commits = pr?.commits?.nodes;
+    if (pr?.number !== prNumber || pr.headRefOid !== expectedHeadSha
+        || !Array.isArray(commits) || commits.length !== 1
+        || commits[0]?.commit?.oid !== expectedHeadSha) {
+      throw new GitHubWorkflowError('Check rollup does not apply to the expected PR HEAD', 'CI_HEAD_MISMATCH');
+    }
+    const commit = commits[0].commit;
+    if (!Object.hasOwn(commit, 'statusCheckRollup')) {
+      throw new GitHubWorkflowError('Commit status check rollup was truncated', 'GRAPHQL_TRUNCATED');
+    }
+    const rollup = commit.statusCheckRollup;
+    if (rollup === null) return { headSha: expectedHeadSha, rollupState: null, contexts: [] };
+    const connection = rollup?.contexts;
+    if (!rollup || typeof rollup.state !== 'string' || !connection || !Array.isArray(connection.nodes)
+        || typeof connection.pageInfo?.hasNextPage !== 'boolean') {
+      throw new GitHubWorkflowError('Commit status check rollup is missing or truncated', 'GRAPHQL_TRUNCATED');
+    }
+    if (rollupState !== null && rollupState !== rollup.state) {
+      throw new GitHubWorkflowError('Commit status check rollup changed during pagination', 'CI_EVIDENCE_AMBIGUOUS');
+    }
+    if (connection.nodes.some((node) => !node || !['CheckRun', 'StatusContext'].includes(node.__typename)
+        || (node.__typename === 'CheckRun' && (typeof node.name !== 'string' || typeof node.status !== 'string'))
+        || (node.__typename === 'StatusContext' && (typeof node.context !== 'string' || typeof node.state !== 'string')))) {
+      throw new GitHubWorkflowError('Commit status context was truncated', 'GRAPHQL_TRUNCATED');
+    }
+    rollupState = rollup.state;
+    contexts.push(...connection.nodes);
+    if (contexts.length > MAX_NODES) {
+      throw new GitHubWorkflowError('PullRequestChecks exceeded the node limit', 'GRAPHQL_TRUNCATED');
+    }
+    if (!connection.pageInfo.hasNextPage) {
+      return { headSha: expectedHeadSha, rollupState, contexts };
+    }
+    if (!connection.pageInfo.endCursor || connection.pageInfo.endCursor === cursor) {
+      throw new GitHubWorkflowError('PullRequestChecks pagination cursor is missing or repeated', 'GRAPHQL_TRUNCATED');
+    }
+    cursor = connection.pageInfo.endCursor;
+  }
+  throw new GitHubWorkflowError('PullRequestChecks exceeded the page limit', 'GRAPHQL_TRUNCATED');
+}
+
+function httpsUrl(value) {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'https:' && parsed.username === '' && parsed.password === '';
+  } catch {
+    return false;
+  }
+}
+
+function ciEvidenceFromRollup(snapshot) {
+  const checkRuns = snapshot.contexts.filter((context) => context?.__typename === 'CheckRun');
+  const namedChecks = [...new Set(snapshot.contexts.map((context) => (
+    context?.__typename === 'CheckRun' ? context.name
+      : context?.__typename === 'StatusContext' ? context.context : null
+  )).filter((name) => typeof name === 'string' && name.length > 0))].sort();
+  const candidates = checkRuns.filter((check) => check.name === FULL_VALIDATION_CHECK
+    && check.checkSuite?.app?.slug === GITHUB_ACTIONS_APP);
+  if (candidates.length === 0) {
+    throw new GitHubWorkflowError('The authoritative Full validation GitHub Actions check is missing', 'CI_CHECK_MISSING');
+  }
+  for (const check of candidates) {
+    const workflowRun = check.checkSuite?.workflowRun;
+    if (typeof workflowRun?.workflow?.name !== 'string' || typeof workflowRun?.file?.path !== 'string') {
+      throw new GitHubWorkflowError('Full validation lacks authoritative workflow identity', 'CI_EVIDENCE_INCOMPLETE');
+    }
+    if (workflowRun.workflow.name !== FULL_VALIDATION_WORKFLOW
+        || workflowRun.file.path !== FULL_VALIDATION_WORKFLOW_PATH) {
+      throw new GitHubWorkflowError('Full validation came from an unexpected workflow', 'CI_WORKFLOW_MISMATCH');
+    }
+  }
+  const authoritative = candidates;
+  const completed = authoritative.filter((check) => check.status === 'COMPLETED'
+    && check.completedAt && Number.isFinite(Date.parse(check.completedAt)));
+  if (completed.length === 0) {
+    throw new GitHubWorkflowError('Full validation is still pending', 'CI_VALIDATION_PENDING');
+  }
+  completed.sort((left, right) => Date.parse(right.completedAt) - Date.parse(left.completedAt)
+    || (right.checkSuite?.workflowRun?.databaseId ?? -1) - (left.checkSuite?.workflowRun?.databaseId ?? -1));
+  const latestTime = Date.parse(completed[0].completedAt);
+  const latestRunId = completed[0].checkSuite?.workflowRun?.databaseId;
+  const latest = completed.filter((check) => Date.parse(check.completedAt) === latestTime
+    && check.checkSuite?.workflowRun?.databaseId === latestRunId);
+  if (latest.length !== 1 || (authoritative.some((check) => check.status !== 'COMPLETED')
+      && snapshot.rollupState === 'SUCCESS')) {
+    throw new GitHubWorkflowError('Latest Full validation evidence is ambiguous', 'CI_EVIDENCE_AMBIGUOUS');
+  }
+  const selected = latest[0];
+  const workflowRun = selected.checkSuite?.workflowRun;
+  if (!Number.isInteger(workflowRun?.databaseId) || workflowRun.databaseId < 1 || !httpsUrl(workflowRun.url)) {
+    throw new GitHubWorkflowError('Full validation lacks an authoritative workflow run URL', 'CI_EVIDENCE_INCOMPLETE');
+  }
+  if (snapshot.rollupState === 'SUCCESS' && selected.conclusion !== 'SUCCESS') {
+    throw new GitHubWorkflowError('Full validation conflicts with the successful commit rollup', 'CI_EVIDENCE_AMBIGUOUS');
+  }
+  const passed = snapshot.rollupState === 'SUCCESS' && selected.conclusion === 'SUCCESS';
+  if (!passed && snapshot.rollupState !== 'FAILURE' && snapshot.rollupState !== 'ERROR') {
+    throw new GitHubWorkflowError('The current commit check rollup is not complete', 'CI_VALIDATION_PENDING');
+  }
+  return {
+    source: 'github-actions', scope: 'full', status: passed ? 'passed' : 'failed',
+    headSha: snapshot.headSha, checks: namedChecks,
+    workflowRunId: workflowRun.databaseId, workflowRunUrl: workflowRun.url,
+    updatedAt: selected.completedAt,
+  };
+}
+
+function sameCiEvidence(left, right) {
+  return left.source === right.source && left.scope === right.scope
+    && left.status === right.status && left.headSha === right.headSha
+    && left.workflowRunId === right.workflowRunId && left.workflowRunUrl === right.workflowRunUrl
+    && left.updatedAt === right.updatedAt
+    && left.checks.length === right.checks.length
+    && left.checks.every((check, index) => check === right.checks[index]);
+}
+
 function validateState(state, prNumber) {
   const errors = validatePrReviewState(state);
   if (errors.length > 0) throw new GitHubWorkflowError(`Invalid active state: ${errors.join('; ')}`, 'INVALID_STATE');
-  if (state.prNumber !== prNumber) throw new GitHubWorkflowError('Explicit PR does not match active state', 'PR_MISMATCH');
+  if (prNumber !== undefined && prNumber !== null && state.prNumber !== prNumber) {
+    throw new GitHubWorkflowError('Explicit PR does not match active state', 'PR_MISMATCH');
+  }
 }
 
 async function readLiveSnapshot(client, state, { reactionsFor = null } = {}) {
@@ -516,8 +647,20 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
   async function status(prNumber) {
     const active = await load(prNumber);
     const live = await readLiveSnapshot(client, active, { reactionsFor: active.reviewRequest?.id ?? null });
+    const ciSnapshot = await readPullRequestChecks(
+      client, active.repository, active.prNumber, live.metadata.headRefOid,
+    );
+    let liveCi;
+    try {
+      liveCi = ciEvidenceFromRollup(ciSnapshot);
+    } catch (error) {
+      if (!(error instanceof GitHubWorkflowError)
+          || !['CI_CHECK_MISSING', 'CI_VALIDATION_PENDING'].includes(error.code)) throw error;
+      liveCi = { status: error.code === 'CI_CHECK_MISSING' ? 'missing' : 'pending', message: error.message };
+    }
+    const openThreads = live.threads.filter((thread) => thread.canonical && !thread.isResolved).length;
     return {
-      prNumber,
+      prNumber: active.prNumber,
       statePhase: active.phase,
       stateHeadSha: active.currentIntegrationHeadSha,
       liveHeadSha: live.metadata.headRefOid,
@@ -529,7 +672,45 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       })),
       reviewCount: live.reviews.length,
       requestReactionCount: live.reactions.length,
+      codexReview: active.reviewOutcome?.outcome ?? (active.reviewRequest ? 'awaiting' : 'not-requested'),
+      taskStatus: {
+        resolved: active.tasks.filter((task) => task.status === 'completed').length,
+        pending: active.tasks.filter((task) => task.status !== 'completed').length,
+        display: active.phase === 'complete' ? 'Done' : 'Resolved',
+        items: active.tasks.map((task) => ({
+          id: task.id,
+          summary: task.summary,
+          status: active.phase === 'complete' ? 'Done'
+            : task.status === 'completed' ? 'Resolved'
+              : task.status === 'integrated' ? 'Integrated'
+                : task.status === 'running' ? 'worker running' : task.status,
+        })),
+      },
+      targetedValidation: active.validationStatus,
+      recordedCiValidation: active.ciValidationStatus,
+      liveCiValidation: liveCi,
+      openCodexThreads: openThreads,
+      nextAction: active.nextAction,
     };
+  }
+
+  async function collectCi(prNumber) {
+    let active = await load(prNumber);
+    const metadata = await readPullRequestMetadata(client, active.repository, active.prNumber);
+    if (metadata.headRefOid !== active.currentIntegrationHeadSha) {
+      throw new GitHubWorkflowError('Live PR HEAD does not match the integration HEAD', 'CI_HEAD_MISMATCH');
+    }
+    const snapshot = await readPullRequestChecks(
+      client, active.repository, active.prNumber, active.currentIntegrationHeadSha,
+    );
+    const evidence = ciEvidenceFromRollup(snapshot);
+    if (!stateAdapter.checkpointCiValidation) {
+      throw new GitHubWorkflowError('The CI validation state checkpoint is unavailable', 'INVALID_ADAPTERS');
+    }
+    active = await stateAdapter.checkpointCiValidation({
+      prNumber: active.prNumber, expectedRevision: active.revision, evidence,
+    });
+    return { evidence: active.ciValidationStatus, phase: active.phase, revision: active.revision };
   }
 
   async function request(prNumber, kind) {
@@ -828,36 +1009,65 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
 
   async function complete(prNumber) {
     let active = await load(prNumber);
-    const live = await readLiveSnapshot(client, active, { reactionsFor: active.reviewRequest?.id ?? null });
-    assertRecordedRequestComment(active, live);
-    const heads = await assertMutationReady({ state: active, git }, live);
-    if (live.threads.some((thread) => thread.canonical && !thread.isResolved)) {
-      throw new GitHubWorkflowError('Canonical threads are still unresolved', 'COMPLETION_NOT_READY');
+    function assertCompletionLiveEvidence(state, live) {
+      assertRecordedRequestComment(state, live);
+      if (live.threads.some((thread) => thread.canonical && !thread.isResolved)) {
+        throw new GitHubWorkflowError('Canonical threads are still unresolved', 'COMPLETION_NOT_READY');
+      }
+      assertLiveThreadProof(state, live);
+      if (state.reviewOutcome?.outcome !== 'clean'
+          || state.reviewOutcome.headSha !== live.metadata.headRefOid
+          || state.reviewRequest?.headSha !== live.metadata.headRefOid) {
+        throw new GitHubWorkflowError('Clean canonical outcome does not apply to live PR HEAD', 'COMPLETION_NOT_READY');
+      }
+      const outcomeIsLive = state.reviewOutcome.evidenceType === 'review-submission'
+        ? live.reviews.some((review) => review.id === state.reviewOutcome.id
+          && review.state === 'COMMENTED' && review.commit?.oid === live.metadata.headRefOid
+          && isCanonicalActor(review.author) && evidenceAtOrAfter(review.submittedAt, state.reviewRequest.at))
+        : live.reactions.some((reaction) => reaction.id === state.reviewOutcome.id
+          && reaction.content === 'THUMBS_UP' && isCanonicalActor(reaction.user)
+          && evidenceAtOrAfter(reaction.createdAt, state.reviewRequest.at));
+      if (!outcomeIsLive) {
+        throw new GitHubWorkflowError('Recorded clean outcome is not proven live', 'COMPLETION_NOT_READY');
+      }
     }
-    assertLiveThreadProof(active, live);
-    if (active.reviewOutcome?.outcome !== 'clean'
-        || active.reviewOutcome.headSha !== live.metadata.headRefOid
-        || active.reviewRequest?.headSha !== live.metadata.headRefOid) {
-      throw new GitHubWorkflowError('Clean canonical outcome does not apply to live PR HEAD', 'COMPLETION_NOT_READY');
+
+    let live = await readLiveSnapshot(client, active, { reactionsFor: active.reviewRequest?.id ?? null });
+    await assertMutationReady({ state: active, git }, live);
+    assertCompletionLiveEvidence(active, live);
+    const snapshot = await readPullRequestChecks(
+      client, active.repository, active.prNumber, live.metadata.headRefOid,
+    );
+    const evidence = ciEvidenceFromRollup(snapshot);
+    if (evidence.status !== 'passed') {
+      throw new GitHubWorkflowError('Full GitHub Actions validation did not pass', 'COMPLETION_NOT_READY');
     }
-    const outcomeIsLive = active.reviewOutcome.evidenceType === 'review-submission'
-      ? live.reviews.some((review) => review.id === active.reviewOutcome.id
-        && review.state === 'COMMENTED' && review.commit?.oid === live.metadata.headRefOid
-        && isCanonicalActor(review.author) && evidenceAtOrAfter(review.submittedAt, active.reviewRequest.at))
-      : live.reactions.some((reaction) => reaction.id === active.reviewOutcome.id
-        && reaction.content === 'THUMBS_UP' && isCanonicalActor(reaction.user)
-        && evidenceAtOrAfter(reaction.createdAt, active.reviewRequest.at));
-    if (!outcomeIsLive) throw new GitHubWorkflowError('Recorded clean outcome is not proven live', 'COMPLETION_NOT_READY');
+    active = await stateAdapter.checkpointCiValidation({
+      prNumber: active.prNumber, expectedRevision: active.revision, evidence,
+    });
+    live = await readLiveSnapshot(client, active, { reactionsFor: active.reviewRequest?.id ?? null });
+    const refreshedHeads = await assertMutationReady({ state: active, git }, live);
+    assertCompletionLiveEvidence(active, live);
+    const finalCiSnapshot = await readPullRequestChecks(
+      client, active.repository, active.prNumber, live.metadata.headRefOid,
+    );
+    const finalEvidence = ciEvidenceFromRollup(finalCiSnapshot);
+    if (finalEvidence.status !== 'passed' || !sameCiEvidence(evidence, finalEvidence)) {
+      throw new GitHubWorkflowError(
+        'Full GitHub Actions validation changed before completion', 'COMPLETION_NOT_READY',
+      );
+    }
     active = await stateAdapter.checkpointCompletion({
       prNumber, expectedRevision: active.revision,
-      pushedHeadSha: heads.pushedHeadSha, prHeadSha: live.metadata.headRefOid,
+      pushedHeadSha: refreshedHeads.pushedHeadSha, prHeadSha: live.metadata.headRefOid,
     });
     return { completed: true, phase: active.phase, revision: active.revision };
   }
 
-  return { status, replyResolve, request, collect, complete };
+  return { status, replyResolve, request, collect, collectCi, complete };
 }
 
 export const githubReviewConstants = {
-  CANONICAL_LOGIN, CANONICAL_URL, REQUEST_BODY, PAGE_SIZE,
+  CANONICAL_LOGIN, CANONICAL_URL, REQUEST_BODY, PAGE_SIZE, FULL_VALIDATION_CHECK, GITHUB_ACTIONS_APP,
+  FULL_VALIDATION_WORKFLOW, FULL_VALIDATION_WORKFLOW_PATH,
 };

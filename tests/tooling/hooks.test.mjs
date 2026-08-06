@@ -44,7 +44,7 @@ function init(cwd) {
 
 function validWorkerResult() {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     taskId: 'task-1',
     status: 'implemented',
     commitSha: 'a'.repeat(40),

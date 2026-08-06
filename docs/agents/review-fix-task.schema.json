@@ -10,6 +10,7 @@
     "reviewedHeadSha",
     "finding",
     "evidence",
+    "affectedAreas",
     "decisionIds",
     "allowedPaths",
     "forbiddenPaths",
@@ -18,20 +19,27 @@
     "requiredValidation"
   ],
   "properties": {
-    "schemaVersion": { "const": 1 },
+    "schemaVersion": { "const": 2 },
     "taskId": { "type": "string", "minLength": 1, "maxLength": 128 },
     "reviewedHeadSha": { "$ref": "#/$defs/sha" },
     "finding": { "type": "string", "minLength": 1, "maxLength": 2000 },
     "evidence": { "type": "string", "minLength": 1, "maxLength": 3000 },
+    "affectedAreas": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "enum": ["api", "web", "shared", "workflow", "documentation", "release", "migration"] }
+    },
     "decisionIds": { "$ref": "#/$defs/stringList" },
     "allowedPaths": {
-      "allOf": [{ "$ref": "#/$defs/stringList" }],
+      "type": "array",
+      "allOf": [{ "$ref": "#/$defs/ownershipPathList" }],
       "minItems": 1
     },
-    "forbiddenPaths": { "$ref": "#/$defs/stringList" },
+    "forbiddenPaths": { "$ref": "#/$defs/ownershipPathList" },
     "dependencies": { "$ref": "#/$defs/stringList" },
     "acceptanceCriteria": { "$ref": "#/$defs/stringList" },
-    "requiredValidation": { "$ref": "#/$defs/stringList" }
+    "requiredValidation": { "$ref": "#/$defs/requiredValidation" }
   },
   "$defs": {
     "sha": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
@@ -39,6 +47,76 @@
       "type": "array",
       "items": { "type": "string", "minLength": 1, "maxLength": 1000 },
       "uniqueItems": true
+    },
+    "ownershipPathList": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/ownershipPath" },
+      "uniqueItems": true
+    },
+    "ownershipPath": {
+      "type": "string", "minLength": 1, "maxLength": 500,
+      "pattern": "^(?!/)(?!.*//)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))[^/*?\\[\\]{}]+(?:/[^/*?\\[\\]{}]+)*(?:/\\*\\*)?$"
+    },
+    "validationCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "$comment": "The manual validator applies the authoritative direct-command allowlist and rejects wrappers, environment assignments, shell syntax, broad commands, and unknown scripts.",
+      "required": ["command", "reason"],
+      "properties": {
+        "command": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 1000 }
+      }
+    },
+    "systemValidationCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "$comment": "The manual validator parses related-E2E commands, rejects broad fallback commands, checks selectors against feature tags and projects against Playwright projects, and requires metadata to equal the command's effective repeatable flag scope. JSON Schema cannot compare command text with sibling arrays.",
+      "required": ["command", "reason", "selectors", "projects"],
+      "properties": {
+        "command": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "selectors": {
+          "type": "array", "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^@?[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 200 }
+        },
+        "projects": {
+          "type": "array", "uniqueItems": true,
+          "items": { "enum": ["tablet-chromium", "mobile-webkit", "desktop-firefox"] }
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "selectors": { "type": "array", "minItems": 1 },
+            "projects": { "type": "array", "minItems": 1 }
+          }
+        },
+        {
+          "properties": {
+            "selectors": { "type": "array", "maxItems": 0 },
+            "projects": { "type": "array", "maxItems": 0 }
+          }
+        }
+      ]
+    },
+    "requiredValidation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "system"],
+      "properties": {
+        "unit": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/validationCommand" }
+        },
+        "system": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/systemValidationCommand" }
+        }
+      },
+      "anyOf": [
+        { "properties": { "unit": { "type": "array", "minItems": 1 } } },
+        { "properties": { "system": { "type": "array", "minItems": 1 } } }
+      ]
     }
   }
 }

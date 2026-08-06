@@ -1,7 +1,7 @@
 interface:
   display_name: "PR Review Cycle"
-  short_description: "Resolve and resume Sky Bar PR review cycles"
-  default_prompt: "Use $pr-review-cycle to resolve the current PR review cycle."
+  short_description: "Take a PR from review findings to clean review and green CI"
+  default_prompt: "Use $pr-review-cycle to continue the current PR review cycle with targeted local checks and exact-commit Codex and CI evidence."
 
 policy:
   allow_implicit_invocation: true
