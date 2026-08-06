@@ -247,6 +247,20 @@ function fakeJournal(events = [], existing = []) {
   };
 }
 
+function racingRequestJournal(intent, events = []) {
+  let concurrentIntent = null;
+  return {
+    async lookupIntent() {
+      return concurrentIntent ? { ...concurrentIntent, isNew: false } : null;
+    },
+    async ensureIntent() {
+      events.push('intent:request');
+      concurrentIntent = structuredClone(intent);
+      return { ...concurrentIntent, isNew: false };
+    },
+  };
+}
+
 function fakeState(initial) {
   let current = structuredClone(initial);
   const calls = [];
@@ -769,6 +783,86 @@ test('request journals before exact mutation, proves live result, and checkpoint
   assert.equal(mutation.variables.body, '@codex review');
   assert.match(mutation.variables.clientMutationId, /^sky-bar-/u);
   assert.equal(state.calls.at(-1).name, 'checkpointReviewRequest');
+});
+
+test('request recovers a concurrent intent using its returned exclusion baseline without mutation', async () => {
+  class CommentsBetweenSnapshotsClient extends FakeClient {
+    constructor(events, comments) {
+      super({ events });
+      this.raceComments = comments;
+      this.commentReads = 0;
+    }
+
+    async graphql(input) {
+      if (input.name === 'PullRequestComments') {
+        this.commentReads += 1;
+        if (this.commentReads === 2) this.comments.push(...this.raceComments);
+      }
+      return super.graphql(input);
+    }
+  }
+
+  const operationId = `request:2:discovery:1:${HEAD}`;
+  const concurrentIntent = {
+    ...priorIntent('request', operationId), excludedCommentIds: ['IC_excluded'],
+  };
+  const comments = [
+    { id: 'IC_excluded', databaseId: 8, url: 'https://x/excluded', body: '@codex review',
+      createdAt: AT, author: VIEWER },
+    { id: 'IC_recovered', databaseId: 9, url: 'https://x/recovered', body: '@codex review',
+      createdAt: AT, author: VIEWER },
+  ];
+  const events = [];
+  const client = new CommentsBetweenSnapshotsClient(events, comments);
+  const setup = workflow(readyState(), client, {
+    journal: racingRequestJournal(concurrentIntent, events),
+  });
+  const result = await setup.api.request(2, 'discovery');
+
+  assert.equal(result.recovered, true);
+  assert.equal(result.request.id, 'IC_recovered');
+  assert.deepEqual(events, ['intent:request']);
+  assert.equal(client.calls.some((call) => call.name === 'AddReviewRequest'), false);
+  assert.equal(setup.state.calls.at(-1).name, 'checkpointReviewRequest');
+});
+
+test('concurrent request intent fails closed for missing or ambiguous candidates and later retries recover', async () => {
+  const operationId = `request:2:discovery:1:${HEAD}`;
+  const intent = priorIntent('request', operationId);
+
+  const missingClient = new FakeClient();
+  const missing = workflow(readyState(), missingClient, {
+    journal: racingRequestJournal(intent),
+  });
+  await assert.rejects(() => missing.api.request(2, 'discovery'), { code: 'REQUEST_RECOVERY_MISSING' });
+  assert.equal(missingClient.calls.some((call) => call.name === 'AddReviewRequest'), false);
+  assert.equal(missing.state.calls.some((call) => call.name === 'checkpointReviewRequest'), false);
+  missingClient.comments.push({ id: 'IC_later', databaseId: 10, url: 'https://x/later', body: '@codex review',
+    createdAt: AT, author: VIEWER });
+  assert.equal((await missing.api.request(2, 'discovery')).request.id, 'IC_later');
+  assert.equal(missingClient.calls.some((call) => call.name === 'AddReviewRequest'), false);
+
+  const ambiguousClient = new FakeClient();
+  const ambiguousJournal = racingRequestJournal(intent);
+  const graphql = ambiguousClient.graphql.bind(ambiguousClient);
+  let commentReads = 0;
+  ambiguousClient.graphql = async (input) => {
+    if (input.name === 'PullRequestComments') {
+      commentReads += 1;
+      if (commentReads === 2) ambiguousClient.comments.push(
+        { id: 'IC_first', databaseId: 11, url: 'https://x/first', body: '@codex review', createdAt: AT, author: VIEWER },
+        { id: 'IC_second', databaseId: 12, url: 'https://x/second', body: '@codex review', createdAt: AT, author: VIEWER },
+      );
+    }
+    return graphql(input);
+  };
+  const ambiguous = workflow(readyState(), ambiguousClient, { journal: ambiguousJournal });
+  await assert.rejects(() => ambiguous.api.request(2, 'discovery'), { code: 'REQUEST_RECOVERY_AMBIGUOUS' });
+  assert.equal(ambiguousClient.calls.some((call) => call.name === 'AddReviewRequest'), false);
+  assert.equal(ambiguous.state.calls.some((call) => call.name === 'checkpointReviewRequest'), false);
+  ambiguousClient.comments = ambiguousClient.comments.filter((comment) => comment.id === 'IC_second');
+  assert.equal((await ambiguous.api.request(2, 'discovery')).request.id, 'IC_second');
+  assert.equal(ambiguousClient.calls.some((call) => call.name === 'AddReviewRequest'), false);
 });
 
 test('request revalidates canonical thread proof before journaling or mutation and retries after resolution', async () => {

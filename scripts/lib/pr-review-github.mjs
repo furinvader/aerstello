@@ -391,10 +391,11 @@ function exactViewerRequestCandidates(comments, viewer, intent, excludedIds = ne
 async function journalIntent(journal, intent) {
   if (!journal?.ensureIntent) throw new GitHubWorkflowError('A durable intent journal is required', 'JOURNAL_REQUIRED');
   const persisted = await journal.ensureIntent(intent);
-  if (!persisted || persisted.operationId !== intent.operationId
+  if (!persisted || persisted.type !== intent.type || persisted.operationId !== intent.operationId
       || persisted.clientMutationId !== intent.clientMutationId || !persisted.at) {
     throw new GitHubWorkflowError('Mutation intent journal did not persist correlation', 'JOURNAL_FAILED');
   }
+  parsedTime(persisted.at, 'Mutation intent');
   if (intent.type === 'request') {
     const ids = persisted.excludedCommentIds;
     if (!Array.isArray(ids) || ids.length > MAX_NODES
@@ -814,7 +815,6 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     const pendingIntent = { ...intentFor('request', operationId, intendedAt), excludedCommentIds };
     const priorIntent = await lookupRequestJournalIntent(journal, operationId);
     let intended = priorIntent ?? pendingIntent;
-    const excludedIds = new Set(intended.excludedCommentIds);
     if (!priorIntent && baselineComments.some((comment) => !priorRequestIds.has(comment.id)
       && requestRecoveryAtOrAfter(comment.createdAt, intended.at))) {
       throw new GitHubWorkflowError('Fresh request window contains an unrecorded viewer comment', 'REQUEST_BASELINE_COLLISION');
@@ -827,12 +827,14 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     assertLiveThreadProof(active, live);
     await assertCurrent(active);
     if (!priorIntent) intended = await journalIntent(journal, pendingIntent);
-    let candidates = priorIntent
+    const recovering = priorIntent !== null || intended.isNew === false;
+    const excludedIds = new Set(intended.excludedCommentIds);
+    let candidates = recovering
       ? exactViewerRequestCandidates(live.comments, live.metadata.viewer, intended, excludedIds) : [];
     if (candidates.length > 1) throw new GitHubWorkflowError('Request recovery is ambiguous', 'REQUEST_RECOVERY_AMBIGUOUS');
     const recovered = candidates.length === 1;
     if (candidates.length === 0) {
-      if (priorIntent) throw new GitHubWorkflowError('Prior request intent has no unique live result', 'REQUEST_RECOVERY_MISSING');
+      if (recovering) throw new GitHubWorkflowError('Prior request intent has no unique live result', 'REQUEST_RECOVERY_MISSING');
       await assertCurrent(active);
       await executeMutation(client, 'AddReviewRequest', {
         subjectId: live.metadata.id, body: REQUEST_BODY, clientMutationId: intended.clientMutationId,
