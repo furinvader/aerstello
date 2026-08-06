@@ -633,7 +633,7 @@ test('generic checkpoint cannot bypass guarded request, outcome, or completion p
   assert.equal(completed.phase, 'complete');
 });
 
-test('full CI evidence is guarded, append-only, exact-head, and invalidated by HEAD drift', () => {
+test('full CI evidence is guarded, restorable, append-only, exact-head, and invalidated by HEAD drift', () => {
   const cwd = repo();
   const initial = init(cwd);
   const forged = {
@@ -658,15 +658,31 @@ test('full CI evidence is guarded, append-only, exact-head, and invalidated by H
   assert.deepEqual(checkpointCiValidation({
     cwd, evidence: passed.ciValidationStatus, expectedRevision: passed.revision,
   }), passed);
+
+  const currentEvidence = structuredClone(passed.ciValidationStatus);
+  writeFileSync(join(cwd, 'dirty-ci-proof.txt'), 'dirty\n');
+  const invalidated = checkpointGitMetadata({ cwd }).state;
+  assert.equal(invalidated.ciValidationStatus.status, 'not-run');
+  assert.deepEqual(invalidated.ciValidationHistory, [currentEvidence]);
+  rmSync(join(cwd, 'dirty-ci-proof.txt'));
+  const cleaned = checkpointGitMetadata({ cwd }).state;
+  assert.equal(cleaned.git.dirty, false);
+  assert.equal(cleaned.ciValidationStatus.status, 'not-run');
+  const restored = checkpointCiValidation({
+    cwd, evidence: currentEvidence, expectedRevision: cleaned.revision,
+  });
+  assert.deepEqual(restored.ciValidationStatus, currentEvidence);
+  assert.deepEqual(restored.ciValidationHistory, [currentEvidence]);
+
   assert.throws(() => checkpointCiValidation({
-    cwd, evidence: { ...passed.ciValidationStatus, status: 'failed' }, expectedRevision: passed.revision,
+    cwd, evidence: { ...currentEvidence, status: 'failed' }, expectedRevision: restored.revision,
   }), { code: 'CI_EVIDENCE_CONFLICT' });
 
-  const failedEvidence = ciEvidence(passed, {
+  const failedEvidence = ciEvidence(restored, {
     status: 'failed', workflowRunId: 123457,
     workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/123457',
   });
-  const failed = checkpointCiValidation({ cwd, evidence: failedEvidence, expectedRevision: passed.revision });
+  const failed = checkpointCiValidation({ cwd, evidence: failedEvidence, expectedRevision: restored.revision });
   assert.equal(failed.ciValidationHistory.length, 2);
   assert.equal(failed.ciValidationStatus.status, 'failed');
 
@@ -679,6 +695,9 @@ test('full CI evidence is guarded, append-only, exact-head, and invalidated by H
     checks: [], workflowRunId: null, workflowRunUrl: null, updatedAt: null,
   });
   assert.deepEqual(drifted.ciValidationHistory, previousHistory);
+  assert.throws(() => checkpointCiValidation({
+    cwd, evidence: currentEvidence, expectedRevision: drifted.revision,
+  }), { code: 'INVALID_CI_VALIDATION' });
 });
 
 test('stale discovery request can be replaced without rewriting its null-outcome ledger entry', () => {

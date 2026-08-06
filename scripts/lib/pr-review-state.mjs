@@ -987,8 +987,14 @@ function assertCheckpointProvenance(current, next, authorization) {
       'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
       'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
     ]) assertImmutableValue(current[field], next[field], field);
-    if (next.ciValidationHistory.length !== current.ciValidationHistory.length + 1) {
-      throw new StateError('CI validation must append exactly one workflow-run record', 'IMMUTABLE_STATE_PROVENANCE');
+    const appended = next.ciValidationHistory.length === current.ciValidationHistory.length + 1;
+    const restored = next.ciValidationHistory.length === current.ciValidationHistory.length
+      && sameEvidence(next.ciValidationHistory.at(-1), next.ciValidationStatus);
+    if (!appended && !restored) {
+      throw new StateError(
+        'CI validation must append one workflow-run record or restore an immutable historical record',
+        'IMMUTABLE_STATE_PROVENANCE',
+      );
     }
     current.ciValidationHistory.forEach((entry, index) => assertImmutableValue(
       entry, next.ciValidationHistory[index], `ciValidationHistory[${index}]`,
@@ -1219,22 +1225,20 @@ export function buildCompletionTransition(state, external) {
 }
 
 export function buildCiValidationTransition(state, evidence) {
-  const existing = state.ciValidationHistory.find((entry) => entry.workflowRunId === evidence?.workflowRunId);
-  if (existing) {
-    if (!sameEvidence(existing, evidence)) {
-      throw new StateError('GitHub Actions workflow run ID was reused with different evidence', 'CI_EVIDENCE_CONFLICT');
-    }
-    return state;
-  }
   if (evidence?.source !== 'github-actions' || evidence?.scope !== 'full'
       || !['passed', 'failed'].includes(evidence?.status)
       || evidence?.headSha !== state.currentIntegrationHeadSha) {
     throw new StateError('CI evidence must be full GitHub Actions validation for the current integration HEAD', 'INVALID_CI_VALIDATION');
   }
+  const existing = state.ciValidationHistory.find((entry) => entry.workflowRunId === evidence.workflowRunId);
+  if (existing && !sameEvidence(existing, evidence)) {
+    throw new StateError('GitHub Actions workflow run ID was reused with different evidence', 'CI_EVIDENCE_CONFLICT');
+  }
+  if (existing && sameEvidence(state.ciValidationStatus, evidence)) return state;
   const next = {
     ...state,
     ciValidationStatus: evidence,
-    ciValidationHistory: [...state.ciValidationHistory, evidence],
+    ciValidationHistory: existing ? state.ciValidationHistory : [...state.ciValidationHistory, evidence],
     nextAction: evidence.status === 'passed'
       ? state.nextAction
       : 'Inspect the failed full GitHub Actions run, then record a new run for the same review commit.',
