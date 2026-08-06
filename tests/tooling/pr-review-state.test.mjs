@@ -162,7 +162,7 @@ function outcome(state, overrides = {}) {
 function ciEvidence(state, overrides = {}) {
   return {
     source: 'github-actions', scope: 'full', status: 'passed', headSha: state.currentIntegrationHeadSha,
-    checks: ['check', 'e2e'], workflowRunId: 123456,
+    checks: ['check', 'e2e'], checkRunId: 'CHECK_123456', workflowRunId: 123456,
     workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/123456', updatedAt: AT,
     ...overrides,
   };
@@ -701,12 +701,22 @@ test('full CI evidence is guarded, restorable, append-only, exact-head, and inva
   }), { code: 'CI_EVIDENCE_CONFLICT' });
 
   const failedEvidence = ciEvidence(restored, {
-    status: 'failed', workflowRunId: 123457,
-    workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/123457',
+    status: 'failed', checkRunId: 'CHECK_123457',
   });
   const failed = checkpointCiValidation({ cwd, evidence: failedEvidence, expectedRevision: restored.revision });
   assert.equal(failed.ciValidationHistory.length, 2);
   assert.equal(failed.ciValidationStatus.status, 'failed');
+  assert.equal(failed.ciValidationHistory[0].workflowRunId, failed.ciValidationHistory[1].workflowRunId);
+
+  const { checkRunId: _legacyCheckRunId, ...legacyEvidence } = currentEvidence;
+  const legacyState = {
+    ...initial, ciValidationStatus: legacyEvidence, ciValidationHistory: [legacyEvidence],
+  };
+  const upgraded = buildCiValidationTransition(legacyState, currentEvidence);
+  assert.deepEqual(upgraded.ciValidationHistory, [legacyEvidence, currentEvidence]);
+  assert.throws(() => buildCiValidationTransition(initial, {
+    ...currentEvidence, checkRunId: '',
+  }), { code: 'INVALID_CI_VALIDATION' });
 
   const previousHistory = structuredClone(failed.ciValidationHistory);
   const newHead = commit(cwd, { 'ci-drift.txt': 'drift\n' }, 'CI proof drift');
@@ -714,7 +724,7 @@ test('full CI evidence is guarded, restorable, append-only, exact-head, and inva
   assert.equal(drifted.currentIntegrationHeadSha, newHead);
   assert.deepEqual(drifted.ciValidationStatus, {
     source: 'github-actions', scope: 'full', status: 'not-run', headSha: null,
-    checks: [], workflowRunId: null, workflowRunUrl: null, updatedAt: null,
+    checks: [], checkRunId: null, workflowRunId: null, workflowRunUrl: null, updatedAt: null,
   });
   assert.deepEqual(drifted.ciValidationHistory, previousHistory);
   assert.throws(() => checkpointCiValidation({
@@ -1404,6 +1414,14 @@ test('targeted validation plan durably de-duplicates the integrated task union a
     now: () => AT,
     onCommandRecorded: () => { if (attempted.length === 1) throw new Error('simulated interruption'); },
   }), /simulated interruption/u);
+  const beforeNoop = loadState(cwd);
+  const eventPath = join(stateDirectory(cwd, state.prNumber), 'events.ndjson');
+  const eventsBeforeNoop = readFileSync(eventPath, 'utf8');
+  const noOp = checkpointGitMetadata({ cwd, backup: true });
+  assert.equal(noOp.checkpointed, false);
+  assert.deepEqual(noOp.state, beforeNoop);
+  assert.equal(readFileSync(eventPath, 'utf8'), eventsBeforeNoop);
+  assert.deepEqual(JSON.parse(readFileSync(join(stateDirectory(cwd, state.prNumber), 'state.backup.json'), 'utf8')), beforeNoop);
   let proofCheckpointHeldLock = false;
   const resumed = executeTargetedValidationPlan({
     cwd,

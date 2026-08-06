@@ -373,6 +373,9 @@
         "status": { "enum": ["not-run", "passed", "failed"] },
         "headSha": { "$ref": "#/$defs/nullableSha" },
         "checks": { "$ref": "#/$defs/stringList" },
+        "checkRunId": {
+          "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 500 }, { "type": "null" }]
+        },
         "workflowRunId": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
         "workflowRunUrl": {
           "oneOf": [
@@ -388,13 +391,14 @@
           "then": {
             "properties": {
               "headSha": { "type": "null" }, "checks": { "type": "array", "maxItems": 0 },
-              "workflowRunId": { "type": "null" }, "workflowRunUrl": { "type": "null" },
+              "checkRunId": { "type": "null" }, "workflowRunId": { "type": "null" }, "workflowRunUrl": { "type": "null" },
               "updatedAt": { "type": "null" }
             }
           },
           "else": {
             "properties": {
               "headSha": { "$ref": "#/$defs/sha" }, "checks": { "type": "array", "minItems": 1 },
+              "checkRunId": { "type": "string", "minLength": 1, "maxLength": 500 },
               "workflowRunId": { "type": "integer", "minimum": 1 },
               "workflowRunUrl": { "type": "string", "format": "uri", "pattern": "^https://", "maxLength": 2000 },
               "updatedAt": { "type": "string", "format": "date-time" }

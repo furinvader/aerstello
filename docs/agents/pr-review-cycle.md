@@ -68,6 +68,12 @@ project only when responsive, touch, installation, cross-device, or
 browser-specific behavior needs it. Unknown related-test selection is a
 planning error, never permission to fall back to the full local suite.
 
+For a pristine taskless first review, save and run the explicit initial targeted
+validation selection, then use `refresh-threads --pr <number>` to record guarded
+exact-head proof that the fully paginated canonical Codex thread set is empty.
+This read-only GitHub operation fails closed if any canonical root exists and
+does not verify later threadless remediation tasks.
+
 Done is stricter. A clean Codex review, full green CI, full E2E, the current PR
 head, and the no-open-thread check must all refer to the same Review commit.
 

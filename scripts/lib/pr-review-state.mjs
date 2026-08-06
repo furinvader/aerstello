@@ -99,7 +99,7 @@ function emptyTargetedValidation() {
 function emptyCiValidation() {
   return {
     source: 'github-actions', scope: 'full', status: 'not-run', headSha: null,
-    checks: [], workflowRunId: null, workflowRunUrl: null, updatedAt: null,
+    checks: [], checkRunId: null, workflowRunId: null, workflowRunUrl: null, updatedAt: null,
   };
 }
 
@@ -1332,12 +1332,13 @@ export function buildCompletionTransition(state, external) {
 export function buildCiValidationTransition(state, evidence) {
   if (evidence?.source !== 'github-actions' || evidence?.scope !== 'full'
       || !['passed', 'failed'].includes(evidence?.status)
+      || typeof evidence?.checkRunId !== 'string' || evidence.checkRunId.length === 0
       || evidence?.headSha !== state.currentIntegrationHeadSha) {
     throw new StateError('CI evidence must be full GitHub Actions validation for the current integration HEAD', 'INVALID_CI_VALIDATION');
   }
-  const existing = state.ciValidationHistory.find((entry) => entry.workflowRunId === evidence.workflowRunId);
+  const existing = state.ciValidationHistory.find((entry) => entry.checkRunId === evidence.checkRunId);
   if (existing && !sameEvidence(existing, evidence)) {
-    throw new StateError('GitHub Actions workflow run ID was reused with different evidence', 'CI_EVIDENCE_CONFLICT');
+    throw new StateError('GitHub Actions check run ID was reused with different evidence', 'CI_EVIDENCE_CONFLICT');
   }
   if (existing && sameEvidence(state.ciValidationStatus, evidence)) return state;
   const next = {
@@ -1631,59 +1632,65 @@ export function reconcileState({ cwd = process.cwd(), prNumber } = {}) {
 }
 
 export function checkpointGitMetadata({ cwd = process.cwd(), sessionId, backup = false } = {}) {
-  const state = loadState(cwd);
-  if (!state) return { state: null, checkpointed: false, warning: null };
-  const currentRoot = repositoryRoot(cwd);
-  if (resolve(currentRoot) !== resolve(state.integrationWorktree)) {
-    return { state, checkpointed: false, warning: 'Skipped checkpoint outside the integration worktree' };
-  }
-  if (state.orchestratorSessionId && sessionId && state.orchestratorSessionId !== sessionId) {
-    return { state, checkpointed: false, warning: 'Skipped checkpoint for a different session' };
-  }
-  const git = gitSnapshot(state.integrationWorktree);
-  if (backup) atomicWriteJson(join(stateDirectory(cwd, state.prNumber), 'state.backup.json'), state);
-  const proofInvalidated = git.headSha !== state.currentIntegrationHeadSha || git.dirty;
-  const headSensitivePhases = new Set([
-    'ready-for-review',
-    'awaiting-review',
-    'triaging',
-    'verifying',
-    'validating',
-    'complete',
-  ]);
-  const nextState = {
-    ...state,
-    currentIntegrationHeadSha: git.headSha,
-    git,
-    ...(proofInvalidated ? {
-      validationStatus: emptyTargetedValidation(),
-      ciValidationStatus: emptyCiValidation(),
-      threadResolutionStatus: {
-        ...state.threadResolutionStatus,
-        status: 'not-run',
-        headSha: null,
-        updatedAt: null,
-      },
-      ...(state.phase === 'awaiting-review' ? {
-        phase: state.reviewRequest?.kind === 'verification' ? 'awaiting-human-decision' : 'recovering',
-        nextAction: state.reviewRequest?.kind === 'verification'
-          ? 'A verification request became stale; present the stale-request decision to a human.'
-          : 'The discovery request became stale; reconcile the new HEAD before requesting another review.',
-      } : headSensitivePhases.has(state.phase) ? {
-          phase: 'recovering',
-          nextAction: 'Reconcile the changed integration checkout and re-establish exact-head proof.',
-        } : {}),
-    } : {}),
-  };
-  const updated = checkpointState({
-    cwd,
-    prNumber: state.prNumber,
-    nextState,
-    expectedRevision: state.revision,
-    event: { type: 'git-checkpoint', summary: `Checkpointed integration HEAD ${git.headSha}` },
-    transitionAuthorization: protectedTransition(nextState, 'git-metadata'),
+  const selectedPr = activePrNumber(cwd);
+  if (selectedPr === null) return { state: null, checkpointed: false, warning: null };
+  return withStateLock(cwd, selectedPr, () => {
+    const state = loadState(cwd, selectedPr);
+    const currentRoot = repositoryRoot(cwd);
+    if (resolve(currentRoot) !== resolve(state.integrationWorktree)) {
+      return { state, checkpointed: false, warning: 'Skipped checkpoint outside the integration worktree' };
+    }
+    if (state.orchestratorSessionId && sessionId && state.orchestratorSessionId !== sessionId) {
+      return { state, checkpointed: false, warning: 'Skipped checkpoint for a different session' };
+    }
+    const git = gitSnapshot(state.integrationWorktree);
+    if (backup) atomicWriteJson(join(stateDirectory(cwd, state.prNumber), 'state.backup.json'), state);
+    const proofInvalidated = git.headSha !== state.currentIntegrationHeadSha || git.dirty;
+    const headSensitivePhases = new Set([
+      'ready-for-review',
+      'awaiting-review',
+      'triaging',
+      'verifying',
+      'validating',
+      'complete',
+    ]);
+    const nextState = {
+      ...state,
+      currentIntegrationHeadSha: git.headSha,
+      git,
+      ...(proofInvalidated ? {
+        validationStatus: emptyTargetedValidation(),
+        ciValidationStatus: emptyCiValidation(),
+        threadResolutionStatus: {
+          ...state.threadResolutionStatus,
+          status: 'not-run',
+          headSha: null,
+          updatedAt: null,
+        },
+        ...(state.phase === 'awaiting-review' ? {
+          phase: state.reviewRequest?.kind === 'verification' ? 'awaiting-human-decision' : 'recovering',
+          nextAction: state.reviewRequest?.kind === 'verification'
+            ? 'A verification request became stale; present the stale-request decision to a human.'
+            : 'The discovery request became stale; reconcile the new HEAD before requesting another review.',
+        } : headSensitivePhases.has(state.phase) ? {
+            phase: 'recovering',
+            nextAction: 'Reconcile the changed integration checkout and re-establish exact-head proof.',
+          } : {}),
+      } : {}),
+    };
+    const warning = git.dirty ? 'Integration checkout is dirty' : null;
+    if (sameEvidence(state, nextState)) return { state, checkpointed: false, warning };
+    const updated = checkpointStateUnlocked({
+      cwd,
+      selectedPr: state.prNumber,
+      nextState,
+      expectedRevision: state.revision,
+      event: { type: 'git-checkpoint', summary: `Checkpointed integration HEAD ${git.headSha}` },
+      eventWriter: appendEvent,
+      transitionAuthorization: protectedTransition(nextState, 'git-metadata'),
+    });
+    return { state: updated, checkpointed: true, warning };
   });
-  return { state: updated, checkpointed: true, warning: git.dirty ? 'Integration checkout is dirty' : null };
 }
 
 function truncate(text, max) {

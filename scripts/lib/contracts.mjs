@@ -836,11 +836,11 @@ function validateProof(value, path, errors, { source, scope } = {}) {
 }
 
 function validateCiProof(value, path, errors, { allowNotRun = true } = {}) {
-  const fields = [
+  const requiredFields = [
     'source', 'scope', 'status', 'headSha', 'checks', 'workflowRunId', 'workflowRunUrl', 'updatedAt',
   ];
-  if (!requireFields(value, fields, path, errors)) return;
-  rejectUnknownFields(value, fields, path, errors);
+  if (!requireFields(value, requiredFields, path, errors)) return;
+  rejectUnknownFields(value, [...requiredFields, 'checkRunId'], path, errors);
   if (value.source !== 'github-actions') errors.push(`${path}.source must be github-actions`);
   if (value.scope !== 'full') errors.push(`${path}.scope must be full`);
   if (!['not-run', 'passed', 'failed'].includes(value.status)) errors.push(`${path}.status is invalid`);
@@ -849,14 +849,21 @@ function validateCiProof(value, path, errors, { allowNotRun = true } = {}) {
   if (!(value.workflowRunId === null || (Number.isInteger(value.workflowRunId) && value.workflowRunId >= 1))) {
     errors.push(`${path}.workflowRunId is invalid`);
   }
+  if (Object.hasOwn(value, 'checkRunId')
+      && !(value.checkRunId === null || isString(value.checkRunId, { min: 1, max: 500 }))) {
+    errors.push(`${path}.checkRunId is invalid`);
+  }
   if (!(value.workflowRunUrl === null || isHttpsUrl(value.workflowRunUrl))) errors.push(`${path}.workflowRunUrl is invalid`);
   if (!isDateTime(value.updatedAt, true)) errors.push(`${path}.updatedAt is invalid`);
   if (value.status === 'not-run') {
     if (!allowNotRun) errors.push(`${path}.status cannot be not-run`);
     if (value.headSha !== null || value.updatedAt !== null || value.workflowRunId !== null
-        || value.workflowRunUrl !== null || value.checks?.length !== 0) {
+        || value.workflowRunUrl !== null || (Object.hasOwn(value, 'checkRunId') && value.checkRunId !== null)
+        || value.checks?.length !== 0) {
       errors.push(`${path} not-run proof must be empty`);
     }
+  } else if (Object.hasOwn(value, 'checkRunId') && !isString(value.checkRunId, { min: 1, max: 500 })) {
+    errors.push(`${path} completed CI proof checkRunId must be nonempty when present`);
   } else if (!isSha(value.headSha) || !isDateTime(value.updatedAt)
       || !Number.isInteger(value.workflowRunId) || !isHttpsUrl(value.workflowRunUrl)
       || value.checks?.length === 0) {
@@ -1216,8 +1223,13 @@ export function validatePrReviewState(value) {
     value.ciValidationHistory.forEach((proof, index) => validateCiProof(
       proof, `$.ciValidationHistory[${index}]`, errors, { allowNotRun: false },
     ));
-    const runIds = value.ciValidationHistory.map((proof) => proof.workflowRunId);
-    if (new Set(runIds).size !== runIds.length) errors.push('$.ciValidationHistory contains duplicate workflow run IDs');
+    const attemptIds = value.ciValidationHistory.map((proof) => (
+      Object.hasOwn(proof, 'checkRunId')
+        ? `check:${proof.checkRunId}` : `legacy-workflow:${proof.workflowRunId}`
+    ));
+    if (new Set(attemptIds).size !== attemptIds.length) {
+      errors.push('$.ciValidationHistory contains duplicate CI attempt identities');
+    }
     const currentCi = value.ciValidationStatus?.status === 'not-run' ? null : value.ciValidationStatus;
     if (currentCi !== null && JSON.stringify(value.ciValidationHistory.at(-1)) !== JSON.stringify(currentCi)) {
       errors.push('$.ciValidationStatus must equal the latest append-only CI evidence');

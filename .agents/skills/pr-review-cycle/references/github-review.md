@@ -85,10 +85,15 @@ npm run check:full
 npm run test:e2e:full
 ```
 
-Record the workflow run, source `github-actions`, full scope, exact commit, and
-result. A run for another commit is stale. A partial workflow or targeted local
+Record the workflow run, attempt-specific `Full validation` check-run ID, source
+`github-actions`, full scope, exact commit, and result. A run for another commit is stale. A partial workflow or targeted local
 result cannot satisfy the full CI gate. Only the `Full validation` job from
 `.github/workflows/ci.yml` counts; missing workflow identity fails closed.
+
+Before the first discovery review in a pristine taskless cycle, run
+`refresh-threads --pr <number>` after targeted validation. It records guarded
+exact-head proof only when the fully paginated canonical Codex root set is empty;
+it never marks a threadless remediation task verified and never writes GitHub.
 
 ## Done gate
 

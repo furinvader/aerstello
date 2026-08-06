@@ -287,6 +287,27 @@ test('state JSON Schema rejects terminal and review-ready states missing current
   assert.equal(validateSchema(complete), true, JSON.stringify(validateSchema.errors));
   assert.deepEqual(validatePrReviewState(ready), []);
   assert.deepEqual(validatePrReviewState(complete), []);
+  const attemptProof = { ...complete.ciValidationStatus, checkRunId: 'CHECK_attempt_1' };
+  const attemptAware = completeStateFixture({
+    ciValidationStatus: attemptProof, ciValidationHistory: [attemptProof],
+  });
+  assert.equal(validateSchema(attemptAware), true, JSON.stringify(validateSchema.errors));
+  assert.deepEqual(validatePrReviewState(attemptAware), []);
+  for (const checkRunId of ['', null, 42]) {
+    const malformed = completeStateFixture({
+      ciValidationStatus: { ...attemptProof, checkRunId },
+      ciValidationHistory: [{ ...attemptProof, checkRunId }],
+    });
+    assert.equal(validateSchema(malformed), false);
+    assert.notDeepEqual(validatePrReviewState(malformed), []);
+  }
+  const rerunProof = { ...attemptProof, checkRunId: 'CHECK_attempt_2' };
+  assert.deepEqual(validatePrReviewState(completeStateFixture({
+    ciValidationStatus: rerunProof, ciValidationHistory: [attemptProof, rerunProof],
+  })), []);
+  assert.notDeepEqual(validatePrReviewState(completeStateFixture({
+    ciValidationStatus: rerunProof, ciValidationHistory: [rerunProof, rerunProof],
+  })), []);
 
   const completedTask = {
     id: 'task', sourceIds: ['local:audit'], sourceType: 'local', fingerprint: 'audit-fingerprint',

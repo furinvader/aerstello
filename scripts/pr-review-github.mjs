@@ -19,7 +19,7 @@ import {
 } from './lib/pr-review-state.mjs';
 
 export function usage() {
-  return `Usage: node scripts/pr-review-github.mjs <command> [--pr <number>] [options]\n\nCommands:\n  status [--human]               Read live review and CI status (active PR by default)\n  reply-resolve --task <id>      Reply to and close one task's Codex review threads\n  request --kind <kind>          Request discovery or verification review\n  collect                        Collect official review evidence for the Review commit\n  collect-ci                     Collect full GitHub Actions evidence for the Review commit\n  complete                       Reconfirm every gate and mark the cycle Done\n\nRequired options:\n  --pr <number>                  Required except for status with an active state\n\nRequest options:\n  --kind discovery|verification\n\nReply-resolve options:\n  --task <task-id>\n\nSuccessful commands write JSON, except status --human which writes plain English.\n`;
+  return `Usage: node scripts/pr-review-github.mjs <command> [--pr <number>] [options]\n\nCommands:\n  status [--human]               Read live review and CI status (active PR by default)\n  refresh-threads                Record exact-head empty canonical-thread proof for a taskless cycle\n  reply-resolve --task <id>      Reply to and close one task's Codex review threads\n  request --kind <kind>          Request discovery or verification review\n  collect                        Collect official review evidence for the Review commit\n  collect-ci                     Collect full GitHub Actions evidence for the Review commit\n  complete                       Reconfirm every gate and mark the cycle Done\n\nRequired options:\n  --pr <number>                  Required except for status with an active state\n\nRequest options:\n  --kind discovery|verification\n\nReply-resolve options:\n  --task <task-id>\n\nSuccessful commands write JSON, except status --human which writes plain English.\n`;
 }
 
 function titleCase(value) {
@@ -164,7 +164,7 @@ export async function runCli(argv, {
 } = {}) {
   const [command, ...args] = argv;
   if (!command || command === 'help' || command === '--help') return { help: usage() };
-  if (!['status', 'reply-resolve', 'request', 'collect', 'collect-ci', 'complete'].includes(command)) {
+  if (!['status', 'refresh-threads', 'reply-resolve', 'request', 'collect', 'collect-ci', 'complete'].includes(command)) {
     throw new UsageError(`Unknown command ${command}`);
   }
   const options = parseOptions(args, { booleans: ['help', 'human'], values: ['pr', 'task', 'kind'] });
@@ -183,12 +183,13 @@ export async function runCli(argv, {
     state: state ?? defaultState(cwd),
     git,
     clock,
-    journal: journal ?? (command === 'status' ? null : defaultJournal(cwd, prNumber)),
+    journal: journal ?? (['status', 'refresh-threads'].includes(command) ? null : defaultJournal(cwd, prNumber)),
   });
   if (command === 'status') {
     const result = await workflow.status(prNumber);
     return options.human ? { human: renderHumanStatus(result) } : result;
   }
+  if (command === 'refresh-threads') return workflow.refreshThreads(prNumber);
   if (command === 'reply-resolve') return workflow.replyResolve(prNumber, options.task);
   if (command === 'request') return workflow.request(prNumber, options.kind);
   if (command === 'collect') return workflow.collect(prNumber);

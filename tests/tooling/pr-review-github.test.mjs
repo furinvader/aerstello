@@ -42,7 +42,7 @@ function stateFixture(overrides = {}) {
     verificationEscalation: null, threadResolutionStatus: proof('not-run'), blockedReasons: [],
     validationStatus: { source: 'orchestrator', scope: 'targeted', status: 'not-run', headSha: null, checks: [], updatedAt: null },
     ciValidationStatus: { source: 'github-actions', scope: 'full', status: 'not-run', headSha: null,
-      checks: [], workflowRunId: null, workflowRunUrl: null, updatedAt: null },
+      checks: [], checkRunId: null, workflowRunId: null, workflowRunUrl: null, updatedAt: null },
     ciValidationHistory: [],
     nextAction: 'Recover.', integrationWorktree: '/tmp/integration', orchestratorSessionId: null,
     abandonmentReason: null, git: { branch: 'main', headSha: HEAD, dirty: false }, updatedAt: AT,
@@ -268,7 +268,7 @@ function fakeState(initial) {
     },
     async checkpointCiValidation(input) {
       calls.push({ name: 'checkpointCiValidation', input });
-      const duplicate = current.ciValidationHistory.find((entry) => entry.workflowRunId === input.evidence.workflowRunId);
+      const duplicate = current.ciValidationHistory.find((entry) => entry.checkRunId === input.evidence.checkRunId);
       if (!duplicate) {
         current = { ...current, revision: current.revision + 1,
           ciValidationStatus: input.evidence,
@@ -430,13 +430,36 @@ test('collect-ci paginates the exact-head rollup and records the latest authorit
   const result = await setup.api.collectCi(2);
   assert.deepEqual(result.evidence, {
     source: 'github-actions', scope: 'full', status: 'passed', headSha: HEAD,
-    checks: ['Full validation', 'lint'], workflowRunId: 701,
+    checks: ['Full validation', 'lint'], checkRunId: 'CHECK_full', workflowRunId: 701,
     workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/701', updatedAt: AT,
   });
   assert.ok(client.calls.filter((call) => call.name === 'PullRequestChecks').length >= 3);
   assert.match(client.calls.find((call) => call.name === 'PullRequestChecks').query,
     /workflowRun\{databaseId url file\{path\} workflow\{name\}\}/u);
   assert.equal(setup.state.calls.at(-1).name, 'checkpointCiValidation');
+});
+
+test('collect-ci appends distinct check attempts for one rerun workflow and is idempotent per check', async () => {
+  const client = new FakeClient({
+    rollupState: 'FAILURE',
+    ciContexts: [fullValidationCheck({ id: 'CHECK_attempt_1', conclusion: 'FAILURE' })],
+  });
+  const setup = workflow(stateFixture(), client);
+  assert.equal((await setup.api.collectCi(2)).evidence.status, 'failed');
+  client.rollupState = 'SUCCESS';
+  client.ciContexts = [fullValidationCheck({
+    id: 'CHECK_attempt_2', conclusion: 'SUCCESS', completedAt: '2026-08-05T00:01:00Z',
+  })];
+  const successful = await setup.api.collectCi(2);
+  assert.equal(successful.evidence.status, 'passed');
+  assert.equal(successful.evidence.workflowRunId, 701);
+  assert.equal(successful.evidence.checkRunId, 'CHECK_attempt_2');
+  assert.deepEqual(setup.state.current.ciValidationHistory.map((entry) => entry.checkRunId), [
+    'CHECK_attempt_1', 'CHECK_attempt_2',
+  ]);
+  const revision = setup.state.current.revision;
+  await setup.api.collectCi(2);
+  assert.equal(setup.state.current.revision, revision);
 });
 
 test('collect-ci records a completed failed full run but rejects pending, stale, missing, and ambiguous evidence', async () => {
@@ -462,6 +485,92 @@ test('collect-ci records a completed failed full run but rejects pending, stale,
         file: { path: '.github/workflows/ci.yml' }, workflow: { name: 'CI' } } } }),
   ] });
   await assert.rejects(() => workflow(stateFixture(), ambiguous).api.collectCi(2), { code: 'CI_EVIDENCE_AMBIGUOUS' });
+
+  const missingAttempt = new FakeClient({ ciContexts: [fullValidationCheck({ id: null })] });
+  await assert.rejects(() => workflow(stateFixture(), missingAttempt).api.collectCi(2), {
+    code: 'CI_EVIDENCE_INCOMPLETE',
+  });
+});
+
+test('taskless thread refresh records guarded empty proof without GitHub mutation or threadless verification', async () => {
+  const initial = stateFixture({
+    validationStatus: {
+      source: 'orchestrator', scope: 'targeted', status: 'passed', headSha: HEAD,
+      checks: ['npm run check:workflow'], updatedAt: AT,
+    },
+  });
+  const client = new FakeClient({ pageSize: 1 });
+  addThread(client, { id: 'THREAD_noncanonical', root: rootComment('THREAD_noncanonical', { author: VIEWER }) });
+  const setup = workflow(initial, client);
+  const result = await setup.api.refreshThreads(2);
+  assert.equal(result.threadResolutionStatus.status, 'passed');
+  assert.deepEqual(result.threadResolutionStatus.threads, []);
+  assert.deepEqual(result.threadResolutionStatus.threadlessVerification, proof('not-run').threadlessVerification);
+  assert.equal(setup.state.current.phase, 'recovering');
+  assert.deepEqual(setup.state.current.tasks, []);
+  assert.equal(client.events.length, 0);
+  assert.equal(setup.state.calls.at(-1).name, 'checkpointTaskCompletion');
+
+  const requestClient = new FakeClient();
+  addThread(requestClient, { resolved: true });
+  const requestState = {
+    ...setup.state.current, phase: 'ready-for-review', nextAction: 'Request review.',
+  };
+  const requestSetup = workflow(requestState, requestClient);
+  await assert.rejects(() => requestSetup.api.request(2, 'discovery'), { code: 'ROOT_IDENTITY_MISMATCH' });
+  assert.equal(requestClient.events.length, 0);
+});
+
+test('taskless thread refresh fails closed across task, root, validation, Git, adapter, and state-race boundaries', async () => {
+  const validated = stateFixture({
+    validationStatus: {
+      source: 'orchestrator', scope: 'targeted', status: 'passed', headSha: HEAD,
+      checks: ['npm run check:workflow'], updatedAt: AT,
+    },
+  });
+  await assert.rejects(() => workflow(stateFixture()).api.refreshThreads(2), { code: 'TASK_NOT_READY' });
+  await assert.rejects(() => workflow({
+    ...validated,
+    tasks: [{
+      id: 'durable-task', sourceIds: ['local:audit'], sourceType: 'local', fingerprint: 'durable-task',
+      summary: 'Durable task.', severity: 'P2', disposition: 'actionable', status: 'completed',
+      integratedCommitSha: HEAD, resolutionSummary: 'Completed.',
+    }],
+  }).api.refreshThreads(2), {
+    code: 'TASKLESS_REFRESH_NOT_ALLOWED',
+  });
+  for (const resolved of [false, true]) {
+    const client = new FakeClient();
+    addThread(client, { resolved });
+    await assert.rejects(() => workflow(validated, client).api.refreshThreads(2), {
+      code: 'ROOT_IDENTITY_MISMATCH',
+    });
+    assert.equal(client.events.length, 0);
+  }
+  const duplicate = new FakeClient();
+  duplicate.threads = [{ id: 'THREAD_duplicate', isResolved: false }, { id: 'THREAD_duplicate', isResolved: false }];
+  duplicate.threadComments.set('THREAD_duplicate', [rootComment('THREAD_duplicate', { author: VIEWER })]);
+  await assert.rejects(() => workflow(validated, duplicate).api.refreshThreads(2), {
+    code: 'ROOT_IDENTITY_AMBIGUOUS',
+  });
+  await assert.rejects(() => workflow(validated, new FakeClient(), {
+    git: fakeGit({ snapshot: async () => ({ headSha: HEAD, dirty: true }) }),
+  }).api.refreshThreads(2), { code: 'MUTATION_NOT_READY' });
+  const withoutCheckpoint = { async load() { return structuredClone(validated); } };
+  await assert.rejects(() => createGitHubReviewWorkflow({
+    client: new FakeClient(), state: withoutCheckpoint, git: fakeGit(), clock: { now: () => AT }, journal: null,
+  }).refreshThreads(2), { code: 'INVALID_ADAPTERS' });
+  const raced = fakeState(validated);
+  const originalLoad = raced.load.bind(raced);
+  let reads = 0;
+  raced.load = async () => {
+    const state = await originalLoad();
+    reads += 1;
+    return reads > 1 ? { ...state, revision: state.revision + 1 } : state;
+  };
+  await assert.rejects(() => createGitHubReviewWorkflow({
+    client: new FakeClient(), state: raced, git: fakeGit(), clock: { now: () => AT }, journal: null,
+  }).refreshThreads(2), { code: 'STATE_REVISION_CHANGED' });
 });
 
 test('collect-ci classifies the selected Full validation run independently of the aggregate rollup', async () => {
@@ -958,6 +1067,12 @@ test('complete rechecks that the same successful workflow evidence is still auth
       },
       code: 'COMPLETION_NOT_READY',
     },
+    {
+      mutate(client) {
+        client.ciContexts = [fullValidationCheck({ id: 'CHECK_rerun', completedAt: '2026-08-05T00:01:00Z' })];
+      },
+      code: 'COMPLETION_NOT_READY',
+    },
   ]) {
     const client = new FinalCiMutationClient(mutate);
     client.reviews.push({
@@ -972,8 +1087,12 @@ test('complete rechecks that the same successful workflow evidence is still auth
 });
 
 test('CLI exposes exactly the documented explicit-PR command surface and JSON-ready results', async () => {
-  assert.match(usage(), /status[\s\S]*reply-resolve[\s\S]*request[\s\S]*collect[\s\S]*collect-ci[\s\S]*complete/u);
+  assert.match(usage(), /status[\s\S]*refresh-threads[\s\S]*reply-resolve[\s\S]*request[\s\S]*collect[\s\S]*collect-ci[\s\S]*complete/u);
   await assert.rejects(() => runCli(['collect'], {}), /--pr/u);
+  await assert.rejects(() => runCli(['refresh-threads'], {}), /--pr/u);
+  await assert.rejects(() => runCli(['refresh-threads', '--pr', '2', '--task', 'x'], {}), /--task is only valid/u);
+  await assert.rejects(() => runCli(['refresh-threads', '--pr', '2', '--kind', 'discovery'], {}), /--kind is only valid/u);
+  await assert.rejects(() => runCli(['refresh-threads', '--pr', '2', '--human'], {}), /--human is only valid/u);
   await assert.rejects(() => runCli(['unknown', '--pr', '2'], {}), /Unknown command/u);
   await assert.rejects(() => runCli(['request', '--pr', '2', '--kind', 'other'], {}), /discovery\|verification/u);
   const client = new FakeClient();
@@ -982,6 +1101,16 @@ test('CLI exposes exactly the documented explicit-PR command surface and JSON-re
     client, state, git: fakeGit(), clock: { now: () => AT }, journal: fakeJournal(),
   });
   assert.equal(result.prNumber, 2);
+  const taskless = fakeState(stateFixture({
+    validationStatus: {
+      source: 'orchestrator', scope: 'targeted', status: 'passed', headSha: HEAD,
+      checks: ['npm run check:workflow'], updatedAt: AT,
+    },
+  }));
+  const refreshed = await runCli(['refresh-threads', '--pr', '2'], {
+    client: new FakeClient(), state: taskless, git: fakeGit(), clock: { now: () => AT },
+  });
+  assert.equal(refreshed.threadResolutionStatus.status, 'passed');
   const human = await runCli(['status', '--human'], {
     client, state, git: fakeGit(), clock: { now: () => AT },
   });

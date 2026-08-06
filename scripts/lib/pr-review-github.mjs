@@ -244,14 +244,15 @@ function ciEvidenceFromRollup(snapshot) {
   }
   const selected = latest[0];
   const workflowRun = selected.checkSuite?.workflowRun;
-  if (!Number.isInteger(workflowRun?.databaseId) || workflowRun.databaseId < 1 || !httpsUrl(workflowRun.url)) {
+  if (typeof selected.id !== 'string' || selected.id.length === 0
+      || !Number.isInteger(workflowRun?.databaseId) || workflowRun.databaseId < 1 || !httpsUrl(workflowRun.url)) {
     throw new GitHubWorkflowError('Full validation lacks an authoritative workflow run URL', 'CI_EVIDENCE_INCOMPLETE');
   }
   const passed = selected.conclusion === 'SUCCESS';
   return {
     source: 'github-actions', scope: 'full', status: passed ? 'passed' : 'failed',
     headSha: snapshot.headSha, checks: namedChecks,
-    workflowRunId: workflowRun.databaseId, workflowRunUrl: workflowRun.url,
+    checkRunId: selected.id, workflowRunId: workflowRun.databaseId, workflowRunUrl: workflowRun.url,
     updatedAt: selected.completedAt,
   };
 }
@@ -272,6 +273,7 @@ function codexReviewStatus(state, liveHeadSha) {
 function sameCiEvidence(left, right) {
   return left.source === right.source && left.scope === right.scope
     && left.status === right.status && left.headSha === right.headSha
+    && left.checkRunId === right.checkRunId
     && left.workflowRunId === right.workflowRunId && left.workflowRunUrl === right.workflowRunUrl
     && left.updatedAt === right.updatedAt
     && left.checks.length === right.checks.length
@@ -294,6 +296,10 @@ async function readLiveSnapshot(client, state, { reactionsFor = null } = {}) {
     readReviewThreads(client, state.repository, state.prNumber),
     reactionsFor ? readRequestReactions(client, reactionsFor) : Promise.resolve([]),
   ]);
+  if (rawThreads.some((thread) => typeof thread?.id !== 'string' || thread.id.length === 0)
+      || new Set(rawThreads.map((thread) => thread.id)).size !== rawThreads.length) {
+    throw new GitHubWorkflowError('Review thread identity is missing or duplicated', 'ROOT_IDENTITY_AMBIGUOUS');
+  }
   const threads = [];
   for (const thread of rawThreads) {
     const threadComments = await readThreadComments(client, thread.id);
@@ -722,6 +728,34 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     return { evidence: active.ciValidationStatus, phase: active.phase, revision: active.revision };
   }
 
+  async function refreshThreads(prNumber) {
+    let active = await load(prNumber);
+    if (active.tasks.length !== 0) {
+      throw new GitHubWorkflowError('Empty-thread refresh is only available before durable tasks exist', 'TASKLESS_REFRESH_NOT_ALLOWED');
+    }
+    if (!stateAdapter.checkpointTaskCompletion) {
+      throw new GitHubWorkflowError('The guarded thread-proof checkpoint is unavailable', 'INVALID_ADAPTERS');
+    }
+    const live = await readLiveSnapshot(client, active);
+    await assertMutationReady({ state: active, git }, live);
+    const { plan } = buildCanonicalRootPlan(active, live);
+    if (plan.length !== 0 || live.threads.some((thread) => thread.canonical)) {
+      throw new GitHubWorkflowError('Canonical Codex roots exist; triage them before refreshing empty proof', 'TASKLESS_THREADS_NOT_EMPTY');
+    }
+    await assertCurrent(active);
+    const threadResolutionStatus = {
+      status: 'passed',
+      headSha: active.currentIntegrationHeadSha,
+      threads: [],
+      threadlessVerification: active.threadResolutionStatus.threadlessVerification,
+      updatedAt: clock.now(),
+    };
+    active = await stateAdapter.checkpointTaskCompletion({
+      prNumber: active.prNumber, expectedRevision: active.revision, threadResolutionStatus,
+    });
+    return { stateRevision: active.revision, threadResolutionStatus: active.threadResolutionStatus };
+  }
+
   async function request(prNumber, kind) {
     let active = await load(prNumber);
     if (!['discovery', 'verification'].includes(kind)) throw new GitHubWorkflowError('Review kind is invalid', 'INVALID_REVIEW_KIND');
@@ -1073,7 +1107,7 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     return { completed: true, phase: active.phase, revision: active.revision };
   }
 
-  return { status, replyResolve, request, collect, collectCi, complete };
+  return { status, refreshThreads, replyResolve, request, collect, collectCi, complete };
 }
 
 export const githubReviewConstants = {
