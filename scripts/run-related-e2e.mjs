@@ -12,10 +12,20 @@ export const KNOWN_PROJECTS = Object.freeze([
 ]);
 
 const DEFAULT_PROJECTS = Object.freeze(['tablet-chromium']);
+const BROWSER_PROJECTS = Object.freeze([
+  ['@browser-webkit', 'mobile-webkit'],
+  ['@browser-firefox', 'desktop-firefox'],
+]);
 const SAFE_SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
-export function readFeatureTags(featureDirectory = resolve('specs/features')) {
+function tagsOnLine(trimmed) {
+  if (!trimmed.startsWith('@')) return [];
+  return trimmed.split(/\s+/).filter((tag) => /^@[a-z0-9]+(?:-[a-z0-9]+)*$/.test(tag));
+}
+
+export function readFeatureCatalog(featureDirectory = resolve('specs/features')) {
   const tags = new Set();
+  const scenarios = [];
   const directories = [featureDirectory];
   while (directories.length > 0) {
     const directory = directories.pop();
@@ -27,16 +37,40 @@ export function readFeatureTags(featureDirectory = resolve('specs/features')) {
       }
       if (!entry.isFile() || !entry.name.endsWith('.feature')) continue;
       const source = readFileSync(entryPath, 'utf8');
+      let featureTags = [];
+      let pendingTags = [];
       for (const line of source.split(/\r?\n/)) {
         const trimmed = line.trim();
-        if (!trimmed.startsWith('@')) continue;
-        for (const tag of trimmed.split(/\s+/)) {
-          if (/^@[a-z0-9]+(?:-[a-z0-9]+)*$/.test(tag)) tags.add(tag);
+        const lineTags = tagsOnLine(trimmed);
+        if (lineTags.length > 0) {
+          lineTags.forEach((tag) => tags.add(tag));
+          pendingTags.push(...lineTags);
+          continue;
         }
+        if (/^Feature:/u.test(trimmed)) {
+          featureTags = [...pendingTags];
+          pendingTags = [];
+          continue;
+        }
+        if (/^Scenario(?: Outline)?:/u.test(trimmed)) {
+          const scenarioTags = [...pendingTags];
+          const ids = scenarioTags.filter((tag) => /^@id-[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(tag));
+          if (ids.length !== 1) {
+            throw new Error(`${entryPath} scenario must have exactly one stable @id- tag`);
+          }
+          scenarios.push({ id: ids[0], tags: [...new Set([...featureTags, ...scenarioTags])] });
+          pendingTags = [];
+          continue;
+        }
+        if (trimmed && !trimmed.startsWith('#')) pendingTags = [];
       }
     }
   }
-  return tags;
+  return { tags, scenarios };
+}
+
+export function readFeatureTags(featureDirectory = resolve('specs/features')) {
+  return readFeatureCatalog(featureDirectory).tags;
 }
 
 function readValue(arguments_, index, option) {
@@ -90,13 +124,23 @@ export function planRelatedE2E(arguments_, featureDirectory = resolve('specs/fea
     throw new Error('at least one --id or --tag selector is required');
   }
 
-  const knownTags = readFeatureTags(featureDirectory);
+  const catalog = readFeatureCatalog(featureDirectory);
   for (const selector of selectors) {
-    if (!knownTags.has(selector)) throw new Error(`unknown selector: ${selector}`);
+    if (!catalog.tags.has(selector)) throw new Error(`unknown selector: ${selector}`);
   }
 
   const uniqueSelectors = [...new Set(selectors)];
   const uniqueProjects = projects.length > 0 ? [...new Set(projects)] : [...DEFAULT_PROJECTS];
+  const matchingScenarios = catalog.scenarios.filter((scenario) => (
+    uniqueSelectors.some((selector) => scenario.tags.includes(selector))
+  ));
+  const requiredProjects = BROWSER_PROJECTS
+    .filter(([tag]) => matchingScenarios.some((scenario) => scenario.tags.includes(tag)))
+    .map(([, project]) => project);
+  const missingProjects = requiredProjects.filter((project) => !uniqueProjects.includes(project));
+  if (missingProjects.length > 0) {
+    throw new Error(`selected scenarios require --project ${missingProjects.join(' and --project ')}`);
+  }
   return {
     selectors: uniqueSelectors,
     projects: uniqueProjects,

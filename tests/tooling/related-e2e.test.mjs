@@ -6,6 +6,7 @@ import test from 'node:test';
 import {
   KNOWN_PROJECTS,
   planRelatedE2E,
+  readFeatureCatalog,
   readFeatureTags,
   runRelatedE2E,
 } from '../../scripts/run-related-e2e.mjs';
@@ -67,6 +68,29 @@ test('declares the supported area and execution-scope tags', () => {
   }
 });
 
+test('feature catalog associates stable IDs with scenario and inherited feature tags', () => {
+  const catalog = readFeatureCatalog(featureDirectory);
+  const manifest = catalog.scenarios.find((scenario) => (
+    scenario.id === '@id-the-app-exposes-an-installable-pwa-manifest'
+  ));
+  assert.deepEqual(manifest?.tags, [
+    '@area-pwa',
+    '@id-the-app-exposes-an-installable-pwa-manifest',
+    '@device-responsive',
+    '@browser-webkit',
+    '@browser-firefox',
+  ]);
+  const touchTargets = catalog.scenarios.find((scenario) => (
+    scenario.id === '@id-order-quantity-controls-meet-mobile-touch-targets'
+  ));
+  assert.deepEqual(touchTargets?.tags, [
+    '@area-pwa',
+    '@id-order-quantity-controls-meet-mobile-touch-targets',
+    '@device-responsive',
+    '@browser-webkit',
+  ]);
+});
+
 test('builds the exact Cucumber OR expression and defaults to tablet Chromium', () => {
   const plan = planRelatedE2E([
     '--id', 'an-administrator-signs-in-and-sees-the-configured-venue',
@@ -84,6 +108,66 @@ test('accepts repeatable known projects', () => {
   ], featureDirectory);
   assert.deepEqual(plan.projects, ['mobile-webkit', 'desktop-firefox']);
   assert.deepEqual(KNOWN_PROJECTS, ['tablet-chromium', 'mobile-webkit', 'desktop-firefox']);
+});
+
+test('requires browser projects from stable IDs, direct tags, inherited area tags, and selector unions', () => {
+  const manifest = planRelatedE2E([
+    '--id', 'the-app-exposes-an-installable-pwa-manifest',
+    '--project', 'mobile-webkit',
+    '--project', 'desktop-firefox',
+  ], featureDirectory);
+  assert.deepEqual(manifest.projects, ['mobile-webkit', 'desktop-firefox']);
+
+  const touchTargets = planRelatedE2E([
+    '--id', 'order-quantity-controls-meet-mobile-touch-targets',
+    '--project', 'mobile-webkit',
+  ], featureDirectory);
+  assert.deepEqual(touchTargets.projects, ['mobile-webkit']);
+
+  const directTag = planRelatedE2E([
+    '--tag', 'browser-firefox',
+    '--project', 'desktop-firefox',
+    '--project', 'mobile-webkit',
+  ], featureDirectory);
+  assert.deepEqual(directTag.projects, ['desktop-firefox', 'mobile-webkit']);
+
+  const areaSuperset = planRelatedE2E([
+    '--tag', 'area-pwa',
+    '--project', 'tablet-chromium',
+    '--project', 'mobile-webkit',
+    '--project', 'desktop-firefox',
+  ], featureDirectory);
+  assert.deepEqual(areaSuperset.projects, ['tablet-chromium', 'mobile-webkit', 'desktop-firefox']);
+
+  const selectorUnion = planRelatedE2E([
+    '--id', 'an-administrator-signs-in-and-sees-the-configured-venue',
+    '--id', 'order-quantity-controls-meet-mobile-touch-targets',
+    '--project', 'mobile-webkit',
+  ], featureDirectory);
+  assert.equal(selectorUnion.tagExpression,
+    '@id-an-administrator-signs-in-and-sees-the-configured-venue or @id-order-quantity-controls-meet-mobile-touch-targets');
+  assert.deepEqual(selectorUnion.projects, ['mobile-webkit']);
+});
+
+test('rejects omitted or incomplete browser projects before invoking bddgen', () => {
+  const invalidScopes = [
+    ['--tag', 'browser-webkit'],
+    ['--tag', 'browser-firefox', '--project', 'desktop-firefox'],
+    ['--id', 'order-quantity-controls-meet-mobile-touch-targets'],
+    ['--id', 'order-quantity-controls-meet-mobile-touch-targets', '--project', 'desktop-firefox'],
+    ['--id', 'the-app-exposes-an-installable-pwa-manifest', '--project', 'mobile-webkit'],
+    ['--tag', 'area-pwa', '--project', 'mobile-webkit'],
+  ];
+  for (const arguments_ of invalidScopes) {
+    assert.throws(() => planRelatedE2E(arguments_, featureDirectory), /require --project/u);
+    const calls = [];
+    assert.equal(runRelatedE2E(arguments_, {
+      featureDirectory,
+      logger: quietLogger,
+      runner: (...args) => calls.push(args),
+    }), 2);
+    assert.deepEqual(calls, []);
+  }
 });
 
 test('known project names stay aligned with Playwright configuration', () => {
