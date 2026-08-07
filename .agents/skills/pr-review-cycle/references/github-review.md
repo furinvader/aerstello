@@ -62,6 +62,13 @@ review commit == recorded Review commit == current PR head
 ```
 
 Any mismatch is stale. Do not infer commit identity from ordinary review prose.
+A canonical exact-head `COMMENTED` review submission is clean only when its
+body is a string with empty trimmed content and it has no attached canonical
+root. Any nonempty trimmed body is findings even without an inline root, and
+any attached canonical root is findings even when the body is empty. A missing
+or non-string body is unsupported evidence and fails closed; never parse prose,
+badge text, or severity wording to weaken that classification. Completion
+rechecks the recorded clean review against these same live body and root rules.
 Codex's official top-level comment may prove clean only when its first line is
 exactly `Codex Review: Didn't find any major issues. Nice work!` or
 `Codex Review: Didn't find any major issues. :tada:`, it follows the recorded

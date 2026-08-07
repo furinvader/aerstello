@@ -103,6 +103,13 @@ function completedState(overrides = {}) {
   });
 }
 
+function canonicalReview(overrides = {}) {
+  return {
+    id: 'PRR_clean', databaseId: 201, url: 'https://x/clean', body: '', state: 'COMMENTED',
+    submittedAt: AT, commit: { oid: HEAD }, author: BOT, ...overrides,
+  };
+}
+
 function cleanIssueComment(overrides = {}) {
   return {
     id: 'IC_clean', databaseId: 202,
@@ -1796,6 +1803,71 @@ test('collect accepts only canonical exact request THUMBS_UP and ignores noncano
   assert.equal(state.calls.at(-1).name, 'checkpointReviewOutcome');
 });
 
+test('collect conservatively classifies canonical review bodies and attached roots', async () => {
+  for (const [kind, expectedPhase] of [
+    ['discovery', 'triaging'],
+    ['verification', 'awaiting-human-decision'],
+  ]) {
+    const client = new FakeClient();
+    client.reviews.push(canonicalReview({
+      id: `PRR_body_${kind}`,
+      body: 'Arbitrary canonical review body; its prose is not parsed.',
+    }));
+    const setup = workflow(pendingState(kind), client);
+    const result = await setup.api.collect(2);
+    assert.equal(result.outcome.outcome, 'findings');
+    assert.equal(result.outcome.evidenceType, 'review-submission');
+    assert.equal(result.phase, expectedPhase);
+    assert.equal(client.threads.length, 0, 'a nonempty body needs no attached root');
+  }
+
+  for (const body of ['', ' \n\t ']) {
+    const client = new FakeClient();
+    client.reviews.push(canonicalReview({ body }));
+    const result = await workflow(pendingState('discovery'), client).api.collect(2);
+    assert.equal(result.outcome.outcome, 'clean');
+    assert.equal(result.phase, 'validating');
+  }
+
+  const attachedClient = new FakeClient();
+  attachedClient.reviews.push(canonicalReview({ id: 'PRR_attached', body: '' }));
+  addThread(attachedClient, {
+    root: rootComment('THREAD_1', { pullRequestReview: { id: 'PRR_attached' } }),
+  });
+  const attached = await workflow(pendingState('discovery'), attachedClient).api.collect(2);
+  assert.equal(attached.outcome.outcome, 'findings');
+  assert.equal(attached.phase, 'triaging');
+});
+
+test('collect rejects canonical reviews with missing or non-string bodies as unsupported', async () => {
+  for (const [label, body, omitBody] of [
+    ['missing', undefined, true],
+    ['null', null, false],
+    ['number', 1, false],
+    ['object', {}, false],
+  ]) {
+    for (const kind of ['discovery', 'verification']) {
+      const client = new FakeClient();
+      const review = canonicalReview({ id: `PRR_${label}_${kind}`, body });
+      if (omitBody) delete review.body;
+      client.reviews.push(review);
+      const setup = workflow(pendingState(kind), client);
+      if (kind === 'discovery') {
+        await assert.rejects(() => setup.api.collect(2), {
+          code: 'DISCOVERY_COLLECTION_UNRESOLVED',
+        }, label);
+        assert.equal(setup.state.calls.length, 0, label);
+      } else {
+        const result = await setup.api.collect(2);
+        assert.equal(result.escalated, true, label);
+        assert.equal(result.escalation.reason, 'ambiguous-canonical-evidence', label);
+        assert.deepEqual(result.escalation.evidenceIds, [`review:${review.id}`], label);
+      }
+      assert.equal(client.events.length, 0, label);
+    }
+  }
+});
+
 test('collect records a unique canonical exact-head clean issue comment at the request-time boundary', async () => {
   const client = new FakeClient();
   client.comments.push(cleanIssueComment());
@@ -2075,6 +2147,32 @@ test('complete performs fresh live proof and uses guarded completion only when e
   });
 });
 
+test('complete freshly revalidates the recorded clean review submission body', async () => {
+  const whitespaceClient = new FakeClient();
+  whitespaceClient.reviews.push(canonicalReview({ body: ' \n\t ' }));
+  assert.equal(
+    (await workflow(completedState(), whitespaceClient).api.complete(2)).phase,
+    'complete',
+  );
+
+  for (const [label, body, omitBody] of [
+    ['nonempty', 'A newly visible threadless finding.', false],
+    ['missing', undefined, true],
+    ['null', null, false],
+    ['number', 1, false],
+  ]) {
+    const client = new FakeClient();
+    const review = canonicalReview({ body });
+    if (omitBody) delete review.body;
+    client.reviews.push(review);
+    const setup = workflow(completedState(), client);
+    await assert.rejects(() => setup.api.complete(2), {
+      code: 'COMPLETION_NOT_READY',
+    }, label);
+    assert.equal(setup.state.calls.length, 0, label);
+  }
+});
+
 test('complete freshly revalidates clean issue-comment identity and content', async () => {
   const goodClient = new FakeClient();
   goodClient.comments.push(cleanIssueComment());
@@ -2151,6 +2249,10 @@ test('complete reruns review and thread proof after checkpointing CI', async () 
     },
     {
       mutate(client) { client.reviews.length = 0; },
+      code: 'COMPLETION_NOT_READY',
+    },
+    {
+      mutate(client) { client.reviews[0].body = 'A late threadless finding.'; },
       code: 'COMPLETION_NOT_READY',
     },
     {

@@ -816,6 +816,13 @@ function canonicalEvidenceId(item, prefix) {
   return `${prefix}:${item.id}`;
 }
 
+function classifyReviewSubmission(review, threads) {
+  if (typeof review.body !== 'string') return 'unsupported';
+  const hasAttachedCanonicalRoot = threads.some((thread) => thread.canonical
+    && thread.root.pullRequestReview?.id === review.id);
+  return review.body.trim().length > 0 || hasAttachedCanonicalRoot ? 'findings' : 'clean';
+}
+
 async function classifyCleanIssueComments({ comments, request, git, cwd, expectedHeads }) {
   const exact = [];
   const unsupported = [];
@@ -1383,11 +1390,14 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     const request = active.reviewRequest;
     const canonicalReviews = live.reviews.filter((review) => isCanonicalActor(review.author)
       && evidenceAtOrAfter(review.submittedAt, request.at));
-    const exactReviews = canonicalReviews.filter((review) => review.state === 'COMMENTED'
+    const supportedReviews = canonicalReviews.filter((review) => review.state === 'COMMENTED'
+      && typeof review.body === 'string');
+    const exactReviews = supportedReviews.filter((review) => review.state === 'COMMENTED'
       && review.commit?.oid === request.headSha);
-    const staleReviews = canonicalReviews.filter((review) => review.state === 'COMMENTED'
+    const staleReviews = supportedReviews.filter((review) => review.state === 'COMMENTED'
       && review.commit?.oid !== request.headSha);
-    const unsupportedReviews = canonicalReviews.filter((review) => review.state !== 'COMMENTED');
+    const unsupportedReviews = canonicalReviews.filter((review) => review.state !== 'COMMENTED'
+      || typeof review.body !== 'string');
     const exactReactions = live.reactions.filter((reaction) => reaction.content === 'THUMBS_UP'
       && isCanonicalActor(reaction.user) && evidenceAtOrAfter(reaction.createdAt, request.at));
     const unsupportedReactions = live.reactions.filter((reaction) => reaction.content === 'THUMBS_UP'
@@ -1454,12 +1464,10 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       };
     } else {
       const review = selected.value;
-      const findingCount = live.threads.filter((thread) => thread.canonical
-        && thread.root.pullRequestReview?.id === review.id).length;
       outcome = {
         id: review.id, databaseId: review.databaseId ?? null, url: review.url,
         headSha: review.commit.oid, at: review.submittedAt, requestId: request.id, kind: request.kind,
-        outcome: findingCount > 0 ? 'findings' : 'clean', evidenceType: 'review-submission',
+        outcome: classifyReviewSubmission(review, live.threads), evidenceType: 'review-submission',
         reviewerLogin: review.author.login, reviewerNodeId: review.author.id,
         reviewerType: review.author.__typename, reviewerUrl: review.author.url,
         reactionContent: null, reactionCommentId: null,
@@ -1488,7 +1496,8 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       if (state.reviewOutcome.evidenceType === 'review-submission') {
         outcomeIsLive = live.reviews.some((review) => review.id === state.reviewOutcome.id
           && review.state === 'COMMENTED' && review.commit?.oid === live.metadata.headRefOid
-          && isCanonicalActor(review.author) && evidenceAtOrAfter(review.submittedAt, state.reviewRequest.at));
+          && isCanonicalActor(review.author) && evidenceAtOrAfter(review.submittedAt, state.reviewRequest.at)
+          && classifyReviewSubmission(review, live.threads) === 'clean');
       } else if (state.reviewOutcome.evidenceType === 'request-reaction') {
         outcomeIsLive = live.reactions.some((reaction) => reaction.id === state.reviewOutcome.id
           && reaction.content === 'THUMBS_UP' && isCanonicalActor(reaction.user)

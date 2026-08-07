@@ -68,6 +68,15 @@ project only when responsive, touch, installation, cross-device, or
 browser-specific behavior needs it. Unknown related-test selection is a
 planning error, never permission to fall back to the full local suite.
 
+When collecting an exact-head canonical `COMMENTED` review submission, treat it
+as clean only if its body is a string whose trimmed content is empty and no
+canonical root is attached. A nonempty body is findings even without an inline
+root, while an attached canonical root is findings even with an empty body.
+Missing or non-string bodies are unsupported and fail closed; the workflow does
+not interpret prose, badge text, or severity wording. The Done transition
+freshly rechecks a recorded clean review against the same live body and root
+rules.
+
 For a pristine taskless first review, save and run the explicit initial targeted
 validation selection, then use `refresh-threads --pr <number>` to record guarded
 exact-head proof that the fully paginated canonical Codex thread set is empty.
