@@ -156,6 +156,35 @@
           {
             "if": { "properties": { "reviewRound": { "const": 3 } }, "required": ["reviewRound"] },
             "then": { "properties": { "verificationReviewUsed": { "const": false } } }
+          },
+          {
+            "if": {
+              "properties": {
+                "tasks": {
+                  "type": "array",
+                  "contains": {
+                    "type": "object", "required": ["sourceType", "status"],
+                    "properties": { "sourceType": { "const": "local" }, "status": { "const": "completed" } }
+                  }
+                }
+              },
+              "required": ["tasks"]
+            },
+            "then": {
+              "properties": {
+                "threadResolutionStatus": {
+                  "type": "object", "required": ["localVerification"],
+                  "properties": {
+                    "localVerification": {
+                      "allOf": [
+                        { "$ref": "#/$defs/localVerification" },
+                        { "type": "object", "properties": { "status": { "const": "passed" } } }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
           }
         ]
       }
@@ -203,6 +232,35 @@
           {
             "if": { "properties": { "reviewRequest": { "type": "object", "properties": { "kind": { "const": "verification" } } } }, "required": ["reviewRequest"] },
             "then": { "properties": { "reviewRound": { "const": 3 }, "verificationReviewUsed": { "const": true } } }
+          },
+          {
+            "if": {
+              "properties": {
+                "tasks": {
+                  "type": "array",
+                  "contains": {
+                    "type": "object", "required": ["sourceType", "status"],
+                    "properties": { "sourceType": { "const": "local" }, "status": { "const": "completed" } }
+                  }
+                }
+              },
+              "required": ["tasks"]
+            },
+            "then": {
+              "properties": {
+                "threadResolutionStatus": {
+                  "type": "object", "required": ["localVerification"],
+                  "properties": {
+                    "localVerification": {
+                      "allOf": [
+                        { "$ref": "#/$defs/localVerification" },
+                        { "type": "object", "properties": { "status": { "const": "passed" } } }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
           }
         ]
       }
@@ -477,6 +535,31 @@
         }
       ]
     },
+    "localVerification": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "headSha", "taskIds", "updatedAt"],
+      "properties": {
+        "status": { "enum": ["not-run", "passed", "failed"] },
+        "headSha": { "$ref": "#/$defs/nullableSha" },
+        "taskIds": { "$ref": "#/$defs/stringList" },
+        "updatedAt": { "oneOf": [{ "type": "null" }, { "type": "string", "format": "date-time" }] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "not-run" } }, "required": ["status"] },
+          "then": { "properties": { "headSha": { "type": "null" }, "taskIds": { "type": "array", "maxItems": 0 }, "updatedAt": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "status": { "const": "passed" } }, "required": ["status"] },
+          "then": {
+            "properties": {
+              "headSha": { "$ref": "#/$defs/sha" }, "taskIds": { "type": "array", "minItems": 1 },
+              "updatedAt": { "type": "string", "format": "date-time" }
+            }
+          }
+        }
+      ]
+    },
     "threadResolutionStatus": {
       "type": "object", "additionalProperties": false,
       "required": ["status", "headSha", "threads", "threadlessVerification", "updatedAt"],
@@ -488,6 +571,7 @@
           "$comment": "The manual validator additionally enforces unique threadNodeId, rootCommentNodeId, rootCommentDatabaseId, and non-null replyId keys; Draft 2020-12 uniqueItems only rejects identical records."
         },
         "threadlessVerification": { "$ref": "#/$defs/threadlessVerification" },
+        "localVerification": { "$ref": "#/$defs/localVerification" },
         "updatedAt": { "oneOf": [{ "type": "null" }, { "type": "string", "format": "date-time" }] }
       },
       "allOf": [

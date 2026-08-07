@@ -804,6 +804,9 @@ function buildThreadProof(state, live, resolvedEvidence, at) {
     headSha: state.currentIntegrationHeadSha,
     threads,
     threadlessVerification: state.threadResolutionStatus.threadlessVerification,
+    ...(Object.hasOwn(state.threadResolutionStatus, 'localVerification') ? {
+      localVerification: state.threadResolutionStatus.localVerification,
+    } : {}),
     updatedAt: at,
   };
 }
@@ -1030,6 +1033,9 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       headSha: active.currentIntegrationHeadSha,
       threads: [],
       threadlessVerification: active.threadResolutionStatus.threadlessVerification,
+      ...(Object.hasOwn(active.threadResolutionStatus, 'localVerification') ? {
+        localVerification: active.threadResolutionStatus.localVerification,
+      } : {}),
       updatedAt: clock.now(),
     };
     await assertCurrent(active);
@@ -1324,10 +1330,7 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     else assertLiveThreadProof(active, live);
     await assertCurrent(active);
 
-    if (selectedTask.status === 'completed') {
-      if (!completedThreadlessRefresh) {
-        return verifyResolveResult(taskIds, active);
-      }
+    if (selectedTask.status === 'completed' && completedThreadlessRefresh) {
       if (completedThreadlessVerification.headSha === active.currentIntegrationHeadSha) {
         return verifyResolveResult(taskIds, active);
       }
@@ -1349,6 +1352,14 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
         prNumber, expectedRevision: active.revision, threadResolutionStatus, verifiedLocalTaskIds: [],
       });
       return verifyResolveResult(taskIds, active);
+    }
+    if (selectedTask.status === 'completed' && selectedTask.sourceType === 'local') {
+      const localVerification = active.threadResolutionStatus.localVerification;
+      if (localVerification?.status === 'passed'
+          && localVerification.headSha === active.currentIntegrationHeadSha
+          && localVerification.taskIds.includes(selectedTask.id)) {
+        return verifyResolveResult(taskIds, active);
+      }
     }
 
     const verifiedAt = clock.now();

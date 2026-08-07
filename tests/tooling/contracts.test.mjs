@@ -141,6 +141,8 @@ test('checked-in JSON contracts parse and declare Draft 2020-12', () => {
       assert.ok(document.required.includes('reviewOutcome'));
       assert.ok(document.required.includes('threadResolutionStatus'));
       assert.ok(document.properties.phase.enum.includes('awaiting-human-decision'));
+      assert.ok(document.$defs.threadResolutionStatus.properties.localVerification);
+      assert.equal(document.$defs.threadResolutionStatus.required.includes('localVerification'), false);
     }
   }
 });
@@ -273,6 +275,72 @@ test('state JSON Schema compiles with Ajv and shares representative fixtures wit
   for (const fixture of invalidFixtures) {
     assert.equal(validateSchema(fixture), false, 'schema should reject shared invalid fixture');
     assert.notDeepEqual(validatePrReviewState(fixture), [], 'manual validator should reject shared invalid fixture');
+  }
+});
+
+test('local verifier proof is backward-readable, source-bound, and mandatory for completed local readiness', () => {
+  const schema = JSON.parse(readFileSync(join(root, 'docs/agents/pr-review-state.schema.json'), 'utf8'));
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajv);
+  const validateSchema = ajv.compile(schema);
+  const head = 'a'.repeat(40);
+  const completedLocal = {
+    id: 'local-task', sourceIds: ['local:audit'], sourceType: 'local', fingerprint: 'local-fingerprint',
+    summary: 'Verified locally.', severity: 'P1', disposition: 'actionable', status: 'completed',
+    integratedCommitSha: head, resolutionSummary: 'Verified.',
+  };
+  const historicalWithoutProof = stateFixture({ tasks: [completedLocal] });
+  assert.equal(validateSchema(historicalWithoutProof), true, JSON.stringify(validateSchema.errors));
+  assert.deepEqual(validatePrReviewState(historicalWithoutProof), []);
+
+  const localVerification = { status: 'passed', headSha: head, taskIds: ['local-task'], updatedAt: AT };
+  const readyProof = {
+    ...readyStateFixture().threadResolutionStatus,
+    localVerification,
+  };
+  const readyWithProof = readyStateFixture({ tasks: [completedLocal], threadResolutionStatus: readyProof });
+  const completeWithProof = completeStateFixture({ tasks: [completedLocal], threadResolutionStatus: readyProof });
+  for (const fixture of [readyWithProof, completeWithProof]) {
+    assert.equal(validateSchema(fixture), true, JSON.stringify(validateSchema.errors));
+    assert.deepEqual(validatePrReviewState(fixture), []);
+  }
+  for (const fixture of [
+    readyStateFixture({ tasks: [completedLocal] }),
+    completeStateFixture({ tasks: [completedLocal] }),
+  ]) {
+    assert.equal(validateSchema(fixture), false, 'ready/Done schema must require local proof');
+    assert.match(validatePrReviewState(fixture).join('\n'), /local verifier proof/u);
+  }
+  for (const localProof of [
+    { ...localVerification, status: 'failed' },
+    { ...localVerification, headSha: 'b'.repeat(40) },
+    { ...localVerification, taskIds: [] },
+  ]) {
+    const invalid = readyStateFixture({
+      tasks: [completedLocal],
+      threadResolutionStatus: { ...readyProof, localVerification: localProof },
+    });
+    assert.notDeepEqual(validatePrReviewState(invalid), []);
+  }
+
+  const githubTask = {
+    ...completedLocal, id: 'github-task', sourceType: 'github-threadless', status: 'integrated',
+    sourceIds: ['review:threadless'], fingerprint: 'github-fingerprint',
+  };
+  const integratedLocal = { ...completedLocal, id: 'integrated-local', status: 'integrated' };
+  for (const [taskId, tasks, reason] of [
+    ['unknown', [completedLocal], /unknown task/u],
+    ['github-task', [githubTask], /non-local task/u],
+    ['integrated-local', [integratedLocal], /ineligible local task/u],
+  ]) {
+    const invalid = stateFixture({
+      tasks,
+      threadResolutionStatus: {
+        ...stateFixture().threadResolutionStatus,
+        localVerification: { status: 'passed', headSha: head, taskIds: [taskId], updatedAt: AT },
+      },
+    });
+    assert.match(validatePrReviewState(invalid).join('\n'), reason);
   }
 });
 

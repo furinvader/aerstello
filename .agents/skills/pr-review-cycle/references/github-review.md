@@ -110,6 +110,17 @@ continue to use `reply-resolve`. For both commands, `--task` is one opaque task
 ID preserved byte-for-byte; commas, whitespace, quotes, and backslashes are not
 separators or escapes.
 
+The guarded transition persists a local assertion in `localVerification` for
+the exact integration HEAD. After HEAD drift, retain the old proof only as
+history and rerun targeted validation plus read-only verifier approval before
+calling `verify-resolve --task <id>` for each completed local task. The first
+new-HEAD assertion records only its selected task; later same-HEAD assertions
+accumulate coverage. A task already covered at the current HEAD is an
+idempotent state retry only after every clean-checkout, equal-HEAD, ancestry,
+canonical-root, and state-revision guard runs again. Do not request review or
+mark Done until passed current-HEAD coverage exactly includes every completed
+local task.
+
 When integration advances after a completed threadless assertion, rerun the
 targeted checks and read-only verifier for every task in the preserved proof at
 the new HEAD, then pass that complete set to `verify-resolve` through one
@@ -174,7 +185,8 @@ The cycle is Done only when all of these facts apply to one Review commit:
 2. Codex returned a clean applicable review, clean issue comment, or eligible clean thumbs-up.
 3. Full GitHub Actions checks passed.
 4. The full E2E suite and complete browser/device matrix passed in CI.
-5. Every finding has a recorded outcome and every actionable task is Resolved.
+5. Every finding has a recorded outcome, every actionable task is Resolved,
+   and every completed local task has passed exact-current-HEAD verifier proof.
 6. A fresh GitHub query shows no open Codex review threads.
 
 Before saving Done, read the exact-commit CI rollup again and confirm that the

@@ -37,6 +37,7 @@ function proof(status = 'passed', headSha = HEAD) {
   return {
     status, headSha: status === 'not-run' ? null : headSha, threads: [],
     threadlessVerification: { status: 'not-run', headSha: null, taskIds: [], updatedAt: null },
+    localVerification: { status: 'not-run', headSha: null, taskIds: [], updatedAt: null },
     updatedAt: status === 'not-run' ? null : AT,
   };
 }
@@ -59,12 +60,22 @@ function stateFixture(overrides = {}) {
 }
 
 function readyState(overrides = {}) {
-  return stateFixture({
+  const state = stateFixture({
     phase: 'ready-for-review',
     validationStatus: { source: 'orchestrator', scope: 'targeted', status: 'passed', headSha: HEAD, checks: ['npm run check'], updatedAt: AT },
     threadResolutionStatus: proof(), nextAction: 'Request review.',
     ...overrides,
   });
+  if (!Object.hasOwn(overrides, 'threadResolutionStatus')) {
+    const localTaskIds = state.tasks.filter((task) => task.sourceType === 'local' && task.status === 'completed')
+      .map((task) => task.id).sort();
+    if (localTaskIds.length > 0) {
+      state.threadResolutionStatus.localVerification = {
+        status: 'passed', headSha: state.currentIntegrationHeadSha, taskIds: localTaskIds, updatedAt: AT,
+      };
+    }
+  }
+  return state;
 }
 
 function requestEvidence(kind = 'verification', overrides = {}) {
@@ -402,16 +413,31 @@ function fakeState(initial) {
     },
     async checkpointTaskCompletion(input) {
       calls.push({ name: 'checkpointTaskCompletion', input });
-      const covered = new Set(input.threadResolutionStatus.threads.filter((thread) => thread.isResolved).flatMap((thread) => thread.taskIds));
-      if (input.threadResolutionStatus.threadlessVerification.status === 'passed') {
-        input.threadResolutionStatus.threadlessVerification.taskIds.forEach((taskId) => covered.add(taskId));
-      }
       const verifiedLocal = new Set(input.verifiedLocalTaskIds ?? []);
+      const priorLocal = current.threadResolutionStatus.localVerification ?? proof('not-run').localVerification;
+      const retainedLocalIds = priorLocal.status === 'passed'
+          && priorLocal.headSha === current.currentIntegrationHeadSha
+        ? priorLocal.taskIds : [];
+      const { localVerification: _untrustedLocal, ...inputWithoutLocal } = input.threadResolutionStatus;
+      const preservedThreadResolutionStatus = Object.hasOwn(current.threadResolutionStatus, 'localVerification')
+        ? { ...inputWithoutLocal, localVerification: priorLocal } : inputWithoutLocal;
+      const threadResolutionStatus = verifiedLocal.size > 0 ? {
+        ...inputWithoutLocal,
+        localVerification: {
+          status: 'passed', headSha: current.currentIntegrationHeadSha,
+          taskIds: [...new Set([...retainedLocalIds, ...verifiedLocal])].sort(),
+          updatedAt: input.threadResolutionStatus.updatedAt,
+        },
+      } : preservedThreadResolutionStatus;
+      const covered = new Set(threadResolutionStatus.threads.filter((thread) => thread.isResolved).flatMap((thread) => thread.taskIds));
+      if (threadResolutionStatus.threadlessVerification.status === 'passed') {
+        threadResolutionStatus.threadlessVerification.taskIds.forEach((taskId) => covered.add(taskId));
+      }
       const tasks = current.tasks.map((task) => (
         covered.has(task.id) || (task.sourceType === 'local' && verifiedLocal.has(task.id))
           ? { ...task, status: 'completed' } : task
       ));
-      const next = { ...current, threadResolutionStatus: input.threadResolutionStatus, tasks };
+      const next = { ...current, threadResolutionStatus, tasks };
       current = {
         ...next, revision: current.revision + 1,
       };
@@ -1426,15 +1452,20 @@ test('verify-resolve completes only the selected local task after repeated read-
   assert.equal(result.taskId, 'task-local');
   assert.deepEqual(setup.state.current.tasks.map((task) => task.status), ['completed', 'integrated']);
   assert.deepEqual(setup.state.calls.at(-1).input.verifiedLocalTaskIds, ['task-local']);
+  assert.deepEqual(setup.state.current.threadResolutionStatus.localVerification, {
+    status: 'passed', headSha: HEAD, taskIds: ['task-local'], updatedAt: AT,
+  });
   assert.ok(client.calls.filter((call) => call.name === 'PullRequestThreads').length >= 2);
   assert.equal(client.calls.some((call) => call.name.startsWith('Add') || call.name === 'ResolveThread'), false);
 
   const revision = setup.state.current.revision;
   const checkpointCount = setup.state.calls.length;
+  const guardedThreadReads = client.calls.filter((call) => call.name === 'PullRequestThreads').length;
   const retried = await setup.api.verifyResolve(2, ['task-local']);
   assert.equal(retried.stateRevision, revision);
   assert.equal(setup.state.current.revision, revision);
   assert.equal(setup.state.calls.length, checkpointCount);
+  assert.ok(client.calls.filter((call) => call.name === 'PullRequestThreads').length >= guardedThreadReads + 2);
 });
 
 test('verify-resolve completes only the selected eligible non-actionable local task idempotently', async () => {
@@ -1463,6 +1494,54 @@ test('verify-resolve completes only the selected eligible non-actionable local t
     await candidateSetup.api.verifyResolve(2, [candidate.tasks[0].id]);
     assert.equal(candidateSetup.state.current.tasks[0].status, 'completed');
   }
+});
+
+test('verify-resolve re-attests completed local tasks at a new HEAD as a guarded accumulating exact set', async () => {
+  const state = integratedNonThreadState('local', 'local-a');
+  state.currentIntegrationHeadSha = OTHER_HEAD;
+  state.git = { ...state.git, headSha: OTHER_HEAD };
+  state.validationStatus = { ...state.validationStatus, headSha: OTHER_HEAD };
+  state.tasks = [
+    { ...state.tasks[0], id: 'local-a', fingerprint: 'fp-local-a', status: 'completed' },
+    { ...state.tasks[0], id: 'local-b', fingerprint: 'fp-local-b', status: 'completed' },
+  ];
+  state.threadResolutionStatus = {
+    status: 'not-run', headSha: null, threads: [],
+    threadlessVerification: proof('not-run').threadlessVerification,
+    localVerification: { status: 'passed', headSha: HEAD, taskIds: ['local-a', 'local-b'], updatedAt: AT },
+    updatedAt: null,
+  };
+  const client = new FakeClient();
+  client.metadata.headRefOid = OTHER_HEAD;
+  const journal = {
+    async lookupIntent() { throw new Error('local re-attestation must not read the mutation journal'); },
+    async ensureIntent() { throw new Error('local re-attestation must not write the mutation journal'); },
+  };
+  const setup = workflow(state, client, {
+    journal,
+    git: fakeGit({
+      snapshot: async () => ({ headSha: OTHER_HEAD, dirty: false }),
+      pushedHead: async () => OTHER_HEAD,
+    }),
+  });
+
+  await setup.api.verifyResolve(2, ['local-a']);
+  assert.deepEqual(setup.state.current.threadResolutionStatus.localVerification, {
+    status: 'passed', headSha: OTHER_HEAD, taskIds: ['local-a'], updatedAt: AT,
+  });
+  assert.deepEqual(setup.state.current.tasks.map((task) => task.status), ['completed', 'completed']);
+
+  await setup.api.verifyResolve(2, ['local-b']);
+  assert.deepEqual(setup.state.current.threadResolutionStatus.localVerification.taskIds, ['local-a', 'local-b']);
+  const revision = setup.state.current.revision;
+  const checkpoints = setup.state.calls.length;
+  const guardedThreadReads = client.calls.filter((call) => call.name === 'PullRequestThreads').length;
+  await setup.api.verifyResolve(2, ['local-a']);
+  assert.equal(setup.state.current.revision, revision);
+  assert.equal(setup.state.calls.length, checkpoints);
+  assert.ok(client.calls.filter((call) => call.name === 'PullRequestThreads').length >= guardedThreadReads + 2);
+  assert.equal(client.calls.some((call) => call.name.startsWith('Add') || call.name === 'ResolveThread'), false);
+  assert.deepEqual(client.events, []);
 });
 
 test('verify-resolve creates current-head threadless proof and preserves prior proven IDs', async () => {
@@ -2786,6 +2865,7 @@ test('CLI keeps opaque singleton IDs distinct from explicit JSON task sets', asy
 
 test('CLI exposes exactly the documented explicit-PR command surface and JSON-ready results', async () => {
   assert.match(usage(), /status[\s\S]*refresh-threads[\s\S]*reply-resolve[\s\S]*verify-resolve[\s\S]*request[\s\S]*collect[\s\S]*collect-ci[\s\S]*complete/u);
+  assert.match(usage(), /Local task verification persists exact-current-HEAD proof[\s\S]*re-attest/u);
   await assert.rejects(() => runCli(['collect'], {}), /--pr/u);
   await assert.rejects(() => runCli(['refresh-threads'], {}), /--pr/u);
   await assert.rejects(() => runCli(['verify-resolve', '--pr', '2'], {}), /exactly one/u);

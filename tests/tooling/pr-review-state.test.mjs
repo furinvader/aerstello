@@ -90,8 +90,14 @@ function emptyThreadless() {
   return { status: 'not-run', headSha: null, taskIds: [], updatedAt: null };
 }
 
+function emptyLocalVerification() {
+  return { status: 'not-run', headSha: null, taskIds: [], updatedAt: null };
+}
+
 function ready(state, tasks = [task(state.currentIntegrationHeadSha)]) {
   const head = state.currentIntegrationHeadSha;
+  const localTaskIds = tasks.filter((item) => item.sourceType === 'local' && item.status === 'completed')
+    .map((item) => item.id).sort();
   return {
     ...state,
     phase: 'ready-for-review',
@@ -102,6 +108,9 @@ function ready(state, tasks = [task(state.currentIntegrationHeadSha)]) {
     },
     threadResolutionStatus: {
       status: 'passed', headSha: head, threads: [], threadlessVerification: emptyThreadless(), updatedAt: AT,
+      localVerification: localTaskIds.length > 0 ? {
+        status: 'passed', headSha: head, taskIds: localTaskIds, updatedAt: AT,
+      } : emptyLocalVerification(),
     },
     git: { ...state.git, headSha: head, dirty: false },
     blockedReasons: [],
@@ -197,10 +206,15 @@ function schemaV2State(state) {
     ciValidationStatus: _ciValidationStatus,
     ciValidationHistory: _ciValidationHistory,
     validationStatus,
+    threadResolutionStatus,
     ...currentFields
   } = state;
   const { source: _source, scope: _scope, ...legacyValidationStatus } = validationStatus;
-  return { ...currentFields, schemaVersion: 2, validationStatus: legacyValidationStatus };
+  const { localVerification: _localVerification, ...legacyThreadResolutionStatus } = threadResolutionStatus;
+  return {
+    ...currentFields, schemaVersion: 2, validationStatus: legacyValidationStatus,
+    threadResolutionStatus: legacyThreadResolutionStatus,
+  };
 }
 
 function migrateTasklessPendingReview(cwd) {
@@ -447,7 +461,8 @@ test('v2 pending review with completed tasks rebuilds fresh validation after one
   assert.deepEqual(migrated.reviewRequest, source.reviewRequest);
   assert.deepEqual(migrated.reviewHistory, source.reviewHistory);
   assert.deepEqual(migrated.tasks, source.tasks);
-  assert.deepEqual(migrated.threadResolutionStatus, source.threadResolutionStatus);
+  const { localVerification: _localVerification, ...legacyThreadResolutionStatus } = source.threadResolutionStatus;
+  assert.deepEqual(migrated.threadResolutionStatus, legacyThreadResolutionStatus);
 
   const collected = checkpointReviewOutcome({
     cwd, outcome: outcome(migrated), expectedRevision: migrated.revision,
@@ -1174,6 +1189,39 @@ test('review request gate requires ready phase, fresh three-way heads, and real 
   rmSync(join(cwd, 'dirty-request.txt'));
 });
 
+test('review and Done gates require exact-current-HEAD coverage for every completed local task', () => {
+  const cwd = repo();
+  const prepared = ready(init(cwd));
+  const requested = buildReviewRequestTransition(prepared, request(prepared), external(cwd, prepared));
+  const reviewed = buildReviewOutcomeTransition(requested, outcome(requested));
+  const ciValidated = buildCiValidationTransition(reviewed, ciEvidence(reviewed));
+  assert.equal(reviewRequestGate(prepared, external(cwd, prepared)).allowed, true);
+  assert.equal(completionGate(ciValidated, external(cwd, ciValidated)).allowed, true);
+
+  const variants = [];
+  const missing = structuredClone(prepared.threadResolutionStatus);
+  delete missing.localVerification;
+  variants.push(missing);
+  variants.push({
+    ...prepared.threadResolutionStatus,
+    localVerification: { ...prepared.threadResolutionStatus.localVerification, status: 'failed' },
+  });
+  variants.push({
+    ...prepared.threadResolutionStatus,
+    localVerification: { ...prepared.threadResolutionStatus.localVerification, headSha: 'b'.repeat(40) },
+  });
+  variants.push({
+    ...prepared.threadResolutionStatus,
+    localVerification: { ...prepared.threadResolutionStatus.localVerification, taskIds: [] },
+  });
+  for (const threadResolutionStatus of variants) {
+    const unready = { ...prepared, threadResolutionStatus };
+    const notDone = { ...ciValidated, threadResolutionStatus };
+    assert.equal(reviewRequestGate(unready, external(cwd, unready)).allowed, false);
+    assert.equal(completionGate(notDone, external(cwd, notDone)).allowed, false);
+  }
+});
+
 test('request and outcome builders are guarded and idempotent; completion is separate', () => {
   const cwd = repo();
   const prepared = ready(init(cwd));
@@ -1715,6 +1763,39 @@ test('guarded verifier completion selects only unique integrated local task IDs'
     { threadResolutionStatus: proof, verifiedLocalTaskIds: ['local-b'] },
   );
   assert.deepEqual(selected.tasks.map((item) => item.status), ['integrated', 'completed', 'integrated']);
+  assert.deepEqual(selected.threadResolutionStatus.localVerification, {
+    status: 'passed', headSha: head, taskIds: ['local-b'], updatedAt: AT,
+  });
+
+  const selectedA = completeIntegratedTasks(
+    { ...state, tasks: [localA, localB] },
+    { threadResolutionStatus: proof, verifiedLocalTaskIds: ['local-a'] },
+  );
+  const accumulated = completeIntegratedTasks(selectedA, {
+    threadResolutionStatus: { ...proof, updatedAt: '2026-08-05T00:01:00Z' },
+    verifiedLocalTaskIds: ['local-b'],
+  });
+  assert.deepEqual(accumulated.threadResolutionStatus.localVerification, {
+    status: 'passed', headSha: head, taskIds: ['local-a', 'local-b'], updatedAt: '2026-08-05T00:01:00Z',
+  });
+  const nextHead = 'b'.repeat(40);
+  const drifted = {
+    ...accumulated,
+    currentIntegrationHeadSha: nextHead,
+    git: { ...accumulated.git, headSha: nextHead },
+    threadResolutionStatus: {
+      ...accumulated.threadResolutionStatus, status: 'not-run', headSha: null, updatedAt: null,
+    },
+  };
+  const reattested = completeIntegratedTasks(drifted, {
+    threadResolutionStatus: {
+      ...proof, headSha: nextHead, updatedAt: '2026-08-05T00:02:00Z',
+    },
+    verifiedLocalTaskIds: ['local-b'],
+  });
+  assert.deepEqual(reattested.threadResolutionStatus.localVerification, {
+    status: 'passed', headSha: nextHead, taskIds: ['local-b'], updatedAt: '2026-08-05T00:02:00Z',
+  });
 
   const disposedA = task(head, {
     id: 'disposed-a', status: 'not-applicable', disposition: 'duplicate', sourceType: 'local',
@@ -1727,6 +1808,7 @@ test('guarded verifier completion selects only unique integrated local task IDs'
     { threadResolutionStatus: proof, verifiedLocalTaskIds: ['disposed-b'] },
   );
   assert.deepEqual(selectedDisposed.tasks.map((item) => item.status), ['not-applicable', 'completed']);
+  assert.deepEqual(selectedDisposed.threadResolutionStatus.localVerification.taskIds, ['disposed-b']);
 
   for (const disposition of [
     'duplicate', 'already-fixed', 'stale', 'invalid', 'policy-conflict', 'out-of-scope',
@@ -1975,6 +2057,47 @@ test('HEAD drift preserves durable task coverage while invalidating and refreshi
     checks: ['npm run check'], updatedAt: '2026-08-05T00:01:00Z',
   };
   assert.equal(reviewRequestGate(refreshed, external(cwd, refreshed)).allowed, true);
+});
+
+test('HEAD drift preserves historical local verifier proof until guarded current-HEAD re-attestation', () => {
+  const cwd = repo();
+  const initial = init(cwd);
+  const headA = initial.currentIntegrationHeadSha;
+  const proposedTask = task(headA, { id: 'local-drift', status: 'proposed', sourceType: 'local' });
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [proposedTask] },
+  });
+  const integratedTask = task(headA, { id: 'local-drift', status: 'integrated', sourceType: 'local' });
+  const integrated = checkpointState({
+    cwd, expectedRevision: proposed.revision, nextState: { ...proposed, tasks: [integratedTask] },
+  });
+  const proofA = {
+    status: 'passed', headSha: headA, threads: [], threadlessVerification: emptyThreadless(), updatedAt: AT,
+  };
+  const completed = checkpointTaskCompletion({
+    cwd, expectedRevision: integrated.revision, threadResolutionStatus: proofA,
+    verifiedLocalTaskIds: ['local-drift'],
+  });
+  assert.deepEqual(completed.threadResolutionStatus.localVerification, {
+    status: 'passed', headSha: headA, taskIds: ['local-drift'], updatedAt: AT,
+  });
+
+  const headB = commit(cwd, { 'local-proof-drift.txt': 'drift\n' }, 'local proof drift');
+  const drifted = checkpointGitMetadata({ cwd }).state;
+  assert.equal(drifted.threadResolutionStatus.status, 'not-run');
+  assert.deepEqual(drifted.threadResolutionStatus.localVerification, completed.threadResolutionStatus.localVerification);
+
+  const proofB = {
+    status: 'passed', headSha: headB, threads: [], threadlessVerification: emptyThreadless(),
+    updatedAt: '2026-08-05T00:01:00Z',
+  };
+  const refreshed = checkpointTaskCompletion({
+    cwd, expectedRevision: drifted.revision, threadResolutionStatus: proofB,
+    verifiedLocalTaskIds: ['local-drift'],
+  });
+  assert.deepEqual(refreshed.threadResolutionStatus.localVerification, {
+    status: 'passed', headSha: headB, taskIds: ['local-drift'], updatedAt: '2026-08-05T00:01:00Z',
+  });
 });
 
 test('generic checkpoint cannot forge zero-thread or threadless successful proof at a new HEAD', () => {

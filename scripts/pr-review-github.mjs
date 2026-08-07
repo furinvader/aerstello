@@ -18,8 +18,12 @@ import {
   stateDirectory,
 } from './lib/pr-review-state.mjs';
 
-export function usage() {
+function baseUsage() {
   return `Usage: node scripts/pr-review-github.mjs <command> [--pr <number>] [options]\n\nCommands:\n  status [--human]               Read live review and CI status (active PR by default)\n  refresh-threads                Record exact-head empty canonical-thread proof for a taskless cycle\n  reply-resolve --task <id>      Reply to and close one task's Codex review threads\n  verify-resolve <selection>     Verify one task or re-attest one complete threadless set\n  request --kind <kind>          Request discovery or verification review\n  collect                        Collect official review evidence for the Review commit\n  collect-ci                     Collect full GitHub Actions evidence for the Review commit\n  complete                       Reconfirm every gate and mark the cycle Done\n\nRequired options:\n  --pr <number>                  Required except for status with an active state\n\nRequest options:\n  --kind discovery|verification\n\nTask resolution options:\n  --task <opaque-task-id>        One byte-for-byte task ID for reply-resolve or verify-resolve\n  --task-set-json <json-array>   Explicit task-ID set for verify-resolve only\n\nSuccessful commands write JSON, except status --human which writes plain English.\n`;
+}
+
+export function usage() {
+  return `${baseUsage().trimEnd()}\n\nLocal task verification persists exact-current-HEAD proof; rerun it to re-attest a completed local task after HEAD drift.\n`;
 }
 
 function titleCase(value) {

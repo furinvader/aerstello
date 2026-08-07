@@ -79,12 +79,17 @@ function utcNow() {
   return new Date().toISOString();
 }
 
+function emptyLocalVerification() {
+  return { status: 'not-run', headSha: null, taskIds: [], updatedAt: null };
+}
+
 function emptyThreadProof() {
   return {
     status: 'not-run',
     headSha: null,
     threads: [],
     threadlessVerification: { status: 'not-run', headSha: null, taskIds: [], updatedAt: null },
+    localVerification: emptyLocalVerification(),
     updatedAt: null,
   };
 }
@@ -970,12 +975,28 @@ export function migratePrReviewStateV2(legacyState, { migratedAt = utcNow() } = 
     checks: ['schema-v2 completion invariant validation only'], workflowRunId: 1,
     workflowRunUrl: 'https://github.com/sky-bar/schema-v2-migration-placeholder', updatedAt: migratedAt,
   };
+  const legacyCompletedLocalTaskIds = (normalized.tasks ?? [])
+    .filter((task) => task.sourceType === 'local' && task.status === 'completed')
+    .map((task) => task.id).sort();
+  const legacyCompletionThreadProof = legacyCompletedLocalTaskIds.length > 0
+    && !Object.hasOwn(normalized.threadResolutionStatus, 'localVerification')
+    ? {
+        ...normalized.threadResolutionStatus,
+        localVerification: {
+          status: 'passed', headSha: normalized.currentIntegrationHeadSha,
+          taskIds: legacyCompletedLocalTaskIds, updatedAt: migratedAt,
+        },
+      }
+    : normalized.threadResolutionStatus;
   const validationCandidate = wasComplete ? {
     ...migrated,
     phase: 'complete',
     validationStatus: migrateValidationProof(normalized.validationStatus, normalized.currentIntegrationHeadSha),
     ciValidationStatus: legacyCompletionPlaceholder,
     ciValidationHistory: [legacyCompletionPlaceholder],
+    // This proof exists only to validate the legacy Done invariant. The returned recovering
+    // state never treats schema-v2 local completion as current verifier evidence.
+    threadResolutionStatus: legacyCompletionThreadProof,
   } : migrated;
   const errors = validatePrReviewState(validationCandidate);
   if (errors.length > 0) {
@@ -1355,6 +1376,26 @@ function assertCheckpointProvenance(current, next, authorization) {
   if (newThreadless.taskIds.some((taskId) => !oldThreadless.taskIds.includes(taskId)) && guardedKind !== 'task-completion') {
     throw new StateError('Threadless task proof may only grow through guarded completion', 'PROTECTED_TRANSITION_REQUIRED');
   }
+  const oldLocal = current.threadResolutionStatus.localVerification ?? emptyLocalVerification();
+  const newLocal = next.threadResolutionStatus.localVerification ?? emptyLocalVerification();
+  if (guardedKind !== 'task-completion') {
+    assertImmutableValue(oldLocal, newLocal, 'local verifier proof');
+  }
+  if (oldLocal.status === 'passed') {
+    if (newLocal.status !== 'passed') {
+      throw new StateError('Successful local verifier proof cannot regress', 'IMMUTABLE_STATE_PROVENANCE');
+    }
+    if (oldLocal.headSha === newLocal.headSha
+        && oldLocal.taskIds.some((taskId) => !newLocal.taskIds.includes(taskId))) {
+      throw new StateError(
+        'Same-HEAD local verifier proof cannot lose task coverage',
+        'IMMUTABLE_STATE_PROVENANCE',
+      );
+    }
+  }
+  if (oldLocal.status !== 'passed' && newLocal.status === 'passed' && guardedKind !== 'task-completion') {
+    throw new StateError('Local verifier proof may only pass through guarded completion', 'PROTECTED_TRANSITION_REQUIRED');
+  }
   if (current.threadResolutionStatus.status !== 'passed'
       && next.threadResolutionStatus.status === 'passed' && guardedKind !== 'task-completion') {
     throw new StateError('Aggregate thread proof may only pass through guarded completion', 'PROTECTED_TRANSITION_REQUIRED');
@@ -1365,6 +1406,7 @@ function assertCheckpointProvenance(current, next, authorization) {
     } else if (next.threadResolutionStatus.status === 'not-run') {
       assertImmutableValue(currentThreads, nextThreads, 'historical canonical thread evidence');
       assertImmutableValue(oldThreadless, newThreadless, 'historical threadless task proof');
+      assertImmutableValue(oldLocal, newLocal, 'historical local verifier proof');
     } else {
       throw new StateError(
         'Successful aggregate thread proof may only be preserved or invalidated to not-run',
@@ -1647,6 +1689,10 @@ function taskIsEligibleForVerifierCompletion(task) {
 }
 
 export function completeIntegratedTasks(state, { threadResolutionStatus, verifiedLocalTaskIds = [] }) {
+  if (!threadResolutionStatus || typeof threadResolutionStatus !== 'object'
+      || Array.isArray(threadResolutionStatus)) {
+    throw new StateError('Thread resolution proof is required for task completion', 'INVALID_TASK_COMPLETION');
+  }
   if (!Array.isArray(verifiedLocalTaskIds)
       || verifiedLocalTaskIds.some((taskId) => typeof taskId !== 'string' || taskId.length === 0)
       || new Set(verifiedLocalTaskIds).size !== verifiedLocalTaskIds.length) {
@@ -1663,20 +1709,47 @@ export function completeIntegratedTasks(state, { threadResolutionStatus, verifie
       throw new StateError(`Verified local task ${taskId} is not eligible for verifier completion`, 'INVALID_TASK_COMPLETION');
     }
   }
+  const previousLocalVerification = state.threadResolutionStatus.localVerification ?? emptyLocalVerification();
+  const { localVerification: _untrustedLocalVerification, ...threadProofWithoutLocal } = threadResolutionStatus;
+  let completionThreadProof = Object.hasOwn(state.threadResolutionStatus, 'localVerification')
+    ? { ...threadProofWithoutLocal, localVerification: previousLocalVerification }
+    : threadProofWithoutLocal;
+  if (verifiedLocalTasks.size > 0) {
+    if (threadResolutionStatus.status === 'not-run'
+        || threadResolutionStatus.headSha !== state.currentIntegrationHeadSha
+        || threadResolutionStatus.updatedAt === null) {
+      throw new StateError(
+        'Verified local tasks require a current-HEAD aggregate observation and timestamp',
+        'INVALID_TASK_COMPLETION',
+      );
+    }
+    const retainedIds = previousLocalVerification.status === 'passed'
+        && previousLocalVerification.headSha === state.currentIntegrationHeadSha
+      ? previousLocalVerification.taskIds : [];
+    completionThreadProof = {
+      ...threadProofWithoutLocal,
+      localVerification: {
+        status: 'passed',
+        headSha: state.currentIntegrationHeadSha,
+        taskIds: [...new Set([...retainedIds, ...verifiedLocalTasks])].sort(),
+        updatedAt: threadResolutionStatus.updatedAt,
+      },
+    };
+  }
   const tasks = state.tasks.map((task) => {
     const eligibleNotApplicable = task.status === 'not-applicable'
       && !['actionable', 'needs-human-decision'].includes(task.disposition);
     if (task.status !== 'integrated' && !eligibleNotApplicable) return task;
     const eligible = (task.sourceType === 'local' && verifiedLocalTasks.has(task.id))
       || (task.sourceType === 'github-thread'
-        && taskHasCanonicalThreadCoverage(task, threadResolutionStatus.threads ?? []))
+        && taskHasCanonicalThreadCoverage(task, completionThreadProof.threads ?? []))
       || (task.sourceType === 'github-threadless'
-        && threadResolutionStatus.threadlessVerification?.status === 'passed'
-        && threadResolutionStatus.threadlessVerification.headSha === state.currentIntegrationHeadSha
-        && threadResolutionStatus.threadlessVerification.taskIds.includes(task.id));
+        && completionThreadProof.threadlessVerification?.status === 'passed'
+        && completionThreadProof.threadlessVerification.headSha === state.currentIntegrationHeadSha
+        && completionThreadProof.threadlessVerification.taskIds.includes(task.id));
     return eligible ? { ...task, status: 'completed' } : task;
   });
-  const next = { ...state, tasks, threadResolutionStatus };
+  const next = { ...state, tasks, threadResolutionStatus: completionThreadProof };
   const errors = validatePrReviewState(next);
   if (errors.length > 0) throw new StateError(`Invalid integrated-to-completed transition:\n- ${errors.join('\n- ')}`, 'INVALID_TASK_COMPLETION');
   return next;

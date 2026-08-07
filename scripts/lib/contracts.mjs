@@ -892,6 +892,33 @@ function validateThreadlessProof(value, path, errors) {
   }
 }
 
+const VERIFIED_LOCAL_NON_ACTIONABLE_DISPOSITIONS = new Set([
+  'duplicate', 'already-fixed', 'stale', 'invalid', 'policy-conflict', 'out-of-scope',
+]);
+
+function localTaskIsEligibleForVerification(task) {
+  if (task?.sourceType !== 'local' || task.status !== 'completed') return false;
+  return (task.disposition === 'actionable' && isSha(task.integratedCommitSha))
+    || VERIFIED_LOCAL_NON_ACTIONABLE_DISPOSITIONS.has(task.disposition);
+}
+
+function validateLocalVerification(value, tasks, path, errors) {
+  validateThreadlessProof(value, path, errors);
+  if (!isObject(value) || !Array.isArray(value.taskIds)) return;
+  if (value.status === 'passed' && value.taskIds.length === 0) {
+    errors.push(`${path} passed proof must cover at least one local task`);
+  }
+  const byId = new Map((tasks ?? []).map((task) => [task.id, task]));
+  for (const taskId of value.taskIds) {
+    const task = byId.get(taskId);
+    if (!task) errors.push(`${path} references unknown task ${taskId}`);
+    else if (task.sourceType !== 'local') errors.push(`${path} references non-local task ${taskId}`);
+    else if (!localTaskIsEligibleForVerification(task)) {
+      errors.push(`${path} references ineligible local task ${taskId}`);
+    }
+  }
+}
+
 const TASK_THREAD_DISPOSITIONS = new Map([
   ['actionable', 'fixed'],
   ['duplicate', 'duplicate'],
@@ -925,8 +952,9 @@ export function taskHasCanonicalThreadCoverage(task, threads) {
 
 function validateThreadStatus(value, tasks, errors) {
   const path = '$.threadResolutionStatus';
-  const fields = ['status', 'headSha', 'threads', 'threadlessVerification', 'updatedAt'];
-  if (!requireFields(value, fields, path, errors)) return;
+  const requiredFields = ['status', 'headSha', 'threads', 'threadlessVerification', 'updatedAt'];
+  const fields = [...requiredFields, 'localVerification'];
+  if (!requireFields(value, requiredFields, path, errors)) return;
   rejectUnknownFields(value, fields, path, errors);
   if (!['not-run', 'passed', 'failed'].includes(value.status)) errors.push(`${path}.status is invalid`);
   if (!isSha(value.headSha, true)) errors.push(`${path}.headSha is invalid`);
@@ -968,6 +996,9 @@ function validateThreadStatus(value, tasks, errors) {
     if (thread.isResolved && thread.replyId === null) errors.push(`${threadPath} resolved disposition requires reply evidence`);
   });
   validateThreadlessProof(value.threadlessVerification, `${path}.threadlessVerification`, errors);
+  if (Object.hasOwn(value, 'localVerification')) {
+    validateLocalVerification(value.localVerification, tasks, `${path}.localVerification`, errors);
+  }
   const unresolved = Array.isArray(value.threads) ? value.threads.filter((thread) => !thread.isResolved) : [];
   if (value.status === 'not-run' && (
     value.headSha !== null || value.updatedAt !== null
@@ -1009,6 +1040,31 @@ function validateThreadStatus(value, tasks, errors) {
   }
 }
 
+function completedLocalTaskIds(state) {
+  return (state?.tasks ?? []).filter((task) => task.sourceType === 'local' && task.status === 'completed')
+    .map((task) => task.id).sort();
+}
+
+function localVerificationStateGate(state) {
+  const expectedTaskIds = completedLocalTaskIds(state);
+  if (expectedTaskIds.length === 0) return [];
+  const proof = state?.threadResolutionStatus?.localVerification;
+  const reasons = [];
+  if (!isObject(proof)) {
+    return ['completed local tasks require persisted local verifier proof'];
+  }
+  if (proof.status !== 'passed') reasons.push('local verifier proof must have passed');
+  if (proof.headSha !== state?.currentIntegrationHeadSha) {
+    reasons.push('local verifier proof HEAD must equal currentIntegrationHeadSha');
+  }
+  const actualTaskIds = Array.isArray(proof.taskIds) ? [...proof.taskIds].sort() : [];
+  if (actualTaskIds.length !== expectedTaskIds.length
+      || actualTaskIds.some((taskId, index) => taskId !== expectedTaskIds[index])) {
+    reasons.push('local verifier proof must cover exactly every completed local task');
+  }
+  return reasons;
+}
+
 function exactHeadReason(label, actual, expected) {
   return actual === expected ? null : `${label} must equal currentIntegrationHeadSha`;
 }
@@ -1031,6 +1087,7 @@ function reviewRequestStateGate(state) {
   }
   if (state?.threadResolutionStatus?.status !== 'passed') reasons.push('thread resolution proof must have passed');
   if (state?.threadResolutionStatus?.threads?.some((thread) => !thread.isResolved)) reasons.push('all canonical threads must be resolved');
+  reasons.push(...localVerificationStateGate(state));
   if (state?.git?.dirty !== false) reasons.push('integration checkout must be clean');
   if (state?.verificationEscalation !== null) reasons.push('verification collection escalation requires human decision');
   if (!Array.isArray(state?.tasks) || state.tasks.some((task) => task.status !== 'completed')) reasons.push('all prior tasks must be completed');
@@ -1103,6 +1160,7 @@ function completionStateGate(state) {
     reasons.push('full validation must be GitHub Actions evidence');
   }
   if (state?.threadResolutionStatus?.status !== 'passed') reasons.push('thread proof must have passed');
+  reasons.push(...localVerificationStateGate(state));
   if (state?.verificationEscalation !== null) reasons.push('verification collection escalation requires human decision');
   if (state?.git?.dirty !== false) reasons.push('integration checkout must be clean');
   if (!Array.isArray(state?.tasks) || state.tasks.some((task) => task.status !== 'completed')) reasons.push('all tasks must be completed');

@@ -100,6 +100,15 @@ separate persisted verifier-artifact schema is implied. `--task` is always one
 opaque task ID for either command and is preserved byte-for-byte; commas,
 whitespace, quotes, and backslashes have no separator or escape meaning.
 
+Local assertions are also persisted as `localVerification` task-ID coverage for
+the exact current integration HEAD. If HEAD advances, the old proof remains
+historical while review and Done stay closed. Rerun targeted validation and the
+read-only verifier, then call `verify-resolve --task <id>` separately for each
+completed local task. The first successful assertion at the new HEAD starts a
+new set containing only that task; later same-HEAD assertions accumulate IDs.
+A retry already covered at that HEAD is state-idempotent, but still repeats all
+clean-checkout, HEAD, ancestry, canonical-root, and state-revision guards.
+
 If integration HEAD advances after a threadless task was already completed,
 repeat current-HEAD targeted validation and read-only verifier approval for
 every task in the preserved proof. Then select the complete set atomically with
@@ -170,7 +179,9 @@ preserved review. Native schema-v3 states and missing, mismatched, tampered, or
 multi-transition provenance are rejected.
 
 Done is stricter. A clean Codex review, full green CI, full E2E, the current PR
-head, and the no-open-thread check must all refer to the same Review commit.
+head, the no-open-thread check, and passed exact-current-HEAD coverage for every
+completed local task must all refer to the same Review commit. Review requests
+use that same local-proof gate.
 
 ## Read the current status
 
