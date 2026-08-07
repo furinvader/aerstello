@@ -496,6 +496,36 @@ test('collect-ci appends distinct check attempts for one rerun workflow and is i
   assert.equal(setup.state.current.revision, revision);
 });
 
+test('collect-ci supersedes failures only within the same workflow run', async () => {
+  const sameRun = new FakeClient({ ciContexts: [
+    fullValidationCheck({
+      id: 'CHECK_failed_attempt', conclusion: 'FAILURE', completedAt: '2026-08-04T23:59:00Z',
+    }),
+    fullValidationCheck({ id: 'CHECK_successful_rerun' }),
+  ] });
+  const rerunEvidence = (await workflow(stateFixture(), sameRun).api.collectCi(2)).evidence;
+  assert.equal(rerunEvidence.status, 'passed');
+  assert.equal(rerunEvidence.checkRunId, 'CHECK_successful_rerun');
+  assert.equal(rerunEvidence.workflowRunId, 701);
+
+  const distinctRuns = new FakeClient({ rollupState: 'FAILURE', ciContexts: [
+    fullValidationCheck({
+      id: 'CHECK_failed_parallel', conclusion: 'FAILURE', completedAt: '2026-08-04T23:59:00Z',
+      checkSuite: { app: { slug: 'github-actions' }, workflowRun: {
+        databaseId: 700, url: 'https://github.com/example/sky-bar/actions/runs/700',
+        file: { path: '.github/workflows/ci.yml' }, workflow: { name: 'CI' },
+      } },
+    }),
+    fullValidationCheck({ id: 'CHECK_newer_success' }),
+  ] });
+  const failedEvidence = (await workflow(stateFixture(), distinctRuns).api.collectCi(2)).evidence;
+  assert.equal(failedEvidence.status, 'failed');
+  assert.equal(failedEvidence.checkRunId, 'CHECK_failed_parallel');
+  assert.equal(failedEvidence.workflowRunId, 700);
+  assert.equal(failedEvidence.workflowRunUrl, 'https://github.com/example/sky-bar/actions/runs/700');
+  assert.equal(failedEvidence.updatedAt, '2026-08-04T23:59:00Z');
+});
+
 test('collect-ci records a completed failed full run but rejects pending, stale, missing, and ambiguous evidence', async () => {
   const failed = new FakeClient({ rollupState: 'FAILURE',
     ciContexts: [fullValidationCheck({ conclusion: 'FAILURE' })] });
@@ -710,6 +740,20 @@ test('collect-ci rejects same-named jobs from another workflow and incomplete wo
       file: { path: null }, workflow: { name: 'CI' } },
   } })] });
   await assert.rejects(() => workflow(stateFixture(), truncatedWorkflow).api.collectCi(2), {
+    code: 'CI_EVIDENCE_INCOMPLETE',
+  });
+
+  const malformedNonSelected = new FakeClient({ ciContexts: [
+    fullValidationCheck(),
+    fullValidationCheck({
+      id: null, completedAt: '2026-08-04T23:00:00Z',
+      checkSuite: { app: { slug: 'github-actions' }, workflowRun: {
+        databaseId: 700, url: 'http://github.com/example/sky-bar/actions/runs/700',
+        file: { path: '.github/workflows/ci.yml' }, workflow: { name: 'CI' },
+      } },
+    }),
+  ] });
+  await assert.rejects(() => workflow(stateFixture(), malformedNonSelected).api.collectCi(2), {
     code: 'CI_EVIDENCE_INCOMPLETE',
   });
 });
@@ -1382,6 +1426,22 @@ test('complete rechecks that the same successful workflow evidence is still auth
       mutate(client) {
         client.rollupState = 'FAILURE';
         client.ciContexts = [fullValidationCheck({ conclusion: 'FAILURE' })];
+      },
+      code: 'COMPLETION_NOT_READY',
+    },
+    {
+      mutate(client) {
+        client.rollupState = 'FAILURE';
+        client.ciContexts = [
+          fullValidationCheck(),
+          fullValidationCheck({ id: 'CHECK_parallel_failure', conclusion: 'FAILURE',
+            completedAt: '2026-08-05T00:01:00Z', checkSuite: {
+              app: { slug: 'github-actions' },
+              workflowRun: { databaseId: 702,
+                url: 'https://github.com/example/sky-bar/actions/runs/702',
+                file: { path: '.github/workflows/ci.yml' }, workflow: { name: 'CI' } },
+            } }),
+        ];
       },
       code: 'COMPLETION_NOT_READY',
     },

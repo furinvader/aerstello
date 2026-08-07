@@ -216,6 +216,8 @@ function ciEvidenceFromRollup(snapshot) {
   if (candidates.length === 0) {
     throw new GitHubWorkflowError('The authoritative Full validation GitHub Actions check is missing', 'CI_CHECK_MISSING');
   }
+  const checkRunIds = new Set();
+  const runs = new Map();
   for (const check of candidates) {
     const workflowRun = check.checkSuite?.workflowRun;
     if (typeof workflowRun?.workflow?.name !== 'string' || typeof workflowRun?.file?.path !== 'string') {
@@ -225,32 +227,47 @@ function ciEvidenceFromRollup(snapshot) {
         || workflowRun.file.path !== FULL_VALIDATION_WORKFLOW_PATH) {
       throw new GitHubWorkflowError('Full validation came from an unexpected workflow', 'CI_WORKFLOW_MISMATCH');
     }
+    if (typeof check.id !== 'string' || check.id.length === 0
+        || !Number.isInteger(workflowRun.databaseId) || workflowRun.databaseId < 1
+        || !httpsUrl(workflowRun.url) || typeof check.status !== 'string' || check.status.length === 0) {
+      throw new GitHubWorkflowError('Full validation lacks authoritative run identity', 'CI_EVIDENCE_INCOMPLETE');
+    }
+    if (checkRunIds.has(check.id)) {
+      throw new GitHubWorkflowError('Full validation check-run identity is duplicated', 'CI_EVIDENCE_AMBIGUOUS');
+    }
+    checkRunIds.add(check.id);
+    if (check.status === 'COMPLETED'
+        && (!check.completedAt || !Number.isFinite(Date.parse(check.completedAt))
+          || typeof check.conclusion !== 'string' || check.conclusion.length === 0)) {
+      throw new GitHubWorkflowError('Completed Full validation lacks completion metadata', 'CI_EVIDENCE_INCOMPLETE');
+    }
+    const group = runs.get(workflowRun.databaseId) ?? { urls: new Set(), attempts: [] };
+    group.urls.add(workflowRun.url);
+    group.attempts.push(check);
+    runs.set(workflowRun.databaseId, group);
   }
-  const authoritative = candidates;
-  const completed = authoritative.filter((check) => check.status === 'COMPLETED'
-    && check.completedAt && Number.isFinite(Date.parse(check.completedAt)));
-  if (completed.length === 0) {
+  if ([...runs.values()].some((run) => run.urls.size !== 1)) {
+    throw new GitHubWorkflowError('Full validation workflow-run identity is ambiguous', 'CI_EVIDENCE_AMBIGUOUS');
+  }
+  if (candidates.some((check) => check.status !== 'COMPLETED')) {
     throw new GitHubWorkflowError('Full validation is still pending', 'CI_VALIDATION_PENDING');
   }
-  if (authoritative.some((check) => check.status !== 'COMPLETED')) {
-    throw new GitHubWorkflowError('Full validation is still pending', 'CI_VALIDATION_PENDING');
+  const effective = [];
+  for (const [runId, run] of runs) {
+    const latestTime = Math.max(...run.attempts.map((check) => Date.parse(check.completedAt)));
+    const latest = run.attempts.filter((check) => Date.parse(check.completedAt) === latestTime);
+    if (latest.length !== 1) {
+      throw new GitHubWorkflowError('Latest Full validation attempt is ambiguous', 'CI_EVIDENCE_AMBIGUOUS');
+    }
+    effective.push({ check: latest[0], runId });
   }
-  completed.sort((left, right) => Date.parse(right.completedAt) - Date.parse(left.completedAt)
-    || (right.checkSuite?.workflowRun?.databaseId ?? -1) - (left.checkSuite?.workflowRun?.databaseId ?? -1));
-  const latestTime = Date.parse(completed[0].completedAt);
-  const latestRunId = completed[0].checkSuite?.workflowRun?.databaseId;
-  const latest = completed.filter((check) => Date.parse(check.completedAt) === latestTime
-    && check.checkSuite?.workflowRun?.databaseId === latestRunId);
-  if (latest.length !== 1) {
-    throw new GitHubWorkflowError('Latest Full validation evidence is ambiguous', 'CI_EVIDENCE_AMBIGUOUS');
-  }
-  const selected = latest[0];
+  const failed = effective.filter(({ check }) => check.conclusion !== 'SUCCESS');
+  const representatives = failed.length > 0 ? failed : effective;
+  representatives.sort((left, right) => Date.parse(right.check.completedAt) - Date.parse(left.check.completedAt)
+    || right.runId - left.runId);
+  const selected = representatives[0].check;
   const workflowRun = selected.checkSuite?.workflowRun;
-  if (typeof selected.id !== 'string' || selected.id.length === 0
-      || !Number.isInteger(workflowRun?.databaseId) || workflowRun.databaseId < 1 || !httpsUrl(workflowRun.url)) {
-    throw new GitHubWorkflowError('Full validation lacks an authoritative workflow run URL', 'CI_EVIDENCE_INCOMPLETE');
-  }
-  const passed = selected.conclusion === 'SUCCESS';
+  const passed = failed.length === 0;
   return {
     source: 'github-actions', scope: 'full', status: passed ? 'passed' : 'failed',
     headSha: snapshot.headSha, checks: namedChecks,
