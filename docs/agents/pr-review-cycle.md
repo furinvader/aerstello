@@ -132,6 +132,25 @@ SHAs. It rejects pending, finding, stale, dirty, or inconsistent states and does
 not infer checks from a missing legacy plan or replace an existing passing proof
 after an ordinary taskless review.
 
+A separate native schema-v3 route recovers a taskless clean discovery review
+after the integration HEAD advances. The clean request, outcome, requested, and
+reviewed SHAs must still agree on one prior commit different from the current
+HEAD, and the latest history entry must exactly equal the active evidence. The
+state must be `recovering`, have no tasks, blockers, escalation, or human
+decision, retain another discovery or verification request allowance, and have
+a clean exact current checkout. Use a nonempty current-HEAD
+`validation-plan --initial-selection` selection (`--replace` may replace only
+the stale plan sidecar), then run it normally. The old review ledger is preserved
+byte-for-byte and remains historical.
+
+After that fresh targeted proof passes, run `refresh-threads --pr <number>`.
+The read-only command requires equal clean local, pushed, and live current
+heads, fully paginates the canonical root set, rechecks state revision and live
+HEAD, and succeeds only when no canonical root exists. It records an aggregate
+passed empty-thread proof for the current HEAD while retaining historical
+threadless evidence, with no GitHub or journal mutation. A new exact-current-
+HEAD review is still required; the historical clean result cannot satisfy Done.
+
 There is one further migration-only `--initial-selection` route for completed
 tasks. Its immutable `state.v2.backup.json` must contain a nonempty all-completed
 task set and an exact-head passed, nonempty legacy targeted proof. A schema-v2

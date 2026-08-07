@@ -83,6 +83,19 @@ does not reconstruct or trust a missing legacy plan and does not repeat the
 still-applicable review. It cannot replace an existing passing proof after an
 ordinary taskless review.
 
+A native schema-v3 taskless cycle has one separate fail-closed recovery when a
+clean discovery review remains internally consistent but its reviewed commit is
+now one historical SHA behind the integration HEAD. The active state must be
+`recovering`, contain no tasks, retain an exact latest request/outcome/history
+triple whose clean request, outcome, requested, and reviewed SHAs all equal that
+one prior SHA, and still have a discovery or verification request available.
+The current checkout and recorded Git snapshot must be clean and exact, with no
+blocked reason, verification escalation, or human-decision task. Use a current-
+HEAD `--initial-selection` (and `--replace` when the historical sidecar exists)
+to run a fresh nonempty targeted selection. This preserves the historical
+request, outcome, and review ledger byte-for-byte; it never makes the old review
+current or permits replacement of the resulting current-HEAD validation proof.
+
 A third, migration-only route exists for a schema-v2 source with a nonempty
 all-completed task set and an exact-head passed, nonempty legacy targeted proof.
 For a `ready-for-review` or `complete` source, canonical migration of the

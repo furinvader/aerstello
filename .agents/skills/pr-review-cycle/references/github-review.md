@@ -152,6 +152,20 @@ Before the first discovery review in a pristine taskless cycle, run
 exact-head proof only when the fully paginated canonical Codex root set is empty;
 it never marks a threadless remediation task verified and never writes GitHub.
 
+The same read-only empty-root refresh is narrowly available after native-v3
+taskless clean-review HEAD-drift recovery. First rebuild nonempty targeted
+validation at the current HEAD through the explicit initial-selection route.
+The retained latest clean request and outcome must match each other exactly on
+one different prior SHA, the state must remain `recovering` with review
+allowance and no tasks, blockers, escalation, or human decision, and local,
+pushed, and live PR heads must all equal the current state HEAD. The command
+fully paginates canonical roots, re-reads state revision and live PR HEAD, and
+checkpoints only an aggregate passed empty-thread proof at the current HEAD. It
+preserves historical threadless evidence and performs no GitHub or journal
+mutation. Any live root, evidence mismatch, exhausted allowance, or state/head
+race fails closed; the historical clean review remains stale and must not be
+used for Done.
+
 ## Done gate
 
 The cycle is Done only when all of these facts apply to one Review commit:

@@ -335,6 +335,33 @@ function isCleanTasklessReviewValidationRecovery(state, expectedIds) {
     && request.headSha === headSha && outcome.headSha === headSha;
 }
 
+function hasRemainingReviewAllowance(state) {
+  return (Number.isInteger(state.reviewRound) && state.reviewRound < 3)
+    || (state.reviewRound === 3 && state.verificationReviewUsed === false);
+}
+
+function isNativeTasklessReviewHeadDriftValidationRecovery(state, expectedIds) {
+  const request = state.reviewRequest;
+  const outcome = state.reviewOutcome;
+  const latest = state.reviewHistory.at(-1);
+  const priorHeadSha = request?.headSha;
+  return state.schemaVersion === 3
+    && state.legacyReviewProvenance === null
+    && state.phase === 'recovering'
+    && state.tasks.length === 0 && expectedIds.length === 0
+    && request !== null && request.kind === 'discovery'
+    && outcome?.outcome === 'clean' && latest !== undefined
+    && sameEvidence(latest.request, request) && sameEvidence(latest.outcome, outcome)
+    && outcome.requestId === request.id && outcome.kind === request.kind
+    && state.requestedHeadSha === priorHeadSha && state.reviewedHeadSha === priorHeadSha
+    && outcome.headSha === priorHeadSha
+    && priorHeadSha !== state.currentIntegrationHeadSha
+    && state.git.headSha === state.currentIntegrationHeadSha && state.git.dirty === false
+    && state.blockedReasons.length === 0 && state.verificationEscalation === null
+    && !state.tasks.some((task) => task.disposition === 'needs-human-decision')
+    && hasRemainingReviewAllowance(state);
+}
+
 function isV2CompletedTaskValidationRecovery(cwd, state, expectedIds) {
   if (!['recovering', 'validating'].includes(state.phase) || state.validationStatus.status !== 'not-run'
       || expectedIds.length !== 0 || state.tasks.length === 0
@@ -460,10 +487,11 @@ function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, initi
     }
     const pristineSelection = isPristineTasklessValidationSelection(state, expectedIds);
     const cleanReviewRecovery = isCleanTasklessReviewValidationRecovery(state, expectedIds);
+    const headDriftRecovery = isNativeTasklessReviewHeadDriftValidationRecovery(state, expectedIds);
     const completedTaskRecovery = isV2CompletedTaskValidationRecovery(cwd, state, expectedIds);
-    if (!pristineSelection && !cleanReviewRecovery && !completedTaskRecovery) {
+    if (!pristineSelection && !cleanReviewRecovery && !headDriftRecovery && !completedTaskRecovery) {
       throw new StateError(
-        'Taskless validation selection requires a pristine cycle, clean exact-head review recovery, or proven v2 completed-task recovery',
+        'Taskless validation selection requires a pristine cycle, guarded clean-review recovery, or proven v2 completed-task recovery',
         'INITIAL_VALIDATION_NOT_ALLOWED',
       );
     }
@@ -473,12 +501,15 @@ function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, initi
     validationInputs = [{
       schemaVersion: 2,
       taskId: cleanReviewRecovery ? 'taskless-clean-review-validation-recovery'
+        : headDriftRecovery ? 'taskless-review-head-drift-validation-recovery'
         : completedTaskRecovery ? 'v2-completed-task-validation-recovery' : 'initial-validation-selection',
       reviewedHeadSha: initialSelection.headSha,
       finding: cleanReviewRecovery ? 'Taskless targeted-validation recovery after a clean exact-head review.'
+        : headDriftRecovery ? 'Taskless targeted-validation recovery after a clean historical review HEAD drifted.'
         : completedTaskRecovery ? 'Fresh targeted validation after schema-v2 completed-task migration.'
           : 'Initial pull-request validation selection.',
       evidence: cleanReviewRecovery ? 'Explicit orchestrator-selected validation for the preserved clean exact-head review.'
+        : headDriftRecovery ? 'Explicit orchestrator-selected validation for the current HEAD while preserving prior clean review evidence.'
         : completedTaskRecovery ? 'Immutable schema-v2 backup authorizes fresh orchestrator-selected validation.'
           : 'Explicit orchestrator-selected validation before the first discovery review.',
       affectedAreas: initialSelection.affectedAreas,
@@ -487,6 +518,7 @@ function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, initi
       forbiddenPaths: [],
       dependencies: [],
       acceptanceCriteria: [cleanReviewRecovery ? 'The selected taskless recovery checks pass.'
+        : headDriftRecovery ? 'The selected taskless current-HEAD recovery checks pass.'
         : completedTaskRecovery ? 'The selected completed-task migration recovery checks pass.'
           : 'The selected initial checks pass.'],
       requiredValidation: initialSelection.requiredValidation,
@@ -590,9 +622,10 @@ export function buildTargetedValidationPlan({
   }
   if (initialSelection !== undefined && initialSelection !== null
       && current.validationStatus.status === 'passed'
-      && isCleanTasklessReviewValidationRecovery(current, actionableIntegratedTaskIds(current))) {
+      && (isCleanTasklessReviewValidationRecovery(current, actionableIntegratedTaskIds(current))
+        || isNativeTasklessReviewHeadDriftValidationRecovery(current, actionableIntegratedTaskIds(current)))) {
     throw new StateError(
-      'Clean taskless review recovery cannot replace existing targeted-validation proof',
+      'Taskless review recovery cannot replace existing targeted-validation proof',
       'INITIAL_VALIDATION_NOT_ALLOWED',
     );
   }
@@ -1500,9 +1533,10 @@ export function checkpointTargetedValidationReset({ cwd = process.cwd(), prNumbe
   if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
   if (current.validationStatus.status === 'not-run') return current;
   if (current.validationStatus.status === 'passed'
-      && isCleanTasklessReviewValidationRecovery(current, actionableIntegratedTaskIds(current))) {
+      && (isCleanTasklessReviewValidationRecovery(current, actionableIntegratedTaskIds(current))
+        || isNativeTasklessReviewHeadDriftValidationRecovery(current, actionableIntegratedTaskIds(current)))) {
     throw new StateError(
-      'Clean taskless review recovery cannot discard existing targeted-validation proof',
+      'Taskless review recovery cannot discard existing targeted-validation proof',
       'INITIAL_VALIDATION_NOT_ALLOWED',
     );
   }

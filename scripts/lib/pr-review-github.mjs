@@ -885,6 +885,30 @@ function escalationFor(state, liveHead, evidenceIds, reason, at) {
   };
 }
 
+function tasklessReviewHeadDriftRefreshAllowed(state) {
+  const request = state.reviewRequest;
+  const outcome = state.reviewOutcome;
+  const latest = state.reviewHistory.at(-1);
+  const priorHeadSha = request?.headSha;
+  const reviewAllowanceRemains = (Number.isInteger(state.reviewRound) && state.reviewRound < 3)
+    || (state.reviewRound === 3 && state.verificationReviewUsed === false);
+  return state.schemaVersion === 3
+    && state.legacyReviewProvenance === null
+    && state.phase === 'recovering'
+    && state.tasks.length === 0
+    && request !== null && request.kind === 'discovery'
+    && outcome?.outcome === 'clean' && latest !== undefined
+    && JSON.stringify(latest.request) === JSON.stringify(request)
+    && JSON.stringify(latest.outcome) === JSON.stringify(outcome)
+    && outcome.requestId === request.id && outcome.kind === request.kind
+    && state.requestedHeadSha === priorHeadSha && state.reviewedHeadSha === priorHeadSha
+    && outcome.headSha === priorHeadSha
+    && priorHeadSha !== state.currentIntegrationHeadSha
+    && state.git.headSha === state.currentIntegrationHeadSha && state.git.dirty === false
+    && state.blockedReasons.length === 0 && state.verificationEscalation === null
+    && reviewAllowanceRemains;
+}
+
 export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, clock, journal }) {
   if (!client?.graphql || !stateAdapter?.load || !git || !clock?.now) {
     throw new GitHubWorkflowError('Client, state, Git, and clock adapters are required', 'INVALID_ADAPTERS');
@@ -985,8 +1009,12 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       && active.reviewHistory.length === 0
       && active.verificationReviewUsed === false
       && active.verificationEscalation === null;
-    if (!pristine) {
-      throw new GitHubWorkflowError('Empty-thread refresh requires a pristine taskless first-review cycle', 'TASKLESS_REFRESH_NOT_ALLOWED');
+    const headDriftRecovery = tasklessReviewHeadDriftRefreshAllowed(active);
+    if (!pristine && !headDriftRecovery) {
+      throw new GitHubWorkflowError(
+        'Empty-thread refresh requires a pristine taskless cycle or guarded clean-review HEAD-drift recovery',
+        'TASKLESS_REFRESH_NOT_ALLOWED',
+      );
     }
     if (!stateAdapter.checkpointTaskCompletion) {
       throw new GitHubWorkflowError('The guarded thread-proof checkpoint is unavailable', 'INVALID_ADAPTERS');

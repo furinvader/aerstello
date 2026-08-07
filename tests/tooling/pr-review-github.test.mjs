@@ -103,6 +103,60 @@ function completedState(overrides = {}) {
   });
 }
 
+function tasklessReviewHeadDriftState(overrides = {}) {
+  const exactHead = completedState();
+  const request = { ...exactHead.reviewRequest, headSha: OTHER_HEAD };
+  const outcome = {
+    ...exactHead.reviewOutcome,
+    headSha: OTHER_HEAD,
+    requestId: request.id,
+    kind: request.kind,
+  };
+  return stateFixture({
+    phase: 'recovering',
+    requestedHeadSha: OTHER_HEAD,
+    reviewedHeadSha: OTHER_HEAD,
+    reviewRound: 1,
+    reviewRequest: request,
+    reviewOutcome: outcome,
+    reviewHistory: [{ request, outcome }],
+    validationStatus: {
+      source: 'orchestrator', scope: 'targeted', status: 'passed', headSha: HEAD,
+      checks: ['npm run check:workflow'], updatedAt: AT,
+    },
+    threadResolutionStatus: proof('not-run'),
+    nextAction: 'Rebuild current-head empty-thread proof before the next review.',
+    ...overrides,
+  });
+}
+
+function cleanReviewEntry(index, kind, headSha = OTHER_HEAD) {
+  const request = requestEvidence(kind, {
+    id: `IC_${kind}_${index}`,
+    databaseId: 100 + index,
+    url: `https://github.com/example/sky-bar/pull/2#issuecomment-${100 + index}`,
+    headSha,
+  });
+  const outcome = {
+    id: `PRR_${kind}_${index}`,
+    databaseId: 200 + index,
+    url: `https://github.com/example/sky-bar/pull/2#pullrequestreview-${200 + index}`,
+    headSha,
+    at: AT,
+    requestId: request.id,
+    kind,
+    outcome: 'clean',
+    evidenceType: 'review-submission',
+    reviewerLogin: BOT.login,
+    reviewerNodeId: BOT.id,
+    reviewerType: BOT.__typename,
+    reviewerUrl: BOT.url,
+    reactionContent: null,
+    reactionCommentId: null,
+  };
+  return { request, outcome };
+}
+
 function canonicalReview(overrides = {}) {
   return {
     id: 'PRR_clean', databaseId: 201, url: 'https://x/clean', body: '', state: 'COMMENTED',
@@ -636,6 +690,161 @@ test('taskless thread refresh records guarded empty proof without GitHub mutatio
   const requestSetup = workflow(requestState, requestClient);
   await assert.rejects(() => requestSetup.api.request(2, 'discovery'), { code: 'ROOT_IDENTITY_MISMATCH' });
   assert.equal(requestClient.events.length, 0);
+});
+
+test('taskless thread refresh restores empty proof after guarded clean-review HEAD drift', async () => {
+  const initial = tasklessReviewHeadDriftState();
+  const preserved = {
+    reviewRequest: structuredClone(initial.reviewRequest),
+    reviewOutcome: structuredClone(initial.reviewOutcome),
+    reviewHistory: structuredClone(initial.reviewHistory),
+    threadlessVerification: structuredClone(initial.threadResolutionStatus.threadlessVerification),
+  };
+  const client = new FakeClient({ pageSize: 1 });
+  addThread(client, {
+    id: 'THREAD_noncanonical_1',
+    root: rootComment('THREAD_noncanonical_1', { author: VIEWER }),
+  });
+  addThread(client, {
+    id: 'THREAD_noncanonical_2',
+    root: rootComment('THREAD_noncanonical_2', { author: VIEWER }),
+  });
+  const setup = workflow(initial, client);
+  const result = await setup.api.refreshThreads(2);
+
+  assert.equal(result.threadResolutionStatus.status, 'passed');
+  assert.equal(result.threadResolutionStatus.headSha, HEAD);
+  assert.deepEqual(result.threadResolutionStatus.threads, []);
+  assert.deepEqual(result.threadResolutionStatus.threadlessVerification, preserved.threadlessVerification);
+  assert.equal(setup.state.current.phase, 'recovering');
+  assert.deepEqual({
+    reviewRequest: setup.state.current.reviewRequest,
+    reviewOutcome: setup.state.current.reviewOutcome,
+    reviewHistory: setup.state.current.reviewHistory,
+    threadlessVerification: setup.state.current.threadResolutionStatus.threadlessVerification,
+  }, preserved);
+  assert.equal(client.calls.filter((call) => call.name === 'PullRequestThreads').length, 2);
+  assert.equal(client.events.length, 0);
+  assert.deepEqual(setup.state.calls.map((call) => call.name), ['checkpointTaskCompletion']);
+});
+
+test('taskless clean-review HEAD-drift refresh fails closed at lifecycle and live-proof boundaries', async () => {
+  const unvalidated = tasklessReviewHeadDriftState({
+    validationStatus: stateFixture().validationStatus,
+  });
+  await assert.rejects(() => workflow(unvalidated).api.refreshThreads(2), { code: 'TASK_NOT_READY' });
+
+  const taskBearing = tasklessReviewHeadDriftState({
+    tasks: [{
+      id: 'unexpected-task', sourceIds: ['local:audit'], sourceType: 'local', fingerprint: 'unexpected-task',
+      summary: 'Unexpected task.', severity: 'P2', disposition: 'actionable', status: 'completed',
+      integratedCommitSha: HEAD, resolutionSummary: 'Completed.',
+    }],
+  });
+  await assert.rejects(() => workflow(taskBearing).api.refreshThreads(2), {
+    code: 'TASKLESS_REFRESH_NOT_ALLOWED',
+  });
+  await assert.rejects(() => workflow(tasklessReviewHeadDriftState({
+    blockedReasons: ['Operator decision remains.'],
+  })).api.refreshThreads(2), { code: 'TASKLESS_REFRESH_NOT_ALLOWED' });
+
+  const sameHead = completedState({
+    phase: 'recovering',
+    threadResolutionStatus: proof('not-run'),
+    nextAction: 'Same-HEAD replacement is not recovery.',
+  });
+  await assert.rejects(() => workflow(sameHead).api.refreshThreads(2), {
+    code: 'TASKLESS_REFRESH_NOT_ALLOWED',
+  });
+
+  const findings = tasklessReviewHeadDriftState();
+  findings.reviewOutcome = { ...findings.reviewOutcome, outcome: 'findings' };
+  findings.reviewHistory = [{ request: findings.reviewRequest, outcome: findings.reviewOutcome }];
+  await assert.rejects(() => workflow(findings).api.refreshThreads(2), {
+    code: 'TASKLESS_REFRESH_NOT_ALLOWED',
+  });
+
+  const pending = tasklessReviewHeadDriftState({
+    reviewedHeadSha: null,
+    reviewOutcome: null,
+  });
+  pending.reviewHistory = [{ request: pending.reviewRequest, outcome: null }];
+  await assert.rejects(() => workflow(pending).api.refreshThreads(2), {
+    code: 'TASKLESS_REFRESH_NOT_ALLOWED',
+  });
+
+  const migrated = tasklessReviewHeadDriftState({
+    legacyReviewProvenance: { schemaVersion: 1, discoveryRounds: 0, migratedAt: AT },
+  });
+  await assert.rejects(() => workflow(migrated).api.refreshThreads(2), {
+    code: 'TASKLESS_REFRESH_NOT_ALLOWED',
+  });
+
+  const exhaustedHistory = [
+    cleanReviewEntry(1, 'discovery'),
+    cleanReviewEntry(2, 'discovery'),
+    cleanReviewEntry(3, 'discovery'),
+    cleanReviewEntry(4, 'verification'),
+  ];
+  const exhaustedLatest = exhaustedHistory.at(-1);
+  const exhausted = tasklessReviewHeadDriftState({
+    requestedHeadSha: OTHER_HEAD,
+    reviewedHeadSha: OTHER_HEAD,
+    reviewRound: 3,
+    verificationReviewUsed: true,
+    reviewRequest: exhaustedLatest.request,
+    reviewOutcome: exhaustedLatest.outcome,
+    reviewHistory: exhaustedHistory,
+  });
+  await assert.rejects(() => workflow(exhausted).api.refreshThreads(2), {
+    code: 'TASKLESS_REFRESH_NOT_ALLOWED',
+  });
+
+  const inconsistent = tasklessReviewHeadDriftState();
+  inconsistent.reviewHistory = [{
+    request: inconsistent.reviewRequest,
+    outcome: { ...inconsistent.reviewOutcome, id: 'PRR_inconsistent' },
+  }];
+  await assert.rejects(() => workflow(inconsistent).api.refreshThreads(2), { code: 'INVALID_STATE' });
+
+  const rootedClient = new FakeClient();
+  addThread(rootedClient);
+  await assert.rejects(() => workflow(tasklessReviewHeadDriftState(), rootedClient).api.refreshThreads(2), {
+    code: 'ROOT_IDENTITY_MISMATCH',
+  });
+  assert.equal(rootedClient.events.length, 0);
+
+  for (const git of [
+    fakeGit({ snapshot: async () => ({ headSha: HEAD, dirty: true }) }),
+    fakeGit({ snapshot: async () => ({ headSha: OTHER_HEAD, dirty: false }) }),
+    fakeGit({ pushedHead: async () => OTHER_HEAD }),
+  ]) {
+    await assert.rejects(() => workflow(tasklessReviewHeadDriftState(), new FakeClient(), { git })
+      .api.refreshThreads(2), { code: 'MUTATION_NOT_READY' });
+  }
+
+  const raced = fakeState(tasklessReviewHeadDriftState());
+  const originalLoad = raced.load.bind(raced);
+  let reads = 0;
+  raced.load = async () => {
+    const state = await originalLoad();
+    reads += 1;
+    return reads > 1 ? { ...state, revision: state.revision + 1 } : state;
+  };
+  await assert.rejects(() => createGitHubReviewWorkflow({
+    client: new FakeClient(), state: raced, git: fakeGit(), clock: { now: () => AT }, journal: null,
+  }).refreshThreads(2), { code: 'STATE_REVISION_CHANGED' });
+
+  class DriftingRecoveryRefreshClient extends FakeClient {
+    async graphql(input) {
+      const result = await super.graphql(input);
+      if (input.name === 'PullRequestThreads') this.metadata.headRefOid = OTHER_HEAD;
+      return result;
+    }
+  }
+  const drifted = workflow(tasklessReviewHeadDriftState(), new DriftingRecoveryRefreshClient());
+  await assert.rejects(() => drifted.api.refreshThreads(2), { code: 'MUTATION_NOT_READY' });
+  assert.equal(drifted.state.calls.some((call) => call.name === 'checkpointTaskCompletion'), false);
 });
 
 test('taskless thread refresh fails closed across task, root, validation, Git, adapter, and state-race boundaries', async () => {

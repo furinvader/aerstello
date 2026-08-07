@@ -268,6 +268,29 @@ function initialSelection(head, overrides = {}) {
   };
 }
 
+function nativeTasklessReview(cwd, { collectOutcome = true, outcomeOverrides = {} } = {}) {
+  const initial = init(cwd);
+  const threadProofed = checkpointTaskCompletion({
+    cwd,
+    expectedRevision: initial.revision,
+    threadResolutionStatus: ready(initial, []).threadResolutionStatus,
+  });
+  const prepared = persistReady(cwd, threadProofed, []);
+  const requested = checkpointReviewRequest({
+    cwd,
+    request: request(prepared),
+    pushedHeadSha: prepared.currentIntegrationHeadSha,
+    prHeadSha: prepared.currentIntegrationHeadSha,
+    expectedRevision: prepared.revision,
+  });
+  const reviewed = collectOutcome ? checkpointReviewOutcome({
+    cwd,
+    outcome: outcome(requested, outcomeOverrides),
+    expectedRevision: requested.revision,
+  }) : null;
+  return { initial, prepared, requested, reviewed };
+}
+
 function integratedTasks(cwd, ids) {
   const initial = init(cwd);
   const proposedTasks = ids.map((id) => task(initial.currentIntegrationHeadSha, {
@@ -665,6 +688,185 @@ test('taskless post-review validation recovery rejects pending, findings, tasks,
   assert.throws(() => buildTargetedValidationPlan({
     cwd: inconsistentCwd, initialSelection: initialSelection(inconsistent.currentIntegrationHeadSha),
   }), StateError);
+});
+
+test('native taskless clean-review HEAD drift rebuilds only current targeted validation', () => {
+  const cwd = repo();
+  const { reviewed } = nativeTasklessReview(cwd);
+  const priorHeadSha = reviewed.currentIntegrationHeadSha;
+  const preserved = {
+    reviewRequest: structuredClone(reviewed.reviewRequest),
+    reviewOutcome: structuredClone(reviewed.reviewOutcome),
+    reviewHistory: structuredClone(reviewed.reviewHistory),
+    threadlessVerification: structuredClone(reviewed.threadResolutionStatus.threadlessVerification),
+  };
+
+  const currentHeadSha = commit(cwd, { 'taskless-head-drift.txt': 'current HEAD\n' }, 'taskless review HEAD drift');
+  const drifted = checkpointGitMetadata({ cwd }).state;
+  assert.notEqual(currentHeadSha, priorHeadSha);
+  assert.equal(drifted.phase, 'recovering');
+  assert.equal(drifted.currentIntegrationHeadSha, currentHeadSha);
+  assert.equal(drifted.validationStatus.status, 'not-run');
+  assert.equal(drifted.threadResolutionStatus.status, 'not-run');
+  assert.equal(drifted.requestedHeadSha, priorHeadSha);
+  assert.equal(drifted.reviewedHeadSha, priorHeadSha);
+  assert.deepEqual({
+    reviewRequest: drifted.reviewRequest,
+    reviewOutcome: drifted.reviewOutcome,
+    reviewHistory: drifted.reviewHistory,
+    threadlessVerification: drifted.threadResolutionStatus.threadlessVerification,
+  }, preserved);
+
+  const selection = initialSelection(currentHeadSha, {
+    affectedAreas: ['workflow', 'documentation'],
+    requiredValidation: {
+      unit: [{
+        command: 'npm run check:workflow',
+        reason: 'Rebuild native taskless validation after the clean Review commit drifted.',
+      }],
+      system: [],
+    },
+  });
+  const plan = buildTargetedValidationPlan({
+    cwd, initialSelection: selection, replace: true, now: () => AT,
+  });
+  assert.equal(plan.headSha, currentHeadSha);
+  assert.equal(plan.stateRevision, drifted.revision);
+  assert.deepEqual(plan.taskIds, []);
+  assert.deepEqual(plan.affectedAreas, ['documentation', 'workflow']);
+
+  const result = executeTargetedValidationPlan({
+    cwd, runCommand: () => ({ status: 0 }), now: () => AT,
+  });
+  assert.equal(result.state.phase, 'recovering');
+  assert.equal(result.state.validationStatus.status, 'passed');
+  assert.equal(result.state.validationStatus.headSha, currentHeadSha);
+  assert.deepEqual(result.state.validationStatus.checks, ['npm run check:workflow']);
+  assert.deepEqual({
+    reviewRequest: result.state.reviewRequest,
+    reviewOutcome: result.state.reviewOutcome,
+    reviewHistory: result.state.reviewHistory,
+    threadlessVerification: result.state.threadResolutionStatus.threadlessVerification,
+  }, preserved);
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd, initialSelection: selection, replace: true,
+  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
+});
+
+test('native taskless review HEAD-drift validation recovery fails closed at every lifecycle boundary', () => {
+  const wrongHeadCwd = repo();
+  const wrongHeadReview = nativeTasklessReview(wrongHeadCwd).reviewed;
+  commit(wrongHeadCwd, { 'wrong-selection-head.txt': 'drift\n' }, 'wrong selection drift');
+  const wrongHeadDrift = checkpointGitMetadata({ cwd: wrongHeadCwd }).state;
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: wrongHeadCwd,
+    initialSelection: initialSelection(wrongHeadReview.currentIntegrationHeadSha),
+    replace: true,
+  }), { code: 'VALIDATION_PLAN_STALE' });
+
+  const dirtyCwd = repo();
+  nativeTasklessReview(dirtyCwd);
+  const dirtyHead = commit(dirtyCwd, { 'dirty-recovery-head.txt': 'drift\n' }, 'dirty recovery drift');
+  const dirtyDrift = checkpointGitMetadata({ cwd: dirtyCwd }).state;
+  writeFileSync(join(dirtyCwd, 'dirty-recovery.txt'), 'dirty\n');
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: dirtyCwd, initialSelection: initialSelection(dirtyHead), replace: true,
+  }), { code: 'VALIDATION_CHECKOUT_DIRTY' });
+  assert.equal(dirtyDrift.validationStatus.status, 'not-run');
+
+  const pendingCwd = repo();
+  nativeTasklessReview(pendingCwd, { collectOutcome: false });
+  const pendingHead = commit(pendingCwd, { 'pending-review-drift.txt': 'drift\n' }, 'pending review drift');
+  const pendingDrift = checkpointGitMetadata({ cwd: pendingCwd }).state;
+  assert.equal(pendingDrift.phase, 'recovering');
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: pendingCwd, initialSelection: initialSelection(pendingHead), replace: true,
+  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
+
+  const findingsCwd = repo();
+  nativeTasklessReview(findingsCwd, { outcomeOverrides: { outcome: 'findings' } });
+  const findingsHead = commit(findingsCwd, { 'findings-review-drift.txt': 'drift\n' }, 'findings review drift');
+  const findingsDrift = checkpointGitMetadata({ cwd: findingsCwd }).state;
+  assert.equal(findingsDrift.phase, 'recovering');
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: findingsCwd, initialSelection: initialSelection(findingsHead), replace: true,
+  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
+
+  const taskCwd = repo();
+  nativeTasklessReview(taskCwd);
+  const taskHead = commit(taskCwd, { 'task-bearing-drift.txt': 'drift\n' }, 'task-bearing drift');
+  const taskDrift = checkpointGitMetadata({ cwd: taskCwd }).state;
+  const taskBearing = checkpointState({
+    cwd: taskCwd,
+    expectedRevision: taskDrift.revision,
+    nextState: {
+      ...taskDrift,
+      tasks: [task(taskHead, {
+        id: 'unexpected-recovery-task', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+      })],
+    },
+  });
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: taskCwd, initialSelection: initialSelection(taskHead), replace: true,
+  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
+  assert.equal(taskBearing.tasks.length, 1);
+
+  const blockedCwd = repo();
+  nativeTasklessReview(blockedCwd);
+  const blockedHead = commit(blockedCwd, { 'blocked-drift.txt': 'drift\n' }, 'blocked drift');
+  const blockedDrift = checkpointGitMetadata({ cwd: blockedCwd }).state;
+  checkpointState({
+    cwd: blockedCwd,
+    expectedRevision: blockedDrift.revision,
+    nextState: { ...blockedDrift, blockedReasons: ['Operator decision remains.'] },
+  });
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: blockedCwd, initialSelection: initialSelection(blockedHead), replace: true,
+  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
+
+  const inconsistentCwd = repo();
+  nativeTasklessReview(inconsistentCwd);
+  const inconsistentHead = commit(inconsistentCwd, { 'inconsistent-drift.txt': 'drift\n' }, 'inconsistent drift');
+  const inconsistent = checkpointGitMetadata({ cwd: inconsistentCwd }).state;
+  writeFileSync(statePath(inconsistentCwd, inconsistent.prNumber), `${JSON.stringify({
+    ...inconsistent,
+    reviewHistory: inconsistent.reviewHistory.map((entry, index) => (
+      index === inconsistent.reviewHistory.length - 1
+        ? { ...entry, outcome: { ...entry.outcome, id: 'different-latest-outcome' } }
+        : entry
+    )),
+  })}\n`);
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: inconsistentCwd, initialSelection: initialSelection(inconsistentHead), replace: true,
+  }), StateError);
+
+  const exhaustedCwd = repo();
+  let exhausted = nativeTasklessReview(exhaustedCwd).reviewed;
+  for (let round = 1; round < 4; round += 1) {
+    const prepared = checkpointState({
+      cwd: exhaustedCwd,
+      expectedRevision: exhausted.revision,
+      nextState: ready(exhausted, []),
+    });
+    const requested = checkpointReviewRequest({
+      cwd: exhaustedCwd,
+      request: request(prepared),
+      pushedHeadSha: prepared.currentIntegrationHeadSha,
+      prHeadSha: prepared.currentIntegrationHeadSha,
+      expectedRevision: prepared.revision,
+    });
+    exhausted = checkpointReviewOutcome({
+      cwd: exhaustedCwd, outcome: outcome(requested), expectedRevision: requested.revision,
+    });
+  }
+  assert.equal(exhausted.reviewRound, 3);
+  assert.equal(exhausted.verificationReviewUsed, true);
+  const exhaustedHead = commit(exhaustedCwd, { 'exhausted-drift.txt': 'drift\n' }, 'exhausted review drift');
+  const exhaustedDrift = checkpointGitMetadata({ cwd: exhaustedCwd }).state;
+  assert.equal(exhaustedDrift.phase, 'recovering');
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: exhaustedCwd, initialSelection: initialSelection(exhaustedHead), replace: true,
+  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
 });
 
 test('v2 completed-task cycles rebuild fresh exact-head validation from immutable migration proof', () => {

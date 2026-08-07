@@ -118,6 +118,18 @@ reviews, tasks, and inconsistent history remain ineligible, and the applicable
 clean review is not repeated. An ordinary taskless clean review with existing
 passing validation cannot use this mode to replace that proof.
 
+One native schema-v3 exception handles a taskless clean discovery review whose
+four review SHAs still agree with each other but differ from the newer current
+integration HEAD. It requires a `recovering` state, exact latest active review
+evidence, zero tasks and actionable Integrated IDs, a clean exact current
+checkout, no blockers or escalation, and remaining discovery-or-verification
+allowance. Save a nonempty explicit selection for the current HEAD, using
+`--replace` only to replace the stale historical plan sidecar, then run every
+selected check again. The transition changes only targeted-validation proof;
+the prior request, outcome, and history stay immutable and remain stale until a
+new current-HEAD review is requested. A same-HEAD review or an already-passing
+recovery proof is not replaceable through this route.
+
 Initial selection also has one migration-only completed-task route. An
 immutable `state.v2.backup.json` must prove an exact-head passed, nonempty
 legacy targeted proof and a nonempty all-completed task set. A
