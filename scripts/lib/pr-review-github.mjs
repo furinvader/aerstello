@@ -15,6 +15,9 @@ const FULL_VALIDATION_CHECK = 'Full validation';
 const GITHUB_ACTIONS_APP = 'github-actions';
 const FULL_VALIDATION_WORKFLOW = 'CI';
 const FULL_VALIDATION_WORKFLOW_PATH = '.github/workflows/ci.yml';
+const VERIFIED_NON_ACTIONABLE_DISPOSITIONS = new Set([
+  'duplicate', 'already-fixed', 'stale', 'invalid', 'policy-conflict', 'out-of-scope',
+]);
 
 const OPERATIONS = {
   PullRequestMetadata: `query PullRequestMetadata($owner:String!,$repo:String!,$pr:Int!){rateLimit{cost remaining} viewer{login id} repository(owner:$owner,name:$repo){pullRequest(number:$pr){id number url headRefOid}}}`,
@@ -456,6 +459,15 @@ async function lookupRequestJournalIntent(journal, operationId) {
 
 function dispositionForTask(task) {
   return task.disposition === 'actionable' ? 'fixed' : task.disposition;
+}
+
+function taskIsEligibleForVerifyResolve(task) {
+  const actionable = task.disposition === 'actionable'
+    && ['integrated', 'completed'].includes(task.status)
+    && Boolean(task.integratedCommitSha);
+  const nonActionable = VERIFIED_NON_ACTIONABLE_DISPOSITIONS.has(task.disposition)
+    && ['not-applicable', 'completed'].includes(task.status);
+  return actionable || nonActionable;
 }
 
 function buildCanonicalRootPlan(state, live, selectedTaskId = null) {
@@ -1039,10 +1051,8 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     if (!['local', 'github-threadless'].includes(selectedTask.sourceType)) {
       throw new GitHubWorkflowError('Task must use reply-resolve for its canonical GitHub thread', 'TASK_NOT_READY');
     }
-    if (selectedTask.disposition !== 'actionable'
-        || !['integrated', 'completed'].includes(selectedTask.status)
-        || !selectedTask.integratedCommitSha) {
-      throw new GitHubWorkflowError('Task is not an integrated actionable fix', 'TASK_NOT_READY');
+    if (!taskIsEligibleForVerifyResolve(selectedTask)) {
+      throw new GitHubWorkflowError('Task is not eligible for verifier completion', 'TASK_NOT_READY');
     }
 
     let live = await readLiveSnapshot(client, active);

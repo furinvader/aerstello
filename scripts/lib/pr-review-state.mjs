@@ -1599,6 +1599,19 @@ export function executeTargetedValidationPlan({
   });
 }
 
+const VERIFIED_NON_ACTIONABLE_DISPOSITIONS = new Set([
+  'duplicate', 'already-fixed', 'stale', 'invalid', 'policy-conflict', 'out-of-scope',
+]);
+
+function taskIsEligibleForVerifierCompletion(task) {
+  const actionable = task.disposition === 'actionable'
+    && ['integrated', 'completed'].includes(task.status)
+    && Boolean(task.integratedCommitSha);
+  const nonActionable = VERIFIED_NON_ACTIONABLE_DISPOSITIONS.has(task.disposition)
+    && ['not-applicable', 'completed'].includes(task.status);
+  return actionable || nonActionable;
+}
+
 export function completeIntegratedTasks(state, { threadResolutionStatus, verifiedLocalTaskIds = [] }) {
   if (!Array.isArray(verifiedLocalTaskIds)
       || verifiedLocalTaskIds.some((taskId) => typeof taskId !== 'string' || taskId.length === 0)
@@ -1612,9 +1625,8 @@ export function completeIntegratedTasks(state, { threadResolutionStatus, verifie
     if (task.sourceType !== 'local') {
       throw new StateError(`Verified local task ${taskId} is not local`, 'INVALID_TASK_COMPLETION');
     }
-    if (task.disposition !== 'actionable' || !['integrated', 'completed'].includes(task.status)
-        || !task.integratedCommitSha) {
-      throw new StateError(`Verified local task ${taskId} is not an integrated actionable fix`, 'INVALID_TASK_COMPLETION');
+    if (!taskIsEligibleForVerifierCompletion(task)) {
+      throw new StateError(`Verified local task ${taskId} is not eligible for verifier completion`, 'INVALID_TASK_COMPLETION');
     }
   }
   const tasks = state.tasks.map((task) => {

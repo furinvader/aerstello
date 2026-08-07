@@ -83,16 +83,19 @@ successful verification.
 A successful close mutation alone is not confirmation. Integrated is not
 Resolved, and neither means Done.
 
-For an actionable `local` or `github-threadless` task, run `verify-resolve`
-only after the read-only integration verifier has approved that selected task
-at the exact current HEAD. The command is the orchestrator's guarded assertion
-of that verifier result: it repeats clean-checkout, equal local/pushed/live
-HEAD, ancestry, state-revision, and fully paginated canonical-root checks before
-writing task state. It never mutates GitHub or creates a mutation journal. A
-local assertion completes only the selected task. A threadless assertion adds
-only the selected task ID to exact-HEAD threadless proof while preserving prior
-IDs. This assertion is transition input, not a persisted verifier-artifact
-schema. GitHub-thread tasks continue to use `reply-resolve`.
+For an actionable Integrated `local` or `github-threadless` fix, or a selected
+`not-applicable` task with disposition `duplicate`, `already-fixed`, `stale`,
+`invalid`, `policy-conflict`, or `out-of-scope`, run `verify-resolve` only after
+the read-only integration verifier has approved that task at the exact current
+HEAD. `needs-human-decision` is never eligible. The command is the
+orchestrator's guarded assertion of that verifier result: it repeats
+clean-checkout, equal local/pushed/live HEAD, ancestry, state-revision, and fully
+paginated canonical-root checks before writing task state. It never mutates
+GitHub or creates a mutation journal. A local assertion completes only the
+selected task. A threadless assertion adds only the selected task ID to
+exact-HEAD threadless proof while preserving prior IDs. This assertion is
+transition input, not a persisted verifier-artifact schema. GitHub-thread tasks
+continue to use `reply-resolve`.
 
 ## Run Codex and CI together
 

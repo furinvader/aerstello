@@ -1450,11 +1450,40 @@ test('guarded verifier completion selects only unique integrated local task IDs'
   );
   assert.deepEqual(selected.tasks.map((item) => item.status), ['integrated', 'completed', 'integrated']);
 
+  const disposedA = task(head, {
+    id: 'disposed-a', status: 'not-applicable', disposition: 'duplicate', sourceType: 'local',
+  });
+  const disposedB = task(head, {
+    id: 'disposed-b', status: 'not-applicable', disposition: 'stale', sourceType: 'local',
+  });
+  const selectedDisposed = completeIntegratedTasks(
+    { ...state, tasks: [disposedA, disposedB] },
+    { threadResolutionStatus: proof, verifiedLocalTaskIds: ['disposed-b'] },
+  );
+  assert.deepEqual(selectedDisposed.tasks.map((item) => item.status), ['not-applicable', 'completed']);
+
+  for (const disposition of [
+    'duplicate', 'already-fixed', 'stale', 'invalid', 'policy-conflict', 'out-of-scope',
+  ]) {
+    const disposed = task(head, {
+      id: `disposed-${disposition}`, status: 'not-applicable', disposition, sourceType: 'local',
+    });
+    assert.equal(completeIntegratedTasks(
+      { ...state, tasks: [disposed] },
+      { threadResolutionStatus: proof, verifiedLocalTaskIds: [disposed.id] },
+    ).tasks[0].status, 'completed');
+  }
+
+  const unintegrated = task(head, { id: 'unintegrated', status: 'proposed', sourceType: 'local' });
+  const needsHuman = task(head, {
+    id: 'needs-human', status: 'not-applicable', disposition: 'needs-human-decision', sourceType: 'local',
+  });
+
   for (const verifiedLocalTaskIds of [
-    ['local-a', 'local-a'], ['missing'], ['threadless'], [''], 'local-a',
+    ['local-a', 'local-a'], ['missing'], ['threadless'], ['unintegrated'], ['needs-human'], [''], 'local-a',
   ]) {
     assert.throws(() => completeIntegratedTasks(
-      { ...state, tasks: [localA, localB, threadless] },
+      { ...state, tasks: [localA, localB, threadless, unintegrated, needsHuman] },
       { threadResolutionStatus: proof, verifiedLocalTaskIds },
     ), { code: 'INVALID_TASK_COMPLETION' });
   }

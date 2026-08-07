@@ -1094,6 +1094,15 @@ function integratedNonThreadState(sourceType = 'local', id = 'task-local') {
   });
 }
 
+function nonActionableNonThreadState(sourceType = 'local', id = 'task-disposed', disposition = 'duplicate') {
+  const state = integratedNonThreadState(sourceType, id);
+  state.tasks[0] = {
+    ...state.tasks[0], disposition, status: 'not-applicable', integratedCommitSha: null,
+    resolutionSummary: 'Disposition verified.',
+  };
+  return state;
+}
+
 test('reply-resolve identifies explicit root, deduplicates shared source identities, replies before resolve, and re-queries proof', async () => {
   const events = [];
   const client = new FakeClient({ events });
@@ -1186,6 +1195,34 @@ test('verify-resolve completes only the selected local task after repeated read-
   assert.equal(setup.state.calls.length, checkpointCount);
 });
 
+test('verify-resolve completes only the selected eligible non-actionable local task idempotently', async () => {
+  const state = nonActionableNonThreadState('local', 'disposed-a', 'duplicate');
+  state.tasks.push(nonActionableNonThreadState('local', 'disposed-b', 'stale').tasks[0]);
+  const client = new FakeClient();
+  const journal = {
+    async lookupIntent() { throw new Error('verify-resolve must not read the mutation journal'); },
+    async ensureIntent() { throw new Error('verify-resolve must not write the mutation journal'); },
+  };
+  const setup = workflow(state, client, { journal });
+  await setup.api.verifyResolve(2, 'disposed-b');
+  assert.deepEqual(setup.state.current.tasks.map((task) => task.status), ['not-applicable', 'completed']);
+  assert.deepEqual(setup.state.calls.at(-1).input.verifiedLocalTaskIds, ['disposed-b']);
+  assert.equal(client.events.length, 0);
+
+  const revision = setup.state.current.revision;
+  const checkpointCount = setup.state.calls.length;
+  const retried = await setup.api.verifyResolve(2, 'disposed-b');
+  assert.equal(retried.stateRevision, revision);
+  assert.equal(setup.state.calls.length, checkpointCount);
+
+  for (const disposition of ['already-fixed', 'invalid', 'policy-conflict', 'out-of-scope']) {
+    const candidate = nonActionableNonThreadState('local', `disposed-${disposition}`, disposition);
+    const candidateSetup = workflow(candidate, new FakeClient());
+    await candidateSetup.api.verifyResolve(2, candidate.tasks[0].id);
+    assert.equal(candidateSetup.state.current.tasks[0].status, 'completed');
+  }
+});
+
 test('verify-resolve creates current-head threadless proof and preserves prior proven IDs', async () => {
   const state = integratedNonThreadState('github-threadless', 'threadless-new');
   state.tasks.unshift({
@@ -1208,6 +1245,42 @@ test('verify-resolve creates current-head threadless proof and preserves prior p
   assert.ok(setup.state.current.tasks.every((task) => task.status === 'completed'));
   assert.deepEqual(setup.state.calls.at(-1).input.verifiedLocalTaskIds, []);
   assert.equal(client.events.length, 0);
+});
+
+test('verify-resolve proves eligible non-actionable threadless tasks and rejects needs-human decisions', async () => {
+  const state = nonActionableNonThreadState('github-threadless', 'threadless-disposed', 'already-fixed');
+  state.tasks.unshift({
+    ...state.tasks[0], id: 'threadless-prior', fingerprint: 'fp-threadless-prior', status: 'completed',
+  });
+  state.threadResolutionStatus = {
+    ...proof(),
+    threadlessVerification: {
+      status: 'passed', headSha: HEAD, taskIds: ['threadless-prior'], updatedAt: AT,
+    },
+  };
+  const client = new FakeClient();
+  const setup = workflow(state, client);
+  await setup.api.verifyResolve(2, 'threadless-disposed');
+  assert.deepEqual(
+    setup.state.current.threadResolutionStatus.threadlessVerification.taskIds,
+    ['threadless-disposed', 'threadless-prior'],
+  );
+  assert.ok(setup.state.current.tasks.every((task) => task.status === 'completed'));
+  assert.equal(client.events.length, 0);
+
+  const revision = setup.state.current.revision;
+  const checkpointCount = setup.state.calls.length;
+  await setup.api.verifyResolve(2, 'threadless-disposed');
+  assert.equal(setup.state.current.revision, revision);
+  assert.equal(setup.state.calls.length, checkpointCount);
+
+  for (const sourceType of ['local', 'github-threadless']) {
+    const needsHuman = nonActionableNonThreadState(sourceType, `needs-human-${sourceType}`, 'needs-human-decision');
+    const rejected = workflow(needsHuman, new FakeClient());
+    await assert.rejects(() => rejected.api.verifyResolve(2, needsHuman.tasks[0].id), { code: 'TASK_NOT_READY' });
+    assert.equal(rejected.state.calls.length, 0);
+    assert.equal(rejected.client.events.length, 0);
+  }
 });
 
 test('verify-resolve rejects unsupported and stale selections without state or GitHub mutation', async () => {
