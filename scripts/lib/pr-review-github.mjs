@@ -8,6 +8,7 @@ const REQUEST_BODY = '@codex review';
 const CLEAN_ISSUE_COMMENT_PREFIX = "Codex Review: Didn't find any major issues.";
 const CLEAN_ISSUE_COMMENT_TEMPLATE = "Codex Review: Didn't find any major issues. Nice work!";
 const CLEAN_ISSUE_COMMENT_PATTERN = /^Codex Review: Didn't find any major issues\. (?:Nice work!|:tada:)\n\n\*\*Reviewed commit:\*\* `([0-9a-f]{7,40})`(?:\n|$)/u;
+const CLEAN_ISSUE_COMMENT_ANCHOR_PATTERN = /\*\*Reviewed commit:\*\*/gu;
 const PAGE_SIZE = 50;
 const MAX_PAGES = 100;
 const MAX_NODES = 10_000;
@@ -790,6 +791,10 @@ async function classifyCleanIssueComments({ comments, request, git, cwd, expecte
     if (!evidenceAtOrAfter(comment.createdAt, request.at)) continue;
     if (!isCanonicalActor(comment.author)) continue;
     if (comment.lastEditedAt !== null) {
+      unsupported.push(comment);
+      continue;
+    }
+    if ((comment.body.match(CLEAN_ISSUE_COMMENT_ANCHOR_PATTERN) ?? []).length !== 1) {
       unsupported.push(comment);
       continue;
     }

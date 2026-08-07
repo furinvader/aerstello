@@ -29,6 +29,10 @@ const VIEWER = { __typename: 'User', login: 'maintainer', url: 'https://github.c
 const CLEAN_COMMENT_BODY = `${githubReviewConstants.CLEAN_ISSUE_COMMENT_TEMPLATE}\n\n**Reviewed commit:** \`${HEAD.slice(0, 10)}\`\n\n<details>About Codex</details>`;
 const CLEAN_TADA_COMMENT_BODY = `Codex Review: Didn't find any major issues. :tada:\n\n**Reviewed commit:** \`${HEAD}\`\n\n<details>About Codex</details>`;
 
+function withDuplicateCleanAnchor(body, sha) {
+  return `${body}\n\n**Reviewed commit:** \`${sha}\``;
+}
+
 function proof(status = 'passed', headSha = HEAD) {
   return {
     status, headSha: status === 'not-run' ? null : headSha, threads: [],
@@ -1710,6 +1714,37 @@ test('collect records the literal :tada: clean issue comment with exact immutabl
   assert.equal(setup.state.calls.at(-1).name, 'checkpointReviewOutcome');
 });
 
+test('collect rejects same-SHA and conflicting duplicate clean-comment anchors for both formats', async () => {
+  const formats = [
+    { body: CLEAN_COMMENT_BODY, anchorSha: HEAD.slice(0, 10), conflictingSha: OTHER_HEAD.slice(0, 10) },
+    { body: CLEAN_TADA_COMMENT_BODY, anchorSha: HEAD, conflictingSha: OTHER_HEAD },
+  ];
+  for (const format of formats) {
+    for (const duplicateSha of [format.anchorSha, format.conflictingSha]) {
+      const client = new FakeClient();
+      client.comments.push(cleanIssueComment({
+        body: withDuplicateCleanAnchor(format.body, duplicateSha),
+      }));
+      const setup = workflow(pendingState('discovery'), client);
+      await assert.rejects(() => setup.api.collect(2), {
+        code: 'DISCOVERY_COLLECTION_UNRESOLVED',
+      });
+      assert.equal(setup.state.calls.length, 0);
+      assert.equal(setup.state.current.reviewOutcome, null);
+    }
+  }
+
+  const unsupportedClient = new FakeClient();
+  const unsupportedComment = cleanIssueComment({
+    body: withDuplicateCleanAnchor(CLEAN_TADA_COMMENT_BODY, HEAD),
+  });
+  unsupportedClient.comments.push(unsupportedComment);
+  const unsupported = await workflow(pendingState('verification'), unsupportedClient).api.collect(2);
+  assert.equal(unsupported.escalated, true);
+  assert.equal(unsupported.escalation.reason, 'ambiguous-canonical-evidence');
+  assert.deepEqual(unsupported.escalation.evidenceIds, [`issue-comment:${unsupportedComment.id}`]);
+});
+
 test('collect ignores historical clean comments from prior requests', async () => {
   const historical = cleanIssueComment({
     id: 'IC_historical', databaseId: 199, createdAt: '2026-08-04T23:59:59Z',
@@ -1953,6 +1988,25 @@ test('complete freshly revalidates clean issue-comment identity and content', as
     await assert.rejects(() => workflow(issueCommentCompletedState(), client).api.complete(2), {
       code: 'COMPLETION_NOT_READY',
     });
+  }
+});
+
+test('complete rejects same-SHA and conflicting duplicate clean-comment anchors for both formats', async () => {
+  const formats = [
+    { body: CLEAN_COMMENT_BODY, anchorSha: HEAD.slice(0, 10), conflictingSha: OTHER_HEAD.slice(0, 10) },
+    { body: CLEAN_TADA_COMMENT_BODY, anchorSha: HEAD, conflictingSha: OTHER_HEAD },
+  ];
+  for (const format of formats) {
+    for (const duplicateSha of [format.anchorSha, format.conflictingSha]) {
+      const client = new FakeClient();
+      client.comments.push(cleanIssueComment({
+        body: withDuplicateCleanAnchor(format.body, duplicateSha),
+      }));
+      const setup = workflow(issueCommentCompletedState(), client);
+      await assert.rejects(() => setup.api.complete(2), { code: 'COMPLETION_NOT_READY' });
+      assert.equal(setup.state.calls.length, 0);
+      assert.equal(setup.state.current.phase, 'validating');
+    }
   }
 });
 
