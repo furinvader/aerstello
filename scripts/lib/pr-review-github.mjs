@@ -480,6 +480,39 @@ function taskIsEligibleForVerifyResolve(task) {
   return actionable || nonActionable;
 }
 
+function normalizeVerifyResolveTaskIds(taskSelection) {
+  const taskIds = Array.isArray(taskSelection)
+    ? [...taskSelection]
+    : typeof taskSelection === 'string'
+      ? taskSelection.split(',')
+      : [];
+  if (
+    taskIds.length === 0
+    || taskIds.some((taskId) => typeof taskId !== 'string'
+      || taskId.length === 0 || taskId.trim() !== taskId)
+    || new Set(taskIds).size !== taskIds.length
+  ) {
+    throw new GitHubWorkflowError(
+      'verify-resolve requires a unique comma-separated task selection without empty entries',
+      'TASK_NOT_READY',
+    );
+  }
+  return taskIds.sort();
+}
+
+function sameTaskIds(left, right) {
+  return left.length === right.length
+    && left.every((taskId, index) => taskId === right[index]);
+}
+
+function verifyResolveResult(taskIds, active) {
+  return {
+    ...(taskIds.length === 1 ? { taskId: taskIds[0] } : { taskIds }),
+    stateRevision: active.revision,
+    threadResolutionStatus: active.threadResolutionStatus,
+  };
+}
+
 function buildCanonicalRootPlan(state, live, selectedTaskId = null) {
   if (state.validationStatus.status !== 'passed'
       || state.validationStatus.headSha !== state.currentIntegrationHeadSha
@@ -1199,44 +1232,73 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     return { taskId, stateRevision: active.revision, threadResolutionStatus: active.threadResolutionStatus };
   }
 
-  async function verifyResolve(prNumber, taskId) {
+  async function verifyResolve(prNumber, taskSelection) {
     let active = await load(prNumber);
     if (!stateAdapter.checkpointTaskCompletion) {
       throw new GitHubWorkflowError('The guarded task-completion checkpoint is unavailable', 'INVALID_ADAPTERS');
     }
-    const selectedTask = active.tasks.find((task) => task.id === taskId);
-    if (!selectedTask) throw new GitHubWorkflowError('Task was not found', 'TASK_NOT_FOUND');
-    if (!['local', 'github-threadless'].includes(selectedTask.sourceType)) {
-      throw new GitHubWorkflowError('Task must use reply-resolve for its canonical GitHub thread', 'TASK_NOT_READY');
+    const taskIds = normalizeVerifyResolveTaskIds(taskSelection);
+    const selectedTasks = taskIds.map((taskId) => {
+      const task = active.tasks.find((candidate) => candidate.id === taskId);
+      if (!task) throw new GitHubWorkflowError(`Task ${taskId} was not found`, 'TASK_NOT_FOUND');
+      return task;
+    });
+    const selectedTask = selectedTasks[0];
+    const completedThreadlessRefresh = selectedTasks.every((task) => (
+      task.sourceType === 'github-threadless' && task.status === 'completed'
+    ));
+    if (taskIds.length > 1 && !completedThreadlessRefresh) {
+      throw new GitHubWorkflowError(
+        'Multiple tasks may only select one completed threadless proof set',
+        'TASK_NOT_READY',
+      );
     }
-    if (!taskIsEligibleForVerifyResolve(selectedTask)) {
-      throw new GitHubWorkflowError('Task is not eligible for verifier completion', 'TASK_NOT_READY');
+    for (const task of selectedTasks) {
+      if (!['local', 'github-threadless'].includes(task.sourceType)) {
+        throw new GitHubWorkflowError(
+          `Task ${task.id} must use reply-resolve for its canonical GitHub thread`,
+          'TASK_NOT_READY',
+        );
+      }
+      if (!taskIsEligibleForVerifyResolve(task)) {
+        throw new GitHubWorkflowError(
+          `Task ${task.id} is not eligible for verifier completion`,
+          'TASK_NOT_READY',
+        );
+      }
     }
-    const completedThreadless = selectedTask.sourceType === 'github-threadless'
-      && selectedTask.status === 'completed';
+
+    let completedThreadlessVerification = null;
+    if (completedThreadlessRefresh) {
+      completedThreadlessVerification = active.threadResolutionStatus.threadlessVerification;
+      const preservedTaskIds = [...(completedThreadlessVerification.taskIds ?? [])].sort();
+      if (completedThreadlessVerification.status !== 'passed'
+          || !sameTaskIds(taskIds, preservedTaskIds)) {
+        throw new GitHubWorkflowError(
+          'Completed threadless refresh requires the complete preserved task set',
+          'TASK_NOT_READY',
+        );
+      }
+    }
 
     let live = await readLiveSnapshot(client, active);
     await assertMutationReady({ state: active, git }, live);
-    if (completedThreadless) assertRecordedThreadsLive(active, live);
+    if (completedThreadlessRefresh) assertRecordedThreadsLive(active, live);
     else assertLiveThreadProof(active, live);
     await assertCurrent(active);
 
     live = await readLiveSnapshot(client, active);
     await assertMutationReady({ state: active, git }, live);
-    if (completedThreadless) assertRecordedThreadsLive(active, live);
+    if (completedThreadlessRefresh) assertRecordedThreadsLive(active, live);
     else assertLiveThreadProof(active, live);
     await assertCurrent(active);
 
     if (selectedTask.status === 'completed') {
-      if (!completedThreadless) {
-        return { taskId, stateRevision: active.revision, threadResolutionStatus: active.threadResolutionStatus };
+      if (!completedThreadlessRefresh) {
+        return verifyResolveResult(taskIds, active);
       }
-      const verification = active.threadResolutionStatus.threadlessVerification;
-      if (verification.status !== 'passed' || !verification.taskIds.includes(taskId)) {
-        throw new GitHubWorkflowError('Completed threadless task lacks preserved verifier proof', 'TASK_NOT_READY');
-      }
-      if (verification.headSha === active.currentIntegrationHeadSha) {
-        return { taskId, stateRevision: active.revision, threadResolutionStatus: active.threadResolutionStatus };
+      if (completedThreadlessVerification.headSha === active.currentIntegrationHeadSha) {
+        return verifyResolveResult(taskIds, active);
       }
       if (active.threadResolutionStatus.status !== 'not-run'
           || active.threadResolutionStatus.headSha !== null
@@ -1246,22 +1308,23 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       const threadResolutionStatus = {
         ...active.threadResolutionStatus,
         threadlessVerification: {
-          ...verification,
+          ...completedThreadlessVerification,
           headSha: active.currentIntegrationHeadSha,
+          taskIds,
           updatedAt: clock.now(),
         },
       };
       active = await stateAdapter.checkpointTaskCompletion({
         prNumber, expectedRevision: active.revision, threadResolutionStatus, verifiedLocalTaskIds: [],
       });
-      return { taskId, stateRevision: active.revision, threadResolutionStatus: active.threadResolutionStatus };
+      return verifyResolveResult(taskIds, active);
     }
 
     const verifiedAt = clock.now();
     let threadResolutionStatus = buildThreadProof(active, live, new Map(), verifiedAt);
     const verifiedLocalTaskIds = [];
     if (selectedTask.sourceType === 'local') {
-      verifiedLocalTaskIds.push(taskId);
+      verifiedLocalTaskIds.push(selectedTask.id);
     } else {
       const previousIds = active.threadResolutionStatus.threadlessVerification.status === 'passed'
         ? active.threadResolutionStatus.threadlessVerification.taskIds : [];
@@ -1270,7 +1333,7 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
         threadlessVerification: {
           status: 'passed',
           headSha: active.currentIntegrationHeadSha,
-          taskIds: [...new Set([...previousIds, taskId])].sort(),
+          taskIds: [...new Set([...previousIds, selectedTask.id])].sort(),
           updatedAt: verifiedAt,
         },
       };
@@ -1278,7 +1341,7 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     active = await stateAdapter.checkpointTaskCompletion({
       prNumber, expectedRevision: active.revision, threadResolutionStatus, verifiedLocalTaskIds,
     });
-    return { taskId, stateRevision: active.revision, threadResolutionStatus: active.threadResolutionStatus };
+    return verifyResolveResult(taskIds, active);
   }
 
   async function collect(prNumber) {

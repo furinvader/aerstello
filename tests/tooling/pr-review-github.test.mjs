@@ -1113,15 +1113,18 @@ function nonActionableNonThreadState(sourceType = 'local', id = 'task-disposed',
   return state;
 }
 
-function completedThreadlessDriftState(id = 'threadless-completed') {
-  const state = integratedNonThreadState('github-threadless', id);
+function completedThreadlessDriftState(selection = 'threadless-completed') {
+  const taskIds = [...(Array.isArray(selection) ? selection : [selection])].sort();
+  const state = integratedNonThreadState('github-threadless', taskIds[0]);
   state.currentIntegrationHeadSha = OTHER_HEAD;
   state.git = { ...state.git, headSha: OTHER_HEAD };
   state.validationStatus = { ...state.validationStatus, headSha: OTHER_HEAD };
-  state.tasks[0].status = 'completed';
+  state.tasks = taskIds.map((id) => ({
+    ...state.tasks[0], id, fingerprint: `fp-${id}`, status: 'completed',
+  }));
   state.threadResolutionStatus = {
     status: 'not-run', headSha: null, threads: [], updatedAt: null,
-    threadlessVerification: { status: 'passed', headSha: HEAD, taskIds: [id], updatedAt: AT },
+    threadlessVerification: { status: 'passed', headSha: HEAD, taskIds, updatedAt: AT },
   };
   return state;
 }
@@ -1293,7 +1296,7 @@ test('verify-resolve proves eligible non-actionable threadless tasks and rejects
 
   const revision = setup.state.current.revision;
   const checkpointCount = setup.state.calls.length;
-  await setup.api.verifyResolve(2, 'threadless-disposed');
+  await setup.api.verifyResolve(2, ['threadless-disposed', 'threadless-prior']);
   assert.equal(setup.state.current.revision, revision);
   assert.equal(setup.state.calls.length, checkpointCount);
 
@@ -1350,6 +1353,120 @@ test('verify-resolve re-attests completed threadless proof after HEAD drift with
   await assert.rejects(() => rejected.api.verifyResolve(2, 'threadless-completed'), { code: 'TASK_NOT_READY' });
   assert.equal(rejected.state.calls.length, 0);
   assert.equal(rejected.client.events.length, 0);
+});
+
+test('verify-resolve atomically re-attests only the exact completed threadless task set', async () => {
+  const taskIds = ['threadless-a', 'threadless-b'];
+  const initial = completedThreadlessDriftState(taskIds);
+  const client = new FakeClient();
+  client.metadata.headRefOid = OTHER_HEAD;
+  const journal = {
+    async lookupIntent() { throw new Error('verify-resolve must not read the mutation journal'); },
+    async ensureIntent() { throw new Error('verify-resolve must not write the mutation journal'); },
+  };
+  const git = fakeGit({
+    snapshot: async () => ({ headSha: OTHER_HEAD, dirty: false }),
+    pushedHead: async () => OTHER_HEAD,
+  });
+  const updatedAt = '2026-08-05T00:02:00Z';
+  const setup = workflow(initial, client, { git, journal, clock: { now: () => updatedAt } });
+
+  const result = await setup.api.verifyResolve(2, ['threadless-b', 'threadless-a']);
+  assert.deepEqual(result.taskIds, taskIds);
+  assert.equal(Object.hasOwn(result, 'taskId'), false);
+  assert.equal(result.stateRevision, initial.revision + 1);
+  const expected = structuredClone(initial);
+  expected.revision += 1;
+  expected.threadResolutionStatus.threadlessVerification = {
+    ...expected.threadResolutionStatus.threadlessVerification,
+    headSha: OTHER_HEAD,
+    taskIds,
+    updatedAt,
+  };
+  assert.deepEqual(setup.state.current, expected, 'only the shared proof and revision advance');
+  assert.deepEqual(setup.state.calls.at(-1).input.verifiedLocalTaskIds, []);
+  assert.deepEqual(
+    setup.state.calls.at(-1).input.threadResolutionStatus.threadlessVerification.taskIds,
+    taskIds,
+  );
+  assert.equal(setup.state.current.threadResolutionStatus.status, 'not-run');
+  assert.equal(client.calls.filter((call) => call.name === 'PullRequestThreads').length, 2);
+  assert.equal(client.events.length, 0);
+
+  const revision = setup.state.current.revision;
+  const checkpointCount = setup.state.calls.length;
+  const retry = await setup.api.verifyResolve(2, ['threadless-a', 'threadless-b']);
+  assert.equal(retry.stateRevision, revision);
+  assert.deepEqual(retry.taskIds, taskIds);
+  assert.equal(setup.state.current.revision, revision);
+  assert.equal(setup.state.calls.length, checkpointCount);
+  assert.equal(client.events.length, 0);
+});
+
+test('verify-resolve rejects every non-exact completed threadless selection before checkpointing', async () => {
+  const taskIds = ['threadless-a', 'threadless-b'];
+  const git = fakeGit({
+    snapshot: async () => ({ headSha: OTHER_HEAD, dirty: false }),
+    pushedHead: async () => OTHER_HEAD,
+  });
+  const cases = [
+    ['partial set', () => completedThreadlessDriftState(taskIds), ['threadless-a'], 'TASK_NOT_READY'],
+    ['duplicate ID', () => completedThreadlessDriftState(taskIds), ['threadless-a', 'threadless-a'], 'TASK_NOT_READY'],
+    ['empty selection', () => completedThreadlessDriftState(taskIds), [], 'TASK_NOT_READY'],
+    ['unknown ID', () => completedThreadlessDriftState(taskIds), [...taskIds, 'threadless-unknown'], 'TASK_NOT_FOUND'],
+    ['extra eligible task', () => {
+      const state = completedThreadlessDriftState(taskIds);
+      state.tasks.push({
+        ...state.tasks[0], id: 'threadless-extra', fingerprint: 'fp-threadless-extra',
+        status: 'integrated',
+      });
+      return state;
+    }, [...taskIds, 'threadless-extra'], 'TASK_NOT_READY'],
+    ['local task', () => {
+      const state = completedThreadlessDriftState(taskIds);
+      state.tasks.push({
+        ...state.tasks[0], id: 'local-completed', fingerprint: 'fp-local-completed',
+        sourceType: 'local', sourceIds: ['local:verifier'],
+      });
+      return state;
+    }, [...taskIds, 'local-completed'], 'TASK_NOT_READY'],
+    ['not-completed task', () => {
+      const state = completedThreadlessDriftState(taskIds);
+      state.tasks.push({
+        ...state.tasks[0], id: 'threadless-integrated', fingerprint: 'fp-threadless-integrated',
+        disposition: 'duplicate', status: 'not-applicable', integratedCommitSha: null,
+      });
+      return state;
+    }, [...taskIds, 'threadless-integrated'], 'TASK_NOT_READY'],
+    ['ineligible task', () => {
+      const state = completedThreadlessDriftState([...taskIds, 'threadless-ineligible']);
+      state.tasks.find((task) => task.id === 'threadless-ineligible').disposition = 'needs-human-decision';
+      state.tasks.find((task) => task.id === 'threadless-ineligible').integratedCommitSha = null;
+      return state;
+    }, [...taskIds, 'threadless-ineligible'], 'TASK_NOT_READY'],
+  ];
+
+  for (const [label, buildState, selection, code] of cases) {
+    const client = new FakeClient();
+    client.metadata.headRefOid = OTHER_HEAD;
+    const setup = workflow(buildState(), client, { git });
+    await assert.rejects(() => setup.api.verifyResolve(2, selection), { code }, label);
+    assert.equal(setup.state.calls.length, 0, label);
+    assert.equal(client.calls.length, 0, label);
+    assert.equal(client.events.length, 0, label);
+  }
+
+  const alreadyCurrent = completedThreadlessDriftState(taskIds);
+  alreadyCurrent.threadResolutionStatus.threadlessVerification.headSha = OTHER_HEAD;
+  const currentClient = new FakeClient();
+  currentClient.metadata.headRefOid = OTHER_HEAD;
+  const current = workflow(alreadyCurrent, currentClient, { git });
+  await assert.rejects(() => current.api.verifyResolve(2, ['threadless-a']), {
+    code: 'TASK_NOT_READY',
+  });
+  assert.equal(current.state.calls.length, 0);
+  assert.equal(currentClient.calls.length, 0);
+  assert.equal(currentClient.events.length, 0);
 });
 
 test('completed threadless refresh permits mapped new roots and enables journal-backed resolution recovery', async () => {
@@ -2172,6 +2289,18 @@ test('CLI exposes exactly the documented explicit-PR command surface and JSON-re
   await assert.rejects(() => runCli(['collect'], {}), /--pr/u);
   await assert.rejects(() => runCli(['refresh-threads'], {}), /--pr/u);
   await assert.rejects(() => runCli(['verify-resolve', '--pr', '2'], {}), /verify-resolve requires --task/u);
+  await assert.rejects(
+    () => runCli(['verify-resolve', '--pr', '2', '--task', 'threadless-a,threadless-a'], {}),
+    /unique comma-separated list/u,
+  );
+  await assert.rejects(
+    () => runCli(['verify-resolve', '--pr', '2', '--task', 'threadless-a,,threadless-b'], {}),
+    /unique comma-separated list/u,
+  );
+  await assert.rejects(
+    () => runCli(['verify-resolve', '--pr', '2', '--task', 'threadless-a, threadless-b'], {}),
+    /unique comma-separated list/u,
+  );
   await assert.rejects(() => runCli(['refresh-threads', '--pr', '2', '--task', 'x'], {}), /--task is only valid/u);
   await assert.rejects(() => runCli(['refresh-threads', '--pr', '2', '--kind', 'discovery'], {}), /--kind is only valid/u);
   await assert.rejects(() => runCli(['refresh-threads', '--pr', '2', '--human'], {}), /--human is only valid/u);
@@ -2199,6 +2328,25 @@ test('CLI exposes exactly the documented explicit-PR command surface and JSON-re
   });
   assert.equal(verified.taskId, 'task-local');
   assert.equal(verifiedState.current.tasks[0].status, 'completed');
+  const threadlessSetState = fakeState(completedThreadlessDriftState([
+    'threadless-a', 'threadless-b',
+  ]));
+  const threadlessSetClient = new FakeClient();
+  threadlessSetClient.metadata.headRefOid = OTHER_HEAD;
+  const threadlessSet = await runCli([
+    'verify-resolve', '--pr', '2', '--task', 'threadless-b,threadless-a',
+  ], {
+    client: threadlessSetClient,
+    state: threadlessSetState,
+    git: fakeGit({
+      snapshot: async () => ({ headSha: OTHER_HEAD, dirty: false }),
+      pushedHead: async () => OTHER_HEAD,
+    }),
+    clock: { now: () => AT },
+  });
+  assert.deepEqual(threadlessSet.taskIds, ['threadless-a', 'threadless-b']);
+  assert.equal(threadlessSetState.current.revision, completedThreadlessDriftState().revision + 1);
+  assert.equal(threadlessSetClient.events.length, 0);
   const human = await runCli(['status', '--human'], {
     client, state, git: fakeGit(), clock: { now: () => AT },
   });

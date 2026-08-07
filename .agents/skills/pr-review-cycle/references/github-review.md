@@ -48,6 +48,7 @@ node scripts/pr-review-github.mjs status --pr 123
 node scripts/pr-review-github.mjs status --human
 node scripts/pr-review-github.mjs reply-resolve --pr 123 --task finding-a
 node scripts/pr-review-github.mjs verify-resolve --pr 123 --task local-finding
+node scripts/pr-review-github.mjs verify-resolve --pr 123 --task threadless-a,threadless-b
 node scripts/pr-review-github.mjs request --pr 123 --kind discovery
 node scripts/pr-review-github.mjs collect --pr 123
 node scripts/pr-review-github.mjs collect-ci --pr 123
@@ -101,17 +102,23 @@ transition input, not a persisted verifier-artifact schema. GitHub-thread tasks
 continue to use `reply-resolve`.
 
 When integration advances after a completed threadless assertion, rerun the
-targeted checks and read-only verifier at the new HEAD, then run
-`verify-resolve` for that completed threadless task. The command re-attests the
-entire preserved threadless task-ID set at the current HEAD while leaving the
-aggregate thread proof invalidated. It rechecks every recorded thread but may
-leave additional uniquely mapped roots unrecorded for `reply-resolve`. If one
-such root was already replied to and resolved at a prior integration HEAD,
-run `reply-resolve` next. Recovery is allowed only through the sole exact
-prior-HEAD reply and its matching durable reply/resolve intent lookups, with
-the prior HEAD proven as an integration ancestor; it performs no duplicate
-GitHub mutation. Extra replies or markers, changed resolution, HEAD drift, or
-state-revision drift fail closed.
+targeted checks and read-only verifier for every task in the preserved proof at
+the new HEAD, then pass that complete set to `verify-resolve` as one
+comma-separated `--task` value. Selection order is irrelevant, but every ID
+must be unique and the selected set must exactly equal the preserved set; a
+partial, extra, unknown, ineligible, local, or not-yet-completed selection is
+rejected before checkpointing. The command atomically re-attests only that
+complete preserved threadless task-ID set at the current HEAD while leaving the
+aggregate thread proof invalidated. A one-task preserved set continues to use
+the ordinary singleton form, and an already-current exact-set retry is
+idempotent. It rechecks every recorded thread but may leave additional uniquely
+mapped roots unrecorded for `reply-resolve`. If one such root was already
+replied to and resolved at a prior integration HEAD, run `reply-resolve` next.
+Recovery is allowed only through the sole exact prior-HEAD reply and its
+matching durable reply/resolve intent lookups, with the prior HEAD proven as an
+integration ancestor; it performs no duplicate GitHub mutation. Extra replies
+or markers, changed resolution, HEAD drift, or state-revision drift fail
+closed.
 
 ## Run Codex and CI together
 

@@ -90,16 +90,23 @@ ID while retaining prior exact-HEAD proof. GitHub-thread tasks remain on
 separate persisted verifier-artifact schema is implied.
 
 If integration HEAD advances after a threadless task was already completed,
-repeat its current-HEAD targeted validation and read-only verifier approval,
-then select it with `verify-resolve`. This refreshes the complete preserved
-threadless task-ID proof at the current HEAD without fabricating an aggregate
-thread proof or discarding recorded thread rows. Additional uniquely mapped
-live roots remain for `reply-resolve`. When one such root already has the exact
-reply and resolution from a prior integration HEAD, `reply-resolve` may recover
-it only after the refresh, from that sole immutable
-reply plus the correlated durable reply and resolve intent lookups and proven
-prior-HEAD ancestry. It does not repeat either GitHub mutation. Extra replies or
-markers and any resolution, live-HEAD, or state-revision drift are rejected.
+repeat current-HEAD targeted validation and read-only verifier approval for
+every task in the preserved proof. Then select the complete set atomically with
+one comma-separated command, for example
+`verify-resolve --pr <number> --task threadless-a,threadless-b`. Order does not
+matter, but IDs must be unique and the selection must exactly equal the
+preserved task-ID set. Partial, extra, unknown, ineligible, local, or
+not-yet-completed selections are rejected before checkpointing. A singleton
+preserved set keeps the ordinary one-ID form, and an already-current exact-set
+retry is idempotent. The successful transition refreshes only that complete
+threadless proof at the current HEAD without fabricating an aggregate thread
+proof or discarding recorded thread rows. Additional uniquely mapped live roots
+remain for `reply-resolve`. When one such root already has the exact reply and
+resolution from a prior integration HEAD, `reply-resolve` may recover it only
+after the refresh, from that sole immutable reply plus the correlated durable
+reply and resolve intent lookups and proven prior-HEAD ancestry. It does not
+repeat either GitHub mutation. Extra replies or markers and any resolution,
+live-HEAD, or state-revision drift are rejected.
 
 A schema-v2 migration may preserve a taskless pending review for the exact
 integration HEAD while deliberately clearing legacy targeted-validation proof.
