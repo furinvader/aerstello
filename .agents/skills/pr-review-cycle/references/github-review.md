@@ -97,6 +97,19 @@ exact-HEAD threadless proof while preserving prior IDs. This assertion is
 transition input, not a persisted verifier-artifact schema. GitHub-thread tasks
 continue to use `reply-resolve`.
 
+When integration advances after a completed threadless assertion, rerun the
+targeted checks and read-only verifier at the new HEAD, then run
+`verify-resolve` for that completed threadless task. The command re-attests the
+entire preserved threadless task-ID set at the current HEAD while leaving the
+aggregate thread proof invalidated. It rechecks every recorded thread but may
+leave additional uniquely mapped roots unrecorded for `reply-resolve`. If one
+such root was already replied to and resolved at a prior integration HEAD,
+run `reply-resolve` next. Recovery is allowed only through the sole exact
+prior-HEAD reply and its matching durable reply/resolve intent lookups, with
+the prior HEAD proven as an integration ancestor; it performs no duplicate
+GitHub mutation. Extra replies or markers, changed resolution, HEAD drift, or
+state-revision drift fail closed.
+
 ## Run Codex and CI together
 
 Once targeted local validation passes and the Review commit is pushed, Codex

@@ -18,6 +18,8 @@ import {
 
 const HEAD = 'a'.repeat(40);
 const OTHER_HEAD = 'b'.repeat(40);
+const PRIOR_INTEGRATION_HEAD = '4b8d4d36dd6ea4da9d1c1a0e39033a829e1852f9';
+const SELECTED_TASK_HEAD = '7ea9bbccc60725dcfd0cfefcb0caff742145b8ec';
 const AT = '2026-08-05T00:00:00Z';
 const BOT = {
   __typename: 'Bot', login: 'chatgpt-codex-connector',
@@ -254,7 +256,10 @@ function fakeGit(overrides = {}) {
 }
 
 function fakeJournal(events = [], existing = []) {
-  const intents = new Map(existing.map((intent) => [intent.operationId, intent]));
+  const intents = new Map();
+  for (const intent of existing) {
+    if (!intents.has(intent.operationId)) intents.set(intent.operationId, intent);
+  }
   return {
     intents,
     async lookupIntent(operationId) { return intents.has(operationId) ? { ...intents.get(operationId), isNew: false } : null; },
@@ -1103,6 +1108,19 @@ function nonActionableNonThreadState(sourceType = 'local', id = 'task-disposed',
   return state;
 }
 
+function completedThreadlessDriftState(id = 'threadless-completed') {
+  const state = integratedNonThreadState('github-threadless', id);
+  state.currentIntegrationHeadSha = OTHER_HEAD;
+  state.git = { ...state.git, headSha: OTHER_HEAD };
+  state.validationStatus = { ...state.validationStatus, headSha: OTHER_HEAD };
+  state.tasks[0].status = 'completed';
+  state.threadResolutionStatus = {
+    status: 'not-run', headSha: null, threads: [], updatedAt: null,
+    threadlessVerification: { status: 'passed', headSha: HEAD, taskIds: [id], updatedAt: AT },
+  };
+  return state;
+}
+
 test('reply-resolve identifies explicit root, deduplicates shared source identities, replies before resolve, and re-queries proof', async () => {
   const events = [];
   const client = new FakeClient({ events });
@@ -1281,6 +1299,230 @@ test('verify-resolve proves eligible non-actionable threadless tasks and rejects
     assert.equal(rejected.state.calls.length, 0);
     assert.equal(rejected.client.events.length, 0);
   }
+});
+
+test('verify-resolve re-attests completed threadless proof after HEAD drift without aggregate fabrication', async () => {
+  const state = completedThreadlessDriftState();
+  const client = new FakeClient();
+  client.metadata.headRefOid = OTHER_HEAD;
+  const journal = {
+    async lookupIntent() { throw new Error('verify-resolve must not read the mutation journal'); },
+    async ensureIntent() { throw new Error('verify-resolve must not write the mutation journal'); },
+  };
+  const git = fakeGit({
+    snapshot: async () => ({ headSha: OTHER_HEAD, dirty: false }),
+    pushedHead: async () => OTHER_HEAD,
+  });
+  const later = '2026-08-05T00:01:00Z';
+  const setup = workflow(state, client, { git, journal, clock: { now: () => later } });
+  const result = await setup.api.verifyResolve(2, 'threadless-completed');
+  assert.equal(result.stateRevision, state.revision + 1);
+  assert.deepEqual(result.threadResolutionStatus, {
+    status: 'not-run', headSha: null, threads: [], updatedAt: null,
+    threadlessVerification: {
+      status: 'passed', headSha: OTHER_HEAD, taskIds: ['threadless-completed'], updatedAt: later,
+    },
+  });
+  assert.deepEqual(setup.state.calls.at(-1).input.verifiedLocalTaskIds, []);
+  assert.equal(client.calls.filter((call) => call.name === 'PullRequestThreads').length, 2);
+  assert.equal(client.events.length, 0);
+
+  const revision = setup.state.current.revision;
+  const checkpointCount = setup.state.calls.length;
+  await setup.api.verifyResolve(2, 'threadless-completed');
+  assert.equal(setup.state.current.revision, revision);
+  assert.equal(setup.state.calls.length, checkpointCount);
+
+  const aggregateNotInvalidated = completedThreadlessDriftState();
+  aggregateNotInvalidated.threadResolutionStatus = {
+    ...aggregateNotInvalidated.threadResolutionStatus,
+    status: 'passed', headSha: HEAD, updatedAt: AT,
+  };
+  const rejected = workflow(aggregateNotInvalidated, new FakeClient({ metadata: {
+    id: 'PR_node', number: 2, url: 'https://github.com/example/sky-bar/pull/2',
+    headRefOid: OTHER_HEAD, viewer: VIEWER,
+  } }), { git });
+  await assert.rejects(() => rejected.api.verifyResolve(2, 'threadless-completed'), { code: 'TASK_NOT_READY' });
+  assert.equal(rejected.state.calls.length, 0);
+  assert.equal(rejected.client.events.length, 0);
+});
+
+test('completed threadless refresh permits mapped new roots and enables journal-backed resolution recovery', async () => {
+  const state = completedThreadlessDriftState();
+  state.tasks[0].integratedCommitSha = PRIOR_INTEGRATION_HEAD;
+  const recordedTask = {
+    ...integratedThreadState(['thread:THREAD_OLD']).tasks[0],
+    id: 'task-thread-old', fingerprint: 'fp-thread-old', status: 'completed', integratedCommitSha: HEAD,
+  };
+  const pendingTask = {
+    ...integratedThreadState(['thread:THREAD_1']).tasks[0],
+    id: 'task-thread-new', fingerprint: 'fp-thread-new', integratedCommitSha: SELECTED_TASK_HEAD,
+  };
+  state.tasks.push(recordedTask, pendingTask);
+  state.threadResolutionStatus.threads = [{
+    threadNodeId: 'THREAD_OLD', rootCommentNodeId: 'ROOT_THREAD_OLD', rootCommentDatabaseId: 42,
+    taskIds: ['task-thread-old'], disposition: 'fixed', replyId: 'REPLY_OLD', replyUrl: 'https://x/old-reply',
+    isResolved: true, resolvedAt: AT, resolvedBy: VIEWER.login, observedHeadSha: HEAD,
+  }];
+
+  function recoveryClient() {
+    const client = new FakeClient();
+    client.metadata.headRefOid = OTHER_HEAD;
+    const oldReplyOperation = `reply:2:THREAD_OLD:${HEAD}`;
+    addThread(client, { id: 'THREAD_OLD', resolved: true, replies: [{
+      id: 'REPLY_OLD', databaseId: 901, url: 'https://x/old-reply', createdAt: AT, author: VIEWER,
+      replyTo: { id: 'ROOT_THREAD_OLD' }, pullRequestReview: null,
+      body: `Sky Bar review resolution at ${HEAD}.\nTasks:\n- task-thread-old: ${HEAD}\nValidation: prior validation.\n${markerFor(oldReplyOperation)}`,
+    }] });
+    const newReplyOperation = `reply:2:THREAD_1:${PRIOR_INTEGRATION_HEAD}`;
+    addThread(client, { id: 'THREAD_1', resolved: true, replies: [{
+      id: 'REPLY_NEW', databaseId: 902, url: 'https://x/new-reply', createdAt: AT, author: VIEWER,
+      replyTo: { id: 'ROOT_THREAD_1' }, pullRequestReview: null,
+      body: `Sky Bar review resolution at ${PRIOR_INTEGRATION_HEAD}.\nTasks:\n- task-thread-new: ${SELECTED_TASK_HEAD}\nValidation: prior validation.\n${markerFor(newReplyOperation)}`,
+    }] });
+    return client;
+  }
+
+  const git = fakeGit({
+    snapshot: async () => ({ headSha: OTHER_HEAD, dirty: false }),
+    pushedHead: async () => OTHER_HEAD,
+  });
+  const driftedClient = recoveryClient();
+  driftedClient.threads.find((thread) => thread.id === 'THREAD_OLD').isResolved = false;
+  const drifted = workflow(state, driftedClient, { git });
+  await assert.rejects(() => drifted.api.verifyResolve(2, 'threadless-completed'), {
+    code: 'THREAD_PROOF_STALE',
+  });
+  assert.equal(drifted.state.calls.length, 0);
+  assert.equal(driftedClient.events.length, 0);
+
+  const client = recoveryClient();
+  const replyOperation = `reply:2:THREAD_1:${PRIOR_INTEGRATION_HEAD}`;
+  const resolveOperation = `resolve:2:THREAD_1:${PRIOR_INTEGRATION_HEAD}`;
+  const journalEvents = [];
+  const journal = fakeJournal(journalEvents, [
+    priorIntent('reply', replyOperation), priorIntent('resolve', resolveOperation),
+  ]);
+  const lookupOperations = [];
+  const lookupRecoveryIntent = journal.lookupIntent.bind(journal);
+  journal.lookupIntent = async (operationId) => {
+    lookupOperations.push(operationId);
+    return lookupRecoveryIntent(operationId);
+  };
+  const setup = workflow(state, client, { git, journal, clock: { now: () => '2026-08-05T00:01:00Z' } });
+  const refreshed = await setup.api.verifyResolve(2, 'threadless-completed');
+  assert.equal(refreshed.threadResolutionStatus.status, 'not-run');
+  assert.deepEqual(refreshed.threadResolutionStatus.threads, state.threadResolutionStatus.threads);
+  assert.equal(refreshed.threadResolutionStatus.threadlessVerification.headSha, OTHER_HEAD);
+  assert.equal(client.events.length, 0);
+  const postRefreshState = structuredClone(setup.state.current);
+
+  const missingPairClient = recoveryClient();
+  const missingPair = workflow(postRefreshState, missingPairClient, {
+    git, journal: fakeJournal([], [priorIntent('resolve', resolveOperation)]),
+  });
+  await assert.rejects(() => missingPair.api.replyResolve(2, 'task-thread-new'), {
+    code: 'RESOLUTION_PROOF_MISSING',
+  });
+  assert.equal(missingPairClient.events.length, 0);
+
+  const reversedPairClient = recoveryClient();
+  const reversedPair = workflow(postRefreshState, reversedPairClient, {
+    git,
+    journal: fakeJournal([], [
+      priorIntent('reply', replyOperation, '2026-08-05T00:00:01Z'),
+      priorIntent('resolve', resolveOperation, AT),
+    ]),
+  });
+  await assert.rejects(() => reversedPair.api.replyResolve(2, 'task-thread-new'), {
+    code: 'RESOLUTION_PROOF_MISSING',
+  });
+  assert.equal(reversedPairClient.events.length, 0);
+
+  const extraReplyClient = recoveryClient();
+  extraReplyClient.threadComments.get('THREAD_1').push({
+    id: 'REPLY_EXTRA', databaseId: 903, url: 'https://x/extra', createdAt: AT, author: VIEWER,
+    replyTo: { id: 'ROOT_THREAD_1' }, pullRequestReview: null,
+    body: `extra\n${markerFor(`reply:2:THREAD_1:${HEAD}`)}`,
+  });
+  const extraReply = workflow(postRefreshState, extraReplyClient, {
+    git,
+    journal: fakeJournal([], [priorIntent('reply', replyOperation), priorIntent('resolve', resolveOperation)]),
+  });
+  await assert.rejects(() => extraReply.api.replyResolve(2, 'task-thread-new'), { code: 'REPLY_AMBIGUOUS' });
+  assert.equal(extraReplyClient.events.length, 0);
+
+  const resolutionFlipClient = recoveryClient();
+  const resolutionFlipGraphql = resolutionFlipClient.graphql.bind(resolutionFlipClient);
+  let threadSnapshots = 0;
+  resolutionFlipClient.graphql = async (input) => {
+    if (input.name === 'PullRequestThreads' && input.variables.cursor === null
+        && ++threadSnapshots === 2) {
+      resolutionFlipClient.threads.find((thread) => thread.id === 'THREAD_1').isResolved = false;
+    }
+    return resolutionFlipGraphql(input);
+  };
+  const resolutionFlip = workflow(postRefreshState, resolutionFlipClient, {
+    git,
+    journal: fakeJournal([], [priorIntent('reply', replyOperation), priorIntent('resolve', resolveOperation)]),
+  });
+  await assert.rejects(() => resolutionFlip.api.replyResolve(2, 'task-thread-new'), {
+    code: 'THREAD_PROOF_STALE',
+  });
+  assert.equal(resolutionFlipClient.events.length, 0);
+
+  const headDriftClient = recoveryClient();
+  const headDriftGraphql = headDriftClient.graphql.bind(headDriftClient);
+  let metadataSnapshots = 0;
+  headDriftClient.graphql = async (input) => {
+    if (input.name === 'PullRequestMetadata' && ++metadataSnapshots === 2) {
+      headDriftClient.metadata.headRefOid = HEAD;
+    }
+    return headDriftGraphql(input);
+  };
+  const headDrift = workflow(postRefreshState, headDriftClient, {
+    git,
+    journal: fakeJournal([], [priorIntent('reply', replyOperation), priorIntent('resolve', resolveOperation)]),
+  });
+  await assert.rejects(() => headDrift.api.replyResolve(2, 'task-thread-new'), { code: 'MUTATION_NOT_READY' });
+  assert.equal(headDriftClient.events.length, 0);
+
+  const stateRaceClient = recoveryClient();
+  const stateRaceJournal = fakeJournal([], [
+    priorIntent('reply', replyOperation), priorIntent('resolve', resolveOperation),
+  ]);
+  const lookupIntent = stateRaceJournal.lookupIntent.bind(stateRaceJournal);
+  let stateRace;
+  let revisionAdvanced = false;
+  stateRaceJournal.lookupIntent = async (operationId) => {
+    const intent = await lookupIntent(operationId);
+    if (!revisionAdvanced) {
+      revisionAdvanced = true;
+      await stateRace.state.checkpointTaskCompletion({
+        prNumber: 2,
+        expectedRevision: stateRace.state.current.revision,
+        threadResolutionStatus: stateRace.state.current.threadResolutionStatus,
+        verifiedLocalTaskIds: [],
+      });
+    }
+    return intent;
+  };
+  stateRace = workflow(postRefreshState, stateRaceClient, { git, journal: stateRaceJournal });
+  await assert.rejects(() => stateRace.api.replyResolve(2, 'task-thread-new'), {
+    code: 'STATE_REVISION_CHANGED',
+  });
+  assert.equal(stateRaceClient.events.length, 0);
+
+  const resolved = await setup.api.replyResolve(2, 'task-thread-new');
+  assert.equal(resolved.threadResolutionStatus.status, 'passed');
+  assert.deepEqual(
+    resolved.threadResolutionStatus.threads.map((thread) => thread.threadNodeId),
+    ['THREAD_1', 'THREAD_OLD'],
+  );
+  assert.equal(resolved.threadResolutionStatus.threadlessVerification.headSha, OTHER_HEAD);
+  assert.equal(client.calls.some((call) => ['AddThreadReply', 'ResolveThread'].includes(call.name)), false);
+  assert.deepEqual(lookupOperations, [replyOperation, resolveOperation]);
+  assert.deepEqual(journalEvents, []);
 });
 
 test('verify-resolve rejects unsupported and stale selections without state or GitHub mutation', async () => {

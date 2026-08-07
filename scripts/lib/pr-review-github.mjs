@@ -368,15 +368,19 @@ function replyMarker(operationId) {
   return `<!-- sky-bar-review:${operationToken(operationId)} -->`;
 }
 
+function replyTaskLine(task) {
+  return task.integratedCommitSha
+    ? `- ${task.id}: ${task.integratedCommitSha}`
+    : `- ${task.id}: ${task.disposition} — ${task.resolutionSummary ?? 'Disposition recorded and verified.'}`;
+}
+
 function deterministicReply(state, entry, operationId) {
   const checks = state.validationStatus.checks.slice(0, 3).join(', ');
   const tasks = entry.tasks.slice().sort((left, right) => left.id.localeCompare(right.id));
   return [
     `Sky Bar review resolution at ${state.currentIntegrationHeadSha}.`,
     'Tasks:',
-    ...tasks.map((task) => task.integratedCommitSha
-      ? `- ${task.id}: ${task.integratedCommitSha}`
-      : `- ${task.id}: ${task.disposition} — ${task.resolutionSummary ?? 'Disposition recorded and verified.'}`),
+    ...tasks.map(replyTaskLine),
     `Validation: ${checks}.`,
     replyMarker(operationId),
   ].join('\n');
@@ -426,16 +430,20 @@ async function journalIntent(journal, intent) {
   return persisted;
 }
 
-async function lookupJournalIntent(journal, operationId) {
+async function lookupMutationJournalIntent(journal, type, operationId) {
   if (!journal?.lookupIntent) throw new GitHubWorkflowError('A durable intent journal lookup is required', 'JOURNAL_REQUIRED');
   const intent = await journal.lookupIntent(operationId);
-  const expected = intentFor('resolve', operationId, intent?.at);
-  if (intent !== null && intent !== undefined && (intent.type !== 'resolve'
+  const expected = intentFor(type, operationId, intent?.at);
+  if (intent !== null && intent !== undefined && (intent.type !== type
       || intent.operationId !== operationId || intent.clientMutationId !== expected.clientMutationId)) {
     throw new GitHubWorkflowError('Mutation intent journal returned invalid correlation', 'JOURNAL_FAILED');
   }
-  if (intent) parsedTime(intent.at, 'Resolve intent');
+  if (intent) parsedTime(intent.at, `${type === 'reply' ? 'Reply' : 'Resolve'} intent`);
   return intent ?? null;
+}
+
+async function lookupJournalIntent(journal, operationId) {
+  return lookupMutationJournalIntent(journal, 'resolve', operationId);
 }
 
 async function lookupRequestJournalIntent(journal, operationId) {
@@ -543,6 +551,102 @@ function exactRepliesFor(state, live, entry) {
   return { body, exact };
 }
 
+function completedThreadlessRecoveryReady(state) {
+  const aggregate = state.threadResolutionStatus;
+  const verification = aggregate.threadlessVerification;
+  if (aggregate.status !== 'not-run' || aggregate.headSha !== null || aggregate.updatedAt !== null
+      || verification.status !== 'passed' || verification.headSha !== state.currentIntegrationHeadSha
+      || verification.taskIds.length === 0) return false;
+  const byId = new Map(state.tasks.map((task) => [task.id, task]));
+  return verification.taskIds.every((taskId) => {
+    const task = byId.get(taskId);
+    return task?.sourceType === 'github-threadless' && task.status === 'completed';
+  });
+}
+
+function priorHeadRecoveryCandidate(state, live, entry, selectedTask) {
+  if (!completedThreadlessRecoveryReady(state) || !entry.thread.isResolved
+      || selectedTask?.sourceType !== 'github-thread'
+      || !entry.tasks.some((task) => task.id === selectedTask.id)
+      || !selectedTask.integratedCommitSha) return null;
+
+  const directReplies = entry.thread.comments.filter((comment) => comment.replyTo?.id === entry.thread.root.id);
+  const markerPattern = /<!-- sky-bar-review:[0-9a-f]{24} -->/u;
+  const markedReplies = directReplies.filter((comment) => markerPattern.test(comment.body ?? ''));
+  const priorCandidates = markedReplies.map((reply) => ({
+    reply,
+    priorHeadSha: /^Sky Bar review resolution at ([0-9a-f]{40})\.\n/u.exec(reply.body ?? '')?.[1] ?? null,
+  })).filter((candidate) => candidate.priorHeadSha !== null
+    && candidate.priorHeadSha !== state.currentIntegrationHeadSha);
+  if (priorCandidates.length === 0) return null;
+  if (directReplies.length !== 1 || markedReplies.length !== 1 || priorCandidates.length !== 1) {
+    throw new GitHubWorkflowError('Prior-head recovery reply is not unique', 'REPLY_AMBIGUOUS');
+  }
+
+  const { reply, priorHeadSha } = priorCandidates[0];
+  if (!state.tasks.some((task) => task.integratedCommitSha === priorHeadSha)) {
+    throw new GitHubWorkflowError('Prior-head recovery is not bound to durable integration state', 'REPLY_AMBIGUOUS');
+  }
+  const replyOperationId = `reply:${state.prNumber}:${entry.thread.id}:${priorHeadSha}`;
+  const expectedMarker = replyMarker(replyOperationId);
+  const lines = String(reply.body ?? '').split('\n');
+  const taskLines = entry.tasks.slice().sort((left, right) => left.id.localeCompare(right.id)).map(replyTaskLine);
+  const expectedPrefix = [`Sky Bar review resolution at ${priorHeadSha}.`, 'Tasks:', ...taskLines];
+  const markers = [...String(reply.body ?? '').matchAll(/<!-- sky-bar-review:[0-9a-f]{24} -->/gu)]
+    .map((match) => match[0]);
+  const prefixMatches = expectedPrefix.every((line, index) => lines[index] === line);
+  const validationLine = lines.at(-2) ?? '';
+  if (!prefixMatches || lines.length !== expectedPrefix.length + 2
+      || !/^Validation: .+\.$/u.test(validationLine)
+      || markers.length !== 1 || markers[0] !== expectedMarker || lines.at(-1) !== expectedMarker
+      || !isViewerActor(reply.author, live.metadata.viewer)
+      || reply.replyTo?.id !== entry.thread.root.id
+      || typeof reply.id !== 'string' || reply.id.length === 0
+      || typeof reply.url !== 'string' || reply.url.length === 0) {
+    throw new GitHubWorkflowError('Prior-head recovery reply lost immutable evidence', 'REPLY_AMBIGUOUS');
+  }
+  parsedTime(reply.createdAt, 'Prior-head reply');
+  return {
+    priorHeadSha,
+    replyOperationId,
+    resolveOperationId: `resolve:${state.prNumber}:${entry.thread.id}:${priorHeadSha}`,
+    reply,
+    selectedTaskId: selectedTask.id,
+  };
+}
+
+function assertPriorHeadRecoveryLive(state, live, entry, recovery) {
+  const selectedTask = state.tasks.find((task) => task.id === recovery.selectedTaskId);
+  const candidate = priorHeadRecoveryCandidate(state, live, entry, selectedTask);
+  if (!candidate || candidate.priorHeadSha !== recovery.priorHeadSha
+      || candidate.reply.id !== recovery.reply.id || candidate.reply.url !== recovery.reply.url
+      || candidate.reply.body !== recovery.reply.body || candidate.reply.createdAt !== recovery.reply.createdAt) {
+    throw new GitHubWorkflowError('Prior-head recovery evidence changed after preflight', 'THREAD_PROOF_STALE');
+  }
+  return candidate.reply;
+}
+
+async function journaledPriorHeadRecovery(state, live, entry, selectedTask, journal, git) {
+  const candidate = priorHeadRecoveryCandidate(state, live, entry, selectedTask);
+  if (!candidate) return null;
+  if (!(await git.isAncestor(
+    candidate.priorHeadSha, state.currentIntegrationHeadSha, state.integrationWorktree,
+  ))) {
+    throw new GitHubWorkflowError('Prior-head recovery commit is not an integration ancestor', 'MUTATION_NOT_READY');
+  }
+  const replyIntent = await lookupMutationJournalIntent(journal, 'reply', candidate.replyOperationId);
+  const resolveIntent = await lookupMutationJournalIntent(journal, 'resolve', candidate.resolveOperationId);
+  if (!replyIntent || !resolveIntent
+      || !evidenceAtOrAfter(candidate.reply.createdAt, replyIntent.at)
+      || !evidenceAtOrAfter(resolveIntent.at, replyIntent.at)) {
+    throw new GitHubWorkflowError(
+      'Prior-head resolved thread lacks its matching journaled reply and resolve pair',
+      'RESOLUTION_PROOF_MISSING',
+    );
+  }
+  return { ...candidate, replyIntent, resolveIntent };
+}
+
 function assertRecordedReply(state, live, entry, proof) {
   const replies = entry.thread.comments.filter((comment) => comment.id === proof.replyId);
   if (replies.length !== 1) throw new GitHubWorkflowError('Historical reply ID is not uniquely live', 'THREAD_PROOF_STALE');
@@ -605,6 +709,21 @@ function assertLiveThreadProof(state, live) {
   }
 }
 
+function assertRecordedThreadsLive(state, live) {
+  const { plan } = buildCanonicalRootPlan(state, live);
+  const liveByThread = new Map(plan.map((entry) => [entry.thread.id, entry]));
+  for (const proof of state.threadResolutionStatus.threads) {
+    const entry = liveByThread.get(proof.threadNodeId);
+    if (!entry || proof.isResolved !== entry.thread.isResolved) {
+      throw new GitHubWorkflowError(
+        `Recorded thread ${proof.threadNodeId} identity or resolution differs from live evidence`,
+        'THREAD_PROOF_STALE',
+      );
+    }
+    assertExistingThreadProof(state, live, entry, proof);
+  }
+}
+
 function buildThreadProof(state, live, resolvedEvidence, at) {
   const { plan: mapped } = buildCanonicalRootPlan(state, live);
   const previous = new Map(state.threadResolutionStatus.threads.map((thread) => [thread.threadNodeId, thread]));
@@ -616,7 +735,10 @@ function buildThreadProof(state, live, resolvedEvidence, at) {
     if (old?.isResolved) {
       return { ...old };
     }
-    const exact = recordedReply ? [recordedReply] : exactRepliesFor(state, live, entry).exact;
+    const exact = recordedReply ? [recordedReply]
+      : fresh?.priorHeadRecovery
+        ? [assertPriorHeadRecoveryLive(state, live, entry, fresh.priorHeadRecovery)]
+        : exactRepliesFor(state, live, entry).exact;
     const reply = recordedReply ?? fresh?.reply ?? exact[0] ?? null;
     if (thread.isResolved && (!fresh || exact.length !== 1)) {
       throw new GitHubWorkflowError(`Thread ${thread.id} exact reply is not live`, 'THREAD_PROOF_STALE');
@@ -932,27 +1054,38 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     }
     const previousProof = new Map(active.threadResolutionStatus.threads.map((item) => [item.threadNodeId, item]));
     const priorResolveIntents = new Map();
+    const priorHeadRecoveries = new Map();
     const preflightReplies = new Map();
     for (const entry of plan) {
       const { thread } = entry;
       const old = previousProof.get(thread.id);
       const recordedReply = old ? assertExistingThreadProof(active, live, entry, old) : null;
-      preflightReplies.set(thread.id, recordedReply
-        ? [recordedReply] : exactRepliesFor(active, live, entry).exact);
+      const priorHeadRecovery = !old && selectedPlan.some((selected) => selected.thread.id === thread.id)
+        ? await journaledPriorHeadRecovery(active, live, entry, selectedTask, journal, git) : null;
+      if (priorHeadRecovery) priorHeadRecoveries.set(thread.id, priorHeadRecovery);
+      preflightReplies.set(thread.id, recordedReply ? [recordedReply]
+        : priorHeadRecovery ? [priorHeadRecovery.reply]
+          : exactRepliesFor(active, live, entry).exact);
       if (thread.isResolved && !old?.isResolved) {
         const operationId = `resolve:${prNumber}:${thread.id}:${active.currentIntegrationHeadSha}`;
-        const intent = await lookupJournalIntent(journal, operationId);
+        const intent = priorHeadRecovery?.resolveIntent ?? await lookupJournalIntent(journal, operationId);
         if (!intent || preflightReplies.get(thread.id).length !== 1) {
           throw new GitHubWorkflowError('Resolved thread lacks pre-existing exact recovery evidence', 'RESOLUTION_PROOF_MISSING');
         }
         priorResolveIntents.set(thread.id, intent);
       }
     }
+    if (priorHeadRecoveries.size > 1) {
+      throw new GitHubWorkflowError('Prior-head recovery is ambiguous across canonical roots', 'REPLY_AMBIGUOUS');
+    }
+    if (priorHeadRecoveries.size === 1) await assertCurrent(active);
     const evidence = new Map();
     for (const entry of plan) {
       const intent = priorResolveIntents.get(entry.thread.id);
       if (intent) evidence.set(entry.thread.id, {
         reply: preflightReplies.get(entry.thread.id)[0], resolvedAt: intent.at, resolvedBy: live.metadata.viewer.login,
+        ...(priorHeadRecoveries.has(entry.thread.id)
+          ? { priorHeadRecovery: priorHeadRecoveries.get(entry.thread.id) } : {}),
       });
     }
     for (const entry of selectedPlan) {
@@ -960,13 +1093,17 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       const operationId = `reply:${prNumber}:${thread.id}:${active.currentIntegrationHeadSha}`;
       live = await readLiveSnapshot(client, active);
       await assertMutationReady({ state: active, git }, live);
+      if (priorHeadRecoveries.size === 1) await assertCurrent(active);
       let current = live.threads.find((item) => item.id === thread.id);
       const old = previousProof.get(thread.id);
       if (old?.isResolved) {
         assertExistingThreadProof(active, live, { ...entry, thread: current }, old);
         continue;
       }
-      let replies = old?.replyId
+      const priorHeadRecovery = priorHeadRecoveries.get(thread.id);
+      let replies = priorHeadRecovery
+        ? [assertPriorHeadRecoveryLive(active, live, { ...entry, thread: current }, priorHeadRecovery)]
+        : old?.replyId
         ? [assertExistingThreadProof(active, live, { ...entry, thread: current }, old)]
         : exactRepliesFor(active, live, { ...entry, thread: current }).exact;
       if (replies.length === 0) {
@@ -998,7 +1135,10 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       if (current.isResolved && !old?.isResolved) {
         const priorIntent = priorResolveIntents.get(thread.id);
         if (!priorIntent) throw new GitHubWorkflowError('Resolved thread lacks a pre-existing resolve intent', 'RESOLUTION_PROOF_MISSING');
-        evidence.set(thread.id, { reply, resolvedAt: priorIntent.at, resolvedBy: live.metadata.viewer.login });
+        evidence.set(thread.id, {
+          reply, resolvedAt: priorIntent.at, resolvedBy: live.metadata.viewer.login,
+          ...(priorHeadRecovery ? { priorHeadRecovery } : {}),
+        });
         continue;
       }
       if (!current.isResolved) {
@@ -1034,6 +1174,14 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     }
     live = await readLiveSnapshot(client, active);
     await assertMutationReady({ state: active, git }, live);
+    if (priorHeadRecoveries.size === 1) {
+      for (const [threadId, recovery] of priorHeadRecoveries) {
+        const entry = plan.find((candidate) => candidate.thread.id === threadId);
+        const current = live.threads.find((thread) => thread.id === threadId);
+        assertPriorHeadRecoveryLive(active, live, { ...entry, thread: current }, recovery);
+      }
+      await assertCurrent(active);
+    }
     const proof = buildThreadProof(active, live, evidence, clock.now());
     active = await stateAdapter.checkpointTaskCompletion({
       prNumber, expectedRevision: active.revision, threadResolutionStatus: proof,
@@ -1054,27 +1202,48 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     if (!taskIsEligibleForVerifyResolve(selectedTask)) {
       throw new GitHubWorkflowError('Task is not eligible for verifier completion', 'TASK_NOT_READY');
     }
+    const completedThreadless = selectedTask.sourceType === 'github-threadless'
+      && selectedTask.status === 'completed';
 
     let live = await readLiveSnapshot(client, active);
     await assertMutationReady({ state: active, git }, live);
-    buildCanonicalRootPlan(active, live);
-    assertLiveThreadProof(active, live);
+    if (completedThreadless) assertRecordedThreadsLive(active, live);
+    else assertLiveThreadProof(active, live);
     await assertCurrent(active);
 
     live = await readLiveSnapshot(client, active);
     await assertMutationReady({ state: active, git }, live);
-    buildCanonicalRootPlan(active, live);
-    assertLiveThreadProof(active, live);
+    if (completedThreadless) assertRecordedThreadsLive(active, live);
+    else assertLiveThreadProof(active, live);
     await assertCurrent(active);
 
     if (selectedTask.status === 'completed') {
-      if (selectedTask.sourceType === 'github-threadless') {
-        const verification = active.threadResolutionStatus.threadlessVerification;
-        if (verification.status !== 'passed' || verification.headSha !== active.currentIntegrationHeadSha
-            || !verification.taskIds.includes(taskId)) {
-          throw new GitHubWorkflowError('Completed threadless task lacks exact-head verifier proof', 'TASK_NOT_READY');
-        }
+      if (!completedThreadless) {
+        return { taskId, stateRevision: active.revision, threadResolutionStatus: active.threadResolutionStatus };
       }
+      const verification = active.threadResolutionStatus.threadlessVerification;
+      if (verification.status !== 'passed' || !verification.taskIds.includes(taskId)) {
+        throw new GitHubWorkflowError('Completed threadless task lacks preserved verifier proof', 'TASK_NOT_READY');
+      }
+      if (verification.headSha === active.currentIntegrationHeadSha) {
+        return { taskId, stateRevision: active.revision, threadResolutionStatus: active.threadResolutionStatus };
+      }
+      if (active.threadResolutionStatus.status !== 'not-run'
+          || active.threadResolutionStatus.headSha !== null
+          || active.threadResolutionStatus.updatedAt !== null) {
+        throw new GitHubWorkflowError('Completed threadless refresh requires invalidated aggregate proof', 'TASK_NOT_READY');
+      }
+      const threadResolutionStatus = {
+        ...active.threadResolutionStatus,
+        threadlessVerification: {
+          ...verification,
+          headSha: active.currentIntegrationHeadSha,
+          updatedAt: clock.now(),
+        },
+      };
+      active = await stateAdapter.checkpointTaskCompletion({
+        prNumber, expectedRevision: active.revision, threadResolutionStatus, verifiedLocalTaskIds: [],
+      });
       return { taskId, stateRevision: active.revision, threadResolutionStatus: active.threadResolutionStatus };
     }
 
