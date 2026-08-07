@@ -1571,6 +1571,7 @@ export function completeIntegratedTasks(state, { threadResolutionStatus }) {
         && taskHasCanonicalThreadCoverage(task, threadResolutionStatus.threads ?? []))
       || (task.sourceType === 'github-threadless'
         && threadResolutionStatus.threadlessVerification?.status === 'passed'
+        && threadResolutionStatus.threadlessVerification.headSha === state.currentIntegrationHeadSha
         && threadResolutionStatus.threadlessVerification.taskIds.includes(task.id));
     return eligible ? { ...task, status: 'completed' } : task;
   });

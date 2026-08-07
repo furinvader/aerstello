@@ -1173,6 +1173,7 @@ test('threadless GitHub task completion requires successful exact-head verificat
   const cwd = repo();
   const state = init(cwd);
   const head = state.currentIntegrationHeadSha;
+  const nextHead = 'b'.repeat(40);
   const tasks = [task(head, { id: 'threadless', status: 'integrated', sourceType: 'github-threadless' })];
   const proof = {
     status: 'passed', headSha: head, threads: [], updatedAt: AT,
@@ -1183,6 +1184,24 @@ test('threadless GitHub task completion requires successful exact-head verificat
     { ...state, tasks },
     { threadResolutionStatus: { ...proof, threadlessVerification: emptyThreadless() } },
   ).tasks[0].status, 'integrated');
+  const reconciled = {
+    ...state, currentIntegrationHeadSha: nextHead, git: { ...state.git, headSha: nextHead }, tasks,
+  };
+  const invalidatedProof = {
+    ...proof, status: 'not-run', headSha: null, updatedAt: null,
+  };
+  assert.equal(completeIntegratedTasks(
+    reconciled,
+    { threadResolutionStatus: invalidatedProof },
+  ).tasks[0].status, 'integrated');
+  const refreshedProof = {
+    ...proof, headSha: nextHead,
+    threadlessVerification: { ...proof.threadlessVerification, headSha: nextHead },
+  };
+  assert.equal(completeIntegratedTasks(
+    reconciled,
+    { threadResolutionStatus: refreshedProof },
+  ).tasks[0].status, 'completed');
 });
 
 test('proven non-actionable not-applicable findings become completed-equivalent', () => {
