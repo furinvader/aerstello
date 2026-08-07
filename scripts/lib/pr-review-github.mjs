@@ -637,10 +637,11 @@ async function classifyCleanIssueComments({ comments, request, git, cwd, expecte
   const exact = [];
   const unsupported = [];
   for (const comment of comments) {
-    if (typeof comment.body !== 'string' || !comment.body.startsWith(CLEAN_ISSUE_COMMENT_TEMPLATE)
-        || !isCanonicalActor(comment.author)) continue;
+    if (typeof comment.body !== 'string' || !comment.body.startsWith(CLEAN_ISSUE_COMMENT_TEMPLATE)) continue;
+    if (!evidenceAtOrAfter(comment.createdAt, request.at)) continue;
+    if (!isCanonicalActor(comment.author)) continue;
     const match = CLEAN_ISSUE_COMMENT_PATTERN.exec(comment.body);
-    if (!match || !evidenceAtOrAfter(comment.createdAt, request.at)) {
+    if (!match) {
       unsupported.push(comment);
       continue;
     }

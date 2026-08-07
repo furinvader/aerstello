@@ -1099,7 +1099,7 @@ test('collect accepts only canonical exact request THUMBS_UP and ignores noncano
   assert.equal(state.calls.at(-1).name, 'checkpointReviewOutcome');
 });
 
-test('collect records a unique canonical exact-head clean issue comment', async () => {
+test('collect records a unique canonical exact-head clean issue comment at the request-time boundary', async () => {
   const client = new FakeClient();
   client.comments.push(cleanIssueComment());
   const setup = workflow(pendingState('discovery'), client);
@@ -1113,10 +1113,40 @@ test('collect records a unique canonical exact-head clean issue comment', async 
   assert.equal(setup.state.current.ciValidationStatus.status, 'not-run');
 });
 
+test('collect ignores historical clean comments from prior requests', async () => {
+  const historical = cleanIssueComment({
+    id: 'IC_historical', databaseId: 199, createdAt: '2026-08-04T23:59:59Z',
+    author: { ...BOT, id: null },
+    body: CLEAN_COMMENT_BODY.replace(HEAD.slice(0, 10), OTHER_HEAD.slice(0, 10)),
+  });
+  const historicalOnlyClient = new FakeClient();
+  historicalOnlyClient.comments.push(historical);
+  const historicalOnly = workflow(pendingState('discovery'), historicalOnlyClient);
+  await assert.rejects(() => historicalOnly.api.collect(2), {
+    code: 'DISCOVERY_COLLECTION_UNRESOLVED',
+  });
+  assert.equal(historicalOnly.state.current.phase, 'awaiting-review');
+  assert.equal(historicalOnly.state.current.reviewOutcome, null);
+  assert.equal(historicalOnly.state.current.verificationEscalation, null);
+  assert.equal(historicalOnly.state.calls.length, 0);
+
+  const current = cleanIssueComment({
+    id: 'IC_current', databaseId: 203, createdAt: '2026-08-05T00:00:01Z',
+  });
+  const currentClient = new FakeClient();
+  currentClient.comments.push(historical, current);
+  const currentSetup = workflow(pendingState('discovery'), currentClient);
+  const collected = await currentSetup.api.collect(2);
+  assert.equal(collected.outcome.id, current.id);
+  assert.equal(collected.outcome.databaseId, current.databaseId);
+  assert.equal(collected.outcome.evidenceType, 'issue-comment');
+  assert.equal(currentSetup.state.calls.length, 1);
+  assert.equal(currentSetup.state.calls[0].name, 'checkpointReviewOutcome');
+});
+
 test('clean issue comments fail closed for actors, time, anchors, and Git resolution', async () => {
   const cases = [
     { comment: cleanIssueComment({ author: VIEWER }) },
-    { comment: cleanIssueComment({ createdAt: '2026-08-04T23:59:59Z' }) },
     { comment: cleanIssueComment({ body: `${githubReviewConstants.CLEAN_ISSUE_COMMENT_TEMPLATE}\n\nNo anchor` }) },
     { comment: cleanIssueComment({ body: `${githubReviewConstants.CLEAN_ISSUE_COMMENT_TEMPLATE}\n\n**Reviewed commit:** \`not-a-sha\`` }) },
     { comment: cleanIssueComment({ body: CLEAN_COMMENT_BODY.replace(HEAD.slice(0, 10), OTHER_HEAD.slice(0, 10)) }) },
