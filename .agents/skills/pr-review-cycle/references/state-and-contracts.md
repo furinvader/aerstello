@@ -83,18 +83,22 @@ does not reconstruct or trust a missing legacy plan and does not repeat the
 still-applicable review. It cannot replace an existing passing proof after an
 ordinary taskless review.
 
-A third, migration-only route exists for a schema-v2 source that was
-`ready-for-review` or `complete` with a nonempty all-completed task set and an
-exact-head passed, nonempty legacy targeted proof. The migrated active state
-must be `recovering` with targeted validation `not-run`, a clean exact current
-integration HEAD, no actionable Integrated tasks, no blocked reason,
-verification escalation, or `needs-human-decision` disposition, and every task
-must still be completed. The immutable `state.v2.backup.json` must match the
-active repository, PR, integration HEAD, tasks, review evidence, and thread
-evidence: canonically migrating that backup must reproduce the active state
-exactly. This proof authorizes only a fresh explicit `--initial-selection`
-plan. Never restore the legacy validation result as current proof; run every
-selected check again and record new exact-head targeted validation.
+A third, migration-only route exists for a schema-v2 source with a nonempty
+all-completed task set and an exact-head passed, nonempty legacy targeted proof.
+For a `ready-for-review` or `complete` source, canonical migration of the
+immutable `state.v2.backup.json` must reproduce the active `recovering` state
+exactly. An `awaiting-review` source may instead preserve its exact pending
+request. After one guarded clean exact-head outcome is collected, canonical
+migration plus exactly that outcome transition must reproduce the active
+`validating` state, with only checkpoint revision and timestamp metadata
+normalized. The active state must have targeted validation `not-run`, a clean
+exact current integration HEAD, no actionable Integrated tasks, no blocked
+reason, verification escalation, or `needs-human-decision` disposition, and
+every task must remain completed. The backup projection must match repository,
+PR, integration HEAD, tasks, request, review history, outcome, and thread
+evidence. This proof authorizes only a fresh explicit `--initial-selection`
+plan. Never restore the legacy validation result or repeat the preserved review;
+run every selected check again and record new exact-head targeted validation.
 
 ## What state must preserve
 

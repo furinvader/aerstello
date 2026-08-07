@@ -222,6 +222,16 @@ function migrateCompletedTaskCycle(cwd, phase) {
   return { source, migrated: migrateState({ cwd }).state };
 }
 
+function migrateCompletedTaskPendingReview(cwd) {
+  const prepared = ready(init(cwd));
+  const source = buildReviewRequestTransition(prepared, request(prepared), external(cwd, prepared));
+  const legacy = schemaV2State(source);
+  const serialized = `${JSON.stringify(legacy)}\n`;
+  writeFileSync(statePath(cwd, source.prNumber), serialized);
+  const migration = migrateState({ cwd });
+  return { source, legacy, serialized, migrated: migration.state, backupPath: migration.backupPath };
+}
+
 function legacyTask(workerCommitSha, overrides = {}) {
   return {
     id: 'legacy-task', sourceIds: ['review:9', 'discussion:99', 'discussion:99'],
@@ -398,6 +408,135 @@ test('v2 migration preserves a pending exact-head review while resetting targete
   assert.deepEqual(migrated.ciValidationHistory, []);
   assert.match(migrated.nextAction, /Collect the pending exact-head review/u);
   assert.equal(buildReviewOutcomeTransition(migrated, outcome(migrated)).reviewOutcome.outcome, 'clean');
+});
+
+test('v2 pending review with completed tasks rebuilds fresh validation after one clean outcome', () => {
+  const cwd = repo();
+  const { source, serialized, migrated, backupPath } = migrateCompletedTaskPendingReview(cwd);
+  assert.equal(readFileSync(backupPath, 'utf8'), serialized);
+  assert.equal(source.phase, 'awaiting-review');
+  assert.ok(source.tasks.length > 0);
+  assert.ok(source.tasks.every((item) => item.status === 'completed'));
+  assert.equal(source.validationStatus.status, 'passed');
+  assert.equal(migrated.phase, 'awaiting-review');
+  assert.equal(migrated.validationStatus.status, 'not-run');
+  assert.equal(migrated.ciValidationStatus.status, 'not-run');
+  assert.deepEqual(migrated.reviewRequest, source.reviewRequest);
+  assert.deepEqual(migrated.reviewHistory, source.reviewHistory);
+  assert.deepEqual(migrated.tasks, source.tasks);
+  assert.deepEqual(migrated.threadResolutionStatus, source.threadResolutionStatus);
+
+  const collected = checkpointReviewOutcome({
+    cwd, outcome: outcome(migrated), expectedRevision: migrated.revision,
+  });
+  const preserved = {
+    tasks: structuredClone(collected.tasks),
+    reviewRequest: structuredClone(collected.reviewRequest),
+    reviewOutcome: structuredClone(collected.reviewOutcome),
+    reviewHistory: structuredClone(collected.reviewHistory),
+    threadResolutionStatus: structuredClone(collected.threadResolutionStatus),
+  };
+  assert.equal(collected.phase, 'validating');
+  assert.equal(collected.reviewOutcome.outcome, 'clean');
+  assert.equal(collected.reviewHistory.length, 1);
+
+  const plan = buildTargetedValidationPlan({
+    cwd, initialSelection: initialSelection(collected.currentIntegrationHeadSha), now: () => AT,
+  });
+  assert.deepEqual(plan.taskIds, []);
+  assert.equal(plan.stateRevision, collected.revision);
+  assert.equal(plan.headSha, collected.currentIntegrationHeadSha);
+  const result = executeTargetedValidationPlan({
+    cwd, runCommand: () => ({ status: 0 }), now: () => AT,
+  });
+  assert.equal(result.state.phase, 'validating');
+  assert.equal(result.state.validationStatus.status, 'passed');
+  assert.equal(result.state.validationStatus.headSha, collected.currentIntegrationHeadSha);
+  assert.deepEqual(result.state.validationStatus.checks, ['npm run check:workflow']);
+  assert.deepEqual({
+    tasks: result.state.tasks,
+    reviewRequest: result.state.reviewRequest,
+    reviewOutcome: result.state.reviewOutcome,
+    reviewHistory: result.state.reviewHistory,
+    threadResolutionStatus: result.state.threadResolutionStatus,
+  }, preserved);
+});
+
+test('v2 pending completed-task recovery requires exact one-outcome backup provenance', () => {
+  function collectedCycle() {
+    const cwd = repo();
+    const setup = migrateCompletedTaskPendingReview(cwd);
+    const collected = checkpointReviewOutcome({
+      cwd, outcome: outcome(setup.migrated), expectedRevision: setup.migrated.revision,
+    });
+    return { cwd, ...setup, collected };
+  }
+  function expectRejected(setup) {
+    assert.throws(() => buildTargetedValidationPlan({
+      cwd: setup.cwd, initialSelection: initialSelection(setup.collected.currentIntegrationHeadSha),
+    }), StateError);
+  }
+
+  const missing = collectedCycle();
+  rmSync(missing.backupPath);
+  expectRejected(missing);
+
+  const corrupt = collectedCycle();
+  writeFileSync(corrupt.backupPath, '{}\n');
+  expectRejected(corrupt);
+
+  const tamperedBackup = collectedCycle();
+  writeFileSync(tamperedBackup.backupPath, `${JSON.stringify({
+    ...tamperedBackup.legacy,
+    tasks: tamperedBackup.legacy.tasks.map((item) => ({ ...item, summary: 'Tampered summary.' })),
+  })}\n`);
+  expectRejected(tamperedBackup);
+
+  const revisionDrift = collectedCycle();
+  revisionDrift.collected = { ...revisionDrift.collected, revision: revisionDrift.collected.revision + 1 };
+  writeFileSync(statePath(revisionDrift.cwd, 17), `${JSON.stringify(revisionDrift.collected)}\n`);
+  expectRejected(revisionDrift);
+
+  const blocked = collectedCycle();
+  blocked.collected = { ...blocked.collected, blockedReasons: ['Operator decision is required.'] };
+  writeFileSync(statePath(blocked.cwd, 17), `${JSON.stringify(blocked.collected)}\n`);
+  expectRejected(blocked);
+
+  const taskMismatch = collectedCycle();
+  taskMismatch.collected = {
+    ...taskMismatch.collected,
+    tasks: taskMismatch.collected.tasks.map((item) => ({ ...item, summary: 'Unexpected active summary.' })),
+  };
+  writeFileSync(statePath(taskMismatch.cwd, 17), `${JSON.stringify(taskMismatch.collected)}\n`);
+  expectRejected(taskMismatch);
+
+  const extraProof = collectedCycle();
+  extraProof.collected = {
+    ...extraProof.collected,
+    validationStatus: {
+      source: 'orchestrator', scope: 'targeted', status: 'passed',
+      headSha: extraProof.collected.currentIntegrationHeadSha,
+      checks: ['npm run check:workflow'], updatedAt: AT,
+    },
+  };
+  writeFileSync(statePath(extraProof.cwd, 17), `${JSON.stringify(extraProof.collected)}\n`);
+  expectRejected(extraProof);
+
+  const dirty = collectedCycle();
+  writeFileSync(join(dirty.cwd, 'dirty.txt'), 'dirty\n');
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: dirty.cwd, initialSelection: initialSelection(dirty.collected.currentIntegrationHeadSha),
+  }), { code: 'VALIDATION_CHECKOUT_DIRTY' });
+
+  const findingsCwd = repo();
+  const findingsSetup = migrateCompletedTaskPendingReview(findingsCwd);
+  const findings = checkpointReviewOutcome({
+    cwd: findingsCwd, outcome: outcome(findingsSetup.migrated, { outcome: 'findings' }),
+    expectedRevision: findingsSetup.migrated.revision,
+  });
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: findingsCwd, initialSelection: initialSelection(findings.currentIntegrationHeadSha),
+  }), { code: 'VALIDATION_PLAN_PHASE_BLOCKED' });
 });
 
 test('migrated taskless clean review rebuilds and runs exact-head targeted validation without repeating review', () => {

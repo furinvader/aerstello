@@ -118,18 +118,23 @@ reviews, tasks, and inconsistent history remain ineligible, and the applicable
 clean review is not repeated. An ordinary taskless clean review with existing
 passing validation cannot use this mode to replace that proof.
 
-Initial selection also has one migration-only completed-task route. It applies
-only when an immutable `state.v2.backup.json` proves a `ready-for-review` or
-`complete` schema-v2 source with an exact-head passed, nonempty legacy targeted
-proof, and canonical migration of that backup exactly reproduces the active
-repository, PR, HEAD, task, review, and thread identities. The active state
-must be `recovering` with targeted validation `not-run`, a clean exact current
-integration HEAD, zero actionable Integrated tasks, a nonempty all-completed
-task set, and no blocked reason, verification escalation, or
+Initial selection also has one migration-only completed-task route. An
+immutable `state.v2.backup.json` must prove an exact-head passed, nonempty
+legacy targeted proof and a nonempty all-completed task set. A
+`ready-for-review` or `complete` source is eligible only when canonical
+migration reproduces the active `recovering` state exactly. An
+`awaiting-review` source is eligible only after migration preserves its exact
+pending request and one guarded clean exact-head outcome is collected: canonical
+migration plus that single outcome transition must reproduce the active
+`validating` state, normalizing only checkpoint revision and timestamp metadata.
+In either case targeted validation must be `not-run`, the current integration
+HEAD and checkout must be exact and clean, there must be zero actionable
+Integrated tasks, and no blocked reason, verification escalation, or
 `needs-human-decision` disposition. Use the backup only to authorize a fresh
 explicit plan. Run the selected checks again and record new exact-head proof;
-never adopt the legacy pass as current validation. Native schema-v3 cycles and
-missing, mismatched, or modified migration provenance remain ineligible.
+never adopt the legacy pass or repeat a preserved review. Native schema-v3
+cycles and missing, mismatched, modified, or multi-transition migration
+provenance remain ineligible.
 
 The packet list must exactly cover the current actionable Integrated tasks. The
 saved plan is tied to the clean integration commit, records each command as it

@@ -85,17 +85,22 @@ not infer checks from a missing legacy plan or replace an existing passing proof
 after an ordinary taskless review.
 
 There is one further migration-only `--initial-selection` route for completed
-tasks. The active state must be `recovering` with targeted validation `not-run`,
-a clean exact current integration HEAD, zero actionable Integrated tasks, a
-nonempty task list containing only completed tasks, and no blocked reason,
-verification escalation, or `needs-human-decision` disposition. Its immutable
-`state.v2.backup.json` must describe a schema-v2 `ready-for-review` or `complete`
-source with an exact-head passed, nonempty legacy targeted proof. Canonically
-migrating that backup must reproduce the active repository, PR, HEAD, task,
-review, and thread identities exactly. The backup authorizes a fresh explicit
-plan only: run all selected checks again and record new exact-head validation;
-never reuse the legacy pass as current proof. Native schema-v3 states and
-missing, mismatched, or tampered backups are rejected.
+tasks. Its immutable `state.v2.backup.json` must contain a nonempty all-completed
+task set and an exact-head passed, nonempty legacy targeted proof. A schema-v2
+`ready-for-review` or `complete` source is eligible only when canonical migration
+reproduces the active `recovering` state exactly. A schema-v2 `awaiting-review`
+source may preserve its exact pending request; after one guarded clean exact-head
+outcome is collected, canonical migration plus exactly that outcome transition
+must reproduce the active `validating` state, normalizing only checkpoint
+revision and timestamp metadata. The active state must have targeted validation
+`not-run`, a clean exact current integration HEAD, zero actionable Integrated
+tasks, and no blocked reason, verification escalation, or
+`needs-human-decision` disposition. Repository, PR, HEAD, task, request, review
+history, outcome, and thread identities must match the backup projection. The
+backup authorizes a fresh explicit plan only: run all selected checks again and
+record new exact-head validation; never reuse the legacy pass or repeat the
+preserved review. Native schema-v3 states and missing, mismatched, tampered, or
+multi-transition provenance are rejected.
 
 Done is stricter. A clean Codex review, full green CI, full E2E, the current PR
 head, and the no-open-thread check must all refer to the same Review commit.

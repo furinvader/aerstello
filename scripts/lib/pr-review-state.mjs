@@ -336,7 +336,7 @@ function isCleanTasklessReviewValidationRecovery(state, expectedIds) {
 }
 
 function isV2CompletedTaskValidationRecovery(cwd, state, expectedIds) {
-  if (state.phase !== 'recovering' || state.validationStatus.status !== 'not-run'
+  if (!['recovering', 'validating'].includes(state.phase) || state.validationStatus.status !== 'not-run'
       || expectedIds.length !== 0 || state.tasks.length === 0
       || state.tasks.some((task) => task.status !== 'completed'
         || task.disposition === 'needs-human-decision')
@@ -345,7 +345,7 @@ function isV2CompletedTaskValidationRecovery(cwd, state, expectedIds) {
   if (!existsSync(backupPath)) return false;
   try {
     const legacy = readStateDocument(backupPath);
-    if (legacy.schemaVersion !== 2 || !['ready-for-review', 'complete'].includes(legacy.phase)
+    if (legacy.schemaVersion !== 2 || !['awaiting-review', 'ready-for-review', 'complete'].includes(legacy.phase)
         || legacy.validationStatus?.status !== 'passed'
         || legacy.validationStatus.headSha !== state.currentIntegrationHeadSha
         || !Array.isArray(legacy.validationStatus.checks) || legacy.validationStatus.checks.length === 0
@@ -354,7 +354,18 @@ function isV2CompletedTaskValidationRecovery(cwd, state, expectedIds) {
         || !Array.isArray(legacy.tasks) || legacy.tasks.length === 0
         || legacy.tasks.some((task) => task.status !== 'completed')) return false;
     const migrated = migratePrReviewStateV2(legacy, { migratedAt: state.updatedAt });
-    return JSON.stringify(canonicalJson(migrated)) === JSON.stringify(canonicalJson(state));
+    let expected = migrated;
+    if (legacy.phase === 'awaiting-review') {
+      if (migrated.phase !== 'awaiting-review' || state.phase !== 'validating'
+          || state.reviewOutcome?.outcome !== 'clean'
+          || state.revision !== migrated.revision + 1) return false;
+      expected = {
+        ...buildReviewOutcomeTransition(migrated, state.reviewOutcome),
+        revision: state.revision,
+        updatedAt: state.updatedAt,
+      };
+    }
+    return JSON.stringify(canonicalJson(expected)) === JSON.stringify(canonicalJson(state));
   } catch {
     return false;
   }
