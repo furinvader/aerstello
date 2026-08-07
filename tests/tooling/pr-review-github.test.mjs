@@ -1213,7 +1213,7 @@ test('verify-resolve completes only the selected local task after repeated read-
     async ensureIntent() { throw new Error('verify-resolve must not write the mutation journal'); },
   };
   const setup = workflow(state, client, { journal });
-  const result = await setup.api.verifyResolve(2, 'task-local');
+  const result = await setup.api.verifyResolve(2, ['task-local']);
   assert.equal(result.taskId, 'task-local');
   assert.deepEqual(setup.state.current.tasks.map((task) => task.status), ['completed', 'integrated']);
   assert.deepEqual(setup.state.calls.at(-1).input.verifiedLocalTaskIds, ['task-local']);
@@ -1222,7 +1222,7 @@ test('verify-resolve completes only the selected local task after repeated read-
 
   const revision = setup.state.current.revision;
   const checkpointCount = setup.state.calls.length;
-  const retried = await setup.api.verifyResolve(2, 'task-local');
+  const retried = await setup.api.verifyResolve(2, ['task-local']);
   assert.equal(retried.stateRevision, revision);
   assert.equal(setup.state.current.revision, revision);
   assert.equal(setup.state.calls.length, checkpointCount);
@@ -1237,21 +1237,21 @@ test('verify-resolve completes only the selected eligible non-actionable local t
     async ensureIntent() { throw new Error('verify-resolve must not write the mutation journal'); },
   };
   const setup = workflow(state, client, { journal });
-  await setup.api.verifyResolve(2, 'disposed-b');
+  await setup.api.verifyResolve(2, ['disposed-b']);
   assert.deepEqual(setup.state.current.tasks.map((task) => task.status), ['not-applicable', 'completed']);
   assert.deepEqual(setup.state.calls.at(-1).input.verifiedLocalTaskIds, ['disposed-b']);
   assert.equal(client.events.length, 0);
 
   const revision = setup.state.current.revision;
   const checkpointCount = setup.state.calls.length;
-  const retried = await setup.api.verifyResolve(2, 'disposed-b');
+  const retried = await setup.api.verifyResolve(2, ['disposed-b']);
   assert.equal(retried.stateRevision, revision);
   assert.equal(setup.state.calls.length, checkpointCount);
 
   for (const disposition of ['already-fixed', 'invalid', 'policy-conflict', 'out-of-scope']) {
     const candidate = nonActionableNonThreadState('local', `disposed-${disposition}`, disposition);
     const candidateSetup = workflow(candidate, new FakeClient());
-    await candidateSetup.api.verifyResolve(2, candidate.tasks[0].id);
+    await candidateSetup.api.verifyResolve(2, [candidate.tasks[0].id]);
     assert.equal(candidateSetup.state.current.tasks[0].status, 'completed');
   }
 });
@@ -1269,7 +1269,7 @@ test('verify-resolve creates current-head threadless proof and preserves prior p
   };
   const client = new FakeClient();
   const setup = workflow(state, client);
-  await setup.api.verifyResolve(2, 'threadless-new');
+  await setup.api.verifyResolve(2, ['threadless-new']);
   assert.deepEqual(
     setup.state.current.threadResolutionStatus.threadlessVerification.taskIds,
     ['threadless-new', 'threadless-prior'],
@@ -1293,7 +1293,7 @@ test('verify-resolve proves eligible non-actionable threadless tasks and rejects
   };
   const client = new FakeClient();
   const setup = workflow(state, client);
-  await setup.api.verifyResolve(2, 'threadless-disposed');
+  await setup.api.verifyResolve(2, ['threadless-disposed']);
   assert.deepEqual(
     setup.state.current.threadResolutionStatus.threadlessVerification.taskIds,
     ['threadless-disposed', 'threadless-prior'],
@@ -1310,7 +1310,7 @@ test('verify-resolve proves eligible non-actionable threadless tasks and rejects
   for (const sourceType of ['local', 'github-threadless']) {
     const needsHuman = nonActionableNonThreadState(sourceType, `needs-human-${sourceType}`, 'needs-human-decision');
     const rejected = workflow(needsHuman, new FakeClient());
-    await assert.rejects(() => rejected.api.verifyResolve(2, needsHuman.tasks[0].id), { code: 'TASK_NOT_READY' });
+    await assert.rejects(() => rejected.api.verifyResolve(2, [needsHuman.tasks[0].id]), { code: 'TASK_NOT_READY' });
     assert.equal(rejected.state.calls.length, 0);
     assert.equal(rejected.client.events.length, 0);
   }
@@ -1330,7 +1330,7 @@ test('verify-resolve re-attests completed threadless proof after HEAD drift with
   });
   const later = '2026-08-05T00:01:00Z';
   const setup = workflow(state, client, { git, journal, clock: { now: () => later } });
-  const result = await setup.api.verifyResolve(2, 'threadless-completed');
+  const result = await setup.api.verifyResolve(2, ['threadless-completed']);
   assert.equal(result.stateRevision, state.revision + 1);
   assert.deepEqual(result.threadResolutionStatus, {
     status: 'not-run', headSha: null, threads: [], updatedAt: null,
@@ -1344,7 +1344,7 @@ test('verify-resolve re-attests completed threadless proof after HEAD drift with
 
   const revision = setup.state.current.revision;
   const checkpointCount = setup.state.calls.length;
-  await setup.api.verifyResolve(2, 'threadless-completed');
+  await setup.api.verifyResolve(2, ['threadless-completed']);
   assert.equal(setup.state.current.revision, revision);
   assert.equal(setup.state.calls.length, checkpointCount);
 
@@ -1357,9 +1357,29 @@ test('verify-resolve re-attests completed threadless proof after HEAD drift with
     id: 'PR_node', number: 2, url: 'https://github.com/example/sky-bar/pull/2',
     headRefOid: OTHER_HEAD, viewer: VIEWER,
   } }), { git });
-  await assert.rejects(() => rejected.api.verifyResolve(2, 'threadless-completed'), { code: 'TASK_NOT_READY' });
+  await assert.rejects(() => rejected.api.verifyResolve(2, ['threadless-completed']), { code: 'TASK_NOT_READY' });
   assert.equal(rejected.state.calls.length, 0);
   assert.equal(rejected.client.events.length, 0);
+});
+
+test('verify-resolve workflow accepts only arrays of exact opaque task IDs', async () => {
+  for (const [label, selection] of [
+    ['string', 'task-local'],
+    ['null', null],
+    ['object', { taskId: 'task-local' }],
+    ['number', 1],
+    ['empty ID', ['']],
+    ['non-string ID', ['task-local', 1]],
+  ]) {
+    const client = new FakeClient();
+    const setup = workflow(integratedNonThreadState(), client);
+    await assert.rejects(() => setup.api.verifyResolve(2, selection), {
+      code: 'TASK_NOT_READY',
+    }, label);
+    assert.equal(setup.state.calls.length, 0, label);
+    assert.equal(client.calls.length, 0, label);
+    assert.equal(client.events.length, 0, label);
+  }
 });
 
 test('verify-resolve atomically re-attests only the exact completed threadless task set', async () => {
@@ -1519,7 +1539,7 @@ test('completed threadless refresh permits mapped new roots and enables journal-
   const driftedClient = recoveryClient();
   driftedClient.threads.find((thread) => thread.id === 'THREAD_OLD').isResolved = false;
   const drifted = workflow(state, driftedClient, { git });
-  await assert.rejects(() => drifted.api.verifyResolve(2, 'threadless-completed'), {
+  await assert.rejects(() => drifted.api.verifyResolve(2, ['threadless-completed']), {
     code: 'THREAD_PROOF_STALE',
   });
   assert.equal(drifted.state.calls.length, 0);
@@ -1539,7 +1559,7 @@ test('completed threadless refresh permits mapped new roots and enables journal-
     return lookupRecoveryIntent(operationId);
   };
   const setup = workflow(state, client, { git, journal, clock: { now: () => '2026-08-05T00:01:00Z' } });
-  const refreshed = await setup.api.verifyResolve(2, 'threadless-completed');
+  const refreshed = await setup.api.verifyResolve(2, ['threadless-completed']);
   assert.equal(refreshed.threadResolutionStatus.status, 'not-run');
   assert.deepEqual(refreshed.threadResolutionStatus.threads, state.threadResolutionStatus.threads);
   assert.equal(refreshed.threadResolutionStatus.threadlessVerification.headSha, OTHER_HEAD);
@@ -1659,7 +1679,7 @@ test('verify-resolve rejects unsupported and stale selections without state or G
   const unsupportedClient = new FakeClient();
   addThread(unsupportedClient);
   const unsupportedSetup = workflow(unsupported, unsupportedClient);
-  await assert.rejects(() => unsupportedSetup.api.verifyResolve(2, 'task-thread'), { code: 'TASK_NOT_READY' });
+  await assert.rejects(() => unsupportedSetup.api.verifyResolve(2, ['task-thread']), { code: 'TASK_NOT_READY' });
   assert.equal(unsupportedSetup.state.calls.length, 0);
   assert.equal(unsupportedClient.events.length, 0);
 
@@ -1698,7 +1718,7 @@ test('verify-resolve rejects unsupported and stale selections without state or G
     } } : {});
     const setup = workflow(state, client, options);
     const taskId = label === 'missing' ? 'missing-task' : state.tasks[0].id;
-    await assert.rejects(() => setup.api.verifyResolve(2, taskId), { code }, label);
+    await assert.rejects(() => setup.api.verifyResolve(2, [taskId]), { code }, label);
     assert.equal(setup.state.calls.length, 0, label);
     assert.equal(client.events.length, 0, label);
   }
@@ -1717,14 +1737,14 @@ test('verify-resolve rechecks state and canonical root resolution before its sta
   const raced = createGitHubReviewWorkflow({
     client: racedClient, state: racedState, git: fakeGit(), clock: { now: () => AT }, journal: null,
   });
-  await assert.rejects(() => raced.verifyResolve(2, 'task-local'), { code: 'STATE_REVISION_CHANGED' });
+  await assert.rejects(() => raced.verifyResolve(2, ['task-local']), { code: 'STATE_REVISION_CHANGED' });
   assert.equal(racedState.calls.length, 0);
   assert.equal(racedClient.events.length, 0);
 
   const unexpectedRootClient = new FakeClient();
   addThread(unexpectedRootClient);
   const unexpectedRoot = workflow(integratedNonThreadState(), unexpectedRootClient);
-  await assert.rejects(() => unexpectedRoot.api.verifyResolve(2, 'task-local'), {
+  await assert.rejects(() => unexpectedRoot.api.verifyResolve(2, ['task-local']), {
     code: 'ROOT_IDENTITY_MISMATCH',
   });
   assert.equal(unexpectedRoot.state.calls.length, 0);
@@ -1761,7 +1781,7 @@ test('verify-resolve rechecks state and canonical root resolution before its sta
     body: `Sky Bar review resolution at ${HEAD}.\nTasks:\n- task-thread: ${HEAD}\nValidation: npm run check.\n${markerFor(operationId)}`,
   }] });
   const resolutionRace = workflow(threadState, resolutionClient);
-  await assert.rejects(() => resolutionRace.api.verifyResolve(2, 'task-local'), {
+  await assert.rejects(() => resolutionRace.api.verifyResolve(2, ['task-local']), {
     code: 'THREAD_PROOF_STALE',
   });
   assert.equal(resolutionRace.state.calls.length, 0);
@@ -2386,23 +2406,180 @@ test('complete ignores unrelated context changes between authoritative CI reads'
   assert.deepEqual(setup.state.current.ciValidationStatus.checks, ['Full validation']);
 });
 
+test('CLI rejects ambiguous or invalid task selections before external reads', async () => {
+  const cases = [
+    ['missing selection', ['verify-resolve', '--pr', '2'], /exactly one/u],
+    ['both selections', [
+      'verify-resolve', '--pr', '2', '--task', 'a', '--task-set-json', '["a"]',
+    ], /exactly one/u],
+    ['repeated task', [
+      'verify-resolve', '--pr', '2', '--task=a', '--task=b',
+    ], /--task may be specified only once/u],
+    ['repeated task set', [
+      'verify-resolve', '--pr', '2', '--task-set-json=["a"]', '--task-set-json=["b"]',
+    ], /--task-set-json may be specified only once/u],
+    ['task set for reply', [
+      'reply-resolve', '--pr', '2', '--task-set-json', '["a"]',
+    ], /only valid for verify-resolve/u],
+    ['task set for unrelated command', [
+      'refresh-threads', '--pr', '2', '--task-set-json', '["a"]',
+    ], /only valid for verify-resolve/u],
+    ['empty singleton', [
+      'verify-resolve', '--pr', '2', '--task=',
+    ], /--task must not be empty/u],
+    ['malformed JSON', [
+      'verify-resolve', '--pr', '2', '--task-set-json', '["a"',
+    ], /valid JSON/u],
+    ['string JSON', [
+      'verify-resolve', '--pr', '2', '--task-set-json', '"a"',
+    ], /nonempty array/u],
+    ['object JSON', [
+      'verify-resolve', '--pr', '2', '--task-set-json', '{"task":"a"}',
+    ], /nonempty array/u],
+    ['null JSON', [
+      'verify-resolve', '--pr', '2', '--task-set-json', 'null',
+    ], /nonempty array/u],
+    ['empty JSON array', [
+      'verify-resolve', '--pr', '2', '--task-set-json', '[]',
+    ], /nonempty array/u],
+    ['non-string JSON entry', [
+      'verify-resolve', '--pr', '2', '--task-set-json', '["a",1]',
+    ], /unique nonempty strings/u],
+    ['empty JSON entry', [
+      'verify-resolve', '--pr', '2', '--task-set-json', '["a",""]',
+    ], /unique nonempty strings/u],
+    ['duplicate JSON entry', [
+      'verify-resolve', '--pr', '2', '--task-set-json', '["a","a"]',
+    ], /unique nonempty strings/u],
+  ];
+
+  for (const [label, argv, pattern] of cases) {
+    let stateReads = 0;
+    let journalReads = 0;
+    const state = {
+      async load() {
+        stateReads += 1;
+        throw new Error('invalid CLI input must not load state');
+      },
+    };
+    const journal = {
+      async lookupIntent() { journalReads += 1; },
+      async ensureIntent() { journalReads += 1; },
+    };
+    const client = new FakeClient();
+    await assert.rejects(() => runCli(argv, {
+      client, state, git: fakeGit(), clock: { now: () => AT }, journal,
+    }), pattern, label);
+    assert.equal(stateReads, 0, label);
+    assert.equal(journalReads, 0, label);
+    assert.equal(client.calls.length, 0, label);
+    assert.equal(client.events.length, 0, label);
+  }
+});
+
+test('CLI keeps opaque singleton IDs distinct from explicit JSON task sets', async () => {
+  const ambiguousSingleton = integratedNonThreadState('local', 'a,b');
+  ambiguousSingleton.tasks[0].fingerprint = 'fp-comma';
+  ambiguousSingleton.tasks.push(
+    { ...ambiguousSingleton.tasks[0], id: 'a', fingerprint: 'fp-task-a' },
+    { ...ambiguousSingleton.tasks[0], id: 'b', fingerprint: 'fp-task-b' },
+  );
+  const singletonState = fakeState(ambiguousSingleton);
+  const singleton = await runCli([
+    'verify-resolve', '--pr', '2', '--task', 'a,b',
+  ], {
+    client: new FakeClient(), state: singletonState, git: fakeGit(), clock: { now: () => AT },
+  });
+  assert.equal(singleton.taskId, 'a,b');
+  assert.deepEqual(singletonState.current.tasks.map((task) => task.status), [
+    'completed', 'integrated', 'integrated',
+  ]);
+
+  const opaqueId = '  a,b "quoted" \\path  ';
+  const opaqueStateValue = integratedNonThreadState('local', opaqueId);
+  opaqueStateValue.tasks[0].fingerprint = 'fp-opaque';
+  const opaqueState = fakeState(opaqueStateValue);
+  const opaque = await runCli([
+    'verify-resolve', '--pr', '2', '--task', opaqueId,
+  ], {
+    client: new FakeClient(), state: opaqueState, git: fakeGit(), clock: { now: () => AT },
+  });
+  assert.equal(opaque.taskId, opaqueId);
+  assert.equal(opaqueState.current.tasks[0].id, opaqueId);
+  assert.equal(opaqueState.current.tasks[0].status, 'completed');
+
+  const setStateValue = completedThreadlessDriftState(['a', 'b']);
+  setStateValue.tasks[0].fingerprint = 'fp-set-task-a';
+  setStateValue.tasks[1].fingerprint = 'fp-set-task-b';
+  setStateValue.tasks.push({
+    ...integratedNonThreadState('local', 'a,b').tasks[0],
+    fingerprint: 'fp-comma-local', integratedCommitSha: HEAD,
+  });
+  const setState = fakeState(setStateValue);
+  const setClient = new FakeClient();
+  setClient.metadata.headRefOid = OTHER_HEAD;
+  const selectedSet = await runCli([
+    'verify-resolve', '--pr', '2', '--task-set-json', '["b","a"]',
+  ], {
+    client: setClient,
+    state: setState,
+    git: fakeGit({
+      snapshot: async () => ({ headSha: OTHER_HEAD, dirty: false }),
+      pushedHead: async () => OTHER_HEAD,
+    }),
+    clock: { now: () => AT },
+  });
+  assert.deepEqual(selectedSet.taskIds, ['a', 'b']);
+  assert.equal(setState.current.tasks.find((task) => task.id === 'a,b').status, 'integrated');
+
+  const specialIds = [' leading ', 'trailing ', 'a,b', '"quoted"', '\\path'];
+  const specialStateValue = completedThreadlessDriftState(specialIds);
+  specialStateValue.tasks.forEach((task, index) => {
+    task.fingerprint = `fp-special-${index}`;
+  });
+  const specialState = fakeState(specialStateValue);
+  const specialClient = new FakeClient();
+  specialClient.metadata.headRefOid = OTHER_HEAD;
+  const special = await runCli([
+    'verify-resolve', '--pr', '2', '--task-set-json', JSON.stringify([...specialIds].reverse()),
+  ], {
+    client: specialClient,
+    state: specialState,
+    git: fakeGit({
+      snapshot: async () => ({ headSha: OTHER_HEAD, dirty: false }),
+      pushedHead: async () => OTHER_HEAD,
+    }),
+    clock: { now: () => AT },
+  });
+  assert.deepEqual(special.taskIds, [...specialIds].sort());
+  assert.deepEqual(
+    specialState.current.threadResolutionStatus.threadlessVerification.taskIds,
+    [...specialIds].sort(),
+  );
+
+  const replyId = ' thread,with "quotes" and \\slashes ';
+  const replyStateValue = integratedThreadState();
+  replyStateValue.tasks[0] = {
+    ...replyStateValue.tasks[0], id: replyId, fingerprint: 'fp-opaque-reply',
+  };
+  const replyState = fakeState(replyStateValue);
+  const replyClient = new FakeClient();
+  addThread(replyClient);
+  const reply = await runCli([
+    'reply-resolve', '--pr', '2', '--task', replyId,
+  ], {
+    client: replyClient, state: replyState, git: fakeGit(), clock: { now: () => AT },
+    journal: fakeJournal(),
+  });
+  assert.equal(reply.taskId, replyId);
+  assert.equal(replyState.current.tasks[0].status, 'completed');
+});
+
 test('CLI exposes exactly the documented explicit-PR command surface and JSON-ready results', async () => {
   assert.match(usage(), /status[\s\S]*refresh-threads[\s\S]*reply-resolve[\s\S]*verify-resolve[\s\S]*request[\s\S]*collect[\s\S]*collect-ci[\s\S]*complete/u);
   await assert.rejects(() => runCli(['collect'], {}), /--pr/u);
   await assert.rejects(() => runCli(['refresh-threads'], {}), /--pr/u);
-  await assert.rejects(() => runCli(['verify-resolve', '--pr', '2'], {}), /verify-resolve requires --task/u);
-  await assert.rejects(
-    () => runCli(['verify-resolve', '--pr', '2', '--task', 'threadless-a,threadless-a'], {}),
-    /unique comma-separated list/u,
-  );
-  await assert.rejects(
-    () => runCli(['verify-resolve', '--pr', '2', '--task', 'threadless-a,,threadless-b'], {}),
-    /unique comma-separated list/u,
-  );
-  await assert.rejects(
-    () => runCli(['verify-resolve', '--pr', '2', '--task', 'threadless-a, threadless-b'], {}),
-    /unique comma-separated list/u,
-  );
+  await assert.rejects(() => runCli(['verify-resolve', '--pr', '2'], {}), /exactly one/u);
   await assert.rejects(() => runCli(['refresh-threads', '--pr', '2', '--task', 'x'], {}), /--task is only valid/u);
   await assert.rejects(() => runCli(['refresh-threads', '--pr', '2', '--kind', 'discovery'], {}), /--kind is only valid/u);
   await assert.rejects(() => runCli(['refresh-threads', '--pr', '2', '--human'], {}), /--human is only valid/u);
@@ -2436,7 +2613,7 @@ test('CLI exposes exactly the documented explicit-PR command surface and JSON-re
   const threadlessSetClient = new FakeClient();
   threadlessSetClient.metadata.headRefOid = OTHER_HEAD;
   const threadlessSet = await runCli([
-    'verify-resolve', '--pr', '2', '--task', 'threadless-b,threadless-a',
+    'verify-resolve', '--pr', '2', '--task-set-json', '["threadless-b","threadless-a"]',
   ], {
     client: threadlessSetClient,
     state: threadlessSetState,

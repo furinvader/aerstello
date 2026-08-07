@@ -481,19 +481,15 @@ function taskIsEligibleForVerifyResolve(task) {
 }
 
 function normalizeVerifyResolveTaskIds(taskSelection) {
-  const taskIds = Array.isArray(taskSelection)
-    ? [...taskSelection]
-    : typeof taskSelection === 'string'
-      ? taskSelection.split(',')
-      : [];
+  const taskIds = Array.isArray(taskSelection) ? [...taskSelection] : [];
   if (
-    taskIds.length === 0
-    || taskIds.some((taskId) => typeof taskId !== 'string'
-      || taskId.length === 0 || taskId.trim() !== taskId)
+    !Array.isArray(taskSelection)
+    || taskIds.length === 0
+    || taskIds.some((taskId) => typeof taskId !== 'string' || taskId.length === 0)
     || new Set(taskIds).size !== taskIds.length
   ) {
     throw new GitHubWorkflowError(
-      'verify-resolve requires a unique comma-separated task selection without empty entries',
+      'verify-resolve requires an array of unique nonempty opaque task IDs',
       'TASK_NOT_READY',
     );
   }
@@ -1240,11 +1236,11 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
   }
 
   async function verifyResolve(prNumber, taskSelection) {
+    const taskIds = normalizeVerifyResolveTaskIds(taskSelection);
     let active = await load(prNumber);
     if (!stateAdapter.checkpointTaskCompletion) {
       throw new GitHubWorkflowError('The guarded task-completion checkpoint is unavailable', 'INVALID_ADAPTERS');
     }
-    const taskIds = normalizeVerifyResolveTaskIds(taskSelection);
     const selectedTasks = taskIds.map((taskId) => {
       const task = active.tasks.find((candidate) => candidate.id === taskId);
       if (!task) throw new GitHubWorkflowError(`Task ${taskId} was not found`, 'TASK_NOT_FOUND');

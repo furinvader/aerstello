@@ -19,7 +19,7 @@ import {
 } from './lib/pr-review-state.mjs';
 
 export function usage() {
-  return `Usage: node scripts/pr-review-github.mjs <command> [--pr <number>] [options]\n\nCommands:\n  status [--human]               Read live review and CI status (active PR by default)\n  refresh-threads                Record exact-head empty canonical-thread proof for a taskless cycle\n  reply-resolve --task <id>      Reply to and close one task's Codex review threads\n  verify-resolve --task <ids>    Verify one non-thread task or re-attest one complete threadless set\n  request --kind <kind>          Request discovery or verification review\n  collect                        Collect official review evidence for the Review commit\n  collect-ci                     Collect full GitHub Actions evidence for the Review commit\n  complete                       Reconfirm every gate and mark the cycle Done\n\nRequired options:\n  --pr <number>                  Required except for status with an active state\n\nRequest options:\n  --kind discovery|verification\n\nTask resolution options:\n  --task <task-id>[,<task-id>...]  Comma-separated sets are valid only for verify-resolve\n\nSuccessful commands write JSON, except status --human which writes plain English.\n`;
+  return `Usage: node scripts/pr-review-github.mjs <command> [--pr <number>] [options]\n\nCommands:\n  status [--human]               Read live review and CI status (active PR by default)\n  refresh-threads                Record exact-head empty canonical-thread proof for a taskless cycle\n  reply-resolve --task <id>      Reply to and close one task's Codex review threads\n  verify-resolve <selection>     Verify one task or re-attest one complete threadless set\n  request --kind <kind>          Request discovery or verification review\n  collect                        Collect official review evidence for the Review commit\n  collect-ci                     Collect full GitHub Actions evidence for the Review commit\n  complete                       Reconfirm every gate and mark the cycle Done\n\nRequired options:\n  --pr <number>                  Required except for status with an active state\n\nRequest options:\n  --kind discovery|verification\n\nTask resolution options:\n  --task <opaque-task-id>        One byte-for-byte task ID for reply-resolve or verify-resolve\n  --task-set-json <json-array>   Explicit task-ID set for verify-resolve only\n\nSuccessful commands write JSON, except status --human which writes plain English.\n`;
 }
 
 function titleCase(value) {
@@ -160,15 +160,28 @@ function parsePr(value) {
   return Number(value);
 }
 
-function parseVerifyTaskSelection(value) {
-  const taskIds = String(value).split(',');
-  if (taskIds.some((taskId) => taskId.length === 0 || taskId.trim() !== taskId)
-      || new Set(taskIds).size !== taskIds.length) {
-    throw new UsageError(
-      'verify-resolve --task must be a unique comma-separated list without empty entries',
-    );
+function optionOccurrences(args, name) {
+  let count = 0;
+  for (const raw of args) {
+    if (raw === '--') break;
+    if (raw === `--${name}` || raw.startsWith(`--${name}=`)) count += 1;
   }
-  return taskIds.sort();
+  return count;
+}
+
+function parseVerifyTaskSetJson(value) {
+  let taskIds;
+  try {
+    taskIds = JSON.parse(value);
+  } catch {
+    throw new UsageError('--task-set-json must be valid JSON');
+  }
+  if (!Array.isArray(taskIds) || taskIds.length === 0
+      || taskIds.some((taskId) => typeof taskId !== 'string' || taskId.length === 0)
+      || new Set(taskIds).size !== taskIds.length) {
+    throw new UsageError('--task-set-json must be a nonempty array of unique nonempty strings');
+  }
+  return taskIds;
 }
 
 export async function runCli(argv, {
@@ -180,16 +193,39 @@ export async function runCli(argv, {
   if (!['status', 'refresh-threads', 'reply-resolve', 'verify-resolve', 'request', 'collect', 'collect-ci', 'complete'].includes(command)) {
     throw new UsageError(`Unknown command ${command}`);
   }
-  const options = parseOptions(args, { booleans: ['help', 'human'], values: ['pr', 'task', 'kind'] });
+  const options = parseOptions(args, {
+    booleans: ['help', 'human'], values: ['pr', 'task', 'task-set-json', 'kind'],
+  });
+  if (optionOccurrences(args, 'task') > 1) {
+    throw new UsageError('--task may be specified only once');
+  }
+  if (optionOccurrences(args, 'task-set-json') > 1) {
+    throw new UsageError('--task-set-json may be specified only once');
+  }
   if (options.help) return { help: usage() };
   if (options._.length > 0) throw new UsageError(`Unexpected argument ${options._[0]}`);
   const prNumber = options.pr === undefined && command === 'status' ? undefined : parsePr(options.pr);
   if (command !== 'status' && options.human) throw new UsageError('--human is only valid for status');
-  if (['reply-resolve', 'verify-resolve'].includes(command) && !options.task) {
-    throw new UsageError(`${command} requires --task`);
-  }
-  if (!['reply-resolve', 'verify-resolve'].includes(command) && options.task !== undefined) {
+  const hasTask = options.task !== undefined;
+  const hasTaskSet = options['task-set-json'] !== undefined;
+  let verifyTaskSelection = null;
+  if (command === 'reply-resolve') {
+    if (hasTaskSet) throw new UsageError('--task-set-json is only valid for verify-resolve');
+    if (!hasTask || options.task.length === 0) throw new UsageError('reply-resolve requires --task');
+  } else if (command === 'verify-resolve') {
+    if (hasTask === hasTaskSet) {
+      throw new UsageError('verify-resolve requires exactly one of --task or --task-set-json');
+    }
+    if (hasTask) {
+      if (options.task.length === 0) throw new UsageError('verify-resolve --task must not be empty');
+      verifyTaskSelection = [options.task];
+    } else {
+      verifyTaskSelection = parseVerifyTaskSetJson(options['task-set-json']);
+    }
+  } else if (hasTask) {
     throw new UsageError('--task is only valid for reply-resolve or verify-resolve');
+  } else if (hasTaskSet) {
+    throw new UsageError('--task-set-json is only valid for verify-resolve');
   }
   if (command === 'request' && !['discovery', 'verification'].includes(options.kind)) {
     throw new UsageError('request requires --kind discovery|verification');
@@ -210,7 +246,7 @@ export async function runCli(argv, {
   if (command === 'refresh-threads') return workflow.refreshThreads(prNumber);
   if (command === 'reply-resolve') return workflow.replyResolve(prNumber, options.task);
   if (command === 'verify-resolve') {
-    return workflow.verifyResolve(prNumber, parseVerifyTaskSelection(options.task));
+    return workflow.verifyResolve(prNumber, verifyTaskSelection);
   }
   if (command === 'request') return workflow.request(prNumber, options.kind);
   if (command === 'collect') return workflow.collect(prNumber);

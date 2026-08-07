@@ -96,25 +96,30 @@ canonical root set without writing to GitHub or creating a mutation journal.
 It completes only the selected local task, or adds only the selected threadless
 ID while retaining prior exact-HEAD proof. GitHub-thread tasks remain on
 `reply-resolve`. The verifier assertion is guarded transition input; no
-separate persisted verifier-artifact schema is implied.
+separate persisted verifier-artifact schema is implied. `--task` is always one
+opaque task ID for either command and is preserved byte-for-byte; commas,
+whitespace, quotes, and backslashes have no separator or escape meaning.
 
 If integration HEAD advances after a threadless task was already completed,
 repeat current-HEAD targeted validation and read-only verifier approval for
 every task in the preserved proof. Then select the complete set atomically with
-one comma-separated command, for example
-`verify-resolve --pr <number> --task threadless-a,threadless-b`. Order does not
-matter, but IDs must be unique and the selection must exactly equal the
-preserved task-ID set. Partial, extra, unknown, ineligible, local, or
+one explicit JSON string-array option, for example
+`verify-resolve --pr <number> --task-set-json '["threadless-a","threadless-b"]'`.
+This is the only multi-task encoding: `--task threadless-a,threadless-b` means
+one literal task ID containing a comma. JSON decoding preserves whitespace,
+quotes, backslashes, and commas in each ID. Order does not matter after
+decoding, but IDs must be unique nonempty strings and the selection must exactly
+equal the preserved task-ID set. Partial, extra, unknown, ineligible, local, or
 not-yet-completed selections are rejected before checkpointing. A singleton
-preserved set keeps the ordinary one-ID form, and an already-current exact-set
-retry is idempotent. The successful transition refreshes only that complete
-threadless proof at the current HEAD without fabricating an aggregate thread
-proof or discarding recorded thread rows. Additional uniquely mapped live roots
-remain for `reply-resolve`. When one such root already has the exact reply and
-resolution from a prior integration HEAD, `reply-resolve` may recover it only
-after the refresh, from that sole immutable reply plus the correlated durable
-reply and resolve intent lookups and proven prior-HEAD ancestry. It does not
-repeat either GitHub mutation. Extra replies or markers and any resolution,
+preserved set keeps the ordinary opaque `--task` form, and an already-current
+exact-set retry is idempotent. The successful transition refreshes only that
+complete threadless proof at the current HEAD without fabricating an aggregate
+thread proof or discarding recorded thread rows. Additional uniquely mapped
+live roots remain for `reply-resolve`. When one such root already has the exact
+reply and resolution from a prior integration HEAD, `reply-resolve` may recover
+it only after the refresh, from that sole immutable reply plus the correlated
+durable reply and resolve intent lookups and proven prior-HEAD ancestry. It does
+not repeat either GitHub mutation. Extra replies or markers and any resolution,
 live-HEAD, or state-revision drift are rejected.
 
 A schema-v2 migration may preserve a taskless pending review for the exact
