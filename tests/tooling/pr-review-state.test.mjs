@@ -268,6 +268,56 @@ function bindPackets(cwd, state, packets) {
   }), state);
 }
 
+function canonicalBoundIntegratedTask(cwd, taskId = 'canonical-ancestry') {
+  const initial = init(cwd);
+  const threadProofed = checkpointTaskCompletion({
+    cwd,
+    expectedRevision: initial.revision,
+    threadResolutionStatus: ready(initial, []).threadResolutionStatus,
+  });
+  const reviewReady = persistReady(cwd, threadProofed, []);
+  const requested = checkpointReviewRequest({
+    cwd,
+    request: request(reviewReady),
+    pushedHeadSha: reviewReady.currentIntegrationHeadSha,
+    prHeadSha: reviewReady.currentIntegrationHeadSha,
+    expectedRevision: reviewReady.revision,
+  });
+  const reviewed = checkpointReviewOutcome({
+    cwd,
+    outcome: outcome(requested, { outcome: 'findings' }),
+    expectedRevision: requested.revision,
+  });
+  const proposedTask = task(reviewed.currentIntegrationHeadSha, {
+    id: taskId, status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const proposed = checkpointState({
+    cwd, expectedRevision: reviewed.revision, nextState: { ...reviewed, tasks: [proposedTask] },
+  });
+  const packet = taskPacket(reviewed.reviewedHeadSha, taskId, {
+    affectedAreas: ['workflow'], command: 'npm run check:workflow',
+  });
+  const bound = checkpointTaskPacketBinding({ cwd, packet, expectedRevision: proposed.revision });
+  const integratedHead = commit(cwd, { [`scripts/${taskId}.mjs`]: 'export const integrated = true;\n' }, `integrate ${taskId}`);
+  const advanced = checkpointGitMetadata({ cwd }).state;
+  rmSync(validationPlanPath(cwd, advanced.prNumber), { force: true });
+  const { execution: _execution, ...boundTask } = advanced.tasks[0];
+  const integrated = checkpointState({
+    cwd,
+    expectedRevision: advanced.revision,
+    nextState: {
+      ...advanced,
+      tasks: [{
+        ...boundTask,
+        status: 'integrated',
+        integratedCommitSha: integratedHead,
+        resolutionSummary: 'Integrated centrally; targeted validation remains.',
+      }],
+    },
+  });
+  return { packet, reviewedHead: reviewed.reviewedHeadSha, integratedHead, integrated, bound };
+}
+
 afterEach(() => {
   while (repositories.length > 0) rmSync(repositories.pop(), { recursive: true, force: true });
 });
@@ -1620,6 +1670,74 @@ test('bound packet rejects rollback, unrelated, or missing central integration a
   git(cwd, ['switch', '--detach', unrelatedHead]);
   const unrelated = checkpointGitMetadata({ cwd }).state;
   assert.equal(unrelated.currentIntegrationHeadSha, unrelatedHead);
+  assert.throws(() => assertTaskPacketBound(unrelated, packet), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+  assert.throws(() => buildTargetedValidationPlan({ cwd, taskPackets: [packet], now: () => AT }), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+  assert.equal(existsSync(validationPlanPath(cwd, unrelated.prNumber)), false);
+  assert.equal(loadState(cwd).validationStatus.status, 'not-run');
+});
+
+test('canonical bound packet accepts direct and descendant central integration ancestry only', () => {
+  const cwd = repo();
+  const { packet, reviewedHead, integratedHead, integrated } = canonicalBoundIntegratedTask(cwd);
+  assert.equal(packet.reviewedHeadSha, reviewedHead);
+  assert.equal(integrated.reviewedHeadSha, reviewedHead);
+  assert.equal(assertTaskPacketBound(integrated, packet).integratedCommitSha, integratedHead);
+
+  const descendantHead = commit(cwd, { 'scripts/canonical-later.mjs': 'export const later = true;\n' }, 'later canonical integration');
+  const descendant = checkpointGitMetadata({ cwd }).state;
+  assert.equal(assertTaskPacketBound(descendant, packet).integratedCommitSha, integratedHead);
+  const plan = buildTargetedValidationPlan({ cwd, taskPackets: [packet], now: () => AT });
+  assert.deepEqual(plan.taskIds, [packet.taskId]);
+  assert.equal(plan.headSha, descendantHead);
+  assert.equal(plan.stateRevision, descendant.revision);
+
+  assert.throws(() => assertTaskPacketBound(descendant, {
+    ...packet, reviewedHeadSha: integratedHead,
+  }), { code: 'TASK_PACKET_HEAD_MISMATCH' });
+  assert.throws(() => assertTaskPacketBound(descendant, {
+    ...packet, evidence: 'Substituted canonical packet evidence.',
+  }), { code: 'TASK_PACKET_CONFLICT' });
+});
+
+test('canonical bound packet rejects rollback, unrelated, or missing integration ancestry without proof', () => {
+  const cwd = repo();
+  const { packet, reviewedHead, integratedHead } = canonicalBoundIntegratedTask(cwd, 'canonical-fail-closed');
+
+  git(cwd, ['switch', '--detach', reviewedHead]);
+  const rollback = checkpointGitMetadata({ cwd }).state;
+  assert.equal(rollback.currentIntegrationHeadSha, reviewedHead);
+  assert.throws(() => assertTaskPacketBound(rollback, packet), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+  assert.throws(() => buildTargetedValidationPlan({ cwd, taskPackets: [packet], now: () => AT }), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+  assert.equal(existsSync(validationPlanPath(cwd, rollback.prNumber)), false);
+  assert.equal(loadState(cwd).validationStatus.status, 'not-run');
+
+  const tree = git(cwd, ['rev-parse', `${integratedHead}^{tree}`]);
+  const unrelatedHead = git(cwd, ['commit-tree', tree, '-m', 'unrelated canonical integration']);
+  const unrelatedCommitState = {
+    ...rollback,
+    tasks: rollback.tasks.map((item) => ({ ...item, integratedCommitSha: unrelatedHead })),
+  };
+  assert.throws(() => assertTaskPacketBound(unrelatedCommitState, packet), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+  const missingCommitState = {
+    ...rollback,
+    tasks: rollback.tasks.map((item) => ({ ...item, integratedCommitSha: 'f'.repeat(40) })),
+  };
+  assert.throws(() => assertTaskPacketBound(missingCommitState, packet), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+
+  git(cwd, ['switch', '--detach', unrelatedHead]);
+  const unrelated = checkpointGitMetadata({ cwd }).state;
   assert.throws(() => assertTaskPacketBound(unrelated, packet), {
     code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
   });

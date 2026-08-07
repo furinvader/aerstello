@@ -340,7 +340,6 @@ function assertTaskPacketHead(state, task, packet, digest) {
     if (packet.reviewedHeadSha !== state.reviewedHeadSha) {
       throw new StateError(`Task packet ${packet.taskId} does not match the exact reviewed HEAD`, 'TASK_PACKET_HEAD_MISMATCH');
     }
-    return;
   }
   const boundIntegratedTask = task.status === 'integrated'
     && typeof task.taskPacketDigest === 'string';
@@ -374,6 +373,7 @@ function assertTaskPacketHead(state, task, packet, digest) {
     }
     return;
   }
+  if (state.reviewedHeadSha !== null) return;
   if (packet.reviewedHeadSha === state.currentIntegrationHeadSha) return;
   throw new StateError(`Task packet ${packet.taskId} does not match the exact reviewed HEAD`, 'TASK_PACKET_HEAD_MISMATCH');
 }
