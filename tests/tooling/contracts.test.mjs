@@ -325,6 +325,25 @@ test('state JSON Schema rejects terminal and review-ready states missing current
   assert.deepEqual(validatePrReviewState(completeStateFixture({
     ciValidationStatus: rerunProof, ciValidationHistory: [attemptProof, rerunProof],
   })), []);
+  const historicalHeadProof = {
+    ...attemptProof, status: 'failed', headSha: 'b'.repeat(40), checkRunId: 'CHECK_head_b',
+    workflowRunId: 100,
+    workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/100',
+    updatedAt: '2026-08-05T00:01:00Z',
+  };
+  const restoredComplete = completeStateFixture({
+    ciValidationStatus: attemptProof, ciValidationHistory: [attemptProof, historicalHeadProof],
+  });
+  assert.equal(validateSchema(restoredComplete), true, JSON.stringify(validateSchema.errors));
+  assert.deepEqual(validatePrReviewState(restoredComplete), []);
+
+  const absentProof = {
+    ...attemptProof, checkRunId: 'CHECK_absent', workflowRunId: 101,
+    workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/101',
+  };
+  assert.match(validatePrReviewState(completeStateFixture({
+    ciValidationStatus: absentProof, ciValidationHistory: [attemptProof, historicalHeadProof],
+  })).join('\n'), /immutable CI history entry/u);
   assert.notDeepEqual(validatePrReviewState(completeStateFixture({
     ciValidationStatus: rerunProof, ciValidationHistory: [rerunProof, rerunProof],
   })), []);

@@ -1202,7 +1202,7 @@ function assertCheckpointProvenance(current, next, authorization) {
     ]) assertImmutableValue(current[field], next[field], field);
     const appended = next.ciValidationHistory.length === current.ciValidationHistory.length + 1;
     const restored = next.ciValidationHistory.length === current.ciValidationHistory.length
-      && sameEvidence(next.ciValidationHistory.at(-1), next.ciValidationStatus);
+      && next.ciValidationHistory.some((entry) => sameEvidence(entry, next.ciValidationStatus));
     if (!appended && !restored) {
       throw new StateError(
         'CI validation must append one workflow-run record or restore an immutable historical record',

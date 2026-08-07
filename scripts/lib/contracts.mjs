@@ -1234,8 +1234,10 @@ export function validatePrReviewState(value) {
       errors.push('$.ciValidationHistory contains duplicate CI attempt identities');
     }
     const currentCi = value.ciValidationStatus?.status === 'not-run' ? null : value.ciValidationStatus;
-    if (currentCi !== null && JSON.stringify(value.ciValidationHistory.at(-1)) !== JSON.stringify(currentCi)) {
-      errors.push('$.ciValidationStatus must equal the latest append-only CI evidence');
+    if (currentCi !== null && !value.ciValidationHistory.some(
+      (proof) => JSON.stringify(proof) === JSON.stringify(currentCi),
+    )) {
+      errors.push('$.ciValidationStatus must equal an immutable CI history entry');
     }
   }
   validateThreadStatus(value.threadResolutionStatus, value.tasks, errors);

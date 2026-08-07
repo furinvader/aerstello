@@ -1136,6 +1136,70 @@ test('full CI evidence is guarded, restorable, append-only, exact-head, and inva
   }), { code: 'INVALID_CI_VALIDATION' });
 });
 
+test('full CI evidence restores a non-tail immutable attempt when integration HEAD returns', () => {
+  const cwd = repo();
+  const initial = init(cwd);
+  const headA = initial.currentIntegrationHeadSha;
+  const evidenceA = ciEvidence(initial, {
+    checkRunId: 'CHECK_HEAD_A', workflowRunId: 123451,
+    workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/123451',
+  });
+  const collectedA = checkpointCiValidation({
+    cwd, evidence: evidenceA, expectedRevision: initial.revision,
+  });
+
+  const headB = commit(cwd, { 'ci-head-b.txt': 'head B\n' }, 'CI head B');
+  const onHeadB = checkpointGitMetadata({ cwd }).state;
+  assert.equal(onHeadB.currentIntegrationHeadSha, headB);
+  assert.equal(onHeadB.ciValidationStatus.status, 'not-run');
+  const evidenceB = ciEvidence(onHeadB, {
+    status: 'failed', checkRunId: 'CHECK_HEAD_B', workflowRunId: 123452,
+    workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/123452',
+    updatedAt: '2026-08-05T00:01:00Z',
+  });
+  const collectedB = checkpointCiValidation({
+    cwd, evidence: evidenceB, expectedRevision: onHeadB.revision,
+  });
+  const immutableHistory = structuredClone(collectedB.ciValidationHistory);
+  assert.deepEqual(immutableHistory, [evidenceA, evidenceB]);
+
+  git(cwd, ['switch', '--detach', headA]);
+  const returnedToHeadA = checkpointGitMetadata({ cwd }).state;
+  assert.equal(returnedToHeadA.currentIntegrationHeadSha, headA);
+  assert.equal(returnedToHeadA.ciValidationStatus.status, 'not-run');
+  assert.deepEqual(returnedToHeadA.ciValidationHistory, immutableHistory);
+
+  const restoredA = checkpointCiValidation({
+    cwd, evidence: evidenceA, expectedRevision: returnedToHeadA.revision,
+  });
+  assert.deepEqual(restoredA.ciValidationStatus, evidenceA);
+  assert.deepEqual(restoredA.ciValidationHistory, immutableHistory);
+  assert.equal(restoredA.revision, returnedToHeadA.revision + 1);
+
+  const repeatedA = checkpointCiValidation({
+    cwd, evidence: evidenceA, expectedRevision: restoredA.revision,
+  });
+  assert.deepEqual(repeatedA, restoredA);
+  assert.equal(repeatedA.revision, restoredA.revision);
+  assert.throws(() => checkpointCiValidation({
+    cwd, evidence: { ...evidenceA, status: 'failed' }, expectedRevision: restoredA.revision,
+  }), { code: 'CI_EVIDENCE_CONFLICT' });
+
+  const unseenA = ciEvidence(restoredA, {
+    checkRunId: 'CHECK_HEAD_A_RERUN', workflowRunId: 123453,
+    workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/123453',
+    updatedAt: '2026-08-05T00:02:00Z',
+  });
+  const appended = checkpointCiValidation({
+    cwd, evidence: unseenA, expectedRevision: restoredA.revision,
+  });
+  assert.deepEqual(appended.ciValidationHistory, [...immutableHistory, unseenA]);
+  assert.deepEqual(appended.ciValidationHistory.slice(0, -1), immutableHistory);
+  assert.deepEqual(checkpointCiValidation({
+    cwd, evidence: unseenA, expectedRevision: appended.revision,
+  }), appended);
+});
+
 test('same-HEAD dirty checkpoints preserve proof while lifecycle gates remain fail-closed', () => {
   const readyCwd = repo();
   const prepared = ready(init(readyCwd));
