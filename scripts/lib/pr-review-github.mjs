@@ -207,15 +207,12 @@ function httpsUrl(value) {
 
 function ciEvidenceFromRollup(snapshot) {
   const checkRuns = snapshot.contexts.filter((context) => context?.__typename === 'CheckRun');
-  const namedChecks = [...new Set(snapshot.contexts.map((context) => (
-    context?.__typename === 'CheckRun' ? context.name
-      : context?.__typename === 'StatusContext' ? context.context : null
-  )).filter((name) => typeof name === 'string' && name.length > 0))].sort();
   const candidates = checkRuns.filter((check) => check.name === FULL_VALIDATION_CHECK
     && check.checkSuite?.app?.slug === GITHUB_ACTIONS_APP);
   if (candidates.length === 0) {
     throw new GitHubWorkflowError('The authoritative Full validation GitHub Actions check is missing', 'CI_CHECK_MISSING');
   }
+  const namedChecks = [...new Set(candidates.map((check) => check.name))].sort();
   const checkRunIds = new Set();
   const runs = new Map();
   for (const check of candidates) {

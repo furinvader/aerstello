@@ -464,13 +464,44 @@ test('collect-ci paginates the exact-head rollup and records the latest authorit
   const result = await setup.api.collectCi(2);
   assert.deepEqual(result.evidence, {
     source: 'github-actions', scope: 'full', status: 'passed', headSha: HEAD,
-    checks: ['Full validation', 'lint'], checkRunId: 'CHECK_full', workflowRunId: 701,
+    checks: ['Full validation'], checkRunId: 'CHECK_full', workflowRunId: 701,
     workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/701', updatedAt: AT,
   });
   assert.ok(client.calls.filter((call) => call.name === 'PullRequestChecks').length >= 3);
   assert.match(client.calls.find((call) => call.name === 'PullRequestChecks').query,
     /workflowRun\{databaseId url file\{path\} workflow\{name\}\}/u);
   assert.equal(setup.state.calls.at(-1).name, 'checkpointCiValidation');
+});
+
+test('collect-ci evidence is unchanged by unrelated rollup contexts', async () => {
+  const authoritative = fullValidationCheck();
+  const unrelatedCheck = {
+    __typename: 'CheckRun', id: 'CHECK_lint', databaseId: 302, name: 'lint',
+    status: 'COMPLETED', conclusion: 'SUCCESS', completedAt: AT,
+    detailsUrl: 'https://github.com/example/sky-bar/actions/runs/800/job/302', checkSuite: null,
+  };
+  const unrelatedStatus = {
+    __typename: 'StatusContext', id: 'STATUS_lint', context: 'legacy lint',
+    state: 'SUCCESS', targetUrl: 'https://github.com/example/sky-bar',
+  };
+  const client = new FakeClient({ ciContexts: [unrelatedStatus, authoritative, unrelatedCheck] });
+  const setup = workflow(stateFixture(), client);
+  const first = await setup.api.collectCi(2);
+  assert.deepEqual(first.evidence.checks, ['Full validation']);
+  const revision = setup.state.current.revision;
+  const historyLength = setup.state.current.ciValidationHistory.length;
+
+  for (const contexts of [
+    [unrelatedCheck, authoritative, { ...unrelatedStatus, context: 'renamed status', state: 'FAILURE' }],
+    [authoritative],
+    [authoritative, { ...unrelatedCheck, id: 'CHECK_other', name: 'unrelated changed check' }],
+  ]) {
+    client.ciContexts = contexts;
+    const repeated = await setup.api.collectCi(2);
+    assert.deepEqual(repeated.evidence, first.evidence);
+    assert.equal(setup.state.current.revision, revision);
+    assert.equal(setup.state.current.ciValidationHistory.length, historyLength);
+  }
 });
 
 test('collect-ci appends distinct check attempts for one rerun workflow and is idempotent per check', async () => {
@@ -1472,6 +1503,43 @@ test('complete rechecks that the same successful workflow evidence is still auth
     assert.equal(setup.state.calls.at(-1).name, 'checkpointCiValidation');
     assert.equal(setup.state.calls.some((call) => call.name === 'checkpointCompletion'), false);
   }
+});
+
+test('complete ignores unrelated context changes between authoritative CI reads', async () => {
+  class UnrelatedContextMutationClient extends FakeClient {
+    constructor() {
+      super();
+      this.checkReads = 0;
+    }
+
+    async graphql(input) {
+      if (input.name === 'PullRequestChecks') {
+        this.checkReads += 1;
+        if (this.checkReads === 2) {
+          this.ciContexts = [
+            { __typename: 'StatusContext', id: 'STATUS_late', context: 'late status',
+              state: 'FAILURE', targetUrl: 'https://github.com/example/sky-bar' },
+            { __typename: 'CheckRun', id: 'CHECK_late', databaseId: 999, name: 'late unrelated check',
+              status: 'COMPLETED', conclusion: 'FAILURE', completedAt: AT,
+              detailsUrl: 'https://github.com/example/sky-bar/actions/runs/999/job/999', checkSuite: null },
+            fullValidationCheck(),
+          ];
+        }
+      }
+      return super.graphql(input);
+    }
+  }
+
+  const client = new UnrelatedContextMutationClient();
+  client.reviews.push({
+    id: 'PRR_clean', databaseId: 201, url: 'https://x/clean', body: '', state: 'COMMENTED',
+    submittedAt: AT, commit: { oid: HEAD }, author: BOT,
+  });
+  const setup = workflow(completedState(), client);
+  const result = await setup.api.complete(2);
+  assert.equal(result.phase, 'complete');
+  assert.equal(setup.state.calls.at(-1).name, 'checkpointCompletion');
+  assert.deepEqual(setup.state.current.ciValidationStatus.checks, ['Full validation']);
 });
 
 test('CLI exposes exactly the documented explicit-PR command surface and JSON-ready results', async () => {
