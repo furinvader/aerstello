@@ -335,6 +335,31 @@ function isCleanTasklessReviewValidationRecovery(state, expectedIds) {
     && request.headSha === headSha && outcome.headSha === headSha;
 }
 
+function isV2CompletedTaskValidationRecovery(cwd, state, expectedIds) {
+  if (state.phase !== 'recovering' || state.validationStatus.status !== 'not-run'
+      || expectedIds.length !== 0 || state.tasks.length === 0
+      || state.tasks.some((task) => task.status !== 'completed'
+        || task.disposition === 'needs-human-decision')
+      || state.blockedReasons.length !== 0 || state.verificationEscalation !== null) return false;
+  const backupPath = join(stateDirectory(cwd, state.prNumber), 'state.v2.backup.json');
+  if (!existsSync(backupPath)) return false;
+  try {
+    const legacy = readStateDocument(backupPath);
+    if (legacy.schemaVersion !== 2 || !['ready-for-review', 'complete'].includes(legacy.phase)
+        || legacy.validationStatus?.status !== 'passed'
+        || legacy.validationStatus.headSha !== state.currentIntegrationHeadSha
+        || !Array.isArray(legacy.validationStatus.checks) || legacy.validationStatus.checks.length === 0
+        || typeof legacy.validationStatus.updatedAt !== 'string'
+        || !Number.isFinite(Date.parse(legacy.validationStatus.updatedAt))
+        || !Array.isArray(legacy.tasks) || legacy.tasks.length === 0
+        || legacy.tasks.some((task) => task.status !== 'completed')) return false;
+    const migrated = migratePrReviewStateV2(legacy, { migratedAt: state.updatedAt });
+    return JSON.stringify(canonicalJson(migrated)) === JSON.stringify(canonicalJson(state));
+  } catch {
+    return false;
+  }
+}
+
 function assertTaskPacketHead(state, task, packet, digest) {
   if (state.reviewedHeadSha !== null) {
     if (packet.reviewedHeadSha !== state.reviewedHeadSha) {
@@ -424,9 +449,10 @@ function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, initi
     }
     const pristineSelection = isPristineTasklessValidationSelection(state, expectedIds);
     const cleanReviewRecovery = isCleanTasklessReviewValidationRecovery(state, expectedIds);
-    if (!pristineSelection && !cleanReviewRecovery) {
+    const completedTaskRecovery = isV2CompletedTaskValidationRecovery(cwd, state, expectedIds);
+    if (!pristineSelection && !cleanReviewRecovery && !completedTaskRecovery) {
       throw new StateError(
-        'Taskless validation selection requires either a pristine first-discovery cycle or a clean exact-head review recovery',
+        'Taskless validation selection requires a pristine cycle, clean exact-head review recovery, or proven v2 completed-task recovery',
         'INITIAL_VALIDATION_NOT_ALLOWED',
       );
     }
@@ -435,22 +461,23 @@ function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, initi
     }
     validationInputs = [{
       schemaVersion: 2,
-      taskId: cleanReviewRecovery ? 'taskless-clean-review-validation-recovery' : 'initial-validation-selection',
+      taskId: cleanReviewRecovery ? 'taskless-clean-review-validation-recovery'
+        : completedTaskRecovery ? 'v2-completed-task-validation-recovery' : 'initial-validation-selection',
       reviewedHeadSha: initialSelection.headSha,
-      finding: cleanReviewRecovery
-        ? 'Taskless targeted-validation recovery after a clean exact-head review.'
-        : 'Initial pull-request validation selection.',
-      evidence: cleanReviewRecovery
-        ? 'Explicit orchestrator-selected validation for the preserved clean exact-head review.'
-        : 'Explicit orchestrator-selected validation before the first discovery review.',
+      finding: cleanReviewRecovery ? 'Taskless targeted-validation recovery after a clean exact-head review.'
+        : completedTaskRecovery ? 'Fresh targeted validation after schema-v2 completed-task migration.'
+          : 'Initial pull-request validation selection.',
+      evidence: cleanReviewRecovery ? 'Explicit orchestrator-selected validation for the preserved clean exact-head review.'
+        : completedTaskRecovery ? 'Immutable schema-v2 backup authorizes fresh orchestrator-selected validation.'
+          : 'Explicit orchestrator-selected validation before the first discovery review.',
       affectedAreas: initialSelection.affectedAreas,
       decisionIds: [],
       allowedPaths: ['scripts/**'],
       forbiddenPaths: [],
       dependencies: [],
-      acceptanceCriteria: [cleanReviewRecovery
-        ? 'The selected taskless recovery checks pass.'
-        : 'The selected initial checks pass.'],
+      acceptanceCriteria: [cleanReviewRecovery ? 'The selected taskless recovery checks pass.'
+        : completedTaskRecovery ? 'The selected completed-task migration recovery checks pass.'
+          : 'The selected initial checks pass.'],
       requiredValidation: initialSelection.requiredValidation,
     }];
     packetIds = [];

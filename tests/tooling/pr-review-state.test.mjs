@@ -210,6 +210,18 @@ function migrateTasklessPendingReview(cwd) {
   return migrateState({ cwd }).state;
 }
 
+function migrateCompletedTaskCycle(cwd, phase) {
+  let source = ready(init(cwd));
+  if (phase === 'complete') {
+    source = buildReviewRequestTransition(source, request(source), external(cwd, source));
+    source = buildReviewOutcomeTransition(source, outcome(source));
+    source = buildCiValidationTransition(source, ciEvidence(source));
+    source = buildCompletionTransition(source, external(cwd, source));
+  }
+  writeFileSync(statePath(cwd, source.prNumber), `${JSON.stringify(schemaV2State(source))}\n`);
+  return { source, migrated: migrateState({ cwd }).state };
+}
+
 function legacyTask(workerCommitSha, overrides = {}) {
   return {
     id: 'legacy-task', sourceIds: ['review:9', 'discussion:99', 'discussion:99'],
@@ -514,6 +526,63 @@ test('taskless post-review validation recovery rejects pending, findings, tasks,
   assert.throws(() => buildTargetedValidationPlan({
     cwd: inconsistentCwd, initialSelection: initialSelection(inconsistent.currentIntegrationHeadSha),
   }), StateError);
+});
+
+test('v2 completed-task cycles rebuild fresh exact-head validation from immutable migration proof', () => {
+  for (const phase of ['ready-for-review', 'complete']) {
+    const cwd = repo();
+    const { source, migrated } = migrateCompletedTaskCycle(cwd, phase);
+    const preserved = {
+      tasks: structuredClone(migrated.tasks),
+      reviewRequest: structuredClone(migrated.reviewRequest),
+      reviewOutcome: structuredClone(migrated.reviewOutcome),
+      reviewHistory: structuredClone(migrated.reviewHistory),
+      threadResolutionStatus: structuredClone(migrated.threadResolutionStatus),
+    };
+    assert.equal(migrated.phase, 'recovering');
+    assert.equal(migrated.validationStatus.status, 'not-run');
+    assert.equal(source.validationStatus.status, 'passed');
+    const plan = buildTargetedValidationPlan({
+      cwd, initialSelection: initialSelection(migrated.currentIntegrationHeadSha), now: () => AT,
+    });
+    assert.deepEqual(plan.taskIds, []);
+    const result = executeTargetedValidationPlan({
+      cwd, runCommand: () => ({ status: 0 }), now: () => AT,
+    });
+    assert.equal(result.state.validationStatus.status, 'passed');
+    assert.equal(result.state.validationStatus.headSha, migrated.currentIntegrationHeadSha);
+    assert.deepEqual({
+      tasks: result.state.tasks,
+      reviewRequest: result.state.reviewRequest,
+      reviewOutcome: result.state.reviewOutcome,
+      reviewHistory: result.state.reviewHistory,
+      threadResolutionStatus: result.state.threadResolutionStatus,
+    }, preserved);
+  }
+});
+
+test('v2 completed-task validation recovery fails closed without exact immutable provenance', () => {
+  for (const mutate of [
+    (cwd) => rmSync(join(stateDirectory(cwd, 17), 'state.v2.backup.json')),
+    (cwd) => writeFileSync(join(stateDirectory(cwd, 17), 'state.v2.backup.json'), '{}\n'),
+    (_cwd, state) => writeFileSync(statePath(_cwd, 17), `${JSON.stringify({ ...state, blockedReasons: ['blocked'] })}\n`),
+  ]) {
+    const cwd = repo();
+    const { migrated } = migrateCompletedTaskCycle(cwd, 'ready-for-review');
+    mutate(cwd, migrated);
+    assert.throws(() => buildTargetedValidationPlan({
+      cwd, initialSelection: initialSelection(migrated.currentIntegrationHeadSha),
+    }), StateError);
+  }
+
+  const nativeCwd = repo();
+  const native = { ...ready(init(nativeCwd)), phase: 'recovering', validationStatus: {
+    source: 'orchestrator', scope: 'targeted', status: 'not-run', headSha: null, checks: [], updatedAt: null,
+  } };
+  writeFileSync(statePath(nativeCwd, native.prNumber), `${JSON.stringify(native)}\n`);
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: nativeCwd, initialSelection: initialSelection(native.currentIntegrationHeadSha),
+  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
 });
 
 test('migration keeps worker and central cherry-pick SHAs distinct and preserves three-round provenance', () => {
