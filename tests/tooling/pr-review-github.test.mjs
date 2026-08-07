@@ -24,6 +24,7 @@ const BOT = {
   url: 'https://github.com/apps/chatgpt-codex-connector', id: 'BOT_codex',
 };
 const VIEWER = { __typename: 'User', login: 'maintainer', url: 'https://github.com/maintainer', id: 'USER_1' };
+const CLEAN_COMMENT_BODY = `${githubReviewConstants.CLEAN_ISSUE_COMMENT_TEMPLATE}\n\n**Reviewed commit:** \`${HEAD.slice(0, 10)}\`\n\n<details>About Codex</details>`;
 
 function proof(status = 'passed', headSha = HEAD) {
   return {
@@ -93,6 +94,24 @@ function completedState(overrides = {}) {
     reviewRequest: request, reviewOutcome: outcome, reviewHistory: [{ request, outcome }],
     nextAction: 'Complete.', ...overrides,
   });
+}
+
+function cleanIssueComment(overrides = {}) {
+  return {
+    id: 'IC_clean', databaseId: 202,
+    url: 'https://github.com/example/sky-bar/pull/2#issuecomment-202',
+    body: CLEAN_COMMENT_BODY, createdAt: AT, author: BOT, ...overrides,
+  };
+}
+
+function issueCommentCompletedState(overrides = {}) {
+  const state = completedState();
+  const comment = cleanIssueComment();
+  const outcome = {
+    ...state.reviewOutcome, id: comment.id, databaseId: comment.databaseId, url: comment.url,
+    at: comment.createdAt, evidenceType: 'issue-comment',
+  };
+  return { ...state, reviewOutcome: outcome, reviewHistory: [{ request: state.reviewRequest, outcome }], ...overrides };
 }
 
 function findingsState(overrides = {}) {
@@ -229,6 +248,7 @@ function fakeGit(overrides = {}) {
     snapshot: async () => ({ headSha: HEAD, dirty: false }),
     pushedHead: async () => HEAD,
     isAncestor: async () => true,
+    resolveCommitPrefix: async (prefix) => HEAD.startsWith(prefix) ? [HEAD] : [],
     ...overrides,
   };
 }
@@ -1079,6 +1099,64 @@ test('collect accepts only canonical exact request THUMBS_UP and ignores noncano
   assert.equal(state.calls.at(-1).name, 'checkpointReviewOutcome');
 });
 
+test('collect records a unique canonical exact-head clean issue comment', async () => {
+  const client = new FakeClient();
+  client.comments.push(cleanIssueComment());
+  const setup = workflow(pendingState('discovery'), client);
+  const result = await setup.api.collect(2);
+  assert.equal(result.outcome.evidenceType, 'issue-comment');
+  assert.equal(result.outcome.outcome, 'clean');
+  assert.equal(result.outcome.headSha, HEAD);
+  assert.equal(result.outcome.databaseId, 202);
+  assert.equal(result.outcome.reactionContent, null);
+  assert.equal(result.phase, 'validating');
+  assert.equal(setup.state.current.ciValidationStatus.status, 'not-run');
+});
+
+test('clean issue comments fail closed for actors, time, anchors, and Git resolution', async () => {
+  const cases = [
+    { comment: cleanIssueComment({ author: VIEWER }) },
+    { comment: cleanIssueComment({ createdAt: '2026-08-04T23:59:59Z' }) },
+    { comment: cleanIssueComment({ body: `${githubReviewConstants.CLEAN_ISSUE_COMMENT_TEMPLATE}\n\nNo anchor` }) },
+    { comment: cleanIssueComment({ body: `${githubReviewConstants.CLEAN_ISSUE_COMMENT_TEMPLATE}\n\n**Reviewed commit:** \`not-a-sha\`` }) },
+    { comment: cleanIssueComment({ body: CLEAN_COMMENT_BODY.replace(HEAD.slice(0, 10), OTHER_HEAD.slice(0, 10)) }) },
+    { comment: cleanIssueComment(), git: fakeGit({ resolveCommitPrefix: async () => [] }) },
+    { comment: cleanIssueComment(), git: fakeGit({ resolveCommitPrefix: async () => [HEAD, OTHER_HEAD] }) },
+  ];
+  for (const entry of cases) {
+    const client = new FakeClient();
+    client.comments.push(entry.comment);
+    await assert.rejects(
+      () => workflow(pendingState('discovery'), client, { git: entry.git }).api.collect(2),
+      { code: 'DISCOVERY_COLLECTION_UNRESOLVED' },
+    );
+  }
+
+  const incomplete = new FakeClient();
+  incomplete.comments.push(cleanIssueComment({ author: { ...BOT, id: null } }));
+  await assert.rejects(() => workflow(pendingState('discovery'), incomplete).api.collect(2), {
+    code: 'CANONICAL_ACTOR_INCOMPLETE',
+  });
+});
+
+test('a clean issue comment remains ambiguous beside any second canonical evidence', async () => {
+  for (const second of ['comment', 'review', 'reaction']) {
+    const client = new FakeClient();
+    client.comments.push(cleanIssueComment());
+    if (second === 'comment') client.comments.push(cleanIssueComment({ id: 'IC_clean_2', databaseId: 203 }));
+    if (second === 'review') client.reviews.push({
+      id: 'PRR_clean_2', databaseId: 204, url: 'https://x/review', body: '', state: 'COMMENTED',
+      submittedAt: AT, commit: { oid: HEAD }, author: BOT,
+    });
+    if (second === 'reaction') client.reactions.set('IC_request', [{
+      id: 'REACTION_clean_2', content: 'THUMBS_UP', createdAt: AT, user: BOT,
+    }]);
+    await assert.rejects(() => workflow(pendingState('discovery'), client).api.collect(2), {
+      code: 'DISCOVERY_COLLECTION_UNRESOLVED',
+    });
+  }
+});
+
 test('collect escalates verification live drift, stale evidence, and exact-head ambiguity truthfully', async () => {
   const driftClient = new FakeClient();
   driftClient.metadata.headRefOid = OTHER_HEAD;
@@ -1177,6 +1255,29 @@ test('complete performs fresh live proof and uses guarded completion only when e
   await assert.rejects(() => workflow(completedState(), unrecordedResolved).api.complete(2), {
     code: 'ROOT_IDENTITY_MISMATCH',
   });
+});
+
+test('complete freshly revalidates clean issue-comment identity and content', async () => {
+  const goodClient = new FakeClient();
+  goodClient.comments.push(cleanIssueComment());
+  assert.equal((await workflow(issueCommentCompletedState(), goodClient).api.complete(2)).phase, 'complete');
+
+  const mutations = [
+    null,
+    cleanIssueComment({ databaseId: 999 }),
+    cleanIssueComment({ url: 'https://github.com/example/sky-bar/pull/2#issuecomment-mutated' }),
+    cleanIssueComment({ createdAt: '2026-08-05T00:00:01Z' }),
+    cleanIssueComment({ author: { ...BOT, id: 'BOT_changed' } }),
+    cleanIssueComment({ body: CLEAN_COMMENT_BODY.replace('Nice work!', 'Good work!') }),
+    cleanIssueComment({ body: CLEAN_COMMENT_BODY.replace(HEAD.slice(0, 10), OTHER_HEAD.slice(0, 10)) }),
+  ];
+  for (const comment of mutations) {
+    const client = new FakeClient();
+    if (comment) client.comments.push(comment);
+    await assert.rejects(() => workflow(issueCommentCompletedState(), client).api.complete(2), {
+      code: 'COMPLETION_NOT_READY',
+    });
+  }
 });
 
 test('complete reruns review and thread proof after checkpointing CI', async () => {

@@ -125,6 +125,8 @@ function defaultGit() {
         return false;
       }
     },
+    resolveCommitPrefix: (prefix, cwd) => gitText(cwd, ['rev-list', '--all'])
+      .split('\n').filter((sha) => sha.startsWith(prefix)),
   };
 }
 

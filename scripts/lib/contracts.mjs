@@ -704,7 +704,7 @@ function validateReviewOutcome(value, path, errors) {
   if (!isString(value.requestId, { min: 1, max: 256 })) errors.push(`${path}.requestId is invalid`);
   if (!['discovery', 'verification'].includes(value.kind)) errors.push(`${path}.kind is invalid`);
   if (!['clean', 'findings'].includes(value.outcome)) errors.push(`${path}.outcome is invalid`);
-  if (!['review-submission', 'request-reaction'].includes(value.evidenceType)) {
+  if (!['review-submission', 'request-reaction', 'issue-comment'].includes(value.evidenceType)) {
     errors.push(`${path}.evidenceType is invalid`);
   }
   if (value.reviewerLogin !== 'chatgpt-codex-connector') errors.push(`${path}.reviewerLogin must identify canonical Codex`);
@@ -717,8 +717,13 @@ function validateReviewOutcome(value, path, errors) {
     if (value.outcome !== 'clean') errors.push(`${path} request-reaction evidence may only prove a clean outcome`);
     if (value.reactionContent !== 'THUMBS_UP') errors.push(`${path}.reactionContent must be THUMBS_UP`);
     if (value.reactionCommentId !== value.requestId) errors.push(`${path}.reactionCommentId must equal requestId`);
-  } else if (value.reactionContent !== null || value.reactionCommentId !== null) {
-    errors.push(`${path} review-submission evidence cannot include reaction fields`);
+  } else {
+    if (value.reactionContent !== null || value.reactionCommentId !== null) {
+      errors.push(`${path} non-reaction evidence cannot include reaction fields`);
+    }
+    if (value.evidenceType === 'issue-comment' && value.outcome !== 'clean') {
+      errors.push(`${path} issue-comment evidence may only prove a clean outcome`);
+    }
   }
 }
 

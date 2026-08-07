@@ -79,8 +79,12 @@ there are no open Codex threads.
 Only the orchestrator posts exactly `@codex review`. Record the Review commit
 and request evidence. After targeted validation and push, Codex review and full
 CI may run concurrently. Accept ordinary review evidence only when the review
-commit, recorded request commit, and current PR head all match. The recorded
-request can also anchor Codex's clean thumbs-up while its commit remains current.
+commit, recorded request commit, and current PR head all match. Clean evidence
+may also be the canonical Bot's official top-level no-major-issues comment when
+its structured `Reviewed commit` anchor resolves uniquely through complete
+local Git history to every current head, or a thumbs-up on the recorded request.
+Either form must follow the request; multiple canonical evidence items are
+ambiguous.
 
 ## Phase 6: Finish or recover
 

@@ -277,7 +277,7 @@
         "requestId": { "type": "string", "minLength": 1, "maxLength": 256 },
         "kind": { "enum": ["discovery", "verification"] },
         "outcome": { "enum": ["clean", "findings"] },
-        "evidenceType": { "enum": ["review-submission", "request-reaction"] },
+        "evidenceType": { "enum": ["review-submission", "request-reaction", "issue-comment"] },
         "reviewerLogin": { "const": "chatgpt-codex-connector" },
         "reviewerNodeId": { "type": "string", "minLength": 1, "maxLength": 256 },
         "reviewerType": { "const": "Bot" },
@@ -298,6 +298,10 @@
           "else": {
             "properties": { "reactionContent": { "type": "null" }, "reactionCommentId": { "type": "null" } }
           }
+        },
+        {
+          "if": { "properties": { "evidenceType": { "const": "issue-comment" } }, "required": ["evidenceType"] },
+          "then": { "properties": { "outcome": { "const": "clean" } } }
         }
       ]
     },

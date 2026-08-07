@@ -287,6 +287,26 @@ test('state JSON Schema rejects terminal and review-ready states missing current
   assert.equal(validateSchema(complete), true, JSON.stringify(validateSchema.errors));
   assert.deepEqual(validatePrReviewState(ready), []);
   assert.deepEqual(validatePrReviewState(complete), []);
+  const issueCommentOutcome = {
+    ...complete.reviewOutcome, id: 'clean-comment', databaseId: 103,
+    url: 'https://github.com/example/sky-bar/pull/17#issuecomment-103', evidenceType: 'issue-comment',
+  };
+  const issueCommentState = completeStateFixture({
+    reviewOutcome: issueCommentOutcome,
+    reviewHistory: [{ request: complete.reviewRequest, outcome: issueCommentOutcome }],
+  });
+  assert.equal(validateSchema(issueCommentState), true, JSON.stringify(validateSchema.errors));
+  assert.deepEqual(validatePrReviewState(issueCommentState), []);
+  for (const outcome of [
+    { ...issueCommentOutcome, outcome: 'findings' },
+    { ...issueCommentOutcome, reactionContent: 'THUMBS_UP' },
+  ]) {
+    const malformed = completeStateFixture({
+      reviewOutcome: outcome, reviewHistory: [{ request: complete.reviewRequest, outcome }],
+    });
+    assert.equal(validateSchema(malformed), false);
+    assert.notDeepEqual(validatePrReviewState(malformed), []);
+  }
   const attemptProof = { ...complete.ciValidationStatus, checkRunId: 'CHECK_attempt_1' };
   const attemptAware = completeStateFixture({
     ciValidationStatus: attemptProof, ciValidationHistory: [attemptProof],

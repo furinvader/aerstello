@@ -5,6 +5,8 @@ import { reviewRequestGate, validatePrReviewState } from './contracts.mjs';
 const CANONICAL_LOGIN = 'chatgpt-codex-connector';
 const CANONICAL_URL = 'https://github.com/apps/chatgpt-codex-connector';
 const REQUEST_BODY = '@codex review';
+const CLEAN_ISSUE_COMMENT_TEMPLATE = "Codex Review: Didn't find any major issues. Nice work!";
+const CLEAN_ISSUE_COMMENT_PATTERN = /^Codex Review: Didn't find any major issues\. Nice work!\n\n\*\*Reviewed commit:\*\* `([0-9a-f]{7,40})`(?:\n|$)/u;
 const PAGE_SIZE = 50;
 const MAX_PAGES = 100;
 const MAX_NODES = 10_000;
@@ -631,6 +633,34 @@ function canonicalEvidenceId(item, prefix) {
   return `${prefix}:${item.id}`;
 }
 
+async function classifyCleanIssueComments({ comments, request, git, cwd, expectedHeads }) {
+  const exact = [];
+  const unsupported = [];
+  for (const comment of comments) {
+    if (typeof comment.body !== 'string' || !comment.body.startsWith(CLEAN_ISSUE_COMMENT_TEMPLATE)
+        || !isCanonicalActor(comment.author)) continue;
+    const match = CLEAN_ISSUE_COMMENT_PATTERN.exec(comment.body);
+    if (!match || !evidenceAtOrAfter(comment.createdAt, request.at)) {
+      unsupported.push(comment);
+      continue;
+    }
+    let candidates;
+    try {
+      candidates = await git.resolveCommitPrefix(match[1], cwd);
+    } catch {
+      candidates = [];
+    }
+    if (!Array.isArray(candidates) || candidates.length !== 1
+        || !/^[0-9a-f]{40}$/u.test(candidates[0])
+        || expectedHeads.some((head) => candidates[0] !== head)) {
+      unsupported.push(comment);
+      continue;
+    }
+    exact.push({ comment, headSha: candidates[0] });
+  }
+  return { exact, unsupported };
+}
+
 function assertRecordedRequestComment(state, live) {
   const request = state.reviewRequest;
   if (!request) throw new GitHubWorkflowError('Review request is missing', 'REVIEW_NOT_PENDING');
@@ -1019,7 +1049,7 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       });
       return { escalated: true, escalation: active.verificationEscalation };
     }
-    await assertMutationReady({ state: active, git }, live);
+    const heads = await assertMutationReady({ state: active, git }, live);
     const request = active.reviewRequest;
     const canonicalReviews = live.reviews.filter((review) => isCanonicalActor(review.author)
       && evidenceAtOrAfter(review.submittedAt, request.at));
@@ -1032,12 +1062,19 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       && isCanonicalActor(reaction.user) && evidenceAtOrAfter(reaction.createdAt, request.at));
     const unsupportedReactions = live.reactions.filter((reaction) => reaction.content === 'THUMBS_UP'
       && isCanonicalActor(reaction.user) && !evidenceAtOrAfter(reaction.createdAt, request.at));
+    const cleanComments = await classifyCleanIssueComments({
+      comments: live.comments, request, git, cwd: active.integrationWorktree,
+      expectedHeads: [request.headSha, active.currentIntegrationHeadSha, heads.pushedHeadSha,
+        live.metadata.headRefOid],
+    });
     const evidence = [
       ...exactReviews.map((review) => ({ type: 'review', value: review })),
       ...exactReactions.map((reaction) => ({ type: 'reaction', value: reaction })),
+      ...cleanComments.exact.map((item) => ({ type: 'issue-comment', value: item })),
     ];
     if (evidence.length !== 1 || staleReviews.length > 0
-        || unsupportedReviews.length > 0 || unsupportedReactions.length > 0) {
+        || unsupportedReviews.length > 0 || unsupportedReactions.length > 0
+        || cleanComments.unsupported.length > 0) {
       if (request.kind !== 'verification') {
         throw new GitHubWorkflowError('Discovery review evidence is stale or ambiguous', 'DISCOVERY_COLLECTION_UNRESOLVED');
       }
@@ -1047,11 +1084,14 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
         ...unsupportedReviews.map((item) => canonicalEvidenceId(item, 'review')),
         ...exactReactions.map((item) => canonicalEvidenceId(item, 'reaction')),
         ...unsupportedReactions.map((item) => canonicalEvidenceId(item, 'reaction')),
+        ...cleanComments.exact.map((item) => canonicalEvidenceId(item.comment, 'issue-comment')),
+        ...cleanComments.unsupported.map((item) => canonicalEvidenceId(item, 'issue-comment')),
       ];
       if (ids.length === 0) {
         throw new GitHubWorkflowError('Canonical review evidence is not available yet', 'REVIEW_NOT_AVAILABLE');
       }
       const reason = unsupportedReviews.length > 0 || unsupportedReactions.length > 0
+        || cleanComments.unsupported.length > 0
         || evidence.length > 1 || (evidence.length === 1 && ids.length > 1)
         ? 'ambiguous-canonical-evidence' : 'stale-canonical-evidence';
       active = await stateAdapter.checkpointVerificationEscalation({
@@ -1071,6 +1111,16 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
         reviewerLogin: reaction.user.login, reviewerNodeId: reaction.user.id,
         reviewerType: reaction.user.__typename, reviewerUrl: reaction.user.url,
         reactionContent: 'THUMBS_UP', reactionCommentId: request.id,
+      };
+    } else if (selected.type === 'issue-comment') {
+      const { comment, headSha } = selected.value;
+      outcome = {
+        id: comment.id, databaseId: comment.databaseId ?? null, url: comment.url,
+        headSha, at: comment.createdAt, requestId: request.id, kind: request.kind,
+        outcome: 'clean', evidenceType: 'issue-comment',
+        reviewerLogin: comment.author.login, reviewerNodeId: comment.author.id,
+        reviewerType: comment.author.__typename, reviewerUrl: comment.author.url,
+        reactionContent: null, reactionCommentId: null,
       };
     } else {
       const review = selected.value;
@@ -1093,7 +1143,7 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
 
   async function complete(prNumber) {
     let active = await load(prNumber);
-    function assertCompletionLiveEvidence(state, live) {
+    async function assertCompletionLiveEvidence(state, live, heads) {
       assertRecordedRequestComment(state, live);
       if (live.threads.some((thread) => thread.canonical && !thread.isResolved)) {
         throw new GitHubWorkflowError('Canonical threads are still unresolved', 'COMPLETION_NOT_READY');
@@ -1104,21 +1154,42 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
           || state.reviewRequest?.headSha !== live.metadata.headRefOid) {
         throw new GitHubWorkflowError('Clean canonical outcome does not apply to live PR HEAD', 'COMPLETION_NOT_READY');
       }
-      const outcomeIsLive = state.reviewOutcome.evidenceType === 'review-submission'
-        ? live.reviews.some((review) => review.id === state.reviewOutcome.id
+      let outcomeIsLive;
+      if (state.reviewOutcome.evidenceType === 'review-submission') {
+        outcomeIsLive = live.reviews.some((review) => review.id === state.reviewOutcome.id
           && review.state === 'COMMENTED' && review.commit?.oid === live.metadata.headRefOid
-          && isCanonicalActor(review.author) && evidenceAtOrAfter(review.submittedAt, state.reviewRequest.at))
-        : live.reactions.some((reaction) => reaction.id === state.reviewOutcome.id
+          && isCanonicalActor(review.author) && evidenceAtOrAfter(review.submittedAt, state.reviewRequest.at));
+      } else if (state.reviewOutcome.evidenceType === 'request-reaction') {
+        outcomeIsLive = live.reactions.some((reaction) => reaction.id === state.reviewOutcome.id
           && reaction.content === 'THUMBS_UP' && isCanonicalActor(reaction.user)
           && evidenceAtOrAfter(reaction.createdAt, state.reviewRequest.at));
+      } else {
+        const classified = await classifyCleanIssueComments({
+          comments: live.comments.filter((comment) => comment.id === state.reviewOutcome.id),
+          request: state.reviewRequest, git, cwd: state.integrationWorktree,
+          expectedHeads: [state.reviewRequest.headSha, state.currentIntegrationHeadSha,
+            heads.pushedHeadSha, live.metadata.headRefOid],
+        });
+        outcomeIsLive = classified.exact.length === 1 && classified.unsupported.length === 0;
+        if (outcomeIsLive) {
+          const comment = classified.exact[0].comment;
+          outcomeIsLive = (comment.databaseId ?? null) === state.reviewOutcome.databaseId
+            && comment.url === state.reviewOutcome.url
+            && sameTimestamp(comment.createdAt, state.reviewOutcome.at)
+            && comment.author.login === state.reviewOutcome.reviewerLogin
+            && comment.author.id === state.reviewOutcome.reviewerNodeId
+            && comment.author.__typename === state.reviewOutcome.reviewerType
+            && comment.author.url === state.reviewOutcome.reviewerUrl;
+        }
+      }
       if (!outcomeIsLive) {
         throw new GitHubWorkflowError('Recorded clean outcome is not proven live', 'COMPLETION_NOT_READY');
       }
     }
 
     let live = await readLiveSnapshot(client, active, { reactionsFor: active.reviewRequest?.id ?? null });
-    await assertMutationReady({ state: active, git }, live);
-    assertCompletionLiveEvidence(active, live);
+    let completionHeads = await assertMutationReady({ state: active, git }, live);
+    await assertCompletionLiveEvidence(active, live, completionHeads);
     const snapshot = await readPullRequestChecks(
       client, active.repository, active.prNumber, live.metadata.headRefOid,
     );
@@ -1131,7 +1202,8 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     });
     live = await readLiveSnapshot(client, active, { reactionsFor: active.reviewRequest?.id ?? null });
     const refreshedHeads = await assertMutationReady({ state: active, git }, live);
-    assertCompletionLiveEvidence(active, live);
+    completionHeads = refreshedHeads;
+    await assertCompletionLiveEvidence(active, live, completionHeads);
     const finalCiSnapshot = await readPullRequestChecks(
       client, active.repository, active.prNumber, live.metadata.headRefOid,
     );
@@ -1153,5 +1225,5 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
 
 export const githubReviewConstants = {
   CANONICAL_LOGIN, CANONICAL_URL, REQUEST_BODY, PAGE_SIZE, FULL_VALIDATION_CHECK, GITHUB_ACTIONS_APP,
-  FULL_VALIDATION_WORKFLOW, FULL_VALIDATION_WORKFLOW_PATH,
+  FULL_VALIDATION_WORKFLOW, FULL_VALIDATION_WORKFLOW_PATH, CLEAN_ISSUE_COMMENT_TEMPLATE,
 };

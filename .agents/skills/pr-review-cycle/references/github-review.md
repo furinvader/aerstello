@@ -59,10 +59,17 @@ Read structured GitHub data. An ordinary review applies only when:
 review commit == recorded Review commit == current PR head
 ```
 
-Any mismatch is stale. Do not infer commit identity from review prose. Codex's
-clean thumbs-up on the recorded request may also be accepted while the request's
-commit still equals the current PR head. A reaction elsewhere or after head
-drift is stale.
+Any mismatch is stale. Do not infer commit identity from ordinary review prose.
+Codex's official top-level
+`Codex Review: Didn't find any major issues. Nice work!` comment may prove clean
+only when it follows the recorded request, has the exact structured
+`**Reviewed commit:** \`<abbreviated-sha>\`` anchor, and that prefix resolves
+uniquely through complete local Git history to the recorded request,
+integration, pushed, and live PR commit. Record its immutable comment identity
+as `issue-comment` evidence. A clean thumbs-up on the recorded request may also
+be accepted while its commit remains current. Multiple canonical reviews,
+clean comments, or reactions are ambiguous; foreign, pre-request, malformed,
+unresolvable, or stale evidence fails closed.
 
 ## Resolve findings
 
@@ -100,7 +107,7 @@ it never marks a threadless remediation task verified and never writes GitHub.
 The cycle is Done only when all of these facts apply to one Review commit:
 
 1. The commit remains review-ready and is the current PR head.
-2. Codex returned a clean applicable review or eligible clean thumbs-up.
+2. Codex returned a clean applicable review, clean issue comment, or eligible clean thumbs-up.
 3. Full GitHub Actions checks passed.
 4. The full E2E suite and complete browser/device matrix passed in CI.
 5. Every finding has a recorded outcome and every actionable task is Resolved.
