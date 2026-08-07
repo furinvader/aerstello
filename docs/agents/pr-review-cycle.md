@@ -84,6 +84,19 @@ SHAs. It rejects pending, finding, stale, dirty, or inconsistent states and does
 not infer checks from a missing legacy plan or replace an existing passing proof
 after an ordinary taskless review.
 
+There is one further migration-only `--initial-selection` route for completed
+tasks. The active state must be `recovering` with targeted validation `not-run`,
+a clean exact current integration HEAD, zero actionable Integrated tasks, a
+nonempty task list containing only completed tasks, and no blocked reason,
+verification escalation, or `needs-human-decision` disposition. Its immutable
+`state.v2.backup.json` must describe a schema-v2 `ready-for-review` or `complete`
+source with an exact-head passed, nonempty legacy targeted proof. Canonically
+migrating that backup must reproduce the active repository, PR, HEAD, task,
+review, and thread identities exactly. The backup authorizes a fresh explicit
+plan only: run all selected checks again and record new exact-head validation;
+never reuse the legacy pass as current proof. Native schema-v3 states and
+missing, mismatched, or tampered backups are rejected.
+
 Done is stricter. A clean Codex review, full green CI, full E2E, the current PR
 head, and the no-open-thread check must all refer to the same Review commit.
 
