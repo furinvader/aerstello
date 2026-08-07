@@ -335,9 +335,14 @@ function fakeState(initial) {
       if (input.threadResolutionStatus.threadlessVerification.status === 'passed') {
         input.threadResolutionStatus.threadlessVerification.taskIds.forEach((taskId) => covered.add(taskId));
       }
+      const verifiedLocal = new Set(input.verifiedLocalTaskIds ?? []);
+      const tasks = current.tasks.map((task) => (
+        covered.has(task.id) || (task.sourceType === 'local' && verifiedLocal.has(task.id))
+          ? { ...task, status: 'completed' } : task
+      ));
+      const next = { ...current, threadResolutionStatus: input.threadResolutionStatus, tasks };
       current = {
-        ...current, revision: current.revision + 1, threadResolutionStatus: input.threadResolutionStatus,
-        tasks: current.tasks.map((task) => covered.has(task.id) ? { ...task, status: 'completed' } : task),
+        ...next, revision: current.revision + 1,
       };
       return structuredClone(current);
     },
@@ -1077,11 +1082,25 @@ function integratedThreadState(sourceIds = ['thread:THREAD_1']) {
   });
 }
 
+function integratedNonThreadState(sourceType = 'local', id = 'task-local') {
+  return readyState({
+    phase: 'verifying',
+    tasks: [{
+      id, sourceIds: [sourceType === 'local' ? 'local:verifier' : 'review:threadless'], sourceType,
+      fingerprint: `fp-${id}`, summary: 'Verify a non-thread finding.', severity: 'P1',
+      disposition: 'actionable', status: 'integrated', integratedCommitSha: HEAD,
+      resolutionSummary: 'Integrated and verified.',
+    }],
+  });
+}
+
 test('reply-resolve identifies explicit root, deduplicates shared source identities, replies before resolve, and re-queries proof', async () => {
   const events = [];
   const client = new FakeClient({ events });
   addThread(client);
-  const { api, state } = workflow(integratedThreadState(['thread:THREAD_1', 'discussion:41']), client);
+  const initial = integratedThreadState(['thread:THREAD_1', 'discussion:41']);
+  initial.tasks.push(integratedNonThreadState().tasks[0]);
+  const { api, state } = workflow(initial, client);
   const result = await api.replyResolve(2, 'task-thread');
   assert.deepEqual(events.filter((item) => item.startsWith('mutation:')), ['mutation:AddThreadReply', 'mutation:ResolveThread']);
   assert.equal(client.calls.filter((call) => call.name === 'AddThreadReply').length, 1);
@@ -1089,6 +1108,8 @@ test('reply-resolve identifies explicit root, deduplicates shared source identit
   assert.match(client.threadComments.get('THREAD_1')[1].body, /<!-- sky-bar-review:[0-9a-f]{24} -->/u);
   assert.equal(result.threadResolutionStatus.status, 'passed');
   assert.equal(state.current.tasks[0].status, 'completed');
+  assert.equal(state.current.tasks[1].status, 'integrated');
+  assert.deepEqual(state.calls.at(-1).input.verifiedLocalTaskIds, undefined);
 });
 
 test('reply-resolve reuses a crash reply marker, resumes resolve, and never trusts mutation responses', async () => {
@@ -1137,6 +1158,170 @@ test('threadless task completion consumes only successful exact-head verificatio
     status: 'not-run', headSha: null, taskIds: [], updatedAt: null,
   };
   await assert.rejects(() => workflow(missing).api.replyResolve(2, 'threadless'), { code: 'TASK_NOT_READY' });
+});
+
+test('verify-resolve completes only the selected local task after repeated read-only exact-head guards', async () => {
+  const state = integratedNonThreadState();
+  state.tasks.push({
+    ...state.tasks[0], id: 'task-other-local', fingerprint: 'fp-task-other-local',
+  });
+  const client = new FakeClient({ pageSize: 1 });
+  const journal = {
+    async lookupIntent() { throw new Error('verify-resolve must not read the mutation journal'); },
+    async ensureIntent() { throw new Error('verify-resolve must not write the mutation journal'); },
+  };
+  const setup = workflow(state, client, { journal });
+  const result = await setup.api.verifyResolve(2, 'task-local');
+  assert.equal(result.taskId, 'task-local');
+  assert.deepEqual(setup.state.current.tasks.map((task) => task.status), ['completed', 'integrated']);
+  assert.deepEqual(setup.state.calls.at(-1).input.verifiedLocalTaskIds, ['task-local']);
+  assert.ok(client.calls.filter((call) => call.name === 'PullRequestThreads').length >= 2);
+  assert.equal(client.calls.some((call) => call.name.startsWith('Add') || call.name === 'ResolveThread'), false);
+
+  const revision = setup.state.current.revision;
+  const checkpointCount = setup.state.calls.length;
+  const retried = await setup.api.verifyResolve(2, 'task-local');
+  assert.equal(retried.stateRevision, revision);
+  assert.equal(setup.state.current.revision, revision);
+  assert.equal(setup.state.calls.length, checkpointCount);
+});
+
+test('verify-resolve creates current-head threadless proof and preserves prior proven IDs', async () => {
+  const state = integratedNonThreadState('github-threadless', 'threadless-new');
+  state.tasks.unshift({
+    ...state.tasks[0], id: 'threadless-prior', fingerprint: 'fp-threadless-prior', status: 'completed',
+  });
+  state.threadResolutionStatus = {
+    ...proof(),
+    threadlessVerification: {
+      status: 'passed', headSha: HEAD, taskIds: ['threadless-prior'], updatedAt: AT,
+    },
+  };
+  const client = new FakeClient();
+  const setup = workflow(state, client);
+  await setup.api.verifyResolve(2, 'threadless-new');
+  assert.deepEqual(
+    setup.state.current.threadResolutionStatus.threadlessVerification.taskIds,
+    ['threadless-new', 'threadless-prior'],
+  );
+  assert.equal(setup.state.current.threadResolutionStatus.threadlessVerification.headSha, HEAD);
+  assert.ok(setup.state.current.tasks.every((task) => task.status === 'completed'));
+  assert.deepEqual(setup.state.calls.at(-1).input.verifiedLocalTaskIds, []);
+  assert.equal(client.events.length, 0);
+});
+
+test('verify-resolve rejects unsupported and stale selections without state or GitHub mutation', async () => {
+  const unsupported = integratedThreadState();
+  const unsupportedClient = new FakeClient();
+  addThread(unsupportedClient);
+  const unsupportedSetup = workflow(unsupported, unsupportedClient);
+  await assert.rejects(() => unsupportedSetup.api.verifyResolve(2, 'task-thread'), { code: 'TASK_NOT_READY' });
+  assert.equal(unsupportedSetup.state.calls.length, 0);
+  assert.equal(unsupportedClient.events.length, 0);
+
+  for (const [label, state, options, code] of [
+    ['missing', integratedNonThreadState(), {}, 'TASK_NOT_FOUND'],
+    ['unintegrated', (() => {
+      const value = integratedNonThreadState();
+      value.tasks[0] = {
+        ...value.tasks[0], status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+        execution: {
+          dependencies: [], ownedPaths: ['scripts/example.mjs'], worker: 'review_fix_worker',
+          branch: null, worktree: null, workerCommitSha: null, validationSummaries: [], lastError: null,
+        },
+      };
+      return value;
+    })(), {}, 'TASK_NOT_READY'],
+    ['unvalidated', (() => {
+      const value = integratedNonThreadState();
+      value.validationStatus = stateFixture().validationStatus;
+      return value;
+    })(), {}, 'TASK_NOT_READY'],
+    ['dirty', integratedNonThreadState(), {
+      git: fakeGit({ snapshot: async () => ({ headSha: HEAD, dirty: true }) }),
+    }, 'MUTATION_NOT_READY'],
+    ['unpushed', integratedNonThreadState(), {
+      git: fakeGit({ pushedHead: async () => OTHER_HEAD }),
+    }, 'MUTATION_NOT_READY'],
+    ['non-ancestor', integratedNonThreadState(), {
+      git: fakeGit({ isAncestor: async () => false }),
+    }, 'MUTATION_NOT_READY'],
+    ['live-head', integratedNonThreadState(), {}, 'MUTATION_NOT_READY'],
+  ]) {
+    const client = new FakeClient(label === 'live-head' ? { metadata: {
+      id: 'PR_node', number: 2, url: 'https://github.com/example/sky-bar/pull/2',
+      headRefOid: OTHER_HEAD, viewer: VIEWER,
+    } } : {});
+    const setup = workflow(state, client, options);
+    const taskId = label === 'missing' ? 'missing-task' : state.tasks[0].id;
+    await assert.rejects(() => setup.api.verifyResolve(2, taskId), { code }, label);
+    assert.equal(setup.state.calls.length, 0, label);
+    assert.equal(client.events.length, 0, label);
+  }
+});
+
+test('verify-resolve rechecks state and canonical root resolution before its state-only checkpoint', async () => {
+  const racedState = fakeState(integratedNonThreadState());
+  const originalLoad = racedState.load.bind(racedState);
+  let stateReads = 0;
+  racedState.load = async () => {
+    const state = await originalLoad();
+    stateReads += 1;
+    return stateReads > 1 ? { ...state, revision: state.revision + 1 } : state;
+  };
+  const racedClient = new FakeClient();
+  const raced = createGitHubReviewWorkflow({
+    client: racedClient, state: racedState, git: fakeGit(), clock: { now: () => AT }, journal: null,
+  });
+  await assert.rejects(() => raced.verifyResolve(2, 'task-local'), { code: 'STATE_REVISION_CHANGED' });
+  assert.equal(racedState.calls.length, 0);
+  assert.equal(racedClient.events.length, 0);
+
+  const unexpectedRootClient = new FakeClient();
+  addThread(unexpectedRootClient);
+  const unexpectedRoot = workflow(integratedNonThreadState(), unexpectedRootClient);
+  await assert.rejects(() => unexpectedRoot.api.verifyResolve(2, 'task-local'), {
+    code: 'ROOT_IDENTITY_MISMATCH',
+  });
+  assert.equal(unexpectedRoot.state.calls.length, 0);
+  assert.equal(unexpectedRootClient.events.length, 0);
+
+  const threadState = integratedThreadState();
+  threadState.tasks[0].status = 'completed';
+  threadState.tasks.push(integratedNonThreadState().tasks[0]);
+  threadState.threadResolutionStatus = {
+    status: 'passed', headSha: HEAD, updatedAt: AT,
+    threadlessVerification: proof('not-run').threadlessVerification,
+    threads: [{
+      threadNodeId: 'THREAD_1', rootCommentNodeId: 'ROOT_THREAD_1', rootCommentDatabaseId: 41,
+      taskIds: ['task-thread'], disposition: 'fixed', replyId: 'REPLY_1', replyUrl: 'https://x/reply',
+      isResolved: true, resolvedAt: AT, resolvedBy: VIEWER.login, observedHeadSha: HEAD,
+    }],
+  };
+  const operationId = `reply:2:THREAD_1:${HEAD}`;
+  class ResolutionRaceClient extends FakeClient {
+    threadReads = 0;
+
+    async graphql(input) {
+      if (input.name === 'PullRequestThreads') {
+        this.threadReads += 1;
+        if (this.threadReads > 1) this.threads[0].isResolved = false;
+      }
+      return super.graphql(input);
+    }
+  }
+  const resolutionClient = new ResolutionRaceClient();
+  addThread(resolutionClient, { resolved: true, replies: [{
+    id: 'REPLY_1', databaseId: 901, url: 'https://x/reply', createdAt: AT, author: VIEWER,
+    replyTo: { id: 'ROOT_THREAD_1' }, pullRequestReview: null,
+    body: `Sky Bar review resolution at ${HEAD}.\nTasks:\n- task-thread: ${HEAD}\nValidation: npm run check.\n${markerFor(operationId)}`,
+  }] });
+  const resolutionRace = workflow(threadState, resolutionClient);
+  await assert.rejects(() => resolutionRace.api.verifyResolve(2, 'task-local'), {
+    code: 'THREAD_PROOF_STALE',
+  });
+  assert.equal(resolutionRace.state.calls.length, 0);
+  assert.equal(resolutionClient.events.length, 0);
 });
 
 test('reply-resolve fails on ambiguous roots and duplicate idempotency markers', async () => {
@@ -1543,9 +1728,10 @@ test('complete ignores unrelated context changes between authoritative CI reads'
 });
 
 test('CLI exposes exactly the documented explicit-PR command surface and JSON-ready results', async () => {
-  assert.match(usage(), /status[\s\S]*refresh-threads[\s\S]*reply-resolve[\s\S]*request[\s\S]*collect[\s\S]*collect-ci[\s\S]*complete/u);
+  assert.match(usage(), /status[\s\S]*refresh-threads[\s\S]*reply-resolve[\s\S]*verify-resolve[\s\S]*request[\s\S]*collect[\s\S]*collect-ci[\s\S]*complete/u);
   await assert.rejects(() => runCli(['collect'], {}), /--pr/u);
   await assert.rejects(() => runCli(['refresh-threads'], {}), /--pr/u);
+  await assert.rejects(() => runCli(['verify-resolve', '--pr', '2'], {}), /verify-resolve requires --task/u);
   await assert.rejects(() => runCli(['refresh-threads', '--pr', '2', '--task', 'x'], {}), /--task is only valid/u);
   await assert.rejects(() => runCli(['refresh-threads', '--pr', '2', '--kind', 'discovery'], {}), /--kind is only valid/u);
   await assert.rejects(() => runCli(['refresh-threads', '--pr', '2', '--human'], {}), /--human is only valid/u);
@@ -1567,6 +1753,12 @@ test('CLI exposes exactly the documented explicit-PR command surface and JSON-re
     client: new FakeClient(), state: taskless, git: fakeGit(), clock: { now: () => AT },
   });
   assert.equal(refreshed.threadResolutionStatus.status, 'passed');
+  const verifiedState = fakeState(integratedNonThreadState());
+  const verified = await runCli(['verify-resolve', '--pr', '2', '--task', 'task-local'], {
+    client: new FakeClient(), state: verifiedState, git: fakeGit(), clock: { now: () => AT },
+  });
+  assert.equal(verified.taskId, 'task-local');
+  assert.equal(verifiedState.current.tasks[0].status, 'completed');
   const human = await runCli(['status', '--human'], {
     client, state, git: fakeGit(), clock: { now: () => AT },
   });

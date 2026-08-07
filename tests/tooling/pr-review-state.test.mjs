@@ -1426,6 +1426,40 @@ test('structured canonical thread proof covers multiple tasks with one reply and
   assert.equal(completed.threadResolutionStatus.threads.length, 1);
 });
 
+test('guarded verifier completion selects only unique integrated local task IDs', () => {
+  const cwd = repo();
+  const state = init(cwd);
+  const head = state.currentIntegrationHeadSha;
+  const localA = task(head, { id: 'local-a', status: 'integrated', sourceType: 'local' });
+  const localB = task(head, { id: 'local-b', status: 'integrated', sourceType: 'local' });
+  const threadless = task(head, {
+    id: 'threadless', status: 'integrated', sourceType: 'github-threadless', sourceIds: ['review:threadless'],
+  });
+  const proof = {
+    status: 'passed', headSha: head, threads: [], threadlessVerification: emptyThreadless(), updatedAt: AT,
+  };
+  const unchanged = completeIntegratedTasks(
+    { ...state, tasks: [localA, localB, threadless] },
+    { threadResolutionStatus: proof },
+  );
+  assert.deepEqual(unchanged.tasks.map((item) => item.status), ['integrated', 'integrated', 'integrated']);
+
+  const selected = completeIntegratedTasks(
+    { ...state, tasks: [localA, localB, threadless] },
+    { threadResolutionStatus: proof, verifiedLocalTaskIds: ['local-b'] },
+  );
+  assert.deepEqual(selected.tasks.map((item) => item.status), ['integrated', 'completed', 'integrated']);
+
+  for (const verifiedLocalTaskIds of [
+    ['local-a', 'local-a'], ['missing'], ['threadless'], [''], 'local-a',
+  ]) {
+    assert.throws(() => completeIntegratedTasks(
+      { ...state, tasks: [localA, localB, threadless] },
+      { threadResolutionStatus: proof, verifiedLocalTaskIds },
+    ), { code: 'INVALID_TASK_COMPLETION' });
+  }
+});
+
 test('completion requires every exact source root to have disposition-matched replied resolved proof', () => {
   const cwd = repo();
   const state = init(cwd);

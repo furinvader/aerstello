@@ -19,7 +19,7 @@ import {
 } from './lib/pr-review-state.mjs';
 
 export function usage() {
-  return `Usage: node scripts/pr-review-github.mjs <command> [--pr <number>] [options]\n\nCommands:\n  status [--human]               Read live review and CI status (active PR by default)\n  refresh-threads                Record exact-head empty canonical-thread proof for a taskless cycle\n  reply-resolve --task <id>      Reply to and close one task's Codex review threads\n  request --kind <kind>          Request discovery or verification review\n  collect                        Collect official review evidence for the Review commit\n  collect-ci                     Collect full GitHub Actions evidence for the Review commit\n  complete                       Reconfirm every gate and mark the cycle Done\n\nRequired options:\n  --pr <number>                  Required except for status with an active state\n\nRequest options:\n  --kind discovery|verification\n\nReply-resolve options:\n  --task <task-id>\n\nSuccessful commands write JSON, except status --human which writes plain English.\n`;
+  return `Usage: node scripts/pr-review-github.mjs <command> [--pr <number>] [options]\n\nCommands:\n  status [--human]               Read live review and CI status (active PR by default)\n  refresh-threads                Record exact-head empty canonical-thread proof for a taskless cycle\n  reply-resolve --task <id>      Reply to and close one task's Codex review threads\n  verify-resolve --task <id>     Record guarded verifier approval for one non-thread task\n  request --kind <kind>          Request discovery or verification review\n  collect                        Collect official review evidence for the Review commit\n  collect-ci                     Collect full GitHub Actions evidence for the Review commit\n  complete                       Reconfirm every gate and mark the cycle Done\n\nRequired options:\n  --pr <number>                  Required except for status with an active state\n\nRequest options:\n  --kind discovery|verification\n\nTask resolution options:\n  --task <task-id>\n\nSuccessful commands write JSON, except status --human which writes plain English.\n`;
 }
 
 function titleCase(value) {
@@ -166,7 +166,7 @@ export async function runCli(argv, {
 } = {}) {
   const [command, ...args] = argv;
   if (!command || command === 'help' || command === '--help') return { help: usage() };
-  if (!['status', 'refresh-threads', 'reply-resolve', 'request', 'collect', 'collect-ci', 'complete'].includes(command)) {
+  if (!['status', 'refresh-threads', 'reply-resolve', 'verify-resolve', 'request', 'collect', 'collect-ci', 'complete'].includes(command)) {
     throw new UsageError(`Unknown command ${command}`);
   }
   const options = parseOptions(args, { booleans: ['help', 'human'], values: ['pr', 'task', 'kind'] });
@@ -174,8 +174,12 @@ export async function runCli(argv, {
   if (options._.length > 0) throw new UsageError(`Unexpected argument ${options._[0]}`);
   const prNumber = options.pr === undefined && command === 'status' ? undefined : parsePr(options.pr);
   if (command !== 'status' && options.human) throw new UsageError('--human is only valid for status');
-  if (command === 'reply-resolve' && !options.task) throw new UsageError('reply-resolve requires --task');
-  if (command !== 'reply-resolve' && options.task !== undefined) throw new UsageError('--task is only valid for reply-resolve');
+  if (['reply-resolve', 'verify-resolve'].includes(command) && !options.task) {
+    throw new UsageError(`${command} requires --task`);
+  }
+  if (!['reply-resolve', 'verify-resolve'].includes(command) && options.task !== undefined) {
+    throw new UsageError('--task is only valid for reply-resolve or verify-resolve');
+  }
   if (command === 'request' && !['discovery', 'verification'].includes(options.kind)) {
     throw new UsageError('request requires --kind discovery|verification');
   }
@@ -185,7 +189,8 @@ export async function runCli(argv, {
     state: state ?? defaultState(cwd),
     git,
     clock,
-    journal: journal ?? (['status', 'refresh-threads'].includes(command) ? null : defaultJournal(cwd, prNumber)),
+    journal: journal ?? (['status', 'refresh-threads', 'verify-resolve'].includes(command)
+      ? null : defaultJournal(cwd, prNumber)),
   });
   if (command === 'status') {
     const result = await workflow.status(prNumber);
@@ -193,6 +198,7 @@ export async function runCli(argv, {
   }
   if (command === 'refresh-threads') return workflow.refreshThreads(prNumber);
   if (command === 'reply-resolve') return workflow.replyResolve(prNumber, options.task);
+  if (command === 'verify-resolve') return workflow.verifyResolve(prNumber, options.task);
   if (command === 'request') return workflow.request(prNumber, options.kind);
   if (command === 'collect') return workflow.collect(prNumber);
   if (command === 'collect-ci') return workflow.collectCi(prNumber);

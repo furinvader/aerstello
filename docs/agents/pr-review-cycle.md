@@ -74,6 +74,17 @@ exact-head proof that the fully paginated canonical Codex thread set is empty.
 This read-only GitHub operation fails closed if any canonical root exists and
 does not verify later threadless remediation tasks.
 
+After read-only integration verification, resolve one actionable non-thread
+task with `verify-resolve --pr <number> --task <id>`. This state-only command is
+the orchestrator's guarded assertion that the selected `local` or
+`github-threadless` task passed verifier review at the exact current HEAD. It
+rechecks a clean checkout, equal local/pushed/live heads, task ancestry, state
+revision, and the fully paginated canonical root set without writing to GitHub
+or creating a mutation journal. It completes only the selected local task, or
+adds only the selected threadless ID while retaining prior exact-HEAD proof.
+GitHub-thread tasks remain on `reply-resolve`. The verifier assertion is guarded
+transition input; no separate persisted verifier-artifact schema is implied.
+
 A schema-v2 migration may preserve a taskless pending review for the exact
 integration HEAD while deliberately clearing legacy targeted-validation proof.
 After that preserved review is collected as clean, `validation-plan

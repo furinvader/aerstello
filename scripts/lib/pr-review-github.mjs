@@ -1029,6 +1029,69 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     return { taskId, stateRevision: active.revision, threadResolutionStatus: active.threadResolutionStatus };
   }
 
+  async function verifyResolve(prNumber, taskId) {
+    let active = await load(prNumber);
+    if (!stateAdapter.checkpointTaskCompletion) {
+      throw new GitHubWorkflowError('The guarded task-completion checkpoint is unavailable', 'INVALID_ADAPTERS');
+    }
+    const selectedTask = active.tasks.find((task) => task.id === taskId);
+    if (!selectedTask) throw new GitHubWorkflowError('Task was not found', 'TASK_NOT_FOUND');
+    if (!['local', 'github-threadless'].includes(selectedTask.sourceType)) {
+      throw new GitHubWorkflowError('Task must use reply-resolve for its canonical GitHub thread', 'TASK_NOT_READY');
+    }
+    if (selectedTask.disposition !== 'actionable'
+        || !['integrated', 'completed'].includes(selectedTask.status)
+        || !selectedTask.integratedCommitSha) {
+      throw new GitHubWorkflowError('Task is not an integrated actionable fix', 'TASK_NOT_READY');
+    }
+
+    let live = await readLiveSnapshot(client, active);
+    await assertMutationReady({ state: active, git }, live);
+    buildCanonicalRootPlan(active, live);
+    assertLiveThreadProof(active, live);
+    await assertCurrent(active);
+
+    live = await readLiveSnapshot(client, active);
+    await assertMutationReady({ state: active, git }, live);
+    buildCanonicalRootPlan(active, live);
+    assertLiveThreadProof(active, live);
+    await assertCurrent(active);
+
+    if (selectedTask.status === 'completed') {
+      if (selectedTask.sourceType === 'github-threadless') {
+        const verification = active.threadResolutionStatus.threadlessVerification;
+        if (verification.status !== 'passed' || verification.headSha !== active.currentIntegrationHeadSha
+            || !verification.taskIds.includes(taskId)) {
+          throw new GitHubWorkflowError('Completed threadless task lacks exact-head verifier proof', 'TASK_NOT_READY');
+        }
+      }
+      return { taskId, stateRevision: active.revision, threadResolutionStatus: active.threadResolutionStatus };
+    }
+
+    const verifiedAt = clock.now();
+    let threadResolutionStatus = buildThreadProof(active, live, new Map(), verifiedAt);
+    const verifiedLocalTaskIds = [];
+    if (selectedTask.sourceType === 'local') {
+      verifiedLocalTaskIds.push(taskId);
+    } else {
+      const previousIds = active.threadResolutionStatus.threadlessVerification.status === 'passed'
+        ? active.threadResolutionStatus.threadlessVerification.taskIds : [];
+      threadResolutionStatus = {
+        ...threadResolutionStatus,
+        threadlessVerification: {
+          status: 'passed',
+          headSha: active.currentIntegrationHeadSha,
+          taskIds: [...new Set([...previousIds, taskId])].sort(),
+          updatedAt: verifiedAt,
+        },
+      };
+    }
+    active = await stateAdapter.checkpointTaskCompletion({
+      prNumber, expectedRevision: active.revision, threadResolutionStatus, verifiedLocalTaskIds,
+    });
+    return { taskId, stateRevision: active.revision, threadResolutionStatus: active.threadResolutionStatus };
+  }
+
   async function collect(prNumber) {
     let active = await load(prNumber);
     if (!active.reviewRequest || active.reviewOutcome || active.reviewHistory.at(-1)?.outcome !== null) {
@@ -1235,7 +1298,7 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     return { completed: true, phase: active.phase, revision: active.revision };
   }
 
-  return { status, refreshThreads, replyResolve, request, collect, collectCi, complete };
+  return { status, refreshThreads, replyResolve, verifyResolve, request, collect, collectCi, complete };
 }
 
 export const githubReviewConstants = {

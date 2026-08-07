@@ -47,6 +47,7 @@ The supported helper commands are:
 node scripts/pr-review-github.mjs status --pr 123
 node scripts/pr-review-github.mjs status --human
 node scripts/pr-review-github.mjs reply-resolve --pr 123 --task finding-a
+node scripts/pr-review-github.mjs verify-resolve --pr 123 --task local-finding
 node scripts/pr-review-github.mjs request --pr 123 --kind discovery
 node scripts/pr-review-github.mjs collect --pr 123
 node scripts/pr-review-github.mjs collect-ci --pr 123
@@ -81,6 +82,17 @@ successful verification.
 
 A successful close mutation alone is not confirmation. Integrated is not
 Resolved, and neither means Done.
+
+For an actionable `local` or `github-threadless` task, run `verify-resolve`
+only after the read-only integration verifier has approved that selected task
+at the exact current HEAD. The command is the orchestrator's guarded assertion
+of that verifier result: it repeats clean-checkout, equal local/pushed/live
+HEAD, ancestry, state-revision, and fully paginated canonical-root checks before
+writing task state. It never mutates GitHub or creates a mutation journal. A
+local assertion completes only the selected task. A threadless assertion adds
+only the selected task ID to exact-HEAD threadless proof while preserving prior
+IDs. This assertion is transition input, not a persisted verifier-artifact
+schema. GitHub-thread tasks continue to use `reply-resolve`.
 
 ## Run Codex and CI together
 

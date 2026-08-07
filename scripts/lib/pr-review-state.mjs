@@ -1599,12 +1599,29 @@ export function executeTargetedValidationPlan({
   });
 }
 
-export function completeIntegratedTasks(state, { threadResolutionStatus }) {
+export function completeIntegratedTasks(state, { threadResolutionStatus, verifiedLocalTaskIds = [] }) {
+  if (!Array.isArray(verifiedLocalTaskIds)
+      || verifiedLocalTaskIds.some((taskId) => typeof taskId !== 'string' || taskId.length === 0)
+      || new Set(verifiedLocalTaskIds).size !== verifiedLocalTaskIds.length) {
+    throw new StateError('Verified local task IDs must be unique nonempty strings', 'INVALID_TASK_COMPLETION');
+  }
+  const verifiedLocalTasks = new Set(verifiedLocalTaskIds);
+  for (const taskId of verifiedLocalTasks) {
+    const task = state.tasks.find((candidate) => candidate.id === taskId);
+    if (!task) throw new StateError(`Verified local task ${taskId} was not found`, 'INVALID_TASK_COMPLETION');
+    if (task.sourceType !== 'local') {
+      throw new StateError(`Verified local task ${taskId} is not local`, 'INVALID_TASK_COMPLETION');
+    }
+    if (task.disposition !== 'actionable' || !['integrated', 'completed'].includes(task.status)
+        || !task.integratedCommitSha) {
+      throw new StateError(`Verified local task ${taskId} is not an integrated actionable fix`, 'INVALID_TASK_COMPLETION');
+    }
+  }
   const tasks = state.tasks.map((task) => {
     const eligibleNotApplicable = task.status === 'not-applicable'
       && !['actionable', 'needs-human-decision'].includes(task.disposition);
     if (task.status !== 'integrated' && !eligibleNotApplicable) return task;
-    const eligible = task.sourceType === 'local'
+    const eligible = (task.sourceType === 'local' && verifiedLocalTasks.has(task.id))
       || (task.sourceType === 'github-thread'
         && taskHasCanonicalThreadCoverage(task, threadResolutionStatus.threads ?? []))
       || (task.sourceType === 'github-threadless'
@@ -1723,11 +1740,11 @@ export function checkpointCiValidation({
 }
 
 export function checkpointTaskCompletion({
-  cwd = process.cwd(), prNumber, threadResolutionStatus, expectedRevision, event,
+  cwd = process.cwd(), prNumber, threadResolutionStatus, verifiedLocalTaskIds = [], expectedRevision, event,
 } = {}) {
   const current = loadState(cwd, prNumber);
   if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
-  const nextState = completeIntegratedTasks(current, { threadResolutionStatus });
+  const nextState = completeIntegratedTasks(current, { threadResolutionStatus, verifiedLocalTaskIds });
   return checkpointState({
     cwd, prNumber: current.prNumber, nextState, expectedRevision,
     event, transitionAuthorization: protectedTransition(nextState, 'task-completion'),
