@@ -948,13 +948,13 @@ test('full CI evidence is guarded, restorable, append-only, exact-head, and inva
 
   const currentEvidence = structuredClone(passed.ciValidationStatus);
   writeFileSync(join(cwd, 'dirty-ci-proof.txt'), 'dirty\n');
-  const invalidated = checkpointGitMetadata({ cwd }).state;
-  assert.equal(invalidated.ciValidationStatus.status, 'not-run');
-  assert.deepEqual(invalidated.ciValidationHistory, [currentEvidence]);
+  const dirty = checkpointGitMetadata({ cwd }).state;
+  assert.deepEqual(dirty.ciValidationStatus, currentEvidence);
+  assert.deepEqual(dirty.ciValidationHistory, [currentEvidence]);
   rmSync(join(cwd, 'dirty-ci-proof.txt'));
   const cleaned = checkpointGitMetadata({ cwd }).state;
   assert.equal(cleaned.git.dirty, false);
-  assert.equal(cleaned.ciValidationStatus.status, 'not-run');
+  assert.deepEqual(cleaned.ciValidationStatus, currentEvidence);
   const restored = checkpointCiValidation({
     cwd, evidence: currentEvidence, expectedRevision: cleaned.revision,
   });
@@ -995,6 +995,99 @@ test('full CI evidence is guarded, restorable, append-only, exact-head, and inva
   assert.throws(() => checkpointCiValidation({
     cwd, evidence: currentEvidence, expectedRevision: drifted.revision,
   }), { code: 'INVALID_CI_VALIDATION' });
+});
+
+test('same-HEAD dirty checkpoints preserve proof while lifecycle gates remain fail-closed', () => {
+  const readyCwd = repo();
+  const prepared = ready(init(readyCwd));
+  writeFileSync(statePath(readyCwd, prepared.prNumber), `${JSON.stringify(prepared)}\n`);
+  const readyProof = {
+    validationStatus: structuredClone(prepared.validationStatus),
+    threadResolutionStatus: structuredClone(prepared.threadResolutionStatus),
+    tasks: structuredClone(prepared.tasks),
+  };
+
+  writeFileSync(join(readyCwd, 'temporary-ready-change.txt'), 'dirty\n');
+  const dirtyReady = checkpointGitMetadata({ cwd: readyCwd }).state;
+  assert.equal(dirtyReady.git.dirty, true);
+  assert.equal(dirtyReady.phase, 'recovering');
+  assert.deepEqual(dirtyReady.validationStatus, readyProof.validationStatus);
+  assert.deepEqual(dirtyReady.threadResolutionStatus, readyProof.threadResolutionStatus);
+  assert.deepEqual(dirtyReady.tasks, readyProof.tasks);
+  assert.equal(reviewRequestGate(dirtyReady, external(readyCwd, dirtyReady)).allowed, false);
+
+  rmSync(join(readyCwd, 'temporary-ready-change.txt'));
+  const restoredReady = checkpointGitMetadata({ cwd: readyCwd }).state;
+  assert.equal(restoredReady.git.dirty, false);
+  assert.equal(restoredReady.phase, 'ready-for-review');
+  assert.deepEqual(restoredReady.validationStatus, readyProof.validationStatus);
+  assert.deepEqual(restoredReady.threadResolutionStatus, readyProof.threadResolutionStatus);
+  assert.equal(reviewRequestGate(restoredReady, external(readyCwd, restoredReady)).allowed, true);
+
+  const tasklessCwd = repo();
+  const tasklessReady = ready(init(tasklessCwd), []);
+  writeFileSync(statePath(tasklessCwd, tasklessReady.prNumber), `${JSON.stringify(tasklessReady)}\n`);
+  const requested = checkpointReviewRequest({
+    cwd: tasklessCwd, request: request(tasklessReady),
+    pushedHeadSha: tasklessReady.currentIntegrationHeadSha,
+    prHeadSha: tasklessReady.currentIntegrationHeadSha,
+    expectedRevision: tasklessReady.revision,
+  });
+  const reviewed = checkpointReviewOutcome({
+    cwd: tasklessCwd, outcome: outcome(requested), expectedRevision: requested.revision,
+  });
+  const validated = checkpointCiValidation({
+    cwd: tasklessCwd, evidence: ciEvidence(reviewed), expectedRevision: reviewed.revision,
+  });
+  const exactHeadProof = {
+    validationStatus: structuredClone(validated.validationStatus),
+    ciValidationStatus: structuredClone(validated.ciValidationStatus),
+    reviewRequest: structuredClone(validated.reviewRequest),
+    reviewOutcome: structuredClone(validated.reviewOutcome),
+    reviewHistory: structuredClone(validated.reviewHistory),
+    threadResolutionStatus: structuredClone(validated.threadResolutionStatus),
+  };
+
+  writeFileSync(join(tasklessCwd, 'temporary-validating-change.txt'), 'dirty\n');
+  const dirtyValidating = checkpointGitMetadata({ cwd: tasklessCwd }).state;
+  assert.equal(dirtyValidating.phase, 'validating');
+  for (const [field, proof] of Object.entries(exactHeadProof)) assert.deepEqual(dirtyValidating[field], proof);
+  assert.equal(completionGate(dirtyValidating, external(tasklessCwd, dirtyValidating)).allowed, false);
+
+  rmSync(join(tasklessCwd, 'temporary-validating-change.txt'));
+  const cleanValidating = checkpointGitMetadata({ cwd: tasklessCwd }).state;
+  const completed = checkpointCompletion({
+    cwd: tasklessCwd,
+    pushedHeadSha: cleanValidating.currentIntegrationHeadSha,
+    prHeadSha: cleanValidating.currentIntegrationHeadSha,
+    expectedRevision: cleanValidating.revision,
+  });
+  assert.equal(completed.phase, 'complete');
+
+  writeFileSync(join(tasklessCwd, 'temporary-complete-change.txt'), 'dirty\n');
+  const dirtyComplete = checkpointGitMetadata({ cwd: tasklessCwd }).state;
+  assert.equal(dirtyComplete.phase, 'recovering');
+  for (const [field, proof] of Object.entries(exactHeadProof)) assert.deepEqual(dirtyComplete[field], proof);
+  assert.equal(completionGate(dirtyComplete, external(tasklessCwd, dirtyComplete)).allowed, false);
+
+  rmSync(join(tasklessCwd, 'temporary-complete-change.txt'));
+  const cleanRecovering = checkpointGitMetadata({ cwd: tasklessCwd }).state;
+  const recompleted = checkpointCompletion({
+    cwd: tasklessCwd,
+    pushedHeadSha: cleanRecovering.currentIntegrationHeadSha,
+    prHeadSha: cleanRecovering.currentIntegrationHeadSha,
+    expectedRevision: cleanRecovering.revision,
+  });
+  assert.equal(recompleted.phase, 'complete');
+
+  commit(tasklessCwd, { 'actual-head-change.txt': 'changed\n' }, 'actual head change');
+  writeFileSync(join(tasklessCwd, 'dirty-after-head-change.txt'), 'dirty too\n');
+  const driftedDirty = checkpointGitMetadata({ cwd: tasklessCwd }).state;
+  assert.equal(driftedDirty.git.dirty, true);
+  assert.equal(driftedDirty.phase, 'recovering');
+  assert.equal(driftedDirty.validationStatus.status, 'not-run');
+  assert.equal(driftedDirty.ciValidationStatus.status, 'not-run');
+  assert.equal(driftedDirty.threadResolutionStatus.status, 'not-run');
 });
 
 test('stale discovery request can be replaced without rewriting its null-outcome ledger entry', () => {

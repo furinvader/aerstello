@@ -1755,7 +1755,7 @@ export function checkpointGitMetadata({ cwd = process.cwd(), sessionId, backup =
     }
     const git = gitSnapshot(state.integrationWorktree);
     if (backup) atomicWriteJson(join(stateDirectory(cwd, state.prNumber), 'state.backup.json'), state);
-    const proofInvalidated = git.headSha !== state.currentIntegrationHeadSha || git.dirty;
+    const headChanged = git.headSha !== state.currentIntegrationHeadSha;
     const headSensitivePhases = new Set([
       'ready-for-review',
       'awaiting-review',
@@ -1764,11 +1764,9 @@ export function checkpointGitMetadata({ cwd = process.cwd(), sessionId, backup =
       'validating',
       'complete',
     ]);
-    const nextState = {
-      ...state,
-      currentIntegrationHeadSha: git.headSha,
-      git,
-      ...(proofInvalidated ? {
+    let checkpointUpdate = {};
+    if (headChanged) {
+      checkpointUpdate = {
         validationStatus: emptyTargetedValidation(),
         ciValidationStatus: emptyCiValidation(),
         threadResolutionStatus: {
@@ -1786,7 +1784,26 @@ export function checkpointGitMetadata({ cwd = process.cwd(), sessionId, backup =
             phase: 'recovering',
             nextAction: 'Reconcile the changed integration checkout and re-establish exact-head proof.',
           } : {}),
-      } : {}),
+      };
+    } else if (git.dirty && state.phase === 'ready-for-review') {
+      checkpointUpdate = {
+        phase: 'recovering',
+        nextAction: 'Clean the integration checkout and checkpoint Git metadata to restore review readiness.',
+      };
+    } else if (git.dirty && state.phase === 'complete') {
+      checkpointUpdate = {
+        phase: 'recovering',
+        nextAction: 'Clean the integration checkout, checkpoint Git metadata, and re-run guarded completion.',
+      };
+    } else if (!git.dirty && state.phase === 'recovering'
+      && state.nextAction === 'Clean the integration checkout and checkpoint Git metadata to restore review readiness.') {
+      checkpointUpdate = { phase: 'ready-for-review', nextAction: 'Request canonical review.' };
+    }
+    const nextState = {
+      ...state,
+      currentIntegrationHeadSha: git.headSha,
+      git,
+      ...checkpointUpdate,
     };
     const warning = git.dirty ? 'Integration checkout is dirty' : null;
     if (sameEvidence(state, nextState)) return { state, checkpointed: false, warning };
