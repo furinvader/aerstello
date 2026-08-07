@@ -61,16 +61,19 @@ review commit == recorded Review commit == current PR head
 ```
 
 Any mismatch is stale. Do not infer commit identity from ordinary review prose.
-Codex's official top-level
-`Codex Review: Didn't find any major issues. Nice work!` comment may prove clean
-only when it follows the recorded request, has the exact structured
+Codex's official top-level comment may prove clean only when its first line is
+exactly `Codex Review: Didn't find any major issues. Nice work!` or
+`Codex Review: Didn't find any major issues. :tada:`, it follows the recorded
+request, its body has never been edited, and it has the exact structured
 `**Reviewed commit:** \`<abbreviated-sha>\`` anchor, and that prefix resolves
 uniquely through complete local Git history to the recorded request,
 integration, pushed, and live PR commit. Record its immutable comment identity
 as `issue-comment` evidence. A clean thumbs-up on the recorded request may also
 be accepted while its commit remains current. Multiple canonical reviews,
 clean comments, or reactions are ambiguous; foreign, pre-request, malformed,
-unresolvable, or stale evidence fails closed.
+unresolvable, or stale evidence fails closed. Any other canonical post-request
+comment beginning with the shared no-major-issues prefix is unsupported clean
+evidence and fails closed rather than being treated as absent.
 
 ## Resolve findings
 

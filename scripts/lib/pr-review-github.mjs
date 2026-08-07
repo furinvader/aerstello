@@ -5,8 +5,9 @@ import { reviewRequestGate, validatePrReviewState } from './contracts.mjs';
 const CANONICAL_LOGIN = 'chatgpt-codex-connector';
 const CANONICAL_URL = 'https://github.com/apps/chatgpt-codex-connector';
 const REQUEST_BODY = '@codex review';
+const CLEAN_ISSUE_COMMENT_PREFIX = "Codex Review: Didn't find any major issues.";
 const CLEAN_ISSUE_COMMENT_TEMPLATE = "Codex Review: Didn't find any major issues. Nice work!";
-const CLEAN_ISSUE_COMMENT_PATTERN = /^Codex Review: Didn't find any major issues\. Nice work!\n\n\*\*Reviewed commit:\*\* `([0-9a-f]{7,40})`(?:\n|$)/u;
+const CLEAN_ISSUE_COMMENT_PATTERN = /^Codex Review: Didn't find any major issues\. (?:Nice work!|:tada:)\n\n\*\*Reviewed commit:\*\* `([0-9a-f]{7,40})`(?:\n|$)/u;
 const PAGE_SIZE = 50;
 const MAX_PAGES = 100;
 const MAX_NODES = 10_000;
@@ -21,7 +22,7 @@ const VERIFIED_NON_ACTIONABLE_DISPOSITIONS = new Set([
 
 const OPERATIONS = {
   PullRequestMetadata: `query PullRequestMetadata($owner:String!,$repo:String!,$pr:Int!){rateLimit{cost remaining} viewer{login id} repository(owner:$owner,name:$repo){pullRequest(number:$pr){id number url headRefOid}}}`,
-  PullRequestComments: `query PullRequestComments($owner:String!,$repo:String!,$pr:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){pullRequest(number:$pr){comments(first:50,after:$cursor){nodes{id databaseId url body createdAt author{__typename login url ... on Bot{id} ... on User{id}}} pageInfo{hasNextPage endCursor}}}}}`,
+  PullRequestComments: `query PullRequestComments($owner:String!,$repo:String!,$pr:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){pullRequest(number:$pr){comments(first:50,after:$cursor){nodes{id databaseId url body createdAt lastEditedAt author{__typename login url ... on Bot{id} ... on User{id}}} pageInfo{hasNextPage endCursor}}}}}`,
   PullRequestReviews: `query PullRequestReviews($owner:String!,$repo:String!,$pr:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviews(first:50,after:$cursor){nodes{id databaseId url body state submittedAt commit{oid} author{__typename login url ... on Bot{id} ... on User{id}}} pageInfo{hasNextPage endCursor}}}}}`,
   PullRequestThreads: `query PullRequestThreads($owner:String!,$repo:String!,$pr:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:50,after:$cursor){nodes{id isResolved} pageInfo{hasNextPage endCursor}}}}}`,
   PullRequestChecks: `query PullRequestChecks($owner:String!,$repo:String!,$pr:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){pullRequest(number:$pr){number headRefOid commits(last:1){nodes{commit{oid statusCheckRollup{state contexts(first:50,after:$cursor){nodes{__typename ... on CheckRun{id databaseId name status conclusion completedAt detailsUrl checkSuite{workflowRun{databaseId url file{path} workflow{name}} app{slug}}} ... on StatusContext{id context state targetUrl}} pageInfo{hasNextPage endCursor}}}}}}}}}`,
@@ -785,9 +786,13 @@ async function classifyCleanIssueComments({ comments, request, git, cwd, expecte
   const exact = [];
   const unsupported = [];
   for (const comment of comments) {
-    if (typeof comment.body !== 'string' || !comment.body.startsWith(CLEAN_ISSUE_COMMENT_TEMPLATE)) continue;
+    if (typeof comment.body !== 'string' || !comment.body.startsWith(CLEAN_ISSUE_COMMENT_PREFIX)) continue;
     if (!evidenceAtOrAfter(comment.createdAt, request.at)) continue;
     if (!isCanonicalActor(comment.author)) continue;
+    if (comment.lastEditedAt !== null) {
+      unsupported.push(comment);
+      continue;
+    }
     const match = CLEAN_ISSUE_COMMENT_PATTERN.exec(comment.body);
     if (!match) {
       unsupported.push(comment);

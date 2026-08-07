@@ -27,6 +27,7 @@ const BOT = {
 };
 const VIEWER = { __typename: 'User', login: 'maintainer', url: 'https://github.com/maintainer', id: 'USER_1' };
 const CLEAN_COMMENT_BODY = `${githubReviewConstants.CLEAN_ISSUE_COMMENT_TEMPLATE}\n\n**Reviewed commit:** \`${HEAD.slice(0, 10)}\`\n\n<details>About Codex</details>`;
+const CLEAN_TADA_COMMENT_BODY = `Codex Review: Didn't find any major issues. :tada:\n\n**Reviewed commit:** \`${HEAD}\`\n\n<details>About Codex</details>`;
 
 function proof(status = 'passed', headSha = HEAD) {
   return {
@@ -102,7 +103,7 @@ function cleanIssueComment(overrides = {}) {
   return {
     id: 'IC_clean', databaseId: 202,
     url: 'https://github.com/example/sky-bar/pull/2#issuecomment-202',
-    body: CLEAN_COMMENT_BODY, createdAt: AT, author: BOT, ...overrides,
+    body: CLEAN_COMMENT_BODY, createdAt: AT, lastEditedAt: null, author: BOT, ...overrides,
   };
 }
 
@@ -1688,6 +1689,27 @@ test('collect records a unique canonical exact-head clean issue comment at the r
   assert.equal(setup.state.current.ciValidationStatus.status, 'not-run');
 });
 
+test('collect records the literal :tada: clean issue comment with exact immutable identity', async () => {
+  const client = new FakeClient();
+  const observed = cleanIssueComment({
+    id: 'IC_kwDOTqOdrM8AAAABNuD83Q', databaseId: 5215681757,
+    url: 'https://github.com/example/sky-bar/pull/2#issuecomment-5215681757',
+    body: CLEAN_TADA_COMMENT_BODY,
+  });
+  client.comments.push(observed);
+  const setup = workflow(pendingState('discovery'), client);
+  const result = await setup.api.collect(2);
+  assert.deepEqual(result.outcome, {
+    id: observed.id, databaseId: observed.databaseId, url: observed.url,
+    headSha: HEAD, at: observed.createdAt, requestId: 'IC_request', kind: 'discovery',
+    outcome: 'clean', evidenceType: 'issue-comment', reviewerLogin: BOT.login,
+    reviewerNodeId: BOT.id, reviewerType: BOT.__typename, reviewerUrl: BOT.url,
+    reactionContent: null, reactionCommentId: null,
+  });
+  assert.equal(client.comments.find((comment) => comment.id === observed.id).body, CLEAN_TADA_COMMENT_BODY);
+  assert.equal(setup.state.calls.at(-1).name, 'checkpointReviewOutcome');
+});
+
 test('collect ignores historical clean comments from prior requests', async () => {
   const historical = cleanIssueComment({
     id: 'IC_historical', databaseId: 199, createdAt: '2026-08-04T23:59:59Z',
@@ -1725,6 +1747,7 @@ test('clean issue comments fail closed for actors, time, anchors, and Git resolu
     { comment: cleanIssueComment({ body: `${githubReviewConstants.CLEAN_ISSUE_COMMENT_TEMPLATE}\n\nNo anchor` }) },
     { comment: cleanIssueComment({ body: `${githubReviewConstants.CLEAN_ISSUE_COMMENT_TEMPLATE}\n\n**Reviewed commit:** \`not-a-sha\`` }) },
     { comment: cleanIssueComment({ body: CLEAN_COMMENT_BODY.replace(HEAD.slice(0, 10), OTHER_HEAD.slice(0, 10)) }) },
+    { comment: cleanIssueComment({ lastEditedAt: '2026-08-05T00:00:01Z' }) },
     { comment: cleanIssueComment(), git: fakeGit({ resolveCommitPrefix: async () => [] }) },
     { comment: cleanIssueComment(), git: fakeGit({ resolveCommitPrefix: async () => [HEAD, OTHER_HEAD] }) },
   ];
@@ -1744,21 +1767,59 @@ test('clean issue comments fail closed for actors, time, anchors, and Git resolu
   });
 });
 
-test('a clean issue comment remains ambiguous beside any second canonical evidence', async () => {
-  for (const second of ['comment', 'review', 'reaction']) {
+test('unknown canonical no-major-issues wording and anchor variants are unsupported evidence', async () => {
+  const prefix = "Codex Review: Didn't find any major issues.";
+  const anchor = `**Reviewed commit:** \`${HEAD.slice(0, 10)}\``;
+  const variants = [
+    `${prefix} Good work!\n\n${anchor}`,
+    `${prefix} 🎉\n\n${anchor}`,
+    `${prefix}  Nice work!\n\n${anchor}`,
+    `${prefix} Nice work.\n\n${anchor}`,
+    `${prefix} nice work!\n\n${anchor}`,
+    `${prefix} :TADA:\n\n${anchor}`,
+    `${prefix} Nice work!\n${anchor}`,
+    `${prefix} Nice work!\r\n\r\n${anchor}`,
+    `${prefix} :tada:\n\n**Reviewed Commit:** \`${HEAD.slice(0, 10)}\``,
+    `${prefix} :tada:\n\n**Reviewed commit:** \`${HEAD.slice(0, 10).toUpperCase()}\``,
+  ];
+  for (const [index, body] of variants.entries()) {
     const client = new FakeClient();
-    client.comments.push(cleanIssueComment());
-    if (second === 'comment') client.comments.push(cleanIssueComment({ id: 'IC_clean_2', databaseId: 203 }));
-    if (second === 'review') client.reviews.push({
-      id: 'PRR_clean_2', databaseId: 204, url: 'https://x/review', body: '', state: 'COMMENTED',
-      submittedAt: AT, commit: { oid: HEAD }, author: BOT,
-    });
-    if (second === 'reaction') client.reactions.set('IC_request', [{
-      id: 'REACTION_clean_2', content: 'THUMBS_UP', createdAt: AT, user: BOT,
-    }]);
-    await assert.rejects(() => workflow(pendingState('discovery'), client).api.collect(2), {
-      code: 'DISCOVERY_COLLECTION_UNRESOLVED',
-    });
+    const comment = cleanIssueComment({ id: `IC_variant_${index}`, databaseId: 300 + index, body });
+    client.comments.push(comment);
+    const setup = workflow(pendingState('verification'), client);
+    const result = await setup.api.collect(2);
+    assert.equal(result.escalated, true);
+    assert.equal(result.escalation.reason, 'ambiguous-canonical-evidence');
+    assert.deepEqual(result.escalation.evidenceIds, [`issue-comment:${comment.id}`]);
+    assert.equal(setup.state.calls.at(-1).name, 'checkpointVerificationEscalation');
+  }
+});
+
+test('either clean issue-comment format remains ambiguous beside any second canonical evidence', async () => {
+  const mixed = new FakeClient();
+  mixed.comments.push(
+    cleanIssueComment(),
+    cleanIssueComment({ id: 'IC_clean_tada', databaseId: 203, body: CLEAN_TADA_COMMENT_BODY }),
+  );
+  await assert.rejects(() => workflow(pendingState('discovery'), mixed).api.collect(2), {
+    code: 'DISCOVERY_COLLECTION_UNRESOLVED',
+  });
+
+  for (const body of [CLEAN_COMMENT_BODY, CLEAN_TADA_COMMENT_BODY]) {
+    for (const second of ['review', 'reaction']) {
+      const client = new FakeClient();
+      client.comments.push(cleanIssueComment({ body }));
+      if (second === 'review') client.reviews.push({
+        id: 'PRR_clean_2', databaseId: 204, url: 'https://x/review', body: '', state: 'COMMENTED',
+        submittedAt: AT, commit: { oid: HEAD }, author: BOT,
+      });
+      if (second === 'reaction') client.reactions.set('IC_request', [{
+        id: 'REACTION_clean_2', content: 'THUMBS_UP', createdAt: AT, user: BOT,
+      }]);
+      await assert.rejects(() => workflow(pendingState('discovery'), client).api.collect(2), {
+        code: 'DISCOVERY_COLLECTION_UNRESOLVED',
+      });
+    }
   }
 });
 
@@ -1867,13 +1928,23 @@ test('complete freshly revalidates clean issue-comment identity and content', as
   goodClient.comments.push(cleanIssueComment());
   assert.equal((await workflow(issueCommentCompletedState(), goodClient).api.complete(2)).phase, 'complete');
 
+  const tadaClient = new FakeClient();
+  tadaClient.comments.push(cleanIssueComment({ body: CLEAN_TADA_COMMENT_BODY }));
+  assert.equal((await workflow(issueCommentCompletedState(), tadaClient).api.complete(2)).phase, 'complete');
+
   const mutations = [
     null,
+    cleanIssueComment({ id: 'IC_changed' }),
     cleanIssueComment({ databaseId: 999 }),
     cleanIssueComment({ url: 'https://github.com/example/sky-bar/pull/2#issuecomment-mutated' }),
     cleanIssueComment({ createdAt: '2026-08-05T00:00:01Z' }),
     cleanIssueComment({ author: { ...BOT, id: 'BOT_changed' } }),
+    cleanIssueComment({ author: { ...BOT, login: 'chatgpt-codex-connector-renamed' } }),
+    cleanIssueComment({ author: { ...BOT, url: 'https://github.com/apps/another-app' } }),
+    cleanIssueComment({ body: CLEAN_TADA_COMMENT_BODY, lastEditedAt: '2026-08-05T00:00:01Z' }),
     cleanIssueComment({ body: CLEAN_COMMENT_BODY.replace('Nice work!', 'Good work!') }),
+    cleanIssueComment({ body: CLEAN_TADA_COMMENT_BODY.replace(':tada:', '🎉') }),
+    cleanIssueComment({ body: CLEAN_TADA_COMMENT_BODY.replace('**Reviewed commit:**', '**Reviewed Commit:**') }),
     cleanIssueComment({ body: CLEAN_COMMENT_BODY.replace(HEAD.slice(0, 10), OTHER_HEAD.slice(0, 10)) }),
   ];
   for (const comment of mutations) {
