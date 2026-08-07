@@ -1117,7 +1117,7 @@ export function completionGate(state, external) {
   return { allowed: reasons.length === 0, reasons };
 }
 
-function validateReviewHistory(value, currentHeadSha, errors) {
+function validateReviewHistory(value, errors) {
   if (!Array.isArray(value) || value.length > 4) {
     errors.push('$.reviewHistory must contain at most four entries');
     return;
@@ -1133,8 +1133,6 @@ function validateReviewHistory(value, currentHeadSha, errors) {
           || entry.outcome.headSha !== entry.request.headSha) {
         errors.push(`${path}.outcome must bind to its exact request and SHA`);
       }
-    } else if (index !== value.length - 1 && entry.request.headSha === currentHeadSha) {
-      errors.push(`${path} only a request made stale by HEAD drift may retain a null outcome`);
     }
   });
   const discoveryCount = value.filter((entry) => entry.request?.kind === 'discovery').length;
@@ -1195,7 +1193,7 @@ export function validatePrReviewState(value) {
   if (value.reviewRequest !== null) validateReviewRequest(value.reviewRequest, '$.reviewRequest', errors);
   if (value.reviewOutcome !== null) validateReviewOutcome(value.reviewOutcome, '$.reviewOutcome', errors);
   validateVerificationEscalation(value.verificationEscalation, value.reviewRequest, errors);
-  validateReviewHistory(value.reviewHistory, value.currentIntegrationHeadSha, errors);
+  validateReviewHistory(value.reviewHistory, errors);
   const latest = Array.isArray(value.reviewHistory) ? value.reviewHistory.at(-1) : null;
   if ((latest?.request ?? null)?.id !== value.reviewRequest?.id) errors.push('$.reviewRequest must equal the latest history request');
   if ((latest?.outcome ?? null)?.id !== value.reviewOutcome?.id) errors.push('$.reviewOutcome must equal the latest history outcome');

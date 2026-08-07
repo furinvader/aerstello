@@ -356,6 +356,64 @@ test('state JSON Schema rejects terminal and review-ready states missing current
   }
 });
 
+test('superseded null-outcome requests remain valid when the integration HEAD returns', () => {
+  const headA = 'a'.repeat(40);
+  const headB = 'b'.repeat(40);
+  const requestA = {
+    id: 'request-a', databaseId: 101,
+    url: 'https://github.com/example/sky-bar/pull/17#issuecomment-101',
+    headSha: headA, at: AT, kind: 'discovery', body: '@codex review',
+    authorLogin: 'maintainer', authorNodeId: 'USER_maintainer',
+  };
+  const requestB = {
+    ...requestA, id: 'request-b', databaseId: 102,
+    url: 'https://github.com/example/sky-bar/pull/17#issuecomment-102', headSha: headB,
+  };
+  const returnedToA = stateFixture({
+    phase: 'recovering', currentIntegrationHeadSha: headA,
+    requestedHeadSha: headB, reviewRound: 2, reviewRequest: requestB,
+    reviewHistory: [{ request: requestA, outcome: null }, { request: requestB, outcome: null }],
+    git: { branch: 'main', headSha: headA, dirty: false },
+  });
+  const immutableHistory = structuredClone(returnedToA.reviewHistory);
+
+  assert.deepEqual(validatePrReviewState(returnedToA), []);
+  assert.deepEqual(returnedToA.reviewHistory, immutableHistory);
+  assert.equal(returnedToA.reviewRequest.id, requestB.id);
+
+  const outcomeA = {
+    id: 'review-a', databaseId: 103,
+    url: 'https://github.com/example/sky-bar/pull/17#pullrequestreview-103',
+    headSha: headA, at: AT, requestId: requestA.id, kind: 'discovery', outcome: 'clean',
+    evidenceType: 'review-submission', reviewerLogin: 'chatgpt-codex-connector',
+    reviewerNodeId: 'BOT_codex', reviewerType: 'Bot',
+    reviewerUrl: 'https://github.com/apps/chatgpt-codex-connector',
+    reactionContent: null, reactionCommentId: null,
+  };
+  for (const outcome of [
+    { ...outcomeA, requestId: requestB.id },
+    { ...outcomeA, headSha: headB },
+  ]) {
+    assert.ok(validatePrReviewState({
+      ...returnedToA,
+      reviewHistory: [{ request: requestA, outcome }, { request: requestB, outcome: null }],
+    }).some((error) => error.includes('outcome must bind')));
+  }
+  assert.ok(validatePrReviewState({
+    ...returnedToA, reviewRequest: requestA,
+  }).some((error) => error.includes('reviewRequest must equal')));
+  assert.ok(validatePrReviewState({
+    ...returnedToA,
+    reviewHistory: [
+      { request: requestA, outcome: null },
+      { request: { ...requestB, id: requestA.id }, outcome: null },
+    ],
+  }).some((error) => error.includes('duplicate request IDs')));
+  assert.ok(validatePrReviewState({
+    ...returnedToA, phase: 'validating',
+  }).some((error) => error.includes('phase is invalid for the pending')));
+});
+
 test('manual escalation binding rejects a mismatched pending request identity or SHA', () => {
   const valid = escalatedStateFixture();
   for (const verificationEscalation of [
