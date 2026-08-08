@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { afterEach, test } from 'node:test';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
@@ -44,7 +44,7 @@ function init(cwd) {
 
 function validWorkerResult() {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     taskId: 'task-1',
     status: 'implemented',
     commitSha: 'a'.repeat(40),
@@ -83,17 +83,22 @@ test('SessionStart with state injects compact additional context', () => {
   assert.ok(output.hookSpecificOutput.additionalContext.length < 9000);
 });
 
-test('PreCompact checkpoints valid active state and creates a backup', () => {
+test('PreCompact preserves evidence-identical state and refreshes an exact backup', () => {
   const cwd = repo();
-  init(cwd);
+  const state = init(cwd);
+  const eventPath = join(stateDirectory(cwd, 23), 'events.ndjson');
+  const events = readFileSync(eventPath, 'utf8');
   const output = runHook('pre-compact.mjs', {
     hook_event_name: 'PreCompact',
     trigger: 'auto',
     cwd,
   }, cwd);
   assert.equal(output.continue, true);
-  assert.equal(loadState(cwd).revision, 1);
-  assert.ok(existsSync(join(stateDirectory(cwd, 23), 'state.backup.json')));
+  assert.deepEqual(loadState(cwd), state);
+  assert.equal(readFileSync(eventPath, 'utf8'), events);
+  const backupPath = join(stateDirectory(cwd, 23), 'state.backup.json');
+  assert.ok(existsSync(backupPath));
+  assert.deepEqual(JSON.parse(readFileSync(backupPath, 'utf8')), state);
 });
 
 test('valid worker result is accepted', () => {

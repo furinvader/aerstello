@@ -38,9 +38,15 @@ The development seed creates `admin@skybar.test`, requires an explicit password 
 | Command | Purpose |
 | --- | --- |
 | `npm run dev` | Start API and PWA development servers |
-| `npm run check` | Type-check, test, and production-build all workspaces |
+| `npm run check:shared` | Build and unit-test the shared contracts and utilities |
+| `npm run check:api` | Build shared code and run related API type and unit checks |
+| `npm run check:web` | Build shared code and run related web type and unit checks |
+| `npm run check:workflow` | Check review and repository tooling |
+| `npm run check:full` | Type-check, test, and production-build all workspaces |
 | `npm test` | Run unit and component tests |
-| `npm run test:e2e` | Generate and run executable Gherkin E2E tests |
+| `npm run test:e2e:related -- …` | Run selected Gherkin scenarios and browser projects |
+| `npm run test:e2e:full` | Run every E2E scenario and browser project (CI gate) |
+| `npm run review:status` | Show the active PR review state and next action |
 | `npm run lint:commit -- --last` | Validate the latest commit message |
 | `npm run db:migrate` | Apply pending PostgreSQL migrations |
 | `npm run admin:create -- …` | Create or recover the initial administrator |
@@ -50,7 +56,15 @@ The development seed creates `admin@skybar.test`, requires an explicit password 
 | `npm run check:release-state` | Fail on stale or inconsistent release metadata |
 | `npm run check:released-migrations` | Enforce immutable released migration blobs |
 
-Before E2E tests, start PostgreSQL with `docker compose up -d db` and install the Playwright browsers with `npx playwright install`.
+Before E2E tests, start PostgreSQL with `docker compose up -d db` and install the
+Playwright browsers with `npx playwright install`. Related E2E requires an
+explicit scenario selector and defaults to `tablet-chromium`; it never falls
+back to the full suite.
+
+```bash
+npm run test:e2e:related -- --id settlement-rejects-a-tab-changed-after-confirmation-opened
+npm run test:e2e:related -- --tag area-auth --project mobile-webkit
+```
 
 ## Repository map
 
@@ -64,8 +78,9 @@ Before E2E tests, start PostgreSQL with `docker compose up -d db` and install th
 Read [AGENTS.md](./AGENTS.md) before making automated changes and [docs/architecture.md](./docs/architecture.md) before changing financial, authentication, or offline behavior.
 
 For long-running pull-request review remediation, use the repository
-`$pr-review-cycle` skill and follow the
-[PR review-cycle guide](./docs/agents/pr-review-cycle.md). Production releases
+`$pr-review-cycle` skill and follow the concise
+[PR review-cycle guide](./docs/agents/pr-review-cycle.md). Local agents run
+related checks; CI runs the complete checks and E2E matrix. Production releases
 follow the [marker-and-annotated-tag contract](./.release/README.md).
 
 ## Contributing

@@ -1,16 +1,11 @@
-# State and contract reference
+# Durable state and machine contracts
 
-## Contents
+Read this reference before initializing, recovering, migrating, checkpointing,
+archiving, or delegating a task.
 
-- [State location](#state-location)
-- [State commands](#state-commands)
-- [Active state](#active-state)
-- [Task packets](#task-packets)
-- [Worker results](#worker-results)
+## State location and ownership
 
-## State location
-
-Mutable state is repository-scoped and outside the tracked worktree:
+Mutable state is repository-scoped and outside tracked worktrees:
 
 ```text
 <absolute-git-common-dir>/codex/pr-review/
@@ -18,20 +13,14 @@ Mutable state is repository-scoped and outside the tracked worktree:
 ├── pr-<number>/
 │   ├── state.json
 │   ├── state.backup.json
+│   ├── targeted-validation-plan.json
 │   └── events.ndjson
 └── archive/
 ```
 
-Only the primary orchestrator is the logical writer. Writes are revisioned,
-locked, validated, limited to 64 KiB, and committed with temporary-file rename.
-Keep raw logs, complete diffs, stack traces, and transcripts out of state and
-events.
-
-Active state uses schema version 2. Loading version 1 does not silently upgrade
-it: the orchestrator must run the explicit atomic migration, which first keeps a
-pre-migration backup. Migration preserves stable task/finding identities,
-source IDs, fingerprints, and dispositions while compacting terminal execution
-details.
+Only the main orchestrator is the logical writer. Writes are locked,
+revision-checked, schema-validated, limited to 64 KiB, and committed by atomic
+rename. Keep raw logs, full diffs, stack traces, and transcripts out of state.
 
 ## State commands
 
@@ -39,6 +28,12 @@ details.
 node scripts/pr-review-state.mjs init --pr 123 --base origin/main --head HEAD
 node scripts/pr-review-state.mjs path
 node scripts/pr-review-state.mjs validate
+node scripts/pr-review-state.mjs bind-task-packet --task-packet /tmp/task.json --expected-revision 4
+node scripts/pr-review-state.mjs validate-result --task-packet /tmp/task.json --worker-result /tmp/result.json
+node scripts/pr-review-state.mjs validation-plan --initial-selection /tmp/initial-validation.json
+node scripts/pr-review-state.mjs validation-plan /tmp/task-a.json /tmp/task-b.json
+node scripts/pr-review-state.mjs validation-plan --replace /tmp/task-a.json /tmp/task-b.json
+node scripts/pr-review-state.mjs run-validation
 node scripts/pr-review-state.mjs show
 node scripts/pr-review-state.mjs migrate
 node scripts/pr-review-state.mjs recover
@@ -47,49 +42,141 @@ node scripts/pr-review-state.mjs archive
 node scripts/pr-review-state.mjs archive --abandon-reason "superseded PR"
 ```
 
-`init` derives `owner/name` only from an unambiguous GitHub `origin`; otherwise
-pass `--repository owner/name`. It never discovers or guesses a PR number.
-`checkpoint` replaces the complete document and fails on revision drift.
-Normal archival requires phase `complete`; any earlier phase requires an
-explicit abandonment reason, which is stored with the archived cycle.
+`init` derives the repository only from an unambiguous GitHub `origin` and never
+guesses a PR number. Pass `--repository owner/name` when needed. `checkpoint`
+replaces the complete document and rejects revision drift. Normal archival
+requires Done; earlier archival requires an explicit durable abandonment reason.
 
-## Active state
+State schema v3 upgrades are explicit. Migration from v1 or v2 first saves an
+exact versioned backup and must preserve stable finding/task identities, source
+IDs, finding keys, and outcomes. Never let an unrelated read silently migrate
+state.
 
-Use `docs/agents/pr-review-state.schema.json` as the wire contract. Preserve:
+Before delegation, `bind-task-packet` records the canonical SHA-256 identity of
+the complete accepted schema-v2 packet on its actionable task. Object key order
+does not affect the digest; array order and every packet value do. A binding is
+guarded, immutable, and retained after execution metadata is removed. Recovery
+for a task accepted before this capability requires one explicit bind from the
+original packet. Worker-result acceptance and remediation planning fail closed
+for missing, stale, or mismatched bindings.
 
-- base, requested, reviewed, and integration SHAs as distinct values;
-- GitHub node/database IDs and URLs;
-- a release baseline derived from `scripts/release-state.mjs`;
-- stable decision/task IDs and semantic fingerprints;
-- discovery versus verification request kind and the one-time verification
-  allowance;
-- review outcome evidence and an exact-head thread-resolution proof containing
-  the unresolved thread IDs;
-- concise validation and error summaries;
-- one explicit next action.
+`targeted-validation-plan.json` is a resumable sidecar, not trusted input to a
+generic checkpoint. `validation-plan` derives its deterministic, de-duplicated
+commands from fixed task packets and requires those packet IDs to exactly match
+the actionable Integrated tasks. It preserves affected areas plus each check's
+kind, reason, E2E selectors, and browser projects, and binds them to the state
+revision and integration commit. `run-validation` serializes execution,
+executes the saved argv directly without a shell, records each attempted command
+atomically, and holds the same PR lock until a guarded transition turns the
+finished plan into targeted validation proof. Recovery output reports plan progress.
+Old or migrated states have no plan and must be validated again before review.
+For the first discovery review of a pristine taskless cycle, use
+`--initial-selection` with a schema-v1 document containing the exact integration
+HEAD, nonempty affected areas, and nonempty targeted validation. This creates a
+plan with no remediation task IDs; it cannot be combined with task packets or
+used after arbitrary task or review evidence exists. The same explicit selection
+is narrowly available after a migrated taskless pending review is collected as
+a clean exact-head outcome while validation remains `not-run`. That recovery
+requires no tasks, exact current request/outcome/history identity and kind, and
+requested, reviewed, request, outcome, and integration SHAs that all match. It
+does not reconstruct or trust a missing legacy plan and does not repeat the
+still-applicable review. It cannot replace an existing passing proof after an
+ordinary taskless review.
 
-`integrated` records that a worker change landed centrally. `completed` records
-that the source thread was answered and resolved, or that a threadless task
-passed verification. `complete` is the cycle phase after a clean exact-head
-review outcome, zero unresolved threads, current validation, clean Git, and all
-tasks completed. Completion requires equality among the request, outcome,
-requested, reviewed, integration, validation, thread-proof, and live Git SHAs.
-Head drift invalidates validation and thread proof and returns terminal or
-review-ready state to recovery. Retain terminal tasks only as compact identity,
-source, fingerprint, disposition, integration, and resolution summaries. Put
-execution detail in Git, GitHub, CI artifacts, or concise `events.ndjson`
-entries.
+A native schema-v3 taskless cycle has one separate fail-closed recovery when a
+clean discovery review remains internally consistent but its reviewed commit is
+now one historical SHA behind the integration HEAD. The active state must be
+`recovering`, contain no tasks, retain an exact latest request/outcome/history
+triple whose clean request, outcome, requested, and reviewed SHAs all equal that
+one prior SHA, and still have a discovery or verification request available.
+The current checkout and recorded Git snapshot must be clean and exact, with no
+blocked reason, verification escalation, or human-decision task. Use a current-
+HEAD `--initial-selection` (and `--replace` when the historical sidecar exists)
+to run a fresh nonempty targeted selection. This preserves the historical
+request, outcome, and review ledger byte-for-byte; it never makes the old review
+current or permits replacement of the resulting current-HEAD validation proof.
 
-## Task packets
+A third, migration-only route exists for a schema-v2 source with a nonempty
+all-completed task set and an exact-head passed, nonempty legacy targeted proof.
+For a `ready-for-review` or `complete` source, canonical migration of the
+immutable `state.v2.backup.json` must reproduce the active `recovering` state
+exactly. An `awaiting-review` source may instead preserve its exact pending
+request. After one guarded clean exact-head outcome is collected, canonical
+migration plus exactly that outcome transition must reproduce the active
+`validating` state, with only checkpoint revision and timestamp metadata
+normalized. The active state must have targeted validation `not-run`, a clean
+exact current integration HEAD, no actionable Integrated tasks, no blocked
+reason, verification escalation, or `needs-human-decision` disposition, and
+every task must remain completed. The backup projection must match repository,
+PR, integration HEAD, tasks, request, review history, outcome, and thread
+evidence. This proof authorizes only a fresh explicit `--initial-selection`
+plan. Never restore the legacy validation result or repeat the preserved review;
+run every selected check again and record new exact-head targeted validation.
 
-Validate against `docs/agents/review-fix-task.schema.json`. A packet is
-immutable after delegation and includes the exact reviewed head, normalized
-finding/evidence, decisions, dependencies, owned paths, forbidden paths,
-acceptance criteria, and required validation.
+## What state must preserve
+
+Use `docs/agents/pr-review-state.schema.json` as the machine contract. Preserve:
+
+- base, requested, reviewed, integration, validation, and current Git SHAs as
+  separate values;
+- GitHub IDs, URLs, request kind, timestamps, and review outcome evidence;
+- release evidence from `scripts/release-state.mjs`;
+- stable decision, finding, and task identities;
+- targeted local validation and full GitHub Actions validation, each tied to an
+  exact commit and recording its source, scope, and result;
+- full E2E evidence for the Review commit;
+- a fresh list of open Codex thread IDs for the current commit;
+- concise errors and one explicit next action.
+
+Human terms translate to the current machine fields as follows:
+
+| Human term | Machine representation |
+| --- | --- |
+| Review commit | Recorded requested SHA/current PR head |
+| Integrated | Task status `integrated` |
+| Resolved | Task status `completed` |
+| Done | Cycle phase `complete` |
+
+Do not collapse these states. Head drift makes prior targeted validation,
+review, CI, and thread confirmation stale. A cycle is Done only when all gates
+refer to the same Review commit.
+
+Keep terminal records compact. Git, GitHub, CI artifacts, and concise
+`events.ndjson` entries carry execution detail.
+
+## Fixed task instructions
+
+Validate tasks against `docs/agents/review-fix-task.schema.json`. The machine
+contract is called a task packet; human guidance calls it fixed task
+instructions. It must include the Review commit, finding and evidence, decisions,
+dependencies, affected areas, owned and forbidden paths, acceptance criteria,
+and exact validation commands. When E2E is relevant, record exact scenario
+selectors, browser projects, and the reason for each selection.
+
+`affectedAreas` must include at least one recognized code or policy area: `api`,
+`web`, `shared`, `workflow`, `documentation`, `release`, or `migration`. Worker
+commands remain the worker's targeted checks. The orchestrator separately adds
+deterministic integrated-area checks when it builds the batch validation union.
+Validation commands use the direct-command allowlist: no environment prefixes,
+shells or other wrappers, control or redirection syntax, npm option wrappers,
+globs, substitutions, or broad root/full-suite commands. Related E2E is valid
+only through the exact repository wrapper with matching selector and project
+metadata, recorded as system validation.
+
+Instructions do not change after delegation. An unknown related command,
+selector, or project is a planning error. Fix the plan instead of asking a
+worker to choose tests or run a full local fallback.
 
 ## Worker results
 
-Validate against `docs/agents/review-fix-result.schema.json`. The worker emits
-one raw JSON object with status `implemented`, `blocked`, `not-applicable`, or
-`failed`. `implemented` requires a commit SHA. Validation entries contain only
-command, result, and concise summary. Never accept raw logs or full diffs.
+Validate results against `docs/agents/review-fix-result.schema.json`. A worker
+returns one raw JSON object with status `implemented`, `blocked`,
+`not-applicable`, or `failed`. `implemented` requires a commit SHA. Each
+validation entry records only its exact command, result, and concise summary.
+`validate-result` proves that the Review commit and worker commit exist, proves
+ancestry, and derives the NUL-delimited, no-renames tree diff between them.
+Implemented work requires a nonempty diff. Reject any mismatch between those
+Git-derived paths and the reported unique `changedPaths`, missing required
+validation, ownership violation, unexpected path, or raw log.
+
+The orchestrator alone decides whether to accept and Integrate a result.

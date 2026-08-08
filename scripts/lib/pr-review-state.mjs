@@ -14,13 +14,18 @@ import {
 } from 'node:fs';
 import { hostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { gitText, resolveCommit, runGit } from './git.mjs';
 import { inspectReleaseState } from './release-state.mjs';
 import {
   completionGate,
+  parseTargetedValidationCommand,
   reviewRequestGate,
   taskHasCanonicalThreadCoverage,
+  unionRequiredValidation,
+  validateInitialValidationSelection,
+  validateTaskPacket,
   validatePrReviewState,
   validatePrReviewStateV1,
 } from './contracts.mjs';
@@ -74,13 +79,32 @@ function utcNow() {
   return new Date().toISOString();
 }
 
+function emptyLocalVerification() {
+  return { status: 'not-run', headSha: null, taskIds: [], updatedAt: null };
+}
+
 function emptyThreadProof() {
   return {
     status: 'not-run',
     headSha: null,
     threads: [],
     threadlessVerification: { status: 'not-run', headSha: null, taskIds: [], updatedAt: null },
+    localVerification: emptyLocalVerification(),
     updatedAt: null,
+  };
+}
+
+function emptyTargetedValidation() {
+  return {
+    source: 'orchestrator', scope: 'targeted', status: 'not-run',
+    headSha: null, checks: [], updatedAt: null,
+  };
+}
+
+function emptyCiValidation() {
+  return {
+    source: 'github-actions', scope: 'full', status: 'not-run', headSha: null,
+    checks: [], checkRunId: null, workflowRunId: null, workflowRunUrl: null, updatedAt: null,
   };
 }
 
@@ -106,6 +130,10 @@ export function stateDirectory(cwd, prNumber) {
 
 export function statePath(cwd, prNumber) {
   return join(stateDirectory(cwd, prNumber), 'state.json');
+}
+
+export function validationPlanPath(cwd, prNumber) {
+  return join(stateDirectory(cwd, prNumber), 'targeted-validation-plan.json');
 }
 
 export function activePointerPath(cwd = process.cwd()) {
@@ -152,6 +180,469 @@ function atomicWriteText(path, data) {
 
 export function atomicWriteJson(path, value) {
   atomicWriteText(path, serializeJson(value));
+}
+
+const VALIDATION_PLAN_LIMIT_BYTES = 64 * 1024;
+const VALIDATION_AREAS = new Set(['api', 'web', 'shared', 'workflow', 'documentation', 'release', 'migration']);
+const VALIDATION_PLANNING_PHASES = new Set(['recovering', 'ready-for-review', 'integrating', 'verifying', 'validating']);
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalJson(value[key])]));
+  }
+  return value;
+}
+
+export function taskPacketDigest(packet) {
+  const errors = validateTaskPacket(packet);
+  if (errors.length > 0) throw new StateError(`Invalid task packet:\n- ${errors.join('\n- ')}`, 'INVALID_TASK_PACKET');
+  return createHash('sha256').update(JSON.stringify(canonicalJson(packet))).digest('hex');
+}
+
+function relatedE2EMetadata(argv) {
+  if (argv.slice(0, 4).join(' ') !== 'npm run test:e2e:related --') return null;
+  const selectors = [];
+  const projects = [];
+  for (let index = 4; index < argv.length; index += 1) {
+    const [option, inlineValue] = argv[index].split('=', 2);
+    const value = inlineValue ?? argv[++index];
+    if (option === '--project') projects.push(value);
+    else if (option === '--id') {
+      const normalized = value.replace(/^@/u, '');
+      selectors.push(normalized.startsWith('id-') ? normalized : `id-${normalized}`);
+    } else if (option === '--tag') selectors.push(value.replace(/^@/u, ''));
+  }
+  return { selectors, projects: projects.length > 0 ? projects : ['tablet-chromium'] };
+}
+
+function validateValidationPlan(plan, state) {
+  const errors = [];
+  const fields = ['schemaVersion', 'prNumber', 'stateRevision', 'headSha', 'taskIds', 'affectedAreas', 'commands', 'createdAt', 'updatedAt'];
+  if (!plan || typeof plan !== 'object' || Array.isArray(plan)) return ['plan must be a JSON object'];
+  for (const field of fields) if (!Object.prototype.hasOwnProperty.call(plan, field)) errors.push(`plan.${field} is required`);
+  for (const field of Object.keys(plan)) if (!fields.includes(field)) errors.push(`plan.${field} is not allowed`);
+  if (plan.schemaVersion !== 1) errors.push('plan.schemaVersion must be 1');
+  if (plan.prNumber !== state.prNumber) errors.push('plan.prNumber must match active state');
+  if (plan.stateRevision !== state.revision) errors.push('plan.stateRevision is stale');
+  if (plan.headSha !== state.currentIntegrationHeadSha) errors.push('plan.headSha is stale');
+  if (!Array.isArray(plan.taskIds)
+      || plan.taskIds.some((id) => typeof id !== 'string' || id.length === 0)
+      || new Set(plan.taskIds).size !== plan.taskIds.length) errors.push('plan.taskIds must be unique nonempty strings');
+  if (!Array.isArray(plan.affectedAreas) || plan.affectedAreas.some((area) => !VALIDATION_AREAS.has(area))
+      || new Set(plan.affectedAreas).size !== plan.affectedAreas.length) errors.push('plan.affectedAreas must be unique strings');
+  if (!Array.isArray(plan.commands) || plan.commands.length === 0) errors.push('plan.commands must not be empty');
+  else {
+    const seen = new Set();
+    for (const [index, entry] of plan.commands.entries()) {
+      const prefix = `plan.commands[${index}]`;
+      const entryFields = ['kind', 'command', 'reason', 'selectors', 'projects', 'argv', 'status', 'exitCode', 'summary', 'completedAt'];
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+        errors.push(`${prefix} must be an object`);
+        continue;
+      }
+      for (const field of entryFields) if (!Object.prototype.hasOwnProperty.call(entry, field)) errors.push(`${prefix}.${field} is required`);
+      for (const field of Object.keys(entry)) if (!entryFields.includes(field)) errors.push(`${prefix}.${field} is not allowed`);
+      const parsed = parseTargetedValidationCommand(entry.command);
+      if (!parsed || JSON.stringify(parsed) !== JSON.stringify(entry.argv)) errors.push(`${prefix} is not a supported exact command`);
+      if (!['unit', 'system'].includes(entry.kind)) errors.push(`${prefix}.kind is invalid`);
+      if (typeof entry.reason !== 'string' || entry.reason.length < 1 || entry.reason.length > 1000) errors.push(`${prefix}.reason is invalid`);
+      for (const field of ['selectors', 'projects']) {
+        if (!Array.isArray(entry[field]) || entry[field].some((item) => typeof item !== 'string')
+            || new Set(entry[field]).size !== entry[field].length) errors.push(`${prefix}.${field} is invalid`);
+      }
+      const e2eMetadata = parsed ? relatedE2EMetadata(parsed) : null;
+      if (entry.kind === 'unit' && (entry.selectors?.length > 0 || entry.projects?.length > 0)) errors.push(`${prefix} unit metadata must be empty`);
+      if (entry.kind === 'system' && e2eMetadata === null && (entry.selectors?.length > 0 || entry.projects?.length > 0)) errors.push(`${prefix} non-E2E metadata must be empty`);
+      if (entry.kind === 'system' && e2eMetadata !== null
+          && (JSON.stringify(entry.selectors) !== JSON.stringify(e2eMetadata.selectors)
+            || JSON.stringify(entry.projects) !== JSON.stringify(e2eMetadata.projects))) errors.push(`${prefix} E2E metadata must match command scope`);
+      if (seen.has(entry.command)) errors.push(`${prefix}.command is duplicated`);
+      seen.add(entry.command);
+      if (!['pending', 'passed', 'failed'].includes(entry.status)) errors.push(`${prefix}.status is invalid`);
+      if (entry.status === 'pending') {
+        if (entry.exitCode !== null || entry.summary !== null || entry.completedAt !== null) errors.push(`${prefix} pending result must be empty`);
+      } else {
+        if (!Number.isInteger(entry.exitCode) || entry.exitCode < 0) errors.push(`${prefix}.exitCode is invalid`);
+        if (typeof entry.summary !== 'string' || entry.summary.length < 1 || entry.summary.length > 500) errors.push(`${prefix}.summary is invalid`);
+        if (typeof entry.completedAt !== 'string' || !Number.isFinite(Date.parse(entry.completedAt))) errors.push(`${prefix}.completedAt is invalid`);
+        if ((entry.status === 'passed') !== (entry.exitCode === 0)) errors.push(`${prefix}.status contradicts exitCode`);
+      }
+    }
+  }
+  for (const field of ['createdAt', 'updatedAt']) {
+    if (typeof plan[field] !== 'string' || !Number.isFinite(Date.parse(plan[field]))) errors.push(`plan.${field} is invalid`);
+  }
+  if (Array.isArray(plan.commands) && Array.isArray(plan.affectedAreas)) {
+    const contractErrors = validateTaskPacket({
+      schemaVersion: 2, taskId: 'saved-validation-plan', reviewedHeadSha: plan.headSha,
+      finding: 'Saved integrated targeted-validation union.', evidence: 'Durable orchestrator plan.',
+      affectedAreas: plan.affectedAreas, decisionIds: [], allowedPaths: ['scripts/**'], forbiddenPaths: [],
+      dependencies: [], acceptanceCriteria: ['All saved checks complete.'],
+      requiredValidation: {
+        unit: plan.commands.filter((entry) => entry?.kind === 'unit').map((entry) => ({ command: entry.command, reason: entry.reason })),
+        system: plan.commands.filter((entry) => entry?.kind === 'system').map((entry) => ({
+          command: entry.command, reason: entry.reason, selectors: entry.selectors, projects: entry.projects,
+        })),
+      },
+    });
+    errors.push(...contractErrors.map((error) => `plan command contract: ${error}`));
+  }
+  return errors;
+}
+
+function readValidationPlan(cwd, state) {
+  const path = validationPlanPath(cwd, state.prNumber);
+  if (!existsSync(path)) throw new StateError(`No saved targeted validation plan at ${path}`, 'VALIDATION_PLAN_NOT_FOUND');
+  let plan;
+  try {
+    const source = readFileSync(path, 'utf8');
+    if (Buffer.byteLength(source, 'utf8') > VALIDATION_PLAN_LIMIT_BYTES) throw new Error('plan exceeds 64 KiB');
+    plan = JSON.parse(source);
+  } catch (error) {
+    throw new StateError(`Unable to read targeted validation plan: ${error.message}`, 'INVALID_VALIDATION_PLAN');
+  }
+  const errors = validateValidationPlan(plan, state);
+  if (errors.length > 0) throw new StateError(`Invalid targeted validation plan:\n- ${errors.join('\n- ')}`, 'INVALID_VALIDATION_PLAN');
+  return plan;
+}
+
+function assertCleanExactIntegrationHead(state) {
+  const actual = gitSnapshot(state.integrationWorktree);
+  if (actual.headSha !== state.currentIntegrationHeadSha) {
+    throw new StateError('Integration HEAD differs from active state; checkpoint Git metadata first', 'VALIDATION_PLAN_STALE');
+  }
+  if (actual.dirty) throw new StateError('Integration checkout must be clean for targeted validation', 'VALIDATION_CHECKOUT_DIRTY');
+  return actual;
+}
+
+function actionableIntegratedTaskIds(state) {
+  return state.tasks.filter((task) => task.disposition === 'actionable' && task.status === 'integrated')
+    .map((task) => task.id).sort();
+}
+
+function isPristineTasklessValidationSelection(state, expectedIds) {
+  return state.reviewRound === 0 && state.reviewRequest === null && state.reviewHistory.length === 0
+    && state.tasks.length === 0 && expectedIds.length === 0;
+}
+
+function isCleanTasklessReviewValidationRecovery(state, expectedIds) {
+  const request = state.reviewRequest;
+  const outcome = state.reviewOutcome;
+  const latest = state.reviewHistory.at(-1);
+  const headSha = state.currentIntegrationHeadSha;
+  return state.phase === 'validating'
+    && state.tasks.length === 0 && expectedIds.length === 0
+    && request !== null && outcome?.outcome === 'clean' && latest !== undefined
+    && sameEvidence(latest.request, request) && sameEvidence(latest.outcome, outcome)
+    && outcome.requestId === request.id && outcome.kind === request.kind
+    && state.requestedHeadSha === headSha && state.reviewedHeadSha === headSha
+    && request.headSha === headSha && outcome.headSha === headSha;
+}
+
+function hasRemainingReviewAllowance(state) {
+  return (Number.isInteger(state.reviewRound) && state.reviewRound < 3)
+    || (state.reviewRound === 3 && state.verificationReviewUsed === false);
+}
+
+function isNativeTasklessReviewHeadDriftValidationRecovery(state, expectedIds) {
+  const request = state.reviewRequest;
+  const outcome = state.reviewOutcome;
+  const latest = state.reviewHistory.at(-1);
+  const priorHeadSha = request?.headSha;
+  return state.schemaVersion === 3
+    && state.legacyReviewProvenance === null
+    && state.phase === 'recovering'
+    && state.tasks.length === 0 && expectedIds.length === 0
+    && request !== null && request.kind === 'discovery'
+    && outcome?.outcome === 'clean' && latest !== undefined
+    && sameEvidence(latest.request, request) && sameEvidence(latest.outcome, outcome)
+    && outcome.requestId === request.id && outcome.kind === request.kind
+    && state.requestedHeadSha === priorHeadSha && state.reviewedHeadSha === priorHeadSha
+    && outcome.headSha === priorHeadSha
+    && priorHeadSha !== state.currentIntegrationHeadSha
+    && state.git.headSha === state.currentIntegrationHeadSha && state.git.dirty === false
+    && state.blockedReasons.length === 0 && state.verificationEscalation === null
+    && !state.tasks.some((task) => task.disposition === 'needs-human-decision')
+    && hasRemainingReviewAllowance(state);
+}
+
+function isV2CompletedTaskValidationRecovery(cwd, state, expectedIds) {
+  if (!['recovering', 'validating'].includes(state.phase) || state.validationStatus.status !== 'not-run'
+      || expectedIds.length !== 0 || state.tasks.length === 0
+      || state.tasks.some((task) => task.status !== 'completed'
+        || task.disposition === 'needs-human-decision')
+      || state.blockedReasons.length !== 0 || state.verificationEscalation !== null) return false;
+  const backupPath = join(stateDirectory(cwd, state.prNumber), 'state.v2.backup.json');
+  if (!existsSync(backupPath)) return false;
+  try {
+    const legacy = readStateDocument(backupPath);
+    if (legacy.schemaVersion !== 2 || !['awaiting-review', 'ready-for-review', 'complete'].includes(legacy.phase)
+        || legacy.validationStatus?.status !== 'passed'
+        || legacy.validationStatus.headSha !== state.currentIntegrationHeadSha
+        || !Array.isArray(legacy.validationStatus.checks) || legacy.validationStatus.checks.length === 0
+        || typeof legacy.validationStatus.updatedAt !== 'string'
+        || !Number.isFinite(Date.parse(legacy.validationStatus.updatedAt))
+        || !Array.isArray(legacy.tasks) || legacy.tasks.length === 0
+        || legacy.tasks.some((task) => task.status !== 'completed')) return false;
+    const migrated = migratePrReviewStateV2(legacy, { migratedAt: state.updatedAt });
+    let expected = migrated;
+    if (legacy.phase === 'awaiting-review') {
+      if (migrated.phase !== 'awaiting-review' || state.phase !== 'validating'
+          || state.reviewOutcome?.outcome !== 'clean'
+          || state.revision !== migrated.revision + 1) return false;
+      expected = {
+        ...buildReviewOutcomeTransition(migrated, state.reviewOutcome),
+        revision: state.revision,
+        updatedAt: state.updatedAt,
+      };
+    }
+    return JSON.stringify(canonicalJson(expected)) === JSON.stringify(canonicalJson(state));
+  } catch {
+    return false;
+  }
+}
+
+function assertTaskPacketHead(state, task, packet, digest) {
+  if (state.reviewedHeadSha !== null) {
+    if (packet.reviewedHeadSha !== state.reviewedHeadSha) {
+      throw new StateError(`Task packet ${packet.taskId} does not match the exact reviewed HEAD`, 'TASK_PACKET_HEAD_MISMATCH');
+    }
+  }
+  const boundIntegratedTask = task.status === 'integrated'
+    && typeof task.taskPacketDigest === 'string';
+  if (boundIntegratedTask) {
+    if (task.taskPacketDigest !== digest) {
+      throw new StateError(`Task packet ${packet.taskId} differs from the accepted packet`, 'TASK_PACKET_CONFLICT');
+    }
+    if (typeof task.integratedCommitSha !== 'string' || task.integratedCommitSha.length === 0) {
+      throw new StateError(
+        `Task ${task.id} integration commit is not proven in the current integration history`,
+        'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+      );
+    }
+    let ancestry;
+    try {
+      ancestry = runGit(
+        ['merge-base', '--is-ancestor', task.integratedCommitSha, state.currentIntegrationHeadSha],
+        { cwd: state.integrationWorktree, allowFailure: true },
+      );
+    } catch {
+      throw new StateError(
+        `Task ${task.id} integration ancestry could not be verified`,
+        'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+      );
+    }
+    if (ancestry.status !== 0) {
+      throw new StateError(
+        `Task ${task.id} integration commit is not an ancestor of the current integration HEAD`,
+        'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+      );
+    }
+    return;
+  }
+  if (state.reviewedHeadSha !== null) return;
+  if (packet.reviewedHeadSha === state.currentIntegrationHeadSha) return;
+  throw new StateError(`Task packet ${packet.taskId} does not match the exact reviewed HEAD`, 'TASK_PACKET_HEAD_MISMATCH');
+}
+
+function assertBoundTaskPacket(state, packet) {
+  const task = state.tasks.find((candidate) => candidate.id === packet.taskId);
+  if (!task || task.disposition !== 'actionable') {
+    throw new StateError(`Task packet ${packet.taskId} does not match an actionable durable task`, 'TASK_PACKET_NOT_BOUND');
+  }
+  const digest = taskPacketDigest(packet);
+  assertTaskPacketHead(state, task, packet, digest);
+  if (!task.taskPacketDigest) {
+    throw new StateError(`Task packet ${packet.taskId} has not been durably bound`, 'TASK_PACKET_NOT_BOUND');
+  }
+  if (task.taskPacketDigest !== digest) {
+    throw new StateError(`Task packet ${packet.taskId} differs from the accepted packet`, 'TASK_PACKET_CONFLICT');
+  }
+  return task;
+}
+
+export function assertTaskPacketBound(state, packet) {
+  const errors = validateTaskPacket(packet);
+  if (errors.length > 0) throw new StateError(`Invalid task packet:\n- ${errors.join('\n- ')}`, 'INVALID_TASK_PACKET');
+  return assertBoundTaskPacket(state, packet);
+}
+
+function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, initialSelection, replace, now }) {
+  const state = loadState(cwd, prNumber);
+  if (!state) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  if (!VALIDATION_PLANNING_PHASES.has(state.phase)) {
+    throw new StateError(`Cannot plan targeted validation while phase is ${state.phase}`, 'VALIDATION_PLAN_PHASE_BLOCKED');
+  }
+  if (state.validationStatus.status !== 'not-run') {
+    throw new StateError('Targeted validation proof must be reset before planning', 'TARGETED_VALIDATION_RESET_REQUIRED');
+  }
+  assertCleanExactIntegrationHead(state);
+  const expectedIds = actionableIntegratedTaskIds(state);
+  const initialMode = initialSelection !== undefined && initialSelection !== null;
+  if (initialMode && Array.isArray(taskPackets) && taskPackets.length > 0) {
+    throw new StateError('Initial selection and task packets are mutually exclusive', 'INVALID_VALIDATION_PLAN');
+  }
+  let validationInputs;
+  let packetIds;
+  if (initialMode) {
+    const selectionErrors = validateInitialValidationSelection(initialSelection);
+    if (selectionErrors.length > 0) {
+      throw new StateError(`Invalid initial validation selection:\n- ${selectionErrors.join('\n- ')}`, 'INVALID_VALIDATION_PLAN');
+    }
+    const pristineSelection = isPristineTasklessValidationSelection(state, expectedIds);
+    const cleanReviewRecovery = isCleanTasklessReviewValidationRecovery(state, expectedIds);
+    const headDriftRecovery = isNativeTasklessReviewHeadDriftValidationRecovery(state, expectedIds);
+    const completedTaskRecovery = isV2CompletedTaskValidationRecovery(cwd, state, expectedIds);
+    if (!pristineSelection && !cleanReviewRecovery && !headDriftRecovery && !completedTaskRecovery) {
+      throw new StateError(
+        'Taskless validation selection requires a pristine cycle, guarded clean-review recovery, or proven v2 completed-task recovery',
+        'INITIAL_VALIDATION_NOT_ALLOWED',
+      );
+    }
+    if (initialSelection.headSha !== state.currentIntegrationHeadSha) {
+      throw new StateError('Initial validation selection does not match the integration HEAD', 'VALIDATION_PLAN_STALE');
+    }
+    validationInputs = [{
+      schemaVersion: 2,
+      taskId: cleanReviewRecovery ? 'taskless-clean-review-validation-recovery'
+        : headDriftRecovery ? 'taskless-review-head-drift-validation-recovery'
+        : completedTaskRecovery ? 'v2-completed-task-validation-recovery' : 'initial-validation-selection',
+      reviewedHeadSha: initialSelection.headSha,
+      finding: cleanReviewRecovery ? 'Taskless targeted-validation recovery after a clean exact-head review.'
+        : headDriftRecovery ? 'Taskless targeted-validation recovery after a clean historical review HEAD drifted.'
+        : completedTaskRecovery ? 'Fresh targeted validation after schema-v2 completed-task migration.'
+          : 'Initial pull-request validation selection.',
+      evidence: cleanReviewRecovery ? 'Explicit orchestrator-selected validation for the preserved clean exact-head review.'
+        : headDriftRecovery ? 'Explicit orchestrator-selected validation for the current HEAD while preserving prior clean review evidence.'
+        : completedTaskRecovery ? 'Immutable schema-v2 backup authorizes fresh orchestrator-selected validation.'
+          : 'Explicit orchestrator-selected validation before the first discovery review.',
+      affectedAreas: initialSelection.affectedAreas,
+      decisionIds: [],
+      allowedPaths: ['scripts/**'],
+      forbiddenPaths: [],
+      dependencies: [],
+      acceptanceCriteria: [cleanReviewRecovery ? 'The selected taskless recovery checks pass.'
+        : headDriftRecovery ? 'The selected taskless current-HEAD recovery checks pass.'
+        : completedTaskRecovery ? 'The selected completed-task migration recovery checks pass.'
+          : 'The selected initial checks pass.'],
+      requiredValidation: initialSelection.requiredValidation,
+    }];
+    packetIds = [];
+  } else {
+    if (!Array.isArray(taskPackets) || taskPackets.length === 0) {
+      throw new StateError('At least one task packet is required', 'INVALID_VALIDATION_PLAN');
+    }
+    const packetErrors = taskPackets.flatMap((packet, index) => validateTaskPacket(packet).map((error) => `packet ${index}: ${error}`));
+    if (packetErrors.length > 0) throw new StateError(`Invalid task packets:\n- ${packetErrors.join('\n- ')}`, 'INVALID_VALIDATION_PLAN');
+    const sortedPackets = [...taskPackets].sort((left, right) => left.taskId.localeCompare(right.taskId));
+    packetIds = sortedPackets.map((packet) => packet.taskId);
+    if (new Set(packetIds).size !== packetIds.length || JSON.stringify(packetIds) !== JSON.stringify(expectedIds)) {
+      throw new StateError('Task packets must exactly cover current actionable integrated tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
+    }
+    sortedPackets.forEach((packet) => assertBoundTaskPacket(state, packet));
+    validationInputs = sortedPackets;
+  }
+  const validationUnion = unionRequiredValidation(validationInputs);
+  const commands = [
+    ...validationUnion.unit.map((entry) => ({ ...entry, kind: 'unit', selectors: [], projects: [] })),
+    ...validationUnion.system.map((entry) => ({ ...entry, kind: 'system' })),
+  ];
+  if (commands.length === 0) throw new StateError('Targeted validation union must not be empty', 'INVALID_VALIDATION_PLAN');
+  const affectedAreas = [...new Set(validationInputs.flatMap((input) => input.affectedAreas))].sort();
+  const plannedCommands = commands.map((entry) => ({
+    ...entry, argv: parseTargetedValidationCommand(entry.command),
+  }));
+  const immutableCommandDefinition = (entry) => ({
+    command: entry.command,
+    reason: entry.reason,
+    kind: entry.kind,
+    selectors: entry.selectors,
+    projects: entry.projects,
+    argv: entry.argv,
+  });
+  const path = validationPlanPath(cwd, state.prNumber);
+  if (existsSync(path)) {
+    let existing;
+    try {
+      existing = readValidationPlan(cwd, state);
+    } catch (error) {
+      if (error.code !== 'INVALID_VALIDATION_PLAN') throw error;
+      try {
+        existing = JSON.parse(readFileSync(path, 'utf8'));
+      } catch (parseError) {
+        throw new StateError(`Unable to read targeted validation plan: ${parseError.message}`, 'INVALID_VALIDATION_PLAN');
+      }
+      const historicalErrors = validateValidationPlan(existing, {
+        ...state, revision: existing?.stateRevision, currentIntegrationHeadSha: existing?.headSha,
+      });
+      if (historicalErrors.length > 0) {
+        throw new StateError(`Invalid targeted validation plan:\n- ${historicalErrors.join('\n- ')}`, 'INVALID_VALIDATION_PLAN');
+      }
+    }
+    const sameDefinition = JSON.stringify({
+      taskIds: existing.taskIds,
+      affectedAreas: existing.affectedAreas,
+      commands: existing.commands.map(immutableCommandDefinition),
+    }) === JSON.stringify({
+      taskIds: packetIds,
+      affectedAreas,
+      commands: plannedCommands.map(immutableCommandDefinition),
+    });
+    if (!replace && sameDefinition && existing.commands.every((entry) => entry.status === 'pending')) return existing;
+    if (!replace) throw new StateError('A saved validation plan already exists; use --replace to start a fresh plan', 'VALIDATION_PLAN_REPLACE_REQUIRED');
+  }
+  const timestamp = now();
+  const plan = {
+    schemaVersion: 1,
+    prNumber: state.prNumber,
+    stateRevision: state.revision,
+    headSha: state.currentIntegrationHeadSha,
+    taskIds: packetIds,
+    affectedAreas,
+    commands: plannedCommands.map((entry) => ({
+      ...entry, status: 'pending', exitCode: null, summary: null, completedAt: null,
+    })),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  const errors = validateValidationPlan(plan, state);
+  if (errors.length > 0) throw new StateError(`Invalid targeted validation plan:\n- ${errors.join('\n- ')}`, 'INVALID_VALIDATION_PLAN');
+  if (Buffer.byteLength(serializeJson(plan), 'utf8') > VALIDATION_PLAN_LIMIT_BYTES) {
+    throw new StateError('Targeted validation plan exceeds 64 KiB', 'VALIDATION_PLAN_TOO_LARGE');
+  }
+  atomicWriteJson(path, plan);
+  appendEvent(cwd, state.prNumber, { type: 'targeted-validation-planned', summary: `Saved ${commands.length} targeted checks for ${state.currentIntegrationHeadSha}` });
+  return plan;
+}
+
+export function buildTargetedValidationPlan({
+  cwd = process.cwd(), prNumber, taskPackets, initialSelection, replace = false, now = utcNow,
+} = {}) {
+  const selectedPr = prNumber ?? activePrNumber(cwd);
+  if (selectedPr === null || selectedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  const current = loadState(cwd, selectedPr);
+  if (!VALIDATION_PLANNING_PHASES.has(current.phase)) {
+    throw new StateError(`Cannot plan targeted validation while phase is ${current.phase}`, 'VALIDATION_PLAN_PHASE_BLOCKED');
+  }
+  if (initialSelection !== undefined && initialSelection !== null
+      && current.validationStatus.status === 'passed'
+      && (isCleanTasklessReviewValidationRecovery(current, actionableIntegratedTaskIds(current))
+        || isNativeTasklessReviewHeadDriftValidationRecovery(current, actionableIntegratedTaskIds(current)))) {
+    throw new StateError(
+      'Taskless review recovery cannot replace existing targeted-validation proof',
+      'INITIAL_VALIDATION_NOT_ALLOWED',
+    );
+  }
+  if (current.validationStatus.status !== 'not-run' && !replace) {
+    throw new StateError('Targeted validation proof already exists; use --replace to start a fresh plan', 'VALIDATION_PLAN_REPLACE_REQUIRED');
+  }
+  if (current.validationStatus.status !== 'not-run') {
+    checkpointTargetedValidationReset({ cwd, prNumber: selectedPr, expectedRevision: current.revision });
+  }
+  return withStateLock(cwd, selectedPr, () => buildTargetedValidationPlanUnlocked({
+    cwd, prNumber: selectedPr, taskPackets, initialSelection, replace, now,
+  }));
 }
 
 function processExists(pid) {
@@ -240,17 +731,9 @@ function readStateDocument(path) {
   }
 }
 
-function upgradeLoadedStateV2Shape(state) {
-  if (state?.schemaVersion === 2
-      && !Object.prototype.hasOwnProperty.call(state, 'verificationEscalation')) {
-    return { ...state, verificationEscalation: null };
-  }
-  return state;
-}
-
 function parseState(path) {
   const document = readStateDocument(path);
-  const state = upgradeLoadedStateV2Shape(document);
+  const state = document;
   if (state?.schemaVersion === 1) {
     const legacyErrors = validatePrReviewStateV1(state);
     if (legacyErrors.length > 0) {
@@ -258,6 +741,16 @@ function parseState(path) {
     }
     throw new StateError(
       `State at ${path} uses schema v1; run the explicit migrate command`,
+      'STATE_MIGRATION_REQUIRED',
+    );
+  }
+  if (state?.schemaVersion === 2) {
+    try { migratePrReviewStateV2(state); } catch (error) {
+      if (error instanceof StateError) throw error;
+      throw new StateError(`Invalid state at ${path}: ${error.message}`, 'INVALID_STATE');
+    }
+    throw new StateError(
+      `State at ${path} uses schema v2; run the explicit migrate command`,
       'STATE_MIGRATION_REQUIRED',
     );
   }
@@ -333,7 +826,7 @@ export function initializeState({
     const path = statePath(cwd, selectedPr);
     if (existsSync(path)) throw new StateError(`State already exists for PR ${selectedPr}`, 'STATE_EXISTS');
     const state = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       revision: 0,
       repository: repo,
       prNumber: selectedPr,
@@ -354,7 +847,9 @@ export function initializeState({
       verificationEscalation: null,
       threadResolutionStatus: emptyThreadProof(),
       blockedReasons: [],
-      validationStatus: { status: 'not-run', headSha: null, checks: [], updatedAt: null },
+      validationStatus: emptyTargetedValidation(),
+      ciValidationStatus: emptyCiValidation(),
+      ciValidationHistory: [],
       nextAction: 'Resolve the PR and pushed head metadata before requesting review.',
       integrationWorktree: root,
       orchestratorSessionId,
@@ -364,7 +859,7 @@ export function initializeState({
     };
     validateStateForWrite(state);
     atomicWriteJson(path, state);
-    atomicWriteJson(activePointerPath(cwd), { schemaVersion: 2, prNumber: selectedPr });
+    atomicWriteJson(activePointerPath(cwd), { schemaVersion: 3, prNumber: selectedPr });
     appendEvent(cwd, selectedPr, { type: 'initialized', summary: `Initialized PR ${selectedPr}` });
     return state;
   });
@@ -432,12 +927,82 @@ function migrateTaskV1(task, integrationMap) {
 
 function migrateValidationProof(proof, head) {
   if (proof.status === 'passed' && proof.headSha === head && proof.checks.length > 0 && proof.updatedAt !== null) {
-    return { ...proof, checks: unique(proof.checks) };
+    return { source: 'orchestrator', scope: 'targeted', ...proof, checks: unique(proof.checks) };
   }
   if (proof.status === 'failed' && proof.headSha !== null && proof.updatedAt !== null) {
-    return { ...proof, checks: unique(proof.checks) };
+    return { source: 'orchestrator', scope: 'targeted', ...proof, checks: unique(proof.checks) };
   }
-  return { status: 'not-run', headSha: null, checks: [], updatedAt: null };
+  return emptyTargetedValidation();
+}
+
+export function migratePrReviewStateV2(legacyState, { migratedAt = utcNow() } = {}) {
+  if (!legacyState || legacyState.schemaVersion !== 2) {
+    throw new StateError('Expected schema v2 state', 'INVALID_STATE');
+  }
+  const normalized = Object.prototype.hasOwnProperty.call(legacyState, 'verificationEscalation')
+    ? legacyState : { ...legacyState, verificationEscalation: null };
+  for (const field of ['ciValidationStatus', 'ciValidationHistory']) {
+    if (Object.prototype.hasOwnProperty.call(normalized, field)) {
+      throw new StateError(`Schema v2 state cannot contain ${field}`, 'INVALID_STATE');
+    }
+  }
+  const wasComplete = normalized.phase === 'complete';
+  const validationMustBeRebuilt = normalized.validationStatus?.status === 'passed';
+  const latestReview = normalized.reviewHistory?.at(-1);
+  const pendingReviewMustBePreserved = normalized.phase === 'awaiting-review'
+    && normalized.reviewOutcome === null
+    && latestReview?.outcome === null
+    && normalized.reviewRequest?.id === latestReview.request?.id
+    && latestReview.request?.headSha === normalized.currentIntegrationHeadSha;
+  const mustRecover = wasComplete || (validationMustBeRebuilt && !pendingReviewMustBePreserved);
+  const migrated = {
+    ...normalized,
+    schemaVersion: 3,
+    revision: normalized.revision + 1,
+    validationStatus: emptyTargetedValidation(),
+    ciValidationStatus: emptyCiValidation(),
+    ciValidationHistory: [],
+    nextAction: pendingReviewMustBePreserved
+      ? 'Collect the pending exact-head review, then reconfirm targeted validation and full GitHub Actions.'
+      : wasComplete || validationMustBeRebuilt
+        ? 'Reconfirm targeted validation, full GitHub Actions, and the exact review commit after schema v3 migration.'
+      : normalized.nextAction,
+    phase: mustRecover ? 'recovering' : normalized.phase,
+    updatedAt: migratedAt,
+  };
+  const legacyCompletionPlaceholder = {
+    source: 'github-actions', scope: 'full', status: 'passed', headSha: normalized.currentIntegrationHeadSha,
+    checks: ['schema-v2 completion invariant validation only'], workflowRunId: 1,
+    workflowRunUrl: 'https://github.com/sky-bar/schema-v2-migration-placeholder', updatedAt: migratedAt,
+  };
+  const legacyCompletedLocalTaskIds = (normalized.tasks ?? [])
+    .filter((task) => task.sourceType === 'local' && task.status === 'completed')
+    .map((task) => task.id).sort();
+  const legacyCompletionThreadProof = legacyCompletedLocalTaskIds.length > 0
+    && !Object.hasOwn(normalized.threadResolutionStatus, 'localVerification')
+    ? {
+        ...normalized.threadResolutionStatus,
+        localVerification: {
+          status: 'passed', headSha: normalized.currentIntegrationHeadSha,
+          taskIds: legacyCompletedLocalTaskIds, updatedAt: migratedAt,
+        },
+      }
+    : normalized.threadResolutionStatus;
+  const validationCandidate = wasComplete ? {
+    ...migrated,
+    phase: 'complete',
+    validationStatus: migrateValidationProof(normalized.validationStatus, normalized.currentIntegrationHeadSha),
+    ciValidationStatus: legacyCompletionPlaceholder,
+    ciValidationHistory: [legacyCompletionPlaceholder],
+    // This proof exists only to validate the legacy Done invariant. The returned recovering
+    // state never treats schema-v2 local completion as current verifier evidence.
+    threadResolutionStatus: legacyCompletionThreadProof,
+  } : migrated;
+  const errors = validatePrReviewState(validationCandidate);
+  if (errors.length > 0) {
+    throw new StateError(`Unable to migrate schema v2 state:\n- ${errors.join('\n- ')}`, 'STATE_MIGRATION_FAILED');
+  }
+  return migrated;
 }
 
 export function migratePrReviewStateV1(legacyState, {
@@ -458,7 +1023,7 @@ export function migratePrReviewStateV1(legacyState, {
       }
     }
   }
-  const migrated = {
+  const schemaV2 = {
     schemaVersion: 2,
     revision: legacyState.revision + 1,
     repository: legacyState.repository,
@@ -492,11 +1057,7 @@ export function migratePrReviewStateV1(legacyState, {
     git: legacyState.git,
     updatedAt: migratedAt,
   };
-  const errors = validatePrReviewState(migrated);
-  if (errors.length > 0) {
-    throw new StateError(`Unable to migrate schema v1 state:\n- ${errors.join('\n- ')}`, 'STATE_MIGRATION_FAILED');
-  }
-  return migrated;
+  return migratePrReviewStateV2(schemaV2, { migratedAt });
 }
 
 export function migrateState({ cwd = process.cwd(), prNumber, integrationMap } = {}) {
@@ -515,31 +1076,33 @@ export function migrateState({ cwd = process.cwd(), prNumber, integrationMap } =
     if (!existsSync(path)) throw new StateError(`No state file at ${path}`, 'STATE_NOT_FOUND');
     const legacySource = readFileSync(path, 'utf8');
     const legacy = readStateDocument(path);
-    if (legacy.schemaVersion === 2) throw new StateError('State already uses schema v2', 'STATE_ALREADY_MIGRATED');
-    const state = migratePrReviewStateV1(legacy, {
-      integrationMap,
-      isAncestor: (ancestor, descendant) => runGit(
-        ['merge-base', '--is-ancestor', ancestor, descendant],
-        { cwd: legacy.integrationWorktree, allowFailure: true },
-      ).status === 0,
-    });
+    if (legacy.schemaVersion === 3) throw new StateError('State already uses schema v3', 'STATE_ALREADY_MIGRATED');
+    const state = legacy.schemaVersion === 1
+      ? migratePrReviewStateV1(legacy, {
+          integrationMap,
+          isAncestor: (ancestor, descendant) => runGit(
+            ['merge-base', '--is-ancestor', ancestor, descendant],
+            { cwd: legacy.integrationWorktree, allowFailure: true },
+          ).status === 0,
+        })
+      : migratePrReviewStateV2(legacy);
     validateStateForWrite(state);
-    const backupPath = join(stateDirectory(cwd, selectedPr), 'state.v1.backup.json');
+    const backupPath = join(stateDirectory(cwd, selectedPr), `state.v${legacy.schemaVersion}.backup.json`);
     if (existsSync(backupPath)) {
       const existingSource = readFileSync(backupPath, 'utf8');
       let semanticallyEqual = false;
       try { semanticallyEqual = JSON.stringify(JSON.parse(existingSource)) === JSON.stringify(legacy); } catch { /* fail closed */ }
       if (existingSource !== legacySource && !semanticallyEqual) {
-        throw new StateError(`Migration backup differs from current v1 state at ${backupPath}`, 'MIGRATION_BACKUP_CONFLICT');
+        throw new StateError(`Migration backup differs from current v${legacy.schemaVersion} state at ${backupPath}`, 'MIGRATION_BACKUP_CONFLICT');
       }
     } else {
       atomicWriteText(backupPath, legacySource);
     }
     atomicWriteJson(path, state);
-    atomicWriteJson(activePointerPath(cwd), { schemaVersion: 2, prNumber: selectedPr });
+    atomicWriteJson(activePointerPath(cwd), { schemaVersion: 3, prNumber: selectedPr });
     appendEvent(cwd, selectedPr, {
       type: 'state-migrated',
-      summary: `Migrated PR ${selectedPr} state from schema v1 to v2`,
+      summary: `Migrated PR ${selectedPr} state from schema v${legacy.schemaVersion} to v3`,
     });
     return { state, backupPath };
   });
@@ -570,57 +1133,63 @@ export function appendEvent(cwd, prNumber, input = {}) {
   atomicWriteText(path, `${existing}${JSON.stringify(event)}\n`);
 }
 
+function checkpointStateUnlocked({
+  cwd, selectedPr, nextState, expectedRevision, event, eventWriter, transitionAuthorization,
+}) {
+  if (event) prepareEvent(event);
+  const current = loadState(cwd, selectedPr);
+  const expected = expectedRevision ?? nextState?.revision;
+  if (expected !== current.revision) {
+    throw new StateError(`State revision changed: expected ${expected}, found ${current.revision}`, 'STATE_REVISION_CONFLICT');
+  }
+  const immutable = ['repository', 'prNumber', 'baseSha', 'integrationWorktree'];
+  for (const field of immutable) {
+    if (nextState[field] !== current[field]) {
+      throw new StateError(`${field} is immutable`, 'IMMUTABLE_STATE_IDENTITY');
+    }
+  }
+  if (JSON.stringify(nextState.releaseBaseline) !== JSON.stringify(current.releaseBaseline)) {
+    throw new StateError('releaseBaseline is immutable', 'IMMUTABLE_STATE_IDENTITY');
+  }
+  if (JSON.stringify(nextState.legacyReviewProvenance) !== JSON.stringify(current.legacyReviewProvenance)) {
+    throw new StateError('legacyReviewProvenance is immutable', 'IMMUTABLE_STATE_IDENTITY');
+  }
+  if (nextState.reviewRound < current.reviewRound) {
+    throw new StateError('reviewRound cannot decrease', 'INVALID_LIFECYCLE_TRANSITION');
+  }
+  if (current.verificationReviewUsed && !nextState.verificationReviewUsed) {
+    throw new StateError('verificationReviewUsed is sticky', 'INVALID_LIFECYCLE_TRANSITION');
+  }
+  if (nextState.abandonmentReason !== null) {
+    throw new StateError('abandonmentReason must remain null in active state', 'INVALID_LIFECYCLE_TRANSITION');
+  }
+  assertCheckpointProvenance(current, nextState, transitionAuthorization);
+  const state = { ...nextState, revision: current.revision + 1, updatedAt: utcNow() };
+  validateStateForWrite(state);
+  atomicWriteJson(statePath(cwd, selectedPr), state);
+  if (event) {
+    try {
+      eventWriter(cwd, selectedPr, event);
+    } catch (error) {
+      atomicWriteJson(statePath(cwd, selectedPr), current);
+      throw new StateError(
+        `Checkpoint event failed; state was rolled back: ${error.message}`,
+        'CHECKPOINT_EVENT_FAILED',
+      );
+    }
+  }
+  return state;
+}
+
 export function checkpointState({
   cwd = process.cwd(), prNumber, nextState, expectedRevision, event, eventWriter = appendEvent,
   transitionAuthorization,
 } = {}) {
   const selectedPr = prNumber ?? nextState?.prNumber ?? activePrNumber(cwd);
   if (selectedPr === null || selectedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
-  if (event) prepareEvent(event);
-  return withStateLock(cwd, selectedPr, () => {
-    const current = loadState(cwd, selectedPr);
-    const expected = expectedRevision ?? nextState?.revision;
-    if (expected !== current.revision) {
-      throw new StateError(`State revision changed: expected ${expected}, found ${current.revision}`, 'STATE_REVISION_CONFLICT');
-    }
-    const immutable = ['repository', 'prNumber', 'baseSha', 'integrationWorktree'];
-    for (const field of immutable) {
-      if (nextState[field] !== current[field]) {
-        throw new StateError(`${field} is immutable`, 'IMMUTABLE_STATE_IDENTITY');
-      }
-    }
-    if (JSON.stringify(nextState.releaseBaseline) !== JSON.stringify(current.releaseBaseline)) {
-      throw new StateError('releaseBaseline is immutable', 'IMMUTABLE_STATE_IDENTITY');
-    }
-    if (JSON.stringify(nextState.legacyReviewProvenance) !== JSON.stringify(current.legacyReviewProvenance)) {
-      throw new StateError('legacyReviewProvenance is immutable', 'IMMUTABLE_STATE_IDENTITY');
-    }
-    if (nextState.reviewRound < current.reviewRound) {
-      throw new StateError('reviewRound cannot decrease', 'INVALID_LIFECYCLE_TRANSITION');
-    }
-    if (current.verificationReviewUsed && !nextState.verificationReviewUsed) {
-      throw new StateError('verificationReviewUsed is sticky', 'INVALID_LIFECYCLE_TRANSITION');
-    }
-    if (nextState.abandonmentReason !== null) {
-      throw new StateError('abandonmentReason must remain null in active state', 'INVALID_LIFECYCLE_TRANSITION');
-    }
-    assertCheckpointProvenance(current, nextState, transitionAuthorization);
-    const state = { ...nextState, revision: current.revision + 1, updatedAt: utcNow() };
-    validateStateForWrite(state);
-    atomicWriteJson(statePath(cwd, selectedPr), state);
-    if (event) {
-      try {
-        eventWriter(cwd, selectedPr, event);
-      } catch (error) {
-        atomicWriteJson(statePath(cwd, selectedPr), current);
-        throw new StateError(
-          `Checkpoint event failed; state was rolled back: ${error.message}`,
-          'CHECKPOINT_EVENT_FAILED',
-        );
-      }
-    }
-    return state;
-  });
+  return withStateLock(cwd, selectedPr, () => checkpointStateUnlocked({
+    cwd, selectedPr, nextState, expectedRevision, event, eventWriter, transitionAuthorization,
+  }));
 }
 
 function sameEvidence(left, right) {
@@ -649,6 +1218,9 @@ function assertCheckpointProvenance(current, next, authorization) {
       'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
       'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
     ]) assertImmutableValue(current[field], next[field], field);
+    assertImmutableValue(current.ciValidationStatus, next.ciValidationStatus, 'ciValidationStatus');
+    assertImmutableValue(current.ciValidationHistory, next.ciValidationHistory, 'ciValidationHistory');
+    assertImmutableValue(current.validationStatus, next.validationStatus, 'validationStatus');
   } else if (guardedKind === 'review-request') {
     if (next.reviewHistory.length !== current.reviewHistory.length + 1) {
       throw new StateError('Review requests must append exactly one history entry', 'IMMUTABLE_STATE_PROVENANCE');
@@ -677,11 +1249,46 @@ function assertCheckpointProvenance(current, next, authorization) {
       'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
       'reviewRequest', 'reviewOutcome', 'reviewHistory',
     ]) assertImmutableValue(current[field], next[field], field);
+  } else if (guardedKind === 'ci-validation') {
+    for (const field of [
+      'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
+      'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
+    ]) assertImmutableValue(current[field], next[field], field);
+    const appended = next.ciValidationHistory.length === current.ciValidationHistory.length + 1;
+    const restored = next.ciValidationHistory.length === current.ciValidationHistory.length
+      && next.ciValidationHistory.some((entry) => sameEvidence(entry, next.ciValidationStatus));
+    if (!appended && !restored) {
+      throw new StateError(
+        'CI validation must append one workflow-run record or restore an immutable historical record',
+        'IMMUTABLE_STATE_PROVENANCE',
+      );
+    }
+    current.ciValidationHistory.forEach((entry, index) => assertImmutableValue(
+      entry, next.ciValidationHistory[index], `ciValidationHistory[${index}]`,
+    ));
+  } else if (guardedKind === 'targeted-validation') {
+    for (const field of [
+      'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
+      'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
+    ]) assertImmutableValue(current[field], next[field], field);
+    assertImmutableValue(current.ciValidationStatus, next.ciValidationStatus, 'ciValidationStatus');
+    assertImmutableValue(current.ciValidationHistory, next.ciValidationHistory, 'ciValidationHistory');
+  } else if (guardedKind === 'git-metadata') {
+    assertImmutableValue(current.ciValidationHistory, next.ciValidationHistory, 'ciValidationHistory');
+    if (!sameEvidence(current.ciValidationStatus, next.ciValidationStatus)) {
+      assertImmutableValue(emptyCiValidation(), next.ciValidationStatus, 'invalidated ciValidationStatus');
+    }
+    if (!sameEvidence(current.validationStatus, next.validationStatus)) {
+      assertImmutableValue(emptyTargetedValidation(), next.validationStatus, 'invalidated validationStatus');
+    }
   } else {
     for (const field of [
       'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
       'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
     ]) assertImmutableValue(current[field], next[field], field);
+  }
+  if (!['targeted-validation', 'git-metadata'].includes(guardedKind)) {
+    assertImmutableValue(current.validationStatus, next.validationStatus, 'validationStatus');
   }
   if (current.phase !== 'complete' && next.phase === 'complete' && guardedKind !== 'cycle-completion') {
     throw new StateError('Only the guarded completion checkpoint may enter complete', 'PROTECTED_TRANSITION_REQUIRED');
@@ -696,12 +1303,20 @@ function assertCheckpointProvenance(current, next, authorization) {
     if (!currentTaskIds.has(task.id) && task.status !== 'proposed') {
       throw new StateError(`New task ${task.id} must begin as proposed`, 'IMMUTABLE_STATE_PROVENANCE');
     }
+    if (!currentTaskIds.has(task.id) && task.taskPacketDigest) {
+      throw new StateError(`New task ${task.id} packet binding requires a guarded transition`, 'PROTECTED_TRANSITION_REQUIRED');
+    }
   }
   for (const task of current.tasks) {
     const updated = nextTasks.get(task.id);
     if (!updated) throw new StateError(`Task ${task.id} cannot be deleted`, 'IMMUTABLE_STATE_PROVENANCE');
     for (const field of ['id', 'sourceIds', 'sourceType', 'fingerprint', 'summary', 'severity', 'disposition']) {
       assertImmutableValue(task[field], updated[field], `task ${task.id} ${field}`);
+    }
+    if (task.taskPacketDigest) {
+      assertImmutableValue(task.taskPacketDigest, updated.taskPacketDigest, `task ${task.id} taskPacketDigest`);
+    } else if (updated.taskPacketDigest && guardedKind !== 'task-packet-binding') {
+      throw new StateError(`Task ${task.id} packet binding requires a guarded transition`, 'PROTECTED_TRANSITION_REQUIRED');
     }
     if (task.integratedCommitSha !== null) {
       assertImmutableValue(task.integratedCommitSha, updated.integratedCommitSha, `task ${task.id} integratedCommitSha`);
@@ -761,6 +1376,26 @@ function assertCheckpointProvenance(current, next, authorization) {
   if (newThreadless.taskIds.some((taskId) => !oldThreadless.taskIds.includes(taskId)) && guardedKind !== 'task-completion') {
     throw new StateError('Threadless task proof may only grow through guarded completion', 'PROTECTED_TRANSITION_REQUIRED');
   }
+  const oldLocal = current.threadResolutionStatus.localVerification ?? emptyLocalVerification();
+  const newLocal = next.threadResolutionStatus.localVerification ?? emptyLocalVerification();
+  if (guardedKind !== 'task-completion') {
+    assertImmutableValue(oldLocal, newLocal, 'local verifier proof');
+  }
+  if (oldLocal.status === 'passed') {
+    if (newLocal.status !== 'passed') {
+      throw new StateError('Successful local verifier proof cannot regress', 'IMMUTABLE_STATE_PROVENANCE');
+    }
+    if (oldLocal.headSha === newLocal.headSha
+        && oldLocal.taskIds.some((taskId) => !newLocal.taskIds.includes(taskId))) {
+      throw new StateError(
+        'Same-HEAD local verifier proof cannot lose task coverage',
+        'IMMUTABLE_STATE_PROVENANCE',
+      );
+    }
+  }
+  if (oldLocal.status !== 'passed' && newLocal.status === 'passed' && guardedKind !== 'task-completion') {
+    throw new StateError('Local verifier proof may only pass through guarded completion', 'PROTECTED_TRANSITION_REQUIRED');
+  }
   if (current.threadResolutionStatus.status !== 'passed'
       && next.threadResolutionStatus.status === 'passed' && guardedKind !== 'task-completion') {
     throw new StateError('Aggregate thread proof may only pass through guarded completion', 'PROTECTED_TRANSITION_REQUIRED');
@@ -771,6 +1406,7 @@ function assertCheckpointProvenance(current, next, authorization) {
     } else if (next.threadResolutionStatus.status === 'not-run') {
       assertImmutableValue(currentThreads, nextThreads, 'historical canonical thread evidence');
       assertImmutableValue(oldThreadless, newThreadless, 'historical threadless task proof');
+      assertImmutableValue(oldLocal, newLocal, 'historical local verifier proof');
     } else {
       throw new StateError(
         'Successful aggregate thread proof may only be preserved or invalidated to not-run',
@@ -884,23 +1520,271 @@ export function buildCompletionTransition(state, external) {
   return next;
 }
 
-export function completeIntegratedTasks(state, { threadResolutionStatus }) {
+export function buildCiValidationTransition(state, evidence) {
+  if (evidence?.source !== 'github-actions' || evidence?.scope !== 'full'
+      || !['passed', 'failed'].includes(evidence?.status)
+      || typeof evidence?.checkRunId !== 'string' || evidence.checkRunId.length === 0
+      || evidence?.headSha !== state.currentIntegrationHeadSha) {
+    throw new StateError('CI evidence must be full GitHub Actions validation for the current integration HEAD', 'INVALID_CI_VALIDATION');
+  }
+  const existing = state.ciValidationHistory.find((entry) => entry.checkRunId === evidence.checkRunId);
+  if (existing && !sameEvidence(existing, evidence)) {
+    throw new StateError('GitHub Actions check run ID was reused with different evidence', 'CI_EVIDENCE_CONFLICT');
+  }
+  if (existing && sameEvidence(state.ciValidationStatus, evidence)) return state;
+  const next = {
+    ...state,
+    ciValidationStatus: evidence,
+    ciValidationHistory: existing ? state.ciValidationHistory : [...state.ciValidationHistory, evidence],
+    nextAction: evidence.status === 'passed'
+      ? state.nextAction
+      : 'Inspect the failed full GitHub Actions run, then record a new run for the same review commit.',
+  };
+  const errors = validatePrReviewState(next);
+  if (errors.length > 0) throw new StateError(`Invalid CI validation transition:\n- ${errors.join('\n- ')}`, 'INVALID_CI_VALIDATION');
+  return next;
+}
+
+function buildTargetedValidationTransition(state, plan, timestamp = utcNow()) {
+  const errors = validateValidationPlan(plan, state);
+  if (errors.length > 0) throw new StateError(`Invalid targeted validation plan:\n- ${errors.join('\n- ')}`, 'INVALID_VALIDATION_PLAN');
+  if (plan.commands.some((entry) => entry.status === 'pending')) {
+    throw new StateError('Targeted validation plan still has pending commands', 'VALIDATION_PLAN_INCOMPLETE');
+  }
+  if (JSON.stringify([...plan.taskIds].sort()) !== JSON.stringify(actionableIntegratedTaskIds(state))) {
+    throw new StateError('Targeted validation plan no longer covers current actionable integrated tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
+  }
+  const status = plan.commands.every((entry) => entry.status === 'passed') ? 'passed' : 'failed';
+  const next = {
+    ...state,
+    validationStatus: {
+      source: 'orchestrator', scope: 'targeted', status, headSha: plan.headSha,
+      checks: plan.commands.map((entry) => entry.command), updatedAt: timestamp,
+    },
+    nextAction: status === 'passed'
+      ? state.nextAction
+      : 'Fix the failed targeted check, rebuild the validation plan, and run it again.',
+  };
+  const stateErrors = validatePrReviewState(next);
+  if (stateErrors.length > 0) throw new StateError(`Invalid targeted validation transition:\n- ${stateErrors.join('\n- ')}`, 'INVALID_TARGETED_VALIDATION');
+  return next;
+}
+
+export function checkpointTargetedValidationReset({ cwd = process.cwd(), prNumber, expectedRevision } = {}) {
+  const current = loadState(cwd, prNumber);
+  if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  if (current.validationStatus.status === 'not-run') return current;
+  if (current.validationStatus.status === 'passed'
+      && (isCleanTasklessReviewValidationRecovery(current, actionableIntegratedTaskIds(current))
+        || isNativeTasklessReviewHeadDriftValidationRecovery(current, actionableIntegratedTaskIds(current)))) {
+    throw new StateError(
+      'Taskless review recovery cannot discard existing targeted-validation proof',
+      'INITIAL_VALIDATION_NOT_ALLOWED',
+    );
+  }
+  const nextState = {
+    ...current,
+    validationStatus: emptyTargetedValidation(),
+    ...(current.phase === 'ready-for-review' ? {
+      phase: 'recovering', nextAction: 'Run the saved targeted validation plan before requesting review.',
+    } : {}),
+  };
+  return checkpointState({
+    cwd, prNumber: current.prNumber, nextState, expectedRevision,
+    event: { type: 'targeted-validation-reset', summary: 'Reset targeted validation before creating a new plan' },
+    transitionAuthorization: protectedTransition(nextState, 'targeted-validation'),
+  });
+}
+
+function checkpointTargetedValidationUnlocked({ cwd, selectedPr, expectedRevision }) {
+  const current = loadState(cwd, selectedPr);
+  if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  assertCleanExactIntegrationHead(current);
+  const plan = readValidationPlan(cwd, current);
+  const nextState = buildTargetedValidationTransition(current, plan);
+  return checkpointStateUnlocked({
+    cwd, selectedPr: current.prNumber, nextState, expectedRevision, eventWriter: appendEvent,
+    event: {
+      type: 'targeted-validation-recorded',
+      summary: `Recorded ${nextState.validationStatus.status} targeted validation for ${current.currentIntegrationHeadSha}`,
+    },
+    transitionAuthorization: protectedTransition(nextState, 'targeted-validation'),
+  });
+}
+
+export function checkpointTargetedValidation({ cwd = process.cwd(), prNumber, expectedRevision } = {}) {
+  const selectedPr = prNumber ?? activePrNumber(cwd);
+  if (selectedPr === null || selectedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  return withStateLock(cwd, selectedPr, () => checkpointTargetedValidationUnlocked({
+    cwd, selectedPr, expectedRevision,
+  }));
+}
+
+export function executeTargetedValidationPlan({
+  cwd = process.cwd(), prNumber, runCommand = (argv, commandCwd) => spawnSync(argv[0], argv.slice(1), {
+    cwd: commandCwd, stdio: 'inherit', shell: false,
+  }), now = utcNow, onCommandRecorded, onProofCheckpointed,
+} = {}) {
+  const selectedPr = prNumber ?? activePrNumber(cwd);
+  if (selectedPr === null || selectedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  return withStateLock(cwd, selectedPr, () => {
+    let state = loadState(cwd, selectedPr);
+    if (!state) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+    assertCleanExactIntegrationHead(state);
+    let plan = readValidationPlan(cwd, state);
+    if (JSON.stringify([...plan.taskIds].sort()) !== JSON.stringify(actionableIntegratedTaskIds(state))) {
+      throw new StateError('Targeted validation plan no longer covers current actionable integrated tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
+    }
+    for (let index = 0; index < plan.commands.length; index += 1) {
+      const entry = plan.commands[index];
+      if (entry.status !== 'pending') continue;
+      state = loadState(cwd, state.prNumber);
+      assertCleanExactIntegrationHead(state);
+      if (state.currentIntegrationHeadSha !== plan.headSha || state.revision !== plan.stateRevision) {
+        throw new StateError('Targeted validation plan is stale', 'VALIDATION_PLAN_STALE');
+      }
+      if (JSON.stringify([...plan.taskIds].sort()) !== JSON.stringify(actionableIntegratedTaskIds(state))) {
+        throw new StateError('Targeted validation plan no longer covers current actionable integrated tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
+      }
+      let result;
+      try {
+        result = runCommand([...entry.argv], state.integrationWorktree);
+      } catch (error) {
+        result = { status: 1, error };
+      }
+      const exitCode = Number.isInteger(result?.status) && result.status >= 0 ? result.status : 1;
+      const completedAt = now();
+      const summary = exitCode === 0
+        ? 'Passed.'
+        : `Failed with exit code ${exitCode}${result?.error?.message ? `: ${String(result.error.message).slice(0, 400)}` : '.'}`;
+      plan = {
+        ...plan,
+        commands: plan.commands.map((item, itemIndex) => itemIndex === index ? {
+          ...item, status: exitCode === 0 ? 'passed' : 'failed', exitCode, summary, completedAt,
+        } : item),
+        updatedAt: completedAt,
+      };
+      atomicWriteJson(validationPlanPath(cwd, state.prNumber), plan);
+      onCommandRecorded?.(entry.command, plan);
+    }
+    const checkpointed = checkpointTargetedValidationUnlocked({
+      cwd, selectedPr: state.prNumber, expectedRevision: state.revision,
+    });
+    onProofCheckpointed?.(checkpointed, plan);
+    return { plan, state: checkpointed };
+  });
+}
+
+const VERIFIED_NON_ACTIONABLE_DISPOSITIONS = new Set([
+  'duplicate', 'already-fixed', 'stale', 'invalid', 'policy-conflict', 'out-of-scope',
+]);
+
+function taskIsEligibleForVerifierCompletion(task) {
+  const actionable = task.disposition === 'actionable'
+    && ['integrated', 'completed'].includes(task.status)
+    && Boolean(task.integratedCommitSha);
+  const nonActionable = VERIFIED_NON_ACTIONABLE_DISPOSITIONS.has(task.disposition)
+    && ['not-applicable', 'completed'].includes(task.status);
+  return actionable || nonActionable;
+}
+
+export function completeIntegratedTasks(state, { threadResolutionStatus, verifiedLocalTaskIds = [] }) {
+  if (!threadResolutionStatus || typeof threadResolutionStatus !== 'object'
+      || Array.isArray(threadResolutionStatus)) {
+    throw new StateError('Thread resolution proof is required for task completion', 'INVALID_TASK_COMPLETION');
+  }
+  if (!Array.isArray(verifiedLocalTaskIds)
+      || verifiedLocalTaskIds.some((taskId) => typeof taskId !== 'string' || taskId.length === 0)
+      || new Set(verifiedLocalTaskIds).size !== verifiedLocalTaskIds.length) {
+    throw new StateError('Verified local task IDs must be unique nonempty strings', 'INVALID_TASK_COMPLETION');
+  }
+  const verifiedLocalTasks = new Set(verifiedLocalTaskIds);
+  for (const taskId of verifiedLocalTasks) {
+    const task = state.tasks.find((candidate) => candidate.id === taskId);
+    if (!task) throw new StateError(`Verified local task ${taskId} was not found`, 'INVALID_TASK_COMPLETION');
+    if (task.sourceType !== 'local') {
+      throw new StateError(`Verified local task ${taskId} is not local`, 'INVALID_TASK_COMPLETION');
+    }
+    if (!taskIsEligibleForVerifierCompletion(task)) {
+      throw new StateError(`Verified local task ${taskId} is not eligible for verifier completion`, 'INVALID_TASK_COMPLETION');
+    }
+  }
+  const previousLocalVerification = state.threadResolutionStatus.localVerification ?? emptyLocalVerification();
+  const { localVerification: _untrustedLocalVerification, ...threadProofWithoutLocal } = threadResolutionStatus;
+  let completionThreadProof = Object.hasOwn(state.threadResolutionStatus, 'localVerification')
+    ? { ...threadProofWithoutLocal, localVerification: previousLocalVerification }
+    : threadProofWithoutLocal;
+  if (verifiedLocalTasks.size > 0) {
+    if (threadResolutionStatus.status === 'not-run'
+        || threadResolutionStatus.headSha !== state.currentIntegrationHeadSha
+        || threadResolutionStatus.updatedAt === null) {
+      throw new StateError(
+        'Verified local tasks require a current-HEAD aggregate observation and timestamp',
+        'INVALID_TASK_COMPLETION',
+      );
+    }
+    const retainedIds = previousLocalVerification.status === 'passed'
+        && previousLocalVerification.headSha === state.currentIntegrationHeadSha
+      ? previousLocalVerification.taskIds : [];
+    completionThreadProof = {
+      ...threadProofWithoutLocal,
+      localVerification: {
+        status: 'passed',
+        headSha: state.currentIntegrationHeadSha,
+        taskIds: [...new Set([...retainedIds, ...verifiedLocalTasks])].sort(),
+        updatedAt: threadResolutionStatus.updatedAt,
+      },
+    };
+  }
   const tasks = state.tasks.map((task) => {
     const eligibleNotApplicable = task.status === 'not-applicable'
       && !['actionable', 'needs-human-decision'].includes(task.disposition);
     if (task.status !== 'integrated' && !eligibleNotApplicable) return task;
-    const eligible = task.sourceType === 'local'
+    const eligible = (task.sourceType === 'local' && verifiedLocalTasks.has(task.id))
       || (task.sourceType === 'github-thread'
-        && taskHasCanonicalThreadCoverage(task, threadResolutionStatus.threads ?? []))
+        && taskHasCanonicalThreadCoverage(task, completionThreadProof.threads ?? []))
       || (task.sourceType === 'github-threadless'
-        && threadResolutionStatus.threadlessVerification?.status === 'passed'
-        && threadResolutionStatus.threadlessVerification.taskIds.includes(task.id));
+        && completionThreadProof.threadlessVerification?.status === 'passed'
+        && completionThreadProof.threadlessVerification.headSha === state.currentIntegrationHeadSha
+        && completionThreadProof.threadlessVerification.taskIds.includes(task.id));
     return eligible ? { ...task, status: 'completed' } : task;
   });
-  const next = { ...state, tasks, threadResolutionStatus };
+  const next = { ...state, tasks, threadResolutionStatus: completionThreadProof };
   const errors = validatePrReviewState(next);
   if (errors.length > 0) throw new StateError(`Invalid integrated-to-completed transition:\n- ${errors.join('\n- ')}`, 'INVALID_TASK_COMPLETION');
   return next;
+}
+
+export function checkpointTaskPacketBinding({
+  cwd = process.cwd(), prNumber, packet, expectedRevision, event,
+} = {}) {
+  const errors = validateTaskPacket(packet);
+  if (errors.length > 0) throw new StateError(`Invalid task packet:\n- ${errors.join('\n- ')}`, 'INVALID_TASK_PACKET');
+  const current = loadState(cwd, prNumber);
+  if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  const task = current.tasks.find((candidate) => candidate.id === packet.taskId);
+  if (!task || task.disposition !== 'actionable') {
+    throw new StateError('Task packet must match an actionable durable task', 'TASK_PACKET_NOT_BOUND');
+  }
+  const digest = taskPacketDigest(packet);
+  assertTaskPacketHead(current, task, packet, digest);
+  if (task.taskPacketDigest) {
+    if (task.taskPacketDigest !== digest) {
+      throw new StateError('Task packet differs from the accepted packet', 'TASK_PACKET_CONFLICT');
+    }
+    return current;
+  }
+  const nextState = {
+    ...current,
+    tasks: current.tasks.map((candidate) => candidate.id === packet.taskId
+      ? { ...candidate, taskPacketDigest: digest }
+      : candidate),
+  };
+  return checkpointState({
+    cwd, prNumber: current.prNumber, nextState, expectedRevision,
+    event: event ?? { type: 'task-packet-bound', summary: `Bound accepted packet for task ${packet.taskId}` },
+    transitionAuthorization: protectedTransition(nextState, 'task-packet-binding'),
+  });
 }
 
 export function checkpointReviewRequest({
@@ -961,12 +1845,25 @@ export function checkpointCompletion({
   });
 }
 
-export function checkpointTaskCompletion({
-  cwd = process.cwd(), prNumber, threadResolutionStatus, expectedRevision, event,
+export function checkpointCiValidation({
+  cwd = process.cwd(), prNumber, evidence, expectedRevision, event,
 } = {}) {
   const current = loadState(cwd, prNumber);
   if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
-  const nextState = completeIntegratedTasks(current, { threadResolutionStatus });
+  const nextState = buildCiValidationTransition(current, evidence);
+  if (nextState === current) return current;
+  return checkpointState({
+    cwd, prNumber: current.prNumber, nextState, expectedRevision,
+    event, transitionAuthorization: protectedTransition(nextState, 'ci-validation'),
+  });
+}
+
+export function checkpointTaskCompletion({
+  cwd = process.cwd(), prNumber, threadResolutionStatus, verifiedLocalTaskIds = [], expectedRevision, event,
+} = {}) {
+  const current = loadState(cwd, prNumber);
+  if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  const nextState = completeIntegratedTasks(current, { threadResolutionStatus, verifiedLocalTaskIds });
   return checkpointState({
     cwd, prNumber: current.prNumber, nextState, expectedRevision,
     event, transitionAuthorization: protectedTransition(nextState, 'task-completion'),
@@ -992,61 +1889,127 @@ export function reconcileState({ cwd = process.cwd(), prNumber } = {}) {
 }
 
 export function checkpointGitMetadata({ cwd = process.cwd(), sessionId, backup = false } = {}) {
-  const state = loadState(cwd);
-  if (!state) return { state: null, checkpointed: false, warning: null };
-  const currentRoot = repositoryRoot(cwd);
-  if (resolve(currentRoot) !== resolve(state.integrationWorktree)) {
-    return { state, checkpointed: false, warning: 'Skipped checkpoint outside the integration worktree' };
-  }
-  if (state.orchestratorSessionId && sessionId && state.orchestratorSessionId !== sessionId) {
-    return { state, checkpointed: false, warning: 'Skipped checkpoint for a different session' };
-  }
-  const git = gitSnapshot(state.integrationWorktree);
-  if (backup) atomicWriteJson(join(stateDirectory(cwd, state.prNumber), 'state.backup.json'), state);
-  const proofInvalidated = git.headSha !== state.currentIntegrationHeadSha || git.dirty;
-  const headSensitivePhases = new Set([
-    'ready-for-review',
-    'awaiting-review',
-    'triaging',
-    'verifying',
-    'validating',
-    'complete',
-  ]);
-  const nextState = {
-    ...state,
-    currentIntegrationHeadSha: git.headSha,
-    git,
-    ...(proofInvalidated ? {
-      validationStatus: { status: 'not-run', headSha: null, checks: [], updatedAt: null },
-      threadResolutionStatus: {
-        ...state.threadResolutionStatus,
-        status: 'not-run',
-        headSha: null,
-        updatedAt: null,
-      },
-      ...(state.phase === 'awaiting-review' ? {
-        phase: state.reviewRequest?.kind === 'verification' ? 'awaiting-human-decision' : 'recovering',
-        nextAction: state.reviewRequest?.kind === 'verification'
-          ? 'A verification request became stale; present the stale-request decision to a human.'
-          : 'The discovery request became stale; reconcile the new HEAD before requesting another review.',
-      } : headSensitivePhases.has(state.phase) ? {
-          phase: 'recovering',
-          nextAction: 'Reconcile the changed integration checkout and re-establish exact-head proof.',
-        } : {}),
-    } : {}),
-  };
-  const updated = checkpointState({
-    cwd,
-    prNumber: state.prNumber,
-    nextState,
-    expectedRevision: state.revision,
-    event: { type: 'git-checkpoint', summary: `Checkpointed integration HEAD ${git.headSha}` },
+  const selectedPr = activePrNumber(cwd);
+  if (selectedPr === null) return { state: null, checkpointed: false, warning: null };
+  return withStateLock(cwd, selectedPr, () => {
+    const state = loadState(cwd, selectedPr);
+    const currentRoot = repositoryRoot(cwd);
+    if (resolve(currentRoot) !== resolve(state.integrationWorktree)) {
+      return { state, checkpointed: false, warning: 'Skipped checkpoint outside the integration worktree' };
+    }
+    if (state.orchestratorSessionId && sessionId && state.orchestratorSessionId !== sessionId) {
+      return { state, checkpointed: false, warning: 'Skipped checkpoint for a different session' };
+    }
+    const git = gitSnapshot(state.integrationWorktree);
+    if (backup) atomicWriteJson(join(stateDirectory(cwd, state.prNumber), 'state.backup.json'), state);
+    const headChanged = git.headSha !== state.currentIntegrationHeadSha;
+    const headSensitivePhases = new Set([
+      'ready-for-review',
+      'awaiting-review',
+      'triaging',
+      'verifying',
+      'validating',
+      'complete',
+    ]);
+    let checkpointUpdate = {};
+    if (headChanged) {
+      checkpointUpdate = {
+        validationStatus: emptyTargetedValidation(),
+        ciValidationStatus: emptyCiValidation(),
+        threadResolutionStatus: {
+          ...state.threadResolutionStatus,
+          status: 'not-run',
+          headSha: null,
+          updatedAt: null,
+        },
+        ...(state.phase === 'awaiting-review' ? {
+          phase: state.reviewRequest?.kind === 'verification' ? 'awaiting-human-decision' : 'recovering',
+          nextAction: state.reviewRequest?.kind === 'verification'
+            ? 'A verification request became stale; present the stale-request decision to a human.'
+            : 'The discovery request became stale; reconcile the new HEAD before requesting another review.',
+        } : headSensitivePhases.has(state.phase) ? {
+            phase: 'recovering',
+            nextAction: 'Reconcile the changed integration checkout and re-establish exact-head proof.',
+          } : {}),
+      };
+    } else if (git.dirty && state.phase === 'ready-for-review') {
+      checkpointUpdate = {
+        phase: 'recovering',
+        nextAction: 'Clean the integration checkout and checkpoint Git metadata to restore review readiness.',
+      };
+    } else if (git.dirty && state.phase === 'complete') {
+      checkpointUpdate = {
+        phase: 'recovering',
+        nextAction: 'Clean the integration checkout, checkpoint Git metadata, and re-run guarded completion.',
+      };
+    } else if (!git.dirty && state.phase === 'recovering'
+      && state.nextAction === 'Clean the integration checkout and checkpoint Git metadata to restore review readiness.') {
+      checkpointUpdate = { phase: 'ready-for-review', nextAction: 'Request canonical review.' };
+    }
+    const nextState = {
+      ...state,
+      currentIntegrationHeadSha: git.headSha,
+      git,
+      ...checkpointUpdate,
+    };
+    const warning = git.dirty ? 'Integration checkout is dirty' : null;
+    if (sameEvidence(state, nextState)) return { state, checkpointed: false, warning };
+    const updated = checkpointStateUnlocked({
+      cwd,
+      selectedPr: state.prNumber,
+      nextState,
+      expectedRevision: state.revision,
+      event: { type: 'git-checkpoint', summary: `Checkpointed integration HEAD ${git.headSha}` },
+      eventWriter: appendEvent,
+      transitionAuthorization: protectedTransition(nextState, 'git-metadata'),
+    });
+    return { state: updated, checkpointed: true, warning };
   });
-  return { state: updated, checkpointed: true, warning: git.dirty ? 'Integration checkout is dirty' : null };
 }
 
 function truncate(text, max) {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+function validationPlanRecoverySummary(cwd, state) {
+  const path = validationPlanPath(cwd, state.prNumber);
+  if (!existsSync(path)) return 'missing';
+  try {
+    const plan = readValidationPlan(cwd, state);
+    const counts = Object.fromEntries(['pending', 'passed', 'failed'].map((status) => [
+      status, plan.commands.filter((entry) => entry.status === status).length,
+    ]));
+    return `${plan.headSha}; pending ${counts.pending}, passed ${counts.passed}, failed ${counts.failed}`;
+  } catch (error) {
+    if (error.code !== 'INVALID_VALIDATION_PLAN') return `unavailable (${error.code ?? 'error'})`;
+    try {
+      const source = readFileSync(path, 'utf8');
+      if (Buffer.byteLength(source, 'utf8') > VALIDATION_PLAN_LIMIT_BYTES) return 'invalid';
+      const plan = JSON.parse(source);
+      const historicalErrors = validateValidationPlan(plan, {
+        ...state, revision: plan?.stateRevision, currentIntegrationHeadSha: plan?.headSha,
+      });
+      if (historicalErrors.length > 0) return 'invalid';
+      const counts = Object.fromEntries(['pending', 'passed', 'failed'].map((status) => [
+        status, plan.commands.filter((entry) => entry.status === status).length,
+      ]));
+      const countSummary = `pending ${counts.pending}, passed ${counts.passed}, failed ${counts.failed}`;
+      if (plan.headSha !== state.currentIntegrationHeadSha) {
+        return `historical for ${plan.headSha}; ${countSummary}; current HEAD is ${state.currentIntegrationHeadSha}`;
+      }
+      const recordedStatus = plan.commands.every((entry) => entry.status === 'passed') ? 'passed' : 'failed';
+      const proofMatches = counts.pending === 0
+        && state.validationStatus.source === 'orchestrator'
+        && state.validationStatus.scope === 'targeted'
+        && state.validationStatus.status === recordedStatus
+        && state.validationStatus.headSha === plan.headSha
+        && JSON.stringify(state.validationStatus.checks) === JSON.stringify(plan.commands.map((entry) => entry.command));
+      if (proofMatches) return `${plan.headSha}; completed; ${countSummary}; recorded proof ${recordedStatus}`;
+      return `${plan.headSha}; historical; ${countSummary}; current proof not recorded`;
+    } catch {
+      return 'invalid';
+    }
+  }
 }
 
 export function renderRecoverySummary({ cwd = process.cwd(), prNumber, maxCharacters = 9000 } = {}) {
@@ -1069,6 +2032,7 @@ export function renderRecoverySummary({ cwd = process.cwd(), prNumber, maxCharac
       ? `${state.verificationEscalation.reason} at PR ${state.verificationEscalation.observedPrHeadSha}`
       : 'none'}`,
     `Integration HEAD: ${state.currentIntegrationHeadSha}`,
+    `Targeted validation plan: ${validationPlanRecoverySummary(cwd, state)}`,
     'Tasks:',
     ...(taskLines.length > 0 ? taskLines : ['- none']),
     'Decisions:',
@@ -1081,8 +2045,9 @@ export function renderRecoverySummary({ cwd = process.cwd(), prNumber, maxCharac
 }
 
 export function archiveState({ cwd = process.cwd(), prNumber, abandonmentReason, onArchiveStep } = {}) {
-  const selectedPr = prNumber ?? activePrNumber(cwd);
-  if (selectedPr === null || selectedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  const requestedPr = prNumber ?? activePrNumber(cwd);
+  if (requestedPr === null || requestedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  const selectedPr = parsePrNumber(requestedPr);
   return withStateLock(cwd, selectedPr, () => {
     const current = loadState(cwd, selectedPr);
     const reason = typeof abandonmentReason === 'string' ? abandonmentReason.trim() : '';

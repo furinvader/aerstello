@@ -10,11 +10,11 @@ dev:
     npm run dev
 
 check:
-    npm run check
+    npm run check:full
 
 e2e:
     docker compose up -d db
-    npm run test:e2e
+    npm run test:e2e:full
 
 seed:
     npm run db:seed -w @sky-bar/api

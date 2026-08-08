@@ -65,29 +65,35 @@ Before editing:
 - The main orchestrator alone writes durable review state, integrates fixes,
   posts evidence replies, resolves review threads, and requests GitHub reviews.
   Fix workers and the integration verifier never write to GitHub.
-- Accept a review only when its commit equals the recorded requested SHA and
-  current PR head; otherwise it is stale. A Codex thumbs-up on the recorded
-  request may represent a clean result only while that request SHA still equals
-  the current PR head.
-- Treat `integrated` as code landed centrally, `completed` as its source finding
-  resolved with evidence (or successful threadless verification), and
-  `complete` as the exact-head cycle terminal state. Re-query live threads after
-  resolving them; local mutation success is not zero-unresolved proof.
-- Fix workers must stay within their task ownership and return structured
-  results. Parallel writers require isolated worktrees and non-overlapping write
-  sets.
+- The **Review commit** is the exact pushed commit sent to Codex. Accept a review
+  only when its commit matches both the recorded Review commit and the current
+  PR head. A Codex thumbs-up on the recorded request is clean evidence only
+  while that request still points to the current PR head.
+- **Integrated** means a worker commit is on the central PR branch. **Resolved**
+  means the fix was verified, evidence was posted, and the Codex thread was
+  closed. **Done** means Codex is clean, full CI including full E2E is green for
+  that same Review commit, and GitHub shows no open Codex threads.
+- Internal state may call Resolved `completed` and Done `complete`. Do not treat
+  Integrated as Resolved or Done. After closing threads, query GitHub again to
+  confirm that none remain open.
+- Fix workers receive fixed, path-limited task instructions and work in isolated
+  worktrees. They must not broaden scope. Parallel workers require non-overlapping
+  write sets.
 
 ## Validation
 
-Run the narrowest relevant test during development, then finish with:
+Workers run only the exact commands, E2E selectors, and browser projects in
+their task instructions. Missing or uncertain test selection is a planning
+error; never fall back to a full local suite.
 
-```bash
-npm run check
-```
+After integrating a batch, the orchestrator runs the union of its related
+checks. Browser-visible changes use only related scenarios and default to
+`tablet-chromium`. Add projects only when responsive, touch, installation, or
+browser-specific behavior requires them. Release-state and released-migration
+checks remain required when relevant.
 
-For cross-device, PWA, offline, or billing changes also run:
-
-```bash
-docker compose up -d db
-npm run test:e2e
-```
+GitHub Actions owns `npm run check:full` and `npm run test:e2e:full`. Normal
+review rounds use targeted local checks and `npm run test:e2e:related` when
+needed. Full local E2E is reserved for an explicit request, CI diagnosis, or an
+exceptional release investigation when CI is unavailable. After targeted
+validation and push, Codex review and CI may run at the same time.

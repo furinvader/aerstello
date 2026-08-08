@@ -68,4 +68,13 @@ npm run lint:commit -- --last --verbose
 Long-running pull-request remediation uses the repository-local Codex workflow
 documented in [docs/agents/pr-review-cycle.md](./docs/agents/pr-review-cycle.md).
 The main orchestrator owns GitHub review requests and integration; fix workers
-operate only from immutable task packets in isolated worktrees.
+operate only from fixed, path-limited task instructions in isolated worktrees.
+Workers run only the validation written in those instructions. After integration,
+the orchestrator runs the union of related checks, normally using
+`tablet-chromium` for selected browser scenarios. GitHub Actions owns
+`npm run check:full` and `npm run test:e2e:full`.
+
+A PR review cycle is Done only when a clean Codex review and green full CI,
+including full E2E, apply to the same Review commit and GitHub shows no open
+Codex review threads. Codex review and CI may run together after targeted local
+validation and push.

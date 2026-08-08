@@ -1,6 +1,33 @@
+import { readdirSync, readFileSync } from 'node:fs';
+
 const SHA_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
 const DATE_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u;
 const RAW_FIELD_PATTERN = /^(?:raw[_-]?(?:log|diff|output)|logs?|full[_-]?(?:diff|review|transcript)|stack(?:trace)?|transcript)$/iu;
+const SAFE_REPOSITORY_SEGMENT_PATTERN = /^[^/\\\0*?\[\]{}]+$/u;
+const SAFE_SELECTOR_PATTERN = /^@?[a-z0-9]+(?:-[a-z0-9]+)*$/u;
+const KNOWN_E2E_PROJECTS = new Set(['tablet-chromium', 'mobile-webkit', 'desktop-firefox']);
+const RECOGNIZED_AREAS = new Set(['api', 'web', 'shared', 'workflow', 'documentation', 'release', 'migration']);
+const AREA_VALIDATION = new Map([
+  ['api', ['npm run check:api']],
+  ['web', ['npm run check:web']],
+  ['shared', ['npm run check:shared', 'npm run check:api', 'npm run check:web']],
+  ['workflow', ['npm run check:workflow']],
+  ['documentation', []],
+  ['release', ['npm run check:release-state', 'npm run check:released-migrations']],
+  ['migration', ['npm run check:release-state', 'npm run check:released-migrations']],
+]);
+const ALLOWED_CHECK_COMMANDS = new Set([
+  'npm run check:api',
+  'npm run check:web',
+  'npm run check:shared',
+  'npm run check:workflow',
+  'npm run check:release-state',
+  'npm run check:released-migrations',
+]);
+const WRAPPER_EXECUTABLES = new Set(['env', 'bash', 'sh', 'zsh', 'fish', 'command', 'exec', 'xargs']);
+const KNOWN_WORKSPACES = new Set(['@sky-bar/api', '@sky-bar/web', '@sky-bar/shared']);
+const SHELL_SYNTAX_PATTERN = /[;&|<>`$()'"\\*?\[\]{}!#~\t\v\f\r\n]/u;
+const NODE_TEST_PATH_PATTERN = /(?:^|\/)[^/]+\.(?:test|spec)\.(?:[cm]?[jt]s|[jt]sx)$/u;
 
 export const STATE_PHASES = [
   'recovering',
@@ -107,6 +134,133 @@ function validateValidationEntry(entry, path, errors) {
   if (!isString(entry.summary, { min: 1, max: 1000 })) errors.push(`${path}.summary must be 1-1000 characters`);
 }
 
+function parseRepositoryPath(value, { allowOwnershipPattern = false } = {}) {
+  if (!isString(value, { min: 1, max: 500 }) || value.startsWith('/') || value.endsWith('/')
+      || value.includes('\\') || value.includes('//')) return null;
+  const suffix = allowOwnershipPattern && value.endsWith('/**') ? '/**' : '';
+  const path = suffix ? value.slice(0, -suffix.length) : value;
+  const segments = path.split('/');
+  if (segments.some((segment) => segment === '.' || segment === '..'
+      || !SAFE_REPOSITORY_SEGMENT_PATTERN.test(segment))) return null;
+  return { path, recursive: suffix !== '' };
+}
+
+function pathMatchesOwnership(changedPath, ownershipPattern) {
+  const changed = parseRepositoryPath(changedPath);
+  const ownership = parseRepositoryPath(ownershipPattern, { allowOwnershipPattern: true });
+  if (!changed || !ownership) return false;
+  return changed.path === ownership.path
+    || (ownership.recursive && changed.path.startsWith(`${ownership.path}/`));
+}
+
+function normalizeSelector(value, option = null) {
+  if (!isString(value, { min: 1, max: 200 }) || !SAFE_SELECTOR_PATTERN.test(value)) return null;
+  const slug = value.startsWith('@') ? value.slice(1) : value;
+  return option === '--id' && !slug.startsWith('id-') ? `id-${slug}` : slug;
+}
+
+let knownE2ESelectors;
+function getKnownE2ESelectors() {
+  if (knownE2ESelectors) return knownE2ESelectors;
+  knownE2ESelectors = new Set();
+  const featureRoot = new URL('../../specs/features/', import.meta.url);
+  // Keep the contract registry derived from the same checked-in feature tags as the E2E runner.
+  const pending = [featureRoot];
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const entryUrl = new URL(entry.name, directory);
+      if (entry.isDirectory()) {
+        pending.push(new URL(`${entry.name}/`, directory));
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.endsWith('.feature')) continue;
+      const source = readFileSync(entryUrl, 'utf8');
+      for (const match of source.matchAll(/(?:^|\s)@([a-z0-9]+(?:-[a-z0-9]+)*)/gmu)) knownE2ESelectors.add(match[1]);
+    }
+  }
+  return knownE2ESelectors;
+}
+
+function parseRelatedE2ECommand(command) {
+  const prefix = 'npm run test:e2e:related -- ';
+  if (!command.startsWith(prefix)) return null;
+  const tokens = command.slice(prefix.length).trim().split(/\s+/u);
+  if (tokens.length === 0 || tokens[0] === '') return null;
+  const selectors = [];
+  const projects = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    const equalsAt = token.indexOf('=');
+    const option = equalsAt === -1 ? token : token.slice(0, equalsAt);
+    if (!['--id', '--tag', '--project'].includes(option)) return null;
+    const value = equalsAt === -1 ? tokens[++index] : token.slice(equalsAt + 1);
+    if (!value) return null;
+    if (option === '--project') projects.push(value);
+    else {
+      const selector = normalizeSelector(value, option);
+      if (!selector) return null;
+      selectors.push(selector);
+    }
+  }
+  if (selectors.length === 0) return null;
+  return { selectors, projects: projects.length === 0 ? ['tablet-chromium'] : projects };
+}
+
+function isSafeCommandArgument(value) {
+  return isString(value, { min: 1, max: 500 })
+    && !SHELL_SYNTAX_PATTERN.test(value)
+    && !/^\w+=/u.test(value);
+}
+
+function isTargetedNpmTest(tokens) {
+  const offset = tokens[1] === 'test' ? 2 : tokens[1] === 'run' && tokens[2] === 'test' ? 3 : -1;
+  if (offset === -1 || tokens.length <= offset) return false;
+  let workspaceCount = 0;
+  let hasTarget = false;
+  for (let index = offset; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === '-w' || token === '--workspace') {
+      const workspace = tokens[++index];
+      if (!KNOWN_WORKSPACES.has(workspace)) return false;
+      workspaceCount += 1;
+    } else if (token.startsWith('--workspace=')) {
+      if (!KNOWN_WORKSPACES.has(token.slice('--workspace='.length))) return false;
+      workspaceCount += 1;
+    } else if (token === '--') {
+      if (index === tokens.length - 1) return false;
+      for (const target of tokens.slice(index + 1)) {
+        if (target.startsWith('-') || !parseRepositoryPath(target)) return false;
+      }
+      hasTarget = true;
+      break;
+    } else {
+      return false;
+    }
+  }
+  return workspaceCount === 1 && hasTarget;
+}
+
+export function parseTargetedValidationCommand(command) {
+  if (!isString(command, { min: 1, max: 500 }) || command.trim() !== command
+      || /\s{2,}/u.test(command) || SHELL_SYNTAX_PATTERN.test(command)) return null;
+  const tokens = command.split(' ');
+  if (tokens.some((token) => !isSafeCommandArgument(token))
+      || WRAPPER_EXECUTABLES.has(tokens[0]) || /^\w+=/u.test(tokens[0])) return null;
+  if (ALLOWED_CHECK_COMMANDS.has(command)) return tokens;
+  if (parseRelatedE2ECommand(command)) return tokens;
+  if (tokens[0] === 'npm') return isTargetedNpmTest(tokens) ? tokens : null;
+  if (tokens[0] === 'node' && tokens[1] === '--test' && tokens.length > 2) {
+    return tokens.slice(2).every((path) => !path.startsWith('-')
+      && parseRepositoryPath(path) && NODE_TEST_PATH_PATTERN.test(path)) ? tokens : null;
+  }
+  return null;
+}
+
+function isTargetedValidationCommand(command) {
+  return parseTargetedValidationCommand(command) !== null;
+}
+
 export function validateWorkerResult(value) {
   const errors = [];
   const fields = [
@@ -122,7 +276,7 @@ export function validateWorkerResult(value) {
   ];
   if (!requireFields(value, fields, '$', errors)) return errors;
   rejectUnknownFields(value, fields, '$', errors);
-  if (value.schemaVersion !== 1) errors.push('$.schemaVersion must equal 1');
+  if (value.schemaVersion !== 2) errors.push('$.schemaVersion must equal 2');
   if (!isString(value.taskId, { min: 1, max: 128 })) errors.push('$.taskId must be 1-128 characters');
   if (!['implemented', 'blocked', 'not-applicable', 'failed'].includes(value.status)) errors.push('$.status is invalid');
   if (value.status === 'implemented' ? !isSha(value.commitSha) : !isSha(value.commitSha, true)) {
@@ -130,6 +284,13 @@ export function validateWorkerResult(value) {
   }
   if (!Array.isArray(value.changedPaths) || value.changedPaths.some((path) => !isString(path, { min: 1, max: 500 }))) {
     errors.push('$.changedPaths must contain repository-relative paths');
+  } else {
+    value.changedPaths.forEach((path, index) => {
+      if (!parseRepositoryPath(path)) errors.push(`$.changedPaths[${index}] must be a safe repository-relative file path`);
+    });
+    if (new Set(value.changedPaths).size !== value.changedPaths.length) {
+      errors.push('$.changedPaths must not contain duplicates');
+    }
   }
   if (!Array.isArray(value.validation)) errors.push('$.validation must be an array');
   else value.validation.forEach((entry, index) => validateValidationEntry(entry, `$.validation[${index}]`, errors));
@@ -151,6 +312,7 @@ export function validateTaskPacket(value) {
     'reviewedHeadSha',
     'finding',
     'evidence',
+    'affectedAreas',
     'decisionIds',
     'allowedPaths',
     'forbiddenPaths',
@@ -160,19 +322,233 @@ export function validateTaskPacket(value) {
   ];
   if (!requireFields(value, fields, '$', errors)) return errors;
   rejectUnknownFields(value, fields, '$', errors);
-  if (value.schemaVersion !== 1) errors.push('$.schemaVersion must equal 1');
+  if (value.schemaVersion !== 2) errors.push('$.schemaVersion must equal 2');
   if (!isString(value.taskId, { min: 1, max: 128 })) errors.push('$.taskId must be 1-128 characters');
   if (!isSha(value.reviewedHeadSha)) errors.push('$.reviewedHeadSha must be a full Git SHA');
   if (!isString(value.finding, { min: 1, max: 2000 })) errors.push('$.finding must be concise');
   if (!isString(value.evidence, { min: 1, max: 3000 })) errors.push('$.evidence must be concise');
-  for (const field of ['decisionIds', 'allowedPaths', 'forbiddenPaths', 'dependencies', 'acceptanceCriteria', 'requiredValidation']) {
-    if (!Array.isArray(value[field]) || value[field].some((item) => !isString(item, { min: 1, max: 1000 }))) {
-      errors.push(`$.${field} must be an array of concise strings`);
-    }
+  for (const field of ['decisionIds', 'affectedAreas', 'allowedPaths', 'forbiddenPaths', 'dependencies', 'acceptanceCriteria']) {
+    validateStringList(value[field], `$.${field}`, errors);
+  }
+  if (Array.isArray(value.affectedAreas) && value.affectedAreas.length === 0) errors.push('$.affectedAreas must not be empty');
+  if (Array.isArray(value.affectedAreas)
+      && value.affectedAreas.some((area) => !RECOGNIZED_AREAS.has(area))) {
+    errors.push('$.affectedAreas must contain only recognized code or policy areas');
   }
   if (Array.isArray(value.allowedPaths) && value.allowedPaths.length === 0) errors.push('$.allowedPaths must not be empty');
+  for (const field of ['allowedPaths', 'forbiddenPaths']) {
+    if (Array.isArray(value[field])) value[field].forEach((path, index) => {
+      if (!parseRepositoryPath(path, { allowOwnershipPattern: true })) {
+        errors.push(`$.${field}[${index}] must be a safe repository-relative path or trailing /** pattern`);
+      }
+    });
+  }
+  validateRequiredValidation(value.requiredValidation, '$.requiredValidation', errors);
   findRawFields(value, '$', errors);
   return errors;
+}
+
+export function validateInitialValidationSelection(value) {
+  const errors = [];
+  const fields = ['schemaVersion', 'headSha', 'affectedAreas', 'requiredValidation'];
+  if (!requireFields(value, fields, '$', errors)) return errors;
+  rejectUnknownFields(value, fields, '$', errors);
+  if (value.schemaVersion !== 1) errors.push('$.schemaVersion must equal 1');
+  if (!isSha(value.headSha)) errors.push('$.headSha must be a full Git SHA');
+  if ((value.requiredValidation?.unit?.length ?? 0) + (value.requiredValidation?.system?.length ?? 0) === 0) {
+    errors.push('$.requiredValidation must select at least one targeted command');
+  }
+  const packetErrors = validateTaskPacket({
+    schemaVersion: 2,
+    taskId: 'initial-validation-selection',
+    reviewedHeadSha: value.headSha,
+    finding: 'Initial pull-request validation selection.',
+    evidence: 'Explicit orchestrator-selected validation before the first discovery review.',
+    affectedAreas: value.affectedAreas,
+    decisionIds: [],
+    allowedPaths: ['scripts/**'],
+    forbiddenPaths: [],
+    dependencies: [],
+    acceptanceCriteria: ['The selected initial checks pass.'],
+    requiredValidation: value.requiredValidation,
+  });
+  errors.push(...packetErrors.map((error) => `$.selection ${error}`));
+  return errors;
+}
+
+function validateRequiredValidation(value, path, errors) {
+  const fields = ['unit', 'system'];
+  if (!requireFields(value, fields, path, errors)) return;
+  rejectUnknownFields(value, fields, path, errors);
+  const commands = [];
+  for (const kind of ['unit', 'system']) {
+    if (!Array.isArray(value[kind])) {
+      errors.push(`${path}.${kind} must be an array`);
+      continue;
+    }
+    value[kind].forEach((entry, index) => {
+      const entryPath = `${path}.${kind}[${index}]`;
+      const entryFields = kind === 'system' ? ['command', 'reason', 'selectors', 'projects'] : ['command', 'reason'];
+      if (!requireFields(entry, entryFields, entryPath, errors)) return;
+      rejectUnknownFields(entry, entryFields, entryPath, errors);
+      if (!isString(entry.command, { min: 1, max: 500 })) errors.push(`${entryPath}.command must be 1-500 characters`);
+      else {
+        commands.push(entry.command);
+        if (!isTargetedValidationCommand(entry.command)) {
+          errors.push(`${entryPath}.command must be an allowed direct targeted command without shell or wrapper syntax`);
+        }
+        if (kind === 'unit' && /(?:test:e2e|(?:^|\s)playwright\s+test|(?:^|\s)bddgen(?:\s|$))/u.test(entry.command)) {
+          errors.push(`${entryPath}.command must record E2E scope as a system validation`);
+        }
+      }
+      if (!isString(entry.reason, { min: 1, max: 1000 })) errors.push(`${entryPath}.reason must be 1-1000 characters`);
+      if (kind === 'system') {
+        validateStringList(entry.selectors, `${entryPath}.selectors`, errors);
+        validateStringList(entry.projects, `${entryPath}.projects`, errors);
+        if (Array.isArray(entry.selectors) && Array.isArray(entry.projects)
+            && (entry.selectors.length === 0) !== (entry.projects.length === 0)) {
+          errors.push(`${entryPath}.selectors and projects must both be empty or both be nonempty`);
+        }
+        if (isString(entry.command, { min: 1, max: 500 })) {
+          const e2eScope = parseRelatedE2ECommand(entry.command);
+          const mentionsE2E = /(?:test:e2e|(?:^|\s)playwright\s+test|(?:^|\s)bddgen(?:\s|$))/u.test(entry.command);
+          if (e2eScope) {
+            const metadataSelectors = Array.isArray(entry.selectors)
+              ? entry.selectors.map((selector) => normalizeSelector(selector)) : [];
+            const selectorsKnown = metadataSelectors.every((selector) => selector && getKnownE2ESelectors().has(selector));
+            const projectsKnown = Array.isArray(entry.projects)
+              && entry.projects.every((project) => KNOWN_E2E_PROJECTS.has(project));
+            if (!selectorsKnown) errors.push(`${entryPath}.selectors contains an unsafe or unknown E2E selector`);
+            if (!projectsKnown) errors.push(`${entryPath}.projects contains an unsafe or unknown E2E project`);
+            if (new Set(metadataSelectors).size !== metadataSelectors.length
+                || new Set(entry.projects ?? []).size !== (entry.projects ?? []).length) {
+              errors.push(`${entryPath} E2E selector and project metadata must not contain duplicates`);
+            }
+            if (JSON.stringify(metadataSelectors) !== JSON.stringify(e2eScope.selectors)) {
+              errors.push(`${entryPath}.selectors must exactly match the command's repeatable --id/--tag scope`);
+            }
+            if (JSON.stringify(entry.projects) !== JSON.stringify(e2eScope.projects)) {
+              errors.push(`${entryPath}.projects must exactly match the command's effective --project scope`);
+            }
+            if (!e2eScope.projects.every((project) => KNOWN_E2E_PROJECTS.has(project))) {
+              errors.push(`${entryPath}.command contains an unsafe or unknown E2E project`);
+            }
+            if (!e2eScope.selectors.every((selector) => getKnownE2ESelectors().has(selector))) {
+              errors.push(`${entryPath}.command contains an unsafe or unknown E2E selector`);
+            }
+          } else if (mentionsE2E) {
+            errors.push(`${entryPath}.command must be a targeted related command, not a full-suite or local fallback`);
+          } else if ((entry.selectors?.length ?? 0) !== 0 || (entry.projects?.length ?? 0) !== 0) {
+            errors.push(`${entryPath} non-E2E commands require empty selector and project metadata`);
+          }
+        }
+      }
+    });
+  }
+  if (Array.isArray(value.unit) && Array.isArray(value.system)
+      && value.unit.length === 0 && value.system.length === 0) {
+    errors.push(`${path} must declare at least one exact command`);
+  }
+  if (new Set(commands).size !== commands.length) errors.push(`${path} contains duplicate commands`);
+}
+
+export function validateWorkerResultAgainstTask(packet, result, actualChangedPaths) {
+  const errors = [
+    ...validateTaskPacket(packet).map((error) => `task packet: ${error}`),
+    ...validateWorkerResult(result).map((error) => `worker result: ${error}`),
+  ];
+  if (errors.length > 0) return errors;
+  if (result.taskId !== packet.taskId) errors.push('worker result taskId must equal task packet taskId');
+  if (new Set(result.changedPaths).size !== result.changedPaths.length) {
+    errors.push('worker result changedPaths must not contain duplicates');
+  }
+  if (result.status === 'implemented' && !Array.isArray(actualChangedPaths)) {
+    errors.push('implemented worker result requires actual Git changed paths');
+  }
+  const pathsToCheck = result.status === 'implemented' && Array.isArray(actualChangedPaths)
+    ? actualChangedPaths : result.changedPaths;
+  if (result.status === 'implemented' && Array.isArray(actualChangedPaths)) {
+    if (actualChangedPaths.length === 0) errors.push('implemented worker commit must contain at least one changed path');
+    if (new Set(actualChangedPaths).size !== actualChangedPaths.length) {
+      errors.push('actual Git changed paths must not contain duplicates');
+    }
+    for (const [index, path] of actualChangedPaths.entries()) {
+      if (!parseRepositoryPath(path)) errors.push(`actual Git changed path ${index} is not a safe repository-relative file path`);
+    }
+    const reported = new Set(result.changedPaths);
+    const actual = new Set(actualChangedPaths);
+    if (reported.size !== actual.size || [...reported].some((path) => !actual.has(path))) {
+      errors.push('worker result changedPaths must exactly equal the actual Git commit diff');
+    }
+  }
+  for (const path of pathsToCheck) {
+    if (!packet.allowedPaths.some((pattern) => pathMatchesOwnership(path, pattern))) {
+      errors.push(`worker result changed path is outside allowedPaths: ${path}`);
+    }
+    if (packet.forbiddenPaths.some((pattern) => pathMatchesOwnership(path, pattern))) {
+      errors.push(`worker result changed path is forbidden: ${path}`);
+    }
+  }
+  const declared = new Set([
+    ...packet.requiredValidation.unit.map((entry) => entry.command),
+    ...packet.requiredValidation.system.map((entry) => entry.command),
+  ]);
+  const reported = new Map();
+  for (const entry of result.validation) {
+    if (reported.has(entry.command)) errors.push(`worker result reports command more than once: ${entry.command}`);
+    reported.set(entry.command, entry.result);
+    if (!declared.has(entry.command)) {
+      errors.push(`worker result reports undeclared command: ${entry.command}`);
+    }
+  }
+  for (const command of declared) {
+    if (!reported.has(command)) errors.push(`required validation was not reported: ${command}`);
+    else if (result.status === 'implemented' && reported.get(command) !== 'passed') {
+      errors.push(`required validation did not pass: ${command}`);
+    }
+  }
+  return errors;
+}
+
+export function unionRequiredValidation(taskPackets) {
+  if (!Array.isArray(taskPackets)) throw new TypeError('taskPackets must be an array');
+  const union = { unit: [], system: [] };
+  const byCommand = new Map();
+  taskPackets.forEach((packet, index) => {
+    const errors = validateTaskPacket(packet);
+    if (errors.length > 0) throw new TypeError(`Invalid task packet ${index}: ${errors.join('; ')}`);
+    for (const kind of ['unit', 'system']) {
+      for (const entry of packet.requiredValidation[kind]) {
+        const existing = byCommand.get(entry.command);
+        if (existing) {
+          const metadataConflicts = kind === 'system' && (
+            JSON.stringify(existing.entry.selectors) !== JSON.stringify(entry.selectors)
+            || JSON.stringify(existing.entry.projects) !== JSON.stringify(entry.projects)
+          );
+          if (existing.kind !== kind || metadataConflicts) {
+            throw new TypeError(`Conflicting validation scope for command: ${entry.command}`);
+          }
+          continue;
+        }
+        const copied = kind === 'system'
+          ? { command: entry.command, reason: entry.reason, selectors: [...entry.selectors], projects: [...entry.projects] }
+          : { command: entry.command, reason: entry.reason };
+        byCommand.set(entry.command, { kind, entry: copied });
+        union[kind].push(copied);
+      }
+    }
+  });
+  const affectedAreas = new Set(taskPackets.flatMap((packet) => packet.affectedAreas));
+  for (const area of AREA_VALIDATION.keys()) {
+    if (!affectedAreas.has(area)) continue;
+    for (const command of AREA_VALIDATION.get(area)) {
+      if (byCommand.has(command)) continue;
+      const copied = { command, reason: `Orchestrator integrated check for affected area: ${area}.` };
+      byCommand.set(command, { kind: 'unit', entry: copied });
+      union.unit.push(copied);
+    }
+  }
+  return union;
 }
 
 function validateTaskV1(task, index, errors) {
@@ -328,7 +704,7 @@ function validateReviewOutcome(value, path, errors) {
   if (!isString(value.requestId, { min: 1, max: 256 })) errors.push(`${path}.requestId is invalid`);
   if (!['discovery', 'verification'].includes(value.kind)) errors.push(`${path}.kind is invalid`);
   if (!['clean', 'findings'].includes(value.outcome)) errors.push(`${path}.outcome is invalid`);
-  if (!['review-submission', 'request-reaction'].includes(value.evidenceType)) {
+  if (!['review-submission', 'request-reaction', 'issue-comment'].includes(value.evidenceType)) {
     errors.push(`${path}.evidenceType is invalid`);
   }
   if (value.reviewerLogin !== 'chatgpt-codex-connector') errors.push(`${path}.reviewerLogin must identify canonical Codex`);
@@ -341,8 +717,13 @@ function validateReviewOutcome(value, path, errors) {
     if (value.outcome !== 'clean') errors.push(`${path} request-reaction evidence may only prove a clean outcome`);
     if (value.reactionContent !== 'THUMBS_UP') errors.push(`${path}.reactionContent must be THUMBS_UP`);
     if (value.reactionCommentId !== value.requestId) errors.push(`${path}.reactionCommentId must equal requestId`);
-  } else if (value.reactionContent !== null || value.reactionCommentId !== null) {
-    errors.push(`${path} review-submission evidence cannot include reaction fields`);
+  } else {
+    if (value.reactionContent !== null || value.reactionCommentId !== null) {
+      errors.push(`${path} non-reaction evidence cannot include reaction fields`);
+    }
+    if (value.evidenceType === 'issue-comment' && value.outcome !== 'clean') {
+      errors.push(`${path} issue-comment evidence may only prove a clean outcome`);
+    }
   }
 }
 
@@ -405,9 +786,9 @@ function validateTaskV2(task, index, errors) {
   const path = `$.tasks[${index}]`;
   const fields = [
     'id', 'sourceIds', 'sourceType', 'fingerprint', 'summary', 'severity', 'disposition', 'status',
-    'integratedCommitSha', 'resolutionSummary', 'execution',
+    'integratedCommitSha', 'resolutionSummary', 'taskPacketDigest', 'execution',
   ];
-  if (!requireFields(task, fields.filter((field) => field !== 'execution'), path, errors)) return;
+  if (!requireFields(task, fields.filter((field) => !['execution', 'taskPacketDigest'].includes(field)), path, errors)) return;
   rejectUnknownFields(task, fields, path, errors);
   if (!isString(task.id, { min: 1, max: 128 })) errors.push(`${path}.id is invalid`);
   validateStringList(task.sourceIds, `${path}.sourceIds`, errors);
@@ -420,6 +801,10 @@ function validateTaskV2(task, index, errors) {
   if (!isSha(task.integratedCommitSha, true)) errors.push(`${path}.integratedCommitSha is invalid`);
   if (!(task.resolutionSummary === null || isString(task.resolutionSummary, { min: 1, max: 1000 }))) {
     errors.push(`${path}.resolutionSummary is invalid`);
+  }
+  if (!(task.taskPacketDigest === undefined || task.taskPacketDigest === null
+      || /^[0-9a-f]{64}$/u.test(task.taskPacketDigest))) {
+    errors.push(`${path}.taskPacketDigest is invalid`);
   }
   if (EXECUTION_STATUSES.has(task.status)) {
     if (task.execution === undefined) errors.push(`${path}.execution is required for ${task.status}`);
@@ -437,10 +822,12 @@ function validateTaskV2(task, index, errors) {
   }
 }
 
-function validateProof(value, path, errors) {
-  const fields = ['status', 'headSha', 'checks', 'updatedAt'];
+function validateProof(value, path, errors, { source, scope } = {}) {
+  const fields = ['source', 'scope', 'status', 'headSha', 'checks', 'updatedAt'];
   if (!requireFields(value, fields, path, errors)) return;
   rejectUnknownFields(value, fields, path, errors);
+  if (value.source !== source) errors.push(`${path}.source must be ${source}`);
+  if (value.scope !== scope) errors.push(`${path}.scope must be ${scope}`);
   if (!['not-run', 'passed', 'failed'].includes(value.status)) errors.push(`${path}.status is invalid`);
   if (!isSha(value.headSha, true)) errors.push(`${path}.headSha is invalid`);
   validateStringList(value.checks, `${path}.checks`, errors);
@@ -450,6 +837,42 @@ function validateProof(value, path, errors) {
   }
   if (value.status === 'passed' && (!isSha(value.headSha) || !isDateTime(value.updatedAt) || value.checks?.length === 0)) {
     errors.push(`${path} passed proof requires a HEAD, checks, and timestamp`);
+  }
+}
+
+function validateCiProof(value, path, errors, { allowNotRun = true } = {}) {
+  const requiredFields = [
+    'source', 'scope', 'status', 'headSha', 'checks', 'workflowRunId', 'workflowRunUrl', 'updatedAt',
+  ];
+  if (!requireFields(value, requiredFields, path, errors)) return;
+  rejectUnknownFields(value, [...requiredFields, 'checkRunId'], path, errors);
+  if (value.source !== 'github-actions') errors.push(`${path}.source must be github-actions`);
+  if (value.scope !== 'full') errors.push(`${path}.scope must be full`);
+  if (!['not-run', 'passed', 'failed'].includes(value.status)) errors.push(`${path}.status is invalid`);
+  if (!isSha(value.headSha, true)) errors.push(`${path}.headSha is invalid`);
+  validateStringList(value.checks, `${path}.checks`, errors);
+  if (!(value.workflowRunId === null || (Number.isInteger(value.workflowRunId) && value.workflowRunId >= 1))) {
+    errors.push(`${path}.workflowRunId is invalid`);
+  }
+  if (Object.hasOwn(value, 'checkRunId')
+      && !(value.checkRunId === null || isString(value.checkRunId, { min: 1, max: 500 }))) {
+    errors.push(`${path}.checkRunId is invalid`);
+  }
+  if (!(value.workflowRunUrl === null || isHttpsUrl(value.workflowRunUrl))) errors.push(`${path}.workflowRunUrl is invalid`);
+  if (!isDateTime(value.updatedAt, true)) errors.push(`${path}.updatedAt is invalid`);
+  if (value.status === 'not-run') {
+    if (!allowNotRun) errors.push(`${path}.status cannot be not-run`);
+    if (value.headSha !== null || value.updatedAt !== null || value.workflowRunId !== null
+        || value.workflowRunUrl !== null || (Object.hasOwn(value, 'checkRunId') && value.checkRunId !== null)
+        || value.checks?.length !== 0) {
+      errors.push(`${path} not-run proof must be empty`);
+    }
+  } else if (Object.hasOwn(value, 'checkRunId') && !isString(value.checkRunId, { min: 1, max: 500 })) {
+    errors.push(`${path} completed CI proof checkRunId must be nonempty when present`);
+  } else if (!isSha(value.headSha) || !isDateTime(value.updatedAt)
+      || !Number.isInteger(value.workflowRunId) || !isHttpsUrl(value.workflowRunUrl)
+      || value.checks?.length === 0) {
+    errors.push(`${path} completed CI proof requires a HEAD, checks, workflow run, URL, and timestamp`);
   }
 }
 
@@ -466,6 +889,33 @@ function validateThreadlessProof(value, path, errors) {
   }
   if (value.status === 'passed' && (!isSha(value.headSha) || !isDateTime(value.updatedAt))) {
     errors.push(`${path} passed proof requires a HEAD and timestamp`);
+  }
+}
+
+const VERIFIED_LOCAL_NON_ACTIONABLE_DISPOSITIONS = new Set([
+  'duplicate', 'already-fixed', 'stale', 'invalid', 'policy-conflict', 'out-of-scope',
+]);
+
+function localTaskIsEligibleForVerification(task) {
+  if (task?.sourceType !== 'local' || task.status !== 'completed') return false;
+  return (task.disposition === 'actionable' && isSha(task.integratedCommitSha))
+    || VERIFIED_LOCAL_NON_ACTIONABLE_DISPOSITIONS.has(task.disposition);
+}
+
+function validateLocalVerification(value, tasks, path, errors) {
+  validateThreadlessProof(value, path, errors);
+  if (!isObject(value) || !Array.isArray(value.taskIds)) return;
+  if (value.status === 'passed' && value.taskIds.length === 0) {
+    errors.push(`${path} passed proof must cover at least one local task`);
+  }
+  const byId = new Map((tasks ?? []).map((task) => [task.id, task]));
+  for (const taskId of value.taskIds) {
+    const task = byId.get(taskId);
+    if (!task) errors.push(`${path} references unknown task ${taskId}`);
+    else if (task.sourceType !== 'local') errors.push(`${path} references non-local task ${taskId}`);
+    else if (!localTaskIsEligibleForVerification(task)) {
+      errors.push(`${path} references ineligible local task ${taskId}`);
+    }
   }
 }
 
@@ -502,8 +952,9 @@ export function taskHasCanonicalThreadCoverage(task, threads) {
 
 function validateThreadStatus(value, tasks, errors) {
   const path = '$.threadResolutionStatus';
-  const fields = ['status', 'headSha', 'threads', 'threadlessVerification', 'updatedAt'];
-  if (!requireFields(value, fields, path, errors)) return;
+  const requiredFields = ['status', 'headSha', 'threads', 'threadlessVerification', 'updatedAt'];
+  const fields = [...requiredFields, 'localVerification'];
+  if (!requireFields(value, requiredFields, path, errors)) return;
   rejectUnknownFields(value, fields, path, errors);
   if (!['not-run', 'passed', 'failed'].includes(value.status)) errors.push(`${path}.status is invalid`);
   if (!isSha(value.headSha, true)) errors.push(`${path}.headSha is invalid`);
@@ -545,6 +996,9 @@ function validateThreadStatus(value, tasks, errors) {
     if (thread.isResolved && thread.replyId === null) errors.push(`${threadPath} resolved disposition requires reply evidence`);
   });
   validateThreadlessProof(value.threadlessVerification, `${path}.threadlessVerification`, errors);
+  if (Object.hasOwn(value, 'localVerification')) {
+    validateLocalVerification(value.localVerification, tasks, `${path}.localVerification`, errors);
+  }
   const unresolved = Array.isArray(value.threads) ? value.threads.filter((thread) => !thread.isResolved) : [];
   if (value.status === 'not-run' && (
     value.headSha !== null || value.updatedAt !== null
@@ -586,6 +1040,31 @@ function validateThreadStatus(value, tasks, errors) {
   }
 }
 
+function completedLocalTaskIds(state) {
+  return (state?.tasks ?? []).filter((task) => task.sourceType === 'local' && task.status === 'completed')
+    .map((task) => task.id).sort();
+}
+
+function localVerificationStateGate(state) {
+  const expectedTaskIds = completedLocalTaskIds(state);
+  if (expectedTaskIds.length === 0) return [];
+  const proof = state?.threadResolutionStatus?.localVerification;
+  const reasons = [];
+  if (!isObject(proof)) {
+    return ['completed local tasks require persisted local verifier proof'];
+  }
+  if (proof.status !== 'passed') reasons.push('local verifier proof must have passed');
+  if (proof.headSha !== state?.currentIntegrationHeadSha) {
+    reasons.push('local verifier proof HEAD must equal currentIntegrationHeadSha');
+  }
+  const actualTaskIds = Array.isArray(proof.taskIds) ? [...proof.taskIds].sort() : [];
+  if (actualTaskIds.length !== expectedTaskIds.length
+      || actualTaskIds.some((taskId, index) => taskId !== expectedTaskIds[index])) {
+    reasons.push('local verifier proof must cover exactly every completed local task');
+  }
+  return reasons;
+}
+
 function exactHeadReason(label, actual, expected) {
   return actual === expected ? null : `${label} must equal currentIntegrationHeadSha`;
 }
@@ -595,6 +1074,9 @@ function reviewRequestStateGate(state) {
   const head = state?.currentIntegrationHeadSha;
   if (state?.phase !== 'ready-for-review') reasons.push('phase must be exactly ready-for-review');
   if (state?.validationStatus?.status !== 'passed') reasons.push('validation must have passed');
+  if (state?.validationStatus?.source !== 'orchestrator' || state?.validationStatus?.scope !== 'targeted') {
+    reasons.push('validation must be targeted orchestrator evidence');
+  }
   for (const [label, actual] of [
     ['validation HEAD', state?.validationStatus?.headSha],
     ['thread proof HEAD', state?.threadResolutionStatus?.headSha],
@@ -605,6 +1087,7 @@ function reviewRequestStateGate(state) {
   }
   if (state?.threadResolutionStatus?.status !== 'passed') reasons.push('thread resolution proof must have passed');
   if (state?.threadResolutionStatus?.threads?.some((thread) => !thread.isResolved)) reasons.push('all canonical threads must be resolved');
+  reasons.push(...localVerificationStateGate(state));
   if (state?.git?.dirty !== false) reasons.push('integration checkout must be clean');
   if (state?.verificationEscalation !== null) reasons.push('verification collection escalation requires human decision');
   if (!Array.isArray(state?.tasks) || state.tasks.some((task) => task.status !== 'completed')) reasons.push('all prior tasks must be completed');
@@ -655,6 +1138,7 @@ function completionStateGate(state) {
     ['requested HEAD', state?.requestedHeadSha], ['reviewed HEAD', state?.reviewedHeadSha],
     ['review request HEAD', state?.reviewRequest?.headSha], ['review outcome HEAD', state?.reviewOutcome?.headSha],
     ['validation HEAD', state?.validationStatus?.headSha], ['thread proof HEAD', state?.threadResolutionStatus?.headSha],
+    ['full CI HEAD', state?.ciValidationStatus?.headSha],
     ['recorded local Git HEAD', state?.git?.headSha],
   ]) {
     const reason = exactHeadReason(label, actual, head);
@@ -668,10 +1152,19 @@ function completionStateGate(state) {
     reasons.push('verification clean completion requires three discovery rounds and consumed verification');
   }
   if (state?.validationStatus?.status !== 'passed') reasons.push('validation must have passed');
+  if (state?.ciValidationStatus?.status !== 'passed') reasons.push('full GitHub Actions validation must have passed');
+  if (state?.validationStatus?.source !== 'orchestrator' || state?.validationStatus?.scope !== 'targeted') {
+    reasons.push('validation must be targeted orchestrator evidence');
+  }
+  if (state?.ciValidationStatus?.source !== 'github-actions' || state?.ciValidationStatus?.scope !== 'full') {
+    reasons.push('full validation must be GitHub Actions evidence');
+  }
   if (state?.threadResolutionStatus?.status !== 'passed') reasons.push('thread proof must have passed');
+  reasons.push(...localVerificationStateGate(state));
   if (state?.verificationEscalation !== null) reasons.push('verification collection escalation requires human decision');
   if (state?.git?.dirty !== false) reasons.push('integration checkout must be clean');
   if (!Array.isArray(state?.tasks) || state.tasks.some((task) => task.status !== 'completed')) reasons.push('all tasks must be completed');
+  if (state?.tasks?.some((task) => task.disposition === 'needs-human-decision')) reasons.push('needs-human-decision findings require a human');
   if ((state?.blockedReasons?.length ?? 0) !== 0) reasons.push('blocked reasons must be cleared');
   return reasons;
 }
@@ -682,7 +1175,7 @@ export function completionGate(state, external) {
   return { allowed: reasons.length === 0, reasons };
 }
 
-function validateReviewHistory(value, currentHeadSha, errors) {
+function validateReviewHistory(value, errors) {
   if (!Array.isArray(value) || value.length > 4) {
     errors.push('$.reviewHistory must contain at most four entries');
     return;
@@ -698,8 +1191,6 @@ function validateReviewHistory(value, currentHeadSha, errors) {
           || entry.outcome.headSha !== entry.request.headSha) {
         errors.push(`${path}.outcome must bind to its exact request and SHA`);
       }
-    } else if (index !== value.length - 1 && entry.request.headSha === currentHeadSha) {
-      errors.push(`${path} only a request made stale by HEAD drift may retain a null outcome`);
     }
   });
   const discoveryCount = value.filter((entry) => entry.request?.kind === 'discovery').length;
@@ -715,12 +1206,12 @@ export function validatePrReviewState(value) {
     'schemaVersion', 'revision', 'repository', 'prNumber', 'phase', 'baseSha', 'requestedHeadSha',
     'reviewedHeadSha', 'currentIntegrationHeadSha', 'reviewRound', 'verificationReviewUsed', 'legacyReviewProvenance',
     'releaseBaseline', 'decisions', 'tasks', 'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
-    'threadResolutionStatus', 'blockedReasons', 'validationStatus', 'nextAction',
+    'threadResolutionStatus', 'blockedReasons', 'validationStatus', 'ciValidationStatus', 'ciValidationHistory', 'nextAction',
     'integrationWorktree', 'orchestratorSessionId', 'abandonmentReason', 'git', 'updatedAt',
   ];
   if (!requireFields(value, fields, '$', errors)) return errors;
   rejectUnknownFields(value, fields, '$', errors);
-  if (value.schemaVersion !== 2) errors.push('$.schemaVersion must equal 2');
+  if (value.schemaVersion !== 3) errors.push('$.schemaVersion must equal 3');
   if (!Number.isInteger(value.revision) || value.revision < 0) errors.push('$.revision must be non-negative');
   if (!isString(value.repository, { min: 3, max: 256 }) || !/^[^/\s]+\/[^/\s]+$/u.test(value.repository)) errors.push('$.repository must be owner/name');
   if (!Number.isInteger(value.prNumber) || value.prNumber < 1) errors.push('$.prNumber must be positive');
@@ -760,7 +1251,7 @@ export function validatePrReviewState(value) {
   if (value.reviewRequest !== null) validateReviewRequest(value.reviewRequest, '$.reviewRequest', errors);
   if (value.reviewOutcome !== null) validateReviewOutcome(value.reviewOutcome, '$.reviewOutcome', errors);
   validateVerificationEscalation(value.verificationEscalation, value.reviewRequest, errors);
-  validateReviewHistory(value.reviewHistory, value.currentIntegrationHeadSha, errors);
+  validateReviewHistory(value.reviewHistory, errors);
   const latest = Array.isArray(value.reviewHistory) ? value.reviewHistory.at(-1) : null;
   if ((latest?.request ?? null)?.id !== value.reviewRequest?.id) errors.push('$.reviewRequest must equal the latest history request');
   if ((latest?.outcome ?? null)?.id !== value.reviewOutcome?.id) errors.push('$.reviewOutcome must equal the latest history outcome');
@@ -786,7 +1277,27 @@ export function validatePrReviewState(value) {
     }
   }
   validateStringList(value.blockedReasons, '$.blockedReasons', errors);
-  validateProof(value.validationStatus, '$.validationStatus', errors);
+  validateProof(value.validationStatus, '$.validationStatus', errors, { source: 'orchestrator', scope: 'targeted' });
+  validateCiProof(value.ciValidationStatus, '$.ciValidationStatus', errors);
+  if (!Array.isArray(value.ciValidationHistory)) errors.push('$.ciValidationHistory must be an array');
+  else {
+    value.ciValidationHistory.forEach((proof, index) => validateCiProof(
+      proof, `$.ciValidationHistory[${index}]`, errors, { allowNotRun: false },
+    ));
+    const attemptIds = value.ciValidationHistory.map((proof) => (
+      Object.hasOwn(proof, 'checkRunId')
+        ? `check:${proof.checkRunId}` : `legacy-workflow:${proof.workflowRunId}`
+    ));
+    if (new Set(attemptIds).size !== attemptIds.length) {
+      errors.push('$.ciValidationHistory contains duplicate CI attempt identities');
+    }
+    const currentCi = value.ciValidationStatus?.status === 'not-run' ? null : value.ciValidationStatus;
+    if (currentCi !== null && !value.ciValidationHistory.some(
+      (proof) => JSON.stringify(proof) === JSON.stringify(currentCi),
+    )) {
+      errors.push('$.ciValidationStatus must equal an immutable CI history entry');
+    }
+  }
   validateThreadStatus(value.threadResolutionStatus, value.tasks, errors);
   if (!isString(value.nextAction, { min: 1, max: 1000 })) errors.push('$.nextAction is invalid');
   if (!isString(value.integrationWorktree, { min: 1, max: 4096 }) || !value.integrationWorktree.startsWith('/')) errors.push('$.integrationWorktree must be absolute');

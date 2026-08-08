@@ -1,15 +1,26 @@
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import {
+  parseTargetedValidationCommand,
+  validateInitialValidationSelection,
   validatePrReviewState,
   validateTaskPacket,
+  validateWorkerResultAgainstTask,
   validateWorkerResult,
+  unionRequiredValidation,
 } from '../../scripts/lib/contracts.mjs';
+import {
+  checkpointState,
+  checkpointTaskPacketBinding,
+  initializeState,
+} from '../../scripts/lib/pr-review-state.mjs';
 
 const root = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..');
 const AT = '2026-08-05T00:00:00Z';
@@ -17,7 +28,7 @@ const AT = '2026-08-05T00:00:00Z';
 function stateFixture(overrides = {}) {
   const head = 'a'.repeat(40);
   return {
-    schemaVersion: 2, revision: 0, repository: 'example/sky-bar', prNumber: 17, phase: 'recovering',
+    schemaVersion: 3, revision: 0, repository: 'example/sky-bar', prNumber: 17, phase: 'recovering',
     baseSha: head, requestedHeadSha: null, reviewedHeadSha: null, currentIntegrationHeadSha: head,
     reviewRound: 0, verificationReviewUsed: false, legacyReviewProvenance: null, releaseBaseline: null,
     decisions: [], tasks: [], reviewRequest: null, reviewOutcome: null, reviewHistory: [], verificationEscalation: null,
@@ -26,7 +37,15 @@ function stateFixture(overrides = {}) {
       threadlessVerification: { status: 'not-run', headSha: null, taskIds: [], updatedAt: null },
       updatedAt: null,
     },
-    blockedReasons: [], validationStatus: { status: 'not-run', headSha: null, checks: [], updatedAt: null },
+    blockedReasons: [],
+    validationStatus: {
+      source: 'orchestrator', scope: 'targeted', status: 'not-run', headSha: null, checks: [], updatedAt: null,
+    },
+    ciValidationStatus: {
+      source: 'github-actions', scope: 'full', status: 'not-run', headSha: null, checks: [],
+      workflowRunId: null, workflowRunUrl: null, updatedAt: null,
+    },
+    ciValidationHistory: [],
     nextAction: 'Recover exact context.', integrationWorktree: '/tmp/integration', orchestratorSessionId: null,
     abandonmentReason: null, git: { branch: 'main', headSha: head, dirty: false }, updatedAt: AT,
     ...overrides,
@@ -61,6 +80,50 @@ function escalatedStateFixture(overrides = {}) {
   });
 }
 
+function readyStateFixture(overrides = {}) {
+  const head = 'a'.repeat(40);
+  return stateFixture({
+    phase: 'ready-for-review',
+    validationStatus: {
+      source: 'orchestrator', scope: 'targeted', status: 'passed', headSha: head,
+      checks: ['npm run check:workflow'], updatedAt: AT,
+    },
+    threadResolutionStatus: {
+      status: 'passed', headSha: head, threads: [],
+      threadlessVerification: { status: 'not-run', headSha: null, taskIds: [], updatedAt: null },
+      updatedAt: AT,
+    },
+    ...overrides,
+  });
+}
+
+function completeStateFixture(overrides = {}) {
+  const head = 'a'.repeat(40);
+  const request = {
+    id: 'request', databaseId: 101, url: 'https://github.com/example/sky-bar/pull/17#issuecomment-101',
+    headSha: head, at: AT, kind: 'discovery', body: '@codex review',
+    authorLogin: 'maintainer', authorNodeId: 'USER_maintainer',
+  };
+  const outcome = {
+    id: 'review', databaseId: 102, url: 'https://github.com/example/sky-bar/pull/17#pullrequestreview-102',
+    headSha: head, at: AT, requestId: request.id, kind: 'discovery', outcome: 'clean',
+    evidenceType: 'review-submission', reviewerLogin: 'chatgpt-codex-connector', reviewerNodeId: 'BOT_codex',
+    reviewerType: 'Bot', reviewerUrl: 'https://github.com/apps/chatgpt-codex-connector',
+    reactionContent: null, reactionCommentId: null,
+  };
+  const ci = {
+    source: 'github-actions', scope: 'full', status: 'passed', headSha: head,
+    checks: ['Full validation', 'Full E2E'], workflowRunId: 99,
+    workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/99', updatedAt: AT,
+  };
+  return readyStateFixture({
+    phase: 'complete', requestedHeadSha: head, reviewedHeadSha: head, reviewRound: 1,
+    reviewRequest: request, reviewOutcome: outcome, reviewHistory: [{ request, outcome }],
+    ciValidationStatus: ci, ciValidationHistory: [ci], nextAction: 'Archive the completed cycle.',
+    ...overrides,
+  });
+}
+
 test('checked-in JSON contracts parse and declare Draft 2020-12', () => {
   const paths = [
     '.release/marker.schema.json',
@@ -73,11 +136,13 @@ test('checked-in JSON contracts parse and declare Draft 2020-12', () => {
     const document = JSON.parse(readFileSync(join(root, path), 'utf8'));
     if (path.endsWith('.schema.json')) assert.equal(document.$schema, 'https://json-schema.org/draft/2020-12/schema');
     if (path === 'docs/agents/pr-review-state.schema.json') {
-      assert.equal(document.properties.schemaVersion.const, 2);
+      assert.equal(document.properties.schemaVersion.const, 3);
       assert.ok(document.required.includes('verificationReviewUsed'));
       assert.ok(document.required.includes('reviewOutcome'));
       assert.ok(document.required.includes('threadResolutionStatus'));
       assert.ok(document.properties.phase.enum.includes('awaiting-human-decision'));
+      assert.ok(document.$defs.threadResolutionStatus.properties.localVerification);
+      assert.equal(document.$defs.threadResolutionStatus.required.includes('localVerification'), false);
     }
   }
 });
@@ -93,12 +158,34 @@ test('state JSON Schema compiles with Ajv and shares representative fixtures wit
   const validEscalation = escalatedStateFixture();
   assert.equal(validateSchema(validEscalation), true, JSON.stringify(validateSchema.errors));
   assert.deepEqual(validatePrReviewState(validEscalation), []);
+  const validUnboundTask = stateFixture({
+    tasks: [{
+      id: 'legacy-task', sourceIds: ['local'], sourceType: 'local', fingerprint: 'fingerprint', summary: 'Done.',
+      severity: 'P1', disposition: 'actionable', status: 'completed', integratedCommitSha: 'a'.repeat(40),
+      resolutionSummary: 'Done.',
+    }],
+  });
+  assert.equal(validateSchema(validUnboundTask), true, JSON.stringify(validateSchema.errors));
+  assert.deepEqual(validatePrReviewState(validUnboundTask), []);
+  const validBoundTask = stateFixture({
+    tasks: [{
+      id: 'task', sourceIds: ['local'], sourceType: 'local', fingerprint: 'fingerprint', summary: 'Done.',
+      severity: 'P1', disposition: 'actionable', status: 'completed', integratedCommitSha: 'a'.repeat(40),
+      resolutionSummary: 'Done.', taskPacketDigest: 'b'.repeat(64),
+    }],
+  });
+  assert.equal(validateSchema(validBoundTask), true, JSON.stringify(validateSchema.errors));
+  assert.deepEqual(validatePrReviewState(validBoundTask), []);
 
   const { verificationEscalation: _verificationEscalation, ...noncanonicalPriorV2 } = valid;
   const invalidFixtures = [
     noncanonicalPriorV2,
     stateFixture({ repository: 'not-a-repository' }),
-    stateFixture({ validationStatus: { status: 'passed', headSha: null, checks: [], updatedAt: null } }),
+    stateFixture({
+      validationStatus: {
+        source: 'orchestrator', scope: 'targeted', status: 'passed', headSha: null, checks: [], updatedAt: null,
+      },
+    }),
     escalatedStateFixture({ phase: 'recovering' }),
     escalatedStateFixture({
       verificationEscalation: {
@@ -120,6 +207,13 @@ test('state JSON Schema compiles with Ajv and shares representative fixtures wit
         id: 'task', sourceIds: ['local'], sourceType: 'local', fingerprint: 'fingerprint', summary: 'Queued.',
         severity: 'P1', disposition: 'actionable', status: 'queued', integratedCommitSha: null,
         resolutionSummary: null,
+      }],
+    }),
+    stateFixture({
+      tasks: [{
+        id: 'task', sourceIds: ['local'], sourceType: 'local', fingerprint: 'fingerprint', summary: 'Done.',
+        severity: 'P1', disposition: 'actionable', status: 'completed', integratedCommitSha: 'a'.repeat(40),
+        resolutionSummary: 'Done.', taskPacketDigest: 'not-a-digest',
       }],
     }),
     stateFixture({
@@ -184,6 +278,229 @@ test('state JSON Schema compiles with Ajv and shares representative fixtures wit
   }
 });
 
+test('local verifier proof is backward-readable, source-bound, and mandatory for completed local readiness', () => {
+  const schema = JSON.parse(readFileSync(join(root, 'docs/agents/pr-review-state.schema.json'), 'utf8'));
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajv);
+  const validateSchema = ajv.compile(schema);
+  const head = 'a'.repeat(40);
+  const completedLocal = {
+    id: 'local-task', sourceIds: ['local:audit'], sourceType: 'local', fingerprint: 'local-fingerprint',
+    summary: 'Verified locally.', severity: 'P1', disposition: 'actionable', status: 'completed',
+    integratedCommitSha: head, resolutionSummary: 'Verified.',
+  };
+  const historicalWithoutProof = stateFixture({ tasks: [completedLocal] });
+  assert.equal(validateSchema(historicalWithoutProof), true, JSON.stringify(validateSchema.errors));
+  assert.deepEqual(validatePrReviewState(historicalWithoutProof), []);
+
+  const localVerification = { status: 'passed', headSha: head, taskIds: ['local-task'], updatedAt: AT };
+  const readyProof = {
+    ...readyStateFixture().threadResolutionStatus,
+    localVerification,
+  };
+  const readyWithProof = readyStateFixture({ tasks: [completedLocal], threadResolutionStatus: readyProof });
+  const completeWithProof = completeStateFixture({ tasks: [completedLocal], threadResolutionStatus: readyProof });
+  for (const fixture of [readyWithProof, completeWithProof]) {
+    assert.equal(validateSchema(fixture), true, JSON.stringify(validateSchema.errors));
+    assert.deepEqual(validatePrReviewState(fixture), []);
+  }
+  for (const fixture of [
+    readyStateFixture({ tasks: [completedLocal] }),
+    completeStateFixture({ tasks: [completedLocal] }),
+  ]) {
+    assert.equal(validateSchema(fixture), false, 'ready/Done schema must require local proof');
+    assert.match(validatePrReviewState(fixture).join('\n'), /local verifier proof/u);
+  }
+  for (const localProof of [
+    { ...localVerification, status: 'failed' },
+    { ...localVerification, headSha: 'b'.repeat(40) },
+    { ...localVerification, taskIds: [] },
+  ]) {
+    const invalid = readyStateFixture({
+      tasks: [completedLocal],
+      threadResolutionStatus: { ...readyProof, localVerification: localProof },
+    });
+    assert.notDeepEqual(validatePrReviewState(invalid), []);
+  }
+
+  const githubTask = {
+    ...completedLocal, id: 'github-task', sourceType: 'github-threadless', status: 'integrated',
+    sourceIds: ['review:threadless'], fingerprint: 'github-fingerprint',
+  };
+  const integratedLocal = { ...completedLocal, id: 'integrated-local', status: 'integrated' };
+  for (const [taskId, tasks, reason] of [
+    ['unknown', [completedLocal], /unknown task/u],
+    ['github-task', [githubTask], /non-local task/u],
+    ['integrated-local', [integratedLocal], /ineligible local task/u],
+  ]) {
+    const invalid = stateFixture({
+      tasks,
+      threadResolutionStatus: {
+        ...stateFixture().threadResolutionStatus,
+        localVerification: { status: 'passed', headSha: head, taskIds: [taskId], updatedAt: AT },
+      },
+    });
+    assert.match(validatePrReviewState(invalid).join('\n'), reason);
+  }
+});
+
+test('state JSON Schema rejects terminal and review-ready states missing current proof shapes', () => {
+  const schema = JSON.parse(readFileSync(join(root, 'docs/agents/pr-review-state.schema.json'), 'utf8'));
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajv);
+  const validateSchema = ajv.compile(schema);
+  const ready = readyStateFixture();
+  const complete = completeStateFixture();
+  assert.equal(validateSchema(ready), true, JSON.stringify(validateSchema.errors));
+  assert.equal(validateSchema(complete), true, JSON.stringify(validateSchema.errors));
+  assert.deepEqual(validatePrReviewState(ready), []);
+  assert.deepEqual(validatePrReviewState(complete), []);
+  const issueCommentOutcome = {
+    ...complete.reviewOutcome, id: 'clean-comment', databaseId: 103,
+    url: 'https://github.com/example/sky-bar/pull/17#issuecomment-103', evidenceType: 'issue-comment',
+  };
+  const issueCommentState = completeStateFixture({
+    reviewOutcome: issueCommentOutcome,
+    reviewHistory: [{ request: complete.reviewRequest, outcome: issueCommentOutcome }],
+  });
+  assert.equal(validateSchema(issueCommentState), true, JSON.stringify(validateSchema.errors));
+  assert.deepEqual(validatePrReviewState(issueCommentState), []);
+  for (const outcome of [
+    { ...issueCommentOutcome, outcome: 'findings' },
+    { ...issueCommentOutcome, reactionContent: 'THUMBS_UP' },
+  ]) {
+    const malformed = completeStateFixture({
+      reviewOutcome: outcome, reviewHistory: [{ request: complete.reviewRequest, outcome }],
+    });
+    assert.equal(validateSchema(malformed), false);
+    assert.notDeepEqual(validatePrReviewState(malformed), []);
+  }
+  const attemptProof = { ...complete.ciValidationStatus, checkRunId: 'CHECK_attempt_1' };
+  const attemptAware = completeStateFixture({
+    ciValidationStatus: attemptProof, ciValidationHistory: [attemptProof],
+  });
+  assert.equal(validateSchema(attemptAware), true, JSON.stringify(validateSchema.errors));
+  assert.deepEqual(validatePrReviewState(attemptAware), []);
+  for (const checkRunId of ['', null, 42]) {
+    const malformed = completeStateFixture({
+      ciValidationStatus: { ...attemptProof, checkRunId },
+      ciValidationHistory: [{ ...attemptProof, checkRunId }],
+    });
+    assert.equal(validateSchema(malformed), false);
+    assert.notDeepEqual(validatePrReviewState(malformed), []);
+  }
+  const rerunProof = { ...attemptProof, checkRunId: 'CHECK_attempt_2' };
+  assert.deepEqual(validatePrReviewState(completeStateFixture({
+    ciValidationStatus: rerunProof, ciValidationHistory: [attemptProof, rerunProof],
+  })), []);
+  const historicalHeadProof = {
+    ...attemptProof, status: 'failed', headSha: 'b'.repeat(40), checkRunId: 'CHECK_head_b',
+    workflowRunId: 100,
+    workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/100',
+    updatedAt: '2026-08-05T00:01:00Z',
+  };
+  const restoredComplete = completeStateFixture({
+    ciValidationStatus: attemptProof, ciValidationHistory: [attemptProof, historicalHeadProof],
+  });
+  assert.equal(validateSchema(restoredComplete), true, JSON.stringify(validateSchema.errors));
+  assert.deepEqual(validatePrReviewState(restoredComplete), []);
+
+  const absentProof = {
+    ...attemptProof, checkRunId: 'CHECK_absent', workflowRunId: 101,
+    workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/101',
+  };
+  assert.match(validatePrReviewState(completeStateFixture({
+    ciValidationStatus: absentProof, ciValidationHistory: [attemptProof, historicalHeadProof],
+  })).join('\n'), /immutable CI history entry/u);
+  assert.notDeepEqual(validatePrReviewState(completeStateFixture({
+    ciValidationStatus: rerunProof, ciValidationHistory: [rerunProof, rerunProof],
+  })), []);
+
+  const completedTask = {
+    id: 'task', sourceIds: ['local:audit'], sourceType: 'local', fingerprint: 'audit-fingerprint',
+    summary: 'Audited.', severity: 'P1', disposition: 'actionable', status: 'completed',
+    integratedCommitSha: 'a'.repeat(40), resolutionSummary: 'Audited.',
+  };
+  const invalid = [
+    readyStateFixture({ validationStatus: stateFixture().validationStatus }),
+    readyStateFixture({ threadResolutionStatus: stateFixture().threadResolutionStatus }),
+    readyStateFixture({ blockedReasons: ['Still blocked.'] }),
+    readyStateFixture({ git: { branch: 'main', headSha: 'a'.repeat(40), dirty: true } }),
+    readyStateFixture({ tasks: [{ ...completedTask, status: 'integrated' }] }),
+    readyStateFixture({ reviewRound: 3, verificationReviewUsed: true }),
+    completeStateFixture({ ciValidationStatus: stateFixture().ciValidationStatus, ciValidationHistory: [] }),
+    completeStateFixture({ requestedHeadSha: null }),
+    completeStateFixture({ reviewedHeadSha: null }),
+    completeStateFixture({ ciValidationHistory: [] }),
+    completeStateFixture({ reviewHistory: [] }),
+    completeStateFixture({ reviewOutcome: { ...complete.reviewOutcome, outcome: 'findings' } }),
+    completeStateFixture({ tasks: [{ ...completedTask, status: 'integrated' }] }),
+    completeStateFixture({ tasks: [{ ...completedTask, disposition: 'needs-human-decision' }] }),
+  ];
+  for (const fixture of invalid) {
+    assert.equal(validateSchema(fixture), false, 'schema must reject an unready terminal/readiness state');
+    assert.notDeepEqual(validatePrReviewState(fixture), [], 'manual validator must reject the same state');
+  }
+});
+
+test('superseded null-outcome requests remain valid when the integration HEAD returns', () => {
+  const headA = 'a'.repeat(40);
+  const headB = 'b'.repeat(40);
+  const requestA = {
+    id: 'request-a', databaseId: 101,
+    url: 'https://github.com/example/sky-bar/pull/17#issuecomment-101',
+    headSha: headA, at: AT, kind: 'discovery', body: '@codex review',
+    authorLogin: 'maintainer', authorNodeId: 'USER_maintainer',
+  };
+  const requestB = {
+    ...requestA, id: 'request-b', databaseId: 102,
+    url: 'https://github.com/example/sky-bar/pull/17#issuecomment-102', headSha: headB,
+  };
+  const returnedToA = stateFixture({
+    phase: 'recovering', currentIntegrationHeadSha: headA,
+    requestedHeadSha: headB, reviewRound: 2, reviewRequest: requestB,
+    reviewHistory: [{ request: requestA, outcome: null }, { request: requestB, outcome: null }],
+    git: { branch: 'main', headSha: headA, dirty: false },
+  });
+  const immutableHistory = structuredClone(returnedToA.reviewHistory);
+
+  assert.deepEqual(validatePrReviewState(returnedToA), []);
+  assert.deepEqual(returnedToA.reviewHistory, immutableHistory);
+  assert.equal(returnedToA.reviewRequest.id, requestB.id);
+
+  const outcomeA = {
+    id: 'review-a', databaseId: 103,
+    url: 'https://github.com/example/sky-bar/pull/17#pullrequestreview-103',
+    headSha: headA, at: AT, requestId: requestA.id, kind: 'discovery', outcome: 'clean',
+    evidenceType: 'review-submission', reviewerLogin: 'chatgpt-codex-connector',
+    reviewerNodeId: 'BOT_codex', reviewerType: 'Bot',
+    reviewerUrl: 'https://github.com/apps/chatgpt-codex-connector',
+    reactionContent: null, reactionCommentId: null,
+  };
+  for (const outcome of [
+    { ...outcomeA, requestId: requestB.id },
+    { ...outcomeA, headSha: headB },
+  ]) {
+    assert.ok(validatePrReviewState({
+      ...returnedToA,
+      reviewHistory: [{ request: requestA, outcome }, { request: requestB, outcome: null }],
+    }).some((error) => error.includes('outcome must bind')));
+  }
+  assert.ok(validatePrReviewState({
+    ...returnedToA, reviewRequest: requestA,
+  }).some((error) => error.includes('reviewRequest must equal')));
+  assert.ok(validatePrReviewState({
+    ...returnedToA,
+    reviewHistory: [
+      { request: requestA, outcome: null },
+      { request: { ...requestB, id: requestA.id }, outcome: null },
+    ],
+  }).some((error) => error.includes('duplicate request IDs')));
+  assert.ok(validatePrReviewState({
+    ...returnedToA, phase: 'validating',
+  }).some((error) => error.includes('phase is invalid for the pending')));
+});
+
 test('manual escalation binding rejects a mismatched pending request identity or SHA', () => {
   const valid = escalatedStateFixture();
   for (const verificationEscalation of [
@@ -244,26 +561,151 @@ test('manual state validation rejects every ambiguous canonical thread identifie
   }
 });
 
-test('task packet validator accepts the documented contract', () => {
-  const errors = validateTaskPacket({
+test('initial validation selections require an exact head and nonempty targeted union', () => {
+  const selection = {
     schemaVersion: 1,
+    headSha: 'a'.repeat(40),
+    affectedAreas: ['workflow'],
+    requiredValidation: {
+      unit: [{ command: 'npm run check:workflow', reason: 'Initial workflow scope.' }],
+      system: [],
+    },
+  };
+  assert.deepEqual(validateInitialValidationSelection(selection), []);
+  for (const invalid of [
+    { ...selection, headSha: 'bad' },
+    { ...selection, affectedAreas: [] },
+    { ...selection, requiredValidation: { unit: [], system: [] } },
+    { ...selection, extra: true },
+  ]) assert.notDeepEqual(validateInitialValidationSelection(invalid), []);
+});
+
+test('task packet validator accepts the documented contract', () => {
+  const packet = {
+    schemaVersion: 2,
     taskId: 'task-1',
     reviewedHeadSha: 'a'.repeat(40),
     finding: 'The mutation can overwrite newer state.',
     evidence: 'The route updates without checking the displayed version.',
+    affectedAreas: ['api'],
     decisionIds: ['decision-1'],
     allowedPaths: ['apps/api/src/example.ts'],
     forbiddenPaths: ['apps/api/migrations/**'],
     dependencies: [],
     acceptanceCriteria: ['Reject stale versions.'],
-    requiredValidation: ['npm test -w @sky-bar/api -- routes'],
-  });
+    requiredValidation: {
+      unit: [{ command: 'npm test -w @sky-bar/api -- routes', reason: 'Covers stale route versions.' }],
+      system: [{
+        command: 'npm run test:e2e:related -- --id id-an-approved-request-token-grants-exactly-one-device --project tablet-chromium',
+        reason: 'Covers the visible stale-version flow.',
+        selectors: ['id-an-approved-request-token-grants-exactly-one-device'], projects: ['tablet-chromium'],
+      }],
+    },
+  };
+  const schema = JSON.parse(readFileSync(join(root, 'docs/agents/review-fix-task.schema.json'), 'utf8'));
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajv);
+  const validateSchema = ajv.compile(schema);
+  const errors = validateTaskPacket(packet);
   assert.deepEqual(errors, []);
+  assert.equal(validateSchema(packet), true, JSON.stringify(validateSchema.errors));
+  assert.ok(validateTaskPacket({
+    ...packet,
+    requiredValidation: {
+      ...packet.requiredValidation,
+      system: [{ ...packet.requiredValidation.system[0], projects: [] }],
+    },
+  }).some((error) => error.includes('both be empty or both be nonempty')));
+});
+
+test('task packets reject unsafe ownership and inexact or broad system validation scopes', () => {
+  const packet = {
+    schemaVersion: 2, taskId: 'task-1', reviewedHeadSha: 'a'.repeat(40), finding: 'Finding.', evidence: 'Evidence.',
+    affectedAreas: ['workflow'], decisionIds: [], allowedPaths: ['scripts/**'], forbiddenPaths: ['scripts/private/**'],
+    dependencies: [], acceptanceCriteria: ['Validated.'], requiredValidation: {
+      unit: [], system: [{
+        command: 'npm run check:workflow', reason: 'Focused workflow check.', selectors: [], projects: [],
+      }],
+    },
+  };
+  assert.deepEqual(validateTaskPacket(packet), []);
+  for (const command of ['npm run check', 'npm run check:full', 'npm run test:e2e', 'npm run test:e2e:full']) {
+    assert.ok(validateTaskPacket({
+      ...packet, requiredValidation: { unit: [], system: [{ command, reason: 'Too broad.', selectors: [], projects: [] }] },
+    }).some((error) => error.includes('allowed direct targeted command')), command);
+  }
+
+  for (const command of [
+    'env CI=1 npm run check:workflow',
+    'npm --silent run check:workflow',
+    'bash -lc npm run check:workflow',
+    'npm run check:workflow && npm run check:api',
+    'npm run check:workflow > result.txt',
+    'npm run check:workflow $(touch unsafe)',
+    'node --test #',
+    'node --test ~',
+    'node --test tests/tooling',
+    'npm test -w @sky-bar/api -- #',
+    'npm test -w @sky-bar/api -- routes\t--watch',
+    'npm test -w @sky-bar/api -w @sky-bar/web -- routes',
+  ]) {
+    assert.equal(parseTargetedValidationCommand(command), null, command);
+    assert.ok(validateTaskPacket({
+      ...packet, requiredValidation: { unit: [{ command, reason: 'Bypass attempt.' }], system: [] },
+    }).some((error) => error.includes('allowed direct targeted command')), command);
+  }
+  for (const affectedAreas of [['other'], ['documentation', 'ap1']]) {
+    const invalid = { ...packet, affectedAreas };
+    assert.ok(validateTaskPacket(invalid).some(
+      (error) => error.includes('only recognized code or policy areas'),
+    ));
+    const schema = JSON.parse(readFileSync(join(root, 'docs/agents/review-fix-task.schema.json'), 'utf8'));
+    const ajv = new Ajv2020({ allErrors: true, strict: true });
+    addFormats(ajv);
+    assert.equal(ajv.compile(schema)(invalid), false);
+  }
+  for (const command of [
+    'npm test -w @sky-bar/api -- routes',
+    'npm run test --workspace=@sky-bar/web -- tests/example.test.ts',
+    'node --test tests/tooling/contracts.test.mjs',
+  ]) {
+    assert.deepEqual(parseTargetedValidationCommand(command), command.split(' '), command);
+    assert.deepEqual(validateTaskPacket({
+      ...packet, requiredValidation: { unit: [{ command, reason: 'Focused test.' }], system: [] },
+    }), [], command);
+  }
+  for (const command of ['npm run check:full', 'npm run test:e2e:related -- --tag area-security']) {
+    if (command === 'npm run check:full') assert.equal(parseTargetedValidationCommand(command), null);
+    assert.notDeepEqual(validateTaskPacket({
+      ...packet, requiredValidation: { unit: [{ command, reason: 'Wrong local scope.' }], system: [] },
+    }), [], command);
+  }
+  for (const allowedPaths of [['../scripts/**'], ['/scripts/**'], ['scripts/*/file.mjs']]) {
+    assert.ok(validateTaskPacket({ ...packet, allowedPaths }).some((error) => error.includes('safe repository-relative')));
+  }
+
+  const command = 'npm run test:e2e:related -- --tag area-security --project mobile-webkit';
+  const e2e = { command, reason: 'Focused security flow.', selectors: ['area-security'], projects: ['mobile-webkit'] };
+  assert.deepEqual(validateTaskPacket({
+    ...packet, requiredValidation: { unit: [], system: [e2e] },
+  }), []);
+  for (const entry of [
+    { ...e2e, selectors: [] },
+    { ...e2e, selectors: ['area-auth'] },
+    { ...e2e, selectors: ['area-does-not-exist'] },
+    { ...e2e, projects: ['tablet-chromium'] },
+    { ...e2e, projects: ['chromium'] },
+    { ...e2e, command: 'npm run test:e2e:related -- --project mobile-webkit' },
+  ]) {
+    assert.notDeepEqual(validateTaskPacket({
+      ...packet, requiredValidation: { unit: [], system: [entry] },
+    }), []);
+  }
 });
 
 test('worker result validator rejects raw artifact fields', () => {
-  const errors = validateWorkerResult({
-    schemaVersion: 1,
+  const result = {
+    schemaVersion: 2,
     taskId: 'task-1',
     status: 'failed',
     commitSha: null,
@@ -273,8 +715,188 @@ test('worker result validator rejects raw artifact fields', () => {
     residualRisks: [],
     unexpectedDependencies: [],
     rawLog: 'large output',
-  });
+  };
+  const errors = validateWorkerResult(result);
   assert.ok(errors.some((error) => error.includes('rawLog')));
+  const schema = JSON.parse(readFileSync(join(root, 'docs/agents/review-fix-result.schema.json'), 'utf8'));
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajv);
+  const validateSchema = ajv.compile(schema);
+  assert.equal(validateSchema(result), false);
+});
+
+test('worker result enforces exact commands and status-aware validation outcomes', () => {
+  const packet = {
+    schemaVersion: 2, taskId: 'task-1', reviewedHeadSha: 'a'.repeat(40), finding: 'Finding.', evidence: 'Evidence.',
+    affectedAreas: ['workflow'], decisionIds: [], allowedPaths: ['scripts/**'], forbiddenPaths: [], dependencies: [],
+    acceptanceCriteria: ['Validated.'], requiredValidation: {
+      unit: [{ command: 'npm run check:workflow', reason: 'Covers workflow tooling.' }], system: [],
+    },
+  };
+  const result = {
+    schemaVersion: 2, taskId: 'task-1', status: 'implemented', commitSha: 'b'.repeat(40), changedPaths: ['scripts/a.mjs'],
+    validation: [{ command: 'npm run check:workflow', result: 'passed', summary: 'Passed.' }],
+    resolutionSummary: 'Implemented.', residualRisks: [], unexpectedDependencies: [],
+  };
+  assert.deepEqual(validateWorkerResultAgainstTask(packet, result, ['scripts/a.mjs']), []);
+  assert.ok(validateWorkerResultAgainstTask(packet, result).some(
+    (error) => error.includes('requires actual Git changed paths'),
+  ));
+  assert.ok(validateWorkerResultAgainstTask(packet, result, []).some(
+    (error) => error.includes('at least one changed path'),
+  ));
+  assert.ok(validateWorkerResultAgainstTask(packet, result, ['scripts/other.mjs']).some(
+    (error) => error.includes('exactly equal'),
+  ));
+  assert.ok(validateWorkerResultAgainstTask(packet, {
+    ...result, changedPaths: ['scripts/a.mjs', 'scripts/a.mjs'],
+  }, ['scripts/a.mjs']).some((error) => error.includes('must not contain duplicates')));
+  assert.ok(validateWorkerResultAgainstTask(packet, {
+    ...result,
+    validation: [...result.validation, { command: 'npm run check:full', result: 'passed', summary: 'Too broad.' }],
+  }, ['scripts/a.mjs']).some((error) => error.includes('undeclared command')));
+  assert.ok(validateWorkerResultAgainstTask(packet, {
+    ...result, validation: [{ ...result.validation[0], result: 'skipped' }],
+  }, ['scripts/a.mjs']).some((error) => error.includes('did not pass')));
+  assert.ok(validateWorkerResultAgainstTask(packet, {
+    ...result, validation: [],
+  }, ['scripts/a.mjs']).some((error) => error.includes('was not reported')));
+  for (const status of ['blocked', 'failed', 'not-applicable']) {
+    for (const outcome of ['passed', 'failed', 'skipped']) {
+      const terminalResult = {
+        ...result,
+        status,
+        commitSha: null,
+        changedPaths: [],
+        validation: [{ ...result.validation[0], result: outcome }],
+      };
+      assert.deepEqual(validateWorkerResultAgainstTask(packet, terminalResult), []);
+    }
+    assert.ok(validateWorkerResultAgainstTask(packet, {
+      ...result, status, commitSha: null, changedPaths: [], validation: [],
+    }).some((error) => error.includes('was not reported')));
+  }
+  assert.ok(validateWorkerResultAgainstTask(packet, {
+    ...result, changedPaths: ['apps/api/src/outside.ts'],
+  }, ['apps/api/src/outside.ts']).some((error) => error.includes('outside allowedPaths')));
+  assert.ok(validateWorkerResultAgainstTask({
+    ...packet, forbiddenPaths: ['scripts/private/**'],
+  }, {
+    ...result, changedPaths: ['scripts/private/a.mjs'],
+  }, ['scripts/private/a.mjs']).some((error) => error.includes('is forbidden')));
+  assert.ok(validateWorkerResult({ ...result, changedPaths: ['../scripts/a.mjs'] }).some(
+    (error) => error.includes('safe repository-relative'),
+  ));
+});
+
+test('validate-result CLI enforces the exact task validation commands', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sky-bar-result-contract-'));
+  try {
+    assert.equal(spawnSync('git', ['init', '-q'], { cwd: directory }).status, 0);
+    assert.equal(spawnSync('git', ['config', 'user.email', 'test@example.com'], { cwd: directory }).status, 0);
+    assert.equal(spawnSync('git', ['config', 'user.name', 'Test'], { cwd: directory }).status, 0);
+    mkdirSync(join(directory, 'scripts'));
+    writeFileSync(join(directory, 'scripts/a.mjs'), 'export const value = 1;\n');
+    assert.equal(spawnSync('git', ['add', 'scripts/a.mjs'], { cwd: directory }).status, 0);
+    assert.equal(spawnSync('git', ['commit', '-q', '-m', 'base'], { cwd: directory }).status, 0);
+    const reviewedHeadSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: directory, encoding: 'utf8' }).stdout.trim();
+    const packet = {
+      schemaVersion: 2, taskId: 'task-1', reviewedHeadSha, finding: 'Finding.', evidence: 'Evidence.',
+      affectedAreas: ['workflow'], decisionIds: [], allowedPaths: ['scripts/**'], forbiddenPaths: [], dependencies: [],
+      acceptanceCriteria: ['Validated.'], requiredValidation: {
+        unit: [{ command: 'npm run check:workflow', reason: 'Covers workflow tooling.' }], system: [],
+      },
+    };
+    let state = initializeState({
+      cwd: directory, prNumber: 17, repository: 'example/sky-bar', base: 'HEAD', head: 'HEAD', releaseRef: 'HEAD',
+    });
+    state = checkpointState({
+      cwd: directory,
+      expectedRevision: state.revision,
+      nextState: {
+        ...state,
+        tasks: [{
+          id: 'task-1', sourceIds: ['local:fixture'], sourceType: 'local', fingerprint: 'fixture-fingerprint',
+          summary: 'Exercise exact validation commands.', severity: 'P2', disposition: 'actionable', status: 'proposed',
+          integratedCommitSha: null, resolutionSummary: null,
+          execution: {
+            dependencies: [], ownedPaths: ['scripts/a.mjs'], worker: 'review_fix_worker', branch: null,
+            worktree: null, workerCommitSha: null, validationSummaries: [], lastError: null,
+          },
+        }],
+      },
+    });
+    checkpointTaskPacketBinding({ cwd: directory, packet, expectedRevision: state.revision });
+    writeFileSync(join(directory, 'scripts/a.mjs'), 'export const value = 2;\n');
+    assert.equal(spawnSync('git', ['add', 'scripts/a.mjs'], { cwd: directory }).status, 0);
+    assert.equal(spawnSync('git', ['commit', '-q', '-m', 'worker'], { cwd: directory }).status, 0);
+    const commitSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: directory, encoding: 'utf8' }).stdout.trim();
+    const result = {
+      schemaVersion: 2, taskId: 'task-1', status: 'implemented', commitSha, changedPaths: ['scripts/a.mjs'],
+      validation: [{ command: 'npm run check:full', result: 'passed', summary: 'Broad command.' }],
+      resolutionSummary: 'Implemented.', residualRisks: [], unexpectedDependencies: [],
+    };
+    const packetPath = join(directory, 'packet.json');
+    const resultPath = join(directory, 'result.json');
+    writeFileSync(packetPath, JSON.stringify(packet));
+    writeFileSync(resultPath, JSON.stringify(result));
+    const cli = spawnSync(process.execPath, [
+      join(root, 'scripts/pr-review-state.mjs'), 'validate-result',
+      '--task-packet', packetPath, '--worker-result', resultPath,
+    ], { cwd: directory, encoding: 'utf8' });
+    assert.equal(cli.status, 1, cli.stderr);
+    assert.match(cli.stderr, /undeclared command/u);
+    assert.match(cli.stderr, /required validation was not reported/u);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('required validation union is deterministic and de-duplicates repeated commands', () => {
+  const base = {
+    schemaVersion: 2, taskId: 'task-1', reviewedHeadSha: 'a'.repeat(40), finding: 'Finding.', evidence: 'Evidence.',
+    affectedAreas: ['workflow'], decisionIds: [], allowedPaths: ['scripts/**'], forbiddenPaths: [], dependencies: [],
+    acceptanceCriteria: ['Validated.'], requiredValidation: {
+      unit: [{ command: 'npm run check:workflow', reason: 'Covers tooling.' }], system: [],
+    },
+  };
+  assert.deepEqual(unionRequiredValidation([base, { ...base, taskId: 'task-2' }]), base.requiredValidation);
+  assert.deepEqual(unionRequiredValidation([
+    base,
+    { ...base, taskId: 'task-2', requiredValidation: {
+      unit: [{ command: 'npm run check:workflow', reason: 'Different reason.' }], system: [],
+    } },
+  ]), base.requiredValidation);
+  assert.throws(() => unionRequiredValidation([
+    base,
+    { ...base, taskId: 'task-2', requiredValidation: {
+      unit: [], system: [{ command: 'npm run check:workflow', reason: 'Wrong scope.', selectors: [], projects: [] }],
+    } },
+  ]), /Conflicting validation scope/u);
+
+  const areaOnly = {
+    ...base,
+    affectedAreas: ['shared', 'migration', 'documentation'],
+    requiredValidation: {
+      unit: [{ command: 'node --test tests/tooling/contracts.test.mjs', reason: 'Focused contract tests.' }],
+      system: [],
+    },
+  };
+  assert.deepEqual(unionRequiredValidation([areaOnly]), {
+    unit: [
+      areaOnly.requiredValidation.unit[0],
+      { command: 'npm run check:shared', reason: 'Orchestrator integrated check for affected area: shared.' },
+      { command: 'npm run check:api', reason: 'Orchestrator integrated check for affected area: shared.' },
+      { command: 'npm run check:web', reason: 'Orchestrator integrated check for affected area: shared.' },
+      { command: 'npm run check:release-state', reason: 'Orchestrator integrated check for affected area: migration.' },
+      { command: 'npm run check:released-migrations', reason: 'Orchestrator integrated check for affected area: migration.' },
+    ],
+    system: [],
+  });
+  assert.deepEqual(unionRequiredValidation([{ ...areaOnly, affectedAreas: ['release'] }]).unit.slice(-2), [
+    { command: 'npm run check:release-state', reason: 'Orchestrator integrated check for affected area: release.' },
+    { command: 'npm run check:released-migrations', reason: 'Orchestrator integrated check for affected area: release.' },
+  ]);
 });
 
 test('skill frontmatter has only name and description and no TODOs', () => {

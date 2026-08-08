@@ -1,30 +1,39 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { afterEach, test } from 'node:test';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   ACTIVE_STATE_LIMIT_BYTES,
   activePointerPath,
   archiveState,
+  assertTaskPacketBound,
   buildCompletionTransition,
+  buildCiValidationTransition,
+  buildTargetedValidationPlan,
   buildReviewOutcomeTransition,
   buildReviewRequestTransition,
   buildVerificationEscalationTransition,
   checkpointCompletion,
+  checkpointCiValidation,
   checkpointGitMetadata,
   checkpointReviewOutcome,
   checkpointReviewRequest,
   checkpointState,
+  checkpointTaskPacketBinding,
   checkpointTaskCompletion,
+  checkpointTargetedValidation,
   checkpointVerificationEscalation,
   completionGate,
   completeIntegratedTasks,
+  executeTargetedValidationPlan,
   gitAwareGateContext,
   gitCommonDirectory,
   initializeState,
   loadState,
   migratePrReviewStateV1,
+  migratePrReviewStateV2,
   migrateState,
   renderRecoverySummary,
   reviewRequestGate,
@@ -32,12 +41,15 @@ import {
   stateDirectory,
   statePath,
   StateError,
+  taskPacketDigest,
+  validationPlanPath,
   withStateLock,
 } from '../../scripts/lib/pr-review-state.mjs';
 import { commit, createRepository, git } from './git-fixtures.mjs';
 
 const repositories = [];
 const AT = '2026-08-05T00:00:00Z';
+const STATE_CLI = fileURLToPath(new URL('../../scripts/pr-review-state.mjs', import.meta.url));
 
 function repo() {
   const cwd = createRepository();
@@ -78,20 +90,54 @@ function emptyThreadless() {
   return { status: 'not-run', headSha: null, taskIds: [], updatedAt: null };
 }
 
+function emptyLocalVerification() {
+  return { status: 'not-run', headSha: null, taskIds: [], updatedAt: null };
+}
+
 function ready(state, tasks = [task(state.currentIntegrationHeadSha)]) {
   const head = state.currentIntegrationHeadSha;
+  const localTaskIds = tasks.filter((item) => item.sourceType === 'local' && item.status === 'completed')
+    .map((item) => item.id).sort();
   return {
     ...state,
     phase: 'ready-for-review',
     tasks,
-    validationStatus: { status: 'passed', headSha: head, checks: ['npm run check'], updatedAt: AT },
+    validationStatus: state.validationStatus.status === 'passed' ? state.validationStatus : {
+      source: 'orchestrator', scope: 'targeted', status: 'passed', headSha: head,
+      checks: ['npm run check'], updatedAt: AT,
+    },
     threadResolutionStatus: {
       status: 'passed', headSha: head, threads: [], threadlessVerification: emptyThreadless(), updatedAt: AT,
+      localVerification: localTaskIds.length > 0 ? {
+        status: 'passed', headSha: head, taskIds: localTaskIds, updatedAt: AT,
+      } : emptyLocalVerification(),
     },
     git: { ...state.git, headSha: head, dirty: false },
     blockedReasons: [],
     nextAction: 'Request canonical review.',
   };
+}
+
+function checkpointSyntheticTargetedValidation(cwd, state) {
+  const taskIds = state.tasks.filter((item) => item.disposition === 'actionable' && item.status === 'integrated')
+    .map((item) => item.id).sort();
+  const plan = {
+    schemaVersion: 1, prNumber: state.prNumber, stateRevision: state.revision,
+    headSha: state.currentIntegrationHeadSha, taskIds, affectedAreas: ['workflow'],
+    commands: [{
+      kind: 'unit', command: 'npm run check:workflow', reason: 'Synthetic focused test proof.', selectors: [], projects: [],
+      argv: ['npm', 'run', 'check:workflow'], status: 'passed', exitCode: 0,
+      summary: 'Passed.', completedAt: AT,
+    }],
+    createdAt: AT, updatedAt: AT,
+  };
+  writeFileSync(validationPlanPath(cwd, state.prNumber), `${JSON.stringify(plan)}\n`);
+  return checkpointTargetedValidation({ cwd, expectedRevision: state.revision });
+}
+
+function persistReady(cwd, state, tasks = state.tasks) {
+  const validated = state.validationStatus.status === 'passed' ? state : checkpointSyntheticTargetedValidation(cwd, state);
+  return checkpointState({ cwd, nextState: ready(validated, tasks), expectedRevision: validated.revision });
 }
 
 function external(cwd, state, overrides = {}) {
@@ -122,6 +168,15 @@ function outcome(state, overrides = {}) {
   };
 }
 
+function ciEvidence(state, overrides = {}) {
+  return {
+    source: 'github-actions', scope: 'full', status: 'passed', headSha: state.currentIntegrationHeadSha,
+    checks: ['check', 'e2e'], checkRunId: 'CHECK_123456', workflowRunId: 123456,
+    workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/123456', updatedAt: AT,
+    ...overrides,
+  };
+}
+
 function legacyState(state, overrides = {}) {
   const {
     verificationReviewUsed: _verificationReviewUsed,
@@ -130,10 +185,65 @@ function legacyState(state, overrides = {}) {
     reviewHistory: _reviewHistory,
     verificationEscalation: _verificationEscalation,
     threadResolutionStatus: _threadResolutionStatus,
+    ciValidationStatus: _ciValidationStatus,
+    ciValidationHistory: _ciValidationHistory,
     abandonmentReason: _abandonmentReason,
+    validationStatus,
     ...legacy
   } = state;
-  return { ...legacy, schemaVersion: 1, reviewSubmission: reviewOutcome, tasks: [], ...overrides };
+  const legacyValidation = {
+    status: validationStatus.status, headSha: validationStatus.headSha,
+    checks: validationStatus.checks, updatedAt: validationStatus.updatedAt,
+  };
+  return {
+    ...legacy, schemaVersion: 1, validationStatus: legacyValidation,
+    reviewSubmission: reviewOutcome, tasks: [], ...overrides,
+  };
+}
+
+function schemaV2State(state) {
+  const {
+    ciValidationStatus: _ciValidationStatus,
+    ciValidationHistory: _ciValidationHistory,
+    validationStatus,
+    threadResolutionStatus,
+    ...currentFields
+  } = state;
+  const { source: _source, scope: _scope, ...legacyValidationStatus } = validationStatus;
+  const { localVerification: _localVerification, ...legacyThreadResolutionStatus } = threadResolutionStatus;
+  return {
+    ...currentFields, schemaVersion: 2, validationStatus: legacyValidationStatus,
+    threadResolutionStatus: legacyThreadResolutionStatus,
+  };
+}
+
+function migrateTasklessPendingReview(cwd) {
+  const prepared = ready(init(cwd), []);
+  const requested = buildReviewRequestTransition(prepared, request(prepared), external(cwd, prepared));
+  writeFileSync(statePath(cwd, requested.prNumber), `${JSON.stringify(schemaV2State(requested))}\n`);
+  return migrateState({ cwd }).state;
+}
+
+function migrateCompletedTaskCycle(cwd, phase) {
+  let source = ready(init(cwd));
+  if (phase === 'complete') {
+    source = buildReviewRequestTransition(source, request(source), external(cwd, source));
+    source = buildReviewOutcomeTransition(source, outcome(source));
+    source = buildCiValidationTransition(source, ciEvidence(source));
+    source = buildCompletionTransition(source, external(cwd, source));
+  }
+  writeFileSync(statePath(cwd, source.prNumber), `${JSON.stringify(schemaV2State(source))}\n`);
+  return { source, migrated: migrateState({ cwd }).state };
+}
+
+function migrateCompletedTaskPendingReview(cwd) {
+  const prepared = ready(init(cwd));
+  const source = buildReviewRequestTransition(prepared, request(prepared), external(cwd, prepared));
+  const legacy = schemaV2State(source);
+  const serialized = `${JSON.stringify(legacy)}\n`;
+  writeFileSync(statePath(cwd, source.prNumber), serialized);
+  const migration = migrateState({ cwd });
+  return { source, legacy, serialized, migrated: migration.state, backupPath: migration.backupPath };
 }
 
 function legacyTask(workerCommitSha, overrides = {}) {
@@ -147,35 +257,688 @@ function legacyTask(workerCommitSha, overrides = {}) {
   };
 }
 
+function taskPacket(head, taskId, { affectedAreas = ['api'], command = 'npm run check:api' } = {}) {
+  return {
+    schemaVersion: 2, taskId, reviewedHeadSha: head, finding: `Finding for ${taskId}.`, evidence: 'Review evidence.',
+    affectedAreas, decisionIds: [], allowedPaths: ['scripts/**'], forbiddenPaths: [], dependencies: [],
+    acceptanceCriteria: ['The targeted behavior is verified.'],
+    requiredValidation: {
+      unit: [{ command, reason: 'Direct targeted check.' }],
+      system: [],
+    },
+  };
+}
+
+function initialSelection(head, overrides = {}) {
+  return {
+    schemaVersion: 1,
+    headSha: head,
+    affectedAreas: ['workflow'],
+    requiredValidation: {
+      unit: [{ command: 'npm run check:workflow', reason: 'Initial workflow selection.' }],
+      system: [],
+    },
+    ...overrides,
+  };
+}
+
+function nativeTasklessReview(cwd, { collectOutcome = true, outcomeOverrides = {} } = {}) {
+  const initial = init(cwd);
+  const threadProofed = checkpointTaskCompletion({
+    cwd,
+    expectedRevision: initial.revision,
+    threadResolutionStatus: ready(initial, []).threadResolutionStatus,
+  });
+  const prepared = persistReady(cwd, threadProofed, []);
+  const requested = checkpointReviewRequest({
+    cwd,
+    request: request(prepared),
+    pushedHeadSha: prepared.currentIntegrationHeadSha,
+    prHeadSha: prepared.currentIntegrationHeadSha,
+    expectedRevision: prepared.revision,
+  });
+  const reviewed = collectOutcome ? checkpointReviewOutcome({
+    cwd,
+    outcome: outcome(requested, outcomeOverrides),
+    expectedRevision: requested.revision,
+  }) : null;
+  return { initial, prepared, requested, reviewed };
+}
+
+function integratedTasks(cwd, ids) {
+  const initial = init(cwd);
+  const proposedTasks = ids.map((id) => task(initial.currentIntegrationHeadSha, {
+    id, status: 'proposed', disposition: 'actionable', integratedCommitSha: null, resolutionSummary: null,
+  }));
+  const proposed = checkpointState({ cwd, nextState: { ...initial, tasks: proposedTasks }, expectedRevision: initial.revision });
+  const integrated = proposedTasks.map((item) => {
+    const { execution: _execution, ...withoutExecution } = item;
+    return {
+      ...withoutExecution, status: 'integrated', integratedCommitSha: initial.currentIntegrationHeadSha,
+      resolutionSummary: 'Integrated centrally; targeted validation remains.',
+    };
+  });
+  return checkpointState({ cwd, nextState: { ...proposed, tasks: integrated }, expectedRevision: proposed.revision });
+}
+
+function bindPackets(cwd, state, packets) {
+  return packets.reduce((current, packet) => checkpointTaskPacketBinding({
+    cwd, packet, expectedRevision: current.revision,
+  }), state);
+}
+
+function canonicalBoundIntegratedTask(cwd, taskId = 'canonical-ancestry') {
+  const initial = init(cwd);
+  const threadProofed = checkpointTaskCompletion({
+    cwd,
+    expectedRevision: initial.revision,
+    threadResolutionStatus: ready(initial, []).threadResolutionStatus,
+  });
+  const reviewReady = persistReady(cwd, threadProofed, []);
+  const requested = checkpointReviewRequest({
+    cwd,
+    request: request(reviewReady),
+    pushedHeadSha: reviewReady.currentIntegrationHeadSha,
+    prHeadSha: reviewReady.currentIntegrationHeadSha,
+    expectedRevision: reviewReady.revision,
+  });
+  const reviewed = checkpointReviewOutcome({
+    cwd,
+    outcome: outcome(requested, { outcome: 'findings' }),
+    expectedRevision: requested.revision,
+  });
+  const proposedTask = task(reviewed.currentIntegrationHeadSha, {
+    id: taskId, status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const proposed = checkpointState({
+    cwd, expectedRevision: reviewed.revision, nextState: { ...reviewed, tasks: [proposedTask] },
+  });
+  const packet = taskPacket(reviewed.reviewedHeadSha, taskId, {
+    affectedAreas: ['workflow'], command: 'npm run check:workflow',
+  });
+  const bound = checkpointTaskPacketBinding({ cwd, packet, expectedRevision: proposed.revision });
+  const integratedHead = commit(cwd, { [`scripts/${taskId}.mjs`]: 'export const integrated = true;\n' }, `integrate ${taskId}`);
+  const advanced = checkpointGitMetadata({ cwd }).state;
+  rmSync(validationPlanPath(cwd, advanced.prNumber), { force: true });
+  const { execution: _execution, ...boundTask } = advanced.tasks[0];
+  const integrated = checkpointState({
+    cwd,
+    expectedRevision: advanced.revision,
+    nextState: {
+      ...advanced,
+      tasks: [{
+        ...boundTask,
+        status: 'integrated',
+        integratedCommitSha: integratedHead,
+        resolutionSummary: 'Integrated centrally; targeted validation remains.',
+      }],
+    },
+  });
+  return { packet, reviewedHead: reviewed.reviewedHeadSha, integratedHead, integrated, bound };
+}
+
 afterEach(() => {
   while (repositories.length > 0) rmSync(repositories.pop(), { recursive: true, force: true });
 });
 
-test('initialization writes the v2 identity and empty durable ledgers', () => {
+test('initialization writes the v3 identity and empty durable ledgers', () => {
   const cwd = repo();
   const state = init(cwd);
-  assert.equal(state.schemaVersion, 2);
+  assert.equal(state.schemaVersion, 3);
   assert.equal(state.legacyReviewProvenance, null);
   assert.deepEqual(state.reviewHistory, []);
   assert.deepEqual(state.threadResolutionStatus.threads, []);
   assert.equal(statePath(cwd, 17), join(gitCommonDirectory(cwd), 'codex', 'pr-review', 'pr-17', 'state.json'));
 });
 
-test('load upgrades the prior v2 shape in memory and the next checkpoint writes canonical state', () => {
+test('v2 loading requires explicit migration and writes an exact versioned backup', () => {
   const cwd = repo();
   const initialized = init(cwd);
-  const { verificationEscalation: _verificationEscalation, ...priorV2 } = initialized;
-  writeFileSync(statePath(cwd, 17), JSON.stringify(priorV2));
-  assert.equal(Object.hasOwn(JSON.parse(readFileSync(statePath(cwd, 17), 'utf8')), 'verificationEscalation'), false);
+  const {
+    ciValidationStatus: _ciValidationStatus, ciValidationHistory: _ciValidationHistory,
+    validationStatus, ...currentFields
+  } = initialized;
+  const priorV2 = {
+    ...currentFields, schemaVersion: 2,
+    validationStatus: {
+      status: validationStatus.status, headSha: validationStatus.headSha,
+      checks: validationStatus.checks, updatedAt: validationStatus.updatedAt,
+    },
+  };
+  const source = `${JSON.stringify(priorV2)}\n`;
+  assert.throws(
+    () => migratePrReviewStateV2({ ...priorV2, phase: 'complete' }),
+    { code: 'STATE_MIGRATION_FAILED' },
+  );
+  writeFileSync(statePath(cwd, 17), source);
+  assert.throws(() => loadState(cwd), { code: 'STATE_MIGRATION_REQUIRED' });
+  const migrated = migrateState({ cwd });
+  assert.equal(migrated.state.schemaVersion, 3);
+  assert.equal(readFileSync(migrated.backupPath, 'utf8'), source);
+  assert.match(migrated.backupPath, /state\.v2\.backup\.json$/u);
+});
 
-  const loaded = loadState(cwd);
-  assert.equal(loaded.verificationEscalation, null);
-  assert.match(renderRecoverySummary({ cwd }), /Verification escalation: none/u);
-  const checkpointed = checkpointGitMetadata({ cwd }).state;
-  assert.equal(checkpointed.verificationEscalation, null);
-  const persisted = JSON.parse(readFileSync(statePath(cwd, 17), 'utf8'));
-  assert.equal(Object.hasOwn(persisted, 'verificationEscalation'), true);
-  assert.equal(persisted.verificationEscalation, null);
+test('v2 migration preserves a pending exact-head review while resetting targeted validation', () => {
+  const cwd = repo();
+  const prepared = ready(init(cwd), []);
+  const requested = buildReviewRequestTransition(prepared, request(prepared), external(cwd, prepared));
+  const {
+    ciValidationStatus: _ciValidationStatus,
+    ciValidationHistory: _ciValidationHistory,
+    validationStatus,
+    ...currentFields
+  } = requested;
+  const { source: _source, scope: _scope, ...legacyValidationStatus } = validationStatus;
+  const priorV2 = {
+    ...currentFields,
+    schemaVersion: 2,
+    validationStatus: legacyValidationStatus,
+  };
+
+  const migrated = migratePrReviewStateV2(priorV2, { migratedAt: AT });
+
+  assert.equal(migrated.phase, 'awaiting-review');
+  assert.equal(migrated.reviewRequest.id, requested.reviewRequest.id);
+  assert.equal(migrated.reviewHistory.at(-1).outcome, null);
+  assert.equal(migrated.validationStatus.status, 'not-run');
+  assert.equal(migrated.ciValidationStatus.status, 'not-run');
+  assert.deepEqual(migrated.ciValidationHistory, []);
+  assert.match(migrated.nextAction, /Collect the pending exact-head review/u);
+  assert.equal(buildReviewOutcomeTransition(migrated, outcome(migrated)).reviewOutcome.outcome, 'clean');
+});
+
+test('v2 pending review with completed tasks rebuilds fresh validation after one clean outcome', () => {
+  const cwd = repo();
+  const { source, serialized, migrated, backupPath } = migrateCompletedTaskPendingReview(cwd);
+  assert.equal(readFileSync(backupPath, 'utf8'), serialized);
+  assert.equal(source.phase, 'awaiting-review');
+  assert.ok(source.tasks.length > 0);
+  assert.ok(source.tasks.every((item) => item.status === 'completed'));
+  assert.equal(source.validationStatus.status, 'passed');
+  assert.equal(migrated.phase, 'awaiting-review');
+  assert.equal(migrated.validationStatus.status, 'not-run');
+  assert.equal(migrated.ciValidationStatus.status, 'not-run');
+  assert.deepEqual(migrated.reviewRequest, source.reviewRequest);
+  assert.deepEqual(migrated.reviewHistory, source.reviewHistory);
+  assert.deepEqual(migrated.tasks, source.tasks);
+  const { localVerification: _localVerification, ...legacyThreadResolutionStatus } = source.threadResolutionStatus;
+  assert.deepEqual(migrated.threadResolutionStatus, legacyThreadResolutionStatus);
+
+  const collected = checkpointReviewOutcome({
+    cwd, outcome: outcome(migrated), expectedRevision: migrated.revision,
+  });
+  const preserved = {
+    tasks: structuredClone(collected.tasks),
+    reviewRequest: structuredClone(collected.reviewRequest),
+    reviewOutcome: structuredClone(collected.reviewOutcome),
+    reviewHistory: structuredClone(collected.reviewHistory),
+    threadResolutionStatus: structuredClone(collected.threadResolutionStatus),
+  };
+  assert.equal(collected.phase, 'validating');
+  assert.equal(collected.reviewOutcome.outcome, 'clean');
+  assert.equal(collected.reviewHistory.length, 1);
+
+  const plan = buildTargetedValidationPlan({
+    cwd, initialSelection: initialSelection(collected.currentIntegrationHeadSha), now: () => AT,
+  });
+  assert.deepEqual(plan.taskIds, []);
+  assert.equal(plan.stateRevision, collected.revision);
+  assert.equal(plan.headSha, collected.currentIntegrationHeadSha);
+  const result = executeTargetedValidationPlan({
+    cwd, runCommand: () => ({ status: 0 }), now: () => AT,
+  });
+  assert.equal(result.state.phase, 'validating');
+  assert.equal(result.state.validationStatus.status, 'passed');
+  assert.equal(result.state.validationStatus.headSha, collected.currentIntegrationHeadSha);
+  assert.deepEqual(result.state.validationStatus.checks, ['npm run check:workflow']);
+  assert.deepEqual({
+    tasks: result.state.tasks,
+    reviewRequest: result.state.reviewRequest,
+    reviewOutcome: result.state.reviewOutcome,
+    reviewHistory: result.state.reviewHistory,
+    threadResolutionStatus: result.state.threadResolutionStatus,
+  }, preserved);
+});
+
+test('v2 pending completed-task recovery requires exact one-outcome backup provenance', () => {
+  function collectedCycle() {
+    const cwd = repo();
+    const setup = migrateCompletedTaskPendingReview(cwd);
+    const collected = checkpointReviewOutcome({
+      cwd, outcome: outcome(setup.migrated), expectedRevision: setup.migrated.revision,
+    });
+    return { cwd, ...setup, collected };
+  }
+  function expectRejected(setup) {
+    assert.throws(() => buildTargetedValidationPlan({
+      cwd: setup.cwd, initialSelection: initialSelection(setup.collected.currentIntegrationHeadSha),
+    }), StateError);
+  }
+
+  const missing = collectedCycle();
+  rmSync(missing.backupPath);
+  expectRejected(missing);
+
+  const corrupt = collectedCycle();
+  writeFileSync(corrupt.backupPath, '{}\n');
+  expectRejected(corrupt);
+
+  const tamperedBackup = collectedCycle();
+  writeFileSync(tamperedBackup.backupPath, `${JSON.stringify({
+    ...tamperedBackup.legacy,
+    tasks: tamperedBackup.legacy.tasks.map((item) => ({ ...item, summary: 'Tampered summary.' })),
+  })}\n`);
+  expectRejected(tamperedBackup);
+
+  const revisionDrift = collectedCycle();
+  revisionDrift.collected = { ...revisionDrift.collected, revision: revisionDrift.collected.revision + 1 };
+  writeFileSync(statePath(revisionDrift.cwd, 17), `${JSON.stringify(revisionDrift.collected)}\n`);
+  expectRejected(revisionDrift);
+
+  const blocked = collectedCycle();
+  blocked.collected = { ...blocked.collected, blockedReasons: ['Operator decision is required.'] };
+  writeFileSync(statePath(blocked.cwd, 17), `${JSON.stringify(blocked.collected)}\n`);
+  expectRejected(blocked);
+
+  const taskMismatch = collectedCycle();
+  taskMismatch.collected = {
+    ...taskMismatch.collected,
+    tasks: taskMismatch.collected.tasks.map((item) => ({ ...item, summary: 'Unexpected active summary.' })),
+  };
+  writeFileSync(statePath(taskMismatch.cwd, 17), `${JSON.stringify(taskMismatch.collected)}\n`);
+  expectRejected(taskMismatch);
+
+  const extraProof = collectedCycle();
+  extraProof.collected = {
+    ...extraProof.collected,
+    validationStatus: {
+      source: 'orchestrator', scope: 'targeted', status: 'passed',
+      headSha: extraProof.collected.currentIntegrationHeadSha,
+      checks: ['npm run check:workflow'], updatedAt: AT,
+    },
+  };
+  writeFileSync(statePath(extraProof.cwd, 17), `${JSON.stringify(extraProof.collected)}\n`);
+  expectRejected(extraProof);
+
+  const dirty = collectedCycle();
+  writeFileSync(join(dirty.cwd, 'dirty.txt'), 'dirty\n');
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: dirty.cwd, initialSelection: initialSelection(dirty.collected.currentIntegrationHeadSha),
+  }), { code: 'VALIDATION_CHECKOUT_DIRTY' });
+
+  const findingsCwd = repo();
+  const findingsSetup = migrateCompletedTaskPendingReview(findingsCwd);
+  const findings = checkpointReviewOutcome({
+    cwd: findingsCwd, outcome: outcome(findingsSetup.migrated, { outcome: 'findings' }),
+    expectedRevision: findingsSetup.migrated.revision,
+  });
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: findingsCwd, initialSelection: initialSelection(findings.currentIntegrationHeadSha),
+  }), { code: 'VALIDATION_PLAN_PHASE_BLOCKED' });
+});
+
+test('migrated taskless clean review rebuilds and runs exact-head targeted validation without repeating review', () => {
+  const cwd = repo();
+  const migrated = migrateTasklessPendingReview(cwd);
+  const collected = checkpointReviewOutcome({
+    cwd, outcome: outcome(migrated), expectedRevision: migrated.revision,
+  });
+  const reviewEvidence = {
+    reviewRequest: structuredClone(collected.reviewRequest),
+    reviewOutcome: structuredClone(collected.reviewOutcome),
+    reviewHistory: structuredClone(collected.reviewHistory),
+  };
+  const selection = initialSelection(collected.currentIntegrationHeadSha, {
+    affectedAreas: ['workflow', 'documentation'],
+    requiredValidation: {
+      unit: [{ command: 'npm run check:workflow', reason: 'Rebuild discarded schema-v2 validation proof.' }],
+      system: [],
+    },
+  });
+
+  const plan = buildTargetedValidationPlan({ cwd, initialSelection: selection, now: () => AT });
+  assert.deepEqual(plan.taskIds, []);
+  assert.deepEqual(plan.affectedAreas, ['documentation', 'workflow']);
+  assert.equal(plan.stateRevision, collected.revision);
+  assert.equal(plan.headSha, collected.currentIntegrationHeadSha);
+  assert.deepEqual(plan.commands.map(({ command, reason }) => ({ command, reason })), [{
+    command: 'npm run check:workflow', reason: 'Rebuild discarded schema-v2 validation proof.',
+  }]);
+
+  const result = executeTargetedValidationPlan({
+    cwd, runCommand: () => ({ status: 0 }), now: () => AT,
+  });
+  assert.equal(result.state.phase, 'validating');
+  assert.equal(result.state.validationStatus.status, 'passed');
+  assert.equal(result.state.validationStatus.headSha, collected.currentIntegrationHeadSha);
+  assert.deepEqual({
+    reviewRequest: result.state.reviewRequest,
+    reviewOutcome: result.state.reviewOutcome,
+    reviewHistory: result.state.reviewHistory,
+  }, reviewEvidence);
+});
+
+test('taskless post-review validation recovery rejects pending, findings, tasks, dirty state, and inconsistent proof', () => {
+  const pendingCwd = repo();
+  const pending = migrateTasklessPendingReview(pendingCwd);
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: pendingCwd, initialSelection: initialSelection(pending.currentIntegrationHeadSha),
+  }), { code: 'VALIDATION_PLAN_PHASE_BLOCKED' });
+
+  const findingsCwd = repo();
+  const findingsMigrated = migrateTasklessPendingReview(findingsCwd);
+  const findings = checkpointReviewOutcome({
+    cwd: findingsCwd,
+    outcome: outcome(findingsMigrated, { outcome: 'findings' }),
+    expectedRevision: findingsMigrated.revision,
+  });
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: findingsCwd, initialSelection: initialSelection(findings.currentIntegrationHeadSha),
+  }), { code: 'VALIDATION_PLAN_PHASE_BLOCKED' });
+
+  const taskCwd = repo();
+  const taskMigrated = migrateTasklessPendingReview(taskCwd);
+  const taskCollected = checkpointReviewOutcome({
+    cwd: taskCwd, outcome: outcome(taskMigrated), expectedRevision: taskMigrated.revision,
+  });
+  const withTask = checkpointState({
+    cwd: taskCwd, expectedRevision: taskCollected.revision,
+    nextState: {
+      ...taskCollected,
+      tasks: [task(taskCollected.currentIntegrationHeadSha, {
+        id: 'unexpected-task', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+      })],
+    },
+  });
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: taskCwd, initialSelection: initialSelection(withTask.currentIntegrationHeadSha),
+  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
+
+  const dirtyCwd = repo();
+  const dirtyMigrated = migrateTasklessPendingReview(dirtyCwd);
+  const dirtyCollected = checkpointReviewOutcome({
+    cwd: dirtyCwd, outcome: outcome(dirtyMigrated), expectedRevision: dirtyMigrated.revision,
+  });
+  writeFileSync(join(dirtyCwd, 'dirty.txt'), 'dirty\n');
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: dirtyCwd, initialSelection: initialSelection(dirtyCollected.currentIntegrationHeadSha),
+  }), { code: 'VALIDATION_CHECKOUT_DIRTY' });
+
+  const ordinaryCwd = repo();
+  const ordinaryInitial = init(ordinaryCwd);
+  const ordinaryProofed = checkpointTaskCompletion({
+    cwd: ordinaryCwd,
+    expectedRevision: ordinaryInitial.revision,
+    threadResolutionStatus: ready(ordinaryInitial, []).threadResolutionStatus,
+  });
+  const ordinaryReady = persistReady(ordinaryCwd, ordinaryProofed, []);
+  const ordinaryRequested = checkpointReviewRequest({
+    cwd: ordinaryCwd,
+    request: request(ordinaryReady),
+    pushedHeadSha: ordinaryReady.currentIntegrationHeadSha,
+    prHeadSha: ordinaryReady.currentIntegrationHeadSha,
+    expectedRevision: ordinaryReady.revision,
+  });
+  const ordinaryCollected = checkpointReviewOutcome({
+    cwd: ordinaryCwd, outcome: outcome(ordinaryRequested), expectedRevision: ordinaryRequested.revision,
+  });
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: ordinaryCwd,
+    initialSelection: initialSelection(ordinaryCollected.currentIntegrationHeadSha),
+    replace: true,
+  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
+  assert.equal(loadState(ordinaryCwd).validationStatus.status, 'passed');
+
+  const inconsistentCwd = repo();
+  const inconsistentMigrated = migrateTasklessPendingReview(inconsistentCwd);
+  const inconsistent = checkpointReviewOutcome({
+    cwd: inconsistentCwd, outcome: outcome(inconsistentMigrated), expectedRevision: inconsistentMigrated.revision,
+  });
+  writeFileSync(statePath(inconsistentCwd, inconsistent.prNumber), `${JSON.stringify({
+    ...inconsistent,
+    reviewHistory: inconsistent.reviewHistory.map((entry, index) => index === inconsistent.reviewHistory.length - 1
+      ? { ...entry, outcome: { ...entry.outcome, id: 'inconsistent-outcome' } }
+      : entry),
+  })}\n`);
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: inconsistentCwd, initialSelection: initialSelection(inconsistent.currentIntegrationHeadSha),
+  }), StateError);
+});
+
+test('native taskless clean-review HEAD drift rebuilds only current targeted validation', () => {
+  const cwd = repo();
+  const { reviewed } = nativeTasklessReview(cwd);
+  const priorHeadSha = reviewed.currentIntegrationHeadSha;
+  const preserved = {
+    reviewRequest: structuredClone(reviewed.reviewRequest),
+    reviewOutcome: structuredClone(reviewed.reviewOutcome),
+    reviewHistory: structuredClone(reviewed.reviewHistory),
+    threadlessVerification: structuredClone(reviewed.threadResolutionStatus.threadlessVerification),
+  };
+
+  const currentHeadSha = commit(cwd, { 'taskless-head-drift.txt': 'current HEAD\n' }, 'taskless review HEAD drift');
+  const drifted = checkpointGitMetadata({ cwd }).state;
+  assert.notEqual(currentHeadSha, priorHeadSha);
+  assert.equal(drifted.phase, 'recovering');
+  assert.equal(drifted.currentIntegrationHeadSha, currentHeadSha);
+  assert.equal(drifted.validationStatus.status, 'not-run');
+  assert.equal(drifted.threadResolutionStatus.status, 'not-run');
+  assert.equal(drifted.requestedHeadSha, priorHeadSha);
+  assert.equal(drifted.reviewedHeadSha, priorHeadSha);
+  assert.deepEqual({
+    reviewRequest: drifted.reviewRequest,
+    reviewOutcome: drifted.reviewOutcome,
+    reviewHistory: drifted.reviewHistory,
+    threadlessVerification: drifted.threadResolutionStatus.threadlessVerification,
+  }, preserved);
+
+  const selection = initialSelection(currentHeadSha, {
+    affectedAreas: ['workflow', 'documentation'],
+    requiredValidation: {
+      unit: [{
+        command: 'npm run check:workflow',
+        reason: 'Rebuild native taskless validation after the clean Review commit drifted.',
+      }],
+      system: [],
+    },
+  });
+  const plan = buildTargetedValidationPlan({
+    cwd, initialSelection: selection, replace: true, now: () => AT,
+  });
+  assert.equal(plan.headSha, currentHeadSha);
+  assert.equal(plan.stateRevision, drifted.revision);
+  assert.deepEqual(plan.taskIds, []);
+  assert.deepEqual(plan.affectedAreas, ['documentation', 'workflow']);
+
+  const result = executeTargetedValidationPlan({
+    cwd, runCommand: () => ({ status: 0 }), now: () => AT,
+  });
+  assert.equal(result.state.phase, 'recovering');
+  assert.equal(result.state.validationStatus.status, 'passed');
+  assert.equal(result.state.validationStatus.headSha, currentHeadSha);
+  assert.deepEqual(result.state.validationStatus.checks, ['npm run check:workflow']);
+  assert.deepEqual({
+    reviewRequest: result.state.reviewRequest,
+    reviewOutcome: result.state.reviewOutcome,
+    reviewHistory: result.state.reviewHistory,
+    threadlessVerification: result.state.threadResolutionStatus.threadlessVerification,
+  }, preserved);
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd, initialSelection: selection, replace: true,
+  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
+});
+
+test('native taskless review HEAD-drift validation recovery fails closed at every lifecycle boundary', () => {
+  const wrongHeadCwd = repo();
+  const wrongHeadReview = nativeTasklessReview(wrongHeadCwd).reviewed;
+  commit(wrongHeadCwd, { 'wrong-selection-head.txt': 'drift\n' }, 'wrong selection drift');
+  const wrongHeadDrift = checkpointGitMetadata({ cwd: wrongHeadCwd }).state;
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: wrongHeadCwd,
+    initialSelection: initialSelection(wrongHeadReview.currentIntegrationHeadSha),
+    replace: true,
+  }), { code: 'VALIDATION_PLAN_STALE' });
+
+  const dirtyCwd = repo();
+  nativeTasklessReview(dirtyCwd);
+  const dirtyHead = commit(dirtyCwd, { 'dirty-recovery-head.txt': 'drift\n' }, 'dirty recovery drift');
+  const dirtyDrift = checkpointGitMetadata({ cwd: dirtyCwd }).state;
+  writeFileSync(join(dirtyCwd, 'dirty-recovery.txt'), 'dirty\n');
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: dirtyCwd, initialSelection: initialSelection(dirtyHead), replace: true,
+  }), { code: 'VALIDATION_CHECKOUT_DIRTY' });
+  assert.equal(dirtyDrift.validationStatus.status, 'not-run');
+
+  const pendingCwd = repo();
+  nativeTasklessReview(pendingCwd, { collectOutcome: false });
+  const pendingHead = commit(pendingCwd, { 'pending-review-drift.txt': 'drift\n' }, 'pending review drift');
+  const pendingDrift = checkpointGitMetadata({ cwd: pendingCwd }).state;
+  assert.equal(pendingDrift.phase, 'recovering');
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: pendingCwd, initialSelection: initialSelection(pendingHead), replace: true,
+  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
+
+  const findingsCwd = repo();
+  nativeTasklessReview(findingsCwd, { outcomeOverrides: { outcome: 'findings' } });
+  const findingsHead = commit(findingsCwd, { 'findings-review-drift.txt': 'drift\n' }, 'findings review drift');
+  const findingsDrift = checkpointGitMetadata({ cwd: findingsCwd }).state;
+  assert.equal(findingsDrift.phase, 'recovering');
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: findingsCwd, initialSelection: initialSelection(findingsHead), replace: true,
+  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
+
+  const taskCwd = repo();
+  nativeTasklessReview(taskCwd);
+  const taskHead = commit(taskCwd, { 'task-bearing-drift.txt': 'drift\n' }, 'task-bearing drift');
+  const taskDrift = checkpointGitMetadata({ cwd: taskCwd }).state;
+  const taskBearing = checkpointState({
+    cwd: taskCwd,
+    expectedRevision: taskDrift.revision,
+    nextState: {
+      ...taskDrift,
+      tasks: [task(taskHead, {
+        id: 'unexpected-recovery-task', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+      })],
+    },
+  });
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: taskCwd, initialSelection: initialSelection(taskHead), replace: true,
+  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
+  assert.equal(taskBearing.tasks.length, 1);
+
+  const blockedCwd = repo();
+  nativeTasklessReview(blockedCwd);
+  const blockedHead = commit(blockedCwd, { 'blocked-drift.txt': 'drift\n' }, 'blocked drift');
+  const blockedDrift = checkpointGitMetadata({ cwd: blockedCwd }).state;
+  checkpointState({
+    cwd: blockedCwd,
+    expectedRevision: blockedDrift.revision,
+    nextState: { ...blockedDrift, blockedReasons: ['Operator decision remains.'] },
+  });
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: blockedCwd, initialSelection: initialSelection(blockedHead), replace: true,
+  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
+
+  const inconsistentCwd = repo();
+  nativeTasklessReview(inconsistentCwd);
+  const inconsistentHead = commit(inconsistentCwd, { 'inconsistent-drift.txt': 'drift\n' }, 'inconsistent drift');
+  const inconsistent = checkpointGitMetadata({ cwd: inconsistentCwd }).state;
+  writeFileSync(statePath(inconsistentCwd, inconsistent.prNumber), `${JSON.stringify({
+    ...inconsistent,
+    reviewHistory: inconsistent.reviewHistory.map((entry, index) => (
+      index === inconsistent.reviewHistory.length - 1
+        ? { ...entry, outcome: { ...entry.outcome, id: 'different-latest-outcome' } }
+        : entry
+    )),
+  })}\n`);
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: inconsistentCwd, initialSelection: initialSelection(inconsistentHead), replace: true,
+  }), StateError);
+
+  const exhaustedCwd = repo();
+  let exhausted = nativeTasklessReview(exhaustedCwd).reviewed;
+  for (let round = 1; round < 4; round += 1) {
+    const prepared = checkpointState({
+      cwd: exhaustedCwd,
+      expectedRevision: exhausted.revision,
+      nextState: ready(exhausted, []),
+    });
+    const requested = checkpointReviewRequest({
+      cwd: exhaustedCwd,
+      request: request(prepared),
+      pushedHeadSha: prepared.currentIntegrationHeadSha,
+      prHeadSha: prepared.currentIntegrationHeadSha,
+      expectedRevision: prepared.revision,
+    });
+    exhausted = checkpointReviewOutcome({
+      cwd: exhaustedCwd, outcome: outcome(requested), expectedRevision: requested.revision,
+    });
+  }
+  assert.equal(exhausted.reviewRound, 3);
+  assert.equal(exhausted.verificationReviewUsed, true);
+  const exhaustedHead = commit(exhaustedCwd, { 'exhausted-drift.txt': 'drift\n' }, 'exhausted review drift');
+  const exhaustedDrift = checkpointGitMetadata({ cwd: exhaustedCwd }).state;
+  assert.equal(exhaustedDrift.phase, 'recovering');
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: exhaustedCwd, initialSelection: initialSelection(exhaustedHead), replace: true,
+  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
+});
+
+test('v2 completed-task cycles rebuild fresh exact-head validation from immutable migration proof', () => {
+  for (const phase of ['ready-for-review', 'complete']) {
+    const cwd = repo();
+    const { source, migrated } = migrateCompletedTaskCycle(cwd, phase);
+    const preserved = {
+      tasks: structuredClone(migrated.tasks),
+      reviewRequest: structuredClone(migrated.reviewRequest),
+      reviewOutcome: structuredClone(migrated.reviewOutcome),
+      reviewHistory: structuredClone(migrated.reviewHistory),
+      threadResolutionStatus: structuredClone(migrated.threadResolutionStatus),
+    };
+    assert.equal(migrated.phase, 'recovering');
+    assert.equal(migrated.validationStatus.status, 'not-run');
+    assert.equal(source.validationStatus.status, 'passed');
+    const plan = buildTargetedValidationPlan({
+      cwd, initialSelection: initialSelection(migrated.currentIntegrationHeadSha), now: () => AT,
+    });
+    assert.deepEqual(plan.taskIds, []);
+    const result = executeTargetedValidationPlan({
+      cwd, runCommand: () => ({ status: 0 }), now: () => AT,
+    });
+    assert.equal(result.state.validationStatus.status, 'passed');
+    assert.equal(result.state.validationStatus.headSha, migrated.currentIntegrationHeadSha);
+    assert.deepEqual({
+      tasks: result.state.tasks,
+      reviewRequest: result.state.reviewRequest,
+      reviewOutcome: result.state.reviewOutcome,
+      reviewHistory: result.state.reviewHistory,
+      threadResolutionStatus: result.state.threadResolutionStatus,
+    }, preserved);
+  }
+});
+
+test('v2 completed-task validation recovery fails closed without exact immutable provenance', () => {
+  for (const mutate of [
+    (cwd) => rmSync(join(stateDirectory(cwd, 17), 'state.v2.backup.json')),
+    (cwd) => writeFileSync(join(stateDirectory(cwd, 17), 'state.v2.backup.json'), '{}\n'),
+    (_cwd, state) => writeFileSync(statePath(_cwd, 17), `${JSON.stringify({ ...state, blockedReasons: ['blocked'] })}\n`),
+  ]) {
+    const cwd = repo();
+    const { migrated } = migrateCompletedTaskCycle(cwd, 'ready-for-review');
+    mutate(cwd, migrated);
+    assert.throws(() => buildTargetedValidationPlan({
+      cwd, initialSelection: initialSelection(migrated.currentIntegrationHeadSha),
+    }), StateError);
+  }
+
+  const nativeCwd = repo();
+  const native = { ...ready(init(nativeCwd)), phase: 'recovering', validationStatus: {
+    source: 'orchestrator', scope: 'targeted', status: 'not-run', headSha: null, checks: [], updatedAt: null,
+  } };
+  writeFileSync(statePath(nativeCwd, native.prNumber), `${JSON.stringify(native)}\n`);
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: nativeCwd, initialSelection: initialSelection(native.currentIntegrationHeadSha),
+  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
 });
 
 test('migration keeps worker and central cherry-pick SHAs distinct and preserves three-round provenance', () => {
@@ -253,7 +1016,9 @@ test('migration downgrades weak exact-head proof and is total over duplicate leg
   });
   const migrated = migratePrReviewStateV1(legacy, { migratedAt: AT });
   assert.deepEqual(migrated.blockedReasons, ['same']);
-  assert.deepEqual(migrated.validationStatus, { status: 'not-run', headSha: null, checks: [], updatedAt: null });
+  assert.deepEqual(migrated.validationStatus, {
+    source: 'orchestrator', scope: 'targeted', status: 'not-run', headSha: null, checks: [], updatedAt: null,
+  });
 });
 
 test('explicit migration uses immutable exact backup and handles a near-limit v1 document', () => {
@@ -321,13 +1086,14 @@ test('explicit migration uses immutable exact backup and handles a near-limit v1
       isResolved: true, resolvedAt: AT, resolvedBy: 'maintainer', observedHeadSha: integrationHead,
     })),
   };
+  const validated = checkpointSyntheticTargetedValidation(cwd, result.state);
   const completed = checkpointTaskCompletion({
-    cwd, threadResolutionStatus: proof, expectedRevision: result.state.revision,
+    cwd, threadResolutionStatus: proof, expectedRevision: validated.revision,
   });
+  const preparedBase = ready(completed, completed.tasks);
   const prepared = checkpointState({
-    cwd, nextState: {
-      ...ready(completed, completed.tasks), threadResolutionStatus: completed.threadResolutionStatus,
-    }, expectedRevision: completed.revision,
+    cwd, nextState: { ...preparedBase, threadResolutionStatus: completed.threadResolutionStatus },
+    expectedRevision: completed.revision,
   });
   const requested = checkpointReviewRequest({
     cwd, request: request(prepared, 'verification-size', 'verification'),
@@ -342,7 +1108,7 @@ test('explicit migration uses immutable exact backup and handles a near-limit v1
   assert.ok(Buffer.byteLength(readFileSync(statePath(cwd, 17))) < ACTIVE_STATE_LIMIT_BYTES);
 
   writeFileSync(statePath(cwd, 17), legacySource);
-  assert.equal(migrateState({ cwd, integrationMap }).state.schemaVersion, 2);
+  assert.equal(migrateState({ cwd, integrationMap }).state.schemaVersion, 3);
   writeFileSync(statePath(cwd, 17), JSON.stringify({ ...legacy, nextAction: 'different v1 state' }));
   assert.throws(() => migrateState({ cwd, integrationMap }), { code: 'MIGRATION_BACKUP_CONFLICT' });
 });
@@ -390,8 +1156,11 @@ test('large v2 state survives the clean lifecycle and rejects documents beyond 6
   assert.equal(collected.reviewOutcome.outcome, 'clean');
   assert.ok(Buffer.byteLength(readFileSync(statePath(cwd, 17))) < ACTIVE_STATE_LIMIT_BYTES);
 
+  const ciValidated = checkpointCiValidation({
+    cwd, evidence: ciEvidence(collected), expectedRevision: collected.revision,
+  });
   const completed = checkpointCompletion({
-    cwd, pushedHeadSha: head, prHeadSha: head, expectedRevision: collected.revision,
+    cwd, pushedHeadSha: head, prHeadSha: head, expectedRevision: ciValidated.revision,
   });
   assert.equal(completed.phase, 'complete');
 
@@ -418,6 +1187,39 @@ test('review request gate requires ready phase, fresh three-way heads, and real 
   writeFileSync(join(cwd, 'dirty-request.txt'), 'dirty\n');
   assert.equal(reviewRequestGate(state, external(cwd, state)).allowed, false);
   rmSync(join(cwd, 'dirty-request.txt'));
+});
+
+test('review and Done gates require exact-current-HEAD coverage for every completed local task', () => {
+  const cwd = repo();
+  const prepared = ready(init(cwd));
+  const requested = buildReviewRequestTransition(prepared, request(prepared), external(cwd, prepared));
+  const reviewed = buildReviewOutcomeTransition(requested, outcome(requested));
+  const ciValidated = buildCiValidationTransition(reviewed, ciEvidence(reviewed));
+  assert.equal(reviewRequestGate(prepared, external(cwd, prepared)).allowed, true);
+  assert.equal(completionGate(ciValidated, external(cwd, ciValidated)).allowed, true);
+
+  const variants = [];
+  const missing = structuredClone(prepared.threadResolutionStatus);
+  delete missing.localVerification;
+  variants.push(missing);
+  variants.push({
+    ...prepared.threadResolutionStatus,
+    localVerification: { ...prepared.threadResolutionStatus.localVerification, status: 'failed' },
+  });
+  variants.push({
+    ...prepared.threadResolutionStatus,
+    localVerification: { ...prepared.threadResolutionStatus.localVerification, headSha: 'b'.repeat(40) },
+  });
+  variants.push({
+    ...prepared.threadResolutionStatus,
+    localVerification: { ...prepared.threadResolutionStatus.localVerification, taskIds: [] },
+  });
+  for (const threadResolutionStatus of variants) {
+    const unready = { ...prepared, threadResolutionStatus };
+    const notDone = { ...ciValidated, threadResolutionStatus };
+    assert.equal(reviewRequestGate(unready, external(cwd, unready)).allowed, false);
+    assert.equal(completionGate(notDone, external(cwd, notDone)).allowed, false);
+  }
 });
 
 test('request and outcome builders are guarded and idempotent; completion is separate', () => {
@@ -452,7 +1254,12 @@ test('request and outcome builders are guarded and idempotent; completion is sep
     { code: 'REVIEW_CYCLE_INCOMPLETE' },
   );
   rmSync(join(cwd, 'dirty-completion.txt'));
-  const completed = buildCompletionTransition(collected, external(cwd, collected));
+  assert.throws(
+    () => buildCompletionTransition(collected, external(cwd, collected)),
+    { code: 'REVIEW_CYCLE_INCOMPLETE' },
+  );
+  const ciValidated = buildCiValidationTransition(collected, ciEvidence(collected));
+  const completed = buildCompletionTransition(ciValidated, external(cwd, ciValidated));
   assert.equal(completed.phase, 'complete');
 });
 
@@ -461,14 +1268,12 @@ test('generic checkpoint cannot bypass guarded request, outcome, or completion p
   const initial = init(cwd);
   assert.throws(
     () => checkpointState({ cwd, nextState: ready(initial, []), expectedRevision: 0 }),
-    { code: 'PROTECTED_TRANSITION_REQUIRED' },
+    { code: 'IMMUTABLE_STATE_PROVENANCE' },
   );
   const proofed = checkpointTaskCompletion({
     cwd, expectedRevision: 0, threadResolutionStatus: ready(initial).threadResolutionStatus,
   });
-  const prepared = checkpointState({
-    cwd, nextState: ready(proofed, []), expectedRevision: proofed.revision,
-  });
+  const prepared = persistReady(cwd, proofed, []);
   const evidence = request(prepared);
   const builtRequest = buildReviewRequestTransition(prepared, evidence, external(cwd, prepared));
   assert.throws(
@@ -489,16 +1294,253 @@ test('generic checkpoint cannot bypass guarded request, outcome, or completion p
   const collected = checkpointReviewOutcome({
     cwd, outcome: reviewOutcome, expectedRevision: requested.revision,
   });
-  const builtComplete = buildCompletionTransition(collected, external(cwd, collected));
+  const ciValidated = checkpointCiValidation({
+    cwd, evidence: ciEvidence(collected), expectedRevision: collected.revision,
+  });
+  const builtComplete = buildCompletionTransition(ciValidated, external(cwd, ciValidated));
   assert.throws(
-    () => checkpointState({ cwd, nextState: builtComplete, expectedRevision: collected.revision }),
+    () => checkpointState({ cwd, nextState: builtComplete, expectedRevision: ciValidated.revision }),
     { code: 'PROTECTED_TRANSITION_REQUIRED' },
   );
   const completed = checkpointCompletion({
-    cwd, pushedHeadSha: collected.currentIntegrationHeadSha, prHeadSha: collected.currentIntegrationHeadSha,
-    expectedRevision: collected.revision,
+    cwd, pushedHeadSha: ciValidated.currentIntegrationHeadSha, prHeadSha: ciValidated.currentIntegrationHeadSha,
+    expectedRevision: ciValidated.revision,
   });
   assert.equal(completed.phase, 'complete');
+});
+
+test('full CI evidence is guarded, restorable, append-only, exact-head, and invalidated by HEAD drift', () => {
+  const cwd = repo();
+  const initial = init(cwd);
+  const forged = {
+    ...initial,
+    ciValidationStatus: ciEvidence(initial),
+    ciValidationHistory: [ciEvidence(initial)],
+  };
+  assert.throws(
+    () => checkpointState({ cwd, nextState: forged, expectedRevision: initial.revision }),
+    { code: 'IMMUTABLE_STATE_PROVENANCE' },
+  );
+  assert.throws(
+    () => checkpointCiValidation({
+      cwd, evidence: ciEvidence(initial, { headSha: 'f'.repeat(40) }), expectedRevision: initial.revision,
+    }),
+    { code: 'INVALID_CI_VALIDATION' },
+  );
+  const passed = checkpointCiValidation({
+    cwd, evidence: ciEvidence(initial), expectedRevision: initial.revision,
+  });
+  assert.deepEqual(passed.ciValidationHistory, [passed.ciValidationStatus]);
+  assert.deepEqual(checkpointCiValidation({
+    cwd, evidence: passed.ciValidationStatus, expectedRevision: passed.revision,
+  }), passed);
+
+  const currentEvidence = structuredClone(passed.ciValidationStatus);
+  writeFileSync(join(cwd, 'dirty-ci-proof.txt'), 'dirty\n');
+  const dirty = checkpointGitMetadata({ cwd }).state;
+  assert.deepEqual(dirty.ciValidationStatus, currentEvidence);
+  assert.deepEqual(dirty.ciValidationHistory, [currentEvidence]);
+  rmSync(join(cwd, 'dirty-ci-proof.txt'));
+  const cleaned = checkpointGitMetadata({ cwd }).state;
+  assert.equal(cleaned.git.dirty, false);
+  assert.deepEqual(cleaned.ciValidationStatus, currentEvidence);
+  const restored = checkpointCiValidation({
+    cwd, evidence: currentEvidence, expectedRevision: cleaned.revision,
+  });
+  assert.deepEqual(restored.ciValidationStatus, currentEvidence);
+  assert.deepEqual(restored.ciValidationHistory, [currentEvidence]);
+
+  assert.throws(() => checkpointCiValidation({
+    cwd, evidence: { ...currentEvidence, status: 'failed' }, expectedRevision: restored.revision,
+  }), { code: 'CI_EVIDENCE_CONFLICT' });
+
+  const failedEvidence = ciEvidence(restored, {
+    status: 'failed', checkRunId: 'CHECK_123457',
+  });
+  const failed = checkpointCiValidation({ cwd, evidence: failedEvidence, expectedRevision: restored.revision });
+  assert.equal(failed.ciValidationHistory.length, 2);
+  assert.equal(failed.ciValidationStatus.status, 'failed');
+  assert.equal(failed.ciValidationHistory[0].workflowRunId, failed.ciValidationHistory[1].workflowRunId);
+
+  const { checkRunId: _legacyCheckRunId, ...legacyEvidence } = currentEvidence;
+  const legacyState = {
+    ...initial, ciValidationStatus: legacyEvidence, ciValidationHistory: [legacyEvidence],
+  };
+  const upgraded = buildCiValidationTransition(legacyState, currentEvidence);
+  assert.deepEqual(upgraded.ciValidationHistory, [legacyEvidence, currentEvidence]);
+  assert.throws(() => buildCiValidationTransition(initial, {
+    ...currentEvidence, checkRunId: '',
+  }), { code: 'INVALID_CI_VALIDATION' });
+
+  const previousHistory = structuredClone(failed.ciValidationHistory);
+  const newHead = commit(cwd, { 'ci-drift.txt': 'drift\n' }, 'CI proof drift');
+  const drifted = checkpointGitMetadata({ cwd }).state;
+  assert.equal(drifted.currentIntegrationHeadSha, newHead);
+  assert.deepEqual(drifted.ciValidationStatus, {
+    source: 'github-actions', scope: 'full', status: 'not-run', headSha: null,
+    checks: [], checkRunId: null, workflowRunId: null, workflowRunUrl: null, updatedAt: null,
+  });
+  assert.deepEqual(drifted.ciValidationHistory, previousHistory);
+  assert.throws(() => checkpointCiValidation({
+    cwd, evidence: currentEvidence, expectedRevision: drifted.revision,
+  }), { code: 'INVALID_CI_VALIDATION' });
+});
+
+test('full CI evidence restores a non-tail immutable attempt when integration HEAD returns', () => {
+  const cwd = repo();
+  const initial = init(cwd);
+  const headA = initial.currentIntegrationHeadSha;
+  const evidenceA = ciEvidence(initial, {
+    checkRunId: 'CHECK_HEAD_A', workflowRunId: 123451,
+    workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/123451',
+  });
+  const collectedA = checkpointCiValidation({
+    cwd, evidence: evidenceA, expectedRevision: initial.revision,
+  });
+
+  const headB = commit(cwd, { 'ci-head-b.txt': 'head B\n' }, 'CI head B');
+  const onHeadB = checkpointGitMetadata({ cwd }).state;
+  assert.equal(onHeadB.currentIntegrationHeadSha, headB);
+  assert.equal(onHeadB.ciValidationStatus.status, 'not-run');
+  const evidenceB = ciEvidence(onHeadB, {
+    status: 'failed', checkRunId: 'CHECK_HEAD_B', workflowRunId: 123452,
+    workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/123452',
+    updatedAt: '2026-08-05T00:01:00Z',
+  });
+  const collectedB = checkpointCiValidation({
+    cwd, evidence: evidenceB, expectedRevision: onHeadB.revision,
+  });
+  const immutableHistory = structuredClone(collectedB.ciValidationHistory);
+  assert.deepEqual(immutableHistory, [evidenceA, evidenceB]);
+
+  git(cwd, ['switch', '--detach', headA]);
+  const returnedToHeadA = checkpointGitMetadata({ cwd }).state;
+  assert.equal(returnedToHeadA.currentIntegrationHeadSha, headA);
+  assert.equal(returnedToHeadA.ciValidationStatus.status, 'not-run');
+  assert.deepEqual(returnedToHeadA.ciValidationHistory, immutableHistory);
+
+  const restoredA = checkpointCiValidation({
+    cwd, evidence: evidenceA, expectedRevision: returnedToHeadA.revision,
+  });
+  assert.deepEqual(restoredA.ciValidationStatus, evidenceA);
+  assert.deepEqual(restoredA.ciValidationHistory, immutableHistory);
+  assert.equal(restoredA.revision, returnedToHeadA.revision + 1);
+
+  const repeatedA = checkpointCiValidation({
+    cwd, evidence: evidenceA, expectedRevision: restoredA.revision,
+  });
+  assert.deepEqual(repeatedA, restoredA);
+  assert.equal(repeatedA.revision, restoredA.revision);
+  assert.throws(() => checkpointCiValidation({
+    cwd, evidence: { ...evidenceA, status: 'failed' }, expectedRevision: restoredA.revision,
+  }), { code: 'CI_EVIDENCE_CONFLICT' });
+
+  const unseenA = ciEvidence(restoredA, {
+    checkRunId: 'CHECK_HEAD_A_RERUN', workflowRunId: 123453,
+    workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/123453',
+    updatedAt: '2026-08-05T00:02:00Z',
+  });
+  const appended = checkpointCiValidation({
+    cwd, evidence: unseenA, expectedRevision: restoredA.revision,
+  });
+  assert.deepEqual(appended.ciValidationHistory, [...immutableHistory, unseenA]);
+  assert.deepEqual(appended.ciValidationHistory.slice(0, -1), immutableHistory);
+  assert.deepEqual(checkpointCiValidation({
+    cwd, evidence: unseenA, expectedRevision: appended.revision,
+  }), appended);
+});
+
+test('same-HEAD dirty checkpoints preserve proof while lifecycle gates remain fail-closed', () => {
+  const readyCwd = repo();
+  const prepared = ready(init(readyCwd));
+  writeFileSync(statePath(readyCwd, prepared.prNumber), `${JSON.stringify(prepared)}\n`);
+  const readyProof = {
+    validationStatus: structuredClone(prepared.validationStatus),
+    threadResolutionStatus: structuredClone(prepared.threadResolutionStatus),
+    tasks: structuredClone(prepared.tasks),
+  };
+
+  writeFileSync(join(readyCwd, 'temporary-ready-change.txt'), 'dirty\n');
+  const dirtyReady = checkpointGitMetadata({ cwd: readyCwd }).state;
+  assert.equal(dirtyReady.git.dirty, true);
+  assert.equal(dirtyReady.phase, 'recovering');
+  assert.deepEqual(dirtyReady.validationStatus, readyProof.validationStatus);
+  assert.deepEqual(dirtyReady.threadResolutionStatus, readyProof.threadResolutionStatus);
+  assert.deepEqual(dirtyReady.tasks, readyProof.tasks);
+  assert.equal(reviewRequestGate(dirtyReady, external(readyCwd, dirtyReady)).allowed, false);
+
+  rmSync(join(readyCwd, 'temporary-ready-change.txt'));
+  const restoredReady = checkpointGitMetadata({ cwd: readyCwd }).state;
+  assert.equal(restoredReady.git.dirty, false);
+  assert.equal(restoredReady.phase, 'ready-for-review');
+  assert.deepEqual(restoredReady.validationStatus, readyProof.validationStatus);
+  assert.deepEqual(restoredReady.threadResolutionStatus, readyProof.threadResolutionStatus);
+  assert.equal(reviewRequestGate(restoredReady, external(readyCwd, restoredReady)).allowed, true);
+
+  const tasklessCwd = repo();
+  const tasklessReady = ready(init(tasklessCwd), []);
+  writeFileSync(statePath(tasklessCwd, tasklessReady.prNumber), `${JSON.stringify(tasklessReady)}\n`);
+  const requested = checkpointReviewRequest({
+    cwd: tasklessCwd, request: request(tasklessReady),
+    pushedHeadSha: tasklessReady.currentIntegrationHeadSha,
+    prHeadSha: tasklessReady.currentIntegrationHeadSha,
+    expectedRevision: tasklessReady.revision,
+  });
+  const reviewed = checkpointReviewOutcome({
+    cwd: tasklessCwd, outcome: outcome(requested), expectedRevision: requested.revision,
+  });
+  const validated = checkpointCiValidation({
+    cwd: tasklessCwd, evidence: ciEvidence(reviewed), expectedRevision: reviewed.revision,
+  });
+  const exactHeadProof = {
+    validationStatus: structuredClone(validated.validationStatus),
+    ciValidationStatus: structuredClone(validated.ciValidationStatus),
+    reviewRequest: structuredClone(validated.reviewRequest),
+    reviewOutcome: structuredClone(validated.reviewOutcome),
+    reviewHistory: structuredClone(validated.reviewHistory),
+    threadResolutionStatus: structuredClone(validated.threadResolutionStatus),
+  };
+
+  writeFileSync(join(tasklessCwd, 'temporary-validating-change.txt'), 'dirty\n');
+  const dirtyValidating = checkpointGitMetadata({ cwd: tasklessCwd }).state;
+  assert.equal(dirtyValidating.phase, 'validating');
+  for (const [field, proof] of Object.entries(exactHeadProof)) assert.deepEqual(dirtyValidating[field], proof);
+  assert.equal(completionGate(dirtyValidating, external(tasklessCwd, dirtyValidating)).allowed, false);
+
+  rmSync(join(tasklessCwd, 'temporary-validating-change.txt'));
+  const cleanValidating = checkpointGitMetadata({ cwd: tasklessCwd }).state;
+  const completed = checkpointCompletion({
+    cwd: tasklessCwd,
+    pushedHeadSha: cleanValidating.currentIntegrationHeadSha,
+    prHeadSha: cleanValidating.currentIntegrationHeadSha,
+    expectedRevision: cleanValidating.revision,
+  });
+  assert.equal(completed.phase, 'complete');
+
+  writeFileSync(join(tasklessCwd, 'temporary-complete-change.txt'), 'dirty\n');
+  const dirtyComplete = checkpointGitMetadata({ cwd: tasklessCwd }).state;
+  assert.equal(dirtyComplete.phase, 'recovering');
+  for (const [field, proof] of Object.entries(exactHeadProof)) assert.deepEqual(dirtyComplete[field], proof);
+  assert.equal(completionGate(dirtyComplete, external(tasklessCwd, dirtyComplete)).allowed, false);
+
+  rmSync(join(tasklessCwd, 'temporary-complete-change.txt'));
+  const cleanRecovering = checkpointGitMetadata({ cwd: tasklessCwd }).state;
+  const recompleted = checkpointCompletion({
+    cwd: tasklessCwd,
+    pushedHeadSha: cleanRecovering.currentIntegrationHeadSha,
+    prHeadSha: cleanRecovering.currentIntegrationHeadSha,
+    expectedRevision: cleanRecovering.revision,
+  });
+  assert.equal(recompleted.phase, 'complete');
+
+  commit(tasklessCwd, { 'actual-head-change.txt': 'changed\n' }, 'actual head change');
+  writeFileSync(join(tasklessCwd, 'dirty-after-head-change.txt'), 'dirty too\n');
+  const driftedDirty = checkpointGitMetadata({ cwd: tasklessCwd }).state;
+  assert.equal(driftedDirty.git.dirty, true);
+  assert.equal(driftedDirty.phase, 'recovering');
+  assert.equal(driftedDirty.validationStatus.status, 'not-run');
+  assert.equal(driftedDirty.ciValidationStatus.status, 'not-run');
+  assert.equal(driftedDirty.threadResolutionStatus.status, 'not-run');
 });
 
 test('stale discovery request can be replaced without rewriting its null-outcome ledger entry', () => {
@@ -507,9 +1549,7 @@ test('stale discovery request can be replaced without rewriting its null-outcome
   const proofedA = checkpointTaskCompletion({
     cwd, expectedRevision: 0, threadResolutionStatus: ready(initial, []).threadResolutionStatus,
   });
-  const preparedA = checkpointState({
-    cwd, expectedRevision: proofedA.revision, nextState: ready(proofedA, []),
-  });
+  const preparedA = persistReady(cwd, proofedA, []);
   const requestedA = checkpointReviewRequest({
     cwd, expectedRevision: preparedA.revision, request: request(preparedA, 'discovery-a', 'discovery'),
     pushedHeadSha: preparedA.currentIntegrationHeadSha, prHeadSha: preparedA.currentIntegrationHeadSha,
@@ -528,9 +1568,7 @@ test('stale discovery request can be replaced without rewriting its null-outcome
       status: 'passed', headSha: headB, threads: [], threadlessVerification: emptyThreadless(), updatedAt: AT,
     },
   });
-  const preparedB = checkpointState({
-    cwd, expectedRevision: proofedB.revision, nextState: ready(proofedB, []),
-  });
+  const preparedB = persistReady(cwd, proofedB, []);
   const requestedB = checkpointReviewRequest({
     cwd, expectedRevision: preparedB.revision, request: request(preparedB, 'discovery-b', 'discovery'),
     pushedHeadSha: headB, prHeadSha: headB,
@@ -551,9 +1589,7 @@ test('stale verification request stops for a human and preserves its evidence', 
   const proofed = checkpointTaskCompletion({
     cwd, expectedRevision: migrated.revision, threadResolutionStatus: ready(migrated, []).threadResolutionStatus,
   });
-  const prepared = checkpointState({
-    cwd, expectedRevision: proofed.revision, nextState: ready(proofed, []),
-  });
+  const prepared = persistReady(cwd, proofed, []);
   const requested = checkpointReviewRequest({
     cwd, expectedRevision: prepared.revision, request: request(prepared, 'verification-stale', 'verification'),
     pushedHeadSha: prepared.currentIntegrationHeadSha, prHeadSha: prepared.currentIntegrationHeadSha,
@@ -590,7 +1626,7 @@ test('verification collection escalation is guarded, append-only, request-bound,
   const proofed = checkpointTaskCompletion({
     cwd, expectedRevision: migrated.revision, threadResolutionStatus: ready(migrated, []).threadResolutionStatus,
   });
-  const prepared = checkpointState({ cwd, expectedRevision: proofed.revision, nextState: ready(proofed, []) });
+  const prepared = persistReady(cwd, proofed, []);
   const requested = checkpointReviewRequest({
     cwd, expectedRevision: prepared.revision,
     request: request(prepared, 'verification-escalation', 'verification'),
@@ -660,7 +1696,7 @@ test('stale verification HEAD drift accepts truthful guarded collection escalati
   const proofed = checkpointTaskCompletion({
     cwd, expectedRevision: migrated.revision, threadResolutionStatus: ready(migrated, []).threadResolutionStatus,
   });
-  const prepared = checkpointState({ cwd, expectedRevision: proofed.revision, nextState: ready(proofed, []) });
+  const prepared = persistReady(cwd, proofed, []);
   const requested = checkpointReviewRequest({
     cwd, expectedRevision: prepared.revision,
     request: request(prepared, 'verification-head-drift', 'verification'),
@@ -702,6 +1738,103 @@ test('structured canonical thread proof covers multiple tasks with one reply and
   const completed = completeIntegratedTasks({ ...state, tasks }, { threadResolutionStatus: proof });
   assert.ok(completed.tasks.every((item) => item.status === 'completed'));
   assert.equal(completed.threadResolutionStatus.threads.length, 1);
+});
+
+test('guarded verifier completion selects only unique integrated local task IDs', () => {
+  const cwd = repo();
+  const state = init(cwd);
+  const head = state.currentIntegrationHeadSha;
+  const localA = task(head, { id: 'local-a', status: 'integrated', sourceType: 'local' });
+  const localB = task(head, { id: 'local-b', status: 'integrated', sourceType: 'local' });
+  const threadless = task(head, {
+    id: 'threadless', status: 'integrated', sourceType: 'github-threadless', sourceIds: ['review:threadless'],
+  });
+  const proof = {
+    status: 'passed', headSha: head, threads: [], threadlessVerification: emptyThreadless(), updatedAt: AT,
+  };
+  const unchanged = completeIntegratedTasks(
+    { ...state, tasks: [localA, localB, threadless] },
+    { threadResolutionStatus: proof },
+  );
+  assert.deepEqual(unchanged.tasks.map((item) => item.status), ['integrated', 'integrated', 'integrated']);
+
+  const selected = completeIntegratedTasks(
+    { ...state, tasks: [localA, localB, threadless] },
+    { threadResolutionStatus: proof, verifiedLocalTaskIds: ['local-b'] },
+  );
+  assert.deepEqual(selected.tasks.map((item) => item.status), ['integrated', 'completed', 'integrated']);
+  assert.deepEqual(selected.threadResolutionStatus.localVerification, {
+    status: 'passed', headSha: head, taskIds: ['local-b'], updatedAt: AT,
+  });
+
+  const selectedA = completeIntegratedTasks(
+    { ...state, tasks: [localA, localB] },
+    { threadResolutionStatus: proof, verifiedLocalTaskIds: ['local-a'] },
+  );
+  const accumulated = completeIntegratedTasks(selectedA, {
+    threadResolutionStatus: { ...proof, updatedAt: '2026-08-05T00:01:00Z' },
+    verifiedLocalTaskIds: ['local-b'],
+  });
+  assert.deepEqual(accumulated.threadResolutionStatus.localVerification, {
+    status: 'passed', headSha: head, taskIds: ['local-a', 'local-b'], updatedAt: '2026-08-05T00:01:00Z',
+  });
+  const nextHead = 'b'.repeat(40);
+  const drifted = {
+    ...accumulated,
+    currentIntegrationHeadSha: nextHead,
+    git: { ...accumulated.git, headSha: nextHead },
+    threadResolutionStatus: {
+      ...accumulated.threadResolutionStatus, status: 'not-run', headSha: null, updatedAt: null,
+    },
+  };
+  const reattested = completeIntegratedTasks(drifted, {
+    threadResolutionStatus: {
+      ...proof, headSha: nextHead, updatedAt: '2026-08-05T00:02:00Z',
+    },
+    verifiedLocalTaskIds: ['local-b'],
+  });
+  assert.deepEqual(reattested.threadResolutionStatus.localVerification, {
+    status: 'passed', headSha: nextHead, taskIds: ['local-b'], updatedAt: '2026-08-05T00:02:00Z',
+  });
+
+  const disposedA = task(head, {
+    id: 'disposed-a', status: 'not-applicable', disposition: 'duplicate', sourceType: 'local',
+  });
+  const disposedB = task(head, {
+    id: 'disposed-b', status: 'not-applicable', disposition: 'stale', sourceType: 'local',
+  });
+  const selectedDisposed = completeIntegratedTasks(
+    { ...state, tasks: [disposedA, disposedB] },
+    { threadResolutionStatus: proof, verifiedLocalTaskIds: ['disposed-b'] },
+  );
+  assert.deepEqual(selectedDisposed.tasks.map((item) => item.status), ['not-applicable', 'completed']);
+  assert.deepEqual(selectedDisposed.threadResolutionStatus.localVerification.taskIds, ['disposed-b']);
+
+  for (const disposition of [
+    'duplicate', 'already-fixed', 'stale', 'invalid', 'policy-conflict', 'out-of-scope',
+  ]) {
+    const disposed = task(head, {
+      id: `disposed-${disposition}`, status: 'not-applicable', disposition, sourceType: 'local',
+    });
+    assert.equal(completeIntegratedTasks(
+      { ...state, tasks: [disposed] },
+      { threadResolutionStatus: proof, verifiedLocalTaskIds: [disposed.id] },
+    ).tasks[0].status, 'completed');
+  }
+
+  const unintegrated = task(head, { id: 'unintegrated', status: 'proposed', sourceType: 'local' });
+  const needsHuman = task(head, {
+    id: 'needs-human', status: 'not-applicable', disposition: 'needs-human-decision', sourceType: 'local',
+  });
+
+  for (const verifiedLocalTaskIds of [
+    ['local-a', 'local-a'], ['missing'], ['threadless'], ['unintegrated'], ['needs-human'], [''], 'local-a',
+  ]) {
+    assert.throws(() => completeIntegratedTasks(
+      { ...state, tasks: [localA, localB, threadless, unintegrated, needsHuman] },
+      { threadResolutionStatus: proof, verifiedLocalTaskIds },
+    ), { code: 'INVALID_TASK_COMPLETION' });
+  }
 });
 
 test('completion requires every exact source root to have disposition-matched replied resolved proof', () => {
@@ -752,6 +1885,7 @@ test('threadless GitHub task completion requires successful exact-head verificat
   const cwd = repo();
   const state = init(cwd);
   const head = state.currentIntegrationHeadSha;
+  const nextHead = 'b'.repeat(40);
   const tasks = [task(head, { id: 'threadless', status: 'integrated', sourceType: 'github-threadless' })];
   const proof = {
     status: 'passed', headSha: head, threads: [], updatedAt: AT,
@@ -762,6 +1896,24 @@ test('threadless GitHub task completion requires successful exact-head verificat
     { ...state, tasks },
     { threadResolutionStatus: { ...proof, threadlessVerification: emptyThreadless() } },
   ).tasks[0].status, 'integrated');
+  const reconciled = {
+    ...state, currentIntegrationHeadSha: nextHead, git: { ...state.git, headSha: nextHead }, tasks,
+  };
+  const invalidatedProof = {
+    ...proof, status: 'not-run', headSha: null, updatedAt: null,
+  };
+  assert.equal(completeIntegratedTasks(
+    reconciled,
+    { threadResolutionStatus: invalidatedProof },
+  ).tasks[0].status, 'integrated');
+  const refreshedProof = {
+    ...proof, headSha: nextHead,
+    threadlessVerification: { ...proof.threadlessVerification, headSha: nextHead },
+  };
+  assert.equal(completeIntegratedTasks(
+    reconciled,
+    { threadResolutionStatus: refreshedProof },
+  ).tasks[0].status, 'completed');
 });
 
 test('proven non-actionable not-applicable findings become completed-equivalent', () => {
@@ -802,9 +1954,7 @@ test('checkpoint enforces immutable identity, monotonic counters, sticky verific
   const proofed = checkpointTaskCompletion({
     cwd, expectedRevision: migrated.revision, threadResolutionStatus: ready(migrated, []).threadResolutionStatus,
   });
-  const prepared = checkpointState({
-    cwd, expectedRevision: proofed.revision, nextState: ready(proofed, []),
-  });
+  const prepared = persistReady(cwd, proofed, []);
   const advanced = checkpointReviewRequest({
     cwd, expectedRevision: prepared.revision,
     request: request(prepared, 'verification-sticky', 'verification'),
@@ -903,9 +2053,51 @@ test('HEAD drift preserves durable task coverage while invalidating and refreshi
   });
   const refreshed = ready(proofRefreshed, proofRefreshed.tasks);
   refreshed.validationStatus = {
-    status: 'passed', headSha: headB, checks: ['npm run check'], updatedAt: '2026-08-05T00:01:00Z',
+    source: 'orchestrator', scope: 'targeted', status: 'passed', headSha: headB,
+    checks: ['npm run check'], updatedAt: '2026-08-05T00:01:00Z',
   };
   assert.equal(reviewRequestGate(refreshed, external(cwd, refreshed)).allowed, true);
+});
+
+test('HEAD drift preserves historical local verifier proof until guarded current-HEAD re-attestation', () => {
+  const cwd = repo();
+  const initial = init(cwd);
+  const headA = initial.currentIntegrationHeadSha;
+  const proposedTask = task(headA, { id: 'local-drift', status: 'proposed', sourceType: 'local' });
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [proposedTask] },
+  });
+  const integratedTask = task(headA, { id: 'local-drift', status: 'integrated', sourceType: 'local' });
+  const integrated = checkpointState({
+    cwd, expectedRevision: proposed.revision, nextState: { ...proposed, tasks: [integratedTask] },
+  });
+  const proofA = {
+    status: 'passed', headSha: headA, threads: [], threadlessVerification: emptyThreadless(), updatedAt: AT,
+  };
+  const completed = checkpointTaskCompletion({
+    cwd, expectedRevision: integrated.revision, threadResolutionStatus: proofA,
+    verifiedLocalTaskIds: ['local-drift'],
+  });
+  assert.deepEqual(completed.threadResolutionStatus.localVerification, {
+    status: 'passed', headSha: headA, taskIds: ['local-drift'], updatedAt: AT,
+  });
+
+  const headB = commit(cwd, { 'local-proof-drift.txt': 'drift\n' }, 'local proof drift');
+  const drifted = checkpointGitMetadata({ cwd }).state;
+  assert.equal(drifted.threadResolutionStatus.status, 'not-run');
+  assert.deepEqual(drifted.threadResolutionStatus.localVerification, completed.threadResolutionStatus.localVerification);
+
+  const proofB = {
+    status: 'passed', headSha: headB, threads: [], threadlessVerification: emptyThreadless(),
+    updatedAt: '2026-08-05T00:01:00Z',
+  };
+  const refreshed = checkpointTaskCompletion({
+    cwd, expectedRevision: drifted.revision, threadResolutionStatus: proofB,
+    verifiedLocalTaskIds: ['local-drift'],
+  });
+  assert.deepEqual(refreshed.threadResolutionStatus.localVerification, {
+    status: 'passed', headSha: headB, taskIds: ['local-drift'], updatedAt: '2026-08-05T00:01:00Z',
+  });
 });
 
 test('generic checkpoint cannot forge zero-thread or threadless successful proof at a new HEAD', () => {
@@ -987,6 +2179,555 @@ test('generic checkpoint cannot forge zero-thread or threadless successful proof
   assert.equal(threadlessRefreshed.threadResolutionStatus.threadlessVerification.headSha, threadlessHeadB);
 });
 
+test('pristine taskless cycles run an explicit initial targeted validation selection', () => {
+  const cwd = repo();
+  const state = init(cwd);
+  const selection = initialSelection(state.currentIntegrationHeadSha);
+  const plan = buildTargetedValidationPlan({ cwd, initialSelection: selection, now: () => AT });
+  assert.deepEqual(plan.taskIds, []);
+  assert.deepEqual(plan.affectedAreas, ['workflow']);
+  assert.deepEqual(plan.commands.map((entry) => entry.command), ['npm run check:workflow']);
+  const result = executeTargetedValidationPlan({ cwd, runCommand: () => ({ status: 0 }), now: () => AT });
+  assert.equal(result.state.validationStatus.status, 'passed');
+  assert.equal(result.state.validationStatus.headSha, state.currentIntegrationHeadSha);
+
+  const laterCwd = repo();
+  const later = init(laterCwd);
+  const packet = taskPacket(later.currentIntegrationHeadSha, 'task-a');
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: laterCwd, taskPackets: [packet], initialSelection: initialSelection(later.currentIntegrationHeadSha),
+  }), { code: 'INVALID_VALIDATION_PLAN' });
+  assert.throws(() => buildTargetedValidationPlan({ cwd: laterCwd, taskPackets: [] }), {
+    code: 'INVALID_VALIDATION_PLAN',
+  });
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: laterCwd, initialSelection: initialSelection('f'.repeat(40)),
+  }), { code: 'VALIDATION_PLAN_STALE' });
+  const withTask = checkpointState({
+    cwd: laterCwd,
+    nextState: {
+      ...later,
+      tasks: [task(later.currentIntegrationHeadSha, {
+        id: 'task-a', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+      })],
+    },
+    expectedRevision: later.revision,
+  });
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: laterCwd, initialSelection: initialSelection(withTask.currentIntegrationHeadSha),
+  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
+});
+
+test('pending initial validation plans require an exact immutable definition match', () => {
+  const cwd = repo();
+  const state = init(cwd);
+  const selection = initialSelection(state.currentIntegrationHeadSha);
+  const plan = buildTargetedValidationPlan({ cwd, initialSelection: selection, now: () => AT });
+  assert.deepEqual(buildTargetedValidationPlan({ cwd, initialSelection: selection }), plan);
+
+  const changedAreas = {
+    ...selection,
+    affectedAreas: ['workflow', 'documentation'],
+  };
+  assert.throws(() => buildTargetedValidationPlan({ cwd, initialSelection: changedAreas }), {
+    code: 'VALIDATION_PLAN_REPLACE_REQUIRED',
+  });
+  const changedReason = initialSelection(state.currentIntegrationHeadSha, {
+    requiredValidation: {
+      unit: [{ command: 'npm run check:workflow', reason: 'Revised workflow rationale.' }],
+      system: [],
+    },
+  });
+  assert.throws(() => buildTargetedValidationPlan({ cwd, initialSelection: changedReason }), {
+    code: 'VALIDATION_PLAN_REPLACE_REQUIRED',
+  });
+
+  const replacementSelection = { ...changedReason, affectedAreas: changedAreas.affectedAreas };
+  const replacement = buildTargetedValidationPlan({
+    cwd, initialSelection: replacementSelection, replace: true, now: () => AT,
+  });
+  assert.deepEqual(replacement.affectedAreas, ['documentation', 'workflow']);
+  assert.equal(replacement.commands[0].reason, 'Revised workflow rationale.');
+  assert.deepEqual(buildTargetedValidationPlan({ cwd, initialSelection: replacementSelection }), replacement);
+});
+
+test('accepted task packet identity is canonical, guarded, persistent, and required by consumers', () => {
+  const cwd = repo();
+  let state = integratedTasks(cwd, ['task-a']);
+  const packet = taskPacket(state.currentIntegrationHeadSha, 'task-a');
+  const reordered = Object.fromEntries(Object.entries(packet).reverse());
+  assert.equal(taskPacketDigest(reordered), taskPacketDigest(packet));
+  assert.notEqual(taskPacketDigest({
+    ...packet,
+    affectedAreas: ['documentation', 'api'],
+  }), taskPacketDigest({
+    ...packet,
+    affectedAreas: ['api', 'documentation'],
+  }));
+  assert.throws(() => checkpointState({
+    cwd,
+    nextState: {
+      ...state,
+      tasks: state.tasks.map((item) => ({ ...item, taskPacketDigest: taskPacketDigest(packet) })),
+    },
+    expectedRevision: state.revision,
+  }), { code: 'PROTECTED_TRANSITION_REQUIRED' });
+  assert.throws(() => buildTargetedValidationPlan({ cwd, taskPackets: [packet] }), {
+    code: 'TASK_PACKET_NOT_BOUND',
+  });
+  assert.throws(() => assertTaskPacketBound(state, { ...packet, taskId: 'missing-task' }), {
+    code: 'TASK_PACKET_NOT_BOUND',
+  });
+  assert.throws(() => assertTaskPacketBound(state, { ...packet, reviewedHeadSha: 'f'.repeat(40) }), {
+    code: 'TASK_PACKET_HEAD_MISMATCH',
+  });
+  state = checkpointTaskPacketBinding({ cwd, packet, expectedRevision: state.revision });
+  const boundRevision = state.revision;
+  assert.equal(state.tasks[0].taskPacketDigest, taskPacketDigest(packet));
+  assert.equal(checkpointTaskPacketBinding({
+    cwd, packet: reordered, expectedRevision: state.revision,
+  }).revision, boundRevision);
+  const weakened = {
+    ...packet,
+    affectedAreas: ['documentation'],
+    requiredValidation: {
+      unit: [{ command: 'node --test tests/tooling/contracts.test.mjs', reason: 'Weakened selection.' }],
+      system: [],
+    },
+  };
+  assert.throws(() => checkpointTaskPacketBinding({
+    cwd, packet: weakened, expectedRevision: state.revision,
+  }), { code: 'TASK_PACKET_CONFLICT' });
+  assert.throws(() => buildTargetedValidationPlan({ cwd, taskPackets: [weakened] }), {
+    code: 'TASK_PACKET_CONFLICT',
+  });
+  const completed = checkpointTaskCompletion({
+    cwd, expectedRevision: state.revision,
+    threadResolutionStatus: {
+      status: 'passed', headSha: state.currentIntegrationHeadSha, threads: [],
+      threadlessVerification: emptyThreadless(), updatedAt: AT,
+    },
+  });
+  assert.equal(completed.tasks[0].taskPacketDigest, taskPacketDigest(packet));
+  assert.throws(() => checkpointState({
+    cwd,
+    nextState: { ...completed, tasks: completed.tasks.map(({ taskPacketDigest: _digest, ...item }) => item) },
+    expectedRevision: completed.revision,
+  }), { code: 'IMMUTABLE_STATE_PROVENANCE' });
+});
+
+test('exact bound packet survives null-review central integration HEAD advance only after integration', () => {
+  const cwd = repo();
+  const initial = init(cwd);
+  const proposedTask = task(initial.currentIntegrationHeadSha, {
+    id: 'post-integration-packet', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [proposedTask] },
+  });
+  const packet = taskPacket(proposed.currentIntegrationHeadSha, proposedTask.id, {
+    affectedAreas: ['workflow'], command: 'npm run check:workflow',
+  });
+  const bound = checkpointTaskPacketBinding({
+    cwd, packet, expectedRevision: proposed.revision,
+  });
+  assert.equal(bound.reviewedHeadSha, null);
+  assert.equal(bound.tasks[0].taskPacketDigest, taskPacketDigest(packet));
+
+  const integratedHead = commit(cwd, { 'scripts/integrated-task.mjs': 'export const integrated = true;\n' }, 'integrate task');
+  const advanced = checkpointGitMetadata({ cwd }).state;
+  assert.equal(advanced.currentIntegrationHeadSha, integratedHead);
+  assert.throws(() => assertTaskPacketBound(advanced, packet), { code: 'TASK_PACKET_HEAD_MISMATCH' });
+
+  const { execution: _execution, ...boundTask } = advanced.tasks[0];
+  const integrated = checkpointState({
+    cwd,
+    expectedRevision: advanced.revision,
+    nextState: {
+      ...advanced,
+      tasks: [{
+        ...boundTask,
+        status: 'integrated',
+        integratedCommitSha: integratedHead,
+        resolutionSummary: 'Integrated centrally; targeted validation remains.',
+      }],
+    },
+  });
+  assert.equal(assertTaskPacketBound(integrated, packet).id, packet.taskId);
+  const descendantHead = commit(cwd, { 'scripts/later-integration.mjs': 'export const later = true;\n' }, 'later integration');
+  const descendant = checkpointGitMetadata({ cwd }).state;
+  assert.equal(descendant.currentIntegrationHeadSha, descendantHead);
+  assert.equal(assertTaskPacketBound(descendant, packet).id, packet.taskId);
+  assert.equal(checkpointTaskPacketBinding({
+    cwd, packet, expectedRevision: descendant.revision,
+  }).revision, descendant.revision);
+  const plan = buildTargetedValidationPlan({ cwd, taskPackets: [packet], now: () => AT });
+  assert.deepEqual(plan.taskIds, [packet.taskId]);
+  assert.equal(plan.headSha, descendantHead);
+  assert.equal(plan.stateRevision, descendant.revision);
+
+  const substituted = { ...packet, evidence: 'Substituted packet evidence.' };
+  assert.throws(() => assertTaskPacketBound(descendant, substituted), {
+    code: 'TASK_PACKET_CONFLICT',
+  });
+  const canonicalReviewedState = { ...descendant, reviewedHeadSha: descendantHead };
+  assert.throws(() => assertTaskPacketBound(canonicalReviewedState, packet), {
+    code: 'TASK_PACKET_HEAD_MISMATCH',
+  });
+  assert.throws(() => assertTaskPacketBound(canonicalReviewedState, {
+    ...packet, reviewedHeadSha: descendantHead,
+  }), { code: 'TASK_PACKET_CONFLICT' });
+});
+
+test('bound packet rejects rollback, unrelated, or missing central integration ancestry without validation proof', () => {
+  const cwd = repo();
+  const initial = init(cwd);
+  const proposedTask = task(initial.currentIntegrationHeadSha, {
+    id: 'ancestry-guard', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [proposedTask] },
+  });
+  const packet = taskPacket(proposed.currentIntegrationHeadSha, proposedTask.id, {
+    affectedAreas: ['workflow'], command: 'npm run check:workflow',
+  });
+  const bound = checkpointTaskPacketBinding({ cwd, packet, expectedRevision: proposed.revision });
+  const integratedHead = commit(cwd, { 'scripts/ancestry-task.mjs': 'export const integrated = true;\n' }, 'integrate ancestry task');
+  const advanced = checkpointGitMetadata({ cwd }).state;
+  const { execution: _execution, ...boundTask } = advanced.tasks[0];
+  const integrated = checkpointState({
+    cwd,
+    expectedRevision: advanced.revision,
+    nextState: {
+      ...advanced,
+      tasks: [{
+        ...boundTask,
+        status: 'integrated',
+        integratedCommitSha: integratedHead,
+        resolutionSummary: 'Integrated centrally; targeted validation remains.',
+      }],
+    },
+  });
+  assert.equal(integrated.tasks[0].taskPacketDigest, bound.tasks[0].taskPacketDigest);
+
+  git(cwd, ['switch', '--detach', packet.reviewedHeadSha]);
+  const rollback = checkpointGitMetadata({ cwd }).state;
+  assert.equal(rollback.currentIntegrationHeadSha, packet.reviewedHeadSha);
+  assert.throws(() => assertTaskPacketBound(rollback, packet), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+  assert.throws(() => buildTargetedValidationPlan({ cwd, taskPackets: [packet], now: () => AT }), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+  assert.equal(existsSync(validationPlanPath(cwd, rollback.prNumber)), false);
+  assert.equal(loadState(cwd).validationStatus.status, 'not-run');
+
+  const tree = git(cwd, ['rev-parse', `${integratedHead}^{tree}`]);
+  const unrelatedHead = git(cwd, ['commit-tree', tree, '-m', 'unrelated integration history']);
+  const unrelatedCommitState = {
+    ...rollback,
+    tasks: rollback.tasks.map((item) => ({ ...item, integratedCommitSha: unrelatedHead })),
+  };
+  assert.throws(() => assertTaskPacketBound(unrelatedCommitState, packet), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+  const missingCommitState = {
+    ...rollback,
+    tasks: rollback.tasks.map((item) => ({ ...item, integratedCommitSha: 'f'.repeat(40) })),
+  };
+  assert.throws(() => assertTaskPacketBound(missingCommitState, packet), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+
+  git(cwd, ['switch', '--detach', unrelatedHead]);
+  const unrelated = checkpointGitMetadata({ cwd }).state;
+  assert.equal(unrelated.currentIntegrationHeadSha, unrelatedHead);
+  assert.throws(() => assertTaskPacketBound(unrelated, packet), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+  assert.throws(() => buildTargetedValidationPlan({ cwd, taskPackets: [packet], now: () => AT }), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+  assert.equal(existsSync(validationPlanPath(cwd, unrelated.prNumber)), false);
+  assert.equal(loadState(cwd).validationStatus.status, 'not-run');
+});
+
+test('canonical bound packet accepts direct and descendant central integration ancestry only', () => {
+  const cwd = repo();
+  const { packet, reviewedHead, integratedHead, integrated } = canonicalBoundIntegratedTask(cwd);
+  assert.equal(packet.reviewedHeadSha, reviewedHead);
+  assert.equal(integrated.reviewedHeadSha, reviewedHead);
+  assert.equal(assertTaskPacketBound(integrated, packet).integratedCommitSha, integratedHead);
+
+  const descendantHead = commit(cwd, { 'scripts/canonical-later.mjs': 'export const later = true;\n' }, 'later canonical integration');
+  const descendant = checkpointGitMetadata({ cwd }).state;
+  assert.equal(assertTaskPacketBound(descendant, packet).integratedCommitSha, integratedHead);
+  const plan = buildTargetedValidationPlan({ cwd, taskPackets: [packet], now: () => AT });
+  assert.deepEqual(plan.taskIds, [packet.taskId]);
+  assert.equal(plan.headSha, descendantHead);
+  assert.equal(plan.stateRevision, descendant.revision);
+
+  assert.throws(() => assertTaskPacketBound(descendant, {
+    ...packet, reviewedHeadSha: integratedHead,
+  }), { code: 'TASK_PACKET_HEAD_MISMATCH' });
+  assert.throws(() => assertTaskPacketBound(descendant, {
+    ...packet, evidence: 'Substituted canonical packet evidence.',
+  }), { code: 'TASK_PACKET_CONFLICT' });
+});
+
+test('canonical bound packet rejects rollback, unrelated, or missing integration ancestry without proof', () => {
+  const cwd = repo();
+  const { packet, reviewedHead, integratedHead } = canonicalBoundIntegratedTask(cwd, 'canonical-fail-closed');
+
+  git(cwd, ['switch', '--detach', reviewedHead]);
+  const rollback = checkpointGitMetadata({ cwd }).state;
+  assert.equal(rollback.currentIntegrationHeadSha, reviewedHead);
+  assert.throws(() => assertTaskPacketBound(rollback, packet), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+  assert.throws(() => buildTargetedValidationPlan({ cwd, taskPackets: [packet], now: () => AT }), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+  assert.equal(existsSync(validationPlanPath(cwd, rollback.prNumber)), false);
+  assert.equal(loadState(cwd).validationStatus.status, 'not-run');
+
+  const tree = git(cwd, ['rev-parse', `${integratedHead}^{tree}`]);
+  const unrelatedHead = git(cwd, ['commit-tree', tree, '-m', 'unrelated canonical integration']);
+  const unrelatedCommitState = {
+    ...rollback,
+    tasks: rollback.tasks.map((item) => ({ ...item, integratedCommitSha: unrelatedHead })),
+  };
+  assert.throws(() => assertTaskPacketBound(unrelatedCommitState, packet), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+  const missingCommitState = {
+    ...rollback,
+    tasks: rollback.tasks.map((item) => ({ ...item, integratedCommitSha: 'f'.repeat(40) })),
+  };
+  assert.throws(() => assertTaskPacketBound(missingCommitState, packet), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+
+  git(cwd, ['switch', '--detach', unrelatedHead]);
+  const unrelated = checkpointGitMetadata({ cwd }).state;
+  assert.throws(() => assertTaskPacketBound(unrelated, packet), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+  assert.throws(() => buildTargetedValidationPlan({ cwd, taskPackets: [packet], now: () => AT }), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+  assert.equal(existsSync(validationPlanPath(cwd, unrelated.prNumber)), false);
+  assert.equal(loadState(cwd).validationStatus.status, 'not-run');
+});
+
+test('worker-result acceptance requires the exact durably bound task packet', () => {
+  const cwd = repo();
+  let state = integratedTasks(cwd, ['task-a']);
+  const packet = taskPacket(state.currentIntegrationHeadSha, 'task-a');
+  const workerCommit = commit(cwd, { 'scripts/worker-result.mjs': 'export const fixed = true;\n' }, 'worker result');
+  const result = {
+    schemaVersion: 2,
+    taskId: 'task-a',
+    status: 'implemented',
+    commitSha: workerCommit,
+    changedPaths: ['scripts/worker-result.mjs'],
+    validation: [{ command: 'npm run check:api', result: 'passed', summary: 'Passed.' }],
+    resolutionSummary: 'Implemented the accepted task.',
+    residualRisks: [],
+    unexpectedDependencies: [],
+  };
+  const packetPath = join(stateDirectory(cwd, state.prNumber), 'accepted-task.json');
+  const resultPath = join(stateDirectory(cwd, state.prNumber), 'worker-result.json');
+  writeFileSync(packetPath, `${JSON.stringify(packet)}\n`);
+  const invalidResult = {
+    ...result,
+    commitSha: 'f'.repeat(40),
+    changedPaths: ['apps/outside-ownership.ts'],
+    validation: [{ command: 'npm run check:web', result: 'passed', summary: 'Wrong check.' }],
+  };
+  writeFileSync(resultPath, `${JSON.stringify(invalidResult)}\n`);
+  const runValidation = () => spawnSync(process.execPath, [
+    STATE_CLI, 'validate-result', '--pr', '17', '--task-packet', packetPath, '--worker-result', resultPath,
+  ], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const unbound = runValidation();
+  assert.equal(unbound.status, 1);
+  assert.match(unbound.stderr, /TASK_PACKET_NOT_BOUND/u);
+  state = checkpointTaskPacketBinding({ cwd, packet, expectedRevision: state.revision });
+  writeFileSync(packetPath, `${JSON.stringify({ ...packet, evidence: 'Conflicting review evidence.' })}\n`);
+  const conflicting = runValidation();
+  assert.equal(conflicting.status, 1);
+  assert.match(conflicting.stderr, /TASK_PACKET_CONFLICT/u);
+  writeFileSync(packetPath, `${JSON.stringify(packet)}\n`);
+  writeFileSync(resultPath, `${JSON.stringify(result)}\n`);
+  const accepted = runValidation();
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.deepEqual(JSON.parse(accepted.stdout), { valid: true, taskId: 'task-a' });
+});
+
+test('targeted validation plan durably de-duplicates the integrated task union and is resumable', () => {
+  const cwd = repo();
+  let state = integratedTasks(cwd, ['task-a', 'task-b']);
+  const packets = [
+    taskPacket(state.currentIntegrationHeadSha, 'task-a'),
+    taskPacket(state.currentIntegrationHeadSha, 'task-b', { affectedAreas: ['shared'] }),
+  ];
+  state = bindPackets(cwd, state, packets);
+  const plan = buildTargetedValidationPlan({ cwd, taskPackets: packets, now: () => AT });
+  assert.deepEqual(plan.commands.map((entry) => entry.command), [
+    'npm run check:api', 'npm run check:shared', 'npm run check:web',
+  ]);
+  assert.deepEqual(JSON.parse(readFileSync(validationPlanPath(cwd, 17), 'utf8')), plan);
+  assert.deepEqual(buildTargetedValidationPlan({ cwd, taskPackets: [...packets].reverse() }), plan);
+
+  const attempted = [];
+  assert.throws(() => executeTargetedValidationPlan({
+    cwd,
+    runCommand: (argv) => { attempted.push(argv.join(' ')); return { status: 0 }; },
+    now: () => AT,
+    onCommandRecorded: () => { if (attempted.length === 1) throw new Error('simulated interruption'); },
+  }), /simulated interruption/u);
+  const beforeNoop = loadState(cwd);
+  const eventPath = join(stateDirectory(cwd, state.prNumber), 'events.ndjson');
+  const eventsBeforeNoop = readFileSync(eventPath, 'utf8');
+  const noOp = checkpointGitMetadata({ cwd, backup: true });
+  assert.equal(noOp.checkpointed, false);
+  assert.deepEqual(noOp.state, beforeNoop);
+  assert.equal(readFileSync(eventPath, 'utf8'), eventsBeforeNoop);
+  assert.deepEqual(JSON.parse(readFileSync(join(stateDirectory(cwd, state.prNumber), 'state.backup.json'), 'utf8')), beforeNoop);
+  let proofCheckpointHeldLock = false;
+  const resumed = executeTargetedValidationPlan({
+    cwd,
+    runCommand: (argv) => { attempted.push(argv.join(' ')); return { status: 0 }; },
+    now: () => AT,
+    onProofCheckpointed: () => {
+      proofCheckpointHeldLock = existsSync(join(reviewRoot(cwd), 'locks', 'pr-17.lock'));
+    },
+  });
+  assert.deepEqual(attempted, ['npm run check:api', 'npm run check:shared', 'npm run check:web']);
+  assert.equal(resumed.state.validationStatus.status, 'passed');
+  assert.equal(resumed.state.validationStatus.headSha, state.currentIntegrationHeadSha);
+  assert.equal(proofCheckpointHeldLock, true);
+  assert.match(renderRecoverySummary({ cwd }), /Targeted validation plan: .*completed; pending 0, passed 3, failed 0; recorded proof passed/u);
+});
+
+test('targeted validation CLI saves and executes the exact durable plan', () => {
+  const cwd = repo();
+  commit(cwd, {
+    'tests/focused.test.mjs': "import test from 'node:test';\ntest('focused command', () => {});\n",
+  }, 'add focused validation fixture');
+  const state = integratedTasks(cwd, ['task-a']);
+  const packet = taskPacket(state.currentIntegrationHeadSha, 'task-a', {
+    affectedAreas: ['documentation'], command: 'node --test tests/focused.test.mjs',
+  });
+  const packetPath = join(stateDirectory(cwd, state.prNumber), 'task-a.json');
+  writeFileSync(packetPath, `${JSON.stringify(packet)}\n`);
+
+  const bound = spawnSync(process.execPath, [
+    STATE_CLI, 'bind-task-packet', '--pr', '17', '--expected-revision', String(state.revision),
+    '--task-packet', packetPath,
+  ], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  assert.equal(bound.status, 0, bound.stderr);
+  assert.equal(JSON.parse(bound.stdout).tasks[0].taskPacketDigest, taskPacketDigest(packet));
+
+  const planned = spawnSync(process.execPath, [STATE_CLI, 'validation-plan', '--pr', '17', packetPath], {
+    cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  assert.equal(planned.status, 0, planned.stderr);
+  assert.deepEqual(JSON.parse(planned.stdout).commands.map((entry) => entry.command), [
+    'node --test tests/focused.test.mjs',
+  ]);
+
+  const executed = spawnSync(process.execPath, [STATE_CLI, 'run-validation', '--pr', '17'], {
+    cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  assert.equal(executed.status, 0, executed.stderr);
+  assert.equal(JSON.parse(executed.stdout).status, 'passed');
+  assert.equal(loadState(cwd).validationStatus.status, 'passed');
+});
+
+test('targeted validation records concise failure and generic checkpoint cannot forge passing proof', () => {
+  const cwd = repo();
+  let state = integratedTasks(cwd, ['task-a']);
+  const packet = taskPacket(state.currentIntegrationHeadSha, 'task-a');
+  state = bindPackets(cwd, state, [packet]);
+  buildTargetedValidationPlan({ cwd, taskPackets: [packet], now: () => AT });
+  const result = executeTargetedValidationPlan({ cwd, runCommand: () => ({ status: 7 }), now: () => AT });
+  assert.equal(result.state.validationStatus.status, 'failed');
+  assert.deepEqual(result.plan.commands.map((entry) => entry.summary), ['Failed with exit code 7.']);
+  const forged = {
+    ...result.state,
+    validationStatus: { ...result.state.validationStatus, status: 'passed' },
+  };
+  assert.throws(
+    () => checkpointState({ cwd, nextState: forged, expectedRevision: result.state.revision }),
+    { code: 'IMMUTABLE_STATE_PROVENANCE' },
+  );
+  assert.throws(
+    () => buildTargetedValidationPlan({ cwd, taskPackets: [packet] }),
+    { code: 'VALIDATION_PLAN_REPLACE_REQUIRED' },
+  );
+  const replacement = buildTargetedValidationPlan({
+    cwd, replace: true, taskPackets: [packet], now: () => AT,
+  });
+  assert.ok(replacement.commands.every((entry) => entry.status === 'pending'));
+  assert.equal(loadState(cwd).validationStatus.status, 'not-run');
+  const retried = executeTargetedValidationPlan({ cwd, runCommand: () => ({ status: 0 }), now: () => AT });
+  assert.equal(retried.state.validationStatus.status, 'passed');
+});
+
+test('replacing a same-head passed plan closes the review gate until the replacement runs', () => {
+  const cwd = repo();
+  let state = integratedTasks(cwd, ['task-a']);
+  const packet = taskPacket(state.currentIntegrationHeadSha, 'task-a');
+  state = bindPackets(cwd, state, [packet]);
+  buildTargetedValidationPlan({ cwd, taskPackets: [packet], now: () => AT });
+  const passed = executeTargetedValidationPlan({ cwd, runCommand: () => ({ status: 0 }), now: () => AT }).state;
+  assert.equal(passed.validationStatus.status, 'passed');
+  const replacement = buildTargetedValidationPlan({ cwd, taskPackets: [packet], replace: true, now: () => AT });
+  assert.equal(loadState(cwd).validationStatus.status, 'not-run');
+  assert.equal(replacement.stateRevision, loadState(cwd).revision);
+});
+
+test('execution refuses changed task coverage before invoking a command', () => {
+  const cwd = repo();
+  let state = integratedTasks(cwd, ['task-a']);
+  const packet = taskPacket(state.currentIntegrationHeadSha, 'task-a');
+  state = bindPackets(cwd, state, [packet]);
+  buildTargetedValidationPlan({ cwd, taskPackets: [packet], now: () => AT });
+  checkpointTaskCompletion({
+    cwd, expectedRevision: state.revision,
+    threadResolutionStatus: { status: 'not-run', headSha: null, threads: [], threadlessVerification: emptyThreadless(), updatedAt: null },
+  });
+  let invoked = false;
+  assert.throws(() => executeTargetedValidationPlan({ cwd, runCommand: () => { invoked = true; return { status: 0 }; } }), {
+    code: 'INVALID_VALIDATION_PLAN',
+  });
+  assert.equal(invoked, false);
+});
+
+test('targeted validation rejects incomplete coverage, dirty worktrees, and head drift', () => {
+  const cwd = repo();
+  let state = integratedTasks(cwd, ['task-a', 'task-b']);
+  const packetA = taskPacket(state.currentIntegrationHeadSha, 'task-a');
+  const packetB = taskPacket(state.currentIntegrationHeadSha, 'task-b');
+  state = bindPackets(cwd, state, [packetA, packetB]);
+  assert.throws(
+    () => buildTargetedValidationPlan({ cwd, taskPackets: [packetA] }),
+    { code: 'VALIDATION_TASK_COVERAGE_MISMATCH' },
+  );
+  buildTargetedValidationPlan({ cwd, taskPackets: [packetA, packetB], now: () => AT });
+  commit(cwd, { 'head-drift.txt': 'drift\n' }, 'head drift');
+  assert.throws(() => executeTargetedValidationPlan({ cwd, runCommand: () => ({ status: 0 }) }), {
+    code: 'VALIDATION_PLAN_STALE',
+  });
+
+  checkpointGitMetadata({ cwd });
+  writeFileSync(join(cwd, 'dirty.txt'), 'dirty\n');
+  assert.throws(() => buildTargetedValidationPlan({ cwd, taskPackets: [packetA, packetB] }), {
+    code: 'VALIDATION_CHECKOUT_DIRTY',
+  });
+});
+
 test('archive interruption before pointer clear leaves active source valid; retry succeeds', () => {
   const cwd = repo();
   init(cwd);
@@ -1011,6 +2752,16 @@ test('archive interruption after pointer clear is recoverable with explicit PR r
   assert.ok(existsSync(statePath(cwd, 17)));
   const archived = archiveState({ cwd, prNumber: 17, abandonmentReason: 'Human-owned cycle.' });
   assert.ok(existsSync(join(archived, 'state.json')));
+});
+
+test('archive normalizes an explicit string PR number before clearing the active pointer', () => {
+  const cwd = repo();
+  init(cwd);
+
+  archiveState({ cwd, prNumber: '17', abandonmentReason: 'Superseded by a new pull request.' });
+
+  assert.equal(existsSync(activePointerPath(cwd)), false);
+  assert.equal(existsSync(stateDirectory(cwd, 17)), false);
 });
 
 test('concurrent lock attempts time out', async () => {
