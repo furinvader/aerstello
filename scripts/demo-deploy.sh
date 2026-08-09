@@ -27,16 +27,22 @@ CURRENT_MANIFEST_TEMP=''
 FINAL_MANIFEST_TEMP=''
 RESTORED_MIGRATIONS_TEMP=''
 BACKUP_PARTIAL=''
+CREATED_BACKUP_PATH=''
 INIT_ENV_TEMP=''
 STATE_STAGING_DIRECTORY=''
 RESTORE_STATE_STAGING=''
 RESTORE_PENDING_PREVIOUS=''
+RESTORE_TRANSACTION_STAGING=''
+REWRITE_REPLACEMENT_STAGING=''
 PUBLISHED_GENERATION_DIRECTORY=''
 PUBLISHED_GENERATION_TARGET=''
 STATE_LINK_TEMP=''
 PENDING_STATE_STAGING=''
 CURRENT_STATE_LINK=''
 ADMIN_PASSWORD=''
+RESTORE_RECOVERED=false
+REWRITE_REPLACEMENT=false
+REWRITE_REPLACEMENT_SHA=''
 
 usage() {
   cat <<'EOF'
@@ -102,6 +108,12 @@ cleanup() {
   fi
   if [[ -n "$RESTORE_STATE_STAGING" && -d "$RESTORE_STATE_STAGING" ]]; then
     rm -rf -- "$RESTORE_STATE_STAGING"
+  fi
+  if [[ -n "$RESTORE_TRANSACTION_STAGING" && -d "$RESTORE_TRANSACTION_STAGING" ]]; then
+    rm -rf -- "$RESTORE_TRANSACTION_STAGING"
+  fi
+  if [[ -n "$REWRITE_REPLACEMENT_STAGING" && -f "$REWRITE_REPLACEMENT_STAGING" ]]; then
+    rm -f -- "$REWRITE_REPLACEMENT_STAGING"
   fi
   if [[ -n "$PUBLISHED_GENERATION_DIRECTORY" && -d "$PUBLISHED_GENERATION_DIRECTORY" ]]; then
     local selected_generation=''
@@ -467,6 +479,8 @@ STATE_DIRECTORY="$REPOSITORY_ROOT/.demo-state/$PROJECT_NAME"
 GENERATIONS_DIRECTORY="$STATE_DIRECTORY/generations"
 CURRENT_STATE_LINK="$STATE_DIRECTORY/current"
 PENDING_STATE_DIRECTORY="$STATE_DIRECTORY/pending"
+RESTORE_TRANSACTION_DIRECTORY="$STATE_DIRECTORY/restore-transaction"
+REWRITE_REPLACEMENT_MARKER="$STATE_DIRECTORY/rewrite-replacement"
 BACKUP_DIRECTORY="$REPOSITORY_ROOT/.demo-backups/$PROJECT_NAME"
 
 mkdir -p -- "$STATE_DIRECTORY"
@@ -496,7 +510,20 @@ if [[ -e "$PENDING_STATE_DIRECTORY" || -L "$PENDING_STATE_DIRECTORY" ]]; then
   PENDING_EXISTS=true
 fi
 
-if [[ "$DATABASE_EXISTS" == false && "$STATE_EXISTS" == true && "$DB_MODE" != rewrite ]]; then
+if [[ -e "$REWRITE_REPLACEMENT_MARKER" || -L "$REWRITE_REPLACEMENT_MARKER" ]]; then
+  [[ -f "$REWRITE_REPLACEMENT_MARKER" && ! -L "$REWRITE_REPLACEMENT_MARKER" ]] ||
+    die 'Rewrite replacement marker is invalid.'
+  REWRITE_REPLACEMENT_SHA="$(< "$REWRITE_REPLACEMENT_MARKER")"
+  [[ "$REWRITE_REPLACEMENT_SHA" =~ ^[0-9a-f]{40,64}$ ]] ||
+    die 'Rewrite replacement marker contains an invalid deployed Git SHA.'
+  if [[ "$PENDING_EXISTS" != true ]]; then
+    [[ -d "$RESTORE_TRANSACTION_DIRECTORY" && ! -L "$RESTORE_TRANSACTION_DIRECTORY" ]] ||
+      die 'Rewrite replacement marker requires pending deployment state or an active restore transaction.'
+  fi
+  REWRITE_REPLACEMENT=true
+fi
+
+if [[ "$DATABASE_EXISTS" == false && "$STATE_EXISTS" == true && "$DB_MODE" != rewrite && "$REWRITE_REPLACEMENT" != true ]]; then
   die 'Deployment state exists but the PostgreSQL volume is missing; investigate or use explicitly confirmed rewrite mode.'
 fi
 
@@ -526,7 +553,7 @@ fi
 if [[ "$DB_MODE" == rewrite && "$ADOPT_EXISTING_DB" == true ]]; then
   die '--adopt-existing-db is valid only with persist mode.'
 fi
-if [[ "$DB_MODE" == rewrite && "$DATABASE_EXISTS" == false && "$STATE_EXISTS" == false ]]; then
+if [[ "$DB_MODE" == rewrite && "$DATABASE_EXISTS" == false && "$STATE_EXISTS" == false && "$PENDING_EXISTS" == false ]]; then
   die 'No existing database or prior deployment state was found; use persist mode for the initial deployment.'
 fi
 if [[ "$DB_MODE" == persist && "$ADOPT_EXISTING_DB" == true && "$DATABASE_EXISTS" == false ]]; then
@@ -610,6 +637,10 @@ validate_pending_state() {
   validate_state_descriptor "$PENDING_STATE_DIRECTORY" 'Pending deployment state'
   [[ "$(< "$PENDING_STATE_DIRECTORY/deployed-sha")" == "$DEPLOYED_SHA" ]] ||
     die 'Pending deployment belongs to a different Git commit; restore that checkout or explicitly rewrite.'
+  if [[ "$REWRITE_REPLACEMENT" == true ]]; then
+    [[ "$(< "$PENDING_STATE_DIRECTORY/deployed-sha")" == "$REWRITE_REPLACEMENT_SHA" ]] ||
+      die 'Rewrite replacement marker differs from pending deployment state.'
+  fi
   cmp -s -- "$CURRENT_MANIFEST_TEMP" "$PENDING_STATE_DIRECTORY/migrations.sha256" ||
     die 'Pending deployment migration manifest differs from this checkout; restore that checkout or explicitly rewrite.'
 }
@@ -678,10 +709,6 @@ validate_recorded_state() {
   done
 }
 
-if [[ "$DB_MODE" != rewrite ]]; then
-  validate_pending_state
-fi
-
 start_database() {
   compose up -d --wait db
 }
@@ -715,7 +742,7 @@ validate_database_migrations() {
       die "Database contains migration $name which is absent from this checkout; refusing an ambiguous rollback."
     applied["$name"]=1
   done
-  if [[ "$STATE_EXISTS" == true ]]; then
+  if [[ "$STATE_EXISTS" == true && "$REWRITE_REPLACEMENT" != true ]]; then
     while IFS= read -r line || [[ -n "$line" ]]; do
       path="${line#*  }"
       name="${path##*/}"
@@ -725,7 +752,83 @@ validate_database_migrations() {
   fi
 }
 
+select_database_state_descriptor() {
+  declare -A current_names=()
+  declare -A pending_names=()
+  declare -A applied_names=()
+  local line path name
+  if [[ "$STATE_EXISTS" == true ]]; then
+    validate_state_descriptor "$CURRENT_STATE_DIRECTORY" 'Current deployment state'
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      path="${line#*  }"
+      current_names["${path##*/}"]=1
+    done < "$CURRENT_STATE_DIRECTORY/migrations.sha256"
+  fi
+  if [[ "$PENDING_EXISTS" == true ]]; then
+    validate_state_descriptor "$PENDING_STATE_DIRECTORY" 'Pending deployment state'
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      path="${line#*  }"
+      pending_names["${path##*/}"]=1
+    done < "$PENDING_STATE_DIRECTORY/migrations.sha256"
+  fi
+  [[ "$STATE_EXISTS" == true || "$PENDING_EXISTS" == true ]] ||
+    die 'Database has no source-bound current or pending deployment descriptor.'
+
+  if [[ "$REWRITE_REPLACEMENT" == true ]]; then
+    [[ "$PENDING_EXISTS" == true ]] || die 'Rewrite replacement requires pending deployment state.'
+    [[ "$(< "$PENDING_STATE_DIRECTORY/deployed-sha")" == "$REWRITE_REPLACEMENT_SHA" ]] ||
+      die 'Rewrite replacement marker differs from pending deployment state.'
+  fi
+
+  local pending_required="$REWRITE_REPLACEMENT"
+  for name in "${DATABASE_MIGRATIONS[@]}"; do
+    [[ "$name" =~ ^[0-9]{4}_[a-z0-9_]+\.sql$ ]] || die "Database migration name is malformed: $name"
+    applied_names["$name"]=1
+    if [[ "$REWRITE_REPLACEMENT" == true ]]; then
+      [[ -v "pending_names[$name]" ]] ||
+        die "Replacement database contains migration $name outside pending deployment state."
+    elif [[ ! -v "current_names[$name]" ]]; then
+      pending_required=true
+      [[ -v "pending_names[$name]" ]] ||
+        die "Database contains unexplained migration $name outside current and pending deployment state."
+    fi
+  done
+  if [[ "$STATE_EXISTS" == true && "$REWRITE_REPLACEMENT" != true ]]; then
+    for name in "${!current_names[@]}"; do
+      [[ -v "applied_names[$name]" ]] ||
+        die "Database is older than recorded current state because migration $name is missing."
+    done
+  else
+    pending_required=true
+  fi
+
+  if [[ "$pending_required" == true ]]; then
+    [[ "$PENDING_EXISTS" == true ]] || die 'Database requires pending deployment state, but none exists.'
+    for name in "${DATABASE_MIGRATIONS[@]}"; do
+      [[ -v "pending_names[$name]" ]] ||
+        die "Database migration $name is not covered by pending deployment state."
+    done
+    DATABASE_STATE_KIND=pending
+    DATABASE_STATE_DIRECTORY="$PENDING_STATE_DIRECTORY"
+  else
+    DATABASE_STATE_KIND=current
+    DATABASE_STATE_DIRECTORY="$CURRENT_STATE_DIRECTORY"
+  fi
+}
+
+validate_database_for_source_bound_backup() {
+  read_database_migrations
+  select_database_state_descriptor
+}
+
+validate_rewritten_database_empty() {
+  read_database_migrations
+  ((${#DATABASE_MIGRATIONS[@]} == 0)) ||
+    die 'Replacement PostgreSQL volume unexpectedly contains recorded migrations.'
+}
+
 create_validated_backup() {
+  select_database_state_descriptor
   mkdir -p -- "$BACKUP_DIRECTORY"
   chmod 700 -- "$BACKUP_DIRECTORY"
   local timestamp final_path dump_path
@@ -752,12 +855,14 @@ create_validated_backup() {
     cp -- "$PENDING_STATE_DIRECTORY/deployed-sha" "$PENDING_STATE_DIRECTORY/migrations.sha256" \
       "$BACKUP_PARTIAL/state/pending/"
   fi
-  printf 'schemaVersion=1\nproject=%s\n' "$PROJECT_NAME" > "$BACKUP_PARTIAL/metadata"
+  printf 'schemaVersion=1\nproject=%s\ndatabaseState=%s\n' \
+    "$PROJECT_NAME" "$DATABASE_STATE_KIND" > "$BACKUP_PARTIAL/metadata"
   chmod 600 -- "$dump_path" "$BACKUP_PARTIAL/dump.sha256" \
     "$BACKUP_PARTIAL/database-migrations.txt" "$BACKUP_PARTIAL/metadata"
   final_path="${BACKUP_PARTIAL%.partial}.bundle"
   mv -- "$BACKUP_PARTIAL" "$final_path"
   BACKUP_PARTIAL=''
+  CREATED_BACKUP_PATH="$final_path"
   note "Created and validated source-bound database backup: $final_path"
 }
 
@@ -873,17 +978,177 @@ publish_state() {
   STATE_LINK_TEMP=''
   PUBLISHED_GENERATION_DIRECTORY=''
   PUBLISHED_GENERATION_TARGET=''
+  if [[ "$REWRITE_REPLACEMENT" == true ]]; then
+    rm -f -- "$REWRITE_REPLACEMENT_MARKER"
+    REWRITE_REPLACEMENT=false
+    REWRITE_REPLACEMENT_SHA=''
+  fi
   if [[ "$PENDING_EXISTS" == true ]]; then
     rm -rf -- "$PENDING_STATE_DIRECTORY"
     PENDING_EXISTS=false
   fi
 }
 
+validate_restore_transaction_context() {
+  validate_private_directory "$RESTORE_TRANSACTION_DIRECTORY" 'The restore transaction'
+  local file
+  for file in phase generation-name database-state-kind bundle-path bundle-digest \
+      database-migrations.txt safety-backup-path; do
+    validate_private_file "$RESTORE_TRANSACTION_DIRECTORY/$file" "The restore transaction $file record"
+  done
+
+  local database_state_kind
+  database_state_kind="$(< "$RESTORE_TRANSACTION_DIRECTORY/database-state-kind")"
+  case "$database_state_kind" in
+    current|pending) ;;
+    *) die 'Restore transaction database-state selector is invalid.' ;;
+  esac
+  local selected_state="$RESTORE_TRANSACTION_DIRECTORY/$database_state_kind"
+  validate_private_directory "$selected_state" "The restore transaction selected $database_state_kind state"
+  validate_state_descriptor "$selected_state" "Restore transaction selected $database_state_kind state"
+  if [[ "$database_state_kind" == current ]]; then
+    [[ ! -e "$RESTORE_TRANSACTION_DIRECTORY/pending" && ! -L "$RESTORE_TRANSACTION_DIRECTORY/pending" ]] ||
+      die 'Current-selected restore transaction contains unexpected pending state.'
+  fi
+  [[ "$(< "$selected_state/deployed-sha")" == "$DEPLOYED_SHA" ]] ||
+    die 'Interrupted restore state belongs to a different Git checkout.'
+  cmp -s -- "$selected_state/migrations.sha256" "$CURRENT_MANIFEST_TEMP" ||
+    die 'Interrupted restore state differs from this checkout migration manifest.'
+
+  local recorded_bundle recorded_digest recorded_safety
+  recorded_bundle="$(< "$RESTORE_TRANSACTION_DIRECTORY/bundle-path")"
+  recorded_digest="$(< "$RESTORE_TRANSACTION_DIRECTORY/bundle-digest")"
+  recorded_safety="$(< "$RESTORE_TRANSACTION_DIRECTORY/safety-backup-path")"
+  [[ -n "$recorded_bundle" && "$recorded_bundle" != *$'\n'* ]] ||
+    die 'Restore transaction bundle path is invalid.'
+  [[ "$recorded_digest" =~ ^[0-9a-f]{64}$ ]] ||
+    die 'Restore transaction bundle digest is invalid.'
+  [[ -n "$recorded_safety" && "$recorded_safety" != *$'\n'* ]] ||
+    die 'Restore transaction safety backup path is invalid.'
+  if [[ -n "$RESTORE_BACKUP" && "$RESTORE_BACKUP" != "$recorded_bundle" ]]; then
+    die 'Interrupted restore must be retried with the exact original source-bound bundle path.'
+  fi
+}
+
+complete_restore_state_transaction() {
+  [[ -d "$RESTORE_TRANSACTION_DIRECTORY" && ! -L "$RESTORE_TRANSACTION_DIRECTORY" ]] || return 0
+  validate_restore_transaction_context
+  [[ "$(< "$RESTORE_TRANSACTION_DIRECTORY/phase")" == database-restored ]] ||
+    die 'An interrupted database restore must be retried with its original source-bound bundle.'
+
+  mkdir -p -- "$GENERATIONS_DIRECTORY"
+  chmod 700 -- "$GENERATIONS_DIRECTORY"
+  local restored_current="$RESTORE_TRANSACTION_DIRECTORY/current"
+  local restored_pending="$RESTORE_TRANSACTION_DIRECTORY/pending"
+  if [[ -d "$restored_current" && ! -L "$restored_current" ]]; then
+    validate_state_descriptor "$restored_current" 'Restore transaction current state'
+    local generation_name generation_directory generation_staging
+    generation_name="$(< "$RESTORE_TRANSACTION_DIRECTORY/generation-name")"
+    [[ "$generation_name" =~ ^restore-[A-Za-z0-9._-]+$ ]] || die 'Restore transaction generation name is invalid.'
+    generation_directory="$GENERATIONS_DIRECTORY/$generation_name"
+    if [[ ! -d "$generation_directory" ]]; then
+      generation_staging="$(mktemp -d "$GENERATIONS_DIRECTORY/.restore-generation.XXXXXX")"
+      cp -- "$restored_current/deployed-sha" "$restored_current/migrations.sha256" "$generation_staging/"
+      chmod 600 -- "$generation_staging/deployed-sha" "$generation_staging/migrations.sha256"
+      mv -T -- "$generation_staging" "$generation_directory"
+    else
+      cmp -s -- "$restored_current/deployed-sha" "$generation_directory/deployed-sha" &&
+        cmp -s -- "$restored_current/migrations.sha256" "$generation_directory/migrations.sha256" ||
+        die 'Restore transaction generation collides with different state.'
+    fi
+    STATE_LINK_TEMP="$STATE_DIRECTORY/.restore-current.$$"
+    ln -s -- "generations/$generation_name" "$STATE_LINK_TEMP"
+    mv -Tf -- "$STATE_LINK_TEMP" "$CURRENT_STATE_LINK"
+    STATE_LINK_TEMP=''
+    CURRENT_STATE_DIRECTORY="$generation_directory"
+    STATE_EXISTS=true
+  else
+    rm -f -- "$CURRENT_STATE_LINK"
+    CURRENT_STATE_DIRECTORY=''
+    STATE_EXISTS=false
+  fi
+
+  if [[ "${SKY_BAR_TEST_FAIL_RESTORE_PUBLICATION-}" == after-current ]]; then
+    die 'Injected restore publication interruption after current state selection.'
+  fi
+
+  local database_state_kind
+  database_state_kind="$(< "$RESTORE_TRANSACTION_DIRECTORY/database-state-kind")"
+  if [[ "$database_state_kind" == pending ]]; then
+    REWRITE_REPLACEMENT_STAGING="$(mktemp "$STATE_DIRECTORY/.rewrite-replacement.XXXXXX")"
+    printf '%s\n' "$(< "$restored_pending/deployed-sha")" > "$REWRITE_REPLACEMENT_STAGING"
+    chmod 600 -- "$REWRITE_REPLACEMENT_STAGING"
+    mv -T -- "$REWRITE_REPLACEMENT_STAGING" "$REWRITE_REPLACEMENT_MARKER"
+    REWRITE_REPLACEMENT_STAGING=''
+    REWRITE_REPLACEMENT=true
+    REWRITE_REPLACEMENT_SHA="$(< "$restored_pending/deployed-sha")"
+  else
+    rm -f -- "$REWRITE_REPLACEMENT_MARKER"
+    REWRITE_REPLACEMENT=false
+    REWRITE_REPLACEMENT_SHA=''
+  fi
+
+  if [[ -e "$PENDING_STATE_DIRECTORY" || -L "$PENDING_STATE_DIRECTORY" ]]; then
+    RESTORE_PENDING_PREVIOUS="$RESTORE_TRANSACTION_DIRECTORY/previous-pending"
+    if [[ ! -e "$RESTORE_PENDING_PREVIOUS" && ! -L "$RESTORE_PENDING_PREVIOUS" ]]; then
+      mv -T -- "$PENDING_STATE_DIRECTORY" "$RESTORE_PENDING_PREVIOUS"
+    else
+      rm -rf -- "$PENDING_STATE_DIRECTORY"
+    fi
+  fi
+  if [[ "${SKY_BAR_TEST_FAIL_RESTORE_PUBLICATION-}" == after-pending-removal ]]; then
+    RESTORE_PENDING_PREVIOUS=''
+    die 'Injected restore publication interruption after pending state removal.'
+  fi
+  if [[ -d "$restored_pending" && ! -L "$restored_pending" ]]; then
+    validate_state_descriptor "$restored_pending" 'Restore transaction pending state'
+    PENDING_STATE_STAGING="$(mktemp -d "$STATE_DIRECTORY/.restore-pending.XXXXXX")"
+    cp -- "$restored_pending/deployed-sha" "$restored_pending/migrations.sha256" "$PENDING_STATE_STAGING/"
+    chmod 600 -- "$PENDING_STATE_STAGING/deployed-sha" "$PENDING_STATE_STAGING/migrations.sha256"
+    mv -T -- "$PENDING_STATE_STAGING" "$PENDING_STATE_DIRECTORY"
+    PENDING_STATE_STAGING=''
+    PENDING_EXISTS=true
+  else
+    PENDING_EXISTS=false
+  fi
+  RESTORE_PENDING_PREVIOUS=''
+  local retired_transaction="$STATE_DIRECTORY/.restore-transaction-completed.$$.$RANDOM"
+  [[ ! -e "$retired_transaction" && ! -L "$retired_transaction" ]] ||
+    die 'Could not retire completed restore transaction safely.'
+  mv -T -- "$RESTORE_TRANSACTION_DIRECTORY" "$retired_transaction"
+  rm -rf -- "$retired_transaction"
+}
+
+recover_completed_restore_transaction() {
+  [[ -e "$RESTORE_TRANSACTION_DIRECTORY" || -L "$RESTORE_TRANSACTION_DIRECTORY" ]] || return 0
+  [[ -d "$RESTORE_TRANSACTION_DIRECTORY" && ! -L "$RESTORE_TRANSACTION_DIRECTORY" ]] ||
+    die 'Restore transaction state is invalid.'
+  validate_private_file "$RESTORE_TRANSACTION_DIRECTORY/phase" 'The restore transaction phase record'
+  case "$(< "$RESTORE_TRANSACTION_DIRECTORY/phase")" in
+    database-restored)
+      complete_restore_state_transaction
+      note 'Recovered interrupted restore state publication.'
+      RESTORE_RECOVERED=true
+      ;;
+    restoring)
+      [[ -n "$RESTORE_BACKUP" ]] ||
+        die 'An interrupted database restore must be retried with its exact original source-bound bundle.'
+      validate_restore_transaction_context
+      ;;
+    *)
+      die 'Restore transaction phase is invalid; use the original source-bound bundle and investigate.'
+      ;;
+  esac
+}
+
 deploy_persist() {
+  recover_completed_restore_transaction
   if [[ "$DATABASE_EXISTS" == true && "$STATE_EXISTS" == false && "$PENDING_EXISTS" == false && "$ADOPT_EXISTING_DB" != true ]]; then
     die 'An existing unmanaged database requires --adopt-existing-db or explicitly confirmed rewrite mode.'
   fi
-  if [[ "$STATE_EXISTS" == true ]]; then
+  if [[ "$REWRITE_REPLACEMENT" == true ]]; then
+    validate_pending_state
+  elif [[ "$STATE_EXISTS" == true ]]; then
     validate_recorded_state
   fi
   prepare_pending_state
@@ -897,7 +1162,8 @@ deploy_persist() {
     compose build app caddy
     compose stop app caddy
   else
-    [[ "$STATE_EXISTS" == false ]] || die 'The PostgreSQL volume is missing; explicitly confirm rewrite instead of silently replacing it.'
+    [[ "$STATE_EXISTS" == false || "$REWRITE_REPLACEMENT" == true ]] ||
+      die 'The PostgreSQL volume is missing; explicitly confirm rewrite instead of silently replacing it.'
     load_admin_password
     compose build app caddy
     start_database
@@ -917,28 +1183,36 @@ deploy_persist() {
 }
 
 deploy_rewrite() {
+  recover_completed_restore_transaction
   confirm_rewrite
+  compose build app caddy
+  if [[ "$DATABASE_EXISTS" == true ]]; then
+    start_database
+    validate_database_for_source_bound_backup
+    create_validated_backup
+  else
+    note 'The previously recorded PostgreSQL volume is missing; no pre-rewrite backup can be created.'
+  fi
   if [[ "$PENDING_EXISTS" == true ]]; then
     rm -rf -- "$PENDING_STATE_DIRECTORY"
     PENDING_EXISTS=false
   fi
   prepare_pending_state
-  compose build app caddy
-  if [[ "$DATABASE_EXISTS" == true ]]; then
-    start_database
-    validate_database_migrations
-    create_validated_backup
-  else
-    note 'The previously recorded PostgreSQL volume is missing; no pre-rewrite backup can be created.'
-  fi
   load_admin_password
   compose down --remove-orphans
   if [[ "$DATABASE_EXISTS" == true ]]; then
     verify_volume_ownership
     docker volume rm "$DB_VOLUME"
   fi
+  REWRITE_REPLACEMENT_STAGING="$(mktemp "$STATE_DIRECTORY/.rewrite-replacement.XXXXXX")"
+  printf '%s\n' "$DEPLOYED_SHA" > "$REWRITE_REPLACEMENT_STAGING"
+  chmod 600 -- "$REWRITE_REPLACEMENT_STAGING"
+  mv -T -- "$REWRITE_REPLACEMENT_STAGING" "$REWRITE_REPLACEMENT_MARKER"
+  REWRITE_REPLACEMENT_STAGING=''
+  REWRITE_REPLACEMENT=true
+  REWRITE_REPLACEMENT_SHA="$DEPLOYED_SHA"
   start_database
-  validate_database_migrations
+  validate_rewritten_database_empty
   run_migrations
   create_administrator
   start_application
@@ -946,6 +1220,10 @@ deploy_rewrite() {
 }
 
 restore_backup_bundle() {
+  recover_completed_restore_transaction
+  if [[ "$RESTORE_RECOVERED" == true ]]; then
+    return
+  fi
   [[ "$DATABASE_EXISTS" == true ]] || die 'Guarded restore requires the existing PostgreSQL volume.'
   verify_volume_ownership
   validate_private_directory "$RESTORE_BACKUP" 'The restore backup bundle'
@@ -963,9 +1241,16 @@ restore_backup_bundle() {
 
   local -a metadata_lines=()
   mapfile -t metadata_lines < "$metadata_path"
-  ((${#metadata_lines[@]} == 2)) || die 'The restore bundle metadata is malformed.'
+  ((${#metadata_lines[@]} == 3)) || die 'The restore bundle metadata is malformed.'
   [[ "${metadata_lines[0]}" == 'schemaVersion=1' ]] || die 'The restore bundle schema version is unsupported.'
   [[ "${metadata_lines[1]}" == "project=$PROJECT_NAME" ]] || die 'The restore bundle belongs to another Compose project.'
+  local database_state_kind="${metadata_lines[2]#databaseState=}"
+  [[ "${metadata_lines[2]}" == "databaseState=$database_state_kind" ]] ||
+    die 'The restore bundle database-state selector is malformed.'
+  case "$database_state_kind" in
+    current|pending) ;;
+    *) die 'The restore bundle database-state selector is unsupported.' ;;
+  esac
 
   local digest_line
   digest_line="$(< "$digest_path")"
@@ -1003,10 +1288,13 @@ restore_backup_bundle() {
   [[ -n "$bundle_current" || -n "$bundle_pending" ]] ||
     die 'The restore bundle contains no source deployment state.'
 
-  local selected_state="$bundle_current"
-  if [[ -n "$bundle_pending" ]]; then
-    selected_state="$bundle_pending"
-  fi
+  local selected_state=''
+  case "$database_state_kind" in
+    current) selected_state="$bundle_current" ;;
+    pending) selected_state="$bundle_pending" ;;
+  esac
+  [[ -n "$selected_state" ]] ||
+    die "The restore bundle is missing its selected $database_state_kind deployment state."
   [[ "$(< "$selected_state/deployed-sha")" == "$DEPLOYED_SHA" ]] ||
     die 'The restore bundle requires a different Git checkout.'
   cmp -s -- "$selected_state/migrations.sha256" "$CURRENT_MANIFEST_TEMP" ||
@@ -1024,7 +1312,7 @@ restore_backup_bundle() {
       die "The restore bundle database contains migration $migration_name which is absent from its source checkout."
     dumped_migrations["$migration_name"]=1
   done
-  if [[ -n "$bundle_current" ]]; then
+  if [[ "$database_state_kind" == current ]]; then
     while IFS= read -r manifest_line || [[ -n "$manifest_line" ]]; do
       manifest_path="${manifest_line#*  }"
       migration_name="${manifest_path##*/}"
@@ -1033,37 +1321,87 @@ restore_backup_bundle() {
     done < "$bundle_current/migrations.sha256"
   fi
 
-  [[ "$STATE_EXISTS" == true || "$PENDING_EXISTS" == true ]] ||
-    die 'Guarded restore requires existing source-bound deployment state for its safety backup.'
-  if [[ "$STATE_EXISTS" == true ]]; then
-    validate_state_descriptor "$CURRENT_STATE_DIRECTORY" 'Current deployment state'
-    validate_recorded_state
-  fi
-  validate_pending_state
-
-  RESTORE_STATE_STAGING="$(mktemp -d "$STATE_DIRECTORY/.restore.XXXXXX")"
-  chmod 700 -- "$RESTORE_STATE_STAGING"
-  if [[ -n "$bundle_current" ]]; then
-    mkdir -- "$RESTORE_STATE_STAGING/current"
-    cp -- "$bundle_current/deployed-sha" "$bundle_current/migrations.sha256" \
-      "$RESTORE_STATE_STAGING/current/"
-    chmod 600 -- "$RESTORE_STATE_STAGING/current/deployed-sha" \
-      "$RESTORE_STATE_STAGING/current/migrations.sha256"
-  fi
-  if [[ -n "$bundle_pending" ]]; then
-    mkdir -- "$RESTORE_STATE_STAGING/pending"
-    cp -- "$bundle_pending/deployed-sha" "$bundle_pending/migrations.sha256" \
-      "$RESTORE_STATE_STAGING/pending/"
-    chmod 600 -- "$RESTORE_STATE_STAGING/pending/deployed-sha" \
-      "$RESTORE_STATE_STAGING/pending/migrations.sha256"
+  local dump_digest="${digest_line%%  *}"
+  local resume_restoring=false
+  if [[ -e "$RESTORE_TRANSACTION_DIRECTORY" || -L "$RESTORE_TRANSACTION_DIRECTORY" ]]; then
+    [[ -d "$RESTORE_TRANSACTION_DIRECTORY" && ! -L "$RESTORE_TRANSACTION_DIRECTORY" ]] ||
+      die 'Restore transaction state is invalid.'
+    [[ "$(< "$RESTORE_TRANSACTION_DIRECTORY/phase")" == restoring ]] ||
+      die 'Restore transaction is not ready for a source-bound retry.'
+    [[ "$(< "$RESTORE_TRANSACTION_DIRECTORY/database-state-kind")" == "$database_state_kind" ]] ||
+      die 'Restore transaction target selector differs from the original bundle.'
+    [[ "$(< "$RESTORE_TRANSACTION_DIRECTORY/bundle-digest")" == "$dump_digest" ]] ||
+      die 'Restore transaction dump identity differs from the original bundle.'
+    cmp -s -- "$RESTORE_TRANSACTION_DIRECTORY/database-migrations.txt" "$migrations_path" ||
+      die 'Restore transaction migration identity differs from the original bundle.'
+    if [[ -n "$bundle_current" ]]; then
+      [[ -d "$RESTORE_TRANSACTION_DIRECTORY/current" && ! -L "$RESTORE_TRANSACTION_DIRECTORY/current" ]] ||
+        die 'Restore transaction is missing its original current state.'
+      cmp -s -- "$RESTORE_TRANSACTION_DIRECTORY/current/deployed-sha" "$bundle_current/deployed-sha" &&
+        cmp -s -- "$RESTORE_TRANSACTION_DIRECTORY/current/migrations.sha256" "$bundle_current/migrations.sha256" ||
+        die 'Restore transaction current state differs from the original bundle.'
+    elif [[ -e "$RESTORE_TRANSACTION_DIRECTORY/current" || -L "$RESTORE_TRANSACTION_DIRECTORY/current" ]]; then
+      die 'Restore transaction contains unexpected current state.'
+    fi
+    if [[ "$database_state_kind" == pending ]]; then
+      [[ -d "$RESTORE_TRANSACTION_DIRECTORY/pending" && ! -L "$RESTORE_TRANSACTION_DIRECTORY/pending" ]] ||
+        die 'Restore transaction is missing its original pending state.'
+      cmp -s -- "$RESTORE_TRANSACTION_DIRECTORY/pending/deployed-sha" "$bundle_pending/deployed-sha" &&
+        cmp -s -- "$RESTORE_TRANSACTION_DIRECTORY/pending/migrations.sha256" "$bundle_pending/migrations.sha256" ||
+        die 'Restore transaction pending state differs from the original bundle.'
+    elif [[ -e "$RESTORE_TRANSACTION_DIRECTORY/pending" || -L "$RESTORE_TRANSACTION_DIRECTORY/pending" ]]; then
+      die 'Restore transaction contains unexpected pending state.'
+    fi
+    local recorded_safety_backup
+    recorded_safety_backup="$(< "$RESTORE_TRANSACTION_DIRECTORY/safety-backup-path")"
+    validate_private_directory "$recorded_safety_backup" 'The completed pre-restore safety backup'
+    resume_restoring=true
+  else
+    RESTORE_STATE_STAGING="$(mktemp -d "$STATE_DIRECTORY/.restore.XXXXXX")"
+    chmod 700 -- "$RESTORE_STATE_STAGING"
+    if [[ -n "$bundle_current" ]]; then
+      mkdir -- "$RESTORE_STATE_STAGING/current"
+      cp -- "$bundle_current/deployed-sha" "$bundle_current/migrations.sha256" \
+        "$RESTORE_STATE_STAGING/current/"
+      chmod 600 -- "$RESTORE_STATE_STAGING/current/deployed-sha" \
+        "$RESTORE_STATE_STAGING/current/migrations.sha256"
+    fi
+    if [[ "$database_state_kind" == pending ]]; then
+      mkdir -- "$RESTORE_STATE_STAGING/pending"
+      cp -- "$bundle_pending/deployed-sha" "$bundle_pending/migrations.sha256" \
+        "$RESTORE_STATE_STAGING/pending/"
+      chmod 600 -- "$RESTORE_STATE_STAGING/pending/deployed-sha" \
+        "$RESTORE_STATE_STAGING/pending/migrations.sha256"
+    fi
+    printf 'restore-%s-%s\n' "${DEPLOYED_SHA:0:12}" "$(date -u +%Y%m%dT%H%M%SZ)-$$" \
+      > "$RESTORE_STATE_STAGING/generation-name"
   fi
 
   start_database
   compose exec -T db pg_restore --list < "$dump_path" >/dev/null ||
     die 'The restore bundle is not a readable PostgreSQL custom-format dump.'
-  validate_database_migrations
-  create_validated_backup
+  if [[ "$resume_restoring" == false ]]; then
+    validate_database_for_source_bound_backup
+    CREATED_BACKUP_PATH=''
+    create_validated_backup
+    [[ -n "$CREATED_BACKUP_PATH" ]] || die 'Pre-restore safety backup identity was not recorded.'
+  fi
   compose stop app caddy
+
+  if [[ "$resume_restoring" == false ]]; then
+    printf '%s\n' "$database_state_kind" > "$RESTORE_STATE_STAGING/database-state-kind"
+    printf '%s\n' "$RESTORE_BACKUP" > "$RESTORE_STATE_STAGING/bundle-path"
+    printf '%s\n' "$dump_digest" > "$RESTORE_STATE_STAGING/bundle-digest"
+    cp -- "$migrations_path" "$RESTORE_STATE_STAGING/database-migrations.txt"
+    printf '%s\n' "$CREATED_BACKUP_PATH" > "$RESTORE_STATE_STAGING/safety-backup-path"
+    printf 'restoring\n' > "$RESTORE_STATE_STAGING/phase"
+    chmod 600 -- "$RESTORE_STATE_STAGING/generation-name" \
+      "$RESTORE_STATE_STAGING/database-state-kind" "$RESTORE_STATE_STAGING/bundle-path" \
+      "$RESTORE_STATE_STAGING/bundle-digest" "$RESTORE_STATE_STAGING/database-migrations.txt" \
+      "$RESTORE_STATE_STAGING/safety-backup-path" "$RESTORE_STATE_STAGING/phase"
+    mv -T -- "$RESTORE_STATE_STAGING" "$RESTORE_TRANSACTION_DIRECTORY"
+    RESTORE_STATE_STAGING=''
+  fi
 
   compose exec -T db pg_restore -U skybar -d skybar --clean --if-exists < "$dump_path"
 
@@ -1073,43 +1411,14 @@ restore_backup_bundle() {
   if ((${#DATABASE_MIGRATIONS[@]} > 0)); then
     printf '%s\n' "${DATABASE_MIGRATIONS[@]}" > "$RESTORED_MIGRATIONS_TEMP"
   fi
-  cmp -s -- "$RESTORED_MIGRATIONS_TEMP" "$migrations_path" ||
+  cmp -s -- "$RESTORED_MIGRATIONS_TEMP" "$RESTORE_TRANSACTION_DIRECTORY/database-migrations.txt" ||
     die 'The restored database migration names differ from the source-bound backup; the application remains stopped.'
 
-  mkdir -p -- "$GENERATIONS_DIRECTORY"
-  chmod 700 -- "$GENERATIONS_DIRECTORY"
-  if [[ -n "$bundle_current" ]]; then
-    local generation_name generation_directory
-    generation_name="restore-$(date -u +%Y%m%dT%H%M%SZ)-${DEPLOYED_SHA:0:12}-$$"
-    generation_directory="$GENERATIONS_DIRECTORY/$generation_name"
-    [[ ! -e "$generation_directory" && ! -L "$generation_directory" ]] ||
-      die 'A restored deployment state generation name collision occurred.'
-    PUBLISHED_GENERATION_DIRECTORY="$generation_directory"
-    PUBLISHED_GENERATION_TARGET="generations/$generation_name"
-    mv -T -- "$RESTORE_STATE_STAGING/current" "$generation_directory"
-    STATE_LINK_TEMP="$RESTORE_STATE_STAGING/current-link"
-    ln -s -- "$PUBLISHED_GENERATION_TARGET" "$STATE_LINK_TEMP"
-    mv -Tf -- "$STATE_LINK_TEMP" "$CURRENT_STATE_LINK"
-    STATE_LINK_TEMP=''
-    PUBLISHED_GENERATION_DIRECTORY=''
-    PUBLISHED_GENERATION_TARGET=''
-  else
-    rm -f -- "$CURRENT_STATE_LINK"
-  fi
+  printf 'database-restored\n' > "$RESTORE_TRANSACTION_DIRECTORY/phase.next"
+  chmod 600 -- "$RESTORE_TRANSACTION_DIRECTORY/phase.next"
+  mv -T -- "$RESTORE_TRANSACTION_DIRECTORY/phase.next" "$RESTORE_TRANSACTION_DIRECTORY/phase"
 
-  if [[ -e "$PENDING_STATE_DIRECTORY" || -L "$PENDING_STATE_DIRECTORY" ]]; then
-    RESTORE_PENDING_PREVIOUS="$RESTORE_STATE_STAGING/previous-pending"
-    mv -T -- "$PENDING_STATE_DIRECTORY" "$RESTORE_PENDING_PREVIOUS"
-  fi
-  if [[ -n "$bundle_pending" ]]; then
-    mv -T -- "$RESTORE_STATE_STAGING/pending" "$PENDING_STATE_DIRECTORY"
-  fi
-  if [[ -n "$RESTORE_PENDING_PREVIOUS" && -d "$RESTORE_PENDING_PREVIOUS" ]]; then
-    rm -rf -- "$RESTORE_PENDING_PREVIOUS"
-  fi
-  RESTORE_PENDING_PREVIOUS=''
-  rm -rf -- "$RESTORE_STATE_STAGING"
-  RESTORE_STATE_STAGING=''
+  complete_restore_state_transaction
 
   note 'The source-bound database backup and matching deployment state were restored.'
   note 'The application and Caddy remain stopped; rerun persist mode from this exact checkout.'
