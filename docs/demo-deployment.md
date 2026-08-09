@@ -207,10 +207,11 @@ recreates the database, migrates it, creates the administrator, and publishes
 new state only after HTTPS health succeeds. It never uses `docker compose down
 -v`, a wildcard, or a global Docker prune.
 
-If deployment state exists but the PostgreSQL volume is missing, use the same
-explicit rewrite confirmation before allowing an empty replacement database to
-be created. First investigate whether the host mounted the wrong Docker data
-root or the project name changed.
+If deployment state exists but the PostgreSQL volume is missing, first
+investigate whether the host mounted the wrong Docker data root or the project
+name changed. An intact off-host source-bound bundle can restore the lost
+volume; without one, use explicit rewrite confirmation only for disposable
+data.
 
 ## Backup, state, and restoration
 
@@ -239,9 +240,13 @@ an exact retry.
 
 Never restore a standalone dump or manually pair a dump with deployment state.
 Use the guarded restore action with one intact source-bound bundle. It validates
-the bundle digest, project and volume ownership, exact checkout SHA and
-migration manifest, and creates a second source-bound safety bundle before it
-stops the application and replaces database contents:
+the bundle digest and project, source history, migration compatibility, and any
+existing volume's exact ownership. A bundle from an older ancestor is eligible
+only when every selected migration path and digest is preserved by the current
+checkout. The restore creates a second source-bound safety bundle before it
+stops the application when prior database data exists; after volume loss it
+durably records that no safety backup is possible before creating the exact
+Compose-owned destination volume.
 
 ```bash
 scripts/demo-deploy.sh --env-file .env.demo --db-mode persist \
@@ -250,21 +255,28 @@ scripts/demo-deploy.sh --env-file .env.demo --db-mode persist \
 scripts/demo-deploy.sh --env-file .env.demo --db-mode persist
 ```
 
-Replace the project and bundle names with their configured values. Check out
-the commit recorded in the bundle before restoring. The restore refuses raw,
-tampered, foreign, or source-mismatched backups and restores the matching
-current/pending descriptors only after database migration names agree. A
+Replace the project and bundle names with their configured values. Use a clean
+current checkout that passes release and released-migration policy. The restore
+refuses raw, tampered, foreign, unrelated, descendant, or migration-incompatible
+backups and restores compatible current/pending descriptors only after database
+migration names agree. A
 current-selected dump must contain every current migration. A pending-selected
 dump may represent a partially applied replacement, but every recorded database
 migration must belong to that pending manifest. A current-selected restore does
 not revive an unrelated pending candidate. State
-publication uses a durable restore transaction; if publication is interrupted,
+publication uses a durable restore transaction that binds whether the original
+destination had recoverable data; if publication is interrupted,
 the next deploy or restore completes that transaction before ordinary state
 validation. If the database replacement itself is interrupted, retry with the
 exact original bundle. The transaction binds that bundle identity and records
 the completed pre-restore safety bundle, so the retry reruns restoration without
-trying to validate or back up a possibly partial database. It never deletes the
-Caddy volumes.
+trying to validate or back up a possibly partial database. Every attempt stops
+the application and Caddy, connects through the PostgreSQL maintenance
+database, drops and recreates the complete `skybar` database, and restores the
+custom archive without relying on archive-listed `--clean` statements. It never
+deletes the Caddy volumes. Do not create compatibility migrations for
+unreleased recovery points; rewrite pre-release migrations or restore a
+compatible source-bound bundle.
 
 ## Secret rotation
 
