@@ -1430,22 +1430,33 @@ validate_completed_restore_retirement() {
 }
 
 recover_completed_restore_retirements() {
-  local retirement name recovered=false
+  local -a retirements=()
+  local retirement name recorded_bundle
   for retirement in "$STATE_DIRECTORY"/.restore-transaction-completed.*; do
     [[ -e "$retirement" || -L "$retirement" ]] || continue
     name="${retirement##*/}"
     [[ "$name" =~ ^\.restore-transaction-completed\.[0-9]+\.[0-9]+$ ]] ||
       die "Unexpected completed restore transaction retirement name: $name"
-    [[ ! -e "$RESTORE_TRANSACTION_DIRECTORY" && ! -L "$RESTORE_TRANSACTION_DIRECTORY" ]] ||
-      die 'Completed and active restore transactions coexist; investigate before retrying.'
-    validate_completed_restore_retirement "$retirement"
-    rm -rf -- "$retirement"
-    recovered=true
+    retirements+=("$retirement")
   done
-  if [[ "$recovered" == true ]]; then
-    note 'Recovered completed restore transaction retirement.'
-    RESTORE_RECOVERED=true
-  fi
+  ((${#retirements[@]} > 0)) || return 0
+  [[ ! -e "$RESTORE_TRANSACTION_DIRECTORY" && ! -L "$RESTORE_TRANSACTION_DIRECTORY" ]] ||
+    die 'Completed and active restore transactions coexist; investigate before retrying.'
+
+  for retirement in "${retirements[@]}"; do
+    validate_completed_restore_retirement "$retirement"
+    if [[ -n "$RESTORE_BACKUP" ]]; then
+      recorded_bundle="$(< "$retirement/bundle-path")"
+      [[ "$recorded_bundle" == "$RESTORE_BACKUP" ]] ||
+        die 'Completed restore transaction belongs to a different source-bound bundle than the requested restore.'
+    fi
+  done
+
+  for retirement in "${retirements[@]}"; do
+    rm -rf -- "$retirement"
+  done
+  note 'Recovered completed restore transaction retirement.'
+  RESTORE_RECOVERED=true
 }
 
 complete_restore_state_transaction() {

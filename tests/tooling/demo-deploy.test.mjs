@@ -1048,7 +1048,7 @@ test('guarded restore recovers a missing destination without inventing a safety 
   }
 });
 
-test('missing-destination identity binding survives staging and retirement interruptions', (t) => {
+test('missing-destination binding and retirement recovery stay bound to the requested bundle', (t) => {
   const fixture = makeFixture(t);
   const state = seedState(fixture);
   const deployed = run(fixture, commonPersistArgs(fixture), {
@@ -1091,16 +1091,55 @@ test('missing-destination identity binding survives staging and retirement inter
   assert.equal(existsSync(join(state, retirement, '.destination-volume-identity.next')), false);
   assert.equal(existsSync(transaction), false);
   const beforeCleanup = stateSnapshot(state);
+  const retirementPath = join(state, retirement);
+  const otherBundle = `${bundle}-different`;
+  const missingBundle = join(fixture.directory, 'missing-restore.bundle');
+  cpSync(bundle, otherBundle, { recursive: true });
+
+  const assertNoRestoreMutation = () => {
+    const lines = dockerLines(fixture);
+    assert.equal(lines.some((line) => /\b(up|stop|run|exec|down)\b/.test(line)), false, lines.join('\n'));
+    assert.equal(lines.some((line) => /^volume (?:create|rm)\b/.test(line)), false, lines.join('\n'));
+    assert.equal(lines.some((line) => /\b(?:pg_dump|pg_restore)\b|DROP DATABASE|CREATE DATABASE/.test(line)),
+      false, lines.join('\n'));
+  };
+
+  const secondRetirement = join(state, '.restore-transaction-completed.999999999.1');
+  cpSync(retirementPath, secondRetirement, { recursive: true });
+  chmodSync(secondRetirement, 0o700);
+  chmodSync(join(secondRetirement, 'current'), 0o700);
+  writeFileSync(join(secondRetirement, 'bundle-path'), `${otherBundle}\n`);
+  writeFileSync(fixture.commandLog, '');
+  const ambiguous = run(fixture, restoreArgs, { FAKE_GIT_SHA: 'f'.repeat(40) });
+  assert.notEqual(ambiguous.status, 0);
+  assert.match(ambiguous.output, /different source-bound bundle.*requested restore/i);
+  assert.ok(existsSync(retirementPath));
+  assert.ok(existsSync(secondRetirement));
+  assert.deepEqual(stateSnapshot(state), beforeCleanup);
+  assertNoRestoreMutation();
+  rmSync(secondRetirement, { recursive: true });
+
+  for (const requestedBundle of [otherBundle, missingBundle]) {
+    writeFileSync(fixture.commandLog, '');
+    const rejected = run(fixture, [...commonPersistArgs(fixture),
+      '--restore-backup', requestedBundle, '--confirm-restore', project], {
+      FAKE_GIT_SHA: 'f'.repeat(40),
+    });
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.output, /different source-bound bundle.*requested restore/i);
+    assert.ok(existsSync(retirementPath));
+    assert.equal(readFileSync(join(retirementPath, 'bundle-path'), 'utf8').trim(), bundle);
+    assert.deepEqual(stateSnapshot(state), beforeCleanup);
+    assertNoRestoreMutation();
+  }
 
   writeFileSync(fixture.commandLog, '');
   const recovered = run(fixture, restoreArgs, { FAKE_GIT_SHA: 'f'.repeat(40) });
   assert.equal(recovered.status, 0, recovered.output);
   assert.match(recovered.output, /Recovered completed restore transaction retirement/i);
-  assert.equal(existsSync(join(state, retirement)), false);
+  assert.equal(existsSync(retirementPath), false);
   assert.deepEqual(stateSnapshot(state), beforeCleanup);
-  const lines = dockerLines(fixture);
-  assert.equal(lines.some((line) => /\b(up|stop|run|exec|down)\b/.test(line)), false, lines.join('\n'));
-  assert.equal(lines.some((line) => /^volume (?:create|rm)\b/.test(line)), false, lines.join('\n'));
+  assertNoRestoreMutation();
 });
 
 test('retry rejects unsafe fixed destination identity staging records', async (t) => {
