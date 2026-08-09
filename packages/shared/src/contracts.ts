@@ -1,4 +1,6 @@
 import { z } from 'zod';
+// @ts-ignore TS6307 -- resolveJsonModule emits this runtime rule although the composite include omits JSON assets.
+import loginEmailRules from './login-email-rules.json' with { type: 'json' };
 
 export const MAX_MONEY_CENTS = 2_147_483_647;
 export const MAX_ORDER_BATCH_LINES = 100;
@@ -150,7 +152,9 @@ export const accessApprovalSchema = z.object({
   expiresAt: z.string().datetime(),
 });
 
-export const loginEmailSchema = z.string().trim().toLowerCase().email().max(254);
+export const loginEmailSchema = z.string().trim().toLowerCase()
+  .regex(new RegExp(loginEmailRules.pattern, loginEmailRules.flags))
+  .max(loginEmailRules.maxLength);
 
 export const loginSchema = z.object({
   email: loginEmailSchema,
