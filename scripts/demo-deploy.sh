@@ -43,6 +43,7 @@ ADMIN_PASSWORD=''
 RESTORE_RECOVERED=false
 REWRITE_REPLACEMENT=false
 REWRITE_REPLACEMENT_SHA=''
+VALIDATED_BACKUP_IDENTITY=''
 
 usage() {
   cat <<'EOF'
@@ -724,8 +725,13 @@ read_database_migrations() {
     present) ;;
     *) die 'Could not determine whether schema_migrations exists.' ;;
   esac
-  mapfile -t DATABASE_MIGRATIONS < <(compose exec -T db psql -U skybar -d skybar -tAc \
-    'SELECT name FROM schema_migrations ORDER BY name')
+  local migration_output
+  migration_output="$(compose exec -T db psql -U skybar -d skybar -tAc \
+    'SELECT name FROM schema_migrations ORDER BY name')" ||
+    die 'Could not read applied database migrations.'
+  if [[ -n "$migration_output" ]]; then
+    mapfile -t DATABASE_MIGRATIONS <<< "$migration_output"
+  fi
 }
 
 validate_database_migrations() {
@@ -866,6 +872,99 @@ create_validated_backup() {
   note "Created and validated source-bound database backup: $final_path"
 }
 
+validate_source_bound_safety_backup() {
+  local bundle="$1"
+  validate_private_directory "$bundle" 'The recorded pre-restore safety backup'
+  validate_private_file "$bundle/metadata" 'The safety backup metadata'
+  validate_private_file "$bundle/database.dump" 'The safety backup database dump'
+  validate_private_file "$bundle/dump.sha256" 'The safety backup dump digest'
+  validate_private_file "$bundle/database-migrations.txt" 'The safety backup database migration list'
+  validate_private_directory "$bundle/state" 'The safety backup state directory'
+
+  local -a metadata_lines=()
+  mapfile -t metadata_lines < "$bundle/metadata"
+  ((${#metadata_lines[@]} == 3)) || die 'The safety backup metadata is malformed.'
+  [[ "${metadata_lines[0]}" == 'schemaVersion=1' ]] || die 'The safety backup schema version is unsupported.'
+  [[ "${metadata_lines[1]}" == "project=$PROJECT_NAME" ]] || die 'The safety backup belongs to another Compose project.'
+  local database_state_kind="${metadata_lines[2]#databaseState=}"
+  [[ "${metadata_lines[2]}" == "databaseState=$database_state_kind" ]] ||
+    die 'The safety backup database-state selector is malformed.'
+  case "$database_state_kind" in
+    current|pending) ;;
+    *) die 'The safety backup database-state selector is unsupported.' ;;
+  esac
+
+  local digest_line
+  digest_line="$(< "$bundle/dump.sha256")"
+  [[ "$digest_line" =~ ^[0-9a-f]{64}'  database.dump'$ ]] ||
+    die 'The safety backup dump digest record is malformed.'
+  (cd -- "$bundle" && sha256sum -c --status dump.sha256) ||
+    die 'The recorded pre-restore safety backup dump failed its digest check.'
+  compose exec -T db pg_restore --list < "$bundle/database.dump" >/dev/null ||
+    die 'The recorded pre-restore safety backup is not a readable PostgreSQL custom-format dump.'
+
+  local -a database_migrations=()
+  mapfile -t database_migrations < "$bundle/database-migrations.txt"
+  local migration_name
+  for migration_name in "${database_migrations[@]}"; do
+    [[ "$migration_name" =~ ^[0-9]{4}_[a-z0-9_]+\.sql$ ]] ||
+      die 'The safety backup database migration list is malformed.'
+  done
+  LC_ALL=C sort -u -- "$bundle/database-migrations.txt" | cmp -s -- "$bundle/database-migrations.txt" - ||
+    die 'The safety backup database migration list must be sorted and unique.'
+
+  local current_state='' pending_state=''
+  local -a identity_files=(metadata database.dump dump.sha256 database-migrations.txt)
+  if [[ -e "$bundle/state/current" || -L "$bundle/state/current" ]]; then
+    current_state="$bundle/state/current"
+    validate_private_directory "$current_state" 'The safety backup current state'
+    validate_private_file "$current_state/deployed-sha" 'The safety backup current deployed SHA'
+    validate_private_file "$current_state/migrations.sha256" 'The safety backup current migration manifest'
+    validate_state_descriptor "$current_state" 'Safety backup current state'
+    identity_files+=(state/current/deployed-sha state/current/migrations.sha256)
+  fi
+  if [[ -e "$bundle/state/pending" || -L "$bundle/state/pending" ]]; then
+    pending_state="$bundle/state/pending"
+    validate_private_directory "$pending_state" 'The safety backup pending state'
+    validate_private_file "$pending_state/deployed-sha" 'The safety backup pending deployed SHA'
+    validate_private_file "$pending_state/migrations.sha256" 'The safety backup pending migration manifest'
+    validate_state_descriptor "$pending_state" 'Safety backup pending state'
+    identity_files+=(state/pending/deployed-sha state/pending/migrations.sha256)
+  fi
+  local selected_state=''
+  case "$database_state_kind" in
+    current) selected_state="$current_state" ;;
+    pending) selected_state="$pending_state" ;;
+  esac
+  [[ -n "$selected_state" ]] ||
+    die "The safety backup is missing its selected $database_state_kind deployment state."
+
+  declare -A selected_migrations=()
+  declare -A dumped_migrations=()
+  local manifest_line manifest_path
+  while IFS= read -r manifest_line || [[ -n "$manifest_line" ]]; do
+    manifest_path="${manifest_line#*  }"
+    selected_migrations["${manifest_path##*/}"]=1
+  done < "$selected_state/migrations.sha256"
+  for migration_name in "${database_migrations[@]}"; do
+    [[ -v "selected_migrations[$migration_name]" ]] ||
+      die "The safety backup database contains migration $migration_name outside its selected source state."
+    dumped_migrations["$migration_name"]=1
+  done
+  if [[ "$database_state_kind" == current ]]; then
+    for migration_name in "${!selected_migrations[@]}"; do
+      [[ -v "dumped_migrations[$migration_name]" ]] ||
+        die "The safety backup database is older than its selected current state because migration $migration_name is missing."
+    done
+  fi
+
+  local identity_line
+  identity_line="$(cd -- "$bundle" && sha256sum -- "${identity_files[@]}" | sha256sum)"
+  VALIDATED_BACKUP_IDENTITY="${identity_line%% *}"
+  [[ "$VALIDATED_BACKUP_IDENTITY" =~ ^[0-9a-f]{64}$ ]] ||
+    die 'Could not establish the recorded pre-restore safety backup identity.'
+}
+
 load_admin_password() {
   if [[ -n "$ADMIN_PASSWORD_FILE" ]]; then
     local -a password_lines=()
@@ -993,7 +1092,7 @@ validate_restore_transaction_context() {
   validate_private_directory "$RESTORE_TRANSACTION_DIRECTORY" 'The restore transaction'
   local file
   for file in phase generation-name database-state-kind bundle-path bundle-digest \
-      database-migrations.txt safety-backup-path; do
+      database-migrations.txt safety-backup-path safety-backup-identity; do
     validate_private_file "$RESTORE_TRANSACTION_DIRECTORY/$file" "The restore transaction $file record"
   done
 
@@ -1015,16 +1114,19 @@ validate_restore_transaction_context() {
   cmp -s -- "$selected_state/migrations.sha256" "$CURRENT_MANIFEST_TEMP" ||
     die 'Interrupted restore state differs from this checkout migration manifest.'
 
-  local recorded_bundle recorded_digest recorded_safety
+  local recorded_bundle recorded_digest recorded_safety recorded_safety_identity
   recorded_bundle="$(< "$RESTORE_TRANSACTION_DIRECTORY/bundle-path")"
   recorded_digest="$(< "$RESTORE_TRANSACTION_DIRECTORY/bundle-digest")"
   recorded_safety="$(< "$RESTORE_TRANSACTION_DIRECTORY/safety-backup-path")"
+  recorded_safety_identity="$(< "$RESTORE_TRANSACTION_DIRECTORY/safety-backup-identity")"
   [[ -n "$recorded_bundle" && "$recorded_bundle" != *$'\n'* ]] ||
     die 'Restore transaction bundle path is invalid.'
   [[ "$recorded_digest" =~ ^[0-9a-f]{64}$ ]] ||
     die 'Restore transaction bundle digest is invalid.'
   [[ -n "$recorded_safety" && "$recorded_safety" != *$'\n'* ]] ||
     die 'Restore transaction safety backup path is invalid.'
+  [[ "$recorded_safety_identity" =~ ^[0-9a-f]{64}$ ]] ||
+    die 'Restore transaction safety backup identity is invalid.'
   if [[ -n "$RESTORE_BACKUP" && "$RESTORE_BACKUP" != "$recorded_bundle" ]]; then
     die 'Interrupted restore must be retried with the exact original source-bound bundle path.'
   fi
@@ -1352,9 +1454,9 @@ restore_backup_bundle() {
     elif [[ -e "$RESTORE_TRANSACTION_DIRECTORY/pending" || -L "$RESTORE_TRANSACTION_DIRECTORY/pending" ]]; then
       die 'Restore transaction contains unexpected pending state.'
     fi
-    local recorded_safety_backup
+    local recorded_safety_backup recorded_safety_identity
     recorded_safety_backup="$(< "$RESTORE_TRANSACTION_DIRECTORY/safety-backup-path")"
-    validate_private_directory "$recorded_safety_backup" 'The completed pre-restore safety backup'
+    recorded_safety_identity="$(< "$RESTORE_TRANSACTION_DIRECTORY/safety-backup-identity")"
     resume_restoring=true
   else
     RESTORE_STATE_STAGING="$(mktemp -d "$STATE_DIRECTORY/.restore.XXXXXX")"
@@ -1385,6 +1487,11 @@ restore_backup_bundle() {
     CREATED_BACKUP_PATH=''
     create_validated_backup
     [[ -n "$CREATED_BACKUP_PATH" ]] || die 'Pre-restore safety backup identity was not recorded.'
+    validate_source_bound_safety_backup "$CREATED_BACKUP_PATH"
+  else
+    validate_source_bound_safety_backup "$recorded_safety_backup"
+    [[ "$VALIDATED_BACKUP_IDENTITY" == "$recorded_safety_identity" ]] ||
+      die 'The recorded pre-restore safety backup identity changed after the interrupted restore.'
   fi
   compose stop app caddy
 
@@ -1394,11 +1501,13 @@ restore_backup_bundle() {
     printf '%s\n' "$dump_digest" > "$RESTORE_STATE_STAGING/bundle-digest"
     cp -- "$migrations_path" "$RESTORE_STATE_STAGING/database-migrations.txt"
     printf '%s\n' "$CREATED_BACKUP_PATH" > "$RESTORE_STATE_STAGING/safety-backup-path"
+    printf '%s\n' "$VALIDATED_BACKUP_IDENTITY" > "$RESTORE_STATE_STAGING/safety-backup-identity"
     printf 'restoring\n' > "$RESTORE_STATE_STAGING/phase"
     chmod 600 -- "$RESTORE_STATE_STAGING/generation-name" \
       "$RESTORE_STATE_STAGING/database-state-kind" "$RESTORE_STATE_STAGING/bundle-path" \
       "$RESTORE_STATE_STAGING/bundle-digest" "$RESTORE_STATE_STAGING/database-migrations.txt" \
-      "$RESTORE_STATE_STAGING/safety-backup-path" "$RESTORE_STATE_STAGING/phase"
+      "$RESTORE_STATE_STAGING/safety-backup-path" "$RESTORE_STATE_STAGING/safety-backup-identity" \
+      "$RESTORE_STATE_STAGING/phase"
     mv -T -- "$RESTORE_STATE_STAGING" "$RESTORE_TRANSACTION_DIRECTORY"
     RESTORE_STATE_STAGING=''
   fi
