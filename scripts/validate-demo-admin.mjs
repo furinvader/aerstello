@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { readFileSync } from 'node:fs';
+import { loginEmailSchema } from '../packages/shared/src/contracts.ts';
 
 function argument(name) {
   const index = process.argv.indexOf(`--${name}`);
@@ -13,10 +14,9 @@ const rules = JSON.parse(readFileSync(
 ));
 const email = argument('email');
 const name = argument('name');
-const emailPattern = new RegExp(rules.emailPattern, rules.emailFlags);
 const namePattern = new RegExp(rules.namePattern);
 
-if (typeof email !== 'string' || email.length > rules.emailMaxLength || !emailPattern.test(email)) {
+if (!loginEmailSchema.safeParse(email).success) {
   process.stderr.write('ADMIN_EMAIL is not accepted by the administrator bootstrap command.\n');
   process.exit(1);
 }

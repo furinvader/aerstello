@@ -1,5 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { guestArchiveSchema, guestUpdateSchema, isValidTimeZone, itemVoidSchema, productCreateSchema, productUpdateSchema, roomArchiveSchema, roomUpdateSchema, settleTabSchema, venueSettingsSchema } from './contracts.js';
+import { guestArchiveSchema, guestUpdateSchema, isValidTimeZone, itemVoidSchema, loginEmailSchema, loginSchema, productCreateSchema, productUpdateSchema, roomArchiveSchema, roomUpdateSchema, settleTabSchema, venueSettingsSchema } from './contracts.js';
+
+const validLoginEmails = [
+  ['admin@example.com', 'admin@example.com'],
+  [' first.last+demo@example-host.test ', 'first.last+demo@example-host.test'],
+  ['ADMIN@EXAMPLE.COM', 'admin@example.com'],
+] as const;
+
+const invalidLoginEmails = [
+  'admin@example.1',
+  'a..b@example.com',
+  '.admin@example.com',
+  'admin.@example.com',
+  'admin@-example.com',
+  'admin@example',
+  'admin @example.com',
+  `${'a'.repeat(244)}@example.com`,
+] as const;
 
 describe('venue contracts', () => {
   it('accepts recognized IANA time zones', () => {
@@ -64,5 +81,17 @@ describe('venue contracts', () => {
   it('requires a mutation identifier and version when archiving a room', () => {
     expect(roomArchiveSchema.safeParse({ mutationId: '00000000-0000-4000-8000-000000000005', expectedVersion: 1 }).success).toBe(true);
     expect(roomArchiveSchema.safeParse({ expectedVersion: 1 }).success).toBe(false);
+  });
+});
+
+describe('login email contract', () => {
+  it.each(validLoginEmails)('accepts and normalizes %s', (email, normalized) => {
+    expect(loginEmailSchema.parse(email)).toBe(normalized);
+    expect(loginSchema.parse({ email, password: 'correct horse battery staple' }).email).toBe(normalized);
+  });
+
+  it.each(invalidLoginEmails)('rejects %s', (email) => {
+    expect(loginEmailSchema.safeParse(email).success).toBe(false);
+    expect(loginSchema.safeParse({ email, password: 'correct horse battery staple' }).success).toBe(false);
   });
 });
