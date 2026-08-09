@@ -29,20 +29,48 @@ runtime-management process used for the source checkout, then verify
 `node --version`. Node runs the repository's release and administrator-input
 preflight checks; deployment fails closed when it is unavailable.
 
-Install Docker Engine and the Compose plugin from Docker's official repository
-for the host distribution, enable the daemon, and verify both commands before
-deploying:
+On Ubuntu, use the repository installer to configure Docker's official apt
+repository, install Docker Engine and Compose, start the services, and verify
+the installation:
 
 ```bash
-docker version
-docker compose version
+sudo scripts/install-docker-ubuntu.sh --install
 ```
 
 The deploying account must be able to talk to the Docker daemon. Membership in
-the `docker` group is effectively root access; grant it deliberately, only to
-a trusted local account, and log out and back in before relying on the new
-membership. Follow Docker's platform-specific instructions when the host uses
-Debian or another non-Ubuntu distribution.
+the `docker` group is effectively root access; grant it deliberately and only
+to a trusted local account. To opt in while installing, name the account
+explicitly, then log out and back in before running Docker without `sudo`:
+
+```bash
+sudo scripts/install-docker-ubuntu.sh --install --grant-docker-group "$USER"
+```
+
+Use `sudo scripts/install-docker-ubuntu.sh --check` to inspect an existing
+installation. Upgrades require the explicit `--upgrade` action. Add `--dry-run`
+to `--install` or `--upgrade` to preview the commands without changing the
+host. The check uses cached apt metadata to prove the installed versions still
+belong to Docker's official repository; run `sudo apt-get update` first if the
+host's apt lists were deliberately removed.
+
+The installer fails closed on conflicting packages, foreign package origins,
+unmanaged Docker executables, shadow systemd units, and service drop-ins. It
+does not remove or rewrite those customizations. A host that intentionally
+needs a Docker systemd override or another managed package source requires a
+separately reviewed manual installation instead of this repository script.
+
+On Debian or another non-Ubuntu host, do not use the Ubuntu installer. Follow
+Docker's official instructions for that platform; for Debian, configure
+Docker's official Debian package repository before installing its engine
+packages:
+
+```bash
+# After configuring Docker's official Debian package repository:
+sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
+docker version
+docker compose version
+```
 
 Point an `A` record (and an `AAAA` record only when IPv6 routing works) for the
 demo hostname at this host. Allow inbound TCP 80 and TCP 443 through the cloud

@@ -98,10 +98,27 @@ For a repeatable, single-host demo behind automatic HTTPS, use the guarded
 deployment command and the dedicated `compose.demo.yml` stack. It keeps
 PostgreSQL private and publishes only Caddy on ports 80 and 443.
 
-Prepare the host with Docker Engine and the Docker Compose plugin from the
-official repository for its Linux distribution. Docker socket access is
-effectively root access, so grant it only to a trusted deploying account. See
-the demo deployment runbook for the complete host prerequisites.
+On Ubuntu, install the host command dependencies first, then install or verify
+Docker Engine from Docker's official repository with the repository installer:
+
+```bash
+sudo apt-get update
+sudo apt-get install bash ca-certificates coreutils curl diffutils findutils git gnupg openssl util-linux
+sudo scripts/install-docker-ubuntu.sh --install
+```
+
+Docker socket access is effectively root access. Grant it only when the
+deploying account needs to run Docker without `sudo`, then log out and back in
+before continuing:
+
+```bash
+sudo scripts/install-docker-ubuntu.sh --install --grant-docker-group "$USER"
+```
+
+The installer also provides `--check`, an explicit `--upgrade` action, and
+`--dry-run` for previewing install or upgrade commands. Debian and other
+non-Ubuntu hosts require their platform's manual Docker Engine installation;
+see the demo deployment runbook.
 
 ```bash
 scripts/demo-deploy.sh --init-env --env-file .env.demo
