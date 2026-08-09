@@ -1,4 +1,4 @@
 {
-  "nameMaxLength": 200,
+  "nameMaxLength": 120,
   "namePattern": "\\S"
 }
