@@ -124,21 +124,37 @@ if (args[0] === 'volume' && args[1] === 'inspect') {
   else process.stdout.write('[{}]\n');
   process.exit(0);
 }
-if (args[0] === 'volume' && args[1] === 'rm') process.exit(0);
+if (args[0] === 'volume' && args[1] === 'rm') {
+  fs.writeFileSync(process.env.FAKE_COMMAND_LOG + '.volume-removed', '1');
+  process.exit(0);
+}
 const command = args.join(' ');
+if (command.includes('npm run db:migrate')) {
+  try { fs.unlinkSync(process.env.FAKE_COMMAND_LOG + '.volume-removed'); } catch {}
+}
 if (/\bps\b/.test(command) && (args.includes('-q') || args.includes('--quiet'))) process.stdout.write('fake-container-id\n');
 else if (/\binspect\b/.test(command) && command.includes('State.Health.Status')) process.stdout.write('healthy\n');
 else if (/\bps\b/.test(command) && command.includes('--services')) process.stdout.write('db\napp\ncaddy\n');
 else if ((/\bexec\b/.test(command) || /\brun\b/.test(command)) && /\bpsql\b/.test(command)) {
-  if (command.includes('to_regclass')) process.stdout.write(process.env.FAKE_SCHEMA_TABLE === '0' ? 'missing\n' : 'present\n');
+  if (command.includes('to_regclass')) {
+    const recreated = fs.existsSync(process.env.FAKE_COMMAND_LOG + '.volume-removed');
+    process.stdout.write(process.env.FAKE_SCHEMA_TABLE === '0' || recreated ? 'missing\n' : 'present\n');
+  }
   else if (command.includes('SELECT name FROM schema_migrations')) {
+    const restoredPath = process.env.FAKE_COMMAND_LOG + '.restored-migrations';
     if (process.env.FAKE_SCHEMA_MIGRATIONS !== '__EMPTY__') {
-      process.stdout.write((process.env.FAKE_SCHEMA_MIGRATIONS || '0001_initial.sql') + '\n');
+      const names = fs.existsSync(restoredPath)
+        ? fs.readFileSync(restoredPath, 'utf8')
+        : (process.env.FAKE_SCHEMA_MIGRATIONS || '0001_initial.sql');
+      if (names) process.stdout.write(names.replace(/\n$/, '') + '\n');
     }
   } else process.stdout.write(process.env.FAKE_ADMIN_EXISTS === '0' ? '0\n' : '1\n');
 } else if (/\bpg_dump\b/.test(command)) {
   process.stdout.write('PGDMP fake custom-format backup\n');
 } else if (/\bpg_restore\b/.test(command)) {
+  if (command.includes('--clean') && process.env.FAKE_RESTORED_SCHEMA_MIGRATIONS !== undefined) {
+    fs.writeFileSync(process.env.FAKE_COMMAND_LOG + '.restored-migrations', process.env.FAKE_RESTORED_SCHEMA_MIGRATIONS);
+  }
   process.stdout.write('; Archive created at 2026-08-08\n');
 }
 process.exit(0);
@@ -455,6 +471,7 @@ test('persist backs up first, always runs the exact compiled migration command, 
   assert.ok(existsSync(join(bundle, 'database-migrations.txt')));
   assert.ok(existsSync(join(bundle, 'state', 'current', 'migrations.sha256')));
   assert.ok(existsSync(join(bundle, 'state', 'pending', 'migrations.sha256')));
+  assert.match(readFileSync(join(bundle, 'metadata'), 'utf8'), /databaseState=current/);
   const state = join(fixture.directory, '.demo-state', project);
   assert.notEqual(stateSnapshot(state).current, 'generations/seed');
 });
@@ -818,6 +835,8 @@ test('guarded restore rejects tampering before replacement and creates safety ba
     const restored = run(fixture, [...commonPersistArgs(fixture),
       '--restore-backup', bundle, '--confirm-restore', project], {
       FAKE_EXISTING_VOLUMES: dbVolume,
+      FAKE_GIT_SHA: 'f'.repeat(40),
+      FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
     });
     assert.notEqual(restored.status, 0);
     assert.match(restored.output, /digest|tamper|backup/i);
@@ -838,6 +857,8 @@ test('guarded restore rejects tampering before replacement and creates safety ba
     const restored = run(fixture, [...commonPersistArgs(fixture),
       '--restore-backup', bundle, '--confirm-restore', project], {
       FAKE_EXISTING_VOLUMES: dbVolume,
+      FAKE_GIT_SHA: 'f'.repeat(40),
+      FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
     });
     assert.equal(restored.status, 0, restored.output);
     const lines = dockerLines(fixture);
@@ -848,4 +869,297 @@ test('guarded restore rejects tampering before replacement and creates safety ba
     assert.ok(lines.slice(0, destructiveRestore).some((line) => line.includes('stop app caddy')));
     assert.equal(backupBundles(fixture).length, 2);
   });
+});
+
+test('confirmed pre-release rewrites preserve restorable old source identity', async (t) => {
+  const cases = [
+    ['modified', (fixture) => {
+      writeFileSync(join(fixture.directory, migrationPath), 'SELECT 999;\n');
+      return '0001_initial.sql';
+    }],
+    ['renamed', (fixture) => {
+      rmSync(join(fixture.directory, migrationPath));
+      writeFileSync(join(fixture.directory, 'apps/api/migrations/0001_renamed.sql'), 'SELECT 1;\n');
+      return '0001_renamed.sql';
+    }],
+    ['removed and replaced', (fixture) => {
+      rmSync(join(fixture.directory, migrationPath));
+      writeFileSync(join(fixture.directory, 'apps/api/migrations/0002_replacement.sql'), 'SELECT 2;\n');
+      return '0002_replacement.sql';
+    }],
+  ];
+  for (const [name, mutate] of cases) {
+    await t.test(name, (st) => {
+      const fixture = makeFixture(st);
+      const state = seedState(fixture);
+      const oldManifest = readFileSync(join(state, 'generations', 'seed', 'migrations.sha256'), 'utf8');
+      const newDatabaseMigration = mutate(fixture);
+      const rewritten = run(fixture, [
+        '--env-file', fixture.environmentPath,
+        '--db-mode', 'rewrite',
+        '--confirm-rewrite', project,
+        '--admin-password-file', passwordFile(fixture),
+      ], {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
+        FAKE_ADMIN_EXISTS: '0',
+      });
+      assert.equal(rewritten.status, 0, rewritten.output);
+      const [oldBundle] = backupBundles(fixture);
+      assert.ok(oldBundle);
+      assert.match(readFileSync(join(oldBundle, 'metadata'), 'utf8'), /databaseState=current/);
+      assert.equal(readFileSync(join(oldBundle, 'state', 'current', 'migrations.sha256'), 'utf8'), oldManifest);
+
+      for (const entry of readdirSync(join(fixture.directory, 'apps/api/migrations'))) {
+        rmSync(join(fixture.directory, 'apps/api/migrations', entry), { recursive: true, force: true });
+      }
+      writeFileSync(join(fixture.directory, migrationPath), '-- initial schema\nSELECT 1;\n');
+      writeFileSync(fixture.commandLog, '');
+      const restored = run(fixture, [...commonPersistArgs(fixture),
+        '--restore-backup', oldBundle, '--confirm-restore', project], {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_GIT_SHA: 'f'.repeat(40),
+        FAKE_SCHEMA_MIGRATIONS: newDatabaseMigration,
+        FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
+      });
+      assert.equal(restored.status, 0, restored.output);
+      const current = join(state, readlinkSync(join(state, 'current')));
+      assert.equal(readFileSync(join(current, 'migrations.sha256'), 'utf8'), oldManifest);
+      assert.equal(existsSync(join(state, 'pending')), false);
+    });
+  }
+});
+
+test('interrupted rewrite binds the replacement database to candidate pending state', (t) => {
+  const fixture = makeFixture(t);
+  const state = seedState(fixture);
+  writeFileSync(join(fixture.directory, migrationPath), 'SELECT 999;\n');
+  const rewritten = run(fixture, [
+    '--env-file', fixture.environmentPath,
+    '--db-mode', 'rewrite',
+    '--confirm-rewrite', project,
+    '--admin-password-file', passwordFile(fixture),
+  ], {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
+    FAKE_ADMIN_EXISTS: '0',
+    FAKE_CURL_FAIL: '1',
+  });
+  assert.notEqual(rewritten.status, 0);
+  assert.ok(existsSync(join(state, 'rewrite-replacement')));
+  assert.ok(existsSync(join(state, 'pending', 'migrations.sha256')));
+  assert.equal(readlinkSync(join(state, 'current')), 'generations/seed');
+
+  writeFileSync(fixture.commandLog, '');
+  const resumed = run(fixture, commonPersistArgs(fixture), {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
+    FAKE_ADMIN_EXISTS: '1',
+  });
+  assert.equal(resumed.status, 0, resumed.output);
+  assert.equal(existsSync(join(state, 'rewrite-replacement')), false);
+  assert.equal(existsSync(join(state, 'pending')), false);
+  assert.notEqual(readlinkSync(join(state, 'current')), 'generations/seed');
+});
+
+test('interrupted restore publication recovers before ordinary state validation', (t) => {
+  const fixture = makeFixture(t);
+  const state = seedState(fixture);
+  const deployed = run(fixture, commonPersistArgs(fixture), {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_ADMIN_EXISTS: '1',
+  });
+  assert.equal(deployed.status, 0, deployed.output);
+  const [bundle] = backupBundles(fixture);
+  assert.ok(bundle);
+
+  const pending = join(state, 'pending');
+  mkdirSync(pending);
+  writeFileSync(join(pending, 'deployed-sha'), `${gitSha}\n`);
+  writeFileSync(join(pending, 'migrations.sha256'),
+    `${hashFile(join(fixture.directory, migrationPath))}  ${migrationPath}\n` +
+    `${'d'.repeat(64)}  apps/api/migrations/0002_unrelated.sql\n`);
+  writeFileSync(fixture.commandLog, '');
+  const restoreArgs = [...commonPersistArgs(fixture),
+    '--restore-backup', bundle, '--confirm-restore', project];
+  const interrupted = run(fixture, restoreArgs, {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_GIT_SHA: 'f'.repeat(40),
+    FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
+    SKY_BAR_TEST_FAIL_RESTORE_PUBLICATION: 'after-current',
+  });
+  assert.notEqual(interrupted.status, 0);
+  assert.match(interrupted.output, /publication interruption/i);
+  const transaction = join(state, 'restore-transaction');
+  assert.ok(existsSync(transaction));
+  assert.ok(existsSync(pending), 'failure should expose the mixed pair guarded by the durable transaction');
+
+  cpSync(join(transaction, 'current'), join(transaction, 'pending'), { recursive: true });
+  writeFileSync(fixture.commandLog, '');
+  const tampered = run(fixture, restoreArgs, {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_GIT_SHA: 'f'.repeat(40),
+  });
+  assert.notEqual(tampered.status, 0);
+  assert.match(tampered.output, /current-selected.*unexpected pending state/i);
+  rmSync(join(transaction, 'pending'), { recursive: true });
+
+  writeFileSync(fixture.commandLog, '');
+  const recovered = run(fixture, restoreArgs, {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_GIT_SHA: 'f'.repeat(40),
+  });
+  assert.equal(recovered.status, 0, recovered.output);
+  assert.match(recovered.output, /Recovered interrupted restore state publication/i);
+  assert.equal(existsSync(join(state, 'restore-transaction')), false);
+  assert.equal(existsSync(pending), false);
+  assert.equal(dockerLines(fixture).some((line) => line.includes('pg_restore') && line.includes('--clean')), false,
+    'publication recovery must not restore the database a second time');
+});
+
+test('pending-selected restore recovers after marker publication removes old pending state', (t) => {
+  const fixture = makeFixture(t);
+  const state = seedState(fixture);
+  const deployed = run(fixture, commonPersistArgs(fixture), {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_GIT_SHA: 'f'.repeat(40),
+    FAKE_ADMIN_EXISTS: '1',
+  });
+  assert.equal(deployed.status, 0, deployed.output);
+  const [bundle] = backupBundles(fixture);
+  assert.ok(bundle);
+
+  const renamedPath = 'apps/api/migrations/0001_rewritten.sql';
+  rmSync(join(fixture.directory, migrationPath));
+  writeFileSync(join(fixture.directory, renamedPath), '-- rewritten initial schema\nSELECT 2;\n');
+  const renamedManifest = `${hashFile(join(fixture.directory, renamedPath))}  ${renamedPath}\n`;
+  const bundlePending = join(bundle, 'state', 'pending');
+  writeFileSync(join(bundlePending, 'deployed-sha'), `${'f'.repeat(40)}\n`);
+  writeFileSync(join(bundlePending, 'migrations.sha256'), renamedManifest);
+  writeFileSync(join(bundle, 'metadata'), `schemaVersion=1\nproject=${project}\ndatabaseState=pending\n`);
+  writeFileSync(join(bundle, 'database-migrations.txt'), '');
+
+  const livePending = join(state, 'pending');
+  mkdirSync(livePending);
+  writeFileSync(join(livePending, 'deployed-sha'), `${'f'.repeat(40)}\n`);
+  writeFileSync(join(livePending, 'migrations.sha256'), renamedManifest);
+  const restoreArgs = [...commonPersistArgs(fixture),
+    '--restore-backup', bundle, '--confirm-restore', project];
+  writeFileSync(fixture.commandLog, '');
+  const interrupted = run(fixture, restoreArgs, {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_GIT_SHA: 'f'.repeat(40),
+    FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
+    FAKE_RESTORED_SCHEMA_MIGRATIONS: '',
+    SKY_BAR_TEST_FAIL_RESTORE_PUBLICATION: 'after-pending-removal',
+  });
+  assert.notEqual(interrupted.status, 0);
+  assert.match(interrupted.output, /pending state removal/i);
+  assert.ok(existsSync(join(state, 'rewrite-replacement')));
+  assert.equal(existsSync(livePending), false);
+  assert.ok(existsSync(join(state, 'restore-transaction')));
+
+  writeFileSync(fixture.commandLog, '');
+  const recovered = run(fixture, restoreArgs, {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_GIT_SHA: 'f'.repeat(40),
+  });
+  assert.equal(recovered.status, 0, recovered.output);
+  assert.match(recovered.output, /Recovered interrupted restore state publication/i);
+  assert.equal(readFileSync(join(livePending, 'migrations.sha256'), 'utf8'), renamedManifest);
+  assert.equal(existsSync(join(state, 'rewrite-replacement')), true);
+  assert.equal(existsSync(join(state, 'restore-transaction')), false);
+  assert.equal(dockerLines(fixture).some((line) => line.includes('pg_restore') && line.includes('--clean')), false,
+    'publication recovery must not restore the database a second time');
+});
+
+test('restoring-phase retry is bound to the original bundle and reuses its safety backup', (t) => {
+  const fixture = makeFixture(t);
+  seedState(fixture);
+  const deployed = run(fixture, commonPersistArgs(fixture), {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_ADMIN_EXISTS: '1',
+  });
+  assert.equal(deployed.status, 0, deployed.output);
+  const [bundle] = backupBundles(fixture);
+  assert.ok(bundle);
+  const restoreArgs = [...commonPersistArgs(fixture),
+    '--restore-backup', bundle, '--confirm-restore', project];
+  writeFileSync(fixture.commandLog, '');
+  const interrupted = run(fixture, restoreArgs, {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_GIT_SHA: 'f'.repeat(40),
+    FAKE_FAIL_MATCH: 'pg_restore -U',
+  });
+  assert.notEqual(interrupted.status, 0);
+  const transaction = join(fixture.directory, '.demo-state', project, 'restore-transaction');
+  assert.equal(readFileSync(join(transaction, 'phase'), 'utf8').trim(), 'restoring');
+  const afterSafety = backupBundles(fixture).length;
+  assert.equal(afterSafety, 2);
+
+  const copiedBundle = `${bundle}-copy`;
+  cpSync(bundle, copiedBundle, { recursive: true });
+  writeFileSync(fixture.commandLog, '');
+  const wrongRetry = run(fixture, [...commonPersistArgs(fixture),
+    '--restore-backup', copiedBundle, '--confirm-restore', project], {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_GIT_SHA: 'f'.repeat(40),
+  });
+  assert.notEqual(wrongRetry.status, 0);
+  assert.match(wrongRetry.output, /original.*bundle|restore transaction|identity/i);
+  assert.equal(dockerLines(fixture).some((line) => line.includes('pg_dump')), false);
+
+  writeFileSync(fixture.commandLog, '');
+  const resumed = run(fixture, restoreArgs, {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_GIT_SHA: 'f'.repeat(40),
+    FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
+  });
+  assert.equal(resumed.status, 0, resumed.output);
+  assert.equal(backupBundles(fixture).length, afterSafety);
+  assert.equal(dockerLines(fixture).some((line) => line.includes('pg_dump')), false,
+    'restoring retry must reuse the completed safety backup');
+  assert.ok(dockerLines(fixture).some((line) => line.includes('pg_restore') && line.includes('--clean')));
+  assert.equal(existsSync(transaction), false);
+});
+
+test('older bundle rollback preserves a safety bundle for the later live migration state', (t) => {
+  const fixture = makeFixture(t);
+  seedState(fixture);
+  const first = run(fixture, commonPersistArgs(fixture), {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
+    FAKE_ADMIN_EXISTS: '1',
+  });
+  assert.equal(first.status, 0, first.output);
+  const [olderBundle] = backupBundles(fixture);
+  assert.ok(olderBundle);
+
+  writeFileSync(join(fixture.directory, 'apps/api/migrations/0002_forward.sql'), 'SELECT 2;\n');
+  writeFileSync(fixture.commandLog, '');
+  const later = run(fixture, commonPersistArgs(fixture), {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
+    FAKE_ADMIN_EXISTS: '1',
+  });
+  assert.equal(later.status, 0, later.output);
+  rmSync(join(fixture.directory, 'apps/api/migrations/0002_forward.sql'));
+
+  const beforeRestore = new Set(backupBundles(fixture));
+  writeFileSync(fixture.commandLog, '');
+  const restored = run(fixture, [...commonPersistArgs(fixture),
+    '--restore-backup', olderBundle, '--confirm-restore', project], {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_GIT_SHA: 'f'.repeat(40),
+    FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql\n0002_forward.sql',
+    FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
+  });
+  assert.equal(restored.status, 0, restored.output);
+  const safetyBundles = backupBundles(fixture).filter((bundle) => !beforeRestore.has(bundle));
+  assert.equal(safetyBundles.length, 1);
+  assert.match(readFileSync(join(safetyBundles[0], 'metadata'), 'utf8'), /databaseState=current/);
+  assert.match(readFileSync(join(safetyBundles[0], 'state', 'current', 'migrations.sha256'), 'utf8'),
+    /0002_forward\.sql/);
+  assert.deepEqual(readFileSync(join(safetyBundles[0], 'database-migrations.txt'), 'utf8').trim().split('\n'),
+    ['0001_initial.sql', '0002_forward.sql']);
 });

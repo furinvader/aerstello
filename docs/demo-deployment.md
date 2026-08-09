@@ -185,8 +185,13 @@ the password value.
 
 Rewrite is destructive to the named PostgreSQL data volume and is intended for
 deliberately resetting disposable demo data. It still builds and validates the
-replacement first, starts and backs up the old database, and aborts if either
-the database or backup is unhealthy. Supply the exact configured Compose
+replacement first, starts and backs up the old database against the old
+matching source descriptor before installing candidate pending state, and
+aborts if either the database or backup is unhealthy. A durable replacement
+marker binds a recreated volume to that candidate even when an interrupted
+rewrite used the same migration filenames; an exact-checkout persist retry
+finishes it without misclassifying the new database as old current state.
+Supply the exact configured Compose
 project name as the confirmation:
 
 ```bash
@@ -212,7 +217,10 @@ root or the project name changed.
 Before changing an existing database, the deploy command atomically publishes
 a timestamped private bundle beneath `.demo-backups/<project>/`. Each bundle
 contains a PostgreSQL custom-format dump, its digest, the exact database
-migration names, and matching current and pending deployment descriptors. The
+migration names, matching current and pending deployment descriptors, and an
+explicit selector identifying which descriptor covers the dumped database. A
+database still at the healthy baseline selects `current`; one containing an
+applied pending-only migration selects `pending`. The
 dump is validated with `pg_restore --list`; incomplete bundles are removed and
 backup or validation failure stops the deployment, including a rewrite.
 
@@ -245,8 +253,18 @@ scripts/demo-deploy.sh --env-file .env.demo --db-mode persist
 Replace the project and bundle names with their configured values. Check out
 the commit recorded in the bundle before restoring. The restore refuses raw,
 tampered, foreign, or source-mismatched backups and restores the matching
-current/pending descriptors only after database migration names agree. It never
-deletes the Caddy volumes.
+current/pending descriptors only after database migration names agree. A
+current-selected dump must contain every current migration. A pending-selected
+dump may represent a partially applied replacement, but every recorded database
+migration must belong to that pending manifest. A current-selected restore does
+not revive an unrelated pending candidate. State
+publication uses a durable restore transaction; if publication is interrupted,
+the next deploy or restore completes that transaction before ordinary state
+validation. If the database replacement itself is interrupted, retry with the
+exact original bundle. The transaction binds that bundle identity and records
+the completed pre-restore safety bundle, so the retry reruns restoration without
+trying to validate or back up a possibly partial database. It never deletes the
+Caddy volumes.
 
 ## Secret rotation
 
