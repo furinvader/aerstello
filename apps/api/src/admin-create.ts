@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { adminProfileSchema } from './admin-profile.js';
 import { migrate, pool, transaction } from './db.js';
 import { audit } from './events.js';
 import { hashPassword } from './security.js';
@@ -16,10 +17,8 @@ async function passwordFromStdin(): Promise<string | undefined> {
   return value.split('\n', 1)[0]?.replace(/\r$/, '');
 }
 
-const input = z.object({
-  email: z.string().email(),
+const input = adminProfileSchema.extend({
   password: z.string().min(12),
-  name: z.string().min(1),
 }).safeParse({ email: argument('email'), password: await passwordFromStdin(), name: argument('name') });
 
 if (!input.success) {

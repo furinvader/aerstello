@@ -19,15 +19,22 @@ CONFIRM_REWRITE=''
 ADMIN_PASSWORD_FILE_ARGUMENT=''
 ADMIN_PASSWORD_FILE=''
 ADOPT_EXISTING_DB=false
+RESTORE_BACKUP_ARGUMENT=''
+RESTORE_BACKUP=''
+CONFIRM_RESTORE=''
 
 CURRENT_MANIFEST_TEMP=''
 FINAL_MANIFEST_TEMP=''
+RESTORED_MIGRATIONS_TEMP=''
 BACKUP_PARTIAL=''
 INIT_ENV_TEMP=''
 STATE_STAGING_DIRECTORY=''
+RESTORE_STATE_STAGING=''
+RESTORE_PENDING_PREVIOUS=''
 PUBLISHED_GENERATION_DIRECTORY=''
 PUBLISHED_GENERATION_TARGET=''
 STATE_LINK_TEMP=''
+PENDING_STATE_STAGING=''
 CURRENT_STATE_LINK=''
 ADMIN_PASSWORD=''
 
@@ -41,6 +48,8 @@ Deploy options:
   --confirm-rewrite NAME      Confirm a non-interactive rewrite with the project name.
   --admin-password-file PATH  Read a required initial administrator password from PATH.
   --adopt-existing-db         Adopt current migrations for an unmanaged existing database.
+  --restore-backup PATH       Restore one source-bound backup bundle.
+  --confirm-restore NAME      Confirm restore with the exact project name.
 
 Other actions:
   --init-env                  Create a private environment file with generated secrets.
@@ -66,8 +75,11 @@ cleanup() {
   if [[ -n "$FINAL_MANIFEST_TEMP" && -f "$FINAL_MANIFEST_TEMP" ]]; then
     rm -f -- "$FINAL_MANIFEST_TEMP"
   fi
-  if [[ -n "$BACKUP_PARTIAL" && -f "$BACKUP_PARTIAL" ]]; then
-    rm -f -- "$BACKUP_PARTIAL"
+  if [[ -n "$RESTORED_MIGRATIONS_TEMP" && -f "$RESTORED_MIGRATIONS_TEMP" ]]; then
+    rm -f -- "$RESTORED_MIGRATIONS_TEMP"
+  fi
+  if [[ -n "$BACKUP_PARTIAL" && -d "$BACKUP_PARTIAL" ]]; then
+    rm -rf -- "$BACKUP_PARTIAL"
   fi
   if [[ -n "$INIT_ENV_TEMP" && -f "$INIT_ENV_TEMP" ]]; then
     rm -f -- "$INIT_ENV_TEMP"
@@ -77,6 +89,19 @@ cleanup() {
   fi
   if [[ -n "$STATE_STAGING_DIRECTORY" && -d "$STATE_STAGING_DIRECTORY" ]]; then
     rm -rf -- "$STATE_STAGING_DIRECTORY"
+  fi
+  if [[ -n "$PENDING_STATE_STAGING" && -d "$PENDING_STATE_STAGING" ]]; then
+    rm -rf -- "$PENDING_STATE_STAGING"
+  fi
+  if [[ -n "$RESTORE_PENDING_PREVIOUS" && -d "$RESTORE_PENDING_PREVIOUS" ]]; then
+    if [[ -n "$PENDING_STATE_DIRECTORY" && ! -e "$PENDING_STATE_DIRECTORY" && ! -L "$PENDING_STATE_DIRECTORY" ]]; then
+      mv -T -- "$RESTORE_PENDING_PREVIOUS" "$PENDING_STATE_DIRECTORY" || true
+    else
+      rm -rf -- "$RESTORE_PENDING_PREVIOUS"
+    fi
+  fi
+  if [[ -n "$RESTORE_STATE_STAGING" && -d "$RESTORE_STATE_STAGING" ]]; then
+    rm -rf -- "$RESTORE_STATE_STAGING"
   fi
   if [[ -n "$PUBLISHED_GENERATION_DIRECTORY" && -d "$PUBLISHED_GENERATION_DIRECTORY" ]]; then
     local selected_generation=''
@@ -132,6 +157,16 @@ while (($# > 0)); do
       ADOPT_EXISTING_DB=true
       shift
       ;;
+    --restore-backup)
+      need_value "$1" "${2-}"
+      RESTORE_BACKUP_ARGUMENT="$2"
+      shift 2
+      ;;
+    --confirm-restore)
+      need_value "$1" "${2-}"
+      CONFIRM_RESTORE="$2"
+      shift 2
+      ;;
     --help|-h)
       usage
       exit 0
@@ -172,6 +207,9 @@ command -v realpath >/dev/null 2>&1 || die 'realpath is required.'
 ENV_FILE="$(resolve_user_path "${ENV_FILE_ARGUMENT:-$DEFAULT_ENV_FILE}")"
 if [[ -n "$ADMIN_PASSWORD_FILE_ARGUMENT" ]]; then
   ADMIN_PASSWORD_FILE="$(resolve_user_path "$ADMIN_PASSWORD_FILE_ARGUMENT")"
+fi
+if [[ -n "$RESTORE_BACKUP_ARGUMENT" ]]; then
+  RESTORE_BACKUP="$(resolve_user_path "$RESTORE_BACKUP_ARGUMENT")"
 fi
 
 path_is_inside_repository() {
@@ -261,6 +299,20 @@ validate_private_file() {
   [[ -r "$path" ]] || die "$description is not readable."
 }
 
+validate_private_directory() {
+  local path="$1"
+  local description="$2"
+  [[ -d "$path" && ! -L "$path" ]] || die "$description must be a directory, not a symbolic link: $path"
+  local owner mode mode_value
+  owner="$(stat -c '%u' -- "$path")"
+  mode="$(stat -c '%a' -- "$path")"
+  [[ "$owner" == "$(id -u)" ]] || die "$description must be owned by the current user."
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || die "Could not validate $description permissions."
+  mode_value=$((8#$mode))
+  (( (mode_value & 0077) == 0 )) || die "$description must have no group or world permissions (use mode 0700)."
+  [[ -r "$path" && -x "$path" ]] || die "$description is not accessible."
+}
+
 load_environment() {
   validate_env_build_context_path
   validate_private_file "$ENV_FILE" 'The demo environment file'
@@ -302,7 +354,6 @@ validate_configuration() {
   local domain_pattern="^${label}(\\.${label})+$"
   [[ ${#CONFIG[SKY_BAR_DOMAIN]} -le 253 && "${CONFIG[SKY_BAR_DOMAIN]}" =~ $domain_pattern ]] || die 'SKY_BAR_DOMAIN must be a hostname without a scheme, port, path, or wildcard.'
   validate_email "${CONFIG[ACME_EMAIL]}" || die 'ACME_EMAIL is not a valid email address.'
-  validate_email "${CONFIG[ADMIN_EMAIL]}" || die 'ADMIN_EMAIL is not a valid email address.'
   [[ "${CONFIG[ADMIN_NAME]}" =~ [^[:space:]] && ${#CONFIG[ADMIN_NAME]} -le 200 ]] || die 'ADMIN_NAME must contain a non-whitespace name of at most 200 characters.'
 
   [[ "${CONFIG[POSTGRES_PASSWORD]}" =~ ^[A-Za-z0-9._~-]{32,256}$ ]] || die 'POSTGRES_PASSWORD must contain 32-256 URI-safe characters.'
@@ -355,6 +406,14 @@ fi
 if [[ "$DB_MODE" == rewrite && "$ADOPT_EXISTING_DB" == true ]]; then
   die '--adopt-existing-db is valid only with persist mode.'
 fi
+if [[ -n "$RESTORE_BACKUP" ]]; then
+  [[ "$ACTION" == deploy ]] || die '--restore-backup is valid only for deployment.'
+  [[ "$DB_MODE" == persist ]] || die '--restore-backup requires --db-mode persist.'
+  [[ "$ADOPT_EXISTING_DB" == false ]] || die '--restore-backup cannot be combined with --adopt-existing-db.'
+  [[ "$CONFIRM_RESTORE" == "${CONFIG[COMPOSE_PROJECT_NAME]}" ]] || die '--confirm-restore must exactly match COMPOSE_PROJECT_NAME.'
+elif [[ -n "$CONFIRM_RESTORE" ]]; then
+  die '--confirm-restore requires --restore-backup.'
+fi
 if [[ "$DB_MODE" == rewrite && -n "$CONFIRM_REWRITE" && "$CONFIRM_REWRITE" != "${CONFIG[COMPOSE_PROJECT_NAME]}" ]]; then
   die '--confirm-rewrite must exactly match COMPOSE_PROJECT_NAME.'
 fi
@@ -363,7 +422,7 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
 }
 
-for required_command in docker git curl stat id sha256sum find sort cmp date mktemp realpath flock; do
+for required_command in node docker git curl stat id sha256sum find sort cmp date mktemp realpath flock; do
   require_command "$required_command"
 done
 
@@ -376,6 +435,12 @@ git_root="$(git rev-parse --show-toplevel)"
 DEPLOYED_SHA="$(git rev-parse --verify HEAD)"
 [[ "$DEPLOYED_SHA" =~ ^[0-9a-f]{40,64}$ ]] || die 'Could not resolve the deployed Git commit.'
 [[ -z "$(git status --porcelain --untracked-files=normal)" ]] || die 'The Git worktree must be clean; commit or remove uncommitted files before deployment.'
+
+node scripts/release-state.mjs --check --base HEAD --head HEAD --release-ref origin/main
+node scripts/check-released-migrations.mjs --base HEAD --head HEAD --release-ref origin/main
+node scripts/validate-demo-admin.mjs \
+  --email "${CONFIG[ADMIN_EMAIL]}" --name "${CONFIG[ADMIN_NAME]}" \
+  || die 'Administrator profile validation failed.'
 
 PROJECT_NAME="${CONFIG[COMPOSE_PROJECT_NAME]}"
 
@@ -401,6 +466,7 @@ DB_VOLUME="${PROJECT_NAME}-postgres-data"
 STATE_DIRECTORY="$REPOSITORY_ROOT/.demo-state/$PROJECT_NAME"
 GENERATIONS_DIRECTORY="$STATE_DIRECTORY/generations"
 CURRENT_STATE_LINK="$STATE_DIRECTORY/current"
+PENDING_STATE_DIRECTORY="$STATE_DIRECTORY/pending"
 BACKUP_DIRECTORY="$REPOSITORY_ROOT/.demo-backups/$PROJECT_NAME"
 
 mkdir -p -- "$STATE_DIRECTORY"
@@ -414,6 +480,7 @@ if docker volume inspect "$DB_VOLUME" >/dev/null 2>&1; then
 fi
 
 STATE_EXISTS=false
+PENDING_EXISTS=false
 CURRENT_STATE_DIRECTORY=''
 if [[ -e "$CURRENT_STATE_LINK" || -L "$CURRENT_STATE_LINK" ]]; then
   [[ -L "$CURRENT_STATE_LINK" ]] || die 'Deployment state current pointer is not a symbolic link.'
@@ -422,6 +489,11 @@ if [[ -e "$CURRENT_STATE_LINK" || -L "$CURRENT_STATE_LINK" ]]; then
   CURRENT_STATE_DIRECTORY="$STATE_DIRECTORY/$current_target"
   [[ -d "$CURRENT_STATE_DIRECTORY" ]] || die 'Deployment state current generation is missing.'
   STATE_EXISTS=true
+fi
+
+if [[ -e "$PENDING_STATE_DIRECTORY" || -L "$PENDING_STATE_DIRECTORY" ]]; then
+  [[ -d "$PENDING_STATE_DIRECTORY" && ! -L "$PENDING_STATE_DIRECTORY" ]] || die 'Pending deployment state is invalid.'
+  PENDING_EXISTS=true
 fi
 
 if [[ "$DATABASE_EXISTS" == false && "$STATE_EXISTS" == true && "$DB_MODE" != rewrite ]]; then
@@ -462,11 +534,12 @@ if [[ "$DB_MODE" == persist && "$ADOPT_EXISTING_DB" == true && "$DATABASE_EXISTS
 fi
 
 verify_volume_ownership() {
-  local owner
-  owner="$(docker volume inspect --format '{{ index .Labels "com.docker.compose.project" }}' "$DB_VOLUME")"
-  if [[ -n "$owner" && "$owner" != '<no value>' && "$owner" != "$PROJECT_NAME" ]]; then
-    die "Refusing to use PostgreSQL volume $DB_VOLUME because its Compose project label is owned by $owner."
-  fi
+  local labels project_owner logical_owner
+  labels="$(docker volume inspect --format '{{ index .Labels "com.docker.compose.project" }}|{{ index .Labels "com.docker.compose.volume" }}' "$DB_VOLUME")"
+  project_owner="${labels%%|*}"
+  logical_owner="${labels#*|}"
+  [[ "$project_owner" == "$PROJECT_NAME" && "$logical_owner" == postgres-data ]] ||
+    die "Refusing to use PostgreSQL volume $DB_VOLUME without exact Compose project and postgres-data ownership labels."
 }
 
 if [[ "$DATABASE_EXISTS" == true ]]; then
@@ -477,11 +550,12 @@ build_migration_manifest() {
   local destination="$1"
   local -a files=()
   declare -A prefixes=()
-  mapfile -d '' files < <(LC_ALL=C find apps/api/migrations -maxdepth 1 -type f -name '*.sql' -print0 | LC_ALL=C sort -z)
+  mapfile -d '' files < <(LC_ALL=C find apps/api/migrations -mindepth 1 -maxdepth 1 -name '*.sql' -print0 | LC_ALL=C sort -z)
   ((${#files[@]} > 0)) || die 'No SQL migration files were found.'
   : > "$destination"
   local path filename prefix digest
   for path in "${files[@]}"; do
+    [[ -f "$path" && ! -L "$path" ]] || die "Migration entry must be a regular, non-symlink file: $path"
     [[ "$path" =~ ^apps/api/migrations/[0-9]{4}_[a-z0-9_]+\.sql$ ]] || die "Unsupported migration filename: $path"
     filename="${path##*/}"
     prefix="${filename%%_*}"
@@ -497,8 +571,65 @@ build_migration_manifest() {
 CURRENT_MANIFEST_TEMP="$(mktemp "${TMPDIR:-/tmp}/sky-bar-demo-migrations.XXXXXX")"
 build_migration_manifest "$CURRENT_MANIFEST_TEMP"
 
+validate_state_descriptor() {
+  local directory="$1"
+  local description="$2"
+  local sha_path="$directory/deployed-sha"
+  local manifest_path="$directory/migrations.sha256"
+  [[ -f "$sha_path" && ! -L "$sha_path" ]] || die "$description is missing deployed-sha."
+  [[ -f "$manifest_path" && ! -L "$manifest_path" ]] || die "$description is missing migrations.sha256."
+  local sha
+  sha="$(< "$sha_path")"
+  [[ "$sha" =~ ^[0-9a-f]{40,64}$ ]] || die "$description contains an invalid deployed Git SHA."
+  validate_migration_manifest_file "$manifest_path" "$description"
+}
+
+validate_migration_manifest_file() {
+  local manifest_path="$1"
+  local description="$2"
+  declare -A paths=()
+  declare -A prefixes=()
+  local manifest_pattern='^([0-9a-f]{64})  (apps/api/migrations/[0-9]{4}_[a-z0-9_]+\.sql)$'
+  local line path filename prefix count=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ $manifest_pattern ]] || die "$description contains a malformed migration manifest."
+    path="${BASH_REMATCH[2]}"
+    [[ ! -v "paths[$path]" ]] || die "$description contains a duplicate migration path: $path"
+    filename="${path##*/}"
+    prefix="${filename%%_*}"
+    [[ ! -v "prefixes[$prefix]" ]] || die "$description contains duplicate migration prefix $prefix."
+    paths["$path"]=1
+    prefixes["$prefix"]=1
+    ((count += 1))
+  done < "$manifest_path"
+  ((count > 0)) || die "$description contains an empty migration manifest."
+}
+
+validate_pending_state() {
+  [[ "$PENDING_EXISTS" == true ]] || return 0
+  validate_state_descriptor "$PENDING_STATE_DIRECTORY" 'Pending deployment state'
+  [[ "$(< "$PENDING_STATE_DIRECTORY/deployed-sha")" == "$DEPLOYED_SHA" ]] ||
+    die 'Pending deployment belongs to a different Git commit; restore that checkout or explicitly rewrite.'
+  cmp -s -- "$CURRENT_MANIFEST_TEMP" "$PENDING_STATE_DIRECTORY/migrations.sha256" ||
+    die 'Pending deployment migration manifest differs from this checkout; restore that checkout or explicitly rewrite.'
+}
+
+prepare_pending_state() {
+  if [[ "$PENDING_EXISTS" == true ]]; then
+    validate_pending_state
+    return
+  fi
+  PENDING_STATE_STAGING="$(mktemp -d "$STATE_DIRECTORY/.pending.XXXXXX")"
+  printf '%s\n' "$DEPLOYED_SHA" > "$PENDING_STATE_STAGING/deployed-sha"
+  cp -- "$CURRENT_MANIFEST_TEMP" "$PENDING_STATE_STAGING/migrations.sha256"
+  chmod 600 -- "$PENDING_STATE_STAGING/deployed-sha" "$PENDING_STATE_STAGING/migrations.sha256"
+  mv -- "$PENDING_STATE_STAGING" "$PENDING_STATE_DIRECTORY"
+  PENDING_STATE_STAGING=''
+  PENDING_EXISTS=true
+}
+
 validate_recorded_state() {
-  [[ "$STATE_EXISTS" == true ]] || return
+  [[ "$STATE_EXISTS" == true ]] || return 0
   local sha_path="$CURRENT_STATE_DIRECTORY/deployed-sha"
   local manifest_path="$CURRENT_STATE_DIRECTORY/migrations.sha256"
   [[ -f "$sha_path" && ! -L "$sha_path" ]] || die 'Deployment state is missing deployed-sha.'
@@ -539,33 +670,95 @@ validate_recorded_state() {
 
   for path in "${!recorded_hashes[@]}"; do
     if [[ ! -v "current_hashes[$path]" ]]; then
-      die "Previously deployed migration $path is missing or renamed. Use database rewrite for disposable data or add an intentional forward migration."
+      die "Previously deployed migration $path is missing or renamed. Use confirmed rewrite for disposable pre-release data or restore matching source-bound state."
     fi
     if [[ "${current_hashes[$path]}" != "${recorded_hashes[$path]}" ]]; then
-      die "Previously deployed migration $path was modified. Use database rewrite for disposable data or add an intentional forward migration."
+      die "Previously deployed migration $path was modified. Use confirmed rewrite for disposable pre-release data or restore matching source-bound state."
     fi
   done
 }
+
+if [[ "$DB_MODE" != rewrite ]]; then
+  validate_pending_state
+fi
 
 start_database() {
   compose up -d --wait db
 }
 
+read_database_migrations() {
+  DATABASE_MIGRATIONS=()
+  local present
+  present="$(compose exec -T db psql -U skybar -d skybar -tAc \
+    "SELECT CASE WHEN to_regclass('public.schema_migrations') IS NULL THEN 'missing' ELSE 'present' END")"
+  present="${present//[[:space:]]/}"
+  case "$present" in
+    missing) return ;;
+    present) ;;
+    *) die 'Could not determine whether schema_migrations exists.' ;;
+  esac
+  mapfile -t DATABASE_MIGRATIONS < <(compose exec -T db psql -U skybar -d skybar -tAc \
+    'SELECT name FROM schema_migrations ORDER BY name')
+}
+
+validate_database_migrations() {
+  read_database_migrations
+  declare -A candidate=()
+  declare -A applied=()
+  local line path name
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    path="${line#*  }"
+    candidate["${path##*/}"]=1
+  done < "$CURRENT_MANIFEST_TEMP"
+  for name in "${DATABASE_MIGRATIONS[@]}"; do
+    [[ "$name" =~ ^[0-9]{4}_[a-z0-9_]+\.sql$ && -v "candidate[$name]" ]] ||
+      die "Database contains migration $name which is absent from this checkout; refusing an ambiguous rollback."
+    applied["$name"]=1
+  done
+  if [[ "$STATE_EXISTS" == true ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      path="${line#*  }"
+      name="${path##*/}"
+      [[ -v "applied[$name]" ]] ||
+        die "Database is older than recorded deployment state because migration $name is missing."
+    done < "$CURRENT_STATE_DIRECTORY/migrations.sha256"
+  fi
+}
+
 create_validated_backup() {
   mkdir -p -- "$BACKUP_DIRECTORY"
   chmod 700 -- "$BACKUP_DIRECTORY"
-  local timestamp final_path
+  local timestamp final_path dump_path
   timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-  BACKUP_PARTIAL="$(mktemp "$BACKUP_DIRECTORY/sky-bar-${timestamp}.XXXXXX.partial")"
-  chmod 600 -- "$BACKUP_PARTIAL"
-  compose exec -T db pg_dump -U skybar -d skybar -Fc > "$BACKUP_PARTIAL"
-  [[ -s "$BACKUP_PARTIAL" ]] || die 'PostgreSQL backup was empty.'
-  compose exec -T db pg_restore --list < "$BACKUP_PARTIAL" >/dev/null
-  final_path="${BACKUP_PARTIAL%.partial}.dump"
+  BACKUP_PARTIAL="$(mktemp -d "$BACKUP_DIRECTORY/sky-bar-${timestamp}.XXXXXX.partial")"
+  chmod 700 -- "$BACKUP_PARTIAL"
+  dump_path="$BACKUP_PARTIAL/database.dump"
+  compose exec -T db pg_dump -U skybar -d skybar -Fc > "$dump_path"
+  [[ -s "$dump_path" ]] || die 'PostgreSQL backup was empty.'
+  compose exec -T db pg_restore --list < "$dump_path" >/dev/null
+  (cd -- "$BACKUP_PARTIAL" && sha256sum database.dump > dump.sha256)
+  : > "$BACKUP_PARTIAL/database-migrations.txt"
+  if ((${#DATABASE_MIGRATIONS[@]} > 0)); then
+    printf '%s\n' "${DATABASE_MIGRATIONS[@]}" > "$BACKUP_PARTIAL/database-migrations.txt"
+  fi
+  mkdir -- "$BACKUP_PARTIAL/state"
+  if [[ "$STATE_EXISTS" == true ]]; then
+    mkdir -- "$BACKUP_PARTIAL/state/current"
+    cp -- "$CURRENT_STATE_DIRECTORY/deployed-sha" "$CURRENT_STATE_DIRECTORY/migrations.sha256" \
+      "$BACKUP_PARTIAL/state/current/"
+  fi
+  if [[ "$PENDING_EXISTS" == true ]]; then
+    mkdir -- "$BACKUP_PARTIAL/state/pending"
+    cp -- "$PENDING_STATE_DIRECTORY/deployed-sha" "$PENDING_STATE_DIRECTORY/migrations.sha256" \
+      "$BACKUP_PARTIAL/state/pending/"
+  fi
+  printf 'schemaVersion=1\nproject=%s\n' "$PROJECT_NAME" > "$BACKUP_PARTIAL/metadata"
+  chmod 600 -- "$dump_path" "$BACKUP_PARTIAL/dump.sha256" \
+    "$BACKUP_PARTIAL/database-migrations.txt" "$BACKUP_PARTIAL/metadata"
+  final_path="${BACKUP_PARTIAL%.partial}.bundle"
   mv -- "$BACKUP_PARTIAL" "$final_path"
   BACKUP_PARTIAL=''
-  chmod 600 -- "$final_path"
-  note "Created and validated local database backup: $final_path"
+  note "Created and validated source-bound database backup: $final_path"
 }
 
 load_admin_password() {
@@ -630,7 +823,8 @@ start_application() {
   compose up -d app caddy
   wait_for_app_health
   curl --fail --silent --show-error --retry 12 --retry-delay 5 --retry-all-errors \
-    --max-time 15 "https://${CONFIG[SKY_BAR_DOMAIN]}/api/v1/health" >/dev/null
+    --max-time 15 --resolve "${CONFIG[SKY_BAR_DOMAIN]}:443:127.0.0.1" \
+    "https://${CONFIG[SKY_BAR_DOMAIN]}/api/v1/health" >/dev/null
 }
 
 confirm_rewrite() {
@@ -679,17 +873,25 @@ publish_state() {
   STATE_LINK_TEMP=''
   PUBLISHED_GENERATION_DIRECTORY=''
   PUBLISHED_GENERATION_TARGET=''
+  if [[ "$PENDING_EXISTS" == true ]]; then
+    rm -rf -- "$PENDING_STATE_DIRECTORY"
+    PENDING_EXISTS=false
+  fi
 }
 
 deploy_persist() {
+  if [[ "$DATABASE_EXISTS" == true && "$STATE_EXISTS" == false && "$PENDING_EXISTS" == false && "$ADOPT_EXISTING_DB" != true ]]; then
+    die 'An existing unmanaged database requires --adopt-existing-db or explicitly confirmed rewrite mode.'
+  fi
+  if [[ "$STATE_EXISTS" == true ]]; then
+    validate_recorded_state
+  fi
+  prepare_pending_state
   if [[ "$DATABASE_EXISTS" == true ]]; then
     start_database
+    validate_database_migrations
     create_validated_backup
-    if [[ "$STATE_EXISTS" == true ]]; then
-      validate_recorded_state
-    elif [[ "$ADOPT_EXISTING_DB" != true ]]; then
-      die 'An existing unmanaged database requires --adopt-existing-db or explicitly confirmed rewrite mode.'
-    else
+    if [[ "$STATE_EXISTS" == false && "$ADOPT_EXISTING_DB" == true ]]; then
       note 'Adopting current migration files as the baseline after this deployment becomes healthy.'
     fi
     compose build app caddy
@@ -699,6 +901,7 @@ deploy_persist() {
     load_admin_password
     compose build app caddy
     start_database
+    validate_database_migrations
   fi
 
   run_migrations
@@ -714,26 +917,208 @@ deploy_persist() {
 }
 
 deploy_rewrite() {
+  confirm_rewrite
+  if [[ "$PENDING_EXISTS" == true ]]; then
+    rm -rf -- "$PENDING_STATE_DIRECTORY"
+    PENDING_EXISTS=false
+  fi
+  prepare_pending_state
   compose build app caddy
   if [[ "$DATABASE_EXISTS" == true ]]; then
     start_database
+    validate_database_migrations
     create_validated_backup
   else
     note 'The previously recorded PostgreSQL volume is missing; no pre-rewrite backup can be created.'
   fi
   load_admin_password
-  confirm_rewrite
   compose down --remove-orphans
   if [[ "$DATABASE_EXISTS" == true ]]; then
     verify_volume_ownership
     docker volume rm "$DB_VOLUME"
   fi
   start_database
+  validate_database_migrations
   run_migrations
   create_administrator
   start_application
   publish_state
 }
+
+restore_backup_bundle() {
+  [[ "$DATABASE_EXISTS" == true ]] || die 'Guarded restore requires the existing PostgreSQL volume.'
+  verify_volume_ownership
+  validate_private_directory "$RESTORE_BACKUP" 'The restore backup bundle'
+
+  local metadata_path="$RESTORE_BACKUP/metadata"
+  local dump_path="$RESTORE_BACKUP/database.dump"
+  local digest_path="$RESTORE_BACKUP/dump.sha256"
+  local migrations_path="$RESTORE_BACKUP/database-migrations.txt"
+  local bundle_state="$RESTORE_BACKUP/state"
+  validate_private_file "$metadata_path" 'The restore bundle metadata'
+  validate_private_file "$dump_path" 'The restore bundle database dump'
+  validate_private_file "$digest_path" 'The restore bundle dump digest'
+  validate_private_file "$migrations_path" 'The restore bundle database migration list'
+  validate_private_directory "$bundle_state" 'The restore bundle state directory'
+
+  local -a metadata_lines=()
+  mapfile -t metadata_lines < "$metadata_path"
+  ((${#metadata_lines[@]} == 2)) || die 'The restore bundle metadata is malformed.'
+  [[ "${metadata_lines[0]}" == 'schemaVersion=1' ]] || die 'The restore bundle schema version is unsupported.'
+  [[ "${metadata_lines[1]}" == "project=$PROJECT_NAME" ]] || die 'The restore bundle belongs to another Compose project.'
+
+  local digest_line
+  digest_line="$(< "$digest_path")"
+  [[ "$digest_line" =~ ^[0-9a-f]{64}'  database.dump'$ ]] || die 'The restore bundle dump digest record is malformed.'
+  (cd -- "$RESTORE_BACKUP" && sha256sum -c --status dump.sha256) ||
+    die 'The restore bundle database dump failed its digest check and may be tampered.'
+
+  local -a bundle_database_migrations=()
+  mapfile -t bundle_database_migrations < "$migrations_path"
+  local migration_name
+  for migration_name in "${bundle_database_migrations[@]}"; do
+    [[ "$migration_name" =~ ^[0-9]{4}_[a-z0-9_]+\.sql$ ]] ||
+      die 'The restore bundle database migration list is malformed.'
+  done
+  if ! LC_ALL=C sort -u -- "$migrations_path" | cmp -s -- "$migrations_path" -; then
+    die 'The restore bundle database migration list must be sorted and unique.'
+  fi
+
+  local bundle_current=''
+  local bundle_pending=''
+  if [[ -e "$bundle_state/current" || -L "$bundle_state/current" ]]; then
+    bundle_current="$bundle_state/current"
+    validate_private_directory "$bundle_current" 'The restore bundle current state'
+    validate_private_file "$bundle_current/deployed-sha" 'The restore bundle current deployed SHA'
+    validate_private_file "$bundle_current/migrations.sha256" 'The restore bundle current migration manifest'
+    validate_state_descriptor "$bundle_current" 'Restore bundle current state'
+  fi
+  if [[ -e "$bundle_state/pending" || -L "$bundle_state/pending" ]]; then
+    bundle_pending="$bundle_state/pending"
+    validate_private_directory "$bundle_pending" 'The restore bundle pending state'
+    validate_private_file "$bundle_pending/deployed-sha" 'The restore bundle pending deployed SHA'
+    validate_private_file "$bundle_pending/migrations.sha256" 'The restore bundle pending migration manifest'
+    validate_state_descriptor "$bundle_pending" 'Restore bundle pending state'
+  fi
+  [[ -n "$bundle_current" || -n "$bundle_pending" ]] ||
+    die 'The restore bundle contains no source deployment state.'
+
+  local selected_state="$bundle_current"
+  if [[ -n "$bundle_pending" ]]; then
+    selected_state="$bundle_pending"
+  fi
+  [[ "$(< "$selected_state/deployed-sha")" == "$DEPLOYED_SHA" ]] ||
+    die 'The restore bundle requires a different Git checkout.'
+  cmp -s -- "$selected_state/migrations.sha256" "$CURRENT_MANIFEST_TEMP" ||
+    die 'The restore bundle migration manifest differs from this checkout.'
+
+  declare -A candidate_migrations=()
+  declare -A dumped_migrations=()
+  local manifest_line manifest_path
+  while IFS= read -r manifest_line || [[ -n "$manifest_line" ]]; do
+    manifest_path="${manifest_line#*  }"
+    candidate_migrations["${manifest_path##*/}"]=1
+  done < "$selected_state/migrations.sha256"
+  for migration_name in "${bundle_database_migrations[@]}"; do
+    [[ -v "candidate_migrations[$migration_name]" ]] ||
+      die "The restore bundle database contains migration $migration_name which is absent from its source checkout."
+    dumped_migrations["$migration_name"]=1
+  done
+  if [[ -n "$bundle_current" ]]; then
+    while IFS= read -r manifest_line || [[ -n "$manifest_line" ]]; do
+      manifest_path="${manifest_line#*  }"
+      migration_name="${manifest_path##*/}"
+      [[ -v "dumped_migrations[$migration_name]" ]] ||
+        die "The restore bundle database is older than its current deployment state because migration $migration_name is missing."
+    done < "$bundle_current/migrations.sha256"
+  fi
+
+  [[ "$STATE_EXISTS" == true || "$PENDING_EXISTS" == true ]] ||
+    die 'Guarded restore requires existing source-bound deployment state for its safety backup.'
+  if [[ "$STATE_EXISTS" == true ]]; then
+    validate_state_descriptor "$CURRENT_STATE_DIRECTORY" 'Current deployment state'
+    validate_recorded_state
+  fi
+  validate_pending_state
+
+  RESTORE_STATE_STAGING="$(mktemp -d "$STATE_DIRECTORY/.restore.XXXXXX")"
+  chmod 700 -- "$RESTORE_STATE_STAGING"
+  if [[ -n "$bundle_current" ]]; then
+    mkdir -- "$RESTORE_STATE_STAGING/current"
+    cp -- "$bundle_current/deployed-sha" "$bundle_current/migrations.sha256" \
+      "$RESTORE_STATE_STAGING/current/"
+    chmod 600 -- "$RESTORE_STATE_STAGING/current/deployed-sha" \
+      "$RESTORE_STATE_STAGING/current/migrations.sha256"
+  fi
+  if [[ -n "$bundle_pending" ]]; then
+    mkdir -- "$RESTORE_STATE_STAGING/pending"
+    cp -- "$bundle_pending/deployed-sha" "$bundle_pending/migrations.sha256" \
+      "$RESTORE_STATE_STAGING/pending/"
+    chmod 600 -- "$RESTORE_STATE_STAGING/pending/deployed-sha" \
+      "$RESTORE_STATE_STAGING/pending/migrations.sha256"
+  fi
+
+  start_database
+  compose exec -T db pg_restore --list < "$dump_path" >/dev/null ||
+    die 'The restore bundle is not a readable PostgreSQL custom-format dump.'
+  validate_database_migrations
+  create_validated_backup
+  compose stop app caddy
+
+  compose exec -T db pg_restore -U skybar -d skybar --clean --if-exists < "$dump_path"
+
+  read_database_migrations
+  RESTORED_MIGRATIONS_TEMP="$(mktemp "${TMPDIR:-/tmp}/sky-bar-restored-migrations.XXXXXX")"
+  : > "$RESTORED_MIGRATIONS_TEMP"
+  if ((${#DATABASE_MIGRATIONS[@]} > 0)); then
+    printf '%s\n' "${DATABASE_MIGRATIONS[@]}" > "$RESTORED_MIGRATIONS_TEMP"
+  fi
+  cmp -s -- "$RESTORED_MIGRATIONS_TEMP" "$migrations_path" ||
+    die 'The restored database migration names differ from the source-bound backup; the application remains stopped.'
+
+  mkdir -p -- "$GENERATIONS_DIRECTORY"
+  chmod 700 -- "$GENERATIONS_DIRECTORY"
+  if [[ -n "$bundle_current" ]]; then
+    local generation_name generation_directory
+    generation_name="restore-$(date -u +%Y%m%dT%H%M%SZ)-${DEPLOYED_SHA:0:12}-$$"
+    generation_directory="$GENERATIONS_DIRECTORY/$generation_name"
+    [[ ! -e "$generation_directory" && ! -L "$generation_directory" ]] ||
+      die 'A restored deployment state generation name collision occurred.'
+    PUBLISHED_GENERATION_DIRECTORY="$generation_directory"
+    PUBLISHED_GENERATION_TARGET="generations/$generation_name"
+    mv -T -- "$RESTORE_STATE_STAGING/current" "$generation_directory"
+    STATE_LINK_TEMP="$RESTORE_STATE_STAGING/current-link"
+    ln -s -- "$PUBLISHED_GENERATION_TARGET" "$STATE_LINK_TEMP"
+    mv -Tf -- "$STATE_LINK_TEMP" "$CURRENT_STATE_LINK"
+    STATE_LINK_TEMP=''
+    PUBLISHED_GENERATION_DIRECTORY=''
+    PUBLISHED_GENERATION_TARGET=''
+  else
+    rm -f -- "$CURRENT_STATE_LINK"
+  fi
+
+  if [[ -e "$PENDING_STATE_DIRECTORY" || -L "$PENDING_STATE_DIRECTORY" ]]; then
+    RESTORE_PENDING_PREVIOUS="$RESTORE_STATE_STAGING/previous-pending"
+    mv -T -- "$PENDING_STATE_DIRECTORY" "$RESTORE_PENDING_PREVIOUS"
+  fi
+  if [[ -n "$bundle_pending" ]]; then
+    mv -T -- "$RESTORE_STATE_STAGING/pending" "$PENDING_STATE_DIRECTORY"
+  fi
+  if [[ -n "$RESTORE_PENDING_PREVIOUS" && -d "$RESTORE_PENDING_PREVIOUS" ]]; then
+    rm -rf -- "$RESTORE_PENDING_PREVIOUS"
+  fi
+  RESTORE_PENDING_PREVIOUS=''
+  rm -rf -- "$RESTORE_STATE_STAGING"
+  RESTORE_STATE_STAGING=''
+
+  note 'The source-bound database backup and matching deployment state were restored.'
+  note 'The application and Caddy remain stopped; rerun persist mode from this exact checkout.'
+}
+
+if [[ -n "$RESTORE_BACKUP" ]]; then
+  restore_backup_bundle
+  exit 0
+fi
 
 case "$DB_MODE" in
   persist) deploy_persist ;;

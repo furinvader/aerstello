@@ -14,7 +14,7 @@ unless you copy them elsewhere.
 ## Prepare the host
 
 Use a persistent clone of the repository on a supported Ubuntu or Debian host.
-The deployment script requires Bash plus standard commands from `coreutils`,
+The deployment script requires Node.js 24, Bash, plus standard commands from `coreutils`,
 `diffutils`, `findutils`, and `util-linux`, as well as Git, curl, GnuPG, OpenSSL, CA
 certificates, and Docker Engine with the Docker Compose plugin. Install the
 common command dependencies first:
@@ -23,6 +23,11 @@ common command dependencies first:
 sudo apt-get update
 sudo apt-get install bash ca-certificates coreutils curl diffutils findutils git gnupg openssl util-linux
 ```
+
+Install a supported Node.js 24 release using the same controlled package or
+runtime-management process used for the source checkout, then verify
+`node --version`. Node runs the repository's release and administrator-input
+preflight checks; deployment fails closed when it is unavailable.
 
 Install Docker Engine and the Compose plugin from Docker's official repository
 for the host distribution, enable the daemon, and verify both commands before
@@ -48,7 +53,9 @@ redirects even though users browse to HTTPS.
 
 Run deployments only from a clean Git worktree at a resolvable commit. The
 command locks each Compose project so two deploys cannot mutate the same stack
-at once.
+at once. Fetch `origin/main` and annotated release tags before deployment. The
+command checks release metadata and released-migration immutability for the
+exact checkout before it changes containers, volumes, or database state.
 
 ## Create the environment file
 
@@ -112,16 +119,24 @@ operator may use `scripts/demo-deploy.sh --env-file .env.demo` (or
 optional and is needed only for that recipe. Agents and other non-interactive
 callers must always pass an explicit `--db-mode`.
 
-Persist mode starts and waits for PostgreSQL, backs up an existing database,
-checks the recorded migration manifest, builds the images, runs the compiled
+Persist mode records an atomic pending source and migration descriptor, starts
+and waits for PostgreSQL, creates a source-bound backup bundle for an existing
+database, checks the recorded and database migration history, builds the images, runs the compiled
 migrations, creates an administrator only when no active administrator exists,
-starts the app and proxy, and checks both internal readiness and the external
-`https://<domain>/api/v1/health` endpoint with strict TLS verification.
+starts the app and proxy, and checks both internal readiness and this host's
+local Caddy listener using the configured hostname and SNI with strict TLS
+verification.
 
-The command records the deployed Git commit and sorted migration hashes only
-after the external health check succeeds. Previously recorded migrations may
+The command promotes pending state to the deployed Git commit and sorted
+migration hashes only after the HTTPS health check succeeds. Pending state
+survives a failed first deployment or update so an exact-checkout retry can
+resume safely. A different commit or migration manifest is rejected rather
+than implicitly adopted. Previously recorded migrations may
 not be changed, renamed, removed, duplicated, malformed, or moved outside
-`apps/api/migrations`; adding a new migration is allowed.
+`apps/api/migrations`. Before the first valid production release, consolidate
+schema changes into `0001_initial.sql` and explicitly rewrite disposable demo
+data when its recorded hash differs. Add a forward migration only after the
+affected schema migration has been frozen by a valid production release.
 
 ### Adopt an existing database
 
@@ -194,11 +209,12 @@ root or the project name changed.
 
 ## Backup, state, and restoration
 
-Before changing an existing database, the deploy command creates a timestamped
-PostgreSQL custom-format dump beneath `.demo-backups/<project>/`, restricts it
-to mode `0600`, and validates it with `pg_restore --list` before publishing its
-final filename. Backup or validation failure stops the deployment, including a
-rewrite.
+Before changing an existing database, the deploy command atomically publishes
+a timestamped private bundle beneath `.demo-backups/<project>/`. Each bundle
+contains a PostgreSQL custom-format dump, its digest, the exact database
+migration names, and matching current and pending deployment descriptors. The
+dump is validated with `pg_restore --list`; incomplete bundles are removed and
+backup or validation failure stops the deployment, including a rewrite.
 
 These dumps are host-local safety copies, not off-host disaster recovery.
 Regularly copy them to encrypted, access-controlled storage on another system,
@@ -207,35 +223,30 @@ financial personal data.
 
 `.demo-state/<project>/` holds generations containing the deployed commit and
 migration manifest; an atomic `current` pointer selects the last successful
-generation. Keep this directory in the persistent checkout, include it in host
-recovery planning, and do not edit it manually. A failed build, migration,
-bootstrap, or health check leaves the prior current generation intact.
+generation and `pending` binds an interrupted attempt to its exact candidate.
+Keep this directory in the persistent checkout, include it in host recovery
+planning, and do not edit it manually. A failed build, migration, bootstrap, or
+health check leaves the prior current generation intact and retains pending for
+an exact retry.
 
-To restore, stop the app and proxy without deleting volumes, preserve another
-copy of the current database, restore the selected custom dump with
-`pg_restore`, and rerun persist deployment so migrations and both health checks
-complete. Use the database/user/project values from the same environment file:
+Never restore a standalone dump or manually pair a dump with deployment state.
+Use the guarded restore action with one intact source-bound bundle. It validates
+the bundle digest, project and volume ownership, exact checkout SHA and
+migration manifest, and creates a second source-bound safety bundle before it
+stops the application and replaces database contents:
 
 ```bash
-docker compose --env-file .env.demo -f compose.demo.yml stop caddy app
-umask 077
-install -d -m 700 /secure/backups
-docker compose --env-file .env.demo -f compose.demo.yml exec -T db \
-  pg_dump -U skybar -Fc skybar > /secure/backups/before-restore.backup
-docker compose --env-file .env.demo -f compose.demo.yml exec -T db \
-  pg_restore --list < /secure/backups/before-restore.backup
-docker compose --env-file .env.demo -f compose.demo.yml exec -T db \
-  pg_restore --list < .demo-backups/sky-bar-demo/TIMESTAMP.dump
-docker compose --env-file .env.demo -f compose.demo.yml exec -T db \
-  pg_restore -U skybar -d skybar --clean --if-exists < .demo-backups/sky-bar-demo/TIMESTAMP.dump
+scripts/demo-deploy.sh --env-file .env.demo --db-mode persist \
+  --restore-backup .demo-backups/sky-bar-demo/TIMESTAMP.bundle \
+  --confirm-restore sky-bar-demo
 scripts/demo-deploy.sh --env-file .env.demo --db-mode persist
 ```
 
-Replace the project directory and dump filename with the selected validated
-backup. Keep `/secure/backups` outside the repository checkout, protect its
-safety dump as personal data, and validate the dump with `pg_restore --list`
-before proceeding. Do not restore over a running application and do not delete
-the Caddy volumes.
+Replace the project and bundle names with their configured values. Check out
+the commit recorded in the bundle before restoring. The restore refuses raw,
+tampered, foreign, or source-mismatched backups and restores the matching
+current/pending descriptors only after database migration names agree. It never
+deletes the Caddy volumes.
 
 ## Secret rotation
 
@@ -269,12 +280,16 @@ classes distinct.
 - **Backup fails:** do not force the deployment. Confirm the old database can
   start, disk space is available, and `.demo-backups/<project>/` is writable;
   then rerun so a validated dump is created.
-- **Migration-manifest validation fails:** deploy migration files that extend
-  the recorded history. Do not edit state or rewrite migration hashes to hide a
-  changed migration. Use rewrite only when discarding demo data is intended.
-- **External health fails after internal health passes:** inspect app and Caddy
-  logs, DNS, firewall, proxy ports, and certificate issuance. State remains on
-  the last healthy generation; correct the cause and rerun persist mode.
+- **Migration-manifest validation fails:** do not edit state or rewrite hashes.
+  Before the first valid production marker-and-tag pair, consolidate schema
+  work in `0001_initial.sql` and use explicitly confirmed rewrite for disposable
+  demo data; do not add a forward migration, compatibility shim, or backfill for
+  an earlier demo or PR state. Only migrations frozen by a valid production
+  release are extended with intentional forward migrations.
+- **Local HTTPS health fails after internal health passes:** inspect app and
+  Caddy logs, DNS, firewall, proxy ports, and certificate issuance. Current
+  remains on the last healthy generation and pending retains the exact retry;
+  correct the cause and rerun persist mode from the same checkout.
 - **A deploy appears stuck:** check for another operator using the same Compose
   project. Do not remove the lock while that process is alive.
 

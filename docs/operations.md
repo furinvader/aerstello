@@ -46,12 +46,15 @@ docker compose exec -T db pg_restore -U aerstello -d aerstello --clean --if-exis
 
 Store backups outside the application host. Back up before upgrades, retain multiple recovery points, and restrict access because guest names and financial records are personal data.
 
-The demo deploy command also writes a validated, permission-restricted dump to
-`.demo-backups/<project>/` before changing an existing database. This is a
-host-local rollback aid only: copy it to encrypted off-host storage if it must
-serve as disaster recovery. Its companion `.demo-state/<project>/` directory
-contains the last successful deployed commit and migration manifest and must
-remain with a persistent checkout. See the
+The demo deploy command also writes a validated, permission-restricted backup
+bundle to `.demo-backups/<project>/` before changing an existing database. The
+bundle binds its dump digest and exact database migration names to matching
+current/pending source state. Never restore its dump separately or pair it with
+another checkout's state. This is a host-local rollback aid only: copy the
+whole bundle to encrypted off-host storage if it must serve as disaster
+recovery. Its companion `.demo-state/<project>/` directory contains successful
+and interrupted source/migration identity and must remain with a persistent
+checkout. See the
 [demo deployment runbook](./demo-deployment.md#backup-state-and-restoration).
 
 ## Recovery
