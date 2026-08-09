@@ -150,8 +150,10 @@ export const accessApprovalSchema = z.object({
   expiresAt: z.string().datetime(),
 });
 
+export const loginEmailSchema = z.string().trim().toLowerCase().email().max(254);
+
 export const loginSchema = z.object({
-  email: z.string().trim().toLowerCase().email().max(254),
+  email: loginEmailSchema,
   password: z.string().min(12).max(256),
 });
 
