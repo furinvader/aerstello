@@ -4,6 +4,12 @@
 
 Production requires `DATABASE_URL`, an explicitly configured nondefault `SESSION_SECRET`, an explicit `ACCESS_CAPABILITY_KEYS` keyring, and HTTPS. Startup fails when production uses the development database URL, omits either secret setting, or uses a shipped placeholder. The supplied Compose service publishes the app directly and therefore defaults `TRUST_PROXY` to `false`. Set `TRUST_PROXY=true` only when clients can reach the app exclusively through a trusted reverse proxy that replaces forwarded headers. Keep PostgreSQL and the API on a private network and expose only the HTTPS proxy.
 
+The root `docker-compose.yml` is development tooling, not a production or demo
+topology. For a single-host HTTPS demonstration, use `compose.demo.yml` only
+through the guarded [demo deployment runbook](./demo-deployment.md). That stack
+sets `TRUST_PROXY=true`, keeps the API and database off host ports, and makes
+Caddy the only public service.
+
 `ACCESS_CAPABILITY_KEYS` is a comma-separated, active-first list of up to eight `key-id:secret` entries, for example `v2:<current>,v1:<previous>`. Key identifiers are immutable labels of at most 32 letters, digits, underscores, or hyphens; each secret must be unique, contain at least 32 non-whitespace characters, and come from a secret manager. These values never belong in API payloads or logs. The first key issues new and idempotently replayed guest-access status capabilities. Retained prior keys verify and reissue requests created under those versions.
 
 Keep access-capability secrets distinct from `SESSION_SECRET`. To rotate access capabilities, prepend a new identifier and secret, deploy the same ordered keyring to every replica, and retain each prior entry until no pending request or lost grant exchange can still reference it. Remove old entries only after that recovery window. Never reuse an identifier for different key material. Session-secret rotation is independent: it revokes cookies without invalidating retained access capabilities.
@@ -39,6 +45,14 @@ docker compose exec -T db pg_restore -U skybar -d skybar --clean --if-exists < s
 ```
 
 Store backups outside the application host. Back up before upgrades, retain multiple recovery points, and restrict access because guest names and financial records are personal data.
+
+The demo deploy command also writes a validated, permission-restricted dump to
+`.demo-backups/<project>/` before changing an existing database. This is a
+host-local rollback aid only: copy it to encrypted off-host storage if it must
+serve as disaster recovery. Its companion `.demo-state/<project>/` directory
+contains the last successful deployed commit and migration manifest and must
+remain with a persistent checkout. See the
+[demo deployment runbook](./demo-deployment.md#backup-state-and-restoration).
 
 ## Recovery
 

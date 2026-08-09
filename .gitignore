@@ -3,6 +3,9 @@ dist/
 coverage/
 .env
 .env.local
+.env.demo
+.demo-state/
+.demo-backups/
 playwright-report/
 test-results/
 .features-gen/
