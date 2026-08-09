@@ -26,6 +26,7 @@ CONFIRM_RESTORE=''
 CURRENT_MANIFEST_TEMP=''
 FINAL_MANIFEST_TEMP=''
 RESTORED_MIGRATIONS_TEMP=''
+GIT_TREE_TEMP=''
 BACKUP_PARTIAL=''
 CREATED_BACKUP_PATH=''
 INIT_ENV_TEMP=''
@@ -86,6 +87,9 @@ cleanup() {
   fi
   if [[ -n "$RESTORED_MIGRATIONS_TEMP" && -f "$RESTORED_MIGRATIONS_TEMP" ]]; then
     rm -f -- "$RESTORED_MIGRATIONS_TEMP"
+  fi
+  if [[ -n "$GIT_TREE_TEMP" && -f "$GIT_TREE_TEMP" ]]; then
+    rm -f -- "$GIT_TREE_TEMP"
   fi
   if [[ -n "$BACKUP_PARTIAL" && -d "$BACKUP_PARTIAL" ]]; then
     rm -rf -- "$BACKUP_PARTIAL"
@@ -579,6 +583,8 @@ verify_volume_ownership() {
   OBSERVED_VOLUME_IDENTITY="${remainder#*|}"
   [[ "$project_owner" == "$PROJECT_NAME" && "$logical_owner" == postgres-data ]] ||
     die "Refusing to use PostgreSQL volume $DB_VOLUME without exact Compose project and postgres-data ownership labels."
+  [[ -z "$OBSERVED_VOLUME_RESTORE_TOKEN" || "$OBSERVED_VOLUME_RESTORE_TOKEN" =~ ^restore-[0-9a-f]{32}$ ]] ||
+    die "Refusing to use PostgreSQL volume $DB_VOLUME with an invalid restore ownership token."
   [[ -n "$OBSERVED_VOLUME_IDENTITY" && "$OBSERVED_VOLUME_IDENTITY" == *'|'* ]] ||
     die "Could not establish stable identity for PostgreSQL volume $DB_VOLUME."
 }
@@ -761,7 +767,7 @@ validate_restore_source_compatibility() {
     die "$description source commit is not an ancestor of this checkout."
   declare -A recorded_entries=()
   declare -A current_entries=()
-  local line digest path mode type object
+  local line digest path mode type object record metadata
   while IFS= read -r line || [[ -n "$line" ]]; do
     digest="${line%%  *}"
     path="${line#*  }"
@@ -775,18 +781,38 @@ validate_restore_source_compatibility() {
       die "$description contains a migration not preserved by this checkout: $path"
   done < "$state_directory/migrations.sha256"
   declare -A source_entries=()
-  local source_tree
-  source_tree="$(git ls-tree -r "$source_sha" -- apps/api/migrations)" ||
+  GIT_TREE_TEMP="$(mktemp "${TMPDIR:-/tmp}/sky-bar-source-tree.XXXXXX")"
+  if ! git ls-tree -rz --full-tree "$source_sha" -- apps/api/migrations > "$GIT_TREE_TEMP"; then
     die "$description migration tree cannot be read from its source commit."
-  while IFS=$' \t' read -r mode type object path; do
+  fi
+  while true; do
+    record=''
+    if IFS= read -r -d '' record; then
+      :
+    elif [[ -n "$record" ]]; then
+      die "$description source commit contains a non-NUL-terminated Git tree record."
+    else
+      break
+    fi
+    [[ "$record" == *$'\t'* ]] ||
+      die "$description source commit contains a malformed Git tree record."
+    metadata="${record%%$'\t'*}"
+    path="${record#*$'\t'}"
+    [[ "$metadata" =~ ^([0-9]{6})\ (blob)\ ([0-9a-f]{40,64})$ ]] ||
+      die "$description source commit contains a malformed or non-blob Git tree record."
+    mode="${BASH_REMATCH[1]}"
+    type="${BASH_REMATCH[2]}"
+    object="${BASH_REMATCH[3]}"
     [[ "$path" == apps/api/migrations/*.sql ]] || continue
-    [[ "$mode" =~ ^100(644|755)$ && "$type" == blob ]] ||
+    [[ "$mode" =~ ^100(644|755)$ && "$type" == blob && -n "$object" ]] ||
       die "$description source commit contains a non-regular SQL migration: $path"
     digest="$(git show "$source_sha:$path" | sha256sum)" ||
       die "$description migration cannot be read from its source commit: $path"
     digest="${digest%% *}"
     source_entries["$path"]="$digest"
-  done <<< "$source_tree"
+  done < "$GIT_TREE_TEMP"
+  rm -f -- "$GIT_TREE_TEMP"
+  GIT_TREE_TEMP=''
   ((${#source_entries[@]} > 0)) || die "$description source commit contains no SQL migrations."
   for path in "${!source_entries[@]}"; do
     [[ -v "recorded_entries[$path]" && "${recorded_entries[$path]}" == "${source_entries[$path]}" ]] ||
@@ -1211,7 +1237,12 @@ validate_restore_transaction_context() {
       die 'Current-selected restore transaction contains unexpected pending state.'
   fi
   validate_restore_source_compatibility "$selected_state" 'Interrupted restore state'
-  if [[ "$database_state_kind" == pending && -d "$RESTORE_TRANSACTION_DIRECTORY/current" ]]; then
+  if [[ "$database_state_kind" == pending &&
+        ( -e "$RESTORE_TRANSACTION_DIRECTORY/current" || -L "$RESTORE_TRANSACTION_DIRECTORY/current" ) ]]; then
+    validate_private_directory "$RESTORE_TRANSACTION_DIRECTORY/current" \
+      'The interrupted restore current baseline'
+    validate_state_descriptor "$RESTORE_TRANSACTION_DIRECTORY/current" \
+      'Interrupted restore current baseline'
     validate_restore_source_compatibility "$RESTORE_TRANSACTION_DIRECTORY/current" \
       'Interrupted restore current baseline'
     validate_pending_baseline_compatibility "$RESTORE_TRANSACTION_DIRECTORY/current" "$selected_state" \
@@ -1289,6 +1320,106 @@ validate_or_bind_restore_destination() {
     [[ "$OBSERVED_VOLUME_RESTORE_TOKEN" == "$destination_token" ]] ||
       die 'The restore destination volume creation token changed before recovery publication.'
   fi
+}
+
+validate_completed_restore_retirement() {
+  local retirement="$1"
+  validate_private_directory "$retirement" 'The completed restore transaction retirement'
+  local file
+  for file in phase generation-name database-state-kind bundle-path bundle-digest \
+      database-migrations.txt safety-backup-kind safety-backup-path safety-backup-identity \
+      destination-volume destination-volume-identity destination-volume-restore-token; do
+    validate_private_file "$retirement/$file" "The completed restore transaction $file record"
+  done
+  [[ "$(< "$retirement/phase")" == database-restored ]] ||
+    die 'Completed restore transaction retirement has an invalid phase.'
+  [[ "$(< "$retirement/generation-name")" =~ ^restore-[A-Za-z0-9._-]+$ ]] ||
+    die 'Completed restore transaction retirement has an invalid generation name.'
+  [[ "$(< "$retirement/bundle-path")" != *$'\n'* && -n "$(< "$retirement/bundle-path")" ]] ||
+    die 'Completed restore transaction retirement has an invalid bundle path.'
+  [[ "$(< "$retirement/bundle-digest")" =~ ^[0-9a-f]{64}$ ]] ||
+    die 'Completed restore transaction retirement has an invalid bundle digest.'
+  [[ "$(< "$retirement/destination-volume")" == "$DB_VOLUME" ]] ||
+    die 'Completed restore transaction retirement belongs to a different destination volume.'
+  local destination_identity destination_token safety_kind safety_path safety_identity
+  destination_identity="$(< "$retirement/destination-volume-identity")"
+  destination_token="$(< "$retirement/destination-volume-restore-token")"
+  [[ -n "$destination_identity" && "$destination_identity" != unbound && "$destination_identity" != *$'\n'* ]] ||
+    die 'Completed restore transaction retirement has an invalid destination identity.'
+  [[ "$destination_token" == none || "$destination_token" =~ ^restore-[0-9a-f]{32}$ ]] ||
+    die 'Completed restore transaction retirement has an invalid destination token.'
+  safety_kind="$(< "$retirement/safety-backup-kind")"
+  safety_path="$(< "$retirement/safety-backup-path")"
+  safety_identity="$(< "$retirement/safety-backup-identity")"
+  case "$safety_kind" in
+    present)
+      [[ -n "$safety_path" && "$safety_path" != *$'\n'* && "$safety_identity" =~ ^[0-9a-f]{64}$ ]] ||
+        die 'Completed restore transaction retirement has invalid safety-backup evidence.'
+      ;;
+    absent)
+      [[ "$safety_path" == absent && "$safety_identity" == absent ]] ||
+        die 'Completed restore transaction retirement contradicts absent safety-backup evidence.'
+      ;;
+    *) die 'Completed restore transaction retirement has an invalid safety-backup classification.' ;;
+  esac
+  local -a retired_migrations=()
+  mapfile -t retired_migrations < "$retirement/database-migrations.txt"
+  local migration
+  for migration in "${retired_migrations[@]}"; do
+    [[ "$migration" =~ ^[0-9]{4}_[a-z0-9_]+\.sql$ ]] ||
+      die 'Completed restore transaction retirement has a malformed database migration list.'
+  done
+  LC_ALL=C sort -u -- "$retirement/database-migrations.txt" |
+    cmp -s -- "$retirement/database-migrations.txt" - ||
+    die 'Completed restore transaction retirement migration list is not sorted and unique.'
+  local database_state_kind
+  database_state_kind="$(< "$retirement/database-state-kind")"
+  case "$database_state_kind" in
+    current)
+      validate_private_directory "$retirement/current" 'The completed restore current state'
+      validate_state_descriptor "$retirement/current" 'Completed restore current state'
+      [[ ! -e "$retirement/pending" && ! -L "$retirement/pending" ]] ||
+        die 'Completed current-selected restore retirement contains unexpected pending state.'
+      ;;
+    pending)
+      validate_private_directory "$retirement/pending" 'The completed restore pending state'
+      validate_state_descriptor "$retirement/pending" 'Completed restore pending state'
+      if [[ -e "$retirement/current" || -L "$retirement/current" ]]; then
+        validate_private_directory "$retirement/current" 'The completed restore current baseline'
+        validate_state_descriptor "$retirement/current" 'Completed restore current baseline'
+      fi
+      ;;
+    *) die 'Completed restore transaction retirement has an invalid database-state selector.' ;;
+  esac
+  if [[ -e "$retirement/previous-pending" || -L "$retirement/previous-pending" ]]; then
+    validate_private_directory "$retirement/previous-pending" 'The retired previous pending state'
+    validate_state_descriptor "$retirement/previous-pending" 'Retired previous pending state'
+  fi
+
+  local -a entries=()
+  mapfile -d '' entries < <(find -P "$retirement" -mindepth 1 -maxdepth 1 -print0)
+  local entry name
+  for entry in "${entries[@]}"; do
+    name="${entry##*/}"
+    case "$name" in
+      phase|generation-name|database-state-kind|bundle-path|bundle-digest|database-migrations.txt|\
+      safety-backup-kind|safety-backup-path|safety-backup-identity|destination-volume|\
+      destination-volume-identity|destination-volume-restore-token|current|pending|previous-pending) ;;
+      *) die "Completed restore transaction retirement contains an unexpected entry: $name" ;;
+    esac
+  done
+}
+
+recover_completed_restore_retirements() {
+  local retirement name
+  for retirement in "$STATE_DIRECTORY"/.restore-transaction-completed.*; do
+    [[ -e "$retirement" || -L "$retirement" ]] || continue
+    name="${retirement##*/}"
+    [[ "$name" =~ ^\.restore-transaction-completed\.[0-9]+\.[0-9]+$ ]] ||
+      die "Unexpected completed restore transaction retirement name: $name"
+    validate_completed_restore_retirement "$retirement"
+    rm -rf -- "$retirement"
+  done
 }
 
 complete_restore_state_transaction() {
@@ -1381,10 +1512,14 @@ complete_restore_state_transaction() {
   [[ ! -e "$retired_transaction" && ! -L "$retired_transaction" ]] ||
     die 'Could not retire completed restore transaction safely.'
   mv -T -- "$RESTORE_TRANSACTION_DIRECTORY" "$retired_transaction"
+  if [[ "${SKY_BAR_TEST_FAIL_RESTORE_RETIREMENT-}" == after-rename ]]; then
+    die 'Injected restore transaction retirement interruption after atomic rename.'
+  fi
   rm -rf -- "$retired_transaction"
 }
 
 recover_completed_restore_transaction() {
+  recover_completed_restore_retirements
   [[ -e "$RESTORE_TRANSACTION_DIRECTORY" || -L "$RESTORE_TRANSACTION_DIRECTORY" ]] || return 0
   [[ -d "$RESTORE_TRANSACTION_DIRECTORY" && ! -L "$RESTORE_TRANSACTION_DIRECTORY" ]] ||
     die 'Restore transaction state is invalid.'
@@ -1663,6 +1798,9 @@ restore_backup_bundle() {
   validate_restore_archive "$dump_path"
   if [[ "$resume_restoring" == false ]]; then
     if [[ "$DATABASE_EXISTS" == true ]]; then
+      verify_volume_ownership
+      local pre_backup_destination_identity="$OBSERVED_VOLUME_IDENTITY"
+      local pre_backup_destination_token="$OBSERVED_VOLUME_RESTORE_TOKEN"
       start_restore_database
       validate_database_for_source_bound_backup
       CREATED_BACKUP_PATH=''
@@ -1673,8 +1811,11 @@ restore_backup_bundle() {
       recorded_safety_backup="$CREATED_BACKUP_PATH"
       recorded_safety_identity="$VALIDATED_BACKUP_IDENTITY"
       verify_volume_ownership
+      [[ "$OBSERVED_VOLUME_IDENTITY" == "$pre_backup_destination_identity" &&
+          "$OBSERVED_VOLUME_RESTORE_TOKEN" == "$pre_backup_destination_token" ]] ||
+        die 'The restore destination volume changed during safety-backup preparation.'
       recorded_destination_identity="$OBSERVED_VOLUME_IDENTITY"
-      recorded_destination_token=none
+      recorded_destination_token="${OBSERVED_VOLUME_RESTORE_TOKEN:-none}"
     else
       recorded_safety_kind=absent
       recorded_safety_backup=absent
@@ -1721,7 +1862,7 @@ restore_backup_bundle() {
   validate_or_bind_restore_destination
   start_restore_database
   DATABASE_EXISTS=true
-  verify_volume_ownership
+  validate_or_bind_restore_destination
   compose exec -T db psql -U skybar -d postgres -v ON_ERROR_STOP=1 \
     -c 'DROP DATABASE IF EXISTS skybar WITH (FORCE)'
   if [[ "${SKY_BAR_TEST_FAIL_RESTORE-}" == after-drop ]]; then
