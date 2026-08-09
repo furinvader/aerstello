@@ -1222,6 +1222,10 @@ validate_restore_transaction_context() {
       destination-volume destination-volume-identity destination-volume-restore-token; do
     validate_private_file "$RESTORE_TRANSACTION_DIRECTORY/$file" "The restore transaction $file record"
   done
+  local identity_staging="$RESTORE_TRANSACTION_DIRECTORY/.destination-volume-identity.next"
+  if [[ -e "$identity_staging" || -L "$identity_staging" ]]; then
+    validate_private_file "$identity_staging" 'The restore destination identity staging record'
+  fi
 
   local database_state_kind
   database_state_kind="$(< "$RESTORE_TRANSACTION_DIRECTORY/database-state-kind")"
@@ -1264,6 +1268,10 @@ validate_restore_transaction_context() {
   local destination_identity destination_token
   destination_identity="$(< "$RESTORE_TRANSACTION_DIRECTORY/destination-volume-identity")"
   destination_token="$(< "$RESTORE_TRANSACTION_DIRECTORY/destination-volume-restore-token")"
+  if [[ -e "$identity_staging" || -L "$identity_staging" ]]; then
+    [[ "$destination_identity" == unbound ]] ||
+      die 'Restore destination identity staging exists after identity binding completed.'
+  fi
   [[ -n "$destination_identity" && "$destination_identity" != *$'\n'* ]] ||
     die 'Restore transaction destination volume identity is invalid.'
   [[ "$destination_token" == none || "$destination_token" =~ ^restore-[0-9a-f]{32}$ ]] ||
@@ -1287,7 +1295,12 @@ validate_restore_transaction_context() {
 }
 
 validate_or_bind_restore_destination() {
-  local phase destination_identity destination_token safety_kind
+  validate_private_file "$RESTORE_TRANSACTION_DIRECTORY/destination-volume" \
+    'The restore transaction destination volume record'
+  local destination_volume phase destination_identity destination_token safety_kind
+  destination_volume="$(< "$RESTORE_TRANSACTION_DIRECTORY/destination-volume")"
+  [[ "$destination_volume" == "$DB_VOLUME" ]] ||
+    die 'Restore transaction destination volume differs from this Compose project.'
   phase="$(< "$RESTORE_TRANSACTION_DIRECTORY/phase")"
   destination_identity="$(< "$RESTORE_TRANSACTION_DIRECTORY/destination-volume-identity")"
   destination_token="$(< "$RESTORE_TRANSACTION_DIRECTORY/destination-volume-restore-token")"
@@ -1305,9 +1318,15 @@ validate_or_bind_restore_destination() {
     verify_volume_ownership
     [[ "$OBSERVED_VOLUME_RESTORE_TOKEN" == "$destination_token" ]] ||
       die 'Unbound restore destination was replaced by a volume outside this restore transaction.'
-    local identity_staging="$RESTORE_TRANSACTION_DIRECTORY/.destination-volume-identity.$$"
+    local identity_staging="$RESTORE_TRANSACTION_DIRECTORY/.destination-volume-identity.next"
+    if [[ -e "$identity_staging" || -L "$identity_staging" ]]; then
+      validate_private_file "$identity_staging" 'The restore destination identity staging record'
+    fi
     printf '%s\n' "$OBSERVED_VOLUME_IDENTITY" > "$identity_staging"
     chmod 600 -- "$identity_staging"
+    if [[ "${SKY_BAR_TEST_FAIL_RESTORE_BIND-}" == after-identity-staging ]]; then
+      die 'Injected restore destination identity interruption before atomic binding.'
+    fi
     mv -T -- "$identity_staging" "$RESTORE_TRANSACTION_DIRECTORY/destination-volume-identity"
     return
   fi
@@ -1411,15 +1430,22 @@ validate_completed_restore_retirement() {
 }
 
 recover_completed_restore_retirements() {
-  local retirement name
+  local retirement name recovered=false
   for retirement in "$STATE_DIRECTORY"/.restore-transaction-completed.*; do
     [[ -e "$retirement" || -L "$retirement" ]] || continue
     name="${retirement##*/}"
     [[ "$name" =~ ^\.restore-transaction-completed\.[0-9]+\.[0-9]+$ ]] ||
       die "Unexpected completed restore transaction retirement name: $name"
+    [[ ! -e "$RESTORE_TRANSACTION_DIRECTORY" && ! -L "$RESTORE_TRANSACTION_DIRECTORY" ]] ||
+      die 'Completed and active restore transactions coexist; investigate before retrying.'
     validate_completed_restore_retirement "$retirement"
     rm -rf -- "$retirement"
+    recovered=true
   done
+  if [[ "$recovered" == true ]]; then
+    note 'Recovered completed restore transaction retirement.'
+    RESTORE_RECOVERED=true
+  fi
 }
 
 complete_restore_state_transaction() {

@@ -199,7 +199,13 @@ if (/\bup\b/.test(command) && command.endsWith(' db')) {
     const counterPath = process.env.FAKE_COMMAND_LOG + '.restore-start-count';
     let count = 0;
     try { count = Number(fs.readFileSync(counterPath, 'utf8')); } catch {}
-    fs.writeFileSync(counterPath, String(count + 1));
+    count += 1;
+    fs.writeFileSync(counterPath, String(count));
+    if (process.env.FAKE_MUTATE_DESTINATION_VOLUME_AFTER_RESTORE_START === '1' && count >= 2) {
+      const transactionVolume = path.join(process.env.FAKE_REPOSITORY_ROOT, '.demo-state',
+        process.env.COMPOSE_PROJECT_NAME, 'restore-transaction', 'destination-volume');
+      fs.writeFileSync(transactionVolume, 'foreign-project-postgres-data\n');
+    }
   }
 }
 if (command.includes('npm run db:migrate')) {
@@ -1042,6 +1048,105 @@ test('guarded restore recovers a missing destination without inventing a safety 
   }
 });
 
+test('missing-destination identity binding survives staging and retirement interruptions', (t) => {
+  const fixture = makeFixture(t);
+  const state = seedState(fixture);
+  const deployed = run(fixture, commonPersistArgs(fixture), {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_ADMIN_EXISTS: '1',
+  });
+  assert.equal(deployed.status, 0, deployed.output);
+  const [bundle] = backupBundles(fixture);
+  rmSync(state, { recursive: true });
+  rmSync(`${fixture.commandLog}.volume-created`, { force: true });
+  rmSync(`${fixture.commandLog}.volume-token`, { force: true });
+  const restoreArgs = [...commonPersistArgs(fixture),
+    '--restore-backup', bundle, '--confirm-restore', project];
+
+  writeFileSync(fixture.commandLog, '');
+  const bindingInterrupted = run(fixture, restoreArgs, {
+    FAKE_GIT_SHA: 'f'.repeat(40),
+    SKY_BAR_TEST_FAIL_RESTORE_BIND: 'after-identity-staging',
+  });
+  assert.notEqual(bindingInterrupted.status, 0);
+  assert.match(bindingInterrupted.output, /identity interruption.*atomic binding/i);
+  const transaction = join(state, 'restore-transaction');
+  const identityStaging = join(transaction, '.destination-volume-identity.next');
+  assert.equal(readFileSync(join(transaction, 'destination-volume-identity'), 'utf8').trim(), 'unbound');
+  assert.ok(existsSync(identityStaging));
+  assert.equal(statSync(identityStaging).mode & 0o777, 0o600);
+  assert.equal(readdirSync(transaction).some((name) => /^\.destination-volume-identity\.\d+$/.test(name)), false);
+
+  writeFileSync(fixture.commandLog, '');
+  const retirementInterrupted = run(fixture, restoreArgs, {
+    FAKE_GIT_SHA: 'f'.repeat(40),
+    FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
+    SKY_BAR_TEST_FAIL_RESTORE_RETIREMENT: 'after-rename',
+  });
+  assert.notEqual(retirementInterrupted.status, 0);
+  assert.match(retirementInterrupted.output, /retirement interruption/i);
+  const [retirement] = readdirSync(state)
+    .filter((name) => /^\.restore-transaction-completed\.\d+\.\d+$/.test(name));
+  assert.ok(retirement);
+  assert.equal(existsSync(join(state, retirement, '.destination-volume-identity.next')), false);
+  assert.equal(existsSync(transaction), false);
+  const beforeCleanup = stateSnapshot(state);
+
+  writeFileSync(fixture.commandLog, '');
+  const recovered = run(fixture, restoreArgs, { FAKE_GIT_SHA: 'f'.repeat(40) });
+  assert.equal(recovered.status, 0, recovered.output);
+  assert.match(recovered.output, /Recovered completed restore transaction retirement/i);
+  assert.equal(existsSync(join(state, retirement)), false);
+  assert.deepEqual(stateSnapshot(state), beforeCleanup);
+  const lines = dockerLines(fixture);
+  assert.equal(lines.some((line) => /\b(up|stop|run|exec|down)\b/.test(line)), false, lines.join('\n'));
+  assert.equal(lines.some((line) => /^volume (?:create|rm)\b/.test(line)), false, lines.join('\n'));
+});
+
+test('retry rejects unsafe fixed destination identity staging records', async (t) => {
+  for (const kind of ['symlink', 'non-private file']) {
+    await t.test(kind, (st) => {
+      const fixture = makeFixture(st);
+      const state = seedState(fixture);
+      const deployed = run(fixture, commonPersistArgs(fixture), {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_ADMIN_EXISTS: '1',
+      });
+      assert.equal(deployed.status, 0, deployed.output);
+      const [bundle] = backupBundles(fixture);
+      rmSync(state, { recursive: true });
+      rmSync(`${fixture.commandLog}.volume-created`, { force: true });
+      rmSync(`${fixture.commandLog}.volume-token`, { force: true });
+      const restoreArgs = [...commonPersistArgs(fixture),
+        '--restore-backup', bundle, '--confirm-restore', project];
+      writeFileSync(fixture.commandLog, '');
+      const interrupted = run(fixture, restoreArgs, {
+        FAKE_GIT_SHA: 'f'.repeat(40),
+        SKY_BAR_TEST_FAIL_RESTORE_BIND: 'after-identity-staging',
+      });
+      assert.notEqual(interrupted.status, 0);
+      const transaction = join(state, 'restore-transaction');
+      const identityStaging = join(transaction, '.destination-volume-identity.next');
+      if (kind === 'symlink') {
+        rmSync(identityStaging);
+        symlinkSync('destination-volume-identity', identityStaging);
+      } else {
+        chmodSync(identityStaging, 0o644);
+      }
+
+      writeFileSync(fixture.commandLog, '');
+      const rejected = run(fixture, restoreArgs, { FAKE_GIT_SHA: 'f'.repeat(40) });
+      assert.notEqual(rejected.status, 0);
+      assert.match(rejected.output, /identity staging record.*(?:symlink|group|world)/i);
+      assert.equal(readFileSync(join(transaction, 'destination-volume-identity'), 'utf8').trim(), 'unbound');
+      const lines = dockerLines(fixture);
+      assert.equal(lines.some((line) => line.includes('stop app caddy')), false);
+      assert.equal(lines.some((line) => line.includes('DROP DATABASE')), false);
+      assert.equal(lines.some((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list')), false);
+    });
+  }
+});
+
 test('guarded restore rejects unrelated bundle history before database mutation', (t) => {
   const fixture = makeFixture(t);
   seedState(fixture);
@@ -1128,6 +1233,8 @@ test('guarded restore rejects destination replacement at both destructive bounda
   for (const [name, injection, expected] of [
     ['during safety-backup preparation', { FAKE_REPLACE_VOLUME_AFTER_PG_DUMP: '1' }, /safety-backup preparation/i],
     ['after restore database startup', { FAKE_REPLACE_VOLUME_AFTER_RESTORE_START: '1' }, /volume identity changed/i],
+    ['destination name after restore database startup',
+      { FAKE_MUTATE_DESTINATION_VOLUME_AFTER_RESTORE_START: '1' }, /destination volume differs/i],
   ]) {
     await t.test(name, (st) => {
       const fixture = makeFixture(st);
@@ -1152,6 +1259,7 @@ test('guarded restore rejects destination replacement at both destructive bounda
       assert.match(rejected.output, expected);
       const lines = dockerLines(fixture);
       assert.equal(lines.some((line) => line.includes('DROP DATABASE')), false);
+      assert.equal(lines.some((line) => line.includes('CREATE DATABASE')), false);
       assert.equal(lines.some((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list')), false);
       if (name === 'during safety-backup preparation') {
         assert.equal(existsSync(join(fixture.directory, '.demo-state', project, 'restore-transaction')), false);
