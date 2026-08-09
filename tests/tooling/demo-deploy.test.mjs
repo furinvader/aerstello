@@ -79,6 +79,17 @@ if (process.env.FAKE_FORBIDDEN_SECRET_FILE) {
   }
 }
 const joined = [tool, ...args].join(' ');
+if (process.env.FAKE_FAIL_SCHEMA_QUERY_AT && joined.includes('SELECT name FROM schema_migrations')) {
+  const counterPath = process.env.FAKE_COMMAND_LOG + '.schema-query-count';
+  let count = 0;
+  try { count = Number(fs.readFileSync(counterPath, 'utf8')); } catch {}
+  count += 1;
+  fs.writeFileSync(counterPath, String(count));
+  if (count === Number(process.env.FAKE_FAIL_SCHEMA_QUERY_AT)) {
+    process.stderr.write('injected schema_migrations query failure\n');
+    process.exit(44);
+  }
+}
 if (process.env.FAKE_FAIL_MATCH && joined.includes(process.env.FAKE_FAIL_MATCH)) {
   process.stderr.write('injected failure: ' + process.env.FAKE_FAIL_MATCH + '\n');
   process.exit(41);
@@ -474,6 +485,46 @@ test('persist backs up first, always runs the exact compiled migration command, 
   assert.match(readFileSync(join(bundle, 'metadata'), 'utf8'), /databaseState=current/);
   const state = join(fixture.directory, '.demo-state', project);
   assert.notEqual(stateSnapshot(state).current, 'generations/seed');
+});
+
+test('schema migration query failures cannot become an empty migration result', async (t) => {
+  await t.test('pre-backup source classification', (st) => {
+    const fixture = makeFixture(st);
+    seedState(fixture);
+    const result = run(fixture, commonPersistArgs(fixture), {
+      FAKE_EXISTING_VOLUMES: dbVolume,
+      FAKE_FAIL_SCHEMA_QUERY_AT: '1',
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.output, /read applied database migrations|schema_migrations query failure/i);
+    assert.equal(dockerLines(fixture).some((line) => line.includes('pg_dump')), false);
+  });
+
+  await t.test('post-restore verification', (st) => {
+    const fixture = makeFixture(st);
+    const state = seedState(fixture);
+    const deployed = run(fixture, commonPersistArgs(fixture), {
+      FAKE_EXISTING_VOLUMES: dbVolume,
+      FAKE_ADMIN_EXISTS: '1',
+    });
+    assert.equal(deployed.status, 0, deployed.output);
+    const [bundle] = backupBundles(fixture);
+    const before = stateSnapshot(state);
+    writeFileSync(fixture.commandLog, '');
+    const restored = run(fixture, [...commonPersistArgs(fixture),
+      '--restore-backup', bundle, '--confirm-restore', project], {
+      FAKE_EXISTING_VOLUMES: dbVolume,
+      FAKE_GIT_SHA: 'f'.repeat(40),
+      FAKE_FAIL_SCHEMA_QUERY_AT: '2',
+      FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
+    });
+    assert.notEqual(restored.status, 0);
+    assert.match(restored.output, /read applied database migrations|schema_migrations query failure/i);
+    assert.ok(dockerLines(fixture).some((line) => line.includes('pg_restore') && line.includes('--clean')));
+    const transaction = join(state, 'restore-transaction');
+    assert.equal(readFileSync(join(transaction, 'phase'), 'utf8').trim(), 'restoring');
+    assert.deepEqual(stateSnapshot(state), before, 'failed verification must not publish restored state');
+  });
 });
 
 test('backup creation or validation failure aborts before migration/deletion and preserves deployment state', async (t) => {
@@ -1108,6 +1159,26 @@ test('restoring-phase retry is bound to the original bundle and reuses its safet
   assert.notEqual(wrongRetry.status, 0);
   assert.match(wrongRetry.output, /original.*bundle|restore transaction|identity/i);
   assert.equal(dockerLines(fixture).some((line) => line.includes('pg_dump')), false);
+
+  const safetyBundle = readFileSync(join(transaction, 'safety-backup-path'), 'utf8').trim();
+  const safetyDump = join(safetyBundle, 'database.dump');
+  const safetyDigest = join(safetyBundle, 'dump.sha256');
+  const originalSafetyDump = readFileSync(safetyDump);
+  const originalSafetyDigest = readFileSync(safetyDigest);
+  writeFileSync(safetyDump, Buffer.concat([originalSafetyDump, Buffer.from('altered')]));
+  writeFileSync(safetyDigest, `${hashFile(safetyDump)}  database.dump\n`);
+  writeFileSync(fixture.commandLog, '');
+  const alteredSafetyRetry = run(fixture, restoreArgs, {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_GIT_SHA: 'f'.repeat(40),
+  });
+  assert.notEqual(alteredSafetyRetry.status, 0);
+  assert.match(alteredSafetyRetry.output, /safety backup identity changed/i);
+  assert.equal(dockerLines(fixture).some((line) => line.includes('pg_restore') && line.includes('--clean')), false,
+    'an altered safety bundle must fail before destructive target restore');
+  assert.equal(dockerLines(fixture).some((line) => line.includes('pg_dump')), false);
+  writeFileSync(safetyDump, originalSafetyDump);
+  writeFileSync(safetyDigest, originalSafetyDigest);
 
   writeFileSync(fixture.commandLog, '');
   const resumed = run(fixture, restoreArgs, {
