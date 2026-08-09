@@ -89,6 +89,21 @@ if (tool === 'git') {
   else if (args[0] === 'rev-parse') process.stdout.write(process.env.FAKE_GIT_SHA + '\n');
   process.exit(0);
 }
+if (tool === 'node') {
+  if (args.some((arg) => arg.includes('release-state.mjs')) && process.env.FAKE_RELEASE_POLICY_FAIL === '1') {
+    process.stderr.write('injected release policy failure\n');
+    process.exit(42);
+  }
+  if (args.some((arg) => arg.includes('validate-demo-admin.mjs'))) {
+    const email = args[args.indexOf('--email') + 1] || '';
+    const name = args[args.indexOf('--name') + 1] || '';
+    if (email.includes('..') || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !/\S/.test(name) || name.length > 200) {
+      process.stderr.write('administrator profile validation failed\n');
+      process.exit(1);
+    }
+  }
+  process.exit(0);
+}
 if (tool === 'curl') {
   if (process.env.FAKE_CURL_FAIL === '1') process.exit(22);
   process.stdout.write('{"status":"ok"}\n');
@@ -103,7 +118,9 @@ if (args[0] === 'volume' && args[1] === 'inspect') {
   const existing = (process.env.FAKE_EXISTING_VOLUMES || '').split(',').filter(Boolean);
   const name = args.find((arg) => existing.includes(arg)) || args.at(-1);
   if (!existing.includes(name)) process.exit(1);
-  if (args.includes('--format')) process.stdout.write((process.env.FAKE_VOLUME_PROJECT || 'sky-bar-demo') + '\n');
+  if (args.includes('--format')) process.stdout.write(
+    (process.env.FAKE_VOLUME_PROJECT || 'sky-bar-demo') + '|' +
+    (process.env.FAKE_VOLUME_LOGICAL || 'postgres-data') + '\n');
   else process.stdout.write('[{}]\n');
   process.exit(0);
 }
@@ -113,7 +130,12 @@ if (/\bps\b/.test(command) && (args.includes('-q') || args.includes('--quiet')))
 else if (/\binspect\b/.test(command) && command.includes('State.Health.Status')) process.stdout.write('healthy\n');
 else if (/\bps\b/.test(command) && command.includes('--services')) process.stdout.write('db\napp\ncaddy\n');
 else if ((/\bexec\b/.test(command) || /\brun\b/.test(command)) && /\bpsql\b/.test(command)) {
-  process.stdout.write(process.env.FAKE_ADMIN_EXISTS === '0' ? '0\n' : '1\n');
+  if (command.includes('to_regclass')) process.stdout.write(process.env.FAKE_SCHEMA_TABLE === '0' ? 'missing\n' : 'present\n');
+  else if (command.includes('SELECT name FROM schema_migrations')) {
+    if (process.env.FAKE_SCHEMA_MIGRATIONS !== '__EMPTY__') {
+      process.stdout.write((process.env.FAKE_SCHEMA_MIGRATIONS || '0001_initial.sql') + '\n');
+    }
+  } else process.stdout.write(process.env.FAKE_ADMIN_EXISTS === '0' ? '0\n' : '1\n');
 } else if (/\bpg_dump\b/.test(command)) {
   process.stdout.write('PGDMP fake custom-format backup\n');
 } else if (/\bpg_restore\b/.test(command)) {
@@ -130,8 +152,12 @@ function makeFixture(t) {
   t.after(() => rmSync(secretsDirectory, { recursive: true, force: true }));
   mkdirSync(join(directory, 'scripts'), { recursive: true });
   mkdirSync(join(directory, 'apps/api/migrations'), { recursive: true });
+  mkdirSync(join(directory, 'apps/api/src'), { recursive: true });
   mkdirSync(join(directory, 'deploy/caddy'), { recursive: true });
   copyFileSync(join(repositoryRoot, 'scripts/demo-deploy.sh'), join(directory, 'scripts/demo-deploy.sh'));
+  copyFileSync(join(repositoryRoot, 'scripts/validate-demo-admin.mjs'), join(directory, 'scripts/validate-demo-admin.mjs'));
+  copyFileSync(join(repositoryRoot, 'apps/api/src/admin-profile-rules.json'),
+    join(directory, 'apps/api/src/admin-profile-rules.json'));
   chmodSync(join(directory, 'scripts/demo-deploy.sh'), 0o755);
   for (const file of ['.env.demo.example', 'compose.demo.yml']) {
     copyFileSync(join(repositoryRoot, file), join(directory, file));
@@ -145,9 +171,10 @@ function makeFixture(t) {
 
   const fakeBin = join(directory, 'fake-bin');
   mkdirSync(fakeBin);
-  for (const tool of ['docker', 'curl', 'git']) {
+  for (const tool of ['docker', 'curl', 'git', 'node']) {
     const path = join(fakeBin, tool);
-    writeFileSync(path, fakeExecutableSource(), { mode: 0o755 });
+    const source = fakeExecutableSource().replace('#!/usr/bin/env node', `#!${process.execPath}`);
+    writeFileSync(path, source, { mode: 0o755 });
   }
   const commandLog = join(directory, 'commands.jsonl');
   writeFileSync(commandLog, '');
@@ -168,7 +195,11 @@ function run(fixture, args, environment = {}) {
       ...environment,
     },
   });
-  return { ...result, output: `${result.stdout}${result.stderr}` };
+  const output = `${result.stdout}${result.stderr}`;
+  const diagnostic = result.status !== 0 && output === ''
+    ? `command log before silent exit:\n${readFileSync(fixture.commandLog, 'utf8')}`
+    : output;
+  return { ...result, output: diagnostic };
 }
 
 function commands(fixture, tool = undefined) {
@@ -213,6 +244,34 @@ function passwordFile(fixture, value = 'correct horse battery staple') {
 function commonPersistArgs(fixture) {
   return ['--env-file', fixture.environmentPath, '--db-mode', 'persist'];
 }
+
+function backupBundles(fixture) {
+  const directory = join(fixture.directory, '.demo-backups', project);
+  if (!existsSync(directory)) return [];
+  return readdirSync(directory).filter((name) => name.endsWith('.bundle')).sort()
+    .map((name) => join(directory, name));
+}
+
+test('administrator preflight validator enforces the shared invalid corpus', () => {
+  const validator = join(repositoryRoot, 'scripts/validate-demo-admin.mjs');
+  const invalid = [
+    ['a..b@example.com', 'Demo Administrator'],
+    ['.admin@example.com', 'Demo Administrator'],
+    ['admin.@example.com', 'Demo Administrator'],
+    ['admin@-example.com', 'Demo Administrator'],
+    ['admin@example', 'Demo Administrator'],
+    ['admin @example.com', 'Demo Administrator'],
+    ['admin@example.com', '   '],
+    ['admin@example.com', 'x'.repeat(201)],
+  ];
+  for (const [email, name] of invalid) {
+    const result = spawnSync(process.execPath, [validator, '--email', email, '--name', name], { encoding: 'utf8' });
+    assert.notEqual(result.status, 0, `${email} / ${name}`);
+  }
+  const valid = spawnSync(process.execPath, [validator,
+    '--email', 'first.last+demo@example-host.test', '--name', 'Demo Administrator'], { encoding: 'utf8' });
+  assert.equal(valid.status, 0, valid.stderr);
+});
 
 test('init-env creates private distinct secrets, reports human fields, and never overwrites', (t) => {
   const fixture = makeFixture(t);
@@ -339,6 +398,24 @@ test('preflight rejects a dirty worktree before deployment mutation', (t) => {
   assert.equal(dockerLines(fixture).some((line) => /\b(up|run|exec|down)\b|volume rm/.test(line)), false);
 });
 
+test('release policy and canonical administrator validation fail before Docker mutation', async (t) => {
+  await t.test('release policy failure', (st) => {
+    const fixture = makeFixture(st);
+    const result = run(fixture, commonPersistArgs(fixture), { FAKE_RELEASE_POLICY_FAIL: '1' });
+    assert.notEqual(result.status, 0);
+    assert.equal(commands(fixture, 'docker').length, 0);
+  });
+  await t.test('administrator email rejected by bootstrap rules', (st) => {
+    const fixture = makeFixture(st);
+    writeFileSync(fixture.environmentPath,
+      shellEnvironment({ ...validEnvironment, ADMIN_EMAIL: 'a..b@example.com' }), { mode: 0o600 });
+    const result = run(fixture, commonPersistArgs(fixture));
+    assert.notEqual(result.status, 0);
+    assert.match(result.output, /administrator profile|ADMIN_EMAIL/i);
+    assert.equal(commands(fixture, 'docker').length, 0);
+  });
+});
+
 test('--check validates Compose and Caddy without container, volume, backup, or state mutation', (t) => {
   const fixture = makeFixture(t);
   const result = run(fixture, ['--check', '--env-file', fixture.environmentPath]);
@@ -369,7 +446,15 @@ test('persist backs up first, always runs the exact compiled migration command, 
   assert.ok(migrate > validate, lines.join('\n'));
   assert.equal(lines.some((line) => line.startsWith('volume rm')), false, lines.join('\n'));
   assert.equal(lines.some((line) => /down.*(?:-v|--volumes)/.test(line)), false, lines.join('\n'));
-  assert.ok(readdirSync(join(fixture.directory, '.demo-backups', project)).some((name) => name.endsWith('.dump')));
+  const bundles = readdirSync(join(fixture.directory, '.demo-backups', project))
+    .filter((name) => name.endsWith('.bundle'));
+  assert.equal(bundles.length, 1);
+  const bundle = join(fixture.directory, '.demo-backups', project, bundles[0]);
+  assert.ok(existsSync(join(bundle, 'database.dump')));
+  assert.ok(existsSync(join(bundle, 'dump.sha256')));
+  assert.ok(existsSync(join(bundle, 'database-migrations.txt')));
+  assert.ok(existsSync(join(bundle, 'state', 'current', 'migrations.sha256')));
+  assert.ok(existsSync(join(bundle, 'state', 'pending', 'migrations.sha256')));
   const state = join(fixture.directory, '.demo-state', project);
   assert.notEqual(stateSnapshot(state).current, 'generations/seed');
 });
@@ -438,6 +523,26 @@ test('rewrite refuses a PostgreSQL volume owned by another Compose project', (t)
   assert.notEqual(result.status, 0);
   assert.match(result.output, /label|owned|project|refus/i);
   assert.equal(dockerLines(fixture).some((line) => line.startsWith('volume rm')), false);
+});
+
+test('existing PostgreSQL volumes require exact project and logical ownership labels', async (t) => {
+  for (const [name, environment] of [
+    ['missing project', { FAKE_VOLUME_PROJECT: '<no value>' }],
+    ['missing logical name', { FAKE_VOLUME_LOGICAL: '<no value>' }],
+    ['foreign logical name', { FAKE_VOLUME_LOGICAL: 'other-data' }],
+  ]) {
+    await t.test(name, (st) => {
+      const fixture = makeFixture(st);
+      seedState(fixture);
+      const result = run(fixture, commonPersistArgs(fixture), {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        ...environment,
+      });
+      assert.notEqual(result.status, 0);
+      assert.match(result.output, /ownership|label|refus/i);
+      assert.equal(dockerLines(fixture).some((line) => /\b(up|run|exec|down)\b|volume rm/.test(line)), false);
+    });
+  }
 });
 
 test('state without its PostgreSQL volume cannot silently create a replacement database', (t) => {
@@ -517,6 +622,25 @@ test('current migration files with a duplicate numeric prefix are rejected befor
   assert.notEqual(result.status, 0);
   assert.match(result.output, /duplicate numeric prefix 0001/i);
   assert.equal(dockerLines(fixture).some((line) => /\b(up|run|exec|down)\b|volume rm/.test(line)), false);
+});
+
+test('symlinked and non-regular SQL migration entries are rejected before database mutation', async (t) => {
+  await t.test('symlink', (st) => {
+    const fixture = makeFixture(st);
+    symlinkSync('0001_initial.sql', join(fixture.directory, 'apps/api/migrations/0002_link.sql'));
+    const result = run(fixture, commonPersistArgs(fixture));
+    assert.notEqual(result.status, 0);
+    assert.match(result.output, /regular|symlink/i);
+    assert.equal(dockerLines(fixture).some((line) => /\b(up|run|exec|down)\b|volume rm/.test(line)), false);
+  });
+  await t.test('directory', (st) => {
+    const fixture = makeFixture(st);
+    mkdirSync(join(fixture.directory, 'apps/api/migrations/0002_directory.sql'));
+    const result = run(fixture, commonPersistArgs(fixture));
+    assert.notEqual(result.status, 0);
+    assert.match(result.output, /regular|symlink/i);
+    assert.equal(dockerLines(fixture).some((line) => /\b(up|run|exec|down)\b|volume rm/.test(line)), false);
+  });
 });
 
 test('an unmanaged existing database requires explicit adoption and publishes the baseline only after health succeeds', (t) => {
@@ -599,4 +723,129 @@ test('failed migration, application health, or external HTTPS health never publi
       assert.deepEqual(stateSnapshot(state), before);
     });
   }
+});
+
+test('pending state resumes an interrupted first deployment and rejects source drift', (t) => {
+  const fixture = makeFixture(t);
+  const secretFile = passwordFile(fixture);
+  const first = run(fixture, [...commonPersistArgs(fixture), '--admin-password-file', secretFile], {
+    FAKE_ADMIN_EXISTS: '0',
+    FAKE_SCHEMA_TABLE: '0',
+    FAKE_CURL_FAIL: '1',
+  });
+  assert.notEqual(first.status, 0);
+  const pending = join(fixture.directory, '.demo-state', project, 'pending');
+  assert.ok(existsSync(join(pending, 'deployed-sha')));
+  assert.equal(existsSync(join(fixture.directory, '.demo-state', project, 'current')), false);
+
+  writeFileSync(fixture.commandLog, '');
+  const resumed = run(fixture, commonPersistArgs(fixture), {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_ADMIN_EXISTS: '1',
+  });
+  assert.equal(resumed.status, 0, resumed.output);
+  assert.equal(existsSync(pending), false);
+  assert.ok(existsSync(join(fixture.directory, '.demo-state', project, 'current')));
+});
+
+test('pending source mismatch and database migration drift fail before migration or app start', async (t) => {
+  await t.test('pending manifest mismatch', (st) => {
+    const fixture = makeFixture(st);
+    const pending = join(fixture.directory, '.demo-state', project, 'pending');
+    mkdirSync(pending, { recursive: true });
+    writeFileSync(join(pending, 'deployed-sha'), `${gitSha}\n`);
+    writeFileSync(join(pending, 'migrations.sha256'), `${'e'.repeat(64)}  ${migrationPath}\n`);
+    const result = run(fixture, commonPersistArgs(fixture), { FAKE_EXISTING_VOLUMES: dbVolume });
+    assert.notEqual(result.status, 0);
+    assert.match(result.output, /pending.*manifest|different.*checkout/i);
+    assert.equal(dockerLines(fixture).some((line) => /\b(up|run|exec)\b/.test(line)), false);
+  });
+  await t.test('database contains migration absent from checkout', (st) => {
+    const fixture = makeFixture(st);
+    seedState(fixture);
+    const result = run(fixture, commonPersistArgs(fixture), {
+      FAKE_EXISTING_VOLUMES: dbVolume,
+      FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql\n0002_removed.sql',
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.output, /absent.*checkout|ambiguous rollback/i);
+    const lines = dockerLines(fixture);
+    assert.equal(lines.some((line) => line.includes('npm run db:migrate')), false);
+    assert.equal(lines.some((line) => line.includes('up -d app')), false);
+  });
+  await t.test('database is older than current state', (st) => {
+    const fixture = makeFixture(st);
+    seedState(fixture);
+    const result = run(fixture, commonPersistArgs(fixture), {
+      FAKE_EXISTING_VOLUMES: dbVolume,
+      FAKE_SCHEMA_MIGRATIONS: '__EMPTY__',
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.output, /older.*state|missing/i);
+    assert.equal(dockerLines(fixture).some((line) => line.includes('npm run db:migrate')), false);
+  });
+});
+
+test('HTTPS health probes local Caddy with configured hostname and SNI', (t) => {
+  const fixture = makeFixture(t);
+  seedState(fixture);
+  const result = run(fixture, commonPersistArgs(fixture), {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_ADMIN_EXISTS: '1',
+  });
+  assert.equal(result.status, 0, result.output);
+  const health = commands(fixture, 'curl').find(({ args }) => args.some((arg) => arg.includes('/api/v1/health')));
+  assert.ok(health);
+  assert.ok(health.args.includes('--resolve'));
+  assert.ok(health.args.includes(`${validEnvironment.SKY_BAR_DOMAIN}:443:127.0.0.1`));
+  assert.ok(health.args.includes(`https://${validEnvironment.SKY_BAR_DOMAIN}/api/v1/health`));
+});
+
+test('guarded restore rejects tampering before replacement and creates safety backup first', async (t) => {
+  await t.test('tampered dump', (st) => {
+    const fixture = makeFixture(st);
+    seedState(fixture);
+    const deployed = run(fixture, commonPersistArgs(fixture), {
+      FAKE_EXISTING_VOLUMES: dbVolume,
+      FAKE_ADMIN_EXISTS: '1',
+    });
+    assert.equal(deployed.status, 0, deployed.output);
+    const [bundle] = backupBundles(fixture);
+    assert.ok(bundle);
+    const dump = join(bundle, 'database.dump');
+    writeFileSync(dump, `${readFileSync(dump, 'utf8')}tampered\n`);
+    writeFileSync(fixture.commandLog, '');
+    const restored = run(fixture, [...commonPersistArgs(fixture),
+      '--restore-backup', bundle, '--confirm-restore', project], {
+      FAKE_EXISTING_VOLUMES: dbVolume,
+    });
+    assert.notEqual(restored.status, 0);
+    assert.match(restored.output, /digest|tamper|backup/i);
+    assert.equal(dockerLines(fixture).some((line) => line.includes('pg_restore') && line.includes('--clean')), false);
+  });
+
+  await t.test('matching bundle', (st) => {
+    const fixture = makeFixture(st);
+    seedState(fixture);
+    const deployed = run(fixture, commonPersistArgs(fixture), {
+      FAKE_EXISTING_VOLUMES: dbVolume,
+      FAKE_ADMIN_EXISTS: '1',
+    });
+    assert.equal(deployed.status, 0, deployed.output);
+    const [bundle] = backupBundles(fixture);
+    assert.ok(bundle);
+    writeFileSync(fixture.commandLog, '');
+    const restored = run(fixture, [...commonPersistArgs(fixture),
+      '--restore-backup', bundle, '--confirm-restore', project], {
+      FAKE_EXISTING_VOLUMES: dbVolume,
+    });
+    assert.equal(restored.status, 0, restored.output);
+    const lines = dockerLines(fixture);
+    const safetyDump = lines.findIndex((line) => line.includes('pg_dump'));
+    const destructiveRestore = lines.findIndex((line) => line.includes('pg_restore') && line.includes('--clean'));
+    assert.ok(safetyDump >= 0, lines.join('\n'));
+    assert.ok(destructiveRestore > safetyDump, lines.join('\n'));
+    assert.ok(lines.slice(0, destructiveRestore).some((line) => line.includes('stop app caddy')));
+    assert.equal(backupBundles(fixture).length, 2);
+  });
 });
