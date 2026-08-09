@@ -9,6 +9,7 @@ const validLoginEmails = [
 
 const invalidLoginEmails = [
   'admin@example.1',
+  'admin@example.c',
   'a..b@example.com',
   '.admin@example.com',
   'admin.@example.com',

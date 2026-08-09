@@ -9,6 +9,7 @@ const valid = [
 
 const invalid = [
   ['admin@example.1', 'Demo Administrator'],
+  ['admin@example.c', 'Demo Administrator'],
   ['a..b@example.com', 'Demo Administrator'],
   ['.admin@example.com', 'Demo Administrator'],
   ['admin.@example.com', 'Demo Administrator'],
