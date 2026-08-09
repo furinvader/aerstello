@@ -261,10 +261,10 @@ Use the guarded restore action with one intact source-bound bundle. It validates
 the bundle digest and project, source history, migration compatibility, and any
 existing volume's exact ownership. A bundle from an older ancestor is eligible
 only when every selected migration path and digest is preserved by the current
-checkout. The restore creates a second source-bound safety bundle before it
-stops the application when prior database data exists; after volume loss it
-durably records that no safety backup is possible before creating the exact
-Compose-owned destination volume.
+checkout. When prior database data exists, the restore stops application
+writers before source classification and creation of a second source-bound
+safety bundle; after volume loss it durably records that no safety backup is
+possible before creating the exact Compose-owned destination volume.
 
 ```bash
 scripts/demo-deploy.sh --env-file .env.demo --db-mode persist \
