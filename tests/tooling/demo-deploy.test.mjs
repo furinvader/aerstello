@@ -101,16 +101,30 @@ if (tool === 'git') {
   else if (args[0] === 'cat-file' && process.env.FAKE_GIT_SOURCE_MISSING === '1') process.exit(1);
   else if (args[0] === 'merge-base' && process.env.FAKE_GIT_SOURCE_ANCESTOR === '0') process.exit(1);
   else if (args[0] === 'ls-tree') {
-    const sourceSha = args[2] || '';
+    const sourceSha = args.find((arg) => /^[0-9a-f]{40,64}$/.test(arg)) || '';
     const configuredPaths = sourceSha.startsWith('d')
       ? process.env.FAKE_GIT_BASELINE_SOURCE_PATHS
       : process.env.FAKE_GIT_SOURCE_PATHS;
-    const paths = (configuredPaths || 'apps/api/migrations/0001_initial.sql').split(',').filter(Boolean);
-    for (const migration of paths) process.stdout.write('100644 blob ' + 'a'.repeat(40) + '\t' + migration + '\n');
+    const configuredJson = sourceSha.startsWith('d')
+      ? process.env.FAKE_GIT_BASELINE_SOURCE_PATHS_JSON
+      : process.env.FAKE_GIT_SOURCE_PATHS_JSON;
+    const paths = configuredJson
+      ? JSON.parse(configuredJson)
+      : (configuredPaths || 'apps/api/migrations/0001_initial.sql').split(',').filter(Boolean);
+    for (const migration of paths) {
+      process.stdout.write('100644 blob ' + 'a'.repeat(40) + '\t' + migration + '\0');
+    }
   }
   else if (args[0] === 'show') {
     const spec = args[1] || '';
     const migration = spec.slice(spec.indexOf(':') + 1);
+    if (process.env.FAKE_GIT_SOURCE_CONTENTS_JSON) {
+      const sources = JSON.parse(process.env.FAKE_GIT_SOURCE_CONTENTS_JSON);
+      if (Object.hasOwn(sources, migration)) {
+        process.stdout.write(sources[migration]);
+        process.exit(0);
+      }
+    }
     const source = path.join(process.env.FAKE_REPOSITORY_ROOT, migration);
     if (!fs.existsSync(source)) process.exit(1);
     process.stdout.write(process.env.FAKE_GIT_SOURCE_CONTENT || fs.readFileSync(source));
@@ -149,11 +163,21 @@ if (args[0] === 'volume' && args[1] === 'inspect') {
   if (!existing.includes(name) && !(created && name.endsWith('-postgres-data'))) process.exit(1);
   let restoreToken = process.env.FAKE_VOLUME_RESTORE_TOKEN || '';
   try { restoreToken ||= fs.readFileSync(process.env.FAKE_COMMAND_LOG + '.volume-token', 'utf8'); } catch {}
+  let volumeIdentity = process.env.FAKE_VOLUME_IDENTITY || '2026-08-09T00:00:00Z|/var/lib/docker/volumes/sky-bar-demo-postgres-data/_data';
+  if (process.env.FAKE_REPLACE_VOLUME_AFTER_PG_DUMP === '1' &&
+      fs.existsSync(process.env.FAKE_COMMAND_LOG + '.pg-dump-complete')) {
+    volumeIdentity = '2026-08-10T00:00:00Z|/var/lib/docker/volumes/safety-race-replacement/_data';
+  }
+  let restoreStarts = 0;
+  try { restoreStarts = Number(fs.readFileSync(process.env.FAKE_COMMAND_LOG + '.restore-start-count', 'utf8')); } catch {}
+  if (process.env.FAKE_REPLACE_VOLUME_AFTER_RESTORE_START === '1' && restoreStarts >= 2) {
+    volumeIdentity = '2026-08-11T00:00:00Z|/var/lib/docker/volumes/startup-race-replacement/_data';
+  }
   if (args.includes('--format')) process.stdout.write(
     (process.env.FAKE_VOLUME_PROJECT || 'sky-bar-demo') + '|' +
     (process.env.FAKE_VOLUME_LOGICAL || 'postgres-data') + '|' +
     restoreToken + '|' +
-    (process.env.FAKE_VOLUME_IDENTITY || '2026-08-09T00:00:00Z|/var/lib/docker/volumes/sky-bar-demo-postgres-data/_data') + '\n');
+    volumeIdentity + '\n');
   else process.stdout.write('[{}]\n');
   process.exit(0);
 }
@@ -171,6 +195,12 @@ if (args[0] === 'volume' && args[1] === 'create') {
 const command = args.join(' ');
 if (/\bup\b/.test(command) && command.endsWith(' db')) {
   fs.writeFileSync(process.env.FAKE_COMMAND_LOG + '.volume-created', '1');
+  if (command.includes('--no-deps')) {
+    const counterPath = process.env.FAKE_COMMAND_LOG + '.restore-start-count';
+    let count = 0;
+    try { count = Number(fs.readFileSync(counterPath, 'utf8')); } catch {}
+    fs.writeFileSync(counterPath, String(count + 1));
+  }
 }
 if (command.includes('npm run db:migrate')) {
   try { fs.unlinkSync(process.env.FAKE_COMMAND_LOG + '.volume-removed'); } catch {}
@@ -193,6 +223,7 @@ else if ((/\bexec\b/.test(command) || /\brun\b/.test(command)) && /\bpsql\b/.tes
     }
   } else process.stdout.write(process.env.FAKE_ADMIN_EXISTS === '0' ? '0\n' : '1\n');
 } else if (/\bpg_dump\b/.test(command)) {
+  fs.writeFileSync(process.env.FAKE_COMMAND_LOG + '.pg-dump-complete', '1');
   process.stdout.write('PGDMP fake custom-format backup\n');
 } else if (/\bpg_restore\b/.test(command)) {
   if (!command.includes('--list') && process.env.FAKE_RESTORED_SCHEMA_MIGRATIONS !== undefined) {
@@ -1060,6 +1091,76 @@ test('guarded restore authenticates an older manifest against its recorded commi
   assert.equal(lines.some((line) => line.includes('DROP DATABASE')), false);
 });
 
+test('historical source authentication cannot omit a pathological SQL pathname', (t) => {
+  const fixture = makeFixture(t);
+  seedState(fixture);
+  const deployed = run(fixture, commonPersistArgs(fixture), {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_ADMIN_EXISTS: '1',
+  });
+  assert.equal(deployed.status, 0, deployed.output);
+  const [bundle] = backupBundles(fixture);
+  writeFileSync(join(bundle, 'state', 'current', 'deployed-sha'), `${'e'.repeat(40)}\n`);
+  const pathologicalPath = 'apps/api/migrations/nested/0002_"quoted\\path\nwith-tab\t.sql';
+  writeFileSync(fixture.commandLog, '');
+  const rejected = run(fixture, [...commonPersistArgs(fixture),
+    '--restore-backup', bundle, '--confirm-restore', project], {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_GIT_SHA: 'f'.repeat(40),
+    FAKE_GIT_SOURCE_PATHS_JSON: JSON.stringify([migrationPath, pathologicalPath]),
+    FAKE_GIT_SOURCE_CONTENTS_JSON: JSON.stringify({
+      [migrationPath]: readFileSync(join(fixture.directory, migrationPath), 'utf8'),
+      [pathologicalPath]: 'SELECT 2;\n',
+    }),
+  });
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.output, /does not match.*recorded source commit/i);
+  const gitTree = commands(fixture, 'git').find(({ args }) => args[0] === 'ls-tree');
+  assert.ok(gitTree?.args.includes('-rz'), JSON.stringify(gitTree));
+  const lines = dockerLines(fixture);
+  assert.equal(lines.some((line) => line.includes('pg_dump')), false);
+  assert.equal(lines.some((line) => line.includes('stop app caddy')), false);
+  assert.equal(lines.some((line) => line.includes('DROP DATABASE')), false);
+  assert.equal(existsSync(join(fixture.directory, '.demo-state', project, 'restore-transaction')), false);
+});
+
+test('guarded restore rejects destination replacement at both destructive boundaries', async (t) => {
+  for (const [name, injection, expected] of [
+    ['during safety-backup preparation', { FAKE_REPLACE_VOLUME_AFTER_PG_DUMP: '1' }, /safety-backup preparation/i],
+    ['after restore database startup', { FAKE_REPLACE_VOLUME_AFTER_RESTORE_START: '1' }, /volume identity changed/i],
+  ]) {
+    await t.test(name, (st) => {
+      const fixture = makeFixture(st);
+      seedState(fixture);
+      const deployed = run(fixture, commonPersistArgs(fixture), {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_ADMIN_EXISTS: '1',
+      });
+      assert.equal(deployed.status, 0, deployed.output);
+      const [bundle] = backupBundles(fixture);
+      rmSync(`${fixture.commandLog}.pg-dump-complete`, { force: true });
+      rmSync(`${fixture.commandLog}.restore-start-count`, { force: true });
+      writeFileSync(fixture.commandLog, '');
+      const rejected = run(fixture, [...commonPersistArgs(fixture),
+        '--restore-backup', bundle, '--confirm-restore', project], {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_GIT_SHA: 'f'.repeat(40),
+        FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
+        ...injection,
+      });
+      assert.notEqual(rejected.status, 0);
+      assert.match(rejected.output, expected);
+      const lines = dockerLines(fixture);
+      assert.equal(lines.some((line) => line.includes('DROP DATABASE')), false);
+      assert.equal(lines.some((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list')), false);
+      if (name === 'during safety-backup preparation') {
+        assert.equal(existsSync(join(fixture.directory, '.demo-state', project, 'restore-transaction')), false);
+        assert.equal(lines.some((line) => line.includes('stop app caddy')), false);
+      }
+    });
+  }
+});
+
 test('confirmed pre-release rewrites preserve restorable old source identity', async (t) => {
   const cases = [
     ['modified', (fixture) => {
@@ -1316,7 +1417,7 @@ test('pending-selected restore recovers after marker publication removes old pen
   writeFileSync(join(bundle, 'database-migrations.txt'), '0001_initial.sql\n');
 
   const livePending = join(state, 'pending');
-  mkdirSync(livePending);
+  mkdirSync(livePending, { mode: 0o700 });
   writeFileSync(join(livePending, 'deployed-sha'), `${'f'.repeat(40)}\n`);
   writeFileSync(join(livePending, 'migrations.sha256'), pendingManifest);
   const restoreArgs = [...commonPersistArgs(fixture),
@@ -1375,6 +1476,39 @@ test('pending-only source-bound bundle stages no invented current baseline', (t)
   assert.equal(existsSync(join(state, 'current')), false);
   assert.equal(existsSync(join(state, 'pending')), true);
   assert.equal(existsSync(join(state, 'rewrite-replacement')), true);
+});
+
+test('interrupted pending restore rejects a symlinked optional current baseline', (t) => {
+  const fixture = makeFixture(t);
+  seedState(fixture);
+  const deployed = run(fixture, commonPersistArgs(fixture), {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_ADMIN_EXISTS: '1',
+  });
+  assert.equal(deployed.status, 0, deployed.output);
+  const [bundle] = backupBundles(fixture);
+  writeFileSync(join(bundle, 'metadata'), `schemaVersion=1\nproject=${project}\ndatabaseState=pending\n`);
+  const restoreArgs = [...commonPersistArgs(fixture),
+    '--restore-backup', bundle, '--confirm-restore', project];
+  writeFileSync(fixture.commandLog, '');
+  const interrupted = run(fixture, restoreArgs, {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    SKY_BAR_TEST_FAIL_RESTORE: 'after-transaction',
+  });
+  assert.notEqual(interrupted.status, 0);
+  const transaction = join(fixture.directory, '.demo-state', project, 'restore-transaction');
+  const transactionCurrent = join(transaction, 'current');
+  rmSync(transactionCurrent, { recursive: true });
+  symlinkSync(join(bundle, 'state', 'current'), transactionCurrent);
+
+  writeFileSync(fixture.commandLog, '');
+  const rejected = run(fixture, restoreArgs, { FAKE_EXISTING_VOLUMES: dbVolume });
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.output, /current baseline.*directory.*symbolic link/i);
+  const lines = dockerLines(fixture);
+  assert.equal(lines.some((line) => line.includes('stop app caddy')), false);
+  assert.equal(lines.some((line) => line.includes('DROP DATABASE')), false);
+  assert.equal(lines.some((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list')), false);
 });
 
 test('pending-selected restore rejects an incompatible bundled current baseline', (t) => {
@@ -1523,4 +1657,70 @@ test('older bundle rollback preserves a safety bundle for the later live migrati
     /0002_forward\.sql/);
   assert.deepEqual(readFileSync(join(safetyBundles[0], 'database-migrations.txt'), 'utf8').trim().split('\n'),
     ['0001_initial.sql', '0002_forward.sql']);
+});
+
+test('completed restore retirement is crash-recoverable and removes previous pending state', (t) => {
+  const fixture = makeFixture(t);
+  const state = seedState(fixture);
+  const deployed = run(fixture, commonPersistArgs(fixture), {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_ADMIN_EXISTS: '1',
+  });
+  assert.equal(deployed.status, 0, deployed.output);
+  const [bundle] = backupBundles(fixture);
+  const livePending = join(state, 'pending');
+  mkdirSync(livePending, { mode: 0o700 });
+  writeFileSync(join(livePending, 'deployed-sha'), `${gitSha}\n`);
+  writeFileSync(join(livePending, 'migrations.sha256'),
+    `${hashFile(join(fixture.directory, migrationPath))}  ${migrationPath}\n`);
+  writeFileSync(fixture.commandLog, '');
+  const interrupted = run(fixture, [...commonPersistArgs(fixture),
+    '--restore-backup', bundle, '--confirm-restore', project], {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
+    SKY_BAR_TEST_FAIL_RESTORE_RETIREMENT: 'after-rename',
+  });
+  assert.notEqual(interrupted.status, 0);
+  assert.match(interrupted.output, /retirement interruption/i);
+  assert.equal(existsSync(join(state, 'restore-transaction')), false);
+  const [retirement] = readdirSync(state)
+    .filter((name) => /^\.restore-transaction-completed\.\d+\.\d+$/.test(name));
+  assert.ok(retirement);
+  assert.ok(existsSync(join(state, retirement, 'previous-pending')));
+
+  writeFileSync(fixture.commandLog, '');
+  const recovered = run(fixture, commonPersistArgs(fixture), {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_ADMIN_EXISTS: '1',
+  });
+  assert.equal(recovered.status, 0, recovered.output);
+  assert.equal(existsSync(join(state, retirement)), false);
+  assert.equal(readdirSync(state).some((name) => name.startsWith('.restore-transaction-completed.')), false);
+  assert.equal(existsSync(livePending), false);
+});
+
+test('completed restore retirement recovery rejects matching malformed entries', async (t) => {
+  for (const kind of ['file', 'symlink', 'malformed directory']) {
+    await t.test(kind, (st) => {
+      const fixture = makeFixture(st);
+      const state = seedState(fixture);
+      const retirement = join(state, '.restore-transaction-completed.12.34');
+      if (kind === 'file') writeFileSync(retirement, 'not a transaction\n');
+      else if (kind === 'symlink') symlinkSync('generations/seed', retirement);
+      else mkdirSync(retirement, { mode: 0o700 });
+      writeFileSync(fixture.commandLog, '');
+      const rejected = run(fixture, commonPersistArgs(fixture), {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_ADMIN_EXISTS: '1',
+      });
+      assert.notEqual(rejected.status, 0);
+      assert.match(rejected.output, kind === 'malformed directory'
+        ? /completed restore transaction phase record.*regular/i
+        : /completed restore transaction retirement.*directory.*symbolic link/i);
+      assert.ok(existsSync(retirement));
+      const lines = dockerLines(fixture);
+      assert.equal(lines.some((line) => /\b(up|run|exec|stop)\b/.test(line)), false);
+      assert.equal(lines.some((line) => line.includes('DROP DATABASE')), false);
+    });
+  }
 });
