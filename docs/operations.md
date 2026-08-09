@@ -41,7 +41,12 @@ Create regular encrypted PostgreSQL dumps and test restoration:
 
 ```bash
 docker compose exec -T db pg_dump -U aerstello -Fc aerstello > aerstello.backup
-docker compose exec -T db pg_restore -U aerstello -d aerstello --clean --if-exists < aerstello.backup
+docker compose stop app
+docker compose exec -T db psql -U aerstello -d postgres -v ON_ERROR_STOP=1 \
+  -c 'DROP DATABASE IF EXISTS aerstello WITH (FORCE)'
+docker compose exec -T db psql -U aerstello -d postgres -v ON_ERROR_STOP=1 \
+  -c 'CREATE DATABASE aerstello OWNER aerstello'
+docker compose exec -T db pg_restore -U aerstello -d aerstello < aerstello.backup
 ```
 
 Store backups outside the application host. Back up before upgrades, retain multiple recovery points, and restrict access because guest names and financial records are personal data.
@@ -49,12 +54,22 @@ Store backups outside the application host. Back up before upgrades, retain mult
 The demo deploy command also writes a validated, permission-restricted backup
 bundle to `.demo-backups/<project>/` before changing an existing database. The
 bundle binds its dump digest and exact database migration names to matching
-current/pending source state. Never restore its dump separately or pair it with
-another checkout's state. This is a host-local rollback aid only: copy the
+current/pending source state. Guarded restore accepts an older ancestor bundle
+from a clean current checkout only when all selected migration paths and
+digests are still preserved. It recreates the whole `skybar` database rather
+than applying an in-place `pg_restore --clean`. When prior database data exists
+it first creates and validates one safety bundle; after volume loss it records
+the absence of that safety evidence and can recreate only the deterministic,
+exactly labelled PostgreSQL volume from an intact off-host bundle. Exact-bundle
+retries retain that original classification and never back up a crash-created
+empty or partial database. Never restore a dump separately or pair it with
+unrelated state, and never add a compatibility migration solely for an
+unreleased recovery point. This is a host-local rollback aid only: copy the
 whole bundle to encrypted off-host storage if it must serve as disaster
 recovery. Its companion `.demo-state/<project>/` directory contains successful
-and interrupted source/migration identity and must remain with a persistent
-checkout. See the
+and interrupted source/migration identity and should remain with a persistent
+checkout, but an intact off-host bundle remains usable after both state and
+volume loss. See the
 [demo deployment runbook](./demo-deployment.md#backup-state-and-restoration).
 
 ## Recovery
