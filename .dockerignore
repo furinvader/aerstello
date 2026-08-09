@@ -11,6 +11,7 @@
 .demo-backups
 *.backup
 *.dump
+postgres-data/
 
 node_modules
 **/node_modules
