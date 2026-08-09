@@ -100,6 +100,21 @@ if (tool === 'git') {
   else if (args[0] === 'rev-parse') process.stdout.write(process.env.FAKE_GIT_SHA + '\n');
   else if (args[0] === 'cat-file' && process.env.FAKE_GIT_SOURCE_MISSING === '1') process.exit(1);
   else if (args[0] === 'merge-base' && process.env.FAKE_GIT_SOURCE_ANCESTOR === '0') process.exit(1);
+  else if (args[0] === 'ls-tree') {
+    const sourceSha = args[2] || '';
+    const configuredPaths = sourceSha.startsWith('d')
+      ? process.env.FAKE_GIT_BASELINE_SOURCE_PATHS
+      : process.env.FAKE_GIT_SOURCE_PATHS;
+    const paths = (configuredPaths || 'apps/api/migrations/0001_initial.sql').split(',').filter(Boolean);
+    for (const migration of paths) process.stdout.write('100644 blob ' + 'a'.repeat(40) + '\t' + migration + '\n');
+  }
+  else if (args[0] === 'show') {
+    const spec = args[1] || '';
+    const migration = spec.slice(spec.indexOf(':') + 1);
+    const source = path.join(process.env.FAKE_REPOSITORY_ROOT, migration);
+    if (!fs.existsSync(source)) process.exit(1);
+    process.stdout.write(process.env.FAKE_GIT_SOURCE_CONTENT || fs.readFileSync(source));
+  }
   process.exit(0);
 }
 if (tool === 'node') {
@@ -132,14 +147,25 @@ if (args[0] === 'volume' && args[1] === 'inspect') {
   const name = args.find((arg) => existing.includes(arg)) || args.at(-1);
   const created = fs.existsSync(process.env.FAKE_COMMAND_LOG + '.volume-created');
   if (!existing.includes(name) && !(created && name.endsWith('-postgres-data'))) process.exit(1);
+  let restoreToken = process.env.FAKE_VOLUME_RESTORE_TOKEN || '';
+  try { restoreToken ||= fs.readFileSync(process.env.FAKE_COMMAND_LOG + '.volume-token', 'utf8'); } catch {}
   if (args.includes('--format')) process.stdout.write(
     (process.env.FAKE_VOLUME_PROJECT || 'sky-bar-demo') + '|' +
-    (process.env.FAKE_VOLUME_LOGICAL || 'postgres-data') + '\n');
+    (process.env.FAKE_VOLUME_LOGICAL || 'postgres-data') + '|' +
+    restoreToken + '|' +
+    (process.env.FAKE_VOLUME_IDENTITY || '2026-08-09T00:00:00Z|/var/lib/docker/volumes/sky-bar-demo-postgres-data/_data') + '\n');
   else process.stdout.write('[{}]\n');
   process.exit(0);
 }
 if (args[0] === 'volume' && args[1] === 'rm') {
   fs.writeFileSync(process.env.FAKE_COMMAND_LOG + '.volume-removed', '1');
+  process.exit(0);
+}
+if (args[0] === 'volume' && args[1] === 'create') {
+  fs.writeFileSync(process.env.FAKE_COMMAND_LOG + '.volume-created', '1');
+  const tokenLabel = args.find((arg) => arg.startsWith('sky-bar.restore-token='));
+  if (tokenLabel) fs.writeFileSync(process.env.FAKE_COMMAND_LOG + '.volume-token', tokenLabel.slice(tokenLabel.indexOf('=') + 1));
+  process.stdout.write(args.at(-1) + '\n');
   process.exit(0);
 }
 const command = args.join(' ');
@@ -962,6 +988,9 @@ test('guarded restore recovers a missing destination without inventing a safety 
       assert.equal(readFileSync(join(transaction, 'safety-backup-kind'), 'utf8').trim(), 'absent');
       assert.equal(readFileSync(join(transaction, 'safety-backup-path'), 'utf8').trim(), 'absent');
       assert.equal(readFileSync(join(transaction, 'destination-volume'), 'utf8').trim(), dbVolume);
+      const destinationIdentity = readFileSync(join(transaction, 'destination-volume-identity'), 'utf8').trim();
+      assert.equal(destinationIdentity === 'unbound', interruption === 'after-transaction');
+      assert.match(readFileSync(join(transaction, 'destination-volume-restore-token'), 'utf8').trim(), /^restore-[0-9a-f]{32}$/);
       assert.equal(dockerLines(fixture).some((line) => line.includes('pg_dump')), false);
 
       writeFileSync(fixture.commandLog, '');
@@ -1005,6 +1034,30 @@ test('guarded restore rejects unrelated bundle history before database mutation'
   assert.equal(lines.some((line) => line.includes('pg_dump')), false);
   assert.equal(lines.some((line) => line.includes('DROP DATABASE')), false);
   assert.equal(lines.some((line) => line.includes('stop app caddy')), false);
+});
+
+test('guarded restore authenticates an older manifest against its recorded commit', (t) => {
+  const fixture = makeFixture(t);
+  seedState(fixture);
+  const deployed = run(fixture, commonPersistArgs(fixture), {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_ADMIN_EXISTS: '1',
+  });
+  assert.equal(deployed.status, 0, deployed.output);
+  const [bundle] = backupBundles(fixture);
+  writeFileSync(join(bundle, 'state', 'current', 'deployed-sha'), `${'e'.repeat(40)}\n`);
+  writeFileSync(fixture.commandLog, '');
+  const rejected = run(fixture, [...commonPersistArgs(fixture),
+    '--restore-backup', bundle, '--confirm-restore', project], {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_GIT_SHA: 'f'.repeat(40),
+    FAKE_GIT_SOURCE_CONTENT: '-- different historical migration\n',
+  });
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.output, /recorded source commit/i);
+  const lines = dockerLines(fixture);
+  assert.equal(lines.some((line) => line.includes('pg_dump')), false);
+  assert.equal(lines.some((line) => line.includes('DROP DATABASE')), false);
 });
 
 test('confirmed pre-release rewrites preserve restorable old source identity', async (t) => {
@@ -1108,6 +1161,7 @@ test('interrupted restore publication recovers before ordinary state validation'
   assert.equal(deployed.status, 0, deployed.output);
   const [bundle] = backupBundles(fixture);
   assert.ok(bundle);
+  assert.ok(existsSync(join(bundle, 'state', 'pending')), 'fixture must cover bundled pending discard');
 
   const pending = join(state, 'pending');
   mkdirSync(pending);
@@ -1153,6 +1207,91 @@ test('interrupted restore publication recovers before ordinary state validation'
     'publication recovery must not restore the database a second time');
 });
 
+test('database-restored recovery rejects a missing or replaced destination volume', async (t) => {
+  for (const replacement of ['missing', 'same-name replacement']) {
+    await t.test(replacement, (st) => {
+      const fixture = makeFixture(st);
+      const state = seedState(fixture);
+      const deployed = run(fixture, commonPersistArgs(fixture), {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_ADMIN_EXISTS: '1',
+      });
+      assert.equal(deployed.status, 0, deployed.output);
+      const [bundle] = backupBundles(fixture);
+      const before = stateSnapshot(state);
+      writeFileSync(fixture.commandLog, '');
+      const restoreArgs = [...commonPersistArgs(fixture),
+        '--restore-backup', bundle, '--confirm-restore', project];
+      const interrupted = run(fixture, restoreArgs, {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_GIT_SHA: 'f'.repeat(40),
+        FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
+        SKY_BAR_TEST_FAIL_RESTORE_PUBLICATION: 'before-current',
+      });
+      assert.notEqual(interrupted.status, 0);
+      const transaction = join(state, 'restore-transaction');
+      assert.equal(readFileSync(join(transaction, 'phase'), 'utf8').trim(), 'database-restored');
+      rmSync(`${fixture.commandLog}.volume-created`, { force: true });
+      writeFileSync(fixture.commandLog, '');
+      const retryEnvironment = replacement === 'missing'
+        ? { FAKE_GIT_SHA: 'f'.repeat(40) }
+        : {
+            FAKE_EXISTING_VOLUMES: dbVolume,
+            FAKE_GIT_SHA: 'f'.repeat(40),
+            FAKE_VOLUME_IDENTITY: '2026-08-10T00:00:00Z|/var/lib/docker/volumes/replacement/_data',
+          };
+      const rejected = run(fixture, restoreArgs, retryEnvironment);
+      assert.notEqual(rejected.status, 0);
+      assert.match(rejected.output, /volume.*(?:disappeared|identity changed)/i);
+      assert.deepEqual(stateSnapshot(state), before);
+      const lines = dockerLines(fixture);
+      assert.equal(lines.some((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list')), false);
+      assert.equal(lines.some((line) => line.includes('up -d app caddy')), false);
+    });
+  }
+});
+
+test('current-selected recovery discards bundled and live pending state across publication interruptions', async (t) => {
+  for (const interruption of ['before-current', 'after-current']) {
+    await t.test(interruption, (st) => {
+      const fixture = makeFixture(st);
+      const state = seedState(fixture);
+      const deployed = run(fixture, commonPersistArgs(fixture), {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_ADMIN_EXISTS: '1',
+      });
+      assert.equal(deployed.status, 0, deployed.output);
+      const [bundle] = backupBundles(fixture);
+      assert.ok(existsSync(join(bundle, 'state', 'pending')));
+      const livePending = join(state, 'pending');
+      mkdirSync(livePending);
+      writeFileSync(join(livePending, 'deployed-sha'), `${gitSha}\n`);
+      writeFileSync(join(livePending, 'migrations.sha256'),
+        `${hashFile(join(fixture.directory, migrationPath))}  ${migrationPath}\n`);
+      const restoreArgs = [...commonPersistArgs(fixture),
+        '--restore-backup', bundle, '--confirm-restore', project];
+      writeFileSync(fixture.commandLog, '');
+      const interrupted = run(fixture, restoreArgs, {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_GIT_SHA: 'f'.repeat(40),
+        FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
+        SKY_BAR_TEST_FAIL_RESTORE_PUBLICATION: interruption,
+      });
+      assert.notEqual(interrupted.status, 0);
+      writeFileSync(fixture.commandLog, '');
+      const recovered = run(fixture, restoreArgs, {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_GIT_SHA: 'f'.repeat(40),
+      });
+      assert.equal(recovered.status, 0, recovered.output);
+      assert.equal(existsSync(livePending), false);
+      assert.equal(existsSync(join(state, 'rewrite-replacement')), false);
+      assert.equal(existsSync(join(state, 'restore-transaction')), false);
+      assert.equal(dockerLines(fixture).some((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list')), false);
+    });
+  }
+});
+
 test('pending-selected restore recovers after marker publication removes old pending state', (t) => {
   const fixture = makeFixture(t);
   const state = seedState(fixture);
@@ -1165,20 +1304,21 @@ test('pending-selected restore recovers after marker publication removes old pen
   const [bundle] = backupBundles(fixture);
   assert.ok(bundle);
 
-  const renamedPath = 'apps/api/migrations/0001_rewritten.sql';
-  rmSync(join(fixture.directory, migrationPath));
-  writeFileSync(join(fixture.directory, renamedPath), '-- rewritten initial schema\nSELECT 2;\n');
-  const renamedManifest = `${hashFile(join(fixture.directory, renamedPath))}  ${renamedPath}\n`;
+  const pendingPath = 'apps/api/migrations/0002_pending.sql';
+  writeFileSync(join(fixture.directory, pendingPath), '-- pending schema\nSELECT 2;\n');
+  const pendingManifest = `${hashFile(join(fixture.directory, migrationPath))}  ${migrationPath}\n` +
+    `${hashFile(join(fixture.directory, pendingPath))}  ${pendingPath}\n`;
+  writeFileSync(join(bundle, 'state', 'current', 'deployed-sha'), `${'d'.repeat(40)}\n`);
   const bundlePending = join(bundle, 'state', 'pending');
   writeFileSync(join(bundlePending, 'deployed-sha'), `${'e'.repeat(40)}\n`);
-  writeFileSync(join(bundlePending, 'migrations.sha256'), renamedManifest);
+  writeFileSync(join(bundlePending, 'migrations.sha256'), pendingManifest);
   writeFileSync(join(bundle, 'metadata'), `schemaVersion=1\nproject=${project}\ndatabaseState=pending\n`);
-  writeFileSync(join(bundle, 'database-migrations.txt'), '');
+  writeFileSync(join(bundle, 'database-migrations.txt'), '0001_initial.sql\n');
 
   const livePending = join(state, 'pending');
   mkdirSync(livePending);
   writeFileSync(join(livePending, 'deployed-sha'), `${'f'.repeat(40)}\n`);
-  writeFileSync(join(livePending, 'migrations.sha256'), renamedManifest);
+  writeFileSync(join(livePending, 'migrations.sha256'), pendingManifest);
   const restoreArgs = [...commonPersistArgs(fixture),
     '--restore-backup', bundle, '--confirm-restore', project];
   writeFileSync(fixture.commandLog, '');
@@ -1186,7 +1326,9 @@ test('pending-selected restore recovers after marker publication removes old pen
     FAKE_EXISTING_VOLUMES: dbVolume,
     FAKE_GIT_SHA: 'f'.repeat(40),
     FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
-    FAKE_RESTORED_SCHEMA_MIGRATIONS: '',
+    FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
+    FAKE_GIT_SOURCE_PATHS: `${migrationPath},${pendingPath}`,
+    FAKE_GIT_BASELINE_SOURCE_PATHS: migrationPath,
     SKY_BAR_TEST_FAIL_RESTORE_PUBLICATION: 'after-pending-removal',
   });
   assert.notEqual(interrupted.status, 0);
@@ -1199,15 +1341,73 @@ test('pending-selected restore recovers after marker publication removes old pen
   const recovered = run(fixture, restoreArgs, {
     FAKE_EXISTING_VOLUMES: dbVolume,
     FAKE_GIT_SHA: 'f'.repeat(40),
+    FAKE_GIT_SOURCE_PATHS: `${migrationPath},${pendingPath}`,
+    FAKE_GIT_BASELINE_SOURCE_PATHS: migrationPath,
   });
   assert.equal(recovered.status, 0, recovered.output);
   assert.match(recovered.output, /Recovered interrupted restore state publication/i);
-  assert.equal(readFileSync(join(livePending, 'migrations.sha256'), 'utf8'), renamedManifest);
+  assert.equal(readFileSync(join(livePending, 'migrations.sha256'), 'utf8'), pendingManifest);
   assert.equal(readFileSync(join(livePending, 'deployed-sha'), 'utf8').trim(), 'f'.repeat(40));
   assert.equal(existsSync(join(state, 'rewrite-replacement')), true);
   assert.equal(existsSync(join(state, 'restore-transaction')), false);
   assert.equal(dockerLines(fixture).some((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list')), false,
     'publication recovery must not restore the database a second time');
+});
+
+test('pending-only source-bound bundle stages no invented current baseline', (t) => {
+  const fixture = makeFixture(t);
+  const state = seedState(fixture);
+  const deployed = run(fixture, commonPersistArgs(fixture), {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_ADMIN_EXISTS: '1',
+  });
+  assert.equal(deployed.status, 0, deployed.output);
+  const [bundle] = backupBundles(fixture);
+  rmSync(join(bundle, 'state', 'current'), { recursive: true });
+  writeFileSync(join(bundle, 'metadata'), `schemaVersion=1\nproject=${project}\ndatabaseState=pending\n`);
+  writeFileSync(fixture.commandLog, '');
+  const restored = run(fixture, [...commonPersistArgs(fixture),
+    '--restore-backup', bundle, '--confirm-restore', project], {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
+  });
+  assert.equal(restored.status, 0, restored.output);
+  assert.equal(existsSync(join(state, 'current')), false);
+  assert.equal(existsSync(join(state, 'pending')), true);
+  assert.equal(existsSync(join(state, 'rewrite-replacement')), true);
+});
+
+test('pending-selected restore rejects an incompatible bundled current baseline', (t) => {
+  const fixture = makeFixture(t);
+  seedState(fixture);
+  const deployed = run(fixture, commonPersistArgs(fixture), {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_ADMIN_EXISTS: '1',
+  });
+  assert.equal(deployed.status, 0, deployed.output);
+  const [bundle] = backupBundles(fixture);
+  const pendingPath = 'apps/api/migrations/0002_pending.sql';
+  writeFileSync(join(fixture.directory, pendingPath), 'SELECT 2;\n');
+  writeFileSync(join(bundle, 'state', 'current', 'deployed-sha'), `${'d'.repeat(40)}\n`);
+  const bundlePending = join(bundle, 'state', 'pending');
+  writeFileSync(join(bundlePending, 'deployed-sha'), `${'e'.repeat(40)}\n`);
+  writeFileSync(join(bundlePending, 'migrations.sha256'),
+    `${hashFile(join(fixture.directory, pendingPath))}  ${pendingPath}\n`);
+  writeFileSync(join(bundle, 'metadata'), `schemaVersion=1\nproject=${project}\ndatabaseState=pending\n`);
+  writeFileSync(join(bundle, 'database-migrations.txt'), '');
+  writeFileSync(fixture.commandLog, '');
+  const rejected = run(fixture, [...commonPersistArgs(fixture),
+    '--restore-backup', bundle, '--confirm-restore', project], {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_GIT_SHA: 'f'.repeat(40),
+    FAKE_GIT_SOURCE_PATHS: pendingPath,
+    FAKE_GIT_BASELINE_SOURCE_PATHS: migrationPath,
+  });
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.output, /current baseline.*pending candidate/i);
+  const lines = dockerLines(fixture);
+  assert.equal(lines.some((line) => line.includes('DROP DATABASE')), false);
+  assert.equal(existsSync(join(fixture.directory, '.demo-state', project, 'restore-transaction')), false);
 });
 
 test('restoring-phase retry is bound to the original bundle and reuses its safety backup', (t) => {
