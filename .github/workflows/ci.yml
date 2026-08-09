@@ -71,6 +71,23 @@ jobs:
         run: |
           npm run check:release-state -- --base origin/main --head "$TAG_HEAD_SHA" --release-ref origin/main
           npm run check:released-migrations -- --base origin/main --head "$TAG_HEAD_SHA" --release-ref origin/main
+      - name: Smoke-check demo deployment configuration
+        env:
+          DEMO_ENV_FILE: ${{ runner.temp }}/sky-bar-demo.env
+          DEMO_PROJECT: sky-bar-ci
+        run: |
+          scripts/demo-deploy.sh --init-env --env-file "$DEMO_ENV_FILE"
+          sed -i \
+            -e "s/^COMPOSE_PROJECT_NAME=.*/COMPOSE_PROJECT_NAME=$DEMO_PROJECT/" \
+            -e 's/^SKY_BAR_DOMAIN=.*/SKY_BAR_DOMAIN=demo.example.com/' \
+            -e 's/^ACME_EMAIL=.*/ACME_EMAIL=demo@example.com/' \
+            -e 's/^ADMIN_EMAIL=.*/ADMIN_EMAIL=admin@example.com/' \
+            -e 's/^ADMIN_NAME=.*/ADMIN_NAME=CI Demo Administrator/' \
+            "$DEMO_ENV_FILE"
+          scripts/demo-deploy.sh --env-file "$DEMO_ENV_FILE" --check
+          test -z "$(docker ps -aq --filter "label=com.docker.compose.project=$DEMO_PROJECT")"
+          test -z "$(docker volume ls -q --filter "label=com.docker.compose.project=$DEMO_PROJECT")"
+          test -z "$(docker network ls -q --filter "label=com.docker.compose.project=$DEMO_PROJECT")"
       - run: npm ci
       - name: Validate pushed commit message
         if: github.event_name == 'push'

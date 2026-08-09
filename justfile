@@ -18,3 +18,6 @@ e2e:
 
 seed:
     npm run db:seed -w @aerstello/api
+
+demo-deploy *args:
+    ./scripts/demo-deploy.sh {{args}}

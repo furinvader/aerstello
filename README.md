@@ -6,7 +6,9 @@ Aerstello is the software name. The venue name is configured by an administrator
 
 ## Quick start
 
-Requirements: Node 24, npm 11, Docker with Compose.
+Requirements: Node 24, npm 11, Docker with Compose. The repository's
+`docker-compose.yml` is development tooling; it publishes the API directly and
+is not the HTTPS demo stack.
 
 ```bash
 cp .env.example .env
@@ -51,6 +53,7 @@ The development seed creates `admin@aerstello.test`, requires an explicit passwo
 | `npm run db:migrate` | Apply pending PostgreSQL migrations |
 | `npm run admin:create -- …` | Create or recover the initial administrator |
 | `npm run db:migrate:dev -w @aerstello/api` | Apply migrations directly from TypeScript during API development |
+| `just demo-deploy -- …` | Run the guarded, single-host HTTPS demo deployment (optional Just runner) |
 | `npm run assets:generate` | Generate required 192px and 512px PWA icons |
 | `npm run release:state` | Inspect production marker/tag state as JSON |
 | `npm run check:release-state` | Fail on stale or inconsistent release metadata |
@@ -89,17 +92,29 @@ Commit messages follow Conventional Commits and are checked in CI. See
 [CONTRIBUTING.md](./CONTRIBUTING.md) for the allowed types, formatting rules,
 scope guidance, and examples.
 
-## Production
+## Demo deployment
 
-Set a unique `SESSION_SECRET` and an `ACCESS_CAPABILITY_KEYS` keyring as described in
-[the operations guide](./docs/operations.md); each secret must have at least 32 random
-characters. Serve the app through HTTPS. Then:
+For a repeatable, single-host demo behind automatic HTTPS, use the guarded
+deployment command and the dedicated `compose.demo.yml` stack. It keeps
+PostgreSQL private and publishes only Caddy on ports 80 and 443.
+
+Prepare the host with Docker Engine and the Docker Compose plugin from the
+official repository for its Linux distribution. Docker socket access is
+effectively root access, so grant it only to a trusted deploying account. See
+the demo deployment runbook for the complete host prerequisites.
 
 ```bash
-docker compose build
-docker compose up -d
-docker compose exec app npm run db:migrate
-printf '%s\n' "$AERSTELLO_ADMIN_PASSWORD" | docker compose exec -T app npm run admin:create -- --email admin@example.com --name "Admin" --password-stdin
+scripts/demo-deploy.sh --init-env --env-file .env.demo
+# Edit the domain, ACME email, and administrator identity before continuing.
+scripts/demo-deploy.sh --env-file .env.demo --check
+scripts/demo-deploy.sh --env-file .env.demo --db-mode persist
 ```
 
-Back up the PostgreSQL volume before upgrades. See [docs/operations.md](./docs/operations.md) for backup, restore, health checks, and deployment constraints.
+The deploy command can generate a secure starting configuration with
+`--init-env`; see the [demo deployment runbook](./docs/demo-deployment.md) for
+DNS and firewall preparation, password handling, database adoption and rewrite
+recovery. The host-local safety dumps it creates are not off-host disaster
+recovery backups.
+
+For production configuration, secret rotation, health checks, backup policy,
+and release constraints, see the [operations guide](./docs/operations.md).
