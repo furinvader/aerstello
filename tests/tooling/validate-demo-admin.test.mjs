@@ -12,6 +12,7 @@ const valid = [
   ['admin@example.com', 'Demo Administrator'],
   [' first.last+demo@example-host.test ', 'A'],
   ['ADMIN@EXAMPLE.COM', 'Demo Administrator'],
+  ['admin@example.com', 'x'.repeat(120)],
 ];
 
 const invalid = [
@@ -25,7 +26,7 @@ const invalid = [
   ['admin @example.com', 'Demo Administrator'],
   [`${'a'.repeat(244)}@example.com`, 'Demo Administrator'],
   ['admin@example.com', '   '],
-  ['admin@example.com', 'x'.repeat(201)],
+  ['admin@example.com', 'x'.repeat(121)],
 ];
 
 function validate(validator, email, name) {
