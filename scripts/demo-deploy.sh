@@ -44,6 +44,8 @@ RESTORE_RECOVERED=false
 REWRITE_REPLACEMENT=false
 REWRITE_REPLACEMENT_SHA=''
 VALIDATED_BACKUP_IDENTITY=''
+OBSERVED_VOLUME_IDENTITY=''
+OBSERVED_VOLUME_RESTORE_TOKEN=''
 
 usage() {
   cat <<'EOF'
@@ -566,12 +568,19 @@ if [[ "$DB_MODE" == persist && "$ADOPT_EXISTING_DB" == true && "$DATABASE_EXISTS
 fi
 
 verify_volume_ownership() {
-  local labels project_owner logical_owner
-  labels="$(docker volume inspect --format '{{ index .Labels "com.docker.compose.project" }}|{{ index .Labels "com.docker.compose.volume" }}' "$DB_VOLUME")"
+  local labels project_owner logical_owner remainder
+  labels="$(docker volume inspect --format '{{ index .Labels "com.docker.compose.project" }}|{{ index .Labels "com.docker.compose.volume" }}|{{ index .Labels "sky-bar.restore-token" }}|{{.CreatedAt}}|{{.Mountpoint}}' "$DB_VOLUME")" ||
+    die "Required PostgreSQL volume $DB_VOLUME is missing."
   project_owner="${labels%%|*}"
-  logical_owner="${labels#*|}"
+  remainder="${labels#*|}"
+  logical_owner="${remainder%%|*}"
+  remainder="${remainder#*|}"
+  OBSERVED_VOLUME_RESTORE_TOKEN="${remainder%%|*}"
+  OBSERVED_VOLUME_IDENTITY="${remainder#*|}"
   [[ "$project_owner" == "$PROJECT_NAME" && "$logical_owner" == postgres-data ]] ||
     die "Refusing to use PostgreSQL volume $DB_VOLUME without exact Compose project and postgres-data ownership labels."
+  [[ -n "$OBSERVED_VOLUME_IDENTITY" && "$OBSERVED_VOLUME_IDENTITY" == *'|'* ]] ||
+    die "Could not establish stable identity for PostgreSQL volume $DB_VOLUME."
 }
 
 if [[ "$DATABASE_EXISTS" == true ]]; then
@@ -750,8 +759,9 @@ validate_restore_source_compatibility() {
     die "$description source commit is unavailable in this checkout."
   git merge-base --is-ancestor "$source_sha" "$DEPLOYED_SHA" ||
     die "$description source commit is not an ancestor of this checkout."
+  declare -A recorded_entries=()
   declare -A current_entries=()
-  local line digest path
+  local line digest path mode type object
   while IFS= read -r line || [[ -n "$line" ]]; do
     digest="${line%%  *}"
     path="${line#*  }"
@@ -760,9 +770,49 @@ validate_restore_source_compatibility() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     digest="${line%%  *}"
     path="${line#*  }"
+    recorded_entries["$path"]="$digest"
     [[ -v "current_entries[$path]" && "${current_entries[$path]}" == "$digest" ]] ||
       die "$description contains a migration not preserved by this checkout: $path"
   done < "$state_directory/migrations.sha256"
+  declare -A source_entries=()
+  local source_tree
+  source_tree="$(git ls-tree -r "$source_sha" -- apps/api/migrations)" ||
+    die "$description migration tree cannot be read from its source commit."
+  while IFS=$' \t' read -r mode type object path; do
+    [[ "$path" == apps/api/migrations/*.sql ]] || continue
+    [[ "$mode" =~ ^100(644|755)$ && "$type" == blob ]] ||
+      die "$description source commit contains a non-regular SQL migration: $path"
+    digest="$(git show "$source_sha:$path" | sha256sum)" ||
+      die "$description migration cannot be read from its source commit: $path"
+    digest="${digest%% *}"
+    source_entries["$path"]="$digest"
+  done <<< "$source_tree"
+  ((${#source_entries[@]} > 0)) || die "$description source commit contains no SQL migrations."
+  for path in "${!source_entries[@]}"; do
+    [[ -v "recorded_entries[$path]" && "${recorded_entries[$path]}" == "${source_entries[$path]}" ]] ||
+      die "$description does not match the migration files in its recorded source commit: $path"
+  done
+  for path in "${!recorded_entries[@]}"; do
+    [[ -v "source_entries[$path]" ]] ||
+      die "$description records a migration absent from its source commit: $path"
+  done
+}
+
+validate_pending_baseline_compatibility() {
+  local current_state="$1" pending_state="$2" description="$3"
+  declare -A pending_entries=()
+  local line digest path
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    digest="${line%%  *}"
+    path="${line#*  }"
+    pending_entries["$path"]="$digest"
+  done < "$pending_state/migrations.sha256"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    digest="${line%%  *}"
+    path="${line#*  }"
+    [[ -v "pending_entries[$path]" && "${pending_entries[$path]}" == "$digest" ]] ||
+      die "$description current baseline is not represented consistently by its pending candidate: $path"
+  done < "$current_state/migrations.sha256"
 }
 
 read_database_migrations() {
@@ -1143,7 +1193,7 @@ validate_restore_transaction_context() {
   local file
   for file in phase generation-name database-state-kind bundle-path bundle-digest \
       database-migrations.txt safety-backup-kind safety-backup-path safety-backup-identity \
-      destination-volume; do
+      destination-volume destination-volume-identity destination-volume-restore-token; do
     validate_private_file "$RESTORE_TRANSACTION_DIRECTORY/$file" "The restore transaction $file record"
   done
 
@@ -1161,6 +1211,12 @@ validate_restore_transaction_context() {
       die 'Current-selected restore transaction contains unexpected pending state.'
   fi
   validate_restore_source_compatibility "$selected_state" 'Interrupted restore state'
+  if [[ "$database_state_kind" == pending && -d "$RESTORE_TRANSACTION_DIRECTORY/current" ]]; then
+    validate_restore_source_compatibility "$RESTORE_TRANSACTION_DIRECTORY/current" \
+      'Interrupted restore current baseline'
+    validate_pending_baseline_compatibility "$RESTORE_TRANSACTION_DIRECTORY/current" "$selected_state" \
+      'Interrupted restore'
+  fi
 
   local recorded_bundle recorded_digest recorded_safety_kind recorded_safety recorded_safety_identity
   recorded_bundle="$(< "$RESTORE_TRANSACTION_DIRECTORY/bundle-path")"
@@ -1174,6 +1230,13 @@ validate_restore_transaction_context() {
     die 'Restore transaction bundle digest is invalid.'
   [[ "$(< "$RESTORE_TRANSACTION_DIRECTORY/destination-volume")" == "$DB_VOLUME" ]] ||
     die 'Restore transaction destination volume differs from this Compose project.'
+  local destination_identity destination_token
+  destination_identity="$(< "$RESTORE_TRANSACTION_DIRECTORY/destination-volume-identity")"
+  destination_token="$(< "$RESTORE_TRANSACTION_DIRECTORY/destination-volume-restore-token")"
+  [[ -n "$destination_identity" && "$destination_identity" != *$'\n'* ]] ||
+    die 'Restore transaction destination volume identity is invalid.'
+  [[ "$destination_token" == none || "$destination_token" =~ ^restore-[0-9a-f]{32}$ ]] ||
+    die 'Restore transaction destination volume creation token is invalid.'
   case "$recorded_safety_kind" in
     present)
       [[ -n "$recorded_safety" && "$recorded_safety" != *$'\n'* ]] ||
@@ -1192,11 +1255,51 @@ validate_restore_transaction_context() {
   fi
 }
 
+validate_or_bind_restore_destination() {
+  local phase destination_identity destination_token safety_kind
+  phase="$(< "$RESTORE_TRANSACTION_DIRECTORY/phase")"
+  destination_identity="$(< "$RESTORE_TRANSACTION_DIRECTORY/destination-volume-identity")"
+  destination_token="$(< "$RESTORE_TRANSACTION_DIRECTORY/destination-volume-restore-token")"
+  safety_kind="$(< "$RESTORE_TRANSACTION_DIRECTORY/safety-backup-kind")"
+  if [[ "$destination_identity" == unbound ]]; then
+    [[ "$phase" == restoring && "$safety_kind" == absent && "$destination_token" != none ]] ||
+      die 'Only an absent-destination restoring transaction may bind a new volume identity.'
+    if ! docker volume inspect "$DB_VOLUME" >/dev/null 2>&1; then
+      docker volume create \
+        --label "com.docker.compose.project=$PROJECT_NAME" \
+        --label 'com.docker.compose.volume=postgres-data' \
+        --label "sky-bar.restore-token=$destination_token" \
+        "$DB_VOLUME" >/dev/null
+    fi
+    verify_volume_ownership
+    [[ "$OBSERVED_VOLUME_RESTORE_TOKEN" == "$destination_token" ]] ||
+      die 'Unbound restore destination was replaced by a volume outside this restore transaction.'
+    local identity_staging="$RESTORE_TRANSACTION_DIRECTORY/.destination-volume-identity.$$"
+    printf '%s\n' "$OBSERVED_VOLUME_IDENTITY" > "$identity_staging"
+    chmod 600 -- "$identity_staging"
+    mv -T -- "$identity_staging" "$RESTORE_TRANSACTION_DIRECTORY/destination-volume-identity"
+    return
+  fi
+  docker volume inspect "$DB_VOLUME" >/dev/null 2>&1 ||
+    die 'The restore destination volume disappeared before recovery publication.'
+  verify_volume_ownership
+  [[ "$OBSERVED_VOLUME_IDENTITY" == "$destination_identity" ]] ||
+    die 'The restore destination volume identity changed before recovery publication.'
+  if [[ "$destination_token" != none ]]; then
+    [[ "$OBSERVED_VOLUME_RESTORE_TOKEN" == "$destination_token" ]] ||
+      die 'The restore destination volume creation token changed before recovery publication.'
+  fi
+}
+
 complete_restore_state_transaction() {
   [[ -d "$RESTORE_TRANSACTION_DIRECTORY" && ! -L "$RESTORE_TRANSACTION_DIRECTORY" ]] || return 0
   validate_restore_transaction_context
   [[ "$(< "$RESTORE_TRANSACTION_DIRECTORY/phase")" == database-restored ]] ||
     die 'An interrupted database restore must be retried with its original source-bound bundle.'
+  validate_or_bind_restore_destination
+  if [[ "${SKY_BAR_TEST_FAIL_RESTORE_PUBLICATION-}" == before-current ]]; then
+    die 'Injected restore publication interruption before current state selection.'
+  fi
 
   mkdir -p -- "$GENERATIONS_DIRECTORY"
   chmod 700 -- "$GENERATIONS_DIRECTORY"
@@ -1459,6 +1562,10 @@ restore_backup_bundle() {
   [[ -n "$selected_state" ]] ||
     die "The restore bundle is missing its selected $database_state_kind deployment state."
   validate_restore_source_compatibility "$selected_state" 'The restore bundle selected state'
+  if [[ "$database_state_kind" == pending && -n "$bundle_current" ]]; then
+    validate_restore_source_compatibility "$bundle_current" 'The restore bundle current baseline'
+    validate_pending_baseline_compatibility "$bundle_current" "$selected_state" 'The restore bundle'
+  fi
   local selected_source_is_current=false
   if [[ "$(< "$selected_state/deployed-sha")" == "$DEPLOYED_SHA" ]]; then
     selected_source_is_current=true
@@ -1565,10 +1672,15 @@ restore_backup_bundle() {
       recorded_safety_kind=present
       recorded_safety_backup="$CREATED_BACKUP_PATH"
       recorded_safety_identity="$VALIDATED_BACKUP_IDENTITY"
+      verify_volume_ownership
+      recorded_destination_identity="$OBSERVED_VOLUME_IDENTITY"
+      recorded_destination_token=none
     else
       recorded_safety_kind=absent
       recorded_safety_backup=absent
       recorded_safety_identity=absent
+      recorded_destination_identity=unbound
+      recorded_destination_token="restore-${dump_digest:0:32}"
     fi
   else
     if [[ "$recorded_safety_kind" == present ]]; then
@@ -1586,12 +1698,16 @@ restore_backup_bundle() {
     printf '%s\n' "$recorded_safety_backup" > "$RESTORE_STATE_STAGING/safety-backup-path"
     printf '%s\n' "$recorded_safety_identity" > "$RESTORE_STATE_STAGING/safety-backup-identity"
     printf '%s\n' "$DB_VOLUME" > "$RESTORE_STATE_STAGING/destination-volume"
+    printf '%s\n' "$recorded_destination_identity" > "$RESTORE_STATE_STAGING/destination-volume-identity"
+    printf '%s\n' "$recorded_destination_token" > "$RESTORE_STATE_STAGING/destination-volume-restore-token"
     printf 'restoring\n' > "$RESTORE_STATE_STAGING/phase"
     chmod 600 -- "$RESTORE_STATE_STAGING/generation-name" \
       "$RESTORE_STATE_STAGING/database-state-kind" "$RESTORE_STATE_STAGING/bundle-path" \
       "$RESTORE_STATE_STAGING/bundle-digest" "$RESTORE_STATE_STAGING/database-migrations.txt" \
       "$RESTORE_STATE_STAGING/safety-backup-kind" "$RESTORE_STATE_STAGING/safety-backup-path" \
       "$RESTORE_STATE_STAGING/safety-backup-identity" "$RESTORE_STATE_STAGING/destination-volume" \
+      "$RESTORE_STATE_STAGING/destination-volume-identity" \
+      "$RESTORE_STATE_STAGING/destination-volume-restore-token" \
       "$RESTORE_STATE_STAGING/phase"
     mv -T -- "$RESTORE_STATE_STAGING" "$RESTORE_TRANSACTION_DIRECTORY"
     RESTORE_STATE_STAGING=''
@@ -1602,6 +1718,7 @@ restore_backup_bundle() {
   fi
 
   compose stop app caddy
+  validate_or_bind_restore_destination
   start_restore_database
   DATABASE_EXISTS=true
   verify_volume_ownership
