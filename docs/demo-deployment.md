@@ -91,8 +91,8 @@ deploy.
 Keep `SESSION_SECRET`, the PostgreSQL password, and every
 `ACCESS_CAPABILITY_KEYS` secret distinct. Capability keys use an active-first
 `key-id:secret` list such as `v2:<current>,v1:<previous>`. Rate limits must be
-positive integers and the configured log level must be one supported by the
-application.
+canonical positive decimal integers whose JavaScript numeric value is finite
+and integral; the configured log level must be one supported by the application.
 
 Validate the host, configuration, Compose model, and pinned Caddy image before
 making deployment changes:
@@ -119,13 +119,16 @@ operator may use `scripts/demo-deploy.sh --env-file .env.demo` (or
 optional and is needed only for that recipe. Agents and other non-interactive
 callers must always pass an explicit `--db-mode`.
 
-Persist mode records an atomic pending source and migration descriptor, starts
-and waits for PostgreSQL, creates a source-bound backup bundle for an existing
-database, checks the recorded and database migration history, builds the images, runs the compiled
-migrations, creates an administrator only when no active administrator exists,
-starts the app and proxy, and checks both internal readiness and this host's
-local Caddy listener using the configured hostname and SNI with strict TLS
-verification.
+Persist mode records an atomic pending source and migration descriptor, builds
+the final images, and immediately rechecks clean HEAD plus the exact migration
+manifest. For an existing database it then stops application writers, starts
+and waits for PostgreSQL, checks recorded and database migration history, and
+creates a source-bound backup bundle while writers remain quiesced. It runs the
+compiled migrations, creates an administrator only when no active administrator
+exists, starts the app and proxy, and checks both internal readiness and this
+host's local Caddy listener using the configured hostname and SNI with strict
+TLS verification. The health probe ignores user curl configuration without
+disabling certificate verification.
 
 The command promotes pending state to the deployed Git commit and sorted
 migration hashes only after the HTTPS health check succeeds. Pending state
@@ -154,14 +157,15 @@ misleading state.
 
 ## Administrator password handling
 
-A fresh or rewritten database requires an administrator password. In an
-interactive terminal, the command prompts twice without echoing. It does not
-place the password in process arguments, environment files, logs, state, or its
-summary.
+A fresh or rewritten database requires an administrator password containing
+12 through 256 JavaScript UTF-16 code units, matching the runtime authentication
+contract. In an interactive terminal, the command prompts twice without
+echoing. It does not place the password in process arguments, environment
+files, logs, state, backup metadata, or its summary.
 
 For automation, create a dedicated password file outside the repository. It
-must contain exactly one password line of at least 12 characters, with no
-carriage return. A final newline is allowed. The file must be regular rather
+must contain exactly one password line within that 12-256-code-unit range, with
+no carriage return. A final newline is allowed. The file must be regular rather
 than a symlink, owned by the current user, and have no group or world
 permissions. For example, prepare it without echoing the password:
 
@@ -185,12 +189,24 @@ the password value.
 
 Rewrite is destructive to the named PostgreSQL data volume and is intended for
 deliberately resetting disposable demo data. It still builds and validates the
-replacement first, starts and backs up the old database against the old
-matching source descriptor before installing candidate pending state, and
-aborts if either the database or backup is unhealthy. A durable replacement
-marker binds a recreated volume to that candidate even when an interrupted
-rewrite used the same migration filenames; an exact-checkout persist retry
-finishes it without misclassifying the new database as old current state.
+replacement first, immediately rechecks the clean source and migration
+manifest, stops application writers, and backs up the old database against the
+old matching source descriptor before installing candidate pending state. It
+aborts if either the database or backup is unhealthy. Before deleting the old
+volume, a private durable rewrite transaction binds the candidate checkout and
+manifest, exact destination name, verified old engine identity, both restore
+and rewrite ownership-token labels, and a unique replacement token. Immediately
+before removal it rechecks the name, labels, tokens, and recorded identity.
+Durable phases distinguish a prepared old volume, successful old-volume
+removal, a token-bound replacement with atomically recorded engine identity,
+and published deployment state. Fixed identity-staging records are private and
+validated on retry; malformed, foreign, or simultaneous restore/rewrite
+transactions fail closed. An exact-checkout retry resumes those phases without
+another destructive confirmation and cannot adopt a foreign same-named volume.
+The transaction and replacement marker retire only after the healthy
+candidate's state is atomically selected, and an interruption between current
+state selection and cleanup completes that publication without rerunning
+database work.
 Supply the exact configured Compose
 project name as the confirmation:
 
@@ -215,8 +231,10 @@ data.
 
 ## Backup, state, and restoration
 
-Before changing an existing database, the deploy command atomically publishes
-a timestamped private bundle beneath `.demo-backups/<project>/`. Each bundle
+Before changing an existing database, the deploy command stops application
+writers and atomically publishes a timestamped private bundle beneath
+`.demo-backups/<project>/`. Database migration classification and `pg_dump`
+both run while those writers remain quiesced. Each bundle
 contains a PostgreSQL custom-format dump, its digest, the exact database
 migration names, matching current and pending deployment descriptors, and an
 explicit selector identifying which descriptor covers the dumped database. A

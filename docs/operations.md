@@ -40,8 +40,8 @@ GitHub. Never use the package version as release evidence.
 Create regular encrypted PostgreSQL dumps and test restoration:
 
 ```bash
-docker compose exec -T db pg_dump -U skybar -Fc skybar > skybar.backup
 docker compose stop app
+docker compose exec -T db pg_dump -U skybar -Fc skybar > skybar.backup
 docker compose exec -T db psql -U skybar -d postgres -v ON_ERROR_STOP=1 \
   -c 'DROP DATABASE IF EXISTS skybar WITH (FORCE)'
 docker compose exec -T db psql -U skybar -d postgres -v ON_ERROR_STOP=1 \
@@ -49,12 +49,17 @@ docker compose exec -T db psql -U skybar -d postgres -v ON_ERROR_STOP=1 \
 docker compose exec -T db pg_restore -U skybar -d skybar < skybar.backup
 ```
 
-Store backups outside the application host. Back up before upgrades, retain multiple recovery points, and restrict access because guest names and financial records are personal data.
+Keep application writers stopped from before `pg_dump` until the backup or
+restore operation is complete. Store backups outside the application host.
+Back up before upgrades, retain multiple recovery points, and restrict access
+because guest names and financial records are personal data.
 
 The demo deploy command also writes a validated, permission-restricted backup
 bundle to `.demo-backups/<project>/` before changing an existing database. The
 bundle binds its dump digest and exact database migration names to matching
-current/pending source state. Guarded restore accepts an older ancestor bundle
+current/pending source state. Persist, rewrite, and guarded restore stop the
+demo application before classifying and dumping an existing database. Guarded
+restore accepts an older ancestor bundle
 from a clean current checkout only when all selected migration paths and
 digests are still preserved. It recreates the whole `skybar` database rather
 than applying an in-place `pg_restore --clean`. When prior database data exists

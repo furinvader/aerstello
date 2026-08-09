@@ -34,6 +34,8 @@ STATE_STAGING_DIRECTORY=''
 RESTORE_STATE_STAGING=''
 RESTORE_PENDING_PREVIOUS=''
 RESTORE_TRANSACTION_STAGING=''
+REWRITE_TRANSACTION_STAGING=''
+REWRITE_RECORD_STAGING=''
 REWRITE_REPLACEMENT_STAGING=''
 PUBLISHED_GENERATION_DIRECTORY=''
 PUBLISHED_GENERATION_TARGET=''
@@ -42,11 +44,19 @@ PENDING_STATE_STAGING=''
 CURRENT_STATE_LINK=''
 ADMIN_PASSWORD=''
 RESTORE_RECOVERED=false
+REWRITE_TRANSACTION_EXISTS=false
+REWRITE_RECOVERED=false
+REWRITE_TRANSACTION_PHASE=''
+REWRITE_GENERATION_NAME=''
+REWRITE_REPLACEMENT_TOKEN=''
+REWRITE_REPLACEMENT_IDENTITY=''
 REWRITE_REPLACEMENT=false
 REWRITE_REPLACEMENT_SHA=''
+APPLICATION_WRITERS_QUIESCED=false
 VALIDATED_BACKUP_IDENTITY=''
 OBSERVED_VOLUME_IDENTITY=''
 OBSERVED_VOLUME_RESTORE_TOKEN=''
+OBSERVED_VOLUME_REWRITE_TOKEN=''
 
 usage() {
   cat <<'EOF'
@@ -118,6 +128,13 @@ cleanup() {
   fi
   if [[ -n "$RESTORE_TRANSACTION_STAGING" && -d "$RESTORE_TRANSACTION_STAGING" ]]; then
     rm -rf -- "$RESTORE_TRANSACTION_STAGING"
+  fi
+  if [[ -n "$REWRITE_TRANSACTION_STAGING" && -d "$REWRITE_TRANSACTION_STAGING" ]]; then
+    rm -rf -- "$REWRITE_TRANSACTION_STAGING"
+  fi
+  if [[ -n "$REWRITE_RECORD_STAGING" && -f "$REWRITE_RECORD_STAGING" &&
+        "${REWRITE_RECORD_STAGING##*/}" != .replacement-volume-identity.next ]]; then
+    rm -f -- "$REWRITE_RECORD_STAGING"
   fi
   if [[ -n "$REWRITE_REPLACEMENT_STAGING" && -f "$REWRITE_REPLACEMENT_STAGING" ]]; then
     rm -f -- "$REWRITE_REPLACEMENT_STAGING"
@@ -365,6 +382,14 @@ validate_email() {
   [[ "$1" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]
 }
 
+validate_positive_javascript_integer() {
+  local name="$1"
+  local value="$2"
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "$name must be a canonical positive decimal integer."
+  node -e 'const value=Number(process.argv[1]);process.exit(Number.isFinite(value)&&Number.isInteger(value)&&value>0?0:1)' \
+    "$value" || die "$name must coerce to a finite positive JavaScript integer."
+}
+
 validate_configuration() {
   local project="${CONFIG[COMPOSE_PROJECT_NAME]}"
   [[ "$project" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] || die 'COMPOSE_PROJECT_NAME must use lowercase letters, digits, underscores, or hyphens.'
@@ -407,8 +432,8 @@ validate_configuration() {
     fatal|error|warn|info|debug|trace|silent) ;;
     *) die 'LOG_LEVEL must be fatal, error, warn, info, debug, trace, or silent.' ;;
   esac
-  [[ "${CONFIG[RATE_LIMIT_MAX]}" =~ ^[1-9][0-9]*$ ]] || die 'RATE_LIMIT_MAX must be a positive integer.'
-  [[ "${CONFIG[ACCESS_STATUS_IP_LIMIT_MAX]}" =~ ^[1-9][0-9]*$ ]] || die 'ACCESS_STATUS_IP_LIMIT_MAX must be a positive integer.'
+  validate_positive_javascript_integer RATE_LIMIT_MAX "${CONFIG[RATE_LIMIT_MAX]}"
+  validate_positive_javascript_integer ACCESS_STATUS_IP_LIMIT_MAX "${CONFIG[ACCESS_STATUS_IP_LIMIT_MAX]}"
 }
 
 load_environment
@@ -490,6 +515,7 @@ GENERATIONS_DIRECTORY="$STATE_DIRECTORY/generations"
 CURRENT_STATE_LINK="$STATE_DIRECTORY/current"
 PENDING_STATE_DIRECTORY="$STATE_DIRECTORY/pending"
 RESTORE_TRANSACTION_DIRECTORY="$STATE_DIRECTORY/restore-transaction"
+REWRITE_TRANSACTION_DIRECTORY="$STATE_DIRECTORY/rewrite-transaction"
 REWRITE_REPLACEMENT_MARKER="$STATE_DIRECTORY/rewrite-replacement"
 BACKUP_DIRECTORY="$REPOSITORY_ROOT/.demo-backups/$PROJECT_NAME"
 
@@ -520,6 +546,17 @@ if [[ -e "$PENDING_STATE_DIRECTORY" || -L "$PENDING_STATE_DIRECTORY" ]]; then
   PENDING_EXISTS=true
 fi
 
+if [[ -e "$REWRITE_TRANSACTION_DIRECTORY" || -L "$REWRITE_TRANSACTION_DIRECTORY" ]]; then
+  [[ -d "$REWRITE_TRANSACTION_DIRECTORY" && ! -L "$REWRITE_TRANSACTION_DIRECTORY" ]] ||
+    die 'Rewrite transaction state is invalid.'
+  REWRITE_TRANSACTION_EXISTS=true
+fi
+
+if [[ "$REWRITE_TRANSACTION_EXISTS" == true &&
+      ( -e "$RESTORE_TRANSACTION_DIRECTORY" || -L "$RESTORE_TRANSACTION_DIRECTORY" ) ]]; then
+  die 'Restore and rewrite transactions may not coexist.'
+fi
+
 if [[ -e "$REWRITE_REPLACEMENT_MARKER" || -L "$REWRITE_REPLACEMENT_MARKER" ]]; then
   [[ -f "$REWRITE_REPLACEMENT_MARKER" && ! -L "$REWRITE_REPLACEMENT_MARKER" ]] ||
     die 'Rewrite replacement marker is invalid.'
@@ -527,14 +564,15 @@ if [[ -e "$REWRITE_REPLACEMENT_MARKER" || -L "$REWRITE_REPLACEMENT_MARKER" ]]; t
   [[ "$REWRITE_REPLACEMENT_SHA" =~ ^[0-9a-f]{40,64}$ ]] ||
     die 'Rewrite replacement marker contains an invalid deployed Git SHA.'
   if [[ "$PENDING_EXISTS" != true ]]; then
-    [[ -d "$RESTORE_TRANSACTION_DIRECTORY" && ! -L "$RESTORE_TRANSACTION_DIRECTORY" ]] ||
-      die 'Rewrite replacement marker requires pending deployment state or an active restore transaction.'
+    [[ ( -d "$RESTORE_TRANSACTION_DIRECTORY" && ! -L "$RESTORE_TRANSACTION_DIRECTORY" ) ||
+        ( -d "$REWRITE_TRANSACTION_DIRECTORY" && ! -L "$REWRITE_TRANSACTION_DIRECTORY" ) ]] ||
+      die 'Rewrite replacement marker requires pending deployment state or an active recovery transaction.'
   fi
   REWRITE_REPLACEMENT=true
 fi
 
 if [[ "$DATABASE_EXISTS" == false && "$STATE_EXISTS" == true && "$DB_MODE" != rewrite &&
-      "$REWRITE_REPLACEMENT" != true && -z "$RESTORE_BACKUP" ]]; then
+      "$REWRITE_REPLACEMENT" != true && "$REWRITE_TRANSACTION_EXISTS" != true && -z "$RESTORE_BACKUP" ]]; then
   die 'Deployment state exists but the PostgreSQL volume is missing; investigate or use explicitly confirmed rewrite mode.'
 fi
 
@@ -564,7 +602,8 @@ fi
 if [[ "$DB_MODE" == rewrite && "$ADOPT_EXISTING_DB" == true ]]; then
   die '--adopt-existing-db is valid only with persist mode.'
 fi
-if [[ "$DB_MODE" == rewrite && "$DATABASE_EXISTS" == false && "$STATE_EXISTS" == false && "$PENDING_EXISTS" == false ]]; then
+if [[ "$DB_MODE" == rewrite && "$DATABASE_EXISTS" == false && "$STATE_EXISTS" == false &&
+      "$PENDING_EXISTS" == false && "$REWRITE_TRANSACTION_EXISTS" != true ]]; then
   die 'No existing database or prior deployment state was found; use persist mode for the initial deployment.'
 fi
 if [[ "$DB_MODE" == persist && "$ADOPT_EXISTING_DB" == true && "$DATABASE_EXISTS" == false ]]; then
@@ -573,18 +612,22 @@ fi
 
 verify_volume_ownership() {
   local labels project_owner logical_owner remainder
-  labels="$(docker volume inspect --format '{{ index .Labels "com.docker.compose.project" }}|{{ index .Labels "com.docker.compose.volume" }}|{{ index .Labels "sky-bar.restore-token" }}|{{.CreatedAt}}|{{.Mountpoint}}' "$DB_VOLUME")" ||
+  labels="$(docker volume inspect --format '{{ index .Labels "com.docker.compose.project" }}|{{ index .Labels "com.docker.compose.volume" }}|{{ index .Labels "sky-bar.restore-token" }}|{{ index .Labels "sky-bar.rewrite-token" }}|{{.CreatedAt}}|{{.Mountpoint}}' "$DB_VOLUME")" ||
     die "Required PostgreSQL volume $DB_VOLUME is missing."
   project_owner="${labels%%|*}"
   remainder="${labels#*|}"
   logical_owner="${remainder%%|*}"
   remainder="${remainder#*|}"
   OBSERVED_VOLUME_RESTORE_TOKEN="${remainder%%|*}"
+  remainder="${remainder#*|}"
+  OBSERVED_VOLUME_REWRITE_TOKEN="${remainder%%|*}"
   OBSERVED_VOLUME_IDENTITY="${remainder#*|}"
   [[ "$project_owner" == "$PROJECT_NAME" && "$logical_owner" == postgres-data ]] ||
     die "Refusing to use PostgreSQL volume $DB_VOLUME without exact Compose project and postgres-data ownership labels."
   [[ -z "$OBSERVED_VOLUME_RESTORE_TOKEN" || "$OBSERVED_VOLUME_RESTORE_TOKEN" =~ ^restore-[0-9a-f]{32}$ ]] ||
     die "Refusing to use PostgreSQL volume $DB_VOLUME with an invalid restore ownership token."
+  [[ -z "$OBSERVED_VOLUME_REWRITE_TOKEN" || "$OBSERVED_VOLUME_REWRITE_TOKEN" =~ ^rewrite-[0-9a-f]{32}$ ]] ||
+    die "Refusing to use PostgreSQL volume $DB_VOLUME with an invalid rewrite ownership token."
   [[ -n "$OBSERVED_VOLUME_IDENTITY" && "$OBSERVED_VOLUME_IDENTITY" == *'|'* ]] ||
     die "Could not establish stable identity for PostgreSQL volume $DB_VOLUME."
 }
@@ -731,6 +774,14 @@ validate_recorded_state() {
 
 start_database() {
   compose up -d --wait db
+}
+
+quiesce_application_writers() {
+  if [[ "$APPLICATION_WRITERS_QUIESCED" == true ]]; then
+    return
+  fi
+  compose stop app caddy
+  APPLICATION_WRITERS_QUIESCED=true
 }
 
 start_restore_database() {
@@ -961,6 +1012,8 @@ validate_rewritten_database_empty() {
 }
 
 create_validated_backup() {
+  [[ "$APPLICATION_WRITERS_QUIESCED" == true ]] ||
+    die 'Internal safety check: application writers must be stopped before creating a database backup.'
   select_database_state_descriptor
   mkdir -p -- "$BACKUP_DIRECTORY"
   chmod 700 -- "$BACKUP_DIRECTORY"
@@ -1106,8 +1159,10 @@ load_admin_password() {
     printf '\n'
     [[ "$ADMIN_PASSWORD" == "$confirmation" ]] || die 'Administrator passwords did not match.'
   fi
-  ((${#ADMIN_PASSWORD} >= 12)) || die 'The administrator password must contain at least 12 characters.'
   [[ "$ADMIN_PASSWORD" != *$'\r'* ]] || die 'The administrator password file contains a carriage return.'
+  printf '%s' "$ADMIN_PASSWORD" | node -e \
+    '/* sky-bar-admin-password-length */let value="";process.stdin.setEncoding("utf8");process.stdin.on("data",chunk=>{value+=chunk});process.stdin.on("end",()=>process.exit(value.length>=12&&value.length<=256?0:1));' ||
+    die 'The administrator password must contain 12-256 JavaScript UTF-16 code units.'
 }
 
 create_administrator() {
@@ -1152,7 +1207,7 @@ wait_for_app_health() {
 start_application() {
   compose up -d app caddy
   wait_for_app_health
-  curl --fail --silent --show-error --retry 12 --retry-delay 5 --retry-all-errors \
+  curl --disable --fail --silent --show-error --retry 12 --retry-delay 5 --retry-all-errors \
     --max-time 15 --noproxy '*' --resolve "${CONFIG[SKY_BAR_DOMAIN]}:443:127.0.0.1" \
     "https://${CONFIG[SKY_BAR_DOMAIN]}/api/v1/health" >/dev/null
 }
@@ -1174,43 +1229,485 @@ verify_source_unchanged() {
   final_sha="$(git rev-parse --verify HEAD)"
   [[ "$final_sha" == "$DEPLOYED_SHA" ]] || die 'Git HEAD changed during deployment; state was not updated.'
   [[ -z "$(git status --porcelain --untracked-files=normal)" ]] || die 'The Git worktree changed during deployment; state was not updated.'
+  if [[ -n "$FINAL_MANIFEST_TEMP" && -f "$FINAL_MANIFEST_TEMP" ]]; then
+    rm -f -- "$FINAL_MANIFEST_TEMP"
+    FINAL_MANIFEST_TEMP=''
+  fi
   FINAL_MANIFEST_TEMP="$(mktemp "${TMPDIR:-/tmp}/sky-bar-demo-migrations-final.XXXXXX")"
   build_migration_manifest "$FINAL_MANIFEST_TEMP"
   cmp -s -- "$CURRENT_MANIFEST_TEMP" "$FINAL_MANIFEST_TEMP" || die 'Migration files changed during deployment; state was not updated.'
+  rm -f -- "$FINAL_MANIFEST_TEMP"
+  FINAL_MANIFEST_TEMP=''
+}
+
+rewrite_transaction_publication_selected() {
+  local transaction="${1:-$REWRITE_TRANSACTION_DIRECTORY}"
+  local generation_name generation_directory current_target
+  [[ -f "$transaction/generation-name" && ! -L "$transaction/generation-name" ]] || return 1
+  generation_name="$(< "$transaction/generation-name")"
+  [[ "$generation_name" =~ ^rewrite-[A-Za-z0-9._-]+$ ]] || return 1
+  [[ -L "$CURRENT_STATE_LINK" ]] || return 1
+  current_target="$(readlink -- "$CURRENT_STATE_LINK")"
+  [[ "$current_target" == "generations/$generation_name" ]] || return 1
+  generation_directory="$GENERATIONS_DIRECTORY/$generation_name"
+  [[ -d "$generation_directory" && ! -L "$generation_directory" ]] || return 1
+  cmp -s -- "$transaction/candidate-deployed-sha" "$generation_directory/deployed-sha" &&
+    cmp -s -- "$transaction/candidate-migrations.sha256" "$generation_directory/migrations.sha256"
+}
+
+validate_rewrite_transaction_directory() {
+  local transaction="$1"
+  local description="$2"
+  validate_private_directory "$transaction" "$description"
+  [[ "$(stat -c '%a' -- "$transaction")" == 700 ]] ||
+    die "$description must have mode 0700."
+
+  local file
+  for file in schema-version phase generation-name candidate-deployed-sha \
+      candidate-migrations.sha256 destination-volume old-volume-identity \
+      old-volume-restore-token old-volume-rewrite-token replacement-volume-token \
+      replacement-volume-identity; do
+    validate_private_file "$transaction/$file" "$description $file record"
+    [[ "$(stat -c '%a' -- "$transaction/$file")" == 600 ]] ||
+      die "$description $file record must have mode 0600."
+  done
+
+  local phase_staging="$transaction/phase.next"
+  local identity_staging="$transaction/.replacement-volume-identity.next"
+  if [[ -e "$phase_staging" || -L "$phase_staging" ]]; then
+    validate_private_file "$phase_staging" "$description phase staging record"
+    [[ "$(stat -c '%a' -- "$phase_staging")" == 600 ]] ||
+      die "$description phase staging record must have mode 0600."
+  fi
+  if [[ -e "$identity_staging" || -L "$identity_staging" ]]; then
+    validate_private_file "$identity_staging" "$description replacement identity staging record"
+    [[ "$(stat -c '%a' -- "$identity_staging")" == 600 ]] ||
+      die "$description replacement identity staging record must have mode 0600."
+  fi
+
+  local -a entries=()
+  mapfile -d '' entries < <(find -P "$transaction" -mindepth 1 -maxdepth 1 -print0)
+  local entry name
+  for entry in "${entries[@]}"; do
+    name="${entry##*/}"
+    case "$name" in
+      schema-version|phase|phase.next|generation-name|candidate-deployed-sha|candidate-migrations.sha256|\
+      destination-volume|old-volume-identity|old-volume-restore-token|old-volume-rewrite-token|\
+      replacement-volume-token|replacement-volume-identity|.replacement-volume-identity.next) ;;
+      *) die "$description contains an unexpected entry: $name" ;;
+    esac
+  done
+
+  [[ "$(< "$transaction/schema-version")" == 1 ]] ||
+    die "$description has an unsupported schema version."
+  local phase candidate_sha generation_name old_identity old_restore_token old_rewrite_token
+  local replacement_token replacement_identity
+  phase="$(< "$transaction/phase")"
+  case "$phase" in
+    prepared|old-volume-removed|replacement-ready|state-published) ;;
+    *) die "$description has an invalid phase." ;;
+  esac
+  candidate_sha="$(< "$transaction/candidate-deployed-sha")"
+  [[ "$candidate_sha" == "$DEPLOYED_SHA" ]] ||
+    die "$description belongs to a different checkout."
+  validate_migration_manifest_file "$transaction/candidate-migrations.sha256" "$description candidate state"
+  cmp -s -- "$transaction/candidate-migrations.sha256" "$CURRENT_MANIFEST_TEMP" ||
+    die "$description migration manifest differs from this checkout."
+  [[ "$(< "$transaction/destination-volume")" == "$DB_VOLUME" ]] ||
+    die "$description destination volume differs from this Compose project."
+  generation_name="$(< "$transaction/generation-name")"
+  [[ "$generation_name" =~ ^rewrite-[A-Za-z0-9._-]+$ ]] ||
+    die "$description has an invalid generation name."
+
+  old_identity="$(< "$transaction/old-volume-identity")"
+  old_restore_token="$(< "$transaction/old-volume-restore-token")"
+  old_rewrite_token="$(< "$transaction/old-volume-rewrite-token")"
+  replacement_token="$(< "$transaction/replacement-volume-token")"
+  replacement_identity="$(< "$transaction/replacement-volume-identity")"
+  [[ "$old_identity" == absent || ( "$old_identity" == *'|'* && "$old_identity" != *$'\n'* ) ]] ||
+    die "$description has an invalid old volume identity."
+  [[ "$old_restore_token" == none || "$old_restore_token" =~ ^restore-[0-9a-f]{32}$ ]] ||
+    die "$description has an invalid old restore ownership token."
+  [[ "$old_rewrite_token" == none || "$old_rewrite_token" =~ ^rewrite-[0-9a-f]{32}$ ]] ||
+    die "$description has an invalid old rewrite ownership token."
+  [[ "$replacement_token" =~ ^rewrite-[0-9a-f]{32}$ ]] ||
+    die "$description has an invalid replacement volume token."
+  [[ "$replacement_identity" == unbound ||
+      ( "$replacement_identity" == *'|'* && "$replacement_identity" != *$'\n'* ) ]] ||
+    die "$description has an invalid replacement volume identity."
+  if [[ "$old_identity" == absent ]]; then
+    [[ "$old_restore_token" == none && "$old_rewrite_token" == none && "$phase" != prepared ]] ||
+      die "$description contradicts its absent old volume identity."
+  fi
+  if [[ "$phase" == prepared ]]; then
+    [[ "$old_identity" != absent && "$replacement_identity" == unbound ]] ||
+      die "$description prepared phase has inconsistent volume identities."
+  fi
+  if [[ "$phase" == replacement-ready || "$phase" == state-published ]]; then
+    [[ "$replacement_identity" != unbound ]] ||
+      die "$description is missing its bound replacement identity."
+  fi
+  if [[ -e "$identity_staging" || -L "$identity_staging" ]]; then
+    [[ "$phase" == old-volume-removed && "$replacement_identity" == unbound ]] ||
+      die "$description replacement identity staging exists outside the binding phase."
+    [[ "$(< "$identity_staging")" == *'|'* && "$(< "$identity_staging")" != *$'\n'* ]] ||
+      die "$description replacement identity staging record is invalid."
+  fi
+
+  if [[ "$phase" == state-published ]]; then
+    rewrite_transaction_publication_selected "$transaction" ||
+      die "$description state-published phase is not selected as current state."
+  elif ! rewrite_transaction_publication_selected "$transaction"; then
+    validate_private_directory "$PENDING_STATE_DIRECTORY" 'The rewrite candidate pending state'
+    validate_state_descriptor "$PENDING_STATE_DIRECTORY" 'Rewrite candidate pending state'
+    [[ "$(< "$PENDING_STATE_DIRECTORY/deployed-sha")" == "$candidate_sha" ]] &&
+      cmp -s -- "$PENDING_STATE_DIRECTORY/migrations.sha256" "$transaction/candidate-migrations.sha256" ||
+      die "$description candidate differs from pending deployment state."
+  fi
+
+  REWRITE_TRANSACTION_PHASE="$phase"
+  REWRITE_GENERATION_NAME="$generation_name"
+  REWRITE_REPLACEMENT_TOKEN="$replacement_token"
+  REWRITE_REPLACEMENT_IDENTITY="$replacement_identity"
+}
+
+validate_rewrite_transaction() {
+  validate_rewrite_transaction_directory "$REWRITE_TRANSACTION_DIRECTORY" 'The rewrite transaction'
+}
+
+atomic_write_rewrite_record() {
+  local name="$1"
+  local value="$2"
+  local staging="$REWRITE_TRANSACTION_DIRECTORY/$name.next"
+  if [[ "$name" == replacement-volume-identity ]]; then
+    staging="$REWRITE_TRANSACTION_DIRECTORY/.replacement-volume-identity.next"
+  fi
+  if [[ -e "$staging" || -L "$staging" ]]; then
+    validate_private_file "$staging" "The rewrite transaction $name staging record"
+  fi
+  printf '%s\n' "$value" > "$staging"
+  chmod 600 -- "$staging"
+  REWRITE_RECORD_STAGING="$staging"
+  if [[ "$name" == replacement-volume-identity &&
+        "${SKY_BAR_TEST_FAIL_REWRITE_BIND-}" == after-identity-staging ]]; then
+    die 'Injected rewrite replacement identity interruption before atomic binding.'
+  fi
+  mv -T -- "$staging" "$REWRITE_TRANSACTION_DIRECTORY/$name"
+  REWRITE_RECORD_STAGING=''
+}
+
+advance_rewrite_transaction_phase() {
+  local expected="$1"
+  local next="$2"
+  validate_rewrite_transaction
+  [[ "$REWRITE_TRANSACTION_PHASE" == "$expected" ]] ||
+    die "Rewrite transaction phase changed while advancing from $expected to $next."
+  case "$expected:$next" in
+    prepared:old-volume-removed|old-volume-removed:replacement-ready|replacement-ready:state-published) ;;
+    *) die 'Invalid rewrite transaction phase transition.' ;;
+  esac
+  atomic_write_rewrite_record phase "$next"
+  REWRITE_TRANSACTION_PHASE="$next"
+}
+
+publish_rewrite_replacement_marker() {
+  local candidate_sha
+  candidate_sha="$(< "$REWRITE_TRANSACTION_DIRECTORY/candidate-deployed-sha")"
+  REWRITE_REPLACEMENT_STAGING="$(mktemp "$STATE_DIRECTORY/.rewrite-replacement.XXXXXX")"
+  printf '%s\n' "$candidate_sha" > "$REWRITE_REPLACEMENT_STAGING"
+  chmod 600 -- "$REWRITE_REPLACEMENT_STAGING"
+  mv -T -- "$REWRITE_REPLACEMENT_STAGING" "$REWRITE_REPLACEMENT_MARKER"
+  REWRITE_REPLACEMENT_STAGING=''
+  REWRITE_REPLACEMENT=true
+  REWRITE_REPLACEMENT_SHA="$candidate_sha"
+}
+
+prepare_rewrite_transaction() {
+  [[ "$REWRITE_TRANSACTION_EXISTS" == false ]] || die 'A rewrite transaction is already active.'
+  [[ ! -e "$RESTORE_TRANSACTION_DIRECTORY" && ! -L "$RESTORE_TRANSACTION_DIRECTORY" ]] ||
+    die 'Restore and rewrite transactions may not coexist.'
+  validate_pending_state
+  local phase old_identity old_restore_token old_rewrite_token
+  if [[ "$DATABASE_EXISTS" == true ]]; then
+    verify_volume_ownership
+    phase=prepared
+    old_identity="$OBSERVED_VOLUME_IDENTITY"
+    old_restore_token="${OBSERVED_VOLUME_RESTORE_TOKEN:-none}"
+    old_rewrite_token="${OBSERVED_VOLUME_REWRITE_TOKEN:-none}"
+  else
+    phase=old-volume-removed
+    old_identity=absent
+    old_restore_token=none
+    old_rewrite_token=none
+  fi
+  local digest replacement_token generation_name
+  digest="$(printf '%s\n' "$DEPLOYED_SHA" "$DB_VOLUME" "$old_identity" "$(date -u +%Y%m%dT%H%M%SZ)" "$$" "$RANDOM" | sha256sum)"
+  replacement_token="rewrite-${digest:0:32}"
+  generation_name="rewrite-$(date -u +%Y%m%dT%H%M%SZ)-${DEPLOYED_SHA:0:12}-$$"
+  REWRITE_TRANSACTION_STAGING="$(mktemp -d "$STATE_DIRECTORY/.rewrite-transaction.XXXXXX")"
+  chmod 700 -- "$REWRITE_TRANSACTION_STAGING"
+  printf '1\n' > "$REWRITE_TRANSACTION_STAGING/schema-version"
+  printf '%s\n' "$phase" > "$REWRITE_TRANSACTION_STAGING/phase"
+  printf '%s\n' "$generation_name" > "$REWRITE_TRANSACTION_STAGING/generation-name"
+  printf '%s\n' "$DEPLOYED_SHA" > "$REWRITE_TRANSACTION_STAGING/candidate-deployed-sha"
+  cp -- "$CURRENT_MANIFEST_TEMP" "$REWRITE_TRANSACTION_STAGING/candidate-migrations.sha256"
+  printf '%s\n' "$DB_VOLUME" > "$REWRITE_TRANSACTION_STAGING/destination-volume"
+  printf '%s\n' "$old_identity" > "$REWRITE_TRANSACTION_STAGING/old-volume-identity"
+  printf '%s\n' "$old_restore_token" > "$REWRITE_TRANSACTION_STAGING/old-volume-restore-token"
+  printf '%s\n' "$old_rewrite_token" > "$REWRITE_TRANSACTION_STAGING/old-volume-rewrite-token"
+  printf '%s\n' "$replacement_token" > "$REWRITE_TRANSACTION_STAGING/replacement-volume-token"
+  printf 'unbound\n' > "$REWRITE_TRANSACTION_STAGING/replacement-volume-identity"
+  chmod 600 -- "$REWRITE_TRANSACTION_STAGING"/*
+  mv -T -- "$REWRITE_TRANSACTION_STAGING" "$REWRITE_TRANSACTION_DIRECTORY"
+  REWRITE_TRANSACTION_STAGING=''
+  REWRITE_TRANSACTION_EXISTS=true
+  validate_rewrite_transaction
+}
+
+verify_rewrite_replacement_volume() {
+  validate_rewrite_transaction
+  [[ "$REWRITE_TRANSACTION_PHASE" == old-volume-removed ||
+      "$REWRITE_TRANSACTION_PHASE" == replacement-ready ]] ||
+    die 'Rewrite replacement volume cannot be verified in the current phase.'
+  docker volume inspect "$DB_VOLUME" >/dev/null 2>&1 ||
+    die 'The rewrite replacement volume is missing.'
+  verify_volume_ownership
+  [[ -z "$OBSERVED_VOLUME_RESTORE_TOKEN" ]] ||
+    die 'Rewrite replacement volume has an unexpected restore ownership token.'
+  [[ "$OBSERVED_VOLUME_REWRITE_TOKEN" == "$REWRITE_REPLACEMENT_TOKEN" ]] ||
+    die 'Rewrite replacement volume token differs from the durable rewrite transaction.'
+  if [[ "$REWRITE_REPLACEMENT_IDENTITY" != unbound ]]; then
+    [[ "$OBSERVED_VOLUME_IDENTITY" == "$REWRITE_REPLACEMENT_IDENTITY" ]] ||
+      die 'Rewrite replacement volume identity differs from the durable rewrite transaction.'
+  fi
+}
+
+ensure_rewrite_replacement_volume() {
+  validate_rewrite_transaction
+  if [[ "$REWRITE_TRANSACTION_PHASE" == prepared ]]; then
+    compose down --remove-orphans
+    if docker volume inspect "$DB_VOLUME" >/dev/null 2>&1; then
+      verify_volume_ownership
+      local old_identity old_restore_token old_rewrite_token
+      old_identity="$(< "$REWRITE_TRANSACTION_DIRECTORY/old-volume-identity")"
+      old_restore_token="$(< "$REWRITE_TRANSACTION_DIRECTORY/old-volume-restore-token")"
+      old_rewrite_token="$(< "$REWRITE_TRANSACTION_DIRECTORY/old-volume-rewrite-token")"
+      [[ "$OBSERVED_VOLUME_IDENTITY" == "$old_identity" &&
+          "${OBSERVED_VOLUME_RESTORE_TOKEN:-none}" == "$old_restore_token" &&
+          "${OBSERVED_VOLUME_REWRITE_TOKEN:-none}" == "$old_rewrite_token" ]] ||
+        die 'The old PostgreSQL volume changed after rewrite preparation; refusing removal.'
+      verify_volume_ownership
+      [[ "$OBSERVED_VOLUME_IDENTITY" == "$old_identity" &&
+          "${OBSERVED_VOLUME_RESTORE_TOKEN:-none}" == "$old_restore_token" &&
+          "${OBSERVED_VOLUME_REWRITE_TOKEN:-none}" == "$old_rewrite_token" ]] ||
+        die 'The old PostgreSQL volume identity or ownership token changed immediately before removal.'
+      if [[ "${SKY_BAR_TEST_FAIL_REWRITE-}" == before-volume-removal ]]; then
+        die 'Injected rewrite interruption immediately before old volume removal.'
+      fi
+      docker volume rm "$DB_VOLUME"
+      DATABASE_EXISTS=false
+      if [[ "${SKY_BAR_TEST_FAIL_REWRITE-}" == after-volume-removal ]]; then
+        die 'Injected rewrite interruption immediately after old volume removal.'
+      fi
+    elif [[ "${SKY_BAR_TEST_FAIL_REWRITE-}" == before-volume-removal ]]; then
+      die 'Injected rewrite interruption before old volume removal.'
+    fi
+    DATABASE_EXISTS=false
+    advance_rewrite_transaction_phase prepared old-volume-removed
+  fi
+
+  validate_rewrite_transaction
+  if [[ "$REWRITE_TRANSACTION_PHASE" == old-volume-removed ]]; then
+    publish_rewrite_replacement_marker
+    if ! docker volume inspect "$DB_VOLUME" >/dev/null 2>&1; then
+      docker volume create \
+        --label "com.docker.compose.project=$PROJECT_NAME" \
+        --label 'com.docker.compose.volume=postgres-data' \
+        --label "sky-bar.rewrite-token=$REWRITE_REPLACEMENT_TOKEN" \
+        "$DB_VOLUME" >/dev/null
+    fi
+    if [[ "${SKY_BAR_TEST_FAIL_REWRITE-}" == after-replacement-creation ]]; then
+      die 'Injected rewrite interruption after replacement volume creation.'
+    fi
+    verify_rewrite_replacement_volume
+    local identity_staging="$REWRITE_TRANSACTION_DIRECTORY/.replacement-volume-identity.next"
+    if [[ "$REWRITE_REPLACEMENT_IDENTITY" == unbound ]]; then
+      if [[ -e "$identity_staging" || -L "$identity_staging" ]]; then
+        validate_private_file "$identity_staging" 'The rewrite transaction replacement identity staging record'
+        [[ "$(stat -c '%a' -- "$identity_staging")" == 600 ]] ||
+          die 'The rewrite transaction replacement identity staging record must have mode 0600.'
+        [[ "$(< "$identity_staging")" == "$OBSERVED_VOLUME_IDENTITY" ]] ||
+          die 'The rewrite replacement identity differs from its durable identity staging record.'
+        mv -T -- "$identity_staging" "$REWRITE_TRANSACTION_DIRECTORY/replacement-volume-identity"
+      else
+        atomic_write_rewrite_record replacement-volume-identity "$OBSERVED_VOLUME_IDENTITY"
+      fi
+      REWRITE_REPLACEMENT_IDENTITY="$OBSERVED_VOLUME_IDENTITY"
+    fi
+    verify_rewrite_replacement_volume
+    advance_rewrite_transaction_phase old-volume-removed replacement-ready
+    if [[ "${SKY_BAR_TEST_FAIL_REWRITE-}" == after-replacement-binding ]]; then
+      die 'Injected rewrite interruption after replacement volume binding.'
+    fi
+  fi
+
+  validate_rewrite_transaction
+  [[ "$REWRITE_TRANSACTION_PHASE" == replacement-ready ]] ||
+    die 'Rewrite transaction did not reach replacement-ready state.'
+  publish_rewrite_replacement_marker
+  verify_rewrite_replacement_volume
+  DATABASE_EXISTS=true
+}
+
+validate_completed_rewrite_retirement() {
+  local retirement="$1"
+  validate_rewrite_transaction_directory "$retirement" 'The completed rewrite transaction retirement'
+  [[ "$(< "$retirement/phase")" == state-published ]] ||
+    die 'Completed rewrite transaction retirement has an invalid phase.'
+  rewrite_transaction_publication_selected "$retirement" ||
+    die 'Completed rewrite transaction retirement is not selected as current state.'
+}
+
+retire_rewrite_transaction() {
+  validate_rewrite_transaction
+  [[ "$REWRITE_TRANSACTION_PHASE" == state-published ]] ||
+    die 'Only a state-published rewrite transaction may be retired.'
+  rewrite_transaction_publication_selected ||
+    die 'Rewrite transaction state is not durably selected before retirement.'
+  local retirement="$STATE_DIRECTORY/.rewrite-transaction-completed.$$.$RANDOM"
+  [[ ! -e "$retirement" && ! -L "$retirement" ]] ||
+    die 'Could not retire completed rewrite transaction safely.'
+  mv -T -- "$REWRITE_TRANSACTION_DIRECTORY" "$retirement"
+  REWRITE_TRANSACTION_EXISTS=false
+  if [[ "${SKY_BAR_TEST_FAIL_REWRITE_RETIREMENT-}" == after-rename ]]; then
+    die 'Injected rewrite transaction retirement interruption after atomic rename.'
+  fi
+  validate_completed_rewrite_retirement "$retirement"
+  rm -rf -- "$retirement"
+}
+
+recover_completed_rewrite_retirements() {
+  local -a retirements=()
+  local retirement name
+  for retirement in "$STATE_DIRECTORY"/.rewrite-transaction-completed.*; do
+    [[ -e "$retirement" || -L "$retirement" ]] || continue
+    name="${retirement##*/}"
+    [[ "$name" =~ ^\.rewrite-transaction-completed\.[0-9]+\.[0-9]+$ ]] ||
+      die "Unexpected completed rewrite transaction retirement name: $name"
+    retirements+=("$retirement")
+  done
+  ((${#retirements[@]} > 0)) || return 0
+  [[ ! -e "$REWRITE_TRANSACTION_DIRECTORY" && ! -L "$REWRITE_TRANSACTION_DIRECTORY" ]] ||
+    die 'Completed and active rewrite transactions coexist; investigate before retrying.'
+  [[ ! -e "$RESTORE_TRANSACTION_DIRECTORY" && ! -L "$RESTORE_TRANSACTION_DIRECTORY" ]] ||
+    die 'Restore and completed rewrite transactions may not coexist.'
+  for retirement in "${retirements[@]}"; do
+    validate_completed_rewrite_retirement "$retirement"
+  done
+  for retirement in "${retirements[@]}"; do
+    rm -rf -- "$retirement"
+  done
+  note 'Recovered completed rewrite transaction retirement.'
+  REWRITE_RECOVERED=true
+}
+
+recover_rewrite_transaction() {
+  recover_completed_rewrite_retirements
+  [[ -e "$REWRITE_TRANSACTION_DIRECTORY" || -L "$REWRITE_TRANSACTION_DIRECTORY" ]] || return 0
+  [[ ! -e "$RESTORE_TRANSACTION_DIRECTORY" && ! -L "$RESTORE_TRANSACTION_DIRECTORY" ]] ||
+    die 'Restore and rewrite transactions may not coexist.'
+  REWRITE_TRANSACTION_EXISTS=true
+  validate_rewrite_transaction
+  if [[ "$REWRITE_TRANSACTION_PHASE" == replacement-ready ]] &&
+      rewrite_transaction_publication_selected; then
+    advance_rewrite_transaction_phase replacement-ready state-published
+  fi
+  if [[ "$REWRITE_TRANSACTION_PHASE" == state-published ]]; then
+    rewrite_transaction_publication_selected ||
+      die 'Published rewrite recovery does not match current deployment state.'
+    rm -f -- "$REWRITE_REPLACEMENT_MARKER"
+    REWRITE_REPLACEMENT=false
+    REWRITE_REPLACEMENT_SHA=''
+    if [[ -e "$PENDING_STATE_DIRECTORY" || -L "$PENDING_STATE_DIRECTORY" ]]; then
+      validate_private_directory "$PENDING_STATE_DIRECTORY" 'The completed rewrite pending state'
+      rm -rf -- "$PENDING_STATE_DIRECTORY"
+    fi
+    PENDING_EXISTS=false
+    retire_rewrite_transaction
+    note 'Recovered interrupted rewrite state publication.'
+    REWRITE_RECOVERED=true
+  fi
 }
 
 publish_state() {
   verify_source_unchanged
   mkdir -p -- "$GENERATIONS_DIRECTORY"
   chmod 700 -- "$GENERATIONS_DIRECTORY"
-  STATE_STAGING_DIRECTORY="$(mktemp -d "$GENERATIONS_DIRECTORY/.staging.XXXXXX")"
-  printf '%s\n' "$DEPLOYED_SHA" > "$STATE_STAGING_DIRECTORY/deployed-sha"
-  cp -- "$CURRENT_MANIFEST_TEMP" "$STATE_STAGING_DIRECTORY/migrations.sha256"
-  chmod 600 -- "$STATE_STAGING_DIRECTORY/deployed-sha" "$STATE_STAGING_DIRECTORY/migrations.sha256"
-
   local generation_name generation_directory
-  generation_name="$(date -u +%Y%m%dT%H%M%SZ)-${DEPLOYED_SHA:0:12}-$$"
+  local rewrite_publication=false
+  if [[ "$REWRITE_TRANSACTION_EXISTS" == true ]]; then
+    validate_rewrite_transaction
+    [[ "$REWRITE_TRANSACTION_PHASE" == replacement-ready ]] ||
+      die 'Rewrite transaction is not ready for state publication.'
+    verify_rewrite_replacement_volume
+    generation_name="$REWRITE_GENERATION_NAME"
+    rewrite_publication=true
+  else
+    generation_name="$(date -u +%Y%m%dT%H%M%SZ)-${DEPLOYED_SHA:0:12}-$$"
+  fi
   generation_directory="$GENERATIONS_DIRECTORY/$generation_name"
-  [[ ! -e "$generation_directory" && ! -L "$generation_directory" ]] || die 'A deployment state generation name collision occurred; retry the deployment.'
-  STATE_LINK_TEMP="$STATE_STAGING_DIRECTORY/.current-link"
+  if [[ ! -e "$generation_directory" && ! -L "$generation_directory" ]]; then
+    STATE_STAGING_DIRECTORY="$(mktemp -d "$GENERATIONS_DIRECTORY/.staging.XXXXXX")"
+    printf '%s\n' "$DEPLOYED_SHA" > "$STATE_STAGING_DIRECTORY/deployed-sha"
+    cp -- "$CURRENT_MANIFEST_TEMP" "$STATE_STAGING_DIRECTORY/migrations.sha256"
+    chmod 600 -- "$STATE_STAGING_DIRECTORY/deployed-sha" "$STATE_STAGING_DIRECTORY/migrations.sha256"
+    PUBLISHED_GENERATION_DIRECTORY="$generation_directory"
+    PUBLISHED_GENERATION_TARGET="generations/$generation_name"
+    mv -T -- "$STATE_STAGING_DIRECTORY" "$generation_directory"
+    STATE_STAGING_DIRECTORY=''
+  elif [[ "$rewrite_publication" == true && -d "$generation_directory" && ! -L "$generation_directory" ]]; then
+    validate_state_descriptor "$generation_directory" 'The rewrite transaction generation'
+    cmp -s -- "$REWRITE_TRANSACTION_DIRECTORY/candidate-deployed-sha" "$generation_directory/deployed-sha" &&
+      cmp -s -- "$REWRITE_TRANSACTION_DIRECTORY/candidate-migrations.sha256" "$generation_directory/migrations.sha256" ||
+      die 'Rewrite transaction generation collides with different deployment state.'
+  else
+    die 'A deployment state generation name collision occurred; retry the deployment.'
+  fi
+  STATE_LINK_TEMP="$STATE_DIRECTORY/.current.$$.$RANDOM"
+  [[ ! -e "$STATE_LINK_TEMP" && ! -L "$STATE_LINK_TEMP" ]] ||
+    die 'Could not create the deployment state pointer safely.'
   ln -s -- "generations/$generation_name" "$STATE_LINK_TEMP"
-  PUBLISHED_GENERATION_DIRECTORY="$generation_directory"
-  PUBLISHED_GENERATION_TARGET="generations/$generation_name"
-  mv -T -- "$STATE_STAGING_DIRECTORY" "$generation_directory"
-  STATE_STAGING_DIRECTORY=''
-  STATE_LINK_TEMP="$generation_directory/.current-link"
   mv -Tf -- "$STATE_LINK_TEMP" "$CURRENT_STATE_LINK"
   STATE_LINK_TEMP=''
+  CURRENT_STATE_DIRECTORY="$generation_directory"
+  STATE_EXISTS=true
   PUBLISHED_GENERATION_DIRECTORY=''
   PUBLISHED_GENERATION_TARGET=''
-  if [[ "$REWRITE_REPLACEMENT" == true ]]; then
+
+  if [[ "$rewrite_publication" == true ]]; then
+    if [[ "${SKY_BAR_TEST_FAIL_REWRITE_PUBLICATION-}" == after-current ]]; then
+      die 'Injected rewrite publication interruption after current state selection.'
+    fi
+    advance_rewrite_transaction_phase replacement-ready state-published
     rm -f -- "$REWRITE_REPLACEMENT_MARKER"
     REWRITE_REPLACEMENT=false
     REWRITE_REPLACEMENT_SHA=''
-  fi
-  if [[ "$PENDING_EXISTS" == true ]]; then
-    rm -rf -- "$PENDING_STATE_DIRECTORY"
+    if [[ -e "$PENDING_STATE_DIRECTORY" || -L "$PENDING_STATE_DIRECTORY" ]]; then
+      validate_private_directory "$PENDING_STATE_DIRECTORY" 'The published rewrite pending state'
+      rm -rf -- "$PENDING_STATE_DIRECTORY"
+    fi
     PENDING_EXISTS=false
+    retire_rewrite_transaction
+  else
+    if [[ "$REWRITE_REPLACEMENT" == true ]]; then
+      rm -f -- "$REWRITE_REPLACEMENT_MARKER"
+      REWRITE_REPLACEMENT=false
+      REWRITE_REPLACEMENT_SHA=''
+    fi
+    if [[ "$PENDING_EXISTS" == true ]]; then
+      rm -rf -- "$PENDING_STATE_DIRECTORY"
+      PENDING_EXISTS=false
+    fi
   fi
 }
 
@@ -1578,8 +2075,42 @@ recover_completed_restore_transaction() {
   esac
 }
 
+resume_rewrite_transaction() {
+  validate_rewrite_transaction
+  if [[ "$REWRITE_TRANSACTION_PHASE" == prepared && -z "$ADMIN_PASSWORD" ]]; then
+    load_admin_password
+  fi
+  ensure_rewrite_replacement_volume
+  start_database
+  verify_rewrite_replacement_volume
+  validate_database_migrations
+  run_migrations
+  local administrator_count
+  administrator_count="$(active_administrator_count)"
+  if ((administrator_count == 0)); then
+    [[ -n "$ADMIN_PASSWORD" ]] || load_admin_password
+    create_administrator
+  else
+    ADMIN_PASSWORD=''
+    note 'An active administrator already exists; existing credentials and sessions were preserved.'
+  fi
+  start_application
+  publish_state
+}
+
 deploy_persist() {
   recover_completed_restore_transaction
+  recover_rewrite_transaction
+  if [[ "$REWRITE_RECOVERED" == true ]]; then
+    return
+  fi
+  if [[ "$REWRITE_TRANSACTION_EXISTS" == true ]]; then
+    compose build app caddy
+    verify_source_unchanged
+    quiesce_application_writers
+    resume_rewrite_transaction
+    return
+  fi
   if [[ "$DATABASE_EXISTS" == true && "$STATE_EXISTS" == false && "$PENDING_EXISTS" == false && "$ADOPT_EXISTING_DB" != true ]]; then
     die 'An existing unmanaged database requires --adopt-existing-db or explicitly confirmed rewrite mode.'
   fi
@@ -1590,19 +2121,21 @@ deploy_persist() {
   fi
   prepare_pending_state
   if [[ "$DATABASE_EXISTS" == true ]]; then
+    compose build app caddy
+    verify_source_unchanged
+    quiesce_application_writers
     start_database
     validate_database_migrations
     create_validated_backup
     if [[ "$STATE_EXISTS" == false && "$ADOPT_EXISTING_DB" == true ]]; then
       note 'Adopting current migration files as the baseline after this deployment becomes healthy.'
     fi
-    compose build app caddy
-    compose stop app caddy
   else
     [[ "$STATE_EXISTS" == false || "$REWRITE_REPLACEMENT" == true ]] ||
       die 'The PostgreSQL volume is missing; explicitly confirm rewrite instead of silently replacing it.'
     load_admin_password
     compose build app caddy
+    verify_source_unchanged
     start_database
     validate_database_migrations
   fi
@@ -1621,12 +2154,27 @@ deploy_persist() {
 
 deploy_rewrite() {
   recover_completed_restore_transaction
+  recover_rewrite_transaction
+  if [[ "$REWRITE_RECOVERED" == true ]]; then
+    return
+  fi
+  if [[ "$REWRITE_TRANSACTION_EXISTS" == true ]]; then
+    compose build app caddy
+    verify_source_unchanged
+    quiesce_application_writers
+    resume_rewrite_transaction
+    return
+  fi
   confirm_rewrite
+  load_admin_password
   compose build app caddy
+  verify_source_unchanged
+  quiesce_application_writers
   if [[ "$DATABASE_EXISTS" == true ]]; then
     start_database
     validate_database_for_source_bound_backup
     create_validated_backup
+    verify_volume_ownership
   else
     note 'The previously recorded PostgreSQL volume is missing; no pre-rewrite backup can be created.'
   fi
@@ -1635,25 +2183,8 @@ deploy_rewrite() {
     PENDING_EXISTS=false
   fi
   prepare_pending_state
-  load_admin_password
-  compose down --remove-orphans
-  if [[ "$DATABASE_EXISTS" == true ]]; then
-    verify_volume_ownership
-    docker volume rm "$DB_VOLUME"
-  fi
-  REWRITE_REPLACEMENT_STAGING="$(mktemp "$STATE_DIRECTORY/.rewrite-replacement.XXXXXX")"
-  printf '%s\n' "$DEPLOYED_SHA" > "$REWRITE_REPLACEMENT_STAGING"
-  chmod 600 -- "$REWRITE_REPLACEMENT_STAGING"
-  mv -T -- "$REWRITE_REPLACEMENT_STAGING" "$REWRITE_REPLACEMENT_MARKER"
-  REWRITE_REPLACEMENT_STAGING=''
-  REWRITE_REPLACEMENT=true
-  REWRITE_REPLACEMENT_SHA="$DEPLOYED_SHA"
-  start_database
-  validate_rewritten_database_empty
-  run_migrations
-  create_administrator
-  start_application
-  publish_state
+  prepare_rewrite_transaction
+  resume_rewrite_transaction
 }
 
 restore_backup_bundle() {
@@ -1835,6 +2366,7 @@ restore_backup_bundle() {
   validate_restore_archive "$dump_path"
   if [[ "$resume_restoring" == false ]]; then
     if [[ "$DATABASE_EXISTS" == true ]]; then
+      quiesce_application_writers
       verify_volume_ownership
       local pre_backup_destination_identity="$OBSERVED_VOLUME_IDENTITY"
       local pre_backup_destination_token="$OBSERVED_VOLUME_RESTORE_TOKEN"
@@ -1895,7 +2427,7 @@ restore_backup_bundle() {
     die 'Injected restore interruption after durable transaction publication.'
   fi
 
-  compose stop app caddy
+  quiesce_application_writers
   validate_or_bind_restore_destination
   start_restore_database
   DATABASE_EXISTS=true
@@ -1929,6 +2461,9 @@ restore_backup_bundle() {
 }
 
 if [[ -n "$RESTORE_BACKUP" ]]; then
+  recover_rewrite_transaction
+  [[ "$REWRITE_TRANSACTION_EXISTS" == false ]] ||
+    die 'An active rewrite transaction must be completed before restoring a backup.'
   restore_backup_bundle
   exit 0
 fi
