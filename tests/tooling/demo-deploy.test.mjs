@@ -132,6 +132,14 @@ if (tool === 'git') {
   process.exit(0);
 }
 if (tool === 'node') {
+  if (args[0] === '-e' && args[1]?.includes('Number.isFinite')) {
+    const value = Number(args[2]);
+    process.exit(Number.isFinite(value) && Number.isInteger(value) && value > 0 ? 0 : 1);
+  }
+  if (args[0] === '-e' && args[1]?.includes('sky-bar-admin-password-length')) {
+    const password = fs.readFileSync(0, 'utf8');
+    process.exit(password.length >= 12 && password.length <= 256 ? 0 : 1);
+  }
   if (args.some((arg) => arg.includes('release-state.mjs')) && process.env.FAKE_RELEASE_POLICY_FAIL === '1') {
     process.stderr.write('injected release policy failure\n');
     process.exit(42);
@@ -160,10 +168,29 @@ if (args[0] === 'volume' && args[1] === 'inspect') {
   const existing = (process.env.FAKE_EXISTING_VOLUMES || '').split(',').filter(Boolean);
   const name = args.find((arg) => existing.includes(arg)) || args.at(-1);
   const created = fs.existsSync(process.env.FAKE_COMMAND_LOG + '.volume-created');
-  if (!existing.includes(name) && !(created && name.endsWith('-postgres-data'))) process.exit(1);
-  let restoreToken = process.env.FAKE_VOLUME_RESTORE_TOKEN || '';
+  const removed = fs.existsSync(process.env.FAKE_COMMAND_LOG + '.volume-removed');
+  if ((removed && !created) || (!existing.includes(name) && !(created && name.endsWith('-postgres-data')))) process.exit(1);
+  let restoreToken = removed ? '' : (process.env.FAKE_VOLUME_RESTORE_TOKEN || '');
   try { restoreToken ||= fs.readFileSync(process.env.FAKE_COMMAND_LOG + '.volume-token', 'utf8'); } catch {}
-  let volumeIdentity = process.env.FAKE_VOLUME_IDENTITY || '2026-08-09T00:00:00Z|/var/lib/docker/volumes/sky-bar-demo-postgres-data/_data';
+  let rewriteToken = removed ? '' : (process.env.FAKE_VOLUME_REWRITE_TOKEN || '');
+  try { rewriteToken ||= fs.readFileSync(process.env.FAKE_COMMAND_LOG + '.volume-rewrite-token', 'utf8'); } catch {}
+  let volumeIdentity = (!removed && process.env.FAKE_VOLUME_IDENTITY) || (removed && created
+    ? '2026-08-13T00:00:00Z|/var/lib/docker/volumes/rewrite-replacement/_data'
+    : '2026-08-09T00:00:00Z|/var/lib/docker/volumes/sky-bar-demo-postgres-data/_data');
+  const rewriteProject = process.env.COMPOSE_PROJECT_NAME || name.replace(/-postgres-data$/, '');
+  const rewriteTransaction = path.join(process.env.FAKE_REPOSITORY_ROOT, '.demo-state',
+    rewriteProject, 'rewrite-transaction');
+  if (fs.existsSync(rewriteTransaction)) {
+    if (Object.hasOwn(process.env, 'FAKE_RESTORE_TOKEN_AFTER_REWRITE_TRANSACTION')) {
+      restoreToken = process.env.FAKE_RESTORE_TOKEN_AFTER_REWRITE_TRANSACTION;
+    }
+    if (Object.hasOwn(process.env, 'FAKE_REWRITE_TOKEN_AFTER_REWRITE_TRANSACTION')) {
+      rewriteToken = process.env.FAKE_REWRITE_TOKEN_AFTER_REWRITE_TRANSACTION;
+    }
+    if (Object.hasOwn(process.env, 'FAKE_VOLUME_IDENTITY_AFTER_REWRITE_TRANSACTION')) {
+      volumeIdentity = process.env.FAKE_VOLUME_IDENTITY_AFTER_REWRITE_TRANSACTION;
+    }
+  }
   if (process.env.FAKE_REPLACE_VOLUME_AFTER_PG_DUMP === '1' &&
       fs.existsSync(process.env.FAKE_COMMAND_LOG + '.pg-dump-complete')) {
     volumeIdentity = '2026-08-10T00:00:00Z|/var/lib/docker/volumes/safety-race-replacement/_data';
@@ -173,27 +200,49 @@ if (args[0] === 'volume' && args[1] === 'inspect') {
   if (process.env.FAKE_REPLACE_VOLUME_AFTER_RESTORE_START === '1' && restoreStarts >= 2) {
     volumeIdentity = '2026-08-11T00:00:00Z|/var/lib/docker/volumes/startup-race-replacement/_data';
   }
+  if (process.env.FAKE_REPLACE_VOLUME_BEFORE_REWRITE_RM === '1' &&
+      fs.existsSync(rewriteTransaction)) {
+    volumeIdentity = '2026-08-12T00:00:00Z|/var/lib/docker/volumes/rewrite-race-replacement/_data';
+  }
   if (args.includes('--format')) process.stdout.write(
     (process.env.FAKE_VOLUME_PROJECT || 'sky-bar-demo') + '|' +
     (process.env.FAKE_VOLUME_LOGICAL || 'postgres-data') + '|' +
     restoreToken + '|' +
+    rewriteToken + '|' +
     volumeIdentity + '\n');
   else process.stdout.write('[{}]\n');
   process.exit(0);
 }
 if (args[0] === 'volume' && args[1] === 'rm') {
   fs.writeFileSync(process.env.FAKE_COMMAND_LOG + '.volume-removed', '1');
+  for (const suffix of ['.volume-created', '.volume-token', '.volume-rewrite-token', '.volume-migrated']) {
+    try { fs.unlinkSync(process.env.FAKE_COMMAND_LOG + suffix); } catch {}
+  }
   process.exit(0);
 }
 if (args[0] === 'volume' && args[1] === 'create') {
   fs.writeFileSync(process.env.FAKE_COMMAND_LOG + '.volume-created', '1');
   const tokenLabel = args.find((arg) => arg.startsWith('sky-bar.restore-token='));
   if (tokenLabel) fs.writeFileSync(process.env.FAKE_COMMAND_LOG + '.volume-token', tokenLabel.slice(tokenLabel.indexOf('=') + 1));
+  const rewriteTokenLabel = args.find((arg) => arg.startsWith('sky-bar.rewrite-token='));
+  if (rewriteTokenLabel) fs.writeFileSync(process.env.FAKE_COMMAND_LOG + '.volume-rewrite-token', rewriteTokenLabel.slice(rewriteTokenLabel.indexOf('=') + 1));
   process.stdout.write(args.at(-1) + '\n');
   process.exit(0);
 }
 const command = args.join(' ');
+if (process.env.FAKE_MUTATE_SOURCE_AFTER_BUILD === '1' && command.includes('build app caddy')) {
+  fs.appendFileSync(path.join(process.env.FAKE_REPOSITORY_ROOT,
+    'apps/api/migrations/0001_initial.sql'), '-- mutated after image build\n');
+}
 if (/\bup\b/.test(command) && command.endsWith(' db')) {
+  const rewriteTransaction = path.join(process.env.FAKE_REPOSITORY_ROOT, '.demo-state',
+    process.env.COMPOSE_PROJECT_NAME, 'rewrite-transaction');
+  if (fs.existsSync(rewriteTransaction) &&
+      fs.existsSync(process.env.FAKE_COMMAND_LOG + '.volume-removed') &&
+      !fs.existsSync(process.env.FAKE_COMMAND_LOG + '.volume-rewrite-token')) {
+    process.stderr.write('refusing fake Compose creation of an un-tokenized rewrite replacement\n');
+    process.exit(45);
+  }
   fs.writeFileSync(process.env.FAKE_COMMAND_LOG + '.volume-created', '1');
   if (command.includes('--no-deps')) {
     const counterPath = process.env.FAKE_COMMAND_LOG + '.restore-start-count';
@@ -209,14 +258,15 @@ if (/\bup\b/.test(command) && command.endsWith(' db')) {
   }
 }
 if (command.includes('npm run db:migrate')) {
-  try { fs.unlinkSync(process.env.FAKE_COMMAND_LOG + '.volume-removed'); } catch {}
+  fs.writeFileSync(process.env.FAKE_COMMAND_LOG + '.volume-migrated', '1');
 }
 if (/\bps\b/.test(command) && (args.includes('-q') || args.includes('--quiet'))) process.stdout.write('fake-container-id\n');
 else if (/\binspect\b/.test(command) && command.includes('State.Health.Status')) process.stdout.write('healthy\n');
 else if (/\bps\b/.test(command) && command.includes('--services')) process.stdout.write('db\napp\ncaddy\n');
 else if ((/\bexec\b/.test(command) || /\brun\b/.test(command)) && /\bpsql\b/.test(command)) {
   if (command.includes('to_regclass')) {
-    const recreated = fs.existsSync(process.env.FAKE_COMMAND_LOG + '.volume-removed');
+    const recreated = fs.existsSync(process.env.FAKE_COMMAND_LOG + '.volume-removed') &&
+      !fs.existsSync(process.env.FAKE_COMMAND_LOG + '.volume-migrated');
     process.stdout.write(process.env.FAKE_SCHEMA_TABLE === '0' || recreated ? 'missing\n' : 'present\n');
   }
   else if (command.includes('SELECT name FROM schema_migrations')) {
@@ -309,6 +359,17 @@ function dockerLines(fixture) {
 
 function hashFile(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+function regularFileTreeText(root) {
+  if (!existsSync(root)) return '';
+  const visit = (path) => {
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) return '';
+    if (stat.isFile()) return readFileSync(path, 'utf8');
+    return readdirSync(path).map((name) => visit(join(path, name))).join('\n');
+  };
+  return visit(root);
 }
 
 function seedState(fixture, entries = [[migrationPath, hashFile(join(fixture.directory, migrationPath))]]) {
@@ -405,6 +466,9 @@ test('environment parsing rejects missing, malformed, insecure, and executable v
     ['trailing empty capability key', { ...validEnvironment, ACCESS_CAPABILITY_KEYS: `v1:${'c'.repeat(64)},` }],
     ['repeated empty capability key', { ...validEnvironment, ACCESS_CAPABILITY_KEYS: `v2:${'d'.repeat(64)},,v1:${'c'.repeat(64)}` }],
     ['invalid positive limit', { ...validEnvironment, RATE_LIMIT_MAX: '0' }],
+    ['non-canonical ordinary limit', { ...validEnvironment, RATE_LIMIT_MAX: '0300' }],
+    ['non-finite ordinary limit', { ...validEnvironment, RATE_LIMIT_MAX: '9'.repeat(400) }],
+    ['non-finite access-status limit', { ...validEnvironment, ACCESS_STATUS_IP_LIMIT_MAX: '9'.repeat(400) }],
     ['literal comment metacharacter', { ...validEnvironment, ADMIN_NAME: 'Demo#comment' }],
     ['literal quote metacharacter', { ...validEnvironment, ADMIN_NAME: '"Demo"' }],
     ['literal escape metacharacter', { ...validEnvironment, ADMIN_NAME: 'Demo\\Admin' }],
@@ -537,10 +601,12 @@ test('persist backs up first, always runs the exact compiled migration command, 
   });
   assert.equal(result.status, 0, result.output);
   const lines = dockerLines(fixture);
+  const build = lines.findIndex((line) => line.includes('build app caddy'));
+  const stop = lines.findIndex((line) => line.includes('stop app caddy'));
   const backup = lines.findIndex((line) => line.includes('pg_dump'));
   const validate = lines.findIndex((line) => line.includes('pg_restore') && line.includes('--list'));
   const migrate = lines.findIndex((line) => line.includes('run --rm --no-deps app npm run db:migrate'));
-  assert.ok(backup >= 0, lines.join('\n'));
+  assert.ok(build >= 0 && stop > build && backup > stop, lines.join('\n'));
   assert.ok(validate > backup, lines.join('\n'));
   assert.ok(migrate > validate, lines.join('\n'));
   assert.equal(lines.some((line) => line.startsWith('volume rm')), false, lines.join('\n'));
@@ -638,8 +704,13 @@ test('rewrite requires exact confirmation and deletes only the deterministic Pos
   ], { FAKE_EXISTING_VOLUMES: dbVolume, FAKE_ADMIN_EXISTS: '0' });
   assert.equal(result.status, 0, result.output);
   const lines = dockerLines(fixture);
+  const build = lines.findIndex((line) => line.includes('build app caddy'));
+  const stop = lines.findIndex((line) => line.includes('stop app caddy'));
+  const dump = lines.findIndex((line) => line.includes('pg_dump'));
   const removals = lines.filter((line) => line.startsWith('volume rm'));
   assert.equal(removals.length, 1, lines.join('\n'));
+  const removal = lines.findIndex((line) => line.startsWith('volume rm'));
+  assert.ok(build >= 0 && stop > build && dump > stop && removal > dump, lines.join('\n'));
   assert.match(removals[0], new RegExp(`${dbVolume}$`));
   assert.doesNotMatch(removals[0], /caddy-(?:data|config)/);
   assert.equal(lines.some((line) => /down.*(?:-v|--volumes)/.test(line)), false);
@@ -843,6 +914,58 @@ test('administrator password files are protected and their contents never enter 
   assert.equal(Object.values(validEnvironment).includes(secret), false);
 });
 
+test('administrator bootstrap password length matches the JavaScript authentication contract', async (t) => {
+  for (const [name, value] of [
+    ['12 ASCII code units', 'x'.repeat(12)],
+    ['256 ASCII code units', 'x'.repeat(256)],
+    ['256 multibyte UTF-16 code units', '😀'.repeat(128)],
+  ]) {
+    await t.test(`accepts ${name}`, (st) => {
+      const fixture = makeFixture(st);
+      const secretFile = passwordFile(fixture, value);
+      const result = run(fixture, [...commonPersistArgs(fixture), '--admin-password-file', secretFile], {
+        FAKE_ADMIN_EXISTS: '0',
+        FAKE_SCHEMA_TABLE: '0',
+        FAKE_FORBIDDEN_SECRET_FILE: secretFile,
+      });
+      assert.equal(result.status, 0, result.output);
+      assert.ok(dockerLines(fixture).some((line) => line.includes('admin:create')));
+      assert.doesNotMatch(`${result.output}\n${readFileSync(fixture.commandLog, 'utf8')}`, new RegExp(value));
+    });
+  }
+
+  for (const [name, value] of [
+    ['257 ASCII code units', 'x'.repeat(257)],
+    ['258 multibyte UTF-16 code units', '😀'.repeat(129)],
+  ]) {
+    await t.test(`rejects ${name} before confirmed rewrite mutation`, (st) => {
+      const fixture = makeFixture(st);
+      seedState(fixture);
+      const secretFile = passwordFile(fixture, value);
+      const result = run(fixture, [
+        '--env-file', fixture.environmentPath,
+        '--db-mode', 'rewrite',
+        '--confirm-rewrite', project,
+        '--admin-password-file', secretFile,
+      ], {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_ADMIN_EXISTS: '0',
+        FAKE_FORBIDDEN_SECRET_FILE: secretFile,
+      });
+      assert.notEqual(result.status, 0);
+      assert.match(result.output, /12-256|UTF-16|password/i);
+      const lines = dockerLines(fixture);
+      assert.equal(lines.some((line) => line.startsWith('volume rm')), false);
+      assert.equal(lines.some((line) => line.includes('down --remove-orphans')), false);
+      assert.equal(lines.some((line) => line.includes('admin:create')), false);
+      const artifacts = `${regularFileTreeText(join(fixture.directory, '.demo-state'))}\n` +
+        regularFileTreeText(join(fixture.directory, '.demo-backups'));
+      assert.doesNotMatch(`${result.output}\n${readFileSync(fixture.commandLog, 'utf8')}\n${artifacts}`,
+        new RegExp(value));
+    });
+  }
+});
+
 test('failed migration, application health, or external HTTPS health never publishes new state', async (t) => {
   const failures = [
     ['migration', { FAKE_FAIL_MATCH: 'npm run db:migrate' }],
@@ -936,11 +1059,62 @@ test('HTTPS health probes local Caddy with configured hostname and SNI', (t) => 
   assert.equal(result.status, 0, result.output);
   const health = commands(fixture, 'curl').find(({ args }) => args.some((arg) => arg.includes('/api/v1/health')));
   assert.ok(health);
+  assert.equal(health.args[0], '--disable');
+  assert.ok(health.args.includes('--fail'));
+  assert.ok(health.args.includes('--retry-all-errors'));
+  assert.equal(health.args.includes('--insecure'), false);
   assert.ok(health.args.includes('--noproxy'));
   assert.ok(health.args.includes('*'));
   assert.ok(health.args.includes('--resolve'));
   assert.ok(health.args.includes(`${validEnvironment.SKY_BAR_DOMAIN}:443:127.0.0.1`));
   assert.ok(health.args.includes(`https://${validEnvironment.SKY_BAR_DOMAIN}/api/v1/health`));
+});
+
+test('post-build source mutation fails before persist or rewrite apply boundaries', async (t) => {
+  for (const mode of ['persist', 'rewrite']) {
+    await t.test(mode, (st) => {
+      const fixture = makeFixture(st);
+      seedState(fixture);
+      const args = mode === 'persist'
+        ? commonPersistArgs(fixture)
+        : [
+            '--env-file', fixture.environmentPath,
+            '--db-mode', 'rewrite',
+            '--confirm-rewrite', project,
+            '--admin-password-file', passwordFile(fixture),
+          ];
+      const result = run(fixture, args, {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_ADMIN_EXISTS: mode === 'persist' ? '1' : '0',
+        FAKE_MUTATE_SOURCE_AFTER_BUILD: '1',
+      });
+      assert.notEqual(result.status, 0);
+      assert.match(result.output, /migration files changed|worktree changed|source/i);
+      const lines = dockerLines(fixture);
+      assert.ok(lines.some((line) => line.includes('build app caddy')));
+      assert.equal(lines.some((line) => line.includes('stop app caddy')), false);
+      assert.equal(lines.some((line) => line.includes('pg_dump')), false);
+      assert.equal(lines.some((line) => line.includes('npm run db:migrate')), false);
+      assert.equal(lines.some((line) => line.startsWith('volume rm')), false);
+    });
+  }
+});
+
+test('post-build and publication source verification leave no temporary manifests', (t) => {
+  const fixture = makeFixture(t);
+  seedState(fixture);
+  const temporaryDirectory = join(fixture.directory, 'deployment-tmp');
+  mkdirSync(temporaryDirectory);
+  const result = run(fixture, commonPersistArgs(fixture), {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_ADMIN_EXISTS: '1',
+    TMPDIR: temporaryDirectory,
+  });
+  assert.equal(result.status, 0, result.output);
+  const statusChecks = commands(fixture, 'git')
+    .filter(({ args }) => args[0] === 'status' && args.includes('--porcelain'));
+  assert.ok(statusChecks.length >= 3, 'expected preflight, post-build, and publication source checks');
+  assert.deepEqual(readdirSync(temporaryDirectory), []);
 });
 
 test('guarded restore rejects tampering before replacement and creates safety backup first', async (t) => {
@@ -966,6 +1140,8 @@ test('guarded restore rejects tampering before replacement and creates safety ba
     assert.notEqual(restored.status, 0);
     assert.match(restored.output, /digest|tamper|backup/i);
     assert.equal(dockerLines(fixture).some((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list')), false);
+    assert.equal(dockerLines(fixture).some((line) => line.includes('stop app caddy')), false,
+      'invalid restore bundle must fail before application quiescence');
   });
 
   await t.test('matching bundle', (st) => {
@@ -987,11 +1163,14 @@ test('guarded restore rejects tampering before replacement and creates safety ba
     });
     assert.equal(restored.status, 0, restored.output);
     const lines = dockerLines(fixture);
+    const stop = lines.findIndex((line) => line.includes('stop app caddy'));
+    const classification = lines.findIndex((line) => line.includes('SELECT name FROM schema_migrations'));
     const safetyDump = lines.findIndex((line) => line.includes('pg_dump'));
+    const drop = lines.findIndex((line) => line.includes('DROP DATABASE'));
     const destructiveRestore = lines.findIndex((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list'));
-    assert.ok(safetyDump >= 0, lines.join('\n'));
-    assert.ok(destructiveRestore > safetyDump, lines.join('\n'));
-    assert.ok(lines.slice(0, destructiveRestore).some((line) => line.includes('stop app caddy')));
+    assert.ok(stop >= 0 && classification > stop && safetyDump > classification &&
+      drop > safetyDump && destructiveRestore > drop,
+      lines.join('\n'));
     assert.equal(backupBundles(fixture).length, 2);
   });
 });
@@ -1302,7 +1481,9 @@ test('guarded restore rejects destination replacement at both destructive bounda
       assert.equal(lines.some((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list')), false);
       if (name === 'during safety-backup preparation') {
         assert.equal(existsSync(join(fixture.directory, '.demo-state', project, 'restore-transaction')), false);
-        assert.equal(lines.some((line) => line.includes('stop app caddy')), false);
+        const stop = lines.findIndex((line) => line.includes('stop app caddy'));
+        const dump = lines.findIndex((line) => line.includes('pg_dump'));
+        assert.ok(stop >= 0 && dump > stop, lines.join('\n'));
       }
     });
   }
@@ -1397,6 +1578,410 @@ test('interrupted rewrite binds the replacement database to candidate pending st
   assert.equal(existsSync(join(state, 'rewrite-replacement')), false);
   assert.equal(existsSync(join(state, 'pending')), false);
   assert.notEqual(readlinkSync(join(state, 'current')), 'generations/seed');
+});
+
+test('confirmed rewrite transaction resumes across both old-volume removal boundaries', async (t) => {
+  for (const interruption of ['before-volume-removal', 'after-volume-removal']) {
+    await t.test(interruption, (st) => {
+      const fixture = makeFixture(st);
+      const state = seedState(fixture);
+      const secret = `private rewrite password ${interruption}`;
+      const secretFile = passwordFile(fixture, secret);
+      const oldIdentity = '2026-08-09T12:34:56Z|/var/lib/docker/volumes/owned-old-volume/_data';
+      const oldRestoreToken = `restore-${'a'.repeat(32)}`;
+      const oldRewriteToken = `rewrite-${'b'.repeat(32)}`;
+      const oldVolumeEnvironment = {
+        FAKE_VOLUME_IDENTITY: oldIdentity,
+        FAKE_VOLUME_RESTORE_TOKEN: oldRestoreToken,
+        FAKE_VOLUME_REWRITE_TOKEN: oldRewriteToken,
+      };
+      const rewriteArgs = [
+        '--env-file', fixture.environmentPath,
+        '--db-mode', 'rewrite',
+        '--confirm-rewrite', project,
+        '--admin-password-file', secretFile,
+      ];
+      const interrupted = run(fixture, rewriteArgs, {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
+        FAKE_ADMIN_EXISTS: '0',
+        SKY_BAR_TEST_FAIL_REWRITE: interruption,
+        ...oldVolumeEnvironment,
+      });
+      assert.notEqual(interrupted.status, 0);
+      const transaction = join(state, 'rewrite-transaction');
+      assert.equal(statSync(transaction).mode & 0o777, 0o700);
+      assert.equal(readFileSync(join(transaction, 'phase'), 'utf8').trim(), 'prepared');
+      assert.equal(readFileSync(join(transaction, 'candidate-deployed-sha'), 'utf8').trim(), gitSha);
+      assert.equal(readFileSync(join(transaction, 'destination-volume'), 'utf8').trim(), dbVolume);
+      assert.equal(readFileSync(join(transaction, 'old-volume-identity'), 'utf8').trim(), oldIdentity);
+      assert.equal(readFileSync(join(transaction, 'old-volume-restore-token'), 'utf8').trim(), oldRestoreToken);
+      assert.equal(readFileSync(join(transaction, 'old-volume-rewrite-token'), 'utf8').trim(), oldRewriteToken);
+      assert.match(readFileSync(join(transaction, 'replacement-volume-token'), 'utf8').trim(), /^rewrite-[0-9a-f]{32}$/);
+      for (const entry of readdirSync(transaction)) {
+        assert.equal(statSync(join(transaction, entry)).mode & 0o777, 0o600, entry);
+        assert.doesNotMatch(readFileSync(join(transaction, entry), 'utf8'), new RegExp(secret));
+      }
+      const firstLines = dockerLines(fixture);
+      assert.equal(firstLines.filter((line) => line.startsWith('volume rm')).length,
+        interruption === 'before-volume-removal' ? 0 : 1);
+      assert.equal(backupBundles(fixture).length, 1);
+
+      writeFileSync(fixture.commandLog, '');
+      const resumed = run(fixture, [...commonPersistArgs(fixture), '--admin-password-file', secretFile], {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
+        FAKE_ADMIN_EXISTS: '0',
+        ...(interruption === 'before-volume-removal' ? oldVolumeEnvironment : {}),
+      });
+      assert.equal(resumed.status, 0, resumed.output);
+      const retryLines = dockerLines(fixture);
+      assert.equal(retryLines.some((line) => line.includes('pg_dump')), false,
+        'confirmed rewrite retry must not create a second old-source backup');
+      assert.equal(retryLines.filter((line) => line.startsWith('volume rm')).length,
+        interruption === 'before-volume-removal' ? 1 : 0);
+      assert.ok(retryLines.some((line) => line.startsWith('volume create') &&
+        line.includes('sky-bar.rewrite-token=rewrite-')));
+      assert.equal(existsSync(transaction), false);
+      assert.equal(existsSync(join(state, 'rewrite-replacement')), false);
+      assert.equal(existsSync(join(state, 'pending')), false);
+      assert.notEqual(readlinkSync(join(state, 'current')), 'generations/seed');
+      assert.equal(backupBundles(fixture).length, 1);
+    });
+  }
+});
+
+test('confirmed rewrite revalidates old identity and ownership tokens immediately before removal', async (t) => {
+  const oldRestoreToken = `restore-${'a'.repeat(32)}`;
+  const oldRewriteToken = `rewrite-${'b'.repeat(32)}`;
+  for (const [name, injection] of [
+    ['engine identity', { FAKE_REPLACE_VOLUME_BEFORE_REWRITE_RM: '1' }],
+    ['restore token', { FAKE_RESTORE_TOKEN_AFTER_REWRITE_TRANSACTION: `restore-${'c'.repeat(32)}` }],
+    ['rewrite token', { FAKE_REWRITE_TOKEN_AFTER_REWRITE_TRANSACTION: `rewrite-${'d'.repeat(32)}` }],
+  ]) {
+    await t.test(name, (st) => {
+      const fixture = makeFixture(st);
+      const state = seedState(fixture);
+      const result = run(fixture, [
+        '--env-file', fixture.environmentPath,
+        '--db-mode', 'rewrite',
+        '--confirm-rewrite', project,
+        '--admin-password-file', passwordFile(fixture),
+      ], {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
+        FAKE_ADMIN_EXISTS: '0',
+        FAKE_VOLUME_RESTORE_TOKEN: oldRestoreToken,
+        FAKE_VOLUME_REWRITE_TOKEN: oldRewriteToken,
+        ...injection,
+      });
+      assert.notEqual(result.status, 0);
+      assert.match(result.output, /old PostgreSQL volume changed|identity|ownership token|rewrite preparation/i);
+      const transaction = join(state, 'rewrite-transaction');
+      assert.equal(readFileSync(join(transaction, 'phase'), 'utf8').trim(), 'prepared');
+      assert.equal(readFileSync(join(transaction, 'old-volume-restore-token'), 'utf8').trim(), oldRestoreToken);
+      assert.equal(readFileSync(join(transaction, 'old-volume-rewrite-token'), 'utf8').trim(), oldRewriteToken);
+      assert.equal(dockerLines(fixture).some((line) => line.startsWith('volume rm')), false);
+    });
+  }
+});
+
+test('rewrite replacement creation is token-bound and resumes before identity publication', (t) => {
+  const fixture = makeFixture(t);
+  const state = seedState(fixture);
+  const secretFile = passwordFile(fixture);
+  const interrupted = run(fixture, [
+    '--env-file', fixture.environmentPath,
+    '--db-mode', 'rewrite',
+    '--confirm-rewrite', project,
+    '--admin-password-file', secretFile,
+  ], {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
+    FAKE_ADMIN_EXISTS: '0',
+    SKY_BAR_TEST_FAIL_REWRITE: 'after-replacement-creation',
+  });
+  assert.notEqual(interrupted.status, 0);
+  const transaction = join(state, 'rewrite-transaction');
+  assert.equal(readFileSync(join(transaction, 'phase'), 'utf8').trim(), 'old-volume-removed');
+  assert.equal(readFileSync(join(transaction, 'replacement-volume-identity'), 'utf8').trim(), 'unbound');
+  const replacementToken = readFileSync(join(transaction, 'replacement-volume-token'), 'utf8').trim();
+  assert.equal(readFileSync(`${fixture.commandLog}.volume-rewrite-token`, 'utf8'), replacementToken);
+  const firstLines = dockerLines(fixture);
+  const removal = firstLines.findIndex((line) => line.startsWith('volume rm'));
+  const creation = firstLines.findIndex((line) => line.startsWith('volume create'));
+  assert.ok(removal >= 0 && creation > removal, firstLines.join('\n'));
+  assert.match(firstLines[creation], new RegExp(`sky-bar\\.rewrite-token=${replacementToken}`));
+  assert.equal(firstLines.some((line) => line.includes('npm run db:migrate')), false);
+
+  writeFileSync(fixture.commandLog, '');
+  const resumed = run(fixture, [...commonPersistArgs(fixture), '--admin-password-file', secretFile], {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_ADMIN_EXISTS: '0',
+  });
+  assert.equal(resumed.status, 0, resumed.output);
+  const retryLines = dockerLines(fixture);
+  assert.equal(retryLines.some((line) => line.startsWith('volume create')), false,
+    'retry must adopt only the already token-bound replacement');
+  assert.equal(retryLines.some((line) => line.startsWith('volume rm')), false);
+  assert.equal(retryLines.some((line) => line.includes('pg_dump')), false);
+  assert.equal(existsSync(transaction), false);
+});
+
+test('rewrite retry rejects unsafe fixed replacement identity staging', async (t) => {
+  for (const kind of ['symlink', 'non-private file']) {
+    await t.test(kind, (st) => {
+      const fixture = makeFixture(st);
+      const state = seedState(fixture);
+      const secretFile = passwordFile(fixture);
+      const interrupted = run(fixture, [
+        '--env-file', fixture.environmentPath,
+        '--db-mode', 'rewrite',
+        '--confirm-rewrite', project,
+        '--admin-password-file', secretFile,
+      ], {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
+        FAKE_ADMIN_EXISTS: '0',
+        SKY_BAR_TEST_FAIL_REWRITE_BIND: 'after-identity-staging',
+      });
+      assert.notEqual(interrupted.status, 0);
+      const transaction = join(state, 'rewrite-transaction');
+      const identityStaging = join(transaction, '.replacement-volume-identity.next');
+      assert.ok(existsSync(identityStaging));
+      if (kind === 'symlink') {
+        rmSync(identityStaging);
+        symlinkSync('replacement-volume-identity', identityStaging);
+      } else {
+        chmodSync(identityStaging, 0o644);
+      }
+
+      writeFileSync(fixture.commandLog, '');
+      const rejected = run(fixture, [...commonPersistArgs(fixture), '--admin-password-file', secretFile], {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_ADMIN_EXISTS: '0',
+      });
+      assert.notEqual(rejected.status, 0);
+      assert.match(rejected.output, /replacement identity staging.*(?:symlink|group|world)/i);
+      const lines = dockerLines(fixture);
+      assert.equal(lines.some((line) => line.startsWith('volume rm')), false);
+      assert.equal(lines.some((line) => line.includes('npm run db:migrate')), false);
+    });
+  }
+});
+
+test('rewrite recovery rejects replacement token and engine identity drift at durable phases', async (t) => {
+  const changedToken = `rewrite-${'e'.repeat(32)}`;
+  const changedIdentity = '2026-08-14T00:00:00Z|/var/lib/docker/volumes/foreign-replacement/_data';
+  const cases = [
+    ['old-volume-removed missing token',
+      { SKY_BAR_TEST_FAIL_REWRITE: 'after-volume-removal' },
+      { FAKE_REWRITE_TOKEN_AFTER_REWRITE_TRANSACTION: '' }, 'prepared'],
+    ['old-volume-removed changed token',
+      { SKY_BAR_TEST_FAIL_REWRITE: 'after-volume-removal' },
+      { FAKE_REWRITE_TOKEN_AFTER_REWRITE_TRANSACTION: changedToken }, 'prepared'],
+    ['old-volume-removed changed staged identity',
+      { SKY_BAR_TEST_FAIL_REWRITE_BIND: 'after-identity-staging' },
+      { FAKE_VOLUME_IDENTITY_AFTER_REWRITE_TRANSACTION: changedIdentity }, 'old-volume-removed'],
+    ['replacement-ready missing token',
+      { SKY_BAR_TEST_FAIL_REWRITE: 'after-replacement-binding' },
+      { FAKE_REWRITE_TOKEN_AFTER_REWRITE_TRANSACTION: '' }, 'replacement-ready'],
+    ['replacement-ready changed token',
+      { SKY_BAR_TEST_FAIL_REWRITE: 'after-replacement-binding' },
+      { FAKE_REWRITE_TOKEN_AFTER_REWRITE_TRANSACTION: changedToken }, 'replacement-ready'],
+    ['replacement-ready changed identity',
+      { SKY_BAR_TEST_FAIL_REWRITE: 'after-replacement-binding' },
+      { FAKE_VOLUME_IDENTITY_AFTER_REWRITE_TRANSACTION: changedIdentity }, 'replacement-ready'],
+  ];
+  for (const [name, interruption, injection, expectedPhase] of cases) {
+    await t.test(name, (st) => {
+      const fixture = makeFixture(st);
+      const state = seedState(fixture);
+      const secretFile = passwordFile(fixture);
+      const interrupted = run(fixture, [
+        '--env-file', fixture.environmentPath,
+        '--db-mode', 'rewrite',
+        '--confirm-rewrite', project,
+        '--admin-password-file', secretFile,
+      ], {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
+        FAKE_ADMIN_EXISTS: '0',
+        ...interruption,
+      });
+      assert.notEqual(interrupted.status, 0);
+      const transaction = join(state, 'rewrite-transaction');
+      assert.equal(readFileSync(join(transaction, 'phase'), 'utf8').trim(), expectedPhase);
+
+      writeFileSync(fixture.commandLog, '');
+      const rejected = run(fixture, [...commonPersistArgs(fixture), '--admin-password-file', secretFile], {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_ADMIN_EXISTS: '0',
+        ...injection,
+      });
+      assert.notEqual(rejected.status, 0);
+      assert.match(rejected.output, /replacement.*(?:token|identity)|identity staging/i);
+      assert.ok(existsSync(transaction));
+      const lines = dockerLines(fixture);
+      assert.equal(lines.some((line) => line.startsWith('volume rm')), false);
+      assert.equal(lines.some((line) => line.includes('up -d --wait db')), false);
+      assert.equal(lines.some((line) => line.includes('npm run db:migrate')), false);
+    });
+  }
+});
+
+test('rewrite transaction rejects unsafe durable state before further mutation', async (t) => {
+  const cases = [
+    ['symlinked phase', (transaction, fixture) => {
+      rmSync(join(transaction, 'phase'));
+      symlinkSync(join(fixture.directory, migrationPath), join(transaction, 'phase'));
+    }],
+    ['non-private directory', (transaction) => chmodSync(transaction, 0o755)],
+    ['source mismatch', (transaction) => writeFileSync(join(transaction, 'candidate-deployed-sha'), `${'e'.repeat(40)}\n`)],
+    ['manifest mismatch', (transaction) => writeFileSync(join(transaction, 'candidate-migrations.sha256'),
+      `${'e'.repeat(64)}  ${migrationPath}\n`)],
+    ['volume mismatch', (transaction) => writeFileSync(join(transaction, 'destination-volume'), 'foreign-postgres-data\n')],
+    ['unexpected entry', (transaction) => writeFileSync(join(transaction, 'surprise'), 'unexpected\n')],
+    ['non-private record', (transaction) => chmodSync(join(transaction, 'destination-volume'), 0o644)],
+    ['malformed phase', (transaction) => writeFileSync(join(transaction, 'phase'), 'removing-maybe\n')],
+    ['malformed replacement token', (transaction) => writeFileSync(join(transaction, 'replacement-volume-token'),
+      'rewrite-not-a-token\n')],
+    ['malformed old identity', (transaction) => writeFileSync(join(transaction, 'old-volume-identity'),
+      'not-an-engine-identity\n')],
+    ['malformed old restore token', (transaction) => writeFileSync(join(transaction, 'old-volume-restore-token'),
+      'restore-not-a-token\n')],
+    ['malformed old rewrite token', (transaction) => writeFileSync(join(transaction, 'old-volume-rewrite-token'),
+      'rewrite-not-a-token\n')],
+  ];
+  for (const [name, mutate] of cases) {
+    await t.test(name, (st) => {
+      const fixture = makeFixture(st);
+      const state = seedState(fixture);
+      const secretFile = passwordFile(fixture);
+      const interrupted = run(fixture, [
+        '--env-file', fixture.environmentPath,
+        '--db-mode', 'rewrite',
+        '--confirm-rewrite', project,
+        '--admin-password-file', secretFile,
+      ], {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
+        FAKE_ADMIN_EXISTS: '0',
+        SKY_BAR_TEST_FAIL_REWRITE: 'before-volume-removal',
+      });
+      assert.notEqual(interrupted.status, 0);
+      const transaction = join(state, 'rewrite-transaction');
+      mutate(transaction, fixture);
+      writeFileSync(fixture.commandLog, '');
+      const rejected = run(fixture, [...commonPersistArgs(fixture), '--admin-password-file', secretFile], {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_ADMIN_EXISTS: '0',
+      });
+      assert.notEqual(rejected.status, 0);
+      assert.match(rejected.output,
+        /rewrite transaction|private|permission|symbolic|checkout|manifest|volume|unexpected|phase|token|identity/i);
+      const lines = dockerLines(fixture);
+      assert.equal(lines.some((line) => line.startsWith('volume rm')), false);
+      assert.equal(lines.some((line) => line.includes('npm run db:migrate')), false);
+    });
+  }
+});
+
+test('restore and rewrite transactions may not coexist', (t) => {
+  const fixture = makeFixture(t);
+  const state = seedState(fixture);
+  const secretFile = passwordFile(fixture);
+  const interrupted = run(fixture, [
+    '--env-file', fixture.environmentPath,
+    '--db-mode', 'rewrite',
+    '--confirm-rewrite', project,
+    '--admin-password-file', secretFile,
+  ], {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
+    FAKE_ADMIN_EXISTS: '0',
+    SKY_BAR_TEST_FAIL_REWRITE: 'before-volume-removal',
+  });
+  assert.notEqual(interrupted.status, 0);
+  mkdirSync(join(state, 'restore-transaction'), { mode: 0o700 });
+
+  writeFileSync(fixture.commandLog, '');
+  const rejected = run(fixture, [...commonPersistArgs(fixture), '--admin-password-file', secretFile], {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_ADMIN_EXISTS: '0',
+  });
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.output, /restore and rewrite transactions.*coexist|transactions.*simultaneous/i);
+  const lines = dockerLines(fixture);
+  assert.equal(lines.some((line) => line.startsWith('volume rm')), false);
+  assert.equal(lines.some((line) => /pg_dump|npm run db:migrate/.test(line)), false);
+});
+
+test('rewrite publication after current selection recovers before cleanup or Docker mutation', (t) => {
+  const fixture = makeFixture(t);
+  const state = seedState(fixture);
+  const interrupted = run(fixture, [
+    '--env-file', fixture.environmentPath,
+    '--db-mode', 'rewrite',
+    '--confirm-rewrite', project,
+    '--admin-password-file', passwordFile(fixture),
+  ], {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
+    FAKE_ADMIN_EXISTS: '0',
+    SKY_BAR_TEST_FAIL_REWRITE_PUBLICATION: 'after-current',
+  });
+  assert.notEqual(interrupted.status, 0);
+  assert.match(interrupted.output, /rewrite publication interruption/i);
+  assert.notEqual(readlinkSync(join(state, 'current')), 'generations/seed');
+  assert.ok(existsSync(join(state, 'rewrite-transaction')));
+  assert.ok(existsSync(join(state, 'rewrite-replacement')));
+  assert.ok(existsSync(join(state, 'pending')));
+
+  writeFileSync(fixture.commandLog, '');
+  const recovered = run(fixture, commonPersistArgs(fixture), {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_ADMIN_EXISTS: '1',
+  });
+  assert.equal(recovered.status, 0, recovered.output);
+  assert.match(recovered.output, /Recovered interrupted rewrite state publication/i);
+  assert.equal(existsSync(join(state, 'rewrite-transaction')), false);
+  assert.equal(existsSync(join(state, 'rewrite-replacement')), false);
+  assert.equal(existsSync(join(state, 'pending')), false);
+  const lines = dockerLines(fixture);
+  assert.equal(lines.some((line) => /^volume (?:create|rm)\b/.test(line)), false);
+  assert.equal(lines.some((line) => /\b(?:up|stop|run|exec|down)\b/.test(line)), false);
+  assert.equal(lines.some((line) => /pg_dump|npm run db:migrate/.test(line)), false);
+});
+
+test('completed rewrite transaction retirement recovers without Docker mutation', (t) => {
+  const fixture = makeFixture(t);
+  const state = seedState(fixture);
+  const first = run(fixture, [
+    '--env-file', fixture.environmentPath,
+    '--db-mode', 'rewrite',
+    '--confirm-rewrite', project,
+    '--admin-password-file', passwordFile(fixture),
+  ], {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
+    FAKE_ADMIN_EXISTS: '0',
+    SKY_BAR_TEST_FAIL_REWRITE_RETIREMENT: 'after-rename',
+  });
+  assert.notEqual(first.status, 0);
+  assert.equal(existsSync(join(state, 'rewrite-transaction')), false);
+  assert.ok(readdirSync(state).some((name) => /^\.rewrite-transaction-completed\.\d+\.\d+$/.test(name)));
+
+  writeFileSync(fixture.commandLog, '');
+  const recovered = run(fixture, commonPersistArgs(fixture), {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_ADMIN_EXISTS: '1',
+  });
+  assert.equal(recovered.status, 0, recovered.output);
+  assert.match(recovered.output, /Recovered completed rewrite transaction retirement/i);
+  assert.equal(readdirSync(state).some((name) => name.startsWith('.rewrite-transaction-completed.')), false);
+  const lines = dockerLines(fixture);
+  assert.equal(lines.some((line) => /pg_dump|npm run db:migrate|volume rm/.test(line)), false);
 });
 
 test('interrupted restore publication recovers before ordinary state validation', (t) => {
