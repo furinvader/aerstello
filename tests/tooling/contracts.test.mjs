@@ -24,14 +24,17 @@ import {
 
 const root = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..');
 const AT = '2026-08-05T00:00:00Z';
+const AUTHORIZED_AT = '2026-08-09T21:30:00Z';
+const NOT_BEFORE = '2026-08-10T13:00:00Z';
 
 function stateFixture(overrides = {}) {
   const head = 'a'.repeat(40);
   return {
-    schemaVersion: 3, revision: 0, repository: 'example/aerstello', prNumber: 17, phase: 'recovering',
+    schemaVersion: 4, revision: 0, repository: 'example/aerstello', prNumber: 17, phase: 'recovering',
     baseSha: head, requestedHeadSha: null, reviewedHeadSha: null, currentIntegrationHeadSha: head,
     reviewRound: 0, verificationReviewUsed: false, legacyReviewProvenance: null, releaseBaseline: null,
     decisions: [], tasks: [], reviewRequest: null, reviewOutcome: null, reviewHistory: [], verificationEscalation: null,
+    humanFinalReviewAuthorization: null,
     threadResolutionStatus: {
       status: 'not-run', headSha: null, threads: [],
       threadlessVerification: { status: 'not-run', headSha: null, taskIds: [], updatedAt: null },
@@ -124,6 +127,43 @@ function completeStateFixture(overrides = {}) {
   });
 }
 
+function humanFinalStateFixture(overrides = {}) {
+  const head = 'a'.repeat(40);
+  const history = Array.from({ length: 4 }, (_, index) => {
+    const kind = index === 3 ? 'verification' : 'discovery';
+    const request = {
+      id: `request-${index + 1}`, databaseId: 101 + index,
+      url: `https://github.com/example/sky-bar/pull/17#issuecomment-${101 + index}`,
+      headSha: head, at: AT, kind, body: '@codex review',
+      authorLogin: 'maintainer', authorNodeId: 'USER_maintainer',
+    };
+    const outcome = {
+      id: `outcome-${index + 1}`, databaseId: 201 + index,
+      url: `https://github.com/example/sky-bar/pull/17#pullrequestreview-${201 + index}`,
+      headSha: head, at: AT, requestId: request.id, kind,
+      outcome: index === 3 ? 'findings' : 'clean', evidenceType: 'review-submission',
+      reviewerLogin: 'chatgpt-codex-connector', reviewerNodeId: 'BOT_codex', reviewerType: 'Bot',
+      reviewerUrl: 'https://github.com/apps/chatgpt-codex-connector', reactionContent: null,
+      reactionCommentId: null,
+    };
+    return { request, outcome };
+  });
+  const latest = history.at(-1);
+  return readyStateFixture({
+    phase: 'awaiting-human-decision', requestedHeadSha: head, reviewedHeadSha: head,
+    reviewRound: 3, verificationReviewUsed: true,
+    decisions: [{ id: 'decision-final', summary: 'Authorize one final human review.' }],
+    reviewRequest: latest.request, reviewOutcome: latest.outcome, reviewHistory: history,
+    humanFinalReviewAuthorization: {
+      decisionId: 'decision-final', source: 'operator-instruction', authorizedAt: AUTHORIZED_AT,
+      verificationOutcomeId: latest.outcome.id, notBefore: NOT_BEFORE,
+      summary: 'One operator-authorized human-final review.',
+    },
+    nextAction: 'Request human-final review at the trusted time.',
+    ...overrides,
+  });
+}
+
 test('checked-in JSON contracts parse and declare Draft 2020-12', () => {
   const paths = [
     '.release/marker.schema.json',
@@ -136,9 +176,10 @@ test('checked-in JSON contracts parse and declare Draft 2020-12', () => {
     const document = JSON.parse(readFileSync(join(root, path), 'utf8'));
     if (path.endsWith('.schema.json')) assert.equal(document.$schema, 'https://json-schema.org/draft/2020-12/schema');
     if (path === 'docs/agents/pr-review-state.schema.json') {
-      assert.equal(document.properties.schemaVersion.const, 3);
+      assert.equal(document.properties.schemaVersion.const, 4);
       assert.ok(document.required.includes('verificationReviewUsed'));
       assert.ok(document.required.includes('reviewOutcome'));
+      assert.ok(document.required.includes('humanFinalReviewAuthorization'));
       assert.ok(document.required.includes('threadResolutionStatus'));
       assert.ok(document.properties.phase.enum.includes('awaiting-human-decision'));
       assert.ok(document.$defs.threadResolutionStatus.properties.localVerification);
@@ -158,6 +199,9 @@ test('state JSON Schema compiles with Ajv and shares representative fixtures wit
   const validEscalation = escalatedStateFixture();
   assert.equal(validateSchema(validEscalation), true, JSON.stringify(validateSchema.errors));
   assert.deepEqual(validatePrReviewState(validEscalation), []);
+  const validHumanFinal = humanFinalStateFixture();
+  assert.equal(validateSchema(validHumanFinal), true, JSON.stringify(validateSchema.errors));
+  assert.deepEqual(validatePrReviewState(validHumanFinal), []);
   const validUnboundTask = stateFixture({
     tasks: [{
       id: 'legacy-task', sourceIds: ['local'], sourceType: 'local', fingerprint: 'fingerprint', summary: 'Done.',
@@ -177,7 +221,11 @@ test('state JSON Schema compiles with Ajv and shares representative fixtures wit
   assert.equal(validateSchema(validBoundTask), true, JSON.stringify(validateSchema.errors));
   assert.deepEqual(validatePrReviewState(validBoundTask), []);
 
-  const { verificationEscalation: _verificationEscalation, ...noncanonicalPriorV2 } = valid;
+  const {
+    verificationEscalation: _verificationEscalation,
+    humanFinalReviewAuthorization: _humanFinalReviewAuthorization,
+    ...noncanonicalPriorV2
+  } = valid;
   const invalidFixtures = [
     noncanonicalPriorV2,
     stateFixture({ repository: 'not-a-repository' }),
@@ -275,6 +323,20 @@ test('state JSON Schema compiles with Ajv and shares representative fixtures wit
   for (const fixture of invalidFixtures) {
     assert.equal(validateSchema(fixture), false, 'schema should reject shared invalid fixture');
     assert.notDeepEqual(validatePrReviewState(fixture), [], 'manual validator should reject shared invalid fixture');
+  }
+  for (const fixture of [
+    humanFinalStateFixture({
+      humanFinalReviewAuthorization: {
+        ...validHumanFinal.humanFinalReviewAuthorization, decisionId: 'missing-decision',
+      },
+    }),
+    humanFinalStateFixture({
+      humanFinalReviewAuthorization: {
+        ...validHumanFinal.humanFinalReviewAuthorization, verificationOutcomeId: 'missing-outcome',
+      },
+    }),
+  ]) {
+    assert.notDeepEqual(validatePrReviewState(fixture), [], 'manual cross-reference validation should reject fixture');
   }
 });
 

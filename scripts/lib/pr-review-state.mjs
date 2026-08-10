@@ -28,6 +28,7 @@ import {
   validateTaskPacket,
   validatePrReviewState,
   validatePrReviewStateV1,
+  validatePrReviewStateV3,
 } from './contracts.mjs';
 
 export { completionGate, reviewRequestGate } from './contracts.mjs';
@@ -60,7 +61,7 @@ export function assertCompletionAllowed(state, external) {
   }
 }
 
-export function gitAwareGateContext(state, { pushedHeadSha, prHeadSha } = {}) {
+export function gitAwareGateContext(state, { pushedHeadSha, prHeadSha, currentTime } = {}) {
   const cwd = state.integrationWorktree;
   const local = gitSnapshot(cwd);
   return {
@@ -68,6 +69,7 @@ export function gitAwareGateContext(state, { pushedHeadSha, prHeadSha } = {}) {
     localDirty: local.dirty,
     pushedHeadSha,
     prHeadSha,
+    currentTime,
     isAncestor: (ancestor, descendant) => runGit(
       ['merge-base', '--is-ancestor', ancestor, descendant],
       { cwd, allowFailure: true },
@@ -77,6 +79,15 @@ export function gitAwareGateContext(state, { pushedHeadSha, prHeadSha } = {}) {
 
 function utcNow() {
   return new Date().toISOString();
+}
+
+const RFC3339_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u;
+
+function assertTrustedTimestamp(value, label) {
+  if (typeof value !== 'string' || !RFC3339_PATTERN.test(value) || !Number.isFinite(Date.parse(value))) {
+    throw new StateError(`${label} must be an RFC 3339 timestamp`, 'INVALID_HUMAN_FINAL_AUTHORIZATION');
+  }
+  return value;
 }
 
 function emptyLocalVerification() {
@@ -350,7 +361,7 @@ function isNativeTasklessReviewHeadDriftValidationRecovery(state, expectedIds) {
   const outcome = state.reviewOutcome;
   const latest = state.reviewHistory.at(-1);
   const priorHeadSha = request?.headSha;
-  return state.schemaVersion === 3
+  return state.schemaVersion === 4
     && state.legacyReviewProvenance === null
     && state.phase === 'recovering'
     && state.tasks.length === 0 && expectedIds.length === 0
@@ -363,6 +374,7 @@ function isNativeTasklessReviewHeadDriftValidationRecovery(state, expectedIds) {
     && priorHeadSha !== state.currentIntegrationHeadSha
     && state.git.headSha === state.currentIntegrationHeadSha && state.git.dirty === false
     && state.blockedReasons.length === 0 && state.verificationEscalation === null
+    && state.humanFinalReviewAuthorization === null
     && !state.tasks.some((task) => task.disposition === 'needs-human-decision')
     && hasRemainingReviewAllowance(state);
 }
@@ -754,6 +766,16 @@ function parseState(path) {
       'STATE_MIGRATION_REQUIRED',
     );
   }
+  if (state?.schemaVersion === 3) {
+    const legacyErrors = validatePrReviewStateV3(state);
+    if (legacyErrors.length > 0) {
+      throw new StateError(`Invalid state at ${path}:\n- ${legacyErrors.join('\n- ')}`, 'INVALID_STATE');
+    }
+    throw new StateError(
+      `State at ${path} uses schema v3; run the explicit migrate command`,
+      'STATE_MIGRATION_REQUIRED',
+    );
+  }
   const errors = validatePrReviewState(state);
   if (errors.length > 0) throw new StateError(`Invalid state at ${path}:\n- ${errors.join('\n- ')}`, 'INVALID_STATE');
   return state;
@@ -826,7 +848,7 @@ export function initializeState({
     const path = statePath(cwd, selectedPr);
     if (existsSync(path)) throw new StateError(`State already exists for PR ${selectedPr}`, 'STATE_EXISTS');
     const state = {
-      schemaVersion: 3,
+      schemaVersion: 4,
       revision: 0,
       repository: repo,
       prNumber: selectedPr,
@@ -845,6 +867,7 @@ export function initializeState({
       reviewOutcome: null,
       reviewHistory: [],
       verificationEscalation: null,
+      humanFinalReviewAuthorization: null,
       threadResolutionStatus: emptyThreadProof(),
       blockedReasons: [],
       validationStatus: emptyTargetedValidation(),
@@ -859,7 +882,7 @@ export function initializeState({
     };
     validateStateForWrite(state);
     atomicWriteJson(path, state);
-    atomicWriteJson(activePointerPath(cwd), { schemaVersion: 3, prNumber: selectedPr });
+    atomicWriteJson(activePointerPath(cwd), { schemaVersion: 4, prNumber: selectedPr });
     appendEvent(cwd, selectedPr, { type: 'initialized', summary: `Initialized PR ${selectedPr}` });
     return state;
   });
@@ -935,7 +958,7 @@ function migrateValidationProof(proof, head) {
   return emptyTargetedValidation();
 }
 
-export function migratePrReviewStateV2(legacyState, { migratedAt = utcNow() } = {}) {
+function migratePrReviewStateV2ToV3(legacyState, { migratedAt = utcNow() } = {}) {
   if (!legacyState || legacyState.schemaVersion !== 2) {
     throw new StateError('Expected schema v2 state', 'INVALID_STATE');
   }
@@ -965,7 +988,7 @@ export function migratePrReviewStateV2(legacyState, { migratedAt = utcNow() } = 
     nextAction: pendingReviewMustBePreserved
       ? 'Collect the pending exact-head review, then reconfirm targeted validation and full GitHub Actions.'
       : wasComplete || validationMustBeRebuilt
-        ? 'Reconfirm targeted validation, full GitHub Actions, and the exact review commit after schema v3 migration.'
+        ? 'Reconfirm targeted validation, full GitHub Actions, and the exact review commit after schema v4 migration.'
       : normalized.nextAction,
     phase: mustRecover ? 'recovering' : normalized.phase,
     updatedAt: migratedAt,
@@ -998,11 +1021,37 @@ export function migratePrReviewStateV2(legacyState, { migratedAt = utcNow() } = 
     // state never treats schema-v2 local completion as current verifier evidence.
     threadResolutionStatus: legacyCompletionThreadProof,
   } : migrated;
-  const errors = validatePrReviewState(validationCandidate);
+  const errors = validatePrReviewStateV3(validationCandidate);
   if (errors.length > 0) {
     throw new StateError(`Unable to migrate schema v2 state:\n- ${errors.join('\n- ')}`, 'STATE_MIGRATION_FAILED');
   }
   return migrated;
+}
+
+export function migratePrReviewStateV3(legacyState, { migratedAt = utcNow() } = {}) {
+  const legacyErrors = validatePrReviewStateV3(legacyState);
+  if (legacyErrors.length > 0) {
+    throw new StateError(`Invalid schema v3 state:\n- ${legacyErrors.join('\n- ')}`, 'INVALID_STATE');
+  }
+  const migrated = {
+    ...legacyState,
+    schemaVersion: 4,
+    revision: legacyState.revision + 1,
+    humanFinalReviewAuthorization: null,
+    updatedAt: migratedAt,
+  };
+  const errors = validatePrReviewState(migrated);
+  if (errors.length > 0) {
+    throw new StateError(`Unable to migrate schema v3 state:\n- ${errors.join('\n- ')}`, 'STATE_MIGRATION_FAILED');
+  }
+  return migrated;
+}
+
+export function migratePrReviewStateV2(legacyState, { migratedAt = utcNow() } = {}) {
+  return migratePrReviewStateV3(
+    migratePrReviewStateV2ToV3(legacyState, { migratedAt }),
+    { migratedAt },
+  );
 }
 
 export function migratePrReviewStateV1(legacyState, {
@@ -1076,7 +1125,7 @@ export function migrateState({ cwd = process.cwd(), prNumber, integrationMap } =
     if (!existsSync(path)) throw new StateError(`No state file at ${path}`, 'STATE_NOT_FOUND');
     const legacySource = readFileSync(path, 'utf8');
     const legacy = readStateDocument(path);
-    if (legacy.schemaVersion === 3) throw new StateError('State already uses schema v3', 'STATE_ALREADY_MIGRATED');
+    if (legacy.schemaVersion === 4) throw new StateError('State already uses schema v4', 'STATE_ALREADY_MIGRATED');
     const state = legacy.schemaVersion === 1
       ? migratePrReviewStateV1(legacy, {
           integrationMap,
@@ -1085,7 +1134,9 @@ export function migrateState({ cwd = process.cwd(), prNumber, integrationMap } =
             { cwd: legacy.integrationWorktree, allowFailure: true },
           ).status === 0,
         })
-      : migratePrReviewStateV2(legacy);
+      : legacy.schemaVersion === 2
+        ? migratePrReviewStateV2(legacy)
+        : migratePrReviewStateV3(legacy);
     validateStateForWrite(state);
     const backupPath = join(stateDirectory(cwd, selectedPr), `state.v${legacy.schemaVersion}.backup.json`);
     if (existsSync(backupPath)) {
@@ -1099,10 +1150,10 @@ export function migrateState({ cwd = process.cwd(), prNumber, integrationMap } =
       atomicWriteText(backupPath, legacySource);
     }
     atomicWriteJson(path, state);
-    atomicWriteJson(activePointerPath(cwd), { schemaVersion: 3, prNumber: selectedPr });
+    atomicWriteJson(activePointerPath(cwd), { schemaVersion: 4, prNumber: selectedPr });
     appendEvent(cwd, selectedPr, {
       type: 'state-migrated',
-      summary: `Migrated PR ${selectedPr} state from schema v${legacy.schemaVersion} to v3`,
+      summary: `Migrated PR ${selectedPr} state from schema v${legacy.schemaVersion} to v4`,
     });
     return { state, backupPath };
   });
@@ -1213,10 +1264,18 @@ function assertCheckpointProvenance(current, next, authorization) {
       throw new StateError('Guarded transition state does not match its authorization', 'INVALID_TRANSITION_AUTHORIZATION');
     }
   }
+  if (guardedKind !== 'human-final-authorization') {
+    assertImmutableValue(
+      current.humanFinalReviewAuthorization,
+      next.humanFinalReviewAuthorization,
+      'humanFinalReviewAuthorization',
+    );
+  }
   if (guardedKind === null) {
     for (const field of [
       'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
       'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
+      'humanFinalReviewAuthorization',
     ]) assertImmutableValue(current[field], next[field], field);
     assertImmutableValue(current.ciValidationStatus, next.ciValidationStatus, 'ciValidationStatus');
     assertImmutableValue(current.ciValidationHistory, next.ciValidationHistory, 'ciValidationHistory');
@@ -1249,10 +1308,24 @@ function assertCheckpointProvenance(current, next, authorization) {
       'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
       'reviewRequest', 'reviewOutcome', 'reviewHistory',
     ]) assertImmutableValue(current[field], next[field], field);
+    assertImmutableValue(
+      current.humanFinalReviewAuthorization,
+      next.humanFinalReviewAuthorization,
+      'humanFinalReviewAuthorization',
+    );
+  } else if (guardedKind === 'human-final-authorization') {
+    if (current.humanFinalReviewAuthorization !== null || next.humanFinalReviewAuthorization === null) {
+      throw new StateError('Human-final authorization may be recorded exactly once', 'IMMUTABLE_STATE_PROVENANCE');
+    }
+    for (const field of [
+      'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
+      'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
+    ]) assertImmutableValue(current[field], next[field], field);
   } else if (guardedKind === 'ci-validation') {
     for (const field of [
       'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
       'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
+      'humanFinalReviewAuthorization',
     ]) assertImmutableValue(current[field], next[field], field);
     const appended = next.ciValidationHistory.length === current.ciValidationHistory.length + 1;
     const restored = next.ciValidationHistory.length === current.ciValidationHistory.length
@@ -1270,10 +1343,16 @@ function assertCheckpointProvenance(current, next, authorization) {
     for (const field of [
       'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
       'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
+      'humanFinalReviewAuthorization',
     ]) assertImmutableValue(current[field], next[field], field);
     assertImmutableValue(current.ciValidationStatus, next.ciValidationStatus, 'ciValidationStatus');
     assertImmutableValue(current.ciValidationHistory, next.ciValidationHistory, 'ciValidationHistory');
   } else if (guardedKind === 'git-metadata') {
+    assertImmutableValue(
+      current.humanFinalReviewAuthorization,
+      next.humanFinalReviewAuthorization,
+      'humanFinalReviewAuthorization',
+    );
     assertImmutableValue(current.ciValidationHistory, next.ciValidationHistory, 'ciValidationHistory');
     if (!sameEvidence(current.ciValidationStatus, next.ciValidationStatus)) {
       assertImmutableValue(emptyCiValidation(), next.ciValidationStatus, 'invalidated ciValidationStatus');
@@ -1285,6 +1364,7 @@ function assertCheckpointProvenance(current, next, authorization) {
     for (const field of [
       'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
       'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
+      'humanFinalReviewAuthorization',
     ]) assertImmutableValue(current[field], next[field], field);
   }
   if (!['targeted-validation', 'git-metadata'].includes(guardedKind)) {
@@ -1416,6 +1496,88 @@ function assertCheckpointProvenance(current, next, authorization) {
   }
 }
 
+export function buildHumanFinalReviewAuthorizationTransition(state, {
+  decisionId, notBefore, summary, authorizedAt = utcNow(),
+} = {}) {
+  if (state.humanFinalReviewAuthorization !== null) {
+    const expected = {
+      ...state.humanFinalReviewAuthorization,
+      decisionId,
+      notBefore,
+      summary,
+    };
+    if (!sameEvidence(state.humanFinalReviewAuthorization, expected)) {
+      throw new StateError(
+        'Human-final authorization is immutable and conflicts with the requested authorization',
+        'HUMAN_FINAL_AUTHORIZATION_CONFLICT',
+      );
+    }
+    return state;
+  }
+  assertTrustedTimestamp(authorizedAt, 'Trusted authorization time');
+  assertTrustedTimestamp(notBefore, 'Human-final notBefore');
+  if (typeof decisionId !== 'string' || decisionId.length < 1 || decisionId.length > 128
+      || !state.decisions.some((decision) => decision.id === decisionId)) {
+    throw new StateError(
+      'Human-final authorization must bind an existing durable decision ID',
+      'INVALID_HUMAN_FINAL_AUTHORIZATION',
+    );
+  }
+  if (typeof summary !== 'string' || summary.length < 1 || summary.length > 1000
+      || summary.trim() !== summary) {
+    throw new StateError('Human-final authorization summary is invalid', 'INVALID_HUMAN_FINAL_AUTHORIZATION');
+  }
+  const latest = state.reviewHistory.at(-1);
+  if (state.schemaVersion !== 4
+      || state.phase !== 'awaiting-human-decision'
+      || state.reviewRound !== 3
+      || state.verificationReviewUsed !== true
+      || state.reviewHistory.length !== 4
+      || state.reviewHistory.filter((entry) => entry.request.kind === 'discovery').length !== 3
+      || state.reviewHistory.filter((entry) => entry.request.kind === 'verification').length !== 1
+      || state.reviewHistory.some((entry) => entry.request.kind === 'human-final')
+      || state.reviewRequest?.id !== latest?.request?.id
+      || state.reviewOutcome?.id !== latest?.outcome?.id
+      || latest?.request?.kind !== 'verification'
+      || latest?.outcome?.kind !== 'verification'
+      || latest?.outcome?.outcome !== 'findings'
+      || latest?.outcome?.requestId !== latest?.request?.id
+      || latest?.outcome?.headSha !== latest?.request?.headSha
+      || state.verificationEscalation !== null) {
+    throw new StateError(
+      'Human-final authorization requires the exact terminal 3+1 verification-findings state',
+      'HUMAN_FINAL_AUTHORIZATION_NOT_ELIGIBLE',
+    );
+  }
+  if (Date.parse(authorizedAt) < Date.parse(latest.outcome.at)) {
+    throw new StateError(
+      'Trusted authorization time cannot predate the verification outcome',
+      'INVALID_HUMAN_FINAL_AUTHORIZATION',
+    );
+  }
+  const authorization = {
+    decisionId,
+    source: 'operator-instruction',
+    authorizedAt,
+    verificationOutcomeId: latest.outcome.id,
+    notBefore,
+    summary,
+  };
+  const next = {
+    ...state,
+    humanFinalReviewAuthorization: authorization,
+    nextAction: `Address the verification findings and request the one-shot human-final review no earlier than ${notBefore}.`,
+  };
+  const errors = validatePrReviewState(next);
+  if (errors.length > 0) {
+    throw new StateError(
+      `Invalid human-final authorization transition:\n- ${errors.join('\n- ')}`,
+      'INVALID_HUMAN_FINAL_AUTHORIZATION',
+    );
+  }
+  return next;
+}
+
 export function buildReviewRequestTransition(state, request, external) {
   if (state.reviewRequest?.id === request?.id) {
     if (!sameEvidence(state.reviewRequest, request)) {
@@ -1426,6 +1588,18 @@ export function buildReviewRequestTransition(state, request, external) {
   const kind = assertReviewRequestAllowed(state, external);
   if (request?.kind !== kind || request?.headSha !== state.currentIntegrationHeadSha) {
     throw new StateError('Review request kind and SHA must match the guarded transition', 'INVALID_REVIEW_REQUEST');
+  }
+  if (kind === 'human-final') {
+    const authorization = state.humanFinalReviewAuthorization;
+    if (authorization === null
+        || !Number.isFinite(Date.parse(request?.at))
+        || Date.parse(request.at) < Date.parse(authorization.notBefore)
+        || Date.parse(request.at) < Date.parse(authorization.authorizedAt)) {
+      throw new StateError(
+        'Human-final request evidence must be created at or after its authorization and notBefore time',
+        'INVALID_REVIEW_REQUEST',
+      );
+    }
   }
   const next = {
     ...state,
@@ -1459,7 +1633,7 @@ export function buildReviewOutcomeTransition(state, outcome) {
       || outcome?.headSha !== request.headSha || outcome?.headSha !== state.currentIntegrationHeadSha) {
     throw new StateError('Review outcome must bind to the pending request, kind, and SHA', 'INVALID_REVIEW_OUTCOME');
   }
-  const phase = outcome.kind === 'verification' && outcome.outcome === 'findings'
+  const phase = ['verification', 'human-final'].includes(outcome.kind) && outcome.outcome === 'findings'
     ? 'awaiting-human-decision'
     : outcome.outcome === 'findings' ? 'triaging' : 'validating';
   const reviewHistory = state.reviewHistory.map((entry, index) => (
@@ -1474,7 +1648,7 @@ export function buildReviewOutcomeTransition(state, outcome) {
     nextAction: phase === 'validating'
       ? 'Confirm fresh local, pushed, and live PR heads, then complete the cycle.'
       : phase === 'awaiting-human-decision'
-        ? 'Present verification findings for human decision.'
+        ? `Present ${outcome.kind} findings for human decision; no further automatic review is permitted.`
         : 'Triage the applicable canonical review findings.',
   };
   const errors = validatePrReviewState(next);
@@ -1492,9 +1666,12 @@ export function buildVerificationEscalationTransition(state, escalation) {
   const request = state.reviewRequest;
   const latest = state.reviewHistory.at(-1);
   if (!['awaiting-review', 'awaiting-human-decision'].includes(state.phase)
-      || request?.kind !== 'verification' || state.verificationReviewUsed !== true
+      || !['verification', 'human-final'].includes(request?.kind) || state.verificationReviewUsed !== true
       || state.reviewOutcome !== null || latest?.request?.id !== request.id || latest?.outcome !== null) {
-    throw new StateError('No pending canonical verification collection to escalate', 'VERIFICATION_ESCALATION_NOT_EXPECTED');
+    throw new StateError(
+      'No pending canonical terminal review collection to escalate',
+      'VERIFICATION_ESCALATION_NOT_EXPECTED',
+    );
   }
   if (escalation?.requestId !== request.id || escalation?.requestHeadSha !== request.headSha) {
     throw new StateError('Verification escalation must bind to the pending request and exact SHA', 'INVALID_VERIFICATION_ESCALATION');
@@ -1503,7 +1680,7 @@ export function buildVerificationEscalationTransition(state, escalation) {
     ...state,
     phase: 'awaiting-human-decision',
     verificationEscalation: escalation,
-    nextAction: 'Present the canonical verification collection escalation and evidence to a human.',
+    nextAction: `Present the canonical ${request.kind} collection escalation and evidence to a human.`,
   };
   const errors = validatePrReviewState(next);
   if (errors.length > 0) {
@@ -1787,15 +1964,40 @@ export function checkpointTaskPacketBinding({
   });
 }
 
+export function checkpointHumanFinalReviewAuthorization({
+  cwd = process.cwd(), prNumber, decisionId, notBefore, summary, authorizedAt, expectedRevision, event,
+} = {}) {
+  const current = loadState(cwd, prNumber);
+  if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  const nextState = buildHumanFinalReviewAuthorizationTransition(current, {
+    decisionId,
+    notBefore,
+    summary,
+    authorizedAt: authorizedAt ?? utcNow(),
+  });
+  if (nextState === current) return current;
+  return checkpointState({
+    cwd,
+    prNumber: current.prNumber,
+    nextState,
+    expectedRevision,
+    event: event ?? {
+      type: 'human-final-review-authorized',
+      summary: `Authorized one human-final review no earlier than ${notBefore}`,
+    },
+    transitionAuthorization: protectedTransition(nextState, 'human-final-authorization'),
+  });
+}
+
 export function checkpointReviewRequest({
-  cwd = process.cwd(), prNumber, request, pushedHeadSha, prHeadSha, expectedRevision, event,
+  cwd = process.cwd(), prNumber, request, pushedHeadSha, prHeadSha, currentTime, expectedRevision, event,
 } = {}) {
   const current = loadState(cwd, prNumber);
   if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
   const nextState = buildReviewRequestTransition(
     current,
     request,
-    gitAwareGateContext(current, { pushedHeadSha, prHeadSha }),
+    gitAwareGateContext(current, { pushedHeadSha, prHeadSha, currentTime }),
   );
   if (nextState === current) return current;
   return checkpointState({
@@ -1923,9 +2125,10 @@ export function checkpointGitMetadata({ cwd = process.cwd(), sessionId, backup =
           updatedAt: null,
         },
         ...(state.phase === 'awaiting-review' ? {
-          phase: state.reviewRequest?.kind === 'verification' ? 'awaiting-human-decision' : 'recovering',
-          nextAction: state.reviewRequest?.kind === 'verification'
-            ? 'A verification request became stale; present the stale-request decision to a human.'
+          phase: ['verification', 'human-final'].includes(state.reviewRequest?.kind)
+            ? 'awaiting-human-decision' : 'recovering',
+          nextAction: ['verification', 'human-final'].includes(state.reviewRequest?.kind)
+            ? `The ${state.reviewRequest.kind} request became stale; present the terminal stale-request decision to a human.`
             : 'The discovery request became stale; reconcile the new HEAD before requesting another review.',
         } : headSensitivePhases.has(state.phase) ? {
             phase: 'recovering',
@@ -2030,6 +2233,9 @@ export function renderRecoverySummary({ cwd = process.cwd(), prNumber, maxCharac
     `Requested/reviewed: ${state.requestedHeadSha ?? 'none'} / ${state.reviewedHeadSha ?? 'none'}`,
     `Verification escalation: ${state.verificationEscalation
       ? `${state.verificationEscalation.reason} at PR ${state.verificationEscalation.observedPrHeadSha}`
+      : 'none'}`,
+    `Human-final authorization: ${state.humanFinalReviewAuthorization
+      ? `${state.humanFinalReviewAuthorization.decisionId}; not before ${state.humanFinalReviewAuthorization.notBefore}; verification outcome ${state.humanFinalReviewAuthorization.verificationOutcomeId}`
       : 'none'}`,
     `Integration HEAD: ${state.currentIntegrationHeadSha}`,
     `Targeted validation plan: ${validationPlanRecoverySummary(cwd, state)}`,

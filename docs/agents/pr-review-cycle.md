@@ -141,7 +141,7 @@ SHAs. It rejects pending, finding, stale, dirty, or inconsistent states and does
 not infer checks from a missing legacy plan or replace an existing passing proof
 after an ordinary taskless review.
 
-A separate native schema-v3 route recovers a taskless clean discovery review
+A separate native schema-v4 route recovers a taskless clean discovery review
 after the integration HEAD advances. The clean request, outcome, requested, and
 reviewed SHAs must still agree on one prior commit different from the current
 HEAD, and the latest history entry must exactly equal the active evidence. The
@@ -175,13 +175,31 @@ tasks, and no blocked reason, verification escalation, or
 history, outcome, and thread identities must match the backup projection. The
 backup authorizes a fresh explicit plan only: run all selected checks again and
 record new exact-head validation; never reuse the legacy pass or repeat the
-preserved review. Native schema-v3 states and missing, mismatched, tampered, or
+preserved review. Native schema-v4 states and missing, mismatched, tampered, or
 multi-transition provenance are rejected.
 
 Done is stricter. A clean Codex review, full green CI, full E2E, the current PR
 head, the no-open-thread check, and passed exact-current-HEAD coverage for every
 completed local task must all refer to the same Review commit. Review requests
 use that same local-proof gate.
+
+The automatic ledger ends after three discovery reviews and one verification
+review. If that verification ends in findings, an operator may explicitly
+authorize one human-only final review by naming an existing durable decision:
+
+```bash
+node scripts/pr-review-state.mjs authorize-final-review --decision-id decision-123 --not-before 2026-08-10T13:00:00Z --summary "One final review" --expected-revision 9
+node scripts/pr-review-github.mjs request --pr 123 --kind human-final
+```
+
+Schema v4 stores this authorization once, bound to the exact verification
+findings outcome. It preserves the 3+1 counters and entries, and the GitHub
+helper enforces the trusted time before journaling, after fresh reads, and on
+the request's GitHub timestamp. The human-final request becomes the fifth and
+last ledger entry. A clean result proceeds through the same exact-head local,
+thread, CI, full-E2E, and Done gates. Findings, staleness, unsupported evidence,
+or ambiguity return terminally to human decision and cannot authorize another
+request.
 
 ## Read the current status
 
@@ -237,7 +255,9 @@ Next action: Integrate the remaining result and run the selected tests.
   missing refs or tags; do not assume the project is pre-release.
 - **Review rounds repeat:** investigate a finding that returns twice. After
   three discovery reviews, only one exact-commit verification review is allowed;
-  new or stale verification evidence needs a human decision.
+  new or stale verification evidence needs a human decision. A human-final
+  request exists only through the explicit one-shot, time-gated authorization
+  above and is never retried automatically.
 
 Machine contracts and command details live in the
 [PR review state schema](./pr-review-state.schema.json),

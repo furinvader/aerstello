@@ -394,6 +394,24 @@ function parsedTime(value, label) {
   return time;
 }
 
+function humanFinalNotBefore(state, kind = state.reviewRequest?.kind) {
+  return kind === 'human-final'
+    ? state.humanFinalReviewAuthorization?.notBefore ?? null
+    : null;
+}
+
+function assertHumanFinalTimeReady(state, value) {
+  if (state.humanFinalReviewAuthorization === null) {
+    throw new GitHubWorkflowError('Human-final review lacks durable operator authorization', 'REQUEST_NOT_READY');
+  }
+  const current = parsedTime(value, 'Trusted current time');
+  const notBefore = parsedTime(state.humanFinalReviewAuthorization.notBefore, 'Human-final notBefore');
+  if (current < notBefore) {
+    throw new GitHubWorkflowError('Human-final review is not authorized yet', 'REQUEST_NOT_READY');
+  }
+  return value;
+}
+
 function requestRecoveryAtOrAfter(candidate, anchor) {
   return parsedTime(candidate, 'Evidence') >= parsedTime(anchor, 'Request') - 1_000;
 }
@@ -406,11 +424,12 @@ function sameTimestamp(left, right) {
   return parsedTime(left, 'Live evidence') === parsedTime(right, 'Recorded evidence');
 }
 
-function exactViewerRequestCandidates(comments, viewer, intent, excludedIds = new Set()) {
+function exactViewerRequestCandidates(comments, viewer, intent, excludedIds = new Set(), notBefore = null) {
   return comments.filter((comment) => comment.body === REQUEST_BODY
     && !excludedIds.has(comment.id)
     && isViewerActor(comment.author, viewer)
-    && requestRecoveryAtOrAfter(comment.createdAt, intent.at));
+    && requestRecoveryAtOrAfter(comment.createdAt, intent.at)
+    && (notBefore === null || parsedTime(comment.createdAt, 'Request evidence') >= parsedTime(notBefore, 'Human-final notBefore')));
 }
 
 async function journalIntent(journal, intent) {
@@ -895,7 +914,7 @@ function tasklessReviewHeadDriftRefreshAllowed(state) {
   const priorHeadSha = request?.headSha;
   const reviewAllowanceRemains = (Number.isInteger(state.reviewRound) && state.reviewRound < 3)
     || (state.reviewRound === 3 && state.verificationReviewUsed === false);
-  return state.schemaVersion === 3
+  return state.schemaVersion === 4
     && state.legacyReviewProvenance === null
     && state.phase === 'recovering'
     && state.tasks.length === 0
@@ -909,6 +928,7 @@ function tasklessReviewHeadDriftRefreshAllowed(state) {
     && priorHeadSha !== state.currentIntegrationHeadSha
     && state.git.headSha === state.currentIntegrationHeadSha && state.git.dirty === false
     && state.blockedReasons.length === 0 && state.verificationEscalation === null
+    && state.humanFinalReviewAuthorization === null
     && reviewAllowanceRemains;
 }
 
@@ -1011,7 +1031,8 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       && active.reviewOutcome === null
       && active.reviewHistory.length === 0
       && active.verificationReviewUsed === false
-      && active.verificationEscalation === null;
+      && active.verificationEscalation === null
+      && active.humanFinalReviewAuthorization === null;
     const headDriftRecovery = tasklessReviewHeadDriftRefreshAllowed(active);
     if (!pristine && !headDriftRecovery) {
       throw new GitHubWorkflowError(
@@ -1051,10 +1072,16 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
 
   async function request(prNumber, kind) {
     let active = await load(prNumber);
-    if (!['discovery', 'verification'].includes(kind)) throw new GitHubWorkflowError('Review kind is invalid', 'INVALID_REVIEW_KIND');
+    if (!['discovery', 'verification', 'human-final'].includes(kind)) {
+      throw new GitHubWorkflowError('Review kind is invalid', 'INVALID_REVIEW_KIND');
+    }
+    const initialTime = clock.now();
+    if (kind === 'human-final') assertHumanFinalTimeReady(active, initialTime);
     let live = await readLiveSnapshot(client, active);
-    const heads = await assertMutationReady({ state: active, git }, live);
-    const gate = reviewRequestGate(active, { ...heads, prHeadSha: live.metadata.headRefOid });
+    let heads = await assertMutationReady({ state: active, git }, live);
+    let gate = reviewRequestGate(active, {
+      ...heads, prHeadSha: live.metadata.headRefOid, currentTime: initialTime,
+    });
     if (!gate.allowed || gate.kind !== kind) {
       throw new GitHubWorkflowError(`State gate does not allow ${kind}: ${gate.reasons.join('; ')}`, 'REQUEST_NOT_READY');
     }
@@ -1065,6 +1092,7 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     const operationId = `request:${prNumber}:${kind}:${active.reviewHistory.length + 1}:${active.currentIntegrationHeadSha}`;
     const priorRequestIds = new Set(active.reviewHistory.map((entry) => entry.request.id));
     const intendedAt = clock.now();
+    if (kind === 'human-final') assertHumanFinalTimeReady(active, intendedAt);
     const baselineComments = live.comments.filter((comment) => comment.body === REQUEST_BODY
       && isViewerActor(comment.author, live.metadata.viewer));
     const excludedCommentIds = [...new Set(baselineComments.map((comment) => comment.id))].sort();
@@ -1074,32 +1102,51 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     const pendingIntent = { ...intentFor('request', operationId, intendedAt), excludedCommentIds };
     const priorIntent = await lookupRequestJournalIntent(journal, operationId);
     let intended = priorIntent ?? pendingIntent;
+    const notBefore = humanFinalNotBefore(active, kind);
+    if (notBefore !== null && parsedTime(intended.at, 'Request intent') < parsedTime(notBefore, 'Human-final notBefore')) {
+      throw new GitHubWorkflowError('Human-final request intent predates its notBefore time', 'REQUEST_NOT_READY');
+    }
     if (!priorIntent && baselineComments.some((comment) => !priorRequestIds.has(comment.id)
       && requestRecoveryAtOrAfter(comment.createdAt, intended.at))) {
       throw new GitHubWorkflowError('Fresh request window contains an unrecorded viewer comment', 'REQUEST_BASELINE_COLLISION');
     }
     live = await readLiveSnapshot(client, active);
-    await assertMutationReady({ state: active, git }, live);
+    heads = await assertMutationReady({ state: active, git }, live);
     if (live.threads.some((thread) => thread.canonical && !thread.isResolved)) {
       throw new GitHubWorkflowError('Canonical review threads remain unresolved', 'REQUEST_NOT_READY');
     }
     assertLiveThreadProof(active, live);
     await assertCurrent(active);
+    const recheckTime = clock.now();
+    if (kind === 'human-final') assertHumanFinalTimeReady(active, recheckTime);
+    gate = reviewRequestGate(active, {
+      ...heads, prHeadSha: live.metadata.headRefOid, currentTime: recheckTime,
+    });
+    if (!gate.allowed || gate.kind !== kind) {
+      throw new GitHubWorkflowError(
+        `State gate no longer allows ${kind}: ${gate.reasons.join('; ')}`,
+        'REQUEST_NOT_READY',
+      );
+    }
     if (!priorIntent) intended = await journalIntent(journal, pendingIntent);
     const recovering = priorIntent !== null || intended.isNew === false;
     const excludedIds = new Set(intended.excludedCommentIds);
     let candidates = recovering
-      ? exactViewerRequestCandidates(live.comments, live.metadata.viewer, intended, excludedIds) : [];
+      ? exactViewerRequestCandidates(live.comments, live.metadata.viewer, intended, excludedIds, notBefore) : [];
     if (candidates.length > 1) throw new GitHubWorkflowError('Request recovery is ambiguous', 'REQUEST_RECOVERY_AMBIGUOUS');
     const recovered = candidates.length === 1;
     if (candidates.length === 0) {
       if (recovering) throw new GitHubWorkflowError('Prior request intent has no unique live result', 'REQUEST_RECOVERY_MISSING');
       await assertCurrent(active);
+      const mutationTime = clock.now();
+      if (kind === 'human-final') assertHumanFinalTimeReady(active, mutationTime);
       await executeMutation(client, 'AddReviewRequest', {
         subjectId: live.metadata.id, body: REQUEST_BODY, clientMutationId: intended.clientMutationId,
       }, 'addComment');
       live = await readLiveSnapshot(client, active);
-      candidates = exactViewerRequestCandidates(live.comments, live.metadata.viewer, intended, excludedIds);
+      candidates = exactViewerRequestCandidates(
+        live.comments, live.metadata.viewer, intended, excludedIds, notBefore,
+      );
       if (candidates.length !== 1) throw new GitHubWorkflowError('Request mutation was not uniquely proven live', 'REQUEST_NOT_PROVEN');
     }
     const comment = candidates[0];
@@ -1111,6 +1158,7 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
         authorLogin: comment.author.login, authorNodeId: comment.author.id,
       },
       pushedHeadSha: heads.pushedHeadSha, prHeadSha: live.metadata.headRefOid,
+      currentTime: clock.now(),
     });
     return { requested: true, recovered, request: active.reviewRequest };
   }
@@ -1396,7 +1444,7 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       assertRecordedRequestComment(active, live);
     } catch (error) {
       if (!(error instanceof GitHubWorkflowError) || error.code !== 'REQUEST_PROOF_STALE'
-          || active.reviewRequest.kind !== 'verification') throw error;
+          || !['verification', 'human-final'].includes(active.reviewRequest.kind)) throw error;
       const changed = live.metadata.headRefOid !== active.reviewRequest.headSha;
       const ids = [
         `request:${active.reviewRequest.id}`,
@@ -1411,7 +1459,7 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       return { escalated: true, escalation: active.verificationEscalation };
     }
     if (live.metadata.headRefOid !== active.reviewRequest.headSha) {
-      if (active.reviewRequest.kind !== 'verification') {
+      if (!['verification', 'human-final'].includes(active.reviewRequest.kind)) {
         throw new GitHubWorkflowError('Discovery request became stale at the live PR head', 'DISCOVERY_COLLECTION_UNRESOLVED');
       }
       const ids = [`request:${active.reviewRequest.id}`];
@@ -1450,7 +1498,7 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     if (evidence.length !== 1 || staleReviews.length > 0
         || unsupportedReviews.length > 0 || unsupportedReactions.length > 0
         || cleanComments.unsupported.length > 0) {
-      if (request.kind !== 'verification') {
+      if (!['verification', 'human-final'].includes(request.kind)) {
         throw new GitHubWorkflowError('Discovery review evidence is stale or ambiguous', 'DISCOVERY_COLLECTION_UNRESOLVED');
       }
       const ids = [

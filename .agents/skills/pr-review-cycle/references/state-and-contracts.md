@@ -36,6 +36,7 @@ node scripts/pr-review-state.mjs validation-plan --replace /tmp/task-a.json /tmp
 node scripts/pr-review-state.mjs run-validation
 node scripts/pr-review-state.mjs show
 node scripts/pr-review-state.mjs migrate
+node scripts/pr-review-state.mjs authorize-final-review --decision-id decision-123 --not-before 2026-08-10T13:00:00Z --summary "One final review" --expected-revision 4
 node scripts/pr-review-state.mjs recover
 node scripts/pr-review-state.mjs checkpoint --input /tmp/state.json --expected-revision 4
 node scripts/pr-review-state.mjs archive
@@ -47,10 +48,20 @@ guesses a PR number. Pass `--repository owner/name` when needed. `checkpoint`
 replaces the complete document and rejects revision drift. Normal archival
 requires Done; earlier archival requires an explicit durable abandonment reason.
 
-State schema v3 upgrades are explicit. Migration from v1 or v2 first saves an
-exact versioned backup and must preserve stable finding/task identities, source
-IDs, finding keys, and outcomes. Never let an unrelated read silently migrate
-state.
+State schema v4 upgrades are explicit. Migration from v3 first saves the source
+bytes exactly as `state.v3.backup.json`; apart from revision, migration time,
+schema version, and the new null authorization field, every decision, task,
+GitHub ID, request/outcome ledger entry, proof, SHA, and sticky counter is
+unchanged. V1 and v2 sources retain their existing explicit migration rules and
+also finish at v4. Never let an unrelated read silently migrate state.
+
+`authorize-final-review` requires an existing durable decision ID and the exact
+terminal verification-findings state after three discovery requests and one
+verification request. Its guarded null-to-object transition records immutable
+`operator-instruction` provenance, trusted authorization and not-before times,
+the exact verification outcome ID, and a concise summary. An identical retry is
+state-idempotent; conflicting or ordinary checkpoints cannot create, rewrite,
+or clear it.
 
 Before delegation, `bind-task-packet` records the canonical SHA-256 identity of
 the complete accepted schema-v2 packet on its actionable task. Object key order
@@ -83,7 +94,7 @@ does not reconstruct or trust a missing legacy plan and does not repeat the
 still-applicable review. It cannot replace an existing passing proof after an
 ordinary taskless review.
 
-A native schema-v3 taskless cycle has one separate fail-closed recovery when a
+A native schema-v4 taskless cycle has one separate fail-closed recovery when a
 clean discovery review remains internally consistent but its reviewed commit is
 now one historical SHA behind the integration HEAD. The active state must be
 `recovering`, contain no tasks, retain an exact latest request/outcome/history
@@ -120,6 +131,8 @@ Use `docs/agents/pr-review-state.schema.json` as the machine contract. Preserve:
 - base, requested, reviewed, integration, validation, and current Git SHAs as
   separate values;
 - GitHub IDs, URLs, request kind, timestamps, and review outcome evidence;
+- the nullable one-shot human-final authorization and its exact decision,
+  verification-outcome, authorization-time, and not-before provenance;
 - release evidence from `scripts/release-state.mjs`;
 - stable decision, finding, and task identities;
 - targeted local validation and full GitHub Actions validation, each tied to an

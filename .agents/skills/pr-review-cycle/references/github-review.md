@@ -50,6 +50,7 @@ node scripts/pr-review-github.mjs reply-resolve --pr 123 --task finding-a
 node scripts/pr-review-github.mjs verify-resolve --pr 123 --task local-finding
 node scripts/pr-review-github.mjs verify-resolve --pr 123 --task-set-json '["threadless-a","threadless-b"]'
 node scripts/pr-review-github.mjs request --pr 123 --kind discovery
+node scripts/pr-review-github.mjs request --pr 123 --kind human-final
 node scripts/pr-review-github.mjs collect --pr 123
 node scripts/pr-review-github.mjs collect-ci --pr 123
 node scripts/pr-review-github.mjs complete --pr 123
@@ -62,6 +63,13 @@ review commit == recorded Review commit == current PR head
 ```
 
 Any mismatch is stale. Do not infer commit identity from ordinary review prose.
+A `human-final` request is supported only after the guarded durable operator
+authorization. Before any journal intent or GitHub mutation, and again after
+fresh state/GitHub reads, trusted time must be at or after its `notBefore`.
+Recovered or newly created request evidence must also have a GitHub timestamp
+at or after that bound. The helper preserves the first four 3+1 ledger entries,
+appends exactly one fifth entry, and recovery may never post it twice.
+
 A canonical exact-head `COMMENTED` review submission is clean only when its
 body is a string with empty trimmed content and it has no attached canonical
 root. Any nonempty trimmed body is findings even without an inline root, and
@@ -163,7 +171,7 @@ Before the first discovery review in a pristine taskless cycle, run
 exact-head proof only when the fully paginated canonical Codex root set is empty;
 it never marks a threadless remediation task verified and never writes GitHub.
 
-The same read-only empty-root refresh is narrowly available after native-v3
+The same read-only empty-root refresh is narrowly available after native-v4
 taskless clean-review HEAD-drift recovery. First rebuild nonempty targeted
 validation at the current HEAD through the explicit initial-selection route.
 The retained latest clean request and outcome must match each other exactly on
@@ -202,6 +210,15 @@ Resolve them, confirm review-ready state, then allow one verification review for
 that exact commit. A stale verification result or any new verification finding
 moves the cycle to `awaiting-human-decision`. Report the evidence and required
 decision; do not request another review automatically.
+
+Only an explicit durable operator decision may make one exception: bind it to
+the exact verification-findings outcome with `authorize-final-review`, record a
+trusted RFC 3339 `notBefore`, and request `--kind human-final` no earlier than
+that time. This is not a fourth discovery round: reviewRound remains 3,
+verification use remains sticky, and the fifth immutable ledger entry consumes
+the exception. Clean evidence enters ordinary validation and Done gates.
+Findings, stale head or request proof, unsupported evidence, and ambiguity are
+terminal `awaiting-human-decision` outcomes; no second final request is allowed.
 
 If the same stable finding returns in two consecutive rounds, pause repeated
 patching and investigate the root cause.
