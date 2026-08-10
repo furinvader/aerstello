@@ -21,6 +21,8 @@ const OTHER_HEAD = 'b'.repeat(40);
 const PRIOR_INTEGRATION_HEAD = '4b8d4d36dd6ea4da9d1c1a0e39033a829e1852f9';
 const SELECTED_TASK_HEAD = '7ea9bbccc60725dcfd0cfefcb0caff742145b8ec';
 const AT = '2026-08-05T00:00:00Z';
+const AUTHORIZED_AT = '2026-08-09T21:30:00Z';
+const NOT_BEFORE = '2026-08-10T13:00:00Z';
 const BOT = {
   __typename: 'Bot', login: 'chatgpt-codex-connector',
   url: 'https://github.com/apps/chatgpt-codex-connector', id: 'BOT_codex',
@@ -44,11 +46,12 @@ function proof(status = 'passed', headSha = HEAD) {
 
 function stateFixture(overrides = {}) {
   return {
-    schemaVersion: 3, revision: 1, repository: 'example/sky-bar', prNumber: 2, phase: 'recovering',
+    schemaVersion: 4, revision: 1, repository: 'example/sky-bar', prNumber: 2, phase: 'recovering',
     baseSha: HEAD, requestedHeadSha: null, reviewedHeadSha: null, currentIntegrationHeadSha: HEAD,
     reviewRound: 0, verificationReviewUsed: false, legacyReviewProvenance: null, releaseBaseline: null,
     decisions: [], tasks: [], reviewRequest: null, reviewOutcome: null, reviewHistory: [],
-    verificationEscalation: null, threadResolutionStatus: proof('not-run'), blockedReasons: [],
+    verificationEscalation: null, humanFinalReviewAuthorization: null,
+    threadResolutionStatus: proof('not-run'), blockedReasons: [],
     validationStatus: { source: 'orchestrator', scope: 'targeted', status: 'not-run', headSha: null, checks: [], updatedAt: null },
     ciValidationStatus: { source: 'github-actions', scope: 'full', status: 'not-run', headSha: null,
       checks: [], checkRunId: null, workflowRunId: null, workflowRunUrl: null, updatedAt: null },
@@ -168,6 +171,46 @@ function cleanReviewEntry(index, kind, headSha = OTHER_HEAD) {
   return { request, outcome };
 }
 
+function humanFinalAuthorizedState(overrides = {}) {
+  const reviewHistory = [
+    cleanReviewEntry(1, 'discovery', HEAD),
+    cleanReviewEntry(2, 'discovery', HEAD),
+    cleanReviewEntry(3, 'discovery', HEAD),
+    cleanReviewEntry(4, 'verification', HEAD),
+  ];
+  reviewHistory[3].outcome = { ...reviewHistory[3].outcome, outcome: 'findings' };
+  const latest = reviewHistory.at(-1);
+  return readyState({
+    phase: 'awaiting-human-decision', requestedHeadSha: HEAD, reviewedHeadSha: HEAD,
+    reviewRound: 3, verificationReviewUsed: true,
+    decisions: [{ id: 'decision-final', summary: 'Authorize one time-gated human-final review.' }],
+    reviewRequest: latest.request, reviewOutcome: latest.outcome, reviewHistory,
+    humanFinalReviewAuthorization: {
+      decisionId: 'decision-final', source: 'operator-instruction', authorizedAt: AUTHORIZED_AT,
+      verificationOutcomeId: latest.outcome.id, notBefore: NOT_BEFORE,
+      summary: 'One operator-authorized final review.',
+    },
+    nextAction: 'Request the human-final review at the trusted time.',
+    ...overrides,
+  });
+}
+
+function pendingHumanFinalState(overrides = {}) {
+  const authorized = humanFinalAuthorizedState();
+  const request = requestEvidence('human-final', {
+    id: 'IC_human_final_request', databaseId: 301,
+    url: 'https://github.com/example/sky-bar/pull/2#issuecomment-301', at: NOT_BEFORE,
+  });
+  return {
+    ...authorized,
+    phase: 'awaiting-review', requestedHeadSha: HEAD, reviewedHeadSha: null,
+    reviewRequest: request, reviewOutcome: null,
+    reviewHistory: [...authorized.reviewHistory, { request, outcome: null }],
+    nextAction: 'Collect the exact human-final outcome.',
+    ...overrides,
+  };
+}
+
 function canonicalReview(overrides = {}) {
   return {
     id: 'PRR_clean', databaseId: 201, url: 'https://x/clean', body: '', state: 'COMMENTED',
@@ -255,6 +298,7 @@ class FakeClient {
     this.remaining = overrides.remaining ?? 5000;
     this.graphqlErrors = overrides.graphqlErrors ?? new Set();
     this.noEffect = overrides.noEffect ?? new Set();
+    this.requestCreatedAt = overrides.requestCreatedAt ?? AT;
     Object.assign(this, overrides);
   }
 
@@ -301,7 +345,7 @@ class FakeClient {
       this.comments.push({
         id: `IC_${this.comments.length + 1}`, databaseId: 500 + this.comments.length,
         url: 'https://github.com/example/sky-bar/pull/2#issuecomment-new', body: variables.body,
-        createdAt: AT, author: this.metadata.viewer,
+        createdAt: this.requestCreatedAt, author: this.metadata.viewer,
       });
     }
     if (name === 'AddThreadReply' && !this.noEffect.has(name)) {
@@ -401,7 +445,7 @@ function fakeState(initial) {
         reviewHistory: current.reviewHistory.map((entry, index) => (
           index === current.reviewHistory.length - 1 ? { ...entry, outcome } : entry
         )),
-        phase: outcome.kind === 'verification' && outcome.outcome === 'findings'
+        phase: ['verification', 'human-final'].includes(outcome.kind) && outcome.outcome === 'findings'
           ? 'awaiting-human-decision' : outcome.outcome === 'findings' ? 'triaging' : 'validating',
       };
       return structuredClone(current);
@@ -1135,6 +1179,63 @@ test('request journals before exact mutation, proves live result, and checkpoint
   assert.equal(mutation.variables.body, '@codex review');
   assert.match(mutation.variables.clientMutationId, /^sky-bar-/u);
   assert.equal(state.calls.at(-1).name, 'checkpointReviewRequest');
+});
+
+test('human-final request performs no journal or GitHub mutation before notBefore and succeeds at the exact boundary', async () => {
+  const beforeEvents = [];
+  const beforeClient = new FakeClient({ events: beforeEvents, requestCreatedAt: NOT_BEFORE });
+  const before = workflow(humanFinalAuthorizedState(), beforeClient, {
+    clock: { now: () => '2026-08-10T12:59:59.999Z' },
+  });
+  await assert.rejects(() => before.api.request(2, 'human-final'), { code: 'REQUEST_NOT_READY' });
+  assert.deepEqual(beforeEvents, []);
+  assert.equal(beforeClient.calls.length, 0);
+  assert.equal(before.state.calls.length, 0);
+
+  const boundaryEvents = [];
+  const boundaryClient = new FakeClient({ events: boundaryEvents, requestCreatedAt: NOT_BEFORE });
+  const initial = humanFinalAuthorizedState();
+  const boundary = workflow(initial, boundaryClient, { clock: { now: () => NOT_BEFORE } });
+  const result = await boundary.api.request(2, 'human-final');
+  assert.equal(result.request.kind, 'human-final');
+  assert.equal(result.request.at, NOT_BEFORE);
+  assert.deepEqual(boundaryEvents, ['intent:request', 'mutation:AddReviewRequest']);
+  assert.equal(boundary.state.current.reviewHistory.length, 5);
+  assert.deepEqual(boundary.state.current.reviewHistory.slice(0, 4), initial.reviewHistory);
+  assert.equal(boundary.state.current.reviewRound, 3);
+  assert.equal(boundary.state.current.verificationReviewUsed, true);
+});
+
+test('human-final request recovery rejects pre-bound evidence and never posts twice', async () => {
+  const operationId = `request:2:human-final:5:${HEAD}`;
+  const intent = priorIntent('request', operationId, NOT_BEFORE);
+  const staleClient = new FakeClient();
+  staleClient.comments.push({
+    id: 'IC_human_final_stale', databaseId: 801, url: 'https://x/human-final-stale',
+    body: '@codex review', createdAt: '2026-08-10T12:59:59.999Z', author: VIEWER,
+  });
+  const stale = workflow(humanFinalAuthorizedState(), staleClient, {
+    clock: { now: () => NOT_BEFORE }, journal: fakeJournal([], [intent]),
+  });
+  await assert.rejects(() => stale.api.request(2, 'human-final'), { code: 'REQUEST_RECOVERY_MISSING' });
+  assert.equal(staleClient.calls.some((call) => call.name === 'AddReviewRequest'), false);
+  assert.equal(stale.state.calls.length, 0);
+
+  const recoveredClient = new FakeClient();
+  recoveredClient.comments.push({
+    id: 'IC_human_final', databaseId: 802, url: 'https://x/human-final',
+    body: '@codex review', createdAt: NOT_BEFORE, author: VIEWER,
+  });
+  const recovered = workflow(humanFinalAuthorizedState(), recoveredClient, {
+    clock: { now: () => NOT_BEFORE }, journal: fakeJournal([], [intent]),
+  });
+  const result = await recovered.api.request(2, 'human-final');
+  assert.equal(result.recovered, true);
+  assert.equal(result.request.id, 'IC_human_final');
+  assert.equal(recoveredClient.calls.some((call) => call.name === 'AddReviewRequest'), false);
+  assert.equal(recovered.state.current.reviewHistory.length, 5);
+  await assert.rejects(() => recovered.api.request(2, 'human-final'), { code: 'REQUEST_NOT_READY' });
+  assert.equal(recoveredClient.calls.some((call) => call.name === 'AddReviewRequest'), false);
 });
 
 test('request recovers a concurrent intent using its returned exclusion baseline without mutation', async () => {
@@ -2387,6 +2488,49 @@ test('collect escalates verification live drift, stale evidence, and exact-head 
   const absent = workflow(pendingState(), new FakeClient());
   await assert.rejects(() => absent.api.collect(2), { code: 'REVIEW_NOT_AVAILABLE' });
   assert.equal(absent.state.calls.length, 0);
+});
+
+test('human-final collection is one-shot: clean validates, findings stop, and stale or ambiguous evidence escalates terminally', async () => {
+  const cleanClient = new FakeClient();
+  cleanClient.reviews.push(canonicalReview({
+    id: 'PRR_human_final_clean', body: '', submittedAt: '2026-08-10T13:01:00Z',
+  }));
+  const clean = workflow(pendingHumanFinalState(), cleanClient);
+  const cleanResult = await clean.api.collect(2);
+  assert.equal(cleanResult.outcome.kind, 'human-final');
+  assert.equal(cleanResult.outcome.outcome, 'clean');
+  assert.equal(cleanResult.phase, 'validating');
+  assert.equal(clean.state.current.reviewHistory.length, 5);
+
+  const findingsClient = new FakeClient();
+  findingsClient.reviews.push(canonicalReview({
+    id: 'PRR_human_final_findings', body: 'One remaining finding.',
+    submittedAt: '2026-08-10T13:01:00Z',
+  }));
+  const findings = workflow(pendingHumanFinalState(), findingsClient);
+  const findingsResult = await findings.api.collect(2);
+  assert.equal(findingsResult.outcome.outcome, 'findings');
+  assert.equal(findingsResult.phase, 'awaiting-human-decision');
+
+  const staleClient = new FakeClient();
+  staleClient.metadata.headRefOid = OTHER_HEAD;
+  const stale = await workflow(pendingHumanFinalState(), staleClient).api.collect(2);
+  assert.equal(stale.escalated, true);
+  assert.equal(stale.escalation.reason, 'request-head-drift');
+
+  const ambiguousClient = new FakeClient();
+  ambiguousClient.reviews.push(canonicalReview({
+    id: 'PRR_human_final_ambiguous', body: '', submittedAt: '2026-08-10T13:01:00Z',
+  }));
+  ambiguousClient.reactions.set('IC_human_final_request', [{
+    id: 'REACTION_human_final', content: 'THUMBS_UP',
+    createdAt: '2026-08-10T13:01:00Z', user: BOT,
+  }]);
+  const ambiguous = workflow(pendingHumanFinalState(), ambiguousClient);
+  const ambiguousResult = await ambiguous.api.collect(2);
+  assert.equal(ambiguousResult.escalated, true);
+  assert.equal(ambiguousResult.escalation.reason, 'ambiguous-canonical-evidence');
+  assert.equal(ambiguous.state.current.phase, 'awaiting-human-decision');
 });
 
 test('discovery stale collection stays separate and verification findings stop for a human', async () => {

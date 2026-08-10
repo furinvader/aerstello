@@ -79,6 +79,11 @@ Before editing:
 - Fix workers receive fixed, path-limited task instructions and work in isolated
   worktrees. They must not broaden scope. Parallel workers require non-overlapping
   write sets.
+- Three discovery requests plus one verification request are the automatic
+  limit. After terminal verification findings, only an explicit durable human
+  decision may authorize one time-gated `human-final` request. It never resets
+  the counters, cannot be repeated, and every non-clean final outcome returns
+  terminally to human decision.
 
 ## Validation
 

@@ -28,6 +28,8 @@ const WRAPPER_EXECUTABLES = new Set(['env', 'bash', 'sh', 'zsh', 'fish', 'comman
 const KNOWN_WORKSPACES = new Set(['@sky-bar/api', '@sky-bar/web', '@sky-bar/shared']);
 const SHELL_SYNTAX_PATTERN = /[;&|<>`$()'"\\*?\[\]{}!#~\t\v\f\r\n]/u;
 const NODE_TEST_PATH_PATTERN = /(?:^|\/)[^/]+\.(?:test|spec)\.(?:[cm]?[jt]s|[jt]sx)$/u;
+const REVIEW_KINDS = ['discovery', 'verification', 'human-final'];
+const TERMINAL_REVIEW_KINDS = ['verification', 'human-final'];
 
 export const STATE_PHASES = [
   'recovering',
@@ -685,7 +687,7 @@ function validateBaseEvidence(value, path, fields, errors) {
 function validateReviewRequest(value, path, errors) {
   const fields = ['id', 'databaseId', 'url', 'headSha', 'at', 'kind', 'body', 'authorLogin', 'authorNodeId'];
   if (!validateBaseEvidence(value, path, fields, errors)) return;
-  if (!['discovery', 'verification'].includes(value.kind)) errors.push(`${path}.kind is invalid`);
+  if (!REVIEW_KINDS.includes(value.kind)) errors.push(`${path}.kind is invalid`);
   if (value.body !== '@codex review') errors.push(`${path}.body must be exactly @codex review`);
   for (const field of ['authorLogin', 'authorNodeId']) {
     if (!isString(value[field], { min: 1, max: field === 'authorLogin' ? 128 : 256 })) {
@@ -702,7 +704,7 @@ function validateReviewOutcome(value, path, errors) {
   ];
   if (!validateBaseEvidence(value, path, fields, errors)) return;
   if (!isString(value.requestId, { min: 1, max: 256 })) errors.push(`${path}.requestId is invalid`);
-  if (!['discovery', 'verification'].includes(value.kind)) errors.push(`${path}.kind is invalid`);
+  if (!REVIEW_KINDS.includes(value.kind)) errors.push(`${path}.kind is invalid`);
   if (!['clean', 'findings'].includes(value.outcome)) errors.push(`${path}.outcome is invalid`);
   if (!['review-submission', 'request-reaction', 'issue-comment'].includes(value.evidenceType)) {
     errors.push(`${path}.evidenceType is invalid`);
@@ -747,7 +749,9 @@ function validateVerificationEscalation(value, request, errors) {
   }
   if (!['same', 'changed'].includes(value.headRelation)) errors.push(`${path}.headRelation is invalid`);
   if (!isDateTime(value.at)) errors.push(`${path}.at is invalid`);
-  if (request?.kind !== 'verification') errors.push(`${path} requires the current verification request`);
+  if (!TERMINAL_REVIEW_KINDS.includes(request?.kind)) {
+    errors.push(`${path} requires the current verification or human-final request`);
+  }
   if (value.requestId !== request?.id || value.requestHeadSha !== request?.headSha) {
     errors.push(`${path} must bind to the current pending request and exact SHA`);
   }
@@ -758,6 +762,43 @@ function validateVerificationEscalation(value, request, errors) {
   const actualRelation = value.observedPrHeadSha === value.requestHeadSha ? 'same' : 'changed';
   if (value.headRelation !== actualRelation) {
     errors.push(`${path}.headRelation contradicts the request and observed PR HEADs`);
+  }
+}
+
+function validateHumanFinalReviewAuthorization(value, state, errors) {
+  const path = '$.humanFinalReviewAuthorization';
+  if (value === null) return;
+  const fields = [
+    'decisionId', 'source', 'authorizedAt', 'verificationOutcomeId', 'notBefore', 'summary',
+  ];
+  if (!requireFields(value, fields, path, errors)) return;
+  rejectUnknownFields(value, fields, path, errors);
+  if (!isString(value.decisionId, { min: 1, max: 128 })) errors.push(`${path}.decisionId is invalid`);
+  if (value.source !== 'operator-instruction') errors.push(`${path}.source must be operator-instruction`);
+  if (!isDateTime(value.authorizedAt)) errors.push(`${path}.authorizedAt is invalid`);
+  if (!isString(value.verificationOutcomeId, { min: 1, max: 256 })) {
+    errors.push(`${path}.verificationOutcomeId is invalid`);
+  }
+  if (!isDateTime(value.notBefore)) errors.push(`${path}.notBefore is invalid`);
+  if (!isString(value.summary, { min: 1, max: 1000 }) || value.summary.trim() !== value.summary) {
+    errors.push(`${path}.summary is invalid`);
+  }
+  if (!state?.decisions?.some((decision) => decision.id === value.decisionId)) {
+    errors.push(`${path}.decisionId must name an existing durable decision`);
+  }
+  const verificationEntries = (state?.reviewHistory ?? []).filter((entry) => (
+    entry.outcome?.id === value.verificationOutcomeId
+      && entry.request?.kind === 'verification'
+      && entry.outcome?.kind === 'verification'
+      && entry.outcome?.outcome === 'findings'
+      && entry.outcome?.requestId === entry.request?.id
+      && entry.outcome?.headSha === entry.request?.headSha
+  ));
+  if (verificationEntries.length !== 1) {
+    errors.push(`${path}.verificationOutcomeId must identify the exact terminal verification findings outcome`);
+  } else if (isDateTime(value.authorizedAt)
+      && Date.parse(value.authorizedAt) < Date.parse(verificationEntries[0].outcome.at)) {
+    errors.push(`${path}.authorizedAt cannot predate the verification outcome`);
   }
 }
 
@@ -1069,10 +1110,21 @@ function exactHeadReason(label, actual, expected) {
   return actual === expected ? null : `${label} must equal currentIntegrationHeadSha`;
 }
 
-function reviewRequestStateGate(state) {
+function reviewRequestStateGate(state, currentTime) {
   const reasons = [];
   const head = state?.currentIntegrationHeadSha;
-  if (state?.phase !== 'ready-for-review') reasons.push('phase must be exactly ready-for-review');
+  const humanFinalCount = state?.reviewHistory?.filter(
+    (entry) => entry.request?.kind === 'human-final',
+  ).length ?? 0;
+  const humanFinalCandidate = state?.phase === 'awaiting-human-decision'
+    && state?.humanFinalReviewAuthorization !== null
+    && state?.reviewRound === 3
+    && state?.verificationReviewUsed === true
+    && state?.reviewHistory?.length === 4
+    && humanFinalCount === 0;
+  if (!humanFinalCandidate && state?.phase !== 'ready-for-review') {
+    reasons.push('phase must be exactly ready-for-review, or authorized terminal human-decision for human-final');
+  }
   if (state?.validationStatus?.status !== 'passed') reasons.push('validation must have passed');
   if (state?.validationStatus?.source !== 'orchestrator' || state?.validationStatus?.scope !== 'targeted') {
     reasons.push('validation must be targeted orchestrator evidence');
@@ -1094,7 +1146,14 @@ function reviewRequestStateGate(state) {
   if (state?.tasks?.some((task) => task.disposition === 'needs-human-decision')) reasons.push('needs-human-decision findings require a human');
   if ((state?.blockedReasons?.length ?? 0) !== 0) reasons.push('blocked reasons must be cleared');
   let kind = null;
-  if (Number.isInteger(state?.reviewRound) && state.reviewRound < 3) kind = 'discovery';
+  if (humanFinalCandidate) {
+    kind = 'human-final';
+    if (!isDateTime(currentTime)) {
+      reasons.push('trusted current time is required for human-final review');
+    } else if (Date.parse(currentTime) < Date.parse(state.humanFinalReviewAuthorization.notBefore)) {
+      reasons.push('human-final review is not authorized before its notBefore time');
+    }
+  } else if (Number.isInteger(state?.reviewRound) && state.reviewRound < 3) kind = 'discovery';
   else if (state?.reviewRound === 3 && state?.verificationReviewUsed === false) kind = 'verification';
   else reasons.push('the three discovery rounds and one verification review are exhausted');
   return { kind, reasons };
@@ -1124,7 +1183,7 @@ function validateExternalHeads(state, external, reasons) {
 }
 
 export function reviewRequestGate(state, external) {
-  const { kind, reasons } = reviewRequestStateGate(state);
+  const { kind, reasons } = reviewRequestStateGate(state, external?.currentTime);
   validateExternalHeads(state, external, reasons);
   return { allowed: reasons.length === 0, kind: reasons.length === 0 ? kind : null, reasons };
 }
@@ -1151,6 +1210,17 @@ function completionStateGate(state) {
       && (state.reviewRound !== 3 || state.verificationReviewUsed !== true)) {
     reasons.push('verification clean completion requires three discovery rounds and consumed verification');
   }
+  if (state?.reviewRequest?.kind === 'human-final') {
+    if (state.reviewRound !== 3 || state.verificationReviewUsed !== true) {
+      reasons.push('human-final clean completion requires the immutable 3+1 review history');
+    }
+    if (state.humanFinalReviewAuthorization === null) {
+      reasons.push('human-final clean completion requires durable operator authorization');
+    }
+    if (state.reviewHistory?.filter((entry) => entry.request?.kind === 'human-final').length !== 1) {
+      reasons.push('human-final clean completion requires exactly one consumed human-final request');
+    }
+  }
   if (state?.validationStatus?.status !== 'passed') reasons.push('validation must have passed');
   if (state?.ciValidationStatus?.status !== 'passed') reasons.push('full GitHub Actions validation must have passed');
   if (state?.validationStatus?.source !== 'orchestrator' || state?.validationStatus?.scope !== 'targeted') {
@@ -1176,8 +1246,8 @@ export function completionGate(state, external) {
 }
 
 function validateReviewHistory(value, errors) {
-  if (!Array.isArray(value) || value.length > 4) {
-    errors.push('$.reviewHistory must contain at most four entries');
+  if (!Array.isArray(value) || value.length > 5) {
+    errors.push('$.reviewHistory must contain at most five entries');
     return;
   }
   value.forEach((entry, index) => {
@@ -1195,7 +1265,19 @@ function validateReviewHistory(value, errors) {
   });
   const discoveryCount = value.filter((entry) => entry.request?.kind === 'discovery').length;
   const verificationCount = value.filter((entry) => entry.request?.kind === 'verification').length;
-  if (discoveryCount > 3 || verificationCount > 1) errors.push('$.reviewHistory exceeds the 3+1 review limit');
+  const humanFinalCount = value.filter((entry) => entry.request?.kind === 'human-final').length;
+  if (discoveryCount > 3 || verificationCount > 1 || humanFinalCount > 1) {
+    errors.push('$.reviewHistory exceeds the 3+1+1 review limit');
+  }
+  if (humanFinalCount === 1) {
+    const humanFinalIndex = value.findIndex((entry) => entry.request?.kind === 'human-final');
+    if (value.length !== 5 || humanFinalIndex !== 4 || discoveryCount !== 3 || verificationCount !== 1
+        || value[3]?.request?.kind !== 'verification'
+        || value[3]?.outcome?.kind !== 'verification'
+        || value[3]?.outcome?.outcome !== 'findings') {
+      errors.push('$.reviewHistory human-final request must be the fifth entry after exact 3+1 verification findings');
+    }
+  }
   const requestIds = value.map((entry) => entry.request?.id);
   if (new Set(requestIds).size !== requestIds.length) errors.push('$.reviewHistory contains duplicate request IDs');
 }
@@ -1206,12 +1288,13 @@ export function validatePrReviewState(value) {
     'schemaVersion', 'revision', 'repository', 'prNumber', 'phase', 'baseSha', 'requestedHeadSha',
     'reviewedHeadSha', 'currentIntegrationHeadSha', 'reviewRound', 'verificationReviewUsed', 'legacyReviewProvenance',
     'releaseBaseline', 'decisions', 'tasks', 'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
+    'humanFinalReviewAuthorization',
     'threadResolutionStatus', 'blockedReasons', 'validationStatus', 'ciValidationStatus', 'ciValidationHistory', 'nextAction',
     'integrationWorktree', 'orchestratorSessionId', 'abandonmentReason', 'git', 'updatedAt',
   ];
   if (!requireFields(value, fields, '$', errors)) return errors;
   rejectUnknownFields(value, fields, '$', errors);
-  if (value.schemaVersion !== 3) errors.push('$.schemaVersion must equal 3');
+  if (value.schemaVersion !== 4) errors.push('$.schemaVersion must equal 4');
   if (!Number.isInteger(value.revision) || value.revision < 0) errors.push('$.revision must be non-negative');
   if (!isString(value.repository, { min: 3, max: 256 }) || !/^[^/\s]+\/[^/\s]+$/u.test(value.repository)) errors.push('$.repository must be owner/name');
   if (!Number.isInteger(value.prNumber) || value.prNumber < 1) errors.push('$.prNumber must be positive');
@@ -1252,11 +1335,13 @@ export function validatePrReviewState(value) {
   if (value.reviewOutcome !== null) validateReviewOutcome(value.reviewOutcome, '$.reviewOutcome', errors);
   validateVerificationEscalation(value.verificationEscalation, value.reviewRequest, errors);
   validateReviewHistory(value.reviewHistory, errors);
+  validateHumanFinalReviewAuthorization(value.humanFinalReviewAuthorization, value, errors);
   const latest = Array.isArray(value.reviewHistory) ? value.reviewHistory.at(-1) : null;
   if ((latest?.request ?? null)?.id !== value.reviewRequest?.id) errors.push('$.reviewRequest must equal the latest history request');
   if ((latest?.outcome ?? null)?.id !== value.reviewOutcome?.id) errors.push('$.reviewOutcome must equal the latest history outcome');
   const discoveryCount = value.reviewHistory?.filter((entry) => entry.request?.kind === 'discovery').length;
   const verificationCount = value.reviewHistory?.filter((entry) => entry.request?.kind === 'verification').length;
+  const humanFinalCount = value.reviewHistory?.filter((entry) => entry.request?.kind === 'human-final').length;
   const legacyDiscoveryCount = value.legacyReviewProvenance?.discoveryRounds ?? 0;
   if (Number.isInteger(discoveryCount) && legacyDiscoveryCount + discoveryCount > 3) {
     errors.push('$.reviewHistory plus migrated discovery count exceeds three rounds');
@@ -1266,6 +1351,17 @@ export function validatePrReviewState(value) {
   }
   if (Number.isInteger(verificationCount) && value.verificationReviewUsed !== (verificationCount === 1)) {
     errors.push('$.verificationReviewUsed must equal durable verification request use');
+  }
+  if (Number.isInteger(humanFinalCount) && humanFinalCount > 0 && value.humanFinalReviewAuthorization === null) {
+    errors.push('$.reviewHistory human-final request requires durable authorization');
+  }
+  if (value.reviewRequest?.kind === 'human-final' && value.humanFinalReviewAuthorization !== null) {
+    if (Date.parse(value.reviewRequest.at) < Date.parse(value.humanFinalReviewAuthorization.notBefore)) {
+      errors.push('$.reviewRequest human-final evidence predates authorization notBefore');
+    }
+    if (Date.parse(value.reviewRequest.at) < Date.parse(value.humanFinalReviewAuthorization.authorizedAt)) {
+      errors.push('$.reviewRequest human-final evidence predates operator authorization');
+    }
   }
   if (value.reviewRequest && value.requestedHeadSha !== value.reviewRequest.headSha) errors.push('$.requestedHeadSha must equal request HEAD');
   if (value.reviewOutcome && value.reviewedHeadSha !== value.reviewOutcome.headSha) errors.push('$.reviewedHeadSha must equal outcome HEAD');
@@ -1324,7 +1420,7 @@ export function validatePrReviewState(value) {
     const allowedPhase = value.phase === 'awaiting-review'
       || (stale && latest.request.kind === 'discovery' && value.phase === 'recovering')
       || (stale && latest.request.kind === 'discovery' && value.phase === 'ready-for-review')
-      || (latest.request.kind === 'verification' && value.phase === 'awaiting-human-decision'
+      || (TERMINAL_REVIEW_KINDS.includes(latest.request.kind) && value.phase === 'awaiting-human-decision'
         && (stale || value.verificationEscalation !== null));
     if (!allowedPhase) errors.push('$.phase is invalid for the pending current or stale review request');
   }
@@ -1332,10 +1428,41 @@ export function validatePrReviewState(value) {
       && value.phase !== 'awaiting-human-decision') {
     errors.push('$.phase must be awaiting-human-decision after verification findings');
   }
+  if (value.reviewOutcome?.kind === 'human-final' && value.reviewOutcome.outcome === 'findings'
+      && value.phase !== 'awaiting-human-decision') {
+    errors.push('$.phase must be awaiting-human-decision after human-final findings');
+  }
   if (value.phase === 'ready-for-review') {
     errors.push(...reviewRequestStateGate(value).reasons.map((reason) => `$.phase ready-for-review requires: ${reason}`));
   }
   if (value.phase === 'complete') errors.push(...completionStateGate(value).map((reason) => `$.phase complete requires: ${reason}`));
   findRawFields(value, '$', errors);
   return errors;
+}
+
+export function validatePrReviewStateV3(value) {
+  const errors = [];
+  if (!isObject(value) || value.schemaVersion !== 3) {
+    return ['$.schemaVersion must equal 3'];
+  }
+  if (Object.hasOwn(value, 'humanFinalReviewAuthorization')) {
+    errors.push('schema v3 cannot contain $.humanFinalReviewAuthorization');
+  }
+  const requests = [value.reviewRequest, ...(value.reviewHistory ?? []).map((entry) => entry?.request)]
+    .filter(Boolean);
+  const outcomes = [value.reviewOutcome, ...(value.reviewHistory ?? []).map((entry) => entry?.outcome)]
+    .filter(Boolean);
+  if (requests.some((request) => request.kind === 'human-final')
+      || outcomes.some((outcome) => outcome.kind === 'human-final')) {
+    errors.push('schema v3 cannot contain human-final review evidence');
+  }
+  if (!Array.isArray(value.reviewHistory) || value.reviewHistory.length > 4) {
+    errors.push('schema v3 reviewHistory must contain at most four entries');
+  }
+  if (errors.length > 0) return errors;
+  return validatePrReviewState({
+    ...value,
+    schemaVersion: 4,
+    humanFinalReviewAuthorization: null,
+  });
 }

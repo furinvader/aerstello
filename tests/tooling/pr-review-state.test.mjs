@@ -11,6 +11,7 @@ import {
   assertTaskPacketBound,
   buildCompletionTransition,
   buildCiValidationTransition,
+  buildHumanFinalReviewAuthorizationTransition,
   buildTargetedValidationPlan,
   buildReviewOutcomeTransition,
   buildReviewRequestTransition,
@@ -18,6 +19,7 @@ import {
   checkpointCompletion,
   checkpointCiValidation,
   checkpointGitMetadata,
+  checkpointHumanFinalReviewAuthorization,
   checkpointReviewOutcome,
   checkpointReviewRequest,
   checkpointState,
@@ -34,6 +36,7 @@ import {
   loadState,
   migratePrReviewStateV1,
   migratePrReviewStateV2,
+  migratePrReviewStateV3,
   migrateState,
   renderRecoverySummary,
   reviewRequestGate,
@@ -49,6 +52,8 @@ import { commit, createRepository, git } from './git-fixtures.mjs';
 
 const repositories = [];
 const AT = '2026-08-05T00:00:00Z';
+const AUTHORIZED_AT = '2026-08-09T21:30:00Z';
+const NOT_BEFORE = '2026-08-10T13:00:00Z';
 const STATE_CLI = fileURLToPath(new URL('../../scripts/pr-review-state.mjs', import.meta.url));
 
 function repo() {
@@ -148,11 +153,16 @@ function external(cwd, state, overrides = {}) {
   });
 }
 
-function request(state, id = `request-${state.reviewRound + 1}`, kind = state.reviewRound < 3 ? 'discovery' : 'verification') {
+function request(
+  state,
+  id = `request-${state.reviewRound + 1}`,
+  kind = state.reviewRound < 3 ? 'discovery' : 'verification',
+  overrides = {},
+) {
   return {
     id, databaseId: 101, url: `https://github.com/example/sky-bar/pull/17#issuecomment-${id}`,
     headSha: state.currentIntegrationHeadSha, at: AT, kind, body: '@codex review',
-    authorLogin: 'maintainer', authorNodeId: 'MDQ6VXNlcjE=',
+    authorLogin: 'maintainer', authorNodeId: 'MDQ6VXNlcjE=', ...overrides,
   };
 }
 
@@ -165,6 +175,33 @@ function outcome(state, overrides = {}) {
     reviewerLogin: 'chatgpt-codex-connector', reviewerNodeId: 'BOT_codex', reviewerType: 'Bot',
     reviewerUrl: 'https://github.com/apps/chatgpt-codex-connector', reactionContent: null,
     reactionCommentId: null, ...overrides,
+  };
+}
+
+function terminalVerificationFindingsState(state) {
+  const head = state.currentIntegrationHeadSha;
+  const entries = Array.from({ length: 4 }, (_, index) => {
+    const kind = index === 3 ? 'verification' : 'discovery';
+    const reviewRequest = request(state, `request-${index + 1}`, kind);
+    const reviewOutcome = {
+      id: `outcome-${index + 1}`, databaseId: 201 + index,
+      url: `https://github.com/example/sky-bar/pull/17#pullrequestreview-${201 + index}`,
+      headSha: head, at: AT, requestId: reviewRequest.id, kind,
+      outcome: index === 3 ? 'findings' : 'clean', evidenceType: 'review-submission',
+      reviewerLogin: 'chatgpt-codex-connector', reviewerNodeId: 'BOT_codex', reviewerType: 'Bot',
+      reviewerUrl: 'https://github.com/apps/chatgpt-codex-connector', reactionContent: null,
+      reactionCommentId: null,
+    };
+    return { request: reviewRequest, outcome: reviewOutcome };
+  });
+  const latest = entries.at(-1);
+  return {
+    ...ready(state),
+    phase: 'awaiting-human-decision', requestedHeadSha: head, reviewedHeadSha: head,
+    reviewRound: 3, verificationReviewUsed: true,
+    decisions: [{ id: 'decision-final', summary: 'Authorize one time-gated human-final review.' }],
+    reviewRequest: latest.request, reviewOutcome: latest.outcome, reviewHistory: entries,
+    nextAction: 'Await an explicit human decision.',
   };
 }
 
@@ -184,6 +221,7 @@ function legacyState(state, overrides = {}) {
     reviewOutcome,
     reviewHistory: _reviewHistory,
     verificationEscalation: _verificationEscalation,
+    humanFinalReviewAuthorization: _humanFinalReviewAuthorization,
     threadResolutionStatus: _threadResolutionStatus,
     ciValidationStatus: _ciValidationStatus,
     ciValidationHistory: _ciValidationHistory,
@@ -207,6 +245,7 @@ function schemaV2State(state) {
     ciValidationHistory: _ciValidationHistory,
     validationStatus,
     threadResolutionStatus,
+    humanFinalReviewAuthorization: _humanFinalReviewAuthorization,
     ...currentFields
   } = state;
   const { source: _source, scope: _scope, ...legacyValidationStatus } = validationStatus;
@@ -381,10 +420,11 @@ afterEach(() => {
   while (repositories.length > 0) rmSync(repositories.pop(), { recursive: true, force: true });
 });
 
-test('initialization writes the v3 identity and empty durable ledgers', () => {
+test('initialization writes the v4 identity and empty durable ledgers', () => {
   const cwd = repo();
   const state = init(cwd);
-  assert.equal(state.schemaVersion, 3);
+  assert.equal(state.schemaVersion, 4);
+  assert.equal(state.humanFinalReviewAuthorization, null);
   assert.equal(state.legacyReviewProvenance, null);
   assert.deepEqual(state.reviewHistory, []);
   assert.deepEqual(state.threadResolutionStatus.threads, []);
@@ -396,6 +436,7 @@ test('v2 loading requires explicit migration and writes an exact versioned backu
   const initialized = init(cwd);
   const {
     ciValidationStatus: _ciValidationStatus, ciValidationHistory: _ciValidationHistory,
+    humanFinalReviewAuthorization: _humanFinalReviewAuthorization,
     validationStatus, ...currentFields
   } = initialized;
   const priorV2 = {
@@ -413,9 +454,57 @@ test('v2 loading requires explicit migration and writes an exact versioned backu
   writeFileSync(statePath(cwd, 17), source);
   assert.throws(() => loadState(cwd), { code: 'STATE_MIGRATION_REQUIRED' });
   const migrated = migrateState({ cwd });
-  assert.equal(migrated.state.schemaVersion, 3);
+  assert.equal(migrated.state.schemaVersion, 4);
   assert.equal(readFileSync(migrated.backupPath, 'utf8'), source);
   assert.match(migrated.backupPath, /state\.v2\.backup\.json$/u);
+});
+
+test('v3 loading requires explicit migration and preserves exact source in state.v3.backup.json', () => {
+  const cwd = repo();
+  const initialized = init(cwd);
+  const {
+    humanFinalReviewAuthorization: _authorization,
+    schemaVersion: _schemaVersion,
+    revision: _revision,
+    updatedAt: _updatedAt,
+    ...preserved
+  } = initialized;
+  const priorV3 = {
+    ...preserved,
+    schemaVersion: 3,
+    revision: 7,
+    decisions: [{ id: 'decision-kept', summary: 'Preserve this durable decision byte-for-byte.' }],
+    updatedAt: AT,
+  };
+  const source = `${JSON.stringify(priorV3, null, 2)}\n`;
+  writeFileSync(statePath(cwd, 17), source);
+
+  assert.throws(() => loadState(cwd), { code: 'STATE_MIGRATION_REQUIRED' });
+  const direct = migratePrReviewStateV3(priorV3, { migratedAt: AUTHORIZED_AT });
+  const {
+    humanFinalReviewAuthorization,
+    schemaVersion,
+    revision,
+    updatedAt,
+    ...directPreserved
+  } = direct;
+  const {
+    schemaVersion: _priorSchemaVersion,
+    revision: _priorRevision,
+    updatedAt: _priorUpdatedAt,
+    ...expectedPreserved
+  } = priorV3;
+  assert.deepEqual(directPreserved, expectedPreserved);
+  assert.equal(schemaVersion, 4);
+  assert.equal(revision, 8);
+  assert.equal(updatedAt, AUTHORIZED_AT);
+  assert.equal(humanFinalReviewAuthorization, null);
+
+  const migrated = migrateState({ cwd });
+  assert.match(migrated.backupPath, /state\.v3\.backup\.json$/u);
+  assert.equal(readFileSync(migrated.backupPath, 'utf8'), source);
+  assert.equal(migrated.state.schemaVersion, 4);
+  assert.equal(migrated.state.humanFinalReviewAuthorization, null);
 });
 
 test('v2 migration preserves a pending exact-head review while resetting targeted validation', () => {
@@ -425,6 +514,7 @@ test('v2 migration preserves a pending exact-head review while resetting targete
   const {
     ciValidationStatus: _ciValidationStatus,
     ciValidationHistory: _ciValidationHistory,
+    humanFinalReviewAuthorization: _humanFinalReviewAuthorization,
     validationStatus,
     ...currentFields
   } = requested;
@@ -1108,7 +1198,7 @@ test('explicit migration uses immutable exact backup and handles a near-limit v1
   assert.ok(Buffer.byteLength(readFileSync(statePath(cwd, 17))) < ACTIVE_STATE_LIMIT_BYTES);
 
   writeFileSync(statePath(cwd, 17), legacySource);
-  assert.equal(migrateState({ cwd, integrationMap }).state.schemaVersion, 3);
+  assert.equal(migrateState({ cwd, integrationMap }).state.schemaVersion, 4);
   writeFileSync(statePath(cwd, 17), JSON.stringify({ ...legacy, nextAction: 'different v1 state' }));
   assert.throws(() => migrateState({ cwd, integrationMap }), { code: 'MIGRATION_BACKUP_CONFLICT' });
 });
@@ -1616,6 +1706,144 @@ test('verification is consumed once after three migrated discovery rounds and fi
   const stopped = buildReviewOutcomeTransition(requested, outcome(requested, { outcome: 'findings' }));
   assert.equal(stopped.phase, 'awaiting-human-decision');
   assert.equal(reviewRequestGate({ ...state, verificationReviewUsed: true }, external(cwd, state)).allowed, false);
+});
+
+test('human-final authorization is exact-state-only, immutable, idempotent, and time gated', () => {
+  const cwd = repo();
+  const terminal = terminalVerificationFindingsState(init(cwd));
+  const authorizationInput = {
+    decisionId: 'decision-final', notBefore: NOT_BEFORE,
+    summary: 'One operator-authorized final review after the time bound.',
+    authorizedAt: AUTHORIZED_AT,
+  };
+  const authorized = buildHumanFinalReviewAuthorizationTransition(terminal, authorizationInput);
+  assert.deepEqual(authorized.humanFinalReviewAuthorization, {
+    decisionId: 'decision-final', source: 'operator-instruction', authorizedAt: AUTHORIZED_AT,
+    verificationOutcomeId: terminal.reviewOutcome.id, notBefore: NOT_BEFORE,
+    summary: authorizationInput.summary,
+  });
+  assert.equal(authorized.reviewRound, 3);
+  assert.equal(authorized.verificationReviewUsed, true);
+  assert.deepEqual(authorized.reviewHistory, terminal.reviewHistory);
+  assert.strictEqual(buildHumanFinalReviewAuthorizationTransition(authorized, {
+    ...authorizationInput, authorizedAt: '2026-08-10T14:00:00Z',
+  }), authorized);
+  assert.throws(() => buildHumanFinalReviewAuthorizationTransition(authorized, {
+    ...authorizationInput, summary: 'Conflicting authorization.',
+  }), { code: 'HUMAN_FINAL_AUTHORIZATION_CONFLICT' });
+
+  assert.equal(reviewRequestGate(authorized, external(cwd, authorized, {
+    currentTime: '2026-08-10T12:59:59.999Z',
+  })).allowed, false);
+  const boundaryGate = reviewRequestGate(authorized, external(cwd, authorized, { currentTime: NOT_BEFORE }));
+  assert.deepEqual({ allowed: boundaryGate.allowed, kind: boundaryGate.kind }, {
+    allowed: true, kind: 'human-final',
+  });
+  const requested = buildReviewRequestTransition(
+    authorized,
+    request(authorized, 'human-final-request', 'human-final', { at: NOT_BEFORE }),
+    external(cwd, authorized, { currentTime: NOT_BEFORE }),
+  );
+  assert.equal(requested.reviewHistory.length, 5);
+  assert.deepEqual(requested.reviewHistory.slice(0, 4), terminal.reviewHistory);
+  assert.equal(requested.reviewRound, 3);
+  assert.equal(requested.verificationReviewUsed, true);
+  assert.throws(() => buildReviewRequestTransition(
+    requested,
+    request(requested, 'second-final-request', 'human-final', { at: NOT_BEFORE }),
+    external(cwd, requested, { currentTime: NOT_BEFORE }),
+  ), { code: 'REVIEW_REQUEST_NOT_READY' });
+});
+
+test('human-final authorization rejects ineligible decisions and malformed bounds and ordinary checkpoints cannot rewrite it', () => {
+  const cwd = repo();
+  const terminal = terminalVerificationFindingsState(init(cwd));
+  for (const input of [
+    { decisionId: 'missing', notBefore: NOT_BEFORE, summary: 'Valid summary.', authorizedAt: AUTHORIZED_AT },
+    { decisionId: 'decision-final', notBefore: 'not-a-time', summary: 'Valid summary.', authorizedAt: AUTHORIZED_AT },
+    { decisionId: 'decision-final', notBefore: NOT_BEFORE, summary: ' Valid summary.', authorizedAt: AUTHORIZED_AT },
+    { decisionId: 'decision-final', notBefore: NOT_BEFORE, summary: 'Valid summary.', authorizedAt: 'invalid' },
+  ]) {
+    assert.throws(() => buildHumanFinalReviewAuthorizationTransition(terminal, input), StateError);
+  }
+  assert.throws(() => buildHumanFinalReviewAuthorizationTransition({
+    ...terminal, reviewOutcome: { ...terminal.reviewOutcome, outcome: 'clean' },
+    reviewHistory: terminal.reviewHistory.map((entry, index) => (
+      index === 3 ? { ...entry, outcome: { ...entry.outcome, outcome: 'clean' } } : entry
+    )),
+  }, {
+    decisionId: 'decision-final', notBefore: NOT_BEFORE, summary: 'Valid summary.', authorizedAt: AUTHORIZED_AT,
+  }), { code: 'HUMAN_FINAL_AUTHORIZATION_NOT_ELIGIBLE' });
+
+  writeFileSync(statePath(cwd, terminal.prNumber), `${JSON.stringify(terminal)}\n`);
+  const authorized = checkpointHumanFinalReviewAuthorization({
+    cwd, expectedRevision: terminal.revision, decisionId: 'decision-final',
+    notBefore: NOT_BEFORE, summary: 'Valid summary.', authorizedAt: AUTHORIZED_AT,
+  });
+  const idempotent = checkpointHumanFinalReviewAuthorization({
+    cwd, expectedRevision: authorized.revision, decisionId: 'decision-final',
+    notBefore: NOT_BEFORE, summary: 'Valid summary.', authorizedAt: '2026-08-10T14:00:00Z',
+  });
+  assert.deepEqual(idempotent, authorized);
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: authorized.revision,
+    nextState: { ...authorized, humanFinalReviewAuthorization: null },
+  }), { code: 'IMMUTABLE_STATE_PROVENANCE' });
+});
+
+test('authorize-final-review CLI requires a durable decision ID and optimistic revision', () => {
+  const cwd = repo();
+  const terminal = terminalVerificationFindingsState(init(cwd));
+  writeFileSync(statePath(cwd, terminal.prNumber), `${JSON.stringify(terminal)}\n`);
+  const missingDecision = spawnSync(process.execPath, [
+    STATE_CLI, 'authorize-final-review', '--pr', '17', '--decision-id', 'missing',
+    '--not-before', NOT_BEFORE, '--summary', 'One final review.',
+    '--expected-revision', String(terminal.revision),
+  ], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  assert.equal(missingDecision.status, 1);
+  assert.match(missingDecision.stderr, /existing durable decision/u);
+
+  const accepted = spawnSync(process.execPath, [
+    STATE_CLI, 'authorize-final-review', '--pr', '17', '--decision-id', 'decision-final',
+    '--not-before', NOT_BEFORE, '--summary', 'One final review.',
+    '--expected-revision', String(terminal.revision),
+  ], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  assert.equal(accepted.status, 0, accepted.stderr);
+  const saved = JSON.parse(accepted.stdout);
+  assert.equal(saved.humanFinalReviewAuthorization.decisionId, 'decision-final');
+  assert.equal(saved.humanFinalReviewAuthorization.notBefore, NOT_BEFORE);
+});
+
+test('human-final outcomes are terminal on findings and clean evidence retains exact-head completion gates', () => {
+  const cwd = repo();
+  const terminal = terminalVerificationFindingsState(init(cwd));
+  const authorized = buildHumanFinalReviewAuthorizationTransition(terminal, {
+    decisionId: 'decision-final', notBefore: NOT_BEFORE,
+    summary: 'One operator-authorized final review.', authorizedAt: AUTHORIZED_AT,
+  });
+  const requested = buildReviewRequestTransition(
+    authorized,
+    request(authorized, 'human-final-request', 'human-final', { at: NOT_BEFORE }),
+    external(cwd, authorized, { currentTime: NOT_BEFORE }),
+  );
+  const findings = buildReviewOutcomeTransition(requested, outcome(requested, {
+    id: 'human-final-findings', outcome: 'findings', at: '2026-08-10T13:01:00Z',
+  }));
+  assert.equal(findings.phase, 'awaiting-human-decision');
+  assert.equal(reviewRequestGate(findings, external(cwd, findings, {
+    currentTime: '2026-08-10T14:00:00Z',
+  })).allowed, false);
+
+  const clean = buildReviewOutcomeTransition(requested, outcome(requested, {
+    id: 'human-final-clean', at: '2026-08-10T13:01:00Z',
+  }));
+  assert.equal(clean.phase, 'validating');
+  const withCi = buildCiValidationTransition(clean, ciEvidence(clean, {
+    updatedAt: '2026-08-10T13:02:00Z',
+  }));
+  const completed = buildCompletionTransition(withCi, external(cwd, withCi));
+  assert.equal(completed.phase, 'complete');
+  assert.equal(completed.reviewHistory.length, 5);
 });
 
 test('verification collection escalation is guarded, append-only, request-bound, and terminal', () => {

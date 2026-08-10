@@ -97,3 +97,11 @@ If work stops earlier, checkpoint the exact next action. Recover from saved
 state, Git, structured GitHub data, and CI artifacts—never from a transcript.
 If the same finding returns twice, investigate its root cause. Stop automatic
 review requests at the round limits in the GitHub reference.
+
+One human-only exception exists after exact verification findings: a durable
+operator decision may authorize one `human-final` review with an RFC 3339
+`notBefore` bound. Use the guarded state command, keep the 3+1 counters and
+first four ledger entries unchanged, and let the GitHub helper enforce trusted
+time plus every ordinary review-ready gate. Clean may proceed to Done gates;
+findings, staleness, unsupported, or ambiguous evidence stop terminally for a
+human and never create another automatic round.
