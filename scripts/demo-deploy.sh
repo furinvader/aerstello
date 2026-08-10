@@ -32,7 +32,6 @@ BACKUP_PARTIAL=''
 CREATED_BACKUP_PATH=''
 INIT_ENV_TEMP=''
 STATE_STAGING_DIRECTORY=''
-RESTORE_STATE_STAGING=''
 RESTORE_PENDING_PREVIOUS=''
 RESTORE_TRANSACTION_STAGING=''
 REWRITE_TRANSACTION_STAGING=''
@@ -128,9 +127,6 @@ cleanup() {
     else
       rm -rf -- "$RESTORE_PENDING_PREVIOUS"
     fi
-  fi
-  if [[ -n "$RESTORE_STATE_STAGING" && -d "$RESTORE_STATE_STAGING" ]]; then
-    rm -rf -- "$RESTORE_STATE_STAGING"
   fi
   if [[ -n "$RESTORE_TRANSACTION_STAGING" && -d "$RESTORE_TRANSACTION_STAGING" ]]; then
     rm -rf -- "$RESTORE_TRANSACTION_STAGING"
@@ -247,13 +243,21 @@ resolve_user_path() {
   printf '%s/%s\n' "$(realpath -m -- "$directory")" "$base"
 }
 
+validate_restore_backup_path() {
+  local path="$1"
+  [[ -n "$path" && "$path" != *$'\n'* && "$path" != *$'\r'* ]] ||
+    die '--restore-backup paths must not contain carriage returns or line feeds.'
+}
+
 command -v realpath >/dev/null 2>&1 || die 'realpath is required.'
 ENV_FILE="$(resolve_user_path "${ENV_FILE_ARGUMENT:-$DEFAULT_ENV_FILE}")"
 if [[ -n "$ADMIN_PASSWORD_FILE_ARGUMENT" ]]; then
   ADMIN_PASSWORD_FILE="$(resolve_user_path "$ADMIN_PASSWORD_FILE_ARGUMENT")"
 fi
 if [[ -n "$RESTORE_BACKUP_ARGUMENT" ]]; then
+  validate_restore_backup_path "$RESTORE_BACKUP_ARGUMENT"
   RESTORE_BACKUP="$(resolve_user_path "$RESTORE_BACKUP_ARGUMENT")"
+  validate_restore_backup_path "$RESTORE_BACKUP"
 fi
 
 path_is_inside_repository() {
@@ -956,6 +960,21 @@ validate_restore_archive() {
   local dump_path="$1"
   docker run --rm -i postgres:17-alpine pg_restore --list < "$dump_path" >/dev/null ||
     die 'The restore bundle is not a readable PostgreSQL custom-format dump.'
+}
+
+validate_transaction_restore_archive() {
+  local transaction_directory="$1"
+  local description="$2"
+  local archive_path="$transaction_directory/database.dump"
+  validate_private_file "$archive_path" "$description database archive"
+  local recorded_digest archive_digest
+  recorded_digest="$(< "$transaction_directory/bundle-digest")"
+  [[ "$recorded_digest" =~ ^[0-9a-f]{64}$ ]] ||
+    die "$description bundle digest is invalid."
+  archive_digest="$(sha256sum -- "$archive_path")"
+  archive_digest="${archive_digest%% *}"
+  [[ "$archive_digest" == "$recorded_digest" ]] ||
+    die "$description database archive differs from its recorded bundle digest."
 }
 
 validate_restore_source_compatibility() {
@@ -1912,10 +1931,11 @@ validate_restore_transaction_context() {
   recorded_safety_kind="$(< "$RESTORE_TRANSACTION_DIRECTORY/safety-backup-kind")"
   recorded_safety="$(< "$RESTORE_TRANSACTION_DIRECTORY/safety-backup-path")"
   recorded_safety_identity="$(< "$RESTORE_TRANSACTION_DIRECTORY/safety-backup-identity")"
-  [[ -n "$recorded_bundle" && "$recorded_bundle" != *$'\n'* ]] ||
+  [[ -n "$recorded_bundle" && "$recorded_bundle" != *$'\n'* && "$recorded_bundle" != *$'\r'* ]] ||
     die 'Restore transaction bundle path is invalid.'
   [[ "$recorded_digest" =~ ^[0-9a-f]{64}$ ]] ||
     die 'Restore transaction bundle digest is invalid.'
+  validate_transaction_restore_archive "$RESTORE_TRANSACTION_DIRECTORY" 'Restore transaction'
   [[ "$(< "$RESTORE_TRANSACTION_DIRECTORY/destination-volume")" == "$DB_VOLUME" ]] ||
     die 'Restore transaction destination volume differs from this Compose project.'
   local destination_identity destination_token
@@ -2007,10 +2027,13 @@ validate_completed_restore_retirement() {
     die 'Completed restore transaction retirement has an invalid phase.'
   [[ "$(< "$retirement/generation-name")" =~ ^restore-[A-Za-z0-9._-]+$ ]] ||
     die 'Completed restore transaction retirement has an invalid generation name.'
-  [[ "$(< "$retirement/bundle-path")" != *$'\n'* && -n "$(< "$retirement/bundle-path")" ]] ||
+  [[ "$(< "$retirement/bundle-path")" != *$'\n'* &&
+      "$(< "$retirement/bundle-path")" != *$'\r'* &&
+      -n "$(< "$retirement/bundle-path")" ]] ||
     die 'Completed restore transaction retirement has an invalid bundle path.'
   [[ "$(< "$retirement/bundle-digest")" =~ ^[0-9a-f]{64}$ ]] ||
     die 'Completed restore transaction retirement has an invalid bundle digest.'
+  validate_transaction_restore_archive "$retirement" 'Completed restore transaction retirement'
   [[ "$(< "$retirement/destination-volume")" == "$DB_VOLUME" ]] ||
     die 'Completed restore transaction retirement belongs to a different destination volume.'
   local destination_identity destination_token safety_kind safety_path safety_identity
@@ -2074,12 +2097,28 @@ validate_completed_restore_retirement() {
   for entry in "${entries[@]}"; do
     name="${entry##*/}"
     case "$name" in
-      phase|generation-name|database-state-kind|bundle-path|bundle-digest|database-migrations.txt|\
+      phase|generation-name|database-state-kind|bundle-path|bundle-digest|database.dump|database-migrations.txt|\
       safety-backup-kind|safety-backup-path|safety-backup-identity|destination-volume|\
       destination-volume-identity|destination-volume-restore-token|current|pending|previous-pending) ;;
       *) die "Completed restore transaction retirement contains an unexpected entry: $name" ;;
     esac
   done
+}
+
+validate_completed_restore_retirement_destination() {
+  local retirement="$1"
+  local destination_identity destination_token
+  destination_identity="$(< "$retirement/destination-volume-identity")"
+  destination_token="$(< "$retirement/destination-volume-restore-token")"
+  docker volume inspect "$DB_VOLUME" >/dev/null 2>&1 ||
+    die 'The completed restore destination volume is missing; retirement evidence was retained.'
+  verify_volume_ownership
+  [[ "$OBSERVED_VOLUME_IDENTITY" == "$destination_identity" ]] ||
+    die 'The completed restore destination volume identity changed; retirement evidence was retained.'
+  if [[ "$destination_token" != none ]]; then
+    [[ "$OBSERVED_VOLUME_RESTORE_TOKEN" == "$destination_token" ]] ||
+      die 'The completed restore destination volume creation token changed; retirement evidence was retained.'
+  fi
 }
 
 recover_completed_restore_retirements() {
@@ -2098,6 +2137,7 @@ recover_completed_restore_retirements() {
 
   for retirement in "${retirements[@]}"; do
     validate_completed_restore_retirement "$retirement"
+    validate_completed_restore_retirement_destination "$retirement"
     if [[ -n "$RESTORE_BACKUP" ]]; then
       recorded_bundle="$(< "$retirement/bundle-path")"
       [[ "$recorded_bundle" == "$RESTORE_BACKUP" ]] ||
@@ -2205,6 +2245,8 @@ complete_restore_state_transaction() {
   if [[ "${SKY_BAR_TEST_FAIL_RESTORE_RETIREMENT-}" == after-rename ]]; then
     die 'Injected restore transaction retirement interruption after atomic rename.'
   fi
+  validate_completed_restore_retirement "$retired_transaction"
+  validate_completed_restore_retirement_destination "$retired_transaction"
   rm -rf -- "$retired_transaction"
 }
 
@@ -2348,18 +2390,28 @@ restore_backup_bundle() {
   if [[ "$RESTORE_RECOVERED" == true ]]; then
     return
   fi
+  local resume_restoring=false
+  if [[ -d "$RESTORE_TRANSACTION_DIRECTORY" && ! -L "$RESTORE_TRANSACTION_DIRECTORY" ]]; then
+    resume_restoring=true
+  fi
   if [[ "$DATABASE_EXISTS" == true ]]; then
     verify_volume_ownership
   fi
   validate_private_directory "$RESTORE_BACKUP" 'The restore backup bundle'
 
   local metadata_path="$RESTORE_BACKUP/metadata"
-  local dump_path="$RESTORE_BACKUP/database.dump"
+  local source_dump_path="$RESTORE_BACKUP/database.dump"
+  local dump_path="$source_dump_path"
   local digest_path="$RESTORE_BACKUP/dump.sha256"
   local migrations_path="$RESTORE_BACKUP/database-migrations.txt"
   local bundle_state="$RESTORE_BACKUP/state"
   validate_private_file "$metadata_path" 'The restore bundle metadata'
-  validate_private_file "$dump_path" 'The restore bundle database dump'
+  if [[ "$resume_restoring" == true ]]; then
+    dump_path="$RESTORE_TRANSACTION_DIRECTORY/database.dump"
+    validate_private_file "$dump_path" 'The restore transaction database archive'
+  else
+    validate_private_file "$source_dump_path" 'The restore bundle database dump'
+  fi
   validate_private_file "$digest_path" 'The restore bundle dump digest'
   validate_private_file "$migrations_path" 'The restore bundle database migration list'
   validate_private_directory "$bundle_state" 'The restore bundle state directory'
@@ -2380,7 +2432,11 @@ restore_backup_bundle() {
   local digest_line
   digest_line="$(< "$digest_path")"
   [[ "$digest_line" =~ ^[0-9a-f]{64}'  database.dump'$ ]] || die 'The restore bundle dump digest record is malformed.'
-  (cd -- "$RESTORE_BACKUP" && sha256sum -c --status dump.sha256) ||
+  local dump_digest="${digest_line%%  *}"
+  local observed_dump_digest
+  observed_dump_digest="$(sha256sum -- "$dump_path")"
+  observed_dump_digest="${observed_dump_digest%% *}"
+  [[ "$observed_dump_digest" == "$dump_digest" ]] ||
     die 'The restore bundle database dump failed its digest check and may be tampered.'
 
   local -a bundle_database_migrations=()
@@ -2451,8 +2507,6 @@ restore_backup_bundle() {
     done < "$bundle_current/migrations.sha256"
   fi
 
-  local dump_digest="${digest_line%%  *}"
-  local resume_restoring=false
   if [[ -e "$RESTORE_TRANSACTION_DIRECTORY" || -L "$RESTORE_TRANSACTION_DIRECTORY" ]]; then
     [[ -d "$RESTORE_TRANSACTION_DIRECTORY" && ! -L "$RESTORE_TRANSACTION_DIRECTORY" ]] ||
       die 'Restore transaction state is invalid.'
@@ -2492,31 +2546,38 @@ restore_backup_bundle() {
     recorded_safety_kind="$(< "$RESTORE_TRANSACTION_DIRECTORY/safety-backup-kind")"
     recorded_safety_backup="$(< "$RESTORE_TRANSACTION_DIRECTORY/safety-backup-path")"
     recorded_safety_identity="$(< "$RESTORE_TRANSACTION_DIRECTORY/safety-backup-identity")"
-    resume_restoring=true
   else
-    RESTORE_STATE_STAGING="$(mktemp -d "$STATE_DIRECTORY/.restore.XXXXXX")"
-    chmod 700 -- "$RESTORE_STATE_STAGING"
+    RESTORE_TRANSACTION_STAGING="$(mktemp -d "$STATE_DIRECTORY/.restore.XXXXXX")"
+    chmod 700 -- "$RESTORE_TRANSACTION_STAGING"
+    dump_path="$RESTORE_TRANSACTION_STAGING/database.dump"
+    cp -- "$source_dump_path" "$dump_path"
+    chmod 600 -- "$dump_path"
+    validate_private_file "$dump_path" 'The staged restore transaction database archive'
+    observed_dump_digest="$(sha256sum -- "$dump_path")"
+    observed_dump_digest="${observed_dump_digest%% *}"
+    [[ "$observed_dump_digest" == "$dump_digest" ]] ||
+      die 'The staged restore transaction database archive differs from the authenticated bundle.'
     if [[ -n "$bundle_current" ]]; then
-      mkdir -- "$RESTORE_STATE_STAGING/current"
+      mkdir -- "$RESTORE_TRANSACTION_STAGING/current"
       cp -- "$bundle_current/deployed-sha" "$bundle_current/migrations.sha256" \
-        "$RESTORE_STATE_STAGING/current/"
-      chmod 600 -- "$RESTORE_STATE_STAGING/current/deployed-sha" \
-        "$RESTORE_STATE_STAGING/current/migrations.sha256"
+        "$RESTORE_TRANSACTION_STAGING/current/"
+      chmod 600 -- "$RESTORE_TRANSACTION_STAGING/current/deployed-sha" \
+        "$RESTORE_TRANSACTION_STAGING/current/migrations.sha256"
     fi
     if [[ "$database_state_kind" == pending ]]; then
-      mkdir -- "$RESTORE_STATE_STAGING/pending"
+      mkdir -- "$RESTORE_TRANSACTION_STAGING/pending"
       if [[ "$selected_source_is_current" == true ]]; then
         cp -- "$bundle_pending/deployed-sha" "$bundle_pending/migrations.sha256" \
-          "$RESTORE_STATE_STAGING/pending/"
+          "$RESTORE_TRANSACTION_STAGING/pending/"
       else
-        printf '%s\n' "$DEPLOYED_SHA" > "$RESTORE_STATE_STAGING/pending/deployed-sha"
-        cp -- "$CURRENT_MANIFEST_TEMP" "$RESTORE_STATE_STAGING/pending/migrations.sha256"
+        printf '%s\n' "$DEPLOYED_SHA" > "$RESTORE_TRANSACTION_STAGING/pending/deployed-sha"
+        cp -- "$CURRENT_MANIFEST_TEMP" "$RESTORE_TRANSACTION_STAGING/pending/migrations.sha256"
       fi
-      chmod 600 -- "$RESTORE_STATE_STAGING/pending/deployed-sha" \
-        "$RESTORE_STATE_STAGING/pending/migrations.sha256"
+      chmod 600 -- "$RESTORE_TRANSACTION_STAGING/pending/deployed-sha" \
+        "$RESTORE_TRANSACTION_STAGING/pending/migrations.sha256"
     fi
     printf 'restore-%s-%s\n' "${DEPLOYED_SHA:0:12}" "$(date -u +%Y%m%dT%H%M%SZ)-$$" \
-      > "$RESTORE_STATE_STAGING/generation-name"
+      > "$RESTORE_TRANSACTION_STAGING/generation-name"
   fi
 
   validate_restore_archive "$dump_path"
@@ -2556,28 +2617,31 @@ restore_backup_bundle() {
     fi
   fi
   if [[ "$resume_restoring" == false ]]; then
-    printf '%s\n' "$database_state_kind" > "$RESTORE_STATE_STAGING/database-state-kind"
-    printf '%s\n' "$RESTORE_BACKUP" > "$RESTORE_STATE_STAGING/bundle-path"
-    printf '%s\n' "$dump_digest" > "$RESTORE_STATE_STAGING/bundle-digest"
-    cp -- "$migrations_path" "$RESTORE_STATE_STAGING/database-migrations.txt"
-    printf '%s\n' "$recorded_safety_kind" > "$RESTORE_STATE_STAGING/safety-backup-kind"
-    printf '%s\n' "$recorded_safety_backup" > "$RESTORE_STATE_STAGING/safety-backup-path"
-    printf '%s\n' "$recorded_safety_identity" > "$RESTORE_STATE_STAGING/safety-backup-identity"
-    printf '%s\n' "$DB_VOLUME" > "$RESTORE_STATE_STAGING/destination-volume"
-    printf '%s\n' "$recorded_destination_identity" > "$RESTORE_STATE_STAGING/destination-volume-identity"
-    printf '%s\n' "$recorded_destination_token" > "$RESTORE_STATE_STAGING/destination-volume-restore-token"
-    printf 'restoring\n' > "$RESTORE_STATE_STAGING/phase"
-    chmod 600 -- "$RESTORE_STATE_STAGING/generation-name" \
-      "$RESTORE_STATE_STAGING/database-state-kind" "$RESTORE_STATE_STAGING/bundle-path" \
-      "$RESTORE_STATE_STAGING/bundle-digest" "$RESTORE_STATE_STAGING/database-migrations.txt" \
-      "$RESTORE_STATE_STAGING/safety-backup-kind" "$RESTORE_STATE_STAGING/safety-backup-path" \
-      "$RESTORE_STATE_STAGING/safety-backup-identity" "$RESTORE_STATE_STAGING/destination-volume" \
-      "$RESTORE_STATE_STAGING/destination-volume-identity" \
-      "$RESTORE_STATE_STAGING/destination-volume-restore-token" \
-      "$RESTORE_STATE_STAGING/phase"
-    mv -T -- "$RESTORE_STATE_STAGING" "$RESTORE_TRANSACTION_DIRECTORY"
-    RESTORE_STATE_STAGING=''
+    printf '%s\n' "$database_state_kind" > "$RESTORE_TRANSACTION_STAGING/database-state-kind"
+    printf '%s\n' "$RESTORE_BACKUP" > "$RESTORE_TRANSACTION_STAGING/bundle-path"
+    printf '%s\n' "$dump_digest" > "$RESTORE_TRANSACTION_STAGING/bundle-digest"
+    cp -- "$migrations_path" "$RESTORE_TRANSACTION_STAGING/database-migrations.txt"
+    printf '%s\n' "$recorded_safety_kind" > "$RESTORE_TRANSACTION_STAGING/safety-backup-kind"
+    printf '%s\n' "$recorded_safety_backup" > "$RESTORE_TRANSACTION_STAGING/safety-backup-path"
+    printf '%s\n' "$recorded_safety_identity" > "$RESTORE_TRANSACTION_STAGING/safety-backup-identity"
+    printf '%s\n' "$DB_VOLUME" > "$RESTORE_TRANSACTION_STAGING/destination-volume"
+    printf '%s\n' "$recorded_destination_identity" > "$RESTORE_TRANSACTION_STAGING/destination-volume-identity"
+    printf '%s\n' "$recorded_destination_token" > "$RESTORE_TRANSACTION_STAGING/destination-volume-restore-token"
+    printf 'restoring\n' > "$RESTORE_TRANSACTION_STAGING/phase"
+    chmod 600 -- "$RESTORE_TRANSACTION_STAGING/generation-name" \
+      "$RESTORE_TRANSACTION_STAGING/database-state-kind" "$RESTORE_TRANSACTION_STAGING/bundle-path" \
+      "$RESTORE_TRANSACTION_STAGING/bundle-digest" "$RESTORE_TRANSACTION_STAGING/database-migrations.txt" \
+      "$RESTORE_TRANSACTION_STAGING/safety-backup-kind" "$RESTORE_TRANSACTION_STAGING/safety-backup-path" \
+      "$RESTORE_TRANSACTION_STAGING/safety-backup-identity" "$RESTORE_TRANSACTION_STAGING/destination-volume" \
+      "$RESTORE_TRANSACTION_STAGING/destination-volume-identity" \
+      "$RESTORE_TRANSACTION_STAGING/destination-volume-restore-token" \
+      "$RESTORE_TRANSACTION_STAGING/phase"
+    mv -T -- "$RESTORE_TRANSACTION_STAGING" "$RESTORE_TRANSACTION_DIRECTORY"
+    RESTORE_TRANSACTION_STAGING=''
   fi
+
+  dump_path="$RESTORE_TRANSACTION_DIRECTORY/database.dump"
+  validate_transaction_restore_archive "$RESTORE_TRANSACTION_DIRECTORY" 'Restore transaction'
 
   if [[ "${SKY_BAR_TEST_FAIL_RESTORE-}" == after-transaction ]]; then
     die 'Injected restore interruption after durable transaction publication.'
@@ -2588,6 +2652,7 @@ restore_backup_bundle() {
   start_restore_database
   DATABASE_EXISTS=true
   validate_or_bind_restore_destination
+  validate_transaction_restore_archive "$RESTORE_TRANSACTION_DIRECTORY" 'Restore transaction'
   compose exec -T db psql -U skybar -d postgres -v ON_ERROR_STOP=1 \
     -c 'DROP DATABASE IF EXISTS skybar WITH (FORCE)'
   if [[ "${SKY_BAR_TEST_FAIL_RESTORE-}" == after-drop ]]; then

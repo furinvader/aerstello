@@ -323,9 +323,18 @@ else if ((/\bexec\b/.test(command) || /\brun\b/.test(command)) && /\bpsql\b/.tes
 } else if (/\bpg_dump\b/.test(command)) {
   fs.writeFileSync(process.env.FAKE_COMMAND_LOG + '.pg-dump-complete', '1');
   process.stdout.write('PGDMP fake custom-format backup\n');
+  if (process.env.FAKE_MUTATE_RESTORE_SOURCE_AFTER_PG_DUMP) {
+    fs.appendFileSync(process.env.FAKE_MUTATE_RESTORE_SOURCE_AFTER_PG_DUMP,
+      'mutated while the safety backup was being created\n');
+  }
 } else if (/\bpg_restore\b/.test(command)) {
-  if (!command.includes('--list') && process.env.FAKE_RESTORED_SCHEMA_MIGRATIONS !== undefined) {
-    fs.writeFileSync(process.env.FAKE_COMMAND_LOG + '.restored-migrations', process.env.FAKE_RESTORED_SCHEMA_MIGRATIONS);
+  if (!command.includes('--list')) {
+    const archive = fs.readFileSync(0);
+    fs.writeFileSync(process.env.FAKE_COMMAND_LOG + '.pg-restore-stdin-sha256',
+      crypto.createHash('sha256').update(archive).digest('hex') + '\n');
+    if (process.env.FAKE_RESTORED_SCHEMA_MIGRATIONS !== undefined) {
+      fs.writeFileSync(process.env.FAKE_COMMAND_LOG + '.restored-migrations', process.env.FAKE_RESTORED_SCHEMA_MIGRATIONS);
+    }
   }
   process.stdout.write('; Archive created at 2026-08-08\n');
 }
@@ -382,9 +391,9 @@ function commandEnvironment(fixture, environment = {}) {
   };
 }
 
-function run(fixture, args, environment = {}) {
+function runFromDirectory(fixture, cwd, args, environment = {}) {
   const result = spawnSync('bash', [join(fixture.directory, 'scripts/demo-deploy.sh'), ...args], {
-    cwd: fixture.directory,
+    cwd,
     encoding: 'utf8',
     env: commandEnvironment(fixture, environment),
   });
@@ -393,6 +402,10 @@ function run(fixture, args, environment = {}) {
     ? `command log before silent exit:\n${readFileSync(fixture.commandLog, 'utf8')}`
     : output;
   return { ...result, output: diagnostic };
+}
+
+function run(fixture, args, environment = {}) {
+  return runFromDirectory(fixture, fixture.directory, args, environment);
 }
 
 function startRun(fixture, args, environment = {}) {
@@ -1427,6 +1440,39 @@ test('post-build and publication source verification leave no temporary manifest
   assert.deepEqual(readdirSync(temporaryDirectory), []);
 });
 
+test('restore rejects raw and resolved line-breaking paths before Docker or state mutation', async (t) => {
+  for (const [name, restorePath] of [
+    ['raw LF', `unsafe\nrestore.bundle`],
+    ['raw CR', `unsafe\rrestore.bundle`],
+  ]) {
+    await t.test(name, (st) => {
+      const fixture = makeFixture(st);
+      const rejected = run(fixture, [...commonPersistArgs(fixture),
+        '--restore-backup', restorePath, '--confirm-restore', project]);
+      assert.notEqual(rejected.status, 0);
+      assert.match(rejected.output, /restore-backup paths.*carriage returns.*line feeds/i);
+      assert.deepEqual(commands(fixture), []);
+      assert.equal(existsSync(join(fixture.directory, '.demo-state')), false);
+      assert.equal(existsSync(join(fixture.directory, '.demo-backups')), false);
+    });
+  }
+
+  for (const [name, separator] of [['LF', '\n'], ['CR', '\r']]) {
+    await t.test(`safe relative path from ${name}-containing directory`, (st) => {
+      const fixture = makeFixture(st);
+      const invocationDirectory = join(fixture.directory, `safe-looking${separator}invocation`);
+      mkdirSync(invocationDirectory);
+      const rejected = runFromDirectory(fixture, invocationDirectory, [...commonPersistArgs(fixture),
+        '--restore-backup', 'restore.bundle', '--confirm-restore', project]);
+      assert.notEqual(rejected.status, 0);
+      assert.match(rejected.output, /restore-backup paths.*carriage returns.*line feeds/i);
+      assert.deepEqual(commands(fixture), []);
+      assert.equal(existsSync(join(fixture.directory, '.demo-state')), false);
+      assert.equal(existsSync(join(fixture.directory, '.demo-backups')), false);
+    });
+  }
+});
+
 test('guarded restore rejects tampering before replacement and creates safety backup first', async (t) => {
   await t.test('tampered dump', (st) => {
     const fixture = makeFixture(st);
@@ -1483,6 +1529,34 @@ test('guarded restore rejects tampering before replacement and creates safety ba
       lines.join('\n'));
     assert.equal(backupBundles(fixture).length, 2);
   });
+});
+
+test('guarded restore uses the authenticated transaction archive after source mutation', (t) => {
+  const fixture = makeFixture(t);
+  seedState(fixture);
+  const deployed = run(fixture, commonPersistArgs(fixture), {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_ADMIN_EXISTS: '1',
+  });
+  assert.equal(deployed.status, 0, deployed.output);
+  const [bundle] = backupBundles(fixture);
+  const sourceDump = join(bundle, 'database.dump');
+  const authenticatedDigest = hashFile(sourceDump);
+
+  writeFileSync(fixture.commandLog, '');
+  const restored = run(fixture, [...commonPersistArgs(fixture),
+    '--restore-backup', bundle, '--confirm-restore', project], {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_GIT_SHA: 'f'.repeat(40),
+    FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
+    FAKE_MUTATE_RESTORE_SOURCE_AFTER_PG_DUMP: sourceDump,
+  });
+  assert.equal(restored.status, 0, restored.output);
+  assert.notEqual(hashFile(sourceDump), authenticatedDigest,
+    'the harness must replace the mutable source bytes during safety-backup creation');
+  assert.equal(readFileSync(`${fixture.commandLog}.pg-restore-stdin-sha256`, 'utf8').trim(),
+    authenticatedDigest,
+    'destructive pg_restore must consume the authenticated transaction-owned archive');
 });
 
 test('guarded restore recovers a missing destination without inventing a safety backup', async (t) => {
@@ -1606,6 +1680,18 @@ test('missing-destination binding and retirement recovery stay bound to the requ
   assert.ok(existsSync(secondRetirement));
   assert.deepEqual(stateSnapshot(state), beforeCleanup);
   assertNoRestoreMutation();
+
+  writeFileSync(join(secondRetirement, 'bundle-path'), `${bundle}\n`);
+  writeFileSync(join(secondRetirement, 'destination-volume-identity'),
+    '2026-08-10T00:00:00Z|/var/lib/docker/volumes/recreated/_data\n');
+  writeFileSync(fixture.commandLog, '');
+  const mismatchedDestination = run(fixture, restoreArgs, { FAKE_GIT_SHA: 'f'.repeat(40) });
+  assert.notEqual(mismatchedDestination.status, 0);
+  assert.match(mismatchedDestination.output, /destination volume identity changed.*retirement evidence.*retained/i);
+  assert.ok(existsSync(retirementPath));
+  assert.ok(existsSync(secondRetirement));
+  assert.deepEqual(stateSnapshot(state), beforeCleanup);
+  assertNoRestoreMutation();
   rmSync(secondRetirement, { recursive: true });
 
   for (const requestedBundle of [otherBundle, missingBundle]) {
@@ -1671,6 +1757,58 @@ test('retry rejects unsafe fixed destination identity staging records', async (t
       assert.equal(lines.some((line) => line.includes('stop app caddy')), false);
       assert.equal(lines.some((line) => line.includes('DROP DATABASE')), false);
       assert.equal(lines.some((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list')), false);
+    });
+  }
+});
+
+test('restoring retry rejects missing, replaced, non-private, or modified transaction archives', async (t) => {
+  for (const kind of ['missing', 'symlink', 'non-private', 'modified']) {
+    await t.test(kind, (st) => {
+      const fixture = makeFixture(st);
+      seedState(fixture);
+      const deployed = run(fixture, commonPersistArgs(fixture), {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_ADMIN_EXISTS: '1',
+      });
+      assert.equal(deployed.status, 0, deployed.output);
+      const [bundle] = backupBundles(fixture);
+      const restoreArgs = [...commonPersistArgs(fixture),
+        '--restore-backup', bundle, '--confirm-restore', project];
+      writeFileSync(fixture.commandLog, '');
+      const interrupted = run(fixture, restoreArgs, {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_GIT_SHA: 'f'.repeat(40),
+        SKY_BAR_TEST_FAIL_RESTORE: 'after-transaction',
+      });
+      assert.notEqual(interrupted.status, 0);
+      const transaction = join(fixture.directory, '.demo-state', project, 'restore-transaction');
+      const archive = join(transaction, 'database.dump');
+      assert.equal(statSync(archive).mode & 0o777, 0o600);
+      assert.equal(hashFile(archive), readFileSync(join(transaction, 'bundle-digest'), 'utf8').trim());
+      if (kind === 'missing') {
+        rmSync(archive);
+      } else if (kind === 'symlink') {
+        rmSync(archive);
+        symlinkSync(join(bundle, 'database.dump'), archive);
+      } else if (kind === 'non-private') {
+        chmodSync(archive, 0o644);
+      } else {
+        writeFileSync(archive, Buffer.concat([readFileSync(archive), Buffer.from('modified')]));
+      }
+
+      writeFileSync(fixture.commandLog, '');
+      const rejected = run(fixture, restoreArgs, {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_GIT_SHA: 'f'.repeat(40),
+      });
+      assert.notEqual(rejected.status, 0);
+      assert.match(rejected.output,
+        /restore transaction database archive.*(?:regular|symlink|group|world|digest)/i);
+      assert.ok(existsSync(transaction));
+      const lines = dockerLines(fixture);
+      assert.equal(lines.some((line) => /\b(?:up|stop|run|exec)\b/.test(line)), false, lines.join('\n'));
+      assert.equal(lines.some((line) => /\b(?:pg_dump|pg_restore)\b|DROP DATABASE|CREATE DATABASE/.test(line)),
+        false, lines.join('\n'));
     });
   }
 });
@@ -2309,7 +2447,7 @@ test('interrupted restore publication recovers before ordinary state validation'
   assert.ok(existsSync(join(bundle, 'state', 'pending')), 'fixture must cover bundled pending discard');
 
   const pending = join(state, 'pending');
-  mkdirSync(pending);
+  mkdirSync(pending, { mode: 0o700 });
   writeFileSync(join(pending, 'deployed-sha'), `${gitSha}\n`);
   writeFileSync(join(pending, 'migrations.sha256'),
     `${hashFile(join(fixture.directory, migrationPath))}  ${migrationPath}\n` +
@@ -2409,7 +2547,7 @@ test('current-selected recovery discards bundled and live pending state across p
       const [bundle] = backupBundles(fixture);
       assert.ok(existsSync(join(bundle, 'state', 'pending')));
       const livePending = join(state, 'pending');
-      mkdirSync(livePending);
+      mkdirSync(livePending, { mode: 0o700 });
       writeFileSync(join(livePending, 'deployed-sha'), `${gitSha}\n`);
       writeFileSync(join(livePending, 'migrations.sha256'),
         `${hashFile(join(fixture.directory, migrationPath))}  ${migrationPath}\n`);
@@ -2644,6 +2782,8 @@ test('restoring-phase retry is bound to the original bundle and reuses its safet
   assert.equal(dockerLines(fixture).some((line) => line.includes('pg_dump')), false);
   writeFileSync(safetyDump, originalSafetyDump);
   writeFileSync(safetyDigest, originalSafetyDigest);
+  const transactionArchiveDigest = readFileSync(join(transaction, 'bundle-digest'), 'utf8').trim();
+  rmSync(join(bundle, 'database.dump'));
 
   writeFileSync(fixture.commandLog, '');
   const resumed = run(fixture, restoreArgs, {
@@ -2655,6 +2795,9 @@ test('restoring-phase retry is bound to the original bundle and reuses its safet
   assert.equal(backupBundles(fixture).length, afterSafety);
   assert.equal(dockerLines(fixture).some((line) => line.includes('pg_dump')), false,
     'restoring retry must reuse the completed safety backup');
+  assert.equal(readFileSync(`${fixture.commandLog}.pg-restore-stdin-sha256`, 'utf8').trim(),
+    transactionArchiveDigest,
+    'restoring retry must consume its staged archive after the source dump is removed');
   assert.ok(dockerLines(fixture).some((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list')));
   assert.equal(existsSync(transaction), false);
 });
@@ -2744,6 +2887,112 @@ test('completed restore retirement is crash-recoverable and removes previous pen
   assert.equal(existsSync(join(state, retirement)), false);
   assert.equal(readdirSync(state).some((name) => name.startsWith('.restore-transaction-completed.')), false);
   assert.equal(existsSync(livePending), false);
+});
+
+test('completed restore retirement retains evidence for a missing or recreated destination', async (t) => {
+  for (const replacement of ['missing', 'recreated']) {
+    await t.test(replacement, (st) => {
+      const fixture = makeFixture(st);
+      const state = seedState(fixture);
+      const deployed = run(fixture, commonPersistArgs(fixture), {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_ADMIN_EXISTS: '1',
+      });
+      assert.equal(deployed.status, 0, deployed.output);
+      const [bundle] = backupBundles(fixture);
+      const restoreArgs = [...commonPersistArgs(fixture),
+        '--restore-backup', bundle, '--confirm-restore', project];
+      writeFileSync(fixture.commandLog, '');
+      const interrupted = run(fixture, restoreArgs, {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_GIT_SHA: 'f'.repeat(40),
+        FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
+        SKY_BAR_TEST_FAIL_RESTORE_RETIREMENT: 'after-rename',
+      });
+      assert.notEqual(interrupted.status, 0);
+      const retirement = readdirSync(state)
+        .find((name) => /^\.restore-transaction-completed\.\d+\.\d+$/.test(name));
+      assert.ok(retirement);
+      const retirementPath = join(state, retirement);
+      const before = regularFileTreeText(retirementPath);
+      rmSync(`${fixture.commandLog}.volume-created`, { force: true });
+      writeFileSync(fixture.commandLog, '');
+      const retryEnvironment = replacement === 'missing'
+        ? { FAKE_GIT_SHA: 'f'.repeat(40) }
+        : {
+            FAKE_EXISTING_VOLUMES: dbVolume,
+            FAKE_GIT_SHA: 'f'.repeat(40),
+            FAKE_VOLUME_IDENTITY: '2026-08-10T00:00:00Z|/var/lib/docker/volumes/recreated/_data',
+          };
+      const rejected = run(fixture, restoreArgs, retryEnvironment);
+      assert.notEqual(rejected.status, 0);
+      assert.match(rejected.output, replacement === 'missing'
+        ? /completed restore destination volume is missing.*retirement evidence.*retained/i
+        : /completed restore destination volume identity changed.*retirement evidence.*retained/i);
+      assert.doesNotMatch(rejected.output, /Recovered completed restore transaction retirement/i);
+      assert.ok(existsSync(retirementPath));
+      assert.equal(regularFileTreeText(retirementPath), before);
+      const lines = dockerLines(fixture);
+      assert.equal(lines.some((line) => /\b(?:up|stop|run|exec|down)\b/.test(line)), false, lines.join('\n'));
+      assert.equal(lines.some((line) => /^volume (?:create|rm)\b/.test(line)), false, lines.join('\n'));
+      assert.equal(lines.some((line) => /\b(?:pg_dump|pg_restore)\b|DROP DATABASE|CREATE DATABASE/.test(line)),
+        false, lines.join('\n'));
+    });
+  }
+});
+
+test('completed retirement rejects missing, replaced, non-private, or modified transaction archives', async (t) => {
+  for (const kind of ['missing', 'symlink', 'non-private', 'modified']) {
+    await t.test(kind, (st) => {
+      const fixture = makeFixture(st);
+      const state = seedState(fixture);
+      const deployed = run(fixture, commonPersistArgs(fixture), {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_ADMIN_EXISTS: '1',
+      });
+      assert.equal(deployed.status, 0, deployed.output);
+      const [bundle] = backupBundles(fixture);
+      const restoreArgs = [...commonPersistArgs(fixture),
+        '--restore-backup', bundle, '--confirm-restore', project];
+      writeFileSync(fixture.commandLog, '');
+      const interrupted = run(fixture, restoreArgs, {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_GIT_SHA: 'f'.repeat(40),
+        FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
+        SKY_BAR_TEST_FAIL_RESTORE_RETIREMENT: 'after-rename',
+      });
+      assert.notEqual(interrupted.status, 0);
+      const retirement = readdirSync(state)
+        .find((name) => /^\.restore-transaction-completed\.\d+\.\d+$/.test(name));
+      assert.ok(retirement);
+      const retirementPath = join(state, retirement);
+      const archive = join(retirementPath, 'database.dump');
+      if (kind === 'missing') {
+        rmSync(archive);
+      } else if (kind === 'symlink') {
+        rmSync(archive);
+        symlinkSync(join(bundle, 'database.dump'), archive);
+      } else if (kind === 'non-private') {
+        chmodSync(archive, 0o644);
+      } else {
+        writeFileSync(archive, Buffer.concat([readFileSync(archive), Buffer.from('modified')]));
+      }
+
+      writeFileSync(fixture.commandLog, '');
+      const rejected = run(fixture, restoreArgs, {
+        FAKE_EXISTING_VOLUMES: dbVolume,
+        FAKE_GIT_SHA: 'f'.repeat(40),
+      });
+      assert.notEqual(rejected.status, 0);
+      assert.match(rejected.output,
+        /completed restore transaction retirement database archive.*(?:regular|symlink|group|world|digest)/i);
+      assert.ok(existsSync(retirementPath));
+      const lines = dockerLines(fixture);
+      assert.equal(lines.some((line) => /\b(?:up|stop|run|exec)\b/.test(line)), false, lines.join('\n'));
+      assert.equal(lines.some((line) => /\b(?:pg_dump|pg_restore)\b|DROP DATABASE|CREATE DATABASE/.test(line)),
+        false, lines.join('\n'));
+    });
+  }
 });
 
 test('completed restore retirement recovery rejects matching malformed entries', async (t) => {
