@@ -12,6 +12,7 @@ import {
   buildCompletionTransition,
   buildCiValidationTransition,
   buildHumanFinalReviewAuthorizationTransition,
+  buildPostFinalRemediationAuthorizationTransition,
   buildTargetedValidationPlan,
   buildReviewOutcomeTransition,
   buildReviewRequestTransition,
@@ -20,6 +21,7 @@ import {
   checkpointCiValidation,
   checkpointGitMetadata,
   checkpointHumanFinalReviewAuthorization,
+  checkpointPostFinalRemediationAuthorization,
   checkpointReviewOutcome,
   checkpointReviewRequest,
   checkpointState,
@@ -37,6 +39,7 @@ import {
   migratePrReviewStateV1,
   migratePrReviewStateV2,
   migratePrReviewStateV3,
+  migratePrReviewStateV4,
   migrateState,
   renderRecoverySummary,
   reviewRequestGate,
@@ -48,12 +51,15 @@ import {
   validationPlanPath,
   withStateLock,
 } from '../../scripts/lib/pr-review-state.mjs';
+import { validatePrReviewState } from '../../scripts/lib/contracts.mjs';
 import { commit, createRepository, git } from './git-fixtures.mjs';
 
 const repositories = [];
 const AT = '2026-08-05T00:00:00Z';
 const AUTHORIZED_AT = '2026-08-09T21:30:00Z';
 const NOT_BEFORE = '2026-08-10T13:00:00Z';
+const HUMAN_FINAL_AT = '2026-08-10T13:05:00Z';
+const POST_FINAL_AUTHORIZED_AT = '2026-08-10T13:06:00Z';
 const STATE_CLI = fileURLToPath(new URL('../../scripts/pr-review-state.mjs', import.meta.url));
 
 function repo() {
@@ -205,6 +211,32 @@ function terminalVerificationFindingsState(state) {
   };
 }
 
+function terminalHumanFinalFindingsState(cwd, state = init(cwd)) {
+  const terminal = terminalVerificationFindingsState(state);
+  const withDecision = {
+    ...terminal,
+    decisions: [
+      ...terminal.decisions,
+      {
+        id: 'decision-post-final',
+        summary: 'Authorize remediation-only work after the human-final findings.',
+      },
+    ],
+  };
+  const authorized = buildHumanFinalReviewAuthorizationTransition(withDecision, {
+    decisionId: 'decision-final', notBefore: NOT_BEFORE,
+    summary: 'One operator-authorized final review.', authorizedAt: AUTHORIZED_AT,
+  });
+  const requested = buildReviewRequestTransition(
+    authorized,
+    request(authorized, 'human-final-request', 'human-final', { at: NOT_BEFORE }),
+    external(cwd, authorized, { currentTime: NOT_BEFORE }),
+  );
+  return buildReviewOutcomeTransition(requested, outcome(requested, {
+    id: 'human-final-findings', outcome: 'findings', at: HUMAN_FINAL_AT,
+  }));
+}
+
 function authorizedHumanFinalValidationSetup(cwd, {
   ids = ['task-a', 'task-b'], stateTransform = (state) => state,
 } = {}) {
@@ -220,6 +252,40 @@ function authorizedHumanFinalValidationSetup(cwd, {
   const packets = ids.map((id, index) => taskPacket(initial.currentIntegrationHeadSha, id, {
     affectedAreas: index === 0 ? ['api'] : ['workflow'],
     command: index === 0 ? 'npm run check:api' : 'npm run check:workflow',
+  }));
+  const tasks = packets.map((packet) => task(integrationHead, {
+    id: packet.taskId,
+    status: 'integrated',
+    taskPacketDigest: taskPacketDigest(packet),
+  }));
+  const state = stateTransform({
+    ...authorized,
+    currentIntegrationHeadSha: integrationHead,
+    git: { ...authorized.git, headSha: integrationHead, dirty: false },
+    tasks,
+    validationStatus: initial.validationStatus,
+    threadResolutionStatus: initial.threadResolutionStatus,
+  });
+  writeFileSync(statePath(cwd, state.prNumber), `${JSON.stringify(state)}\n`);
+  return { initial, terminal, authorized, integrationHead, state, packets };
+}
+
+function authorizedPostFinalValidationSetup(cwd, {
+  ids = ['task-post-final'], stateTransform = (state) => state,
+} = {}) {
+  const initial = init(cwd);
+  const terminal = terminalHumanFinalFindingsState(cwd, initial);
+  const authorized = buildPostFinalRemediationAuthorizationTransition(terminal, {
+    decisionId: 'decision-post-final',
+    summary: 'Remediate the one-shot human-final findings without requesting another review.',
+    authorizedAt: POST_FINAL_AUTHORIZED_AT,
+  });
+  const integrationHead = commit(cwd, {
+    'post-final-remediation-integration.txt': 'integrated remediation\n',
+  }, 'integrate post-final remediation');
+  const packets = ids.map((id, index) => taskPacket(initial.currentIntegrationHeadSha, id, {
+    affectedAreas: index === 0 ? ['workflow'] : ['documentation'],
+    command: 'npm run check:workflow',
   }));
   const tasks = packets.map((packet) => task(integrationHead, {
     id: packet.taskId,
@@ -255,6 +321,7 @@ function legacyState(state, overrides = {}) {
     reviewHistory: _reviewHistory,
     verificationEscalation: _verificationEscalation,
     humanFinalReviewAuthorization: _humanFinalReviewAuthorization,
+    postFinalRemediationAuthorization: _postFinalRemediationAuthorization,
     threadResolutionStatus: _threadResolutionStatus,
     ciValidationStatus: _ciValidationStatus,
     ciValidationHistory: _ciValidationHistory,
@@ -279,6 +346,7 @@ function schemaV2State(state) {
     validationStatus,
     threadResolutionStatus,
     humanFinalReviewAuthorization: _humanFinalReviewAuthorization,
+    postFinalRemediationAuthorization: _postFinalRemediationAuthorization,
     ...currentFields
   } = state;
   const { source: _source, scope: _scope, ...legacyValidationStatus } = validationStatus;
@@ -453,11 +521,12 @@ afterEach(() => {
   while (repositories.length > 0) rmSync(repositories.pop(), { recursive: true, force: true });
 });
 
-test('initialization writes the v4 identity and empty durable ledgers', () => {
+test('initialization writes the v5 identity and empty durable ledgers', () => {
   const cwd = repo();
   const state = init(cwd);
-  assert.equal(state.schemaVersion, 4);
+  assert.equal(state.schemaVersion, 5);
   assert.equal(state.humanFinalReviewAuthorization, null);
+  assert.equal(state.postFinalRemediationAuthorization, null);
   assert.equal(state.legacyReviewProvenance, null);
   assert.deepEqual(state.reviewHistory, []);
   assert.deepEqual(state.threadResolutionStatus.threads, []);
@@ -470,6 +539,7 @@ test('v2 loading requires explicit migration and writes an exact versioned backu
   const {
     ciValidationStatus: _ciValidationStatus, ciValidationHistory: _ciValidationHistory,
     humanFinalReviewAuthorization: _humanFinalReviewAuthorization,
+    postFinalRemediationAuthorization: _postFinalRemediationAuthorization,
     validationStatus, ...currentFields
   } = initialized;
   const priorV2 = {
@@ -487,7 +557,7 @@ test('v2 loading requires explicit migration and writes an exact versioned backu
   writeFileSync(statePath(cwd, 17), source);
   assert.throws(() => loadState(cwd), { code: 'STATE_MIGRATION_REQUIRED' });
   const migrated = migrateState({ cwd });
-  assert.equal(migrated.state.schemaVersion, 4);
+  assert.equal(migrated.state.schemaVersion, 5);
   assert.equal(readFileSync(migrated.backupPath, 'utf8'), source);
   assert.match(migrated.backupPath, /state\.v2\.backup\.json$/u);
 });
@@ -497,6 +567,7 @@ test('v3 loading requires explicit migration and preserves exact source in state
   const initialized = init(cwd);
   const {
     humanFinalReviewAuthorization: _authorization,
+    postFinalRemediationAuthorization: _postFinalAuthorization,
     schemaVersion: _schemaVersion,
     revision: _revision,
     updatedAt: _updatedAt,
@@ -516,6 +587,7 @@ test('v3 loading requires explicit migration and preserves exact source in state
   const direct = migratePrReviewStateV3(priorV3, { migratedAt: AUTHORIZED_AT });
   const {
     humanFinalReviewAuthorization,
+    postFinalRemediationAuthorization,
     schemaVersion,
     revision,
     updatedAt,
@@ -528,16 +600,18 @@ test('v3 loading requires explicit migration and preserves exact source in state
     ...expectedPreserved
   } = priorV3;
   assert.deepEqual(directPreserved, expectedPreserved);
-  assert.equal(schemaVersion, 4);
-  assert.equal(revision, 8);
+  assert.equal(schemaVersion, 5);
+  assert.equal(revision, 9);
   assert.equal(updatedAt, AUTHORIZED_AT);
   assert.equal(humanFinalReviewAuthorization, null);
+  assert.equal(postFinalRemediationAuthorization, null);
 
   const migrated = migrateState({ cwd });
   assert.match(migrated.backupPath, /state\.v3\.backup\.json$/u);
   assert.equal(readFileSync(migrated.backupPath, 'utf8'), source);
-  assert.equal(migrated.state.schemaVersion, 4);
+  assert.equal(migrated.state.schemaVersion, 5);
   assert.equal(migrated.state.humanFinalReviewAuthorization, null);
+  assert.equal(migrated.state.postFinalRemediationAuthorization, null);
 });
 
 test('v3 migration retry rejects a semantically equal byte-different backup without mutation', () => {
@@ -545,6 +619,7 @@ test('v3 migration retry rejects a semantically equal byte-different backup with
   const initialized = init(cwd);
   const {
     humanFinalReviewAuthorization: _authorization,
+    postFinalRemediationAuthorization: _postFinalAuthorization,
     schemaVersion: _schemaVersion,
     revision: _revision,
     updatedAt: _updatedAt,
@@ -567,7 +642,7 @@ test('v3 migration retry rejects a semantically equal byte-different backup with
   assert.equal(readFileSync(migrated.backupPath, 'utf8'), firstSource);
 
   writeFileSync(statePath(cwd, 17), firstSource);
-  assert.equal(migrateState({ cwd }).state.schemaVersion, 4);
+  assert.equal(migrateState({ cwd }).state.schemaVersion, 5);
   assert.equal(readFileSync(migrated.backupPath, 'utf8'), firstSource);
 
   writeFileSync(statePath(cwd, 17), retrySource);
@@ -588,6 +663,77 @@ test('v3 migration retry rejects a semantically equal byte-different backup with
   }, durableBefore);
 });
 
+test('v4 migration adds only the v5 authorization slot and requires byte-identical backup retries', () => {
+  const cwd = repo();
+  const initialized = init(cwd);
+  const {
+    postFinalRemediationAuthorization: _postFinalAuthorization,
+    schemaVersion: _schemaVersion,
+    revision: _revision,
+    updatedAt: _updatedAt,
+    ...preserved
+  } = initialized;
+  const priorV4 = {
+    ...preserved,
+    schemaVersion: 4,
+    revision: 11,
+    decisions: [{ id: 'decision-kept', summary: 'Preserve all schema-v4 provenance exactly.' }],
+    updatedAt: AT,
+  };
+  const firstSource = `${JSON.stringify(priorV4, null, 2)}\n`;
+  const byteDifferentSource = `${JSON.stringify(priorV4)}\n`;
+  assert.notEqual(firstSource, byteDifferentSource);
+  assert.deepEqual(JSON.parse(firstSource), JSON.parse(byteDifferentSource));
+
+  const direct = migratePrReviewStateV4(priorV4, { migratedAt: POST_FINAL_AUTHORIZED_AT });
+  const {
+    postFinalRemediationAuthorization,
+    schemaVersion,
+    revision,
+    updatedAt,
+    ...directPreserved
+  } = direct;
+  const {
+    schemaVersion: _priorSchemaVersion,
+    revision: _priorRevision,
+    updatedAt: _priorUpdatedAt,
+    ...expectedPreserved
+  } = priorV4;
+  assert.deepEqual(directPreserved, expectedPreserved);
+  assert.equal(schemaVersion, 5);
+  assert.equal(revision, 12);
+  assert.equal(updatedAt, POST_FINAL_AUTHORIZED_AT);
+  assert.equal(postFinalRemediationAuthorization, null);
+
+  writeFileSync(statePath(cwd, 17), firstSource);
+  assert.throws(() => loadState(cwd), { code: 'STATE_MIGRATION_REQUIRED' });
+  const first = migrateState({ cwd });
+  assert.match(first.backupPath, /state\.v4\.backup\.json$/u);
+  assert.equal(readFileSync(first.backupPath, 'utf8'), firstSource);
+  assert.equal(first.state.schemaVersion, 5);
+  assert.equal(JSON.parse(readFileSync(activePointerPath(cwd), 'utf8')).schemaVersion, 5);
+
+  writeFileSync(statePath(cwd, 17), firstSource);
+  assert.equal(migrateState({ cwd }).state.schemaVersion, 5);
+  assert.equal(readFileSync(first.backupPath, 'utf8'), firstSource);
+
+  writeFileSync(statePath(cwd, 17), byteDifferentSource);
+  const eventPath = join(stateDirectory(cwd, 17), 'events.ndjson');
+  const durableBefore = {
+    state: readFileSync(statePath(cwd, 17), 'utf8'),
+    backup: readFileSync(first.backupPath, 'utf8'),
+    pointer: readFileSync(activePointerPath(cwd), 'utf8'),
+    journal: readFileSync(eventPath, 'utf8'),
+  };
+  assert.throws(() => migrateState({ cwd }), { code: 'MIGRATION_BACKUP_CONFLICT' });
+  assert.deepEqual({
+    state: readFileSync(statePath(cwd, 17), 'utf8'),
+    backup: readFileSync(first.backupPath, 'utf8'),
+    pointer: readFileSync(activePointerPath(cwd), 'utf8'),
+    journal: readFileSync(eventPath, 'utf8'),
+  }, durableBefore);
+});
+
 test('v2 migration preserves a pending exact-head review while resetting targeted validation', () => {
   const cwd = repo();
   const prepared = ready(init(cwd), []);
@@ -596,6 +742,7 @@ test('v2 migration preserves a pending exact-head review while resetting targete
     ciValidationStatus: _ciValidationStatus,
     ciValidationHistory: _ciValidationHistory,
     humanFinalReviewAuthorization: _humanFinalReviewAuthorization,
+    postFinalRemediationAuthorization: _postFinalRemediationAuthorization,
     validationStatus,
     ...currentFields
   } = requested;
@@ -1279,7 +1426,7 @@ test('explicit migration uses immutable exact backup and handles a near-limit v1
   assert.ok(Buffer.byteLength(readFileSync(statePath(cwd, 17))) < ACTIVE_STATE_LIMIT_BYTES);
 
   writeFileSync(statePath(cwd, 17), legacySource);
-  assert.equal(migrateState({ cwd, integrationMap }).state.schemaVersion, 4);
+  assert.equal(migrateState({ cwd, integrationMap }).state.schemaVersion, 5);
   writeFileSync(statePath(cwd, 17), JSON.stringify({ ...legacy, nextAction: 'different v1 state' }));
   assert.throws(() => migrateState({ cwd, integrationMap }), { code: 'MIGRATION_BACKUP_CONFLICT' });
 });
@@ -1925,6 +2072,160 @@ test('human-final outcomes are terminal on findings and clean evidence retains e
   const completed = buildCompletionTransition(withCi, external(cwd, withCi));
   assert.equal(completed.phase, 'complete');
   assert.equal(completed.reviewHistory.length, 5);
+});
+
+test('post-final remediation authorization is exact-ledger-only, immutable, and idempotent', () => {
+  const cwd = repo();
+  const terminal = terminalHumanFinalFindingsState(cwd);
+  const input = {
+    decisionId: 'decision-post-final',
+    summary: 'Remediate the one-shot human-final findings without another review request.',
+    authorizedAt: POST_FINAL_AUTHORIZED_AT,
+  };
+  const authorized = buildPostFinalRemediationAuthorizationTransition(terminal, input);
+  assert.deepEqual(authorized.postFinalRemediationAuthorization, {
+    decisionId: input.decisionId,
+    source: 'operator-instruction',
+    authorizedAt: POST_FINAL_AUTHORIZED_AT,
+    humanFinalOutcomeId: terminal.reviewOutcome.id,
+    summary: input.summary,
+  });
+  assert.deepEqual(authorized.reviewHistory, terminal.reviewHistory);
+  assert.deepEqual(authorized.humanFinalReviewAuthorization, terminal.humanFinalReviewAuthorization);
+  assert.match(authorized.nextAction, /no further review request is permitted/u);
+  assert.equal(completionGate(authorized, external(cwd, authorized)).allowed, false);
+  assert.strictEqual(buildPostFinalRemediationAuthorizationTransition(authorized, {
+    ...input, authorizedAt: '2026-08-10T14:00:00Z',
+  }), authorized);
+  for (const conflict of [
+    { ...input, summary: 'Conflicting authorization.' },
+    { ...input, decisionId: 'decision-final' },
+  ]) {
+    assert.throws(() => buildPostFinalRemediationAuthorizationTransition(authorized, conflict), {
+      code: 'POST_FINAL_REMEDIATION_AUTHORIZATION_CONFLICT',
+    });
+  }
+  assert.throws(() => buildPostFinalRemediationAuthorizationTransition(terminal, {
+    ...input, authorizedAt: '2026-08-10T13:04:59.999Z',
+  }), { code: 'INVALID_POST_FINAL_REMEDIATION_AUTHORIZATION' });
+  assert.throws(() => buildPostFinalRemediationAuthorizationTransition(terminal, {
+    ...input, decisionId: 'missing-decision',
+  }), { code: 'INVALID_POST_FINAL_REMEDIATION_AUTHORIZATION' });
+
+  writeFileSync(statePath(cwd, terminal.prNumber), `${JSON.stringify(terminal)}\n`);
+  const saved = checkpointPostFinalRemediationAuthorization({
+    cwd,
+    expectedRevision: terminal.revision,
+    ...input,
+  });
+  const idempotent = checkpointPostFinalRemediationAuthorization({
+    cwd,
+    expectedRevision: saved.revision,
+    ...input,
+    authorizedAt: '2026-08-10T14:00:00Z',
+  });
+  assert.deepEqual(idempotent, saved);
+  const withCi = checkpointCiValidation({
+    cwd,
+    expectedRevision: saved.revision,
+    evidence: ciEvidence(saved, { updatedAt: '2026-08-10T13:07:00Z' }),
+  });
+  assert.deepEqual(
+    withCi.postFinalRemediationAuthorization,
+    saved.postFinalRemediationAuthorization,
+  );
+  assert.throws(() => checkpointState({
+    cwd,
+    expectedRevision: withCi.revision,
+    nextState: { ...withCi, postFinalRemediationAuthorization: null },
+  }), { code: 'IMMUTABLE_STATE_PROVENANCE' });
+  const recovered = renderRecoverySummary({ cwd });
+  assert.match(recovered, /Post-final remediation authorization: decision-post-final/u);
+});
+
+test('post-final remediation authorization rejects every nonterminal ledger shape and keeps review exhausted', () => {
+  const cwd = repo();
+  const terminal = terminalHumanFinalFindingsState(cwd);
+  const input = {
+    decisionId: 'decision-post-final',
+    summary: 'Remediate the final findings only.',
+    authorizedAt: POST_FINAL_AUTHORIZED_AT,
+  };
+  for (const state of [
+    { ...terminal, phase: 'recovering' },
+    { ...terminal, verificationReviewUsed: false },
+    { ...terminal, humanFinalReviewAuthorization: null },
+    { ...terminal, reviewOutcome: { ...terminal.reviewOutcome, outcome: 'clean' } },
+    { ...terminal, reviewHistory: terminal.reviewHistory.slice(0, 4) },
+    {
+      ...terminal,
+      reviewHistory: terminal.reviewHistory.map((entry, index) => (
+        index === 0 ? { ...entry, outcome: null } : entry
+      )),
+    },
+    {
+      ...terminal,
+      verificationEscalation: {
+        requestId: terminal.reviewRequest.id,
+        requestHeadSha: terminal.reviewRequest.headSha,
+        observedPrHeadSha: terminal.reviewRequest.headSha,
+        headRelation: 'same', evidenceIds: ['review:ambiguous'],
+        reason: 'ambiguous-canonical-evidence', at: HUMAN_FINAL_AT,
+      },
+    },
+  ]) {
+    assert.throws(() => buildPostFinalRemediationAuthorizationTransition(state, input), {
+      code: 'POST_FINAL_REMEDIATION_AUTHORIZATION_NOT_ELIGIBLE',
+    });
+  }
+
+  const authorized = buildPostFinalRemediationAuthorizationTransition(terminal, input);
+  const gate = reviewRequestGate(authorized, external(cwd, authorized, {
+    currentTime: POST_FINAL_AUTHORIZED_AT,
+  }));
+  assert.equal(gate.allowed, false);
+  assert.throws(() => buildReviewRequestTransition(
+    authorized,
+    request(authorized, 'sixth-request', 'human-final', { at: POST_FINAL_AUTHORIZED_AT }),
+    external(cwd, authorized, { currentTime: POST_FINAL_AUTHORIZED_AT }),
+  ), { code: 'REVIEW_REQUEST_NOT_READY' });
+  assert.notDeepEqual(validatePrReviewState({
+    ...authorized,
+    reviewHistory: [...authorized.reviewHistory, {
+      request: request(authorized, 'sixth-request', 'human-final', { at: POST_FINAL_AUTHORIZED_AT }),
+      outcome: null,
+    }],
+  }), []);
+});
+
+test('authorize-post-final-remediation CLI requires durable decision and optimistic revision', () => {
+  const cwd = repo();
+  const terminal = terminalHumanFinalFindingsState(cwd);
+  writeFileSync(statePath(cwd, terminal.prNumber), `${JSON.stringify(terminal)}\n`);
+  const missingRevision = spawnSync(process.execPath, [
+    STATE_CLI, 'authorize-post-final-remediation', '--pr', '17',
+    '--decision-id', 'decision-post-final', '--summary', 'Remediate only the final findings.',
+  ], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  assert.equal(missingRevision.status, 2);
+  assert.match(missingRevision.stderr, /requires --expected-revision/u);
+
+  const missingDecision = spawnSync(process.execPath, [
+    STATE_CLI, 'authorize-post-final-remediation', '--pr', '17',
+    '--decision-id', 'missing', '--summary', 'Remediate only the final findings.',
+    '--expected-revision', String(terminal.revision),
+  ], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  assert.equal(missingDecision.status, 1);
+  assert.match(missingDecision.stderr, /existing durable decision/u);
+
+  const accepted = spawnSync(process.execPath, [
+    STATE_CLI, 'authorize-post-final-remediation', '--pr', '17',
+    '--decision-id', 'decision-post-final', '--summary', 'Remediate only the final findings.',
+    '--expected-revision', String(terminal.revision),
+  ], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  assert.equal(accepted.status, 0, accepted.stderr);
+  const saved = JSON.parse(accepted.stdout);
+  assert.equal(saved.postFinalRemediationAuthorization.decisionId, 'decision-post-final');
+  assert.equal(saved.postFinalRemediationAuthorization.humanFinalOutcomeId, terminal.reviewOutcome.id);
 });
 
 test('verification collection escalation is guarded, append-only, request-bound, and terminal', () => {
@@ -2665,6 +2966,153 @@ test('awaiting-human validation planning rejects every unapproved or noncurrent 
     now: () => AT,
   }), { code: 'VALIDATION_PLAN_PHASE_BLOCKED' });
   assert.equal(existsSync(validationPlanPath(initialCwd, authorized.state.prNumber)), false);
+});
+
+test('authorized post-final remediation runs the exact packet union and remains terminal on pass or failure', () => {
+  const passedCwd = repo();
+  const passedSetup = authorizedPostFinalValidationSetup(passedCwd, {
+    ids: ['task-post-a', 'task-post-b'],
+  });
+  const passedPlan = buildTargetedValidationPlan({
+    cwd: passedCwd, taskPackets: passedSetup.packets, now: () => POST_FINAL_AUTHORIZED_AT,
+  });
+  assert.deepEqual(passedPlan.taskIds, ['task-post-a', 'task-post-b']);
+  assert.deepEqual(passedPlan.commands.map((entry) => entry.command), ['npm run check:workflow']);
+  const passed = executeTargetedValidationPlan({
+    cwd: passedCwd,
+    runCommand: () => ({ status: 0 }),
+    now: () => '2026-08-10T13:07:00Z',
+  });
+  assert.equal(passed.state.phase, 'awaiting-human-decision');
+  assert.equal(passed.state.validationStatus.status, 'passed');
+  assert.deepEqual(
+    passed.state.postFinalRemediationAuthorization,
+    passedSetup.state.postFinalRemediationAuthorization,
+  );
+  assert.match(passed.state.nextAction, /no further review request is permitted/u);
+  assert.equal(reviewRequestGate(passed.state, external(passedCwd, passed.state, {
+    currentTime: '2026-08-10T13:08:00Z',
+  })).allowed, false);
+  const withCi = checkpointCiValidation({
+    cwd: passedCwd,
+    expectedRevision: passed.state.revision,
+    evidence: ciEvidence(passed.state, { updatedAt: '2026-08-10T13:08:00Z' }),
+  });
+  const resolved = checkpointTaskCompletion({
+    cwd: passedCwd,
+    expectedRevision: withCi.revision,
+    verifiedLocalTaskIds: withCi.tasks.map((item) => item.id),
+    threadResolutionStatus: {
+      status: 'passed', headSha: withCi.currentIntegrationHeadSha, threads: [],
+      threadlessVerification: emptyThreadless(), localVerification: emptyLocalVerification(),
+      updatedAt: '2026-08-10T13:09:00Z',
+    },
+  });
+  assert.ok(resolved.tasks.every((item) => item.status === 'completed'));
+  assert.equal(resolved.phase, 'awaiting-human-decision');
+  assert.equal(completionGate(resolved, external(passedCwd, resolved)).allowed, false);
+  assert.deepEqual(
+    resolved.postFinalRemediationAuthorization,
+    passedSetup.state.postFinalRemediationAuthorization,
+  );
+
+  const failedCwd = repo();
+  const failedSetup = authorizedPostFinalValidationSetup(failedCwd);
+  buildTargetedValidationPlan({
+    cwd: failedCwd, taskPackets: failedSetup.packets, now: () => POST_FINAL_AUTHORIZED_AT,
+  });
+  const failed = executeTargetedValidationPlan({
+    cwd: failedCwd,
+    runCommand: () => ({ status: 7 }),
+    now: () => '2026-08-10T13:07:00Z',
+  });
+  assert.equal(failed.state.phase, 'awaiting-human-decision');
+  assert.equal(failed.state.validationStatus.status, 'failed');
+  assert.doesNotMatch(failed.state.nextAction, /request (?:another )?review/iu);
+});
+
+test('post-final remediation validation fails closed without exact authorization and Integrated task state', () => {
+  const cases = [
+    ['missing authorization', (state) => ({ ...state, postFinalRemediationAuthorization: null })],
+    ['blocked reason', (state) => ({ ...state, blockedReasons: ['A blocker remains.'] })],
+    ['needs-human task', (state) => ({
+      ...state,
+      tasks: [...state.tasks, task(state.currentIntegrationHeadSha, {
+        id: 'needs-human', status: 'not-applicable', disposition: 'needs-human-decision',
+      })],
+    })],
+    ['failed task', (state) => ({
+      ...state,
+      tasks: [...state.tasks, task(state.currentIntegrationHeadSha, {
+        id: 'failed-task', status: 'failed', integratedCommitSha: null, resolutionSummary: null,
+      })],
+    })],
+    ['no actionable Integrated task', (state) => ({
+      ...state,
+      tasks: state.tasks.map((item) => ({ ...item, status: 'completed' })),
+    })],
+    ['authorization no longer binds fifth outcome', (state) => ({
+      ...state,
+      postFinalRemediationAuthorization: {
+        ...state.postFinalRemediationAuthorization,
+        humanFinalOutcomeId: 'different-outcome',
+      },
+    })],
+    ['original final authorization no longer binds verification outcome', (state) => ({
+      ...state,
+      humanFinalReviewAuthorization: {
+        ...state.humanFinalReviewAuthorization,
+        verificationOutcomeId: 'different-verification-outcome',
+      },
+    })],
+  ];
+  for (const [label, stateTransform] of cases) {
+    const cwd = repo();
+    const setup = authorizedPostFinalValidationSetup(cwd, { stateTransform });
+    assert.throws(() => buildTargetedValidationPlan({
+      cwd, taskPackets: setup.packets, now: () => POST_FINAL_AUTHORIZED_AT,
+    }), StateError, label);
+    assert.equal(existsSync(validationPlanPath(cwd, setup.state.prNumber)), false, label);
+  }
+
+  const initialCwd = repo();
+  const initialSetup = authorizedPostFinalValidationSetup(initialCwd);
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: initialCwd,
+    initialSelection: initialSelection(initialSetup.state.currentIntegrationHeadSha),
+    now: () => POST_FINAL_AUTHORIZED_AT,
+  }), { code: 'VALIDATION_PLAN_PHASE_BLOCKED' });
+  assert.equal(existsSync(validationPlanPath(initialCwd, initialSetup.state.prNumber)), false);
+});
+
+test('post-final remediation validation requires exact packet coverage and never restores stale proof', () => {
+  const coverageCwd = repo();
+  const coverageSetup = authorizedPostFinalValidationSetup(coverageCwd, {
+    ids: ['task-post-a', 'task-post-b'],
+  });
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: coverageCwd,
+    taskPackets: coverageSetup.packets.slice(0, 1),
+    now: () => POST_FINAL_AUTHORIZED_AT,
+  }), { code: 'VALIDATION_TASK_COVERAGE_MISMATCH' });
+  assert.equal(existsSync(validationPlanPath(coverageCwd, coverageSetup.state.prNumber)), false);
+
+  const staleCwd = repo();
+  const staleSetup = authorizedPostFinalValidationSetup(staleCwd, {
+    stateTransform: (state) => ({
+      ...state,
+      validationStatus: {
+        source: 'orchestrator', scope: 'targeted', status: 'passed',
+        headSha: state.reviewedHeadSha, checks: ['npm run check:workflow'], updatedAt: HUMAN_FINAL_AT,
+      },
+    }),
+  });
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: staleCwd,
+    taskPackets: staleSetup.packets,
+    now: () => POST_FINAL_AUTHORIZED_AT,
+  }), { code: 'VALIDATION_PLAN_REPLACE_REQUIRED' });
+  assert.equal(existsSync(validationPlanPath(staleCwd, staleSetup.state.prNumber)), false);
 });
 
 test('accepted task packet identity is canonical, guarded, persistent, and required by consumers', () => {

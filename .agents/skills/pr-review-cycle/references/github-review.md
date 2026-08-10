@@ -171,7 +171,7 @@ Before the first discovery review in a pristine taskless cycle, run
 exact-head proof only when the fully paginated canonical Codex root set is empty;
 it never marks a threadless remediation task verified and never writes GitHub.
 
-The same read-only empty-root refresh is narrowly available after native-v4
+The same read-only empty-root refresh is narrowly available after native-v5
 taskless clean-review HEAD-drift recovery. First rebuild nonempty targeted
 validation at the current HEAD through the explicit initial-selection route.
 The retained latest clean request and outcome must match each other exactly on
@@ -219,6 +219,18 @@ verification use remains sticky, and the fifth immutable ledger entry consumes
 the exception. Clean evidence enters ordinary validation and Done gates.
 Findings, stale head or request proof, unsupported evidence, and ambiguity are
 terminal `awaiting-human-decision` outcomes; no second final request is allowed.
+
+If the human-final result is findings, a later operator instruction is not
+review permission. Record it separately with
+`authorize-post-final-remediation --decision-id <id> --summary <text>
+--expected-revision <n>`. The guarded authorization must bind the exact fifth
+outcome and may enable remediation-only packet validation. The request gate
+remains exhausted for discovery, verification, and human-final kinds: perform
+no request-intent journal write and no GitHub mutation, and never append a sixth
+ledger entry. Fresh targeted validation, verifier, canonical-thread closure,
+and full CI may make the remediation tasks Resolved. They cannot make the cycle
+Done because Done still requires an applicable clean exact-head Codex outcome;
+there is no second final review exception.
 
 If the same stable finding returns in two consecutive rounds, pause repeated
 patching and investigate the root cause.

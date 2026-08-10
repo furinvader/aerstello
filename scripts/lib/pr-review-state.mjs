@@ -29,6 +29,7 @@ import {
   validatePrReviewState,
   validatePrReviewStateV1,
   validatePrReviewStateV3,
+  validatePrReviewStateV4,
 } from './contracts.mjs';
 
 export { completionGate, reviewRequestGate } from './contracts.mjs';
@@ -83,9 +84,9 @@ function utcNow() {
 
 const RFC3339_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u;
 
-function assertTrustedTimestamp(value, label) {
+function assertTrustedTimestamp(value, label, code = 'INVALID_HUMAN_FINAL_AUTHORIZATION') {
   if (typeof value !== 'string' || !RFC3339_PATTERN.test(value) || !Number.isFinite(Date.parse(value))) {
-    throw new StateError(`${label} must be an RFC 3339 timestamp`, 'INVALID_HUMAN_FINAL_AUTHORIZATION');
+    throw new StateError(`${label} must be an RFC 3339 timestamp`, code);
   }
   return value;
 }
@@ -214,7 +215,7 @@ function isAuthorizedHumanFinalValidationPhase(state, expectedIds) {
   const humanFinalCount = state?.reviewHistory?.filter(
     (entry) => entry.request?.kind === 'human-final',
   ).length;
-  return state?.schemaVersion === 4
+  return state?.schemaVersion === 5
     && state.phase === 'awaiting-human-decision'
     && state.reviewRound === 3
     && state.verificationReviewUsed === true
@@ -244,11 +245,56 @@ function isAuthorizedHumanFinalValidationPhase(state, expectedIds) {
     && sameEvidence(latest.outcome, outcome);
 }
 
+function isAuthorizedPostFinalRemediationValidationPhase(state, expectedIds) {
+  const authorization = state?.postFinalRemediationAuthorization;
+  const humanFinalAuthorization = state?.humanFinalReviewAuthorization;
+  const request = state?.reviewRequest;
+  const outcome = state?.reviewOutcome;
+  const verificationEntry = state?.reviewHistory?.[3];
+  const humanFinalEntry = state?.reviewHistory?.[4];
+  return state?.schemaVersion === 5
+    && state.phase === 'awaiting-human-decision'
+    && state.reviewRound === 3
+    && state.verificationReviewUsed === true
+    && state.reviewHistory?.length === 5
+    && state.reviewHistory.slice(0, 3).every((entry) => (
+      entry.request?.kind === 'discovery'
+      && entry.outcome?.kind === 'discovery'
+      && entry.outcome?.requestId === entry.request?.id
+      && entry.outcome?.headSha === entry.request?.headSha
+    ))
+    && verificationEntry?.request?.kind === 'verification'
+    && verificationEntry?.outcome?.kind === 'verification'
+    && verificationEntry?.outcome?.outcome === 'findings'
+    && verificationEntry?.outcome?.requestId === verificationEntry?.request?.id
+    && verificationEntry?.outcome?.headSha === verificationEntry?.request?.headSha
+    && humanFinalEntry?.request?.kind === 'human-final'
+    && humanFinalEntry?.outcome?.kind === 'human-final'
+    && humanFinalEntry?.outcome?.outcome === 'findings'
+    && humanFinalEntry?.outcome?.requestId === humanFinalEntry?.request?.id
+    && humanFinalEntry?.outcome?.headSha === humanFinalEntry?.request?.headSha
+    && sameEvidence(request, humanFinalEntry?.request)
+    && sameEvidence(outcome, humanFinalEntry?.outcome)
+    && state.requestedHeadSha === request?.headSha
+    && state.reviewedHeadSha === outcome?.headSha
+    && humanFinalAuthorization?.verificationOutcomeId === verificationEntry?.outcome?.id
+    && authorization?.source === 'operator-instruction'
+    && authorization?.humanFinalOutcomeId === humanFinalEntry?.outcome?.id
+    && state.decisions?.some((decision) => decision.id === authorization?.decisionId)
+    && state.verificationEscalation === null
+    && state.blockedReasons?.length === 0
+    && !state.tasks?.some((task) => task.disposition === 'needs-human-decision')
+    && !state.tasks?.some((task) => VALIDATION_PLANNING_EXECUTION_STATUSES.has(task.status))
+    && Array.isArray(expectedIds)
+    && expectedIds.length > 0;
+}
+
 function validationPlanningPhaseAllowed(state, initialSelection) {
   const expectedIds = actionableIntegratedTaskIds(state);
   return VALIDATION_PLANNING_PHASES.has(state.phase)
     || ((initialSelection === undefined || initialSelection === null)
-      && isAuthorizedHumanFinalValidationPhase(state, expectedIds));
+      && (isAuthorizedHumanFinalValidationPhase(state, expectedIds)
+        || isAuthorizedPostFinalRemediationValidationPhase(state, expectedIds)));
 }
 
 function canonicalJson(value) {
@@ -415,7 +461,7 @@ function isNativeTasklessReviewHeadDriftValidationRecovery(state, expectedIds) {
   const outcome = state.reviewOutcome;
   const latest = state.reviewHistory.at(-1);
   const priorHeadSha = request?.headSha;
-  return state.schemaVersion === 4
+  return state.schemaVersion === 5
     && state.legacyReviewProvenance === null
     && state.phase === 'recovering'
     && state.tasks.length === 0 && expectedIds.length === 0
@@ -830,6 +876,16 @@ function parseState(path) {
       'STATE_MIGRATION_REQUIRED',
     );
   }
+  if (state?.schemaVersion === 4) {
+    const legacyErrors = validatePrReviewStateV4(state);
+    if (legacyErrors.length > 0) {
+      throw new StateError(`Invalid state at ${path}:\n- ${legacyErrors.join('\n- ')}`, 'INVALID_STATE');
+    }
+    throw new StateError(
+      `State at ${path} uses schema v4; run the explicit migrate command`,
+      'STATE_MIGRATION_REQUIRED',
+    );
+  }
   const errors = validatePrReviewState(state);
   if (errors.length > 0) throw new StateError(`Invalid state at ${path}:\n- ${errors.join('\n- ')}`, 'INVALID_STATE');
   return state;
@@ -902,7 +958,7 @@ export function initializeState({
     const path = statePath(cwd, selectedPr);
     if (existsSync(path)) throw new StateError(`State already exists for PR ${selectedPr}`, 'STATE_EXISTS');
     const state = {
-      schemaVersion: 4,
+      schemaVersion: 5,
       revision: 0,
       repository: repo,
       prNumber: selectedPr,
@@ -922,6 +978,7 @@ export function initializeState({
       reviewHistory: [],
       verificationEscalation: null,
       humanFinalReviewAuthorization: null,
+      postFinalRemediationAuthorization: null,
       threadResolutionStatus: emptyThreadProof(),
       blockedReasons: [],
       validationStatus: emptyTargetedValidation(),
@@ -936,7 +993,7 @@ export function initializeState({
     };
     validateStateForWrite(state);
     atomicWriteJson(path, state);
-    atomicWriteJson(activePointerPath(cwd), { schemaVersion: 4, prNumber: selectedPr });
+    atomicWriteJson(activePointerPath(cwd), { schemaVersion: 5, prNumber: selectedPr });
     appendEvent(cwd, selectedPr, { type: 'initialized', summary: `Initialized PR ${selectedPr}` });
     return state;
   });
@@ -1042,7 +1099,7 @@ function migratePrReviewStateV2ToV3(legacyState, { migratedAt = utcNow() } = {})
     nextAction: pendingReviewMustBePreserved
       ? 'Collect the pending exact-head review, then reconfirm targeted validation and full GitHub Actions.'
       : wasComplete || validationMustBeRebuilt
-        ? 'Reconfirm targeted validation, full GitHub Actions, and the exact review commit after schema v4 migration.'
+        ? 'Reconfirm targeted validation, full GitHub Actions, and the exact review commit after schema v5 migration.'
       : normalized.nextAction,
     phase: mustRecover ? 'recovering' : normalized.phase,
     updatedAt: migratedAt,
@@ -1082,7 +1139,7 @@ function migratePrReviewStateV2ToV3(legacyState, { migratedAt = utcNow() } = {})
   return migrated;
 }
 
-export function migratePrReviewStateV3(legacyState, { migratedAt = utcNow() } = {}) {
+function migratePrReviewStateV3ToV4(legacyState, { migratedAt = utcNow() } = {}) {
   const legacyErrors = validatePrReviewStateV3(legacyState);
   if (legacyErrors.length > 0) {
     throw new StateError(`Invalid schema v3 state:\n- ${legacyErrors.join('\n- ')}`, 'INVALID_STATE');
@@ -1094,11 +1151,37 @@ export function migratePrReviewStateV3(legacyState, { migratedAt = utcNow() } = 
     humanFinalReviewAuthorization: null,
     updatedAt: migratedAt,
   };
-  const errors = validatePrReviewState(migrated);
+  const errors = validatePrReviewStateV4(migrated);
   if (errors.length > 0) {
     throw new StateError(`Unable to migrate schema v3 state:\n- ${errors.join('\n- ')}`, 'STATE_MIGRATION_FAILED');
   }
   return migrated;
+}
+
+export function migratePrReviewStateV4(legacyState, { migratedAt = utcNow() } = {}) {
+  const legacyErrors = validatePrReviewStateV4(legacyState);
+  if (legacyErrors.length > 0) {
+    throw new StateError(`Invalid schema v4 state:\n- ${legacyErrors.join('\n- ')}`, 'INVALID_STATE');
+  }
+  const migrated = {
+    ...legacyState,
+    schemaVersion: 5,
+    revision: legacyState.revision + 1,
+    postFinalRemediationAuthorization: null,
+    updatedAt: migratedAt,
+  };
+  const errors = validatePrReviewState(migrated);
+  if (errors.length > 0) {
+    throw new StateError(`Unable to migrate schema v4 state:\n- ${errors.join('\n- ')}`, 'STATE_MIGRATION_FAILED');
+  }
+  return migrated;
+}
+
+export function migratePrReviewStateV3(legacyState, { migratedAt = utcNow() } = {}) {
+  return migratePrReviewStateV4(
+    migratePrReviewStateV3ToV4(legacyState, { migratedAt }),
+    { migratedAt },
+  );
 }
 
 export function migratePrReviewStateV2(legacyState, { migratedAt = utcNow() } = {}) {
@@ -1179,7 +1262,7 @@ export function migrateState({ cwd = process.cwd(), prNumber, integrationMap } =
     if (!existsSync(path)) throw new StateError(`No state file at ${path}`, 'STATE_NOT_FOUND');
     const legacySource = readFileSync(path, 'utf8');
     const legacy = readStateDocument(path);
-    if (legacy.schemaVersion === 4) throw new StateError('State already uses schema v4', 'STATE_ALREADY_MIGRATED');
+    if (legacy.schemaVersion === 5) throw new StateError('State already uses schema v5', 'STATE_ALREADY_MIGRATED');
     const state = legacy.schemaVersion === 1
       ? migratePrReviewStateV1(legacy, {
           integrationMap,
@@ -1190,13 +1273,15 @@ export function migrateState({ cwd = process.cwd(), prNumber, integrationMap } =
         })
       : legacy.schemaVersion === 2
         ? migratePrReviewStateV2(legacy)
-        : migratePrReviewStateV3(legacy);
+        : legacy.schemaVersion === 3
+          ? migratePrReviewStateV3(legacy)
+          : migratePrReviewStateV4(legacy);
     validateStateForWrite(state);
     const backupPath = join(stateDirectory(cwd, selectedPr), `state.v${legacy.schemaVersion}.backup.json`);
     if (existsSync(backupPath)) {
       const existingSource = readFileSync(backupPath, 'utf8');
       let semanticallyEqual = false;
-      if (legacy.schemaVersion !== 3) {
+      if (![3, 4].includes(legacy.schemaVersion)) {
         try { semanticallyEqual = JSON.stringify(JSON.parse(existingSource)) === JSON.stringify(legacy); } catch { /* fail closed */ }
       }
       if (existingSource !== legacySource && !semanticallyEqual) {
@@ -1206,10 +1291,10 @@ export function migrateState({ cwd = process.cwd(), prNumber, integrationMap } =
       atomicWriteText(backupPath, legacySource);
     }
     atomicWriteJson(path, state);
-    atomicWriteJson(activePointerPath(cwd), { schemaVersion: 4, prNumber: selectedPr });
+    atomicWriteJson(activePointerPath(cwd), { schemaVersion: 5, prNumber: selectedPr });
     appendEvent(cwd, selectedPr, {
       type: 'state-migrated',
-      summary: `Migrated PR ${selectedPr} state from schema v${legacy.schemaVersion} to v4`,
+      summary: `Migrated PR ${selectedPr} state from schema v${legacy.schemaVersion} to v5`,
     });
     return { state, backupPath };
   });
@@ -1327,11 +1412,18 @@ function assertCheckpointProvenance(current, next, authorization) {
       'humanFinalReviewAuthorization',
     );
   }
+  if (guardedKind !== 'post-final-remediation-authorization') {
+    assertImmutableValue(
+      current.postFinalRemediationAuthorization,
+      next.postFinalRemediationAuthorization,
+      'postFinalRemediationAuthorization',
+    );
+  }
   if (guardedKind === null) {
     for (const field of [
       'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
       'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
-      'humanFinalReviewAuthorization',
+      'humanFinalReviewAuthorization', 'postFinalRemediationAuthorization',
     ]) assertImmutableValue(current[field], next[field], field);
     assertImmutableValue(current.ciValidationStatus, next.ciValidationStatus, 'ciValidationStatus');
     assertImmutableValue(current.ciValidationHistory, next.ciValidationHistory, 'ciValidationHistory');
@@ -1377,11 +1469,24 @@ function assertCheckpointProvenance(current, next, authorization) {
       'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
       'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
     ]) assertImmutableValue(current[field], next[field], field);
-  } else if (guardedKind === 'ci-validation') {
+  } else if (guardedKind === 'post-final-remediation-authorization') {
+    if (current.postFinalRemediationAuthorization !== null
+        || next.postFinalRemediationAuthorization === null) {
+      throw new StateError(
+        'Post-final remediation authorization may be recorded exactly once',
+        'IMMUTABLE_STATE_PROVENANCE',
+      );
+    }
     for (const field of [
       'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
       'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
       'humanFinalReviewAuthorization',
+    ]) assertImmutableValue(current[field], next[field], field);
+  } else if (guardedKind === 'ci-validation') {
+    for (const field of [
+      'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
+      'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
+      'humanFinalReviewAuthorization', 'postFinalRemediationAuthorization',
     ]) assertImmutableValue(current[field], next[field], field);
     const appended = next.ciValidationHistory.length === current.ciValidationHistory.length + 1;
     const restored = next.ciValidationHistory.length === current.ciValidationHistory.length
@@ -1399,7 +1504,7 @@ function assertCheckpointProvenance(current, next, authorization) {
     for (const field of [
       'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
       'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
-      'humanFinalReviewAuthorization',
+      'humanFinalReviewAuthorization', 'postFinalRemediationAuthorization',
     ]) assertImmutableValue(current[field], next[field], field);
     assertImmutableValue(current.ciValidationStatus, next.ciValidationStatus, 'ciValidationStatus');
     assertImmutableValue(current.ciValidationHistory, next.ciValidationHistory, 'ciValidationHistory');
@@ -1408,6 +1513,11 @@ function assertCheckpointProvenance(current, next, authorization) {
       current.humanFinalReviewAuthorization,
       next.humanFinalReviewAuthorization,
       'humanFinalReviewAuthorization',
+    );
+    assertImmutableValue(
+      current.postFinalRemediationAuthorization,
+      next.postFinalRemediationAuthorization,
+      'postFinalRemediationAuthorization',
     );
     assertImmutableValue(current.ciValidationHistory, next.ciValidationHistory, 'ciValidationHistory');
     if (!sameEvidence(current.ciValidationStatus, next.ciValidationStatus)) {
@@ -1420,7 +1530,7 @@ function assertCheckpointProvenance(current, next, authorization) {
     for (const field of [
       'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
       'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
-      'humanFinalReviewAuthorization',
+      'humanFinalReviewAuthorization', 'postFinalRemediationAuthorization',
     ]) assertImmutableValue(current[field], next[field], field);
   }
   if (!['targeted-validation', 'git-metadata'].includes(guardedKind)) {
@@ -1584,7 +1694,7 @@ export function buildHumanFinalReviewAuthorizationTransition(state, {
     throw new StateError('Human-final authorization summary is invalid', 'INVALID_HUMAN_FINAL_AUTHORIZATION');
   }
   const latest = state.reviewHistory.at(-1);
-  if (state.schemaVersion !== 4
+  if (state.schemaVersion !== 5
       || state.phase !== 'awaiting-human-decision'
       || state.reviewRound !== 3
       || state.verificationReviewUsed !== true
@@ -1629,6 +1739,104 @@ export function buildHumanFinalReviewAuthorizationTransition(state, {
     throw new StateError(
       `Invalid human-final authorization transition:\n- ${errors.join('\n- ')}`,
       'INVALID_HUMAN_FINAL_AUTHORIZATION',
+    );
+  }
+  return next;
+}
+
+export function buildPostFinalRemediationAuthorizationTransition(state, {
+  decisionId, summary, authorizedAt = utcNow(),
+} = {}) {
+  if (state.postFinalRemediationAuthorization !== null) {
+    const expected = {
+      ...state.postFinalRemediationAuthorization,
+      decisionId,
+      summary,
+    };
+    if (!sameEvidence(state.postFinalRemediationAuthorization, expected)) {
+      throw new StateError(
+        'Post-final remediation authorization is immutable and conflicts with the requested authorization',
+        'POST_FINAL_REMEDIATION_AUTHORIZATION_CONFLICT',
+      );
+    }
+    return state;
+  }
+  assertTrustedTimestamp(
+    authorizedAt,
+    'Trusted authorization time',
+    'INVALID_POST_FINAL_REMEDIATION_AUTHORIZATION',
+  );
+  if (typeof decisionId !== 'string' || decisionId.length < 1 || decisionId.length > 128
+      || !state.decisions.some((decision) => decision.id === decisionId)) {
+    throw new StateError(
+      'Post-final remediation authorization must bind an existing durable decision ID',
+      'INVALID_POST_FINAL_REMEDIATION_AUTHORIZATION',
+    );
+  }
+  if (typeof summary !== 'string' || summary.length < 1 || summary.length > 1000
+      || summary.trim() !== summary) {
+    throw new StateError(
+      'Post-final remediation authorization summary is invalid',
+      'INVALID_POST_FINAL_REMEDIATION_AUTHORIZATION',
+    );
+  }
+  const verificationEntry = state.reviewHistory[3];
+  const humanFinalEntry = state.reviewHistory[4];
+  if (state.schemaVersion !== 5
+      || state.phase !== 'awaiting-human-decision'
+      || state.reviewRound !== 3
+      || state.verificationReviewUsed !== true
+      || state.reviewHistory.length !== 5
+      || state.reviewHistory.slice(0, 3).some((entry) => (
+        entry.request?.kind !== 'discovery'
+        || entry.outcome?.kind !== 'discovery'
+        || entry.outcome?.requestId !== entry.request?.id
+        || entry.outcome?.headSha !== entry.request?.headSha
+      ))
+      || verificationEntry?.request?.kind !== 'verification'
+      || verificationEntry?.outcome?.kind !== 'verification'
+      || verificationEntry?.outcome?.outcome !== 'findings'
+      || verificationEntry?.outcome?.requestId !== verificationEntry?.request?.id
+      || verificationEntry?.outcome?.headSha !== verificationEntry?.request?.headSha
+      || humanFinalEntry?.request?.kind !== 'human-final'
+      || humanFinalEntry?.outcome?.kind !== 'human-final'
+      || humanFinalEntry?.outcome?.outcome !== 'findings'
+      || humanFinalEntry?.outcome?.requestId !== humanFinalEntry?.request?.id
+      || humanFinalEntry?.outcome?.headSha !== humanFinalEntry?.request?.headSha
+      || !sameEvidence(state.reviewRequest, humanFinalEntry?.request)
+      || !sameEvidence(state.reviewOutcome, humanFinalEntry?.outcome)
+      || state.requestedHeadSha !== humanFinalEntry?.request?.headSha
+      || state.reviewedHeadSha !== humanFinalEntry?.outcome?.headSha
+      || state.humanFinalReviewAuthorization?.verificationOutcomeId !== verificationEntry?.outcome?.id
+      || state.verificationEscalation !== null) {
+    throw new StateError(
+      'Post-final remediation authorization requires the exact terminal 3+1+1 human-final findings state',
+      'POST_FINAL_REMEDIATION_AUTHORIZATION_NOT_ELIGIBLE',
+    );
+  }
+  if (Date.parse(authorizedAt) < Date.parse(humanFinalEntry.outcome.at)) {
+    throw new StateError(
+      'Trusted authorization time cannot predate the human-final outcome',
+      'INVALID_POST_FINAL_REMEDIATION_AUTHORIZATION',
+    );
+  }
+  const authorization = {
+    decisionId,
+    source: 'operator-instruction',
+    authorizedAt,
+    humanFinalOutcomeId: humanFinalEntry.outcome.id,
+    summary,
+  };
+  const next = {
+    ...state,
+    postFinalRemediationAuthorization: authorization,
+    nextAction: 'Integrate only the authorized final findings, then record fresh targeted validation, verifier, thread, and CI evidence; no further review request is permitted.',
+  };
+  const errors = validatePrReviewState(next);
+  if (errors.length > 0) {
+    throw new StateError(
+      `Invalid post-final remediation authorization transition:\n- ${errors.join('\n- ')}`,
+      'INVALID_POST_FINAL_REMEDIATION_AUTHORIZATION',
     );
   }
   return next;
@@ -2045,6 +2253,30 @@ export function checkpointHumanFinalReviewAuthorization({
   });
 }
 
+export function checkpointPostFinalRemediationAuthorization({
+  cwd = process.cwd(), prNumber, decisionId, summary, authorizedAt, expectedRevision, event,
+} = {}) {
+  const current = loadState(cwd, prNumber);
+  if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  const nextState = buildPostFinalRemediationAuthorizationTransition(current, {
+    decisionId,
+    summary,
+    authorizedAt: authorizedAt ?? utcNow(),
+  });
+  if (nextState === current) return current;
+  return checkpointState({
+    cwd,
+    prNumber: current.prNumber,
+    nextState,
+    expectedRevision,
+    event: event ?? {
+      type: 'post-final-remediation-authorized',
+      summary: 'Authorized remediation of the one-shot human-final review findings without another review request',
+    },
+    transitionAuthorization: protectedTransition(nextState, 'post-final-remediation-authorization'),
+  });
+}
+
 export function checkpointReviewRequest({
   cwd = process.cwd(), prNumber, request, pushedHeadSha, prHeadSha, currentTime, expectedRevision, event,
 } = {}) {
@@ -2292,6 +2524,9 @@ export function renderRecoverySummary({ cwd = process.cwd(), prNumber, maxCharac
       : 'none'}`,
     `Human-final authorization: ${state.humanFinalReviewAuthorization
       ? `${state.humanFinalReviewAuthorization.decisionId}; not before ${state.humanFinalReviewAuthorization.notBefore}; verification outcome ${state.humanFinalReviewAuthorization.verificationOutcomeId}`
+      : 'none'}`,
+    `Post-final remediation authorization: ${state.postFinalRemediationAuthorization
+      ? `${state.postFinalRemediationAuthorization.decisionId}; human-final outcome ${state.postFinalRemediationAuthorization.humanFinalOutcomeId}`
       : 'none'}`,
     `Integration HEAD: ${state.currentIntegrationHeadSha}`,
     `Targeted validation plan: ${validationPlanRecoverySummary(cwd, state)}`,

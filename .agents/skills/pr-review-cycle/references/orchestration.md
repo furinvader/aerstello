@@ -118,7 +118,7 @@ reviews, tasks, and inconsistent history remain ineligible, and the applicable
 clean review is not repeated. An ordinary taskless clean review with existing
 passing validation cannot use this mode to replace that proof.
 
-One native schema-v4 exception handles a taskless clean discovery review whose
+One native schema-v5 exception handles a taskless clean discovery review whose
 four review SHAs still agree with each other but differ from the newer current
 integration HEAD. It requires a `recovering` state, exact latest active review
 evidence, zero tasks and actionable Integrated IDs, a clean exact current
@@ -144,9 +144,20 @@ HEAD and checkout must be exact and clean, there must be zero actionable
 Integrated tasks, and no blocked reason, verification escalation, or
 `needs-human-decision` disposition. Use the backup only to authorize a fresh
 explicit plan. Run the selected checks again and record new exact-head proof;
-never adopt the legacy pass or repeat a preserved review. Native schema-v4
+never adopt the legacy pass or repeat a preserved review. Native schema-v5
 cycles and missing, mismatched, modified, or multi-transition migration
 provenance remain ineligible.
+
+After a guarded post-final remediation authorization, normal packet-derived
+planning is narrowly available even though the phase stays
+`awaiting-human-decision`. Require exactly five ledger entries (three discovery,
+one verification findings, then current human-final findings), both immutable
+authorizations bound to their exact outcomes, no escalation or blocker, no
+active, failed, or `needs-human-decision` task, and a nonempty exact set of
+actionable Integrated task packets. Do not accept `--initial-selection`, a
+stale validation result, a dirty or wrong integration HEAD, or an unbound or
+mismatched packet. Passing and failing plans both remain terminal and must not
+suggest or enable another review request.
 
 The packet list must exactly cover the current actionable Integrated tasks. The
 saved plan is tied to the clean integration commit, records each command as it

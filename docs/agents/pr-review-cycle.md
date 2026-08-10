@@ -141,7 +141,7 @@ SHAs. It rejects pending, finding, stale, dirty, or inconsistent states and does
 not infer checks from a missing legacy plan or replace an existing passing proof
 after an ordinary taskless review.
 
-A separate native schema-v4 route recovers a taskless clean discovery review
+A separate native schema-v5 route recovers a taskless clean discovery review
 after the integration HEAD advances. The clean request, outcome, requested, and
 reviewed SHAs must still agree on one prior commit different from the current
 HEAD, and the latest history entry must exactly equal the active evidence. The
@@ -175,13 +175,19 @@ tasks, and no blocked reason, verification escalation, or
 history, outcome, and thread identities must match the backup projection. The
 backup authorizes a fresh explicit plan only: run all selected checks again and
 record new exact-head validation; never reuse the legacy pass or repeat the
-preserved review. Native schema-v4 states and missing, mismatched, tampered, or
+preserved review. Native schema-v5 states and missing, mismatched, tampered, or
 multi-transition provenance are rejected.
 
 Done is stricter. A clean Codex review, full green CI, full E2E, the current PR
 head, the no-open-thread check, and passed exact-current-HEAD coverage for every
 completed local task must all refer to the same Review commit. Review requests
 use that same local-proof gate.
+
+Native active state uses schema v5. The explicit `migrate` command accepts v1
+through v4 and finishes at v5; it never runs during `show` or `recover`. A v4
+migration first preserves the exact source bytes as `state.v4.backup.json`, and
+an existing backup must be byte-identical before any state, pointer, backup, or
+journal mutation may proceed.
 
 The automatic ledger ends after three discovery reviews and one verification
 review. If that verification ends in findings, an operator may explicitly
@@ -192,7 +198,7 @@ node scripts/pr-review-state.mjs authorize-final-review --decision-id decision-1
 node scripts/pr-review-github.mjs request --pr 123 --kind human-final
 ```
 
-Schema v4 stores this authorization once, bound to the exact verification
+Schema v5 stores this authorization once, bound to the exact verification
 findings outcome. It preserves the 3+1 counters and entries, and the GitHub
 helper enforces the trusted time before journaling, after fresh reads, and on
 the request's GitHub timestamp. The human-final request becomes the fifth and
@@ -200,6 +206,25 @@ last ledger entry. A clean result proceeds through the same exact-head local,
 thread, CI, full-E2E, and Done gates. Findings, staleness, unsupported evidence,
 or ambiguity return terminally to human decision and cannot authorize another
 request.
+
+If the human-final outcome is findings and the operator explicitly authorizes
+remediation-only work, record a separate existing durable decision:
+
+```bash
+node scripts/pr-review-state.mjs authorize-post-final-remediation --decision-id decision-456 --summary "Remediate the final findings without another review" --expected-revision 12
+```
+
+The immutable schema-v5 authorization binds trusted process time and the exact
+fifth human-final findings outcome. It does not reset either counter, append a
+review entry, or enable a GitHub request. While the state remains
+`awaiting-human-decision`, only the exact nonempty set of actionable Integrated
+task packets may supply a fresh targeted-validation plan; active or failed
+tasks, blockers, human-decision tasks, stale proof, initial-selection mode,
+dirty or wrong HEADs, and packet mismatches fail closed. Passing or failing
+validation remains terminal and never instructs another review. Fresh
+validation, verifier, thread, and CI evidence may make the tasks Resolved, but
+Done remains impossible without applicable clean exact-head Codex evidence;
+there is no second human-final request.
 
 ## Read the current status
 

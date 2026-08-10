@@ -9,12 +9,13 @@
     "requestedHeadSha", "reviewedHeadSha", "currentIntegrationHeadSha", "reviewRound",
     "verificationReviewUsed", "legacyReviewProvenance", "releaseBaseline", "decisions", "tasks", "reviewRequest",
     "reviewOutcome", "reviewHistory", "verificationEscalation", "humanFinalReviewAuthorization",
+    "postFinalRemediationAuthorization",
     "threadResolutionStatus", "blockedReasons",
     "validationStatus", "ciValidationStatus", "ciValidationHistory", "nextAction", "integrationWorktree", "orchestratorSessionId",
     "abandonmentReason", "git", "updatedAt"
   ],
   "properties": {
-    "schemaVersion": { "const": 4 },
+    "schemaVersion": { "const": 5 },
     "revision": { "type": "integer", "minimum": 0 },
     "repository": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$", "maxLength": 256 },
     "prNumber": { "type": "integer", "minimum": 1 },
@@ -84,6 +85,7 @@
     },
     "verificationEscalation": { "$ref": "#/$defs/nullableVerificationEscalation" },
     "humanFinalReviewAuthorization": { "$ref": "#/$defs/nullableHumanFinalReviewAuthorization" },
+    "postFinalRemediationAuthorization": { "$ref": "#/$defs/nullablePostFinalRemediationAuthorization" },
     "threadResolutionStatus": { "$ref": "#/$defs/threadResolutionStatus" },
     "blockedReasons": { "$ref": "#/$defs/stringList" },
     "validationStatus": { "$ref": "#/$defs/targetedProofStatus" },
@@ -295,6 +297,30 @@
     },
     {
       "if": {
+        "properties": { "postFinalRemediationAuthorization": { "type": "object" } },
+        "required": ["postFinalRemediationAuthorization"]
+      },
+      "then": {
+        "$comment": "The manual validator binds both authorizations to the exact fourth verification-findings and fifth current human-final-findings outcomes, and binds decisionId to an immutable durable decision.",
+        "properties": {
+          "phase": { "const": "awaiting-human-decision" },
+          "reviewRound": { "const": 3 },
+          "verificationReviewUsed": { "const": true },
+          "decisions": { "type": "array", "minItems": 1 },
+          "verificationEscalation": { "type": "null" },
+          "humanFinalReviewAuthorization": { "$ref": "#/$defs/humanFinalReviewAuthorization" },
+          "reviewRequest": {
+            "allOf": [{ "$ref": "#/$defs/reviewRequest" }, { "type": "object", "properties": { "kind": { "const": "human-final" } } }]
+          },
+          "reviewOutcome": {
+            "allOf": [{ "$ref": "#/$defs/reviewOutcome" }, { "type": "object", "properties": { "kind": { "const": "human-final" }, "outcome": { "const": "findings" } } }]
+          },
+          "reviewHistory": { "type": "array", "minItems": 5, "maxItems": 5 }
+        }
+      }
+    },
+    {
+      "if": {
         "properties": {
           "reviewOutcome": {
             "type": "object", "required": ["kind", "outcome"],
@@ -436,6 +462,21 @@
     },
     "nullableHumanFinalReviewAuthorization": {
       "oneOf": [{ "$ref": "#/$defs/humanFinalReviewAuthorization" }, { "type": "null" }]
+    },
+    "postFinalRemediationAuthorization": {
+      "type": "object", "additionalProperties": false,
+      "$comment": "The manual validator binds decisionId to an immutable durable decision and humanFinalOutcomeId to the exact current fifth human-final findings outcome.",
+      "required": ["decisionId", "source", "authorizedAt", "humanFinalOutcomeId", "summary"],
+      "properties": {
+        "decisionId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "source": { "const": "operator-instruction" },
+        "authorizedAt": { "type": "string", "format": "date-time" },
+        "humanFinalOutcomeId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 1000, "pattern": "^\\S(?:[\\s\\S]*\\S)?$" }
+      }
+    },
+    "nullablePostFinalRemediationAuthorization": {
+      "oneOf": [{ "$ref": "#/$defs/postFinalRemediationAuthorization" }, { "type": "null" }]
     },
     "targetedProofStatus": {
       "type": "object", "additionalProperties": false,

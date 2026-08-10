@@ -48,12 +48,14 @@ guesses a PR number. Pass `--repository owner/name` when needed. `checkpoint`
 replaces the complete document and rejects revision drift. Normal archival
 requires Done; earlier archival requires an explicit durable abandonment reason.
 
-State schema v4 upgrades are explicit. Migration from v3 first saves the source
-bytes exactly as `state.v3.backup.json`; apart from revision, migration time,
-schema version, and the new null authorization field, every decision, task,
-GitHub ID, request/outcome ledger entry, proof, SHA, and sticky counter is
-unchanged. V1 and v2 sources retain their existing explicit migration rules and
-also finish at v4. Never let an unrelated read silently migrate state.
+State schema v5 upgrades are explicit. Migration from v4 first saves the source
+bytes exactly as `state.v4.backup.json`; retry accepts only byte-identical source
+bytes. Apart from revision, migration time, schema version, and the new null
+post-final remediation authorization field, every decision, task, GitHub ID,
+request/outcome ledger entry, proof, SHA, and sticky counter is unchanged. V1,
+v2, and v3 sources retain their existing explicit migration and exact-backup
+rules and also finish at v5. Never let `show`, `recover`, or another unrelated
+read silently migrate state.
 
 `authorize-final-review` requires an existing durable decision ID and the exact
 terminal verification-findings state after three discovery requests and one
@@ -62,6 +64,18 @@ verification request. Its guarded null-to-object transition records immutable
 the exact verification outcome ID, and a concise summary. An identical retry is
 state-idempotent; conflicting or ordinary checkpoints cannot create, rewrite,
 or clear it.
+
+`authorize-post-final-remediation` is a separate one-shot authorization after
+the fifth human-final ledger entry ends in findings. It requires native schema
+v5, the exact 3+1+1 terminal ledger, the original authorization still bound to
+the fourth verification outcome, the current request/outcome equal to the fifth
+entry, no escalation, an existing durable decision ID, a concise summary, and
+trusted process time at or after the fifth outcome. Its immutable object stores
+exactly `decisionId`, `source`, `authorizedAt`, `humanFinalOutcomeId`, and
+`summary`. An identical decision-and-summary retry is state-idempotent; every
+conflict and every unrelated transition fails closed or preserves it byte-for-
+byte. This authorization permits remediation and exact packet-derived targeted
+validation, never another review request.
 
 Before delegation, `bind-task-packet` records the canonical SHA-256 identity of
 the complete accepted schema-v2 packet on its actionable task. Object key order
@@ -81,6 +95,15 @@ executes the saved argv directly without a shell, records each attempted command
 atomically, and holds the same PR lock until a guarded transition turns the
 finished plan into targeted validation proof. Recovery output reports plan progress.
 Old or migrated states have no plan and must be validated again before review.
+
+An authorized post-final findings state remains `awaiting-human-decision` but
+may use normal task-packet planning. It requires the authorization to remain
+bound to the exact current fifth findings outcome, a nonempty exact set of
+actionable Integrated tasks, immutable packet bindings, no active or failed
+task, no blocker, no `needs-human-decision` task, and a clean exact integration
+checkout. Initial-selection mode is never available. Passing or failing the
+plan records fresh proof without changing phase or suggesting another review;
+stale validation is never restored.
 For the first discovery review of a pristine taskless cycle, use
 `--initial-selection` with a schema-v1 document containing the exact integration
 HEAD, nonempty affected areas, and nonempty targeted validation. This creates a
@@ -94,7 +117,7 @@ does not reconstruct or trust a missing legacy plan and does not repeat the
 still-applicable review. It cannot replace an existing passing proof after an
 ordinary taskless review.
 
-A native schema-v4 taskless cycle has one separate fail-closed recovery when a
+A native schema-v5 taskless cycle has one separate fail-closed recovery when a
 clean discovery review remains internally consistent but its reviewed commit is
 now one historical SHA behind the integration HEAD. The active state must be
 `recovering`, contain no tasks, retain an exact latest request/outcome/history
@@ -133,6 +156,8 @@ Use `docs/agents/pr-review-state.schema.json` as the machine contract. Preserve:
 - GitHub IDs, URLs, request kind, timestamps, and review outcome evidence;
 - the nullable one-shot human-final authorization and its exact decision,
   verification-outcome, authorization-time, and not-before provenance;
+- the nullable one-shot post-final remediation authorization and its exact
+  decision, human-final-outcome, and authorization-time provenance;
 - release evidence from `scripts/release-state.mjs`;
 - stable decision, finding, and task identities;
 - targeted local validation and full GitHub Actions validation, each tied to an
