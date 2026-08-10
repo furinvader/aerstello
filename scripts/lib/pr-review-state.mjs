@@ -580,6 +580,187 @@ export function assertTaskPacketBound(state, packet) {
   return assertBoundTaskPacket(state, packet);
 }
 
+function properSubset(left, right) {
+  const rightSet = new Set(right);
+  return left.length < right.length && left.every((value) => rightSet.has(value));
+}
+
+function exactSetDifference(left, right) {
+  const rightSet = new Set(right);
+  return left.filter((value) => !rightSet.has(value));
+}
+
+function validationIdentity(kind, entry) {
+  return JSON.stringify(kind === 'unit'
+    ? { kind, command: entry.command }
+    : { kind, command: entry.command, selectors: entry.selectors, projects: entry.projects });
+}
+
+function packetValidationIdentities(packet) {
+  return new Set(['unit', 'system'].flatMap((kind) => (
+    packet.requiredValidation[kind].map((entry) => validationIdentity(kind, entry))
+  )));
+}
+
+function assertTaskSupersessionPacketRelationship({
+  state, originalTask, replacementTask, originalPacket, replacementPacket, decisionId,
+}) {
+  if (originalPacket.taskId === replacementPacket.taskId) {
+    throw new StateError('Task supersession requires two distinct task packets', 'INVALID_TASK_SUPERSESSION');
+  }
+  if (originalPacket.reviewedHeadSha !== replacementPacket.reviewedHeadSha
+      || originalPacket.reviewedHeadSha !== state.reviewedHeadSha) {
+    throw new StateError(
+      'Task supersession packets must share the exact active reviewed HEAD',
+      'INVALID_TASK_SUPERSESSION',
+    );
+  }
+  if (!sameEvidence(originalPacket.affectedAreas, replacementPacket.affectedAreas)
+      || !sameEvidence(originalPacket.dependencies, replacementPacket.dependencies)
+      || originalTask.severity !== replacementTask.severity) {
+    throw new StateError(
+      'Task supersession must preserve affected areas, dependencies, and severity',
+      'INVALID_TASK_SUPERSESSION',
+    );
+  }
+  if (!properSubset(originalTask.sourceIds, replacementTask.sourceIds)) {
+    throw new StateError(
+      'Replacement task sources must be a strict superset of the original local sources',
+      'INVALID_TASK_SUPERSESSION',
+    );
+  }
+  if (!properSubset(originalPacket.decisionIds, replacementPacket.decisionIds)) {
+    throw new StateError(
+      'Replacement packet decisions must be a strict superset of the original decisions',
+      'INVALID_TASK_SUPERSESSION',
+    );
+  }
+  const addedDecisionIds = exactSetDifference(replacementPacket.decisionIds, originalPacket.decisionIds);
+  if (addedDecisionIds.length !== 1 || addedDecisionIds[0] !== decisionId
+      || !state.decisions.some((decision) => decision.id === decisionId)
+      || replacementPacket.decisionIds.some(
+        (packetDecisionId) => !state.decisions.some((decision) => decision.id === packetDecisionId),
+      )) {
+    throw new StateError(
+      'Task supersession decision must be the sole durable replacement-only correction decision',
+      'INVALID_TASK_SUPERSESSION',
+    );
+  }
+
+  if (!properSubset(originalPacket.allowedPaths, replacementPacket.allowedPaths)) {
+    throw new StateError(
+      'Replacement packet ownership must be a strict superset of original ownership',
+      'INVALID_TASK_SUPERSESSION',
+    );
+  }
+  const addedPaths = exactSetDifference(replacementPacket.allowedPaths, originalPacket.allowedPaths);
+  const originalForbidden = new Set(originalPacket.forbiddenPaths);
+  const replacementForbidden = new Set(replacementPacket.forbiddenPaths);
+  if (addedPaths.length === 0 || addedPaths.some((path) => (
+    path.endsWith('/**') || !originalForbidden.has(path) || replacementForbidden.has(path)
+  ))) {
+    throw new StateError(
+      'Replacement ownership may add only exact concrete paths removed from original forbidden paths',
+      'INVALID_TASK_SUPERSESSION',
+    );
+  }
+  const addedPathSet = new Set(addedPaths);
+  if (originalPacket.forbiddenPaths.some((path) => (
+    !addedPathSet.has(path) && !replacementForbidden.has(path)
+  ))) {
+    throw new StateError(
+      'Replacement packet must retain every unrelated original forbidden path',
+      'INVALID_TASK_SUPERSESSION',
+    );
+  }
+
+  const replacementValidation = packetValidationIdentities(replacementPacket);
+  const missingValidation = [...packetValidationIdentities(originalPacket)].some(
+    (identity) => !replacementValidation.has(identity),
+  );
+  if (missingValidation) {
+    throw new StateError(
+      'Replacement packet validation scope must cover every original validation identity',
+      'INVALID_TASK_SUPERSESSION',
+    );
+  }
+}
+
+function assertTaskSupersessionAncestry(state, sha, label) {
+  let ancestry;
+  try {
+    ancestry = runGit(
+      ['merge-base', '--is-ancestor', sha, state.currentIntegrationHeadSha],
+      { cwd: state.integrationWorktree, allowFailure: true },
+    );
+  } catch {
+    throw new StateError(`${label} ancestry could not be verified`, 'TASK_SUPERSESSION_ANCESTRY_MISMATCH');
+  }
+  if (ancestry.status !== 0) {
+    throw new StateError(
+      `${label} is not an ancestor of the current integration HEAD`,
+      'TASK_SUPERSESSION_ANCESTRY_MISMATCH',
+    );
+  }
+}
+
+function readCompletedTaskSupersessionValidationPlan(cwd, state, replacementTaskId) {
+  const path = validationPlanPath(cwd, state.prNumber);
+  if (!existsSync(path)) {
+    throw new StateError(
+      'Task supersession requires the completed saved targeted-validation plan',
+      'TASK_SUPERSESSION_VALIDATION_REQUIRED',
+    );
+  }
+  let plan;
+  try {
+    const source = readFileSync(path, 'utf8');
+    if (Buffer.byteLength(source, 'utf8') > VALIDATION_PLAN_LIMIT_BYTES) {
+      throw new Error('plan exceeds 64 KiB');
+    }
+    plan = JSON.parse(source);
+  } catch (error) {
+    throw new StateError(
+      `Unable to read task-supersession validation plan: ${error.message}`,
+      'TASK_SUPERSESSION_VALIDATION_REQUIRED',
+    );
+  }
+  const planRevision = plan?.stateRevision;
+  const errors = validateValidationPlan(plan, { ...state, revision: planRevision });
+  if (errors.length > 0 || !Number.isInteger(planRevision) || planRevision < 0
+      || planRevision >= state.revision) {
+    throw new StateError(
+      `Invalid task-supersession validation plan${errors.length > 0 ? `:\n- ${errors.join('\n- ')}` : ''}`,
+      'TASK_SUPERSESSION_VALIDATION_REQUIRED',
+    );
+  }
+  if (!plan.taskIds.includes(replacementTaskId)
+      || plan.commands.some((entry) => entry.status !== 'passed' || entry.exitCode !== 0)
+      || state.validationStatus.source !== 'orchestrator'
+      || state.validationStatus.scope !== 'targeted'
+      || state.validationStatus.status !== 'passed'
+      || state.validationStatus.headSha !== state.currentIntegrationHeadSha
+      || state.validationStatus.checks.length === 0
+      || !sameEvidence(state.validationStatus.checks, plan.commands.map((entry) => entry.command))) {
+    throw new StateError(
+      'Task supersession requires exact-current-HEAD passed proof from the completed saved plan covering the replacement',
+      'TASK_SUPERSESSION_VALIDATION_REQUIRED',
+    );
+  }
+  const planTasks = plan.taskIds.map((taskId) => state.tasks.find((task) => task.id === taskId));
+  const currentIntegratedIds = actionableIntegratedTaskIds(state);
+  if (planTasks.some((task) => !task || task.disposition !== 'actionable'
+      || !['integrated', 'completed'].includes(task.status)
+      || typeof task.integratedCommitSha !== 'string')
+      || currentIntegratedIds.some((taskId) => !plan.taskIds.includes(taskId))) {
+    throw new StateError(
+      'Completed task-supersession validation plan does not cover the current actionable integration set',
+      'TASK_SUPERSESSION_VALIDATION_REQUIRED',
+    );
+  }
+  return plan;
+}
+
 function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, initialSelection, replace, now }) {
   const state = loadState(cwd, prNumber);
   if (!state) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
@@ -1325,6 +1506,115 @@ export function appendEvent(cwd, prNumber, input = {}) {
   atomicWriteText(path, `${existing}${JSON.stringify(event)}\n`);
 }
 
+function readTaskSupersessionEvents(cwd, prNumber) {
+  const path = join(stateDirectory(cwd, prNumber), 'events.ndjson');
+  if (!existsSync(path)) return [];
+  let source;
+  try {
+    source = readFileSync(path, 'utf8');
+  } catch (error) {
+    throw new StateError(
+      `Unable to read task-supersession event evidence: ${error.message}`,
+      'TASK_SUPERSESSION_EVENT_INVALID',
+    );
+  }
+  const events = [];
+  for (const [index, line] of source.split('\n').entries()) {
+    if (line.length === 0) continue;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch (error) {
+      throw new StateError(
+        `Unable to parse task-supersession event evidence at line ${index + 1}: ${error.message}`,
+        'TASK_SUPERSESSION_EVENT_INVALID',
+      );
+    }
+    if (event?.type === 'task-superseded') {
+      const detailFields = [
+        'decisionId', 'originalTaskId', 'originalTaskPacketDigest', 'replacementTaskId',
+        'replacementTaskPacketDigest', 'replacementIntegrationCommitSha', 'priorStateRevision',
+      ];
+      const details = event.details;
+      const valid = event.schemaVersion === 1
+        && typeof event.summary === 'string' && event.summary.length >= 1
+        && event.summary.length <= 1000 && event.summary.trim() === event.summary
+        && typeof event.at === 'string' && Number.isFinite(Date.parse(event.at))
+        && details !== null && typeof details === 'object' && !Array.isArray(details)
+        && sameEvidence(Object.keys(details).sort(), [...detailFields].sort())
+        && ['decisionId', 'originalTaskId', 'replacementTaskId'].every(
+          (field) => typeof details[field] === 'string' && details[field].length >= 1
+            && details[field].length <= 128,
+        )
+        && ['originalTaskPacketDigest', 'replacementTaskPacketDigest'].every(
+          (field) => /^[0-9a-f]{64}$/u.test(details[field]),
+        )
+        && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(details.replacementIntegrationCommitSha)
+        && Number.isInteger(details.priorStateRevision) && details.priorStateRevision >= 0;
+      if (!valid) {
+        throw new StateError(
+          `Invalid task-superseded event evidence at line ${index + 1}`,
+          'TASK_SUPERSESSION_EVENT_INVALID',
+        );
+      }
+      events.push(event);
+    }
+  }
+  return events;
+}
+
+function taskSupersessionEventInput({
+  decisionId,
+  originalTaskId,
+  originalTaskPacketDigest,
+  replacementTaskId,
+  replacementTaskPacketDigest,
+  replacementIntegrationCommitSha,
+  priorStateRevision,
+  summary,
+}) {
+  return {
+    type: 'task-superseded',
+    summary,
+    details: {
+      decisionId,
+      originalTaskId,
+      originalTaskPacketDigest,
+      replacementTaskId,
+      replacementTaskPacketDigest,
+      replacementIntegrationCommitSha,
+      priorStateRevision,
+    },
+  };
+}
+
+function assertExactTaskSupersessionRetry(events, expectedEvent) {
+  const byOriginal = events.filter((event) => (
+    event?.details?.originalTaskId === expectedEvent.details.originalTaskId
+  ));
+  if (byOriginal.length === 0) {
+    throw new StateError(
+      'Duplicate task disposition lacks its required durable task-superseded event',
+      'TASK_SUPERSESSION_EVENT_MISSING',
+    );
+  }
+  const related = events.filter((event) => (
+    event?.details?.decisionId === expectedEvent.details.decisionId
+    || event?.details?.originalTaskId === expectedEvent.details.originalTaskId
+    || event?.details?.replacementTaskId === expectedEvent.details.originalTaskId
+    || event?.details?.originalTaskId === expectedEvent.details.replacementTaskId
+    || event?.details?.replacementTaskId === expectedEvent.details.replacementTaskId
+  ));
+  if (byOriginal.length !== 1 || related.length !== 1
+      || byOriginal[0].summary !== expectedEvent.summary
+      || !sameEvidence(byOriginal[0].details, expectedEvent.details)) {
+    throw new StateError(
+      'Durable task-superseded event conflicts with the requested retry',
+      'TASK_SUPERSESSION_EVENT_CONFLICT',
+    );
+  }
+}
+
 function checkpointStateUnlocked({
   cwd, selectedPr, nextState, expectedRevision, event, eventWriter, transitionAuthorization,
 }) {
@@ -1545,6 +1835,7 @@ function assertCheckpointProvenance(current, next, authorization) {
 
   const nextTasks = new Map((next.tasks ?? []).map((task) => [task.id, task]));
   const currentTaskIds = new Set(current.tasks.map((task) => task.id));
+  const supersededTaskIds = [];
   for (const task of next.tasks ?? []) {
     if (!currentTaskIds.has(task.id) && task.status !== 'proposed') {
       throw new StateError(`New task ${task.id} must begin as proposed`, 'IMMUTABLE_STATE_PROVENANCE');
@@ -1556,8 +1847,18 @@ function assertCheckpointProvenance(current, next, authorization) {
   for (const task of current.tasks) {
     const updated = nextTasks.get(task.id);
     if (!updated) throw new StateError(`Task ${task.id} cannot be deleted`, 'IMMUTABLE_STATE_PROVENANCE');
-    for (const field of ['id', 'sourceIds', 'sourceType', 'fingerprint', 'summary', 'severity', 'disposition']) {
+    for (const field of ['id', 'sourceIds', 'sourceType', 'fingerprint', 'summary', 'severity']) {
       assertImmutableValue(task[field], updated[field], `task ${task.id} ${field}`);
+    }
+    if (!sameEvidence(task.disposition, updated.disposition)) {
+      if (guardedKind !== 'task-supersession'
+          || task.disposition !== 'actionable'
+          || updated.disposition !== 'duplicate'
+          || task.status !== 'not-applicable'
+          || updated.status !== 'not-applicable') {
+        throw new StateError(`task ${task.id} disposition is append-only provenance`, 'IMMUTABLE_STATE_PROVENANCE');
+      }
+      supersededTaskIds.push(task.id);
     }
     if (task.taskPacketDigest) {
       assertImmutableValue(task.taskPacketDigest, updated.taskPacketDigest, `task ${task.id} taskPacketDigest`);
@@ -1574,6 +1875,12 @@ function assertCheckpointProvenance(current, next, authorization) {
     if (task.status !== 'completed' && updated.status === 'completed' && guardedKind !== 'task-completion') {
       throw new StateError(`Task ${task.id} completion requires guarded proof`, 'PROTECTED_TRANSITION_REQUIRED');
     }
+  }
+  if (guardedKind === 'task-supersession' && supersededTaskIds.length !== 1) {
+    throw new StateError(
+      'Guarded task supersession must change exactly one actionable disposition to duplicate',
+      'INVALID_TASK_SUPERSESSION',
+    );
   }
 
   const nextDecisions = new Map((next.decisions ?? []).map((decision) => [decision.id, decision]));
@@ -2225,6 +2532,155 @@ export function checkpointTaskPacketBinding({
     cwd, prNumber: current.prNumber, nextState, expectedRevision,
     event: event ?? { type: 'task-packet-bound', summary: `Bound accepted packet for task ${packet.taskId}` },
     transitionAuthorization: protectedTransition(nextState, 'task-packet-binding'),
+  });
+}
+
+export function checkpointTaskSupersession({
+  cwd = process.cwd(),
+  prNumber,
+  taskPacket,
+  replacementTaskPacket,
+  decisionId,
+  summary,
+  expectedRevision,
+  eventWriter = appendEvent,
+} = {}) {
+  const selectedPr = prNumber ?? activePrNumber(cwd);
+  if (selectedPr === null || selectedPr === undefined) {
+    throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  }
+  if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
+    throw new StateError(
+      'Task supersession requires a non-negative expected state revision',
+      'INVALID_TASK_SUPERSESSION',
+    );
+  }
+  if (typeof decisionId !== 'string' || decisionId.length < 1 || decisionId.length > 128
+      || typeof summary !== 'string' || summary.length < 1 || summary.length > 1000
+      || summary.trim() !== summary) {
+    throw new StateError(
+      'Task supersession requires a durable decision ID and trimmed concise summary',
+      'INVALID_TASK_SUPERSESSION',
+    );
+  }
+  const originalDigest = taskPacketDigest(taskPacket);
+  const replacementDigest = taskPacketDigest(replacementTaskPacket);
+  return withStateLock(cwd, selectedPr, () => {
+    const state = loadState(cwd, selectedPr);
+    if (!state) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+    const originalTask = state.tasks.find((task) => task.id === taskPacket.taskId);
+    const replacementTask = state.tasks.find((task) => task.id === replacementTaskPacket.taskId);
+    if (!originalTask || !replacementTask
+        || originalTask.taskPacketDigest !== originalDigest
+        || replacementTask.taskPacketDigest !== replacementDigest) {
+      throw new StateError(
+        'Both task packets must match their exact durable packet bindings',
+        'TASK_PACKET_NOT_BOUND',
+      );
+    }
+    assertTaskPacketHead(state, originalTask, taskPacket, originalDigest);
+    assertTaskPacketHead(state, replacementTask, replacementTaskPacket, replacementDigest);
+    if (originalDigest === replacementDigest
+        || originalTask.sourceType !== 'local'
+        || replacementTask.sourceType !== 'local'
+        || !['actionable', 'duplicate'].includes(originalTask.disposition)
+        || originalTask.status !== 'not-applicable'
+        || originalTask.integratedCommitSha !== null
+        || Object.hasOwn(originalTask, 'execution')
+        || typeof originalTask.resolutionSummary !== 'string'
+        || originalTask.resolutionSummary.length === 0
+        || replacementTask.disposition !== 'actionable'
+        || !['integrated', 'completed'].includes(replacementTask.status)
+        || typeof replacementTask.integratedCommitSha !== 'string') {
+      throw new StateError(
+        'Task supersession requires one stopped local task and one distinct actionable integrated replacement',
+        'INVALID_TASK_SUPERSESSION',
+      );
+    }
+    assertTaskSupersessionPacketRelationship({
+      state,
+      originalTask,
+      replacementTask,
+      originalPacket: taskPacket,
+      replacementPacket: replacementTaskPacket,
+      decisionId,
+    });
+
+    const expectedEvent = taskSupersessionEventInput({
+      decisionId,
+      originalTaskId: originalTask.id,
+      originalTaskPacketDigest: originalDigest,
+      replacementTaskId: replacementTask.id,
+      replacementTaskPacketDigest: replacementDigest,
+      replacementIntegrationCommitSha: replacementTask.integratedCommitSha,
+      priorStateRevision: expectedRevision,
+      summary,
+    });
+    const supersessionEvents = readTaskSupersessionEvents(cwd, state.prNumber);
+    if (originalTask.disposition === 'duplicate') {
+      assertExactTaskSupersessionRetry(supersessionEvents, expectedEvent);
+      return state;
+    }
+    if (expectedRevision !== state.revision) {
+      throw new StateError(
+        `State revision changed: expected ${expectedRevision}, found ${state.revision}`,
+        'STATE_REVISION_CONFLICT',
+      );
+    }
+    const relatedEvent = supersessionEvents.some((event) => (
+      event.details.decisionId === decisionId
+      || event.details.originalTaskId === originalTask.id
+      || event.details.replacementTaskId === originalTask.id
+      || event.details.originalTaskId === replacementTask.id
+      || event.details.replacementTaskId === replacementTask.id
+    ));
+    if (relatedEvent) {
+      throw new StateError(
+        'Task or decision already participates in a durable supersession chain',
+        'TASK_SUPERSESSION_CHAINED',
+      );
+    }
+    const integratedIds = actionableIntegratedTaskIds(state);
+    if (!isAuthorizedPostFinalRemediationValidationPhase(state, integratedIds)) {
+      throw new StateError(
+        'Task supersession requires the exact authorized terminal post-final remediation state',
+        'TASK_SUPERSESSION_NOT_ELIGIBLE',
+      );
+    }
+    if (state.git.headSha !== state.currentIntegrationHeadSha || state.git.dirty !== false) {
+      throw new StateError(
+        'Recorded integration metadata is stale or dirty',
+        'TASK_SUPERSESSION_CHECKOUT_STALE',
+      );
+    }
+    assertCleanExactIntegrationHead(state);
+    assertTaskSupersessionAncestry(state, taskPacket.reviewedHeadSha, 'Reviewed task-packet HEAD');
+    assertTaskSupersessionAncestry(
+      state,
+      replacementTask.integratedCommitSha,
+      `Replacement task ${replacementTask.id} integration commit`,
+    );
+    const plan = readCompletedTaskSupersessionValidationPlan(cwd, state, replacementTask.id);
+    for (const taskId of plan.taskIds) {
+      const task = state.tasks.find((candidate) => candidate.id === taskId);
+      assertTaskSupersessionAncestry(state, task.integratedCommitSha, `Validated task ${taskId} integration commit`);
+    }
+
+    const nextState = {
+      ...state,
+      tasks: state.tasks.map((task) => task.id === originalTask.id
+        ? { ...task, disposition: 'duplicate' }
+        : task),
+    };
+    return checkpointStateUnlocked({
+      cwd,
+      selectedPr: state.prNumber,
+      nextState,
+      expectedRevision,
+      event: expectedEvent,
+      eventWriter,
+      transitionAuthorization: protectedTransition(nextState, 'task-supersession'),
+    });
   });
 }
 

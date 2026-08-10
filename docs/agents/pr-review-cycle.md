@@ -49,6 +49,29 @@ Use $pr-review-cycle to continue the current PR remediation session.
 The machine state still uses task status `completed` for Resolved and cycle
 phase `complete` for Done. These are storage names, not extra workflow stages.
 
+If a fixed worker discovers that one required concrete path was explicitly
+forbidden, it stops without inventing a commit or widening its task. The main
+agent binds a distinct replacement packet with that narrowly corrected path and
+runs the full current packet validation union after integration. In the terminal
+post-final workflow, it can then record the relationship with:
+
+```bash
+node scripts/pr-review-state.mjs supersede-task --task-packet /tmp/stopped.json --replacement-task-packet /tmp/replacement.json --decision-id decision-scope-correction --summary "Replace the stopped packet with its bound replacement" --expected-revision 8
+```
+
+This is a provenance correction, not a general escape hatch. Both packet IDs are
+derived from the files; no caller chooses a disposition. The command accepts
+only the same reviewed finding scope with strict source and decision provenance,
+the original validation identities, and concrete ownership additions that were
+explicitly forbidden before. It also requires the exact authorized 3+1+1
+findings ledger, clean current Git ancestry, and a completed passed saved plan.
+It changes only the stopped task from `actionable` to `duplicate` and records one
+atomic event; missing, conflicting, or chained evidence fails closed.
+Task classification comes from `sourceType`, so a local task may retain shared
+opaque `review:` source IDs. An exact retry after an uncertain response must
+replay the original pre-transition `--expected-revision`; using the current
+post-transition revision is a conflicting new command and fails closed.
+
 ## Review-ready and Done
 
 Review-ready is the handoff from targeted local work to Codex and CI. It means:
@@ -99,6 +122,10 @@ ID while retaining prior exact-HEAD proof. GitHub-thread tasks remain on
 separate persisted verifier-artifact schema is implied. `--task` is always one
 opaque task ID for either command and is preserved byte-for-byte; commas,
 whitespace, quotes, and backslashes have no separator or escape meaning.
+
+For a guarded supersession, verify the stopped `duplicate` local task separately.
+That proof does not complete its actionable replacement or the supersession
+guard; each still requires its own ordinary exact-current-HEAD verifier proof.
 
 Local assertions are also persisted as `localVerification` task-ID coverage for
 the exact current integration HEAD. If HEAD advances, the old proof remains

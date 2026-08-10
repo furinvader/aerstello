@@ -29,6 +29,7 @@ node scripts/pr-review-state.mjs init --pr 123 --base origin/main --head HEAD
 node scripts/pr-review-state.mjs path
 node scripts/pr-review-state.mjs validate
 node scripts/pr-review-state.mjs bind-task-packet --task-packet /tmp/task.json --expected-revision 4
+node scripts/pr-review-state.mjs supersede-task --task-packet /tmp/stopped.json --replacement-task-packet /tmp/replacement.json --decision-id decision-scope-correction --summary "Replace the stopped packet with its bound replacement" --expected-revision 8
 node scripts/pr-review-state.mjs validate-result --task-packet /tmp/task.json --worker-result /tmp/result.json
 node scripts/pr-review-state.mjs validation-plan --initial-selection /tmp/initial-validation.json
 node scripts/pr-review-state.mjs validation-plan /tmp/task-a.json /tmp/task-b.json
@@ -84,6 +85,35 @@ guarded, immutable, and retained after execution metadata is removed. Recovery
 for a task accepted before this capability requires one explicit bind from the
 original packet. Worker-result acceptance and remediation planning fail closed
 for missing, stale, or mismatched bindings.
+
+`supersede-task` is the sole exception to immutable task disposition. It is only
+for a stopped `local`, actionable, `not-applicable` fixed packet that has no
+integration or execution evidence and a distinct bound `local` replacement that
+is actionable and Integrated or completed. Both packets must retain the same
+reviewed HEAD, affected areas, dependencies, and severity. Original task sources
+and packet decisions must be proper subsets; the supplied existing decision must
+be the sole replacement-only decision. Replacement ownership may add only exact
+concrete paths that the original packet forbade and the replacement removed,
+while all other original forbidden paths remain. Its validation identities must
+cover the original by kind, command, selectors, and projects; prose is not
+authorization. `sourceType: local` is authoritative for task classification;
+the opaque source-ID sets may retain shared `review:` provenance.
+
+The guarded command additionally requires native schema v5, the exact authorized
+3+1+1 post-final findings ledger, no active/failed/human-decision task or blocker,
+a clean recorded and live integration checkout, valid reviewed/replacement
+ancestry, and nonempty passed exact-current-HEAD proof from the completed saved
+plan covering the replacement and every currently Integrated actionable task.
+It derives both task IDs from the packet files and accepts no disposition option.
+The atomic transition changes only the original disposition from `actionable` to
+`duplicate` and appends one `task-superseded` event with the decision, both task
+IDs and packet digests, replacement integration commit, prior revision, and
+summary. Event failure rolls state back. An exact retry is a no-op only when that
+single durable event matches, including the original pre-transition
+`--expected-revision`. This models replay of the identical command after an
+uncertain response; a retry using the current post-transition revision is a new,
+conflicting command and fails closed. Missing, conflicting, reused, or chained
+evidence also fails closed. Ordinary checkpoints cannot perform this correction.
 
 `targeted-validation-plan.json` is a resumable sidecar, not trusted input to a
 generic checkpoint. `validation-plan` derives its deterministic, de-duplicated

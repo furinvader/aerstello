@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import {
   ACTIVE_STATE_LIMIT_BYTES,
   activePointerPath,
+  appendEvent,
   archiveState,
   assertTaskPacketBound,
   buildCompletionTransition,
@@ -26,6 +27,7 @@ import {
   checkpointReviewRequest,
   checkpointState,
   checkpointTaskPacketBinding,
+  checkpointTaskSupersession,
   checkpointTaskCompletion,
   checkpointTargetedValidation,
   checkpointVerificationEscalation,
@@ -60,6 +62,7 @@ const AUTHORIZED_AT = '2026-08-09T21:30:00Z';
 const NOT_BEFORE = '2026-08-10T13:00:00Z';
 const HUMAN_FINAL_AT = '2026-08-10T13:05:00Z';
 const POST_FINAL_AUTHORIZED_AT = '2026-08-10T13:06:00Z';
+const TASK_SUPERSESSION_SUMMARY = 'Replace the stopped packet with its narrowly expanded native-v5 packet.';
 const STATE_CLI = fileURLToPath(new URL('../../scripts/pr-review-state.mjs', import.meta.url));
 
 function repo() {
@@ -406,6 +409,135 @@ function taskPacket(head, taskId, { affectedAreas = ['api'], command = 'npm run 
       unit: [{ command, reason: 'Direct targeted check.' }],
       system: [],
     },
+  };
+}
+
+function taskSupersessionPackets(reviewedHead) {
+  const original = {
+    ...taskPacket(reviewedHead, 'stopped-contract', {
+      affectedAreas: ['workflow', 'documentation'], command: 'npm run check:workflow',
+    }),
+    finding: 'The stopped fixed packet cannot own a required compatibility path.',
+    evidence: 'Implementation stopped before validation or commit when the forbidden dependency was found.',
+    decisionIds: ['decision-original-contract'],
+    allowedPaths: ['scripts/lib/pr-review-state.mjs'],
+    forbiddenPaths: ['scripts/lib/pr-review-github.mjs', 'apps/**'],
+    dependencies: ['post-final-remediation'],
+  };
+  const replacement = {
+    ...original,
+    taskId: 'replacement-contract',
+    finding: 'The replacement packet owns the required native-v5 compatibility correction.',
+    evidence: 'A new fixed packet explicitly added the one required concrete compatibility path.',
+    decisionIds: ['decision-original-contract', 'decision-scope-correction'],
+    allowedPaths: [...original.allowedPaths, 'scripts/lib/pr-review-github.mjs'],
+    forbiddenPaths: original.forbiddenPaths.filter((path) => path !== 'scripts/lib/pr-review-github.mjs'),
+    acceptanceCriteria: ['The original contract and its required compatibility path are both verified.'],
+    requiredValidation: {
+      unit: [{
+        command: 'npm run check:workflow',
+        reason: 'Replacement reason prose may differ while the validation identity stays exact.',
+      }],
+      system: [],
+    },
+  };
+  return { original, replacement };
+}
+
+function taskSupersessionSetup(cwd, {
+  mutatePackets = () => {}, mutateTasks = () => {}, replacementStatus = 'integrated',
+} = {}) {
+  const initial = init(cwd);
+  const terminal = terminalHumanFinalFindingsState(cwd, initial);
+  const withDecisions = {
+    ...terminal,
+    decisions: [
+      ...terminal.decisions,
+      { id: 'decision-original-contract', summary: 'Bind the original stopped fixed packet.' },
+      { id: 'decision-scope-correction', summary: 'Authorize only the required replacement scope.' },
+    ],
+  };
+  const authorized = buildPostFinalRemediationAuthorizationTransition(withDecisions, {
+    decisionId: 'decision-post-final',
+    summary: 'Remediate the one-shot human-final findings without requesting another review.',
+    authorizedAt: POST_FINAL_AUTHORIZED_AT,
+  });
+  const { original, replacement } = taskSupersessionPackets(initial.currentIntegrationHeadSha);
+  mutatePackets({ original, replacement });
+  const replacementIntegration = commit(cwd, {
+    'scripts/replacement-contract.mjs': 'export const replacement = true;\n',
+  }, 'integrate replacement contract');
+  const integrationHead = commit(cwd, {
+    'scripts/supersession-guard.mjs': 'export const guarded = true;\n',
+  }, 'integrate supersession guard');
+  const guardPacket = taskPacket(initial.currentIntegrationHeadSha, 'supersession-guard', {
+    affectedAreas: ['workflow'], command: 'npm run check:workflow',
+  });
+  const tasks = [
+    task(integrationHead, {
+      id: original.taskId,
+      sourceIds: ['local:human-final-contract', 'review:PRR_kwDOTqOdrM8AAAABI-Uw1A'],
+      fingerprint: 'fingerprint-stopped-contract',
+      summary: original.finding,
+      status: 'not-applicable',
+      integratedCommitSha: null,
+      resolutionSummary: 'Stopped before validation or commit when the forbidden dependency was discovered.',
+      taskPacketDigest: taskPacketDigest(original),
+    }),
+    task(replacementIntegration, {
+      id: replacement.taskId,
+      sourceIds: [
+        'local:human-final-contract',
+        'review:PRR_kwDOTqOdrM8AAAABI-Uw1A',
+        'local:native-v5-scope-correction',
+      ],
+      fingerprint: 'fingerprint-replacement-contract',
+      summary: replacement.finding,
+      status: 'integrated',
+      integratedCommitSha: replacementIntegration,
+      resolutionSummary: 'Integrated the narrowly expanded replacement packet.',
+      taskPacketDigest: taskPacketDigest(replacement),
+    }),
+    task(integrationHead, {
+      id: guardPacket.taskId,
+      sourceIds: ['local:supersession-guard'],
+      fingerprint: 'fingerprint-supersession-guard',
+      summary: guardPacket.finding,
+      status: 'integrated',
+      integratedCommitSha: integrationHead,
+      resolutionSummary: 'Integrated the guarded supersession contract.',
+      taskPacketDigest: taskPacketDigest(guardPacket),
+    }),
+  ];
+  mutateTasks({ tasks, original, replacement, guardPacket, replacementIntegration, integrationHead });
+  const state = {
+    ...authorized,
+    currentIntegrationHeadSha: integrationHead,
+    git: { ...authorized.git, headSha: integrationHead, dirty: false },
+    tasks,
+    validationStatus: initial.validationStatus,
+    threadResolutionStatus: initial.threadResolutionStatus,
+  };
+  writeFileSync(statePath(cwd, state.prNumber), `${JSON.stringify(state)}\n`);
+  buildTargetedValidationPlan({
+    cwd,
+    taskPackets: [replacement, guardPacket],
+    now: () => AT,
+  });
+  let validated = executeTargetedValidationPlan({
+    cwd, runCommand: () => ({ status: 0 }), now: () => AT,
+  }).state;
+  if (replacementStatus === 'completed') {
+    validated = {
+      ...validated,
+      tasks: validated.tasks.map((item) => item.id === replacement.taskId
+        ? { ...item, status: 'completed' }
+        : item),
+    };
+    writeFileSync(statePath(cwd, state.prNumber), `${JSON.stringify(validated)}\n`);
+  }
+  return {
+    initial, original, replacement, guardPacket, replacementIntegration, integrationHead, validated,
   };
 }
 
@@ -2226,6 +2358,328 @@ test('authorize-post-final-remediation CLI requires durable decision and optimis
   const saved = JSON.parse(accepted.stdout);
   assert.equal(saved.postFinalRemediationAuthorization.decisionId, 'decision-post-final');
   assert.equal(saved.postFinalRemediationAuthorization.humanFinalOutcomeId, terminal.reviewOutcome.id);
+});
+
+test('guarded task supersession changes only one disposition and records exact retry provenance', () => {
+  const cwd = repo();
+  const setup = taskSupersessionSetup(cwd);
+  const before = loadState(cwd);
+  const originalBefore = structuredClone(before.tasks.find((task) => task.id === setup.original.taskId));
+  const eventPath = join(stateDirectory(cwd, before.prNumber), 'events.ndjson');
+  const eventsBefore = readFileSync(eventPath, 'utf8');
+  const superseded = checkpointTaskSupersession({
+    cwd,
+    taskPacket: setup.original,
+    replacementTaskPacket: setup.replacement,
+    decisionId: 'decision-scope-correction',
+    summary: TASK_SUPERSESSION_SUMMARY,
+    expectedRevision: before.revision,
+  });
+  const originalAfter = superseded.tasks.find((task) => task.id === setup.original.taskId);
+  assert.deepEqual(originalAfter, { ...originalBefore, disposition: 'duplicate' });
+  assert.deepEqual(
+    { ...superseded, revision: before.revision, updatedAt: before.updatedAt },
+    {
+      ...before,
+      tasks: before.tasks.map((item) => item.id === setup.original.taskId
+        ? { ...item, disposition: 'duplicate' }
+        : item),
+    },
+  );
+  const newEvents = readFileSync(eventPath, 'utf8').slice(eventsBefore.length).trim().split('\n');
+  assert.equal(newEvents.length, 1);
+  const event = JSON.parse(newEvents[0]);
+  assert.equal(event.type, 'task-superseded');
+  assert.equal(event.summary, TASK_SUPERSESSION_SUMMARY);
+  assert.deepEqual(event.details, {
+    decisionId: 'decision-scope-correction',
+    originalTaskId: setup.original.taskId,
+    originalTaskPacketDigest: taskPacketDigest(setup.original),
+    replacementTaskId: setup.replacement.taskId,
+    replacementTaskPacketDigest: taskPacketDigest(setup.replacement),
+    replacementIntegrationCommitSha: setup.replacementIntegration,
+    priorStateRevision: before.revision,
+  });
+
+  const stateBytes = readFileSync(statePath(cwd, before.prNumber), 'utf8');
+  const eventBytes = readFileSync(eventPath, 'utf8');
+  const retried = checkpointTaskSupersession({
+    cwd,
+    taskPacket: setup.original,
+    replacementTaskPacket: setup.replacement,
+    decisionId: 'decision-scope-correction',
+    summary: TASK_SUPERSESSION_SUMMARY,
+    expectedRevision: before.revision,
+  });
+  assert.deepEqual(retried, superseded);
+  assert.equal(readFileSync(statePath(cwd, before.prNumber), 'utf8'), stateBytes);
+  assert.equal(readFileSync(eventPath, 'utf8'), eventBytes);
+});
+
+test('task supersession retry must replay the original pre-transition revision', () => {
+  const cwd = repo();
+  const setup = taskSupersessionSetup(cwd);
+  const before = loadState(cwd);
+  const superseded = checkpointTaskSupersession({
+    cwd,
+    taskPacket: setup.original,
+    replacementTaskPacket: setup.replacement,
+    decisionId: 'decision-scope-correction',
+    summary: TASK_SUPERSESSION_SUMMARY,
+    expectedRevision: before.revision,
+  });
+  const stateBytes = readFileSync(statePath(cwd, before.prNumber), 'utf8');
+  const eventPath = join(stateDirectory(cwd, before.prNumber), 'events.ndjson');
+  const eventBytes = readFileSync(eventPath, 'utf8');
+  assert.throws(() => checkpointTaskSupersession({
+    cwd,
+    taskPacket: setup.original,
+    replacementTaskPacket: setup.replacement,
+    decisionId: 'decision-scope-correction',
+    summary: TASK_SUPERSESSION_SUMMARY,
+    expectedRevision: superseded.revision,
+  }), { code: 'TASK_SUPERSESSION_EVENT_CONFLICT' });
+  assert.equal(readFileSync(statePath(cwd, before.prNumber), 'utf8'), stateBytes);
+  assert.equal(readFileSync(eventPath, 'utf8'), eventBytes);
+});
+
+test('guarded task supersession rolls state back when its event cannot be written', () => {
+  const cwd = repo();
+  const setup = taskSupersessionSetup(cwd);
+  const before = loadState(cwd);
+  const stateBefore = readFileSync(statePath(cwd, before.prNumber), 'utf8');
+  const eventPath = join(stateDirectory(cwd, before.prNumber), 'events.ndjson');
+  const eventsBefore = readFileSync(eventPath, 'utf8');
+  assert.throws(() => checkpointTaskSupersession({
+    cwd,
+    taskPacket: setup.original,
+    replacementTaskPacket: setup.replacement,
+    decisionId: 'decision-scope-correction',
+    summary: TASK_SUPERSESSION_SUMMARY,
+    expectedRevision: before.revision,
+    eventWriter: () => { throw new Error('simulated event failure'); },
+  }), { code: 'CHECKPOINT_EVENT_FAILED' });
+  assert.equal(readFileSync(statePath(cwd, before.prNumber), 'utf8'), stateBefore);
+  assert.equal(readFileSync(eventPath, 'utf8'), eventsBefore);
+});
+
+test('guarded task supersession fails closed on scope, provenance, checkout, and ancestry drift', () => {
+  const cases = [
+    ['unbound original packet', ({ state, setup }) => {
+      state.tasks.find((task) => task.id === setup.original.taskId).taskPacketDigest = 'f'.repeat(64);
+    }, 'TASK_PACKET_NOT_BOUND'],
+    ['GitHub-thread task', ({ state, setup }) => {
+      state.tasks.find((task) => task.id === setup.original.taskId).sourceType = 'github-thread';
+    }, 'INVALID_TASK_SUPERSESSION'],
+    ['non-superset source provenance', ({ state, setup }) => {
+      state.tasks.find((task) => task.id === setup.replacement.taskId).sourceIds = [
+        'local:human-final-contract',
+        'review:PRR_kwDOTqOdrM8AAAABI-Uw1A',
+      ];
+    }, 'INVALID_TASK_SUPERSESSION'],
+    ['unrelated ownership widening', ({ state, setup }) => {
+      setup.replacement.allowedPaths = [...setup.original.allowedPaths, 'scripts/unrelated.mjs'];
+      state.tasks.find((task) => task.id === setup.replacement.taskId).taskPacketDigest = taskPacketDigest(setup.replacement);
+    }, 'INVALID_TASK_SUPERSESSION'],
+    ['missing original validation identity', ({ state, setup }) => {
+      setup.replacement.requiredValidation.unit = [{
+        command: 'npm run check:web', reason: 'Unrelated replacement validation.',
+      }];
+      state.tasks.find((task) => task.id === setup.replacement.taskId).taskPacketDigest = taskPacketDigest(setup.replacement);
+    }, 'INVALID_TASK_SUPERSESSION'],
+    ['replacement-only decision mismatch', ({ state, setup }) => {
+      setup.replacement.decisionIds = [...setup.original.decisionIds, 'decision-post-final'];
+      state.tasks.find((task) => task.id === setup.replacement.taskId).taskPacketDigest = taskPacketDigest(setup.replacement);
+    }, 'INVALID_TASK_SUPERSESSION'],
+    ['recorded dirty integration', ({ state }) => {
+      state.git.dirty = true;
+    }, 'TASK_SUPERSESSION_CHECKOUT_STALE'],
+    ['invalid replacement ancestry', ({ state, setup }) => {
+      state.tasks.find((task) => task.id === setup.replacement.taskId).integratedCommitSha = 'f'.repeat(40);
+    }, 'TASK_INTEGRATION_ANCESTRY_MISMATCH'],
+    ['blocked terminal state', ({ state }) => {
+      state.blockedReasons = ['Await an operator decision.'];
+    }, 'TASK_SUPERSESSION_NOT_ELIGIBLE'],
+  ];
+  for (const [label, mutate, code] of cases) {
+    const cwd = repo();
+    const setup = taskSupersessionSetup(cwd);
+    const state = loadState(cwd);
+    mutate({ state, setup });
+    writeFileSync(statePath(cwd, state.prNumber), `${JSON.stringify(state)}\n`);
+    const stateBefore = readFileSync(statePath(cwd, state.prNumber), 'utf8');
+    const eventPath = join(stateDirectory(cwd, state.prNumber), 'events.ndjson');
+    const eventsBefore = readFileSync(eventPath, 'utf8');
+    assert.throws(() => checkpointTaskSupersession({
+      cwd,
+      taskPacket: setup.original,
+      replacementTaskPacket: setup.replacement,
+      decisionId: 'decision-scope-correction',
+      summary: TASK_SUPERSESSION_SUMMARY,
+      expectedRevision: state.revision,
+    }), { code }, label);
+    assert.equal(readFileSync(statePath(cwd, state.prNumber), 'utf8'), stateBefore, label);
+    assert.equal(readFileSync(eventPath, 'utf8'), eventsBefore, label);
+  }
+
+  const dirtyCwd = repo();
+  const dirtySetup = taskSupersessionSetup(dirtyCwd);
+  writeFileSync(join(dirtyCwd, 'untracked-supersession-drift.txt'), 'dirty\n');
+  assert.throws(() => checkpointTaskSupersession({
+    cwd: dirtyCwd,
+    taskPacket: dirtySetup.original,
+    replacementTaskPacket: dirtySetup.replacement,
+    decisionId: 'decision-scope-correction',
+    summary: TASK_SUPERSESSION_SUMMARY,
+    expectedRevision: dirtySetup.validated.revision,
+  }), { code: 'VALIDATION_CHECKOUT_DIRTY' });
+});
+
+test('guarded task supersession requires completed current proof and rejects chains', () => {
+  const cwd = repo();
+  const setup = taskSupersessionSetup(cwd, { replacementStatus: 'completed' });
+  const state = loadState(cwd);
+  assert.equal(state.tasks.find((task) => task.id === setup.replacement.taskId).status, 'completed');
+  const superseded = checkpointTaskSupersession({
+    cwd,
+    taskPacket: setup.original,
+    replacementTaskPacket: setup.replacement,
+    decisionId: 'decision-scope-correction',
+    summary: TASK_SUPERSESSION_SUMMARY,
+    expectedRevision: state.revision,
+  });
+  assert.equal(superseded.tasks.find((task) => task.id === setup.original.taskId).disposition, 'duplicate');
+
+  const missingPlanCwd = repo();
+  const missingPlan = taskSupersessionSetup(missingPlanCwd);
+  rmSync(validationPlanPath(missingPlanCwd, 17));
+  assert.throws(() => checkpointTaskSupersession({
+    cwd: missingPlanCwd,
+    taskPacket: missingPlan.original,
+    replacementTaskPacket: missingPlan.replacement,
+    decisionId: 'decision-scope-correction',
+    summary: TASK_SUPERSESSION_SUMMARY,
+    expectedRevision: missingPlan.validated.revision,
+  }), { code: 'TASK_SUPERSESSION_VALIDATION_REQUIRED' });
+
+  const staleRevisionCwd = repo();
+  const staleRevision = taskSupersessionSetup(staleRevisionCwd);
+  assert.throws(() => checkpointTaskSupersession({
+    cwd: staleRevisionCwd,
+    taskPacket: staleRevision.original,
+    replacementTaskPacket: staleRevision.replacement,
+    decisionId: 'decision-scope-correction',
+    summary: TASK_SUPERSESSION_SUMMARY,
+    expectedRevision: staleRevision.validated.revision - 1,
+  }), { code: 'STATE_REVISION_CONFLICT' });
+
+  const chainedCwd = repo();
+  const chained = taskSupersessionSetup(chainedCwd);
+  appendEvent(chainedCwd, 17, {
+    type: 'task-superseded',
+    summary: 'Prior narrow supersession.',
+    details: {
+      decisionId: 'decision-original-contract',
+      originalTaskId: 'prior-stopped-task',
+      originalTaskPacketDigest: 'a'.repeat(64),
+      replacementTaskId: chained.original.taskId,
+      replacementTaskPacketDigest: 'b'.repeat(64),
+      replacementIntegrationCommitSha: chained.replacementIntegration,
+      priorStateRevision: 1,
+    },
+  });
+  const chainedState = loadState(chainedCwd);
+  assert.throws(() => checkpointTaskSupersession({
+    cwd: chainedCwd,
+    taskPacket: chained.original,
+    replacementTaskPacket: chained.replacement,
+    decisionId: 'decision-scope-correction',
+    summary: TASK_SUPERSESSION_SUMMARY,
+    expectedRevision: chainedState.revision,
+  }), { code: 'TASK_SUPERSESSION_CHAINED' });
+});
+
+test('task supersession retry requires the one exact durable event', () => {
+  const cwd = repo();
+  const setup = taskSupersessionSetup(cwd);
+  const before = loadState(cwd);
+  checkpointTaskSupersession({
+    cwd,
+    taskPacket: setup.original,
+    replacementTaskPacket: setup.replacement,
+    decisionId: 'decision-scope-correction',
+    summary: TASK_SUPERSESSION_SUMMARY,
+    expectedRevision: before.revision,
+  });
+  const eventPath = join(stateDirectory(cwd, before.prNumber), 'events.ndjson');
+  const lines = readFileSync(eventPath, 'utf8').trimEnd().split('\n');
+  const supersessionEvent = lines.pop();
+  writeFileSync(eventPath, `${lines.join('\n')}\n`);
+  assert.throws(() => checkpointTaskSupersession({
+    cwd,
+    taskPacket: setup.original,
+    replacementTaskPacket: setup.replacement,
+    decisionId: 'decision-scope-correction',
+    summary: TASK_SUPERSESSION_SUMMARY,
+    expectedRevision: before.revision,
+  }), { code: 'TASK_SUPERSESSION_EVENT_MISSING' });
+
+  const conflicting = JSON.parse(supersessionEvent);
+  conflicting.summary = 'Conflicting durable summary.';
+  writeFileSync(eventPath, `${lines.join('\n')}\n${JSON.stringify(conflicting)}\n`);
+  assert.throws(() => checkpointTaskSupersession({
+    cwd,
+    taskPacket: setup.original,
+    replacementTaskPacket: setup.replacement,
+    decisionId: 'decision-scope-correction',
+    summary: TASK_SUPERSESSION_SUMMARY,
+    expectedRevision: before.revision,
+  }), { code: 'TASK_SUPERSESSION_EVENT_CONFLICT' });
+});
+
+test('ordinary checkpoint cannot select task disposition and supersede-task CLI is packet-derived', () => {
+  const cwd = repo();
+  const setup = taskSupersessionSetup(cwd);
+  const state = loadState(cwd);
+  assert.throws(() => checkpointState({
+    cwd,
+    expectedRevision: state.revision,
+    nextState: {
+      ...state,
+      tasks: state.tasks.map((task) => task.id === setup.original.taskId
+        ? { ...task, disposition: 'duplicate' }
+        : task),
+    },
+  }), { code: 'IMMUTABLE_STATE_PROVENANCE' });
+
+  const originalPath = join(stateDirectory(cwd, state.prNumber), 'original-task.json');
+  const replacementPath = join(stateDirectory(cwd, state.prNumber), 'replacement-task.json');
+  writeFileSync(originalPath, `${JSON.stringify(setup.original)}\n`);
+  writeFileSync(replacementPath, `${JSON.stringify(setup.replacement)}\n`);
+  const args = [
+    STATE_CLI, 'supersede-task', '--pr', '17',
+    '--task-packet', originalPath,
+    '--replacement-task-packet', replacementPath,
+    '--decision-id', 'decision-scope-correction',
+    '--summary', TASK_SUPERSESSION_SUMMARY,
+    '--expected-revision', String(state.revision),
+  ];
+  const callerDisposition = spawnSync(process.execPath, [...args, '--disposition', 'duplicate'], {
+    cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  assert.equal(callerDisposition.status, 2);
+  assert.match(callerDisposition.stderr, /Unknown option --disposition/u);
+  const accepted = spawnSync(process.execPath, args, {
+    cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  assert.equal(accepted.status, 0, accepted.stderr);
+  const saved = JSON.parse(accepted.stdout);
+  assert.equal(saved.tasks.find((task) => task.id === setup.original.taskId).disposition, 'duplicate');
+  const retried = spawnSync(process.execPath, args, {
+    cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  assert.equal(retried.status, 0, retried.stderr);
+  assert.equal(JSON.parse(retried.stdout).revision, saved.revision);
 });
 
 test('verification collection escalation is guarded, append-only, request-bound, and terminal', () => {

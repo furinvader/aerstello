@@ -1645,6 +1645,34 @@ test('verify-resolve completes only the selected eligible non-actionable local t
   }
 });
 
+test('superseded local task verifies without granting proof to its actionable replacement or guard', async () => {
+  const state = nonActionableNonThreadState('local', 'stopped-contract', 'duplicate');
+  state.tasks.push(
+    integratedNonThreadState('local', 'replacement-contract').tasks[0],
+    integratedNonThreadState('local', 'supersession-guard').tasks[0],
+  );
+  const setup = workflow(state, new FakeClient());
+  await setup.api.verifyResolve(2, ['stopped-contract']);
+  assert.deepEqual(
+    setup.state.current.tasks.map((task) => [task.id, task.status]),
+    [
+      ['stopped-contract', 'completed'],
+      ['replacement-contract', 'integrated'],
+      ['supersession-guard', 'integrated'],
+    ],
+  );
+  assert.deepEqual(setup.state.current.threadResolutionStatus.localVerification.taskIds, ['stopped-contract']);
+  const status = await setup.api.status(2);
+  assert.equal(status.taskStatus.pending, 2);
+
+  await setup.api.verifyResolve(2, ['replacement-contract']);
+  assert.equal(setup.state.current.tasks.find((task) => task.id === 'supersession-guard').status, 'integrated');
+  assert.deepEqual(
+    setup.state.current.threadResolutionStatus.localVerification.taskIds,
+    ['replacement-contract', 'stopped-contract'],
+  );
+});
+
 test('verify-resolve re-attests completed local tasks at a new HEAD as a guarded accumulating exact set', async () => {
   const state = integratedNonThreadState('local', 'local-a');
   state.currentIntegrationHeadSha = OTHER_HEAD;

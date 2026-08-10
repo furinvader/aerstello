@@ -30,6 +30,42 @@ The guarded binding is the durable identity used by worker-result acceptance
 and integrated validation. Do not delegate, validate a result, or build a
 remediation plan from an unbound or changed packet.
 
+## Replace one stopped packet safely
+
+Do not broaden fixed instructions after delegation. If implementation exposes
+one required concrete path that the packet explicitly forbids, stop that worker
+before validation or commit, retain its actionable `not-applicable` task and
+nonempty reason, and bind a new task with the corrected fixed packet. The new
+task must preserve the reviewed HEAD, finding sources, decisions, severity,
+affected areas, dependencies, and original validation identities as strict
+provenance subsets. Its only ownership expansion may be the exact forbidden
+concrete path or paths removed from the replacement's forbidden list.
+
+After the replacement is Integrated, include it and every current actionable
+Integrated task in the normal saved plan and run that plan. Only then may the
+orchestrator record the narrow provenance correction:
+
+```bash
+node scripts/pr-review-state.mjs supersede-task \
+  --task-packet /tmp/stopped-task.json \
+  --replacement-task-packet /tmp/replacement-task.json \
+  --decision-id decision-scope-correction \
+  --summary "Replace the stopped packet with its bound replacement" \
+  --expected-revision 8
+```
+
+The command derives task IDs and the `duplicate` disposition; callers cannot
+select them. It requires the exact post-final ledger, clean current integration
+and ancestry, immutable bindings, and the completed passed plan. It changes no
+task status, commit, sources, packet binding, or resolution text. Do not use it
+for changed findings, GitHub-thread tasks, caller-selected triage, broad/glob
+ownership, unrelated validation, chained replacements, or missing evidence.
+Local-task classification is taken from `sourceType`; shared opaque source IDs,
+including `review:` provenance, are preserved. If the command response is
+uncertain, an exact retry must reuse the original pre-transition
+`--expected-revision`; the current post-transition revision is not an idempotent
+retry and fails closed.
+
 ## Separate tasks safely
 
 Tasks cannot run together when they overlap anticipated writes, change and use
