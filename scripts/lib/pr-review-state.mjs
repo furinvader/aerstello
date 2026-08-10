@@ -1196,7 +1196,9 @@ export function migrateState({ cwd = process.cwd(), prNumber, integrationMap } =
     if (existsSync(backupPath)) {
       const existingSource = readFileSync(backupPath, 'utf8');
       let semanticallyEqual = false;
-      try { semanticallyEqual = JSON.stringify(JSON.parse(existingSource)) === JSON.stringify(legacy); } catch { /* fail closed */ }
+      if (legacy.schemaVersion !== 3) {
+        try { semanticallyEqual = JSON.stringify(JSON.parse(existingSource)) === JSON.stringify(legacy); } catch { /* fail closed */ }
+      }
       if (existingSource !== legacySource && !semanticallyEqual) {
         throw new StateError(`Migration backup differs from current v${legacy.schemaVersion} state at ${backupPath}`, 'MIGRATION_BACKUP_CONFLICT');
       }

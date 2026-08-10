@@ -540,6 +540,54 @@ test('v3 loading requires explicit migration and preserves exact source in state
   assert.equal(migrated.state.humanFinalReviewAuthorization, null);
 });
 
+test('v3 migration retry rejects a semantically equal byte-different backup without mutation', () => {
+  const cwd = repo();
+  const initialized = init(cwd);
+  const {
+    humanFinalReviewAuthorization: _authorization,
+    schemaVersion: _schemaVersion,
+    revision: _revision,
+    updatedAt: _updatedAt,
+    ...preserved
+  } = initialized;
+  const priorV3 = {
+    ...preserved,
+    schemaVersion: 3,
+    revision: 7,
+    decisions: [{ id: 'decision-kept', summary: 'Preserve exact migration source bytes.' }],
+    updatedAt: AT,
+  };
+  const firstSource = `${JSON.stringify(priorV3, null, 2)}\n`;
+  const retrySource = `${JSON.stringify(priorV3)}\n`;
+  assert.notEqual(retrySource, firstSource);
+  assert.deepEqual(JSON.parse(retrySource), JSON.parse(firstSource));
+
+  writeFileSync(statePath(cwd, 17), firstSource);
+  const migrated = migrateState({ cwd });
+  assert.equal(readFileSync(migrated.backupPath, 'utf8'), firstSource);
+
+  writeFileSync(statePath(cwd, 17), firstSource);
+  assert.equal(migrateState({ cwd }).state.schemaVersion, 4);
+  assert.equal(readFileSync(migrated.backupPath, 'utf8'), firstSource);
+
+  writeFileSync(statePath(cwd, 17), retrySource);
+  const eventPath = join(stateDirectory(cwd, 17), 'events.ndjson');
+  const durableBefore = {
+    state: readFileSync(statePath(cwd, 17), 'utf8'),
+    backup: readFileSync(migrated.backupPath, 'utf8'),
+    pointer: readFileSync(activePointerPath(cwd), 'utf8'),
+    journal: readFileSync(eventPath, 'utf8'),
+  };
+
+  assert.throws(() => migrateState({ cwd }), { code: 'MIGRATION_BACKUP_CONFLICT' });
+  assert.deepEqual({
+    state: readFileSync(statePath(cwd, 17), 'utf8'),
+    backup: readFileSync(migrated.backupPath, 'utf8'),
+    pointer: readFileSync(activePointerPath(cwd), 'utf8'),
+    journal: readFileSync(eventPath, 'utf8'),
+  }, durableBefore);
+});
+
 test('v2 migration preserves a pending exact-head review while resetting targeted validation', () => {
   const cwd = repo();
   const prepared = ready(init(cwd), []);
