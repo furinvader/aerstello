@@ -46,11 +46,12 @@ function proof(status = 'passed', headSha = HEAD) {
 
 function stateFixture(overrides = {}) {
   return {
-    schemaVersion: 4, revision: 1, repository: 'example/aerstello', prNumber: 2, phase: 'recovering',
+    schemaVersion: 5, revision: 1, repository: 'example/aerstello', prNumber: 2, phase: 'recovering',
     baseSha: HEAD, requestedHeadSha: null, reviewedHeadSha: null, currentIntegrationHeadSha: HEAD,
     reviewRound: 0, verificationReviewUsed: false, legacyReviewProvenance: null, releaseBaseline: null,
     decisions: [], tasks: [], reviewRequest: null, reviewOutcome: null, reviewHistory: [],
     verificationEscalation: null, humanFinalReviewAuthorization: null,
+    postFinalRemediationAuthorization: null,
     threadResolutionStatus: proof('not-run'), blockedReasons: [],
     validationStatus: { source: 'orchestrator', scope: 'targeted', status: 'not-run', headSha: null, checks: [], updatedAt: null },
     ciValidationStatus: { source: 'github-actions', scope: 'full', status: 'not-run', headSha: null,
@@ -207,6 +208,37 @@ function pendingHumanFinalState(overrides = {}) {
     reviewRequest: request, reviewOutcome: null,
     reviewHistory: [...authorized.reviewHistory, { request, outcome: null }],
     nextAction: 'Collect the exact human-final outcome.',
+    ...overrides,
+  };
+}
+
+function postFinalRemediationAuthorizedState(overrides = {}) {
+  const pending = pendingHumanFinalState();
+  const outcome = {
+    id: 'PRR_human_final_findings', databaseId: 401,
+    url: 'https://github.com/example/sky-bar/pull/2#pullrequestreview-401',
+    headSha: HEAD, at: '2026-08-10T13:05:00Z', requestId: pending.reviewRequest.id,
+    kind: 'human-final', outcome: 'findings', evidenceType: 'review-submission',
+    reviewerLogin: BOT.login, reviewerNodeId: BOT.id, reviewerType: BOT.__typename,
+    reviewerUrl: BOT.url, reactionContent: null, reactionCommentId: null,
+  };
+  return {
+    ...pending,
+    phase: 'awaiting-human-decision', reviewedHeadSha: HEAD,
+    decisions: [
+      ...pending.decisions,
+      { id: 'decision-post-final', summary: 'Authorize remediation-only work.' },
+    ],
+    reviewOutcome: outcome,
+    reviewHistory: pending.reviewHistory.map((entry, index) => (
+      index === pending.reviewHistory.length - 1 ? { ...entry, outcome } : entry
+    )),
+    postFinalRemediationAuthorization: {
+      decisionId: 'decision-post-final', source: 'operator-instruction',
+      authorizedAt: '2026-08-10T13:06:00Z', humanFinalOutcomeId: outcome.id,
+      summary: 'Remediate the final findings without another review request.',
+    },
+    nextAction: 'Remediate and validate without another review request.',
     ...overrides,
   };
 }
@@ -764,6 +796,7 @@ test('taskless thread refresh records guarded empty proof without GitHub mutatio
 
 test('taskless thread refresh restores empty proof after guarded clean-review HEAD drift', async () => {
   const initial = tasklessReviewHeadDriftState();
+  assert.equal(initial.schemaVersion, 5);
   const preserved = {
     reviewRequest: structuredClone(initial.reviewRequest),
     reviewOutcome: structuredClone(initial.reviewOutcome),
@@ -1236,6 +1269,21 @@ test('human-final request recovery rejects pre-bound evidence and never posts tw
   assert.equal(recovered.state.current.reviewHistory.length, 5);
   await assert.rejects(() => recovered.api.request(2, 'human-final'), { code: 'REQUEST_NOT_READY' });
   assert.equal(recoveredClient.calls.some((call) => call.name === 'AddReviewRequest'), false);
+});
+
+test('post-final remediation authorization never enables a sixth request or journal mutation', async () => {
+  for (const kind of ['discovery', 'verification', 'human-final']) {
+    const events = [];
+    const client = new FakeClient({ events });
+    const setup = workflow(postFinalRemediationAuthorizedState(), client, {
+      clock: { now: () => '2026-08-10T13:07:00Z' },
+      journal: fakeJournal(events),
+    });
+    await assert.rejects(() => setup.api.request(2, kind), { code: 'REQUEST_NOT_READY' });
+    assert.equal(client.calls.some((call) => call.name === 'AddReviewRequest'), false);
+    assert.deepEqual(events, []);
+    assert.equal(setup.state.calls.length, 0);
+  }
 });
 
 test('request recovers a concurrent intent using its returned exclusion baseline without mutation', async () => {

@@ -105,3 +105,11 @@ first four ledger entries unchanged, and let the GitHub helper enforce trusted
 time plus every ordinary review-ready gate. Clean may proceed to Done gates;
 findings, staleness, unsupported, or ambiguous evidence stop terminally for a
 human and never create another automatic round.
+
+If that one-shot human-final review returns findings, continue only after a
+second immutable durable decision authorizes post-final remediation. Use
+`authorize-post-final-remediation`, keep the five-entry ledger and both review
+counters unchanged, and plan only the exact nonempty packet union for actionable
+Integrated tasks. Fresh targeted validation, verifier, thread, and CI evidence
+may make those tasks Resolved, but no sixth review is permitted and Done remains
+closed without applicable clean exact-head Codex evidence.

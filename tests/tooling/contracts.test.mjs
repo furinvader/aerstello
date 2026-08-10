@@ -30,11 +30,11 @@ const NOT_BEFORE = '2026-08-10T13:00:00Z';
 function stateFixture(overrides = {}) {
   const head = 'a'.repeat(40);
   return {
-    schemaVersion: 4, revision: 0, repository: 'example/aerstello', prNumber: 17, phase: 'recovering',
+    schemaVersion: 5, revision: 0, repository: 'example/aerstello', prNumber: 17, phase: 'recovering',
     baseSha: head, requestedHeadSha: null, reviewedHeadSha: null, currentIntegrationHeadSha: head,
     reviewRound: 0, verificationReviewUsed: false, legacyReviewProvenance: null, releaseBaseline: null,
     decisions: [], tasks: [], reviewRequest: null, reviewOutcome: null, reviewHistory: [], verificationEscalation: null,
-    humanFinalReviewAuthorization: null,
+    humanFinalReviewAuthorization: null, postFinalRemediationAuthorization: null,
     threadResolutionStatus: {
       status: 'not-run', headSha: null, threads: [],
       threadlessVerification: { status: 'not-run', headSha: null, taskIds: [], updatedAt: null },
@@ -164,6 +164,43 @@ function humanFinalStateFixture(overrides = {}) {
   });
 }
 
+function postFinalRemediationStateFixture(overrides = {}) {
+  const authorized = humanFinalStateFixture();
+  const head = authorized.currentIntegrationHeadSha;
+  const request = {
+    id: 'request-5', databaseId: 105,
+    url: 'https://github.com/example/sky-bar/pull/17#issuecomment-105',
+    headSha: head, at: NOT_BEFORE, kind: 'human-final', body: '@codex review',
+    authorLogin: 'maintainer', authorNodeId: 'USER_maintainer',
+  };
+  const outcome = {
+    id: 'outcome-5', databaseId: 205,
+    url: 'https://github.com/example/sky-bar/pull/17#pullrequestreview-205',
+    headSha: head, at: '2026-08-10T13:05:00Z', requestId: request.id,
+    kind: 'human-final', outcome: 'findings', evidenceType: 'review-submission',
+    reviewerLogin: 'chatgpt-codex-connector', reviewerNodeId: 'BOT_codex', reviewerType: 'Bot',
+    reviewerUrl: 'https://github.com/apps/chatgpt-codex-connector', reactionContent: null,
+    reactionCommentId: null,
+  };
+  return {
+    ...authorized,
+    decisions: [
+      ...authorized.decisions,
+      { id: 'decision-post-final', summary: 'Authorize remediation-only final work.' },
+    ],
+    reviewRequest: request,
+    reviewOutcome: outcome,
+    reviewHistory: [...authorized.reviewHistory, { request, outcome }],
+    postFinalRemediationAuthorization: {
+      decisionId: 'decision-post-final', source: 'operator-instruction',
+      authorizedAt: '2026-08-10T13:06:00Z', humanFinalOutcomeId: outcome.id,
+      summary: 'Remediate the final findings without requesting another review.',
+    },
+    nextAction: 'Perform remediation-only validation without another review request.',
+    ...overrides,
+  };
+}
+
 test('checked-in JSON contracts parse and declare Draft 2020-12', () => {
   const paths = [
     '.release/marker.schema.json',
@@ -176,10 +213,11 @@ test('checked-in JSON contracts parse and declare Draft 2020-12', () => {
     const document = JSON.parse(readFileSync(join(root, path), 'utf8'));
     if (path.endsWith('.schema.json')) assert.equal(document.$schema, 'https://json-schema.org/draft/2020-12/schema');
     if (path === 'docs/agents/pr-review-state.schema.json') {
-      assert.equal(document.properties.schemaVersion.const, 4);
+      assert.equal(document.properties.schemaVersion.const, 5);
       assert.ok(document.required.includes('verificationReviewUsed'));
       assert.ok(document.required.includes('reviewOutcome'));
       assert.ok(document.required.includes('humanFinalReviewAuthorization'));
+      assert.ok(document.required.includes('postFinalRemediationAuthorization'));
       assert.ok(document.required.includes('threadResolutionStatus'));
       assert.ok(document.properties.phase.enum.includes('awaiting-human-decision'));
       assert.ok(document.$defs.threadResolutionStatus.properties.localVerification);
@@ -202,6 +240,9 @@ test('state JSON Schema compiles with Ajv and shares representative fixtures wit
   const validHumanFinal = humanFinalStateFixture();
   assert.equal(validateSchema(validHumanFinal), true, JSON.stringify(validateSchema.errors));
   assert.deepEqual(validatePrReviewState(validHumanFinal), []);
+  const validPostFinal = postFinalRemediationStateFixture();
+  assert.equal(validateSchema(validPostFinal), true, JSON.stringify(validateSchema.errors));
+  assert.deepEqual(validatePrReviewState(validPostFinal), []);
   const validUnboundTask = stateFixture({
     tasks: [{
       id: 'legacy-task', sourceIds: ['local'], sourceType: 'local', fingerprint: 'fingerprint', summary: 'Done.',
@@ -224,6 +265,7 @@ test('state JSON Schema compiles with Ajv and shares representative fixtures wit
   const {
     verificationEscalation: _verificationEscalation,
     humanFinalReviewAuthorization: _humanFinalReviewAuthorization,
+    postFinalRemediationAuthorization: _postFinalRemediationAuthorization,
     ...noncanonicalPriorV2
   } = valid;
   const invalidFixtures = [
@@ -338,6 +380,36 @@ test('state JSON Schema compiles with Ajv and shares representative fixtures wit
   ]) {
     assert.notDeepEqual(validatePrReviewState(fixture), [], 'manual cross-reference validation should reject fixture');
   }
+  for (const fixture of [
+    postFinalRemediationStateFixture({
+      postFinalRemediationAuthorization: {
+        ...validPostFinal.postFinalRemediationAuthorization,
+        decisionId: 'missing-decision',
+      },
+    }),
+    postFinalRemediationStateFixture({
+      postFinalRemediationAuthorization: {
+        ...validPostFinal.postFinalRemediationAuthorization,
+        humanFinalOutcomeId: 'missing-outcome',
+      },
+    }),
+    postFinalRemediationStateFixture({
+      postFinalRemediationAuthorization: {
+        ...validPostFinal.postFinalRemediationAuthorization,
+        authorizedAt: '2026-08-10T13:04:59Z',
+      },
+    }),
+  ]) {
+    assert.notDeepEqual(validatePrReviewState(fixture), [], 'manual post-final binding validation should reject fixture');
+  }
+  const unknownPostFinalField = postFinalRemediationStateFixture({
+    postFinalRemediationAuthorization: {
+      ...validPostFinal.postFinalRemediationAuthorization,
+      notBefore: NOT_BEFORE,
+    },
+  });
+  assert.equal(validateSchema(unknownPostFinalField), false);
+  assert.notDeepEqual(validatePrReviewState(unknownPostFinalField), []);
 });
 
 test('local verifier proof is backward-readable, source-bound, and mandatory for completed local readiness', () => {

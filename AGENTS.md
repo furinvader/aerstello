@@ -84,6 +84,11 @@ Before editing:
   decision may authorize one time-gated `human-final` request. It never resets
   the counters, cannot be repeated, and every non-clean final outcome returns
   terminally to human decision.
+- After human-final findings, a separate immutable operator decision may
+  authorize remediation-only work and packet-derived validation. It never
+  authorizes a sixth review. Those tasks may become Resolved after fresh
+  validation, verifier, thread, and CI evidence, but the cycle cannot become
+  Done without an applicable clean exact-head Codex outcome.
 
 ## Validation
 

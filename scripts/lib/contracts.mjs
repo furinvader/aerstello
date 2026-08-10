@@ -802,6 +802,60 @@ function validateHumanFinalReviewAuthorization(value, state, errors) {
   }
 }
 
+function validatePostFinalRemediationAuthorization(value, state, errors) {
+  const path = '$.postFinalRemediationAuthorization';
+  if (value === null) return;
+  const fields = ['decisionId', 'source', 'authorizedAt', 'humanFinalOutcomeId', 'summary'];
+  if (!requireFields(value, fields, path, errors)) return;
+  rejectUnknownFields(value, fields, path, errors);
+  if (!isString(value.decisionId, { min: 1, max: 128 })) errors.push(`${path}.decisionId is invalid`);
+  if (value.source !== 'operator-instruction') errors.push(`${path}.source must be operator-instruction`);
+  if (!isDateTime(value.authorizedAt)) errors.push(`${path}.authorizedAt is invalid`);
+  if (!isString(value.humanFinalOutcomeId, { min: 1, max: 256 })) {
+    errors.push(`${path}.humanFinalOutcomeId is invalid`);
+  }
+  if (!isString(value.summary, { min: 1, max: 1000 }) || value.summary.trim() !== value.summary) {
+    errors.push(`${path}.summary is invalid`);
+  }
+  if (!state?.decisions?.some((decision) => decision.id === value.decisionId)) {
+    errors.push(`${path}.decisionId must name an existing durable decision`);
+  }
+  const verificationEntry = state?.reviewHistory?.[3];
+  const humanFinalEntry = state?.reviewHistory?.[4];
+  if (state?.phase !== 'awaiting-human-decision'
+      || state?.reviewRound !== 3
+      || state?.verificationReviewUsed !== true
+      || state?.reviewHistory?.length !== 5
+      || state.reviewHistory.slice(0, 3).some((entry) => (
+        entry.request?.kind !== 'discovery'
+        || entry.outcome?.kind !== 'discovery'
+        || entry.outcome?.requestId !== entry.request?.id
+        || entry.outcome?.headSha !== entry.request?.headSha
+      ))
+      || verificationEntry?.request?.kind !== 'verification'
+      || verificationEntry?.outcome?.kind !== 'verification'
+      || verificationEntry?.outcome?.outcome !== 'findings'
+      || verificationEntry?.outcome?.requestId !== verificationEntry?.request?.id
+      || verificationEntry?.outcome?.headSha !== verificationEntry?.request?.headSha
+      || humanFinalEntry?.request?.kind !== 'human-final'
+      || humanFinalEntry?.outcome?.kind !== 'human-final'
+      || humanFinalEntry?.outcome?.outcome !== 'findings'
+      || humanFinalEntry?.outcome?.requestId !== humanFinalEntry?.request?.id
+      || humanFinalEntry?.outcome?.headSha !== humanFinalEntry?.request?.headSha
+      || JSON.stringify(state?.reviewRequest) !== JSON.stringify(humanFinalEntry?.request)
+      || JSON.stringify(state?.reviewOutcome) !== JSON.stringify(humanFinalEntry?.outcome)
+      || state?.requestedHeadSha !== humanFinalEntry?.request?.headSha
+      || state?.reviewedHeadSha !== humanFinalEntry?.outcome?.headSha
+      || value.humanFinalOutcomeId !== humanFinalEntry?.outcome?.id
+      || state?.humanFinalReviewAuthorization?.verificationOutcomeId !== verificationEntry?.outcome?.id
+      || state?.verificationEscalation !== null) {
+    errors.push(`${path} requires the exact current 3+1+1 human-final findings state`);
+  } else if (isDateTime(value.authorizedAt)
+      && Date.parse(value.authorizedAt) < Date.parse(humanFinalEntry.outcome.at)) {
+    errors.push(`${path}.authorizedAt cannot predate the human-final outcome`);
+  }
+}
+
 function validateExecution(value, path, errors) {
   const fields = [
     'dependencies', 'ownedPaths', 'worker', 'branch', 'worktree', 'workerCommitSha',
@@ -1288,13 +1342,13 @@ export function validatePrReviewState(value) {
     'schemaVersion', 'revision', 'repository', 'prNumber', 'phase', 'baseSha', 'requestedHeadSha',
     'reviewedHeadSha', 'currentIntegrationHeadSha', 'reviewRound', 'verificationReviewUsed', 'legacyReviewProvenance',
     'releaseBaseline', 'decisions', 'tasks', 'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
-    'humanFinalReviewAuthorization',
+    'humanFinalReviewAuthorization', 'postFinalRemediationAuthorization',
     'threadResolutionStatus', 'blockedReasons', 'validationStatus', 'ciValidationStatus', 'ciValidationHistory', 'nextAction',
     'integrationWorktree', 'orchestratorSessionId', 'abandonmentReason', 'git', 'updatedAt',
   ];
   if (!requireFields(value, fields, '$', errors)) return errors;
   rejectUnknownFields(value, fields, '$', errors);
-  if (value.schemaVersion !== 4) errors.push('$.schemaVersion must equal 4');
+  if (value.schemaVersion !== 5) errors.push('$.schemaVersion must equal 5');
   if (!Number.isInteger(value.revision) || value.revision < 0) errors.push('$.revision must be non-negative');
   if (!isString(value.repository, { min: 3, max: 256 }) || !/^[^/\s]+\/[^/\s]+$/u.test(value.repository)) errors.push('$.repository must be owner/name');
   if (!Number.isInteger(value.prNumber) || value.prNumber < 1) errors.push('$.prNumber must be positive');
@@ -1336,6 +1390,7 @@ export function validatePrReviewState(value) {
   validateVerificationEscalation(value.verificationEscalation, value.reviewRequest, errors);
   validateReviewHistory(value.reviewHistory, errors);
   validateHumanFinalReviewAuthorization(value.humanFinalReviewAuthorization, value, errors);
+  validatePostFinalRemediationAuthorization(value.postFinalRemediationAuthorization, value, errors);
   const latest = Array.isArray(value.reviewHistory) ? value.reviewHistory.at(-1) : null;
   if ((latest?.request ?? null)?.id !== value.reviewRequest?.id) errors.push('$.reviewRequest must equal the latest history request');
   if ((latest?.outcome ?? null)?.id !== value.reviewOutcome?.id) errors.push('$.reviewOutcome must equal the latest history outcome');
@@ -1460,9 +1515,25 @@ export function validatePrReviewStateV3(value) {
     errors.push('schema v3 reviewHistory must contain at most four entries');
   }
   if (errors.length > 0) return errors;
-  return validatePrReviewState({
+  return validatePrReviewStateV4({
     ...value,
     schemaVersion: 4,
     humanFinalReviewAuthorization: null,
+  });
+}
+
+export function validatePrReviewStateV4(value) {
+  const errors = [];
+  if (!isObject(value) || value.schemaVersion !== 4) {
+    return ['$.schemaVersion must equal 4'];
+  }
+  if (Object.hasOwn(value, 'postFinalRemediationAuthorization')) {
+    errors.push('schema v4 cannot contain $.postFinalRemediationAuthorization');
+  }
+  if (errors.length > 0) return errors;
+  return validatePrReviewState({
+    ...value,
+    schemaVersion: 5,
+    postFinalRemediationAuthorization: null,
   });
 }

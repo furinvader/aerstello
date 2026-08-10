@@ -914,7 +914,7 @@ function tasklessReviewHeadDriftRefreshAllowed(state) {
   const priorHeadSha = request?.headSha;
   const reviewAllowanceRemains = (Number.isInteger(state.reviewRound) && state.reviewRound < 3)
     || (state.reviewRound === 3 && state.verificationReviewUsed === false);
-  return state.schemaVersion === 4
+  return state.schemaVersion === 5
     && state.legacyReviewProvenance === null
     && state.phase === 'recovering'
     && state.tasks.length === 0
