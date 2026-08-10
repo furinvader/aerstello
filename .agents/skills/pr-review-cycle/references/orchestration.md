@@ -118,7 +118,7 @@ reviews, tasks, and inconsistent history remain ineligible, and the applicable
 clean review is not repeated. An ordinary taskless clean review with existing
 passing validation cannot use this mode to replace that proof.
 
-One native schema-v3 exception handles a taskless clean discovery review whose
+One native schema-v4 exception handles a taskless clean discovery review whose
 four review SHAs still agree with each other but differ from the newer current
 integration HEAD. It requires a `recovering` state, exact latest active review
 evidence, zero tasks and actionable Integrated IDs, a clean exact current
@@ -144,7 +144,7 @@ HEAD and checkout must be exact and clean, there must be zero actionable
 Integrated tasks, and no blocked reason, verification escalation, or
 `needs-human-decision` disposition. Use the backup only to authorize a fresh
 explicit plan. Run the selected checks again and record new exact-head proof;
-never adopt the legacy pass or repeat a preserved review. Native schema-v3
+never adopt the legacy pass or repeat a preserved review. Native schema-v4
 cycles and missing, mismatched, modified, or multi-transition migration
 provenance remain ineligible.
 
