@@ -205,6 +205,39 @@ function terminalVerificationFindingsState(state) {
   };
 }
 
+function authorizedHumanFinalValidationSetup(cwd, {
+  ids = ['task-a', 'task-b'], stateTransform = (state) => state,
+} = {}) {
+  const initial = init(cwd);
+  const terminal = terminalVerificationFindingsState(initial);
+  const authorized = buildHumanFinalReviewAuthorizationTransition(terminal, {
+    decisionId: 'decision-final', notBefore: NOT_BEFORE,
+    summary: 'One operator-authorized final review.', authorizedAt: AUTHORIZED_AT,
+  });
+  const integrationHead = commit(cwd, {
+    'human-final-validation-integration.txt': 'integrated remediation\n',
+  }, 'integrate human-final remediation');
+  const packets = ids.map((id, index) => taskPacket(initial.currentIntegrationHeadSha, id, {
+    affectedAreas: index === 0 ? ['api'] : ['workflow'],
+    command: index === 0 ? 'npm run check:api' : 'npm run check:workflow',
+  }));
+  const tasks = packets.map((packet) => task(integrationHead, {
+    id: packet.taskId,
+    status: 'integrated',
+    taskPacketDigest: taskPacketDigest(packet),
+  }));
+  const state = stateTransform({
+    ...authorized,
+    currentIntegrationHeadSha: integrationHead,
+    git: { ...authorized.git, headSha: integrationHead, dirty: false },
+    tasks,
+    validationStatus: initial.validationStatus,
+    threadResolutionStatus: initial.threadResolutionStatus,
+  });
+  writeFileSync(statePath(cwd, state.prNumber), `${JSON.stringify(state)}\n`);
+  return { initial, terminal, authorized, integrationHead, state, packets };
+}
+
 function ciEvidence(state, overrides = {}) {
   return {
     source: 'github-actions', scope: 'full', status: 'passed', headSha: state.currentIntegrationHeadSha,
@@ -2477,6 +2510,113 @@ test('pending initial validation plans require an exact immutable definition mat
   assert.deepEqual(replacement.affectedAreas, ['documentation', 'workflow']);
   assert.equal(replacement.commands[0].reason, 'Revised workflow rationale.');
   assert.deepEqual(buildTargetedValidationPlan({ cwd, initialSelection: replacementSelection }), replacement);
+});
+
+test('authorized terminal verification findings may plan the normal integrated-task union before notBefore', () => {
+  const cwd = repo();
+  const setup = authorizedHumanFinalValidationSetup(cwd);
+  assert.ok(Date.parse(AT) < Date.parse(setup.state.humanFinalReviewAuthorization.notBefore));
+  assert.notEqual(setup.state.reviewOutcome.headSha, setup.state.currentIntegrationHeadSha);
+
+  const plan = buildTargetedValidationPlan({ cwd, taskPackets: setup.packets, now: () => AT });
+
+  assert.deepEqual(plan.taskIds, ['task-a', 'task-b']);
+  assert.deepEqual(plan.affectedAreas, ['api', 'workflow']);
+  assert.deepEqual(plan.commands.map((entry) => entry.command), [
+    'npm run check:api',
+    'npm run check:workflow',
+  ]);
+  assert.equal(plan.headSha, setup.state.currentIntegrationHeadSha);
+  assert.equal(plan.stateRevision, setup.state.revision);
+  assert.deepEqual(loadState(cwd), setup.state);
+});
+
+test('awaiting-human validation planning rejects every unapproved or noncurrent terminal shape before sidecar mutation', () => {
+  const cases = [
+    ['missing authorization', (state) => ({ ...state, humanFinalReviewAuthorization: null })],
+    ['blocked reason', (state) => ({ ...state, blockedReasons: ['A human blocker remains.'] })],
+    ['needs-human task', (state) => ({
+      ...state,
+      tasks: [...state.tasks, task(state.currentIntegrationHeadSha, {
+        id: 'needs-human', status: 'not-applicable', disposition: 'needs-human-decision',
+      })],
+    })],
+    ['execution straggler', (state) => ({
+      ...state,
+      tasks: [...state.tasks, task(state.currentIntegrationHeadSha, {
+        id: 'still-running', status: 'running', integratedCommitSha: null, resolutionSummary: null,
+      })],
+    })],
+    ['no actionable integrated task', (state) => ({
+      ...state,
+      tasks: state.tasks.map((item) => ({ ...item, status: 'completed' })),
+    })],
+    ['terminal escalation', (state) => {
+      const request = state.reviewRequest;
+      return {
+        ...state,
+        reviewedHeadSha: null,
+        reviewOutcome: null,
+        reviewHistory: state.reviewHistory.map((entry, index) => (
+          index === state.reviewHistory.length - 1 ? { ...entry, outcome: null } : entry
+        )),
+        humanFinalReviewAuthorization: null,
+        verificationEscalation: {
+          requestId: request.id,
+          requestHeadSha: request.headSha,
+          observedPrHeadSha: request.headSha,
+          headRelation: 'same',
+          evidenceIds: ['review:terminal-escalation'],
+          reason: 'ambiguous-canonical-evidence',
+          at: AUTHORIZED_AT,
+        },
+      };
+    }],
+    ['stale terminal request', (state) => {
+      const staleRequest = { ...state.reviewRequest, headSha: 'b'.repeat(40) };
+      return {
+        ...state,
+        requestedHeadSha: staleRequest.headSha,
+        reviewedHeadSha: null,
+        reviewRequest: staleRequest,
+        reviewOutcome: null,
+        reviewHistory: state.reviewHistory.map((entry, index) => (
+          index === state.reviewHistory.length - 1
+            ? { request: staleRequest, outcome: null }
+            : entry
+        )),
+        humanFinalReviewAuthorization: null,
+      };
+    }],
+    ['authorization bound to a noncurrent verification outcome', (state) => {
+      const [first, second, third, verification] = state.reviewHistory;
+      const currentOutcome = { ...third.outcome, outcome: 'findings' };
+      return {
+        ...state,
+        reviewRequest: third.request,
+        reviewOutcome: currentOutcome,
+        reviewHistory: [first, second, verification, { request: third.request, outcome: currentOutcome }],
+      };
+    }],
+  ];
+
+  for (const [label, stateTransform] of cases) {
+    const cwd = repo();
+    const setup = authorizedHumanFinalValidationSetup(cwd, { stateTransform });
+    assert.throws(() => buildTargetedValidationPlan({
+      cwd, taskPackets: setup.packets, replace: true, now: () => AT,
+    }), { code: 'VALIDATION_PLAN_PHASE_BLOCKED' }, label);
+    assert.equal(existsSync(validationPlanPath(cwd, setup.state.prNumber)), false, label);
+  }
+
+  const initialCwd = repo();
+  const authorized = authorizedHumanFinalValidationSetup(initialCwd);
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd: initialCwd,
+    initialSelection: initialSelection(authorized.state.currentIntegrationHeadSha),
+    now: () => AT,
+  }), { code: 'VALIDATION_PLAN_PHASE_BLOCKED' });
+  assert.equal(existsSync(validationPlanPath(initialCwd, authorized.state.prNumber)), false);
 });
 
 test('accepted task packet identity is canonical, guarded, persistent, and required by consumers', () => {

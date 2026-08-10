@@ -196,6 +196,60 @@ export function atomicWriteJson(path, value) {
 const VALIDATION_PLAN_LIMIT_BYTES = 64 * 1024;
 const VALIDATION_AREAS = new Set(['api', 'web', 'shared', 'workflow', 'documentation', 'release', 'migration']);
 const VALIDATION_PLANNING_PHASES = new Set(['recovering', 'ready-for-review', 'integrating', 'verifying', 'validating']);
+const VALIDATION_PLANNING_EXECUTION_STATUSES = new Set([
+  'proposed', 'queued', 'running', 'implemented', 'blocked', 'failed',
+]);
+
+function isAuthorizedHumanFinalValidationPhase(state, expectedIds) {
+  const authorization = state?.humanFinalReviewAuthorization;
+  const request = state?.reviewRequest;
+  const outcome = state?.reviewOutcome;
+  const latest = state?.reviewHistory?.at(-1);
+  const discoveryCount = state?.reviewHistory?.filter(
+    (entry) => entry.request?.kind === 'discovery',
+  ).length;
+  const verificationCount = state?.reviewHistory?.filter(
+    (entry) => entry.request?.kind === 'verification',
+  ).length;
+  const humanFinalCount = state?.reviewHistory?.filter(
+    (entry) => entry.request?.kind === 'human-final',
+  ).length;
+  return state?.schemaVersion === 4
+    && state.phase === 'awaiting-human-decision'
+    && state.reviewRound === 3
+    && state.verificationReviewUsed === true
+    && state.reviewHistory?.length === 4
+    && discoveryCount === 3
+    && verificationCount === 1
+    && humanFinalCount === 0
+    && state.verificationEscalation === null
+    && state.blockedReasons?.length === 0
+    && !state.tasks?.some((task) => task.disposition === 'needs-human-decision')
+    && !state.tasks?.some((task) => VALIDATION_PLANNING_EXECUTION_STATUSES.has(task.status))
+    && Array.isArray(expectedIds)
+    && expectedIds.length > 0
+    && authorization !== null
+    && authorization?.source === 'operator-instruction'
+    && state.decisions?.some((decision) => decision.id === authorization.decisionId)
+    && request?.kind === 'verification'
+    && outcome?.kind === 'verification'
+    && outcome.outcome === 'findings'
+    && outcome.requestId === request.id
+    && outcome.headSha === request.headSha
+    && state.requestedHeadSha === request.headSha
+    && state.reviewedHeadSha === outcome.headSha
+    && authorization.verificationOutcomeId === outcome.id
+    && latest !== undefined
+    && sameEvidence(latest.request, request)
+    && sameEvidence(latest.outcome, outcome);
+}
+
+function validationPlanningPhaseAllowed(state, initialSelection) {
+  const expectedIds = actionableIntegratedTaskIds(state);
+  return VALIDATION_PLANNING_PHASES.has(state.phase)
+    || ((initialSelection === undefined || initialSelection === null)
+      && isAuthorizedHumanFinalValidationPhase(state, expectedIds));
+}
 
 function canonicalJson(value) {
   if (Array.isArray(value)) return value.map(canonicalJson);
@@ -483,7 +537,7 @@ export function assertTaskPacketBound(state, packet) {
 function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, initialSelection, replace, now }) {
   const state = loadState(cwd, prNumber);
   if (!state) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
-  if (!VALIDATION_PLANNING_PHASES.has(state.phase)) {
+  if (!validationPlanningPhaseAllowed(state, initialSelection)) {
     throw new StateError(`Cannot plan targeted validation while phase is ${state.phase}`, 'VALIDATION_PLAN_PHASE_BLOCKED');
   }
   if (state.validationStatus.status !== 'not-run') {
@@ -634,7 +688,7 @@ export function buildTargetedValidationPlan({
   const selectedPr = prNumber ?? activePrNumber(cwd);
   if (selectedPr === null || selectedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
   const current = loadState(cwd, selectedPr);
-  if (!VALIDATION_PLANNING_PHASES.has(current.phase)) {
+  if (!validationPlanningPhaseAllowed(current, initialSelection)) {
     throw new StateError(`Cannot plan targeted validation while phase is ${current.phase}`, 'VALIDATION_PLAN_PHASE_BLOCKED');
   }
   if (initialSelection !== undefined && initialSelection !== null
