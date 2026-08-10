@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
@@ -102,12 +102,20 @@ if (tool === 'git') {
   else if (args[0] === 'merge-base' && process.env.FAKE_GIT_SOURCE_ANCESTOR === '0') process.exit(1);
   else if (args[0] === 'ls-tree') {
     const sourceSha = args.find((arg) => /^[0-9a-f]{40,64}$/.test(arg)) || '';
-    const configuredPaths = sourceSha.startsWith('d')
-      ? process.env.FAKE_GIT_BASELINE_SOURCE_PATHS
-      : process.env.FAKE_GIT_SOURCE_PATHS;
-    const configuredJson = sourceSha.startsWith('d')
-      ? process.env.FAKE_GIT_BASELINE_SOURCE_PATHS_JSON
-      : process.env.FAKE_GIT_SOURCE_PATHS_JSON;
+    const currentSource = sourceSha === process.env.FAKE_GIT_SHA;
+    let configuredPaths;
+    let configuredJson;
+    if (sourceSha.startsWith('d')) {
+      configuredPaths = process.env.FAKE_GIT_BASELINE_SOURCE_PATHS;
+      configuredJson = process.env.FAKE_GIT_BASELINE_SOURCE_PATHS_JSON;
+    } else if (currentSource && (Object.hasOwn(process.env, 'FAKE_GIT_CURRENT_SOURCE_PATHS') ||
+        Object.hasOwn(process.env, 'FAKE_GIT_CURRENT_SOURCE_PATHS_JSON'))) {
+      configuredPaths = process.env.FAKE_GIT_CURRENT_SOURCE_PATHS;
+      configuredJson = process.env.FAKE_GIT_CURRENT_SOURCE_PATHS_JSON;
+    } else {
+      configuredPaths = process.env.FAKE_GIT_SOURCE_PATHS;
+      configuredJson = process.env.FAKE_GIT_SOURCE_PATHS_JSON;
+    }
     const paths = configuredJson
       ? JSON.parse(configuredJson)
       : (configuredPaths || 'apps/api/migrations/0001_initial.sql').split(',').filter(Boolean);
@@ -117,8 +125,18 @@ if (tool === 'git') {
   }
   else if (args[0] === 'show') {
     const spec = args[1] || '';
-    const migration = spec.slice(spec.indexOf(':') + 1);
-    if (process.env.FAKE_GIT_SOURCE_CONTENTS_JSON) {
+    const separator = spec.indexOf(':');
+    const sourceSha = spec.slice(0, separator);
+    const migration = spec.slice(separator + 1);
+    const historicalSource = sourceSha !== process.env.FAKE_GIT_SHA;
+    if (!historicalSource && process.env.FAKE_GIT_CURRENT_SOURCE_CONTENTS_JSON) {
+      const sources = JSON.parse(process.env.FAKE_GIT_CURRENT_SOURCE_CONTENTS_JSON);
+      if (Object.hasOwn(sources, migration)) {
+        process.stdout.write(sources[migration]);
+        process.exit(0);
+      }
+    }
+    if (historicalSource && process.env.FAKE_GIT_SOURCE_CONTENTS_JSON) {
       const sources = JSON.parse(process.env.FAKE_GIT_SOURCE_CONTENTS_JSON);
       if (Object.hasOwn(sources, migration)) {
         process.stdout.write(sources[migration]);
@@ -127,7 +145,7 @@ if (tool === 'git') {
     }
     const source = path.join(process.env.FAKE_REPOSITORY_ROOT, migration);
     if (!fs.existsSync(source)) process.exit(1);
-    process.stdout.write(process.env.FAKE_GIT_SOURCE_CONTENT || fs.readFileSync(source));
+    process.stdout.write((historicalSource && process.env.FAKE_GIT_SOURCE_CONTENT) || fs.readFileSync(source));
   }
   process.exit(0);
 }
@@ -160,7 +178,27 @@ if (tool === 'curl') {
   process.exit(0);
 }
 if (tool !== 'docker') process.exit(0);
+if (args[0] === 'context' && args[1] === 'show') {
+  process.stdout.write((process.env.FAKE_DOCKER_CONTEXT || 'default') + '\n');
+  process.exit(0);
+}
+if (args[0] === 'context' && args[1] === 'inspect') {
+  process.stdout.write((process.env.FAKE_DOCKER_CONTEXT_ENDPOINT ||
+    process.env.DOCKER_HOST || 'unix:///var/run/docker.sock') + '\n');
+  process.exit(0);
+}
 if (args[0] === 'info') {
+  if (process.env.FAKE_DOCKER_INFO_READY && process.env.FAKE_DOCKER_INFO_RELEASE) {
+    fs.writeFileSync(process.env.FAKE_DOCKER_INFO_READY, 'ready\n');
+    const deadline = Date.now() + 15000;
+    while (!fs.existsSync(process.env.FAKE_DOCKER_INFO_RELEASE)) {
+      if (Date.now() >= deadline) {
+        process.stderr.write('timed out waiting to release fake docker info\n');
+        process.exit(48);
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
+  }
   process.stdout.write('27.0.0\n');
   process.exit(0);
 }
@@ -233,6 +271,10 @@ const command = args.join(' ');
 if (process.env.FAKE_MUTATE_SOURCE_AFTER_BUILD === '1' && command.includes('build app caddy')) {
   fs.appendFileSync(path.join(process.env.FAKE_REPOSITORY_ROOT,
     'apps/api/migrations/0001_initial.sql'), '-- mutated after image build\n');
+}
+if (process.env.FAKE_ADD_MIGRATION_AFTER_BUILD === '1' && command.includes('build app caddy')) {
+  fs.writeFileSync(path.join(process.env.FAKE_REPOSITORY_ROOT,
+    'apps/api/migrations/0002_after_build.sql'), '-- added after image build\nSELECT 2;\n');
 }
 if (/\bup\b/.test(command) && command.endsWith(' db')) {
   const rewriteTransaction = path.join(process.env.FAKE_REPOSITORY_ROOT, '.demo-state',
@@ -327,25 +369,91 @@ function makeFixture(t) {
   return { directory, environmentPath, fakeBin, commandLog, secretsDirectory };
 }
 
+function commandEnvironment(fixture, environment = {}) {
+  return {
+    ...process.env,
+    PATH: `${fixture.fakeBin}:${process.env.PATH}`,
+    DOCKER_CONTEXT: '',
+    DOCKER_HOST: 'unix:///dev/sky-bar-tests-must-never-use-real-docker.sock',
+    FAKE_COMMAND_LOG: fixture.commandLog,
+    FAKE_REPOSITORY_ROOT: fixture.directory,
+    FAKE_GIT_SHA: gitSha,
+    ...environment,
+  };
+}
+
 function run(fixture, args, environment = {}) {
   const result = spawnSync('bash', [join(fixture.directory, 'scripts/demo-deploy.sh'), ...args], {
     cwd: fixture.directory,
     encoding: 'utf8',
-    env: {
-      ...process.env,
-      PATH: `${fixture.fakeBin}:${process.env.PATH}`,
-      DOCKER_HOST: 'unix:///dev/sky-bar-tests-must-never-use-real-docker.sock',
-      FAKE_COMMAND_LOG: fixture.commandLog,
-      FAKE_REPOSITORY_ROOT: fixture.directory,
-      FAKE_GIT_SHA: gitSha,
-      ...environment,
-    },
+    env: commandEnvironment(fixture, environment),
   });
   const output = `${result.stdout}${result.stderr}`;
   const diagnostic = result.status !== 0 && output === ''
     ? `command log before silent exit:\n${readFileSync(fixture.commandLog, 'utf8')}`
     : output;
   return { ...result, output: diagnostic };
+}
+
+function startRun(fixture, args, environment = {}) {
+  const child = spawn('bash', [join(fixture.directory, 'scripts/demo-deploy.sh'), ...args], {
+    cwd: fixture.directory,
+    env: commandEnvironment(fixture, environment),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  const completion = new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', (status, signal) => resolve({ status, signal, stdout, stderr, output: `${stdout}${stderr}` }));
+  });
+  return { child, completion };
+}
+
+async function waitForPath(path, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) assert.fail(`timed out waiting for ${path}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+function hostLockPath(endpoint, projectName = project) {
+  const digest = createHash('sha256')
+    .update(endpoint).update('\0').update(projectName).update('\0').digest('hex');
+  return join('/tmp', `sky-bar-demo-deploy-${digest}.lock`);
+}
+
+function installReplacingStat(fixture, lockPath) {
+  const realStat = ['/usr/bin/stat', '/bin/stat'].find((path) => existsSync(path));
+  assert.ok(realStat, 'a real stat executable is required by the deployment harness');
+  const wrapper = join(fixture.fakeBin, 'stat');
+  writeFileSync(wrapper, `#!${process.execPath}
+const fs = require('node:fs');
+const { spawnSync } = require('node:child_process');
+const args = process.argv.slice(2);
+const target = process.env.FAKE_REPLACE_LOCK_PATH;
+const countPath = process.env.FAKE_COMMAND_LOG + '.lock-stat-count';
+if (args.at(-1) === target) {
+  let count = 0;
+  try { count = Number(fs.readFileSync(countPath, 'utf8')); } catch {}
+  count += 1;
+  fs.writeFileSync(countPath, String(count));
+  if (count === 3) {
+    fs.renameSync(target, target + '.replaced-by-test');
+    fs.writeFileSync(target, '', { mode: 0o666 });
+    fs.chmodSync(target, 0o666);
+  }
+}
+const result = spawnSync(process.env.FAKE_REAL_STAT, args, { stdio: 'inherit' });
+process.exit(result.status ?? 1);
+`, { mode: 0o755 });
+  chmodSync(wrapper, 0o755);
+  return { FAKE_REPLACE_LOCK_PATH: lockPath, FAKE_REAL_STAT: realStat };
 }
 
 function commands(fixture, tool = undefined) {
@@ -452,6 +560,31 @@ test('init-env creates private distinct secrets, reports human fields, and never
   const second = run(fixture, ['--init-env', '--env-file', fixture.environmentPath]);
   assert.notEqual(second.status, 0);
   assert.deepEqual(readFileSync(fixture.environmentPath), before);
+});
+
+test('init-env rejects restore-only arguments before initialization regardless of ordering', async (t) => {
+  const cases = [
+    ['restore backup before init', (fixture) => [
+      '--restore-backup', join(fixture.directory, 'missing.bundle'), '--init-env']],
+    ['restore backup after init', (fixture) => [
+      '--init-env', '--restore-backup', join(fixture.directory, 'missing.bundle')]],
+    ['restore confirmation before init', () => ['--confirm-restore', project, '--init-env']],
+    ['restore confirmation after init', () => ['--init-env', '--confirm-restore', project]],
+  ];
+  for (const [name, buildArgs] of cases) {
+    await t.test(name, (st) => {
+      const fixture = makeFixture(st);
+      rmSync(fixture.environmentPath);
+      const result = run(fixture, [...buildArgs(fixture), '--env-file', fixture.environmentPath]);
+      assert.notEqual(result.status, 0, result.output);
+      assert.match(result.output, /restore-backup|confirm-restore|cannot be combined/i);
+      assert.doesNotMatch(result.output, /Created private demo environment file/i);
+      assert.equal(existsSync(fixture.environmentPath), false);
+      assert.equal(existsSync(join(fixture.directory, '.demo-state')), false);
+      assert.equal(existsSync(join(fixture.directory, '.demo-backups')), false);
+      assert.equal(commands(fixture).length, 0);
+    });
+  }
 });
 
 test('environment parsing rejects missing, malformed, insecure, and executable values without sourcing them', async (t) => {
@@ -590,6 +723,149 @@ test('--check validates Compose and Caddy without container, volume, backup, or 
   assert.equal(lines.some((line) => line.startsWith('volume ')), false, lines.join('\n'));
   assert.equal(existsSync(join(fixture.directory, '.demo-state')), false);
   assert.equal(existsSync(join(fixture.directory, '.demo-backups')), false);
+});
+
+test('host-global deployment lock serializes separate checkouts by endpoint and project', async (t) => {
+  const firstFixture = makeFixture(t);
+  const secondFixture = makeFixture(t);
+  const endpoint = `unix:///dev/sky-bar-shared-lock-${process.pid}.sock`;
+  const independentEndpoint = `unix:///dev/sky-bar-independent-lock-${process.pid}.sock`;
+  const sharedLock = hostLockPath(endpoint);
+  const independentLock = hostLockPath(independentEndpoint);
+  for (const path of [sharedLock, independentLock]) rmSync(path, { recursive: true, force: true });
+  t.after(() => {
+    for (const path of [sharedLock, independentLock]) rmSync(path, { recursive: true, force: true });
+  });
+
+  const firstTmp = join(firstFixture.directory, 'different-tmp');
+  const secondTmp = join(secondFixture.directory, 'different-tmp');
+  mkdirSync(firstTmp);
+  mkdirSync(secondTmp);
+  const ready = join(firstFixture.directory, 'docker-info-ready');
+  const release = join(firstFixture.directory, 'docker-info-release');
+  const first = startRun(firstFixture, ['--check', '--env-file', firstFixture.environmentPath], {
+    DOCKER_HOST: endpoint,
+    TMPDIR: firstTmp,
+    XDG_RUNTIME_DIR: join(firstFixture.directory, 'runtime'),
+    FAKE_DOCKER_INFO_READY: ready,
+    FAKE_DOCKER_INFO_RELEASE: release,
+  });
+  await waitForPath(ready);
+  try {
+    const blocked = run(secondFixture, ['--check', '--env-file', secondFixture.environmentPath], {
+      DOCKER_HOST: endpoint,
+      TMPDIR: secondTmp,
+      XDG_RUNTIME_DIR: join(secondFixture.directory, 'runtime'),
+    });
+    assert.notEqual(blocked.status, 0, blocked.output);
+    assert.match(blocked.output, /another deployment.*project.*Docker endpoint/i);
+    assert.equal(commands(secondFixture, 'docker').length, 0,
+      'contending checkout reached the Docker daemon before failing at the lock');
+    assert.equal(existsSync(join(secondFixture.directory, '.demo-state')), false);
+
+    const independent = run(secondFixture, ['--check', '--env-file', secondFixture.environmentPath], {
+      DOCKER_HOST: independentEndpoint,
+      TMPDIR: secondTmp,
+      XDG_RUNTIME_DIR: join(secondFixture.directory, 'runtime'),
+    });
+    assert.equal(independent.status, 0, independent.output);
+  } finally {
+    writeFileSync(release, 'release\n');
+  }
+  const firstResult = await first.completion;
+  assert.equal(firstResult.status, 0, firstResult.output);
+  assert.equal(statSync(sharedLock).mode & 0o777, 0o666);
+  assert.match(sharedLock.split('/').at(-1), /^sky-bar-demo-deploy-[0-9a-f]{64}\.lock$/);
+  assert.doesNotMatch(sharedLock, /shared-lock/);
+});
+
+test('host lock endpoint identity follows Docker context precedence', async (t) => {
+  await t.test('explicit context overrides DOCKER_HOST', (st) => {
+    const fixture = makeFixture(st);
+    const contextEndpoint = `ssh://context-${process.pid}.example.test`;
+    const ignoredHost = `unix:///dev/ignored-host-${process.pid}.sock`;
+    const contextLock = hostLockPath(contextEndpoint);
+    const ignoredLock = hostLockPath(ignoredHost);
+    for (const path of [contextLock, ignoredLock]) rmSync(path, { recursive: true, force: true });
+    st.after(() => {
+      for (const path of [contextLock, ignoredLock]) rmSync(path, { recursive: true, force: true });
+    });
+    const result = run(fixture, ['--check', '--env-file', fixture.environmentPath], {
+      DOCKER_CONTEXT: 'remote-demo',
+      DOCKER_HOST: ignoredHost,
+      FAKE_DOCKER_CONTEXT_ENDPOINT: contextEndpoint,
+    });
+    assert.equal(result.status, 0, result.output);
+    assert.equal(existsSync(contextLock), true);
+    assert.equal(existsSync(ignoredLock), false);
+    assert.ok(commands(fixture, 'docker').some(({ args }) =>
+      args[0] === 'context' && args[1] === 'inspect' && args.includes('remote-demo')));
+  });
+
+  await t.test('active context supplies the endpoint when host and context are unset', (st) => {
+    const fixture = makeFixture(st);
+    const contextEndpoint = `unix:///dev/current-context-${process.pid}.sock`;
+    const contextLock = hostLockPath(contextEndpoint);
+    rmSync(contextLock, { recursive: true, force: true });
+    st.after(() => rmSync(contextLock, { recursive: true, force: true }));
+    const result = run(fixture, ['--check', '--env-file', fixture.environmentPath], {
+      DOCKER_CONTEXT: '',
+      DOCKER_HOST: '',
+      FAKE_DOCKER_CONTEXT: 'current-demo',
+      FAKE_DOCKER_CONTEXT_ENDPOINT: contextEndpoint,
+    });
+    assert.equal(result.status, 0, result.output);
+    assert.equal(existsSync(contextLock), true);
+    const docker = commands(fixture, 'docker');
+    assert.ok(docker.some(({ args }) => args[0] === 'context' && args[1] === 'show'));
+    assert.ok(docker.some(({ args }) =>
+      args[0] === 'context' && args[1] === 'inspect' && args.includes('current-demo')));
+  });
+});
+
+test('host lock rejects unsafe inodes, modes, and path replacement before Docker access', async (t) => {
+  const cases = [
+    ['symbolic link', (fixture, path) => {
+      const target = join(fixture.directory, 'lock-target');
+      writeFileSync(target, '');
+      chmodSync(target, 0o666);
+      symlinkSync(target, path);
+      return {};
+    }],
+    ['directory', (_fixture, path) => {
+      mkdirSync(path);
+      chmodSync(path, 0o777);
+      return {};
+    }],
+    ['unsafe mode', (_fixture, path) => {
+      writeFileSync(path, '', { mode: 0o600 });
+      chmodSync(path, 0o600);
+      return {};
+    }],
+    ['path replacement after open', (fixture, path) => installReplacingStat(fixture, path)],
+  ];
+  for (const [name, prepare] of cases) {
+    await t.test(name, (st) => {
+      const fixture = makeFixture(st);
+      const endpoint = `unix:///dev/unsafe-lock-${name.replaceAll(' ', '-')}-${process.pid}.sock`;
+      const lock = hostLockPath(endpoint);
+      const replaced = `${lock}.replaced-by-test`;
+      for (const path of [lock, replaced]) rmSync(path, { recursive: true, force: true });
+      st.after(() => {
+        for (const path of [lock, replaced]) rmSync(path, { recursive: true, force: true });
+      });
+      const environment = prepare(fixture, lock);
+      const result = run(fixture, ['--check', '--env-file', fixture.environmentPath], {
+        DOCKER_HOST: endpoint,
+        ...environment,
+      });
+      assert.notEqual(result.status, 0, result.output);
+      assert.match(result.output, /host deployment lock|lock path.*replaced|regular|symlink|mode|link/i);
+      assert.equal(commands(fixture, 'docker').length, 0,
+        'unsafe host lock reached Docker before rejection');
+      assert.equal(existsSync(join(fixture.directory, '.demo-state')), false);
+    });
+  }
 });
 
 test('persist backs up first, always runs the exact compiled migration command, and never deletes volumes', (t) => {
@@ -775,6 +1051,7 @@ test('persist migration manifest permits unchanged/new files and rejects modifie
     const result = run(fixture, commonPersistArgs(fixture), {
       FAKE_EXISTING_VOLUMES: dbVolume,
       FAKE_ADMIN_EXISTS: '1',
+      FAKE_GIT_SOURCE_PATHS: `${migrationPath},apps/api/migrations/0002_forward.sql`,
     });
     assert.equal(result.status, 0, result.output);
   });
@@ -824,6 +1101,17 @@ test('persist migration manifest permits unchanged/new files and rejects modifie
       assert.deepEqual(stateSnapshot(state), before);
     });
   }
+});
+
+test('migration manifest rejects a validly named ignored SQL file absent from the deployed commit', (t) => {
+  const fixture = makeFixture(t);
+  writeFileSync(join(fixture.directory, 'apps/api/migrations/0002_ignored.sql'), 'SELECT 2;\n');
+  const result = run(fixture, commonPersistArgs(fixture));
+  assert.notEqual(result.status, 0, result.output);
+  assert.match(result.output, /absent from the deployed Git commit|deployed Git commit.*missing/i);
+  assert.equal(commands(fixture, 'docker').length, 0);
+  assert.equal(existsSync(join(fixture.directory, '.demo-state')), false);
+  assert.equal(existsSync(join(fixture.directory, '.demo-backups')), false);
 });
 
 test('current migration files with a duplicate numeric prefix are rejected before database mutation', (t) => {
@@ -1087,9 +1375,12 @@ test('post-build source mutation fails before persist or rewrite apply boundarie
         FAKE_EXISTING_VOLUMES: dbVolume,
         FAKE_ADMIN_EXISTS: mode === 'persist' ? '1' : '0',
         FAKE_MUTATE_SOURCE_AFTER_BUILD: '1',
+        FAKE_GIT_CURRENT_SOURCE_CONTENTS_JSON: JSON.stringify({
+          [migrationPath]: '-- initial schema\nSELECT 1;\n',
+        }),
       });
       assert.notEqual(result.status, 0);
-      assert.match(result.output, /migration files changed|worktree changed|source/i);
+      assert.match(result.output, /migration files changed|worktree changed|source|deployed Git commit/i);
       const lines = dockerLines(fixture);
       assert.ok(lines.some((line) => line.includes('build app caddy')));
       assert.equal(lines.some((line) => line.includes('stop app caddy')), false);
@@ -1098,6 +1389,25 @@ test('post-build source mutation fails before persist or rewrite apply boundarie
       assert.equal(lines.some((line) => line.startsWith('volume rm')), false);
     });
   }
+});
+
+test('migration introduced after build fails exact source verification before quiescence', (t) => {
+  const fixture = makeFixture(t);
+  seedState(fixture);
+  const result = run(fixture, commonPersistArgs(fixture), {
+    FAKE_EXISTING_VOLUMES: dbVolume,
+    FAKE_ADMIN_EXISTS: '1',
+    FAKE_ADD_MIGRATION_AFTER_BUILD: '1',
+  });
+  assert.notEqual(result.status, 0, result.output);
+  assert.match(result.output, /absent from the deployed Git commit|migration files changed|source/i);
+  const lines = dockerLines(fixture);
+  assert.ok(lines.some((line) => line.includes('build app caddy')));
+  assert.equal(lines.some((line) => line.includes('stop app caddy')), false);
+  assert.equal(lines.some((line) => line.includes('pg_dump')), false);
+  assert.equal(lines.some((line) => line.includes('npm run db:migrate')), false);
+  assert.equal(lines.some((line) => line.startsWith('volume rm')), false);
+  assert.equal(existsSync(join(fixture.directory, '.demo-backups')), false);
 });
 
 test('post-build and publication source verification leave no temporary manifests', (t) => {
@@ -1430,6 +1740,7 @@ test('historical source authentication cannot omit a pathological SQL pathname',
     '--restore-backup', bundle, '--confirm-restore', project], {
     FAKE_EXISTING_VOLUMES: dbVolume,
     FAKE_GIT_SHA: 'f'.repeat(40),
+    FAKE_GIT_CURRENT_SOURCE_PATHS: migrationPath,
     FAKE_GIT_SOURCE_PATHS_JSON: JSON.stringify([migrationPath, pathologicalPath]),
     FAKE_GIT_SOURCE_CONTENTS_JSON: JSON.stringify({
       [migrationPath]: readFileSync(join(fixture.directory, migrationPath), 'utf8'),
@@ -1521,6 +1832,7 @@ test('confirmed pre-release rewrites preserve restorable old source identity', a
         FAKE_EXISTING_VOLUMES: dbVolume,
         FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
         FAKE_ADMIN_EXISTS: '0',
+        FAKE_GIT_SOURCE_PATHS: `apps/api/migrations/${newDatabaseMigration}`,
       });
       assert.equal(rewritten.status, 0, rewritten.output);
       const [oldBundle] = backupBundles(fixture);
@@ -2266,6 +2578,7 @@ test('pending-selected restore rejects an incompatible bundled current baseline'
     '--restore-backup', bundle, '--confirm-restore', project], {
     FAKE_EXISTING_VOLUMES: dbVolume,
     FAKE_GIT_SHA: 'f'.repeat(40),
+    FAKE_GIT_CURRENT_SOURCE_PATHS: `${migrationPath},${pendingPath}`,
     FAKE_GIT_SOURCE_PATHS: pendingPath,
     FAKE_GIT_BASELINE_SOURCE_PATHS: migrationPath,
   });
@@ -2364,6 +2677,7 @@ test('older bundle rollback preserves a safety bundle for the later live migrati
     FAKE_EXISTING_VOLUMES: dbVolume,
     FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
     FAKE_ADMIN_EXISTS: '1',
+    FAKE_GIT_SOURCE_PATHS: `${migrationPath},apps/api/migrations/0002_forward.sql`,
   });
   assert.equal(later.status, 0, later.output);
   writeFileSync(join(olderBundle, 'state', 'current', 'deployed-sha'), `${'e'.repeat(40)}\n`);
@@ -2376,6 +2690,7 @@ test('older bundle rollback preserves a safety bundle for the later live migrati
     FAKE_GIT_SHA: 'f'.repeat(40),
     FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql\n0002_forward.sql',
     FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
+    FAKE_GIT_CURRENT_SOURCE_PATHS: `${migrationPath},apps/api/migrations/0002_forward.sql`,
   });
   assert.equal(restored.status, 0, restored.output);
   const restoredCurrent = join(fixture.directory, '.demo-state', project,
