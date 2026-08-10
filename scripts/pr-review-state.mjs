@@ -15,6 +15,7 @@ import {
   checkpointPostFinalRemediationAuthorization,
   checkpointState,
   checkpointTaskPacketBinding,
+  checkpointTaskSupersession,
   executeTargetedValidationPlan,
   initializeState,
   loadState,
@@ -26,7 +27,7 @@ import {
 } from './lib/pr-review-state.mjs';
 
 function usage() {
-  return `Usage: node scripts/pr-review-state.mjs <command> [options]\n\nCommands:\n  init                      Start durable state for a PR review cycle\n  path                      Print the active state path\n  validate                  Check state against the integration checkout\n  bind-task-packet          Bind accepted fixed instructions to a durable task\n  validate-result           Check a worker result against its bound fixed instructions\n  validation-plan           Save and print the combined targeted checks\n  run-validation            Run pending checks from the saved plan and record the result\n  show                      Print active state JSON\n  checkpoint                Replace ordinary operational state from --input\n  migrate                   Explicitly migrate active schema v1, v2, v3, or v4 state to v5\n  authorize-final-review    Record one immutable operator-authorized human-final review\n  authorize-post-final-remediation\n                            Record one immutable remediation-only authorization after human-final findings\n  recover                   Print compact recovery context\n  archive                   Archive a Done or explicitly abandoned cycle\n\nCommon options:\n  --pr <number>\n  --help\n\nBind-task-packet options:\n  --task-packet <file>\n  --expected-revision <number>\n\nValidation-plan arguments:\n  <task-packet.json> [...]       One bound file for every actionable Integrated task\n  --initial-selection <file>     Explicit pristine, clean-taskless, or proven v2 completed-task recovery selection\n  --replace                      Start a fresh plan after a failure or commit change\n\nValidate-result options:\n  --task-packet <file>\n  --worker-result <file>\n\nCheckpoint options:\n  --expected-revision <number>\n\nAuthorize-final-review options:\n  --decision-id <id>             Existing durable operator decision ID\n  --not-before <RFC3339>         Earliest trusted time for the one-shot request\n  --summary <text>               Concise immutable authorization summary\n  --expected-revision <number>   Required optimistic state revision\n\nAuthorize-post-final-remediation options:\n  --decision-id <id>             Existing durable operator decision ID\n  --summary <text>               Concise immutable remediation-only authorization summary\n  --expected-revision <number>   Required optimistic state revision\n\nMigrate options:\n  --integration-map <file>  JSON task-ID to central integration SHA map (v1 only)\n\nArchive options:\n  --abandon-reason <reason>\n\nReview, CI, task-resolution, targeted-validation, and Done transitions use guarded helpers that verify their evidence before saving.\n`;
+  return `Usage: node scripts/pr-review-state.mjs <command> [options]\n\nCommands:\n  init                      Start durable state for a PR review cycle\n  path                      Print the active state path\n  validate                  Check state against the integration checkout\n  bind-task-packet          Bind accepted fixed instructions to a durable task\n  supersede-task            Guard one stopped local task with its integrated replacement\n  validate-result           Check a worker result against its bound fixed instructions\n  validation-plan           Save and print the combined targeted checks\n  run-validation            Run pending checks from the saved plan and record the result\n  show                      Print active state JSON\n  checkpoint                Replace ordinary operational state from --input\n  migrate                   Explicitly migrate active schema v1, v2, v3, or v4 state to v5\n  authorize-final-review    Record one immutable operator-authorized human-final review\n  authorize-post-final-remediation\n                            Record one immutable remediation-only authorization after human-final findings\n  recover                   Print compact recovery context\n  archive                   Archive a Done or explicitly abandoned cycle\n\nCommon options:\n  --pr <number>\n  --help\n\nBind-task-packet options:\n  --task-packet <file>\n  --expected-revision <number>\n\nSupersede-task options:\n  --task-packet <file>             Original stopped task packet\n  --replacement-task-packet <file> Exact integrated replacement packet\n  --decision-id <id>               Sole durable replacement-only correction decision\n  --summary <text>                 Concise immutable supersession summary\n  --expected-revision <number>     Required optimistic state revision\n\nValidation-plan arguments:\n  <task-packet.json> [...]       One bound file for every actionable Integrated task\n  --initial-selection <file>     Explicit pristine, clean-taskless, or proven v2 completed-task recovery selection\n  --replace                      Start a fresh plan after a failure or commit change\n\nValidate-result options:\n  --task-packet <file>\n  --worker-result <file>\n\nCheckpoint options:\n  --expected-revision <number>\n\nAuthorize-final-review options:\n  --decision-id <id>             Existing durable operator decision ID\n  --not-before <RFC3339>         Earliest trusted time for the one-shot request\n  --summary <text>               Concise immutable authorization summary\n  --expected-revision <number>   Required optimistic state revision\n\nAuthorize-post-final-remediation options:\n  --decision-id <id>             Existing durable operator decision ID\n  --summary <text>               Concise immutable remediation-only authorization summary\n  --expected-revision <number>   Required optimistic state revision\n\nMigrate options:\n  --integration-map <file>  JSON task-ID to central integration SHA map (v1 only)\n\nArchive options:\n  --abandon-reason <reason>\n\nReview, CI, task-resolution, targeted-validation, and Done transitions use guarded helpers that verify their evidence before saving.\n`;
 }
 
 function optionsFor(command, argv) {
@@ -41,6 +42,8 @@ function optionsFor(command, argv) {
     common.values.push('decision-id', 'not-before', 'summary');
   } else if (command === 'authorize-post-final-remediation') {
     common.values.push('decision-id', 'summary');
+  } else if (command === 'supersede-task') {
+    common.values.push('task-packet', 'replacement-task-packet', 'decision-id', 'summary');
   } else if (['bind-task-packet', 'validate-result'].includes(command)) {
     common.values.push('task-packet', 'worker-result');
   } else if (command === 'validation-plan') {
@@ -80,7 +83,7 @@ try {
     process.stdout.write(usage());
     process.exit(0);
   }
-  if (!['init', 'path', 'validate', 'bind-task-packet', 'validate-result', 'validation-plan', 'run-validation', 'show', 'checkpoint', 'migrate', 'authorize-final-review', 'authorize-post-final-remediation', 'recover', 'archive'].includes(command)) {
+  if (!['init', 'path', 'validate', 'bind-task-packet', 'supersede-task', 'validate-result', 'validation-plan', 'run-validation', 'show', 'checkpoint', 'migrate', 'authorize-final-review', 'authorize-post-final-remediation', 'recover', 'archive'].includes(command)) {
     throw new UsageError(`Unknown command ${command}`);
   }
   const options = optionsFor(command, argv);
@@ -145,6 +148,26 @@ try {
     const errors = validateWorkerResultAgainstTask(packet, result, actualWorkerChangedPaths(packet, result));
     if (errors.length > 0) throw new StateError(`Worker result does not satisfy task packet:\n- ${errors.join('\n- ')}`, 'INVALID_WORKER_RESULT');
     writeJson({ valid: true, taskId: packet.taskId });
+  } else if (command === 'supersede-task') {
+    if (!options['task-packet'] || !options['replacement-task-packet']
+        || !options['decision-id'] || !options.summary || options.summary.trim() !== options.summary) {
+      throw new UsageError(
+        'supersede-task requires --task-packet, --replacement-task-packet, --decision-id, and a trimmed nonempty --summary',
+      );
+    }
+    if (parsedExpectedRevision === undefined) {
+      throw new UsageError('supersede-task requires --expected-revision');
+    }
+    const taskPacket = JSON.parse(readFileSync(options['task-packet'], 'utf8'));
+    const replacementTaskPacket = JSON.parse(readFileSync(options['replacement-task-packet'], 'utf8'));
+    writeJson(checkpointTaskSupersession({
+      prNumber: options.pr,
+      taskPacket,
+      replacementTaskPacket,
+      decisionId: options['decision-id'],
+      summary: options.summary,
+      expectedRevision: parsedExpectedRevision,
+    }));
   } else if (command === 'validation-plan') {
     if (options['initial-selection'] && options._.length > 0) {
       throw new UsageError('--initial-selection cannot be combined with task-packet files');

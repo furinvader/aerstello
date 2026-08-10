@@ -102,6 +102,15 @@ successful verification.
 A successful close mutation alone is not confirmation. Integrated is not
 Resolved, and neither means Done.
 
+A stopped local packet may become `duplicate` only through the state helper's
+guarded, event-backed `supersede-task` transition after its bound replacement and
+the exact current validation union are proven. This writes no GitHub mutation.
+The resulting original `not-applicable` task still needs its own read-only
+integration-verifier approval and `verify-resolve` assertion. That assertion
+completes only the original task: the actionable replacement and the guarded
+supersession task each remain pending until separately approved and verified at
+the same current HEAD. Never infer their proof from the duplicate disposition.
+
 For an actionable Integrated `local` or `github-threadless` fix, or a selected
 `not-applicable` task with disposition `duplicate`, `already-fixed`, `stale`,
 `invalid`, `policy-conflict`, or `out-of-scope`, run `verify-resolve` only after

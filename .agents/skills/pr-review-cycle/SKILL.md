@@ -50,6 +50,16 @@ separate worktrees from the reviewed commit and non-overlapping ownership.
 Workers must not broaden scope, update central state, integrate, push, delegate,
 or write to GitHub.
 
+If a worker stops because a required concrete path is forbidden, preserve that
+task as actionable `not-applicable` with no invented commit and bind a new,
+distinct replacement packet. After the replacement is Integrated and the
+current packet union passes, use the guarded `supersede-task` command only when
+the replacement is a proven strict provenance and ownership expansion. It may
+change only the stopped task's disposition to `duplicate`; it is not a generic
+way to rewrite task triage, widen ownership, or bypass verifier evidence. Task
+classification comes from `sourceType`; a local task may retain opaque shared
+review-source IDs as part of its provenance.
+
 ## Phase 3: Integrate and verify
 
 Validate each structured worker result before cherry-picking it centrally in
