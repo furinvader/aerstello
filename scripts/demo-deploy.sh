@@ -26,6 +26,7 @@ CONFIRM_RESTORE=''
 CURRENT_MANIFEST_TEMP=''
 FINAL_MANIFEST_TEMP=''
 RESTORED_MIGRATIONS_TEMP=''
+MIGRATION_FILES_TEMP=''
 GIT_TREE_TEMP=''
 BACKUP_PARTIAL=''
 CREATED_BACKUP_PATH=''
@@ -57,6 +58,8 @@ VALIDATED_BACKUP_IDENTITY=''
 OBSERVED_VOLUME_IDENTITY=''
 OBSERVED_VOLUME_RESTORE_TOKEN=''
 OBSERVED_VOLUME_REWRITE_TOKEN=''
+HOST_DEPLOY_LOCK_FD=''
+HOST_DEPLOY_LOCK_PATH=''
 
 usage() {
   cat <<'EOF'
@@ -97,6 +100,9 @@ cleanup() {
   fi
   if [[ -n "$RESTORED_MIGRATIONS_TEMP" && -f "$RESTORED_MIGRATIONS_TEMP" ]]; then
     rm -f -- "$RESTORED_MIGRATIONS_TEMP"
+  fi
+  if [[ -n "$MIGRATION_FILES_TEMP" && -f "$MIGRATION_FILES_TEMP" ]]; then
+    rm -f -- "$MIGRATION_FILES_TEMP"
   fi
   if [[ -n "$GIT_TREE_TEMP" && -f "$GIT_TREE_TEMP" ]]; then
     rm -f -- "$GIT_TREE_TEMP"
@@ -223,6 +229,8 @@ if [[ "$ACTION" != deploy ]]; then
   [[ -z "$CONFIRM_REWRITE" ]] || die "--confirm-rewrite cannot be combined with --$ACTION."
   [[ -z "$ADMIN_PASSWORD_FILE_ARGUMENT" ]] || die "--admin-password-file cannot be combined with --$ACTION."
   [[ "$ADOPT_EXISTING_DB" == false ]] || die "--adopt-existing-db cannot be combined with --$ACTION."
+  [[ -z "$RESTORE_BACKUP_ARGUMENT" ]] || die "--restore-backup cannot be combined with --$ACTION."
+  [[ -z "$CONFIRM_RESTORE" ]] || die "--confirm-restore cannot be combined with --$ACTION."
 fi
 
 resolve_user_path() {
@@ -483,6 +491,90 @@ DEPLOYED_SHA="$(git rev-parse --verify HEAD)"
 [[ "$DEPLOYED_SHA" =~ ^[0-9a-f]{40,64}$ ]] || die 'Could not resolve the deployed Git commit.'
 [[ -z "$(git status --porcelain --untracked-files=normal)" ]] || die 'The Git worktree must be clean; commit or remove uncommitted files before deployment.'
 
+build_migration_manifest() {
+  local destination="$1"
+  local -a files=()
+  MIGRATION_FILES_TEMP="$(mktemp "${TMPDIR:-/tmp}/sky-bar-migration-files.XXXXXX")"
+  if ! LC_ALL=C find apps/api/migrations -mindepth 1 -name '*.sql' -print0 |
+      LC_ALL=C sort -z > "$MIGRATION_FILES_TEMP"; then
+    die 'Could not enumerate the filesystem SQL migrations.'
+  fi
+  mapfile -d '' files < "$MIGRATION_FILES_TEMP"
+  rm -f -- "$MIGRATION_FILES_TEMP"
+  MIGRATION_FILES_TEMP=''
+  ((${#files[@]} > 0)) || die 'No SQL migration files were found.'
+
+  declare -A filesystem_paths=()
+  declare -A prefixes=()
+  local path filename prefix digest
+  for path in "${files[@]}"; do
+    [[ -f "$path" && ! -L "$path" ]] || die "Migration entry must be a regular, non-symlink file: $path"
+    [[ "$path" =~ ^apps/api/migrations/[0-9]{4}_[a-z0-9_]+\.sql$ ]] || die "Unsupported migration filename: $path"
+    filename="${path##*/}"
+    prefix="${filename%%_*}"
+    [[ ! -v "prefixes[$prefix]" ]] || die "Migration files contain duplicate numeric prefix $prefix."
+    prefixes["$prefix"]="$path"
+    filesystem_paths["$path"]=1
+  done
+
+  GIT_TREE_TEMP="$(mktemp "${TMPDIR:-/tmp}/sky-bar-deployed-tree.XXXXXX")"
+  if ! git ls-tree -rz --full-tree "$DEPLOYED_SHA" -- apps/api/migrations > "$GIT_TREE_TEMP"; then
+    die 'Could not enumerate SQL migrations from the deployed Git commit.'
+  fi
+  declare -A deployed_paths=()
+  local record metadata mode type object
+  while true; do
+    record=''
+    if IFS= read -r -d '' record; then
+      :
+    elif [[ -n "$record" ]]; then
+      die 'The deployed Git commit contains a non-NUL-terminated migration tree record.'
+    else
+      break
+    fi
+    [[ "$record" == *$'\t'* ]] ||
+      die 'The deployed Git commit contains a malformed migration tree record.'
+    metadata="${record%%$'\t'*}"
+    path="${record#*$'\t'}"
+    [[ "$path" == apps/api/migrations/*.sql ]] || continue
+    [[ "$path" =~ ^apps/api/migrations/[0-9]{4}_[a-z0-9_]+\.sql$ ]] ||
+      die "The deployed Git commit contains an unsupported SQL migration path: $path"
+    [[ "$metadata" =~ ^([0-9]{6})\ (blob)\ ([0-9a-f]{40,64})$ ]] ||
+      die "The deployed Git commit contains a malformed or non-blob SQL migration: $path"
+    mode="${BASH_REMATCH[1]}"
+    type="${BASH_REMATCH[2]}"
+    object="${BASH_REMATCH[3]}"
+    [[ "$mode" =~ ^100(644|755)$ && "$type" == blob && -n "$object" ]] ||
+      die "The deployed Git commit contains a non-regular SQL migration: $path"
+    [[ ! -v "deployed_paths[$path]" ]] ||
+      die "The deployed Git commit contains a duplicate SQL migration path: $path"
+    deployed_paths["$path"]=1
+    [[ -v "filesystem_paths[$path]" ]] ||
+      die "A SQL migration from the deployed Git commit is missing from the filesystem: $path"
+    if ! git show "$DEPLOYED_SHA:$path" | cmp -s -- "$path" -; then
+      die "Filesystem migration content differs from the deployed Git commit: $path"
+    fi
+  done < "$GIT_TREE_TEMP"
+  rm -f -- "$GIT_TREE_TEMP"
+  GIT_TREE_TEMP=''
+  ((${#deployed_paths[@]} > 0)) || die 'The deployed Git commit contains no SQL migrations.'
+  for path in "${files[@]}"; do
+    [[ -v "deployed_paths[$path]" ]] ||
+      die "Filesystem SQL migration is absent from the deployed Git commit: $path"
+  done
+
+  : > "$destination"
+  for path in "${files[@]}"; do
+    digest="$(sha256sum -- "$path")"
+    digest="${digest%% *}"
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || die "Could not hash migration: $path"
+    printf '%s  %s\n' "$digest" "$path" >> "$destination"
+  done
+}
+
+CURRENT_MANIFEST_TEMP="$(mktemp "${TMPDIR:-/tmp}/sky-bar-demo-migrations.XXXXXX")"
+build_migration_manifest "$CURRENT_MANIFEST_TEMP"
+
 node scripts/release-state.mjs --check --base HEAD --head HEAD --release-ref origin/main
 node scripts/check-released-migrations.mjs --base HEAD --head HEAD --release-ref origin/main
 node scripts/validate-demo-admin.mjs \
@@ -498,6 +590,97 @@ compose() (
   done
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 )
+
+EFFECTIVE_DOCKER_ENDPOINT=''
+resolve_effective_docker_endpoint() {
+  local context=''
+  if [[ -n "${DOCKER_CONTEXT-}" ]]; then
+    context="$DOCKER_CONTEXT"
+  elif [[ -n "${DOCKER_HOST-}" ]]; then
+    EFFECTIVE_DOCKER_ENDPOINT="$DOCKER_HOST"
+  else
+    context="$(docker context show)" || die 'Could not resolve the active Docker context.'
+  fi
+
+  if [[ -n "$context" ]]; then
+    [[ "$context" != -* && "$context" != *$'\n'* && "$context" != *$'\r'* ]] ||
+      die 'The effective Docker context name is invalid.'
+    EFFECTIVE_DOCKER_ENDPOINT="$(docker context inspect "$context" --format '{{ .Endpoints.docker.Host }}')" ||
+      die 'Could not resolve the effective Docker endpoint from its context.'
+  fi
+  [[ -n "$EFFECTIVE_DOCKER_ENDPOINT" && ${#EFFECTIVE_DOCKER_ENDPOINT} -le 4096 &&
+      "$EFFECTIVE_DOCKER_ENDPOINT" != *$'\n'* && "$EFFECTIVE_DOCKER_ENDPOINT" != *$'\r'* ]] ||
+    die 'The effective Docker endpoint is invalid.'
+}
+
+validate_host_lock_parent() {
+  local directory="$1"
+  [[ -d "$directory" && ! -L "$directory" ]] ||
+    die 'The shared host deployment lock parent must be a non-symlink directory.'
+  local metadata
+  metadata="$(stat -Lc '%u:%a' -- "$directory")" ||
+    die 'Could not inspect the shared host deployment lock parent.'
+  [[ "$metadata" == 0:1777 ]] ||
+    die 'The shared host deployment lock parent must be root-owned with mode 1777.'
+}
+
+validate_host_lock_file() {
+  [[ -f "$HOST_DEPLOY_LOCK_PATH" && ! -L "$HOST_DEPLOY_LOCK_PATH" ]] ||
+    die 'The host deployment lock must be a regular, non-symlink file.'
+  local metadata
+  metadata="$(stat -Lc '%a:%h' -- "$HOST_DEPLOY_LOCK_PATH")" ||
+    die 'Could not inspect the host deployment lock.'
+  [[ "$metadata" == 666:1 ]] ||
+    die 'The host deployment lock must have mode 0666 and exactly one link.'
+}
+
+acquire_host_deployment_lock() {
+  local lock_directory=/tmp
+  validate_host_lock_parent "$lock_directory"
+
+  local lock_digest
+  lock_digest="$(printf '%s\0%s\0' "$EFFECTIVE_DOCKER_ENDPOINT" "$PROJECT_NAME" | sha256sum)"
+  lock_digest="${lock_digest%% *}"
+  [[ "$lock_digest" =~ ^[0-9a-f]{64}$ ]] || die 'Could not derive the host deployment lock identity.'
+  HOST_DEPLOY_LOCK_PATH="$lock_directory/sky-bar-demo-deploy-$lock_digest.lock"
+
+  if [[ ! -e "$HOST_DEPLOY_LOCK_PATH" && ! -L "$HOST_DEPLOY_LOCK_PATH" ]]; then
+    if ! (umask 000; set -o noclobber; : > "$HOST_DEPLOY_LOCK_PATH") 2>/dev/null; then
+      [[ -e "$HOST_DEPLOY_LOCK_PATH" || -L "$HOST_DEPLOY_LOCK_PATH" ]] ||
+        die 'Could not create the host deployment lock.'
+    fi
+  fi
+  validate_host_lock_file
+
+  local path_identity_before path_identity_after descriptor_identity descriptor_path
+  path_identity_before="$(stat -Lc '%d:%i' -- "$HOST_DEPLOY_LOCK_PATH")" ||
+    die 'Could not establish the host deployment lock identity.'
+  if ! exec {HOST_DEPLOY_LOCK_FD}>> "$HOST_DEPLOY_LOCK_PATH"; then
+    die 'Could not open the host deployment lock.'
+  fi
+  validate_host_lock_file
+  descriptor_path="/proc/$$/fd/$HOST_DEPLOY_LOCK_FD"
+  descriptor_identity="$(stat -Lc '%d:%i' -- "$descriptor_path")" ||
+    die 'Could not establish the opened host deployment lock identity.'
+  path_identity_after="$(stat -Lc '%d:%i' -- "$HOST_DEPLOY_LOCK_PATH")" ||
+    die 'Could not revalidate the host deployment lock identity.'
+  [[ "$path_identity_before" == "$descriptor_identity" &&
+      "$path_identity_after" == "$descriptor_identity" ]] ||
+    die 'The host deployment lock path was replaced while it was being opened.'
+
+  flock -n "$HOST_DEPLOY_LOCK_FD" ||
+    die "Another deployment is already running for project $PROJECT_NAME on this Docker endpoint."
+  validate_host_lock_file
+  path_identity_after="$(stat -Lc '%d:%i' -- "$HOST_DEPLOY_LOCK_PATH")" ||
+    die 'Could not revalidate the acquired host deployment lock identity.'
+  descriptor_identity="$(stat -Lc '%d:%i' -- "$descriptor_path")" ||
+    die 'Could not revalidate the opened host deployment lock identity.'
+  [[ "$path_identity_after" == "$descriptor_identity" ]] ||
+    die 'The host deployment lock path was replaced after acquisition.'
+}
+
+resolve_effective_docker_endpoint
+acquire_host_deployment_lock
 
 docker info >/dev/null
 docker compose version >/dev/null
@@ -521,8 +704,6 @@ BACKUP_DIRECTORY="$REPOSITORY_ROOT/.demo-backups/$PROJECT_NAME"
 
 mkdir -p -- "$STATE_DIRECTORY"
 chmod 700 -- "$STATE_DIRECTORY"
-exec {DEPLOY_LOCK_FD}> "$STATE_DIRECTORY/deploy.lock"
-flock -n "$DEPLOY_LOCK_FD" || die "Another deployment is already running for project $PROJECT_NAME."
 
 DATABASE_EXISTS=false
 if docker volume inspect "$DB_VOLUME" >/dev/null 2>&1; then
@@ -635,31 +816,6 @@ verify_volume_ownership() {
 if [[ "$DATABASE_EXISTS" == true ]]; then
   verify_volume_ownership
 fi
-
-build_migration_manifest() {
-  local destination="$1"
-  local -a files=()
-  declare -A prefixes=()
-  mapfile -d '' files < <(LC_ALL=C find apps/api/migrations -mindepth 1 -maxdepth 1 -name '*.sql' -print0 | LC_ALL=C sort -z)
-  ((${#files[@]} > 0)) || die 'No SQL migration files were found.'
-  : > "$destination"
-  local path filename prefix digest
-  for path in "${files[@]}"; do
-    [[ -f "$path" && ! -L "$path" ]] || die "Migration entry must be a regular, non-symlink file: $path"
-    [[ "$path" =~ ^apps/api/migrations/[0-9]{4}_[a-z0-9_]+\.sql$ ]] || die "Unsupported migration filename: $path"
-    filename="${path##*/}"
-    prefix="${filename%%_*}"
-    [[ ! -v "prefixes[$prefix]" ]] || die "Migration files contain duplicate numeric prefix $prefix."
-    prefixes["$prefix"]="$path"
-    digest="$(sha256sum -- "$path")"
-    digest="${digest%% *}"
-    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || die "Could not hash migration: $path"
-    printf '%s  %s\n' "$digest" "$path" >> "$destination"
-  done
-}
-
-CURRENT_MANIFEST_TEMP="$(mktemp "${TMPDIR:-/tmp}/sky-bar-demo-migrations.XXXXXX")"
-build_migration_manifest "$CURRENT_MANIFEST_TEMP"
 
 validate_state_descriptor() {
   local directory="$1"
