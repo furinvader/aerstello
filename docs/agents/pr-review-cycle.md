@@ -1,6 +1,6 @@
 # How the PR review cycle works
 
-Sky Bar keeps review work in the repository. One main agent coordinates the
+Aerstello keeps review work in the repository. One main agent coordinates the
 cycle; there is no separate implementation service. Start or resume it with:
 
 ```text

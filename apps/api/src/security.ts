@@ -41,8 +41,8 @@ declare module 'fastify' {
   }
 }
 
-const hostCookie = 'skybar_host';
-const guestCookie = 'skybar_guest';
+const hostCookie = 'aerstello_host';
+const guestCookie = 'aerstello_guest';
 
 export function hashToken(token: string, secret = config.SESSION_SECRET): string {
   return createHmac('sha256', secret).update(token).digest('hex');

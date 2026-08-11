@@ -1,5 +1,5 @@
-import type { Language, LocalizedText } from '@sky-bar/shared';
-export type { OrderItem, Tab } from '@sky-bar/shared';
+import type { Language, LocalizedText } from '@aerstello/shared';
+export type { OrderItem, Tab } from '@aerstello/shared';
 
 export interface Host { id: string; email: string; name: string; role: 'admin' | 'staff'; language: Language; version: number; sessionId: string }
 export interface Venue { name: string; defaultLanguage: Language; timezone: string; version: number }

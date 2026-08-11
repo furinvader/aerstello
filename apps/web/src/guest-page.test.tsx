@@ -18,7 +18,7 @@ describe('guest realtime events', () => {
   beforeEach(() => {
     apiMock.mockReset();
     eventSourceUrls.length = 0;
-    localStorage.setItem('skybar-language', 'en');
+    localStorage.setItem('aerstello-language', 'en');
     apiMock.mockImplementation((path: string) => {
       if (path === '/guest/me') return Promise.resolve({ guest: guestIdentity });
       if (path === '/guest/tab') return Promise.resolve({ id: 'tab-1', guestId: 'guest-1', status: 'open', items: [], itemCount: 0, totalCents: 0 });
@@ -96,7 +96,7 @@ describe('guest realtime events', () => {
   });
 
   it('restores the persisted guest language before showing the authenticated shell', async () => {
-    localStorage.setItem('skybar-language','en');
+    localStorage.setItem('aerstello-language','en');
     apiMock.mockImplementation((path: string) => {
       if(path==='/guest/me')return Promise.resolve({guest:{...guestIdentity,language:'it'}});
       if(path==='/guest/tab')return Promise.resolve({id:'tab-1',guestId:'guest-1',status:'open',items:[],itemCount:0,totalCents:0});
@@ -110,7 +110,7 @@ describe('guest realtime events', () => {
     const selector=await screen.findByRole('combobox',{name:'Lingua'});
     expect(selector).toHaveValue('it');
     expect(screen.getByRole('heading',{name:'Self-service'})).toHaveTextContent('Self-service');
-    expect(localStorage.getItem('skybar-language')).toBe('it');
+    expect(localStorage.getItem('aerstello-language')).toBe('it');
     expect(document.documentElement.lang).toBe('it');
   });
 
@@ -131,7 +131,7 @@ describe('guest realtime events', () => {
     await waitFor(()=>expect(apiMock.mock.calls.filter(([path])=>path==='/guest/me')).toHaveLength(2));
 
     expect(screen.getByRole('combobox',{name:'Language'})).toHaveValue('en');
-    expect(localStorage.getItem('skybar-language')).toBe('en');
+    expect(localStorage.getItem('aerstello-language')).toBe('en');
     expect(document.documentElement.lang).toBe('en');
   });
 
@@ -161,7 +161,7 @@ describe('guest realtime events', () => {
     identity={...identity,sessionId:'session-2',language:'de'};
     await client.invalidateQueries({queryKey:['guest-me']});
     expect(await screen.findByRole('combobox',{name:'Sprache'})).toHaveValue('de');
-    expect(localStorage.getItem('skybar-language')).toBe('de');
+    expect(localStorage.getItem('aerstello-language')).toBe('de');
     expect(document.documentElement.lang).toBe('de');
   });
 });

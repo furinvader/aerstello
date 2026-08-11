@@ -363,11 +363,11 @@ function operationToken(value) {
 }
 
 function intentFor(type, operationId, at) {
-  return { type, operationId, clientMutationId: `sky-bar-${operationToken(operationId)}`, at };
+  return { type, operationId, clientMutationId: `aerstello-${operationToken(operationId)}`, at };
 }
 
 function replyMarker(operationId) {
-  return `<!-- sky-bar-review:${operationToken(operationId)} -->`;
+  return `<!-- aerstello-review:${operationToken(operationId)} -->`;
 }
 
 function replyTaskLine(task) {
@@ -380,7 +380,7 @@ function deterministicReply(state, entry, operationId) {
   const checks = state.validationStatus.checks.slice(0, 3).join(', ');
   const tasks = entry.tasks.slice().sort((left, right) => left.id.localeCompare(right.id));
   return [
-    `Sky Bar review resolution at ${state.currentIntegrationHeadSha}.`,
+    `Aerstello review resolution at ${state.currentIntegrationHeadSha}.`,
     'Tasks:',
     ...tasks.map(replyTaskLine),
     `Validation: ${checks}.`,
@@ -567,7 +567,7 @@ function exactRepliesFor(state, live, entry) {
   const operationId = `reply:${state.prNumber}:${entry.thread.id}:${state.currentIntegrationHeadSha}`;
   const body = deterministicReply(state, entry, operationId);
   const marker = replyMarker(operationId);
-  const markerPattern = /<!-- sky-bar-review:[0-9a-f]{24} -->/u;
+  const markerPattern = /<!-- aerstello-review:[0-9a-f]{24} -->/u;
   const replies = entry.thread.comments.filter((comment) => comment.replyTo?.id === entry.thread.root.id);
   for (const reply of replies.filter((comment) => markerPattern.test(comment.body ?? ''))) {
     if (!reply.body.includes(marker)) throw new GitHubWorkflowError('Prior-head idempotency reply is present', 'REPLY_AMBIGUOUS');
@@ -602,11 +602,11 @@ function priorHeadRecoveryCandidate(state, live, entry, selectedTask) {
       || !selectedTask.integratedCommitSha) return null;
 
   const directReplies = entry.thread.comments.filter((comment) => comment.replyTo?.id === entry.thread.root.id);
-  const markerPattern = /<!-- sky-bar-review:[0-9a-f]{24} -->/u;
+  const markerPattern = /<!-- aerstello-review:[0-9a-f]{24} -->/u;
   const markedReplies = directReplies.filter((comment) => markerPattern.test(comment.body ?? ''));
   const priorCandidates = markedReplies.map((reply) => ({
     reply,
-    priorHeadSha: /^Sky Bar review resolution at ([0-9a-f]{40})\.\n/u.exec(reply.body ?? '')?.[1] ?? null,
+    priorHeadSha: /^Aerstello review resolution at ([0-9a-f]{40})\.\n/u.exec(reply.body ?? '')?.[1] ?? null,
   })).filter((candidate) => candidate.priorHeadSha !== null
     && candidate.priorHeadSha !== state.currentIntegrationHeadSha);
   if (priorCandidates.length === 0) return null;
@@ -622,8 +622,8 @@ function priorHeadRecoveryCandidate(state, live, entry, selectedTask) {
   const expectedMarker = replyMarker(replyOperationId);
   const lines = String(reply.body ?? '').split('\n');
   const taskLines = entry.tasks.slice().sort((left, right) => left.id.localeCompare(right.id)).map(replyTaskLine);
-  const expectedPrefix = [`Sky Bar review resolution at ${priorHeadSha}.`, 'Tasks:', ...taskLines];
-  const markers = [...String(reply.body ?? '').matchAll(/<!-- sky-bar-review:[0-9a-f]{24} -->/gu)]
+  const expectedPrefix = [`Aerstello review resolution at ${priorHeadSha}.`, 'Tasks:', ...taskLines];
+  const markers = [...String(reply.body ?? '').matchAll(/<!-- aerstello-review:[0-9a-f]{24} -->/gu)]
     .map((match) => match[0]);
   const prefixMatches = expectedPrefix.every((line, index) => lines[index] === line);
   const validationLine = lines.at(-2) ?? '';
@@ -682,10 +682,10 @@ function assertRecordedReply(state, live, entry, proof) {
   const replies = entry.thread.comments.filter((comment) => comment.id === proof.replyId);
   if (replies.length !== 1) throw new GitHubWorkflowError('Historical reply ID is not uniquely live', 'THREAD_PROOF_STALE');
   const reply = replies[0];
-  const header = /^Sky Bar review resolution at ([0-9a-f]{40})\.\n/u.exec(reply.body ?? '');
+  const header = /^Aerstello review resolution at ([0-9a-f]{40})\.\n/u.exec(reply.body ?? '');
   const replyHeadSha = header?.[1] ?? null;
   const operationId = replyHeadSha ? `reply:${state.prNumber}:${entry.thread.id}:${replyHeadSha}` : null;
-  const markers = [...String(reply.body ?? '').matchAll(/<!-- sky-bar-review:[0-9a-f]{24} -->/gu)].map((match) => match[0]);
+  const markers = [...String(reply.body ?? '').matchAll(/<!-- aerstello-review:[0-9a-f]{24} -->/gu)].map((match) => match[0]);
   const authorMatches = proof.isResolved
     ? reply.author?.login === proof.resolvedBy
     : isViewerActor(reply.author, live.metadata.viewer);

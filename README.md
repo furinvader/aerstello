@@ -1,8 +1,8 @@
-# Sky Bar
+# Aerstello
 
-Sky Bar is a tablet-first, installable bar-operations PWA for one venue. Hosts manage rooms, guests, products, open tabs, guest access requests, and bills. Guests receive device-bound access to their tab and can report self-service items.
+Aerstello is a tablet-first, installable hospitality-operations PWA for one venue. Hosts manage rooms, guests, products, open tabs, guest access requests, and bills. Guests receive device-bound access to their tab and can report self-service items.
 
-Sky Bar is the software name. The venue name is configured by an administrator and snapshotted onto every bill.
+Aerstello is the software name. The venue name is configured by an administrator and snapshotted onto every bill.
 
 ## Quick start
 
@@ -15,7 +15,7 @@ npm install
 npm run assets:generate
 npm run build
 npm run db:migrate
-printf '%s\n' "$SKY_BAR_ADMIN_PASSWORD" | npm run admin:create -- --email you@example.com --name "Your name" --password-stdin
+printf '%s\n' "$AERSTELLO_ADMIN_PASSWORD" | npm run admin:create -- --email you@example.com --name "Your name" --password-stdin
 npm run dev
 ```
 
@@ -27,11 +27,11 @@ For a populated local system instead of creating an administrator manually:
 read -rsp 'Development seed administrator password: ' SEED_ADMIN_PASSWORD
 printf '\n'
 export SEED_ADMIN_PASSWORD
-npm run db:seed -w @sky-bar/api
+npm run db:seed -w @aerstello/api
 unset SEED_ADMIN_PASSWORD
 ```
 
-The development seed creates `admin@skybar.test`, requires an explicit password of at least 12 characters, and refuses to run when `NODE_ENV=production`.
+The development seed creates `admin@aerstello.test`, requires an explicit password of at least 12 characters, and refuses to run when `NODE_ENV=production`.
 
 ## Commands
 
@@ -50,7 +50,7 @@ The development seed creates `admin@skybar.test`, requires an explicit password 
 | `npm run lint:commit -- --last` | Validate the latest commit message |
 | `npm run db:migrate` | Apply pending PostgreSQL migrations |
 | `npm run admin:create -- …` | Create or recover the initial administrator |
-| `npm run db:migrate:dev -w @sky-bar/api` | Apply migrations directly from TypeScript during API development |
+| `npm run db:migrate:dev -w @aerstello/api` | Apply migrations directly from TypeScript during API development |
 | `npm run assets:generate` | Generate required 192px and 512px PWA icons |
 | `npm run release:state` | Inspect production marker/tag state as JSON |
 | `npm run check:release-state` | Fail on stale or inconsistent release metadata |
@@ -99,7 +99,7 @@ characters. Serve the app through HTTPS. Then:
 docker compose build
 docker compose up -d
 docker compose exec app npm run db:migrate
-printf '%s\n' "$SKY_BAR_ADMIN_PASSWORD" | docker compose exec -T app npm run admin:create -- --email admin@example.com --name "Admin" --password-stdin
+printf '%s\n' "$AERSTELLO_ADMIN_PASSWORD" | docker compose exec -T app npm run admin:create -- --email admin@example.com --name "Admin" --password-stdin
 ```
 
 Back up the PostgreSQL volume before upgrades. See [docs/operations.md](./docs/operations.md) for backup, restore, health checks, and deployment constraints.

@@ -37,7 +37,7 @@ Feature: German, Italian, and English localization
 
   @id-the-guest-access-form-localizes-its-name-label
   Scenario: The guest access form localizes its name label
-    Given the seeded Sky Bar venue
+    Given the seeded Aerstello venue
     When a fresh guest selects Italian on the access form
     Then the guest name field is labeled in Italian
 

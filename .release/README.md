@@ -1,6 +1,6 @@
 # Production release markers
 
-Sky Bar becomes released only when a valid marker and an annotated Git tag
+Aerstello becomes released only when a valid marker and an annotated Git tag
 exist for the same version on the protected `main` release history. A marker
 without its tag is pending release preparation and does not freeze migrations.
 The root package version is not release evidence.

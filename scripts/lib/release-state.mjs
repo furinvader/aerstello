@@ -11,7 +11,7 @@ import {
 } from './git.mjs';
 
 export const RELEASE_STATE_SCHEMA_VERSION = 1;
-export const PRODUCT = 'sky-bar';
+export const PRODUCT = 'aerstello';
 export const DEFAULT_RELEASE_REF = 'origin/main';
 export const STABLE_VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
 export const STABLE_TAG_PATTERN = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;

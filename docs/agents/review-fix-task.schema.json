@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://sky-bar.local/schemas/review-fix-task.schema.json",
-  "title": "Sky Bar review-fix task packet",
+  "$id": "https://aerstello.local/schemas/review-fix-task.schema.json",
+  "title": "Aerstello review-fix task packet",
   "type": "object",
   "additionalProperties": false,
   "required": [

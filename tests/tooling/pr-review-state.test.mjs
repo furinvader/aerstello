@@ -150,7 +150,7 @@ function external(cwd, state, overrides = {}) {
 
 function request(state, id = `request-${state.reviewRound + 1}`, kind = state.reviewRound < 3 ? 'discovery' : 'verification') {
   return {
-    id, databaseId: 101, url: `https://github.com/example/sky-bar/pull/17#issuecomment-${id}`,
+    id, databaseId: 101, url: `https://github.com/example/aerstello/pull/17#issuecomment-${id}`,
     headSha: state.currentIntegrationHeadSha, at: AT, kind, body: '@codex review',
     authorLogin: 'maintainer', authorNodeId: 'MDQ6VXNlcjE=',
   };
@@ -159,7 +159,7 @@ function request(state, id = `request-${state.reviewRound + 1}`, kind = state.re
 function outcome(state, overrides = {}) {
   return {
     id: `outcome-${state.reviewRequest.id}`, databaseId: 201,
-    url: 'https://github.com/example/sky-bar/pull/17#pullrequestreview-201',
+    url: 'https://github.com/example/aerstello/pull/17#pullrequestreview-201',
     headSha: state.currentIntegrationHeadSha, at: AT, requestId: state.reviewRequest.id,
     kind: state.reviewRequest.kind, outcome: 'clean', evidenceType: 'review-submission',
     reviewerLogin: 'chatgpt-codex-connector', reviewerNodeId: 'BOT_codex', reviewerType: 'Bot',
@@ -172,7 +172,7 @@ function ciEvidence(state, overrides = {}) {
   return {
     source: 'github-actions', scope: 'full', status: 'passed', headSha: state.currentIntegrationHeadSha,
     checks: ['check', 'e2e'], checkRunId: 'CHECK_123456', workflowRunId: 123456,
-    workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/123456', updatedAt: AT,
+    workflowRunUrl: 'https://github.com/example/aerstello/actions/runs/123456', updatedAt: AT,
     ...overrides,
   };
 }
@@ -1082,7 +1082,7 @@ test('explicit migration uses immutable exact backup and handles a near-limit v1
       threadNodeId: `PRRT_current_${threadIndex}`, rootCommentNodeId: `PRRC_current_${threadIndex}`,
       rootCommentDatabaseId: threadIndex + 1, taskIds,
       disposition: 'fixed', replyId: `PRRC_reply_${threadIndex}`,
-      replyUrl: `https://github.com/example/sky-bar/pull/17#discussion_r${threadIndex}`,
+      replyUrl: `https://github.com/example/aerstello/pull/17#discussion_r${threadIndex}`,
       isResolved: true, resolvedAt: AT, resolvedBy: 'maintainer', observedHeadSha: integrationHead,
     })),
   };
@@ -1392,7 +1392,7 @@ test('full CI evidence restores a non-tail immutable attempt when integration HE
   const headA = initial.currentIntegrationHeadSha;
   const evidenceA = ciEvidence(initial, {
     checkRunId: 'CHECK_HEAD_A', workflowRunId: 123451,
-    workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/123451',
+    workflowRunUrl: 'https://github.com/example/aerstello/actions/runs/123451',
   });
   const collectedA = checkpointCiValidation({
     cwd, evidence: evidenceA, expectedRevision: initial.revision,
@@ -1404,7 +1404,7 @@ test('full CI evidence restores a non-tail immutable attempt when integration HE
   assert.equal(onHeadB.ciValidationStatus.status, 'not-run');
   const evidenceB = ciEvidence(onHeadB, {
     status: 'failed', checkRunId: 'CHECK_HEAD_B', workflowRunId: 123452,
-    workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/123452',
+    workflowRunUrl: 'https://github.com/example/aerstello/actions/runs/123452',
     updatedAt: '2026-08-05T00:01:00Z',
   });
   const collectedB = checkpointCiValidation({
@@ -1437,7 +1437,7 @@ test('full CI evidence restores a non-tail immutable attempt when integration HE
 
   const unseenA = ciEvidence(restoredA, {
     checkRunId: 'CHECK_HEAD_A_RERUN', workflowRunId: 123453,
-    workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/123453',
+    workflowRunUrl: 'https://github.com/example/aerstello/actions/runs/123453',
     updatedAt: '2026-08-05T00:02:00Z',
   });
   const appended = checkpointCiValidation({
@@ -1730,7 +1730,7 @@ test('structured canonical thread proof covers multiple tasks with one reply and
     threads: [{
       threadNodeId: 'PRRT_node', rootCommentNodeId: 'PRRC_root', rootCommentDatabaseId: 9,
       taskIds: ['task-a', 'task-b'],
-      disposition: 'fixed', replyId: 'PRRC_reply', replyUrl: 'https://github.com/example/sky-bar/pull/17#discussion_r9',
+      disposition: 'fixed', replyId: 'PRRC_reply', replyUrl: 'https://github.com/example/aerstello/pull/17#discussion_r9',
       isResolved: true, resolvedAt: AT, resolvedBy: 'maintainer', observedHeadSha: head,
     }],
     threadlessVerification: emptyThreadless(),
@@ -1848,12 +1848,12 @@ test('completion requires every exact source root to have disposition-matched re
   const first = {
     threadNodeId: 'PRRT_first', rootCommentNodeId: 'PRRC_first', rootCommentDatabaseId: 41,
     taskIds: ['multi-root'], disposition: 'fixed', replyId: 'PRRC_reply_1',
-    replyUrl: 'https://github.com/example/sky-bar/pull/17#discussion_r41', isResolved: true,
+    replyUrl: 'https://github.com/example/aerstello/pull/17#discussion_r41', isResolved: true,
     resolvedAt: AT, resolvedBy: 'maintainer', observedHeadSha: head,
   };
   const second = {
     ...first, threadNodeId: 'PRRT_second', rootCommentNodeId: 'PRRC_second', rootCommentDatabaseId: 42,
-    replyId: 'PRRC_reply_2', replyUrl: 'https://github.com/example/sky-bar/pull/17#discussion_r42',
+    replyId: 'PRRC_reply_2', replyUrl: 'https://github.com/example/aerstello/pull/17#discussion_r42',
   };
   const proof = {
     status: 'passed', headSha: head, threads: [first], threadlessVerification: emptyThreadless(), updatedAt: AT,
@@ -1930,7 +1930,7 @@ test('proven non-actionable not-applicable findings become completed-equivalent'
       threadNodeId: 'PRRT_invalid', rootCommentNodeId: 'PRRC_invalid', rootCommentDatabaseId: 10,
       taskIds: ['invalid-finding'],
       disposition: 'invalid', replyId: 'PRRC_invalid_reply',
-      replyUrl: 'https://github.com/example/sky-bar/pull/17#discussion_r10', isResolved: true, resolvedAt: AT,
+      replyUrl: 'https://github.com/example/aerstello/pull/17#discussion_r10', isResolved: true, resolvedAt: AT,
       resolvedBy: 'maintainer', observedHeadSha: head,
     }],
   };
@@ -2006,7 +2006,7 @@ test('HEAD drift preserves durable task coverage while invalidating and refreshi
     threads: [{
       threadNodeId: 'PRRT_drift', rootCommentNodeId: 'PRRC_root', rootCommentDatabaseId: 11,
       taskIds: ['thread-task'],
-      disposition: 'fixed', replyId: 'PRRC_reply', replyUrl: 'https://github.com/example/sky-bar/pull/17#discussion_r1',
+      disposition: 'fixed', replyId: 'PRRC_reply', replyUrl: 'https://github.com/example/aerstello/pull/17#discussion_r1',
       isResolved: true, resolvedAt: AT, resolvedBy: 'maintainer', observedHeadSha: headA,
     }],
   };

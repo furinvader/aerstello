@@ -1,4 +1,4 @@
-import { settleTabSchema } from '@sky-bar/shared';
+import { settleTabSchema } from '@aerstello/shared';
 
 type SettleTabCommand = ReturnType<typeof settleTabSchema.parse>;
 
@@ -20,7 +20,7 @@ interface SettlementStorage {
 }
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-export const pendingSettlementKey = (hostId: string) => `skybar-pending-settlement:${hostId}`;
+export const pendingSettlementKey = (hostId: string) => `aerstello-pending-settlement:${hostId}`;
 
 function isPendingSettlement(value: unknown, hostId: string): value is PendingSettlement {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;

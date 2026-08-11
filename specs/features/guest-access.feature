@@ -4,7 +4,7 @@ Feature: Guest device access and self-service
 
   @id-public-bootstrap-loading-and-failure-hide-the-access-form
   Scenario: Public bootstrap loading and failure hide the access form
-    Given the seeded Sky Bar venue
+    Given the seeded Aerstello venue
     When the public bootstrap request remains pending
     Then bootstrap loading is shown without the access form
     When the public bootstrap request fails

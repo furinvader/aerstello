@@ -25,7 +25,7 @@ await transaction(async (client) => {
   }
   const passwordHash = await hashPassword(administratorPassword);
   await client.query(
-    `INSERT INTO hosts(email,name,password_hash,role,language) VALUES ('admin@skybar.test','Mira Host',$1,'admin','de')
+    `INSERT INTO hosts(email,name,password_hash,role,language) VALUES ('admin@aerstello.test','Mira Host',$1,'admin','de')
      ON CONFLICT ((lower(email))) DO UPDATE SET password_hash=excluded.password_hash,active=true,role='admin',version=hosts.version+1`,
     [passwordHash],
   );
@@ -62,5 +62,5 @@ await transaction(async (client) => {
     await client.query(`INSERT INTO product_versions(product_id,catalog_version,name,price_cents,enabled,self_service_only) VALUES ($1,$2,$3,$4,true,$5)`,[product.rows[0]!.id,version,JSON.stringify(example.name),example.price,example.self]);
   }
 });
-console.log('Seed complete: admin@skybar.test');
+console.log('Seed complete: admin@aerstello.test');
 await pool.end();

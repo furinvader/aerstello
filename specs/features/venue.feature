@@ -1,6 +1,6 @@
 @area-management
 Feature: Venue identity
-  Sky Bar is the software while bills carry the administrator-configured venue name.
+  Aerstello is the software while bills carry the administrator-configured venue name.
 
   @id-an-administrator-changes-the-venue-name
   Scenario: An administrator changes the venue name

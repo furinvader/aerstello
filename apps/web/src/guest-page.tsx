@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Redirect } from 'wouter';
 import { Clock3, LogOut, Plus, ReceiptText } from 'lucide-react';
-import { formatMoney, localized, type GuestItemCreated, type Language, type LocalizedText, type Tab } from '@sky-bar/shared';
+import { formatMoney, localized, type GuestItemCreated, type Language, type LocalizedText, type Tab } from '@aerstello/shared';
 import { ApiError, api, apiErrorMessage, json } from './api';
 import { Button, Card, Empty, Notice } from './components';
 import { useI18n } from './i18n';
@@ -15,7 +15,7 @@ interface ProvisionalEntry { id: string; expiresAtMonotonic: number }
 interface UndoEntry extends ProvisionalEntry { productId: string; mutationId: string }
 interface PendingAddStore { sessionId: string; entries: [string,string,number,number][] }
 interface GuestMutationError { owner: string; message: string }
-const pendingAddKey='skybar-guest-pending-adds';
+const pendingAddKey='aerstello-guest-pending-adds';
 
 function loadPendingAdds(): PendingAddStore {
   const raw=localStorage.getItem(pendingAddKey);
@@ -176,7 +176,7 @@ export function GuestPage() {
     }
   };
   const logout=async()=>{try{await api('/guest/logout',{method:'POST'})}catch{/* Clear cached guest data after an uncertain response. */}finally{client.clear();globalThis.location.assign('/guest/request')}};
-  if (me.isLoading||restoringLanguage) return <div className="splash">Sky Bar</div>;
+  if (me.isLoading||restoringLanguage) return <div className="splash">Aerstello</div>;
   if (me.isError) {
     if (me.error instanceof ApiError && me.error.status === 401) return <Redirect to="/guest/request" />;
     return <main className="guest-shell"><Card><Notice kind="error">{t('requestFailed')}</Notice><Button onClick={() => void me.refetch()}>{t('retry')}</Button></Card></main>;

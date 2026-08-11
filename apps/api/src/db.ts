@@ -41,7 +41,7 @@ export async function migrate(database: MigrationDatabase = pool): Promise<void>
   const client = await database.connect();
   let locked = false;
   try {
-    await client.query(`SELECT pg_advisory_lock(hashtext('sky-bar-schema-migrations'))`);
+    await client.query(`SELECT pg_advisory_lock(hashtext('aerstello-schema-migrations'))`);
     locked = true;
     await client.query('CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())');
     const files = (await readdir(directory)).filter((file) => file.endsWith('.sql')).sort();
@@ -61,7 +61,7 @@ export async function migrate(database: MigrationDatabase = pool): Promise<void>
     }
   } finally {
     try {
-      if (locked) await client.query(`SELECT pg_advisory_unlock(hashtext('sky-bar-schema-migrations'))`);
+      if (locked) await client.query(`SELECT pg_advisory_unlock(hashtext('aerstello-schema-migrations'))`);
     } finally {
       client.release();
     }

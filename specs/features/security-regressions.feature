@@ -40,7 +40,7 @@ Feature: Device grants and replay protection
 
   @id-malformed-json-remains-a-definitive-client-error
   Scenario: Malformed JSON remains a definitive client error
-    Given the seeded Sky Bar venue
+    Given the seeded Aerstello venue
     When a client submits malformed JSON
     Then the malformed request is rejected as a client error
 

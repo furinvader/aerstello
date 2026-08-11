@@ -1,4 +1,4 @@
-import { MAX_ORDER_BATCH_LINES, MAX_ORDER_LINE_QUANTITY } from '@sky-bar/shared';
+import { MAX_ORDER_BATCH_LINES, MAX_ORDER_LINE_QUANTITY } from '@aerstello/shared';
 
 export type OrderCart = Record<string, number>;
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_ORDER_BATCH_LINES, MAX_ORDER_LINE_QUANTITY } from '@sky-bar/shared';
+import { MAX_ORDER_BATCH_LINES, MAX_ORDER_LINE_QUANTITY } from '@aerstello/shared';
 import { canAddOrderProduct, updateOrderCart } from './cart';
 
 describe('order cart limits', () => {

@@ -1,5 +1,5 @@
 name = "review_fix_worker"
-description = "Implementation worker for one fixed Sky Bar PR-review task and owned write set."
+description = "Implementation worker for one fixed Aerstello PR-review task and owned write set."
 model_reasoning_effort = "medium"
 
 developer_instructions = """

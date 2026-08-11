@@ -1,4 +1,4 @@
-# Contributing to Sky Bar
+# Contributing to Aerstello
 
 ## Commit messages
 
