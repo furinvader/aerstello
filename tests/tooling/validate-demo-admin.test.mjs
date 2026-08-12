@@ -36,7 +36,7 @@ function validate(validator, email, name) {
 }
 
 function hermeticValidator(t) {
-  const directory = mkdtempSync(join(tmpdir(), 'sky-bar-admin-validator-'));
+  const directory = mkdtempSync(join(tmpdir(), 'aerstello-admin-validator-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const relativeFiles = [
     'scripts/validate-demo-admin.mjs',

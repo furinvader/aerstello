@@ -2,11 +2,11 @@ services:
   db:
     image: postgres:17-alpine
     environment:
-      POSTGRES_DB: skybar
-      POSTGRES_USER: skybar
+      POSTGRES_DB: aerstello
+      POSTGRES_USER: aerstello
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the demo environment file}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U skybar -d skybar"]
+      test: ["CMD-SHELL", "pg_isready -U aerstello -d aerstello"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -25,9 +25,9 @@ services:
         condition: service_healthy
     environment:
       NODE_ENV: production
-      DATABASE_URL: postgres://skybar:${POSTGRES_PASSWORD}@db:5432/skybar
+      DATABASE_URL: postgres://aerstello:${POSTGRES_PASSWORD}@db:5432/aerstello
       PORT: 3001
-      WEB_ORIGIN: https://${SKY_BAR_DOMAIN:?Set SKY_BAR_DOMAIN in the demo environment file}
+      WEB_ORIGIN: https://${AERSTELLO_DOMAIN:?Set AERSTELLO_DOMAIN in the demo environment file}
       SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in the demo environment file}
       ACCESS_CAPABILITY_KEYS: ${ACCESS_CAPABILITY_KEYS:?Set ACCESS_CAPABILITY_KEYS in the demo environment file}
       TRUST_PROXY: "true"
@@ -49,13 +49,13 @@ services:
     build:
       context: deploy/caddy
       args:
-        SKY_BAR_DOMAIN: ${SKY_BAR_DOMAIN:?Set SKY_BAR_DOMAIN in the demo environment file}
+        AERSTELLO_DOMAIN: ${AERSTELLO_DOMAIN:?Set AERSTELLO_DOMAIN in the demo environment file}
         ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in the demo environment file}
     depends_on:
       app:
         condition: service_healthy
     environment:
-      SKY_BAR_DOMAIN: ${SKY_BAR_DOMAIN:?Set SKY_BAR_DOMAIN in the demo environment file}
+      AERSTELLO_DOMAIN: ${AERSTELLO_DOMAIN:?Set AERSTELLO_DOMAIN in the demo environment file}
       ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in the demo environment file}
     ports:
       - "80:80"

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { accountUpdateSchema } from '@sky-bar/shared';
+import { accountUpdateSchema } from '@aerstello/shared';
 import { adminProfileSchema } from './admin-profile.js';
 
 const valid = [

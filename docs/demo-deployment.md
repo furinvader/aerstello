@@ -1,6 +1,6 @@
 # Demo deployment
 
-This runbook deploys a repeatable Sky Bar demonstration to one Linux host.
+This runbook deploys a repeatable Aerstello demonstration to one Linux host.
 The dedicated demo stack runs PostgreSQL on a private backend network, the app
 on private backend and edge networks, and Caddy as the only host-facing service
 on TCP 80, TCP 443, and UDP 443. Caddy obtains and renews the HTTPS certificate
@@ -173,10 +173,10 @@ permissions. For example, prepare it without echoing the password:
 umask 077
 read -r -s -p 'Administrator password file value: ' ADMIN_PASSWORD
 printf '\n'
-printf '%s\n' "$ADMIN_PASSWORD" > /secure/path/sky-bar-admin-password
+printf '%s\n' "$ADMIN_PASSWORD" > /secure/path/aerstello-admin-password
 unset ADMIN_PASSWORD
 scripts/demo-deploy.sh --env-file .env.demo --db-mode persist \
-  --admin-password-file /secure/path/sky-bar-admin-password
+  --admin-password-file /secure/path/aerstello-admin-password
 ```
 
 Delete or rotate the automation secret according to your secret-management
@@ -212,12 +212,12 @@ project name as the confirmation:
 
 ```bash
 scripts/demo-deploy.sh --env-file .env.demo --db-mode rewrite \
-  --confirm-rewrite sky-bar-demo \
-  --admin-password-file /secure/path/sky-bar-admin-password
+  --confirm-rewrite aerstello-demo \
+  --admin-password-file /secure/path/aerstello-admin-password
 ```
 
 Use the actual `COMPOSE_PROJECT_NAME` value from your environment file in place
-of `sky-bar-demo`. The command removes only that project's explicitly named
+of `aerstello-demo`. The command removes only that project's explicitly named
 PostgreSQL volume. It preserves Caddy's certificate and configuration volumes,
 recreates the database, migrates it, creates the administrator, and publishes
 new state only after HTTPS health succeeds. It never uses `docker compose down
@@ -268,8 +268,8 @@ possible before creating the exact Compose-owned destination volume.
 
 ```bash
 scripts/demo-deploy.sh --env-file .env.demo --db-mode persist \
-  --restore-backup .demo-backups/sky-bar-demo/TIMESTAMP.bundle \
-  --confirm-restore sky-bar-demo
+  --restore-backup .demo-backups/aerstello-demo/TIMESTAMP.bundle \
+  --confirm-restore aerstello-demo
 scripts/demo-deploy.sh --env-file .env.demo --db-mode persist
 ```
 
@@ -290,7 +290,7 @@ exact original bundle. The transaction binds that bundle identity and records
 the completed pre-restore safety bundle, so the retry reruns restoration without
 trying to validate or back up a possibly partial database. Every attempt stops
 the application and Caddy, connects through the PostgreSQL maintenance
-database, drops and recreates the complete `skybar` database, and restores the
+database, drops and recreates the complete `aerstello` database, and restores the
 custom archive without relying on archive-listed `--clean` statements. It never
 deletes the Caddy volumes. Do not create compatibility migrations for
 unreleased recovery points; rewrite pre-release migrations or restore a

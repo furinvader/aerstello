@@ -24,13 +24,13 @@ import { fileURLToPath } from 'node:url';
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const gitSha = '0123456789abcdef0123456789abcdef01234567';
-const project = 'sky-bar-demo';
+const project = 'aerstello-demo';
 const dbVolume = `${project}-postgres-data`;
 const migrationPath = 'apps/api/migrations/0001_initial.sql';
 
 const validEnvironment = {
   COMPOSE_PROJECT_NAME: project,
-  SKY_BAR_DOMAIN: 'demo.example.test',
+  AERSTELLO_DOMAIN: 'demo.example.test',
   ACME_EMAIL: 'ops@example.test',
   ADMIN_EMAIL: 'admin@example.test',
   ADMIN_NAME: 'Demo Administrator',
@@ -54,7 +54,7 @@ const crypto = require('node:crypto');
 const tool = path.basename(process.argv[1]);
 const args = process.argv.slice(2);
 const safeConfigKeys = [
-  'COMPOSE_PROJECT_NAME', 'SKY_BAR_DOMAIN', 'ACME_EMAIL', 'ADMIN_EMAIL', 'ADMIN_NAME',
+  'COMPOSE_PROJECT_NAME', 'AERSTELLO_DOMAIN', 'ACME_EMAIL', 'ADMIN_EMAIL', 'ADMIN_NAME',
   'LOG_LEVEL', 'RATE_LIMIT_MAX', 'ACCESS_STATUS_IP_LIMIT_MAX',
 ];
 const secretConfigKeys = ['POSTGRES_PASSWORD', 'SESSION_SECRET', 'ACCESS_CAPABILITY_KEYS'];
@@ -154,7 +154,7 @@ if (tool === 'node') {
     const value = Number(args[2]);
     process.exit(Number.isFinite(value) && Number.isInteger(value) && value > 0 ? 0 : 1);
   }
-  if (args[0] === '-e' && args[1]?.includes('sky-bar-admin-password-length')) {
+  if (args[0] === '-e' && args[1]?.includes('aerstello-admin-password-length')) {
     const password = fs.readFileSync(0, 'utf8');
     process.exit(password.length >= 12 && password.length <= 256 ? 0 : 1);
   }
@@ -214,7 +214,7 @@ if (args[0] === 'volume' && args[1] === 'inspect') {
   try { rewriteToken ||= fs.readFileSync(process.env.FAKE_COMMAND_LOG + '.volume-rewrite-token', 'utf8'); } catch {}
   let volumeIdentity = (!removed && process.env.FAKE_VOLUME_IDENTITY) || (removed && created
     ? '2026-08-13T00:00:00Z|/var/lib/docker/volumes/rewrite-replacement/_data'
-    : '2026-08-09T00:00:00Z|/var/lib/docker/volumes/sky-bar-demo-postgres-data/_data');
+    : '2026-08-09T00:00:00Z|/var/lib/docker/volumes/aerstello-demo-postgres-data/_data');
   const rewriteProject = process.env.COMPOSE_PROJECT_NAME || name.replace(/-postgres-data$/, '');
   const rewriteTransaction = path.join(process.env.FAKE_REPOSITORY_ROOT, '.demo-state',
     rewriteProject, 'rewrite-transaction');
@@ -243,7 +243,7 @@ if (args[0] === 'volume' && args[1] === 'inspect') {
     volumeIdentity = '2026-08-12T00:00:00Z|/var/lib/docker/volumes/rewrite-race-replacement/_data';
   }
   if (args.includes('--format')) process.stdout.write(
-    (process.env.FAKE_VOLUME_PROJECT || 'sky-bar-demo') + '|' +
+    (process.env.FAKE_VOLUME_PROJECT || 'aerstello-demo') + '|' +
     (process.env.FAKE_VOLUME_LOGICAL || 'postgres-data') + '|' +
     restoreToken + '|' +
     rewriteToken + '|' +
@@ -260,9 +260,9 @@ if (args[0] === 'volume' && args[1] === 'rm') {
 }
 if (args[0] === 'volume' && args[1] === 'create') {
   fs.writeFileSync(process.env.FAKE_COMMAND_LOG + '.volume-created', '1');
-  const tokenLabel = args.find((arg) => arg.startsWith('sky-bar.restore-token='));
+  const tokenLabel = args.find((arg) => arg.startsWith('aerstello.restore-token='));
   if (tokenLabel) fs.writeFileSync(process.env.FAKE_COMMAND_LOG + '.volume-token', tokenLabel.slice(tokenLabel.indexOf('=') + 1));
-  const rewriteTokenLabel = args.find((arg) => arg.startsWith('sky-bar.rewrite-token='));
+  const rewriteTokenLabel = args.find((arg) => arg.startsWith('aerstello.rewrite-token='));
   if (rewriteTokenLabel) fs.writeFileSync(process.env.FAKE_COMMAND_LOG + '.volume-rewrite-token', rewriteTokenLabel.slice(rewriteTokenLabel.indexOf('=') + 1));
   process.stdout.write(args.at(-1) + '\n');
   process.exit(0);
@@ -343,8 +343,8 @@ process.exit(0);
 }
 
 function makeFixture(t) {
-  const directory = mkdtempSync(join(tmpdir(), 'sky-bar-demo-deploy-'));
-  const secretsDirectory = mkdtempSync(join(tmpdir(), 'sky-bar-demo-secrets-'));
+  const directory = mkdtempSync(join(tmpdir(), 'aerstello-demo-deploy-'));
+  const secretsDirectory = mkdtempSync(join(tmpdir(), 'aerstello-demo-secrets-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   t.after(() => rmSync(secretsDirectory, { recursive: true, force: true }));
   mkdirSync(join(directory, 'scripts'), { recursive: true });
@@ -383,7 +383,7 @@ function commandEnvironment(fixture, environment = {}) {
     ...process.env,
     PATH: `${fixture.fakeBin}:${process.env.PATH}`,
     DOCKER_CONTEXT: '',
-    DOCKER_HOST: 'unix:///dev/sky-bar-tests-must-never-use-real-docker.sock',
+    DOCKER_HOST: 'unix:///dev/aerstello-tests-must-never-use-real-docker.sock',
     FAKE_COMMAND_LOG: fixture.commandLog,
     FAKE_REPOSITORY_ROOT: fixture.directory,
     FAKE_GIT_SHA: gitSha,
@@ -438,7 +438,7 @@ async function waitForPath(path, timeoutMs = 5000) {
 function hostLockPath(endpoint, projectName = project) {
   const digest = createHash('sha256')
     .update(endpoint).update('\0').update(projectName).update('\0').digest('hex');
-  return join('/tmp', `sky-bar-demo-deploy-${digest}.lock`);
+  return join('/tmp', `aerstello-demo-deploy-${digest}.lock`);
 }
 
 function installReplacingStat(fixture, lockPath) {
@@ -567,7 +567,7 @@ test('init-env creates private distinct secrets, reports human fields, and never
     values.SESSION_SECRET,
     values.ACCESS_CAPABILITY_KEYS.slice(3),
   ]).size, 3);
-  assert.match(first.output, /SKY_BAR_DOMAIN/);
+  assert.match(first.output, /AERSTELLO_DOMAIN/);
   assert.doesNotMatch(first.output, new RegExp(values.POSTGRES_PASSWORD));
   const before = readFileSync(fixture.environmentPath);
   const second = run(fixture, ['--init-env', '--env-file', fixture.environmentPath]);
@@ -602,7 +602,7 @@ test('init-env rejects restore-only arguments before initialization regardless o
 
 test('environment parsing rejects missing, malformed, insecure, and executable values without sourcing them', async (t) => {
   const cases = [
-    ['missing domain', { ...validEnvironment, SKY_BAR_DOMAIN: '' }],
+    ['missing domain', { ...validEnvironment, AERSTELLO_DOMAIN: '' }],
     ['unsafe project', { ...validEnvironment, COMPOSE_PROJECT_NAME: '../other-stack' }],
     ['invalid email', { ...validEnvironment, ADMIN_EMAIL: 'not-an-email' }],
     ['URI-unsafe database password', { ...validEnvironment, POSTGRES_PASSWORD: 'x/y?z' }],
@@ -651,7 +651,7 @@ test('validated env-file values override conflicting ambient allowlisted variabl
   const fixture = makeFixture(t);
   const result = run(fixture, ['--check', '--env-file', fixture.environmentPath], {
     COMPOSE_PROJECT_NAME: 'ambient-project',
-    SKY_BAR_DOMAIN: 'ambient.invalid.test',
+    AERSTELLO_DOMAIN: 'ambient.invalid.test',
     POSTGRES_PASSWORD: 'z'.repeat(64),
     SESSION_SECRET: 'y'.repeat(64),
     ACCESS_CAPABILITY_KEYS: `ambient:${'x'.repeat(64)}`,
@@ -668,7 +668,7 @@ test('validated env-file values override conflicting ambient allowlisted variabl
   );
   for (const call of composeCalls) {
     assert.equal(call.safeConfig.COMPOSE_PROJECT_NAME, validEnvironment.COMPOSE_PROJECT_NAME);
-    assert.equal(call.safeConfig.SKY_BAR_DOMAIN, validEnvironment.SKY_BAR_DOMAIN);
+    assert.equal(call.safeConfig.AERSTELLO_DOMAIN, validEnvironment.AERSTELLO_DOMAIN);
     assert.equal(call.safeConfig.LOG_LEVEL, validEnvironment.LOG_LEVEL);
     assert.equal(call.safeConfig.RATE_LIMIT_MAX, validEnvironment.RATE_LIMIT_MAX);
     assert.deepEqual(call.secretHashes, expectedSecretHashes);
@@ -741,8 +741,8 @@ test('--check validates Compose and Caddy without container, volume, backup, or 
 test('host-global deployment lock serializes separate checkouts by endpoint and project', async (t) => {
   const firstFixture = makeFixture(t);
   const secondFixture = makeFixture(t);
-  const endpoint = `unix:///dev/sky-bar-shared-lock-${process.pid}.sock`;
-  const independentEndpoint = `unix:///dev/sky-bar-independent-lock-${process.pid}.sock`;
+  const endpoint = `unix:///dev/aerstello-shared-lock-${process.pid}.sock`;
+  const independentEndpoint = `unix:///dev/aerstello-independent-lock-${process.pid}.sock`;
   const sharedLock = hostLockPath(endpoint);
   const independentLock = hostLockPath(independentEndpoint);
   for (const path of [sharedLock, independentLock]) rmSync(path, { recursive: true, force: true });
@@ -788,7 +788,7 @@ test('host-global deployment lock serializes separate checkouts by endpoint and 
   const firstResult = await first.completion;
   assert.equal(firstResult.status, 0, firstResult.output);
   assert.equal(statSync(sharedLock).mode & 0o777, 0o666);
-  assert.match(sharedLock.split('/').at(-1), /^sky-bar-demo-deploy-[0-9a-f]{64}\.lock$/);
+  assert.match(sharedLock.split('/').at(-1), /^aerstello-demo-deploy-[0-9a-f]{64}\.lock$/);
   assert.doesNotMatch(sharedLock, /shared-lock/);
 });
 
@@ -947,7 +947,7 @@ test('schema migration query failures cannot become an empty migration result', 
     });
     assert.notEqual(restored.status, 0);
     assert.match(restored.output, /read applied database migrations|schema_migrations query failure/i);
-    assert.ok(dockerLines(fixture).some((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list')));
+    assert.ok(dockerLines(fixture).some((line) => line.includes('pg_restore -U aerstello -d aerstello') && !line.includes('--list')));
     const transaction = join(state, 'restore-transaction');
     assert.equal(readFileSync(join(transaction, 'phase'), 'utf8').trim(), 'restoring');
     assert.deepEqual(stateSnapshot(state), before, 'failed verification must not publish restored state');
@@ -1367,8 +1367,8 @@ test('HTTPS health probes local Caddy with configured hostname and SNI', (t) => 
   assert.ok(health.args.includes('--noproxy'));
   assert.ok(health.args.includes('*'));
   assert.ok(health.args.includes('--resolve'));
-  assert.ok(health.args.includes(`${validEnvironment.SKY_BAR_DOMAIN}:443:127.0.0.1`));
-  assert.ok(health.args.includes(`https://${validEnvironment.SKY_BAR_DOMAIN}/api/v1/health`));
+  assert.ok(health.args.includes(`${validEnvironment.AERSTELLO_DOMAIN}:443:127.0.0.1`));
+  assert.ok(health.args.includes(`https://${validEnvironment.AERSTELLO_DOMAIN}/api/v1/health`));
 });
 
 test('post-build source mutation fails before persist or rewrite apply boundaries', async (t) => {
@@ -1495,7 +1495,7 @@ test('guarded restore rejects tampering before replacement and creates safety ba
     });
     assert.notEqual(restored.status, 0);
     assert.match(restored.output, /digest|tamper|backup/i);
-    assert.equal(dockerLines(fixture).some((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list')), false);
+    assert.equal(dockerLines(fixture).some((line) => line.includes('pg_restore -U aerstello -d aerstello') && !line.includes('--list')), false);
     assert.equal(dockerLines(fixture).some((line) => line.includes('stop app caddy')), false,
       'invalid restore bundle must fail before application quiescence');
   });
@@ -1523,7 +1523,7 @@ test('guarded restore rejects tampering before replacement and creates safety ba
     const classification = lines.findIndex((line) => line.includes('SELECT name FROM schema_migrations'));
     const safetyDump = lines.findIndex((line) => line.includes('pg_dump'));
     const drop = lines.findIndex((line) => line.includes('DROP DATABASE'));
-    const destructiveRestore = lines.findIndex((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list'));
+    const destructiveRestore = lines.findIndex((line) => line.includes('pg_restore -U aerstello -d aerstello') && !line.includes('--list'));
     assert.ok(stop >= 0 && classification > stop && safetyDump > classification &&
       drop > safetyDump && destructiveRestore > drop,
       lines.join('\n'));
@@ -1581,7 +1581,7 @@ test('guarded restore recovers a missing destination without inventing a safety 
       const interrupted = run(fixture, restoreArgs, {
         FAKE_GIT_SHA: 'f'.repeat(40),
         FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
-        SKY_BAR_TEST_FAIL_RESTORE: interruption,
+        AERSTELLO_TEST_FAIL_RESTORE: interruption,
       });
       assert.notEqual(interrupted.status, 0);
       const transaction = join(fixture.directory, '.demo-state', project, 'restore-transaction');
@@ -1601,9 +1601,9 @@ test('guarded restore recovers a missing destination without inventing a safety 
       assert.equal(recovered.status, 0, recovered.output);
       const lines = dockerLines(fixture);
       assert.equal(lines.some((line) => line.includes('pg_dump')), false);
-      const drop = lines.findIndex((line) => line.includes('DROP DATABASE IF EXISTS skybar'));
-      const create = lines.findIndex((line) => line.includes('CREATE DATABASE skybar OWNER skybar'));
-      const restore = lines.findIndex((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list'));
+      const drop = lines.findIndex((line) => line.includes('DROP DATABASE IF EXISTS aerstello'));
+      const create = lines.findIndex((line) => line.includes('CREATE DATABASE aerstello OWNER aerstello'));
+      const restore = lines.findIndex((line) => line.includes('pg_restore -U aerstello -d aerstello') && !line.includes('--list'));
       assert.ok(drop >= 0 && create > drop && restore > create, lines.join('\n'));
       assert.equal(lines[restore].includes('--clean'), false);
       assert.equal(existsSync(transaction), false);
@@ -1629,7 +1629,7 @@ test('missing-destination binding and retirement recovery stay bound to the requ
   writeFileSync(fixture.commandLog, '');
   const bindingInterrupted = run(fixture, restoreArgs, {
     FAKE_GIT_SHA: 'f'.repeat(40),
-    SKY_BAR_TEST_FAIL_RESTORE_BIND: 'after-identity-staging',
+    AERSTELLO_TEST_FAIL_RESTORE_BIND: 'after-identity-staging',
   });
   assert.notEqual(bindingInterrupted.status, 0);
   assert.match(bindingInterrupted.output, /identity interruption.*atomic binding/i);
@@ -1644,7 +1644,7 @@ test('missing-destination binding and retirement recovery stay bound to the requ
   const retirementInterrupted = run(fixture, restoreArgs, {
     FAKE_GIT_SHA: 'f'.repeat(40),
     FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
-    SKY_BAR_TEST_FAIL_RESTORE_RETIREMENT: 'after-rename',
+    AERSTELLO_TEST_FAIL_RESTORE_RETIREMENT: 'after-rename',
   });
   assert.notEqual(retirementInterrupted.status, 0);
   assert.match(retirementInterrupted.output, /retirement interruption/i);
@@ -1736,7 +1736,7 @@ test('retry rejects unsafe fixed destination identity staging records', async (t
       writeFileSync(fixture.commandLog, '');
       const interrupted = run(fixture, restoreArgs, {
         FAKE_GIT_SHA: 'f'.repeat(40),
-        SKY_BAR_TEST_FAIL_RESTORE_BIND: 'after-identity-staging',
+        AERSTELLO_TEST_FAIL_RESTORE_BIND: 'after-identity-staging',
       });
       assert.notEqual(interrupted.status, 0);
       const transaction = join(state, 'restore-transaction');
@@ -1756,7 +1756,7 @@ test('retry rejects unsafe fixed destination identity staging records', async (t
       const lines = dockerLines(fixture);
       assert.equal(lines.some((line) => line.includes('stop app caddy')), false);
       assert.equal(lines.some((line) => line.includes('DROP DATABASE')), false);
-      assert.equal(lines.some((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list')), false);
+      assert.equal(lines.some((line) => line.includes('pg_restore -U aerstello -d aerstello') && !line.includes('--list')), false);
     });
   }
 });
@@ -1778,7 +1778,7 @@ test('restoring retry rejects missing, replaced, non-private, or modified transa
       const interrupted = run(fixture, restoreArgs, {
         FAKE_EXISTING_VOLUMES: dbVolume,
         FAKE_GIT_SHA: 'f'.repeat(40),
-        SKY_BAR_TEST_FAIL_RESTORE: 'after-transaction',
+        AERSTELLO_TEST_FAIL_RESTORE: 'after-transaction',
       });
       assert.notEqual(interrupted.status, 0);
       const transaction = join(fixture.directory, '.demo-state', project, 'restore-transaction');
@@ -1927,7 +1927,7 @@ test('guarded restore rejects destination replacement at both destructive bounda
       const lines = dockerLines(fixture);
       assert.equal(lines.some((line) => line.includes('DROP DATABASE')), false);
       assert.equal(lines.some((line) => line.includes('CREATE DATABASE')), false);
-      assert.equal(lines.some((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list')), false);
+      assert.equal(lines.some((line) => line.includes('pg_restore -U aerstello -d aerstello') && !line.includes('--list')), false);
       if (name === 'during safety-backup preparation') {
         assert.equal(existsSync(join(fixture.directory, '.demo-state', project, 'restore-transaction')), false);
         const stop = lines.findIndex((line) => line.includes('stop app caddy'));
@@ -2055,7 +2055,7 @@ test('confirmed rewrite transaction resumes across both old-volume removal bound
         FAKE_EXISTING_VOLUMES: dbVolume,
         FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
         FAKE_ADMIN_EXISTS: '0',
-        SKY_BAR_TEST_FAIL_REWRITE: interruption,
+        AERSTELLO_TEST_FAIL_REWRITE: interruption,
         ...oldVolumeEnvironment,
       });
       assert.notEqual(interrupted.status, 0);
@@ -2091,7 +2091,7 @@ test('confirmed rewrite transaction resumes across both old-volume removal bound
       assert.equal(retryLines.filter((line) => line.startsWith('volume rm')).length,
         interruption === 'before-volume-removal' ? 1 : 0);
       assert.ok(retryLines.some((line) => line.startsWith('volume create') &&
-        line.includes('sky-bar.rewrite-token=rewrite-')));
+        line.includes('aerstello.rewrite-token=rewrite-')));
       assert.equal(existsSync(transaction), false);
       assert.equal(existsSync(join(state, 'rewrite-replacement')), false);
       assert.equal(existsSync(join(state, 'pending')), false);
@@ -2149,7 +2149,7 @@ test('rewrite replacement creation is token-bound and resumes before identity pu
     FAKE_EXISTING_VOLUMES: dbVolume,
     FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
     FAKE_ADMIN_EXISTS: '0',
-    SKY_BAR_TEST_FAIL_REWRITE: 'after-replacement-creation',
+    AERSTELLO_TEST_FAIL_REWRITE: 'after-replacement-creation',
   });
   assert.notEqual(interrupted.status, 0);
   const transaction = join(state, 'rewrite-transaction');
@@ -2161,7 +2161,7 @@ test('rewrite replacement creation is token-bound and resumes before identity pu
   const removal = firstLines.findIndex((line) => line.startsWith('volume rm'));
   const creation = firstLines.findIndex((line) => line.startsWith('volume create'));
   assert.ok(removal >= 0 && creation > removal, firstLines.join('\n'));
-  assert.match(firstLines[creation], new RegExp(`sky-bar\\.rewrite-token=${replacementToken}`));
+  assert.match(firstLines[creation], new RegExp(`aerstello\\.rewrite-token=${replacementToken}`));
   assert.equal(firstLines.some((line) => line.includes('npm run db:migrate')), false);
 
   writeFileSync(fixture.commandLog, '');
@@ -2193,7 +2193,7 @@ test('rewrite retry rejects unsafe fixed replacement identity staging', async (t
         FAKE_EXISTING_VOLUMES: dbVolume,
         FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
         FAKE_ADMIN_EXISTS: '0',
-        SKY_BAR_TEST_FAIL_REWRITE_BIND: 'after-identity-staging',
+        AERSTELLO_TEST_FAIL_REWRITE_BIND: 'after-identity-staging',
       });
       assert.notEqual(interrupted.status, 0);
       const transaction = join(state, 'rewrite-transaction');
@@ -2225,22 +2225,22 @@ test('rewrite recovery rejects replacement token and engine identity drift at du
   const changedIdentity = '2026-08-14T00:00:00Z|/var/lib/docker/volumes/foreign-replacement/_data';
   const cases = [
     ['old-volume-removed missing token',
-      { SKY_BAR_TEST_FAIL_REWRITE: 'after-volume-removal' },
+      { AERSTELLO_TEST_FAIL_REWRITE: 'after-volume-removal' },
       { FAKE_REWRITE_TOKEN_AFTER_REWRITE_TRANSACTION: '' }, 'prepared'],
     ['old-volume-removed changed token',
-      { SKY_BAR_TEST_FAIL_REWRITE: 'after-volume-removal' },
+      { AERSTELLO_TEST_FAIL_REWRITE: 'after-volume-removal' },
       { FAKE_REWRITE_TOKEN_AFTER_REWRITE_TRANSACTION: changedToken }, 'prepared'],
     ['old-volume-removed changed staged identity',
-      { SKY_BAR_TEST_FAIL_REWRITE_BIND: 'after-identity-staging' },
+      { AERSTELLO_TEST_FAIL_REWRITE_BIND: 'after-identity-staging' },
       { FAKE_VOLUME_IDENTITY_AFTER_REWRITE_TRANSACTION: changedIdentity }, 'old-volume-removed'],
     ['replacement-ready missing token',
-      { SKY_BAR_TEST_FAIL_REWRITE: 'after-replacement-binding' },
+      { AERSTELLO_TEST_FAIL_REWRITE: 'after-replacement-binding' },
       { FAKE_REWRITE_TOKEN_AFTER_REWRITE_TRANSACTION: '' }, 'replacement-ready'],
     ['replacement-ready changed token',
-      { SKY_BAR_TEST_FAIL_REWRITE: 'after-replacement-binding' },
+      { AERSTELLO_TEST_FAIL_REWRITE: 'after-replacement-binding' },
       { FAKE_REWRITE_TOKEN_AFTER_REWRITE_TRANSACTION: changedToken }, 'replacement-ready'],
     ['replacement-ready changed identity',
-      { SKY_BAR_TEST_FAIL_REWRITE: 'after-replacement-binding' },
+      { AERSTELLO_TEST_FAIL_REWRITE: 'after-replacement-binding' },
       { FAKE_VOLUME_IDENTITY_AFTER_REWRITE_TRANSACTION: changedIdentity }, 'replacement-ready'],
   ];
   for (const [name, interruption, injection, expectedPhase] of cases) {
@@ -2317,7 +2317,7 @@ test('rewrite transaction rejects unsafe durable state before further mutation',
         FAKE_EXISTING_VOLUMES: dbVolume,
         FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
         FAKE_ADMIN_EXISTS: '0',
-        SKY_BAR_TEST_FAIL_REWRITE: 'before-volume-removal',
+        AERSTELLO_TEST_FAIL_REWRITE: 'before-volume-removal',
       });
       assert.notEqual(interrupted.status, 0);
       const transaction = join(state, 'rewrite-transaction');
@@ -2350,7 +2350,7 @@ test('restore and rewrite transactions may not coexist', (t) => {
     FAKE_EXISTING_VOLUMES: dbVolume,
     FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
     FAKE_ADMIN_EXISTS: '0',
-    SKY_BAR_TEST_FAIL_REWRITE: 'before-volume-removal',
+    AERSTELLO_TEST_FAIL_REWRITE: 'before-volume-removal',
   });
   assert.notEqual(interrupted.status, 0);
   mkdirSync(join(state, 'restore-transaction'), { mode: 0o700 });
@@ -2379,7 +2379,7 @@ test('rewrite publication after current selection recovers before cleanup or Doc
     FAKE_EXISTING_VOLUMES: dbVolume,
     FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
     FAKE_ADMIN_EXISTS: '0',
-    SKY_BAR_TEST_FAIL_REWRITE_PUBLICATION: 'after-current',
+    AERSTELLO_TEST_FAIL_REWRITE_PUBLICATION: 'after-current',
   });
   assert.notEqual(interrupted.status, 0);
   assert.match(interrupted.output, /rewrite publication interruption/i);
@@ -2416,7 +2416,7 @@ test('completed rewrite transaction retirement recovers without Docker mutation'
     FAKE_EXISTING_VOLUMES: dbVolume,
     FAKE_SCHEMA_MIGRATIONS: '0001_initial.sql',
     FAKE_ADMIN_EXISTS: '0',
-    SKY_BAR_TEST_FAIL_REWRITE_RETIREMENT: 'after-rename',
+    AERSTELLO_TEST_FAIL_REWRITE_RETIREMENT: 'after-rename',
   });
   assert.notEqual(first.status, 0);
   assert.equal(existsSync(join(state, 'rewrite-transaction')), false);
@@ -2459,7 +2459,7 @@ test('interrupted restore publication recovers before ordinary state validation'
     FAKE_EXISTING_VOLUMES: dbVolume,
     FAKE_GIT_SHA: 'f'.repeat(40),
     FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
-    SKY_BAR_TEST_FAIL_RESTORE_PUBLICATION: 'after-current',
+    AERSTELLO_TEST_FAIL_RESTORE_PUBLICATION: 'after-current',
   });
   assert.notEqual(interrupted.status, 0);
   assert.match(interrupted.output, /publication interruption/i);
@@ -2486,7 +2486,7 @@ test('interrupted restore publication recovers before ordinary state validation'
   assert.match(recovered.output, /Recovered interrupted restore state publication/i);
   assert.equal(existsSync(join(state, 'restore-transaction')), false);
   assert.equal(existsSync(pending), false);
-  assert.equal(dockerLines(fixture).some((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list')), false,
+  assert.equal(dockerLines(fixture).some((line) => line.includes('pg_restore -U aerstello -d aerstello') && !line.includes('--list')), false,
     'publication recovery must not restore the database a second time');
 });
 
@@ -2509,7 +2509,7 @@ test('database-restored recovery rejects a missing or replaced destination volum
         FAKE_EXISTING_VOLUMES: dbVolume,
         FAKE_GIT_SHA: 'f'.repeat(40),
         FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
-        SKY_BAR_TEST_FAIL_RESTORE_PUBLICATION: 'before-current',
+        AERSTELLO_TEST_FAIL_RESTORE_PUBLICATION: 'before-current',
       });
       assert.notEqual(interrupted.status, 0);
       const transaction = join(state, 'restore-transaction');
@@ -2528,7 +2528,7 @@ test('database-restored recovery rejects a missing or replaced destination volum
       assert.match(rejected.output, /volume.*(?:disappeared|identity changed)/i);
       assert.deepEqual(stateSnapshot(state), before);
       const lines = dockerLines(fixture);
-      assert.equal(lines.some((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list')), false);
+      assert.equal(lines.some((line) => line.includes('pg_restore -U aerstello -d aerstello') && !line.includes('--list')), false);
       assert.equal(lines.some((line) => line.includes('up -d app caddy')), false);
     });
   }
@@ -2558,7 +2558,7 @@ test('current-selected recovery discards bundled and live pending state across p
         FAKE_EXISTING_VOLUMES: dbVolume,
         FAKE_GIT_SHA: 'f'.repeat(40),
         FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
-        SKY_BAR_TEST_FAIL_RESTORE_PUBLICATION: interruption,
+        AERSTELLO_TEST_FAIL_RESTORE_PUBLICATION: interruption,
       });
       assert.notEqual(interrupted.status, 0);
       writeFileSync(fixture.commandLog, '');
@@ -2570,7 +2570,7 @@ test('current-selected recovery discards bundled and live pending state across p
       assert.equal(existsSync(livePending), false);
       assert.equal(existsSync(join(state, 'rewrite-replacement')), false);
       assert.equal(existsSync(join(state, 'restore-transaction')), false);
-      assert.equal(dockerLines(fixture).some((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list')), false);
+      assert.equal(dockerLines(fixture).some((line) => line.includes('pg_restore -U aerstello -d aerstello') && !line.includes('--list')), false);
     });
   }
 });
@@ -2612,7 +2612,7 @@ test('pending-selected restore recovers after marker publication removes old pen
     FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
     FAKE_GIT_SOURCE_PATHS: `${migrationPath},${pendingPath}`,
     FAKE_GIT_BASELINE_SOURCE_PATHS: migrationPath,
-    SKY_BAR_TEST_FAIL_RESTORE_PUBLICATION: 'after-pending-removal',
+    AERSTELLO_TEST_FAIL_RESTORE_PUBLICATION: 'after-pending-removal',
   });
   assert.notEqual(interrupted.status, 0);
   assert.match(interrupted.output, /pending state removal/i);
@@ -2633,7 +2633,7 @@ test('pending-selected restore recovers after marker publication removes old pen
   assert.equal(readFileSync(join(livePending, 'deployed-sha'), 'utf8').trim(), 'f'.repeat(40));
   assert.equal(existsSync(join(state, 'rewrite-replacement')), true);
   assert.equal(existsSync(join(state, 'restore-transaction')), false);
-  assert.equal(dockerLines(fixture).some((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list')), false,
+  assert.equal(dockerLines(fixture).some((line) => line.includes('pg_restore -U aerstello -d aerstello') && !line.includes('--list')), false,
     'publication recovery must not restore the database a second time');
 });
 
@@ -2675,7 +2675,7 @@ test('interrupted pending restore rejects a symlinked optional current baseline'
   writeFileSync(fixture.commandLog, '');
   const interrupted = run(fixture, restoreArgs, {
     FAKE_EXISTING_VOLUMES: dbVolume,
-    SKY_BAR_TEST_FAIL_RESTORE: 'after-transaction',
+    AERSTELLO_TEST_FAIL_RESTORE: 'after-transaction',
   });
   assert.notEqual(interrupted.status, 0);
   const transaction = join(fixture.directory, '.demo-state', project, 'restore-transaction');
@@ -2690,7 +2690,7 @@ test('interrupted pending restore rejects a symlinked optional current baseline'
   const lines = dockerLines(fixture);
   assert.equal(lines.some((line) => line.includes('stop app caddy')), false);
   assert.equal(lines.some((line) => line.includes('DROP DATABASE')), false);
-  assert.equal(lines.some((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list')), false);
+  assert.equal(lines.some((line) => line.includes('pg_restore -U aerstello -d aerstello') && !line.includes('--list')), false);
 });
 
 test('pending-selected restore rejects an incompatible bundled current baseline', (t) => {
@@ -2777,7 +2777,7 @@ test('restoring-phase retry is bound to the original bundle and reuses its safet
   });
   assert.notEqual(alteredSafetyRetry.status, 0);
   assert.match(alteredSafetyRetry.output, /safety backup identity changed/i);
-  assert.equal(dockerLines(fixture).some((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list')), false,
+  assert.equal(dockerLines(fixture).some((line) => line.includes('pg_restore -U aerstello -d aerstello') && !line.includes('--list')), false,
     'an altered safety bundle must fail before destructive target restore');
   assert.equal(dockerLines(fixture).some((line) => line.includes('pg_dump')), false);
   writeFileSync(safetyDump, originalSafetyDump);
@@ -2798,7 +2798,7 @@ test('restoring-phase retry is bound to the original bundle and reuses its safet
   assert.equal(readFileSync(`${fixture.commandLog}.pg-restore-stdin-sha256`, 'utf8').trim(),
     transactionArchiveDigest,
     'restoring retry must consume its staged archive after the source dump is removed');
-  assert.ok(dockerLines(fixture).some((line) => line.includes('pg_restore -U skybar -d skybar') && !line.includes('--list')));
+  assert.ok(dockerLines(fixture).some((line) => line.includes('pg_restore -U aerstello -d aerstello') && !line.includes('--list')));
   assert.equal(existsSync(transaction), false);
 });
 
@@ -2868,7 +2868,7 @@ test('completed restore retirement is crash-recoverable and removes previous pen
     '--restore-backup', bundle, '--confirm-restore', project], {
     FAKE_EXISTING_VOLUMES: dbVolume,
     FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
-    SKY_BAR_TEST_FAIL_RESTORE_RETIREMENT: 'after-rename',
+    AERSTELLO_TEST_FAIL_RESTORE_RETIREMENT: 'after-rename',
   });
   assert.notEqual(interrupted.status, 0);
   assert.match(interrupted.output, /retirement interruption/i);
@@ -2907,7 +2907,7 @@ test('completed restore retirement retains evidence for a missing or recreated d
         FAKE_EXISTING_VOLUMES: dbVolume,
         FAKE_GIT_SHA: 'f'.repeat(40),
         FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
-        SKY_BAR_TEST_FAIL_RESTORE_RETIREMENT: 'after-rename',
+        AERSTELLO_TEST_FAIL_RESTORE_RETIREMENT: 'after-rename',
       });
       assert.notEqual(interrupted.status, 0);
       const retirement = readdirSync(state)
@@ -2959,7 +2959,7 @@ test('completed retirement rejects missing, replaced, non-private, or modified t
         FAKE_EXISTING_VOLUMES: dbVolume,
         FAKE_GIT_SHA: 'f'.repeat(40),
         FAKE_RESTORED_SCHEMA_MIGRATIONS: '0001_initial.sql',
-        SKY_BAR_TEST_FAIL_RESTORE_RETIREMENT: 'after-rename',
+        AERSTELLO_TEST_FAIL_RESTORE_RETIREMENT: 'after-rename',
       });
       assert.notEqual(interrupted.status, 0);
       const retirement = readdirSync(state)

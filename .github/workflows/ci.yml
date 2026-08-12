@@ -73,13 +73,13 @@ jobs:
           npm run check:released-migrations -- --base origin/main --head "$TAG_HEAD_SHA" --release-ref origin/main
       - name: Smoke-check demo deployment configuration
         env:
-          DEMO_ENV_FILE: ${{ runner.temp }}/sky-bar-demo.env
-          DEMO_PROJECT: sky-bar-ci
+          DEMO_ENV_FILE: ${{ runner.temp }}/aerstello-demo.env
+          DEMO_PROJECT: aerstello-ci
         run: |
           scripts/demo-deploy.sh --init-env --env-file "$DEMO_ENV_FILE"
           sed -i \
             -e "s/^COMPOSE_PROJECT_NAME=.*/COMPOSE_PROJECT_NAME=$DEMO_PROJECT/" \
-            -e 's/^SKY_BAR_DOMAIN=.*/SKY_BAR_DOMAIN=demo.example.com/' \
+            -e 's/^AERSTELLO_DOMAIN=.*/AERSTELLO_DOMAIN=demo.example.com/' \
             -e 's/^ACME_EMAIL=.*/ACME_EMAIL=demo@example.com/' \
             -e 's/^ADMIN_EMAIL=.*/ADMIN_EMAIL=admin@example.com/' \
             -e 's/^ADMIN_NAME=.*/ADMIN_NAME=CI Demo Administrator/' \

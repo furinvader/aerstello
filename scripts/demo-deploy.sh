@@ -311,7 +311,7 @@ initialize_environment() {
 
   note "Created private demo environment file: $ENV_FILE"
   note 'Complete these human-supplied values before deploying:'
-  note '  SKY_BAR_DOMAIN'
+  note '  AERSTELLO_DOMAIN'
   note '  ACME_EMAIL'
   note '  ADMIN_EMAIL'
   note '  ADMIN_NAME'
@@ -324,7 +324,7 @@ fi
 
 declare -A CONFIG=()
 readonly -a CONFIG_KEYS=(
-  COMPOSE_PROJECT_NAME SKY_BAR_DOMAIN ACME_EMAIL ADMIN_EMAIL ADMIN_NAME
+  COMPOSE_PROJECT_NAME AERSTELLO_DOMAIN ACME_EMAIL ADMIN_EMAIL ADMIN_NAME
   POSTGRES_PASSWORD SESSION_SECRET ACCESS_CAPABILITY_KEYS LOG_LEVEL
   RATE_LIMIT_MAX ACCESS_STATUS_IP_LIMIT_MAX
 )
@@ -408,7 +408,7 @@ validate_configuration() {
 
   local label='[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
   local domain_pattern="^${label}(\\.${label})+$"
-  [[ ${#CONFIG[SKY_BAR_DOMAIN]} -le 253 && "${CONFIG[SKY_BAR_DOMAIN]}" =~ $domain_pattern ]] || die 'SKY_BAR_DOMAIN must be a hostname without a scheme, port, path, or wildcard.'
+  [[ ${#CONFIG[AERSTELLO_DOMAIN]} -le 253 && "${CONFIG[AERSTELLO_DOMAIN]}" =~ $domain_pattern ]] || die 'AERSTELLO_DOMAIN must be a hostname without a scheme, port, path, or wildcard.'
   validate_email "${CONFIG[ACME_EMAIL]}" || die 'ACME_EMAIL is not a valid email address.'
   [[ "${CONFIG[ADMIN_NAME]}" =~ [^[:space:]] && ${#CONFIG[ADMIN_NAME]} -le 200 ]] || die 'ADMIN_NAME must contain a non-whitespace name of at most 200 characters.'
 
@@ -498,7 +498,7 @@ DEPLOYED_SHA="$(git rev-parse --verify HEAD)"
 build_migration_manifest() {
   local destination="$1"
   local -a files=()
-  MIGRATION_FILES_TEMP="$(mktemp "${TMPDIR:-/tmp}/sky-bar-migration-files.XXXXXX")"
+  MIGRATION_FILES_TEMP="$(mktemp "${TMPDIR:-/tmp}/aerstello-migration-files.XXXXXX")"
   if ! LC_ALL=C find apps/api/migrations -mindepth 1 -name '*.sql' -print0 |
       LC_ALL=C sort -z > "$MIGRATION_FILES_TEMP"; then
     die 'Could not enumerate the filesystem SQL migrations.'
@@ -521,7 +521,7 @@ build_migration_manifest() {
     filesystem_paths["$path"]=1
   done
 
-  GIT_TREE_TEMP="$(mktemp "${TMPDIR:-/tmp}/sky-bar-deployed-tree.XXXXXX")"
+  GIT_TREE_TEMP="$(mktemp "${TMPDIR:-/tmp}/aerstello-deployed-tree.XXXXXX")"
   if ! git ls-tree -rz --full-tree "$DEPLOYED_SHA" -- apps/api/migrations > "$GIT_TREE_TEMP"; then
     die 'Could not enumerate SQL migrations from the deployed Git commit.'
   fi
@@ -576,7 +576,7 @@ build_migration_manifest() {
   done
 }
 
-CURRENT_MANIFEST_TEMP="$(mktemp "${TMPDIR:-/tmp}/sky-bar-demo-migrations.XXXXXX")"
+CURRENT_MANIFEST_TEMP="$(mktemp "${TMPDIR:-/tmp}/aerstello-demo-migrations.XXXXXX")"
 build_migration_manifest "$CURRENT_MANIFEST_TEMP"
 
 node scripts/release-state.mjs --check --base HEAD --head HEAD --release-ref origin/main
@@ -646,7 +646,7 @@ acquire_host_deployment_lock() {
   lock_digest="$(printf '%s\0%s\0' "$EFFECTIVE_DOCKER_ENDPOINT" "$PROJECT_NAME" | sha256sum)"
   lock_digest="${lock_digest%% *}"
   [[ "$lock_digest" =~ ^[0-9a-f]{64}$ ]] || die 'Could not derive the host deployment lock identity.'
-  HOST_DEPLOY_LOCK_PATH="$lock_directory/sky-bar-demo-deploy-$lock_digest.lock"
+  HOST_DEPLOY_LOCK_PATH="$lock_directory/aerstello-demo-deploy-$lock_digest.lock"
 
   if [[ ! -e "$HOST_DEPLOY_LOCK_PATH" && ! -L "$HOST_DEPLOY_LOCK_PATH" ]]; then
     if ! (umask 000; set -o noclobber; : > "$HOST_DEPLOY_LOCK_PATH") 2>/dev/null; then
@@ -764,7 +764,7 @@ fi
 if [[ -z "$DB_MODE" ]]; then
   if [[ "$DATABASE_EXISTS" == true ]]; then
     cat <<'EOF'
-An existing Sky Bar demo database was found.
+An existing Aerstello demo database was found.
 
   1) Persist it and apply pending migrations
   2) Rewrite it from scratch and delete all current demo data
@@ -797,7 +797,7 @@ fi
 
 verify_volume_ownership() {
   local labels project_owner logical_owner remainder
-  labels="$(docker volume inspect --format '{{ index .Labels "com.docker.compose.project" }}|{{ index .Labels "com.docker.compose.volume" }}|{{ index .Labels "sky-bar.restore-token" }}|{{ index .Labels "sky-bar.rewrite-token" }}|{{.CreatedAt}}|{{.Mountpoint}}' "$DB_VOLUME")" ||
+  labels="$(docker volume inspect --format '{{ index .Labels "com.docker.compose.project" }}|{{ index .Labels "com.docker.compose.volume" }}|{{ index .Labels "aerstello.restore-token" }}|{{ index .Labels "aerstello.rewrite-token" }}|{{.CreatedAt}}|{{.Mountpoint}}' "$DB_VOLUME")" ||
     die "Required PostgreSQL volume $DB_VOLUME is missing."
   project_owner="${labels%%|*}"
   remainder="${labels#*|}"
@@ -948,7 +948,7 @@ start_restore_database() {
   compose up -d --no-deps db
   local attempt
   for attempt in {1..60}; do
-    if compose exec -T db pg_isready -U skybar -d postgres >/dev/null 2>&1; then
+    if compose exec -T db pg_isready -U aerstello -d postgres >/dev/null 2>&1; then
       return
     fi
     sleep 2
@@ -1007,7 +1007,7 @@ validate_restore_source_compatibility() {
       die "$description contains a migration not preserved by this checkout: $path"
   done < "$state_directory/migrations.sha256"
   declare -A source_entries=()
-  GIT_TREE_TEMP="$(mktemp "${TMPDIR:-/tmp}/sky-bar-source-tree.XXXXXX")"
+  GIT_TREE_TEMP="$(mktemp "${TMPDIR:-/tmp}/aerstello-source-tree.XXXXXX")"
   if ! git ls-tree -rz --full-tree "$source_sha" -- apps/api/migrations > "$GIT_TREE_TEMP"; then
     die "$description migration tree cannot be read from its source commit."
   fi
@@ -1070,7 +1070,7 @@ validate_pending_baseline_compatibility() {
 read_database_migrations() {
   DATABASE_MIGRATIONS=()
   local present
-  present="$(compose exec -T db psql -U skybar -d skybar -tAc \
+  present="$(compose exec -T db psql -U aerstello -d aerstello -tAc \
     "SELECT CASE WHEN to_regclass('public.schema_migrations') IS NULL THEN 'missing' ELSE 'present' END")"
   present="${present//[[:space:]]/}"
   case "$present" in
@@ -1079,7 +1079,7 @@ read_database_migrations() {
     *) die 'Could not determine whether schema_migrations exists.' ;;
   esac
   local migration_output
-  migration_output="$(compose exec -T db psql -U skybar -d skybar -tAc \
+  migration_output="$(compose exec -T db psql -U aerstello -d aerstello -tAc \
     'SELECT name FROM schema_migrations ORDER BY name')" ||
     die 'Could not read applied database migrations.'
   if [[ -n "$migration_output" ]]; then
@@ -1194,10 +1194,10 @@ create_validated_backup() {
   chmod 700 -- "$BACKUP_DIRECTORY"
   local timestamp final_path dump_path
   timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-  BACKUP_PARTIAL="$(mktemp -d "$BACKUP_DIRECTORY/sky-bar-${timestamp}.XXXXXX.partial")"
+  BACKUP_PARTIAL="$(mktemp -d "$BACKUP_DIRECTORY/aerstello-${timestamp}.XXXXXX.partial")"
   chmod 700 -- "$BACKUP_PARTIAL"
   dump_path="$BACKUP_PARTIAL/database.dump"
-  compose exec -T db pg_dump -U skybar -d skybar -Fc > "$dump_path"
+  compose exec -T db pg_dump -U aerstello -d aerstello -Fc > "$dump_path"
   [[ -s "$dump_path" ]] || die 'PostgreSQL backup was empty.'
   compose exec -T db pg_restore --list < "$dump_path" >/dev/null
   (cd -- "$BACKUP_PARTIAL" && sha256sum database.dump > dump.sha256)
@@ -1336,7 +1336,7 @@ load_admin_password() {
   fi
   [[ "$ADMIN_PASSWORD" != *$'\r'* ]] || die 'The administrator password file contains a carriage return.'
   printf '%s' "$ADMIN_PASSWORD" | node -e \
-    '/* sky-bar-admin-password-length */let value="";process.stdin.setEncoding("utf8");process.stdin.on("data",chunk=>{value+=chunk});process.stdin.on("end",()=>process.exit(value.length>=12&&value.length<=256?0:1));' ||
+    '/* aerstello-admin-password-length */let value="";process.stdin.setEncoding("utf8");process.stdin.on("data",chunk=>{value+=chunk});process.stdin.on("end",()=>process.exit(value.length>=12&&value.length<=256?0:1));' ||
     die 'The administrator password must contain 12-256 JavaScript UTF-16 code units.'
 }
 
@@ -1352,7 +1352,7 @@ create_administrator() {
 
 active_administrator_count() {
   local count
-  count="$(compose exec -T db psql -U skybar -d skybar -tAc \
+  count="$(compose exec -T db psql -U aerstello -d aerstello -tAc \
     "SELECT count(*) FROM hosts WHERE role='admin' AND active=true")"
   count="${count//[[:space:]]/}"
   [[ "$count" =~ ^[0-9]+$ ]] || die 'Could not determine whether an active administrator exists.'
@@ -1383,8 +1383,8 @@ start_application() {
   compose up -d app caddy
   wait_for_app_health
   curl --disable --fail --silent --show-error --retry 12 --retry-delay 5 --retry-all-errors \
-    --max-time 15 --noproxy '*' --resolve "${CONFIG[SKY_BAR_DOMAIN]}:443:127.0.0.1" \
-    "https://${CONFIG[SKY_BAR_DOMAIN]}/api/v1/health" >/dev/null
+    --max-time 15 --noproxy '*' --resolve "${CONFIG[AERSTELLO_DOMAIN]}:443:127.0.0.1" \
+    "https://${CONFIG[AERSTELLO_DOMAIN]}/api/v1/health" >/dev/null
 }
 
 confirm_rewrite() {
@@ -1408,7 +1408,7 @@ verify_source_unchanged() {
     rm -f -- "$FINAL_MANIFEST_TEMP"
     FINAL_MANIFEST_TEMP=''
   fi
-  FINAL_MANIFEST_TEMP="$(mktemp "${TMPDIR:-/tmp}/sky-bar-demo-migrations-final.XXXXXX")"
+  FINAL_MANIFEST_TEMP="$(mktemp "${TMPDIR:-/tmp}/aerstello-demo-migrations-final.XXXXXX")"
   build_migration_manifest "$FINAL_MANIFEST_TEMP"
   cmp -s -- "$CURRENT_MANIFEST_TEMP" "$FINAL_MANIFEST_TEMP" || die 'Migration files changed during deployment; state was not updated.'
   rm -f -- "$FINAL_MANIFEST_TEMP"
@@ -1564,7 +1564,7 @@ atomic_write_rewrite_record() {
   chmod 600 -- "$staging"
   REWRITE_RECORD_STAGING="$staging"
   if [[ "$name" == replacement-volume-identity &&
-        "${SKY_BAR_TEST_FAIL_REWRITE_BIND-}" == after-identity-staging ]]; then
+        "${AERSTELLO_TEST_FAIL_REWRITE_BIND-}" == after-identity-staging ]]; then
     die 'Injected rewrite replacement identity interruption before atomic binding.'
   fi
   mv -T -- "$staging" "$REWRITE_TRANSACTION_DIRECTORY/$name"
@@ -1676,15 +1676,15 @@ ensure_rewrite_replacement_volume() {
           "${OBSERVED_VOLUME_RESTORE_TOKEN:-none}" == "$old_restore_token" &&
           "${OBSERVED_VOLUME_REWRITE_TOKEN:-none}" == "$old_rewrite_token" ]] ||
         die 'The old PostgreSQL volume identity or ownership token changed immediately before removal.'
-      if [[ "${SKY_BAR_TEST_FAIL_REWRITE-}" == before-volume-removal ]]; then
+      if [[ "${AERSTELLO_TEST_FAIL_REWRITE-}" == before-volume-removal ]]; then
         die 'Injected rewrite interruption immediately before old volume removal.'
       fi
       docker volume rm "$DB_VOLUME"
       DATABASE_EXISTS=false
-      if [[ "${SKY_BAR_TEST_FAIL_REWRITE-}" == after-volume-removal ]]; then
+      if [[ "${AERSTELLO_TEST_FAIL_REWRITE-}" == after-volume-removal ]]; then
         die 'Injected rewrite interruption immediately after old volume removal.'
       fi
-    elif [[ "${SKY_BAR_TEST_FAIL_REWRITE-}" == before-volume-removal ]]; then
+    elif [[ "${AERSTELLO_TEST_FAIL_REWRITE-}" == before-volume-removal ]]; then
       die 'Injected rewrite interruption before old volume removal.'
     fi
     DATABASE_EXISTS=false
@@ -1698,10 +1698,10 @@ ensure_rewrite_replacement_volume() {
       docker volume create \
         --label "com.docker.compose.project=$PROJECT_NAME" \
         --label 'com.docker.compose.volume=postgres-data' \
-        --label "sky-bar.rewrite-token=$REWRITE_REPLACEMENT_TOKEN" \
+        --label "aerstello.rewrite-token=$REWRITE_REPLACEMENT_TOKEN" \
         "$DB_VOLUME" >/dev/null
     fi
-    if [[ "${SKY_BAR_TEST_FAIL_REWRITE-}" == after-replacement-creation ]]; then
+    if [[ "${AERSTELLO_TEST_FAIL_REWRITE-}" == after-replacement-creation ]]; then
       die 'Injected rewrite interruption after replacement volume creation.'
     fi
     verify_rewrite_replacement_volume
@@ -1721,7 +1721,7 @@ ensure_rewrite_replacement_volume() {
     fi
     verify_rewrite_replacement_volume
     advance_rewrite_transaction_phase old-volume-removed replacement-ready
-    if [[ "${SKY_BAR_TEST_FAIL_REWRITE-}" == after-replacement-binding ]]; then
+    if [[ "${AERSTELLO_TEST_FAIL_REWRITE-}" == after-replacement-binding ]]; then
       die 'Injected rewrite interruption after replacement volume binding.'
     fi
   fi
@@ -1754,7 +1754,7 @@ retire_rewrite_transaction() {
     die 'Could not retire completed rewrite transaction safely.'
   mv -T -- "$REWRITE_TRANSACTION_DIRECTORY" "$retirement"
   REWRITE_TRANSACTION_EXISTS=false
-  if [[ "${SKY_BAR_TEST_FAIL_REWRITE_RETIREMENT-}" == after-rename ]]; then
+  if [[ "${AERSTELLO_TEST_FAIL_REWRITE_RETIREMENT-}" == after-rename ]]; then
     die 'Injected rewrite transaction retirement interruption after atomic rename.'
   fi
   validate_completed_rewrite_retirement "$retirement"
@@ -1860,7 +1860,7 @@ publish_state() {
   PUBLISHED_GENERATION_TARGET=''
 
   if [[ "$rewrite_publication" == true ]]; then
-    if [[ "${SKY_BAR_TEST_FAIL_REWRITE_PUBLICATION-}" == after-current ]]; then
+    if [[ "${AERSTELLO_TEST_FAIL_REWRITE_PUBLICATION-}" == after-current ]]; then
       die 'Injected rewrite publication interruption after current state selection.'
     fi
     advance_rewrite_transaction_phase replacement-ready state-published
@@ -1985,7 +1985,7 @@ validate_or_bind_restore_destination() {
       docker volume create \
         --label "com.docker.compose.project=$PROJECT_NAME" \
         --label 'com.docker.compose.volume=postgres-data' \
-        --label "sky-bar.restore-token=$destination_token" \
+        --label "aerstello.restore-token=$destination_token" \
         "$DB_VOLUME" >/dev/null
     fi
     verify_volume_ownership
@@ -1997,7 +1997,7 @@ validate_or_bind_restore_destination() {
     fi
     printf '%s\n' "$OBSERVED_VOLUME_IDENTITY" > "$identity_staging"
     chmod 600 -- "$identity_staging"
-    if [[ "${SKY_BAR_TEST_FAIL_RESTORE_BIND-}" == after-identity-staging ]]; then
+    if [[ "${AERSTELLO_TEST_FAIL_RESTORE_BIND-}" == after-identity-staging ]]; then
       die 'Injected restore destination identity interruption before atomic binding.'
     fi
     mv -T -- "$identity_staging" "$RESTORE_TRANSACTION_DIRECTORY/destination-volume-identity"
@@ -2158,7 +2158,7 @@ complete_restore_state_transaction() {
   [[ "$(< "$RESTORE_TRANSACTION_DIRECTORY/phase")" == database-restored ]] ||
     die 'An interrupted database restore must be retried with its original source-bound bundle.'
   validate_or_bind_restore_destination
-  if [[ "${SKY_BAR_TEST_FAIL_RESTORE_PUBLICATION-}" == before-current ]]; then
+  if [[ "${AERSTELLO_TEST_FAIL_RESTORE_PUBLICATION-}" == before-current ]]; then
     die 'Injected restore publication interruption before current state selection.'
   fi
 
@@ -2194,7 +2194,7 @@ complete_restore_state_transaction() {
     STATE_EXISTS=false
   fi
 
-  if [[ "${SKY_BAR_TEST_FAIL_RESTORE_PUBLICATION-}" == after-current ]]; then
+  if [[ "${AERSTELLO_TEST_FAIL_RESTORE_PUBLICATION-}" == after-current ]]; then
     die 'Injected restore publication interruption after current state selection.'
   fi
 
@@ -2222,7 +2222,7 @@ complete_restore_state_transaction() {
       rm -rf -- "$PENDING_STATE_DIRECTORY"
     fi
   fi
-  if [[ "${SKY_BAR_TEST_FAIL_RESTORE_PUBLICATION-}" == after-pending-removal ]]; then
+  if [[ "${AERSTELLO_TEST_FAIL_RESTORE_PUBLICATION-}" == after-pending-removal ]]; then
     RESTORE_PENDING_PREVIOUS=''
     die 'Injected restore publication interruption after pending state removal.'
   fi
@@ -2242,7 +2242,7 @@ complete_restore_state_transaction() {
   [[ ! -e "$retired_transaction" && ! -L "$retired_transaction" ]] ||
     die 'Could not retire completed restore transaction safely.'
   mv -T -- "$RESTORE_TRANSACTION_DIRECTORY" "$retired_transaction"
-  if [[ "${SKY_BAR_TEST_FAIL_RESTORE_RETIREMENT-}" == after-rename ]]; then
+  if [[ "${AERSTELLO_TEST_FAIL_RESTORE_RETIREMENT-}" == after-rename ]]; then
     die 'Injected restore transaction retirement interruption after atomic rename.'
   fi
   validate_completed_restore_retirement "$retired_transaction"
@@ -2643,7 +2643,7 @@ restore_backup_bundle() {
   dump_path="$RESTORE_TRANSACTION_DIRECTORY/database.dump"
   validate_transaction_restore_archive "$RESTORE_TRANSACTION_DIRECTORY" 'Restore transaction'
 
-  if [[ "${SKY_BAR_TEST_FAIL_RESTORE-}" == after-transaction ]]; then
+  if [[ "${AERSTELLO_TEST_FAIL_RESTORE-}" == after-transaction ]]; then
     die 'Injected restore interruption after durable transaction publication.'
   fi
 
@@ -2653,17 +2653,17 @@ restore_backup_bundle() {
   DATABASE_EXISTS=true
   validate_or_bind_restore_destination
   validate_transaction_restore_archive "$RESTORE_TRANSACTION_DIRECTORY" 'Restore transaction'
-  compose exec -T db psql -U skybar -d postgres -v ON_ERROR_STOP=1 \
-    -c 'DROP DATABASE IF EXISTS skybar WITH (FORCE)'
-  if [[ "${SKY_BAR_TEST_FAIL_RESTORE-}" == after-drop ]]; then
+  compose exec -T db psql -U aerstello -d postgres -v ON_ERROR_STOP=1 \
+    -c 'DROP DATABASE IF EXISTS aerstello WITH (FORCE)'
+  if [[ "${AERSTELLO_TEST_FAIL_RESTORE-}" == after-drop ]]; then
     die 'Injected restore interruption after destination database removal.'
   fi
-  compose exec -T db psql -U skybar -d postgres -v ON_ERROR_STOP=1 \
-    -c 'CREATE DATABASE skybar OWNER skybar'
-  compose exec -T db pg_restore -U skybar -d skybar < "$dump_path"
+  compose exec -T db psql -U aerstello -d postgres -v ON_ERROR_STOP=1 \
+    -c 'CREATE DATABASE aerstello OWNER aerstello'
+  compose exec -T db pg_restore -U aerstello -d aerstello < "$dump_path"
 
   read_database_migrations
-  RESTORED_MIGRATIONS_TEMP="$(mktemp "${TMPDIR:-/tmp}/sky-bar-restored-migrations.XXXXXX")"
+  RESTORED_MIGRATIONS_TEMP="$(mktemp "${TMPDIR:-/tmp}/aerstello-restored-migrations.XXXXXX")"
   : > "$RESTORED_MIGRATIONS_TEMP"
   if ((${#DATABASE_MIGRATIONS[@]} > 0)); then
     printf '%s\n' "${DATABASE_MIGRATIONS[@]}" > "$RESTORED_MIGRATIONS_TEMP"
@@ -2695,5 +2695,5 @@ case "$DB_MODE" in
   *) die 'Internal error: no database mode was selected.' ;;
 esac
 
-note "Sky Bar demo deployment is healthy at https://${CONFIG[SKY_BAR_DOMAIN]}"
+note "Aerstello demo deployment is healthy at https://${CONFIG[AERSTELLO_DOMAIN]}"
 note "Deployed Git commit: $DEPLOYED_SHA"

@@ -1,4 +1,4 @@
-import { loginEmailSchema } from '@sky-bar/shared';
+import { loginEmailSchema } from '@aerstello/shared';
 import { z } from 'zod';
 import rules from './admin-profile-rules.json' with { type: 'json' };
 

@@ -61,7 +61,7 @@ current/pending source state. Persist, rewrite, and guarded restore stop the
 demo application before classifying and dumping an existing database. Guarded
 restore accepts an older ancestor bundle
 from a clean current checkout only when all selected migration paths and
-digests are still preserved. It recreates the whole `skybar` database rather
+digests are still preserved. It recreates the whole `aerstello` database rather
 than applying an in-place `pg_restore --clean`. When prior database data exists
 it first creates and validates one safety bundle; after volume loss it records
 the absence of that safety evidence and can recreate only the deterministic,
