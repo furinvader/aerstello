@@ -1,5 +1,5 @@
 {
-  "description": "Durable Sky Bar PR-review recovery and worker-result validation.",
+  "description": "Durable Aerstello PR-review recovery and worker-result validation.",
   "hooks": {
     "SessionStart": [
       {

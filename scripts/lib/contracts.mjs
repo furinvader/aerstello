@@ -25,7 +25,7 @@ const ALLOWED_CHECK_COMMANDS = new Set([
   'npm run check:released-migrations',
 ]);
 const WRAPPER_EXECUTABLES = new Set(['env', 'bash', 'sh', 'zsh', 'fish', 'command', 'exec', 'xargs']);
-const KNOWN_WORKSPACES = new Set(['@sky-bar/api', '@sky-bar/web', '@sky-bar/shared']);
+const KNOWN_WORKSPACES = new Set(['@aerstello/api', '@aerstello/web', '@aerstello/shared']);
 const SHELL_SYNTAX_PATTERN = /[;&|<>`$()'"\\*?\[\]{}!#~\t\v\f\r\n]/u;
 const NODE_TEST_PATH_PATTERN = /(?:^|\/)[^/]+\.(?:test|spec)\.(?:[cm]?[jt]s|[jt]sx)$/u;
 

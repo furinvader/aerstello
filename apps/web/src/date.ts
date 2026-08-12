@@ -1,4 +1,4 @@
-import type { Language } from '@sky-bar/shared';
+import type { Language } from '@aerstello/shared';
 
 export function formatVenueDateTime(value: string, language: Language, venueTimezone: string): string {
   return new Date(value).toLocaleString(language, { timeZone: venueTimezone });

@@ -1,5 +1,5 @@
 import Dexie, { type EntityTable } from 'dexie';
-import type { LocalizedText } from '@sky-bar/shared';
+import type { LocalizedText } from '@aerstello/shared';
 import { ApiError, api, json } from './api';
 
 export type QueuedMutationDisplay = {
@@ -30,7 +30,7 @@ export interface QueuedMutation {
   display?: QueuedMutationDisplay;
 }
 
-const db = new Dexie('sky-bar') as Dexie & { mutations: EntityTable<QueuedMutation, 'id'> };
+const db = new Dexie('aerstello') as Dexie & { mutations: EntityTable<QueuedMutation, 'id'> };
 db.version(1).stores({ mutations: 'id,hostId,status,[hostId+status],[hostId+createdAt],createdAt' });
 
 export function isPermanentSyncConflict(error: unknown): error is ApiError {

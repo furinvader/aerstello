@@ -79,7 +79,7 @@ jobs:
         if: github.event_name == 'pull_request'
         run: npm run lint:commit -- --from "${{ github.event.pull_request.base.sha }}" --to "${{ github.event.pull_request.head.sha }}" --verbose
       - run: npm run assets:generate
-      - run: npm run db:migrate:dev -w @sky-bar/api
+      - run: npm run db:migrate:dev -w @aerstello/api
       - run: npm run check:full
       - run: npx playwright install --with-deps chromium webkit firefox
       - run: npm run test:e2e:full

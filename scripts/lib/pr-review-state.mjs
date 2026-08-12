@@ -973,7 +973,7 @@ export function migratePrReviewStateV2(legacyState, { migratedAt = utcNow() } = 
   const legacyCompletionPlaceholder = {
     source: 'github-actions', scope: 'full', status: 'passed', headSha: normalized.currentIntegrationHeadSha,
     checks: ['schema-v2 completion invariant validation only'], workflowRunId: 1,
-    workflowRunUrl: 'https://github.com/sky-bar/schema-v2-migration-placeholder', updatedAt: migratedAt,
+    workflowRunUrl: 'https://github.com/aerstello/schema-v2-migration-placeholder', updatedAt: migratedAt,
   };
   const legacyCompletedLocalTaskIds = (normalized.tasks ?? [])
     .filter((task) => task.sourceType === 'local' && task.status === 'completed')

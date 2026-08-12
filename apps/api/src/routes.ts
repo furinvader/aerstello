@@ -24,8 +24,8 @@ import {
   settleTabSchema,
   venueSettingsSchema,
   voidSchema,
-} from '@sky-bar/shared';
-import type { GuestItemCreated, OrderItem, Tab } from '@sky-bar/shared';
+} from '@aerstello/shared';
+import type { GuestItemCreated, OrderItem, Tab } from '@aerstello/shared';
 import { audit, eventBus, requestRealtimeRelay, storeEvent, type RealtimeEvent } from './events.js';
 import { pool, transaction } from './db.js';
 import { config } from './config.js';
@@ -202,7 +202,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('onRequest', async (request, reply) => {
     if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method)) return;
     if (request.url.startsWith('/api/v1/public/') || request.url === '/api/v1/auth/login') return;
-    if ((request.cookies.skybar_host || request.cookies.skybar_guest) && request.headers['x-skybar-csrf'] !== '1') {
+    if ((request.cookies.aerstello_host || request.cookies.aerstello_guest) && request.headers['x-aerstello-csrf'] !== '1') {
       await reply.code(403).send({ error: { code: 'CSRF', message: 'Missing request verification header.' } });
     }
   });

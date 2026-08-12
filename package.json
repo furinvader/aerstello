@@ -1,5 +1,5 @@
 {
-  "name": "sky-bar",
+  "name": "aerstello",
   "version": "0.1.0",
   "private": true,
   "workspaces": [
@@ -7,10 +7,10 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "concurrently -n api,web -c blue,cyan \"npm run dev -w @sky-bar/api\" \"npm run dev -w @sky-bar/web\"",
-    "start:e2e:ci": "npm run build && concurrently -k -s first -n api,web -c blue,cyan \"npm run start -w @sky-bar/api\" \"npm run preview:e2e -w @sky-bar/web\"",
-    "build": "npm run build -w @sky-bar/shared && npm run build -w @sky-bar/api && npm run build -w @sky-bar/web",
-    "typecheck": "npm run build -w @sky-bar/shared && npm run typecheck -w @sky-bar/api && npm run typecheck -w @sky-bar/web",
+    "dev": "concurrently -n api,web -c blue,cyan \"npm run dev -w @aerstello/api\" \"npm run dev -w @aerstello/web\"",
+    "start:e2e:ci": "npm run build && concurrently -k -s first -n api,web -c blue,cyan \"npm run start -w @aerstello/api\" \"npm run preview:e2e -w @aerstello/web\"",
+    "build": "npm run build -w @aerstello/shared && npm run build -w @aerstello/api && npm run build -w @aerstello/web",
+    "typecheck": "npm run build -w @aerstello/shared && npm run typecheck -w @aerstello/api && npm run typecheck -w @aerstello/web",
     "test": "npm run test:tooling && npm run test --workspaces --if-present",
     "test:tooling": "node --test tests/tooling/*.test.mjs",
     "test:coverage": "npm run test:coverage --workspaces --if-present",
@@ -24,14 +24,14 @@
     "release:state": "node scripts/release-state.mjs --json",
     "check:release-state": "node scripts/release-state.mjs --check",
     "check:released-migrations": "node scripts/check-released-migrations.mjs",
-    "check:shared": "npm run build -w @sky-bar/shared && npm test -w @sky-bar/shared",
-    "check:api": "npm run build -w @sky-bar/shared && npm run typecheck -w @sky-bar/api && npm test -w @sky-bar/api",
-    "check:web": "npm run build -w @sky-bar/shared && npm run typecheck -w @sky-bar/web && npm test -w @sky-bar/web",
+    "check:shared": "npm run build -w @aerstello/shared && npm test -w @aerstello/shared",
+    "check:api": "npm run build -w @aerstello/shared && npm run typecheck -w @aerstello/api && npm test -w @aerstello/api",
+    "check:web": "npm run build -w @aerstello/shared && npm run typecheck -w @aerstello/web && npm test -w @aerstello/web",
     "check:workflow": "npm run test:tooling",
     "check:full": "npm run typecheck && npm run test && npm run build",
     "check": "npm run check:full",
-    "db:migrate": "npm run db:migrate -w @sky-bar/api",
-    "admin:create": "npm run admin:create -w @sky-bar/api --"
+    "db:migrate": "npm run db:migrate -w @aerstello/api",
+    "admin:create": "npm run admin:create -w @aerstello/api --"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.10.2",

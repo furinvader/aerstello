@@ -1,6 +1,6 @@
 ---
 name: pr-review-cycle
-description: Orchestrate and resume Sky Bar pull-request review remediation with official GitHub `@codex review`, exact-commit matching, isolated fix workers, central integration, targeted local validation, full CI evidence, and durable recovery state. Use when asked to resolve or continue the current PR review cycle, request Codex review and address its findings, recover a long-running PR remediation session, or delegate independent review fixes. Do not use for ordinary one-file edits or reviews unrelated to an active pull request cycle.
+description: Orchestrate and resume Aerstello pull-request review remediation with official GitHub `@codex review`, exact-commit matching, isolated fix workers, central integration, targeted local validation, full CI evidence, and durable recovery state. Use when asked to resolve or continue the current PR review cycle, request Codex review and address its findings, recover a long-running PR remediation session, or delegate independent review fixes. Do not use for ordinary one-file edits or reviews unrelated to an active pull request cycle.
 ---
 
 # Resolve a PR review cycle

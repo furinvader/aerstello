@@ -309,7 +309,7 @@ let historicalEvidenceResult: {
 } | undefined;
 
 Before(async () => {
-  execFileSync('npm',['run','db:seed','-w','@sky-bar/api'],{cwd:process.cwd(),env:{...process.env,E2E_RESET:'true',SEED_ADMIN_PASSWORD:'SkyBarTest123!'},stdio:'pipe'});
+  execFileSync('npm',['run','db:seed','-w','@aerstello/api'],{cwd:process.cwd(),env:{...process.env,E2E_RESET:'true',SEED_ADMIN_PASSWORD:'AerstelloTest123!'},stdio:'pipe'});
 });
 
 After(async () => {
@@ -326,8 +326,8 @@ After(async () => {
 
 async function signIn(page: import('@playwright/test').Page) {
   await page.goto('/login');
-  await page.getByLabel('Email').fill('admin@skybar.test');
-  await page.getByLabel('Password').fill('SkyBarTest123!');
+  await page.getByLabel('Email').fill('admin@aerstello.test');
+  await page.getByLabel('Password').fill('AerstelloTest123!');
   await page.getByRole('button',{name:'Sign in'}).click();
   await expect(page).toHaveURL(/\/app/);
 }
@@ -338,7 +338,7 @@ async function installQueryOutage(page:import('@playwright/test').Page,paths:str
     let release!:()=>void;
     const pending=new Promise<void>((resolve)=>{release=resolve});
     const state={active:true,attempts:0,observed:{} as Record<string,number>,release,restore:()=>{window.fetch=originalFetch}};
-    Object.assign(window,{__skyBarQueryOutage:state});
+    Object.assign(window,{__aerstelloQueryOutage:state});
     window.fetch=async(input,init)=>{
       const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
       const path=new URL(url,window.location.href).pathname;
@@ -357,23 +357,23 @@ async function installQueryOutage(page:import('@playwright/test').Page,paths:str
 
 async function releaseQueryOutage(page:import('@playwright/test').Page) {
   await page.evaluate(()=>{
-    const state=(window as unknown as {__skyBarQueryOutage:{release:()=>void}}).__skyBarQueryOutage;
+    const state=(window as unknown as {__aerstelloQueryOutage:{release:()=>void}}).__aerstelloQueryOutage;
     state.release();
   });
 }
 
 async function retryQueryOutage(page:import('@playwright/test').Page,retry:import('@playwright/test').Locator) {
   await retry.evaluate((button)=>button.addEventListener('click',()=>{
-    (window as unknown as {__skyBarQueryOutage:{active:boolean}}).__skyBarQueryOutage.active=false;
+    (window as unknown as {__aerstelloQueryOutage:{active:boolean}}).__aerstelloQueryOutage.active=false;
   },{capture:true,once:true}));
   await retry.click();
 }
 
 async function restoreQueryOutage(page:import('@playwright/test').Page) {
   await page.evaluate(()=>{
-    const state=(window as unknown as {__skyBarQueryOutage:{restore:()=>void}}).__skyBarQueryOutage;
+    const state=(window as unknown as {__aerstelloQueryOutage:{restore:()=>void}}).__aerstelloQueryOutage;
     state.restore();
-    delete (window as unknown as {__skyBarQueryOutage?:unknown}).__skyBarQueryOutage;
+    delete (window as unknown as {__aerstelloQueryOutage?:unknown}).__aerstelloQueryOutage;
   });
 }
 
@@ -381,7 +381,7 @@ async function installLiveQueryFailure(page:import('@playwright/test').Page,path
   await page.evaluate((targetPaths)=>{
     const originalFetch=window.fetch.bind(window);
     const state={attempts:0,restore:()=>{window.fetch=originalFetch}};
-    Object.assign(window,{__skyBarLiveQueryFailure:state});
+    Object.assign(window,{__aerstelloLiveQueryFailure:state});
     window.fetch=async(input,init)=>{
       const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
       if(targetPaths.includes(new URL(url,window.location.href).pathname)){
@@ -395,16 +395,16 @@ async function installLiveQueryFailure(page:import('@playwright/test').Page,path
 
 async function restoreLiveQueryFailure(page:import('@playwright/test').Page) {
   await page.evaluate(()=>{
-    const state=(window as unknown as {__skyBarLiveQueryFailure:{restore:()=>void}}).__skyBarLiveQueryFailure;
+    const state=(window as unknown as {__aerstelloLiveQueryFailure:{restore:()=>void}}).__aerstelloLiveQueryFailure;
     state.restore();
-    delete (window as unknown as {__skyBarLiveQueryFailure?:unknown}).__skyBarLiveQueryFailure;
+    delete (window as unknown as {__aerstelloLiveQueryFailure?:unknown}).__aerstelloLiveQueryFailure;
   });
 }
 
 async function startClockSkewedApi(port:number,offsetMs:number) {
   const replica=spawn(process.execPath,['--import','./tests/e2e/fixtures/future-clock.mjs','apps/api/dist/index.js'],{
     cwd:process.cwd(),
-    env:{...process.env,PORT:String(port),LOG_LEVEL:'warn',RATE_LIMIT_MAX:'5000',SKY_BAR_TEST_CLOCK_OFFSET_MS:String(offsetMs)},
+    env:{...process.env,PORT:String(port),LOG_LEVEL:'warn',RATE_LIMIT_MAX:'5000',AERSTELLO_TEST_CLOCK_OFFSET_MS:String(offsetMs)},
     stdio:'ignore',
   });
   extraApiProcesses.push(replica);
@@ -413,7 +413,7 @@ async function startClockSkewedApi(port:number,offsetMs:number) {
   return baseURL;
 }
 
-Given('the seeded Sky Bar venue', async ({ page }) => { await page.goto('/login'); });
+Given('the seeded Aerstello venue', async ({ page }) => { await page.goto('/login'); });
 When('the administrator signs in', async ({ page }) => { await signIn(page); });
 Given('an authenticated administrator', async ({ page }) => { await signIn(page); });
 Then('the host dashboard shows the venue name {string}', async ({ page }, name:string) => { await expect(page.locator('.page-header')).toContainText(name); });
@@ -421,13 +421,13 @@ Then('the page has no serious accessibility violations', async ({ page }) => { c
 When('a public launch identity check fails transiently',async({page})=>{
   await page.addInitScript(()=>{
     const originalFetch=window.fetch.bind(window);
-    const state=window as unknown as {__skyBarLaunchIdentityOutage:{active:boolean;attempts:number}};
-    state.__skyBarLaunchIdentityOutage={active:true,attempts:0};
+    const state=window as unknown as {__aerstelloLaunchIdentityOutage:{active:boolean;attempts:number}};
+    state.__aerstelloLaunchIdentityOutage={active:true,attempts:0};
     window.fetch=async(input,init)=>{
       const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
       if(new URL(url,window.location.href).pathname==='/api/v1/auth/me'){
-        state.__skyBarLaunchIdentityOutage.attempts+=1;
-        if(state.__skyBarLaunchIdentityOutage.active)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated launch identity outage'}}),{status:503,headers:{'content-type':'application/json'}});
+        state.__aerstelloLaunchIdentityOutage.attempts+=1;
+        if(state.__aerstelloLaunchIdentityOutage.active)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated launch identity outage'}}),{status:503,headers:{'content-type':'application/json'}});
       }
       return originalFetch(input,init);
     };
@@ -442,28 +442,28 @@ Then('public launch shows a localized failure with retry',async({page})=>{
 When('the visitor retries the launch identity checks',async({page})=>{
   const retry=page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/});
   await retry.evaluate((button)=>button.addEventListener('click',()=>{
-    (window as unknown as {__skyBarLaunchIdentityOutage:{active:boolean}}).__skyBarLaunchIdentityOutage.active=false;
+    (window as unknown as {__aerstelloLaunchIdentityOutage:{active:boolean}}).__aerstelloLaunchIdentityOutage.active=false;
   },{capture:true,once:true}));
   await retry.click();
 });
 Then('public entry opens after launch identity recovery',async({page})=>{
   await expect(page).toHaveURL(/\/login$/);
   await expect(page.getByLabel(/E-Mail|Email/)).toBeVisible();
-  expect(await page.evaluate(()=>(window as unknown as {__skyBarLaunchIdentityOutage:{attempts:number}}).__skyBarLaunchIdentityOutage.attempts)).toBeGreaterThanOrEqual(2);
+  expect(await page.evaluate(()=>(window as unknown as {__aerstelloLaunchIdentityOutage:{attempts:number}}).__aerstelloLaunchIdentityOutage.attempts)).toBeGreaterThanOrEqual(2);
 });
 When('the public bootstrap request remains pending',async({page})=>{
   await page.addInitScript(()=>{
     const originalFetch=window.fetch.bind(window);
-    const state=window as unknown as {__skyBarBootstrapOutage:{active:boolean;attempts:number;release?:()=>void}};
-    state.__skyBarBootstrapOutage={active:true,attempts:0};
+    const state=window as unknown as {__aerstelloBootstrapOutage:{active:boolean;attempts:number;release?:()=>void}};
+    state.__aerstelloBootstrapOutage={active:true,attempts:0};
     window.fetch=async(input,init)=>{
       const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
-      if(new URL(url,window.location.href).pathname==='/api/v1/public/bootstrap'&&state.__skyBarBootstrapOutage.active){
-        state.__skyBarBootstrapOutage.attempts+=1;
-        await new Promise<void>((resolve)=>{state.__skyBarBootstrapOutage.release=resolve});
+      if(new URL(url,window.location.href).pathname==='/api/v1/public/bootstrap'&&state.__aerstelloBootstrapOutage.active){
+        state.__aerstelloBootstrapOutage.attempts+=1;
+        await new Promise<void>((resolve)=>{state.__aerstelloBootstrapOutage.release=resolve});
         return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated bootstrap outage'}}),{status:503,headers:{'content-type':'application/json'}});
       }
-      if(new URL(url,window.location.href).pathname==='/api/v1/public/bootstrap')state.__skyBarBootstrapOutage.attempts+=1;
+      if(new URL(url,window.location.href).pathname==='/api/v1/public/bootstrap')state.__aerstelloBootstrapOutage.attempts+=1;
       return originalFetch(input,init);
     };
   });
@@ -476,7 +476,7 @@ Then('bootstrap loading is shown without the access form',async({page})=>{
 });
 When('the public bootstrap request fails',async({page})=>{
   await page.evaluate(()=>{
-    const release=(window as unknown as {__skyBarBootstrapOutage:{release?:()=>void}}).__skyBarBootstrapOutage.release;
+    const release=(window as unknown as {__aerstelloBootstrapOutage:{release?:()=>void}}).__aerstelloBootstrapOutage.release;
     if(!release)throw new Error('Bootstrap request was not pending');
     release();
   });
@@ -489,14 +489,14 @@ Then('bootstrap failure is localized and still hides the access form',async({pag
 When('the guest retries public bootstrap',async({page})=>{
   const retry=page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/});
   await retry.evaluate((button)=>button.addEventListener('click',()=>{
-    (window as unknown as {__skyBarBootstrapOutage:{active:boolean}}).__skyBarBootstrapOutage.active=false;
+    (window as unknown as {__aerstelloBootstrapOutage:{active:boolean}}).__aerstelloBootstrapOutage.active=false;
   },{capture:true,once:true}));
   await retry.click();
 });
 Then('the access form appears after bootstrap recovery',async({page})=>{
   await expect(page.getByLabel(/Name|Nome/)).toBeVisible();
   await expect(page.getByRole('button',{name:/Zugang anfragen|Richiedi accesso|Request access/})).toBeEnabled();
-  expect(await page.evaluate(()=>(window as unknown as {__skyBarBootstrapOutage:{attempts:number}}).__skyBarBootstrapOutage.attempts)).toBe(2);
+  expect(await page.evaluate(()=>(window as unknown as {__aerstelloBootstrapOutage:{attempts:number}}).__aerstelloBootstrapOutage.attempts)).toBe(2);
 });
 When('the host opens the account screen', async ({ page }) => { await page.goto('/app/account'); });
 Then('the current device is listed', async ({ page }) => { await expect(page.getByText(/Dieses Gerät|Questo dispositivo|This device/)).toBeVisible(); });
@@ -525,12 +525,12 @@ When('the host retries the device directory',async({page})=>{
 });
 Then('the current device reappears without a reload',async({page})=>{
   await expect(page.getByText(/Dieses Gerät|Questo dispositivo|This device/)).toBeVisible();
-  expect(await page.evaluate(()=>(window as unknown as {__skyBarQueryOutage:{attempts:number}}).__skyBarQueryOutage.attempts)).toBeGreaterThanOrEqual(3);
+  expect(await page.evaluate(()=>(window as unknown as {__aerstelloQueryOutage:{attempts:number}}).__aerstelloQueryOutage.attempts)).toBeGreaterThanOrEqual(3);
   await restoreQueryOutage(page);
 });
 When('the host account directory remains pending',async({page})=>{
   const request=page.context().request;
-  expect((await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'directory-staff@skybar.test',name:'Directory Staff',password:'DirectoryStaff123!',role:'staff',language:'de'}})).status()).toBe(201);
+  expect((await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'directory-staff@aerstello.test',name:'Directory Staff',password:'DirectoryStaff123!',role:'staff',language:'de'}})).status()).toBe(201);
   await installQueryOutage(page,['/api/v1/hosts']);
   await page.goto('/app/account');
 });
@@ -562,7 +562,7 @@ Then('host account failure and retry hide empty and host mutation actions',async
 When('the administrator retries the host account directory',async({page})=>{
   const heading=page.getByRole('heading',{name:/Host-Konten|Account host|Host accounts/});
   const directory=heading.locator('xpath=../following-sibling::*[1]');
-  hostSessionRequestsBeforeDirectoryRetry=await page.evaluate(()=>(window as unknown as {__skyBarQueryOutage:{observed:Record<string,number>}}).__skyBarQueryOutage.observed['/api/v1/account/sessions']??0);
+  hostSessionRequestsBeforeDirectoryRetry=await page.evaluate(()=>(window as unknown as {__aerstelloQueryOutage:{observed:Record<string,number>}}).__aerstelloQueryOutage.observed['/api/v1/account/sessions']??0);
   await retryQueryOutage(page,directory.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}));
 });
 Then('host account rows and mutation actions recover independently',async({page})=>{
@@ -571,7 +571,7 @@ Then('host account rows and mutation actions recover independently',async({page}
   await expect(directory.getByText('Directory Staff',{exact:true})).toBeVisible();
   await expect(page.getByRole('button',{name:/^Hinzufügen$|^Aggiungi$|^Add$/})).toBeEnabled();
   await expect(directory.getByRole('button',{name:/Deaktivieren|Disabilita|Disable/})).toBeEnabled();
-  const state=await page.evaluate(()=>(window as unknown as {__skyBarQueryOutage:{attempts:number;observed:Record<string,number>}}).__skyBarQueryOutage);
+  const state=await page.evaluate(()=>(window as unknown as {__aerstelloQueryOutage:{attempts:number;observed:Record<string,number>}}).__aerstelloQueryOutage);
   expect(state.attempts).toBeGreaterThanOrEqual(3);
   expect(state.observed['/api/v1/account/sessions']??0).toBe(hostSessionRequestsBeforeDirectoryRetry);
   await restoreQueryOutage(page);
@@ -579,13 +579,13 @@ Then('host account rows and mutation actions recover independently',async({page}
 When('the initial host identity request fails transiently on the bills route',async({page})=>{
   await page.addInitScript(()=>{
     const originalFetch=window.fetch.bind(window);
-    const state=window as unknown as {__skyBarTransientHostIdentityRequests:number};
-    state.__skyBarTransientHostIdentityRequests=0;
+    const state=window as unknown as {__aerstelloTransientHostIdentityRequests:number};
+    state.__aerstelloTransientHostIdentityRequests=0;
     window.fetch=async(input,init)=>{
       const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
       if(new URL(url,window.location.href).pathname==='/api/v1/auth/me'){
-        state.__skyBarTransientHostIdentityRequests+=1;
-        if(state.__skyBarTransientHostIdentityRequests===1)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated host identity outage'}}),{status:503,headers:{'content-type':'application/json'}});
+        state.__aerstelloTransientHostIdentityRequests+=1;
+        if(state.__aerstelloTransientHostIdentityRequests===1)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated host identity outage'}}),{status:503,headers:{'content-type':'application/json'}});
       }
       return originalFetch(input,init);
     };
@@ -601,12 +601,12 @@ When('the host retries the initial identity request',async({page})=>{await page.
 Then('the requested bills route opens after identity recovery',async({page})=>{
   await expect(page).toHaveURL(/\/app\/bills$/);
   await expect(page.getByRole('heading',{name:/Rechnungen|Conti|Bills/})).toBeVisible();
-  expect(await page.evaluate(()=>(window as unknown as {__skyBarTransientHostIdentityRequests:number}).__skyBarTransientHostIdentityRequests)).toBeGreaterThanOrEqual(2);
+  expect(await page.evaluate(()=>(window as unknown as {__aerstelloTransientHostIdentityRequests:number}).__aerstelloTransientHostIdentityRequests)).toBeGreaterThanOrEqual(2);
 });
 When('a profile save response is lost before another device edits the profile',async({page})=>{
   await page.goto('/app/account');
   await page.getByLabel(/Name|Nome/).first().fill('First profile save');
-  await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarProfileCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/account')&&init?.method==='PATCH'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});
+  await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__aerstelloProfileCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/account')&&init?.method==='PATCH'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});
   await page.getByRole('button',{name:/Speichern|Salva|Save/}).first().click();
   await expect(page.locator('.notice--error')).toBeVisible();
   uncertainProfileFieldsLocked=await page.locator('form.stack').first().locator('input,select').evaluateAll(fields=>fields.every(field=>(field as HTMLInputElement).disabled));
@@ -614,35 +614,35 @@ When('a profile save response is lost before another device edits the profile',a
   expect((await request.patch('/api/v1/account',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:current.host.version,name:'Newer device profile',language:current.host.language}})).status()).toBe(200);
   await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).first().click();
   await expect(page.locator('.notice--success')).toBeVisible();
-  retriedProfileMutationIds=(await page.evaluate(()=>(window as unknown as {__skyBarProfileCommands:Array<Record<string,unknown>>}).__skyBarProfileCommands)).map(command=>String(command.mutationId));
+  retriedProfileMutationIds=(await page.evaluate(()=>(window as unknown as {__aerstelloProfileCommands:Array<Record<string,unknown>>}).__aerstelloProfileCommands)).map(command=>String(command.mutationId));
   finalProfileName=((await (await request.get('/api/v1/auth/me')).json()) as {host:{name:string}}).host.name;
 });
 Then('both profile save attempts use the same mutation identifier',async()=>{expect(retriedProfileMutationIds).toHaveLength(2);expect(new Set(retriedProfileMutationIds).size).toBe(1)});
 Then('the uncertain profile fields stay locked for retry',async()=>{expect(uncertainProfileFieldsLocked).toBe(true)});
 Then('the newer profile remains configured',async({page})=>{expect(finalProfileName).toBe('Newer device profile');await expect(page.getByLabel(/Name|Nome/).first()).toHaveValue('Newer device profile')});
-When('the administrator retries host creation after its response is lost',async({page})=>{await page.goto('/app/account');await page.getByRole('button',{name:/Hinzufügen|Aggiungi|Add/}).last().click();const modal=page.locator('.modal');await modal.getByLabel('Name').fill('Recoverable Host');await modal.getByLabel(/E-Mail/).fill('recoverable-host@skybar.test');await modal.getByLabel(/Temporäres Passwort|Password temporanea|Temporary password/).fill('RecoverableHost123!');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarHostCreateCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/hosts')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});await modal.getByRole('button',{name:/Konto erstellen|Crea account|Create account/}).click();await expect(modal.locator('.notice--error')).toBeVisible();uncertainHostFieldsLocked=await modal.locator('input,select').evaluateAll(fields=>fields.every(field=>(field as HTMLInputElement).disabled));await modal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(modal).toHaveCount(0);const commands=await page.evaluate(()=>(window as unknown as {__skyBarHostCreateCommands:Array<Record<string,unknown>>}).__skyBarHostCreateCommands);retriedHostCreationMutationIds=commands.map(command=>String(command.mutationId));const hosts=await (await page.context().request.get('/api/v1/hosts')).json() as {data:{email:string}[]};recoverableHostCount=hosts.data.filter(host=>host.email==='recoverable-host@skybar.test').length});
+When('the administrator retries host creation after its response is lost',async({page})=>{await page.goto('/app/account');await page.getByRole('button',{name:/Hinzufügen|Aggiungi|Add/}).last().click();const modal=page.locator('.modal');await modal.getByLabel('Name').fill('Recoverable Host');await modal.getByLabel(/E-Mail/).fill('recoverable-host@aerstello.test');await modal.getByLabel(/Temporäres Passwort|Password temporanea|Temporary password/).fill('RecoverableHost123!');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__aerstelloHostCreateCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/hosts')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});await modal.getByRole('button',{name:/Konto erstellen|Crea account|Create account/}).click();await expect(modal.locator('.notice--error')).toBeVisible();uncertainHostFieldsLocked=await modal.locator('input,select').evaluateAll(fields=>fields.every(field=>(field as HTMLInputElement).disabled));await modal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(modal).toHaveCount(0);const commands=await page.evaluate(()=>(window as unknown as {__aerstelloHostCreateCommands:Array<Record<string,unknown>>}).__aerstelloHostCreateCommands);retriedHostCreationMutationIds=commands.map(command=>String(command.mutationId));const hosts=await (await page.context().request.get('/api/v1/hosts')).json() as {data:{email:string}[]};recoverableHostCount=hosts.data.filter(host=>host.email==='recoverable-host@aerstello.test').length});
 Then('both host creation attempts use the same mutation identifier',async()=>{expect(retriedHostCreationMutationIds).toHaveLength(2);expect(new Set(retriedHostCreationMutationIds).size).toBe(1)});
 Then('the uncertain host fields stay locked for retry',async()=>{expect(uncertainHostFieldsLocked).toBe(true)});
 Then('only one recoverable host account exists',async()=>{expect(recoverableHostCount).toBe(1)});
-Then('host creation retains no retired password verifier',async()=>{const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();try{const host=(await database.query(`SELECT password_hash AS "passwordHash",create_command_hash AS "commandHash" FROM hosts WHERE email='recoverable-host@skybar.test'`)).rows[0] as {passwordHash:string;commandHash:string};expect(host.passwordHash).toMatch(/^\$argon2id\$/);expect(host.commandHash).toMatch(/^[0-9a-f]{64}$/);expect(Number((await database.query(`SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='hosts' AND column_name='create_password_hash'`)).rows[0].count)).toBe(0)}finally{await database.end()}});
+Then('host creation retains no retired password verifier',async()=>{const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();try{const host=(await database.query(`SELECT password_hash AS "passwordHash",create_command_hash AS "commandHash" FROM hosts WHERE email='recoverable-host@aerstello.test'`)).rows[0] as {passwordHash:string;commandHash:string};expect(host.passwordHash).toMatch(/^\$argon2id\$/);expect(host.commandHash).toMatch(/^[0-9a-f]{64}$/);expect(Number((await database.query(`SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='hosts' AND column_name='create_password_hash'`)).rows[0].count)).toBe(0)}finally{await database.end()}});
 When('another device creates a host while the account directory is open',async({page})=>{
   await page.setViewportSize({width:390,height:844});
   await page.goto('/app/account');
-  await expect(page.locator('.page-header .eyebrow')).toHaveText('admin@skybar.test');
-  expect((await page.context().request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'realtime-host@skybar.test',name:'Realtime Host',password:'RealtimeHost123!',role:'staff',language:'de'}})).status()).toBe(201);
+  await expect(page.locator('.page-header .eyebrow')).toHaveText('admin@aerstello.test');
+  expect((await page.context().request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'realtime-host@aerstello.test',name:'Realtime Host',password:'RealtimeHost123!',role:'staff',language:'de'}})).status()).toBe(201);
 });
-Then('the new host appears after the committed authorization event',async({page})=>{const row=page.locator('.section-heading+.card .table-row').filter({hasText:'realtime-host@skybar.test'});await expect(row).toBeVisible({timeout:10_000});await expect(row).toContainText('Realtime Host')});
+Then('the new host appears after the committed authorization event',async({page})=>{const row=page.locator('.section-heading+.card .table-row').filter({hasText:'realtime-host@aerstello.test'});await expect(row).toBeVisible({timeout:10_000});await expect(row).toContainText('Realtime Host')});
 When('the host selects Italian on an English-locale device',async({page})=>{expect(await page.evaluate(()=>navigator.language)).toMatch(/^en/);await page.goto('/app/account');await expect(page.getByText('Dieses Gerät')).toBeVisible();const payload=await (await page.context().request.get('/api/v1/account/sessions')).json() as {data:{lastSeenAt:string;current:boolean}[]};const lastSeenAt=payload.data.find(session=>session.current)!.lastSeenAt;expectedItalianSessionTimestamp=await page.evaluate(value=>new Date(value).toLocaleString('it'),lastSeenAt);await page.getByLabel('Sprache').selectOption('it');await page.getByRole('button',{name:'Speichern'}).click()});
 Then('the last-active timestamp uses Italian formatting',async({page})=>{const current=page.locator('.device-list>div').filter({hasText:'Questo dispositivo'});await expect(current).toContainText(`Ultima attività ${expectedItalianSessionTimestamp}`)});
 When('the administrator changes the password with another device logged in',async({page,browser})=>{
   const other=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(other);
-  expect((await other.request.post('/api/v1/auth/login',{data:{email:'admin@skybar.test',password:'SkyBarTest123!'}})).status()).toBe(200);
+  expect((await other.request.post('/api/v1/auth/login',{data:{email:'admin@aerstello.test',password:'AerstelloTest123!'}})).status()).toBe(200);
   const me=await (await page.context().request.get('/api/v1/auth/me')).json() as {host:{version:number}};
-  expect((await page.context().request.patch('/api/v1/account',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:me.host.version,currentPassword:'SkyBarTest123!',newPassword:'ChangedPassword123!'}})).status()).toBe(200);
+  expect((await page.context().request.patch('/api/v1/account',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expectedVersion:me.host.version,currentPassword:'AerstelloTest123!',newPassword:'ChangedPassword123!'}})).status()).toBe(200);
   currentDeviceAfterPasswordChangeStatus=(await page.context().request.get('/api/v1/auth/me')).status();
   otherDeviceAfterPasswordChangeStatus=(await other.request.get('/api/v1/auth/me')).status();
   const fresh=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(fresh);
-  newPasswordLoginStatus=(await fresh.request.post('/api/v1/auth/login',{data:{email:'admin@skybar.test',password:'ChangedPassword123!'}})).status();
+  newPasswordLoginStatus=(await fresh.request.post('/api/v1/auth/login',{data:{email:'admin@aerstello.test',password:'ChangedPassword123!'}})).status();
 });
 Then('the password change keeps the current device and revokes the other device',async()=>{expect(currentDeviceAfterPasswordChangeStatus).toBe(200);expect(otherDeviceAfterPasswordChangeStatus).toBe(401)});
 Then('the new password can be used to sign in',async()=>{expect(newPasswordLoginStatus).toBe(200)});
@@ -668,25 +668,25 @@ Then('replaying logout for the revoked session succeeds',async()=>{expect(replay
 Given('an authenticated staff host', async ({ page }) => {
   await signIn(page);
   const request=page.context().request;
-  expect((await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'room-staff@skybar.test',name:'Room Staff',password:'RoomStaff123!',role:'staff',language:'de'}})).status()).toBe(201);
+  expect((await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'room-staff@aerstello.test',name:'Room Staff',password:'RoomStaff123!',role:'staff',language:'de'}})).status()).toBe(201);
   expect((await request.post('/api/v1/auth/logout',{headers:csrfHeaders})).status()).toBe(204);
-  expect((await request.post('/api/v1/auth/login',{data:{email:'room-staff@skybar.test',password:'RoomStaff123!'}})).status()).toBe(200);
+  expect((await request.post('/api/v1/auth/login',{data:{email:'room-staff@aerstello.test',password:'RoomStaff123!'}})).status()).toBe(200);
   await page.goto('/app');
 });
 Then('room management is absent from the navigation', async ({ page }) => { await expect(page.getByRole('link',{name:/^Zimmer$|^Camere$|^Rooms$/})).toHaveCount(0); });
 Then('opening the room-management URL shows no mutation controls', async ({ page }) => { await page.goto('/app/rooms');await expect(page.locator('.notice--error')).toBeVisible();await expect(page.locator('.inline-form,.sortable-list')).toHaveCount(0); });
 Then('opening the product-management URL shows no mutation controls', async ({ page }) => { await page.goto('/app/products');await expect(page.locator('.notice--error')).toBeVisible();await expect(page.locator('.inline-form,.product-admin-list')).toHaveCount(0); });
-When('another administrator demotes an open host session to staff',async({page,browser})=>{const request=page.context().request;const created=await (await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'role-refresh@skybar.test',name:'Role Refresh',password:'RoleRefresh123!',role:'admin',language:'en'}})).json() as {id:string;version:number};const context=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(context);roleChangedHostPage=await context.newPage();await roleChangedHostPage.goto('/login');await roleChangedHostPage.getByLabel('Email').fill('role-refresh@skybar.test');await roleChangedHostPage.getByLabel('Password').fill('RoleRefresh123!');await roleChangedHostPage.getByRole('button',{name:'Sign in'}).click();await expect(roleChangedHostPage.getByRole('link',{name:'Rooms'})).toBeVisible();expect((await request.patch(`/api/v1/hosts/${created.id}`,{headers:csrfHeaders,data:{role:'staff',expectedVersion:created.version}})).status()).toBe(200)});
+When('another administrator demotes an open host session to staff',async({page,browser})=>{const request=page.context().request;const created=await (await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'role-refresh@aerstello.test',name:'Role Refresh',password:'RoleRefresh123!',role:'admin',language:'en'}})).json() as {id:string;version:number};const context=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(context);roleChangedHostPage=await context.newPage();await roleChangedHostPage.goto('/login');await roleChangedHostPage.getByLabel('Email').fill('role-refresh@aerstello.test');await roleChangedHostPage.getByLabel('Password').fill('RoleRefresh123!');await roleChangedHostPage.getByRole('button',{name:'Sign in'}).click();await expect(roleChangedHostPage.getByRole('link',{name:'Rooms'})).toBeVisible();expect((await request.patch(`/api/v1/hosts/${created.id}`,{headers:csrfHeaders,data:{role:'staff',expectedVersion:created.version}})).status()).toBe(200)});
 Then('administrator controls disappear from the affected session',async()=>{await expect(roleChangedHostPage!.getByRole('link',{name:'Rooms'})).toHaveCount(0,{timeout:10_000});expect(((await (await roleChangedHostPage!.context().request.get('/api/v1/auth/me')).json()) as {host:{role:string}}).host.role).toBe('staff')});
 When('a host disable response is lost before the account is re-enabled',async({page,browser})=>{
   const request=page.context().request;
-  const created=await (await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'stale-host@skybar.test',name:'Stale Host',password:'StaleHostPassword123!',role:'staff',language:'de'}})).json() as {id:string;version:number};
+  const created=await (await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'stale-host@aerstello.test',name:'Stale Host',password:'StaleHostPassword123!',role:'staff',language:'de'}})).json() as {id:string;version:number};
   const staleCommand={active:false,expectedVersion:created.version};
   const disabled=await (await request.patch(`/api/v1/hosts/${created.id}`,{headers:csrfHeaders,data:staleCommand})).json() as {version:number};
   const enabled=await request.patch(`/api/v1/hosts/${created.id}`,{headers:csrfHeaders,data:{active:true,expectedVersion:disabled.version}});
   expect(enabled.status()).toBe(200);
   const context=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(context);
-  expect((await context.request.post('/api/v1/auth/login',{data:{email:'stale-host@skybar.test',password:'StaleHostPassword123!'}})).status()).toBe(200);
+  expect((await context.request.post('/api/v1/auth/login',{data:{email:'stale-host@aerstello.test',password:'StaleHostPassword123!'}})).status()).toBe(200);
   staleHostUpdateStatus=(await request.patch(`/api/v1/hosts/${created.id}`,{headers:csrfHeaders,data:staleCommand})).status();
   reopenedHostSessionStatus=(await context.request.get('/api/v1/auth/me')).status();
   const hosts=await (await request.get('/api/v1/hosts')).json() as {data:{id:string;active:boolean}[]};
@@ -696,24 +696,24 @@ Then('retrying the stale host disable is rejected',async()=>{expect(staleHostUpd
 Then('the re-enabled host remains active and signed in',async()=>{expect(staleHostFinalActive).toBe(true);expect(reopenedHostSessionStatus).toBe(200)});
 When('the current host session is revoked from another administrator',async({page,browser})=>{
   const request=page.context().request;
-  expect((await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'remote-admin@skybar.test',name:'Remote Admin',password:'RemoteAdmin123!',role:'admin',language:'de'}})).status()).toBe(201);
-  const other=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(other);expect((await other.request.post('/api/v1/auth/login',{data:{email:'remote-admin@skybar.test',password:'RemoteAdmin123!'}})).status()).toBe(200);
+  expect((await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'remote-admin@aerstello.test',name:'Remote Admin',password:'RemoteAdmin123!',role:'admin',language:'de'}})).status()).toBe(201);
+  const other=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(other);expect((await other.request.post('/api/v1/auth/login',{data:{email:'remote-admin@aerstello.test',password:'RemoteAdmin123!'}})).status()).toBe(200);
   await page.waitForTimeout(250);
-  execFileSync('npm',['run','admin:create:dev','-w','@sky-bar/api','--','--email','admin@skybar.test','--name','Mira Host','--password-stdin'],{cwd:process.cwd(),env:process.env,stdio:'pipe',input:'RemoteReset123!\n'});
+  execFileSync('npm',['run','admin:create:dev','-w','@aerstello/api','--','--email','admin@aerstello.test','--name','Mira Host','--password-stdin'],{cwd:process.cwd(),env:process.env,stdio:'pipe',input:'RemoteReset123!\n'});
   expect((await other.request.post('/api/v1/rooms',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:'Remote logout signal'}})).status()).toBe(201);
 });
 Then('the remotely revoked host is redirected to login',async({page})=>{await expect(page).toHaveURL(/\/login$/,{timeout:10_000});await expect(page.getByText('Hotel Aurora',{exact:true})).toHaveCount(0)});
 When('invalid passwords are submitted for known and unknown host emails', async ({ page }) => {
   const request=page.context().request;
   const responses=await Promise.all([
-    request.post('/api/v1/auth/login',{data:{email:'admin@skybar.test',password:'DefinitelyWrong123!'}}),
-    request.post('/api/v1/auth/login',{data:{email:'missing@skybar.test',password:'DefinitelyWrong123!'}}),
+    request.post('/api/v1/auth/login',{data:{email:'admin@aerstello.test',password:'DefinitelyWrong123!'}}),
+    request.post('/api/v1/auth/login',{data:{email:'missing@aerstello.test',password:'DefinitelyWrong123!'}}),
   ]);
   loginFailureResults=await Promise.all(responses.map(async response=>({status:response.status(),body:await response.json()})));
 });
 Then('both login attempts return the same credential error', async () => { expect(loginFailureResults).toHaveLength(2);expect(loginFailureResults[0]).toEqual(loginFailureResults[1]); });
 When('the administrator credentials are recovered from the command line', async ({ page }) => {
-  execFileSync('npm',['run','admin:create:dev','-w','@sky-bar/api','--','--email','admin@skybar.test','--name','Mira Host','--password-stdin'],{cwd:process.cwd(),env:process.env,stdio:'pipe',input:'RecoveredAdmin123!\n'});
+  execFileSync('npm',['run','admin:create:dev','-w','@aerstello/api','--','--email','admin@aerstello.test','--name','Mira Host','--password-stdin'],{cwd:process.cwd(),env:process.env,stdio:'pipe',input:'RecoveredAdmin123!\n'});
   recoveredDeviceStatus=(await page.context().request.get('/api/v1/auth/me')).status();
 });
 Then('the existing host device is signed out',async()=>{expect(recoveredDeviceStatus).toBe(401)});
@@ -724,21 +724,21 @@ When('credential recovery completes while an old-password login is being verifie
   const database=new pg.Client({connectionString:process.env.DATABASE_URL});
   await database.connect();
   try{
-    await database.query("UPDATE hosts SET password_hash=$1 WHERE lower(email)='admin@skybar.test'",[oldHash]);
-    await database.query("UPDATE host_sessions SET revoked_at=now() WHERE host_id=(SELECT id FROM hosts WHERE lower(email)='admin@skybar.test') AND revoked_at IS NULL");
-    const login=page.context().request.post('/api/v1/auth/login',{data:{email:'admin@skybar.test',password:oldPassword}});
+    await database.query("UPDATE hosts SET password_hash=$1 WHERE lower(email)='admin@aerstello.test'",[oldHash]);
+    await database.query("UPDATE host_sessions SET revoked_at=now() WHERE host_id=(SELECT id FROM hosts WHERE lower(email)='admin@aerstello.test') AND revoked_at IS NULL");
+    const login=page.context().request.post('/api/v1/auth/login',{data:{email:'admin@aerstello.test',password:oldPassword}});
     await expect.poll(async()=>Number((await database.query(
       `SELECT count(*) FROM pg_stat_activity
         WHERE pid<>pg_backend_pid() AND state='idle'
           AND query LIKE '%password_hash AS "passwordHash"%lower(email)=lower($1)%'`,
     )).rows[0].count),{timeout:5_000,intervals:[10,20,50]}).toBeGreaterThan(0);
     await database.query('BEGIN');
-    await database.query("UPDATE hosts SET password_hash=$1,version=version+1 WHERE lower(email)='admin@skybar.test'",[newHash]);
-    await database.query("UPDATE host_sessions SET revoked_at=now() WHERE host_id=(SELECT id FROM hosts WHERE lower(email)='admin@skybar.test') AND revoked_at IS NULL");
+    await database.query("UPDATE hosts SET password_hash=$1,version=version+1 WHERE lower(email)='admin@aerstello.test'",[newHash]);
+    await database.query("UPDATE host_sessions SET revoked_at=now() WHERE host_id=(SELECT id FROM hosts WHERE lower(email)='admin@aerstello.test') AND revoked_at IS NULL");
     await database.query('COMMIT');
     credentialRaceLoginStatuses=[(await login).status()];
     credentialRaceActiveSessions=Number((await database.query(
-      "SELECT count(*) FROM host_sessions WHERE host_id=(SELECT id FROM hosts WHERE lower(email)='admin@skybar.test') AND revoked_at IS NULL AND expires_at>now()",
+      "SELECT count(*) FROM host_sessions WHERE host_id=(SELECT id FROM hosts WHERE lower(email)='admin@aerstello.test') AND revoked_at IS NULL AND expires_at>now()",
     )).rows[0].count);
   }finally{await database.end()}
 });
@@ -749,7 +749,7 @@ Then('the navigation shows the venue name {string}', async ({ page }, name:strin
 When('the administrator opens venue settings', async ({ page }) => { await page.goto('/app/settings'); });
 Then('a venue QR code and room QR codes are shown', async ({ page }) => { await expect(page.locator('.qr-code')).toHaveCount(4); });
 When('the room QR directory remains pending',async({page})=>{
-  await page.addInitScript(()=>{Object.assign(window,{__skyBarPrintCount:0});window.print=()=>{(window as unknown as {__skyBarPrintCount:number}).__skyBarPrintCount+=1}});
+  await page.addInitScript(()=>{Object.assign(window,{__aerstelloPrintCount:0});window.print=()=>{(window as unknown as {__aerstelloPrintCount:number}).__aerstelloPrintCount+=1}});
   await installQueryOutage(page,['/api/v1/rooms']);
   await page.goto('/app/settings');
 });
@@ -760,7 +760,7 @@ Then('room QR loading hides empty cards and disables printing',async({page})=>{
   await expect(page.locator('.empty')).toHaveCount(0);
   await expect(page.getByRole('button',{name:/Drucken|Stampa|Print/})).toBeDisabled();
   await page.getByRole('button',{name:/Drucken|Stampa|Print/}).click({force:true});
-  expect(await page.evaluate(()=>(window as unknown as {__skyBarPrintCount:number}).__skyBarPrintCount)).toBe(0);
+  expect(await page.evaluate(()=>(window as unknown as {__aerstelloPrintCount:number}).__aerstelloPrintCount)).toBe(0);
 });
 When('the pending room QR directory fails',async({page})=>{await releaseQueryOutage(page)});
 Then('room QR failure and retry preserve venue controls and disable printing',async({page})=>{
@@ -781,15 +781,15 @@ Then('room QR cards recover and printing is enabled',async({page})=>{
   const print=page.getByRole('button',{name:/Drucken|Stampa|Print/});
   await expect(print).toBeEnabled();
   await print.click();
-  expect(await page.evaluate(()=>(window as unknown as {__skyBarPrintCount:number}).__skyBarPrintCount)).toBe(1);
+  expect(await page.evaluate(()=>(window as unknown as {__aerstelloPrintCount:number}).__aerstelloPrintCount)).toBe(1);
   await restoreQueryOutage(page);
 });
 When('venue settings loads a successful empty room QR directory',async({page})=>{
-  await page.addInitScript(()=>{Object.assign(window,{__skyBarPrintCount:0});window.print=()=>{(window as unknown as {__skyBarPrintCount:number}).__skyBarPrintCount+=1}});
+  await page.addInitScript(()=>{Object.assign(window,{__aerstelloPrintCount:0});window.print=()=>{(window as unknown as {__aerstelloPrintCount:number}).__aerstelloPrintCount+=1}});
   await page.addInitScript(()=>{
     const originalFetch=window.fetch.bind(window);
     const state={restore:()=>{window.fetch=originalFetch}};
-    Object.assign(window,{__skyBarEmptyRooms:state});
+    Object.assign(window,{__aerstelloEmptyRooms:state});
     window.fetch=async(input,init)=>{
       const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
       if(new URL(url,window.location.href).pathname==='/api/v1/rooms')return new Response(JSON.stringify({data:[]}),{status:200,headers:{'content-type':'application/json'}});
@@ -805,24 +805,24 @@ Then('the room QR empty state appears without failure and printing is enabled',a
   const print=page.getByRole('button',{name:/Drucken|Stampa|Print/});
   await expect(print).toBeEnabled();
   await print.click();
-  expect(await page.evaluate(()=>(window as unknown as {__skyBarPrintCount:number}).__skyBarPrintCount)).toBe(1);
+  expect(await page.evaluate(()=>(window as unknown as {__aerstelloPrintCount:number}).__aerstelloPrintCount)).toBe(1);
   await page.evaluate(()=>{
-    const state=(window as unknown as {__skyBarEmptyRooms:{restore:()=>void}}).__skyBarEmptyRooms;
+    const state=(window as unknown as {__aerstelloEmptyRooms:{restore:()=>void}}).__aerstelloEmptyRooms;
     state.restore();
-    delete (window as unknown as {__skyBarEmptyRooms?:unknown}).__skyBarEmptyRooms;
+    delete (window as unknown as {__aerstelloEmptyRooms?:unknown}).__aerstelloEmptyRooms;
   });
 });
 Then('venue settings is available in the primary navigation', async ({ page }) => { await expect(page.getByRole('link',{name:'Betrieb'})).toBeVisible(); });
 When('the initial venue load fails transiently',async({page})=>{
   await page.addInitScript(()=>{
     const originalFetch=window.fetch.bind(window);
-    const state=window as unknown as {__skyBarVenueLoadOutage:{active:boolean;attempts:number}};
-    state.__skyBarVenueLoadOutage={active:true,attempts:0};
+    const state=window as unknown as {__aerstelloVenueLoadOutage:{active:boolean;attempts:number}};
+    state.__aerstelloVenueLoadOutage={active:true,attempts:0};
     window.fetch=async(input,init)=>{
       const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
       if(new URL(url,window.location.href).pathname==='/api/v1/venue'){
-        state.__skyBarVenueLoadOutage.attempts+=1;
-        if(state.__skyBarVenueLoadOutage.active)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated venue outage'}}),{status:503,headers:{'content-type':'application/json'}});
+        state.__aerstelloVenueLoadOutage.attempts+=1;
+        if(state.__aerstelloVenueLoadOutage.active)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated venue outage'}}),{status:503,headers:{'content-type':'application/json'}});
       }
       return originalFetch(input,init);
     };
@@ -837,14 +837,14 @@ Then('venue settings shows a localized failure with retry',async({page})=>{
 When('the administrator retries the venue load',async({page})=>{
   const retry=page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/});
   await retry.evaluate((button)=>button.addEventListener('click',()=>{
-    (window as unknown as {__skyBarVenueLoadOutage:{active:boolean}}).__skyBarVenueLoadOutage.active=false;
+    (window as unknown as {__aerstelloVenueLoadOutage:{active:boolean}}).__aerstelloVenueLoadOutage.active=false;
   },{capture:true,once:true}));
   await retry.click();
 });
 Then('editable venue settings appear after recovery',async({page})=>{
   await expect(page.getByLabel(/Name des Betriebs|Nome del locale|Venue name/)).toHaveValue('Hotel Aurora');
   await expect(page.getByRole('button',{name:/Speichern|Salva|Save/,exact:true})).toBeEnabled();
-  expect(await page.evaluate(()=>(window as unknown as {__skyBarVenueLoadOutage:{attempts:number}}).__skyBarVenueLoadOutage.attempts)).toBeGreaterThanOrEqual(2);
+  expect(await page.evaluate(()=>(window as unknown as {__aerstelloVenueLoadOutage:{attempts:number}}).__aerstelloVenueLoadOutage.attempts)).toBeGreaterThanOrEqual(2);
 });
 When('a venue update response is lost before another administrator edits it',async({page})=>{const request=page.context().request;const original=await (await request.get('/api/v1/venue')).json() as {name:string;defaultLanguage:string;timezone:string;version:number};const command={name:'First venue update',language:original.defaultLanguage,timezone:original.timezone,expectedVersion:original.version};const committed=await (await request.put('/api/v1/venue',{headers:csrfHeaders,data:command})).json() as {version:number};expect((await request.put('/api/v1/venue',{headers:csrfHeaders,data:{...command,name:'Newer venue update',expectedVersion:committed.version}})).status()).toBe(200);staleVenueUpdateStatus=(await request.put('/api/v1/venue',{headers:csrfHeaders,data:command})).status();staleVenueFinalName=((await (await request.get('/api/v1/venue')).json()) as {name:string}).name});
 Then('retrying the stale venue update is rejected',async()=>{expect(staleVenueUpdateStatus).toBe(409)});
@@ -877,7 +877,7 @@ Then('authoritative guest selection and creation recover without reload',async({
   const picker=page.locator('.guest-picker');
   await expect(picker.getByRole('button',{name:/Anna Berger/})).toBeVisible();
   await expect(picker.getByRole('button',{name:/Hinzufügen.*Gäste|Aggiungi.*Ospiti|Add.*Guests/})).toBeEnabled();
-  expect(await page.evaluate(()=>(window as unknown as {__skyBarQueryOutage:{attempts:number}}).__skyBarQueryOutage.attempts)).toBeGreaterThanOrEqual(3);
+  expect(await page.evaluate(()=>(window as unknown as {__aerstelloQueryOutage:{attempts:number}}).__aerstelloQueryOutage.attempts)).toBeGreaterThanOrEqual(3);
   await restoreQueryOutage(page);
 });
 
@@ -914,7 +914,7 @@ When('the recovered Take Orders catalog fails during background refresh',async({
   const products=await (await request.get('/api/v1/products')).json() as {data:{id:string;name:{de:string;it:string;en:string};description?:{de:string;it:string;en:string};priceCents:number;categoryId:string;enabled:boolean;selfServiceOnly:boolean;version:number}[]};
   const product=products.data.find(item=>item.name.de==='Helles')!;
   expect((await request.patch(`/api/v1/products/${product.id}`,{headers:csrfHeaders,data:{name:product.name,...(product.description?{description:product.description}:{}),priceCents:product.priceCents+1,categoryId:product.categoryId,enabled:product.enabled,selfServiceOnly:product.selfServiceOnly,expectedVersion:product.version}})).status()).toBe(200);
-  await expect.poll(()=>page.evaluate(()=>(window as unknown as {__skyBarLiveQueryFailure:{attempts:number}}).__skyBarLiveQueryFailure.attempts),{timeout:10_000}).toBeGreaterThan(0);
+  await expect.poll(()=>page.evaluate(()=>(window as unknown as {__aerstelloLiveQueryFailure:{attempts:number}}).__aerstelloLiveQueryFailure.attempts),{timeout:10_000}).toBeGreaterThan(0);
 });
 Then('cached catalog ordering remains usable',async({page})=>{
   await expect(page.locator('.product-tile').filter({hasText:'Helles'})).toBeVisible();
@@ -976,7 +976,7 @@ Then('the refreshed item removal succeeds',async()=>{expect(refreshedLifecycleVo
 When('the host retries item removal after its response is lost',async({page})=>{
   await page.evaluate(()=>{
     const originalFetch=window.fetch.bind(window);let loseResponse=true;const reasons:string[]=[];
-    Object.assign(window,{__skyBarVoidRetryReasons:reasons});
+    Object.assign(window,{__aerstelloVoidRetryReasons:reasons});
     window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(/\/api\/v1\/order-items\/[^/]+\/void$/.test(url)&&init?.method==='POST'){reasons.push((JSON.parse(String(init.body)) as {reason:string}).reason);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)};
   });
   await page.locator('.open-tab').getByRole('button',{name:/Artikel entfernen|Rimuovi articolo|Remove item/}).click();
@@ -987,7 +987,7 @@ When('the host retries item removal after its response is lost',async({page})=>{
   uncertainVoidReasonLocked=await reason.isDisabled();
   await modal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();
   await expect(modal).toHaveCount(0);
-  retriedVoidReasons=await page.evaluate(()=>(window as unknown as {__skyBarVoidRetryReasons:string[]}).__skyBarVoidRetryReasons);
+  retriedVoidReasons=await page.evaluate(()=>(window as unknown as {__aerstelloVoidRetryReasons:string[]}).__aerstelloVoidRetryReasons);
 });
 Then('the uncertain void reason is locked',async()=>{expect(uncertainVoidReasonLocked).toBe(true)});
 Then('both item removal attempts use the same reason',async()=>{expect(retriedVoidReasons).toEqual(['Original correction','Original correction'])});
@@ -997,9 +997,9 @@ When('the host reloads after an item removal response is lost',async({page})=>{
     window.fetch=async(input,init)=>{
       const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
       if(/\/api\/v1\/order-items\/[^/]+\/void$/.test(new URL(url,window.location.href).pathname)&&init?.method==='POST'){
-        const requests=JSON.parse(localStorage.getItem('__skyBarReloadVoidRequests')??'[]') as {mutationId:string;reason:string;expectedBillingVersion:number}[];
+        const requests=JSON.parse(localStorage.getItem('__aerstelloReloadVoidRequests')??'[]') as {mutationId:string;reason:string;expectedBillingVersion:number}[];
         requests.push(JSON.parse(String(init.body)) as {mutationId:string;reason:string;expectedBillingVersion:number});
-        localStorage.setItem('__skyBarReloadVoidRequests',JSON.stringify(requests));
+        localStorage.setItem('__aerstelloReloadVoidRequests',JSON.stringify(requests));
         const response=await originalFetch(input,init);
         if(requests.length===1)throw new TypeError('Simulated lost response');
         return response;
@@ -1007,23 +1007,23 @@ When('the host reloads after an item removal response is lost',async({page})=>{
       return originalFetch(input,init);
     };
   };
-  await page.evaluate(()=>localStorage.setItem('__skyBarReloadVoidRequests','[]'));
+  await page.evaluate(()=>localStorage.setItem('__aerstelloReloadVoidRequests','[]'));
   await page.addInitScript(installLostResponse);
   await page.evaluate(installLostResponse);
   await page.locator('.open-tab').getByRole('button',{name:/Artikel entfernen|Rimuovi articolo|Remove item/}).click();
   const modal=page.locator('.modal');await modal.getByLabel(/Grund|Motivo|Reason/).fill('Reload recovery');
   await modal.getByRole('button',{name:/Bestätigen|Conferma|Confirm/}).click();
-  await expect.poll(async()=>page.evaluate(async()=>new Promise<number>((resolve,reject)=>{const open=indexedDB.open('sky-bar');open.onerror=()=>reject(open.error);open.onsuccess=()=>{const transaction=open.result.transaction('mutations');const count=transaction.objectStore('mutations').count();count.onsuccess=()=>{open.result.close();resolve(count.result)};count.onerror=()=>reject(count.error)}})),{timeout:10_000}).toBe(1);
-  const originalRequest=(await page.evaluate(()=>JSON.parse(localStorage.getItem('__skyBarReloadVoidRequests')??'[]') as {mutationId:string;reason:string;expectedBillingVersion:number}[]))[0]!;
-  const storedRequest=await page.evaluate(async()=>new Promise<{id:string;status:string;body:{mutationId:string;reason:string;expectedBillingVersion:number}}>((resolve,reject)=>{const open=indexedDB.open('sky-bar');open.onerror=()=>reject(open.error);open.onsuccess=()=>{const transaction=open.result.transaction('mutations');const all=transaction.objectStore('mutations').getAll();all.onsuccess=()=>{open.result.close();resolve(all.result[0] as {id:string;status:string;body:{mutationId:string;reason:string;expectedBillingVersion:number}})};all.onerror=()=>reject(all.error)}}));
+  await expect.poll(async()=>page.evaluate(async()=>new Promise<number>((resolve,reject)=>{const open=indexedDB.open('aerstello');open.onerror=()=>reject(open.error);open.onsuccess=()=>{const transaction=open.result.transaction('mutations');const count=transaction.objectStore('mutations').count();count.onsuccess=()=>{open.result.close();resolve(count.result)};count.onerror=()=>reject(count.error)}})),{timeout:10_000}).toBe(1);
+  const originalRequest=(await page.evaluate(()=>JSON.parse(localStorage.getItem('__aerstelloReloadVoidRequests')??'[]') as {mutationId:string;reason:string;expectedBillingVersion:number}[]))[0]!;
+  const storedRequest=await page.evaluate(async()=>new Promise<{id:string;status:string;body:{mutationId:string;reason:string;expectedBillingVersion:number}}>((resolve,reject)=>{const open=indexedDB.open('aerstello');open.onerror=()=>reject(open.error);open.onsuccess=()=>{const transaction=open.result.transaction('mutations');const all=transaction.objectStore('mutations').getAll();all.onsuccess=()=>{open.result.close();resolve(all.result[0] as {id:string;status:string;body:{mutationId:string;reason:string;expectedBillingVersion:number}})};all.onerror=()=>reject(all.error)}}));
   expect(storedRequest).toEqual(expect.objectContaining({id:originalRequest.mutationId,status:'pending',body:originalRequest}));
   await page.reload();
-  await expect.poll(async()=>page.evaluate(()=>((JSON.parse(localStorage.getItem('__skyBarReloadVoidRequests')??'[]')) as unknown[]).length),{timeout:10_000}).toBeGreaterThanOrEqual(2);
+  await expect.poll(async()=>page.evaluate(()=>((JSON.parse(localStorage.getItem('__aerstelloReloadVoidRequests')??'[]')) as unknown[]).length),{timeout:10_000}).toBeGreaterThanOrEqual(2);
   const {request,guests}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;
   reloadedVoidItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
-  await expect.poll(async()=>page.evaluate(async()=>new Promise<number>((resolve,reject)=>{const open=indexedDB.open('sky-bar');open.onerror=()=>reject(open.error);open.onsuccess=()=>{const transaction=open.result.transaction('mutations');const count=transaction.objectStore('mutations').count();count.onsuccess=()=>{open.result.close();resolve(count.result)};count.onerror=()=>reject(count.error)}})),{timeout:10_000}).toBe(0);
-  reloadedVoidPendingCount=await page.evaluate(async()=>new Promise<number>((resolve,reject)=>{const open=indexedDB.open('sky-bar');open.onerror=()=>reject(open.error);open.onsuccess=()=>{const transaction=open.result.transaction('mutations');const count=transaction.objectStore('mutations').count();count.onsuccess=()=>{open.result.close();resolve(count.result)};count.onerror=()=>reject(count.error)}}));
-  reloadedVoidRequests=await page.evaluate(()=>JSON.parse(localStorage.getItem('__skyBarReloadVoidRequests')??'[]') as {mutationId:string;reason:string;expectedBillingVersion:number}[]);
+  await expect.poll(async()=>page.evaluate(async()=>new Promise<number>((resolve,reject)=>{const open=indexedDB.open('aerstello');open.onerror=()=>reject(open.error);open.onsuccess=()=>{const transaction=open.result.transaction('mutations');const count=transaction.objectStore('mutations').count();count.onsuccess=()=>{open.result.close();resolve(count.result)};count.onerror=()=>reject(count.error)}})),{timeout:10_000}).toBe(0);
+  reloadedVoidPendingCount=await page.evaluate(async()=>new Promise<number>((resolve,reject)=>{const open=indexedDB.open('aerstello');open.onerror=()=>reject(open.error);open.onsuccess=()=>{const transaction=open.result.transaction('mutations');const count=transaction.objectStore('mutations').count();count.onsuccess=()=>{open.result.close();resolve(count.result)};count.onerror=()=>reject(count.error)}}));
+  reloadedVoidRequests=await page.evaluate(()=>JSON.parse(localStorage.getItem('__aerstelloReloadVoidRequests')??'[]') as {mutationId:string;reason:string;expectedBillingVersion:number}[]);
 });
 Then('the restored item removal uses the original mutation identifier',async()=>{expect(reloadedVoidRequests.length).toBeGreaterThanOrEqual(2);expect(new Set(reloadedVoidRequests.map(request=>request.mutationId)).size).toBe(1);expect(reloadedVoidRequests[0]!.reason).toBe('Reload recovery');for(const request of reloadedVoidRequests.slice(1))expect(request).toEqual(reloadedVoidRequests[0])});
 Then('the restored item removal is applied and cleared from recovery',async()=>{expect(reloadedVoidItemCount).toBe(0);expect(reloadedVoidPendingCount).toBe(0)});
@@ -1049,20 +1049,20 @@ When('a queued order encounters one transient synchronization failure',async({pa
   await context.setOffline(true);await page.getByRole('button',{name:/Bestellung buchen/}).click();await expect(page.getByText(/Synchronisierung vorgemerkt|queued for sync/)).toBeVisible();
   await page.evaluate(()=>{
     const originalFetch=window.fetch.bind(window);let attempts=0;
-    Object.assign(window,{__skyBarTransientReplayAttempts:0});
-    window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'){attempts+=1;Object.assign(window,{__skyBarTransientReplayAttempts:attempts});if(attempts===1)throw new TypeError('Simulated transient sync failure')}return originalFetch(input,init)};
+    Object.assign(window,{__aerstelloTransientReplayAttempts:0});
+    window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'){attempts+=1;Object.assign(window,{__aerstelloTransientReplayAttempts:attempts});if(attempts===1)throw new TypeError('Simulated transient sync failure')}return originalFetch(input,init)};
   });
   await context.setOffline(false);
   const {request,guests}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;
   await expect.poll(async()=>((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount,{timeout:15_000}).toBe(1);
-  transientReplayAttempts=await page.evaluate(()=>(window as unknown as {__skyBarTransientReplayAttempts:number}).__skyBarTransientReplayAttempts);
+  transientReplayAttempts=await page.evaluate(()=>(window as unknown as {__aerstelloTransientReplayAttempts:number}).__aerstelloTransientReplayAttempts);
 });
 Then('the queued order is retried without another connectivity event',async()=>{expect(transientReplayAttempts).toBeGreaterThanOrEqual(2)});
 
 When('an offline order is quarantined as a synchronization conflict',async({page})=>{
   const {me,guests,products}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;const product=products.data.find(item=>item.name.de==='Helles')!;const mutationId=crypto.randomUUID();const capturedAt=new Date().toISOString();conflictGuestId=guest.id;
   await page.evaluate(async({mutationId,capturedAt,hostId,guest,product,catalogVersion})=>new Promise<void>((resolve,reject)=>{
-    const request=indexedDB.open('sky-bar');request.onerror=()=>reject(request.error);request.onsuccess=()=>{const transaction=request.result.transaction('mutations','readwrite');transaction.objectStore('mutations').put({id:mutationId,hostId,path:'/order-batches',method:'POST',createdAt:capturedAt,status:'conflict',errorCode:'CATALOG_CONFLICT',body:{mutationId,originHostId:hostId,guestId:guest.id,catalogVersion,capturedAt,items:[{productId:product.id,quantity:2}]},display:{kind:'order',guestId:guest.id,guestName:guest.name,roomName:guest.roomName,items:[{productId:product.id,productName:product.name,unitPriceCents:product.priceCents,quantity:2}]}});transaction.oncomplete=()=>resolve();transaction.onerror=()=>reject(transaction.error)};
+    const request=indexedDB.open('aerstello');request.onerror=()=>reject(request.error);request.onsuccess=()=>{const transaction=request.result.transaction('mutations','readwrite');transaction.objectStore('mutations').put({id:mutationId,hostId,path:'/order-batches',method:'POST',createdAt:capturedAt,status:'conflict',errorCode:'CATALOG_CONFLICT',body:{mutationId,originHostId:hostId,guestId:guest.id,catalogVersion,capturedAt,items:[{productId:product.id,quantity:2}]},display:{kind:'order',guestId:guest.id,guestName:guest.name,roomName:guest.roomName,items:[{productId:product.id,productName:product.name,unitPriceCents:product.priceCents,quantity:2}]}});transaction.oncomplete=()=>resolve();transaction.onerror=()=>reject(transaction.error)};
   }),{mutationId,capturedAt,hostId:me.host.id,guest,product,catalogVersion:products.catalogVersion});
   await expect(page.locator('.sync-conflict-banner')).toBeVisible({timeout:10_000});await page.locator('.sync-conflict-banner').click();
 });
@@ -1081,13 +1081,13 @@ When('approval guest directory data remains loading',async({page})=>{
   expect((await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Approval Directory Guest',roomId:room.id,language:'de'}})).status()).toBe(201);
   await page.addInitScript(()=>{
     const originalFetch=window.fetch.bind(window);
-    const state=window as unknown as {__skyBarApprovalGuestDirectory:{release?:()=>void;attempts:number}};
-    state.__skyBarApprovalGuestDirectory={attempts:0};
+    const state=window as unknown as {__aerstelloApprovalGuestDirectory:{release?:()=>void;attempts:number}};
+    state.__aerstelloApprovalGuestDirectory={attempts:0};
     window.fetch=async(input,init)=>{
       const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
-      if(new URL(url,window.location.href).pathname==='/api/v1/guests'&&state.__skyBarApprovalGuestDirectory.attempts===0){
-        state.__skyBarApprovalGuestDirectory.attempts+=1;
-        await new Promise<void>((resolve)=>{state.__skyBarApprovalGuestDirectory.release=resolve});
+      if(new URL(url,window.location.href).pathname==='/api/v1/guests'&&state.__aerstelloApprovalGuestDirectory.attempts===0){
+        state.__aerstelloApprovalGuestDirectory.attempts+=1;
+        await new Promise<void>((resolve)=>{state.__aerstelloApprovalGuestDirectory.release=resolve});
       }
       return originalFetch(input,init);
     };
@@ -1103,7 +1103,7 @@ Then('approval is unavailable before the guest directory loads',async({page})=>{
 });
 When('the approval guest directory finishes loading',async({page})=>{
   await page.evaluate(()=>{
-    const release=(window as unknown as {__skyBarApprovalGuestDirectory:{release?:()=>void}}).__skyBarApprovalGuestDirectory.release;
+    const release=(window as unknown as {__aerstelloApprovalGuestDirectory:{release?:()=>void}}).__aerstelloApprovalGuestDirectory.release;
     if(!release)throw new Error('Approval guest directory was not pending');
     release();
   });
@@ -1114,7 +1114,7 @@ Then('the host can open approval with the loaded guest directory',async({page})=
   await approve.click();
   await expect(page.locator('.modal select').first()).toHaveValue('new');
 });
-When('the host retries an approval after its first response is lost',async({page})=>{await guestPage!.goto('/guest/request');await guestPage!.locator('form select').nth(1).selectOption('de');await guestPage!.getByLabel('Name').fill('Approval Retry');await guestPage!.locator('form select').first().selectOption({label:'102'});await guestPage!.locator('form button[type="submit"]').click();await page.goto('/app/requests');const card=page.locator('.request-card').filter({hasText:'Approval Retry'});await expect(card).toBeVisible();await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarApprovalRetryCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/access-requests/')&&url.endsWith('/approve')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});await card.getByRole('button',{name:/Genehmigen|Approva|Approve/}).click();const modal=page.locator('.modal');await modal.getByRole('button',{name:/Genehmigen|Approva|Approve/}).click();await expect(modal.locator('.notice--error')).toBeVisible();uncertainApprovalFieldsLocked=await modal.locator('input,select').evaluateAll(fields=>fields.every(field=>(field as HTMLInputElement).disabled));await modal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(modal).toHaveCount(0);const commands=await page.evaluate(()=>(window as unknown as {__skyBarApprovalRetryCommands:Array<Record<string,unknown>>}).__skyBarApprovalRetryCommands);retriedApprovalMutationIds=commands.map(command=>String(command.mutationId));const guests=await (await page.context().request.get('/api/v1/guests')).json() as {data:{name:string}[]};approvedGuestIdentityCount=guests.data.filter(guest=>guest.name==='Approval Retry').length});
+When('the host retries an approval after its first response is lost',async({page})=>{await guestPage!.goto('/guest/request');await guestPage!.locator('form select').nth(1).selectOption('de');await guestPage!.getByLabel('Name').fill('Approval Retry');await guestPage!.locator('form select').first().selectOption({label:'102'});await guestPage!.locator('form button[type="submit"]').click();await page.goto('/app/requests');const card=page.locator('.request-card').filter({hasText:'Approval Retry'});await expect(card).toBeVisible();await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__aerstelloApprovalRetryCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/access-requests/')&&url.endsWith('/approve')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});await card.getByRole('button',{name:/Genehmigen|Approva|Approve/}).click();const modal=page.locator('.modal');await modal.getByRole('button',{name:/Genehmigen|Approva|Approve/}).click();await expect(modal.locator('.notice--error')).toBeVisible();uncertainApprovalFieldsLocked=await modal.locator('input,select').evaluateAll(fields=>fields.every(field=>(field as HTMLInputElement).disabled));await modal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(modal).toHaveCount(0);const commands=await page.evaluate(()=>(window as unknown as {__aerstelloApprovalRetryCommands:Array<Record<string,unknown>>}).__aerstelloApprovalRetryCommands);retriedApprovalMutationIds=commands.map(command=>String(command.mutationId));const guests=await (await page.context().request.get('/api/v1/guests')).json() as {data:{name:string}[]};approvedGuestIdentityCount=guests.data.filter(guest=>guest.name==='Approval Retry').length});
 Then('both approval attempts use the same mutation identifier',async()=>{expect(retriedApprovalMutationIds).toHaveLength(2);expect(new Set(retriedApprovalMutationIds).size).toBe(1)});
 Then('approval fields stay locked while the result is uncertain',async()=>{expect(uncertainApprovalFieldsLocked).toBe(true)});
 Then('only one approved guest identity exists',async()=>{expect(approvedGuestIdentityCount).toBe(1)});
@@ -1128,7 +1128,7 @@ When('the guest retries an access request after its first response is lost',asyn
   await guestPage!.locator('form select').first().selectOption({label:'102'});
   await guestPage!.evaluate(()=>{
     const originalFetch=window.fetch.bind(window);let loseResponse=true;const ids:string[]=[];
-    Object.assign(window,{__skyBarAccessRequestRetryIds:ids});
+    Object.assign(window,{__aerstelloAccessRequestRetryIds:ids});
     window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/public/access-requests')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)};
   });
   await guestPage!.locator('form button[type="submit"]').click();
@@ -1136,7 +1136,7 @@ When('the guest retries an access request after its first response is lost',asyn
   uncertainAccessRequestFieldsLocked=await guestPage!.locator('form input,form select').evaluateAll(fields=>fields.every(field=>(field as HTMLInputElement).disabled));
   await guestPage!.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();
   await expect(guestPage!.locator('.request-wait')).toBeVisible();
-  retriedAccessRequestMutationIds=await guestPage!.evaluate(()=>(window as unknown as {__skyBarAccessRequestRetryIds:string[]}).__skyBarAccessRequestRetryIds);
+  retriedAccessRequestMutationIds=await guestPage!.evaluate(()=>(window as unknown as {__aerstelloAccessRequestRetryIds:string[]}).__aerstelloAccessRequestRetryIds);
 });
 Then('both access request attempts use the same mutation identifier',async()=>{expect(retriedAccessRequestMutationIds).toHaveLength(2);expect(new Set(retriedAccessRequestMutationIds).size).toBe(1)});
 Then('the uncertain access request fields stay locked for retry',async()=>{expect(uncertainAccessRequestFieldsLocked).toBe(true)});
@@ -1145,7 +1145,7 @@ When('the guest closes the pending request page',async()=>{await guestPage!.clos
 Then('reopening the request restores the approved guest access',async()=>{const context=guestPage!.context();guestPage=await context.newPage();await guestPage.goto('/guest/request');await expect(guestPage).toHaveURL(/\/guest$/,{timeout:10_000});await expect(guestPage.getByRole('heading',{name:'Persistent Guest'})).toBeVisible()});
 When('the host denies the request for {string}',async({page},name:string)=>{let polls=0;guestPage!.on('request',request=>{if(request.url().includes('/api/v1/public/access-requests/')&&request.url().endsWith('/status'))polls+=1});const card=page.locator('.request-card').filter({hasText:name});await card.getByRole('button',{name:/Ablehnen|Rifiuta|Deny/}).click();await expect(guestPage!.locator('.request-wait').getByRole('heading')).toHaveText(/Ablehnen|Rifiuta|Deny/,{timeout:10_000});await guestPage!.waitForTimeout(500);const terminalCount=polls;await guestPage!.waitForTimeout(3_000);deniedPollCounts=[terminalCount,polls]});
 Then('the denied guest device stops status polling',async()=>{expect(deniedPollCounts[1]).toBe(deniedPollCounts[0])});
-When('the host retries a denial after its first response is lost',async({page})=>{await guestPage!.goto('/guest/request');await guestPage!.locator('form select').nth(1).selectOption('de');await guestPage!.getByLabel('Name').fill('Denial Retry');await guestPage!.locator('form select').first().selectOption({label:'102'});await guestPage!.locator('form button[type="submit"]').click();await page.goto('/app/requests');const card=page.locator('.request-card').filter({hasText:'Denial Retry'});await expect(card).toBeVisible();await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarDenialRetryCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/access-requests/')&&url.endsWith('/deny')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});await card.getByRole('button',{name:/Ablehnen|Rifiuta|Deny/}).click();const retry=page.getByRole('button',{name:/Erneut versuchen.*Denial Retry|Riprova.*Denial Retry|Retry.*Denial Retry/});await expect(retry).toBeVisible();await retry.click();await expect(retry).toHaveCount(0);const commands=await page.evaluate(()=>(window as unknown as {__skyBarDenialRetryCommands:Array<Record<string,unknown>>}).__skyBarDenialRetryCommands);retriedDenialMutationIds=commands.map(command=>String(command.mutationId));const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();try{deniedRequestCount=Number((await database.query("SELECT count(*) FROM access_requests WHERE name='Denial Retry' AND status='denied'")).rows[0].count)}finally{await database.end()}});
+When('the host retries a denial after its first response is lost',async({page})=>{await guestPage!.goto('/guest/request');await guestPage!.locator('form select').nth(1).selectOption('de');await guestPage!.getByLabel('Name').fill('Denial Retry');await guestPage!.locator('form select').first().selectOption({label:'102'});await guestPage!.locator('form button[type="submit"]').click();await page.goto('/app/requests');const card=page.locator('.request-card').filter({hasText:'Denial Retry'});await expect(card).toBeVisible();await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__aerstelloDenialRetryCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/access-requests/')&&url.endsWith('/deny')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});await card.getByRole('button',{name:/Ablehnen|Rifiuta|Deny/}).click();const retry=page.getByRole('button',{name:/Erneut versuchen.*Denial Retry|Riprova.*Denial Retry|Retry.*Denial Retry/});await expect(retry).toBeVisible();await retry.click();await expect(retry).toHaveCount(0);const commands=await page.evaluate(()=>(window as unknown as {__aerstelloDenialRetryCommands:Array<Record<string,unknown>>}).__aerstelloDenialRetryCommands);retriedDenialMutationIds=commands.map(command=>String(command.mutationId));const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();try{deniedRequestCount=Number((await database.query("SELECT count(*) FROM access_requests WHERE name='Denial Retry' AND status='denied'")).rows[0].count)}finally{await database.end()}});
 Then('both denial attempts use the same mutation identifier',async()=>{expect(retriedDenialMutationIds).toHaveLength(2);expect(new Set(retriedDenialMutationIds).size).toBe(1)});
 Then('the denied request remains resolved only once',async()=>{expect(deniedRequestCount).toBe(1)});
 When('approved guest access expires before the requesting page exchanges it',async({page})=>{await guestPage!.goto('/guest/request');await guestPage!.route('**/api/v1/public/access-requests/*/status',route=>route.fulfill({json:{status:'pending',granted:false}}));await guestPage!.locator('form select').nth(1).selectOption('de');await guestPage!.getByLabel('Name').fill('Expired UI');await guestPage!.locator('form select').first().selectOption({label:'102'});await guestPage!.locator('form button[type="submit"]').click();await expect(guestPage!.locator('.request-wait')).toBeVisible();const pending=await (await page.context().request.get('/api/v1/access-requests')).json() as {data:{id:string;name:string}[]};const access=pending.data.find(item=>item.name==='Expired UI')!;expect((await page.context().request.post(`/api/v1/access-requests/${access.id}/approve`,{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),expiresAt:new Date(Date.now()+1_200).toISOString()}})).status()).toBe(200);await guestPage!.waitForTimeout(1_300);await guestPage!.unroute('**/api/v1/public/access-requests/*/status')});
@@ -1163,16 +1163,16 @@ When('a transient guest identity outage occurs during app launch',async()=>{
   const catalog=await (await request.get('/api/v1/guest/catalog')).json() as {data:{id:string;priceCents:number;version:number}[]};
   const product=catalog.data[0]!;
   transientGuestPendingState=JSON.stringify({sessionId:identity.guest.sessionId,entries:[[product.id,crypto.randomUUID(),product.priceCents,product.version]]});
-  await guestPage!.evaluate((pending)=>localStorage.setItem('skybar-guest-pending-adds',pending),transientGuestPendingState);
+  await guestPage!.evaluate((pending)=>localStorage.setItem('aerstello-guest-pending-adds',pending),transientGuestPendingState);
   await guestPage!.addInitScript(()=>{
     const originalFetch=window.fetch.bind(window);
-    const state=window as unknown as {__skyBarTransientGuestIdentityRequests:number};
-    state.__skyBarTransientGuestIdentityRequests=0;
+    const state=window as unknown as {__aerstelloTransientGuestIdentityRequests:number};
+    state.__aerstelloTransientGuestIdentityRequests=0;
     window.fetch=async(input,init)=>{
       const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
       if(new URL(url,window.location.href).pathname==='/api/v1/guest/me'){
-        state.__skyBarTransientGuestIdentityRequests+=1;
-        if(state.__skyBarTransientGuestIdentityRequests===1)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated guest identity outage'}}),{status:503,headers:{'content-type':'application/json'}});
+        state.__aerstelloTransientGuestIdentityRequests+=1;
+        if(state.__aerstelloTransientGuestIdentityRequests===1)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated guest identity outage'}}),{status:503,headers:{'content-type':'application/json'}});
       }
       return originalFetch(input,init);
     };
@@ -1183,13 +1183,13 @@ Then('the guest remains on the guest page with a retry action',async()=>{
   await expect(guestPage!).toHaveURL(/\/guest$/);
   await expect(guestPage!.locator('.notice--error')).toContainText('Die Anfrage konnte nicht abgeschlossen werden.');
   await expect(guestPage!.getByRole('button',{name:'Erneut versuchen'})).toBeVisible();
-  expect(await guestPage!.evaluate(()=>localStorage.getItem('skybar-guest-pending-adds'))).toBe(transientGuestPendingState);
+  expect(await guestPage!.evaluate(()=>localStorage.getItem('aerstello-guest-pending-adds'))).toBe(transientGuestPendingState);
 });
 When('the guest retries the identity request',async()=>{await guestPage!.getByRole('button',{name:'Erneut versuchen'}).click()});
 Then("Luca's guest application opens with persisted guest state intact",async()=>{
   await expect(guestPage!.getByRole('heading',{name:'Luca Rossi'})).toBeVisible();
-  expect(await guestPage!.evaluate(()=>(window as unknown as {__skyBarTransientGuestIdentityRequests:number}).__skyBarTransientGuestIdentityRequests)).toBe(2);
-  expect(await guestPage!.evaluate(()=>localStorage.getItem('skybar-guest-pending-adds'))).toBe(transientGuestPendingState);
+  expect(await guestPage!.evaluate(()=>(window as unknown as {__aerstelloTransientGuestIdentityRequests:number}).__aerstelloTransientGuestIdentityRequests)).toBe(2);
+  expect(await guestPage!.evaluate(()=>localStorage.getItem('aerstello-guest-pending-adds'))).toBe(transientGuestPendingState);
 });
 When('the guest adds {string} from self-service',async({},product:string)=>{await guestPage!.getByText(product,{exact:true}).click()});
 Then('an undo action is available',async()=>{await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toBeVisible()});
@@ -1291,10 +1291,10 @@ When('the guest retries the catalog request',async()=>{
 });
 Then('recovered self-service products appear without a reload',async()=>{
   await expect(guestPage!.getByText('Mineralwasser',{exact:true})).toBeVisible();
-  expect(await guestPage!.evaluate(()=>(window as unknown as {__skyBarQueryOutage:{attempts:number}}).__skyBarQueryOutage.attempts)).toBeGreaterThanOrEqual(3);
+  expect(await guestPage!.evaluate(()=>(window as unknown as {__aerstelloQueryOutage:{attempts:number}}).__aerstelloQueryOutage.attempts)).toBeGreaterThanOrEqual(3);
   await restoreQueryOutage(guestPage!);
 });
-When('a self-service price changes after the guest catalog is displayed',async({page})=>{const guestRequest=guestPage!.context().request;const me=await (await guestRequest.get('/api/v1/guest/me')).json() as {guest:{sessionId:string}};const catalog=await (await guestRequest.get('/api/v1/guest/catalog')).json() as {data:{id:string;name:{de:string};priceCents:number;version:number}[]};const displayed=catalog.data.find(item=>item.name.de==='Mineralwasser')!;const staleMutationId=crypto.randomUUID();staleGuestMutationIds=[];guestPage!.on('request',request=>{if(request.url().endsWith('/api/v1/guest/items')&&request.method()==='POST')staleGuestMutationIds.push((request.postDataJSON() as {mutationId:string}).mutationId)});const request=page.context().request;const products=await (await request.get('/api/v1/products')).json() as {data:{id:string;name:{de:string;it:string;en:string};description?:{de:string;it:string;en:string};priceCents:number;categoryId:string;enabled:boolean;selfServiceOnly:boolean;version:number}[]};const product=products.data.find(item=>item.id===displayed.id)!;expect((await request.patch(`/api/v1/products/${product.id}`,{headers:csrfHeaders,data:{name:product.name,...(product.description?{description:product.description}:{}),priceCents:product.priceCents+100,categoryId:product.categoryId,enabled:product.enabled,selfServiceOnly:product.selfServiceOnly,expectedVersion:product.version}})).status()).toBe(200);await guestPage!.evaluate(({sessionId,productId,mutationId,expectedPriceCents,expectedProductVersion})=>localStorage.setItem('skybar-guest-pending-adds',JSON.stringify({sessionId,entries:[[productId,mutationId,expectedPriceCents,expectedProductVersion]]})),{sessionId:me.guest.sessionId,productId:product.id,mutationId:staleMutationId,expectedPriceCents:displayed.priceCents,expectedProductVersion:displayed.version});await guestPage!.reload();await guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'}).click();await expect(guestPage!.locator('.notice--error')).toBeVisible();staleGuestPriceRejected=true;staleGuestPriceItemCount=((await (await guestRequest.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount;await guestPage!.reload();await guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'}).click();await expect.poll(async()=>((await (await guestRequest.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount).toBe(1)});
+When('a self-service price changes after the guest catalog is displayed',async({page})=>{const guestRequest=guestPage!.context().request;const me=await (await guestRequest.get('/api/v1/guest/me')).json() as {guest:{sessionId:string}};const catalog=await (await guestRequest.get('/api/v1/guest/catalog')).json() as {data:{id:string;name:{de:string};priceCents:number;version:number}[]};const displayed=catalog.data.find(item=>item.name.de==='Mineralwasser')!;const staleMutationId=crypto.randomUUID();staleGuestMutationIds=[];guestPage!.on('request',request=>{if(request.url().endsWith('/api/v1/guest/items')&&request.method()==='POST')staleGuestMutationIds.push((request.postDataJSON() as {mutationId:string}).mutationId)});const request=page.context().request;const products=await (await request.get('/api/v1/products')).json() as {data:{id:string;name:{de:string;it:string;en:string};description?:{de:string;it:string;en:string};priceCents:number;categoryId:string;enabled:boolean;selfServiceOnly:boolean;version:number}[]};const product=products.data.find(item=>item.id===displayed.id)!;expect((await request.patch(`/api/v1/products/${product.id}`,{headers:csrfHeaders,data:{name:product.name,...(product.description?{description:product.description}:{}),priceCents:product.priceCents+100,categoryId:product.categoryId,enabled:product.enabled,selfServiceOnly:product.selfServiceOnly,expectedVersion:product.version}})).status()).toBe(200);await guestPage!.evaluate(({sessionId,productId,mutationId,expectedPriceCents,expectedProductVersion})=>localStorage.setItem('aerstello-guest-pending-adds',JSON.stringify({sessionId,entries:[[productId,mutationId,expectedPriceCents,expectedProductVersion]]})),{sessionId:me.guest.sessionId,productId:product.id,mutationId:staleMutationId,expectedPriceCents:displayed.priceCents,expectedProductVersion:displayed.version});await guestPage!.reload();await guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'}).click();await expect(guestPage!.locator('.notice--error')).toBeVisible();staleGuestPriceRejected=true;staleGuestPriceItemCount=((await (await guestRequest.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount;await guestPage!.reload();await guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'}).click();await expect.poll(async()=>((await (await guestRequest.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount).toBe(1)});
 Then('adding the stale self-service product is rejected without a charge',async()=>{expect(staleGuestPriceRejected).toBe(true);expect(staleGuestPriceItemCount).toBe(0)});
 Then('the guest can retry the refreshed self-service product',async()=>{expect(staleGuestMutationIds).toHaveLength(2);expect(staleGuestMutationIds[1]).not.toBe(staleGuestMutationIds[0])});
 When('a self-service product is renamed after the guest catalog is displayed',async({page})=>{await expect(guestPage!.getByText('Mineralwasser',{exact:true})).toBeVisible();await guestPage!.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseRequest=true;window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guest/items')&&init?.method==='POST'&&loseRequest){loseRequest=false;throw new TypeError('Simulated request loss')}return originalFetch(input,init)}});await guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'}).click();await expect(guestPage!.locator('.notice--error')).toBeVisible();const request=page.context().request;const products=await (await request.get('/api/v1/products')).json() as {data:{id:string;name:{de:string;it:string;en:string};description?:{de:string;it:string;en:string};priceCents:number;categoryId:string;enabled:boolean;selfServiceOnly:boolean;version:number}[]};const product=products.data.find(item=>item.name.de==='Mineralwasser')!;expect((await request.patch(`/api/v1/products/${product.id}`,{headers:csrfHeaders,data:{name:{de:'Quellwasser',it:'Acqua di fonte',en:'Spring water'},...(product.description?{description:product.description}:{}),priceCents:product.priceCents,categoryId:product.categoryId,enabled:product.enabled,selfServiceOnly:product.selfServiceOnly,expectedVersion:product.version}})).status()).toBe(200);await guestPage!.reload();await expect(guestPage!.getByText('Quellwasser',{exact:true})).toBeVisible();const response=guestPage!.waitForResponse(candidate=>candidate.url().endsWith('/api/v1/guest/items')&&candidate.request().method()==='POST');await guestPage!.locator('.product-tile').filter({hasText:'Quellwasser'}).click();staleGuestSnapshotRejected=(await response).status()===409;await expect(guestPage!.locator('.notice--error')).toBeVisible();staleGuestSnapshotItemCount=((await (await guestPage!.context().request.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount});
@@ -1317,10 +1317,10 @@ When('the guest refreshes a provisional item with a device clock twelve hours sl
 When('the guest retries undo after its first response is lost',async()=>{
   await guestPage!.getByText('Mineralwasser',{exact:true}).click();await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toBeVisible();
   await guestPage!.evaluate(() => {
-    const originalFetch=window.fetch.bind(window);let loseResponse=true;const ids:string[]=[];Object.assign(window,{__skyBarGuestUndoRetryIds:ids});
+    const originalFetch=window.fetch.bind(window);let loseResponse=true;const ids:string[]=[];Object.assign(window,{__aerstelloGuestUndoRetryIds:ids});
     window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/guest/items/')&&url.endsWith('/undo')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)};
   });
-  await guestPage!.getByRole('button',{name:'Rückgängig'}).click();await expect(guestPage!.locator('.notice--error')).toBeVisible();await guestPage!.getByRole('button',{name:'Rückgängig'}).click();retriedGuestUndoMutationIds=await guestPage!.evaluate(()=>(window as unknown as {__skyBarGuestUndoRetryIds:string[]}).__skyBarGuestUndoRetryIds);
+  await guestPage!.getByRole('button',{name:'Rückgängig'}).click();await expect(guestPage!.locator('.notice--error')).toBeVisible();await guestPage!.getByRole('button',{name:'Rückgängig'}).click();retriedGuestUndoMutationIds=await guestPage!.evaluate(()=>(window as unknown as {__aerstelloGuestUndoRetryIds:string[]}).__aerstelloGuestUndoRetryIds);
 });
 Then('both guest undo attempts use the same mutation identifier',async()=>{expect(retriedGuestUndoMutationIds).toHaveLength(2);expect(new Set(retriedGuestUndoMutationIds).size).toBe(1)});
 When('the same guest item mutation is submitted concurrently',async()=>{const request=guestPage!.context().request;const catalog=await (await request.get('/api/v1/guest/catalog')).json() as {data:{id:string;name:{de:string};priceCents:number;version:number}[]};const product=catalog.data.find(item=>item.name.de==='Mineralwasser')!;const data={mutationId:crypto.randomUUID(),productId:product.id,expectedPriceCents:product.priceCents,expectedProductVersion:product.version};const responses=await Promise.all([request.post('/api/v1/guest/items',{headers:csrfHeaders,data}),request.post('/api/v1/guest/items',{headers:csrfHeaders,data})]);concurrentGuestItemStatuses=responses.map(response=>response.status());concurrentGuestItemCount=((await (await request.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount});
@@ -1555,13 +1555,13 @@ Then("Luca's revoked device loses guest access",async()=>{guestRevokedStatus=(aw
 When('the guest device directory fails to load',async({page})=>{
   await page.addInitScript(()=>{
     const originalFetch=window.fetch.bind(window);
-    const state=window as unknown as {__skyBarGuestDeviceOutage:{active:boolean;attempts:number}};
-    state.__skyBarGuestDeviceOutage={active:true,attempts:0};
+    const state=window as unknown as {__aerstelloGuestDeviceOutage:{active:boolean;attempts:number}};
+    state.__aerstelloGuestDeviceOutage={active:true,attempts:0};
     window.fetch=async(input,init)=>{
       const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
       if(/^\/api\/v1\/guests\/[^/]+\/sessions$/.test(new URL(url,window.location.href).pathname)){
-        state.__skyBarGuestDeviceOutage.attempts+=1;
-        if(state.__skyBarGuestDeviceOutage.active)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated guest device outage'}}),{status:503,headers:{'content-type':'application/json'}});
+        state.__aerstelloGuestDeviceOutage.attempts+=1;
+        if(state.__aerstelloGuestDeviceOutage.active)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated guest device outage'}}),{status:503,headers:{'content-type':'application/json'}});
       }
       return originalFetch(input,init);
     };
@@ -1580,7 +1580,7 @@ Then('the guest device failure is localized instead of empty',async({page})=>{
 When('the host retries the guest device directory',async({page})=>{
   const retry=page.locator('.modal').getByRole('button',{name:/Erneut versuchen|Riprova|Retry/});
   await retry.evaluate((button)=>button.addEventListener('click',()=>{
-    (window as unknown as {__skyBarGuestDeviceOutage:{active:boolean}}).__skyBarGuestDeviceOutage.active=false;
+    (window as unknown as {__aerstelloGuestDeviceOutage:{active:boolean}}).__aerstelloGuestDeviceOutage.active=false;
   },{capture:true,once:true}));
   await retry.click();
 });
@@ -1588,7 +1588,7 @@ Then("Luca's device appears after guest device recovery",async({page})=>{
   const modal=page.locator('.modal');
   await expect(modal.locator('.device-list')).toBeVisible();
   await expect(modal.getByRole('button',{name:/Widerrufen|Revoca|Revoke/})).toBeVisible();
-  expect(await page.evaluate(()=>(window as unknown as {__skyBarGuestDeviceOutage:{attempts:number}}).__skyBarGuestDeviceOutage.attempts)).toBeGreaterThanOrEqual(2);
+  expect(await page.evaluate(()=>(window as unknown as {__aerstelloGuestDeviceOutage:{attempts:number}}).__aerstelloGuestDeviceOutage.attempts)).toBeGreaterThanOrEqual(2);
 });
 When("another host revokes Luca's device while the first host's device list is open",async({page,browser})=>{
   await page.goto('/app/guests');
@@ -1599,10 +1599,10 @@ When("another host revokes Luca's device while the first host's device list is o
   const guests=await (await firstHost.get('/api/v1/guests')).json() as {data:{id:string;name:string}[]};
   const luca=guests.data.find(guest=>guest.name==='Luca Rossi')!;
   const sessions=await (await firstHost.get(`/api/v1/guests/${luca.id}/sessions`)).json() as {data:{id:string}[]};
-  expect((await firstHost.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'guest-device-revoker@skybar.test',name:'Guest Device Revoker',password:'GuestDeviceRevoker123!',role:'staff',language:'de'}})).status()).toBe(201);
+  expect((await firstHost.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'guest-device-revoker@aerstello.test',name:'Guest Device Revoker',password:'GuestDeviceRevoker123!',role:'staff',language:'de'}})).status()).toBe(201);
   const other=await browser.newContext({baseURL:e2eBaseURL});
   extraContexts.push(other);
-  expect((await other.request.post('/api/v1/auth/login',{data:{email:'guest-device-revoker@skybar.test',password:'GuestDeviceRevoker123!'}})).status()).toBe(200);
+  expect((await other.request.post('/api/v1/auth/login',{data:{email:'guest-device-revoker@aerstello.test',password:'GuestDeviceRevoker123!'}})).status()).toBe(200);
   expect((await other.request.delete(`/api/v1/guests/${luca.id}/sessions/${sessions.data[0]!.id}`,{headers:csrfHeaders})).status()).toBe(204);
 });
 Then("the first host's open guest device list updates",async({page})=>{await expect(page.locator('.modal .device-list')).toHaveCount(0,{timeout:10_000})});
@@ -1613,12 +1613,12 @@ Then("Luca's open guest view returns to access request without cached data",asyn
 When('the host renames Luca to {string}',async({page},name:string)=>{const request=page.context().request;const guests=await (await request.get('/api/v1/guests')).json() as {data:{id:string;name:string;roomId:string;language:string;version:number}[]};const luca=guests.data.find((item)=>item.name==='Luca Rossi')!;expect((await request.patch(`/api/v1/guests/${luca.id}`,{headers:csrfHeaders,data:{name,roomId:luca.roomId,language:luca.language,expectedVersion:luca.version}})).status()).toBe(200)});
 Then("Luca's open guest view shows {string}",async({},name:string)=>{await expect(guestPage!.getByRole('heading',{name})).toBeVisible({timeout:10_000})});
 When('the guest opens a guest-scoped event stream while also authenticated as a host',async({page})=>{
-  expect((await guestPage!.context().request.post('/api/v1/auth/login',{data:{email:'admin@skybar.test',password:'SkyBarTest123!'}})).status()).toBe(200);
+  expect((await guestPage!.context().request.post('/api/v1/auth/login',{data:{email:'admin@aerstello.test',password:'AerstelloTest123!'}})).status()).toBe(200);
   await guestPage!.evaluate(()=>new Promise<void>((resolve,reject)=>{
     const received:{topic:string;payload:unknown}[]=[];
-    Object.assign(window,{__skyBarGuestScopedEvents:received});
+    Object.assign(window,{__aerstelloGuestScopedEvents:received});
     const events=new EventSource('/api/v1/events?scope=guest');
-    Object.assign(window,{__skyBarGuestScopedStream:events});
+    Object.assign(window,{__aerstelloGuestScopedStream:events});
     for(const topic of ['orders.changed','bills.changed'])events.addEventListener(topic,(rawEvent)=>{
       const event=rawEvent as MessageEvent<string>;
       received.push({topic,payload:JSON.parse(event.data) as unknown});
@@ -1638,12 +1638,12 @@ When('the guest opens a guest-scoped event stream while also authenticated as a 
       [JSON.stringify({guestId:ownGuest.guest.id,marker:'own'}),JSON.stringify({guestId:otherGuest.id,marker:'other'}),JSON.stringify({marker:'host-only'})],
     );
   }finally{await database.end()}
-  await expect.poll(()=>guestPage!.evaluate(()=>(window as unknown as {__skyBarGuestScopedEvents:unknown[]}).__skyBarGuestScopedEvents.length),{timeout:5_000}).toBe(1);
+  await expect.poll(()=>guestPage!.evaluate(()=>(window as unknown as {__aerstelloGuestScopedEvents:unknown[]}).__aerstelloGuestScopedEvents.length),{timeout:5_000}).toBe(1);
   await guestPage!.waitForTimeout(500);
   guestScopedEvents=await guestPage!.evaluate(()=>{
-    const state=window as unknown as {__skyBarGuestScopedEvents:{topic:string;payload:unknown}[];__skyBarGuestScopedStream:EventSource};
-    state.__skyBarGuestScopedStream.close();
-    return state.__skyBarGuestScopedEvents;
+    const state=window as unknown as {__aerstelloGuestScopedEvents:{topic:string;payload:unknown}[];__aerstelloGuestScopedStream:EventSource};
+    state.__aerstelloGuestScopedStream.close();
+    return state.__aerstelloGuestScopedEvents;
   });
 });
 Then('the guest stream receives only its own payload-free order event',async()=>{expect(guestScopedEvents).toEqual([{topic:'orders.changed',payload:{}}])});
@@ -1655,13 +1655,13 @@ When('the initial request queue load fails transiently',async({page})=>{
   expect((await request.post('/api/v1/public/access-requests',{data:{mutationId:crypto.randomUUID(),name:'Retry Queue Guest',roomId:room.id,language:'de'}})).status()).toBe(201);
   await page.addInitScript(()=>{
     const originalFetch=window.fetch.bind(window);
-    const state=window as unknown as {__skyBarRequestQueueOutage:{active:boolean;attempts:number}};
-    state.__skyBarRequestQueueOutage={active:true,attempts:0};
+    const state=window as unknown as {__aerstelloRequestQueueOutage:{active:boolean;attempts:number}};
+    state.__aerstelloRequestQueueOutage={active:true,attempts:0};
     window.fetch=async(input,init)=>{
       const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
       if(new URL(url,window.location.href).pathname==='/api/v1/access-requests'){
-        state.__skyBarRequestQueueOutage.attempts+=1;
-        if(state.__skyBarRequestQueueOutage.active)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated request queue outage'}}),{status:503,headers:{'content-type':'application/json'}});
+        state.__aerstelloRequestQueueOutage.attempts+=1;
+        if(state.__aerstelloRequestQueueOutage.active)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated request queue outage'}}),{status:503,headers:{'content-type':'application/json'}});
       }
       return originalFetch(input,init);
     };
@@ -1676,13 +1676,13 @@ Then('the request queue shows a localized failure instead of an empty state',asy
 When('the host retries the request queue',async({page})=>{
   const retry=page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/});
   await retry.evaluate((button)=>button.addEventListener('click',()=>{
-    (window as unknown as {__skyBarRequestQueueOutage:{active:boolean}}).__skyBarRequestQueueOutage.active=false;
+    (window as unknown as {__aerstelloRequestQueueOutage:{active:boolean}}).__aerstelloRequestQueueOutage.active=false;
   },{capture:true,once:true}));
   await retry.click();
 });
 Then('the pending request appears after request queue recovery',async({page})=>{
   await expect(page.locator('.request-card').filter({hasText:'Retry Queue Guest'})).toBeVisible();
-  expect(await page.evaluate(()=>(window as unknown as {__skyBarRequestQueueOutage:{attempts:number}}).__skyBarRequestQueueOutage.attempts)).toBeGreaterThanOrEqual(2);
+  expect(await page.evaluate(()=>(window as unknown as {__aerstelloRequestQueueOutage:{attempts:number}}).__aerstelloRequestQueueOutage.attempts)).toBeGreaterThanOrEqual(2);
 });
 When('the guest adds two different self-service items',async()=>{await guestPage!.locator('.product-tile').getByText('Mineralwasser',{exact:true}).click();await expect(guestPage!.locator('.undo-toast')).toHaveCount(1);await guestPage!.locator('.product-tile').getByText('Hauskeks',{exact:true}).click()});
 Then('both provisional items offer their own undo action',async()=>{await expect(guestPage!.locator('.undo-toast')).toHaveCount(2);await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toHaveCount(2)});
@@ -1717,7 +1717,7 @@ When('one self-service addition remains pending while another product is added',
   await guestPage!.evaluate(()=>{
     const originalFetch=window.fetch.bind(window);
     const control:{requestCount:number;firstReleased:boolean;secondStartedBeforeFirstRelease:boolean;releaseFirst?:()=>void;releaseSecond?:()=>void}={requestCount:0,firstReleased:false,secondStartedBeforeFirstRelease:false};
-    Object.assign(window,{__skyBarPendingGuestAddControl:control});
+    Object.assign(window,{__aerstelloPendingGuestAddControl:control});
     window.fetch=async(input,init)=>{
       const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;
       if(url.endsWith('/api/v1/guest/items')&&init?.method==='POST'){
@@ -1737,21 +1737,21 @@ When('one self-service addition remains pending while another product is added',
   const first=guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'});
   const second=guestPage!.locator('.product-tile').filter({hasText:'Hauskeks'});
   await first.click();
-  await expect.poll(()=>guestPage!.evaluate(()=>(window as unknown as {__skyBarPendingGuestAddControl:{requestCount:number}}).__skyBarPendingGuestAddControl.requestCount)).toBe(1);
+  await expect.poll(()=>guestPage!.evaluate(()=>(window as unknown as {__aerstelloPendingGuestAddControl:{requestCount:number}}).__aerstelloPendingGuestAddControl.requestCount)).toBe(1);
   await expect(first).toBeDisabled();
   const firstDisabledWhilePending=await first.isDisabled();
   const secondEnabledBeforeStart=await second.isEnabled();
   await second.click();
-  await expect.poll(()=>guestPage!.evaluate(()=>(window as unknown as {__skyBarPendingGuestAddControl:{requestCount:number}}).__skyBarPendingGuestAddControl.requestCount)).toBe(2);
+  await expect.poll(()=>guestPage!.evaluate(()=>(window as unknown as {__aerstelloPendingGuestAddControl:{requestCount:number}}).__aerstelloPendingGuestAddControl.requestCount)).toBe(2);
   await expect(first).toBeDisabled();await expect(second).toBeDisabled();
   const bothDisabled=await first.isDisabled()&&await second.isDisabled();
-  await expect.poll(()=>guestPage!.evaluate(()=>(window as unknown as {__skyBarPendingGuestAddControl:{releaseSecond?:()=>void}}).__skyBarPendingGuestAddControl.releaseSecond!==undefined)).toBe(true);
-  const secondStartedBeforeFirstRelease=await guestPage!.evaluate(()=>(window as unknown as {__skyBarPendingGuestAddControl:{secondStartedBeforeFirstRelease:boolean}}).__skyBarPendingGuestAddControl.secondStartedBeforeFirstRelease);
-  await guestPage!.evaluate(()=>(window as unknown as {__skyBarPendingGuestAddControl:{releaseSecond:()=>void}}).__skyBarPendingGuestAddControl.releaseSecond());
+  await expect.poll(()=>guestPage!.evaluate(()=>(window as unknown as {__aerstelloPendingGuestAddControl:{releaseSecond?:()=>void}}).__aerstelloPendingGuestAddControl.releaseSecond!==undefined)).toBe(true);
+  const secondStartedBeforeFirstRelease=await guestPage!.evaluate(()=>(window as unknown as {__aerstelloPendingGuestAddControl:{secondStartedBeforeFirstRelease:boolean}}).__aerstelloPendingGuestAddControl.secondStartedBeforeFirstRelease);
+  await guestPage!.evaluate(()=>(window as unknown as {__aerstelloPendingGuestAddControl:{releaseSecond:()=>void}}).__aerstelloPendingGuestAddControl.releaseSecond());
   await expect(second).toBeEnabled();await expect(first).toBeDisabled();
   const secondEnabledAfterOwnSettle=await second.isEnabled();
   const firstDisabledAfterSecondSettled=await first.isDisabled();
-  await guestPage!.evaluate(()=>(window as unknown as {__skyBarPendingGuestAddControl:{releaseFirst:()=>void}}).__skyBarPendingGuestAddControl.releaseFirst());
+  await guestPage!.evaluate(()=>(window as unknown as {__aerstelloPendingGuestAddControl:{releaseFirst:()=>void}}).__aerstelloPendingGuestAddControl.releaseFirst());
   await expect(first).toBeEnabled();
   pendingGuestAddResult={secondStartedBeforeFirstRelease,firstDisabledWhilePending,secondEnabledBeforeStart,bothDisabled,firstDisabledAfterSecondSettled,secondEnabledAfterOwnSettle,firstEnabledAfterOwnSettle:await first.isEnabled()};
 });
@@ -1761,7 +1761,7 @@ When('one guest product fails while another product remains pending',async()=>{
   await guestPage!.evaluate(()=>{
     const originalFetch=window.fetch.bind(window);
     const control:{requestCount:number;failureReleased:boolean;successReleased:boolean;failureMessage?:string;releaseFailure?:()=>void;releaseSuccess?:()=>void}={requestCount:0,failureReleased:false,successReleased:false};
-    Object.assign(window,{__skyBarGuestAddErrorControl:control});
+    Object.assign(window,{__aerstelloGuestAddErrorControl:control});
     window.fetch=async(input,init)=>{
       const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;
       if(url.endsWith('/api/v1/guest/items')&&init?.method==='POST'){
@@ -1781,64 +1781,64 @@ When('one guest product fails while another product remains pending',async()=>{
   const failed=guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'});
   const pending=guestPage!.locator('.product-tile').filter({hasText:'Hauskeks'});
   await failed.click();
-  await expect.poll(()=>guestPage!.evaluate(()=>(window as unknown as {__skyBarGuestAddErrorControl:{releaseFailure?:()=>void}}).__skyBarGuestAddErrorControl.releaseFailure!==undefined)).toBe(true);
+  await expect.poll(()=>guestPage!.evaluate(()=>(window as unknown as {__aerstelloGuestAddErrorControl:{releaseFailure?:()=>void}}).__aerstelloGuestAddErrorControl.releaseFailure!==undefined)).toBe(true);
   await pending.click();
-  await expect.poll(()=>guestPage!.evaluate(()=>(window as unknown as {__skyBarGuestAddErrorControl:{releaseSuccess?:()=>void}}).__skyBarGuestAddErrorControl.releaseSuccess!==undefined)).toBe(true);
-  await guestPage!.evaluate(()=>(window as unknown as {__skyBarGuestAddErrorControl:{releaseFailure:()=>void}}).__skyBarGuestAddErrorControl.releaseFailure());
+  await expect.poll(()=>guestPage!.evaluate(()=>(window as unknown as {__aerstelloGuestAddErrorControl:{releaseSuccess?:()=>void}}).__aerstelloGuestAddErrorControl.releaseSuccess!==undefined)).toBe(true);
+  await guestPage!.evaluate(()=>(window as unknown as {__aerstelloGuestAddErrorControl:{releaseFailure:()=>void}}).__aerstelloGuestAddErrorControl.releaseFailure());
   await expect(guestPage!.locator('.notice--error')).toBeVisible();
   await expect(failed).toBeEnabled();
   await expect(pending).toBeDisabled();
   const failureMessage=await guestPage!.locator('.notice--error').innerText();
-  await guestPage!.evaluate((message)=>{(window as unknown as {__skyBarGuestAddErrorControl:{failureMessage:string}}).__skyBarGuestAddErrorControl.failureMessage=message},failureMessage);
+  await guestPage!.evaluate((message)=>{(window as unknown as {__aerstelloGuestAddErrorControl:{failureMessage:string}}).__aerstelloGuestAddErrorControl.failureMessage=message},failureMessage);
 });
 Then('the guest product failure is visible before the other product settles',async()=>{
-  const state=await guestPage!.evaluate(()=>{const control=(window as unknown as {__skyBarGuestAddErrorControl:{failureReleased:boolean;successReleased:boolean;failureMessage:string}}).__skyBarGuestAddErrorControl;return {failureReleased:control.failureReleased,successReleased:control.successReleased,failureMessage:control.failureMessage}});
+  const state=await guestPage!.evaluate(()=>{const control=(window as unknown as {__aerstelloGuestAddErrorControl:{failureReleased:boolean;successReleased:boolean;failureMessage:string}}).__aerstelloGuestAddErrorControl;return {failureReleased:control.failureReleased,successReleased:control.successReleased,failureMessage:control.failureMessage}});
   expect(state).toMatchObject({failureReleased:true,successReleased:false});
   await expect(guestPage!.locator('.notice--error')).toHaveText(state.failureMessage);
 });
 When('the pending guest product succeeds',async()=>{
-  await guestPage!.evaluate(()=>(window as unknown as {__skyBarGuestAddErrorControl:{releaseSuccess:()=>void}}).__skyBarGuestAddErrorControl.releaseSuccess());
+  await guestPage!.evaluate(()=>(window as unknown as {__aerstelloGuestAddErrorControl:{releaseSuccess:()=>void}}).__aerstelloGuestAddErrorControl.releaseSuccess());
   await expect(guestPage!.locator('.product-tile').filter({hasText:'Hauskeks'})).toBeEnabled();
   await expect(guestPage!.locator('.undo-toast').filter({hasText:'Hauskeks'})).toBeVisible();
 });
 Then('the guest product failure remains visible',async()=>{
-  const state=await guestPage!.evaluate(()=>{const control=(window as unknown as {__skyBarGuestAddErrorControl:{successReleased:boolean;failureMessage:string}}).__skyBarGuestAddErrorControl;return {successReleased:control.successReleased,failureMessage:control.failureMessage}});
+  const state=await guestPage!.evaluate(()=>{const control=(window as unknown as {__aerstelloGuestAddErrorControl:{successReleased:boolean;failureMessage:string}}).__aerstelloGuestAddErrorControl;return {successReleased:control.successReleased,failureMessage:control.failureMessage}});
   expect(state.successReleased).toBe(true);
   await expect(guestPage!.locator('.notice--error')).toHaveText(state.failureMessage);
 });
 When('one guest addition loses its response before another product is added',async()=>{
   await guestPage!.evaluate(()=>{
     const originalFetch=window.fetch.bind(window);let loseResponse=true;const entries:{productId:string;mutationId:string}[]=[];
-    Object.assign(window,{__skyBarGuestAddRetryEntries:entries});
+    Object.assign(window,{__aerstelloGuestAddRetryEntries:entries});
     window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guest/items')&&init?.method==='POST'){const body=JSON.parse(String(init.body)) as {productId:string;mutationId:string};entries.push(body);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)};
   });
   await guestPage!.locator('.product-tile').getByText('Mineralwasser',{exact:true}).click();await expect(guestPage!.locator('.notice--error')).toBeVisible();await expect(guestPage!.locator('.undo-toast')).toHaveCount(1);
   await guestPage!.locator('.product-tile').getByText('Hauskeks',{exact:true}).click();await expect(guestPage!.locator('.undo-toast')).toHaveCount(2);
   await guestPage!.locator('.product-tile').getByText('Mineralwasser',{exact:true}).click();await expect(guestPage!.locator('.undo-toast')).toHaveCount(2);
-  const entries=await guestPage!.evaluate(()=>(window as unknown as {__skyBarGuestAddRetryEntries:{productId:string;mutationId:string}[]}).__skyBarGuestAddRetryEntries);
+  const entries=await guestPage!.evaluate(()=>(window as unknown as {__aerstelloGuestAddRetryEntries:{productId:string;mutationId:string}[]}).__aerstelloGuestAddRetryEntries);
   retriedGuestAddMutationIds=[entries[0]!.mutationId,entries[2]!.mutationId];
   const tab=await (await guestPage!.context().request.get('/api/v1/guest/tab')).json() as {items:{productName:{de:string};quantity:number}[]};
   uncertainGuestProductCounts=Object.fromEntries(tab.items.map((item)=>[item.productName.de,item.quantity]));
 });
 Then('retrying the uncertain product reuses its mutation identifier',async()=>{expect(retriedGuestAddMutationIds).toHaveLength(2);expect(new Set(retriedGuestAddMutationIds).size).toBe(1)});
 Then('each selected self-service product is stored once',async()=>{expect(uncertainGuestProductCounts).toEqual(expect.objectContaining({Mineralwasser:1,Hauskeks:1}))});
-When('the guest retries an addition after a committed HTTP timeout',async()=>{await guestPage!.evaluate(()=>{const originalFetch=window.fetch.bind(window);let returnTimeout=true;const ids:string[]=[];Object.assign(window,{__skyBarGuestAddRetryIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guest/items')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);const response=await originalFetch(input,init);if(returnTimeout){returnTimeout=false;return new Response(JSON.stringify({error:{code:'REQUEST_TIMEOUT',message:'The upstream response timed out.'}}),{status:408,headers:{'content-type':'application/json'}})}return response}return originalFetch(input,init)}});const product=guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'});await product.click();await expect(guestPage!.locator('.notice--error')).toBeVisible();await product.click();await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toBeVisible();retriedGuestAddMutationIds=await guestPage!.evaluate(()=>(window as unknown as {__skyBarGuestAddRetryIds:string[]}).__skyBarGuestAddRetryIds);timeoutGuestItemCount=((await (await guestPage!.context().request.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount});
+When('the guest retries an addition after a committed HTTP timeout',async()=>{await guestPage!.evaluate(()=>{const originalFetch=window.fetch.bind(window);let returnTimeout=true;const ids:string[]=[];Object.assign(window,{__aerstelloGuestAddRetryIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guest/items')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);const response=await originalFetch(input,init);if(returnTimeout){returnTimeout=false;return new Response(JSON.stringify({error:{code:'REQUEST_TIMEOUT',message:'The upstream response timed out.'}}),{status:408,headers:{'content-type':'application/json'}})}return response}return originalFetch(input,init)}});const product=guestPage!.locator('.product-tile').filter({hasText:'Mineralwasser'});await product.click();await expect(guestPage!.locator('.notice--error')).toBeVisible();await product.click();await expect(guestPage!.getByRole('button',{name:'Rückgängig'})).toBeVisible();retriedGuestAddMutationIds=await guestPage!.evaluate(()=>(window as unknown as {__aerstelloGuestAddRetryIds:string[]}).__aerstelloGuestAddRetryIds);timeoutGuestItemCount=((await (await guestPage!.context().request.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount});
 Then('both timed-out guest additions use the same mutation identifier',async()=>{expect(retriedGuestAddMutationIds).toHaveLength(2);expect(new Set(retriedGuestAddMutationIds).size).toBe(1)});
 Then('the timed-out self-service product is stored once',async()=>{expect(timeoutGuestItemCount).toBe(1)});
 
 When('the guest closes the app after a self-service response is lost',async()=>{
   await guestPage!.evaluate(()=>{
-    const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__skyBarClosingGuestAddIds:ids});
+    const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__aerstelloClosingGuestAddIds:ids});
     window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guest/items')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);await originalFetch(input,init);throw new TypeError('Simulated lost response')}return originalFetch(input,init)};
   });
   await guestPage!.locator('.product-tile').getByText('Mineralwasser',{exact:true}).click();
   await expect(guestPage!.locator('.notice--error')).toBeVisible();
-  reopenedGuestAddMutationIds=await guestPage!.evaluate(()=>(window as unknown as {__skyBarClosingGuestAddIds:string[]}).__skyBarClosingGuestAddIds);
+  reopenedGuestAddMutationIds=await guestPage!.evaluate(()=>(window as unknown as {__aerstelloClosingGuestAddIds:string[]}).__aerstelloClosingGuestAddIds);
   const context=guestPage!.context();await guestPage!.close();guestPage=await context.newPage();await guestPage.goto('/guest');await expect(guestPage.getByRole('heading',{name:'Luca Rossi'})).toBeVisible();
-  await guestPage.evaluate(()=>{const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__skyBarReopenedGuestAddIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guest/items')&&init?.method==='POST')ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);return originalFetch(input,init)}});
+  await guestPage.evaluate(()=>{const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__aerstelloReopenedGuestAddIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guest/items')&&init?.method==='POST')ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);return originalFetch(input,init)}});
   await guestPage.locator('.product-tile').getByText('Mineralwasser',{exact:true}).click();
   await expect(guestPage.getByRole('button',{name:'Rückgängig'})).toBeVisible();
-  reopenedGuestAddMutationIds.push(...await guestPage.evaluate(()=>(window as unknown as {__skyBarReopenedGuestAddIds:string[]}).__skyBarReopenedGuestAddIds));
+  reopenedGuestAddMutationIds.push(...await guestPage.evaluate(()=>(window as unknown as {__aerstelloReopenedGuestAddIds:string[]}).__aerstelloReopenedGuestAddIds));
   reopenedGuestAddItemCount=((await (await guestPage.context().request.get('/api/v1/guest/tab')).json()) as {itemCount:number}).itemCount;
 });
 Then('reopening and retrying reuses the original item mutation identifier',async()=>{expect(reopenedGuestAddMutationIds).toHaveLength(2);expect(new Set(reopenedGuestAddMutationIds).size).toBe(1)});
@@ -1906,17 +1906,17 @@ Then('the room editor shows a validation error',async({page})=>{await expect(pag
 When('a room rename response is lost before another administrator renames it',async({page})=>{const request=page.context().request;const rooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;name:string;version:number}[]};const original=rooms.data.find(room=>room.name==='101')!;const command={name:'First room rename',expectedVersion:original.version};const committed=await (await request.patch(`/api/v1/rooms/${original.id}`,{headers:csrfHeaders,data:command})).json() as {version:number};expect((await request.patch(`/api/v1/rooms/${original.id}`,{headers:csrfHeaders,data:{name:'Newer room rename',expectedVersion:committed.version}})).status()).toBe(200);staleRoomUpdateStatus=(await request.patch(`/api/v1/rooms/${original.id}`,{headers:csrfHeaders,data:command})).status();const finalRooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string;name:string}[]};staleRoomFinalName=finalRooms.data.find(room=>room.id===original.id)!.name});
 Then('retrying the stale room rename is rejected',async()=>{expect(staleRoomUpdateStatus).toBe(409)});
 Then('the newer room name remains configured',async()=>{expect(staleRoomFinalName).toBe('Newer room rename')});
-When('the administrator retries room creation after its first response is lost',async({page})=>{await page.goto('/app/rooms');await page.getByPlaceholder(/Zimmername|Nome camera|Room name/).fill('Recoverable room');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarRoomCreateCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/rooms')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});await page.locator('.inline-form').getByRole('button').click();await expect(page.locator('.notice--error')).toBeVisible();uncertainRoomFieldsLocked=await page.getByPlaceholder(/Zimmername|Nome camera|Room name/).isDisabled();await page.locator('.inline-form').getByRole('button').click();await expect(page.getByText('Recoverable room',{exact:true})).toBeVisible();const commands=await page.evaluate(()=>(window as unknown as {__skyBarRoomCreateCommands:Array<Record<string,unknown>>}).__skyBarRoomCreateCommands);retriedRoomMutationIds=commands.map(command=>String(command.mutationId));const rooms=await (await page.context().request.get('/api/v1/rooms')).json() as {data:{name:string}[]};recoverableRoomCount=rooms.data.filter(room=>room.name==='Recoverable room').length;changedRoomCreationReplayStatus=(await page.context().request.post('/api/v1/rooms',{headers:csrfHeaders,data:{...commands[0]!,name:'Changed recoverable room'}})).status()});
+When('the administrator retries room creation after its first response is lost',async({page})=>{await page.goto('/app/rooms');await page.getByPlaceholder(/Zimmername|Nome camera|Room name/).fill('Recoverable room');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__aerstelloRoomCreateCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/rooms')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});await page.locator('.inline-form').getByRole('button').click();await expect(page.locator('.notice--error')).toBeVisible();uncertainRoomFieldsLocked=await page.getByPlaceholder(/Zimmername|Nome camera|Room name/).isDisabled();await page.locator('.inline-form').getByRole('button').click();await expect(page.getByText('Recoverable room',{exact:true})).toBeVisible();const commands=await page.evaluate(()=>(window as unknown as {__aerstelloRoomCreateCommands:Array<Record<string,unknown>>}).__aerstelloRoomCreateCommands);retriedRoomMutationIds=commands.map(command=>String(command.mutationId));const rooms=await (await page.context().request.get('/api/v1/rooms')).json() as {data:{name:string}[]};recoverableRoomCount=rooms.data.filter(room=>room.name==='Recoverable room').length;changedRoomCreationReplayStatus=(await page.context().request.post('/api/v1/rooms',{headers:csrfHeaders,data:{...commands[0]!,name:'Changed recoverable room'}})).status()});
 Then('both room creation attempts use the same mutation identifier',async()=>{expect(retriedRoomMutationIds).toHaveLength(2);expect(new Set(retriedRoomMutationIds).size).toBe(1)});
 Then('the uncertain room name stays locked for retry',async()=>{expect(uncertainRoomFieldsLocked).toBe(true)});
 Then('only one recoverable room exists',async()=>{expect(recoverableRoomCount).toBe(1)});
 Then('changing the replayed room creation is rejected',async()=>{expect(changedRoomCreationReplayStatus).toBe(409)});
-When('the administrator retries category creation after its first response is lost',async({page})=>{await page.goto('/app/products');await page.getByPlaceholder(/Deutscher Name|Nome tedesco|German name/).fill('Recoverable category');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarCategoryCreateCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/categories')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});const form=page.locator('.inline-form');await form.getByRole('button').click();await expect(page.locator('.notice--error')).toBeVisible();uncertainCategoryFieldsLocked=await form.locator('input').isDisabled();await form.getByRole('button').click();await expect(page.getByText('Recoverable category',{exact:true})).toBeVisible();const commands=await page.evaluate(()=>(window as unknown as {__skyBarCategoryCreateCommands:Array<Record<string,unknown>>}).__skyBarCategoryCreateCommands);retriedCategoryMutationIds=commands.map(command=>String(command.mutationId));const categories=await (await page.context().request.get('/api/v1/categories')).json() as {data:{name:{de:string}}[]};recoverableCategoryCount=categories.data.filter(category=>category.name.de==='Recoverable category').length;changedCategoryCreationReplayStatus=(await page.context().request.post('/api/v1/categories',{headers:csrfHeaders,data:{...commands[0]!,name:{de:'Changed recoverable category',it:'',en:''}}})).status()});
+When('the administrator retries category creation after its first response is lost',async({page})=>{await page.goto('/app/products');await page.getByPlaceholder(/Deutscher Name|Nome tedesco|German name/).fill('Recoverable category');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__aerstelloCategoryCreateCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/categories')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});const form=page.locator('.inline-form');await form.getByRole('button').click();await expect(page.locator('.notice--error')).toBeVisible();uncertainCategoryFieldsLocked=await form.locator('input').isDisabled();await form.getByRole('button').click();await expect(page.getByText('Recoverable category',{exact:true})).toBeVisible();const commands=await page.evaluate(()=>(window as unknown as {__aerstelloCategoryCreateCommands:Array<Record<string,unknown>>}).__aerstelloCategoryCreateCommands);retriedCategoryMutationIds=commands.map(command=>String(command.mutationId));const categories=await (await page.context().request.get('/api/v1/categories')).json() as {data:{name:{de:string}}[]};recoverableCategoryCount=categories.data.filter(category=>category.name.de==='Recoverable category').length;changedCategoryCreationReplayStatus=(await page.context().request.post('/api/v1/categories',{headers:csrfHeaders,data:{...commands[0]!,name:{de:'Changed recoverable category',it:'',en:''}}})).status()});
 Then('both category creation attempts use the same mutation identifier',async()=>{expect(retriedCategoryMutationIds).toHaveLength(2);expect(new Set(retriedCategoryMutationIds).size).toBe(1)});
 Then('the uncertain category name stays locked for retry',async()=>{expect(uncertainCategoryFieldsLocked).toBe(true)});
 Then('only one recoverable category exists',async()=>{expect(recoverableCategoryCount).toBe(1)});
 Then('changing the replayed category creation is rejected',async()=>{expect(changedCategoryCreationReplayStatus).toBe(409)});
-When('the host retries guest creation after its first response is lost',async({page})=>{await page.goto('/app/guests');await page.getByRole('button',{name:/Hinzufügen|Aggiungi|Add/}).first().click();const modal=page.locator('.modal');await modal.getByLabel('Name').fill('Recoverable guest');await modal.getByLabel(/Zimmer|Camere|Rooms/).selectOption({label:'101'});await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarGuestCreateCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guests')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});await modal.getByRole('button',{name:/Speichern|Salva|Save/}).click();await expect(modal.locator('.notice--error')).toBeVisible();uncertainGuestFieldsLocked=await modal.locator('input,select').evaluateAll(fields=>fields.every(field=>(field as HTMLInputElement).disabled));await modal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(modal).toHaveCount(0);const commands=await page.evaluate(()=>(window as unknown as {__skyBarGuestCreateCommands:Array<Record<string,unknown>>}).__skyBarGuestCreateCommands);retriedGuestCreationMutationIds=commands.map(command=>String(command.mutationId));const guests=await (await page.context().request.get('/api/v1/guests')).json() as {data:{name:string}[]};recoverableGuestCount=guests.data.filter(guest=>guest.name==='Recoverable guest').length;changedGuestCreationReplayStatus=(await page.context().request.post('/api/v1/guests',{headers:csrfHeaders,data:{...commands[0]!,name:'Changed recoverable guest'}})).status()});
+When('the host retries guest creation after its first response is lost',async({page})=>{await page.goto('/app/guests');await page.getByRole('button',{name:/Hinzufügen|Aggiungi|Add/}).first().click();const modal=page.locator('.modal');await modal.getByLabel('Name').fill('Recoverable guest');await modal.getByLabel(/Zimmer|Camere|Rooms/).selectOption({label:'101'});await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__aerstelloGuestCreateCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guests')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});await modal.getByRole('button',{name:/Speichern|Salva|Save/}).click();await expect(modal.locator('.notice--error')).toBeVisible();uncertainGuestFieldsLocked=await modal.locator('input,select').evaluateAll(fields=>fields.every(field=>(field as HTMLInputElement).disabled));await modal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(modal).toHaveCount(0);const commands=await page.evaluate(()=>(window as unknown as {__aerstelloGuestCreateCommands:Array<Record<string,unknown>>}).__aerstelloGuestCreateCommands);retriedGuestCreationMutationIds=commands.map(command=>String(command.mutationId));const guests=await (await page.context().request.get('/api/v1/guests')).json() as {data:{name:string}[]};recoverableGuestCount=guests.data.filter(guest=>guest.name==='Recoverable guest').length;changedGuestCreationReplayStatus=(await page.context().request.post('/api/v1/guests',{headers:csrfHeaders,data:{...commands[0]!,name:'Changed recoverable guest'}})).status()});
 Then('both guest creation attempts use the same mutation identifier',async()=>{expect(retriedGuestCreationMutationIds).toHaveLength(2);expect(new Set(retriedGuestCreationMutationIds).size).toBe(1)});
 Then('the uncertain guest fields stay locked for retry',async()=>{expect(uncertainGuestFieldsLocked).toBe(true)});
 Then('only one recoverable guest exists',async()=>{expect(recoverableGuestCount).toBe(1)});
@@ -1941,7 +1941,7 @@ When('the host tries to close a guest creation whose response was lost',async({p
   await expect(modal).toHaveCount(0);
 });
 Then('the uncertain guest creation remains open for retry',async()=>{expect(uncertainGuestCreationStayedOpen).toBe(true)});
-When('the host retries guest creation after a committed HTTP timeout',async({page})=>{await page.goto('/app/guests');await page.getByRole('button',{name:/Hinzufügen|Aggiungi|Add/}).first().click();const modal=page.locator('.modal');await modal.getByLabel('Name').fill('Timed out guest');await modal.getByLabel(/Zimmer|Camere|Rooms/).selectOption({label:'101'});await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let returnTimeout=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarGuestCreateCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guests')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(returnTimeout){returnTimeout=false;return new Response(JSON.stringify({error:{code:'REQUEST_TIMEOUT',message:'The upstream response timed out.'}}),{status:408,headers:{'content-type':'application/json'}})}return response}return originalFetch(input,init)}});await modal.getByRole('button',{name:/Speichern|Salva|Save/}).click();await expect(modal.locator('.notice--error')).toBeVisible();await modal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(modal).toHaveCount(0);const commands=await page.evaluate(()=>(window as unknown as {__skyBarGuestCreateCommands:Array<Record<string,unknown>>}).__skyBarGuestCreateCommands);retriedGuestCreationMutationIds=commands.map(command=>String(command.mutationId));const guests=await (await page.context().request.get('/api/v1/guests')).json() as {data:{name:string}[]};recoverableGuestCount=guests.data.filter(guest=>guest.name==='Timed out guest').length});
+When('the host retries guest creation after a committed HTTP timeout',async({page})=>{await page.goto('/app/guests');await page.getByRole('button',{name:/Hinzufügen|Aggiungi|Add/}).first().click();const modal=page.locator('.modal');await modal.getByLabel('Name').fill('Timed out guest');await modal.getByLabel(/Zimmer|Camere|Rooms/).selectOption({label:'101'});await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let returnTimeout=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__aerstelloGuestCreateCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/guests')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(returnTimeout){returnTimeout=false;return new Response(JSON.stringify({error:{code:'REQUEST_TIMEOUT',message:'The upstream response timed out.'}}),{status:408,headers:{'content-type':'application/json'}})}return response}return originalFetch(input,init)}});await modal.getByRole('button',{name:/Speichern|Salva|Save/}).click();await expect(modal.locator('.notice--error')).toBeVisible();await modal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(modal).toHaveCount(0);const commands=await page.evaluate(()=>(window as unknown as {__aerstelloGuestCreateCommands:Array<Record<string,unknown>>}).__aerstelloGuestCreateCommands);retriedGuestCreationMutationIds=commands.map(command=>String(command.mutationId));const guests=await (await page.context().request.get('/api/v1/guests')).json() as {data:{name:string}[]};recoverableGuestCount=guests.data.filter(guest=>guest.name==='Timed out guest').length});
 Then('both timed-out guest creations use the same mutation identifier',async()=>{expect(retriedGuestCreationMutationIds).toHaveLength(2);expect(new Set(retriedGuestCreationMutationIds).size).toBe(1)});
 Then('only one timed-out guest exists',async()=>{expect(recoverableGuestCount).toBe(1)});
 When('the host creates guest {string} in room {string}',async({page},name:string,room:string)=>{await page.goto('/app/guests');await page.getByRole('button',{name:/Hinzufügen/}).click();await page.locator('.modal').getByLabel('Name').fill(name);await page.locator('.modal').getByLabel('Zimmer').selectOption({label:room});await page.locator('.modal').getByRole('button',{name:'Speichern'}).click()});
@@ -1949,13 +1949,13 @@ Then('guest {string} is listed in room {string}',async({page},name:string,room:s
 When('the guest directory fails to load',async({page})=>{
   await page.addInitScript(()=>{
     const originalFetch=window.fetch.bind(window);
-    const state=window as unknown as {__skyBarGuestDirectoryOutage:{active:boolean;attempts:number}};
-    state.__skyBarGuestDirectoryOutage={active:true,attempts:0};
+    const state=window as unknown as {__aerstelloGuestDirectoryOutage:{active:boolean;attempts:number}};
+    state.__aerstelloGuestDirectoryOutage={active:true,attempts:0};
     window.fetch=async(input,init)=>{
       const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
       if(new URL(url,window.location.href).pathname==='/api/v1/guests'){
-        state.__skyBarGuestDirectoryOutage.attempts+=1;
-        if(state.__skyBarGuestDirectoryOutage.active)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated guest directory outage'}}),{status:503,headers:{'content-type':'application/json'}});
+        state.__aerstelloGuestDirectoryOutage.attempts+=1;
+        if(state.__aerstelloGuestDirectoryOutage.active)return new Response(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE',message:'Simulated guest directory outage'}}),{status:503,headers:{'content-type':'application/json'}});
       }
       return originalFetch(input,init);
     };
@@ -1971,13 +1971,13 @@ Then('the guest directory failure is localized instead of empty',async({page})=>
 When('the host retries the guest directory',async({page})=>{
   const retry=page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/});
   await retry.evaluate((button)=>button.addEventListener('click',()=>{
-    (window as unknown as {__skyBarGuestDirectoryOutage:{active:boolean}}).__skyBarGuestDirectoryOutage.active=false;
+    (window as unknown as {__aerstelloGuestDirectoryOutage:{active:boolean}}).__aerstelloGuestDirectoryOutage.active=false;
   },{capture:true,once:true}));
   await retry.click();
 });
 Then('existing guests appear after guest directory recovery',async({page})=>{
   await expect(page.locator('.table-row').filter({hasText:'Anna Berger'})).toBeVisible();
-  expect(await page.evaluate(()=>(window as unknown as {__skyBarGuestDirectoryOutage:{attempts:number}}).__skyBarGuestDirectoryOutage.attempts)).toBeGreaterThanOrEqual(2);
+  expect(await page.evaluate(()=>(window as unknown as {__aerstelloGuestDirectoryOutage:{attempts:number}}).__aerstelloGuestDirectoryOutage.attempts)).toBeGreaterThanOrEqual(2);
 });
 When('a guest update response is lost before another host edits the guest',async({page})=>{const request=page.context().request;const guests=await (await request.get('/api/v1/guests')).json() as {data:{id:string;name:string;roomId:string;language:string;version:number}[]};const original=guests.data.find(guest=>guest.name==='Anna Berger')!;const command={name:'First guest edit',roomId:original.roomId,language:original.language,expectedVersion:original.version};const committed=await (await request.patch(`/api/v1/guests/${original.id}`,{headers:csrfHeaders,data:command})).json() as {version:number};expect((await request.patch(`/api/v1/guests/${original.id}`,{headers:csrfHeaders,data:{...command,name:'Newer guest edit',expectedVersion:committed.version}})).status()).toBe(200);staleGuestUpdateStatus=(await request.patch(`/api/v1/guests/${original.id}`,{headers:csrfHeaders,data:command})).status();const finalGuests=await (await request.get('/api/v1/guests')).json() as {data:{id:string;name:string}[]};staleGuestFinalName=finalGuests.data.find(guest=>guest.id===original.id)!.name});
 Then('retrying the stale guest update is rejected',async()=>{expect(staleGuestUpdateStatus).toBe(409)});
@@ -1992,7 +1992,7 @@ When('the host retries guest archival after its response is lost',async({page})=
   const guest=await (await request.post('/api/v1/guests',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:'Recoverable archive guest',roomId:rooms.data.find(room=>room.name==='102')!.id,language:'de'}})).json() as {id:string;version:number};
   await page.goto('/app/guests');
   await page.getByRole('button',{name:/Entfernen Recoverable archive guest|Rimuovi Recoverable archive guest|Remove Recoverable archive guest/}).click();
-  await page.evaluate((guestId)=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarGuestArchiveCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith(`/api/v1/guests/${guestId}`)&&init?.method==='DELETE'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}},guest.id);
+  await page.evaluate((guestId)=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__aerstelloGuestArchiveCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith(`/api/v1/guests/${guestId}`)&&init?.method==='DELETE'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}},guest.id);
   const modal=page.locator('.modal');
   await modal.getByRole('button',{name:/Entfernen|Rimuovi|Remove/}).click();
   await expect(modal.locator('.notice--error')).toBeVisible();
@@ -2002,7 +2002,7 @@ When('the host retries guest archival after its response is lost',async({page})=
   uncertainGuestArchiveStayedOpen=await modal.isVisible();
   await modal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();
   await expect(modal).toHaveCount(0);
-  const commands=await page.evaluate(()=>(window as unknown as {__skyBarGuestArchiveCommands:Array<Record<string,unknown>>}).__skyBarGuestArchiveCommands);
+  const commands=await page.evaluate(()=>(window as unknown as {__aerstelloGuestArchiveCommands:Array<Record<string,unknown>>}).__aerstelloGuestArchiveCommands);
   retriedGuestArchiveMutationIds=commands.map(command=>String(command.mutationId));
   const guests=await (await request.get('/api/v1/guests')).json() as {data:{id:string}[]};
   archivedGuestCount=guests.data.filter(item=>item.id===guest.id).length;
@@ -2023,7 +2023,7 @@ Then('the stale guest archival is rejected',async()=>{expect(staleGuestArchiveSt
 Then("the guest's newer edit remains configured",async()=>{expect(staleGuestArchiveFinalName).toBe('Newer archive guest')});
 When('the administrator creates the self-service product {string} priced {string}',async({page},name:string,price:string)=>{await page.goto('/app/products');await page.getByRole('button',{name:/Hinzufügen/}).first().click();await page.getByLabel('Name · DE').fill(name);await page.getByLabel(/Preis · EUR|Prezzo · EUR|Price · EUR/).fill(price);await page.locator('.modal').getByText(/Selbstbedienung|Self-service/,{exact:true}).click();await page.locator('.modal').getByRole('button',{name:'Speichern'}).click()});
 Then('product {string} is listed as self-service',async({page},name:string)=>{const row=page.locator('.product-admin-list>button').filter({hasText:name});await expect(row).toContainText('Selbstbedienung')});
-When('the administrator retries product creation after its first response is lost',async({page})=>{await page.goto('/app/products');await page.getByRole('button',{name:/Hinzufügen|Aggiungi|Add/}).first().click();await page.getByLabel('Name · DE').fill('Recoverable product');await page.getByLabel(/Preis · EUR|Prezzo · EUR|Price · EUR/).fill('4.20');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarProductCreateCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/products')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});await page.locator('.modal').getByRole('button',{name:/Speichern|Salva|Save/}).click();await expect(page.locator('.modal .notice--error')).toBeVisible();uncertainProductFieldsLocked=await page.locator('.modal input,.modal select').evaluateAll(fields=>fields.every(field=>(field as HTMLInputElement).disabled));await page.locator('.modal').getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(page.locator('.modal')).toHaveCount(0);const commands=await page.evaluate(()=>(window as unknown as {__skyBarProductCreateCommands:Array<Record<string,unknown>>}).__skyBarProductCreateCommands);retriedProductMutationIds=commands.map(command=>String(command.mutationId));const products=await (await page.context().request.get('/api/v1/products')).json() as {data:{name:{de:string}}[]};recoverableProductCount=products.data.filter(product=>product.name.de==='Recoverable product').length;changedProductCreationReplayStatus=(await page.context().request.post('/api/v1/products',{headers:csrfHeaders,data:{...commands[0]!,name:{de:'Changed recoverable product',it:'',en:''}}})).status()});
+When('the administrator retries product creation after its first response is lost',async({page})=>{await page.goto('/app/products');await page.getByRole('button',{name:/Hinzufügen|Aggiungi|Add/}).first().click();await page.getByLabel('Name · DE').fill('Recoverable product');await page.getByLabel(/Preis · EUR|Prezzo · EUR|Price · EUR/).fill('4.20');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__aerstelloProductCreateCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith('/api/v1/products')&&init?.method==='POST'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});await page.locator('.modal').getByRole('button',{name:/Speichern|Salva|Save/}).click();await expect(page.locator('.modal .notice--error')).toBeVisible();uncertainProductFieldsLocked=await page.locator('.modal input,.modal select').evaluateAll(fields=>fields.every(field=>(field as HTMLInputElement).disabled));await page.locator('.modal').getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(page.locator('.modal')).toHaveCount(0);const commands=await page.evaluate(()=>(window as unknown as {__aerstelloProductCreateCommands:Array<Record<string,unknown>>}).__aerstelloProductCreateCommands);retriedProductMutationIds=commands.map(command=>String(command.mutationId));const products=await (await page.context().request.get('/api/v1/products')).json() as {data:{name:{de:string}}[]};recoverableProductCount=products.data.filter(product=>product.name.de==='Recoverable product').length;changedProductCreationReplayStatus=(await page.context().request.post('/api/v1/products',{headers:csrfHeaders,data:{...commands[0]!,name:{de:'Changed recoverable product',it:'',en:''}}})).status()});
 Then('both product creation attempts use the same mutation identifier',async()=>{expect(retriedProductMutationIds).toHaveLength(2);expect(new Set(retriedProductMutationIds).size).toBe(1)});
 Then('the uncertain product fields stay locked for retry',async()=>{expect(uncertainProductFieldsLocked).toBe(true)});
 Then('only one recoverable product exists',async()=>{expect(recoverableProductCount).toBe(1)});
@@ -2031,7 +2031,7 @@ Then('changing the replayed product creation is rejected',async()=>{expect(chang
 When('a product update response is lost before another administrator edits it',async({page})=>{await page.goto('/app/products');await page.getByText('Helles',{exact:true}).click();const modal=page.locator('.modal');await modal.getByLabel(/Preis · EUR|Prezzo · EUR|Price · EUR/).fill('5.00');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/products/')&&init?.method==='PATCH'&&loseResponse){loseResponse=false;await originalFetch(input,init);throw new TypeError('Simulated lost response')}return originalFetch(input,init)}});await modal.getByRole('button',{name:/Speichern|Salva|Save/}).click();await expect(modal.locator('.notice--error')).toBeVisible();const request=page.context().request;const products=await (await request.get('/api/v1/products')).json() as {data:{id:string;name:{de:string;it:string;en:string};description?:{de:string;it:string;en:string};priceCents:number;categoryId:string;enabled:boolean;selfServiceOnly:boolean;version:number}[]};const current=products.data.find(item=>item.name.de==='Helles')!;staleProductFinalPrice=current.priceCents+321;expect((await request.patch(`/api/v1/products/${current.id}`,{headers:csrfHeaders,data:{name:current.name,...(current.description?{description:current.description}:{}),priceCents:staleProductFinalPrice,categoryId:current.categoryId,enabled:current.enabled,selfServiceOnly:current.selfServiceOnly,expectedVersion:current.version}})).status()).toBe(200);const response=page.waitForResponse(candidate=>candidate.url().endsWith(`/api/v1/products/${current.id}`)&&candidate.request().method()==='PATCH');await modal.getByRole('button',{name:/Speichern|Salva|Save/}).click();staleProductRetryRejected=(await response).status()===409;await expect(modal.locator('.notice--error')).toContainText(/zwischenzeitlich geändert|modificato nel frattempo|changed in the meantime/);const finalProducts=await (await request.get('/api/v1/products')).json() as {data:{id:string;priceCents:number}[]};staleProductFinalPrice=finalProducts.data.find(item=>item.id===current.id)!.priceCents});
 Then('retrying the stale product update is rejected',async()=>{expect(staleProductRetryRejected).toBe(true)});
 Then('the newer product price remains configured',async()=>{expect(staleProductFinalPrice).toBe(821)});
-When('the administrator retries product archival after its response is lost',async({page})=>{await page.goto('/app/products');await page.getByText('Hauskeks',{exact:true}).click();const modal=page.locator('.modal');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarProductArchiveCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/products/')&&init?.method==='DELETE'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});await modal.getByRole('button',{name:/Archiv|Archivia|Archive/}).click();await expect(modal.locator('.notice--error')).toBeVisible();uncertainProductArchiveFieldsLocked=await modal.locator('input,select').evaluateAll(fields=>fields.every(field=>(field as HTMLInputElement).disabled));await modal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(modal).toHaveCount(0);retriedProductArchiveMutationIds=(await page.evaluate(()=>(window as unknown as {__skyBarProductArchiveCommands:Array<Record<string,unknown>>}).__skyBarProductArchiveCommands)).map(command=>String(command.mutationId));const products=await (await page.context().request.get('/api/v1/products')).json() as {data:{name:{de:string}}[]};archivedProductCount=products.data.filter(product=>product.name.de==='Hauskeks').length});
+When('the administrator retries product archival after its response is lost',async({page})=>{await page.goto('/app/products');await page.getByText('Hauskeks',{exact:true}).click();const modal=page.locator('.modal');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__aerstelloProductArchiveCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/products/')&&init?.method==='DELETE'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}});await modal.getByRole('button',{name:/Archiv|Archivia|Archive/}).click();await expect(modal.locator('.notice--error')).toBeVisible();uncertainProductArchiveFieldsLocked=await modal.locator('input,select').evaluateAll(fields=>fields.every(field=>(field as HTMLInputElement).disabled));await modal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(modal).toHaveCount(0);retriedProductArchiveMutationIds=(await page.evaluate(()=>(window as unknown as {__aerstelloProductArchiveCommands:Array<Record<string,unknown>>}).__aerstelloProductArchiveCommands)).map(command=>String(command.mutationId));const products=await (await page.context().request.get('/api/v1/products')).json() as {data:{name:{de:string}}[]};archivedProductCount=products.data.filter(product=>product.name.de==='Hauskeks').length});
 Then('both product archival attempts use the same mutation identifier',async()=>{expect(retriedProductArchiveMutationIds).toHaveLength(2);expect(new Set(retriedProductArchiveMutationIds).size).toBe(1)});
 Then('the uncertain product fields stay locked for archival retry',async()=>{expect(uncertainProductArchiveFieldsLocked).toBe(true)});
 Then('the product is archived only once',async()=>{expect(archivedProductCount).toBe(0)});
@@ -2052,13 +2052,13 @@ When('the administrator retries room archival after its response is lost',async(
   const request=page.context().request;
   const room=await (await request.post('/api/v1/rooms',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:'Recoverable archive room'}})).json() as {id:string;version:number};
   await page.goto('/app/rooms');
-  await page.evaluate((roomId)=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__skyBarRoomArchiveCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith(`/api/v1/rooms/${roomId}`)&&init?.method==='DELETE'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}},room.id);
+  await page.evaluate((roomId)=>{const originalFetch=window.fetch.bind(window);let loseResponse=true;const commands:Record<string,unknown>[]=[];Object.assign(window,{__aerstelloRoomArchiveCommands:commands});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.endsWith(`/api/v1/rooms/${roomId}`)&&init?.method==='DELETE'){commands.push(JSON.parse(String(init.body)) as Record<string,unknown>);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)}},room.id);
   await page.getByRole('button',{name:/Archiv Recoverable archive room|Archivio Recoverable archive room|Archive Recoverable archive room/}).click();
   const retry=page.getByRole('button',{name:/Erneut versuchen.*Recoverable archive room|Riprova.*Recoverable archive room|Retry.*Recoverable archive room/});
   await expect(retry).toBeVisible();
   await retry.click();
   await expect(retry).toHaveCount(0);
-  const commands=await page.evaluate(()=>(window as unknown as {__skyBarRoomArchiveCommands:Array<Record<string,unknown>>}).__skyBarRoomArchiveCommands);
+  const commands=await page.evaluate(()=>(window as unknown as {__aerstelloRoomArchiveCommands:Array<Record<string,unknown>>}).__aerstelloRoomArchiveCommands);
   retriedRoomArchiveMutationIds=commands.map(command=>String(command.mutationId));
   const rooms=await (await request.get('/api/v1/rooms')).json() as {data:{id:string}[]};
   archivedRoomCount=rooms.data.filter(item=>item.id===room.id).length;
@@ -2087,24 +2087,24 @@ When('another API replica creates a room',async({page})=>{
   extraApiProcesses.push(replica);
   await expect.poll(async()=>{try{return (await fetch(`http://127.0.0.1:${replicaPort}/api/v1/health`)).status}catch{return 0}},{timeout:15_000}).toBe(200);
   await page.evaluate(()=>new Promise<void>((resolve,reject)=>{
-    sessionStorage.setItem('__skyBarReplicaRoomEvent','0');
+    sessionStorage.setItem('__aerstelloReplicaRoomEvent','0');
     const events=new EventSource('/api/v1/events?scope=host');
-    Object.assign(window,{__skyBarReplicaStream:events});
-    events.addEventListener('rooms.changed',()=>sessionStorage.setItem('__skyBarReplicaRoomEvent','1'));
+    Object.assign(window,{__aerstelloReplicaStream:events});
+    events.addEventListener('rooms.changed',()=>sessionStorage.setItem('__aerstelloReplicaRoomEvent','1'));
     events.addEventListener('open',()=>resolve(),{once:true});
     events.addEventListener('error',()=>{if(events.readyState===EventSource.CLOSED)reject(new Error('Replica test stream closed before opening'))},{once:true});
   }));
   const cookie=(await page.context().cookies()).map(item=>`${item.name}=${item.value}`).join('; ');
   const response=await fetch(`http://127.0.0.1:${replicaPort}/api/v1/rooms`,{
     method:'POST',
-    headers:{cookie,'content-type':'application/json','x-skybar-csrf':'1'},
+    headers:{cookie,'content-type':'application/json','x-aerstello-csrf':'1'},
     body:JSON.stringify({mutationId:crypto.randomUUID(),name:'Replica room'}),
   });
   expect(response.status).toBe(201);
 });
 Then('the connected host receives the other replica room event',async({page})=>{
-  await expect.poll(()=>page.evaluate(()=>sessionStorage.getItem('__skyBarReplicaRoomEvent')),{timeout:10_000}).toBe('1');
-  await page.evaluate(()=>((window as unknown as {__skyBarReplicaStream:EventSource}).__skyBarReplicaStream).close());
+  await expect.poll(()=>page.evaluate(()=>sessionStorage.getItem('__aerstelloReplicaRoomEvent')),{timeout:10_000}).toBe('1');
+  await page.evaluate(()=>((window as unknown as {__aerstelloReplicaStream:EventSource}).__aerstelloReplicaStream).close());
 });
 When('realtime events try to commit out of identity order',async({page})=>{
   const testId=crypto.randomUUID();
@@ -2112,16 +2112,16 @@ When('realtime events try to commit out of identity order',async({page})=>{
   commitOrderedRealtimeIds=[];
   relayedCommitOrderedEvents=[];
   await page.evaluate((currentTestId)=>new Promise<void>((resolve,reject)=>{
-    sessionStorage.setItem('__skyBarCommitOrderedEvents','[]');
+    sessionStorage.setItem('__aerstelloCommitOrderedEvents','[]');
     const events=new EventSource('/api/v1/events?scope=host');
-    Object.assign(window,{__skyBarCommitOrderStream:events});
+    Object.assign(window,{__aerstelloCommitOrderStream:events});
     events.addEventListener('rooms.changed',(rawEvent)=>{
       const event=rawEvent as MessageEvent<string>;
       const payload=JSON.parse(event.data) as {commitOrderTest?:string;marker?:string};
       if(payload.commitOrderTest!==currentTestId||!payload.marker)return;
-      const received=JSON.parse(sessionStorage.getItem('__skyBarCommitOrderedEvents')??'[]') as {id:string;marker:string}[];
+      const received=JSON.parse(sessionStorage.getItem('__aerstelloCommitOrderedEvents')??'[]') as {id:string;marker:string}[];
       received.push({id:event.lastEventId,marker:payload.marker});
-      sessionStorage.setItem('__skyBarCommitOrderedEvents',JSON.stringify(received));
+      sessionStorage.setItem('__aerstelloCommitOrderedEvents',JSON.stringify(received));
     });
     events.addEventListener('open',()=>resolve(),{once:true});
     events.addEventListener('error',()=>{if(events.readyState===EventSource.CLOSED)reject(new Error('Commit-order event stream closed before opening'))},{once:true});
@@ -2157,8 +2157,8 @@ When('realtime events try to commit out of identity order',async({page})=>{
     await second.query('COMMIT');
     secondCommitted=true;
     commitOrderedRealtimeIds=[earlier.rows[0]!.id,later.rows[0]!.id];
-    await expect.poll(()=>page.evaluate(()=>JSON.parse(sessionStorage.getItem('__skyBarCommitOrderedEvents')??'[]').length),{timeout:10_000}).toBe(2);
-    relayedCommitOrderedEvents=await page.evaluate(()=>JSON.parse(sessionStorage.getItem('__skyBarCommitOrderedEvents')??'[]') as {id:string;marker:string}[]);
+    await expect.poll(()=>page.evaluate(()=>JSON.parse(sessionStorage.getItem('__aerstelloCommitOrderedEvents')??'[]').length),{timeout:10_000}).toBe(2);
+    relayedCommitOrderedEvents=await page.evaluate(()=>JSON.parse(sessionStorage.getItem('__aerstelloCommitOrderedEvents')??'[]') as {id:string;marker:string}[]);
   }finally{
     if(!firstCommitted)await first.query('ROLLBACK');
     if(!secondCommitted){
@@ -2166,7 +2166,7 @@ When('realtime events try to commit out of identity order',async({page})=>{
       await second.query('ROLLBACK');
     }
     await Promise.all([first.end(),second.end()]);
-    await page.evaluate(()=>((window as unknown as {__skyBarCommitOrderStream:EventSource}).__skyBarCommitOrderStream).close());
+    await page.evaluate(()=>((window as unknown as {__aerstelloCommitOrderStream:EventSource}).__aerstelloCommitOrderStream).close());
   }
 });
 Then('the later realtime insertion waits for the earlier transaction',async()=>{expect(laterRealtimeInsertWaited).toBe(true)});
@@ -2210,10 +2210,10 @@ When('the saved guest language conflicts with local language on launch',async({p
   const guest=guests.data.find(item=>item.name==='Luca Rossi')!;
   expect((await request.patch(`/api/v1/guests/${guest.id}`,{headers:csrfHeaders,data:{name:guest.name,roomId:guest.roomId,language:'it',expectedVersion:guest.version}})).status()).toBe(200);
   await guestPage!.addInitScript(()=>{
-    localStorage.setItem('skybar-language','en');
-    const state=window as unknown as {__skyBarFirstGuestShellLanguage?:string};
+    localStorage.setItem('aerstello-language','en');
+    const state=window as unknown as {__aerstelloFirstGuestShellLanguage?:string};
     new MutationObserver(()=>{
-      if(!state.__skyBarFirstGuestShellLanguage&&document.querySelector('.guest-shell'))state.__skyBarFirstGuestShellLanguage=document.documentElement.lang;
+      if(!state.__aerstelloFirstGuestShellLanguage&&document.querySelector('.guest-shell'))state.__aerstelloFirstGuestShellLanguage=document.documentElement.lang;
     }).observe(document,{childList:true,subtree:true});
   });
   await guestPage!.reload();
@@ -2221,9 +2221,9 @@ When('the saved guest language conflicts with local language on launch',async({p
 Then('the authenticated guest shell uses the saved language',async()=>{
   await expect(guestPage!.getByLabel('Lingua')).toHaveValue('it');
   await expect(guestPage!.getByRole('heading',{name:'Ordini aperti'})).toBeVisible();
-  expect(await guestPage!.evaluate(()=>localStorage.getItem('skybar-language'))).toBe('it');
+  expect(await guestPage!.evaluate(()=>localStorage.getItem('aerstello-language'))).toBe('it');
   expect(await guestPage!.evaluate(()=>document.documentElement.lang)).toBe('it');
-  expect(await guestPage!.evaluate(()=>(window as unknown as {__skyBarFirstGuestShellLanguage?:string}).__skyBarFirstGuestShellLanguage)).toBe('it');
+  expect(await guestPage!.evaluate(()=>(window as unknown as {__aerstelloFirstGuestShellLanguage?:string}).__aerstelloFirstGuestShellLanguage)).toBe('it');
 });
 When('the guest manually changes language before an unchanged identity refetch',async({page})=>{
   await guestPage!.getByLabel('Lingua').selectOption('en');
@@ -2238,17 +2238,17 @@ When('the guest manually changes language before an unchanged identity refetch',
 Then('the manual guest language remains selected',async()=>{
   await expect(guestPage!.getByLabel('Language')).toHaveValue('en');
   await expect(guestPage!.getByRole('heading',{name:'Open orders'})).toBeVisible();
-  expect(await guestPage!.evaluate(()=>localStorage.getItem('skybar-language'))).toBe('en');
+  expect(await guestPage!.evaluate(()=>localStorage.getItem('aerstello-language'))).toBe('en');
   expect(await guestPage!.evaluate(()=>document.documentElement.lang)).toBe('en');
 });
 When('the venue default language is Italian',async({page,browser})=>{const request=page.context().request;const venue=await (await request.get('/api/v1/venue')).json() as {name:string;timezone:string;version:number};expect((await request.put('/api/v1/venue',{headers:csrfHeaders,data:{name:venue.name,timezone:venue.timezone,language:'it',expectedVersion:venue.version}})).status()).toBe(200);const context=await browser.newContext({baseURL:e2eBaseURL,locale:'en-US'});extraContexts.push(context);freshGuestPage=await context.newPage();await freshGuestPage.goto('/guest/request')});
 Then('a fresh English guest device starts in Italian',async()=>{await expect(freshGuestPage!.getByRole('heading',{name:'Accesso ospite'})).toBeVisible()});
 When('a fresh guest selects Italian on the access form',async({page})=>{await page.goto('/guest/request');await page.locator('form select').nth(1).selectOption('it')});
 Then('the guest name field is labeled in Italian',async({page})=>{await expect(page.getByLabel('Nome')).toBeVisible()});
-When('an Italian administrator opens first-time venue setup',async({page})=>{const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();try{await database.query("UPDATE hosts SET language='it' WHERE lower(email)='admin@skybar.test'");await database.query("UPDATE venue_settings SET name='' WHERE id=1")}finally{await database.end()}await page.goto('/app/settings');await expect(page.getByRole('heading',{name:'Locale',exact:true})).toBeVisible()});
+When('an Italian administrator opens first-time venue setup',async({page})=>{const database=new pg.Client({connectionString:process.env.DATABASE_URL});await database.connect();try{await database.query("UPDATE hosts SET language='it' WHERE lower(email)='admin@aerstello.test'");await database.query("UPDATE venue_settings SET name='' WHERE id=1")}finally{await database.end()}await page.goto('/app/settings');await expect(page.getByRole('heading',{name:'Locale',exact:true})).toBeVisible()});
 Then('the empty venue label is shown in Italian',async({page})=>{await expect(page.locator('.brand strong')).toHaveText('Configura locale')});
 
-const csrfHeaders = { 'x-skybar-csrf': '1' };
+const csrfHeaders = { 'x-aerstello-csrf': '1' };
 async function operationalData(page: import('@playwright/test').Page) {
   const request=page.context().request;
   const me=await (await request.get('/api/v1/auth/me')).json() as {host:{id:string;version:number}};
@@ -2282,7 +2282,7 @@ When('an approved request is exchanged for a guest grant',async({page,browser})=
   const context=await browser.newContext({baseURL:e2eBaseURL});
   extraContexts.push(context);
   const pending={id:created.id,token:created.statusToken,grantId:crypto.randomUUID()};
-  await context.addInitScript((value)=>localStorage.setItem('skybar-pending',JSON.stringify(value)),pending);
+  await context.addInitScript((value)=>localStorage.setItem('aerstello-pending',JSON.stringify(value)),pending);
   const device=await context.newPage();
   const observed=device.waitForRequest(candidate=>candidate.url().includes(`/api/v1/public/access-requests/${created.id}/status`));
   await device.goto('/guest/request');
@@ -2379,9 +2379,9 @@ Then('approval either wins before the move or rejects the moved guest',async()=>
 
 When("another host submits the administrator's queued order",async({page})=>{
   const {request,me,guests,products}=await operationalData(page);
-  await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'staff@skybar.test',name:'Queue Staff',password:'QueueStaff123!',role:'staff',language:'de'}});
+  await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'staff@aerstello.test',name:'Queue Staff',password:'QueueStaff123!',role:'staff',language:'de'}});
   await request.post('/api/v1/auth/logout',{headers:csrfHeaders});
-  await request.post('/api/v1/auth/login',{data:{email:'staff@skybar.test',password:'QueueStaff123!'}});
+  await request.post('/api/v1/auth/login',{data:{email:'staff@aerstello.test',password:'QueueStaff123!'}});
   const product=products.data.find((item)=>item.name.de==='Helles')!;
   const guest=guests.data.find((item)=>item.name==='Anna Berger')!;
   const response=await request.post('/api/v1/order-batches',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),originHostId:me.host.id,guestId:guest.id,catalogVersion:products.catalogVersion,capturedAt:new Date().toISOString(),items:[{productId:product.id,quantity:1}]}});
@@ -2405,7 +2405,7 @@ When('the host retries an order after its first response is lost',async({page})=
   await chooseOrder(page,'Helles','Anna Berger','101');
   await page.evaluate(() => {
     const originalFetch=window.fetch.bind(window);let loseResponse=true;const ids:string[]=[];
-    Object.assign(window,{__skyBarOrderRetryIds:ids});
+    Object.assign(window,{__aerstelloOrderRetryIds:ids});
     window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)};
   });
   await page.getByRole('button',{name:/Bestellung buchen/}).click();
@@ -2413,28 +2413,28 @@ When('the host retries an order after its first response is lost',async({page})=
   uncertainOrderControlsLocked=await page.locator('.product-tile').filter({hasText:'Helles'}).isDisabled()&&await page.locator('.guest-list').getByRole('button',{name:/Anna Berger/}).isDisabled()&&await page.locator('.stepper button').last().isDisabled();
   await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();
   await expect(page.getByText(/Bestellung hinzugefügt|Order added/)).toBeVisible();
-  retriedOrderMutationIds=await page.evaluate(()=>(window as unknown as {__skyBarOrderRetryIds:string[]}).__skyBarOrderRetryIds);
+  retriedOrderMutationIds=await page.evaluate(()=>(window as unknown as {__aerstelloOrderRetryIds:string[]}).__aerstelloOrderRetryIds);
   const {request,guests}=await operationalData(page);const guest=guests.data.find((item)=>item.name==='Anna Berger')!;retriedOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
 });
 Then('both order attempts use the same mutation identifier',async()=>{expect(retriedOrderMutationIds).toHaveLength(2);expect(new Set(retriedOrderMutationIds).size).toBe(1)});
 Then('order editing was locked while the result was uncertain',async()=>{expect(uncertainOrderControlsLocked).toBe(true)});
 Then('the guest tab contains the order only once',async()=>{expect(retriedOrderItemCount).toBe(1)});
 
-When('the host retries an order after a committed HTTP timeout',async({page})=>{await chooseOrder(page,'Helles','Anna Berger','101');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let returnTimeout=true;const ids:string[]=[];Object.assign(window,{__skyBarOrderRetryIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);const response=await originalFetch(input,init);if(returnTimeout){returnTimeout=false;return new Response(JSON.stringify({error:{code:'REQUEST_TIMEOUT',message:'The upstream response timed out.'}}),{status:408,headers:{'content-type':'application/json'}})}return response}return originalFetch(input,init)}});await page.getByRole('button',{name:/Bestellung buchen|Invia ordine|Submit order/}).click();await expect(page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(page.getByText(/Bestellung hinzugefügt|Ordine aggiunto|Order added/)).toBeVisible();retriedOrderMutationIds=await page.evaluate(()=>(window as unknown as {__skyBarOrderRetryIds:string[]}).__skyBarOrderRetryIds);const {request,guests}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;retriedOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount});
+When('the host retries an order after a committed HTTP timeout',async({page})=>{await chooseOrder(page,'Helles','Anna Berger','101');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);let returnTimeout=true;const ids:string[]=[];Object.assign(window,{__aerstelloOrderRetryIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);const response=await originalFetch(input,init);if(returnTimeout){returnTimeout=false;return new Response(JSON.stringify({error:{code:'REQUEST_TIMEOUT',message:'The upstream response timed out.'}}),{status:408,headers:{'content-type':'application/json'}})}return response}return originalFetch(input,init)}});await page.getByRole('button',{name:/Bestellung buchen|Invia ordine|Submit order/}).click();await expect(page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(page.getByText(/Bestellung hinzugefügt|Ordine aggiunto|Order added/)).toBeVisible();retriedOrderMutationIds=await page.evaluate(()=>(window as unknown as {__aerstelloOrderRetryIds:string[]}).__aerstelloOrderRetryIds);const {request,guests}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;retriedOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount});
 
 When('the host reloads after an order response is lost',async({page})=>{
   await chooseOrder(page,'Helles','Anna Berger','101');
-  await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__skyBarReloadOrderIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);await originalFetch(input,init);throw new TypeError('Simulated lost response')}return originalFetch(input,init)}});
-  await page.getByRole('button',{name:/Bestellung buchen|Submit order/}).click();await expect(page.locator('.notice--error')).toBeVisible();const firstIds=await page.evaluate(()=>(window as unknown as {__skyBarReloadOrderIds:string[]}).__skyBarReloadOrderIds);await page.reload();await expect(page.locator('.cart-lines').getByText('Helles',{exact:true})).toBeVisible();await expect(page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__skyBarReloadOrderIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST')ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);return originalFetch(input,init)}});await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(page.getByText(/Bestellung hinzugefügt|Order added/)).toBeVisible();const secondIds=await page.evaluate(()=>(window as unknown as {__skyBarReloadOrderIds:string[]}).__skyBarReloadOrderIds);reloadedOrderMutationIds=[...firstIds,...secondIds];const {request,guests}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;reloadedOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
+  await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__aerstelloReloadOrderIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);await originalFetch(input,init);throw new TypeError('Simulated lost response')}return originalFetch(input,init)}});
+  await page.getByRole('button',{name:/Bestellung buchen|Submit order/}).click();await expect(page.locator('.notice--error')).toBeVisible();const firstIds=await page.evaluate(()=>(window as unknown as {__aerstelloReloadOrderIds:string[]}).__aerstelloReloadOrderIds);await page.reload();await expect(page.locator('.cart-lines').getByText('Helles',{exact:true})).toBeVisible();await expect(page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__aerstelloReloadOrderIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST')ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);return originalFetch(input,init)}});await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(page.getByText(/Bestellung hinzugefügt|Order added/)).toBeVisible();const secondIds=await page.evaluate(()=>(window as unknown as {__aerstelloReloadOrderIds:string[]}).__aerstelloReloadOrderIds);reloadedOrderMutationIds=[...firstIds,...secondIds];const {request,guests}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;reloadedOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount;
 });
 Then('the restored order retry uses the original mutation identifier',async()=>{expect(reloadedOrderMutationIds).toHaveLength(2);expect(new Set(reloadedOrderMutationIds).size).toBe(1)});
 Then('the guest tab contains the restored order only once',async()=>{expect(reloadedOrderItemCount).toBe(1)});
 
-When('the host closes the app after an order response is lost',async({page})=>{await chooseOrder(page,'Helles','Anna Berger','101');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__skyBarClosedOrderIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);await originalFetch(input,init);throw new TypeError('Simulated lost response')}return originalFetch(input,init)}});await page.getByRole('button',{name:/Bestellung buchen|Submit order/}).click();await expect(page.locator('.notice--error')).toBeVisible();closedOrderMutationIds=await page.evaluate(()=>(window as unknown as {__skyBarClosedOrderIds:string[]}).__skyBarClosedOrderIds);closedOrderPreReopenTransmissionCount=closedOrderMutationIds.length;const context=page.context();await page.close();const reopened=await context.newPage();await reopened.goto('/app/orders/new');await expect(reopened.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();await reopened.evaluate(()=>{const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__skyBarClosedOrderIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST')ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);return originalFetch(input,init)}});await reopened.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(reopened.getByText(/Bestellung hinzugefügt|Order added/)).toBeVisible();closedOrderMutationIds.push(...await reopened.evaluate(()=>(window as unknown as {__skyBarClosedOrderIds:string[]}).__skyBarClosedOrderIds));const {request,guests}=await operationalData(reopened);const guest=guests.data.find(item=>item.name==='Anna Berger')!;closedOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount});
+When('the host closes the app after an order response is lost',async({page})=>{await chooseOrder(page,'Helles','Anna Berger','101');await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__aerstelloClosedOrderIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);await originalFetch(input,init);throw new TypeError('Simulated lost response')}return originalFetch(input,init)}});await page.getByRole('button',{name:/Bestellung buchen|Submit order/}).click();await expect(page.locator('.notice--error')).toBeVisible();closedOrderMutationIds=await page.evaluate(()=>(window as unknown as {__aerstelloClosedOrderIds:string[]}).__aerstelloClosedOrderIds);closedOrderPreReopenTransmissionCount=closedOrderMutationIds.length;const context=page.context();await page.close();const reopened=await context.newPage();await reopened.goto('/app/orders/new');await expect(reopened.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/})).toBeVisible();await reopened.evaluate(()=>{const originalFetch=window.fetch.bind(window);const ids:string[]=[];Object.assign(window,{__aerstelloClosedOrderIds:ids});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST')ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);return originalFetch(input,init)}});await reopened.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(reopened.getByText(/Bestellung hinzugefügt|Order added/)).toBeVisible();closedOrderMutationIds.push(...await reopened.evaluate(()=>(window as unknown as {__aerstelloClosedOrderIds:string[]}).__aerstelloClosedOrderIds));const {request,guests}=await operationalData(reopened);const guest=guests.data.find(item=>item.name==='Anna Berger')!;closedOrderItemCount=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {itemCount:number}).itemCount});
 Then('reopening the order uses the original mutation identifier',async()=>{expect(closedOrderPreReopenTransmissionCount).toBeGreaterThan(0);expect(closedOrderMutationIds.length).toBeGreaterThan(closedOrderPreReopenTransmissionCount);expect(new Set(closedOrderMutationIds).size).toBe(1)});
 Then('the guest tab contains the reopened order only once',async()=>{expect(closedOrderItemCount).toBe(1)});
 
-When('a product price changes after its order response is lost',async({page})=>{await chooseOrder(page,'Helles','Anna Berger','101');capturedUncertainTotal=await page.locator('.cart-total strong').innerText();const {request,products}=await operationalData(page);const product=products.data.find(item=>item.name.de==='Helles')!;capturedExpectedTotalCents=product.priceCents;await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);Object.assign(window,{__skyBarLosePriceOrderResponse:true});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'&&(window as unknown as {__skyBarLosePriceOrderResponse:boolean}).__skyBarLosePriceOrderResponse){(window as unknown as {__skyBarLosePriceOrderResponse:boolean}).__skyBarLosePriceOrderResponse=false;await originalFetch(input,init);throw new TypeError('Simulated lost response')}return originalFetch(input,init)}});await page.getByRole('button',{name:/Bestellung buchen|Submit order/}).click();await expect(page.locator('.notice--error')).toBeVisible();const refreshed=page.waitForResponse(response=>response.url().endsWith('/api/v1/products')&&response.request().method()==='GET');expect((await request.patch(`/api/v1/products/${product.id}`,{headers:csrfHeaders,data:{name:product.name,...(product.description?{description:product.description}:{}),priceCents:product.priceCents+1000,categoryId:product.categoryId,enabled:product.enabled,selfServiceOnly:product.selfServiceOnly,expectedVersion:product.version}})).status()).toBe(200);await refreshed});
+When('a product price changes after its order response is lost',async({page})=>{await chooseOrder(page,'Helles','Anna Berger','101');capturedUncertainTotal=await page.locator('.cart-total strong').innerText();const {request,products}=await operationalData(page);const product=products.data.find(item=>item.name.de==='Helles')!;capturedExpectedTotalCents=product.priceCents;await page.evaluate(()=>{const originalFetch=window.fetch.bind(window);Object.assign(window,{__aerstelloLosePriceOrderResponse:true});window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(url.includes('/api/v1/order-batches')&&init?.method==='POST'&&(window as unknown as {__aerstelloLosePriceOrderResponse:boolean}).__aerstelloLosePriceOrderResponse){(window as unknown as {__aerstelloLosePriceOrderResponse:boolean}).__aerstelloLosePriceOrderResponse=false;await originalFetch(input,init);throw new TypeError('Simulated lost response')}return originalFetch(input,init)}});await page.getByRole('button',{name:/Bestellung buchen|Submit order/}).click();await expect(page.locator('.notice--error')).toBeVisible();const refreshed=page.waitForResponse(response=>response.url().endsWith('/api/v1/products')&&response.request().method()==='GET');expect((await request.patch(`/api/v1/products/${product.id}`,{headers:csrfHeaders,data:{name:product.name,...(product.description?{description:product.description}:{}),priceCents:product.priceCents+1000,categoryId:product.categoryId,enabled:product.enabled,selfServiceOnly:product.selfServiceOnly,expectedVersion:product.version}})).status()).toBe(200);await refreshed});
 Then('the uncertain cart still shows its captured total',async({page})=>{await expect(page.locator('.cart-total strong')).toHaveText(capturedUncertainTotal)});
 Then('retrying retains the captured charge',async({page})=>{await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(page.getByText(/Bestellung hinzugefügt|Order added/)).toBeVisible();const {request,guests}=await operationalData(page);const guest=guests.data.find(item=>item.name==='Anna Berger')!;capturedOrderTabTotalCents=((await (await request.get(`/api/v1/guests/${guest.id}/tab`)).json()) as {totalCents:number}).totalCents;expect(capturedOrderTabTotalCents).toBe(capturedExpectedTotalCents)});
 
@@ -2566,11 +2566,11 @@ When('the host retries settlement after its first response is lost',async({page}
   await chooseOrder(page,'Helles','Anna Berger','101');await page.getByRole('button',{name:/Bestellung buchen/}).click();await expect(page.locator('.tab-pill')).toContainText('1 Artikel');
   await page.evaluate(() => {
     const originalFetch=window.fetch.bind(window);let loseResponse=true;const ids:string[]=[];
-    Object.assign(window,{__skyBarSettlementRetryIds:ids});
+    Object.assign(window,{__aerstelloSettlementRetryIds:ids});
     window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;if(/\/api\/v1\/tabs\/[^/]+\/settle$/.test(url)&&init?.method==='POST'){ids.push((JSON.parse(String(init.body)) as {mutationId:string}).mutationId);const response=await originalFetch(input,init);if(loseResponse){loseResponse=false;throw new TypeError('Simulated lost response')}return response}return originalFetch(input,init)};
   });
   await page.getByRole('button',{name:/Abrechnen/}).click();await page.locator('.modal').getByRole('button',{name:'Abrechnen'}).click();await expect(page.locator('.modal .notice--error')).toBeVisible();uncertainSettlementDetailsLocked=await page.locator('.choice-grid').getByRole('button',{name:/Bar/}).isDisabled()&&await page.locator('.choice-grid').getByRole('button',{name:/Karte/}).isDisabled();await page.locator('.modal').getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();await expect(page).toHaveURL(/\/app\/bills\//);
-  retriedSettlementMutationIds=await page.evaluate(()=>(window as unknown as {__skyBarSettlementRetryIds:string[]}).__skyBarSettlementRetryIds);
+  retriedSettlementMutationIds=await page.evaluate(()=>(window as unknown as {__aerstelloSettlementRetryIds:string[]}).__aerstelloSettlementRetryIds);
 });
 Then('both settlement attempts use the same mutation identifier',async()=>{expect(retriedSettlementMutationIds).toHaveLength(2);expect(new Set(retriedSettlementMutationIds).size).toBe(1)});
 Then('settlement details were locked while the result was uncertain',async()=>{expect(uncertainSettlementDetailsLocked).toBe(true)});
@@ -2580,19 +2580,19 @@ When('a committed settlement response is lost before modal close and reload',asy
   await page.getByRole('button',{name:/Bestellung buchen|Invia ordine|Submit order/}).click();
   await expect(page.locator('.tab-pill')).toContainText(/1 Artikel|1 articolo|1 item/);
   const instrumentSettlementFetch=()=>{
-    const marker='__skyBarSettlementFetchInstrumented';
+    const marker='__aerstelloSettlementFetchInstrumented';
     if((window as unknown as Record<string,unknown>)[marker])return;
     (window as unknown as Record<string,unknown>)[marker]=true;
     const originalFetch=window.fetch.bind(window);
     window.fetch=async(input,init)=>{
       const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;
       if(/\/api\/v1\/tabs\/[^/]+\/settle$/.test(url)&&init?.method==='POST'){
-        const requests=JSON.parse(localStorage.getItem('__skyBarReloadSettlementRequests')??'[]') as {path:string;body:unknown}[];
+        const requests=JSON.parse(localStorage.getItem('__aerstelloReloadSettlementRequests')??'[]') as {path:string;body:unknown}[];
         requests.push({path:new URL(url,location.href).pathname,body:JSON.parse(String(init.body))});
-        localStorage.setItem('__skyBarReloadSettlementRequests',JSON.stringify(requests));
+        localStorage.setItem('__aerstelloReloadSettlementRequests',JSON.stringify(requests));
         const response=await originalFetch(input,init);
-        if(localStorage.getItem('__skyBarLoseSettlementResponse')==='true'){
-          localStorage.setItem('__skyBarLoseSettlementResponse','false');
+        if(localStorage.getItem('__aerstelloLoseSettlementResponse')==='true'){
+          localStorage.setItem('__aerstelloLoseSettlementResponse','false');
           throw new TypeError('Simulated committed settlement response loss');
         }
         return response;
@@ -2601,7 +2601,7 @@ When('a committed settlement response is lost before modal close and reload',asy
     };
   };
   await page.addInitScript(instrumentSettlementFetch);
-  await page.evaluate(()=>{localStorage.setItem('__skyBarReloadSettlementRequests','[]');localStorage.setItem('__skyBarLoseSettlementResponse','true')});
+  await page.evaluate(()=>{localStorage.setItem('__aerstelloReloadSettlementRequests','[]');localStorage.setItem('__aerstelloLoseSettlementResponse','true')});
   await page.evaluate(instrumentSettlementFetch);
   await page.getByRole('button',{name:/Abrechnen|Incassa|Settle/}).click();
   const modal=page.locator('.modal');
@@ -2610,7 +2610,7 @@ When('a committed settlement response is lost before modal close and reload',asy
   await modal.getByRole('button',{name:/Abrechnen|Incassa|Settle/,exact:true}).click();
   await expect(modal.locator('.notice--error')).toBeVisible();
   settlementRecoveryBeforeReload=await page.evaluate(()=>{
-    const key=Object.keys(localStorage).find(item=>item.startsWith('skybar-pending-settlement:'));
+    const key=Object.keys(localStorage).find(item=>item.startsWith('aerstello-pending-settlement:'));
     return key?JSON.parse(localStorage.getItem(key)!) as SettlementRecoveryRecord:undefined;
   });
   await modal.getByRole('button',{name:/Schließen|Chiudi|Close/}).click();
@@ -2619,7 +2619,7 @@ When('a committed settlement response is lost before modal close and reload',asy
   const recoveryButton=page.getByRole('button',{name:/Abrechnung wiederherstellen|Recupera incasso|Recover settlement/});
   await expect(recoveryButton).toBeVisible();
   settlementRecoveryAfterReload=await page.evaluate(()=>{
-    const key=Object.keys(localStorage).find(item=>item.startsWith('skybar-pending-settlement:'));
+    const key=Object.keys(localStorage).find(item=>item.startsWith('aerstello-pending-settlement:'));
     return key?JSON.parse(localStorage.getItem(key)!) as SettlementRecoveryRecord:undefined;
   });
   await recoveryButton.click();
@@ -2629,8 +2629,8 @@ When('a committed settlement response is lost before modal close and reload',asy
   await expect(recoveryModal.getByLabel(/Notiz|Nota|Note/)).toBeDisabled();
   await recoveryModal.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();
   await expect(page).toHaveURL(/\/app\/bills\//);
-  reloadedSettlementRequests=await page.evaluate(()=>JSON.parse(localStorage.getItem('__skyBarReloadSettlementRequests')??'[]') as {path:string;body:SettlementRecoveryRecord['command']}[]);
-  reloadedSettlementStorageCount=await page.evaluate(()=>Object.keys(localStorage).filter(key=>key.startsWith('skybar-pending-settlement:')).length);
+  reloadedSettlementRequests=await page.evaluate(()=>JSON.parse(localStorage.getItem('__aerstelloReloadSettlementRequests')??'[]') as {path:string;body:SettlementRecoveryRecord['command']}[]);
+  reloadedSettlementStorageCount=await page.evaluate(()=>Object.keys(localStorage).filter(key=>key.startsWith('aerstello-pending-settlement:')).length);
   reloadedSettlementBillCount=((await (await page.context().request.get('/api/v1/bills')).json()) as {data:unknown[]}).data.length;
 });
 Then('settlement recovery replays the original frozen command',async()=>{
@@ -2835,7 +2835,7 @@ When('the host opens a bill while its detail service is unavailable',async({page
   await page.addInitScript(({billId})=>{
     const originalFetch=window.fetch.bind(window);
     const state={billId,active:true,attempts:0};
-    Object.assign(window,{__skyBarBillDetailOutage:state});
+    Object.assign(window,{__aerstelloBillDetailOutage:state});
     window.fetch=async(input,init)=>{
       const url=input instanceof Request?input.url:input instanceof URL?input.href:String(input);
       if(new URL(url,window.location.href).pathname===`/api/v1/bills/${state.billId}`){
@@ -2854,7 +2854,7 @@ Then('bill detail shows localized failure and retry without fabricated bill cont
   await expect(page.locator('.bill-sheet')).toHaveCount(0);
 });
 When('the host retries the bill detail request after recovery',async({page})=>{
-  await page.evaluate(()=>{(window as unknown as {__skyBarBillDetailOutage:{active:boolean}}).__skyBarBillDetailOutage.active=false});
+  await page.evaluate(()=>{(window as unknown as {__aerstelloBillDetailOutage:{active:boolean}}).__aerstelloBillDetailOutage.active=false});
   await page.getByRole('button',{name:/Erneut versuchen|Riprova|Retry/}).click();
 });
 Then('the same bill detail is rendered',async({page})=>{await expect(page).toHaveURL(new RegExp(`/app/bills/${recoverableBillId}$`));await expect(page.locator('.bill-sheet h1')).toHaveText('Hotel Aurora');await expect(page.locator('.bill-sheet header')).toContainText(`#${recoverableBillNumber}`)});
@@ -3202,8 +3202,8 @@ When('the host opens a voided bill for printing',async({page})=>{const {request,
 Then('the printed bill shows its void reason',async({page})=>{await expect(page.locator('.bill-void-marker .notice')).toBeVisible();await expect(page.locator('.bill-void-marker')).toContainText('Printed correction')});
 
 When('the administrator session is revoked while its event stream is open',async({page,browser})=>{
-  await page.evaluate(()=>new Promise<void>((resolve,reject)=>{sessionStorage.setItem('__skyBarRevokedEvents','0');const events=new EventSource('/api/v1/events?scope=host');Object.assign(window,{__skyBarRevokedStream:events});events.addEventListener('rooms.changed',()=>sessionStorage.setItem('__skyBarRevokedEvents',String(Number(sessionStorage.getItem('__skyBarRevokedEvents'))+1)));events.addEventListener('open',()=>resolve(),{once:true});events.addEventListener('error',()=>{if(events.readyState===EventSource.CLOSED)reject(new Error('Event stream closed before opening'))},{once:true})}));
-  const request=page.context().request;await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'realtime-admin@skybar.test',name:'Realtime Admin',password:'RealtimeAdmin123!',role:'admin',language:'de'}});const other=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(other);await other.request.post('/api/v1/auth/login',{data:{email:'realtime-admin@skybar.test',password:'RealtimeAdmin123!'}});execFileSync('npm',['run','admin:create:dev','-w','@sky-bar/api','--','--email','admin@skybar.test','--name','Mira Host','--password-stdin'],{cwd:process.cwd(),env:process.env,stdio:'pipe',input:'RecoveredAgain123!\n'});expect((await other.request.post('/api/v1/rooms',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:'After revocation'}})).status()).toBe(201);await page.waitForTimeout(500);revokedStreamEventCount=await page.evaluate(()=>Number(sessionStorage.getItem('__skyBarRevokedEvents')));
+  await page.evaluate(()=>new Promise<void>((resolve,reject)=>{sessionStorage.setItem('__aerstelloRevokedEvents','0');const events=new EventSource('/api/v1/events?scope=host');Object.assign(window,{__aerstelloRevokedStream:events});events.addEventListener('rooms.changed',()=>sessionStorage.setItem('__aerstelloRevokedEvents',String(Number(sessionStorage.getItem('__aerstelloRevokedEvents'))+1)));events.addEventListener('open',()=>resolve(),{once:true});events.addEventListener('error',()=>{if(events.readyState===EventSource.CLOSED)reject(new Error('Event stream closed before opening'))},{once:true})}));
+  const request=page.context().request;await request.post('/api/v1/hosts',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),email:'realtime-admin@aerstello.test',name:'Realtime Admin',password:'RealtimeAdmin123!',role:'admin',language:'de'}});const other=await browser.newContext({baseURL:e2eBaseURL});extraContexts.push(other);await other.request.post('/api/v1/auth/login',{data:{email:'realtime-admin@aerstello.test',password:'RealtimeAdmin123!'}});execFileSync('npm',['run','admin:create:dev','-w','@aerstello/api','--','--email','admin@aerstello.test','--name','Mira Host','--password-stdin'],{cwd:process.cwd(),env:process.env,stdio:'pipe',input:'RecoveredAgain123!\n'});expect((await other.request.post('/api/v1/rooms',{headers:csrfHeaders,data:{mutationId:crypto.randomUUID(),name:'After revocation'}})).status()).toBe(201);await page.waitForTimeout(500);revokedStreamEventCount=await page.evaluate(()=>Number(sessionStorage.getItem('__aerstelloRevokedEvents')));
 });
 Then('the revoked stream receives no later venue events',async()=>{expect(revokedStreamEventCount).toBe(0)});
 

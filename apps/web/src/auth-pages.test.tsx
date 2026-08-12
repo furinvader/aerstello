@@ -24,7 +24,7 @@ function renderPage(page: React.ReactNode, path = '/') {
 describe('public launch identity resolution', () => {
   beforeEach(() => {
     apiMock.mockReset();
-    localStorage.setItem('skybar-language', 'en');
+    localStorage.setItem('aerstello-language', 'en');
   });
 
   afterEach(() => cleanup());
@@ -85,7 +85,7 @@ describe('guest request bootstrap states', () => {
   beforeEach(() => {
     apiMock.mockReset();
     localStorage.clear();
-    localStorage.setItem('skybar-language', 'en');
+    localStorage.setItem('aerstello-language', 'en');
   });
 
   afterEach(() => cleanup());

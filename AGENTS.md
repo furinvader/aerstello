@@ -2,11 +2,11 @@
 
 ## Start here
 
-Sky Bar is a TypeScript npm-workspace application. Preserve the distinction between the **Sky Bar software name** and the **administrator-configured venue name**. Financial history must never be rewritten by later venue, guest, room, or product edits.
+Aerstello is a TypeScript npm-workspace application. Preserve the distinction between the **Aerstello software name** and the **administrator-configured venue name**. Financial history must never be rewritten by later venue, guest, room, or product edits.
 
 ## Project lifecycle status
 
-Sky Bar is currently a **pre-release initial implementation** because no valid
+Aerstello is currently a **pre-release initial implementation** because no valid
 production release marker-and-tag pair exists. Release status is derived from
 Git history by `npm run release:state`, never from `package.json`, a migration
 number, or an earlier commit or PR revision.
@@ -15,7 +15,7 @@ A valid production release is an annotated Git tag named
 `vMAJOR.MINOR.PATCH`. Its commit must be reachable from the protected release
 branch, currently `main`, and contain the matching
 `.release/markers/vMAJOR.MINOR.PATCH.json`. The marker must identify product
-`sky-bar`, the same stable version and tag, channel `production`, and a valid
+`aerstello`, the same stable version and tag, channel `production`, and a valid
 release timestamp. A marker without its tag is pending preparation, not release
 evidence. A release-like tag without a valid matching marker is inconsistent
 and must be reported rather than guessed around.

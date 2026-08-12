@@ -44,7 +44,7 @@ function proof(status = 'passed', headSha = HEAD) {
 
 function stateFixture(overrides = {}) {
   return {
-    schemaVersion: 3, revision: 1, repository: 'example/sky-bar', prNumber: 2, phase: 'recovering',
+    schemaVersion: 3, revision: 1, repository: 'example/aerstello', prNumber: 2, phase: 'recovering',
     baseSha: HEAD, requestedHeadSha: null, reviewedHeadSha: null, currentIntegrationHeadSha: HEAD,
     reviewRound: 0, verificationReviewUsed: false, legacyReviewProvenance: null, releaseBaseline: null,
     decisions: [], tasks: [], reviewRequest: null, reviewOutcome: null, reviewHistory: [],
@@ -80,7 +80,7 @@ function readyState(overrides = {}) {
 
 function requestEvidence(kind = 'verification', overrides = {}) {
   return {
-    id: 'IC_request', databaseId: 101, url: 'https://github.com/example/sky-bar/pull/2#issuecomment-101',
+    id: 'IC_request', databaseId: 101, url: 'https://github.com/example/aerstello/pull/2#issuecomment-101',
     headSha: HEAD, at: AT, kind, body: '@codex review', authorLogin: VIEWER.login,
     authorNodeId: VIEWER.id, ...overrides,
   };
@@ -102,7 +102,7 @@ function pendingState(kind = 'verification', overrides = {}) {
 function completedState(overrides = {}) {
   const request = requestEvidence('discovery');
   const outcome = {
-    id: 'PRR_clean', databaseId: 201, url: 'https://github.com/example/sky-bar/pull/2#pullrequestreview-201',
+    id: 'PRR_clean', databaseId: 201, url: 'https://github.com/example/aerstello/pull/2#pullrequestreview-201',
     headSha: HEAD, at: AT, requestId: request.id, kind: 'discovery', outcome: 'clean',
     evidenceType: 'review-submission', reviewerLogin: BOT.login, reviewerNodeId: BOT.id,
     reviewerType: BOT.__typename, reviewerUrl: BOT.url, reactionContent: null, reactionCommentId: null,
@@ -145,13 +145,13 @@ function cleanReviewEntry(index, kind, headSha = OTHER_HEAD) {
   const request = requestEvidence(kind, {
     id: `IC_${kind}_${index}`,
     databaseId: 100 + index,
-    url: `https://github.com/example/sky-bar/pull/2#issuecomment-${100 + index}`,
+    url: `https://github.com/example/aerstello/pull/2#issuecomment-${100 + index}`,
     headSha,
   });
   const outcome = {
     id: `PRR_${kind}_${index}`,
     databaseId: 200 + index,
-    url: `https://github.com/example/sky-bar/pull/2#pullrequestreview-${200 + index}`,
+    url: `https://github.com/example/aerstello/pull/2#pullrequestreview-${200 + index}`,
     headSha,
     at: AT,
     requestId: request.id,
@@ -178,7 +178,7 @@ function canonicalReview(overrides = {}) {
 function cleanIssueComment(overrides = {}) {
   return {
     id: 'IC_clean', databaseId: 202,
-    url: 'https://github.com/example/sky-bar/pull/2#issuecomment-202',
+    url: 'https://github.com/example/aerstello/pull/2#issuecomment-202',
     body: CLEAN_COMMENT_BODY, createdAt: AT, lastEditedAt: null, author: BOT, ...overrides,
   };
 }
@@ -203,7 +203,7 @@ function findingsState(overrides = {}) {
 function rootComment(threadId = 'THREAD_1', overrides = {}) {
   return {
     id: `ROOT_${threadId}`, databaseId: threadId === 'THREAD_1' ? 41 : 42,
-    url: `https://github.com/example/sky-bar/pull/2#discussion_r${threadId}`,
+    url: `https://github.com/example/aerstello/pull/2#discussion_r${threadId}`,
     body: 'Canonical finding.', createdAt: AT, author: BOT, replyTo: null,
     pullRequestReview: { id: 'PRR_review' }, ...overrides,
   };
@@ -223,11 +223,11 @@ function fullValidationCheck(overrides = {}) {
   return {
     __typename: 'CheckRun', id: 'CHECK_full', databaseId: 301, name: 'Full validation',
     status: 'COMPLETED', conclusion: 'SUCCESS', completedAt: AT,
-    detailsUrl: 'https://github.com/example/sky-bar/actions/runs/701/job/301',
+    detailsUrl: 'https://github.com/example/aerstello/actions/runs/701/job/301',
     checkSuite: {
       app: { slug: 'github-actions' },
       workflowRun: {
-        databaseId: 701, url: 'https://github.com/example/sky-bar/actions/runs/701',
+        databaseId: 701, url: 'https://github.com/example/aerstello/actions/runs/701',
         file: { path: '.github/workflows/ci.yml' }, workflow: { name: 'CI' },
       },
     },
@@ -238,7 +238,7 @@ function fullValidationCheck(overrides = {}) {
 class FakeClient {
   constructor(overrides = {}) {
     this.metadata = {
-      id: 'PR_node', number: 2, url: 'https://github.com/example/sky-bar/pull/2',
+      id: 'PR_node', number: 2, url: 'https://github.com/example/aerstello/pull/2',
       headRefOid: HEAD, viewer: VIEWER,
     };
     this.comments = [];
@@ -300,7 +300,7 @@ class FakeClient {
     if (name === 'AddReviewRequest' && !this.noEffect.has(name)) {
       this.comments.push({
         id: `IC_${this.comments.length + 1}`, databaseId: 500 + this.comments.length,
-        url: 'https://github.com/example/sky-bar/pull/2#issuecomment-new', body: variables.body,
+        url: 'https://github.com/example/aerstello/pull/2#issuecomment-new', body: variables.body,
         createdAt: AT, author: this.metadata.viewer,
       });
     }
@@ -308,7 +308,7 @@ class FakeClient {
       const comments = this.threadComments.get(variables.threadId);
       comments.push({
         id: `REPLY_${comments.length}`, databaseId: 900 + comments.length,
-        url: 'https://github.com/example/sky-bar/pull/2#discussion_reply', body: variables.body,
+        url: 'https://github.com/example/aerstello/pull/2#discussion_reply', body: variables.body,
         createdAt: AT, author: this.metadata.viewer, replyTo: { id: comments.find((item) => item.replyTo === null).id },
         pullRequestReview: null,
       });
@@ -480,12 +480,12 @@ function addThread(client, { id = 'THREAD_1', resolved = false, root = rootComme
 }
 
 function markerFor(operationId) {
-  return `<!-- sky-bar-review:${createHash('sha256').update(operationId).digest('hex').slice(0, 24)} -->`;
+  return `<!-- aerstello-review:${createHash('sha256').update(operationId).digest('hex').slice(0, 24)} -->`;
 }
 
 function priorIntent(type, operationId, at = AT) {
   return { type, operationId,
-    clientMutationId: `sky-bar-${createHash('sha256').update(operationId).digest('hex').slice(0, 24)}`, at,
+    clientMutationId: `aerstello-${createHash('sha256').update(operationId).digest('hex').slice(0, 24)}`, at,
     ...(type === 'request' ? { excludedCommentIds: [] } : {}) };
 }
 
@@ -555,10 +555,10 @@ test('Actor author queries select node IDs only through Bot and User fragments',
 test('collect-ci paginates the exact-head rollup and records the latest authoritative workflow run', async () => {
   const client = new FakeClient({ pageSize: 1 });
   client.ciContexts = [
-    { __typename: 'StatusContext', id: 'STATUS_lint', context: 'lint', state: 'SUCCESS', targetUrl: 'https://github.com/example/sky-bar' },
+    { __typename: 'StatusContext', id: 'STATUS_lint', context: 'lint', state: 'SUCCESS', targetUrl: 'https://github.com/example/aerstello' },
     fullValidationCheck({ id: 'CHECK_old', completedAt: '2026-08-04T23:00:00Z',
       checkSuite: { app: { slug: 'github-actions' }, workflowRun: { databaseId: 700,
-        url: 'https://github.com/example/sky-bar/actions/runs/700',
+        url: 'https://github.com/example/aerstello/actions/runs/700',
         file: { path: '.github/workflows/ci.yml' }, workflow: { name: 'CI' } } } }),
     fullValidationCheck(),
   ];
@@ -567,7 +567,7 @@ test('collect-ci paginates the exact-head rollup and records the latest authorit
   assert.deepEqual(result.evidence, {
     source: 'github-actions', scope: 'full', status: 'passed', headSha: HEAD,
     checks: ['Full validation'], checkRunId: 'CHECK_full', workflowRunId: 701,
-    workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/701', updatedAt: AT,
+    workflowRunUrl: 'https://github.com/example/aerstello/actions/runs/701', updatedAt: AT,
   });
   assert.ok(client.calls.filter((call) => call.name === 'PullRequestChecks').length >= 3);
   assert.match(client.calls.find((call) => call.name === 'PullRequestChecks').query,
@@ -580,11 +580,11 @@ test('collect-ci evidence is unchanged by unrelated rollup contexts', async () =
   const unrelatedCheck = {
     __typename: 'CheckRun', id: 'CHECK_lint', databaseId: 302, name: 'lint',
     status: 'COMPLETED', conclusion: 'SUCCESS', completedAt: AT,
-    detailsUrl: 'https://github.com/example/sky-bar/actions/runs/800/job/302', checkSuite: null,
+    detailsUrl: 'https://github.com/example/aerstello/actions/runs/800/job/302', checkSuite: null,
   };
   const unrelatedStatus = {
     __typename: 'StatusContext', id: 'STATUS_lint', context: 'legacy lint',
-    state: 'SUCCESS', targetUrl: 'https://github.com/example/sky-bar',
+    state: 'SUCCESS', targetUrl: 'https://github.com/example/aerstello',
   };
   const client = new FakeClient({ ciContexts: [unrelatedStatus, authoritative, unrelatedCheck] });
   const setup = workflow(stateFixture(), client);
@@ -645,7 +645,7 @@ test('collect-ci supersedes failures only within the same workflow run', async (
     fullValidationCheck({
       id: 'CHECK_failed_parallel', conclusion: 'FAILURE', completedAt: '2026-08-04T23:59:00Z',
       checkSuite: { app: { slug: 'github-actions' }, workflowRun: {
-        databaseId: 700, url: 'https://github.com/example/sky-bar/actions/runs/700',
+        databaseId: 700, url: 'https://github.com/example/aerstello/actions/runs/700',
         file: { path: '.github/workflows/ci.yml' }, workflow: { name: 'CI' },
       } },
     }),
@@ -655,7 +655,7 @@ test('collect-ci supersedes failures only within the same workflow run', async (
   assert.equal(failedEvidence.status, 'failed');
   assert.equal(failedEvidence.checkRunId, 'CHECK_failed_parallel');
   assert.equal(failedEvidence.workflowRunId, 700);
-  assert.equal(failedEvidence.workflowRunUrl, 'https://github.com/example/sky-bar/actions/runs/700');
+  assert.equal(failedEvidence.workflowRunUrl, 'https://github.com/example/aerstello/actions/runs/700');
   assert.equal(failedEvidence.updatedAt, '2026-08-04T23:59:00Z');
 });
 
@@ -678,7 +678,7 @@ test('collect-ci records a completed failed full run but rejects pending, stale,
   const ambiguous = new FakeClient({ ciContexts: [
     fullValidationCheck(),
     fullValidationCheck({ id: 'CHECK_other', checkSuite: { app: { slug: 'github-actions' },
-      workflowRun: { databaseId: 701, url: 'https://github.com/example/sky-bar/actions/runs/701',
+      workflowRun: { databaseId: 701, url: 'https://github.com/example/aerstello/actions/runs/701',
         file: { path: '.github/workflows/ci.yml' }, workflow: { name: 'CI' } } } }),
   ] });
   await assert.rejects(() => workflow(stateFixture(), ambiguous).api.collectCi(2), { code: 'CI_EVIDENCE_AMBIGUOUS' });
@@ -980,7 +980,7 @@ test('collect-ci classifies the selected Full validation run independently of th
       ciContexts: [
         fullValidationCheck({ conclusion }),
         { __typename: 'StatusContext', id: `STATUS_${rollupState}`, context: 'unrelated',
-          state: rollupState, targetUrl: 'https://github.com/example/sky-bar' },
+          state: rollupState, targetUrl: 'https://github.com/example/aerstello' },
       ],
     });
     const result = await workflow(stateFixture(), client).api.collectCi(2);
@@ -994,7 +994,7 @@ test('collect-ci waits when another authoritative Full validation run is incompl
     fullValidationCheck({
       id: 'CHECK_pending', status: 'IN_PROGRESS', conclusion: null, completedAt: null,
       checkSuite: { app: { slug: 'github-actions' }, workflowRun: {
-        databaseId: 702, url: 'https://github.com/example/sky-bar/actions/runs/702',
+        databaseId: 702, url: 'https://github.com/example/aerstello/actions/runs/702',
         file: { path: '.github/workflows/ci.yml' }, workflow: { name: 'CI' },
       } },
     }),
@@ -1007,7 +1007,7 @@ test('collect-ci waits when another authoritative Full validation run is incompl
 test('collect-ci rejects same-named jobs from another workflow and incomplete workflow identity', async () => {
   const wrongWorkflow = new FakeClient({ ciContexts: [fullValidationCheck({ checkSuite: {
     app: { slug: 'github-actions' },
-    workflowRun: { databaseId: 701, url: 'https://github.com/example/sky-bar/actions/runs/701',
+    workflowRun: { databaseId: 701, url: 'https://github.com/example/aerstello/actions/runs/701',
       file: { path: '.github/workflows/other.yml' }, workflow: { name: 'CI' } },
   } })] });
   await assert.rejects(() => workflow(stateFixture(), wrongWorkflow).api.collectCi(2), {
@@ -1016,7 +1016,7 @@ test('collect-ci rejects same-named jobs from another workflow and incomplete wo
 
   const missingWorkflow = new FakeClient({ ciContexts: [fullValidationCheck({ checkSuite: {
     app: { slug: 'github-actions' },
-    workflowRun: { databaseId: 701, url: 'https://github.com/example/sky-bar/actions/runs/701' },
+    workflowRun: { databaseId: 701, url: 'https://github.com/example/aerstello/actions/runs/701' },
   } })] });
   await assert.rejects(() => workflow(stateFixture(), missingWorkflow).api.collectCi(2), {
     code: 'CI_EVIDENCE_INCOMPLETE',
@@ -1024,7 +1024,7 @@ test('collect-ci rejects same-named jobs from another workflow and incomplete wo
 
   const truncatedWorkflow = new FakeClient({ ciContexts: [fullValidationCheck({ checkSuite: {
     app: { slug: 'github-actions' },
-    workflowRun: { databaseId: 701, url: 'https://github.com/example/sky-bar/actions/runs/701',
+    workflowRun: { databaseId: 701, url: 'https://github.com/example/aerstello/actions/runs/701',
       file: { path: null }, workflow: { name: 'CI' } },
   } })] });
   await assert.rejects(() => workflow(stateFixture(), truncatedWorkflow).api.collectCi(2), {
@@ -1036,7 +1036,7 @@ test('collect-ci rejects same-named jobs from another workflow and incomplete wo
     fullValidationCheck({
       id: null, completedAt: '2026-08-04T23:00:00Z',
       checkSuite: { app: { slug: 'github-actions' }, workflowRun: {
-        databaseId: 700, url: 'http://github.com/example/sky-bar/actions/runs/700',
+        databaseId: 700, url: 'http://github.com/example/aerstello/actions/runs/700',
         file: { path: '.github/workflows/ci.yml' }, workflow: { name: 'CI' },
       } },
     }),
@@ -1091,14 +1091,14 @@ test('GraphQL reads fail closed on errors, unsafe cost, and truncated pagination
     new FakeClient({ graphqlErrors: new Set(['PullRequestComments']) }),
     new FakeClient({ remaining: 0 }),
   ]) {
-    await assert.rejects(() => readTopLevelComments(client, 'example/sky-bar', 2), GitHubWorkflowError);
+    await assert.rejects(() => readTopLevelComments(client, 'example/aerstello', 2), GitHubWorkflowError);
   }
   const client = new FakeClient();
   client.comments = [{ id: 'C1' }, { id: 'C2' }];
   client.graphql = async () => client.result({
     repository: { pullRequest: { comments: { nodes: [{ id: 'C1' }], pageInfo: { hasNextPage: true, endCursor: null } } } },
   });
-  await assert.rejects(() => readTopLevelComments(client, 'example/sky-bar', 2), { code: 'GRAPHQL_TRUNCATED' });
+  await assert.rejects(() => readTopLevelComments(client, 'example/aerstello', 2), { code: 'GRAPHQL_TRUNCATED' });
 });
 
 test('request preflight rejects dirty, local, pushed, live, and ancestry drift before mutation', async () => {
@@ -1133,7 +1133,7 @@ test('request journals before exact mutation, proves live result, and checkpoint
   assert.deepEqual(events.slice(0, 2), ['intent:request', 'mutation:AddReviewRequest']);
   const mutation = client.calls.find((call) => call.name === 'AddReviewRequest');
   assert.equal(mutation.variables.body, '@codex review');
-  assert.match(mutation.variables.clientMutationId, /^sky-bar-/u);
+  assert.match(mutation.variables.clientMutationId, /^aerstello-/u);
   assert.equal(state.calls.at(-1).name, 'checkpointReviewRequest');
 });
 
@@ -1249,7 +1249,7 @@ test('request revalidates canonical thread proof before journaling or mutation a
   const reply = {
     id: 'REPLY_resolved', databaseId: 901, url: 'https://x/reply', createdAt: AT, author: VIEWER,
     replyTo: { id: 'ROOT_THREAD_1' }, pullRequestReview: null,
-    body: `Sky Bar review resolution at ${HEAD}.\nTasks:\n- task-thread: ${HEAD}\nValidation: npm run check.\n${markerFor(replyOperation)}`,
+    body: `Aerstello review resolution at ${HEAD}.\nTasks:\n- task-thread: ${HEAD}\nValidation: npm run check.\n${markerFor(replyOperation)}`,
   };
   client.threadComments.get('THREAD_1').push(reply);
   const resolvedState = readyState({
@@ -1293,7 +1293,7 @@ test('mutation correlation is required in addition to live proof', async () => {
 test('request recovers one exact viewer comment and fails closed on ambiguous or unproven recovery', async () => {
   const recoveredClient = new FakeClient();
   recoveredClient.comments.push({
-    id: 'IC_recovered', databaseId: 9, url: 'https://github.com/example/sky-bar/pull/2#issuecomment-9',
+    id: 'IC_recovered', databaseId: 9, url: 'https://github.com/example/aerstello/pull/2#issuecomment-9',
     body: '@codex review', createdAt: AT, author: VIEWER,
   });
   const operationId = `request:2:discovery:1:${HEAD}`;
@@ -1382,7 +1382,7 @@ test('reply-resolve identifies explicit root, deduplicates shared source identit
   assert.deepEqual(events.filter((item) => item.startsWith('mutation:')), ['mutation:AddThreadReply', 'mutation:ResolveThread']);
   assert.equal(client.calls.filter((call) => call.name === 'AddThreadReply').length, 1);
   assert.equal(client.calls.filter((call) => call.name === 'ResolveThread').length, 1);
-  assert.match(client.threadComments.get('THREAD_1')[1].body, /<!-- sky-bar-review:[0-9a-f]{24} -->/u);
+  assert.match(client.threadComments.get('THREAD_1')[1].body, /<!-- aerstello-review:[0-9a-f]{24} -->/u);
   assert.equal(result.threadResolutionStatus.status, 'passed');
   assert.equal(state.current.tasks[0].status, 'completed');
   assert.equal(state.current.tasks[1].status, 'integrated');
@@ -1642,7 +1642,7 @@ test('verify-resolve re-attests completed threadless proof after HEAD drift with
     status: 'passed', headSha: HEAD, updatedAt: AT,
   };
   const rejected = workflow(aggregateNotInvalidated, new FakeClient({ metadata: {
-    id: 'PR_node', number: 2, url: 'https://github.com/example/sky-bar/pull/2',
+    id: 'PR_node', number: 2, url: 'https://github.com/example/aerstello/pull/2',
     headRefOid: OTHER_HEAD, viewer: VIEWER,
   } }), { git });
   await assert.rejects(() => rejected.api.verifyResolve(2, ['threadless-completed']), { code: 'TASK_NOT_READY' });
@@ -1809,13 +1809,13 @@ test('completed threadless refresh permits mapped new roots and enables journal-
     addThread(client, { id: 'THREAD_OLD', resolved: true, replies: [{
       id: 'REPLY_OLD', databaseId: 901, url: 'https://x/old-reply', createdAt: AT, author: VIEWER,
       replyTo: { id: 'ROOT_THREAD_OLD' }, pullRequestReview: null,
-      body: `Sky Bar review resolution at ${HEAD}.\nTasks:\n- task-thread-old: ${HEAD}\nValidation: prior validation.\n${markerFor(oldReplyOperation)}`,
+      body: `Aerstello review resolution at ${HEAD}.\nTasks:\n- task-thread-old: ${HEAD}\nValidation: prior validation.\n${markerFor(oldReplyOperation)}`,
     }] });
     const newReplyOperation = `reply:2:THREAD_1:${PRIOR_INTEGRATION_HEAD}`;
     addThread(client, { id: 'THREAD_1', resolved: true, replies: [{
       id: 'REPLY_NEW', databaseId: 902, url: 'https://x/new-reply', createdAt: AT, author: VIEWER,
       replyTo: { id: 'ROOT_THREAD_1' }, pullRequestReview: null,
-      body: `Sky Bar review resolution at ${PRIOR_INTEGRATION_HEAD}.\nTasks:\n- task-thread-new: ${SELECTED_TASK_HEAD}\nValidation: prior validation.\n${markerFor(newReplyOperation)}`,
+      body: `Aerstello review resolution at ${PRIOR_INTEGRATION_HEAD}.\nTasks:\n- task-thread-new: ${SELECTED_TASK_HEAD}\nValidation: prior validation.\n${markerFor(newReplyOperation)}`,
     }] });
     return client;
   }
@@ -2001,7 +2001,7 @@ test('verify-resolve rejects unsupported and stale selections without state or G
     ['live-head', integratedNonThreadState(), {}, 'MUTATION_NOT_READY'],
   ]) {
     const client = new FakeClient(label === 'live-head' ? { metadata: {
-      id: 'PR_node', number: 2, url: 'https://github.com/example/sky-bar/pull/2',
+      id: 'PR_node', number: 2, url: 'https://github.com/example/aerstello/pull/2',
       headRefOid: OTHER_HEAD, viewer: VIEWER,
     } } : {});
     const setup = workflow(state, client, options);
@@ -2066,7 +2066,7 @@ test('verify-resolve rechecks state and canonical root resolution before its sta
   addThread(resolutionClient, { resolved: true, replies: [{
     id: 'REPLY_1', databaseId: 901, url: 'https://x/reply', createdAt: AT, author: VIEWER,
     replyTo: { id: 'ROOT_THREAD_1' }, pullRequestReview: null,
-    body: `Sky Bar review resolution at ${HEAD}.\nTasks:\n- task-thread: ${HEAD}\nValidation: npm run check.\n${markerFor(operationId)}`,
+    body: `Aerstello review resolution at ${HEAD}.\nTasks:\n- task-thread: ${HEAD}\nValidation: npm run check.\n${markerFor(operationId)}`,
   }] });
   const resolutionRace = workflow(threadState, resolutionClient);
   await assert.rejects(() => resolutionRace.api.verifyResolve(2, ['task-local']), {
@@ -2085,7 +2085,7 @@ test('reply-resolve fails on ambiguous roots and duplicate idempotency markers',
 
   const duplicate = new FakeClient();
   const root = addThread(duplicate);
-  const marker = '<!-- sky-bar-review:1234567890abcdef12345678 -->';
+  const marker = '<!-- aerstello-review:1234567890abcdef12345678 -->';
   duplicate.threadComments.get('THREAD_1').push(
     { id: 'R1', url: 'https://x/1', body: marker, replyTo: { id: root.id }, author: VIEWER },
     { id: 'R2', url: 'https://x/2', body: marker, replyTo: { id: root.id }, author: VIEWER },
@@ -2194,7 +2194,7 @@ test('collect records the literal :tada: clean issue comment with exact immutabl
   const client = new FakeClient();
   const observed = cleanIssueComment({
     id: 'IC_kwDOTqOdrM8AAAABNuD83Q', databaseId: 5215681757,
-    url: 'https://github.com/example/sky-bar/pull/2#issuecomment-5215681757',
+    url: 'https://github.com/example/aerstello/pull/2#issuecomment-5215681757',
     body: CLEAN_TADA_COMMENT_BODY,
   });
   client.comments.push(observed);
@@ -2494,7 +2494,7 @@ test('complete freshly revalidates clean issue-comment identity and content', as
     null,
     cleanIssueComment({ id: 'IC_changed' }),
     cleanIssueComment({ databaseId: 999 }),
-    cleanIssueComment({ url: 'https://github.com/example/sky-bar/pull/2#issuecomment-mutated' }),
+    cleanIssueComment({ url: 'https://github.com/example/aerstello/pull/2#issuecomment-mutated' }),
     cleanIssueComment({ createdAt: '2026-08-05T00:00:01Z' }),
     cleanIssueComment({ author: { ...BOT, id: 'BOT_changed' } }),
     cleanIssueComment({ author: { ...BOT, login: 'chatgpt-codex-connector-renamed' } }),
@@ -2621,7 +2621,7 @@ test('complete rechecks that the same successful workflow evidence is still auth
             completedAt: '2026-08-05T00:01:00Z', checkSuite: {
               app: { slug: 'github-actions' },
               workflowRun: { databaseId: 702,
-                url: 'https://github.com/example/sky-bar/actions/runs/702',
+                url: 'https://github.com/example/aerstello/actions/runs/702',
                 file: { path: '.github/workflows/ci.yml' }, workflow: { name: 'CI' } },
             } }),
         ];
@@ -2632,7 +2632,7 @@ test('complete rechecks that the same successful workflow evidence is still auth
       mutate(client) {
         client.ciContexts = [fullValidationCheck({ completedAt: '2026-08-05T00:01:00Z', checkSuite: {
           app: { slug: 'github-actions' },
-          workflowRun: { databaseId: 702, url: 'https://github.com/example/sky-bar/actions/runs/702',
+          workflowRun: { databaseId: 702, url: 'https://github.com/example/aerstello/actions/runs/702',
             file: { path: '.github/workflows/ci.yml' }, workflow: { name: 'CI' } },
         } })];
       },
@@ -2670,10 +2670,10 @@ test('complete ignores unrelated context changes between authoritative CI reads'
         if (this.checkReads === 2) {
           this.ciContexts = [
             { __typename: 'StatusContext', id: 'STATUS_late', context: 'late status',
-              state: 'FAILURE', targetUrl: 'https://github.com/example/sky-bar' },
+              state: 'FAILURE', targetUrl: 'https://github.com/example/aerstello' },
             { __typename: 'CheckRun', id: 'CHECK_late', databaseId: 999, name: 'late unrelated check',
               status: 'COMPLETED', conclusion: 'FAILURE', completedAt: AT,
-              detailsUrl: 'https://github.com/example/sky-bar/actions/runs/999/job/999', checkSuite: null },
+              detailsUrl: 'https://github.com/example/aerstello/actions/runs/999/job/999', checkSuite: null },
             fullValidationCheck(),
           ];
         }
@@ -2958,7 +2958,7 @@ test('default gh GraphQL transport preserves literal strings and typed scalar va
   const result = await client.graphql({
     query: 'mutation($body:String!,$pr:Int!,$enabled:Boolean!){example}',
     variables: {
-      body: '@codex review', owner: 'openai/sky-bar', pr: 2, enabled: true,
+      body: '@codex review', owner: 'openai/aerstello', pr: 2, enabled: true,
       cursor: null, absent: undefined,
     },
   });
@@ -2967,7 +2967,7 @@ test('default gh GraphQL transport preserves literal strings and typed scalar va
     'api', 'graphql',
     '-f', 'query=mutation($body:String!,$pr:Int!,$enabled:Boolean!){example}',
     '-f', 'body=@codex review',
-    '-f', 'owner=openai/sky-bar',
+    '-f', 'owner=openai/aerstello',
     '-F', 'pr=2',
     '-F', 'enabled=true',
   ]);
@@ -3020,7 +3020,7 @@ test('reply recovery rejects foreign, altered, and prior-head markers', async ()
   for (const variant of ['foreign', 'altered', 'prior']) {
     const client = new FakeClient();
     const operationId = `reply:2:THREAD_1:${HEAD}`;
-    const baseBody = `Sky Bar review resolution at ${HEAD}.\nTasks:\n- task-thread: ${HEAD}\nValidation: npm run check.\n${markerFor(operationId)}`;
+    const baseBody = `Aerstello review resolution at ${HEAD}.\nTasks:\n- task-thread: ${HEAD}\nValidation: npm run check.\n${markerFor(operationId)}`;
     const reply = {
       id: `REPLY_${variant}`, databaseId: 901, url: 'https://x/reply', createdAt: AT,
       author: variant === 'foreign' ? BOT : VIEWER, replyTo: { id: 'ROOT_THREAD_1' }, pullRequestReview: null,
@@ -3041,7 +3041,7 @@ test('pre-resolved root without durable proof requires a pre-existing resolve in
   addThread(client, { resolved: true, replies: [{
     id: 'REPLY_1', databaseId: 901, url: 'https://x/reply', createdAt: AT, author: VIEWER,
     replyTo: { id: 'ROOT_THREAD_1' }, pullRequestReview: null,
-    body: `Sky Bar review resolution at ${HEAD}.\nTasks:\n- task-thread: ${HEAD}\nValidation: npm run check.\n${markerFor(operationId)}`,
+    body: `Aerstello review resolution at ${HEAD}.\nTasks:\n- task-thread: ${HEAD}\nValidation: npm run check.\n${markerFor(operationId)}`,
   }] });
   const { api } = workflow(integratedThreadState(), client);
   await assert.rejects(() => api.replyResolve(2, 'task-thread'), { code: 'RESOLUTION_PROOF_MISSING' });
@@ -3054,7 +3054,7 @@ test('pre-resolved root is adopted only from its pre-existing resolve intent tim
   addThread(client, { resolved: true, replies: [{
     id: 'REPLY_1', databaseId: 901, url: 'https://x/reply', createdAt: AT, author: VIEWER,
     replyTo: { id: 'ROOT_THREAD_1' }, pullRequestReview: null,
-    body: `Sky Bar review resolution at ${HEAD}.\nTasks:\n- task-thread: ${HEAD}\nValidation: npm run check.\n${markerFor(replyOperation)}`,
+    body: `Aerstello review resolution at ${HEAD}.\nTasks:\n- task-thread: ${HEAD}\nValidation: npm run check.\n${markerFor(replyOperation)}`,
   }] });
   const resolveOperation = `resolve:2:THREAD_1:${HEAD}`;
   const journal = fakeJournal([], [{
@@ -3127,7 +3127,7 @@ test('a fresh later ordinal excludes prior review-history request IDs', async ()
     nextAction: 'Request another discovery review.' };
   const client = new FakeClient();
   client.comments.push({ id: 'IC_request', databaseId: 101,
-    url: 'https://github.com/example/sky-bar/pull/2#issuecomment-101', body: '@codex review',
+    url: 'https://github.com/example/aerstello/pull/2#issuecomment-101', body: '@codex review',
     createdAt: AT, author: VIEWER });
   const journal = fakeJournal();
   const setup = workflow(state, client, { journal });
@@ -3148,7 +3148,7 @@ test('malformed pre-existing resolve intents cannot adopt a live resolved root',
     addThread(client, { resolved: true, replies: [{
       id: 'REPLY_1', databaseId: 901, url: 'https://x/reply', createdAt: AT, author: VIEWER,
       replyTo: { id: 'ROOT_THREAD_1' }, pullRequestReview: null,
-      body: `Sky Bar review resolution at ${HEAD}.\nTasks:\n- task-thread: ${HEAD}\nValidation: npm run check.\n${markerFor(replyOperation)}`,
+      body: `Aerstello review resolution at ${HEAD}.\nTasks:\n- task-thread: ${HEAD}\nValidation: npm run check.\n${markerFor(replyOperation)}`,
     }] });
     const setup = workflow(integratedThreadState(), client, { journal: fakeJournal([], [intent]) });
     await assert.rejects(() => setup.api.replyResolve(2, 'task-thread'), GitHubWorkflowError);
@@ -3199,7 +3199,7 @@ test('historical resolved proof survives a later-head validation, request, colle
   const root = addThread(client, { resolved: true, replies: [{
     id: 'REPLY_old', databaseId: 901, url: 'https://x/old-reply', createdAt: AT, author: VIEWER,
     replyTo: { id: 'ROOT_THREAD_1' }, pullRequestReview: null,
-    body: `Sky Bar review resolution at ${HEAD}.\nTasks:\n- task-thread: ${HEAD}\nValidation: old validation.\n${markerFor(oldOperation)}`,
+    body: `Aerstello review resolution at ${HEAD}.\nTasks:\n- task-thread: ${HEAD}\nValidation: old validation.\n${markerFor(oldOperation)}`,
   }] });
   const task = integratedThreadState().tasks[0];
   task.status = 'completed';
@@ -3267,7 +3267,7 @@ test('unresolved head-A provenance is preserved when reply and resolution occur 
   const record = first.state.current.threadResolutionStatus.threads[0];
   assert.equal(record.observedHeadSha, HEAD);
   assert.match(client.threadComments.get('THREAD_1').at(-1).body,
-    new RegExp(`Sky Bar review resolution at ${OTHER_HEAD}`, 'u'));
+    new RegExp(`Aerstello review resolution at ${OTHER_HEAD}`, 'u'));
 
   const ready = { ...first.state.current, phase: 'ready-for-review', nextAction: 'Request review.' };
   const second = workflow(ready, client, { git });
@@ -3284,7 +3284,7 @@ test('paired unresolved recorded reply is reused and resolved without posting an
   const operationId = `reply:2:THREAD_1:${OTHER_HEAD}`;
   const root = addThread(client, { replies: [{ id: 'REPLY_paired', databaseId: 902, url: 'https://x/paired',
     createdAt: AT, author: VIEWER, replyTo: { id: 'ROOT_THREAD_1' }, pullRequestReview: null,
-    body: `Sky Bar review resolution at ${OTHER_HEAD}.\nTasks:\n- task-thread: ${HEAD}\nValidation: head-B check.\n${markerFor(operationId)}` }] });
+    body: `Aerstello review resolution at ${OTHER_HEAD}.\nTasks:\n- task-thread: ${HEAD}\nValidation: head-B check.\n${markerFor(operationId)}` }] });
   const state = integratedThreadState();
   state.currentIntegrationHeadSha = OTHER_HEAD;
   state.git = { branch: 'main', headSha: OTHER_HEAD, dirty: false };
@@ -3308,7 +3308,7 @@ test('paired unresolved reply from a prior head fails before journal or GitHub m
   const operationId = `reply:2:THREAD_1:${HEAD}`;
   const root = addThread(client, { replies: [{ id: 'REPLY_stale', databaseId: 903, url: 'https://x/stale',
     createdAt: AT, author: VIEWER, replyTo: { id: 'ROOT_THREAD_1' }, pullRequestReview: null,
-    body: `Sky Bar review resolution at ${HEAD}.\nTasks:\n- task-thread: ${HEAD}\nValidation: head-A check.\n${markerFor(operationId)}` }] });
+    body: `Aerstello review resolution at ${HEAD}.\nTasks:\n- task-thread: ${HEAD}\nValidation: head-A check.\n${markerFor(operationId)}` }] });
   const state = integratedThreadState();
   state.currentIntegrationHeadSha = OTHER_HEAD;
   state.git = { branch: 'main', headSha: OTHER_HEAD, dirty: false };

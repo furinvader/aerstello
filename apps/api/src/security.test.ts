@@ -74,7 +74,7 @@ describe('security primitives', () => {
         ['host-a', expect.stringMatching(/^[0-9a-f]{64}$/), 'Clock skew test agent'],
       );
       expect(setCookie).toHaveBeenCalledWith(
-        'skybar_host',
+        'aerstello_host',
         expect.any(String),
         expect.objectContaining({ expires: databaseExpiry }),
       );

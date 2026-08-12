@@ -36,7 +36,7 @@ describe('host identity query failures', () => {
   beforeEach(() => {
     apiMock.mockReset();
     eventSourceUrls.length = 0;
-    localStorage.setItem('skybar-language', 'en');
+    localStorage.setItem('aerstello-language', 'en');
     window.history.replaceState({}, '', '/app/bills/42');
     vi.stubGlobal('EventSource', class {
       constructor(url: string) { eventSourceUrls.push(url); }

@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { localized } from '@sky-bar/shared';
+import { localized } from '@aerstello/shared';
 import { Link, Redirect, useLocation } from 'wouter';
 import { BedDouble, Boxes, Building2, ClipboardList, CreditCard, Gauge, GlassWater, LogOut, Settings, UserRound, UserRoundCheck } from 'lucide-react';
 import { ApiError, api, apiErrorCodeMessage } from './api';
@@ -64,12 +64,12 @@ export function HostShell({children}:{children:ReactNode}) {
     return () => events.close();
   }, [me.isSuccess, client]);
   useLayoutEffect(() => { if (me.data?.host.language && language !== me.data.host.language) setLanguage(me.data.host.language); }, [me.data?.host.language, language, setLanguage]);
-  if (me.isLoading) return <div className="splash"><img src="/sky-bar.svg" alt=""/><span>Sky Bar</span></div>;
+  if (me.isLoading) return <div className="splash"><img src="/aerstello.svg" alt=""/><span>Aerstello</span></div>;
   if (me.isError) {
     if (me.error instanceof ApiError && me.error.status === 401) return <Redirect to="/login" />;
     return <main className="app-content"><Card><Notice kind="error">{t('requestFailed')}</Notice><Button onClick={() => void me.refetch()}>{t('retry')}</Button></Card></main>;
   }
-  if (language !== me.data!.host.language) return <div className="splash"><img src="/sky-bar.svg" alt=""/><span>Sky Bar</span></div>;
+  if (language !== me.data!.host.language) return <div className="splash"><img src="/aerstello.svg" alt=""/><span>Aerstello</span></div>;
   if (!me.data!.venue.name && currentPath !== '/app/settings') return <Redirect to="/app/settings" />;
   const discardConflict=async(mutationId:string)=>{await discardMutationConflict(mutationId,hostId!);const remaining=await mutationConflicts(hostId!);setConflicts(remaining);if(!remaining.length)setShowConflicts(false)};
   const retryConflict=async(mutationId:string)=>{await retryMutationConflict(mutationId,hostId!);if(navigator.onLine&&await flushQueue(hostId!)>0)await client.invalidateQueries();setQueued(await pendingMutationCount(hostId!));setConflicts(await mutationConflicts(hostId!))};
@@ -89,7 +89,7 @@ export function HostShell({children}:{children:ReactNode}) {
   return <HostContext.Provider value={{host:me.data!.host,venue:me.data!.venue}}>
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand"><img src="/sky-bar.svg" alt=""/><div><strong>{me.data!.venue.name || t('venueSetup')}</strong><span>Sky Bar</span></div></div>
+        <div className="brand"><img src="/aerstello.svg" alt=""/><div><strong>{me.data!.venue.name || t('venueSetup')}</strong><span>Aerstello</span></div></div>
         <nav aria-label="Primary">{nav.filter((item) => !item.admin || me.data!.host.role === 'admin').map(({ icon:Icon, ...item }) => {
           const active=currentPath===item.to||(!item.end&&item.to!=='/app/orders'&&currentPath.startsWith(`${item.to}/`));
           return <Link key={item.to} href={item.to} className={`${item.primary ? 'nav-primary ' : ''}${active ? 'active' : ''}`}><Icon/><span>{item.label}</span>{Boolean(item.badge) && <b className="badge">{item.badge}</b>}</Link>;

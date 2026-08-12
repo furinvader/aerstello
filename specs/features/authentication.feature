@@ -4,14 +4,14 @@ Feature: Secure host accounts and devices
 
   @id-an-administrator-signs-in-and-sees-the-configured-venue
   Scenario: An administrator signs in and sees the configured venue
-    Given the seeded Sky Bar venue
+    Given the seeded Aerstello venue
     When the administrator signs in
     Then the host dashboard shows the venue name "Hotel Aurora"
     And the page has no serious accessibility violations
 
   @id-a-public-launch-identity-outage-can-be-retried
   Scenario: A public launch identity outage can be retried
-    Given the seeded Sky Bar venue
+    Given the seeded Aerstello venue
     When a public launch identity check fails transiently
     Then public launch shows a localized failure with retry
     When the visitor retries the launch identity checks
@@ -136,7 +136,7 @@ Feature: Secure host accounts and devices
 
   @id-unknown-and-known-accounts-share-the-same-login-response
   Scenario: Unknown and known accounts share the same login response
-    Given the seeded Sky Bar venue
+    Given the seeded Aerstello venue
     When invalid passwords are submitted for known and unknown host emails
     Then both login attempts return the same credential error
 
@@ -148,6 +148,6 @@ Feature: Secure host accounts and devices
 
   @id-credential-recovery-rejects-an-in-flight-old-password-login
   Scenario: Credential recovery rejects an in-flight old-password login
-    Given the seeded Sky Bar venue
+    Given the seeded Aerstello venue
     When credential recovery completes while an old-password login is being verified
     Then the old-password login is rejected without creating a session

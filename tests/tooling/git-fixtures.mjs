@@ -31,16 +31,16 @@ export function commit(cwd, files, message = 'test commit') {
 }
 
 export function createRepository({ remote = true } = {}) {
-  const cwd = mkdtempSync(join(tmpdir(), 'sky-bar-tooling-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'aerstello-tooling-'));
   git(cwd, ['init', '-b', 'main']);
-  git(cwd, ['config', 'user.name', 'Sky Bar Tests']);
-  git(cwd, ['config', 'user.email', 'tests@sky-bar.invalid']);
+  git(cwd, ['config', 'user.name', 'Aerstello Tests']);
+  git(cwd, ['config', 'user.email', 'tests@aerstello.invalid']);
   commit(cwd, {
     'package.json': '{"name":"fixture","version":"9.9.9"}\n',
     'apps/api/migrations/0001_initial.sql': 'create table fixture (id integer);\n',
   }, 'initial');
   if (remote) {
-    git(cwd, ['remote', 'add', 'origin', 'https://github.com/example/sky-bar.git']);
+    git(cwd, ['remote', 'add', 'origin', 'https://github.com/example/aerstello.git']);
     updateOriginMain(cwd);
   }
   return cwd;
@@ -53,7 +53,7 @@ export function updateOriginMain(cwd) {
 export function marker(version, overrides = {}) {
   return `${JSON.stringify({
     schemaVersion: 1,
-    product: 'sky-bar',
+    product: 'aerstello',
     version,
     tag: `v${version}`,
     channel: 'production',

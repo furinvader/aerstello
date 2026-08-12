@@ -79,7 +79,7 @@ test('SessionStart with state injects compact additional context', () => {
   }, cwd);
   assert.equal(output.continue, true);
   assert.equal(output.hookSpecificOutput.hookEventName, 'SessionStart');
-  assert.match(output.hookSpecificOutput.additionalContext, /example\/sky-bar#23/u);
+  assert.match(output.hookSpecificOutput.additionalContext, /example\/aerstello#23/u);
   assert.ok(output.hookSpecificOutput.additionalContext.length < 9000);
 });
 

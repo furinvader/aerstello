@@ -1,5 +1,5 @@
 name = "integration_verifier"
-description = "Read-only verifier for integrated Sky Bar PR-review fixes before the next official Codex review."
+description = "Read-only verifier for integrated Aerstello PR-review fixes before the next official Codex review."
 model_reasoning_effort = "high"
 sandbox_mode = "read-only"
 

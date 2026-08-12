@@ -5,12 +5,12 @@ import { ApiError, api, apiErrorMessage, json } from './api';
 import { Button, Card, Field, Notice } from './components';
 import { useI18n } from './i18n';
 import { isPermanentSyncConflict } from './offline';
-import type { Language } from '@sky-bar/shared';
+import type { Language } from '@aerstello/shared';
 import type { Room } from './types';
 
 function PublicFrame({ children, languageLocked = false }: { children: React.ReactNode; languageLocked?: boolean }) {
   const { language, setLanguage, t } = useI18n();
-  return <main className="public-shell"><header className="public-brand"><img src="/sky-bar.svg" alt=""/><span>Sky Bar</span><select aria-label={t('language')} value={language} disabled={languageLocked} onChange={(e) => setLanguage(e.target.value as Language)}><option value="de">DE</option><option value="it">IT</option><option value="en">EN</option></select></header>{children}</main>;
+  return <main className="public-shell"><header className="public-brand"><img src="/aerstello.svg" alt=""/><span>Aerstello</span><select aria-label={t('language')} value={language} disabled={languageLocked} onChange={(e) => setLanguage(e.target.value as Language)}><option value="de">DE</option><option value="it">IT</option><option value="en">EN</option></select></header>{children}</main>;
 }
 
 export function LaunchPage() {
@@ -22,9 +22,9 @@ export function LaunchPage() {
   const hostUnauthenticated=host.isError&&host.error instanceof ApiError&&host.error.status===401;
   const guestUnauthenticated=guest.isError&&guest.error instanceof ApiError&&guest.error.status===401;
   if (hostUnauthenticated&&guestUnauthenticated) return <Redirect to="/login" />;
-  if (host.isFetching||guest.isFetching) return <div className="splash">Sky Bar</div>;
+  if (host.isFetching||guest.isFetching) return <div className="splash">Aerstello</div>;
   if (host.isError||guest.isError) return <PublicFrame><Card className="auth-card"><Notice kind="error">{t('requestFailed')}</Notice><Button onClick={() => void Promise.all([host.refetch(),guest.refetch()])}>{t('retry')}</Button></Card></PublicFrame>;
-  return <div className="splash">Sky Bar</div>;
+  return <div className="splash">Aerstello</div>;
 }
 
 export function LoginPage() {
@@ -42,7 +42,7 @@ export function LoginPage() {
     catch (caught) { setError(apiErrorMessage(caught, language, t('requestFailed'))); }
     finally { setBusy(false); }
   };
-  return <PublicFrame><Card className="auth-card"><p className="eyebrow">Sky Bar · Host</p><h1>{t('welcome')}</h1><p className="muted">{t('signInDescription')}</p><form onSubmit={submit} className="stack"><Field label={t('email')}><input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" required autoFocus /></Field><Field label={t('password')}><input type="password" minLength={12} value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" required /></Field>{error && <Notice kind="error">{error}</Notice>}<Button disabled={busy} type="submit">{busy ? '…' : t('signIn')}</Button></form><a className="text-link" href="/guest/request">{t('guestAccess')} →</a></Card></PublicFrame>;
+  return <PublicFrame><Card className="auth-card"><p className="eyebrow">Aerstello · Host</p><h1>{t('welcome')}</h1><p className="muted">{t('signInDescription')}</p><form onSubmit={submit} className="stack"><Field label={t('email')}><input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" required autoFocus /></Field><Field label={t('password')}><input type="password" minLength={12} value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" required /></Field>{error && <Notice kind="error">{error}</Notice>}<Button disabled={busy} type="submit">{busy ? '…' : t('signIn')}</Button></form><a className="text-link" href="/guest/request">{t('guestAccess')} →</a></Card></PublicFrame>;
 }
 
 interface Bootstrap { venue: { name: string; defaultLanguage: Language }; rooms: Pick<Room, 'id'|'name'>[] }
@@ -61,7 +61,7 @@ export function RequestAccessPage() {
   const params = new URLSearchParams(search);
   const bootstrap = useQuery<Bootstrap>({ queryKey: ['public-bootstrap'], queryFn: () => api('/public/bootstrap'), retry: false });
   const [submission, setSubmission] = useState<AccessSubmission | null>(() => {
-    const raw=loadDurableRecovery('skybar-access-submission');
+    const raw=loadDurableRecovery('aerstello-access-submission');
     if(!raw)return null;
     try {
       const stored: unknown = JSON.parse(raw);
@@ -70,12 +70,12 @@ export function RequestAccessPage() {
         if (typeof command.mutationId === 'string' && typeof command.name === 'string' && typeof command.roomId === 'string' && isLanguage(command.language)) return command;
       }
     } catch { /* Remove malformed recovery state below. */ }
-    localStorage.removeItem('skybar-access-submission');return null;
+    localStorage.removeItem('aerstello-access-submission');return null;
   });
   const [name, setName] = useState(submission?.name ?? '');
   const [roomId, setRoomId] = useState(submission?.roomId ?? params.get('room') ?? '');
   const [pending, setPending] = useState<PendingAccess | null>(() => {
-    const raw = loadDurableRecovery('skybar-pending');
+    const raw = loadDurableRecovery('aerstello-pending');
     if (!raw) return null;
     try {
       const stored: unknown = JSON.parse(raw);
@@ -85,7 +85,7 @@ export function RequestAccessPage() {
       }
       throw new Error('Invalid pending access recovery state.');
     } catch {
-      localStorage.removeItem('skybar-pending');
+      localStorage.removeItem('aerstello-pending');
       return null;
     }
   });
@@ -101,7 +101,7 @@ export function RequestAccessPage() {
   useEffect(() => {
     if (!pending) return;
     const stopPolling = (status:'denied'|'expired'|'disabled',showError = false) => {
-      localStorage.removeItem('skybar-pending');
+      localStorage.removeItem('aerstello-pending');
       setPending(null);
       setTerminalStatus(status);
       if (showError) setError(t('requestFailed'));
@@ -109,7 +109,7 @@ export function RequestAccessPage() {
     const poll = async () => {
       try {
         const result = await api<{ status: string; granted: boolean }>(`/public/access-requests/${pending.id}/status`, { method:'POST', body:json({ token:pending.token, grantId:pending.grantId }) });
-        if (result.status === 'approved' && result.granted) { localStorage.removeItem('skybar-pending'); setPending(null); navigate('/guest'); }
+        if (result.status === 'approved' && result.granted) { localStorage.removeItem('aerstello-pending'); setPending(null); navigate('/guest'); }
         else if (result.status === 'approved' && !result.granted) stopPolling('denied',true);
         else if (result.status==='denied'||result.status==='expired'||result.status==='disabled') stopPolling(result.status);
       } catch { /* Keep polling across transient network errors. */ }
@@ -120,16 +120,16 @@ export function RequestAccessPage() {
     event.preventDefault(); setError(''); setTerminalStatus(null);
     const command=submission??{mutationId:crypto.randomUUID(),name,roomId,language};
     setSubmission(command);
-    localStorage.setItem('skybar-access-submission',JSON.stringify(command));
+    localStorage.setItem('aerstello-access-submission',JSON.stringify(command));
     try {
       const result = await api<{ id: string; statusToken: string }>('/public/access-requests', { method: 'POST', body: json(command) });
-      localStorage.removeItem('skybar-access-submission');setSubmission(null);
-      const next = { id: result.id, token: result.statusToken, grantId: crypto.randomUUID() }; localStorage.setItem('skybar-pending', JSON.stringify(next)); setPending(next);
-    } catch (caught) { if(isPermanentSyncConflict(caught)){localStorage.removeItem('skybar-access-submission');setSubmission(null)}setError(apiErrorMessage(caught, language, t('requestFailed'))); }
+      localStorage.removeItem('aerstello-access-submission');setSubmission(null);
+      const next = { id: result.id, token: result.statusToken, grantId: crypto.randomUUID() }; localStorage.setItem('aerstello-pending', JSON.stringify(next)); setPending(next);
+    } catch (caught) { if(isPermanentSyncConflict(caught)){localStorage.removeItem('aerstello-access-submission');setSubmission(null)}setError(apiErrorMessage(caught, language, t('requestFailed'))); }
   };
   const terminalTitle=terminalStatus==='expired'?t('accessExpired'):terminalStatus==='disabled'?t('accessDisabled'):t('deny');
   const terminalMessage=terminalStatus==='expired'?t('requestExpired'):terminalStatus==='disabled'?t('requestDisabled'):t('requestDenied');
   if (bootstrap.isPending) return <PublicFrame><Card className="auth-card"><p>{t('loading')}</p></Card></PublicFrame>;
   if (bootstrap.isError) return <PublicFrame><Card className="auth-card"><Notice kind="error">{t('requestFailed')}</Notice><Button onClick={() => void bootstrap.refetch()}>{t('retry')}</Button></Card></PublicFrame>;
-  return <PublicFrame languageLocked={Boolean(submission)}><Card className="auth-card"><p className="eyebrow">{bootstrap.data?.venue.name || 'Sky Bar'}</p><h1>{t('guestAccess')}</h1>{pending || terminalStatus ? <div className="request-wait"><div className="pulse-orb"/><h2>{terminalStatus ? terminalTitle : t('pending')}</h2><p className="muted">{terminalStatus ? terminalMessage : t('requestWaiting')}</p>{terminalStatus && <Button onClick={() => { setTerminalStatus(null); setError(''); }}>{t('requestAccess')}</Button>}</div> : <form onSubmit={submit} className="stack"><Field label={t('name')}><input value={name} onChange={(e) => setName(e.target.value)} required autoFocus disabled={Boolean(submission)}/></Field><Field label={t('rooms')}><select value={roomId} onChange={(e) => setRoomId(e.target.value)} required disabled={Boolean(submission)}><option value="">{t('selectRoom')}</option>{bootstrap.data?.rooms.map((room) => <option value={room.id} key={room.id}>{room.name}</option>)}</select></Field><Field label={t('language')}><select value={language} onChange={(e) => setLanguage(e.target.value as Language)} disabled={Boolean(submission)}><option value="de">Deutsch</option><option value="it">Italiano</option><option value="en">English</option></select></Field>{error && <Notice kind="error">{error}</Notice>}<Button type="submit">{submission?t('retry'):t('requestAccess')}</Button></form>}<a className="text-link" href="/login">{t('hostLogin')} →</a></Card></PublicFrame>;
+  return <PublicFrame languageLocked={Boolean(submission)}><Card className="auth-card"><p className="eyebrow">{bootstrap.data?.venue.name || 'Aerstello'}</p><h1>{t('guestAccess')}</h1>{pending || terminalStatus ? <div className="request-wait"><div className="pulse-orb"/><h2>{terminalStatus ? terminalTitle : t('pending')}</h2><p className="muted">{terminalStatus ? terminalMessage : t('requestWaiting')}</p>{terminalStatus && <Button onClick={() => { setTerminalStatus(null); setError(''); }}>{t('requestAccess')}</Button>}</div> : <form onSubmit={submit} className="stack"><Field label={t('name')}><input value={name} onChange={(e) => setName(e.target.value)} required autoFocus disabled={Boolean(submission)}/></Field><Field label={t('rooms')}><select value={roomId} onChange={(e) => setRoomId(e.target.value)} required disabled={Boolean(submission)}><option value="">{t('selectRoom')}</option>{bootstrap.data?.rooms.map((room) => <option value={room.id} key={room.id}>{room.name}</option>)}</select></Field><Field label={t('language')}><select value={language} onChange={(e) => setLanguage(e.target.value as Language)} disabled={Boolean(submission)}><option value="de">Deutsch</option><option value="it">Italiano</option><option value="en">English</option></select></Field>{error && <Notice kind="error">{error}</Notice>}<Button type="submit">{submission?t('retry'):t('requestAccess')}</Button></form>}<a className="text-link" href="/login">{t('hostLogin')} →</a></Card></PublicFrame>;
 }

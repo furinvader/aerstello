@@ -28,8 +28,8 @@ export default defineConfig({
         stderr: 'pipe',
       }]
     : [
-        { command: 'RATE_LIMIT_MAX=5000 npm run dev -w @sky-bar/api', url: `${apiURL}/api/v1/health`, reuseExistingServer: true, timeout: 120_000 },
-        { command: 'npm run dev -w @sky-bar/web', url: webURL, reuseExistingServer: true, timeout: 120_000 },
+        { command: 'RATE_LIMIT_MAX=5000 npm run dev -w @aerstello/api', url: `${apiURL}/api/v1/health`, reuseExistingServer: true, timeout: 120_000 },
+        { command: 'npm run dev -w @aerstello/web', url: webURL, reuseExistingServer: true, timeout: 120_000 },
       ],
   projects: [
     { name: 'tablet-chromium', use: { ...devices['iPad Pro 11'], browserName: 'chromium', ...(chromiumExecutable ? { launchOptions: { executablePath: chromiumExecutable } } : {}) } },

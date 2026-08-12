@@ -72,7 +72,7 @@ describe('bill archive query states', () => {
   beforeEach(() => {
     apiMock.mockReset();
     hostContextMock.mockReturnValue({ venue: { name: 'Hotel Aurora' } });
-    localStorage.setItem('skybar-language', 'en');
+    localStorage.setItem('aerstello-language', 'en');
   });
   afterEach(cleanup);
 
@@ -103,7 +103,7 @@ describe('bill detail query states', () => {
   beforeEach(() => {
     apiMock.mockReset();
     hostContextMock.mockReturnValue({ host: { role: 'admin' } });
-    localStorage.setItem('skybar-language', 'en');
+    localStorage.setItem('aerstello-language', 'en');
     window.history.replaceState({}, '', '/app/bills/bill-1');
   });
   afterEach(cleanup);
@@ -136,7 +136,7 @@ describe.each(openOrderSurfaces)('$name query states',({render:renderOpenOrders,
   beforeEach(() => {
     apiMock.mockReset();
     hostContextMock.mockReturnValue({ venue: { name: 'Hotel Aurora' } });
-    localStorage.setItem('skybar-language', 'en');
+    localStorage.setItem('aerstello-language', 'en');
   });
   afterEach(cleanup);
 
@@ -173,7 +173,7 @@ describe('access request query states', () => {
   beforeEach(() => {
     apiMock.mockReset();
     hostContextMock.mockReturnValue({ host: { id: 'host-1', role: 'admin' } });
-    localStorage.setItem('skybar-language', 'en');
+    localStorage.setItem('aerstello-language', 'en');
   });
   afterEach(cleanup);
 
@@ -248,7 +248,7 @@ const directoryGuest={id:'guest-1',name:'Luca Rossi',roomId:'room-102',roomName:
 describe('guest directory query states', () => {
   beforeEach(() => {
     apiMock.mockReset();
-    localStorage.setItem('skybar-language', 'en');
+    localStorage.setItem('aerstello-language', 'en');
   });
   afterEach(cleanup);
 
@@ -285,7 +285,7 @@ describe('guest directory query states', () => {
 describe('guest device query states', () => {
   beforeEach(() => {
     apiMock.mockReset();
-    localStorage.setItem('skybar-language', 'en');
+    localStorage.setItem('aerstello-language', 'en');
   });
   afterEach(cleanup);
 
@@ -332,7 +332,7 @@ describe('venue settings query states', () => {
   beforeEach(() => {
     apiMock.mockReset();
     hostContextMock.mockReturnValue({ host: { role: 'admin' } });
-    localStorage.setItem('skybar-language', 'en');
+    localStorage.setItem('aerstello-language', 'en');
   });
   afterEach(cleanup);
 
@@ -359,13 +359,13 @@ describe('venue settings query states', () => {
   });
 });
 
-const administrator={id:'host-1',email:'admin@skybar.test',name:'Mira Host',role:'admin' as const,language:'en' as const,version:1};
+const administrator={id:'host-1',email:'admin@aerstello.test',name:'Mira Host',role:'admin' as const,language:'en' as const,version:1};
 
 describe('catalog administration query states', () => {
   beforeEach(() => {
     apiMock.mockReset();
     hostContextMock.mockReturnValue({ host: administrator });
-    localStorage.setItem('skybar-language', 'en');
+    localStorage.setItem('aerstello-language', 'en');
   });
   afterEach(cleanup);
 
@@ -421,7 +421,7 @@ describe('account session query states', () => {
   beforeEach(() => {
     apiMock.mockReset();
     hostContextMock.mockReturnValue({ host: administrator });
-    localStorage.setItem('skybar-language', 'en');
+    localStorage.setItem('aerstello-language', 'en');
   });
   afterEach(cleanup);
 
@@ -469,7 +469,7 @@ describe('room management query states', () => {
   beforeEach(() => {
     apiMock.mockReset();
     hostContextMock.mockReturnValue({ host: administrator });
-    localStorage.setItem('skybar-language', 'en');
+    localStorage.setItem('aerstello-language', 'en');
   });
   afterEach(cleanup);
 
@@ -525,7 +525,7 @@ describe('take orders operational query states', () => {
     apiMock.mockReset();
     hostContextMock.mockReturnValue({ host: orderHost });
     localStorage.clear();
-    localStorage.setItem('skybar-language', 'en');
+    localStorage.setItem('aerstello-language', 'en');
     window.history.replaceState({}, '', '/app/orders/new');
   });
   afterEach(cleanup);
@@ -641,7 +641,7 @@ describe('take orders operational query states', () => {
     expect(screen.getAllByText('Lager')).toHaveLength(2);
 
     cleanup();
-    localStorage.setItem(`skybar-uncertain-order:${orderHost.id}`,JSON.stringify({id:'00000000-0000-4000-8000-000000000006',hostId:orderHost.id,path:'/order-batches',method:'POST',createdAt:'2026-08-05T10:00:00.000Z',body:{mutationId:'00000000-0000-4000-8000-000000000006',originHostId:orderHost.id,guestId:orderGuest.id,catalogVersion:1,capturedAt:'2026-08-05T10:00:00.000Z',items:[{productId:orderProduct.id,quantity:1}]},display:{kind:'order',guestId:orderGuest.id,guestName:'Anna Berger',roomName:'101',items:[{productId:orderProduct.id,productName:{de:'Gesichertes Helles',it:'Bionda acquisita',en:'Captured Lager'},unitPriceCents:420,quantity:1}]}}));
+    localStorage.setItem(`aerstello-uncertain-order:${orderHost.id}`,JSON.stringify({id:'00000000-0000-4000-8000-000000000006',hostId:orderHost.id,path:'/order-batches',method:'POST',createdAt:'2026-08-05T10:00:00.000Z',body:{mutationId:'00000000-0000-4000-8000-000000000006',originHostId:orderHost.id,guestId:orderGuest.id,catalogVersion:1,capturedAt:'2026-08-05T10:00:00.000Z',items:[{productId:orderProduct.id,quantity:1}]},display:{kind:'order',guestId:orderGuest.id,guestName:'Anna Berger',roomName:'101',items:[{productId:orderProduct.id,productName:{de:'Gesichertes Helles',it:'Bionda acquisita',en:'Captured Lager'},unitPriceCents:420,quantity:1}]}}));
     const emptyClient=new QueryClient({ defaultOptions: { queries: { retry: false } } });
     renderTakeOrdersPage(emptyClient);
 
@@ -656,7 +656,7 @@ describe('settings room QR query states', () => {
   beforeEach(() => {
     apiMock.mockReset();
     hostContextMock.mockReturnValue({ host: administrator });
-    localStorage.setItem('skybar-language', 'en');
+    localStorage.setItem('aerstello-language', 'en');
   });
   afterEach(cleanup);
 
@@ -711,7 +711,7 @@ describe('administrator host directory query states', () => {
   beforeEach(() => {
     apiMock.mockReset();
     hostContextMock.mockReturnValue({ host: administrator });
-    localStorage.setItem('skybar-language', 'en');
+    localStorage.setItem('aerstello-language', 'en');
   });
   afterEach(cleanup);
 

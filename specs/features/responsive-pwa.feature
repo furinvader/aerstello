@@ -1,12 +1,12 @@
 @area-pwa
 Feature: Responsive installable application
-  Sky Bar works across tablet, mobile, and desktop browser shapes.
+  Aerstello works across tablet, mobile, and desktop browser shapes.
 
   @id-the-app-exposes-an-installable-pwa-manifest @device-responsive @browser-webkit @browser-firefox
   Scenario: The app exposes an installable PWA manifest
-    Given the seeded Sky Bar venue
+    Given the seeded Aerstello venue
     When the PWA manifest is requested
-    Then it names the software "Sky Bar" and provides application icons
+    Then it names the software "Aerstello" and provides application icons
 
   @id-an-installed-guest-launch-restores-the-active-guest-session @device-responsive
   Scenario: An installed guest launch restores the active guest session

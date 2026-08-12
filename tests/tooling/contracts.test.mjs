@@ -28,7 +28,7 @@ const AT = '2026-08-05T00:00:00Z';
 function stateFixture(overrides = {}) {
   const head = 'a'.repeat(40);
   return {
-    schemaVersion: 3, revision: 0, repository: 'example/sky-bar', prNumber: 17, phase: 'recovering',
+    schemaVersion: 3, revision: 0, repository: 'example/aerstello', prNumber: 17, phase: 'recovering',
     baseSha: head, requestedHeadSha: null, reviewedHeadSha: null, currentIntegrationHeadSha: head,
     reviewRound: 0, verificationReviewUsed: false, legacyReviewProvenance: null, releaseBaseline: null,
     decisions: [], tasks: [], reviewRequest: null, reviewOutcome: null, reviewHistory: [], verificationEscalation: null,
@@ -56,7 +56,7 @@ function threadFixture(overrides = {}) {
   return {
     threadNodeId: 'PRRT_node', rootCommentNodeId: 'PRRC_root', rootCommentDatabaseId: 9,
     taskIds: ['task'], disposition: 'fixed', replyId: 'PRRC_reply',
-    replyUrl: 'https://github.com/example/sky-bar/pull/17#discussion_r9', isResolved: true,
+    replyUrl: 'https://github.com/example/aerstello/pull/17#discussion_r9', isResolved: true,
     resolvedAt: AT, resolvedBy: 'maintainer', observedHeadSha: 'a'.repeat(40), ...overrides,
   };
 }
@@ -65,7 +65,7 @@ function escalatedStateFixture(overrides = {}) {
   const head = 'a'.repeat(40);
   const request = {
     id: 'verification-request', databaseId: 101,
-    url: 'https://github.com/example/sky-bar/pull/17#issuecomment-101', headSha: head, at: AT,
+    url: 'https://github.com/example/aerstello/pull/17#issuecomment-101', headSha: head, at: AT,
     kind: 'verification', body: '@codex review', authorLogin: 'maintainer', authorNodeId: 'USER_maintainer',
   };
   return stateFixture({
@@ -100,12 +100,12 @@ function readyStateFixture(overrides = {}) {
 function completeStateFixture(overrides = {}) {
   const head = 'a'.repeat(40);
   const request = {
-    id: 'request', databaseId: 101, url: 'https://github.com/example/sky-bar/pull/17#issuecomment-101',
+    id: 'request', databaseId: 101, url: 'https://github.com/example/aerstello/pull/17#issuecomment-101',
     headSha: head, at: AT, kind: 'discovery', body: '@codex review',
     authorLogin: 'maintainer', authorNodeId: 'USER_maintainer',
   };
   const outcome = {
-    id: 'review', databaseId: 102, url: 'https://github.com/example/sky-bar/pull/17#pullrequestreview-102',
+    id: 'review', databaseId: 102, url: 'https://github.com/example/aerstello/pull/17#pullrequestreview-102',
     headSha: head, at: AT, requestId: request.id, kind: 'discovery', outcome: 'clean',
     evidenceType: 'review-submission', reviewerLogin: 'chatgpt-codex-connector', reviewerNodeId: 'BOT_codex',
     reviewerType: 'Bot', reviewerUrl: 'https://github.com/apps/chatgpt-codex-connector',
@@ -114,7 +114,7 @@ function completeStateFixture(overrides = {}) {
   const ci = {
     source: 'github-actions', scope: 'full', status: 'passed', headSha: head,
     checks: ['Full validation', 'Full E2E'], workflowRunId: 99,
-    workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/99', updatedAt: AT,
+    workflowRunUrl: 'https://github.com/example/aerstello/actions/runs/99', updatedAt: AT,
   };
   return readyStateFixture({
     phase: 'complete', requestedHeadSha: head, reviewedHeadSha: head, reviewRound: 1,
@@ -240,7 +240,7 @@ test('state JSON Schema compiles with Ajv and shares representative fixtures wit
     stateFixture({
       threadResolutionStatus: {
         status: 'failed', headSha: 'a'.repeat(40), threads: [
-          threadFixture({ replyUrl: 'http://github.com/example/sky-bar/pull/17#discussion_r9' }),
+          threadFixture({ replyUrl: 'http://github.com/example/aerstello/pull/17#discussion_r9' }),
         ],
         threadlessVerification: { status: 'not-run', headSha: null, taskIds: [], updatedAt: null },
         updatedAt: AT,
@@ -357,7 +357,7 @@ test('state JSON Schema rejects terminal and review-ready states missing current
   assert.deepEqual(validatePrReviewState(complete), []);
   const issueCommentOutcome = {
     ...complete.reviewOutcome, id: 'clean-comment', databaseId: 103,
-    url: 'https://github.com/example/sky-bar/pull/17#issuecomment-103', evidenceType: 'issue-comment',
+    url: 'https://github.com/example/aerstello/pull/17#issuecomment-103', evidenceType: 'issue-comment',
   };
   const issueCommentState = completeStateFixture({
     reviewOutcome: issueCommentOutcome,
@@ -396,7 +396,7 @@ test('state JSON Schema rejects terminal and review-ready states missing current
   const historicalHeadProof = {
     ...attemptProof, status: 'failed', headSha: 'b'.repeat(40), checkRunId: 'CHECK_head_b',
     workflowRunId: 100,
-    workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/100',
+    workflowRunUrl: 'https://github.com/example/aerstello/actions/runs/100',
     updatedAt: '2026-08-05T00:01:00Z',
   };
   const restoredComplete = completeStateFixture({
@@ -407,7 +407,7 @@ test('state JSON Schema rejects terminal and review-ready states missing current
 
   const absentProof = {
     ...attemptProof, checkRunId: 'CHECK_absent', workflowRunId: 101,
-    workflowRunUrl: 'https://github.com/example/sky-bar/actions/runs/101',
+    workflowRunUrl: 'https://github.com/example/aerstello/actions/runs/101',
   };
   assert.match(validatePrReviewState(completeStateFixture({
     ciValidationStatus: absentProof, ciValidationHistory: [attemptProof, historicalHeadProof],
@@ -448,13 +448,13 @@ test('superseded null-outcome requests remain valid when the integration HEAD re
   const headB = 'b'.repeat(40);
   const requestA = {
     id: 'request-a', databaseId: 101,
-    url: 'https://github.com/example/sky-bar/pull/17#issuecomment-101',
+    url: 'https://github.com/example/aerstello/pull/17#issuecomment-101',
     headSha: headA, at: AT, kind: 'discovery', body: '@codex review',
     authorLogin: 'maintainer', authorNodeId: 'USER_maintainer',
   };
   const requestB = {
     ...requestA, id: 'request-b', databaseId: 102,
-    url: 'https://github.com/example/sky-bar/pull/17#issuecomment-102', headSha: headB,
+    url: 'https://github.com/example/aerstello/pull/17#issuecomment-102', headSha: headB,
   };
   const returnedToA = stateFixture({
     phase: 'recovering', currentIntegrationHeadSha: headA,
@@ -470,7 +470,7 @@ test('superseded null-outcome requests remain valid when the integration HEAD re
 
   const outcomeA = {
     id: 'review-a', databaseId: 103,
-    url: 'https://github.com/example/sky-bar/pull/17#pullrequestreview-103',
+    url: 'https://github.com/example/aerstello/pull/17#pullrequestreview-103',
     headSha: headA, at: AT, requestId: requestA.id, kind: 'discovery', outcome: 'clean',
     evidenceType: 'review-submission', reviewerLogin: 'chatgpt-codex-connector',
     reviewerNodeId: 'BOT_codex', reviewerType: 'Bot',
@@ -549,7 +549,7 @@ test('manual state validation rejects every ambiguous canonical thread identifie
           threadFixture(),
           threadFixture({
             threadNodeId: 'PRRT_other', rootCommentNodeId: 'PRRC_other', rootCommentDatabaseId: 10,
-            replyId: 'PRRC_other_reply', replyUrl: 'https://github.com/example/sky-bar/pull/17#discussion_r10',
+            replyId: 'PRRC_other_reply', replyUrl: 'https://github.com/example/aerstello/pull/17#discussion_r10',
             [field]: duplicate,
           }),
         ],
@@ -594,7 +594,7 @@ test('task packet validator accepts the documented contract', () => {
     dependencies: [],
     acceptanceCriteria: ['Reject stale versions.'],
     requiredValidation: {
-      unit: [{ command: 'npm test -w @sky-bar/api -- routes', reason: 'Covers stale route versions.' }],
+      unit: [{ command: 'npm test -w @aerstello/api -- routes', reason: 'Covers stale route versions.' }],
       system: [{
         command: 'npm run test:e2e:related -- --id id-an-approved-request-token-grants-exactly-one-device --project tablet-chromium',
         reason: 'Covers the visible stale-version flow.',
@@ -645,9 +645,9 @@ test('task packets reject unsafe ownership and inexact or broad system validatio
     'node --test #',
     'node --test ~',
     'node --test tests/tooling',
-    'npm test -w @sky-bar/api -- #',
-    'npm test -w @sky-bar/api -- routes\t--watch',
-    'npm test -w @sky-bar/api -w @sky-bar/web -- routes',
+    'npm test -w @aerstello/api -- #',
+    'npm test -w @aerstello/api -- routes\t--watch',
+    'npm test -w @aerstello/api -w @aerstello/web -- routes',
   ]) {
     assert.equal(parseTargetedValidationCommand(command), null, command);
     assert.ok(validateTaskPacket({
@@ -665,8 +665,8 @@ test('task packets reject unsafe ownership and inexact or broad system validatio
     assert.equal(ajv.compile(schema)(invalid), false);
   }
   for (const command of [
-    'npm test -w @sky-bar/api -- routes',
-    'npm run test --workspace=@sky-bar/web -- tests/example.test.ts',
+    'npm test -w @aerstello/api -- routes',
+    'npm run test --workspace=@aerstello/web -- tests/example.test.ts',
     'node --test tests/tooling/contracts.test.mjs',
   ]) {
     assert.deepEqual(parseTargetedValidationCommand(command), command.split(' '), command);
@@ -790,7 +790,7 @@ test('worker result enforces exact commands and status-aware validation outcomes
 });
 
 test('validate-result CLI enforces the exact task validation commands', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'sky-bar-result-contract-'));
+  const directory = mkdtempSync(join(tmpdir(), 'aerstello-result-contract-'));
   try {
     assert.equal(spawnSync('git', ['init', '-q'], { cwd: directory }).status, 0);
     assert.equal(spawnSync('git', ['config', 'user.email', 'test@example.com'], { cwd: directory }).status, 0);
@@ -808,7 +808,7 @@ test('validate-result CLI enforces the exact task validation commands', () => {
       },
     };
     let state = initializeState({
-      cwd: directory, prNumber: 17, repository: 'example/sky-bar', base: 'HEAD', head: 'HEAD', releaseRef: 'HEAD',
+      cwd: directory, prNumber: 17, repository: 'example/aerstello', base: 'HEAD', head: 'HEAD', releaseRef: 'HEAD',
     });
     state = checkpointState({
       cwd: directory,
