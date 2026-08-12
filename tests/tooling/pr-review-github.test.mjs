@@ -200,7 +200,7 @@ function pendingHumanFinalState(overrides = {}) {
   const authorized = humanFinalAuthorizedState();
   const request = requestEvidence('human-final', {
     id: 'IC_human_final_request', databaseId: 301,
-    url: 'https://github.com/example/sky-bar/pull/2#issuecomment-301', at: NOT_BEFORE,
+    url: 'https://github.com/example/aerstello/pull/2#issuecomment-301', at: NOT_BEFORE,
   });
   return {
     ...authorized,
@@ -216,7 +216,7 @@ function postFinalRemediationAuthorizedState(overrides = {}) {
   const pending = pendingHumanFinalState();
   const outcome = {
     id: 'PRR_human_final_findings', databaseId: 401,
-    url: 'https://github.com/example/sky-bar/pull/2#pullrequestreview-401',
+    url: 'https://github.com/example/aerstello/pull/2#pullrequestreview-401',
     headSha: HEAD, at: '2026-08-10T13:05:00Z', requestId: pending.reviewRequest.id,
     kind: 'human-final', outcome: 'findings', evidenceType: 'review-submission',
     reviewerLogin: BOT.login, reviewerNodeId: BOT.id, reviewerType: BOT.__typename,

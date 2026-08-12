@@ -133,13 +133,13 @@ function humanFinalStateFixture(overrides = {}) {
     const kind = index === 3 ? 'verification' : 'discovery';
     const request = {
       id: `request-${index + 1}`, databaseId: 101 + index,
-      url: `https://github.com/example/sky-bar/pull/17#issuecomment-${101 + index}`,
+      url: `https://github.com/example/aerstello/pull/17#issuecomment-${101 + index}`,
       headSha: head, at: AT, kind, body: '@codex review',
       authorLogin: 'maintainer', authorNodeId: 'USER_maintainer',
     };
     const outcome = {
       id: `outcome-${index + 1}`, databaseId: 201 + index,
-      url: `https://github.com/example/sky-bar/pull/17#pullrequestreview-${201 + index}`,
+      url: `https://github.com/example/aerstello/pull/17#pullrequestreview-${201 + index}`,
       headSha: head, at: AT, requestId: request.id, kind,
       outcome: index === 3 ? 'findings' : 'clean', evidenceType: 'review-submission',
       reviewerLogin: 'chatgpt-codex-connector', reviewerNodeId: 'BOT_codex', reviewerType: 'Bot',
@@ -169,13 +169,13 @@ function postFinalRemediationStateFixture(overrides = {}) {
   const head = authorized.currentIntegrationHeadSha;
   const request = {
     id: 'request-5', databaseId: 105,
-    url: 'https://github.com/example/sky-bar/pull/17#issuecomment-105',
+    url: 'https://github.com/example/aerstello/pull/17#issuecomment-105',
     headSha: head, at: NOT_BEFORE, kind: 'human-final', body: '@codex review',
     authorLogin: 'maintainer', authorNodeId: 'USER_maintainer',
   };
   const outcome = {
     id: 'outcome-5', databaseId: 205,
-    url: 'https://github.com/example/sky-bar/pull/17#pullrequestreview-205',
+    url: 'https://github.com/example/aerstello/pull/17#pullrequestreview-205',
     headSha: head, at: '2026-08-10T13:05:00Z', requestId: request.id,
     kind: 'human-final', outcome: 'findings', evidenceType: 'review-submission',
     reviewerLogin: 'chatgpt-codex-connector', reviewerNodeId: 'BOT_codex', reviewerType: 'Bot',

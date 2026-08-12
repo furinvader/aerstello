@@ -194,7 +194,7 @@ function terminalVerificationFindingsState(state) {
     const reviewRequest = request(state, `request-${index + 1}`, kind);
     const reviewOutcome = {
       id: `outcome-${index + 1}`, databaseId: 201 + index,
-      url: `https://github.com/example/sky-bar/pull/17#pullrequestreview-${201 + index}`,
+      url: `https://github.com/example/aerstello/pull/17#pullrequestreview-${201 + index}`,
       headSha: head, at: AT, requestId: reviewRequest.id, kind,
       outcome: index === 3 ? 'findings' : 'clean', evidenceType: 'review-submission',
       reviewerLogin: 'chatgpt-codex-connector', reviewerNodeId: 'BOT_codex', reviewerType: 'Bot',
