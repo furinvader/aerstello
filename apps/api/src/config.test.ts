@@ -3,7 +3,7 @@ import { parseConfig } from './config.js';
 
 const productionEnvironment = {
   NODE_ENV: 'production',
-  DATABASE_URL: 'postgres://skybar:secret@database.example/skybar',
+  DATABASE_URL: 'postgres://aerstello:secret@database.example/aerstello',
   SESSION_SECRET: 'a-unique-production-session-secret-value',
   ACCESS_CAPABILITY_KEYS: 'v1:an-independent-access-capability-secret',
 } as const;
@@ -16,7 +16,7 @@ describe('runtime configuration', () => {
   it('rejects the published session secret placeholder in production', () => {
     expect(() => parseConfig({
       NODE_ENV: 'production',
-      DATABASE_URL: 'postgres://skybar:secret@database.example/skybar',
+      DATABASE_URL: 'postgres://aerstello:secret@database.example/aerstello',
       SESSION_SECRET: 'replace-with-at-least-32-random-characters',
       ACCESS_CAPABILITY_KEYS: productionEnvironment.ACCESS_CAPABILITY_KEYS,
     })).toThrow(/SESSION_SECRET/);

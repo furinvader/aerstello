@@ -15,17 +15,17 @@ jobs:
       postgres:
         image: postgres:17-alpine
         env:
-          POSTGRES_DB: skybar
-          POSTGRES_USER: skybar
-          POSTGRES_PASSWORD: skybar
+          POSTGRES_DB: aerstello
+          POSTGRES_USER: aerstello
+          POSTGRES_PASSWORD: aerstello
         ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U skybar"
+          --health-cmd "pg_isready -U aerstello"
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
     env:
-      DATABASE_URL: postgres://skybar:skybar@127.0.0.1:5432/skybar
+      DATABASE_URL: postgres://aerstello:aerstello@127.0.0.1:5432/aerstello
       SESSION_SECRET: ci-only-session-secret-at-least-32-characters
       ACCESS_CAPABILITY_KEYS: v1:ci-only-access-capability-secret-32-characters
       CI: true

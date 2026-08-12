@@ -34,8 +34,8 @@ GitHub. Never use the package version as release evidence.
 Create regular encrypted PostgreSQL dumps and test restoration:
 
 ```bash
-docker compose exec -T db pg_dump -U skybar -Fc skybar > skybar.backup
-docker compose exec -T db pg_restore -U skybar -d skybar --clean --if-exists < skybar.backup
+docker compose exec -T db pg_dump -U aerstello -Fc aerstello > aerstello.backup
+docker compose exec -T db pg_restore -U aerstello -d aerstello --clean --if-exists < aerstello.backup
 ```
 
 Store backups outside the application host. Back up before upgrades, retain multiple recovery points, and restrict access because guest names and financial records are personal data.
