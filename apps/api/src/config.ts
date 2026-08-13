@@ -5,7 +5,7 @@ const developmentAccessCapabilitySecret = 'development-only-access-capability-se
 const publishedSessionSecretPlaceholder = 'replace-with-at-least-32-random-characters';
 const publishedAccessCapabilitySecret = 'replace-with-distinct-access-capability-secret';
 const publishedAccessCapabilityPlaceholder = `v1:${publishedAccessCapabilitySecret}`;
-const developmentDatabaseUrl = 'postgres://skybar:skybar@localhost:5432/skybar';
+const developmentDatabaseUrl = 'postgres://aerstello:aerstello@localhost:5432/aerstello';
 const insecureProductionSessionSecrets = new Set([developmentSessionSecret, publishedSessionSecretPlaceholder]);
 const insecureProductionCapabilitySecrets = new Set([
   developmentAccessCapabilitySecret,

@@ -2,16 +2,16 @@ services:
   db:
     image: postgres:17-alpine
     environment:
-      POSTGRES_DB: skybar
-      POSTGRES_USER: skybar
-      POSTGRES_PASSWORD: skybar
+      POSTGRES_DB: aerstello
+      POSTGRES_USER: aerstello
+      POSTGRES_PASSWORD: aerstello
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U skybar"]
+      test: ["CMD-SHELL", "pg_isready -U aerstello"]
       interval: 5s
       timeout: 3s
       retries: 10
     volumes:
-      - skybar-db:/var/lib/postgresql/data
+      - aerstello-db:/var/lib/postgresql/data
 
   app:
     build: .
@@ -20,7 +20,7 @@ services:
         condition: service_healthy
     environment:
       NODE_ENV: production
-      DATABASE_URL: postgres://skybar:skybar@db:5432/skybar
+      DATABASE_URL: postgres://aerstello:aerstello@db:5432/aerstello
       PORT: 3001
       SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET}
       ACCESS_CAPABILITY_KEYS: ${ACCESS_CAPABILITY_KEYS:?Set ACCESS_CAPABILITY_KEYS}
@@ -30,4 +30,4 @@ services:
     restart: unless-stopped
 
 volumes:
-  skybar-db:
+  aerstello-db:
