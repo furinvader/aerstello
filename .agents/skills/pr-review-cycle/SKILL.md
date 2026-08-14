@@ -32,7 +32,8 @@ Read the phase reference before acting in that phase:
 
 ## Phase 1: Restore and confirm
 
-Read root `AGENTS.md` and run `node scripts/pr-review-state.mjs show`. Confirm
+Read root `AGENTS.md` and the [operator guide](README.md), then run
+`npm run review:state -- show`. Confirm
 the repository, explicit PR, base, local head, GitHub head, saved state, and
 `npm run release:state -- --json`. Never guess missing identity or treat
 inconsistent release metadata as pre-release. Explicitly migrate old state and

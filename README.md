@@ -79,7 +79,7 @@ Read [AGENTS.md](./AGENTS.md) before making automated changes and [docs/architec
 
 For long-running pull-request review remediation, use the repository
 `$pr-review-cycle` skill and follow the concise
-[PR review-cycle guide](./docs/agents/pr-review-cycle.md). Local agents run
+[PR review-cycle guide](./.agents/skills/pr-review-cycle/README.md). Local agents run
 related checks; CI runs the complete checks and E2E matrix. Production releases
 follow the [marker-and-annotated-tag contract](./.release/README.md).
 

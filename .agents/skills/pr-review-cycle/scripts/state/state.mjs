@@ -16,8 +16,8 @@ import { hostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { gitText, resolveCommit, runGit } from './git.mjs';
-import { inspectReleaseState } from './release-state.mjs';
+import { gitText, resolveCommit, runGit } from '../../../../../scripts/lib/git.mjs';
+import { inspectReleaseState } from '../../../../../scripts/lib/release-state.mjs';
 import {
   completionGate,
   parseTargetedValidationCommand,
@@ -28,9 +28,11 @@ import {
   validateTaskPacket,
   validatePrReviewState,
   validatePrReviewStateV1,
-} from './contracts.mjs';
+} from '../contracts/contracts.mjs';
+import { gitCommonDirectory, repositoryRoot, reviewRoot } from '../paths.mjs';
 
-export { completionGate, reviewRequestGate } from './contracts.mjs';
+export { completionGate, reviewRequestGate } from '../contracts/contracts.mjs';
+export { gitCommonDirectory, repositoryRoot, reviewRoot } from '../paths.mjs';
 
 export const ACTIVE_STATE_LIMIT_BYTES = 64 * 1024;
 const DEFAULT_LOCK_TIMEOUT_MS = 5000;
@@ -110,18 +112,6 @@ function emptyCiValidation() {
 
 function sleep(milliseconds) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
-}
-
-export function gitCommonDirectory(cwd = process.cwd()) {
-  return gitText(['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd });
-}
-
-export function repositoryRoot(cwd = process.cwd()) {
-  return gitText(['rev-parse', '--path-format=absolute', '--show-toplevel'], { cwd });
-}
-
-export function reviewRoot(cwd = process.cwd()) {
-  return join(gitCommonDirectory(cwd), 'codex', 'pr-review');
 }
 
 export function stateDirectory(cwd, prNumber) {

@@ -44,15 +44,15 @@ Never use `@codex address that feedback`.
 The supported helper commands are:
 
 ```bash
-node scripts/pr-review-github.mjs status --pr 123
-node scripts/pr-review-github.mjs status --human
-node scripts/pr-review-github.mjs reply-resolve --pr 123 --task finding-a
-node scripts/pr-review-github.mjs verify-resolve --pr 123 --task local-finding
-node scripts/pr-review-github.mjs verify-resolve --pr 123 --task-set-json '["threadless-a","threadless-b"]'
-node scripts/pr-review-github.mjs request --pr 123 --kind discovery
-node scripts/pr-review-github.mjs collect --pr 123
-node scripts/pr-review-github.mjs collect-ci --pr 123
-node scripts/pr-review-github.mjs complete --pr 123
+npm run review:github -- status --pr 123
+npm run review:github -- status --human
+npm run review:github -- reply-resolve --pr 123 --task finding-a
+npm run review:github -- verify-resolve --pr 123 --task local-finding
+npm run review:github -- verify-resolve --pr 123 --task-set-json '["threadless-a","threadless-b"]'
+npm run review:github -- request --pr 123 --kind discovery
+npm run review:github -- collect --pr 123
+npm run review:github -- collect-ci --pr 123
+npm run review:github -- complete --pr 123
 ```
 
 Read structured GitHub data. An ordinary review applies only when:
@@ -208,7 +208,7 @@ patching and investigate the root cause.
 
 ## Recovery
 
-Run `node scripts/pr-review-state.mjs recover`, then re-read Git, GitHub, and CI.
+Run `npm run review:state -- recover`, then re-read Git, GitHub, and CI.
 If state is invalid, use `state.backup.json`, Git history, structured GitHub
 metadata, and CI artifacts. Never reconstruct decisions from Codex transcripts.
 Explicitly migrate old state. To abandon a non-Done cycle, record the PR number

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { renderRecoverySummary, StateError } from '../../scripts/lib/pr-review-state.mjs';
+import { renderRecoverySummary, StateError } from '../state/state.mjs';
 
 async function readInput() {
   let text = '';

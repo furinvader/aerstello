@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { parseOptions, UsageError, writeJson } from './lib/cli.mjs';
+import { parseOptions, UsageError, writeJson } from '../../../../../scripts/lib/cli.mjs';
 import {
   validateTaskPacket,
   validateWorkerResult,
   validateWorkerResultAgainstTask,
-} from './lib/contracts.mjs';
+} from '../contracts/contracts.mjs';
 import {
   archiveState,
   assertTaskPacketBound,
@@ -21,10 +21,10 @@ import {
   reconcileState,
   renderRecoverySummary,
   StateError,
-} from './lib/pr-review-state.mjs';
+} from './state.mjs';
 
 function usage() {
-  return `Usage: node scripts/pr-review-state.mjs <command> [options]\n\nCommands:\n  init              Start durable state for a PR review cycle\n  path              Print the active state path\n  validate          Check state against the integration checkout\n  bind-task-packet  Bind accepted fixed instructions to a durable task\n  validate-result   Check a worker result against its bound fixed instructions\n  validation-plan   Save and print the combined targeted checks\n  run-validation    Run pending checks from the saved plan and record the result\n  show              Print active state JSON\n  checkpoint        Replace ordinary operational state from --input\n  migrate           Explicitly migrate active schema v1 or v2 state to v3\n  recover           Print compact recovery context\n  archive           Archive a Done or explicitly abandoned cycle\n\nCommon options:\n  --pr <number>\n  --help\n\nBind-task-packet options:\n  --task-packet <file>\n  --expected-revision <number>\n\nValidation-plan arguments:\n  <task-packet.json> [...]       One bound file for every actionable Integrated task\n  --initial-selection <file>     Explicit pristine, clean-taskless, or proven v2 completed-task recovery selection\n  --replace                      Start a fresh plan after a failure or commit change\n\nValidate-result options:\n  --task-packet <file>\n  --worker-result <file>\n\nCheckpoint options:\n  --expected-revision <number>\n\nMigrate options:\n  --integration-map <file>  JSON task-ID to central integration SHA map (v1 only)\n\nArchive options:\n  --abandon-reason <reason>\n\nReview, CI, task-resolution, targeted-validation, and Done transitions use guarded helpers that verify their evidence before saving.\n`;
+  return `Usage: node .agents/skills/pr-review-cycle/scripts/state/cli.mjs <command> [options]\n\nCommands:\n  init              Start durable state for a PR review cycle\n  path              Print the active state path\n  validate          Check state against the integration checkout\n  bind-task-packet  Bind accepted fixed instructions to a durable task\n  validate-result   Check a worker result against its bound fixed instructions\n  validation-plan   Save and print the combined targeted checks\n  run-validation    Run pending checks from the saved plan and record the result\n  show              Print active state JSON\n  checkpoint        Replace ordinary operational state from --input\n  migrate           Explicitly migrate active schema v1 or v2 state to v3\n  recover           Print compact recovery context\n  archive           Archive a Done or explicitly abandoned cycle\n\nCommon options:\n  --pr <number>\n  --help\n\nBind-task-packet options:\n  --task-packet <file>\n  --expected-revision <number>\n\nValidation-plan arguments:\n  <task-packet.json> [...]       One bound file for every actionable Integrated task\n  --initial-selection <file>     Explicit pristine, clean-taskless, or proven v2 completed-task recovery selection\n  --replace                      Start a fresh plan after a failure or commit change\n\nValidate-result options:\n  --task-packet <file>\n  --worker-result <file>\n\nCheckpoint options:\n  --expected-revision <number>\n\nMigrate options:\n  --integration-map <file>  JSON task-ID to central integration SHA map (v1 only)\n\nArchive options:\n  --abandon-reason <reason>\n\nReview, CI, task-resolution, targeted-validation, and Done transitions use guarded helpers that verify their evidence before saving.\n`;
 }
 
 function optionsFor(command, argv) {

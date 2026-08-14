@@ -25,21 +25,21 @@ rename. Keep raw logs, full diffs, stack traces, and transcripts out of state.
 ## State commands
 
 ```bash
-node scripts/pr-review-state.mjs init --pr 123 --base origin/main --head HEAD
-node scripts/pr-review-state.mjs path
-node scripts/pr-review-state.mjs validate
-node scripts/pr-review-state.mjs bind-task-packet --task-packet /tmp/task.json --expected-revision 4
-node scripts/pr-review-state.mjs validate-result --task-packet /tmp/task.json --worker-result /tmp/result.json
-node scripts/pr-review-state.mjs validation-plan --initial-selection /tmp/initial-validation.json
-node scripts/pr-review-state.mjs validation-plan /tmp/task-a.json /tmp/task-b.json
-node scripts/pr-review-state.mjs validation-plan --replace /tmp/task-a.json /tmp/task-b.json
-node scripts/pr-review-state.mjs run-validation
-node scripts/pr-review-state.mjs show
-node scripts/pr-review-state.mjs migrate
-node scripts/pr-review-state.mjs recover
-node scripts/pr-review-state.mjs checkpoint --input /tmp/state.json --expected-revision 4
-node scripts/pr-review-state.mjs archive
-node scripts/pr-review-state.mjs archive --abandon-reason "superseded PR"
+npm run review:state -- init --pr 123 --base origin/main --head HEAD
+npm run review:state -- path
+npm run review:state -- validate
+npm run review:state -- bind-task-packet --task-packet /tmp/task.json --expected-revision 4
+npm run review:state -- validate-result --task-packet /tmp/task.json --worker-result /tmp/result.json
+npm run review:state -- validation-plan --initial-selection /tmp/initial-validation.json
+npm run review:state -- validation-plan /tmp/task-a.json /tmp/task-b.json
+npm run review:state -- validation-plan --replace /tmp/task-a.json /tmp/task-b.json
+npm run review:state -- run-validation
+npm run review:state -- show
+npm run review:state -- migrate
+npm run review:state -- recover
+npm run review:state -- checkpoint --input /tmp/state.json --expected-revision 4
+npm run review:state -- archive
+npm run review:state -- archive --abandon-reason "superseded PR"
 ```
 
 `init` derives the repository only from an unambiguous GitHub `origin` and never
@@ -115,7 +115,7 @@ run every selected check again and record new exact-head targeted validation.
 
 ## What state must preserve
 
-Use `docs/agents/pr-review-state.schema.json` as the machine contract. Preserve:
+Use `.agents/skills/pr-review-cycle/schemas/pr-review-state.schema.json` as the machine contract. Preserve:
 
 - base, requested, reviewed, integration, validation, and current Git SHAs as
   separate values;
@@ -146,7 +146,7 @@ Keep terminal records compact. Git, GitHub, CI artifacts, and concise
 
 ## Fixed task instructions
 
-Validate tasks against `docs/agents/review-fix-task.schema.json`. The machine
+Validate tasks against `.agents/skills/pr-review-cycle/schemas/review-fix-task.schema.json`. The machine
 contract is called a task packet; human guidance calls it fixed task
 instructions. It must include the Review commit, finding and evidence, decisions,
 dependencies, affected areas, owned and forbidden paths, acceptance criteria,
@@ -169,7 +169,7 @@ worker to choose tests or run a full local fallback.
 
 ## Worker results
 
-Validate results against `docs/agents/review-fix-result.schema.json`. A worker
+Validate results against `.agents/skills/pr-review-cycle/schemas/review-fix-result.schema.json`. A worker
 returns one raw JSON object with status `implemented`, `blocked`,
 `not-applicable`, or `failed`. `implemented` requires a commit SHA. Each
 validation entry records only its exact command, result, and concise summary.

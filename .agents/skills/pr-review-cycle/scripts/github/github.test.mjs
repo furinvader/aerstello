@@ -7,14 +7,14 @@ import {
   GitHubWorkflowError,
   githubReviewConstants,
   readTopLevelComments,
-} from '../../scripts/lib/pr-review-github.mjs';
+} from './github.mjs';
 import {
   buildGhGraphqlArgs,
   createDefaultGitHubClient,
   renderHumanStatus,
   runCli,
   usage,
-} from '../../scripts/pr-review-github.mjs';
+} from './cli.mjs';
 
 const HEAD = 'a'.repeat(40);
 const OTHER_HEAD = 'b'.repeat(40);

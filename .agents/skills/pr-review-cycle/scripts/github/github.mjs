@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { reviewRequestGate, validatePrReviewState } from './contracts.mjs';
+import { reviewRequestGate, validatePrReviewState } from '../contracts/contracts.mjs';
 
 const CANONICAL_LOGIN = 'chatgpt-codex-connector';
 const CANONICAL_URL = 'https://github.com/apps/chatgpt-codex-connector';

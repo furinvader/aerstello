@@ -1,4 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+import { featureDirectory } from '../paths.mjs';
 
 const SHA_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
 const DATE_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u;
@@ -17,6 +20,7 @@ const AREA_VALIDATION = new Map([
   ['migration', ['npm run check:release-state', 'npm run check:released-migrations']],
 ]);
 const ALLOWED_CHECK_COMMANDS = new Set([
+  'npm run test:pr-review',
   'npm run check:api',
   'npm run check:web',
   'npm run check:shared',
@@ -163,19 +167,19 @@ let knownE2ESelectors;
 function getKnownE2ESelectors() {
   if (knownE2ESelectors) return knownE2ESelectors;
   knownE2ESelectors = new Set();
-  const featureRoot = new URL('../../specs/features/', import.meta.url);
+  const featureRoot = featureDirectory();
   // Keep the contract registry derived from the same checked-in feature tags as the E2E runner.
   const pending = [featureRoot];
   while (pending.length > 0) {
     const directory = pending.pop();
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const entryUrl = new URL(entry.name, directory);
+      const entryPath = join(directory, entry.name);
       if (entry.isDirectory()) {
-        pending.push(new URL(`${entry.name}/`, directory));
+        pending.push(entryPath);
         continue;
       }
       if (!entry.isFile() || !entry.name.endsWith('.feature')) continue;
-      const source = readFileSync(entryUrl, 'utf8');
+      const source = readFileSync(entryPath, 'utf8');
       for (const match of source.matchAll(/(?:^|\s)@([a-z0-9]+(?:-[a-z0-9]+)*)/gmu)) knownE2ESelectors.add(match[1]);
     }
   }

@@ -1,19 +1,23 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { afterEach, test } from 'node:test';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
   initializeState,
   loadState,
   stateDirectory,
-} from '../../scripts/lib/pr-review-state.mjs';
-import { createRepository, git } from './git-fixtures.mjs';
+} from '../state/state.mjs';
+import {
+  repositoryDirectory as resolveRepositoryDirectory,
+  skillDirectory,
+} from '../paths.mjs';
+import { createRepository, git } from '../../../../../tests/support/git-fixtures.mjs';
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
-const repositoryDirectory = join(testDirectory, '..', '..');
-const hooksDirectory = join(repositoryDirectory, '.codex', 'hooks');
+const repositoryDirectory = resolveRepositoryDirectory();
+const hooksDirectory = testDirectory;
 const repositories = [];
 
 function repo() {
@@ -56,6 +60,16 @@ function validWorkerResult() {
   };
 }
 
+function repositoryWithSpacePath() {
+  const cwd = createRepository({ directoryPrefix: 'aerstello hooks with spaces-' });
+  repositories.push(cwd);
+  mkdirSync(join(cwd, '.agents', 'skills'), { recursive: true });
+  mkdirSync(join(cwd, 'scripts'), { recursive: true });
+  cpSync(skillDirectory, join(cwd, '.agents', 'skills', 'pr-review-cycle'), { recursive: true });
+  cpSync(join(repositoryDirectory, 'scripts', 'lib'), join(cwd, 'scripts', 'lib'), { recursive: true });
+  return cwd;
+}
+
 afterEach(() => {
   while (repositories.length > 0) rmSync(repositories.pop(), { recursive: true, force: true });
 });
@@ -67,6 +81,34 @@ test('SessionStart without state is a valid no-op', () => {
     source: 'startup',
     cwd,
   }, cwd), { continue: true });
+});
+
+test('configured hook commands preserve a repository path containing spaces', () => {
+  const cwd = repositoryWithSpacePath();
+  const config = JSON.parse(readFileSync(join(repositoryDirectory, '.codex', 'hooks.json'), 'utf8'));
+  const cases = [
+    [config.hooks.SessionStart[0].hooks[0].command, {
+      hook_event_name: 'SessionStart', source: 'startup', cwd,
+    }],
+    [config.hooks.PreCompact[0].hooks[0].command, {
+      hook_event_name: 'PreCompact', trigger: 'manual', cwd,
+    }],
+    [config.hooks.SubagentStop[0].hooks[0].command, {
+      hook_event_name: 'SubagentStop', agent_type: 'review_fix_worker',
+      last_assistant_message: JSON.stringify(validWorkerResult()), cwd,
+    }],
+  ];
+
+  for (const [command, input] of cases) {
+    const result = spawnSync(command, {
+      cwd,
+      input: JSON.stringify(input),
+      encoding: 'utf8',
+      shell: true,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), { continue: true });
+  }
 });
 
 test('SessionStart with state injects compact additional context', () => {
