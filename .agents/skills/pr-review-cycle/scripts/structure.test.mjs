@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 import { test } from 'node:test';
@@ -278,6 +279,37 @@ test('hooks and npm façades target only canonical skill entrypoints', () => {
   assert.match(workflow, /Full validation/u);
   assert.match(workflow, /npm run check:full/u);
   assert.match(workflow, /npm run test:e2e:full/u);
+});
+
+test('root npm façades remain available from a nested workspace directory', () => {
+  const workspaceDirectory = join(repositoryDirectory, 'apps', 'api');
+  const facades = [
+    {
+      script: 'review:state',
+      usage: 'Usage: node .agents/skills/pr-review-cycle/scripts/state/cli.mjs <command> [options]',
+    },
+    {
+      script: 'review:github',
+      usage: 'Usage: node .agents/skills/pr-review-cycle/scripts/github/cli.mjs <command> [--pr <number>] [options]',
+    },
+    {
+      script: 'review:worktree',
+      usage: 'Usage: node .agents/skills/pr-review-cycle/scripts/worktree/cli.mjs <create|inspect|remove> [options]',
+    },
+  ];
+
+  for (const { script, usage } of facades) {
+    const result = spawnSync(
+      'npm',
+      ['--prefix', repositoryDirectory, 'run', script, '--', '--help'],
+      { cwd: workspaceDirectory, encoding: 'utf8' },
+    );
+    assert.equal(result.error, undefined, `${script} failed to start`);
+    assert.equal(result.status, 0, `${script} failed:\n${result.stderr}`);
+    assert.equal(result.signal, null, `${script} terminated by ${result.signal}`);
+    assert.ok(result.stdout.includes(`${usage}\n`), `${script} did not print canonical usage`);
+    assert.equal(result.stderr, '');
+  }
 });
 
 test('schemas and operator documentation have one canonical copy', () => {

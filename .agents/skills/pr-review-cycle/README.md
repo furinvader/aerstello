@@ -51,12 +51,21 @@ phase `complete` for Done. These are storage names, not extra workflow stages.
 
 ## Durable state and recovery
 
-Use the npm façades from any directory inside the checkout:
+Use the npm façades directly from the repository root:
 
 ```bash
 npm run review:state -- show
 npm run review:github -- status --human
 npm run review:worktree -- inspect --pr 123 --task finding-a
+```
+
+From a nested npm workspace directory such as `apps/api`, prefix npm with the
+checkout's Git root so npm selects the root package scripts:
+
+```bash
+npm --prefix "$(git rev-parse --show-toplevel)" run review:state -- show
+npm --prefix "$(git rev-parse --show-toplevel)" run review:github -- status --human
+npm --prefix "$(git rev-parse --show-toplevel)" run review:worktree -- inspect --pr 123 --task finding-a
 ```
 
 The scripts discover checked-in skill, schema, and feature resources from this
