@@ -48,8 +48,9 @@ function init(cwd) {
 
 function validWorkerResult() {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     taskId: 'task-1',
+    specialization: 'ops-workflow',
     status: 'implemented',
     commitSha: 'a'.repeat(40),
     changedPaths: ['src/example.ts'],
@@ -66,6 +67,11 @@ function repositoryWithSpacePath() {
   mkdirSync(join(cwd, '.agents', 'skills'), { recursive: true });
   mkdirSync(join(cwd, 'scripts'), { recursive: true });
   cpSync(skillDirectory, join(cwd, '.agents', 'skills', 'pr-review-cycle'), { recursive: true });
+  cpSync(
+    join(dirname(skillDirectory), 'aerstello-specialists'),
+    join(cwd, '.agents', 'skills', 'aerstello-specialists'),
+    { recursive: true },
+  );
   cpSync(join(repositoryDirectory, 'scripts', 'lib'), join(cwd, 'scripts', 'lib'), { recursive: true });
   return cwd;
 }
@@ -175,12 +181,19 @@ test('repeated invalid worker result does not loop indefinitely', () => {
   assert.match(output.systemMessage, /after one correction attempt/u);
 });
 
-test('unrelated subagent types are unaffected', () => {
-  const output = runHook('subagent-stop.mjs', {
-    hook_event_name: 'SubagentStop',
-    agent_type: 'integration_verifier',
-    stop_hook_active: false,
-    last_assistant_message: 'not json',
-  });
-  assert.deepEqual(output, { continue: true });
+test('all read-only specialist and verifier types are unaffected', () => {
+  for (const agentType of [
+    'behavior_mapper',
+    'security_reviewer',
+    'offline_realtime_reviewer',
+    'integration_verifier',
+  ]) {
+    const output = runHook('subagent-stop.mjs', {
+      hook_event_name: 'SubagentStop',
+      agent_type: agentType,
+      stop_hook_active: false,
+      last_assistant_message: 'not json',
+    });
+    assert.deepEqual(output, { continue: true });
+  }
 });

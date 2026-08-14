@@ -46,18 +46,27 @@ instructions with exact owned paths, acceptance criteria, related commands, E2E
 selectors, browser projects, and reasons. Missing related-test selection is a
 planning error, never permission to run a full local suite.
 
+Use the [Aerstello specialist registry](../aerstello-specialists/SKILL.md) to
+select one primary profile and compatible risk tags for each task. Record the
+explicit pre-bind `browserVisible` and `testSelectionUncertain` signals and run
+`behavior_mapper` before binding whenever routing requires it. Profiles guide
+the work; they never grant paths, commands, selectors, projects, or criteria.
+
 Use at most four independent implementation workers. Parallel writers require
 separate worktrees from the reviewed commit and non-overlapping ownership.
 Workers must not broaden scope, update central state, integrate, push, delegate,
-or write to GitHub.
+or write to GitHub. Finish planning helpers before writers and reserve the
+four-thread session capacity for required post-integration reviewers.
 
 ## Phase 3: Integrate and verify
 
 Validate each structured worker result before cherry-picking it centrally in
 dependency order. Integrated means only that the code has landed; the finding
-is not yet Resolved. Run the union of related checks after each batch, then use
-the read-only integration verifier. Turn valid verifier findings into normal
-planned tasks.
+is not yet Resolved. Run the union of related checks after each batch, then run
+only the risk reviewers selected for the exact integrated HEAD. Turn their valid
+findings into ordinary fixed tasks. Finally run `integration_verifier` alone
+with generated specialist context. A clean specialist result cannot resolve a
+task or satisfy Done.
 
 For browser changes, run selected scenarios with `tablet-chromium` by default.
 Add projects only for responsive, touch, installation, or browser-specific

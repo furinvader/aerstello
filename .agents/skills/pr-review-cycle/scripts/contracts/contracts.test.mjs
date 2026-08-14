@@ -14,12 +14,15 @@ import {
   validateTaskPacket,
   validateWorkerResultAgainstTask,
   validateWorkerResult,
+  unionInitialValidationSelection,
   unionRequiredValidation,
 } from './contracts.mjs';
 import {
   checkpointState,
   checkpointTaskPacketBinding,
   initializeState,
+  planSpecialists,
+  taskPacketDigest,
 } from '../state/state.mjs';
 import {
   prReviewStateSchemaPath,
@@ -27,6 +30,7 @@ import {
   reviewFixResultSchemaPath,
   reviewFixTaskSchemaPath,
 } from '../paths.mjs';
+import { loadRegistry } from '../../../aerstello-specialists/scripts/validate-registry.mjs';
 
 const root = repositoryDirectory();
 const AT = '2026-08-05T00:00:00Z';
@@ -131,6 +135,7 @@ function completeStateFixture(overrides = {}) {
 }
 
 test('checked-in JSON contracts parse and declare Draft 2020-12', () => {
+  const registry = loadRegistry();
   const paths = [
     join(root, '.release/marker.schema.json'),
     prReviewStateSchemaPath,
@@ -149,6 +154,15 @@ test('checked-in JSON contracts parse and declare Draft 2020-12', () => {
       assert.ok(document.properties.phase.enum.includes('awaiting-human-decision'));
       assert.ok(document.$defs.threadResolutionStatus.properties.localVerification);
       assert.equal(document.$defs.threadResolutionStatus.required.includes('localVerification'), false);
+    }
+    if (path === reviewFixTaskSchemaPath || path === reviewFixResultSchemaPath) {
+      assert.equal(document.properties.schemaVersion.const, 3);
+      assert.ok(document.required.includes('specialization'));
+      assert.deepEqual(document.properties.specialization.enum, registry.profiles.map(({ id }) => id));
+    }
+    if (path === reviewFixTaskSchemaPath) {
+      assert.ok(document.required.includes('riskTags'));
+      assert.deepEqual(document.properties.riskTags.items.enum, registry.riskTags);
     }
   }
 });
@@ -586,11 +600,39 @@ test('initial validation selections require an exact head and nonempty targeted 
   ]) assert.notDeepEqual(validateInitialValidationSelection(invalid), []);
 });
 
+test('initial taskless validation union adds area checks without packet metadata', () => {
+  const selection = {
+    affectedAreas: ['shared', 'documentation'],
+    requiredValidation: {
+      unit: [
+        { command: 'npm run check:api', reason: 'Explicit API consumer coverage.' },
+        { command: 'node --test .agents/skills/pr-review-cycle/scripts/contracts/contracts.test.mjs', reason: 'Focused contracts.' },
+      ],
+      system: [],
+    },
+  };
+  const original = structuredClone(selection);
+  assert.deepEqual(unionInitialValidationSelection(selection), {
+    unit: [
+      ...selection.requiredValidation.unit,
+      { command: 'npm run check:shared', reason: 'Orchestrator integrated check for affected area: shared.' },
+      { command: 'npm run check:web', reason: 'Orchestrator integrated check for affected area: shared.' },
+    ],
+    system: [],
+  });
+  assert.deepEqual(selection, original);
+  assert.throws(() => unionInitialValidationSelection({
+    ...selection, specialization: 'contracts',
+  }), /specialization is not supported/u);
+});
+
 test('task packet validator accepts the documented contract', () => {
   const packet = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     taskId: 'task-1',
     reviewedHeadSha: 'a'.repeat(40),
+    specialization: 'api',
+    riskTags: ['authorization'],
     finding: 'The mutation can overwrite newer state.',
     evidence: 'The route updates without checking the displayed version.',
     affectedAreas: ['api'],
@@ -624,9 +666,61 @@ test('task packet validator accepts the documented contract', () => {
   }).some((error) => error.includes('both be empty or both be nonempty')));
 });
 
+test('task packet specialization and risks are registry-validated without expanding authority', () => {
+  const packet = {
+    schemaVersion: 3, taskId: 'task-specialized', reviewedHeadSha: 'a'.repeat(40),
+    specialization: 'web', riskTags: [], finding: 'Finding.', evidence: 'Evidence.',
+    affectedAreas: ['web'], decisionIds: [], allowedPaths: ['apps/web/src/example.ts'], forbiddenPaths: [],
+    dependencies: [], acceptanceCriteria: ['Validated.'], requiredValidation: {
+      unit: [{ command: 'npm run check:web', reason: 'Covers the affected web area.' }], system: [],
+    },
+  };
+  const original = structuredClone(packet);
+  assert.deepEqual(validateTaskPacket(packet), []);
+  assert.deepEqual(packet, original);
+  const { specialization: _specialization, ...withoutSpecialization } = packet;
+  const { riskTags: _riskTags, ...withoutRiskTags } = packet;
+  assert.ok(validateTaskPacket(withoutSpecialization).some((error) => error.includes('specialization is required')));
+  assert.ok(validateTaskPacket(withoutRiskTags).some((error) => error.includes('riskTags is required')));
+
+  const schema = JSON.parse(readFileSync(reviewFixTaskSchemaPath, 'utf8'));
+  const validateSchema = new Ajv2020({ allErrors: true, strict: true }).compile(schema);
+  assert.equal(validateSchema(packet), true, JSON.stringify(validateSchema.errors));
+  assert.equal(validateSchema({ ...packet, riskTags: ['offline', 'offline'] }), false);
+  assert.equal(validateSchema({ ...packet, specialization: 'unknown' }), false);
+  assert.equal(validateSchema({ ...packet, riskTags: ['unknown'] }), false);
+
+  for (const [change, expected] of [
+    [{ specialization: 'unknown' }, /unknown|specialization|profile/iu],
+    [{ riskTags: ['unknown'] }, /unknown|risk/iu],
+    [{ riskTags: ['offline', 'offline'] }, /duplicate/iu],
+    [{ specialization: 'web', affectedAreas: ['api'] }, /compatible|affected|profile|specialization/iu],
+    [{ specialization: 'web', riskTags: ['migration'] }, /support|risk|profile|specialization/iu],
+  ]) {
+    assert.ok(validateTaskPacket({ ...packet, ...change }).some((error) => expected.test(error)));
+  }
+});
+
+test('specialization and ordered risk tags are binding packet identity', () => {
+  const packet = {
+    schemaVersion: 3, taskId: 'task-identity', reviewedHeadSha: 'a'.repeat(40),
+    specialization: 'data-integrity', riskTags: ['migration', 'release'], finding: 'Finding.', evidence: 'Evidence.',
+    affectedAreas: ['release'], decisionIds: [], allowedPaths: ['.release/markers/example.json'], forbiddenPaths: [],
+    dependencies: [], acceptanceCriteria: ['Validated.'], requiredValidation: {
+      unit: [{ command: 'npm run check:release-state', reason: 'Covers release metadata.' }], system: [],
+    },
+  };
+  assert.notEqual(taskPacketDigest(packet), taskPacketDigest({ ...packet, specialization: 'ops-workflow' }));
+  assert.notEqual(taskPacketDigest(packet), taskPacketDigest({ ...packet, riskTags: ['release', 'migration'] }));
+  assert.notEqual(taskPacketDigest(packet), taskPacketDigest({ ...packet, riskTags: ['migration'] }));
+  const reordered = Object.fromEntries(Object.entries(packet).reverse());
+  assert.equal(taskPacketDigest(packet), taskPacketDigest(reordered));
+});
+
 test('task packets reject unsafe ownership and inexact or broad system validation scopes', () => {
   const packet = {
-    schemaVersion: 2, taskId: 'task-1', reviewedHeadSha: 'a'.repeat(40), finding: 'Finding.', evidence: 'Evidence.',
+    schemaVersion: 3, taskId: 'task-1', reviewedHeadSha: 'a'.repeat(40),
+    specialization: 'ops-workflow', riskTags: ['workflow'], finding: 'Finding.', evidence: 'Evidence.',
     affectedAreas: ['workflow'], decisionIds: [], allowedPaths: ['scripts/**'], forbiddenPaths: ['scripts/private/**'],
     dependencies: [], acceptanceCriteria: ['Validated.'], requiredValidation: {
       unit: [], system: [{
@@ -712,8 +806,9 @@ test('task packets reject unsafe ownership and inexact or broad system validatio
 
 test('worker result validator rejects raw artifact fields', () => {
   const result = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     taskId: 'task-1',
+    specialization: 'ops-workflow',
     status: 'failed',
     commitSha: null,
     changedPaths: [],
@@ -732,20 +827,42 @@ test('worker result validator rejects raw artifact fields', () => {
   assert.equal(validateSchema(result), false);
 });
 
+test('worker result schema requires only the specialization echo, not risk tags', () => {
+  const result = {
+    schemaVersion: 3, taskId: 'task-1', specialization: 'ops-workflow', status: 'failed', commitSha: null,
+    changedPaths: [], validation: [], resolutionSummary: 'The task failed.', residualRisks: [],
+    unexpectedDependencies: [],
+  };
+  assert.deepEqual(validateWorkerResult(result), []);
+  const schema = JSON.parse(readFileSync(reviewFixResultSchemaPath, 'utf8'));
+  const validateSchema = new Ajv2020({ allErrors: true, strict: true }).compile(schema);
+  assert.equal(validateSchema(result), true, JSON.stringify(validateSchema.errors));
+  assert.equal(validateSchema({ ...result, riskTags: [] }), false);
+  assert.equal(validateSchema({ ...result, specialization: 'unknown' }), false);
+  assert.ok(validateWorkerResult({ ...result, specialization: 'unknown' }).some(
+    (error) => error.includes('unknown specialist profile'),
+  ));
+});
+
 test('worker result enforces exact commands and status-aware validation outcomes', () => {
   const packet = {
-    schemaVersion: 2, taskId: 'task-1', reviewedHeadSha: 'a'.repeat(40), finding: 'Finding.', evidence: 'Evidence.',
+    schemaVersion: 3, taskId: 'task-1', reviewedHeadSha: 'a'.repeat(40),
+    specialization: 'ops-workflow', riskTags: ['workflow'], finding: 'Finding.', evidence: 'Evidence.',
     affectedAreas: ['workflow'], decisionIds: [], allowedPaths: ['scripts/**'], forbiddenPaths: [], dependencies: [],
     acceptanceCriteria: ['Validated.'], requiredValidation: {
       unit: [{ command: 'npm run check:workflow', reason: 'Covers workflow tooling.' }], system: [],
     },
   };
   const result = {
-    schemaVersion: 2, taskId: 'task-1', status: 'implemented', commitSha: 'b'.repeat(40), changedPaths: ['scripts/a.mjs'],
+    schemaVersion: 3, taskId: 'task-1', specialization: 'ops-workflow', status: 'implemented',
+    commitSha: 'b'.repeat(40), changedPaths: ['scripts/a.mjs'],
     validation: [{ command: 'npm run check:workflow', result: 'passed', summary: 'Passed.' }],
     resolutionSummary: 'Implemented.', residualRisks: [], unexpectedDependencies: [],
   };
   assert.deepEqual(validateWorkerResultAgainstTask(packet, result, ['scripts/a.mjs']), []);
+  assert.ok(validateWorkerResultAgainstTask(packet, {
+    ...result, specialization: 'api',
+  }, ['scripts/a.mjs']).some((error) => error.includes('specialization must equal')));
   assert.ok(validateWorkerResultAgainstTask(packet, result).some(
     (error) => error.includes('requires actual Git changed paths'),
   ));
@@ -808,7 +925,8 @@ test('validate-result CLI enforces the exact task validation commands', () => {
     assert.equal(spawnSync('git', ['commit', '-q', '-m', 'base'], { cwd: directory }).status, 0);
     const reviewedHeadSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: directory, encoding: 'utf8' }).stdout.trim();
     const packet = {
-      schemaVersion: 2, taskId: 'task-1', reviewedHeadSha, finding: 'Finding.', evidence: 'Evidence.',
+      schemaVersion: 3, taskId: 'task-1', reviewedHeadSha, specialization: 'ops-workflow',
+      riskTags: ['workflow'], finding: 'Finding.', evidence: 'Evidence.',
       affectedAreas: ['workflow'], decisionIds: [], allowedPaths: ['scripts/**'], forbiddenPaths: [], dependencies: [],
       acceptanceCriteria: ['Validated.'], requiredValidation: {
         unit: [{ command: 'npm run check:workflow', reason: 'Covers workflow tooling.' }], system: [],
@@ -833,13 +951,22 @@ test('validate-result CLI enforces the exact task validation commands', () => {
         }],
       },
     });
+    planSpecialists({
+      cwd: directory,
+      expectedRevision: state.revision,
+      input: {
+        schemaVersion: 1, stage: 'pre-bind', headSha: reviewedHeadSha,
+        tasks: [{ taskPacket: packet, planningSignals: { browserVisible: false, testSelectionUncertain: false } }],
+      },
+    });
     checkpointTaskPacketBinding({ cwd: directory, packet, expectedRevision: state.revision });
     writeFileSync(join(directory, 'scripts/a.mjs'), 'export const value = 2;\n');
     assert.equal(spawnSync('git', ['add', 'scripts/a.mjs'], { cwd: directory }).status, 0);
     assert.equal(spawnSync('git', ['commit', '-q', '-m', 'worker'], { cwd: directory }).status, 0);
     const commitSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: directory, encoding: 'utf8' }).stdout.trim();
     const result = {
-      schemaVersion: 2, taskId: 'task-1', status: 'implemented', commitSha, changedPaths: ['scripts/a.mjs'],
+      schemaVersion: 3, taskId: 'task-1', specialization: 'ops-workflow', status: 'implemented',
+      commitSha, changedPaths: ['scripts/a.mjs'],
       validation: [{ command: 'npm run check:full', result: 'passed', summary: 'Broad command.' }],
       resolutionSummary: 'Implemented.', residualRisks: [], unexpectedDependencies: [],
     };
@@ -861,7 +988,8 @@ test('validate-result CLI enforces the exact task validation commands', () => {
 
 test('required validation union is deterministic and de-duplicates repeated commands', () => {
   const base = {
-    schemaVersion: 2, taskId: 'task-1', reviewedHeadSha: 'a'.repeat(40), finding: 'Finding.', evidence: 'Evidence.',
+    schemaVersion: 3, taskId: 'task-1', reviewedHeadSha: 'a'.repeat(40),
+    specialization: 'ops-workflow', riskTags: ['workflow'], finding: 'Finding.', evidence: 'Evidence.',
     affectedAreas: ['workflow'], decisionIds: [], allowedPaths: ['scripts/**'], forbiddenPaths: [], dependencies: [],
     acceptanceCriteria: ['Validated.'], requiredValidation: {
       unit: [{ command: 'npm run check:workflow', reason: 'Covers tooling.' }], system: [],
@@ -883,6 +1011,8 @@ test('required validation union is deterministic and de-duplicates repeated comm
 
   const areaOnly = {
     ...base,
+    specialization: 'data-integrity',
+    riskTags: ['migration'],
     affectedAreas: ['shared', 'migration', 'documentation'],
     requiredValidation: {
       unit: [{ command: 'node --test .agents/skills/pr-review-cycle/scripts/contracts/contracts.test.mjs', reason: 'Focused contract tests.' }],

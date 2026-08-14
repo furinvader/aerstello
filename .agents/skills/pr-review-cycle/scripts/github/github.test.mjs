@@ -2918,7 +2918,13 @@ test('CLI exposes exactly the documented explicit-PR command surface and JSON-re
   const human = await runCli(['status', '--human'], {
     client, state, git: fakeGit(), clock: { now: () => AT },
   });
-  assert.match(human.human, /PR: #2[\s\S]*Current commit:[\s\S]*Codex review:[\s\S]*Tasks:[\s\S]*Full CI: Passed[\s\S]*Open Codex threads: 0[\s\S]*Next action:/u);
+  assert.match(human.human, /PR: #2[\s\S]*Current commit:[\s\S]*Codex review:[\s\S]*Tasks:[\s\S]*Specialist reviews: Missing[\s\S]*Full CI: Passed[\s\S]*Open Codex threads: 0[\s\S]*Next action:/u);
+  assert.match(renderHumanStatus({
+    ...result,
+    specialistReviews: {
+      status: 'pending', requiredReviewerIds: ['security_reviewer'], recordedReviewerIds: [],
+    },
+  }), /Specialist reviews: Pending \(required: security_reviewer\)/u);
   const done = renderHumanStatus({ ...result, statePhase: 'complete', taskStatus: {
     resolved: 1, pending: 0, display: 'Done',
     items: [{ id: 'finding-a', summary: 'Preserve exact SHA evidence.', status: 'Done' }],

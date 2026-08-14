@@ -42,6 +42,7 @@ The development seed creates `admin@aerstello.test`, requires an explicit passwo
 | `npm run check:api` | Build shared code and run related API type and unit checks |
 | `npm run check:web` | Build shared code and run related web type and unit checks |
 | `npm run check:workflow` | Check review and repository tooling |
+| `npm run test:specialists` | Check Aerstello specialist profiles and routing |
 | `npm run check:full` | Type-check, test, and production-build all workspaces |
 | `npm test` | Run unit and component tests |
 | `npm run test:e2e:related -- …` | Run selected Gherkin scenarios and browser projects |
@@ -82,6 +83,8 @@ For long-running pull-request review remediation, use the repository
 [PR review-cycle guide](./.agents/skills/pr-review-cycle/README.md). Local agents run
 related checks; CI runs the complete checks and E2E matrix. Production releases
 follow the [marker-and-annotated-tag contract](./.release/README.md).
+Reusable domain guidance and deterministic risk routing live in the
+[Aerstello specialist guide](./.agents/skills/aerstello-specialists/README.md).
 
 ## Contributing
 

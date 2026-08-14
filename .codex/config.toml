@@ -1,3 +1,23 @@
 [agents]
 max_concurrent_threads_per_session = 4
 default_subagent_reasoning_effort = "medium"
+
+[agents.review_fix_worker]
+description = "Implementation worker for one fixed Aerstello PR-review task and owned write set."
+config_file = "agents/review-fix-worker.toml"
+
+[agents.integration_verifier]
+description = "Read-only verifier for integrated Aerstello PR-review fixes."
+config_file = "agents/integration-verifier.toml"
+
+[agents.behavior_mapper]
+description = "Read-only Aerstello behavior and related-test planning helper."
+config_file = "agents/behavior-mapper.toml"
+
+[agents.security_reviewer]
+description = "Read-only Aerstello authentication and authorization risk reviewer."
+config_file = "agents/security-reviewer.toml"
+
+[agents.offline_realtime_reviewer]
+description = "Read-only Aerstello offline and realtime risk reviewer."
+config_file = "agents/offline-realtime-reviewer.toml"

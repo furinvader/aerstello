@@ -92,6 +92,12 @@
     "tests/support/git-fixtures.mjs"
   ],
   "separateCapabilities": {
+    "specialists": [
+      ".agents/skills/aerstello-specialists/**",
+      ".codex/agents/behavior-mapper.toml",
+      ".codex/agents/offline-realtime-reviewer.toml",
+      ".codex/agents/security-reviewer.toml"
+    ],
     "release": [
       ".release/**",
       "scripts/check-released-migrations.mjs",

@@ -5,6 +5,7 @@ import {
   fsyncSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -23,13 +24,27 @@ import {
   parseTargetedValidationCommand,
   reviewRequestGate,
   taskHasCanonicalThreadCoverage,
+  unionInitialValidationSelection,
   unionRequiredValidation,
   validateInitialValidationSelection,
   validateTaskPacket,
   validatePrReviewState,
   validatePrReviewStateV1,
 } from '../contracts/contracts.mjs';
-import { gitCommonDirectory, repositoryRoot, reviewRoot } from '../paths.mjs';
+import {
+  gitCommonDirectory,
+  repositoryRoot,
+  reviewRoot,
+  specialistReviewDirectory,
+  taskPacketDirectory,
+} from '../paths.mjs';
+import {
+  isReviewerEvidenceApplicable,
+  loadRegistry,
+  requiredReviewerIds,
+  routeSpecialists,
+  validateReviewerEvidence,
+} from '../../../aerstello-specialists/scripts/validate-registry.mjs';
 
 export { completionGate, reviewRequestGate } from '../contracts/contracts.mjs';
 export { gitCommonDirectory, repositoryRoot, reviewRoot } from '../paths.mjs';
@@ -126,6 +141,25 @@ export function validationPlanPath(cwd, prNumber) {
   return join(stateDirectory(cwd, prNumber), 'targeted-validation-plan.json');
 }
 
+export function taskPacketSidecarPath(cwd, prNumber, taskId) {
+  const name = createHash('sha256').update(String(taskId)).digest('hex');
+  return join(taskPacketDirectory(cwd, parsePrNumber(prNumber)), `${name}.json`);
+}
+
+export function specialistReviewBundlePath(cwd, prNumber, headSha, revision) {
+  if (typeof headSha !== 'string' || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(headSha)) {
+    throw new StateError('Specialist review HEAD must be a full commit SHA', 'INVALID_SPECIALIST_REVIEW');
+  }
+  if (!Number.isInteger(revision) || revision < 0) {
+    throw new StateError('Specialist review revision must be a non-negative integer', 'INVALID_SPECIALIST_REVIEW');
+  }
+  return join(specialistReviewDirectory(cwd, parsePrNumber(prNumber)), `${headSha}-r${revision}.json`);
+}
+
+export function specialistPlanReceiptPath(cwd, prNumber, headSha, revision) {
+  return specialistReviewBundlePath(cwd, prNumber, headSha, revision).replace(/\.json$/u, '.plan.sha256');
+}
+
 export function activePointerPath(cwd = process.cwd()) {
   return join(reviewRoot(cwd), 'active.json');
 }
@@ -184,10 +218,683 @@ function canonicalJson(value) {
   return value;
 }
 
+function canonicalSerializedJson(value) {
+  return serializeJson(canonicalJson(value));
+}
+
 export function taskPacketDigest(packet) {
-  const errors = validateTaskPacket(packet);
-  if (errors.length > 0) throw new StateError(`Invalid task packet:\n- ${errors.join('\n- ')}`, 'INVALID_TASK_PACKET');
+  if (packet?.schemaVersion !== 2) {
+    const errors = validateTaskPacket(packet);
+    if (errors.length > 0) throw new StateError(`Invalid task packet:\n- ${errors.join('\n- ')}`, 'INVALID_TASK_PACKET');
+  } else if (!packet || typeof packet !== 'object' || Array.isArray(packet)
+      || typeof packet.taskId !== 'string' || packet.taskId.length === 0) {
+    throw new StateError('Invalid historical schema-v2 task packet', 'INVALID_TASK_PACKET');
+  }
   return createHash('sha256').update(JSON.stringify(canonicalJson(packet))).digest('hex');
+}
+
+function readJsonSidecar(path, label, limit = ACTIVE_STATE_LIMIT_BYTES) {
+  try {
+    const source = readFileSync(path, 'utf8');
+    if (Buffer.byteLength(source, 'utf8') > limit) throw new Error(`${label} exceeds ${limit} bytes`);
+    return JSON.parse(source);
+  } catch (error) {
+    throw new StateError(`Unable to read ${label} at ${path}: ${error.message}`, 'INVALID_DURABLE_SIDECAR');
+  }
+}
+
+function persistImmutableTaskPacketSidecar(cwd, state, packet, digest) {
+  const path = taskPacketSidecarPath(cwd, state.prNumber, packet.taskId);
+  const serialized = canonicalSerializedJson(packet);
+  if (Buffer.byteLength(serialized, 'utf8') > ACTIVE_STATE_LIMIT_BYTES) {
+    throw new StateError('Task packet sidecar exceeds 64 KiB', 'TASK_PACKET_SIDECAR_WRITE_FAILED');
+  }
+  if (existsSync(path)) {
+    let existing;
+    try {
+      existing = readJsonSidecar(path, 'task packet sidecar');
+    } catch (error) {
+      throw new StateError(
+        `Task ${packet.taskId} already has an invalid durable packet sidecar; explicitly replan the task`,
+        'TASK_PACKET_REPLAN_REQUIRED',
+      );
+    }
+    let existingDigest;
+    try { existingDigest = taskPacketDigest(existing); } catch { existingDigest = null; }
+    if (existing?.schemaVersion !== 3 || existingDigest !== digest
+        || canonicalSerializedJson(existing) !== serialized) {
+      throw new StateError(
+        `Task ${packet.taskId} already has a different or invalid durable packet sidecar; explicitly replan the task`,
+        'TASK_PACKET_REPLAN_REQUIRED',
+      );
+    }
+    return path;
+  }
+  atomicWriteText(path, serialized);
+  const persisted = readJsonSidecar(path, 'task packet sidecar');
+  if (persisted?.schemaVersion !== 3 || taskPacketDigest(persisted) !== digest
+      || canonicalSerializedJson(persisted) !== serialized) {
+    throw new StateError(`Durable packet sidecar verification failed for task ${packet.taskId}`, 'TASK_PACKET_SIDECAR_WRITE_FAILED');
+  }
+  return path;
+}
+
+function readBoundTaskPacketSidecar(cwd, state, task, { suppliedPacket } = {}) {
+  const path = taskPacketSidecarPath(cwd, state.prNumber, task.id);
+  if (!existsSync(path)) {
+    if (task.status === 'completed' && suppliedPacket?.schemaVersion === 2
+        && taskPacketDigest(suppliedPacket) === task.taskPacketDigest) return suppliedPacket;
+    throw new StateError(
+      `Task ${task.id} is bound without a valid schema-v3 packet sidecar; explicitly replan it`,
+      'TASK_PACKET_REPLAN_REQUIRED',
+    );
+  }
+  let packet;
+  try {
+    packet = readJsonSidecar(path, 'task packet sidecar');
+    if (packet?.schemaVersion !== 3) throw new Error('sidecar packet must use schema v3');
+    const errors = validateTaskPacket(packet);
+    if (errors.length > 0) throw new Error(errors.join('; '));
+    if (packet.taskId !== task.id || taskPacketDigest(packet) !== task.taskPacketDigest) {
+      throw new Error('task ID or digest does not match active state');
+    }
+  } catch (error) {
+    throw new StateError(
+      `Task ${task.id} has a missing or tampered durable packet sidecar; explicitly replan it (${error.message})`,
+      'TASK_PACKET_REPLAN_REQUIRED',
+    );
+  }
+  return packet;
+}
+
+function hasCompletedHistoricalV2TaskProof(cwd, state, task) {
+  const backupPath = join(stateDirectory(cwd, state.prNumber), 'state.v2.backup.json');
+  if (!existsSync(backupPath) || task.status !== 'completed') return false;
+  try {
+    const legacy = readJsonSidecar(backupPath, 'schema-v2 migration backup');
+    migratePrReviewStateV2(legacy, { migratedAt: state.updatedAt });
+    if (legacy.repository !== state.repository || legacy.prNumber !== state.prNumber
+        || resolve(legacy.integrationWorktree) !== resolve(state.integrationWorktree)) return false;
+    const legacyTask = legacy.tasks.find((candidate) => candidate.id === task.id);
+    return legacyTask?.status === 'completed'
+      && legacyTask.taskPacketDigest === task.taskPacketDigest;
+  } catch {
+    return false;
+  }
+}
+
+export function loadBoundTaskPackets(cwd, state, { statuses } = {}) {
+  const selected = state.tasks.filter((task) => task.disposition === 'actionable'
+    && typeof task.taskPacketDigest === 'string'
+    && (!statuses || statuses.includes(task.status)));
+  return selected.map((task) => readBoundTaskPacketSidecar(cwd, state, task));
+}
+
+function specialistPlanningErrors(input) {
+  const errors = [];
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return ['input must be an object'];
+  const fields = ['schemaVersion', 'stage', 'headSha', 'tasks'];
+  for (const field of fields) if (!Object.hasOwn(input, field)) errors.push(`input.${field} is required`);
+  for (const field of Object.keys(input)) if (!fields.includes(field)) errors.push(`input.${field} is not allowed`);
+  if (input.schemaVersion !== 1) errors.push('input.schemaVersion must be 1');
+  if (!['pre-bind', 'post-integration'].includes(input.stage)) errors.push('input.stage is invalid');
+  if (typeof input.headSha !== 'string' || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(input.headSha)) errors.push('input.headSha is invalid');
+  if (!Array.isArray(input.tasks) || input.tasks.length === 0) errors.push('input.tasks must not be empty');
+  else for (const [index, entry] of input.tasks.entries()) {
+    const prefix = `input.tasks[${index}]`;
+    const entryFields = input.stage === 'pre-bind' ? ['taskPacket', 'planningSignals'] : ['taskPacket'];
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) { errors.push(`${prefix} must be an object`); continue; }
+    for (const field of entryFields) if (!Object.hasOwn(entry, field)) errors.push(`${prefix}.${field} is required`);
+    for (const field of Object.keys(entry)) if (!entryFields.includes(field)) errors.push(`${prefix}.${field} is not allowed`);
+    errors.push(...validateTaskPacket(entry.taskPacket).map((error) => `${prefix}.taskPacket: ${error}`));
+    if (input.stage === 'pre-bind') {
+      const signals = entry.planningSignals;
+      if (!signals || typeof signals !== 'object' || Array.isArray(signals)
+          || Object.keys(signals).sort().join(',') !== 'browserVisible,testSelectionUncertain'
+          || typeof signals.browserVisible !== 'boolean'
+          || typeof signals.testSelectionUncertain !== 'boolean') {
+        errors.push(`${prefix}.planningSignals must contain exactly browserVisible and testSelectionUncertain booleans`);
+      }
+    }
+  }
+  return errors;
+}
+
+function specialistRouteFor(packet, planningSignals = {}) {
+  loadRegistry();
+  return routeSpecialists({
+    specialization: packet.specialization,
+    riskTags: packet.riskTags,
+    browserVisible: planningSignals.browserVisible === true,
+    testSelectionUncertain: planningSignals.testSelectionUncertain === true,
+  });
+}
+
+function normalizedRequiredReviewerIds(route, { stage }) {
+  const ids = requiredReviewerIds(route, { phase: stage === 'post-integration' ? 'review' : 'planning' });
+  return [...new Set(stage === 'post-integration'
+    ? ids.filter((id) => id !== 'integration_verifier') : ids)].sort();
+}
+
+function canonicalBundleTaskRoute(task, stage) {
+  return specialistRouteFor(stage === 'pre-bind' ? task.taskPacket : task, stage === 'pre-bind' ? task.planningSignals : {
+    browserVisible: false, testSelectionUncertain: false,
+  });
+}
+
+function specialistPlanDigest(bundle) {
+  const {
+    records: _records,
+    createdAt: _createdAt,
+    updatedAt: _updatedAt,
+    ...immutablePlan
+  } = bundle;
+  return createHash('sha256').update(canonicalSerializedJson(immutablePlan)).digest('hex');
+}
+
+function verifySpecialistPlanReceipt(cwd, state, bundle) {
+  const path = specialistPlanReceiptPath(cwd, state.prNumber, bundle.headSha, bundle.stateRevision);
+  let recorded;
+  try {
+    if (statSync(path).size > 128) throw new Error('receipt exceeds 128 bytes');
+    recorded = readFileSync(path, 'utf8');
+  } catch (error) {
+    throw new StateError(`Unable to read specialist plan receipt at ${path}: ${error.message}`, 'INVALID_SPECIALIST_REVIEW');
+  }
+  const expected = `${specialistPlanDigest(bundle)}\n`;
+  if (recorded !== expected) {
+    throw new StateError('Specialist plan receipt does not match immutable bundle planning data', 'INVALID_SPECIALIST_REVIEW');
+  }
+  return path;
+}
+
+function persistSpecialistPlanReceipt(cwd, state, bundle) {
+  const path = specialistPlanReceiptPath(cwd, state.prNumber, bundle.headSha, bundle.stateRevision);
+  const expected = `${specialistPlanDigest(bundle)}\n`;
+  if (existsSync(path)) {
+    if (statSync(path).size > 128 || readFileSync(path, 'utf8') !== expected) {
+      throw new StateError('A different specialist plan receipt already exists', 'SPECIALIST_PLAN_CONFLICT');
+    }
+    return path;
+  }
+  atomicWriteText(path, expected);
+  return path;
+}
+
+function conciseSpecialistPayloadErrors({ status, summary, findings }, label) {
+  const errors = [];
+  if (!['clean', 'findings'].includes(status)) errors.push(`${label}.status is invalid`);
+  if (typeof summary !== 'string' || summary.trim() === '' || summary.length > 1000) {
+    errors.push(`${label}.summary must be a non-empty string of at most 1000 characters`);
+  }
+  if (!Array.isArray(findings) || findings.length > 20) {
+    errors.push(`${label}.findings must be an array with at most 20 entries`);
+    return errors;
+  }
+  if ((status === 'clean' && findings.length !== 0)
+      || (status === 'findings' && findings.length === 0)) {
+    errors.push(`${label}.findings contradicts its status`);
+  }
+  if (JSON.stringify(findings).length > 8000) errors.push(`${label}.findings exceeds the concise evidence limit`);
+  for (const [index, finding] of findings.entries()) {
+    const prefix = `${label}.findings[${index}]`;
+    if (!finding || typeof finding !== 'object' || Array.isArray(finding)) {
+      errors.push(`${prefix} must be an object`);
+      continue;
+    }
+    for (const key of Object.keys(finding)) {
+      if (key !== 'summary') errors.push(`${prefix}.${key} is not allowed`);
+    }
+    if (typeof finding.summary !== 'string' || finding.summary.trim() === '' || finding.summary.length > 1000) {
+      errors.push(`${prefix}.summary must be a non-empty string of at most 1000 characters`);
+    }
+  }
+  return errors;
+}
+
+function validateSpecialistBundle(bundle, state) {
+  const errors = [];
+  if (!bundle || typeof bundle !== 'object' || Array.isArray(bundle)) return ['bundle must be an object'];
+  const fields = ['schemaVersion', 'stage', 'prNumber', 'headSha', 'stateRevision', 'tasks', 'records', 'createdAt', 'updatedAt'];
+  for (const field of fields) if (!Object.hasOwn(bundle, field)) errors.push(`bundle.${field} is required`);
+  for (const field of Object.keys(bundle)) if (!fields.includes(field)) errors.push(`bundle.${field} is not allowed`);
+  if (bundle.schemaVersion !== 1) errors.push('bundle.schemaVersion must be 1');
+  if (!['pre-bind', 'post-integration'].includes(bundle.stage)) errors.push('bundle.stage is invalid');
+  if (bundle.prNumber !== state.prNumber) errors.push('bundle.prNumber does not match state');
+  if (typeof bundle.headSha !== 'string' || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(bundle.headSha)) {
+    errors.push('bundle.headSha is invalid');
+  }
+  if (bundle.stage === 'post-integration' && bundle.headSha !== state.currentIntegrationHeadSha) {
+    errors.push('bundle.headSha is stale for the integrated review stage');
+  }
+  if (bundle.stage === 'pre-bind' && state.reviewedHeadSha !== null
+      && bundle.headSha !== state.reviewedHeadSha) {
+    errors.push('bundle.headSha does not match the reviewed commit');
+  }
+  if (bundle.stateRevision !== state.revision) errors.push('bundle.stateRevision is stale');
+  if (!Array.isArray(bundle.tasks) || bundle.tasks.length === 0) errors.push('bundle.tasks must not be empty');
+  else {
+    if (bundle.stage === 'pre-bind' && bundle.tasks.length !== 1) {
+      errors.push('pre-bind bundles must contain exactly one task');
+    }
+    const ids = [];
+    for (const [index, task] of bundle.tasks.entries()) {
+      const prefix = `bundle.tasks[${index}]`;
+      const taskFields = ['taskId', 'packetDigest', 'specialization', 'riskTags', 'route'];
+      if (bundle.stage === 'pre-bind') taskFields.push('reviewedHeadSha', 'planningSignals', 'taskPacket');
+      if (!task || typeof task !== 'object' || Array.isArray(task)) { errors.push(`${prefix} must be an object`); continue; }
+      for (const field of taskFields) if (!Object.hasOwn(task, field)) errors.push(`${prefix}.${field} is required`);
+      for (const field of Object.keys(task)) if (!taskFields.includes(field)) errors.push(`${prefix}.${field} is not allowed`);
+      if (typeof task.taskId !== 'string' || task.taskId.length === 0) errors.push(`${prefix}.taskId is invalid`);
+      else ids.push(task.taskId);
+      if (!/^[0-9a-f]{64}$/u.test(task.packetDigest ?? '')) errors.push(`${prefix}.packetDigest is invalid`);
+      if (typeof task.specialization !== 'string' || !Array.isArray(task.riskTags)) errors.push(`${prefix} specialization metadata is invalid`);
+      if (bundle.stage === 'pre-bind') {
+        const packetErrors = validateTaskPacket(task.taskPacket);
+        errors.push(...packetErrors.map((error) => `${prefix}.taskPacket: ${error}`));
+        if (packetErrors.length === 0) {
+          if (task.taskPacket.taskId !== task.taskId
+              || taskPacketDigest(task.taskPacket) !== task.packetDigest
+              || task.taskPacket.reviewedHeadSha !== task.reviewedHeadSha
+              || task.taskPacket.specialization !== task.specialization
+              || canonicalSerializedJson(task.taskPacket.riskTags) !== canonicalSerializedJson(task.riskTags)) {
+            errors.push(`${prefix}.taskPacket does not match its immutable planning metadata`);
+          }
+        }
+        if (task.reviewedHeadSha !== bundle.headSha) {
+          errors.push(`${prefix}.reviewedHeadSha must match the bundle reviewed commit`);
+        }
+        const signals = task.planningSignals;
+        if (!signals || typeof signals !== 'object' || Array.isArray(signals)
+            || Object.keys(signals).sort().join(',') !== 'browserVisible,testSelectionUncertain'
+            || typeof signals.browserVisible !== 'boolean' || typeof signals.testSelectionUncertain !== 'boolean') {
+          errors.push(`${prefix}.planningSignals is invalid`);
+        }
+      }
+      try {
+        const canonicalRoute = canonicalBundleTaskRoute(task, bundle.stage);
+        if (canonicalSerializedJson(task.route) !== canonicalSerializedJson(canonicalRoute)) {
+          errors.push(`${prefix}.route does not match canonical specialist routing`);
+        }
+      } catch (error) {
+        errors.push(`${prefix}.route cannot be recomputed: ${error.message}`);
+      }
+    }
+    if (new Set(ids).size !== ids.length) errors.push('bundle task IDs must be unique');
+  }
+  if (!Array.isArray(bundle.records)) errors.push('bundle.records must be an array');
+  else {
+    const reviewers = [];
+    const required = new Set(bundle.tasks?.flatMap((task) =>
+      normalizedRequiredReviewerIds(task.route, { stage: bundle.stage })) ?? []);
+    for (const record of bundle.records) {
+      if (!record || typeof record !== 'object' || Array.isArray(record)) {
+        errors.push('bundle record must be an object');
+        continue;
+      }
+      const recordFields = [
+        'schemaVersion', 'planRevision', 'headSha', 'reviewerId', 'status',
+        'summary', 'findings', 'recordedAt',
+      ];
+      for (const key of Object.keys(record)) {
+        if (!recordFields.includes(key)) errors.push(`bundle record ${record.reviewerId ?? 'unknown'}.${key} is not allowed`);
+      }
+      if (typeof record?.reviewerId === 'string') reviewers.push(record.reviewerId);
+      if (!required.has(record?.reviewerId)) errors.push(`bundle record ${record?.reviewerId ?? 'unknown'} is not routed`);
+      if (!isReviewerEvidenceApplicable({ evidence: record, integratedHeadSha: bundle.headSha })) {
+        errors.push(`bundle record ${record?.reviewerId ?? 'unknown'} is stale`);
+      }
+      if (record?.schemaVersion !== 1 || record?.planRevision !== bundle.stateRevision) {
+        errors.push(`bundle record ${record?.reviewerId ?? 'unknown'} does not match the exact plan revision`);
+      }
+      errors.push(...conciseSpecialistPayloadErrors({
+        status: record.status, summary: record.summary, findings: record.findings,
+      }, `bundle record ${record.reviewerId ?? 'unknown'}`));
+      if (typeof record.recordedAt !== 'string' || !Number.isFinite(Date.parse(record.recordedAt))) {
+        errors.push(`bundle record ${record.reviewerId ?? 'unknown'}.recordedAt is invalid`);
+      }
+    }
+    if (new Set(reviewers).size !== reviewers.length) errors.push('bundle reviewer records must be unique');
+  }
+  for (const field of ['createdAt', 'updatedAt']) {
+    if (typeof bundle[field] !== 'string' || !Number.isFinite(Date.parse(bundle[field]))) errors.push(`bundle.${field} is invalid`);
+  }
+  return errors;
+}
+
+function readSpecialistBundle(cwd, state, { headSha = state.currentIntegrationHeadSha } = {}) {
+  const path = specialistReviewBundlePath(cwd, state.prNumber, headSha, state.revision);
+  if (!existsSync(path)) throw new StateError(`No exact-HEAD specialist bundle at ${path}`, 'SPECIALIST_EVIDENCE_MISSING');
+  const bundle = readJsonSidecar(path, 'specialist review bundle');
+  if (bundle?.headSha !== headSha) {
+    throw new StateError('Specialist bundle content does not match its exact-HEAD path', 'INVALID_SPECIALIST_REVIEW');
+  }
+  const errors = validateSpecialistBundle(bundle, state);
+  if (errors.length > 0) throw new StateError(`Invalid specialist review bundle:\n- ${errors.join('\n- ')}`, 'INVALID_SPECIALIST_REVIEW');
+  verifySpecialistPlanReceipt(cwd, state, bundle);
+  return bundle;
+}
+
+function writeNewSpecialistBundle(cwd, state, bundle) {
+  const path = specialistReviewBundlePath(cwd, state.prNumber, bundle.headSha, state.revision);
+  const serialized = canonicalSerializedJson(bundle);
+  if (Buffer.byteLength(serialized, 'utf8') > ACTIVE_STATE_LIMIT_BYTES) {
+    throw new StateError('Specialist review bundle exceeds 64 KiB', 'INVALID_SPECIALIST_REVIEW');
+  }
+  if (existsSync(path)) {
+    const existing = readJsonSidecar(path, 'specialist review bundle');
+    const errors = validateSpecialistBundle(existing, state);
+    if (errors.length > 0) {
+      throw new StateError(`Invalid existing specialist review bundle:\n- ${errors.join('\n- ')}`, 'INVALID_SPECIALIST_REVIEW');
+    }
+    if (specialistPlanDigest(existing) !== specialistPlanDigest(bundle)) {
+      throw new StateError('An exact-HEAD/revision specialist plan already exists', 'SPECIALIST_PLAN_CONFLICT');
+    }
+    verifySpecialistPlanReceipt(cwd, state, existing);
+    return existing;
+  }
+  persistSpecialistPlanReceipt(cwd, state, bundle);
+  atomicWriteText(path, serialized);
+  return bundle;
+}
+
+function assertPostIntegrationBundleCoverage(cwd, state, bundle) {
+  if (bundle.stage !== 'post-integration') return null;
+  const packets = loadBoundTaskPackets(cwd, state, { statuses: ['integrated'] })
+    .sort((a, b) => a.taskId.localeCompare(b.taskId));
+  const expectedTasks = packets.map((packet) => ({
+    taskId: packet.taskId,
+    packetDigest: taskPacketDigest(packet),
+    specialization: packet.specialization,
+    riskTags: packet.riskTags,
+    route: specialistRouteFor(packet, { browserVisible: false, testSelectionUncertain: false }),
+  }));
+  const actualTasks = [...bundle.tasks].sort((a, b) => a.taskId.localeCompare(b.taskId));
+  if (canonicalSerializedJson(actualTasks) !== canonicalSerializedJson(expectedTasks)) {
+    throw new StateError(
+      'Specialist bundle does not cover current Integrated packet sidecars',
+      'SPECIALIST_PLAN_TASK_MISMATCH',
+    );
+  }
+  return { packets, expectedTasks };
+}
+
+export function planSpecialists({ cwd = process.cwd(), prNumber, input, expectedRevision, now = utcNow } = {}) {
+  const errors = specialistPlanningErrors(input);
+  if (errors.length > 0) throw new StateError(`Invalid specialist planning input:\n- ${errors.join('\n- ')}`, 'INVALID_SPECIALIST_PLAN');
+  const selectedPr = prNumber ?? activePrNumber(cwd);
+  if (selectedPr === null || selectedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  return withStateLock(cwd, selectedPr, () => {
+    const state = loadState(cwd, selectedPr);
+    if (expectedRevision !== state.revision) throw new StateError(`State revision changed: expected ${expectedRevision}, found ${state.revision}`, 'STATE_REVISION_CONFLICT');
+    if (input.stage === 'pre-bind' && input.tasks.length !== 1) {
+      throw new StateError('Pre-bind specialist planning accepts exactly one task per guarded revision', 'INVALID_SPECIALIST_PLAN');
+    }
+    const expectedHeadSha = input.stage === 'pre-bind'
+      ? input.tasks[0].taskPacket.reviewedHeadSha
+      : state.currentIntegrationHeadSha;
+    if (input.headSha !== expectedHeadSha) {
+      throw new StateError(
+        `Specialist plan must bind to the exact ${input.stage === 'pre-bind' ? 'reviewed' : 'integrated'} HEAD`,
+        'SPECIALIST_PLAN_STALE',
+      );
+    }
+    let packets;
+    if (input.stage === 'pre-bind') {
+      packets = input.tasks.map((entry) => entry.taskPacket);
+      for (const packet of packets) {
+        const task = state.tasks.find((candidate) => candidate.id === packet.taskId);
+        if (!task || task.disposition !== 'actionable' || task.taskPacketDigest) {
+          throw new StateError(`Task ${packet.taskId} is not an unbound actionable task`, 'SPECIALIST_PLAN_TASK_MISMATCH');
+        }
+        assertTaskPacketHead(state, task, packet, taskPacketDigest(packet));
+      }
+    } else {
+      assertCleanExactIntegrationHead(state);
+      if (state.validationStatus.status !== 'passed' || state.validationStatus.headSha !== state.currentIntegrationHeadSha) {
+        throw new StateError('Post-integration specialist planning requires passed exact-HEAD targeted validation', 'SPECIALIST_VALIDATION_REQUIRED');
+      }
+      packets = loadBoundTaskPackets(cwd, state, { statuses: ['integrated'] }).sort((a, b) => a.taskId.localeCompare(b.taskId));
+      const supplied = [...input.tasks].map((entry) => entry.taskPacket).sort((a, b) => a.taskId.localeCompare(b.taskId));
+      if (canonicalSerializedJson(supplied) !== canonicalSerializedJson(packets)) {
+        throw new StateError('Post-integration planning input must exactly cover durable Integrated packet sidecars', 'SPECIALIST_PLAN_TASK_MISMATCH');
+      }
+    }
+    const timestamp = now();
+    const tasks = packets.map((packet, index) => {
+      const planningSignals = input.stage === 'pre-bind' ? input.tasks[index].planningSignals : {};
+      return {
+        taskId: packet.taskId,
+        packetDigest: taskPacketDigest(packet),
+        specialization: packet.specialization,
+        riskTags: packet.riskTags,
+        route: specialistRouteFor(packet, planningSignals),
+        ...(input.stage === 'pre-bind' ? {
+          reviewedHeadSha: packet.reviewedHeadSha,
+          planningSignals,
+          taskPacket: canonicalJson(packet),
+        } : {}),
+      };
+    });
+    const bundle = {
+      schemaVersion: 1, stage: input.stage, prNumber: state.prNumber,
+      headSha: input.headSha, stateRevision: state.revision,
+      tasks, records: [], createdAt: timestamp, updatedAt: timestamp,
+    };
+    const bundleErrors = validateSpecialistBundle(bundle, state);
+    if (bundleErrors.length > 0) throw new StateError(`Invalid specialist plan:\n- ${bundleErrors.join('\n- ')}`, 'INVALID_SPECIALIST_PLAN');
+    return writeNewSpecialistBundle(cwd, state, bundle);
+  });
+}
+
+function assertConciseSpecialistRecord(input) {
+  const fields = ['schemaVersion', 'planRevision', 'headSha', 'reviewerId', 'outcome', 'summary', 'findings'];
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new StateError('Specialist record input must be an object', 'INVALID_SPECIALIST_REVIEW');
+  for (const field of fields) if (!Object.hasOwn(input, field)) throw new StateError(`Specialist record input.${field} is required`, 'INVALID_SPECIALIST_REVIEW');
+  for (const field of Object.keys(input)) if (!fields.includes(field)) throw new StateError(`Specialist record input.${field} is not allowed`, 'INVALID_SPECIALIST_REVIEW');
+  const payloadErrors = conciseSpecialistPayloadErrors({
+    status: input.outcome, summary: input.summary, findings: input.findings,
+  }, 'specialist record input');
+  if (input.schemaVersion !== 1 || payloadErrors.length > 0) {
+    throw new StateError(
+      `Specialist record must contain one concise clean statement or concise findings${payloadErrors.length > 0 ? `:\n- ${payloadErrors.join('\n- ')}` : ''}`,
+      'INVALID_SPECIALIST_REVIEW',
+    );
+  }
+}
+
+export function recordSpecialistReview({ cwd = process.cwd(), prNumber, input, expectedRevision, now = utcNow } = {}) {
+  assertConciseSpecialistRecord(input);
+  const selectedPr = prNumber ?? activePrNumber(cwd);
+  if (selectedPr === null || selectedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  return withStateLock(cwd, selectedPr, () => {
+    const state = loadState(cwd, selectedPr);
+    if (expectedRevision !== state.revision || input.planRevision !== state.revision) {
+      throw new StateError(`Specialist evidence revision must equal current revision ${state.revision}`, 'STATE_REVISION_CONFLICT');
+    }
+    const bundle = readSpecialistBundle(cwd, state, { headSha: input.headSha });
+    if (bundle.stage === 'post-integration') {
+      const checkoutError = currentSpecialistCheckoutError(state);
+      if (checkoutError !== null) {
+        throw new StateError(`Specialist evidence is stale: ${checkoutError}`, 'SPECIALIST_PLAN_STALE');
+      }
+      assertPostIntegrationBundleCoverage(cwd, state, bundle);
+    }
+    const required = new Set(bundle.tasks.flatMap((task) => normalizedRequiredReviewerIds(task.route, { stage: bundle.stage })));
+    if (!required.has(input.reviewerId)) throw new StateError(`Reviewer ${input.reviewerId} is not routed by this plan`, 'SPECIALIST_REVIEWER_MISMATCH');
+    const evidence = {
+      schemaVersion: 1, planRevision: input.planRevision, headSha: input.headSha,
+      reviewerId: input.reviewerId, status: input.outcome, summary: input.summary,
+      findings: input.findings, recordedAt: now(),
+    };
+    const route = bundle.tasks.find((task) => normalizedRequiredReviewerIds(task.route, { stage: bundle.stage }).includes(input.reviewerId)).route;
+    const oneReviewerRoute = { ...route, reviewers: route.reviewers.filter((reviewer) => reviewer.id === input.reviewerId) };
+    const evidenceErrors = validateReviewerEvidence({ evidence: [evidence], route: oneReviewerRoute, integratedHeadSha: bundle.headSha });
+    if (evidenceErrors.length > 0) {
+      throw new StateError(`Invalid specialist reviewer evidence:\n- ${evidenceErrors.join('\n- ')}`, 'INVALID_SPECIALIST_REVIEW');
+    }
+    const existing = bundle.records.find((record) => record.reviewerId === input.reviewerId);
+    if (existing) {
+      const comparableExisting = {
+        schemaVersion: existing.schemaVersion, planRevision: existing.planRevision, headSha: existing.headSha,
+        reviewerId: existing.reviewerId, outcome: existing.status, summary: existing.summary, findings: existing.findings,
+      };
+      if (canonicalSerializedJson(comparableExisting) === canonicalSerializedJson(input)) return bundle;
+      throw new StateError(`Reviewer ${input.reviewerId} already has different exact-plan evidence`, 'SPECIALIST_EVIDENCE_CONFLICT');
+    }
+    const updated = { ...bundle, records: [...bundle.records, evidence], updatedAt: evidence.recordedAt };
+    const errors = validateSpecialistBundle(updated, state);
+    if (errors.length > 0) throw new StateError(`Invalid specialist review bundle:\n- ${errors.join('\n- ')}`, 'INVALID_SPECIALIST_REVIEW');
+    const serialized = canonicalSerializedJson(updated);
+    if (Buffer.byteLength(serialized, 'utf8') > ACTIVE_STATE_LIMIT_BYTES) {
+      throw new StateError('Specialist review bundle exceeds 64 KiB', 'INVALID_SPECIALIST_REVIEW');
+    }
+    atomicWriteText(specialistReviewBundlePath(cwd, state.prNumber, bundle.headSha, state.revision), serialized);
+    return updated;
+  });
+}
+
+function assertBehaviorMapperPlanningComplete(cwd, state, packet) {
+  const path = specialistReviewBundlePath(cwd, state.prNumber, packet.reviewedHeadSha, state.revision);
+  if (!existsSync(path)) throw new StateError(`Task ${packet.taskId} requires a guarded pre-bind specialist plan`, 'SPECIALIST_PLAN_REQUIRED');
+  const bundle = readSpecialistBundle(cwd, state, { headSha: packet.reviewedHeadSha });
+  const planned = bundle.stage === 'pre-bind' && bundle.tasks.length === 1 ? bundle.tasks[0] : null;
+  if (!planned || planned.taskId !== packet.taskId || planned.packetDigest !== taskPacketDigest(packet)) {
+    throw new StateError(`Task ${packet.taskId} does not match the exact pre-bind specialist plan`, 'SPECIALIST_PLAN_TASK_MISMATCH');
+  }
+  if (canonicalSerializedJson(planned.taskPacket) !== canonicalSerializedJson(packet)) {
+    throw new StateError(`Task ${packet.taskId} differs from its exact pre-bind specialist packet`, 'SPECIALIST_PLAN_TASK_MISMATCH');
+  }
+  const required = normalizedRequiredReviewerIds(planned.route, { stage: 'pre-bind' });
+  if (required.includes('behavior_mapper')) {
+    const mapper = bundle.records.find((record) => record.reviewerId === 'behavior_mapper');
+    if (!mapper || mapper.status !== 'clean' || !isReviewerEvidenceApplicable({ evidence: mapper, integratedHeadSha: packet.reviewedHeadSha })) {
+      throw new StateError('Behavior mapper must record a current-plan clean result before packet binding', 'BEHAVIOR_MAPPING_REQUIRED');
+    }
+    const hasExactRelatedE2E = packet.requiredValidation.system.some((entry) =>
+      entry.command.startsWith('npm run test:e2e:related -- ')
+      && entry.selectors.length > 0 && entry.projects.length > 0);
+    if (!hasExactRelatedE2E) {
+      throw new StateError(
+        'Behavior-mapped work requires an exact related-E2E selector and browser-project selection before binding',
+        'BEHAVIOR_TEST_SELECTION_REQUIRED',
+      );
+    }
+  }
+}
+
+function currentSpecialistCheckoutError(state) {
+  try {
+    const actual = gitSnapshot(state.integrationWorktree);
+    if (actual.headSha !== state.currentIntegrationHeadSha) return 'integration HEAD changed without a guarded state checkpoint';
+    if (actual.dirty) return 'integration checkout has uncommitted changes';
+    return null;
+  } catch (error) {
+    return `integration checkout could not be inspected: ${error.message}`;
+  }
+}
+
+export function specialistContext({ cwd = process.cwd(), prNumber } = {}) {
+  const state = loadState(cwd, prNumber);
+  if (!state) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  const checkoutError = currentSpecialistCheckoutError(state);
+  if (checkoutError !== null) {
+    throw new StateError(`Specialist evidence is stale: ${checkoutError}`, 'SPECIALIST_PLAN_STALE');
+  }
+  const bundle = readSpecialistBundle(cwd, state);
+  if (bundle.stage !== 'post-integration') throw new StateError('Current specialist bundle is not a post-integration review plan', 'SPECIALIST_EVIDENCE_MISSING');
+  const { packets, expectedTasks } = assertPostIntegrationBundleCoverage(cwd, state, bundle);
+  const required = [...new Set(bundle.tasks.flatMap((task) => normalizedRequiredReviewerIds(task.route, { stage: 'post-integration' })))].sort();
+  const records = new Map(bundle.records.map((record) => [record.reviewerId, record]));
+  const missing = required.filter((id) => !records.has(id));
+  const stale = required.filter((id) => records.has(id)
+    && !isReviewerEvidenceApplicable({ evidence: records.get(id), integratedHeadSha: state.currentIntegrationHeadSha }));
+  const findings = required.filter((id) => records.get(id)?.status === 'findings')
+    .map((id) => records.get(id));
+  return {
+    schemaVersion: 1,
+    status: missing.length > 0 || stale.length > 0 ? 'incomplete' : findings.length > 0 ? 'findings' : 'clean',
+    readyForIntegrationVerifier: missing.length === 0 && stale.length === 0 && findings.length === 0,
+    headSha: state.currentIntegrationHeadSha,
+    stateRevision: state.revision,
+    packets: packets.map((packet) => canonicalJson(packet)),
+    routes: expectedTasks.map(({ taskId, route }) => ({ taskId, route })),
+    requiredReviewerIds: required,
+    missingReviewerIds: missing,
+    staleReviewerIds: stale,
+    specialistResults: required.filter((id) => records.has(id)).map((id) => records.get(id)),
+    findings,
+    targetedValidation: state.validationStatus,
+  };
+}
+
+export function readSpecialistStatus({ cwd = process.cwd(), prNumber } = {}) {
+  const state = loadState(cwd, prNumber);
+  if (!state) return { status: 'missing', headSha: null, stateRevision: null, bundlePath: null, requiredReviewerIds: [], recordedReviewerIds: [] };
+  const checkoutError = currentSpecialistCheckoutError(state);
+  if (checkoutError !== null) {
+    return {
+      status: 'stale', headSha: state.currentIntegrationHeadSha, stateRevision: state.revision,
+      bundlePath: null, requiredReviewerIds: [], recordedReviewerIds: [], error: 'SPECIALIST_PLAN_STALE',
+    };
+  }
+  const candidates = [...new Set([
+    state.currentIntegrationHeadSha,
+    ...(state.reviewedHeadSha === null ? [] : [state.reviewedHeadSha]),
+  ])].map((headSha) => ({
+    headSha,
+    path: specialistReviewBundlePath(cwd, state.prNumber, headSha, state.revision),
+  })).filter(({ path }) => existsSync(path));
+  if (candidates.length === 0) {
+    const directory = specialistReviewDirectory(cwd, state.prNumber);
+    const orphanReceipts = [...new Set([
+      state.currentIntegrationHeadSha,
+      ...(state.reviewedHeadSha === null ? [] : [state.reviewedHeadSha]),
+    ])].map((headSha) => specialistPlanReceiptPath(cwd, state.prNumber, headSha, state.revision))
+      .filter((path) => existsSync(path));
+    if (orphanReceipts.length > 0) {
+      return {
+        status: 'pending', headSha: state.currentIntegrationHeadSha, stateRevision: state.revision,
+        bundlePath: null, receiptPath: orphanReceipts[0], requiredReviewerIds: [], recordedReviewerIds: [],
+        error: 'SPECIALIST_PLAN_INCOMPLETE',
+      };
+    }
+    const hasHistorical = existsSync(directory) && readdirSync(directory)
+      .some((name) => name.endsWith('.json') || name.endsWith('.plan.sha256'));
+    return {
+      status: hasHistorical ? 'stale' : 'missing', headSha: state.currentIntegrationHeadSha,
+      stateRevision: state.revision, bundlePath: null, requiredReviewerIds: [], recordedReviewerIds: [],
+    };
+  }
+  if (candidates.length !== 1) {
+    return {
+      status: 'stale', headSha: state.currentIntegrationHeadSha, stateRevision: state.revision,
+      bundlePath: null, requiredReviewerIds: [], recordedReviewerIds: [], error: 'AMBIGUOUS_SPECIALIST_REVIEW',
+    };
+  }
+  const [{ headSha, path }] = candidates;
+  try {
+    const bundle = readSpecialistBundle(cwd, state, { headSha });
+    assertPostIntegrationBundleCoverage(cwd, state, bundle);
+    const required = [...new Set(bundle.tasks.flatMap((task) => normalizedRequiredReviewerIds(task.route, { stage: bundle.stage })))].sort();
+    const recorded = bundle.records.map((record) => record.reviewerId).sort();
+    const missing = required.filter((id) => !recorded.includes(id));
+    const stale = bundle.records.filter((record) => !isReviewerEvidenceApplicable({
+      evidence: record, integratedHeadSha: bundle.headSha,
+    })).map((record) => record.reviewerId).sort();
+    const findings = bundle.records.filter((record) => record.status === 'findings').map((record) => record.reviewerId).sort();
+    return {
+      status: stale.length > 0 ? 'stale' : missing.length > 0 ? 'pending' : findings.length > 0 ? 'finding' : 'clean',
+      headSha: bundle.headSha, stateRevision: state.revision, bundlePath: path,
+      stage: bundle.stage, requiredReviewerIds: required, recordedReviewerIds: recorded,
+      missingReviewerIds: missing, staleReviewerIds: stale, findingReviewerIds: findings,
+    };
+  } catch (error) {
+    return {
+      status: 'stale', headSha, stateRevision: state.revision,
+      bundlePath: path, requiredReviewerIds: [], recordedReviewerIds: [], error: error.code ?? 'INVALID_SPECIALIST_REVIEW',
+    };
+  }
 }
 
 function relatedE2EMetadata(argv) {
@@ -262,21 +969,6 @@ function validateValidationPlan(plan, state) {
   }
   for (const field of ['createdAt', 'updatedAt']) {
     if (typeof plan[field] !== 'string' || !Number.isFinite(Date.parse(plan[field]))) errors.push(`plan.${field} is invalid`);
-  }
-  if (Array.isArray(plan.commands) && Array.isArray(plan.affectedAreas)) {
-    const contractErrors = validateTaskPacket({
-      schemaVersion: 2, taskId: 'saved-validation-plan', reviewedHeadSha: plan.headSha,
-      finding: 'Saved integrated targeted-validation union.', evidence: 'Durable orchestrator plan.',
-      affectedAreas: plan.affectedAreas, decisionIds: [], allowedPaths: ['scripts/**'], forbiddenPaths: [],
-      dependencies: [], acceptanceCriteria: ['All saved checks complete.'],
-      requiredValidation: {
-        unit: plan.commands.filter((entry) => entry?.kind === 'unit').map((entry) => ({ command: entry.command, reason: entry.reason })),
-        system: plan.commands.filter((entry) => entry?.kind === 'system').map((entry) => ({
-          command: entry.command, reason: entry.reason, selectors: entry.selectors, projects: entry.projects,
-        })),
-      },
-    });
-    errors.push(...contractErrors.map((error) => `plan command contract: ${error}`));
   }
   return errors;
 }
@@ -436,26 +1128,34 @@ function assertTaskPacketHead(state, task, packet, digest) {
   throw new StateError(`Task packet ${packet.taskId} does not match the exact reviewed HEAD`, 'TASK_PACKET_HEAD_MISMATCH');
 }
 
-function assertBoundTaskPacket(state, packet) {
+function assertBoundTaskPacket(state, packet, cwd = state.integrationWorktree) {
   const task = state.tasks.find((candidate) => candidate.id === packet.taskId);
   if (!task || task.disposition !== 'actionable') {
     throw new StateError(`Task packet ${packet.taskId} does not match an actionable durable task`, 'TASK_PACKET_NOT_BOUND');
   }
   const digest = taskPacketDigest(packet);
-  assertTaskPacketHead(state, task, packet, digest);
   if (!task.taskPacketDigest) {
+    assertTaskPacketHead(state, task, packet, digest);
     throw new StateError(`Task packet ${packet.taskId} has not been durably bound`, 'TASK_PACKET_NOT_BOUND');
   }
+  const durablePacket = readBoundTaskPacketSidecar(cwd, state, task, { suppliedPacket: packet });
+  assertTaskPacketHead(state, task, packet, digest);
   if (task.taskPacketDigest !== digest) {
     throw new StateError(`Task packet ${packet.taskId} differs from the accepted packet`, 'TASK_PACKET_CONFLICT');
+  }
+  if (durablePacket.schemaVersion === 3
+      && canonicalSerializedJson(durablePacket) !== canonicalSerializedJson(packet)) {
+    throw new StateError(`Task packet ${packet.taskId} differs from its durable sidecar`, 'TASK_PACKET_CONFLICT');
   }
   return task;
 }
 
-export function assertTaskPacketBound(state, packet) {
-  const errors = validateTaskPacket(packet);
-  if (errors.length > 0) throw new StateError(`Invalid task packet:\n- ${errors.join('\n- ')}`, 'INVALID_TASK_PACKET');
-  return assertBoundTaskPacket(state, packet);
+export function assertTaskPacketBound(state, packet, { cwd = state.integrationWorktree } = {}) {
+  if (packet?.schemaVersion !== 2) {
+    const errors = validateTaskPacket(packet);
+    if (errors.length > 0) throw new StateError(`Invalid task packet:\n- ${errors.join('\n- ')}`, 'INVALID_TASK_PACKET');
+  }
+  return assertBoundTaskPacket(state, packet, cwd);
 }
 
 function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, initialSelection, replace, now }) {
@@ -494,46 +1194,37 @@ function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, initi
       throw new StateError('Initial validation selection does not match the integration HEAD', 'VALIDATION_PLAN_STALE');
     }
     validationInputs = [{
-      schemaVersion: 2,
-      taskId: cleanReviewRecovery ? 'taskless-clean-review-validation-recovery'
-        : headDriftRecovery ? 'taskless-review-head-drift-validation-recovery'
-        : completedTaskRecovery ? 'v2-completed-task-validation-recovery' : 'initial-validation-selection',
-      reviewedHeadSha: initialSelection.headSha,
-      finding: cleanReviewRecovery ? 'Taskless targeted-validation recovery after a clean exact-head review.'
-        : headDriftRecovery ? 'Taskless targeted-validation recovery after a clean historical review HEAD drifted.'
-        : completedTaskRecovery ? 'Fresh targeted validation after schema-v2 completed-task migration.'
-          : 'Initial pull-request validation selection.',
-      evidence: cleanReviewRecovery ? 'Explicit orchestrator-selected validation for the preserved clean exact-head review.'
-        : headDriftRecovery ? 'Explicit orchestrator-selected validation for the current HEAD while preserving prior clean review evidence.'
-        : completedTaskRecovery ? 'Immutable schema-v2 backup authorizes fresh orchestrator-selected validation.'
-          : 'Explicit orchestrator-selected validation before the first discovery review.',
       affectedAreas: initialSelection.affectedAreas,
-      decisionIds: [],
-      allowedPaths: ['scripts/**'],
-      forbiddenPaths: [],
-      dependencies: [],
-      acceptanceCriteria: [cleanReviewRecovery ? 'The selected taskless recovery checks pass.'
-        : headDriftRecovery ? 'The selected taskless current-HEAD recovery checks pass.'
-        : completedTaskRecovery ? 'The selected completed-task migration recovery checks pass.'
-          : 'The selected initial checks pass.'],
       requiredValidation: initialSelection.requiredValidation,
     }];
     packetIds = [];
   } else {
-    if (!Array.isArray(taskPackets) || taskPackets.length === 0) {
-      throw new StateError('At least one task packet is required', 'INVALID_VALIDATION_PLAN');
+    const missingBinding = state.tasks.find((task) => task.disposition === 'actionable'
+      && task.status === 'integrated' && typeof task.taskPacketDigest !== 'string');
+    if (missingBinding) {
+      throw new StateError(`Task ${missingBinding.id} has not been durably bound`, 'TASK_PACKET_NOT_BOUND');
     }
-    const packetErrors = taskPackets.flatMap((packet, index) => validateTaskPacket(packet).map((error) => `packet ${index}: ${error}`));
-    if (packetErrors.length > 0) throw new StateError(`Invalid task packets:\n- ${packetErrors.join('\n- ')}`, 'INVALID_VALIDATION_PLAN');
-    const sortedPackets = [...taskPackets].sort((left, right) => left.taskId.localeCompare(right.taskId));
+    const sortedPackets = loadBoundTaskPackets(cwd, state, { statuses: ['integrated'] })
+      .sort((left, right) => left.taskId.localeCompare(right.taskId));
     packetIds = sortedPackets.map((packet) => packet.taskId);
     if (new Set(packetIds).size !== packetIds.length || JSON.stringify(packetIds) !== JSON.stringify(expectedIds)) {
       throw new StateError('Task packets must exactly cover current actionable integrated tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
     }
-    sortedPackets.forEach((packet) => assertBoundTaskPacket(state, packet));
+    if (Array.isArray(taskPackets) && taskPackets.length > 0) {
+      const supplied = [...taskPackets].sort((left, right) => left.taskId.localeCompare(right.taskId));
+      if (JSON.stringify(supplied.map((packet) => packet.taskId)) !== JSON.stringify(expectedIds)) {
+        throw new StateError('Task packets must exactly cover current actionable integrated tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
+      }
+      if (canonicalSerializedJson(supplied) !== canonicalSerializedJson(sortedPackets)) {
+        throw new StateError('Supplied packets differ from durable task packet sidecars', 'TASK_PACKET_CONFLICT');
+      }
+    }
+    sortedPackets.forEach((packet) => assertBoundTaskPacket(state, packet, cwd));
     validationInputs = sortedPackets;
   }
-  const validationUnion = unionRequiredValidation(validationInputs);
+  const validationUnion = initialMode
+    ? unionInitialValidationSelection(validationInputs[0])
+    : unionRequiredValidation(validationInputs);
   const commands = [
     ...validationUnion.unit.map((entry) => ({ ...entry, kind: 'unit', selectors: [], projects: [] })),
     ...validationUnion.system.map((entry) => ({ ...entry, kind: 'system' })),
@@ -1750,30 +2441,44 @@ export function checkpointTaskPacketBinding({
 } = {}) {
   const errors = validateTaskPacket(packet);
   if (errors.length > 0) throw new StateError(`Invalid task packet:\n- ${errors.join('\n- ')}`, 'INVALID_TASK_PACKET');
-  const current = loadState(cwd, prNumber);
-  if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
-  const task = current.tasks.find((candidate) => candidate.id === packet.taskId);
-  if (!task || task.disposition !== 'actionable') {
-    throw new StateError('Task packet must match an actionable durable task', 'TASK_PACKET_NOT_BOUND');
-  }
-  const digest = taskPacketDigest(packet);
-  assertTaskPacketHead(current, task, packet, digest);
-  if (task.taskPacketDigest) {
-    if (task.taskPacketDigest !== digest) {
-      throw new StateError('Task packet differs from the accepted packet', 'TASK_PACKET_CONFLICT');
+  const selectedPr = prNumber ?? activePrNumber(cwd);
+  if (selectedPr === null || selectedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  return withStateLock(cwd, selectedPr, () => {
+    const current = loadState(cwd, selectedPr);
+    if (expectedRevision !== undefined && expectedRevision !== current.revision) {
+      throw new StateError(`State revision changed: expected ${expectedRevision}, found ${current.revision}`, 'STATE_REVISION_CONFLICT');
     }
-    return current;
-  }
-  const nextState = {
-    ...current,
-    tasks: current.tasks.map((candidate) => candidate.id === packet.taskId
-      ? { ...candidate, taskPacketDigest: digest }
-      : candidate),
-  };
-  return checkpointState({
-    cwd, prNumber: current.prNumber, nextState, expectedRevision,
-    event: event ?? { type: 'task-packet-bound', summary: `Bound accepted packet for task ${packet.taskId}` },
-    transitionAuthorization: protectedTransition(nextState, 'task-packet-binding'),
+    const task = current.tasks.find((candidate) => candidate.id === packet.taskId);
+    if (!task || task.disposition !== 'actionable') {
+      throw new StateError('Task packet must match an actionable durable task', 'TASK_PACKET_NOT_BOUND');
+    }
+    const digest = taskPacketDigest(packet);
+    if (task.taskPacketDigest) {
+      readBoundTaskPacketSidecar(cwd, current, task, { suppliedPacket: packet });
+      assertTaskPacketHead(current, task, packet, digest);
+      if (task.taskPacketDigest !== digest) {
+        throw new StateError('Task packet differs from the accepted packet', 'TASK_PACKET_CONFLICT');
+      }
+      return current;
+    }
+    assertTaskPacketHead(current, task, packet, digest);
+    if (packet.schemaVersion !== 3) {
+      throw new StateError('New task packet bindings require explicit schema v3 instructions', 'TASK_PACKET_V3_REQUIRED');
+    }
+    assertBehaviorMapperPlanningComplete(cwd, current, packet);
+    persistImmutableTaskPacketSidecar(cwd, current, packet, digest);
+    const nextState = {
+      ...current,
+      tasks: current.tasks.map((candidate) => candidate.id === packet.taskId
+        ? { ...candidate, taskPacketDigest: digest }
+        : candidate),
+    };
+    return checkpointStateUnlocked({
+      cwd, selectedPr: current.prNumber, nextState, expectedRevision: current.revision,
+      event: event ?? { type: 'task-packet-bound', summary: `Bound accepted packet for task ${packet.taskId}` },
+      eventWriter: appendEvent,
+      transitionAuthorization: protectedTransition(nextState, 'task-packet-binding'),
+    });
   });
 }
 
@@ -1875,7 +2580,27 @@ export function reconcileState({ cwd = process.cwd(), prNumber } = {}) {
     warnings.push(`Unable to inspect integration checkout: ${error.message}`);
     actual = null;
   }
-  return { state, actualGit: actual, warnings };
+  const packetSidecars = [];
+  const evidenceErrors = [];
+  for (const task of state.tasks.filter((candidate) => typeof candidate.taskPacketDigest === 'string')) {
+    const path = taskPacketSidecarPath(cwd, state.prNumber, task.id);
+    if (!existsSync(path) && hasCompletedHistoricalV2TaskProof(cwd, state, task)) {
+      packetSidecars.push({ taskId: task.id, status: 'historical-v2', path: null });
+      continue;
+    }
+    try {
+      readBoundTaskPacketSidecar(cwd, state, task);
+      packetSidecars.push({ taskId: task.id, status: 'valid', path });
+    } catch (error) {
+      packetSidecars.push({ taskId: task.id, status: 'invalid', path: existsSync(path) ? path : null, error: error.code });
+      evidenceErrors.push(`Task ${task.id} packet sidecar: ${error.message}`);
+    }
+  }
+  const specialist = readSpecialistStatus({ cwd, prNumber: state.prNumber });
+  if (specialist.error && specialist.error !== 'SPECIALIST_PLAN_STALE') {
+    evidenceErrors.push(`Specialist review bundle is invalid: ${specialist.error}`);
+  }
+  return { state, actualGit: actual, warnings, evidenceErrors, packetSidecars, specialist };
 }
 
 export function checkpointGitMetadata({ cwd = process.cwd(), sessionId, backup = false } = {}) {
@@ -2003,7 +2728,7 @@ function validationPlanRecoverySummary(cwd, state) {
 }
 
 export function renderRecoverySummary({ cwd = process.cwd(), prNumber, maxCharacters = 9000 } = {}) {
-  const { state, warnings } = reconcileState({ cwd, prNumber });
+  const { state, warnings, evidenceErrors, packetSidecars, specialist } = reconcileState({ cwd, prNumber });
   if (!state) return '';
   const release = state.releaseBaseline ? `${state.releaseBaseline.tag} (${state.releaseBaseline.commit})` : 'pre-release';
   const taskLines = state.tasks.slice(0, 30).map((task) => `- ${task.id} [${task.status}]: ${truncate(task.summary, 180)}`);
@@ -2022,6 +2747,8 @@ export function renderRecoverySummary({ cwd = process.cwd(), prNumber, maxCharac
       ? `${state.verificationEscalation.reason} at PR ${state.verificationEscalation.observedPrHeadSha}`
       : 'none'}`,
     `Integration HEAD: ${state.currentIntegrationHeadSha}`,
+    `Task packet sidecars: ${packetSidecars.length === 0 ? 'none' : packetSidecars.map((entry) => `${entry.taskId}=${entry.status}`).join(', ')}`,
+    `Specialist evidence: ${specialist.status}${specialist.requiredReviewerIds.length > 0 ? `; required ${specialist.requiredReviewerIds.join(', ')}` : ''}`,
     `Targeted validation plan: ${validationPlanRecoverySummary(cwd, state)}`,
     'Tasks:',
     ...(taskLines.length > 0 ? taskLines : ['- none']),
@@ -2030,6 +2757,7 @@ export function renderRecoverySummary({ cwd = process.cwd(), prNumber, maxCharac
     `Blocked: ${state.blockedReasons.length > 0 ? state.blockedReasons.map((item) => truncate(item, 200)).join('; ') : 'none'}`,
     `Next action: ${truncate(state.nextAction, 500)}`,
     `Reconciliation warnings: ${warnings.length > 0 ? warnings.join('; ') : 'none'}`,
+    `Recovery evidence errors: ${evidenceErrors.length > 0 ? evidenceErrors.map((item) => truncate(item, 240)).join('; ') : 'none'}`,
   ];
   return truncate(lines.join('\n'), maxCharacters);
 }
