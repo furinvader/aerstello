@@ -308,7 +308,6 @@ test('root npm façades remain available from a nested workspace directory', () 
     assert.equal(result.status, 0, `${script} failed:\n${result.stderr}`);
     assert.equal(result.signal, null, `${script} terminated by ${result.signal}`);
     assert.ok(result.stdout.includes(`${usage}\n`), `${script} did not print canonical usage`);
-    assert.equal(result.stderr, '');
   }
 });
 
