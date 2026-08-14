@@ -7,9 +7,9 @@ import {
   inspectTaskWorktree,
   removeTaskWorktree,
   sanitizeTaskId,
-} from '../../scripts/lib/pr-review-worktree.mjs';
-import { StateError } from '../../scripts/lib/pr-review-state.mjs';
-import { createRepository, git } from './git-fixtures.mjs';
+} from './worktree.mjs';
+import { StateError } from '../state/state.mjs';
+import { createRepository, git } from '../../../../../tests/support/git-fixtures.mjs';
 
 const repositories = [];
 

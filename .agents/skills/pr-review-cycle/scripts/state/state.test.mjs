@@ -44,12 +44,12 @@ import {
   taskPacketDigest,
   validationPlanPath,
   withStateLock,
-} from '../../scripts/lib/pr-review-state.mjs';
-import { commit, createRepository, git } from './git-fixtures.mjs';
+} from './state.mjs';
+import { commit, createRepository, git } from '../../../../../tests/support/git-fixtures.mjs';
 
 const repositories = [];
 const AT = '2026-08-05T00:00:00Z';
-const STATE_CLI = fileURLToPath(new URL('../../scripts/pr-review-state.mjs', import.meta.url));
+const STATE_CLI = fileURLToPath(new URL('./cli.mjs', import.meta.url));
 
 function repo() {
   const cwd = createRepository();
@@ -2291,7 +2291,7 @@ test('accepted task packet identity is canonical, guarded, persistent, and requi
     ...packet,
     affectedAreas: ['documentation'],
     requiredValidation: {
-      unit: [{ command: 'node --test tests/tooling/contracts.test.mjs', reason: 'Weakened selection.' }],
+      unit: [{ command: 'node --test .agents/skills/pr-review-cycle/scripts/contracts/contracts.test.mjs', reason: 'Weakened selection.' }],
       system: [],
     },
   };
@@ -2768,7 +2768,7 @@ test('concurrent lock attempts time out', async () => {
   const cwd = repo();
   init(cwd);
   const fixture = new URL('./fixtures/hold-state-lock.mjs', import.meta.url);
-  const child = spawn(process.execPath, [fixture.pathname, cwd, '17', '350'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [fileURLToPath(fixture), cwd, '17', '350'], { stdio: ['ignore', 'pipe', 'pipe'] });
   await new Promise((resolveLocked, reject) => {
     child.stdout.once('data', (chunk) => chunk.toString().includes('locked') ? resolveLocked() : reject(new Error('not locked')));
     child.once('error', reject);

@@ -1,14 +1,14 @@
 #!/usr/bin/env node
-import { parseOptions, UsageError, writeJson } from './lib/cli.mjs';
+import { parseOptions, UsageError, writeJson } from '../../../../../scripts/lib/cli.mjs';
 import {
   createTaskWorktree,
   inspectTaskWorktree,
   removeTaskWorktree,
-} from './lib/pr-review-worktree.mjs';
-import { StateError } from './lib/pr-review-state.mjs';
+} from './worktree.mjs';
+import { StateError } from '../state/state.mjs';
 
 function usage() {
-  return `Usage: node scripts/pr-review-worktree.mjs <create|inspect|remove> [options]\n\nOptions:\n  --pr <number>     Required PR number\n  --task <id>       Required task identifier\n  --base <sha>      Explicit reviewed SHA (create only)\n  --detached        Create a detached worktree\n  --help            Show this help\n`;
+  return `Usage: node .agents/skills/pr-review-cycle/scripts/worktree/cli.mjs <create|inspect|remove> [options]\n\nOptions:\n  --pr <number>     Required PR number\n  --task <id>       Required task identifier\n  --base <sha>      Explicit reviewed SHA (create only)\n  --detached        Create a detached worktree\n  --help            Show this help\n`;
 }
 
 try {

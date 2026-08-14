@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { validateWorkerResult } from '../../scripts/lib/contracts.mjs';
+import { validateWorkerResult } from '../contracts/contracts.mjs';
 
 async function readInput() {
   let text = '';

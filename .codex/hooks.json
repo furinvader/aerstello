@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$(git rev-parse --show-toplevel)/.codex/hooks/session-start.mjs\"",
+            "command": "node \"$(git rev-parse --show-toplevel)/.agents/skills/pr-review-cycle/scripts/hooks/session-start.mjs\"",
             "timeout": 10,
             "statusMessage": "Recovering PR review state",
             "additionalContextLimit": 2500
@@ -21,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$(git rev-parse --show-toplevel)/.codex/hooks/pre-compact.mjs\"",
+            "command": "node \"$(git rev-parse --show-toplevel)/.agents/skills/pr-review-cycle/scripts/hooks/pre-compact.mjs\"",
             "timeout": 10,
             "statusMessage": "Checkpointing PR review state"
           }
@@ -34,7 +34,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$(git rev-parse --show-toplevel)/.codex/hooks/subagent-stop.mjs\"",
+            "command": "node \"$(git rev-parse --show-toplevel)/.agents/skills/pr-review-cycle/scripts/hooks/subagent-stop.mjs\"",
             "timeout": 10,
             "statusMessage": "Validating review worker result"
           }

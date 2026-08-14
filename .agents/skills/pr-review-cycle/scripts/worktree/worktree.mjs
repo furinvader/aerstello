@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { atomicWriteJson, gitCommonDirectory, reviewRoot, StateError } from './pr-review-state.mjs';
-import { gitText, resolveCommit, runGit } from './git.mjs';
+import { gitText, resolveCommit, runGit } from '../../../../../scripts/lib/git.mjs';
+import { atomicWriteJson, gitCommonDirectory, reviewRoot, StateError } from '../state/state.mjs';
 
 function parsePrNumber(value) {
   const number = Number(value);

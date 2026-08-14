@@ -49,6 +49,40 @@ Use $pr-review-cycle to continue the current PR remediation session.
 The machine state still uses task status `completed` for Resolved and cycle
 phase `complete` for Done. These are storage names, not extra workflow stages.
 
+## Durable state and recovery
+
+Use the npm façades directly from the repository root:
+
+```bash
+npm run review:state -- show
+npm run review:github -- status --human
+npm run review:worktree -- inspect --pr 123 --task finding-a
+```
+
+From a nested npm workspace directory such as `apps/api`, prefix npm with the
+checkout's Git root so npm selects the root package scripts:
+
+```bash
+npm --prefix "$(git rev-parse --show-toplevel)" run review:state -- show
+npm --prefix "$(git rev-parse --show-toplevel)" run review:github -- status --human
+npm --prefix "$(git rev-parse --show-toplevel)" run review:worktree -- inspect --pr 123 --task finding-a
+```
+
+The scripts discover checked-in skill, schema, and feature resources from this
+skill and the checkout's Git top level. Mutable review state is different: it
+always lives under `<git-common-dir>/codex/pr-review/`, so every linked worktree
+shares the same active pointer, state, archives, locks, manifests, and task
+worktrees.
+
+State migration is explicit and one-way. Preserve the exact pre-migration
+backup, validate it before writing schema v3, and never migrate active state
+downward. Archive a Done cycle, or an abandoned cycle with an explicit durable
+reason, into a new timestamped directory and clear the active pointer. Never
+rewrite an archive, delete worktree manifests as cleanup, or prune stale Git
+worktree registrations as part of state recovery. Recover from state, its
+backups and event log, Git, structured GitHub data, and CI evidence—not from a
+chat transcript.
+
 ## Review-ready and Done
 
 Review-ready is the handoff from targeted local work to Codex and CI. It means:
@@ -78,13 +112,15 @@ freshly rechecks a recorded clean review against the same live body and root
 rules.
 
 For a pristine taskless first review, save and run the explicit initial targeted
-validation selection, then use `refresh-threads --pr <number>` to record guarded
+validation selection, then use
+`npm run review:github -- refresh-threads --pr <number>` to record guarded
 exact-head proof that the fully paginated canonical Codex thread set is empty.
 This read-only GitHub operation fails closed if any canonical root exists and
 does not verify later threadless remediation tasks.
 
 After read-only integration verification, resolve one eligible non-thread task
-with `verify-resolve --pr <number> --task <id>`. Eligibility covers an
+with `npm run review:github -- verify-resolve --pr <number> --task <id>`.
+Eligibility covers an
 actionable Integrated `local` or `github-threadless` fix, plus a
 `not-applicable` task whose disposition is `duplicate`, `already-fixed`,
 `stale`, `invalid`, `policy-conflict`, or `out-of-scope`;
@@ -103,7 +139,8 @@ whitespace, quotes, and backslashes have no separator or escape meaning.
 Local assertions are also persisted as `localVerification` task-ID coverage for
 the exact current integration HEAD. If HEAD advances, the old proof remains
 historical while review and Done stay closed. Rerun targeted validation and the
-read-only verifier, then call `verify-resolve --task <id>` separately for each
+read-only verifier, then call
+`npm run review:github -- verify-resolve --task <id>` separately for each
 completed local task. The first successful assertion at the new HEAD starts a
 new set containing only that task; later same-HEAD assertions accumulate IDs.
 A retry already covered at that HEAD is state-idempotent, but still repeats all
@@ -113,7 +150,7 @@ If integration HEAD advances after a threadless task was already completed,
 repeat current-HEAD targeted validation and read-only verifier approval for
 every task in the preserved proof. Then select the complete set atomically with
 one explicit JSON string-array option, for example
-`verify-resolve --pr <number> --task-set-json '["threadless-a","threadless-b"]'`.
+`npm run review:github -- verify-resolve --pr <number> --task-set-json '["threadless-a","threadless-b"]'`.
 This is the only multi-task encoding: `--task threadless-a,threadless-b` means
 one literal task ID containing a comma. JSON decoding preserves whitespace,
 quotes, backslashes, and commas in each ID. Order does not matter after
@@ -133,8 +170,9 @@ live-HEAD, or state-revision drift are rejected.
 
 A schema-v2 migration may preserve a taskless pending review for the exact
 integration HEAD while deliberately clearing legacy targeted-validation proof.
-After that preserved review is collected as clean, `validation-plan
---initial-selection <file>` may rebuild the explicit nonempty selection without
+After that preserved review is collected as clean,
+`npm run review:state -- validation-plan --initial-selection <file>` may rebuild
+the explicit nonempty selection without
 requesting the review again. This exception requires no tasks and exact matching
 current request, outcome, latest history entry, kind, and requested/reviewed
 SHAs. It rejects pending, finding, stale, dirty, or inconsistent states and does
@@ -148,11 +186,13 @@ HEAD, and the latest history entry must exactly equal the active evidence. The
 state must be `recovering`, have no tasks, blockers, escalation, or human
 decision, retain another discovery or verification request allowance, and have
 a clean exact current checkout. Use a nonempty current-HEAD
-`validation-plan --initial-selection` selection (`--replace` may replace only
+`npm run review:state -- validation-plan --initial-selection` selection
+(`--replace` may replace only
 the stale plan sidecar), then run it normally. The old review ledger is preserved
 byte-for-byte and remains historical.
 
-After that fresh targeted proof passes, run `refresh-threads --pr <number>`.
+After that fresh targeted proof passes, run
+`npm run review:github -- refresh-threads --pr <number>`.
 The read-only command requires equal clean local, pushed, and live current
 heads, fully paginates the canonical root set, rechecks state revision and live
 HEAD, and succeeds only when no canonical root exists. It records an aggregate
@@ -219,7 +259,7 @@ Next action: Integrate the remaining result and run the selected tests.
 ## Troubleshooting pointers
 
 - **Status cannot be restored:** run
-  `node scripts/pr-review-state.mjs recover`. Use the saved backup, Git,
+  `npm run review:state -- recover`. Use the saved backup, Git,
   structured GitHub data, and CI artifacts—not transcripts. Old state requires
   an explicit migration.
 - **Review is stale:** compare the review commit, recorded Review commit, and
@@ -240,9 +280,9 @@ Next action: Integrate the remaining result and run the selected tests.
   new or stale verification evidence needs a human decision.
 
 Machine contracts and command details live in the
-[PR review state schema](./pr-review-state.schema.json),
-[task schema](./review-fix-task.schema.json), and
-[worker result schema](./review-fix-result.schema.json). The skill's phase
-references cover [durable state](../../.agents/skills/pr-review-cycle/references/state-and-contracts.md),
-[integration and validation](../../.agents/skills/pr-review-cycle/references/orchestration.md),
-and [GitHub review and CI](../../.agents/skills/pr-review-cycle/references/github-review.md).
+[PR review state schema](./schemas/pr-review-state.schema.json),
+[task schema](./schemas/review-fix-task.schema.json), and
+[worker result schema](./schemas/review-fix-result.schema.json). The skill's phase
+references cover [durable state](./references/state-and-contracts.md),
+[integration and validation](./references/orchestration.md),
+and [GitHub review and CI](./references/github-review.md).

@@ -66,7 +66,7 @@ npm run lint:commit -- --last --verbose
 ```
 
 Long-running pull-request remediation uses the repository-local Codex workflow
-documented in [docs/agents/pr-review-cycle.md](./docs/agents/pr-review-cycle.md).
+documented in the [canonical PR review-cycle guide](./.agents/skills/pr-review-cycle/README.md).
 The main orchestrator owns GitHub review requests and integration; fix workers
 operate only from fixed, path-limited task instructions in isolated worktrees.
 Workers run only the validation written in those instructions. After integration,

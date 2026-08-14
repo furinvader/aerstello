@@ -15,14 +15,20 @@ import {
   validateWorkerResultAgainstTask,
   validateWorkerResult,
   unionRequiredValidation,
-} from '../../scripts/lib/contracts.mjs';
+} from './contracts.mjs';
 import {
   checkpointState,
   checkpointTaskPacketBinding,
   initializeState,
-} from '../../scripts/lib/pr-review-state.mjs';
+} from '../state/state.mjs';
+import {
+  prReviewStateSchemaPath,
+  repositoryDirectory,
+  reviewFixResultSchemaPath,
+  reviewFixTaskSchemaPath,
+} from '../paths.mjs';
 
-const root = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..');
+const root = repositoryDirectory();
 const AT = '2026-08-05T00:00:00Z';
 
 function stateFixture(overrides = {}) {
@@ -126,16 +132,16 @@ function completeStateFixture(overrides = {}) {
 
 test('checked-in JSON contracts parse and declare Draft 2020-12', () => {
   const paths = [
-    '.release/marker.schema.json',
-    'docs/agents/pr-review-state.schema.json',
-    'docs/agents/review-fix-task.schema.json',
-    'docs/agents/review-fix-result.schema.json',
-    '.codex/hooks.json',
+    join(root, '.release/marker.schema.json'),
+    prReviewStateSchemaPath,
+    reviewFixTaskSchemaPath,
+    reviewFixResultSchemaPath,
+    join(root, '.codex/hooks.json'),
   ];
   for (const path of paths) {
-    const document = JSON.parse(readFileSync(join(root, path), 'utf8'));
+    const document = JSON.parse(readFileSync(path, 'utf8'));
     if (path.endsWith('.schema.json')) assert.equal(document.$schema, 'https://json-schema.org/draft/2020-12/schema');
-    if (path === 'docs/agents/pr-review-state.schema.json') {
+    if (path === prReviewStateSchemaPath) {
       assert.equal(document.properties.schemaVersion.const, 3);
       assert.ok(document.required.includes('verificationReviewUsed'));
       assert.ok(document.required.includes('reviewOutcome'));
@@ -148,7 +154,7 @@ test('checked-in JSON contracts parse and declare Draft 2020-12', () => {
 });
 
 test('state JSON Schema compiles with Ajv and shares representative fixtures with the manual validator', () => {
-  const schema = JSON.parse(readFileSync(join(root, 'docs/agents/pr-review-state.schema.json'), 'utf8'));
+  const schema = JSON.parse(readFileSync(prReviewStateSchemaPath, 'utf8'));
   const ajv = new Ajv2020({ allErrors: true, strict: true });
   addFormats(ajv);
   const validateSchema = ajv.compile(schema);
@@ -279,7 +285,7 @@ test('state JSON Schema compiles with Ajv and shares representative fixtures wit
 });
 
 test('local verifier proof is backward-readable, source-bound, and mandatory for completed local readiness', () => {
-  const schema = JSON.parse(readFileSync(join(root, 'docs/agents/pr-review-state.schema.json'), 'utf8'));
+  const schema = JSON.parse(readFileSync(prReviewStateSchemaPath, 'utf8'));
   const ajv = new Ajv2020({ allErrors: true, strict: true });
   addFormats(ajv);
   const validateSchema = ajv.compile(schema);
@@ -345,7 +351,7 @@ test('local verifier proof is backward-readable, source-bound, and mandatory for
 });
 
 test('state JSON Schema rejects terminal and review-ready states missing current proof shapes', () => {
-  const schema = JSON.parse(readFileSync(join(root, 'docs/agents/pr-review-state.schema.json'), 'utf8'));
+  const schema = JSON.parse(readFileSync(prReviewStateSchemaPath, 'utf8'));
   const ajv = new Ajv2020({ allErrors: true, strict: true });
   addFormats(ajv);
   const validateSchema = ajv.compile(schema);
@@ -527,7 +533,7 @@ test('unresolved canonical thread may retain paired reply evidence for recovery'
       updatedAt: AT,
     },
   });
-  const schema = JSON.parse(readFileSync(join(root, 'docs/agents/pr-review-state.schema.json'), 'utf8'));
+  const schema = JSON.parse(readFileSync(prReviewStateSchemaPath, 'utf8'));
   const ajv = new Ajv2020({ allErrors: true, strict: true });
   addFormats(ajv);
   const validateSchema = ajv.compile(schema);
@@ -602,7 +608,7 @@ test('task packet validator accepts the documented contract', () => {
       }],
     },
   };
-  const schema = JSON.parse(readFileSync(join(root, 'docs/agents/review-fix-task.schema.json'), 'utf8'));
+  const schema = JSON.parse(readFileSync(reviewFixTaskSchemaPath, 'utf8'));
   const ajv = new Ajv2020({ allErrors: true, strict: true });
   addFormats(ajv);
   const validateSchema = ajv.compile(schema);
@@ -644,7 +650,7 @@ test('task packets reject unsafe ownership and inexact or broad system validatio
     'npm run check:workflow $(touch unsafe)',
     'node --test #',
     'node --test ~',
-    'node --test tests/tooling',
+    'node --test .agents/skills/pr-review-cycle/scripts',
     'npm test -w @aerstello/api -- #',
     'npm test -w @aerstello/api -- routes\t--watch',
     'npm test -w @aerstello/api -w @aerstello/web -- routes',
@@ -659,7 +665,7 @@ test('task packets reject unsafe ownership and inexact or broad system validatio
     assert.ok(validateTaskPacket(invalid).some(
       (error) => error.includes('only recognized code or policy areas'),
     ));
-    const schema = JSON.parse(readFileSync(join(root, 'docs/agents/review-fix-task.schema.json'), 'utf8'));
+    const schema = JSON.parse(readFileSync(reviewFixTaskSchemaPath, 'utf8'));
     const ajv = new Ajv2020({ allErrors: true, strict: true });
     addFormats(ajv);
     assert.equal(ajv.compile(schema)(invalid), false);
@@ -667,7 +673,8 @@ test('task packets reject unsafe ownership and inexact or broad system validatio
   for (const command of [
     'npm test -w @aerstello/api -- routes',
     'npm run test --workspace=@aerstello/web -- tests/example.test.ts',
-    'node --test tests/tooling/contracts.test.mjs',
+    'node --test .agents/skills/pr-review-cycle/scripts/contracts/contracts.test.mjs',
+    'npm run test:pr-review',
   ]) {
     assert.deepEqual(parseTargetedValidationCommand(command), command.split(' '), command);
     assert.deepEqual(validateTaskPacket({
@@ -718,7 +725,7 @@ test('worker result validator rejects raw artifact fields', () => {
   };
   const errors = validateWorkerResult(result);
   assert.ok(errors.some((error) => error.includes('rawLog')));
-  const schema = JSON.parse(readFileSync(join(root, 'docs/agents/review-fix-result.schema.json'), 'utf8'));
+  const schema = JSON.parse(readFileSync(reviewFixResultSchemaPath, 'utf8'));
   const ajv = new Ajv2020({ allErrors: true, strict: true });
   addFormats(ajv);
   const validateSchema = ajv.compile(schema);
@@ -841,7 +848,7 @@ test('validate-result CLI enforces the exact task validation commands', () => {
     writeFileSync(packetPath, JSON.stringify(packet));
     writeFileSync(resultPath, JSON.stringify(result));
     const cli = spawnSync(process.execPath, [
-      join(root, 'scripts/pr-review-state.mjs'), 'validate-result',
+      fileURLToPath(new URL('../state/cli.mjs', import.meta.url)), 'validate-result',
       '--task-packet', packetPath, '--worker-result', resultPath,
     ], { cwd: directory, encoding: 'utf8' });
     assert.equal(cli.status, 1, cli.stderr);
@@ -878,7 +885,7 @@ test('required validation union is deterministic and de-duplicates repeated comm
     ...base,
     affectedAreas: ['shared', 'migration', 'documentation'],
     requiredValidation: {
-      unit: [{ command: 'node --test tests/tooling/contracts.test.mjs', reason: 'Focused contract tests.' }],
+      unit: [{ command: 'node --test .agents/skills/pr-review-cycle/scripts/contracts/contracts.test.mjs', reason: 'Focused contract tests.' }],
       system: [],
     },
   };

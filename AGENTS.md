@@ -50,6 +50,15 @@ Before editing:
 - Add every new user-visible behavior to a `.feature` file and bind it to Playwright-BDD steps.
 - User-facing UI must work in DE/IT/EN, with German as the fallback. Product DE text is required.
 
+## Repository organization
+
+Co-locate agent-specific implementation, schemas, tests, fixtures, hooks, and
+operator documentation under the owning `.agents/skills/<skill>/` directory.
+Keep only discovery/configuration adapters and genuinely shared,
+capability-neutral utilities outside it. Do not add compatibility wrappers or
+duplicate canonical schemas or operator guides. Release-state and related-E2E
+remain separately owned capabilities consumed by the review skill.
+
 ## Code Review Rules
 
 ### Release and migration compatibility
@@ -62,38 +71,14 @@ Before editing:
 
 ### PR review cycle
 
-- The main orchestrator alone writes durable review state, integrates fixes,
-  posts evidence replies, resolves review threads, and requests GitHub reviews.
-  Fix workers and the integration verifier never write to GitHub.
-- The **Review commit** is the exact pushed commit sent to Codex. Accept a review
-  only when its commit matches both the recorded Review commit and the current
-  PR head. A Codex thumbs-up on the recorded request is clean evidence only
-  while that request still points to the current PR head.
-- **Integrated** means a worker commit is on the central PR branch. **Resolved**
-  means the fix was verified, evidence was posted, and the Codex thread was
-  closed. **Done** means Codex is clean, full CI including full E2E is green for
-  that same Review commit, and GitHub shows no open Codex threads.
-- Internal state may call Resolved `completed` and Done `complete`. Do not treat
-  Integrated as Resolved or Done. After closing threads, query GitHub again to
-  confirm that none remain open.
-- Fix workers receive fixed, path-limited task instructions and work in isolated
-  worktrees. They must not broaden scope. Parallel workers require non-overlapping
-  write sets.
+- Follow the [canonical PR review-cycle guide](./.agents/skills/pr-review-cycle/README.md)
+  for exact-commit gates, role boundaries, thread resolution, validation,
+  recovery, and loop breakers. The main orchestrator owns state, integration,
+  and GitHub writes; fix workers and the verifier stay within their fixed roles.
 
 ## Validation
 
-Workers run only the exact commands, E2E selectors, and browser projects in
-their task instructions. Missing or uncertain test selection is a planning
-error; never fall back to a full local suite.
-
-After integrating a batch, the orchestrator runs the union of its related
-checks. Browser-visible changes use only related scenarios and default to
-`tablet-chromium`. Add projects only when responsive, touch, installation, or
-browser-specific behavior requires them. Release-state and released-migration
-checks remain required when relevant.
-
-GitHub Actions owns `npm run check:full` and `npm run test:e2e:full`. Normal
-review rounds use targeted local checks and `npm run test:e2e:related` when
-needed. Full local E2E is reserved for an explicit request, CI diagnosis, or an
-exceptional release investigation when CI is unavailable. After targeted
-validation and push, Codex review and CI may run at the same time.
+Use the smallest relevant checks for ordinary changes. During an active PR
+review cycle, use only the exact commands, selectors, and browser projects
+selected under the canonical guide; GitHub Actions remains authoritative for
+`npm run check:full` and `npm run test:e2e:full`.

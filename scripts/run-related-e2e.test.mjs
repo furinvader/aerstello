@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   KNOWN_PROJECTS,
@@ -9,10 +10,10 @@ import {
   readFeatureCatalog,
   readFeatureTags,
   runRelatedE2E,
-} from '../../scripts/run-related-e2e.mjs';
+} from './run-related-e2e.mjs';
 
-const featureDirectory = new URL('../../specs/features', import.meta.url).pathname;
-const playwrightConfig = new URL('../../playwright.config.ts', import.meta.url).pathname;
+const featureDirectory = fileURLToPath(new URL('../specs/features', import.meta.url));
+const playwrightConfig = fileURLToPath(new URL('../playwright.config.ts', import.meta.url));
 const quietLogger = { log() {}, error() {} };
 
 test('every scenario has exactly one globally unique stable id', () => {

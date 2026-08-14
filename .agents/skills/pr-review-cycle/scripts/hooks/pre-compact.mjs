@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { checkpointGitMetadata, StateError } from '../../scripts/lib/pr-review-state.mjs';
+import { checkpointGitMetadata, StateError } from '../state/state.mjs';
 
 async function readInput() {
   let text = '';

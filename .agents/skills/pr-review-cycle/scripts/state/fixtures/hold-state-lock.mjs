@@ -1,4 +1,4 @@
-import { withStateLock } from '../../../scripts/lib/pr-review-state.mjs';
+import { withStateLock } from '../state.mjs';
 
 const [cwd, prNumber, holdMilliseconds = '250'] = process.argv.slice(2);
 

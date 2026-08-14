@@ -23,7 +23,7 @@ orchestrator may substitute a full local test run.
 Bind each accepted packet before delegation:
 
 ```bash
-node scripts/pr-review-state.mjs bind-task-packet --task-packet /tmp/task-a.json --expected-revision 4
+npm run review:state -- bind-task-packet --task-packet /tmp/task-a.json --expected-revision 4
 ```
 
 The guarded binding is the durable identity used by worker-result acceptance
@@ -58,9 +58,9 @@ writers one at a time.
 ## Manage worktrees
 
 ```bash
-node scripts/pr-review-worktree.mjs create --pr 123 --task finding-a --base <review-commit>
-node scripts/pr-review-worktree.mjs inspect --pr 123 --task finding-a
-node scripts/pr-review-worktree.mjs remove --pr 123 --task finding-a
+npm run review:worktree -- create --pr 123 --task finding-a --base <review-commit>
+npm run review:worktree -- inspect --pr 123 --task finding-a
+npm run review:worktree -- remove --pr 123 --task finding-a
 ```
 
 Creation refuses existing paths and branches. Removal uses the saved PR/task
@@ -93,16 +93,16 @@ de-duplicates that union, and runs it once:
 Save that operational union before running it:
 
 ```bash
-node scripts/pr-review-state.mjs validation-plan /tmp/task-a.json /tmp/task-b.json
-node scripts/pr-review-state.mjs run-validation
+npm run review:state -- validation-plan /tmp/task-a.json /tmp/task-b.json
+npm run review:state -- run-validation
 ```
 
 Before the first discovery review, a pristine cycle has no remediation tasks.
 Provide its explicitly selected checks without inventing one:
 
 ```bash
-node scripts/pr-review-state.mjs validation-plan --initial-selection /tmp/initial-validation.json
-node scripts/pr-review-state.mjs run-validation
+npm run review:state -- validation-plan --initial-selection /tmp/initial-validation.json
+npm run review:state -- run-validation
 ```
 
 The selection document has schema version 1 plus `headSha`, `affectedAreas`,

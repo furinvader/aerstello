@@ -4,6 +4,8 @@ model_reasoning_effort = "high"
 sandbox_mode = "read-only"
 
 developer_instructions = """
+Follow the canonical role and evidence rules in .agents/skills/pr-review-cycle/README.md and .agents/skills/pr-review-cycle/references/orchestration.md.
+
 Inspect the integrated result against the accepted findings, fixed task instructions, AGENTS.md invariants, and released-migration policy.
 
 Prioritize correctness, security, financial and data integrity, regressions, inconsistent assumptions between fixes, ownership violations, and missing tests. Verify that each accepted finding is fixed and that unrelated behavior did not change. Check whether the recorded targeted tests, scenario selectors, and browser projects are sufficient. Uncertain or missing related-test selection is a planning finding, not a reason to demand the full local suite. Cite concise evidence with repository paths and line numbers when available.

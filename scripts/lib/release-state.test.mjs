@@ -7,15 +7,12 @@ import { dirname, join } from 'node:path';
 import {
   checkReleasedMigrations,
   inspectReleaseState,
-} from '../../scripts/lib/release-state.mjs';
+} from './release-state.mjs';
 import {
-  addRelease,
   commit,
   createRepository,
   git,
-  marker,
-  updateOriginMain,
-} from './git-fixtures.mjs';
+} from '../../tests/support/git-fixtures.mjs';
 
 const repositories = [];
 const testDirectory = dirname(fileURLToPath(import.meta.url));
@@ -23,9 +20,45 @@ const releaseCli = join(testDirectory, '..', '..', 'scripts', 'release-state.mjs
 const migrationsCli = join(testDirectory, '..', '..', 'scripts', 'check-released-migrations.mjs');
 
 function repo() {
-  const cwd = createRepository();
+  const cwd = createRepository({
+    initialFiles: {
+      'package.json': '{"name":"fixture","version":"9.9.9"}\n',
+      'apps/api/migrations/0001_initial.sql': 'create table fixture (id integer);\n',
+    },
+  });
   repositories.push(cwd);
   return cwd;
+}
+
+function updateOriginMain(cwd) {
+  git(cwd, ['update-ref', 'refs/remotes/origin/main', git(cwd, ['rev-parse', 'main'])]);
+}
+
+function marker(version, overrides = {}) {
+  return `${JSON.stringify({
+    schemaVersion: 1,
+    product: 'aerstello',
+    version,
+    tag: `v${version}`,
+    channel: 'production',
+    releasedAt: '2026-08-04T12:00:00Z',
+    ...overrides,
+  }, null, 2)}\n`;
+}
+
+function addRelease(cwd, version, {
+  annotated = true,
+  markerContent = marker(version),
+  migrationContent,
+  updateRemote = true,
+} = {}) {
+  const files = { [`.release/markers/v${version}.json`]: markerContent };
+  if (migrationContent !== undefined) files['apps/api/migrations/0001_initial.sql'] = migrationContent;
+  const sha = commit(cwd, files, `release ${version}`);
+  if (annotated) git(cwd, ['tag', '-a', `v${version}`, '-m', `Release ${version}`]);
+  else git(cwd, ['tag', `v${version}`]);
+  if (updateRemote) updateOriginMain(cwd);
+  return sha;
 }
 
 function inspect(cwd, overrides = {}) {
