@@ -46,6 +46,10 @@ export function taskPacketDirectory(cwd = process.cwd(), prNumber) {
   return join(reviewRoot(cwd), `pr-${Number(prNumber)}`, 'task-packets');
 }
 
+export function taskBindingProvenanceDirectory(cwd = process.cwd(), prNumber) {
+  return join(reviewRoot(cwd), `pr-${Number(prNumber)}`, 'task-binding-provenance');
+}
+
 export function specialistReviewDirectory(cwd = process.cwd(), prNumber) {
   return join(reviewRoot(cwd), `pr-${Number(prNumber)}`, 'specialist-reviews');
 }

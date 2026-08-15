@@ -22,6 +22,7 @@ import {
   checkpointReviewRequest,
   checkpointState,
   checkpointTaskPacketBinding,
+  checkpointTaskPacketReplan,
   checkpointTaskCompletion,
   checkpointTargetedValidation,
   checkpointVerificationEscalation,
@@ -46,6 +47,8 @@ import {
   statePath,
   StateError,
   taskPacketDigest,
+  taskBindingProvenancePath,
+  taskBindingProvenanceReceiptPath,
   taskPacketSidecarPath,
   specialistContext,
   specialistPlanReceiptPath,
@@ -282,6 +285,35 @@ function taskPacket(head, taskId, {
       system: [],
     },
   };
+}
+
+function historicalTaskPacketV2(packet) {
+  return Object.fromEntries(Object.entries(packet)
+    .filter(([key]) => !['specialization', 'riskTags'].includes(key))
+    .map(([key, value]) => [key, key === 'schemaVersion' ? 2 : value]));
+}
+
+function migrateV2BoundTask(cwd, {
+  taskId = 'legacy-active', status = 'proposed', packetOptions = {}, taskOverrides = {},
+} = {}) {
+  const initial = init(cwd);
+  const packet = taskPacket(initial.currentIntegrationHeadSha, taskId, packetOptions);
+  const historicalPacket = historicalTaskPacketV2(packet);
+  const boundTask = task(initial.currentIntegrationHeadSha, {
+    id: taskId,
+    sourceIds: [`local:${taskId}`],
+    fingerprint: `fingerprint-${taskId}`,
+    status,
+    taskPacketDigest: taskPacketDigest(historicalPacket),
+    ...(['proposed', 'blocked', 'failed'].includes(status) ? {
+      execution: { worker: null, branch: null, worktree: null, workerCommitSha: null },
+    } : {}),
+    ...taskOverrides,
+  });
+  const source = { ...initial, tasks: [boundTask] };
+  writeFileSync(statePath(cwd, source.prNumber), `${JSON.stringify(schemaV2State(source))}\n`);
+  const migration = migrateState({ cwd });
+  return { source, packet, historicalPacket, ...migration };
 }
 
 function initialSelection(head, overrides = {}) {
@@ -2810,16 +2842,42 @@ test('schema-v3 packet sidecars are canonical, immutable, digest-verified, and r
   }), { code: 'INVALID_EVENT' });
   assert.equal(loadState(cwd).tasks[0].taskPacketDigest, undefined);
   const sidecarPath = taskPacketSidecarPath(cwd, state.prNumber, packet.taskId);
+  const provenancePath = taskBindingProvenancePath(cwd, state.prNumber, packet.taskId);
+  const provenanceReceiptPath = taskBindingProvenanceReceiptPath(cwd, state.prNumber, packet.taskId);
   assert.deepEqual(JSON.parse(readFileSync(sidecarPath, 'utf8')), packet);
+  assert.equal(existsSync(provenancePath), true);
+  assert.match(readFileSync(provenanceReceiptPath, 'utf8'), /^[0-9a-f]{64}\n$/u);
+  const interrupted = reconcileState({ cwd });
+  assert.equal(interrupted.packetSidecars.find((entry) => entry.taskId === packet.taskId).status, 'pending-binding');
+  assert.equal(interrupted.bindingProvenance.find((entry) => entry.taskId === packet.taskId).status, 'pending-binding');
+  rmSync(provenancePath);
+  const receiptOnly = reconcileState({ cwd });
+  assert.equal(receiptOnly.bindingProvenance.find((entry) => entry.taskId === packet.taskId).status, 'pending-binding');
+  assert.equal(receiptOnly.bindingProvenance.find((entry) => entry.taskId === packet.taskId).path, null);
+  assert.equal(receiptOnly.bindingProvenance.find((entry) => entry.taskId === packet.taskId).receiptPath, provenanceReceiptPath);
   state = checkpointTaskPacketBinding({ cwd, packet, expectedRevision: state.revision });
   assert.equal(state.tasks[0].taskPacketDigest, taskPacketDigest(packet));
+  const provenance = JSON.parse(readFileSync(provenancePath, 'utf8'));
+  assert.equal(provenance.phase, 'pre-bind');
+  assert.equal(provenance.packetDigest, taskPacketDigest(packet));
+  assert.equal(provenance.reviewedHeadSha, packet.reviewedHeadSha);
+  assert.equal(provenance.planRevision, state.revision - 1);
+  assert.match(provenance.planReceiptDigest, /^[0-9a-f]{64}$/u);
+  assert.deepEqual(provenance.planningSignals, {
+    browserVisible: false, testSelectionUncertain: false,
+  });
+  assert.equal(provenance.behaviorMapperResult, null);
 
   writeFileSync(sidecarPath, `${JSON.stringify({ ...packet, evidence: 'tampered' })}\n`);
   assert.throws(() => assertTaskPacketBound(state, packet, { cwd }), { code: 'TASK_PACKET_REPLAN_REQUIRED' });
   assert.throws(() => buildTargetedValidationPlan({ cwd }), { code: 'TASK_PACKET_REPLAN_REQUIRED' });
   const recovery = reconcileState({ cwd });
   assert.equal(recovery.packetSidecars[0].status, 'invalid');
-  assert.equal(recovery.evidenceErrors.length, 1);
+  assert.equal(recovery.specialist.status, 'stale');
+  assert.equal(recovery.specialist.error, 'TASK_PACKET_REPLAN_REQUIRED');
+  assert.deepEqual(recovery.evidenceErrors.map((message) => message.split(':')[0]), [
+    'Task sidecar-task packet sidecar', 'Specialist review bundle is invalid',
+  ]);
 });
 
 test('a stale packet binder cannot create a sidecar after revision drift', () => {
@@ -2859,11 +2917,201 @@ test('active legacy-bound tasks fail with the dedicated replan error before rebi
   assert.equal(existsSync(taskPacketSidecarPath(cwd, state.prNumber, packet.taskId)), false);
 });
 
+test('migration-origin v2 binding replanning is guarded, neutral, and followed by explicit v3 planning', () => {
+  const cwd = repo();
+  const opaqueTaskId = 'legacy, task "quoted"';
+  const { state: migrated, packet, backupPath } = migrateV2BoundTask(cwd, { taskId: opaqueTaskId });
+  const backup = readFileSync(backupPath, 'utf8');
+  assert.equal(migrated.tasks[0].status, 'proposed');
+  assert.equal(typeof migrated.tasks[0].taskPacketDigest, 'string');
+  assert.throws(() => checkpointState({
+    cwd,
+    expectedRevision: migrated.revision,
+    nextState: {
+      ...migrated,
+      tasks: migrated.tasks.map(({ taskPacketDigest: _digest, ...taskItem }) => taskItem),
+    },
+  }), { code: 'IMMUTABLE_STATE_PROVENANCE' });
+  assert.throws(() => checkpointTaskPacketReplan({
+    cwd, taskId: opaqueTaskId, expectedRevision: migrated.revision + 1,
+  }), { code: 'STATE_REVISION_CONFLICT' });
+  assert.equal(existsSync(taskPacketSidecarPath(cwd, migrated.prNumber, opaqueTaskId)), false);
+
+  const replanned = checkpointTaskPacketReplan({
+    cwd, taskId: opaqueTaskId, expectedRevision: migrated.revision,
+  });
+  const replannedTask = replanned.tasks[0];
+  assert.equal(replannedTask.status, 'proposed');
+  assert.equal(Object.hasOwn(replannedTask, 'taskPacketDigest'), false);
+  assert.equal(replannedTask.integratedCommitSha, null);
+  assert.equal(replannedTask.resolutionSummary, null);
+  assert.deepEqual(replannedTask.execution, {
+    dependencies: [], ownedPaths: [], worker: null, branch: null, worktree: null,
+    workerCommitSha: null, validationSummaries: [], lastError: null,
+  });
+  assert.equal(replanned.phase, 'recovering');
+  assert.equal(readFileSync(backupPath, 'utf8'), backup);
+  assert.equal(existsSync(taskPacketSidecarPath(cwd, replanned.prNumber, opaqueTaskId)), false);
+  assert.equal(existsSync(taskBindingProvenancePath(cwd, replanned.prNumber, opaqueTaskId)), false);
+
+  assert.throws(() => checkpointTaskPacketBinding({
+    cwd, packet, expectedRevision: replanned.revision,
+  }), { code: 'SPECIALIST_PLAN_REQUIRED' });
+  planSpecialists({
+    cwd, input: planInput(replanned, packet), expectedRevision: replanned.revision, now: () => AT,
+  });
+  const rebound = checkpointTaskPacketBinding({
+    cwd, packet, expectedRevision: replanned.revision,
+  });
+  assert.equal(rebound.tasks[0].taskPacketDigest, taskPacketDigest(packet));
+  assert.equal(existsSync(taskPacketSidecarPath(cwd, rebound.prNumber, opaqueTaskId)), true);
+  assert.equal(existsSync(taskBindingProvenancePath(cwd, rebound.prNumber, opaqueTaskId)), true);
+  assert.throws(() => checkpointTaskPacketReplan({
+    cwd, taskId: opaqueTaskId, expectedRevision: rebound.revision,
+  }), { code: 'TASK_PACKET_REPLAN_NOT_ALLOWED' });
+});
+
+test('replan-task-packet CLI preserves one opaque task ID and requires its revision guard', () => {
+  const cwd = repo();
+  const taskId = 'legacy, opaque task';
+  const { state: migrated } = migrateV2BoundTask(cwd, { taskId });
+  const missingRevision = spawnSync(process.execPath, [
+    STATE_CLI, 'replan-task-packet', '--pr', '17', '--task', taskId,
+  ], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  assert.equal(missingRevision.status, 2);
+  assert.match(missingRevision.stderr, /requires --expected-revision/u);
+
+  const replanned = spawnSync(process.execPath, [
+    STATE_CLI, 'replan-task-packet', '--pr', '17', '--task', taskId,
+    '--expected-revision', String(migrated.revision),
+  ], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  assert.equal(replanned.status, 0, replanned.stderr);
+  assert.equal(JSON.parse(replanned.stdout).tasks[0].id, taskId);
+  assert.equal(JSON.parse(replanned.stdout).tasks[0].status, 'proposed');
+});
+
+test('v2 replan preserves integrated facts, invalidates targeted proof, and rejects unsafe provenance', () => {
+  const integratedCwd = repo();
+  const integratedSetup = migrateV2BoundTask(integratedCwd, { status: 'integrated' });
+  const validated = checkpointSyntheticTargetedValidation(integratedCwd, integratedSetup.state);
+  const integratedTask = structuredClone(validated.tasks[0]);
+  const replanned = checkpointTaskPacketReplan({
+    cwd: integratedCwd, taskId: integratedTask.id, expectedRevision: validated.revision,
+  });
+  assert.equal(replanned.tasks[0].status, 'integrated');
+  assert.equal(replanned.tasks[0].integratedCommitSha, integratedTask.integratedCommitSha);
+  assert.equal(replanned.tasks[0].resolutionSummary, integratedTask.resolutionSummary);
+  assert.equal(Object.hasOwn(replanned.tasks[0], 'execution'), false);
+  assert.equal(Object.hasOwn(replanned.tasks[0], 'taskPacketDigest'), false);
+  assert.equal(replanned.validationStatus.status, 'not-run');
+
+  for (const status of ['queued', 'running', 'implemented']) {
+    const activeCwd = repo();
+    const active = migrateV2BoundTask(activeCwd, { status });
+    assert.throws(() => checkpointTaskPacketReplan({
+      cwd: activeCwd, taskId: 'legacy-active', expectedRevision: active.state.revision,
+    }), { code: 'TASK_PACKET_REPLAN_NOT_ALLOWED' });
+    assert.equal(loadState(activeCwd).tasks[0].status, status);
+    assert.equal(loadState(activeCwd).tasks[0].taskPacketDigest, taskPacketDigest(active.historicalPacket));
+  }
+
+  const assignedCwd = repo();
+  const assigned = migrateV2BoundTask(assignedCwd, {
+    status: 'proposed', taskOverrides: { execution: { worker: 'review_fix_worker' } },
+  });
+  assert.throws(() => checkpointTaskPacketReplan({
+    cwd: assignedCwd, taskId: 'legacy-active', expectedRevision: assigned.state.revision,
+  }), { code: 'TASK_PACKET_REPLAN_NOT_ALLOWED' });
+  assert.equal(loadState(assignedCwd).tasks[0].execution.worker, 'review_fix_worker');
+
+  for (const status of ['blocked', 'failed']) {
+    const neutralCwd = repo();
+    const neutral = migrateV2BoundTask(neutralCwd, { status });
+    const safelyReplanned = checkpointTaskPacketReplan({
+      cwd: neutralCwd, taskId: 'legacy-active', expectedRevision: neutral.state.revision,
+    });
+    assert.equal(safelyReplanned.tasks[0].status, 'proposed');
+    assert.equal(safelyReplanned.tasks[0].taskPacketDigest, undefined);
+    assert.deepEqual(safelyReplanned.tasks[0].execution, {
+      dependencies: [], ownedPaths: [], worker: null, branch: null, worktree: null,
+      workerCommitSha: null, validationSummaries: [], lastError: null,
+    });
+  }
+
+  const nativeCwd = repo();
+  const native = integratedTasks(nativeCwd, ['legacy-active']);
+  const legacyPacket = historicalTaskPacketV2(taskPacket(native.currentIntegrationHeadSha, 'legacy-active'));
+  writeFileSync(statePath(nativeCwd, native.prNumber), `${JSON.stringify({
+    ...native,
+    tasks: native.tasks.map((taskItem) => ({
+      ...taskItem, taskPacketDigest: taskPacketDigest(legacyPacket),
+    })),
+  })}\n`);
+  assert.throws(() => checkpointTaskPacketReplan({
+    cwd: nativeCwd, taskId: 'legacy-active', expectedRevision: native.revision,
+  }), { code: 'TASK_PACKET_REPLAN_PROVENANCE_INVALID' });
+
+  const tamperedCwd = repo();
+  const tampered = migrateV2BoundTask(tamperedCwd);
+  const backup = JSON.parse(readFileSync(tampered.backupPath, 'utf8'));
+  backup.tasks[0].taskPacketDigest = 'f'.repeat(64);
+  writeFileSync(tampered.backupPath, `${JSON.stringify(backup)}\n`);
+  assert.throws(() => checkpointTaskPacketReplan({
+    cwd: tamperedCwd, taskId: 'legacy-active', expectedRevision: tampered.state.revision,
+  }), { code: 'TASK_PACKET_REPLAN_PROVENANCE_INVALID' });
+
+  const sidecarCwd = repo();
+  const sidecar = migrateV2BoundTask(sidecarCwd);
+  mkdirSync(join(stateDirectory(sidecarCwd, 17), 'task-packets'), { recursive: true });
+  writeFileSync(taskPacketSidecarPath(sidecarCwd, 17, 'legacy-active'), '{}\n');
+  assert.throws(() => checkpointTaskPacketReplan({
+    cwd: sidecarCwd, taskId: 'legacy-active', expectedRevision: sidecar.state.revision,
+  }), { code: 'TASK_PACKET_REPLAN_NOT_ALLOWED' });
+  assert.equal(existsSync(taskPacketSidecarPath(sidecarCwd, 17, 'legacy-active')), true);
+
+  const receiptCwd = repo();
+  const receipt = migrateV2BoundTask(receiptCwd);
+  const receiptPath = taskBindingProvenanceReceiptPath(receiptCwd, 17, 'legacy-active');
+  mkdirSync(join(stateDirectory(receiptCwd, 17), 'task-binding-provenance'), { recursive: true });
+  writeFileSync(receiptPath, `${'f'.repeat(64)}\n`);
+  assert.throws(() => checkpointTaskPacketReplan({
+    cwd: receiptCwd, taskId: 'legacy-active', expectedRevision: receipt.state.revision,
+  }), { code: 'TASK_PACKET_REPLAN_NOT_ALLOWED' });
+  assert.equal(existsSync(receiptPath), true);
+
+  const completedCwd = repo();
+  const completed = migrateV2BoundTask(completedCwd, { status: 'completed' });
+  assert.throws(() => checkpointTaskPacketReplan({
+    cwd: completedCwd, taskId: 'legacy-active', expectedRevision: completed.state.revision,
+  }), { code: 'TASK_PACKET_REPLAN_NOT_ALLOWED' });
+});
+
 test('a bound schema-v3 task without its sidecar requires explicit replanning while completed v2 remains readable', () => {
   const cwd = repo();
   let state = integratedTasks(cwd, ['missing-sidecar']);
   const packet = taskPacket(state.currentIntegrationHeadSha, 'missing-sidecar');
   state = bindPacket(cwd, state, packet);
+  const provenancePath = taskBindingProvenancePath(cwd, state.prNumber, packet.taskId);
+  const provenanceReceiptPath = taskBindingProvenanceReceiptPath(cwd, state.prNumber, packet.taskId);
+  const provenanceReceipt = readFileSync(provenanceReceiptPath, 'utf8');
+  rmSync(provenancePath);
+  assert.throws(() => assertTaskPacketBound(state, packet, { cwd }), {
+    code: 'INVALID_TASK_BINDING_PROVENANCE',
+  });
+  assert.equal(reconcileState({ cwd }).bindingProvenance[0].status, 'invalid');
+  assert.match(renderRecoverySummary({ cwd }), /Task binding provenance: missing-sidecar=invalid/u);
+  checkpointTaskPacketBinding({ cwd, packet, expectedRevision: state.revision });
+  assert.equal(existsSync(provenancePath), true);
+  rmSync(provenanceReceiptPath);
+  assert.throws(() => assertTaskPacketBound(state, packet, { cwd }), {
+    code: 'INVALID_TASK_BINDING_PROVENANCE',
+  });
+  assert.equal(readSpecialistStatus({ cwd }).error, 'INVALID_TASK_BINDING_PROVENANCE');
+  assert.equal(reconcileState({ cwd }).bindingProvenance[0].status, 'invalid');
+  assert.throws(() => checkpointTaskPacketBinding({
+    cwd, packet, expectedRevision: state.revision,
+  }), { code: 'INVALID_TASK_BINDING_PROVENANCE' });
+  writeFileSync(provenanceReceiptPath, provenanceReceipt);
   rmSync(taskPacketSidecarPath(cwd, state.prNumber, packet.taskId));
   assert.throws(() => assertTaskPacketBound(state, packet, { cwd }), { code: 'TASK_PACKET_REPLAN_REQUIRED' });
   assert.match(renderRecoverySummary({ cwd }), /missing-sidecar=invalid/u);
@@ -2893,6 +3141,8 @@ test('a bound schema-v3 task without its sidecar requires explicit replanning wh
     tasks: completedV3.tasks.map((item) => ({ ...item, taskPacketDigest: taskPacketDigest(historicalV2) })),
   };
   assert.equal(assertTaskPacketBound(completed, historicalV2, { cwd }).id, packet.taskId);
+  rmSync(provenancePath);
+  rmSync(provenanceReceiptPath);
   writeFileSync(statePath(cwd, state.prNumber), `${JSON.stringify(schemaV2State(completed))}\n`);
   migrateState({ cwd });
   assert.equal(reconcileState({ cwd }).packetSidecars[0].status, 'historical-v2');
@@ -2953,6 +3203,84 @@ test('specialist plan creation recovers receipt-only interruption without weaken
   assert.notEqual(first.createdAt, recovered.createdAt);
 });
 
+test('an already-bound pre-fix v3 packet repairs only from one exact historical pre-bind plan', () => {
+  const cwd = repo();
+  let state = integratedTasks(cwd, ['pre-fix-bound']);
+  const packet = taskPacket(state.currentIntegrationHeadSha, 'pre-fix-bound', {
+    affectedAreas: ['web'], command: 'npm run check:web', specialization: 'web', riskTags: [],
+  });
+  packet.requiredValidation.system.push({
+    command: 'npm run test:e2e:related -- --id id-a-host-switches-the-interface-to-italian --project tablet-chromium',
+    reason: 'Exact browser-visible scenario selected before binding.',
+    selectors: ['id-a-host-switches-the-interface-to-italian'], projects: ['tablet-chromium'],
+  });
+  planSpecialists({
+    cwd, input: planInput(state, packet, { browserVisible: true, testSelectionUncertain: false }),
+    expectedRevision: state.revision, now: () => AT,
+  });
+  recordSpecialistReview({
+    cwd, expectedRevision: state.revision, now: () => AT,
+    input: {
+      schemaVersion: 1, planRevision: state.revision, headSha: packet.reviewedHeadSha,
+      reviewerId: 'behavior_mapper', outcome: 'clean',
+      summary: 'Exact historical browser scenario selected.', findings: [],
+    },
+  });
+  const planRevision = state.revision;
+  state = checkpointTaskPacketBinding({ cwd, packet, expectedRevision: state.revision });
+  const provenancePath = taskBindingProvenancePath(cwd, state.prNumber, packet.taskId);
+  const provenanceReceiptPath = taskBindingProvenanceReceiptPath(cwd, state.prNumber, packet.taskId);
+  const expectedProvenance = readFileSync(provenancePath, 'utf8');
+  const expectedProvenanceReceipt = readFileSync(provenanceReceiptPath, 'utf8');
+  rmSync(provenancePath);
+  rmSync(provenanceReceiptPath);
+  assert.throws(() => assertTaskPacketBound(state, packet, { cwd }), {
+    code: 'INVALID_TASK_BINDING_PROVENANCE',
+  });
+
+  const repaired = checkpointTaskPacketBinding({
+    cwd, packet, expectedRevision: state.revision,
+  });
+  assert.equal(repaired.revision, state.revision);
+  assert.equal(readFileSync(provenancePath, 'utf8'), expectedProvenance);
+  assert.equal(readFileSync(provenanceReceiptPath, 'utf8'), expectedProvenanceReceipt);
+  assert.equal(JSON.parse(expectedProvenance).behaviorMapperResult.evidence.summary, 'Exact historical browser scenario selected.');
+
+  rmSync(provenancePath);
+  const receiptPath = specialistPlanReceiptPath(cwd, state.prNumber, packet.reviewedHeadSha, planRevision);
+  const receipt = readFileSync(receiptPath, 'utf8');
+  writeFileSync(receiptPath, `${'f'.repeat(64)}\n`);
+  assert.throws(() => checkpointTaskPacketBinding({
+    cwd, packet, expectedRevision: state.revision,
+  }), { code: 'TASK_BINDING_PROVENANCE_RECOVERY_REQUIRED' });
+  assert.equal(existsSync(provenancePath), false);
+  writeFileSync(receiptPath, receipt);
+  assert.doesNotThrow(() => checkpointTaskPacketBinding({
+    cwd, packet, expectedRevision: state.revision,
+  }));
+
+  rmSync(provenancePath);
+  const bundlePath = specialistReviewBundlePath(cwd, state.prNumber, packet.reviewedHeadSha, planRevision);
+  const bundle = JSON.parse(readFileSync(bundlePath, 'utf8'));
+  writeFileSync(bundlePath, `${JSON.stringify({
+    ...bundle,
+    tasks: bundle.tasks.map((planned) => ({
+      ...planned,
+      planningSignals: { browserVisible: false, testSelectionUncertain: false },
+      route: routeSpecialists({
+        specialization: planned.specialization,
+        riskTags: planned.riskTags,
+        browserVisible: false,
+        testSelectionUncertain: false,
+      }),
+    })),
+  })}\n`);
+  assert.throws(() => checkpointTaskPacketBinding({
+    cwd, packet, expectedRevision: state.revision,
+  }), { code: 'TASK_BINDING_PROVENANCE_RECOVERY_REQUIRED' });
+  assert.equal(existsSync(provenancePath), false);
+});
+
 test('archival preserves immutable packet sidecars and specialist bundles', () => {
   const cwd = repo();
   let state = integratedTasks(cwd, ['archive-evidence']);
@@ -2971,6 +3299,8 @@ test('archival preserves immutable packet sidecars and specialist bundles', () =
   });
   const archived = archiveState({ cwd, abandonmentReason: 'Archive specialist evidence fixture.' });
   assert.equal(readdirSync(join(archived, 'task-packets')).filter((name) => name.endsWith('.json')).length, 1);
+  assert.equal(readdirSync(join(archived, 'task-binding-provenance')).filter((name) => name.endsWith('.json')).length, 1);
+  assert.equal(readdirSync(join(archived, 'task-binding-provenance')).filter((name) => name.endsWith('.sha256')).length, 1);
   assert.equal(readdirSync(join(archived, 'specialist-reviews')).filter((name) => name.endsWith('.json')).length, 2);
   assert.equal(readdirSync(join(archived, 'specialist-reviews')).filter((name) => name.endsWith('.plan.sha256')).length, 2);
 });
@@ -3077,6 +3407,145 @@ test('behavior mapping gates binding and exact-head risk evidence feeds only ver
   assert.equal(readSpecialistStatus({ cwd }).status, 'clean');
 });
 
+test('signal-only behavior mapping survives binding and compound provenance tampering fails every specialist consumer', () => {
+  const cwd = repo();
+  let state = integratedTasks(cwd, ['signal-only-mapping']);
+  const packet = taskPacket(state.currentIntegrationHeadSha, 'signal-only-mapping', {
+    specialization: 'api', riskTags: [],
+  });
+  packet.requiredValidation.system.push({
+    command: 'npm run test:e2e:related -- --id id-a-host-switches-the-interface-to-italian --project tablet-chromium',
+    reason: 'Explicit browser-visible planning signal selected this scenario.',
+    selectors: ['id-a-host-switches-the-interface-to-italian'], projects: ['tablet-chromium'],
+  });
+  planSpecialists({
+    cwd, input: planInput(state, packet, { browserVisible: false, testSelectionUncertain: true }),
+    expectedRevision: state.revision, now: () => AT,
+  });
+  recordSpecialistReview({
+    cwd, expectedRevision: state.revision, now: () => AT,
+    input: {
+      schemaVersion: 1, planRevision: state.revision, headSha: packet.reviewedHeadSha,
+      reviewerId: 'behavior_mapper', outcome: 'clean',
+      summary: 'Browser-visible scenario and project selected.', findings: [],
+    },
+  });
+  state = checkpointTaskPacketBinding({ cwd, packet, expectedRevision: state.revision });
+  const provenancePath = taskBindingProvenancePath(cwd, state.prNumber, packet.taskId);
+  const provenance = JSON.parse(readFileSync(provenancePath, 'utf8'));
+  assert.deepEqual(provenance.planningSignals, {
+    browserVisible: false, testSelectionUncertain: true,
+  });
+  assert.equal(provenance.behaviorMapperResult.phase, 'planning');
+  assert.equal(provenance.behaviorMapperResult.evidence.headSha, packet.reviewedHeadSha);
+
+  buildTargetedValidationPlan({ cwd, now: () => AT });
+  state = executeTargetedValidationPlan({ cwd, runCommand: () => ({ status: 0 }), now: () => AT }).state;
+  const postInput = {
+    schemaVersion: 1, stage: 'post-integration', headSha: state.currentIntegrationHeadSha,
+    tasks: [{ taskPacket: packet }],
+  };
+  const post = planSpecialists({ cwd, input: postInput, expectedRevision: state.revision, now: () => AT });
+  assert.deepEqual(post.tasks[0].planningSignals, provenance.planningSignals);
+  assert.deepEqual(post.tasks[0].route.reviewers.map(({ id }) => id), [
+    'behavior_mapper', 'integration_verifier',
+  ]);
+  assert.deepEqual(post.records, []);
+  const context = specialistContext({ cwd });
+  assert.equal(context.readyForIntegrationVerifier, true);
+  assert.deepEqual(context.requiredReviewerIds, []);
+  assert.equal(context.preBindPlanning[0].phase, 'pre-bind');
+  assert.equal(context.preBindPlanning[0].behaviorMapperResult.phase, 'planning');
+  assert.equal(context.preBindPlanning[0].route.reviewers[0].reasons[0], 'signal:testSelectionUncertain');
+  assert.equal(context.routes[0].phase, 'post-integration');
+  assert.equal(context.postIntegrationReview.phase, 'review');
+  assert.deepEqual(context.postIntegrationReview.specialistResults, []);
+
+  const historicalBundlePath = specialistReviewBundlePath(
+    cwd, state.prNumber, provenance.reviewedHeadSha, provenance.planRevision,
+  );
+  const historicalReceiptPath = specialistPlanReceiptPath(
+    cwd, state.prNumber, provenance.reviewedHeadSha, provenance.planRevision,
+  );
+  const historicalBundle = JSON.parse(readFileSync(historicalBundlePath, 'utf8'));
+  const historicalReceipt = readFileSync(historicalReceiptPath, 'utf8');
+  const provenanceReceiptPath = taskBindingProvenanceReceiptPath(
+    cwd, state.prNumber, packet.taskId,
+  );
+  const provenanceReceipt = readFileSync(provenanceReceiptPath, 'utf8');
+  const forgedMapperSummary = 'Coherently forged in both mutable evidence files.';
+  writeFileSync(historicalBundlePath, `${JSON.stringify({
+    ...historicalBundle,
+    records: historicalBundle.records.map((record) => record.reviewerId === 'behavior_mapper'
+      ? { ...record, summary: forgedMapperSummary } : record),
+  })}\n`);
+  writeFileSync(provenancePath, `${JSON.stringify({
+    ...provenance,
+    behaviorMapperResult: {
+      ...provenance.behaviorMapperResult,
+      evidence: { ...provenance.behaviorMapperResult.evidence, summary: forgedMapperSummary },
+    },
+  })}\n`);
+  assert.equal(readFileSync(historicalReceiptPath, 'utf8'), historicalReceipt);
+  assert.equal(readFileSync(provenanceReceiptPath, 'utf8'), provenanceReceipt);
+  assert.throws(() => assertTaskPacketBound(state, packet, { cwd }), {
+    code: 'INVALID_TASK_BINDING_PROVENANCE',
+  });
+  assert.throws(() => specialistContext({ cwd }), {
+    code: 'INVALID_TASK_BINDING_PROVENANCE',
+  });
+  assert.equal(readSpecialistStatus({ cwd }).error, 'INVALID_TASK_BINDING_PROVENANCE');
+  assert.equal(reconcileState({ cwd }).bindingProvenance[0].status, 'invalid');
+  assert.throws(() => recordSpecialistReview({
+    cwd, expectedRevision: state.revision, now: () => AT,
+    input: {
+      schemaVersion: 1, planRevision: state.revision, headSha: state.currentIntegrationHeadSha,
+      reviewerId: 'security_reviewer', outcome: 'clean', summary: 'Should not record.', findings: [],
+    },
+  }), { code: 'INVALID_TASK_BINDING_PROVENANCE' });
+  writeFileSync(historicalBundlePath, `${JSON.stringify(historicalBundle)}\n`);
+  writeFileSync(provenancePath, `${JSON.stringify(provenance)}\n`);
+  assert.doesNotThrow(() => assertTaskPacketBound(state, packet, { cwd }));
+
+  const tamperedSignals = { browserVisible: true, testSelectionUncertain: false };
+  const tampered = {
+    ...provenance,
+    planReceiptDigest: 'f'.repeat(64),
+    planningSignals: tamperedSignals,
+    route: routeSpecialists({
+      specialization: packet.specialization,
+      riskTags: packet.riskTags,
+      ...tamperedSignals,
+    }),
+    behaviorMapperResult: {
+      phase: 'planning',
+      evidence: {
+        ...provenance.behaviorMapperResult.evidence,
+        summary: 'Coherently forged mapper evidence.',
+      },
+    },
+  };
+  writeFileSync(provenancePath, `${JSON.stringify(tampered)}\n`);
+  assert.throws(() => assertTaskPacketBound(state, packet, { cwd }), {
+    code: 'INVALID_TASK_BINDING_PROVENANCE',
+  });
+  assert.throws(() => specialistContext({ cwd }), {
+    code: 'INVALID_TASK_BINDING_PROVENANCE',
+  });
+  assert.equal(readSpecialistStatus({ cwd }).status, 'stale');
+  assert.equal(readSpecialistStatus({ cwd }).error, 'INVALID_TASK_BINDING_PROVENANCE');
+  assert.throws(() => recordSpecialistReview({
+    cwd, expectedRevision: state.revision, now: () => AT,
+    input: {
+      schemaVersion: 1, planRevision: state.revision, headSha: state.currentIntegrationHeadSha,
+      reviewerId: 'security_reviewer', outcome: 'clean', summary: 'Should not record.', findings: [],
+    },
+  }), { code: 'INVALID_TASK_BINDING_PROVENANCE' });
+  const recovery = reconcileState({ cwd });
+  assert.equal(recovery.bindingProvenance[0].status, 'invalid');
+  assert.match(recovery.evidenceErrors.join('\n'), /binding provenance/u);
+});
+
 test('behavior mapping cannot bind without exact related-E2E selectors and projects', () => {
   const cwd = repo();
   const state = integratedTasks(cwd, ['missing-related-selection']);
@@ -3107,7 +3576,9 @@ test('behavior mapping cannot bind without exact related-E2E selectors and proje
 
 test('behavior mapping remains bound to the reviewed commit after dependent integration advances HEAD', () => {
   const cwd = repo();
-  const { integrated, reviewedHead, integratedHead } = canonicalBoundIntegratedTask(cwd, 'first-dependency');
+  const {
+    packet: firstPacket, integrated, reviewedHead, integratedHead,
+  } = canonicalBoundIntegratedTask(cwd, 'first-dependency');
   const laterTask = task(reviewedHead, {
     id: 'later-browser-task', sourceIds: ['local:later-browser-task'], fingerprint: 'later-browser-task',
     status: 'proposed', disposition: 'actionable', integratedCommitSha: null, resolutionSummary: null,
@@ -3146,7 +3617,52 @@ test('behavior mapping remains bound to the reviewed commit after dependent inte
       reviewerId: 'behavior_mapper', outcome: 'clean', summary: 'Reviewed-commit scenarios selected.', findings: [],
     },
   });
-  assert.doesNotThrow(() => checkpointTaskPacketBinding({ cwd, packet, expectedRevision: state.revision }));
+  const bound = checkpointTaskPacketBinding({ cwd, packet, expectedRevision: state.revision });
+  const laterIntegratedHead = commit(cwd, {
+    'scripts/later-browser-task.mjs': 'export const laterBrowserTask = true;\n',
+  }, 'integrate later browser task');
+  const advanced = checkpointGitMetadata({ cwd }).state;
+  const integratedTasksAtHead = advanced.tasks.map((taskItem) => {
+    if (taskItem.id !== packet.taskId) return taskItem;
+    const { execution: _execution, ...withoutExecution } = taskItem;
+    return {
+      ...withoutExecution,
+      status: 'integrated',
+      integratedCommitSha: laterIntegratedHead,
+      resolutionSummary: 'Integrated centrally; targeted validation remains.',
+    };
+  });
+  let integratedLater = checkpointState({
+    cwd, expectedRevision: advanced.revision,
+    nextState: { ...advanced, tasks: integratedTasksAtHead },
+  });
+  assert.equal(bound.tasks.find((taskItem) => taskItem.id === packet.taskId).taskPacketDigest, taskPacketDigest(packet));
+  buildTargetedValidationPlan({ cwd, now: () => AT });
+  integratedLater = executeTargetedValidationPlan({
+    cwd, runCommand: () => ({ status: 0 }), now: () => AT,
+  }).state;
+  const post = planSpecialists({
+    cwd, expectedRevision: integratedLater.revision, now: () => AT,
+    input: {
+      schemaVersion: 1, stage: 'post-integration', headSha: laterIntegratedHead,
+      tasks: [{ taskPacket: firstPacket }, { taskPacket: packet }],
+    },
+  });
+  assert.equal(post.headSha, laterIntegratedHead);
+  const context = specialistContext({ cwd });
+  const preBind = context.preBindPlanning.find((entry) => entry.taskId === packet.taskId);
+  const postRoute = context.routes.find((entry) => entry.taskId === packet.taskId);
+  assert.equal(preBind.reviewedHeadSha, reviewedHead);
+  assert.equal(preBind.behaviorMapperResult.phase, 'planning');
+  assert.equal(preBind.behaviorMapperResult.evidence.headSha, reviewedHead);
+  assert.deepEqual(preBind.planningSignals, {
+    browserVisible: true, testSelectionUncertain: false,
+  });
+  assert.equal(postRoute.phase, 'post-integration');
+  assert.equal(postRoute.route.signals.browserVisible, true);
+  assert.ok(postRoute.route.reviewers.some(({ id }) => id === 'behavior_mapper'));
+  assert.equal(context.headSha, laterIntegratedHead);
+  assert.notEqual(context.headSha, preBind.reviewedHeadSha);
 });
 
 test('specialist risk evidence is exact reviewer/head/revision, deduplicated, tamper-proof, and stale after HEAD change', () => {
@@ -3186,7 +3702,7 @@ test('specialist risk evidence is exact reviewer/head/revision, deduplicated, ta
   recordSpecialistReview({ cwd, input: record, expectedRevision: state.revision, now: () => AT });
   assert.equal(specialistContext({ cwd }).status, 'findings');
   assert.equal(specialistContext({ cwd }).readyForIntegrationVerifier, false);
-  assert.equal(readSpecialistStatus({ cwd }).status, 'finding');
+  assert.equal(readSpecialistStatus({ cwd }).status, 'findings');
   assert.throws(() => recordSpecialistReview({
     cwd, expectedRevision: state.revision,
     input: { ...record, reviewerId: 'offline_realtime_reviewer' },

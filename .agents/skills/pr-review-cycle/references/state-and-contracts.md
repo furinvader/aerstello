@@ -15,6 +15,9 @@ Mutable state is repository-scoped and outside tracked worktrees:
 │   ├── state.backup.json
 │   ├── task-packets/
 │   │   └── <sha256(taskId)>.json
+│   ├── task-binding-provenance/
+│   │   ├── <sha256(taskId)>.json
+│   │   └── <sha256(taskId)>.sha256
 │   ├── specialist-reviews/
 │   │   ├── <head>-r<revision>.json
 │   │   └── <head>-r<revision>.plan.sha256
@@ -34,6 +37,7 @@ npm run review:state -- init --pr 123 --base origin/main --head HEAD
 npm run review:state -- path
 npm run review:state -- validate
 npm run review:state -- bind-task-packet --task-packet /tmp/task.json --expected-revision 4
+npm run review:state -- replan-task-packet --task '<opaque-id>' --expected-revision 4
 npm run review:state -- validate-result --task-packet /tmp/task.json --worker-result /tmp/result.json
 npm run review:state -- specialist-plan --input /tmp/specialist-plan.json --expected-revision 4
 npm run review:state -- specialist-record --input /tmp/specialist-result.json --expected-revision 4
@@ -62,7 +66,15 @@ state.
 
 Before delegation, `bind-task-packet` atomically persists the complete accepted
 schema-v3 packet under `task-packets/<sha256(taskId)>.json`, verifies its
-canonical SHA-256 identity, and records that digest on its actionable task.
+canonical SHA-256 identity, persists the receipt-verified pre-bind plan under
+`task-binding-provenance/<sha256(taskId)>.json`, and records the packet digest
+on its actionable task. The provenance captures the packet digest and reviewed
+HEAD, specialist-plan revision and receipt digest, both explicit planning
+signals, canonical route, and any required clean planning-phase behavior-mapper
+result. Binding writes all immutable sidecars under one state lock before the
+digest checkpoint. An adjacent immutable SHA-256 receipt covers the complete
+binding provenance, including its mapper record. An interrupted exact write is
+retryable; changed, missing, or unverifiable sidecars or receipts fail closed.
 Object key order does not affect the digest; array order and every packet value,
 including specialization and risks, do. The sidecar and binding are immutable.
 Missing or changed sidecars fail recovery, result acceptance, validation
@@ -71,7 +83,19 @@ planning, and specialist routing.
 Completed historical schema-v2 tasks remain readable. An unbound task may
 receive an explicitly planned schema-v3 packet. An active task already bound to
 a legacy packet cannot be inferred, silently rebound, or assigned a fallback
-profile; it requires an explicit replan through the dedicated legacy error.
+profile. For one genuine migration-origin schema-v2 binding in neutral
+`proposed`, `blocked`, or `failed` execution—or already `integrated`—use
+`replan-task-packet --task <opaque-id> --expected-revision <n>`. The guarded
+transition verifies the exact `state.v2.backup.json` identity and task digest,
+rejects any packet, provenance, or provenance-receipt sidecar, accepts no
+replacement packet, and deletes nothing. `queued`, `running`, `implemented`,
+completed, or worker/branch/worktree/worker-commit-bearing tasks are rejected.
+It clears only that safe legacy digest, resets a pre-integration task to neutral
+`proposed` execution, preserves an Integrated task's central commit and
+resolution, and invalidates targeted validation. Then run ordinary explicit
+schema-v3 `specialist-plan` and `bind-task-packet`; the generic checkpoint still
+cannot clear or replace a digest. `--task` is one byte-for-byte opaque ID—commas,
+spaces, quotes, and backslashes are not separators.
 State remains schema v3 because canonical packets and specialist evidence are
 durable, digest-verified sidecars rather than duplicated task fields.
 
@@ -87,10 +111,14 @@ to the packet's exact reviewed commit. Record, status, recovery, and binding
 reads all verify the receipt and the packet's task ID, digest, specialization,
 risk tags, and canonical route.
 Post-integration plans cover the exact bound packets and required reviewers for
-one integration HEAD. `specialist-record` accepts only the planned reviewer and
-exact HEAD/revision. `specialist-context` is read-only and produces the guarded
-input for the final verifier, including every exact immutable packet, its
-canonical route, required reviewer results, and targeted-validation proof. Any
+one integration HEAD. They reuse each verified pre-bind signal set and route,
+while reviewer requirements still select review-phase risk reviewers only;
+planning-phase behavior mapping is not rerun against the integration HEAD.
+`specialist-record` accepts only the planned reviewer and exact HEAD/revision.
+`specialist-context` is read-only and produces the guarded input for the final
+verifier, including every exact immutable packet, phase-qualified pre-bind
+signals, route, and reviewed-HEAD mapper result, separate exact-integration-HEAD
+risk results, and targeted-validation proof. Any
 HEAD change makes the prior bundle stale; clean specialist evidence is not
 task-resolution, GitHub, review-request, or Done evidence.
 

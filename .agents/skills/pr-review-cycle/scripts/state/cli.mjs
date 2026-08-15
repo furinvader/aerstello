@@ -13,6 +13,7 @@ import {
   buildTargetedValidationPlan,
   checkpointState,
   checkpointTaskPacketBinding,
+  checkpointTaskPacketReplan,
   executeTargetedValidationPlan,
   initializeState,
   loadState,
@@ -27,7 +28,61 @@ import {
 } from './state.mjs';
 
 function usage() {
-  return `Usage: node .agents/skills/pr-review-cycle/scripts/state/cli.mjs <command> [options]\n\nCommands:\n  init                Start durable state for a PR review cycle\n  path                Print the active state path\n  validate            Check state and durable evidence against the integration checkout\n  specialist-plan     Save a guarded pre-bind or post-integration routing plan\n  specialist-record   Append one concise exact-plan specialist result\n  specialist-context  Print fail-closed exact-HEAD verifier context (read-only)\n  bind-task-packet    Bind accepted fixed instructions to a durable task\n  validate-result     Check a worker result against its bound fixed instructions\n  validation-plan     Save and print the combined targeted checks from packet sidecars\n  run-validation      Run pending checks from the saved plan and record the result\n  show                Print active state JSON\n  checkpoint          Replace ordinary operational state from --input\n  migrate             Explicitly migrate active schema v1 or v2 state to v3\n  recover             Print compact recovery context\n  archive             Archive a Done or explicitly abandoned cycle\n\nCommon options:\n  --pr <number>\n  --help\n\nSpecialist-plan and specialist-record options:\n  --input <file>\n  --expected-revision <number>\n\nBind-task-packet options:\n  --task-packet <file>\n  --expected-revision <number>\n\nValidation-plan options:\n  --initial-selection <file>     Explicit pristine, clean-taskless, or proven v2 completed-task recovery selection\n  --replace                      Start a fresh plan after a failure or commit change\n\nValidate-result options:\n  --task-packet <file>\n  --worker-result <file>\n\nCheckpoint options:\n  --expected-revision <number>\n\nMigrate options:\n  --integration-map <file>  JSON task-ID to central integration SHA map (v1 only)\n\nArchive options:\n  --abandon-reason <reason>\n\nReview, CI, task-resolution, targeted-validation, specialist-evidence, and Done transitions use guarded helpers that verify their evidence before saving.\n`;
+  return `Usage: node .agents/skills/pr-review-cycle/scripts/state/cli.mjs <command> [options]
+
+Commands:
+  init                Start durable state for a PR review cycle
+  path                Print the active state path
+  validate            Check state and durable evidence against the integration checkout
+  specialist-plan     Save a guarded pre-bind or post-integration routing plan
+  specialist-record   Append one concise exact-plan specialist result
+  specialist-context  Print fail-closed exact-HEAD verifier context (read-only)
+  bind-task-packet    Bind accepted fixed instructions to a durable task
+  replan-task-packet  Clear one proven migration-origin schema-v2 task binding
+  validate-result     Check a worker result against its bound fixed instructions
+  validation-plan     Save and print the combined targeted checks from packet sidecars
+  run-validation      Run pending checks from the saved plan and record the result
+  show                Print active state JSON
+  checkpoint          Replace ordinary operational state from --input
+  migrate             Explicitly migrate active schema v1 or v2 state to v3
+  recover             Print compact recovery context
+  archive             Archive a Done or explicitly abandoned cycle
+
+Common options:
+  --pr <number>
+  --help
+
+Specialist-plan and specialist-record options:
+  --input <file>
+  --expected-revision <number>
+
+Bind-task-packet options:
+  --task-packet <file>
+  --expected-revision <number>
+
+Replan-task-packet options:
+  --task <opaque-id>
+  --expected-revision <number>
+
+Validation-plan options:
+  --initial-selection <file>     Explicit pristine, clean-taskless, or proven v2 completed-task recovery selection
+  --replace                      Start a fresh plan after a failure or commit change
+
+Validate-result options:
+  --task-packet <file>
+  --worker-result <file>
+
+Checkpoint options:
+  --expected-revision <number>
+
+Migrate options:
+  --integration-map <file>  JSON task-ID to central integration SHA map (v1 only)
+
+Archive options:
+  --abandon-reason <reason>
+
+Review, CI, task-resolution, targeted-validation, specialist-evidence, and Done transitions use guarded helpers that verify their evidence before saving.
+`;
 }
 
 function optionsFor(command, argv) {
@@ -40,6 +95,8 @@ function optionsFor(command, argv) {
     common.values.push('integration-map');
   } else if (['bind-task-packet', 'validate-result'].includes(command)) {
     common.values.push('task-packet', 'worker-result');
+  } else if (command === 'replan-task-packet') {
+    common.values.push('task');
   } else if (command === 'validation-plan') {
     common.booleans.push('replace');
     common.values.push('initial-selection');
@@ -79,7 +136,7 @@ try {
     process.stdout.write(usage());
     process.exit(0);
   }
-  if (!['init', 'path', 'validate', 'specialist-plan', 'specialist-record', 'specialist-context', 'bind-task-packet', 'validate-result', 'validation-plan', 'run-validation', 'show', 'checkpoint', 'migrate', 'recover', 'archive'].includes(command)) {
+  if (!['init', 'path', 'validate', 'specialist-plan', 'specialist-record', 'specialist-context', 'bind-task-packet', 'replan-task-packet', 'validate-result', 'validation-plan', 'run-validation', 'show', 'checkpoint', 'migrate', 'recover', 'archive'].includes(command)) {
     throw new UsageError(`Unknown command ${command}`);
   }
   const options = optionsFor(command, argv);
@@ -147,6 +204,16 @@ try {
     const packet = JSON.parse(readFileSync(options['task-packet'], 'utf8'));
     writeJson(checkpointTaskPacketBinding({
       prNumber: options.pr, packet, expectedRevision: parsedExpectedRevision,
+    }));
+  } else if (command === 'replan-task-packet') {
+    if (options.task === undefined || options.task.length === 0) {
+      throw new UsageError('replan-task-packet requires --task');
+    }
+    if (parsedExpectedRevision === undefined) {
+      throw new UsageError('replan-task-packet requires --expected-revision');
+    }
+    writeJson(checkpointTaskPacketReplan({
+      prNumber: options.pr, taskId: options.task, expectedRevision: parsedExpectedRevision,
     }));
   } else if (command === 'validate-result') {
     if (!options['task-packet'] || !options['worker-result']) {

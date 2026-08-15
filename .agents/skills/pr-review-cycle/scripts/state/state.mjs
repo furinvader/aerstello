@@ -36,6 +36,7 @@ import {
   repositoryRoot,
   reviewRoot,
   specialistReviewDirectory,
+  taskBindingProvenanceDirectory,
   taskPacketDirectory,
 } from '../paths.mjs';
 import {
@@ -144,6 +145,16 @@ export function validationPlanPath(cwd, prNumber) {
 export function taskPacketSidecarPath(cwd, prNumber, taskId) {
   const name = createHash('sha256').update(String(taskId)).digest('hex');
   return join(taskPacketDirectory(cwd, parsePrNumber(prNumber)), `${name}.json`);
+}
+
+export function taskBindingProvenancePath(cwd, prNumber, taskId) {
+  const name = createHash('sha256').update(String(taskId)).digest('hex');
+  return join(taskBindingProvenanceDirectory(cwd, parsePrNumber(prNumber)), `${name}.json`);
+}
+
+export function taskBindingProvenanceReceiptPath(cwd, prNumber, taskId) {
+  const name = createHash('sha256').update(String(taskId)).digest('hex');
+  return join(taskBindingProvenanceDirectory(cwd, parsePrNumber(prNumber)), `${name}.sha256`);
 }
 
 export function specialistReviewBundlePath(cwd, prNumber, headSha, revision) {
@@ -279,7 +290,9 @@ function persistImmutableTaskPacketSidecar(cwd, state, packet, digest) {
   return path;
 }
 
-function readBoundTaskPacketSidecar(cwd, state, task, { suppliedPacket } = {}) {
+function readBoundTaskPacketSidecar(cwd, state, task, {
+  suppliedPacket, verifyBindingProvenance = true,
+} = {}) {
   const path = taskPacketSidecarPath(cwd, state.prNumber, task.id);
   if (!existsSync(path)) {
     if (task.status === 'completed' && suppliedPacket?.schemaVersion === 2
@@ -304,6 +317,7 @@ function readBoundTaskPacketSidecar(cwd, state, task, { suppliedPacket } = {}) {
       'TASK_PACKET_REPLAN_REQUIRED',
     );
   }
+  if (verifyBindingProvenance) readBoundTaskBindingProvenance(cwd, state, task, packet);
   return packet;
 }
 
@@ -324,10 +338,7 @@ function hasCompletedHistoricalV2TaskProof(cwd, state, task) {
 }
 
 export function loadBoundTaskPackets(cwd, state, { statuses } = {}) {
-  const selected = state.tasks.filter((task) => task.disposition === 'actionable'
-    && typeof task.taskPacketDigest === 'string'
-    && (!statuses || statuses.includes(task.status)));
-  return selected.map((task) => readBoundTaskPacketSidecar(cwd, state, task));
+  return loadBoundTaskPacketEntries(cwd, state, { statuses }).map(({ packet }) => packet);
 }
 
 function specialistPlanningErrors(input) {
@@ -377,9 +388,7 @@ function normalizedRequiredReviewerIds(route, { stage }) {
 }
 
 function canonicalBundleTaskRoute(task, stage) {
-  return specialistRouteFor(stage === 'pre-bind' ? task.taskPacket : task, stage === 'pre-bind' ? task.planningSignals : {
-    browserVisible: false, testSelectionUncertain: false,
-  });
+  return specialistRouteFor(stage === 'pre-bind' ? task.taskPacket : task, task.planningSignals);
 }
 
 function specialistPlanDigest(bundle) {
@@ -480,14 +489,19 @@ function validateSpecialistBundle(bundle, state) {
     const ids = [];
     for (const [index, task] of bundle.tasks.entries()) {
       const prefix = `bundle.tasks[${index}]`;
-      const taskFields = ['taskId', 'packetDigest', 'specialization', 'riskTags', 'route'];
-      if (bundle.stage === 'pre-bind') taskFields.push('reviewedHeadSha', 'planningSignals', 'taskPacket');
+      const taskFields = ['taskId', 'packetDigest', 'specialization', 'riskTags', 'planningSignals', 'route'];
+      if (bundle.stage === 'pre-bind') taskFields.push('reviewedHeadSha', 'taskPacket');
+      else taskFields.push('bindingProvenanceDigest');
       if (!task || typeof task !== 'object' || Array.isArray(task)) { errors.push(`${prefix} must be an object`); continue; }
       for (const field of taskFields) if (!Object.hasOwn(task, field)) errors.push(`${prefix}.${field} is required`);
       for (const field of Object.keys(task)) if (!taskFields.includes(field)) errors.push(`${prefix}.${field} is not allowed`);
       if (typeof task.taskId !== 'string' || task.taskId.length === 0) errors.push(`${prefix}.taskId is invalid`);
       else ids.push(task.taskId);
       if (!/^[0-9a-f]{64}$/u.test(task.packetDigest ?? '')) errors.push(`${prefix}.packetDigest is invalid`);
+      if (bundle.stage === 'post-integration'
+          && !/^[0-9a-f]{64}$/u.test(task.bindingProvenanceDigest ?? '')) {
+        errors.push(`${prefix}.bindingProvenanceDigest is invalid`);
+      }
       if (typeof task.specialization !== 'string' || !Array.isArray(task.riskTags)) errors.push(`${prefix} specialization metadata is invalid`);
       if (bundle.stage === 'pre-bind') {
         const packetErrors = validateTaskPacket(task.taskPacket);
@@ -504,12 +518,12 @@ function validateSpecialistBundle(bundle, state) {
         if (task.reviewedHeadSha !== bundle.headSha) {
           errors.push(`${prefix}.reviewedHeadSha must match the bundle reviewed commit`);
         }
-        const signals = task.planningSignals;
-        if (!signals || typeof signals !== 'object' || Array.isArray(signals)
-            || Object.keys(signals).sort().join(',') !== 'browserVisible,testSelectionUncertain'
-            || typeof signals.browserVisible !== 'boolean' || typeof signals.testSelectionUncertain !== 'boolean') {
-          errors.push(`${prefix}.planningSignals is invalid`);
-        }
+      }
+      const signals = task.planningSignals;
+      if (!signals || typeof signals !== 'object' || Array.isArray(signals)
+          || Object.keys(signals).sort().join(',') !== 'browserVisible,testSelectionUncertain'
+          || typeof signals.browserVisible !== 'boolean' || typeof signals.testSelectionUncertain !== 'boolean') {
+        errors.push(`${prefix}.planningSignals is invalid`);
       }
       try {
         const canonicalRoute = canonicalBundleTaskRoute(task, bundle.stage);
@@ -598,16 +612,284 @@ function writeNewSpecialistBundle(cwd, state, bundle) {
   return bundle;
 }
 
+function taskBindingProvenanceDigest(provenance) {
+  return createHash('sha256').update(canonicalSerializedJson(provenance)).digest('hex');
+}
+
+function verifyTaskBindingProvenanceReceipt(cwd, state, task, provenance) {
+  const path = taskBindingProvenanceReceiptPath(cwd, state.prNumber, task.id);
+  let recorded;
+  try {
+    if (statSync(path).size > 128) throw new Error('receipt exceeds 128 bytes');
+    recorded = readFileSync(path, 'utf8');
+  } catch (error) {
+    throw new StateError(
+      `Unable to read task ${task.id} binding provenance receipt at ${path}: ${error.message}`,
+      'INVALID_TASK_BINDING_PROVENANCE',
+    );
+  }
+  const expected = `${taskBindingProvenanceDigest(provenance)}\n`;
+  if (recorded !== expected) {
+    throw new StateError(
+      `Task ${task.id} binding provenance receipt does not match its complete immutable evidence`,
+      'INVALID_TASK_BINDING_PROVENANCE',
+    );
+  }
+  return path;
+}
+
+function persistTaskBindingProvenanceReceipt(cwd, state, task, provenance) {
+  const path = taskBindingProvenanceReceiptPath(cwd, state.prNumber, task.id);
+  const expected = `${taskBindingProvenanceDigest(provenance)}\n`;
+  if (existsSync(path)) {
+    try {
+      if (statSync(path).size > 128 || readFileSync(path, 'utf8') !== expected) {
+        throw new Error('receipt differs from the complete binding provenance');
+      }
+    } catch (error) {
+      throw new StateError(
+        `Task ${task.id} already has invalid immutable binding provenance receipt: ${error.message}`,
+        'INVALID_TASK_BINDING_PROVENANCE',
+      );
+    }
+    return path;
+  }
+  atomicWriteText(path, expected);
+  return path;
+}
+
+function validateTaskBindingProvenance(provenance, state, task, packet) {
+  const errors = [];
+  const fields = [
+    'schemaVersion', 'phase', 'prNumber', 'taskId', 'packetDigest', 'reviewedHeadSha',
+    'planRevision', 'planReceiptDigest', 'planningSignals', 'route', 'behaviorMapperResult',
+  ];
+  if (!provenance || typeof provenance !== 'object' || Array.isArray(provenance)) {
+    return ['provenance must be an object'];
+  }
+  for (const field of fields) if (!Object.hasOwn(provenance, field)) errors.push(`provenance.${field} is required`);
+  for (const field of Object.keys(provenance)) if (!fields.includes(field)) errors.push(`provenance.${field} is not allowed`);
+  if (provenance.schemaVersion !== 1) errors.push('provenance.schemaVersion must be 1');
+  if (provenance.phase !== 'pre-bind') errors.push('provenance.phase must be pre-bind');
+  if (provenance.prNumber !== state.prNumber) errors.push('provenance.prNumber does not match state');
+  if (provenance.taskId !== task.id || provenance.taskId !== packet.taskId) {
+    errors.push('provenance.taskId does not match the durable task and packet');
+  }
+  const packetDigest = taskPacketDigest(packet);
+  if (provenance.packetDigest !== packetDigest) errors.push('provenance.packetDigest does not match the packet');
+  if (typeof task.taskPacketDigest === 'string' && task.taskPacketDigest !== provenance.packetDigest) {
+    errors.push('provenance.packetDigest does not match active state');
+  }
+  if (provenance.reviewedHeadSha !== packet.reviewedHeadSha) {
+    errors.push('provenance.reviewedHeadSha does not match the packet');
+  }
+  if (!Number.isInteger(provenance.planRevision) || provenance.planRevision < 0
+      || provenance.planRevision > state.revision) {
+    errors.push('provenance.planRevision is invalid');
+  }
+  if (!/^[0-9a-f]{64}$/u.test(provenance.planReceiptDigest ?? '')) {
+    errors.push('provenance.planReceiptDigest is invalid');
+  }
+  const signals = provenance.planningSignals;
+  if (!signals || typeof signals !== 'object' || Array.isArray(signals)
+      || Object.keys(signals).sort().join(',') !== 'browserVisible,testSelectionUncertain'
+      || typeof signals.browserVisible !== 'boolean'
+      || typeof signals.testSelectionUncertain !== 'boolean') {
+    errors.push('provenance.planningSignals must contain exactly browserVisible and testSelectionUncertain booleans');
+  }
+  let canonicalRoute;
+  try {
+    canonicalRoute = specialistRouteFor(packet, signals);
+    if (canonicalSerializedJson(provenance.route) !== canonicalSerializedJson(canonicalRoute)) {
+      errors.push('provenance.route does not match canonical specialist routing');
+    }
+  } catch (error) {
+    errors.push(`provenance.route cannot be recomputed: ${error.message}`);
+  }
+  let requiredPlanning = [];
+  try {
+    requiredPlanning = normalizedRequiredReviewerIds(canonicalRoute ?? provenance.route, { stage: 'pre-bind' });
+  } catch (error) {
+    errors.push(`provenance planning reviewers are invalid: ${error.message}`);
+  }
+  if (requiredPlanning.some((reviewerId) => reviewerId !== 'behavior_mapper')) {
+    errors.push('provenance contains an unsupported planning reviewer route');
+  }
+  const mapperRequired = requiredPlanning.includes('behavior_mapper');
+  const mapperResult = provenance.behaviorMapperResult;
+  if (!mapperRequired && mapperResult !== null) {
+    errors.push('provenance.behaviorMapperResult is present when behavior mapping was not routed');
+  } else if (mapperRequired) {
+    if (!mapperResult || typeof mapperResult !== 'object' || Array.isArray(mapperResult)) {
+      errors.push('provenance.behaviorMapperResult is required');
+    } else {
+      const mapperFields = ['phase', 'evidence'];
+      for (const field of mapperFields) if (!Object.hasOwn(mapperResult, field)) errors.push(`provenance.behaviorMapperResult.${field} is required`);
+      for (const field of Object.keys(mapperResult)) if (!mapperFields.includes(field)) errors.push(`provenance.behaviorMapperResult.${field} is not allowed`);
+      if (mapperResult.phase !== 'planning') errors.push('provenance.behaviorMapperResult.phase must be planning');
+      const evidence = mapperResult.evidence;
+      const evidenceFields = [
+        'schemaVersion', 'planRevision', 'headSha', 'reviewerId', 'status',
+        'summary', 'findings', 'recordedAt',
+      ];
+      if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) {
+        errors.push('provenance.behaviorMapperResult.evidence must be an object');
+      } else {
+        for (const field of evidenceFields) if (!Object.hasOwn(evidence, field)) errors.push(`provenance.behaviorMapperResult.evidence.${field} is required`);
+        for (const field of Object.keys(evidence)) if (!evidenceFields.includes(field)) errors.push(`provenance.behaviorMapperResult.evidence.${field} is not allowed`);
+        if (evidence.schemaVersion !== 1 || evidence.planRevision !== provenance.planRevision
+            || evidence.reviewerId !== 'behavior_mapper' || evidence.status !== 'clean') {
+          errors.push('provenance behavior mapper evidence does not match its clean exact plan');
+        }
+        if (!isReviewerEvidenceApplicable({ evidence, integratedHeadSha: provenance.reviewedHeadSha })) {
+          errors.push('provenance behavior mapper evidence is stale for the reviewed HEAD');
+        }
+        errors.push(...conciseSpecialistPayloadErrors({
+          status: evidence.status, summary: evidence.summary, findings: evidence.findings,
+        }, 'provenance behavior mapper evidence'));
+        if (typeof evidence.recordedAt !== 'string' || !Number.isFinite(Date.parse(evidence.recordedAt))) {
+          errors.push('provenance behavior mapper evidence.recordedAt is invalid');
+        }
+      }
+    }
+  }
+  return errors;
+}
+
+function buildTaskBindingProvenance(state, packet, planning) {
+  const mapper = planning.bundle.records.find((record) => record.reviewerId === 'behavior_mapper') ?? null;
+  return canonicalJson({
+    schemaVersion: 1,
+    phase: 'pre-bind',
+    prNumber: state.prNumber,
+    taskId: packet.taskId,
+    packetDigest: taskPacketDigest(packet),
+    reviewedHeadSha: packet.reviewedHeadSha,
+    planRevision: planning.bundle.stateRevision,
+    planReceiptDigest: specialistPlanDigest(planning.bundle),
+    planningSignals: planning.planned.planningSignals,
+    route: planning.planned.route,
+    behaviorMapperResult: mapper === null ? null : { phase: 'planning', evidence: mapper },
+  });
+}
+
+function assertTaskBindingProvenanceSource(cwd, state, task, packet, provenance) {
+  const historicalState = {
+    ...state,
+    revision: provenance.planRevision,
+    reviewedHeadSha: provenance.reviewedHeadSha,
+  };
+  let planning;
+  try {
+    const bundle = readSpecialistBundle(cwd, historicalState, { headSha: provenance.reviewedHeadSha });
+    planning = assertBehaviorMapperBundleComplete(bundle, packet);
+  } catch (error) {
+    throw new StateError(
+      `Task ${task.id} binding provenance source is invalid: ${error.message}`,
+      'INVALID_TASK_BINDING_PROVENANCE',
+    );
+  }
+  if (specialistPlanDigest(planning.bundle) !== provenance.planReceiptDigest) {
+    throw new StateError(
+      `Task ${task.id} binding provenance does not match its specialist plan receipt`,
+      'INVALID_TASK_BINDING_PROVENANCE',
+    );
+  }
+  const expected = buildTaskBindingProvenance(state, packet, planning);
+  if (canonicalSerializedJson(expected) !== canonicalSerializedJson(provenance)) {
+    throw new StateError(
+      `Task ${task.id} binding provenance differs from its receipt-verified historical pre-bind plan`,
+      'INVALID_TASK_BINDING_PROVENANCE',
+    );
+  }
+  return planning;
+}
+
+function persistImmutableTaskBindingProvenance(cwd, state, task, packet, provenance) {
+  const path = taskBindingProvenancePath(cwd, state.prNumber, task.id);
+  const errors = validateTaskBindingProvenance(provenance, state, task, packet);
+  if (errors.length > 0) {
+    throw new StateError(`Invalid task binding provenance:\n- ${errors.join('\n- ')}`, 'INVALID_TASK_BINDING_PROVENANCE');
+  }
+  assertTaskBindingProvenanceSource(cwd, state, task, packet, provenance);
+  const serialized = canonicalSerializedJson(provenance);
+  if (Buffer.byteLength(serialized, 'utf8') > ACTIVE_STATE_LIMIT_BYTES) {
+    throw new StateError('Task binding provenance exceeds 64 KiB', 'INVALID_TASK_BINDING_PROVENANCE');
+  }
+  if (existsSync(path)) {
+    let existing;
+    try { existing = readJsonSidecar(path, 'task binding provenance'); } catch (error) {
+      throw new StateError(`Task ${task.id} has invalid immutable binding provenance: ${error.message}`, 'INVALID_TASK_BINDING_PROVENANCE');
+    }
+    const existingErrors = validateTaskBindingProvenance(existing, state, task, packet);
+    if (existingErrors.length > 0 || canonicalSerializedJson(existing) !== serialized) {
+      throw new StateError(
+        `Task ${task.id} already has different or invalid immutable binding provenance`,
+        'INVALID_TASK_BINDING_PROVENANCE',
+      );
+    }
+    assertTaskBindingProvenanceSource(cwd, state, task, packet, existing);
+    verifyTaskBindingProvenanceReceipt(cwd, state, task, existing);
+    return existing;
+  }
+  persistTaskBindingProvenanceReceipt(cwd, state, task, provenance);
+  atomicWriteText(path, serialized);
+  const persisted = readJsonSidecar(path, 'task binding provenance');
+  const persistedErrors = validateTaskBindingProvenance(persisted, state, task, packet);
+  if (persistedErrors.length > 0 || canonicalSerializedJson(persisted) !== serialized) {
+    throw new StateError(`Binding provenance verification failed for task ${task.id}`, 'TASK_BINDING_PROVENANCE_WRITE_FAILED');
+  }
+  assertTaskBindingProvenanceSource(cwd, state, task, packet, persisted);
+  verifyTaskBindingProvenanceReceipt(cwd, state, task, persisted);
+  return persisted;
+}
+
+function readBoundTaskBindingProvenance(cwd, state, task, packet) {
+  const path = taskBindingProvenancePath(cwd, state.prNumber, task.id);
+  if (!existsSync(path)) {
+    throw new StateError(
+      `Task ${task.id} is bound without immutable pre-bind planning provenance`,
+      'INVALID_TASK_BINDING_PROVENANCE',
+    );
+  }
+  let provenance;
+  try { provenance = readJsonSidecar(path, 'task binding provenance'); } catch (error) {
+    throw new StateError(`Task ${task.id} has invalid immutable binding provenance: ${error.message}`, 'INVALID_TASK_BINDING_PROVENANCE');
+  }
+  const errors = validateTaskBindingProvenance(provenance, state, task, packet);
+  if (errors.length > 0) {
+    throw new StateError(
+      `Task ${task.id} has invalid immutable binding provenance:\n- ${errors.join('\n- ')}`,
+      'INVALID_TASK_BINDING_PROVENANCE',
+    );
+  }
+  assertTaskBindingProvenanceSource(cwd, state, task, packet, provenance);
+  verifyTaskBindingProvenanceReceipt(cwd, state, task, provenance);
+  return provenance;
+}
+
+function loadBoundTaskPacketEntries(cwd, state, { statuses } = {}) {
+  const selected = state.tasks.filter((task) => task.disposition === 'actionable'
+    && typeof task.taskPacketDigest === 'string'
+    && (!statuses || statuses.includes(task.status)));
+  return selected.map((task) => {
+    const packet = readBoundTaskPacketSidecar(cwd, state, task, { verifyBindingProvenance: false });
+    return { task, packet, provenance: readBoundTaskBindingProvenance(cwd, state, task, packet) };
+  });
+}
+
 function assertPostIntegrationBundleCoverage(cwd, state, bundle) {
   if (bundle.stage !== 'post-integration') return null;
-  const packets = loadBoundTaskPackets(cwd, state, { statuses: ['integrated'] })
-    .sort((a, b) => a.taskId.localeCompare(b.taskId));
-  const expectedTasks = packets.map((packet) => ({
+  const entries = loadBoundTaskPacketEntries(cwd, state, { statuses: ['integrated'] })
+    .sort((a, b) => a.packet.taskId.localeCompare(b.packet.taskId));
+  const expectedTasks = entries.map(({ packet, provenance }) => ({
     taskId: packet.taskId,
     packetDigest: taskPacketDigest(packet),
     specialization: packet.specialization,
     riskTags: packet.riskTags,
-    route: specialistRouteFor(packet, { browserVisible: false, testSelectionUncertain: false }),
+    bindingProvenanceDigest: taskBindingProvenanceDigest(provenance),
+    planningSignals: provenance.planningSignals,
+    route: specialistRouteFor(packet, provenance.planningSignals),
   }));
   const actualTasks = [...bundle.tasks].sort((a, b) => a.taskId.localeCompare(b.taskId));
   if (canonicalSerializedJson(actualTasks) !== canonicalSerializedJson(expectedTasks)) {
@@ -616,7 +898,7 @@ function assertPostIntegrationBundleCoverage(cwd, state, bundle) {
       'SPECIALIST_PLAN_TASK_MISMATCH',
     );
   }
-  return { packets, expectedTasks };
+  return { entries, packets: entries.map(({ packet }) => packet), expectedTasks };
 }
 
 export function planSpecialists({ cwd = process.cwd(), prNumber, input, expectedRevision, now = utcNow } = {}) {
@@ -640,6 +922,7 @@ export function planSpecialists({ cwd = process.cwd(), prNumber, input, expected
       );
     }
     let packets;
+    let boundEntries = null;
     if (input.stage === 'pre-bind') {
       packets = input.tasks.map((entry) => entry.taskPacket);
       for (const packet of packets) {
@@ -654,7 +937,9 @@ export function planSpecialists({ cwd = process.cwd(), prNumber, input, expected
       if (state.validationStatus.status !== 'passed' || state.validationStatus.headSha !== state.currentIntegrationHeadSha) {
         throw new StateError('Post-integration specialist planning requires passed exact-HEAD targeted validation', 'SPECIALIST_VALIDATION_REQUIRED');
       }
-      packets = loadBoundTaskPackets(cwd, state, { statuses: ['integrated'] }).sort((a, b) => a.taskId.localeCompare(b.taskId));
+      boundEntries = loadBoundTaskPacketEntries(cwd, state, { statuses: ['integrated'] })
+        .sort((a, b) => a.packet.taskId.localeCompare(b.packet.taskId));
+      packets = boundEntries.map(({ packet }) => packet);
       const supplied = [...input.tasks].map((entry) => entry.taskPacket).sort((a, b) => a.taskId.localeCompare(b.taskId));
       if (canonicalSerializedJson(supplied) !== canonicalSerializedJson(packets)) {
         throw new StateError('Post-integration planning input must exactly cover durable Integrated packet sidecars', 'SPECIALIST_PLAN_TASK_MISMATCH');
@@ -662,7 +947,9 @@ export function planSpecialists({ cwd = process.cwd(), prNumber, input, expected
     }
     const timestamp = now();
     const tasks = packets.map((packet, index) => {
-      const planningSignals = input.stage === 'pre-bind' ? input.tasks[index].planningSignals : {};
+      const planningSignals = input.stage === 'pre-bind'
+        ? input.tasks[index].planningSignals
+        : boundEntries[index].provenance.planningSignals;
       return {
         taskId: packet.taskId,
         packetDigest: taskPacketDigest(packet),
@@ -673,7 +960,10 @@ export function planSpecialists({ cwd = process.cwd(), prNumber, input, expected
           reviewedHeadSha: packet.reviewedHeadSha,
           planningSignals,
           taskPacket: canonicalJson(packet),
-        } : {}),
+        } : {
+          bindingProvenanceDigest: taskBindingProvenanceDigest(boundEntries[index].provenance),
+          planningSignals,
+        }),
       };
     });
     const bundle = {
@@ -754,10 +1044,7 @@ export function recordSpecialistReview({ cwd = process.cwd(), prNumber, input, e
   });
 }
 
-function assertBehaviorMapperPlanningComplete(cwd, state, packet) {
-  const path = specialistReviewBundlePath(cwd, state.prNumber, packet.reviewedHeadSha, state.revision);
-  if (!existsSync(path)) throw new StateError(`Task ${packet.taskId} requires a guarded pre-bind specialist plan`, 'SPECIALIST_PLAN_REQUIRED');
-  const bundle = readSpecialistBundle(cwd, state, { headSha: packet.reviewedHeadSha });
+function assertBehaviorMapperBundleComplete(bundle, packet) {
   const planned = bundle.stage === 'pre-bind' && bundle.tasks.length === 1 ? bundle.tasks[0] : null;
   if (!planned || planned.taskId !== packet.taskId || planned.packetDigest !== taskPacketDigest(packet)) {
     throw new StateError(`Task ${packet.taskId} does not match the exact pre-bind specialist plan`, 'SPECIALIST_PLAN_TASK_MISMATCH');
@@ -781,6 +1068,49 @@ function assertBehaviorMapperPlanningComplete(cwd, state, packet) {
       );
     }
   }
+  return { bundle, planned };
+}
+
+function assertBehaviorMapperPlanningComplete(cwd, state, packet) {
+  const path = specialistReviewBundlePath(cwd, state.prNumber, packet.reviewedHeadSha, state.revision);
+  if (!existsSync(path)) throw new StateError(`Task ${packet.taskId} requires a guarded pre-bind specialist plan`, 'SPECIALIST_PLAN_REQUIRED');
+  const bundle = readSpecialistBundle(cwd, state, { headSha: packet.reviewedHeadSha });
+  return assertBehaviorMapperBundleComplete(bundle, packet);
+}
+
+function recoverHistoricalTaskBindingPlanning(cwd, state, packet) {
+  const directory = specialistReviewDirectory(cwd, state.prNumber);
+  if (!existsSync(directory)) {
+    throw new StateError(
+      `Task ${packet.taskId} has no durable historical pre-bind specialist plan for provenance recovery`,
+      'TASK_BINDING_PROVENANCE_RECOVERY_REQUIRED',
+    );
+  }
+  const escapedHead = packet.reviewedHeadSha.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const pattern = new RegExp(`^${escapedHead}-r(\\d+)\\.json$`, 'u');
+  const candidates = [];
+  for (const name of readdirSync(directory).sort()) {
+    const match = name.match(pattern);
+    if (!match) continue;
+    const revision = Number(match[1]);
+    if (!Number.isInteger(revision) || revision > state.revision) continue;
+    const historicalState = { ...state, revision, reviewedHeadSha: packet.reviewedHeadSha };
+    let planning;
+    try {
+      const bundle = readSpecialistBundle(cwd, historicalState, { headSha: packet.reviewedHeadSha });
+      planning = assertBehaviorMapperBundleComplete(bundle, packet);
+    } catch {
+      continue;
+    }
+    candidates.push(planning);
+  }
+  if (candidates.length !== 1) {
+    throw new StateError(
+      `Task ${packet.taskId} requires exactly one receipt-verified historical pre-bind plan; found ${candidates.length}`,
+      'TASK_BINDING_PROVENANCE_RECOVERY_REQUIRED',
+    );
+  }
+  return candidates[0];
 }
 
 function currentSpecialistCheckoutError(state) {
@@ -803,7 +1133,7 @@ export function specialistContext({ cwd = process.cwd(), prNumber } = {}) {
   }
   const bundle = readSpecialistBundle(cwd, state);
   if (bundle.stage !== 'post-integration') throw new StateError('Current specialist bundle is not a post-integration review plan', 'SPECIALIST_EVIDENCE_MISSING');
-  const { packets, expectedTasks } = assertPostIntegrationBundleCoverage(cwd, state, bundle);
+  const { entries, packets, expectedTasks } = assertPostIntegrationBundleCoverage(cwd, state, bundle);
   const required = [...new Set(bundle.tasks.flatMap((task) => normalizedRequiredReviewerIds(task.route, { stage: 'post-integration' })))].sort();
   const records = new Map(bundle.records.map((record) => [record.reviewerId, record]));
   const missing = required.filter((id) => !records.has(id));
@@ -811,6 +1141,19 @@ export function specialistContext({ cwd = process.cwd(), prNumber } = {}) {
     && !isReviewerEvidenceApplicable({ evidence: records.get(id), integratedHeadSha: state.currentIntegrationHeadSha }));
   const findings = required.filter((id) => records.get(id)?.status === 'findings')
     .map((id) => records.get(id));
+  const routes = expectedTasks.map(({ taskId, route }) => ({ phase: 'post-integration', taskId, route }));
+  const specialistResults = required.filter((id) => records.has(id)).map((id) => records.get(id));
+  const preBindPlanning = entries.map(({ provenance }) => canonicalJson({
+    phase: 'pre-bind',
+    taskId: provenance.taskId,
+    packetDigest: provenance.packetDigest,
+    reviewedHeadSha: provenance.reviewedHeadSha,
+    planRevision: provenance.planRevision,
+    planReceiptDigest: provenance.planReceiptDigest,
+    planningSignals: provenance.planningSignals,
+    route: provenance.route,
+    behaviorMapperResult: provenance.behaviorMapperResult,
+  }));
   return {
     schemaVersion: 1,
     status: missing.length > 0 || stale.length > 0 ? 'incomplete' : findings.length > 0 ? 'findings' : 'clean',
@@ -818,12 +1161,17 @@ export function specialistContext({ cwd = process.cwd(), prNumber } = {}) {
     headSha: state.currentIntegrationHeadSha,
     stateRevision: state.revision,
     packets: packets.map((packet) => canonicalJson(packet)),
-    routes: expectedTasks.map(({ taskId, route }) => ({ taskId, route })),
+    preBindPlanning,
+    routes,
     requiredReviewerIds: required,
     missingReviewerIds: missing,
     staleReviewerIds: stale,
-    specialistResults: required.filter((id) => records.has(id)).map((id) => records.get(id)),
+    specialistResults,
     findings,
+    postIntegrationReview: {
+      phase: 'review', headSha: state.currentIntegrationHeadSha, routes,
+      requiredReviewerIds: required, specialistResults, findings,
+    },
     targetedValidation: state.validationStatus,
   };
 }
@@ -836,6 +1184,22 @@ export function readSpecialistStatus({ cwd = process.cwd(), prNumber } = {}) {
     return {
       status: 'stale', headSha: state.currentIntegrationHeadSha, stateRevision: state.revision,
       bundlePath: null, requiredReviewerIds: [], recordedReviewerIds: [], error: 'SPECIALIST_PLAN_STALE',
+    };
+  }
+  try {
+    for (const task of state.tasks.filter((candidate) => candidate.disposition === 'actionable'
+      && typeof candidate.taskPacketDigest === 'string')) {
+      if (!existsSync(taskPacketSidecarPath(cwd, state.prNumber, task.id))
+          && !existsSync(taskBindingProvenancePath(cwd, state.prNumber, task.id))
+          && !existsSync(taskBindingProvenanceReceiptPath(cwd, state.prNumber, task.id))
+          && hasCompletedHistoricalV2TaskProof(cwd, state, task)) continue;
+      readBoundTaskPacketSidecar(cwd, state, task);
+    }
+  } catch (error) {
+    return {
+      status: 'stale', headSha: state.currentIntegrationHeadSha, stateRevision: state.revision,
+      bundlePath: null, requiredReviewerIds: [], recordedReviewerIds: [],
+      error: error.code ?? 'INVALID_TASK_BINDING_PROVENANCE',
     };
   }
   const candidates = [...new Set([
@@ -884,7 +1248,7 @@ export function readSpecialistStatus({ cwd = process.cwd(), prNumber } = {}) {
     })).map((record) => record.reviewerId).sort();
     const findings = bundle.records.filter((record) => record.status === 'findings').map((record) => record.reviewerId).sort();
     return {
-      status: stale.length > 0 ? 'stale' : missing.length > 0 ? 'pending' : findings.length > 0 ? 'finding' : 'clean',
+      status: stale.length > 0 ? 'stale' : missing.length > 0 ? 'pending' : findings.length > 0 ? 'findings' : 'clean',
       headSha: bundle.headSha, stateRevision: state.revision, bundlePath: path,
       stage: bundle.stage, requiredReviewerIds: required, recordedReviewerIds: recorded,
       missingReviewerIds: missing, staleReviewerIds: stale, findingReviewerIds: findings,
@@ -1968,7 +2332,7 @@ function assertCheckpointProvenance(current, next, authorization) {
       'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
     ]) assertImmutableValue(current[field], next[field], field);
   }
-  if (!['targeted-validation', 'git-metadata'].includes(guardedKind)) {
+  if (!['targeted-validation', 'git-metadata', 'task-packet-replan'].includes(guardedKind)) {
     assertImmutableValue(current.validationStatus, next.validationStatus, 'validationStatus');
   }
   if (current.phase !== 'complete' && next.phase === 'complete' && guardedKind !== 'cycle-completion') {
@@ -1995,7 +2359,11 @@ function assertCheckpointProvenance(current, next, authorization) {
       assertImmutableValue(task[field], updated[field], `task ${task.id} ${field}`);
     }
     if (task.taskPacketDigest) {
-      assertImmutableValue(task.taskPacketDigest, updated.taskPacketDigest, `task ${task.id} taskPacketDigest`);
+      if (guardedKind === 'task-packet-replan' && !updated.taskPacketDigest) {
+        // The dedicated migration-only replan helper authorizes this one digest clear.
+      } else {
+        assertImmutableValue(task.taskPacketDigest, updated.taskPacketDigest, `task ${task.id} taskPacketDigest`);
+      }
     } else if (updated.taskPacketDigest && guardedKind !== 'task-packet-binding') {
       throw new StateError(`Task ${task.id} packet binding requires a guarded transition`, 'PROTECTED_TRANSITION_REQUIRED');
     }
@@ -2436,6 +2804,135 @@ export function completeIntegratedTasks(state, { threadResolutionStatus, verifie
   return next;
 }
 
+const REPLANNABLE_EXECUTION_STATUSES = new Set(['proposed', 'blocked', 'failed']);
+const REPLANNABLE_NEUTRAL_EXECUTION_FIELDS = ['worker', 'branch', 'worktree', 'workerCommitSha'];
+const STABLE_TASK_IDENTITY_FIELDS = [
+  'id', 'sourceIds', 'sourceType', 'fingerprint', 'summary', 'severity', 'disposition',
+];
+
+function assertMigrationOriginV2Binding(cwd, state, task) {
+  if (task.disposition !== 'actionable' || typeof task.taskPacketDigest !== 'string'
+      || task.status === 'completed'
+      || (!REPLANNABLE_EXECUTION_STATUSES.has(task.status) && task.status !== 'integrated')) {
+    throw new StateError(
+      `Task ${task.id} is not an eligible non-completed actionable v2 binding`,
+      'TASK_PACKET_REPLAN_NOT_ALLOWED',
+    );
+  }
+  if (REPLANNABLE_EXECUTION_STATUSES.has(task.status)
+      && REPLANNABLE_NEUTRAL_EXECUTION_FIELDS.some((field) => task.execution?.[field] !== null)) {
+    throw new StateError(
+      `Task ${task.id} still has an active assignment or worker commit and cannot be replanned`,
+      'TASK_PACKET_REPLAN_NOT_ALLOWED',
+    );
+  }
+  if (existsSync(taskPacketSidecarPath(cwd, state.prNumber, task.id))
+      || existsSync(taskBindingProvenancePath(cwd, state.prNumber, task.id))
+      || existsSync(taskBindingProvenanceReceiptPath(cwd, state.prNumber, task.id))) {
+    throw new StateError(
+      `Task ${task.id} has schema-v3 sidecar evidence and cannot use legacy replanning`,
+      'TASK_PACKET_REPLAN_NOT_ALLOWED',
+    );
+  }
+  const backupPath = join(stateDirectory(cwd, state.prNumber), 'state.v2.backup.json');
+  if (!existsSync(backupPath)) {
+    throw new StateError(
+      `Task ${task.id} has no immutable schema-v2 migration backup`,
+      'TASK_PACKET_REPLAN_PROVENANCE_INVALID',
+    );
+  }
+  let legacy;
+  try {
+    legacy = readStateDocument(backupPath);
+    if (legacy.schemaVersion !== 2) throw new Error('backup is not schema v2');
+    migratePrReviewStateV2(legacy, { migratedAt: state.updatedAt });
+  } catch (error) {
+    throw new StateError(
+      `Task ${task.id} schema-v2 migration backup is invalid: ${error.message}`,
+      'TASK_PACKET_REPLAN_PROVENANCE_INVALID',
+    );
+  }
+  if (legacy.repository !== state.repository || legacy.prNumber !== state.prNumber
+      || legacy.baseSha !== state.baseSha
+      || resolve(legacy.integrationWorktree) !== resolve(state.integrationWorktree)
+      || !sameEvidence(legacy.releaseBaseline, state.releaseBaseline)
+      || !sameEvidence(legacy.legacyReviewProvenance, state.legacyReviewProvenance)
+      || state.revision < legacy.revision + 1) {
+    throw new StateError(
+      `Task ${task.id} schema-v2 migration backup does not match active state identity`,
+      'TASK_PACKET_REPLAN_PROVENANCE_INVALID',
+    );
+  }
+  const legacyTask = legacy.tasks.find((candidate) => candidate.id === task.id);
+  if (!legacyTask || legacyTask.status === 'completed'
+      || legacyTask.disposition !== 'actionable'
+      || legacyTask.taskPacketDigest !== task.taskPacketDigest
+      || STABLE_TASK_IDENTITY_FIELDS.some((field) => !sameEvidence(legacyTask[field], task[field]))) {
+    throw new StateError(
+      `Task ${task.id} binding is not proven by the immutable schema-v2 migration backup`,
+      'TASK_PACKET_REPLAN_PROVENANCE_INVALID',
+    );
+  }
+  return { backupPath, legacyTask };
+}
+
+function neutralReplannedTask(task) {
+  const { taskPacketDigest: _taskPacketDigest, execution: _execution, ...withoutBinding } = task;
+  if (task.status === 'integrated') return withoutBinding;
+  return {
+    ...withoutBinding,
+    status: 'proposed',
+    integratedCommitSha: null,
+    resolutionSummary: null,
+    execution: {
+      dependencies: [], ownedPaths: [], worker: null, branch: null, worktree: null,
+      workerCommitSha: null, validationSummaries: [], lastError: null,
+    },
+  };
+}
+
+export function checkpointTaskPacketReplan({
+  cwd = process.cwd(), prNumber, taskId, expectedRevision, event,
+} = {}) {
+  if (typeof taskId !== 'string' || taskId.length === 0) {
+    throw new StateError('Task replanning requires one opaque nonempty task ID', 'INVALID_TASK_PACKET_REPLAN');
+  }
+  if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
+    throw new StateError('Task replanning requires an expected non-negative revision', 'INVALID_TASK_PACKET_REPLAN');
+  }
+  const selectedPr = prNumber ?? activePrNumber(cwd);
+  if (selectedPr === null || selectedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  return withStateLock(cwd, selectedPr, () => {
+    const current = loadState(cwd, selectedPr);
+    if (expectedRevision !== current.revision) {
+      throw new StateError(
+        `State revision changed: expected ${expectedRevision}, found ${current.revision}`,
+        'STATE_REVISION_CONFLICT',
+      );
+    }
+    const task = current.tasks.find((candidate) => candidate.id === taskId);
+    if (!task) throw new StateError(`Task ${taskId} was not found`, 'TASK_PACKET_REPLAN_NOT_ALLOWED');
+    assertMigrationOriginV2Binding(cwd, current, task);
+    const nextTask = neutralReplannedTask(task);
+    const nextState = {
+      ...current,
+      phase: 'recovering',
+      tasks: current.tasks.map((candidate) => candidate.id === taskId ? nextTask : candidate),
+      validationStatus: emptyTargetedValidation(),
+      nextAction: `Create an explicit schema-v3 specialist plan and bind a new packet for task ${taskId}.`,
+    };
+    return checkpointStateUnlocked({
+      cwd, selectedPr: current.prNumber, nextState, expectedRevision: current.revision,
+      event: event ?? {
+        type: 'task-packet-replan',
+        summary: `Cleared migration-origin schema-v2 packet binding for task ${taskId}`,
+      },
+      eventWriter: appendEvent,
+      transitionAuthorization: protectedTransition(nextState, 'task-packet-replan'),
+    });
+  });
+}
+
 export function checkpointTaskPacketBinding({
   cwd = process.cwd(), prNumber, packet, expectedRevision, event,
 } = {}) {
@@ -2454,10 +2951,20 @@ export function checkpointTaskPacketBinding({
     }
     const digest = taskPacketDigest(packet);
     if (task.taskPacketDigest) {
-      readBoundTaskPacketSidecar(cwd, current, task, { suppliedPacket: packet });
+      const durablePacket = readBoundTaskPacketSidecar(cwd, current, task, {
+        suppliedPacket: packet, verifyBindingProvenance: false,
+      });
       assertTaskPacketHead(current, task, packet, digest);
       if (task.taskPacketDigest !== digest) {
         throw new StateError('Task packet differs from the accepted packet', 'TASK_PACKET_CONFLICT');
+      }
+      const provenancePath = taskBindingProvenancePath(cwd, current.prNumber, task.id);
+      if (existsSync(provenancePath)) {
+        readBoundTaskBindingProvenance(cwd, current, task, durablePacket);
+      } else {
+        const planning = recoverHistoricalTaskBindingPlanning(cwd, current, durablePacket);
+        const provenance = buildTaskBindingProvenance(current, durablePacket, planning);
+        persistImmutableTaskBindingProvenance(cwd, current, task, durablePacket, provenance);
       }
       return current;
     }
@@ -2465,8 +2972,10 @@ export function checkpointTaskPacketBinding({
     if (packet.schemaVersion !== 3) {
       throw new StateError('New task packet bindings require explicit schema v3 instructions', 'TASK_PACKET_V3_REQUIRED');
     }
-    assertBehaviorMapperPlanningComplete(cwd, current, packet);
+    const planning = assertBehaviorMapperPlanningComplete(cwd, current, packet);
+    const provenance = buildTaskBindingProvenance(current, packet, planning);
     persistImmutableTaskPacketSidecar(cwd, current, packet, digest);
+    persistImmutableTaskBindingProvenance(cwd, current, task, packet, provenance);
     const nextState = {
       ...current,
       tasks: current.tasks.map((candidate) => candidate.id === packet.taskId
@@ -2581,26 +3090,154 @@ export function reconcileState({ cwd = process.cwd(), prNumber } = {}) {
     actual = null;
   }
   const packetSidecars = [];
+  const bindingProvenance = [];
   const evidenceErrors = [];
+  const seenPacketPaths = new Set();
+  const seenProvenancePaths = new Set();
+  const seenProvenanceReceiptPaths = new Set();
   for (const task of state.tasks.filter((candidate) => typeof candidate.taskPacketDigest === 'string')) {
     const path = taskPacketSidecarPath(cwd, state.prNumber, task.id);
-    if (!existsSync(path) && hasCompletedHistoricalV2TaskProof(cwd, state, task)) {
+    const provenancePath = taskBindingProvenancePath(cwd, state.prNumber, task.id);
+    const provenanceReceiptPath = taskBindingProvenanceReceiptPath(cwd, state.prNumber, task.id);
+    seenPacketPaths.add(path);
+    seenProvenancePaths.add(provenancePath);
+    seenProvenanceReceiptPaths.add(provenanceReceiptPath);
+    if (!existsSync(path) && !existsSync(provenancePath) && !existsSync(provenanceReceiptPath)
+        && hasCompletedHistoricalV2TaskProof(cwd, state, task)) {
       packetSidecars.push({ taskId: task.id, status: 'historical-v2', path: null });
+      bindingProvenance.push({ taskId: task.id, status: 'historical-v2', path: null, receiptPath: null });
       continue;
     }
+    let packet;
     try {
-      readBoundTaskPacketSidecar(cwd, state, task);
+      packet = readBoundTaskPacketSidecar(cwd, state, task, { verifyBindingProvenance: false });
       packetSidecars.push({ taskId: task.id, status: 'valid', path });
     } catch (error) {
       packetSidecars.push({ taskId: task.id, status: 'invalid', path: existsSync(path) ? path : null, error: error.code });
       evidenceErrors.push(`Task ${task.id} packet sidecar: ${error.message}`);
+    }
+    if (packet) {
+      try {
+        readBoundTaskBindingProvenance(cwd, state, task, packet);
+        bindingProvenance.push({
+          taskId: task.id, status: 'valid', path: provenancePath,
+          receiptPath: provenanceReceiptPath,
+        });
+      } catch (error) {
+        bindingProvenance.push({
+          taskId: task.id, status: 'invalid', path: existsSync(provenancePath) ? provenancePath : null,
+          receiptPath: existsSync(provenanceReceiptPath) ? provenanceReceiptPath : null,
+          error: error.code,
+        });
+        evidenceErrors.push(`Task ${task.id} binding provenance: ${error.message}`);
+      }
+    } else {
+      bindingProvenance.push({
+        taskId: task.id, status: 'unverifiable', path: existsSync(provenancePath) ? provenancePath : null,
+        receiptPath: existsSync(provenanceReceiptPath) ? provenanceReceiptPath : null,
+      });
+    }
+  }
+  const packetDirectory = taskPacketDirectory(cwd, state.prNumber);
+  if (existsSync(packetDirectory)) {
+    for (const name of readdirSync(packetDirectory).filter((entry) => entry.endsWith('.json')).sort()) {
+      const path = join(packetDirectory, name);
+      if (seenPacketPaths.has(path)) continue;
+      try {
+        const packet = readJsonSidecar(path, 'unbound task packet sidecar');
+        const packetErrors = validateTaskPacket(packet);
+        if (packetErrors.length > 0 || taskPacketSidecarPath(cwd, state.prNumber, packet.taskId) !== path) {
+          throw new Error(packetErrors.join('; ') || 'sidecar filename does not match its hashed task ID');
+        }
+        const pendingTask = state.tasks.find((task) => task.id === packet.taskId && !task.taskPacketDigest);
+        const status = pendingTask ? 'pending-binding' : 'orphan';
+        packetSidecars.push({ taskId: packet.taskId, status, path });
+        evidenceErrors.push(`Task ${packet.taskId} packet sidecar is ${status}`);
+      } catch (error) {
+        packetSidecars.push({ taskId: null, status: 'invalid', path, error: 'INVALID_DURABLE_SIDECAR' });
+        evidenceErrors.push(`Unbound packet sidecar ${name} is invalid: ${error.message}`);
+      }
+    }
+  }
+  const provenanceDirectory = taskBindingProvenanceDirectory(cwd, state.prNumber);
+  if (existsSync(provenanceDirectory)) {
+    for (const name of readdirSync(provenanceDirectory).filter((entry) => entry.endsWith('.json')).sort()) {
+      const path = join(provenanceDirectory, name);
+      if (seenProvenancePaths.has(path)) continue;
+      try {
+        const provenance = readJsonSidecar(path, 'unbound task binding provenance');
+        if (typeof provenance?.taskId !== 'string'
+            || taskBindingProvenancePath(cwd, state.prNumber, provenance.taskId) !== path) {
+          throw new Error('provenance filename does not match its hashed task ID');
+        }
+        const receiptPath = taskBindingProvenanceReceiptPath(
+          cwd, state.prNumber, provenance.taskId,
+        );
+        seenProvenanceReceiptPaths.add(receiptPath);
+        const pendingTask = state.tasks.find((task) => task.id === provenance.taskId && !task.taskPacketDigest);
+        const packetPath = taskPacketSidecarPath(cwd, state.prNumber, provenance.taskId);
+        if (!pendingTask || !existsSync(packetPath)) {
+          bindingProvenance.push({
+            taskId: provenance.taskId, status: 'orphan', path,
+            receiptPath: existsSync(receiptPath) ? receiptPath : null,
+          });
+          evidenceErrors.push(`Task ${provenance.taskId} binding provenance is orphaned`);
+          continue;
+        }
+        const packet = readJsonSidecar(packetPath, 'pending task packet sidecar');
+        const errors = validateTaskBindingProvenance(provenance, state, pendingTask, packet);
+        if (errors.length > 0) throw new Error(errors.join('; '));
+        assertTaskBindingProvenanceSource(cwd, state, pendingTask, packet, provenance);
+        verifyTaskBindingProvenanceReceipt(cwd, state, pendingTask, provenance);
+        bindingProvenance.push({
+          taskId: provenance.taskId, status: 'pending-binding', path, receiptPath,
+        });
+        evidenceErrors.push(`Task ${provenance.taskId} binding provenance is pending state checkpoint`);
+      } catch (error) {
+        bindingProvenance.push({
+          taskId: null, status: 'invalid', path, receiptPath: null,
+          error: 'INVALID_TASK_BINDING_PROVENANCE',
+        });
+        evidenceErrors.push(`Unbound task binding provenance ${name} is invalid: ${error.message}`);
+      }
+    }
+    for (const name of readdirSync(provenanceDirectory).filter((entry) => entry.endsWith('.sha256')).sort()) {
+      const receiptPath = join(provenanceDirectory, name);
+      if (seenProvenanceReceiptPaths.has(receiptPath)) continue;
+      const pendingTask = state.tasks.find((task) => !task.taskPacketDigest
+        && taskBindingProvenanceReceiptPath(cwd, state.prNumber, task.id) === receiptPath);
+      const packetPath = pendingTask
+        ? taskPacketSidecarPath(cwd, state.prNumber, pendingTask.id) : null;
+      if (!pendingTask || !existsSync(packetPath)) {
+        bindingProvenance.push({ taskId: pendingTask?.id ?? null, status: 'orphan', path: null, receiptPath });
+        evidenceErrors.push(`Task binding provenance receipt ${name} is orphaned`);
+        continue;
+      }
+      try {
+        const packet = readJsonSidecar(packetPath, 'pending task packet sidecar');
+        const planning = recoverHistoricalTaskBindingPlanning(cwd, state, packet);
+        const provenance = buildTaskBindingProvenance(state, packet, planning);
+        verifyTaskBindingProvenanceReceipt(cwd, state, pendingTask, provenance);
+        bindingProvenance.push({
+          taskId: pendingTask.id, status: 'pending-binding', path: null, receiptPath,
+        });
+        evidenceErrors.push(`Task ${pendingTask.id} binding provenance receipt is pending sidecar and state checkpoints`);
+      } catch (error) {
+        bindingProvenance.push({
+          taskId: pendingTask.id, status: 'invalid', path: null, receiptPath,
+          error: 'INVALID_TASK_BINDING_PROVENANCE',
+        });
+        evidenceErrors.push(`Task ${pendingTask.id} binding provenance receipt is invalid: ${error.message}`);
+      }
     }
   }
   const specialist = readSpecialistStatus({ cwd, prNumber: state.prNumber });
   if (specialist.error && specialist.error !== 'SPECIALIST_PLAN_STALE') {
     evidenceErrors.push(`Specialist review bundle is invalid: ${specialist.error}`);
   }
-  return { state, actualGit: actual, warnings, evidenceErrors, packetSidecars, specialist };
+  return {
+    state, actualGit: actual, warnings, evidenceErrors, packetSidecars, bindingProvenance, specialist,
+  };
 }
 
 export function checkpointGitMetadata({ cwd = process.cwd(), sessionId, backup = false } = {}) {
@@ -2728,7 +3365,9 @@ function validationPlanRecoverySummary(cwd, state) {
 }
 
 export function renderRecoverySummary({ cwd = process.cwd(), prNumber, maxCharacters = 9000 } = {}) {
-  const { state, warnings, evidenceErrors, packetSidecars, specialist } = reconcileState({ cwd, prNumber });
+  const {
+    state, warnings, evidenceErrors, packetSidecars, bindingProvenance, specialist,
+  } = reconcileState({ cwd, prNumber });
   if (!state) return '';
   const release = state.releaseBaseline ? `${state.releaseBaseline.tag} (${state.releaseBaseline.commit})` : 'pre-release';
   const taskLines = state.tasks.slice(0, 30).map((task) => `- ${task.id} [${task.status}]: ${truncate(task.summary, 180)}`);
@@ -2748,6 +3387,7 @@ export function renderRecoverySummary({ cwd = process.cwd(), prNumber, maxCharac
       : 'none'}`,
     `Integration HEAD: ${state.currentIntegrationHeadSha}`,
     `Task packet sidecars: ${packetSidecars.length === 0 ? 'none' : packetSidecars.map((entry) => `${entry.taskId}=${entry.status}`).join(', ')}`,
+    `Task binding provenance: ${bindingProvenance.length === 0 ? 'none' : bindingProvenance.map((entry) => `${entry.taskId ?? 'unknown'}=${entry.status}`).join(', ')}`,
     `Specialist evidence: ${specialist.status}${specialist.requiredReviewerIds.length > 0 ? `; required ${specialist.requiredReviewerIds.join(', ')}` : ''}`,
     `Targeted validation plan: ${validationPlanRecoverySummary(cwd, state)}`,
     'Tasks:',

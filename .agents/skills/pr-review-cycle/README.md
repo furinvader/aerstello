@@ -87,12 +87,36 @@ backups and event log, Git, structured GitHub data, and CI evidence—not from a
 chat transcript.
 
 Schema-v3 task packets are persisted immutably under `task-packets/` before
-their digest is checkpointed. Exact-HEAD specialist plans and concise results
-live under `specialist-reviews/`, with an immutable `.plan.sha256` receipt next
-to each mutable result bundle. Recovery verifies all three. Missing, altered,
-pending, stale, clean, or finding specialist evidence is reported explicitly;
-no profile or risk is inferred for legacy bound tasks. These sidecars keep the
-active state schema at v3 and move with the PR directory when it is archived.
+their digest is checkpointed. The same locked transition also persists hashed,
+immutable `task-binding-provenance/` evidence for the exact receipt-verified
+pre-bind signals, route, and reviewed-HEAD behavior-mapper result. An adjacent
+immutable `.sha256` receipt covers that complete provenance, including mapper
+evidence. Exact-HEAD
+specialist plans and concise results live under `specialist-reviews/`, with an
+immutable `.plan.sha256` receipt next to each mutable result bundle. Recovery
+verifies packet, binding-provenance and its receipt, plan receipt, and result
+evidence.
+Missing, altered, pending, stale, clean, or finding specialist evidence is
+reported explicitly; no profile, risk, or planning signal is inferred for
+legacy bound tasks. These sidecars keep the active state schema at v3 and move
+with the PR directory when it is archived.
+
+A task in neutral `proposed`, `blocked`, or `failed` execution—or already
+`integrated`—whose packet digest came directly from an immutable schema-v2
+migration backup has one narrow recovery command:
+
+```bash
+npm run review:state -- replan-task-packet --task '<opaque-id>' --expected-revision <n>
+```
+
+It accepts no packet, verifies the backup's state/task identity and digest,
+rejects schema-v3 sidecar evidence, deletes nothing, and cannot change a native
+schema-v3 or completed binding. `queued`, `running`, and `implemented` tasks are
+rejected, as is any nominally safe status that still has a worker, branch,
+worktree, or worker commit. Safe pre-integration execution returns to a neutral
+Proposed task; Integrated commit and resolution facts remain. Targeted proof is
+invalidated. Follow it with the normal explicit schema-v3 `specialist-plan` and
+`bind-task-packet` flow. The task option is one opaque value, not a comma list.
 
 ## Review-ready and Done
 
@@ -283,9 +307,10 @@ Next action: Integrate the remaining result and run the selected tests.
   commands, selectors, projects, and reasons. Do not run full local E2E as a
   fallback.
 - **Specialist evidence is missing or stale:** verify every packet sidecar,
-  rebuild the exact-current-HEAD plan, and rerun only its required reviewers.
-  Do not infer a legacy specialization or treat an earlier clean result as
-  current.
+  its binding provenance and historical pre-bind receipt, rebuild the
+  exact-current-HEAD plan, and rerun only its required review-phase reviewers.
+  Do not infer legacy planning signals, rerun a reviewed-HEAD behavior mapper at
+  integration HEAD, or treat an earlier risk-review clean result as current.
 - **CI failed:** inspect the exact-commit workflow and its artifacts. Run full
   E2E locally only when explicitly requested or when diagnosing that failure.
 - **Release state is inconsistent:** run `npm run release:state`,

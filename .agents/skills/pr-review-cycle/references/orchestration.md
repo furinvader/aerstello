@@ -42,8 +42,31 @@ npm run review:state -- bind-task-packet --task-packet /tmp/task-a.json --expect
 ```
 
 The guarded binding is the durable identity used by worker-result acceptance
-and integrated validation. Do not delegate, validate a result, or build a
-remediation plan from an unbound or changed packet.
+and integrated validation. It saves the exact explicit planning signals,
+canonical route, plan receipt, and any clean behavior-mapper result in immutable
+hashed per-task provenance before checkpointing the packet digest. Do not
+delegate, validate a result, or build a remediation plan from an unbound,
+changed, or provenance-less packet. A retry of a pre-fix schema-v3 binding may
+repair only missing provenance from one unique receipt-verified historical
+pre-bind bundle for that exact packet; it never defaults either planning signal.
+The adjacent immutable provenance `.sha256` receipt covers every field,
+including the mapper record, and is mandatory on every trusted read.
+
+If and only if an immutable schema-v2 migration backup proves that a task with
+neutral `proposed`, `blocked`, or `failed` execution—or an already Integrated
+task—carried its current legacy digest, clear that binding without supplying a
+replacement:
+
+```bash
+npm run review:state -- replan-task-packet --task '<opaque-id>' --expected-revision <n>
+```
+
+The command rejects `queued`, `running`, `implemented`, and completed tasks,
+any task with a worker/branch/worktree/worker commit, native schema-v3 bindings,
+any v3 packet/provenance/receipt sidecar, revision drift, and changed backup
+identity. It deletes nothing. Safe neutral execution is reset; Integrated
+central facts remain. Plan an explicit schema-v3 packet at the new revision and
+bind it normally.
 
 ## Separate tasks safely
 
@@ -199,8 +222,12 @@ of a full-suite CI failure, or a release investigation while CI is unavailable.
 ## Verify the combined change
 
 After integration and targeted validation, build the exact-HEAD post-integration
-specialist plan from the immutable packet sidecars. Run only the routed risk
-reviewers:
+specialist plan from the immutable packet and binding-provenance sidecars. The
+canonical route reuses the verified pre-bind `browserVisible` and
+`testSelectionUncertain` values, including a mapper routed only by one of those
+signals. Planning-phase mapper evidence stays bound to the reviewed HEAD and is
+passed to the final verifier; it is not rerun at integration HEAD. Run only the
+routed review-phase risk reviewers:
 
 - `security_reviewer` for `authentication` or `authorization`;
 - `offline_realtime_reviewer` for `offline` or `realtime`.
@@ -220,9 +247,12 @@ any task, close a thread, request review, or satisfy Done. Any HEAD advance
 invalidates the bundle and requires the routed reviewers again.
 
 Then generate `specialist-context` and run `integration_verifier` read-only and
-alone. Give it the findings, outcomes, fixed task instructions, worker results,
-Review commit, integrated commit, targeted validation, profiles and risks, and
-all applicable specialist results. It checks correctness, security, data
+alone. Its pre-bind planning section contains phase-qualified signals, route,
+and mapper result for each packet; its post-integration section separately
+contains exact-current-HEAD risk requirements and results. Give it the findings,
+outcomes, fixed task instructions, worker results, Review commit, integrated
+commit, targeted validation, profiles and risks, and all applicable specialist
+results. It checks correctness, security, data
 integrity, regressions, ownership, inconsistent assumptions, selected-test
 sufficiency, released migrations, missing required reviews, and profile misuse.
 It does not edit, delegate, or write to GitHub.
