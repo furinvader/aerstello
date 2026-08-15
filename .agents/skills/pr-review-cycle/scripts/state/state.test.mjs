@@ -2677,6 +2677,40 @@ test('targeted validation CLI saves and executes the exact durable plan', () => 
   assert.equal(loadState(cwd).validationStatus.status, 'passed');
 });
 
+test('specialist-plan CLI rejects malformed packet specialization before durable writes', () => {
+  const cwd = repo();
+  const state = integratedTasks(cwd, ['malformed-specialization']);
+  const packet = {
+    ...taskPacket(state.currentIntegrationHeadSha, 'malformed-specialization'),
+    specialization: null,
+  };
+  const inputPath = join(cwd, 'malformed-specialist-plan.json');
+  writeFileSync(inputPath, `${JSON.stringify(planInput(state, packet))}\n`);
+  const stateBefore = readFileSync(statePath(cwd, state.prNumber), 'utf8');
+  const eventsPath = join(stateDirectory(cwd, state.prNumber), 'events.ndjson');
+  const eventsBefore = readFileSync(eventsPath, 'utf8');
+  const bundlePath = specialistReviewBundlePath(
+    cwd, state.prNumber, state.currentIntegrationHeadSha, state.revision,
+  );
+  const receiptPath = specialistPlanReceiptPath(
+    cwd, state.prNumber, state.currentIntegrationHeadSha, state.revision,
+  );
+
+  const result = spawnSync(process.execPath, [
+    STATE_CLI, 'specialist-plan', '--pr', '17', '--expected-revision', String(state.revision),
+    '--input', inputPath,
+  ], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /^INVALID_SPECIALIST_PLAN:/u);
+  assert.doesNotMatch(result.stderr, /STATE_OPERATIONAL_ERROR|TypeError/u);
+  assert.match(result.stderr, /specialization must be a 1-128 character specialist profile ID/u);
+  assert.equal(readFileSync(statePath(cwd, state.prNumber), 'utf8'), stateBefore);
+  assert.equal(readFileSync(eventsPath, 'utf8'), eventsBefore);
+  assert.equal(existsSync(bundlePath), false);
+  assert.equal(existsSync(receiptPath), false);
+});
+
 test('targeted validation records concise failure and generic checkpoint cannot forge passing proof', () => {
   const cwd = repo();
   let state = integratedTasks(cwd, ['task-a']);

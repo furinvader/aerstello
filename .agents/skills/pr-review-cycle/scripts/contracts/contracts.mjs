@@ -344,8 +344,10 @@ export function validateTaskPacket(value) {
     validateStringList(value[field], `$.${field}`, errors);
   }
   validateAffectedAreas(value.affectedAreas, '$.affectedAreas', errors);
-  if (isString(value.specialization, { min: 1, max: 128 })
-      && Array.isArray(value.affectedAreas) && Array.isArray(value.riskTags)) {
+  const specializationHasValidShape = isString(value.specialization, { min: 1, max: 128 });
+  if (!specializationHasValidShape) {
+    errors.push('$.specialization must be a 1-128 character specialist profile ID');
+  } else if (Array.isArray(value.affectedAreas) && Array.isArray(value.riskTags)) {
     errors.push(...validateSpecialization({
       specialization: value.specialization,
       affectedAreas: value.affectedAreas,

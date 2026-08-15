@@ -690,6 +690,17 @@ test('task packet specialization and risks are registry-validated without expand
   assert.equal(validateSchema({ ...packet, specialization: 'unknown' }), false);
   assert.equal(validateSchema({ ...packet, riskTags: ['unknown'] }), false);
 
+  for (const specialization of [null, 1, true, {}, [], '', 'x'.repeat(129)]) {
+    const invalid = { ...packet, specialization };
+    const shapeErrors = validateTaskPacket(invalid).filter(
+      (error) => error === '$.specialization must be a 1-128 character specialist profile ID',
+    );
+    assert.deepEqual(shapeErrors, [
+      '$.specialization must be a 1-128 character specialist profile ID',
+    ]);
+    assert.equal(validateSchema(invalid), false, JSON.stringify(specialization));
+  }
+
   for (const [change, expected] of [
     [{ specialization: 'unknown' }, /unknown|specialization|profile/iu],
     [{ riskTags: ['unknown'] }, /unknown|risk/iu],
