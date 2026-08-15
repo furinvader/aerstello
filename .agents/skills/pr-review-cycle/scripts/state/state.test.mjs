@@ -3702,7 +3702,7 @@ test('specialist risk evidence is exact reviewer/head/revision, deduplicated, ta
   recordSpecialistReview({ cwd, input: record, expectedRevision: state.revision, now: () => AT });
   assert.equal(specialistContext({ cwd }).status, 'findings');
   assert.equal(specialistContext({ cwd }).readyForIntegrationVerifier, false);
-  assert.equal(readSpecialistStatus({ cwd }).status, 'findings');
+  assert.equal(readSpecialistStatus({ cwd }).status, 'finding');
   assert.throws(() => recordSpecialistReview({
     cwd, expectedRevision: state.revision,
     input: { ...record, reviewerId: 'offline_realtime_reviewer' },

@@ -1248,7 +1248,7 @@ export function readSpecialistStatus({ cwd = process.cwd(), prNumber } = {}) {
     })).map((record) => record.reviewerId).sort();
     const findings = bundle.records.filter((record) => record.status === 'findings').map((record) => record.reviewerId).sort();
     return {
-      status: stale.length > 0 ? 'stale' : missing.length > 0 ? 'pending' : findings.length > 0 ? 'findings' : 'clean',
+      status: stale.length > 0 ? 'stale' : missing.length > 0 ? 'pending' : findings.length > 0 ? 'finding' : 'clean',
       headSha: bundle.headSha, stateRevision: state.revision, bundlePath: path,
       stage: bundle.stage, requiredReviewerIds: required, recordedReviewerIds: recorded,
       missingReviewerIds: missing, staleReviewerIds: stale, findingReviewerIds: findings,
