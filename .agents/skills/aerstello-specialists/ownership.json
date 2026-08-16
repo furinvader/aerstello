@@ -25,10 +25,12 @@
     { "path": ".codex/agents/behavior-mapper.toml", "targets": ["references/routing.md", "references/reviewer-contracts.md"] },
     { "path": ".codex/agents/security-reviewer.toml", "targets": ["references/reviewer-contracts.md"] },
     { "path": ".codex/agents/offline-realtime-reviewer.toml", "targets": ["references/reviewer-contracts.md"] },
+    { "path": ".codex/config.toml", "targets": [] },
+    { "path": "AGENTS.md", "targets": ["README.md"] }
+  ],
+  "permittedWorkflowConsumers": [
     { "path": ".codex/agents/integration-verifier.toml", "targets": ["references/reviewer-contracts.md"] },
     { "path": ".codex/agents/review-fix-worker.toml", "targets": ["registry.json"] },
-    { "path": ".codex/config.toml", "targets": [] },
-    { "path": "AGENTS.md", "targets": ["README.md"] },
     { "path": ".agents/skills/pr-review-cycle/ownership.json", "targets": [] }
   ],
   "consumedCapabilities": {
