@@ -275,7 +275,7 @@ test('hooks and npm façades target only canonical skill entrypoints', () => {
   );
   assert.equal(
     scripts['test:tooling'],
-    'npm run test:pr-review && npm run test:specialists && node --test "scripts/**/*.test.mjs"',
+    'npm run test:pr-review && npm run test:specialists && node --test "scripts/**/*.test.mjs" && npm run test:e2e:structure',
   );
   assert.equal(scripts['check:workflow'], 'npm run test:tooling');
   assert.equal(scripts.test, 'npm run test:tooling && npm run test --workspaces --if-present');

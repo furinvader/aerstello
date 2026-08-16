@@ -3,7 +3,10 @@ import { defineBddConfig } from 'playwright-bdd';
 
 const testDir = defineBddConfig({
   features: 'specs/features/**/*.feature',
-  steps: 'tests/e2e/steps/**/*.ts',
+  steps: [
+    'tests/e2e/fixtures/test.ts',
+    'tests/e2e/**/*.steps.ts',
+  ],
 });
 const chromiumExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
 const isCI = Boolean(process.env.CI);
