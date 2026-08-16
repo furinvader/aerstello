@@ -15,6 +15,7 @@ import {
   checkpointTaskCompletion,
   checkpointVerificationEscalation,
   loadState,
+  readSpecialistStatus,
   stateDirectory,
 } from '../state/state.mjs';
 
@@ -52,6 +53,10 @@ export function renderHumanStatus(status) {
     : status.liveCiValidation?.status === 'failed'
       ? `Failed — ${status.liveCiValidation.workflowRunUrl}`
       : titleCase(status.liveCiValidation?.status);
+  const specialistStatus = status.specialistReviews?.status ?? 'missing';
+  const specialistReviewers = status.specialistReviews?.requiredReviewerIds ?? [];
+  const specialists = `${titleCase(specialistStatus)}${specialistReviewers.length > 0
+    ? ` (required: ${specialistReviewers.join(', ')})` : ''}`;
   return [
     `PR: #${status.prNumber}`,
     `Current commit: ${status.stateHeadSha} (${headRelation})`,
@@ -62,6 +67,7 @@ export function renderHumanStatus(status) {
     `Tasks: ${tasks}`,
     ...taskRows,
     `Targeted local tests: ${targeted}`,
+    `Specialist reviews: ${specialists}`,
     `Full CI: ${ci}`,
     `Open Codex threads: ${status.openCodexThreads}`,
     `Next action: ${headMatches ? status.nextAction
@@ -109,6 +115,7 @@ function defaultState(cwd) {
     checkpointVerificationEscalation: (input) => checkpointVerificationEscalation({ cwd, ...input }),
     checkpointTaskCompletion: (input) => checkpointTaskCompletion({ cwd, ...input }),
     checkpointCompletion: (input) => checkpointCompletion({ cwd, ...input }),
+    specialistStatus: (prNumber) => readSpecialistStatus({ cwd, prNumber }),
   };
 }
 

@@ -4,14 +4,17 @@ model_reasoning_effort = "medium"
 
 developer_instructions = """
 Follow the canonical role boundaries in .agents/skills/pr-review-cycle/README.md and .agents/skills/pr-review-cycle/references/orchestration.md.
+Follow the specialization registry in .agents/skills/aerstello-specialists/registry.json and read exactly the profile named by the bound task packet.
 
 Implement exactly one supplied set of fixed review-task instructions.
 
 Start from the task's Review commit and work only in the assigned worktree. Make the smallest coherent fix that satisfies the acceptance criteria. Edit only allowed paths, never edit forbidden paths, and stop with an unexpected dependency instead of broadening scope. Preserve AGENTS.md invariants.
 
+The profile is guidance only. The packet's paths, dependencies, acceptance criteria, and validation remain authoritative. Report an unexpected dependency instead of changing profiles or broadening scope.
+
 Do not post or reply on GitHub, request a review, push branches, integrate commits, edit central PR-cycle state, or delegate to another agent. Run only the exact validation commands, E2E selectors, and browser projects recorded in the fixed task instructions. Do not add tests, projects, or a full-suite fallback to compensate for missing instructions; report the planning error. Create one logical commit when Git access permits.
 
-Your final assistant message must be only one raw JSON object that validates against .agents/skills/pr-review-cycle/schemas/review-fix-result.schema.json. Do not use a Markdown fence. Do not include raw logs, complete diffs, stack traces, or transcript text.
+Your final assistant message must be only one raw JSON object that validates against .agents/skills/pr-review-cycle/schemas/review-fix-result.schema.json, including the exact packet specialization. Do not use a Markdown fence. Do not include raw logs, complete diffs, stack traces, or transcript text.
 """
 
 [agents]

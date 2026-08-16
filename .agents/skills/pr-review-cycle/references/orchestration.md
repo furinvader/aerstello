@@ -16,6 +16,21 @@ must record:
 - exact E2E scenario IDs, tags, or test selectors when needed;
 - exact browser projects and why each selected check is relevant.
 
+Select the primary profile and compatible risks through the
+[canonical specialist registry](../../aerstello-specialists/registry.json).
+Normally split cross-domain work. The `data-integrity` profile may cover an
+unsplittable highest-risk root cause only when the packet's existing evidence
+documents why the work cannot be separated. A profile never changes path,
+dependency, acceptance, or validation authority.
+
+Before binding, supply both explicit planning signals, `browserVisible` and
+`testSelectionUncertain`, through `specialist-plan`. Run `behavior_mapper` when
+the registry routes it, resolve any scenario/selector uncertainty, and record
+its concise clean result. Binding rejects behavior-mapped packets unless their
+system validation includes a non-empty exact `npm run test:e2e:related -- ...`
+selection with explicit selectors and browser projects. The signals are
+planning evidence and are not packet fields.
+
 The instructions are fixed after delegation. If a related command, selector, or
 project cannot be determined, stop and repair the plan. Neither a worker nor the
 orchestrator may substitute a full local test run.
@@ -27,8 +42,31 @@ npm run review:state -- bind-task-packet --task-packet /tmp/task-a.json --expect
 ```
 
 The guarded binding is the durable identity used by worker-result acceptance
-and integrated validation. Do not delegate, validate a result, or build a
-remediation plan from an unbound or changed packet.
+and integrated validation. It saves the exact explicit planning signals,
+canonical route, plan receipt, and any clean behavior-mapper result in immutable
+hashed per-task provenance before checkpointing the packet digest. Do not
+delegate, validate a result, or build a remediation plan from an unbound,
+changed, or provenance-less packet. A retry of a pre-fix schema-v3 binding may
+repair only missing provenance from one unique receipt-verified historical
+pre-bind bundle for that exact packet; it never defaults either planning signal.
+The adjacent immutable provenance `.sha256` receipt covers every field,
+including the mapper record, and is mandatory on every trusted read.
+
+If and only if an immutable schema-v2 migration backup proves that a task with
+neutral `proposed`, `blocked`, or `failed` execution—or an already Integrated
+task—carried its current legacy digest, clear that binding without supplying a
+replacement:
+
+```bash
+npm run review:state -- replan-task-packet --task '<opaque-id>' --expected-revision <n>
+```
+
+The command rejects `queued`, `running`, `implemented`, and completed tasks,
+any task with a worker/branch/worktree/worker commit, native schema-v3 bindings,
+any v3 packet/provenance/receipt sidecar, revision drift, and changed backup
+identity. It deletes nothing. Safe neutral execution is reset; Integrated
+central facts remain. Plan an explicit schema-v3 packet at the new revision and
+bind it normally.
 
 ## Separate tasks safely
 
@@ -53,7 +91,10 @@ shared Playwright fixtures and global steps
 Use no more than four implementation workers. Every parallel writer needs an
 isolated worktree based on the Review commit and a non-overlapping path set. If
 the active Codex surface cannot keep a writer in its assigned worktree, run
-writers one at a time.
+writers one at a time. The four-thread cap covers helpers and reviewers too:
+finish planning helpers before writers, stop writers before risk review, and run
+the final integration verifier alone. Never consume all capacity while a
+required reviewer still needs a slot.
 
 ## Manage worktrees
 
@@ -93,7 +134,7 @@ de-duplicates that union, and runs it once:
 Save that operational union before running it:
 
 ```bash
-npm run review:state -- validation-plan /tmp/task-a.json /tmp/task-b.json
+npm run review:state -- validation-plan
 npm run review:state -- run-validation
 ```
 
@@ -180,11 +221,41 @@ of a full-suite CI failure, or a release investigation while CI is unavailable.
 
 ## Verify the combined change
 
-Run `integration_verifier` read-only after integration. Give it the findings,
+After integration and targeted validation, build the exact-HEAD post-integration
+specialist plan from the immutable packet and binding-provenance sidecars. The
+canonical route reuses the verified pre-bind `browserVisible` and
+`testSelectionUncertain` values, including a mapper routed only by one of those
+signals. Planning-phase mapper evidence stays bound to the reviewed HEAD and is
+passed to the final verifier; it is not rerun at integration HEAD. Run only the
+routed review-phase risk reviewers:
+
+- `security_reviewer` for `authentication` or `authorization`;
+- `offline_realtime_reviewer` for `offline` or `realtime`.
+
+Billing, money, migration, and release risks add data-integrity guidance and
+priority final verification. Deployment and workflow risks add ops/workflow
+guidance and normal final verification. Localization, responsive behavior,
+browser-visible work, `behavior-tests`, or uncertain selection must already
+have exact related-E2E planning through `behavior_mapper`. The canonical rules
+and reviewer contracts live under
+`.agents/skills/aerstello-specialists/references/`.
+
+Record each concise reviewer result against the exact plan HEAD and revision.
+Convert every valid finding into an ordinary task that receives the same
+pre-bind planning and immutable packet treatment. A clean result cannot resolve
+any task, close a thread, request review, or satisfy Done. Any HEAD advance
+invalidates the bundle and requires the routed reviewers again.
+
+Then generate `specialist-context` and run `integration_verifier` read-only and
+alone. Its pre-bind planning section contains phase-qualified signals, route,
+and mapper result for each packet; its post-integration section separately
+contains exact-current-HEAD risk requirements and results. Give it the findings,
 outcomes, fixed task instructions, worker results, Review commit, integrated
-commit, and targeted validation. It checks correctness, security, data
+commit, targeted validation, profiles and risks, and all applicable specialist
+results. It checks correctness, security, data
 integrity, regressions, ownership, inconsistent assumptions, selected-test
-sufficiency, and released migrations. It does not edit or write to GitHub.
+sufficiency, released migrations, missing required reviews, and profile misuse.
+It does not edit, delegate, or write to GitHub.
 
 A missing or uncertain related-test selection is a verifier finding and returns
 to planning. It is never resolved by requesting the full local suite.

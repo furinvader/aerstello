@@ -97,6 +97,12 @@ const EXPECTED_NEUTRAL_DEPENDENCIES = [
 ];
 
 const EXPECTED_SEPARATE_CAPABILITIES = {
+  specialists: [
+    '.agents/skills/aerstello-specialists/**',
+    '.codex/agents/behavior-mapper.toml',
+    '.codex/agents/offline-realtime-reviewer.toml',
+    '.codex/agents/security-reviewer.toml',
+  ],
   release: [
     '.release/**',
     'scripts/check-released-migrations.mjs',
@@ -236,6 +242,8 @@ test('ownership manifest names the complete canonical skill and no obsolete path
 
 test('hooks and npm façades target only canonical skill entrypoints', () => {
   const hooks = JSON.parse(readRepositoryFile('.codex/hooks.json'));
+  assert.equal(hooks.hooks.SubagentStop.length, 1);
+  assert.equal(hooks.hooks.SubagentStop[0].matcher, '^review_fix_worker$');
   assert.equal(
     hooks.hooks.SessionStart[0].hooks[0].command,
     'node "$(git rev-parse --show-toplevel)/.agents/skills/pr-review-cycle/scripts/hooks/session-start.mjs"',
@@ -262,8 +270,12 @@ test('hooks and npm façades target only canonical skill entrypoints', () => {
     'node --test ".agents/skills/pr-review-cycle/scripts/**/*.test.mjs"',
   );
   assert.equal(
+    scripts['test:specialists'],
+    'node --test ".agents/skills/aerstello-specialists/scripts/**/*.test.mjs"',
+  );
+  assert.equal(
     scripts['test:tooling'],
-    'npm run test:pr-review && node --test "scripts/**/*.test.mjs"',
+    'npm run test:pr-review && npm run test:specialists && node --test "scripts/**/*.test.mjs"',
   );
   assert.equal(scripts['check:workflow'], 'npm run test:tooling');
   assert.equal(scripts.test, 'npm run test:tooling && npm run test --workspaces --if-present');
@@ -279,6 +291,29 @@ test('hooks and npm façades target only canonical skill entrypoints', () => {
   assert.match(workflow, /Full validation/u);
   assert.match(workflow, /npm run check:full/u);
   assert.match(workflow, /npm run test:e2e:full/u);
+});
+
+test('agent configuration preserves the global thread cap and read-only verifier boundary', () => {
+  const config = readRepositoryFile('.codex/config.toml');
+  assert.match(config, /^max_concurrent_threads_per_session = 4$/mu);
+  for (const [role, configFile] of [
+    ['review_fix_worker', 'agents/review-fix-worker.toml'],
+    ['integration_verifier', 'agents/integration-verifier.toml'],
+    ['behavior_mapper', 'agents/behavior-mapper.toml'],
+    ['security_reviewer', 'agents/security-reviewer.toml'],
+    ['offline_realtime_reviewer', 'agents/offline-realtime-reviewer.toml'],
+  ]) {
+    assert.match(
+      config,
+      new RegExp(`^\\[agents\\.${role}\\][\\s\\S]*?^config_file = "${configFile}"$`, 'mu'),
+    );
+  }
+
+  const verifier = readRepositoryFile('.codex/agents/integration-verifier.toml');
+  assert.match(verifier, /^sandbox_mode = "read-only"$/mu);
+  assert.match(verifier, /^\[agents\]\nenabled = false$/mu);
+  assert.match(verifier, /Never edit files/u);
+  assert.match(verifier, /delegate/u);
 });
 
 test('root npm façades remain available from a nested workspace directory', () => {

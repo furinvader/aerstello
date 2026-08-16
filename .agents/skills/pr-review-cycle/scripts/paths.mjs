@@ -41,3 +41,15 @@ export function gitCommonDirectory(cwd = process.cwd()) {
 export function reviewRoot(cwd = process.cwd()) {
   return join(gitCommonDirectory(cwd), 'codex', 'pr-review');
 }
+
+export function taskPacketDirectory(cwd = process.cwd(), prNumber) {
+  return join(reviewRoot(cwd), `pr-${Number(prNumber)}`, 'task-packets');
+}
+
+export function taskBindingProvenanceDirectory(cwd = process.cwd(), prNumber) {
+  return join(reviewRoot(cwd), `pr-${Number(prNumber)}`, 'task-binding-provenance');
+}
+
+export function specialistReviewDirectory(cwd = process.cwd(), prNumber) {
+  return join(reviewRoot(cwd), `pr-${Number(prNumber)}`, 'specialist-reviews');
+}

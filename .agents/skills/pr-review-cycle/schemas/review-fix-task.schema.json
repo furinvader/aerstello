@@ -8,6 +8,8 @@
     "schemaVersion",
     "taskId",
     "reviewedHeadSha",
+    "specialization",
+    "riskTags",
     "finding",
     "evidence",
     "affectedAreas",
@@ -19,9 +21,20 @@
     "requiredValidation"
   ],
   "properties": {
-    "schemaVersion": { "const": 2 },
+    "schemaVersion": { "const": 3 },
     "taskId": { "type": "string", "minLength": 1, "maxLength": 128 },
     "reviewedHeadSha": { "$ref": "#/$defs/sha" },
+    "specialization": {
+      "enum": ["web", "api", "contracts", "data-integrity", "behavior-tests", "ops-workflow"]
+    },
+    "riskTags": {
+      "type": "array",
+      "$comment": "The manual validator checks IDs and profile/risk/affected-area compatibility against the canonical Aerstello specialist registry.",
+      "items": {
+        "enum": ["authentication", "authorization", "billing", "money", "migration", "release", "offline", "realtime", "localization", "responsive", "deployment", "workflow"]
+      },
+      "uniqueItems": true
+    },
     "finding": { "type": "string", "minLength": 1, "maxLength": 2000 },
     "evidence": { "type": "string", "minLength": 1, "maxLength": 3000 },
     "affectedAreas": {

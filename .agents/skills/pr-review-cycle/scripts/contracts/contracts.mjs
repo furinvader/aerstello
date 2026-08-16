@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { featureDirectory } from '../paths.mjs';
+import { loadRegistry, validateSpecialization } from '../../../aerstello-specialists/scripts/validate-registry.mjs';
 
 const SHA_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
 const DATE_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u;
@@ -270,6 +271,7 @@ export function validateWorkerResult(value) {
   const fields = [
     'schemaVersion',
     'taskId',
+    'specialization',
     'status',
     'commitSha',
     'changedPaths',
@@ -280,8 +282,13 @@ export function validateWorkerResult(value) {
   ];
   if (!requireFields(value, fields, '$', errors)) return errors;
   rejectUnknownFields(value, fields, '$', errors);
-  if (value.schemaVersion !== 2) errors.push('$.schemaVersion must equal 2');
+  if (value.schemaVersion !== 3) errors.push('$.schemaVersion must equal 3');
   if (!isString(value.taskId, { min: 1, max: 128 })) errors.push('$.taskId must be 1-128 characters');
+  if (!isString(value.specialization, { min: 1, max: 128 })) {
+    errors.push('$.specialization must be a 1-128 character specialist profile ID');
+  } else if (!loadRegistry().profiles.some((profile) => profile.id === value.specialization)) {
+    errors.push(`$.specialization is an unknown specialist profile: ${value.specialization}`);
+  }
   if (!['implemented', 'blocked', 'not-applicable', 'failed'].includes(value.status)) errors.push('$.status is invalid');
   if (value.status === 'implemented' ? !isSha(value.commitSha) : !isSha(value.commitSha, true)) {
     errors.push('$.commitSha must be a full Git SHA when implemented and otherwise may be null');
@@ -314,6 +321,8 @@ export function validateTaskPacket(value) {
     'schemaVersion',
     'taskId',
     'reviewedHeadSha',
+    'specialization',
+    'riskTags',
     'finding',
     'evidence',
     'affectedAreas',
@@ -326,18 +335,24 @@ export function validateTaskPacket(value) {
   ];
   if (!requireFields(value, fields, '$', errors)) return errors;
   rejectUnknownFields(value, fields, '$', errors);
-  if (value.schemaVersion !== 2) errors.push('$.schemaVersion must equal 2');
+  if (value.schemaVersion !== 3) errors.push('$.schemaVersion must equal 3');
   if (!isString(value.taskId, { min: 1, max: 128 })) errors.push('$.taskId must be 1-128 characters');
   if (!isSha(value.reviewedHeadSha)) errors.push('$.reviewedHeadSha must be a full Git SHA');
   if (!isString(value.finding, { min: 1, max: 2000 })) errors.push('$.finding must be concise');
   if (!isString(value.evidence, { min: 1, max: 3000 })) errors.push('$.evidence must be concise');
-  for (const field of ['decisionIds', 'affectedAreas', 'allowedPaths', 'forbiddenPaths', 'dependencies', 'acceptanceCriteria']) {
+  for (const field of ['decisionIds', 'riskTags', 'allowedPaths', 'forbiddenPaths', 'dependencies', 'acceptanceCriteria']) {
     validateStringList(value[field], `$.${field}`, errors);
   }
-  if (Array.isArray(value.affectedAreas) && value.affectedAreas.length === 0) errors.push('$.affectedAreas must not be empty');
-  if (Array.isArray(value.affectedAreas)
-      && value.affectedAreas.some((area) => !RECOGNIZED_AREAS.has(area))) {
-    errors.push('$.affectedAreas must contain only recognized code or policy areas');
+  validateAffectedAreas(value.affectedAreas, '$.affectedAreas', errors);
+  const specializationHasValidShape = isString(value.specialization, { min: 1, max: 128 });
+  if (!specializationHasValidShape) {
+    errors.push('$.specialization must be a 1-128 character specialist profile ID');
+  } else if (Array.isArray(value.affectedAreas) && Array.isArray(value.riskTags)) {
+    errors.push(...validateSpecialization({
+      specialization: value.specialization,
+      affectedAreas: value.affectedAreas,
+      riskTags: value.riskTags,
+    }).map((error) => `$.specialization: ${error}`));
   }
   if (Array.isArray(value.allowedPaths) && value.allowedPaths.length === 0) errors.push('$.allowedPaths must not be empty');
   for (const field of ['allowedPaths', 'forbiddenPaths']) {
@@ -362,22 +377,18 @@ export function validateInitialValidationSelection(value) {
   if ((value.requiredValidation?.unit?.length ?? 0) + (value.requiredValidation?.system?.length ?? 0) === 0) {
     errors.push('$.requiredValidation must select at least one targeted command');
   }
-  const packetErrors = validateTaskPacket({
-    schemaVersion: 2,
-    taskId: 'initial-validation-selection',
-    reviewedHeadSha: value.headSha,
-    finding: 'Initial pull-request validation selection.',
-    evidence: 'Explicit orchestrator-selected validation before the first discovery review.',
-    affectedAreas: value.affectedAreas,
-    decisionIds: [],
-    allowedPaths: ['scripts/**'],
-    forbiddenPaths: [],
-    dependencies: [],
-    acceptanceCriteria: ['The selected initial checks pass.'],
-    requiredValidation: value.requiredValidation,
-  });
-  errors.push(...packetErrors.map((error) => `$.selection ${error}`));
+  validateAffectedAreas(value.affectedAreas, '$.affectedAreas', errors);
+  validateRequiredValidation(value.requiredValidation, '$.requiredValidation', errors);
   return errors;
+}
+
+function validateAffectedAreas(value, path, errors) {
+  validateStringList(value, path, errors);
+  if (!Array.isArray(value)) return;
+  if (value.length === 0) errors.push(`${path} must not be empty`);
+  if (value.some((area) => !RECOGNIZED_AREAS.has(area))) {
+    errors.push(`${path} must contain only recognized code or policy areas`);
+  }
 }
 
 function validateRequiredValidation(value, path, errors) {
@@ -463,6 +474,9 @@ export function validateWorkerResultAgainstTask(packet, result, actualChangedPat
   ];
   if (errors.length > 0) return errors;
   if (result.taskId !== packet.taskId) errors.push('worker result taskId must equal task packet taskId');
+  if (result.specialization !== packet.specialization) {
+    errors.push('worker result specialization must equal task packet specialization');
+  }
   if (new Set(result.changedPaths).size !== result.changedPaths.length) {
     errors.push('worker result changedPaths must not contain duplicates');
   }
@@ -516,13 +530,30 @@ export function validateWorkerResultAgainstTask(packet, result, actualChangedPat
 
 export function unionRequiredValidation(taskPackets) {
   if (!Array.isArray(taskPackets)) throw new TypeError('taskPackets must be an array');
-  const union = { unit: [], system: [] };
-  const byCommand = new Map();
   taskPackets.forEach((packet, index) => {
     const errors = validateTaskPacket(packet);
     if (errors.length > 0) throw new TypeError(`Invalid task packet ${index}: ${errors.join('; ')}`);
+  });
+  return unionValidationSelections(taskPackets);
+}
+
+export function unionInitialValidationSelection(value) {
+  const errors = [];
+  const fields = ['affectedAreas', 'requiredValidation'];
+  if (!requireFields(value, fields, '$', errors)) throw new TypeError(`Invalid initial validation selection: ${errors.join('; ')}`);
+  rejectUnknownFields(value, fields, '$', errors);
+  validateAffectedAreas(value.affectedAreas, '$.affectedAreas', errors);
+  validateRequiredValidation(value.requiredValidation, '$.requiredValidation', errors);
+  if (errors.length > 0) throw new TypeError(`Invalid initial validation selection: ${errors.join('; ')}`);
+  return unionValidationSelections([value]);
+}
+
+function unionValidationSelections(selections) {
+  const union = { unit: [], system: [] };
+  const byCommand = new Map();
+  for (const selection of selections) {
     for (const kind of ['unit', 'system']) {
-      for (const entry of packet.requiredValidation[kind]) {
+      for (const entry of selection.requiredValidation[kind]) {
         const existing = byCommand.get(entry.command);
         if (existing) {
           const metadataConflicts = kind === 'system' && (
@@ -541,8 +572,8 @@ export function unionRequiredValidation(taskPackets) {
         union[kind].push(copied);
       }
     }
-  });
-  const affectedAreas = new Set(taskPackets.flatMap((packet) => packet.affectedAreas));
+  }
+  const affectedAreas = new Set(selections.flatMap((selection) => selection.affectedAreas));
   for (const area of AREA_VALIDATION.keys()) {
     if (!affectedAreas.has(area)) continue;
     for (const command of AREA_VALIDATION.get(area)) {

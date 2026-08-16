@@ -946,6 +946,12 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       liveCi = { status: error.code === 'CI_CHECK_MISSING' ? 'missing' : 'pending', message: error.message };
     }
     const openThreads = live.threads.filter((thread) => thread.canonical && !thread.isResolved).length;
+    const specialistReviews = stateAdapter.specialistStatus
+      ? await stateAdapter.specialistStatus(active.prNumber)
+      : {
+          status: 'missing', headSha: active.currentIntegrationHeadSha,
+          stateRevision: active.revision, requiredReviewerIds: [], recordedReviewerIds: [],
+        };
     return {
       prNumber: active.prNumber,
       statePhase: active.phase,
@@ -974,6 +980,7 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
         })),
       },
       targetedValidation: active.validationStatus,
+      specialistReviews,
       recordedCiValidation: active.ciValidationStatus,
       liveCiValidation: liveCi,
       openCodexThreads: openThreads,

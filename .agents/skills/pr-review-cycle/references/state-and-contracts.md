@@ -13,6 +13,14 @@ Mutable state is repository-scoped and outside tracked worktrees:
 ├── pr-<number>/
 │   ├── state.json
 │   ├── state.backup.json
+│   ├── task-packets/
+│   │   └── <sha256(taskId)>.json
+│   ├── task-binding-provenance/
+│   │   ├── <sha256(taskId)>.json
+│   │   └── <sha256(taskId)>.sha256
+│   ├── specialist-reviews/
+│   │   ├── <head>-r<revision>.json
+│   │   └── <head>-r<revision>.plan.sha256
 │   ├── targeted-validation-plan.json
 │   └── events.ndjson
 └── archive/
@@ -29,10 +37,14 @@ npm run review:state -- init --pr 123 --base origin/main --head HEAD
 npm run review:state -- path
 npm run review:state -- validate
 npm run review:state -- bind-task-packet --task-packet /tmp/task.json --expected-revision 4
+npm run review:state -- replan-task-packet --task '<opaque-id>' --expected-revision 4
 npm run review:state -- validate-result --task-packet /tmp/task.json --worker-result /tmp/result.json
+npm run review:state -- specialist-plan --input /tmp/specialist-plan.json --expected-revision 4
+npm run review:state -- specialist-record --input /tmp/specialist-result.json --expected-revision 4
+npm run review:state -- specialist-context
 npm run review:state -- validation-plan --initial-selection /tmp/initial-validation.json
-npm run review:state -- validation-plan /tmp/task-a.json /tmp/task-b.json
-npm run review:state -- validation-plan --replace /tmp/task-a.json /tmp/task-b.json
+npm run review:state -- validation-plan
+npm run review:state -- validation-plan --replace
 npm run review:state -- run-validation
 npm run review:state -- show
 npm run review:state -- migrate
@@ -52,13 +64,63 @@ exact versioned backup and must preserve stable finding/task identities, source
 IDs, finding keys, and outcomes. Never let an unrelated read silently migrate
 state.
 
-Before delegation, `bind-task-packet` records the canonical SHA-256 identity of
-the complete accepted schema-v2 packet on its actionable task. Object key order
-does not affect the digest; array order and every packet value do. A binding is
-guarded, immutable, and retained after execution metadata is removed. Recovery
-for a task accepted before this capability requires one explicit bind from the
-original packet. Worker-result acceptance and remediation planning fail closed
-for missing, stale, or mismatched bindings.
+Before delegation, `bind-task-packet` atomically persists the complete accepted
+schema-v3 packet under `task-packets/<sha256(taskId)>.json`, verifies its
+canonical SHA-256 identity, persists the receipt-verified pre-bind plan under
+`task-binding-provenance/<sha256(taskId)>.json`, and records the packet digest
+on its actionable task. The provenance captures the packet digest and reviewed
+HEAD, specialist-plan revision and receipt digest, both explicit planning
+signals, canonical route, and any required clean planning-phase behavior-mapper
+result. Binding writes all immutable sidecars under one state lock before the
+digest checkpoint. An adjacent immutable SHA-256 receipt covers the complete
+binding provenance, including its mapper record. An interrupted exact write is
+retryable; changed, missing, or unverifiable sidecars or receipts fail closed.
+Object key order does not affect the digest; array order and every packet value,
+including specialization and risks, do. The sidecar and binding are immutable.
+Missing or changed sidecars fail recovery, result acceptance, validation
+planning, and specialist routing.
+
+Completed historical schema-v2 tasks remain readable. An unbound task may
+receive an explicitly planned schema-v3 packet. An active task already bound to
+a legacy packet cannot be inferred, silently rebound, or assigned a fallback
+profile. For one genuine migration-origin schema-v2 binding in neutral
+`proposed`, `blocked`, or `failed` execution—or already `integrated`—use
+`replan-task-packet --task <opaque-id> --expected-revision <n>`. The guarded
+transition verifies the exact `state.v2.backup.json` identity and task digest,
+rejects any packet, provenance, or provenance-receipt sidecar, accepts no
+replacement packet, and deletes nothing. `queued`, `running`, `implemented`,
+completed, or worker/branch/worktree/worker-commit-bearing tasks are rejected.
+It clears only that safe legacy digest, resets a pre-integration task to neutral
+`proposed` execution, preserves an Integrated task's central commit and
+resolution, and invalidates targeted validation. Then run ordinary explicit
+schema-v3 `specialist-plan` and `bind-task-packet`; the generic checkpoint still
+cannot clear or replace a digest. `--task` is one byte-for-byte opaque ID—commas,
+spaces, quotes, and backslashes are not separators.
+State remains schema v3 because canonical packets and specialist evidence are
+durable, digest-verified sidecars rather than duplicated task fields.
+
+`specialist-reviews/<head>-r<revision>.json` stores concise guarded planning and
+review evidence. Its immutable planning fields are anchored by the adjacent
+`.plan.sha256` receipt; reviewer records and operational timestamps are excluded
+from the semantic plan identity. A receipt-only interrupted create reports
+pending evidence and the same exact guarded plan may finish it; changed packets,
+signals, or routes conflict. Pre-bind plans carry the full canonical
+packet plus the explicit `browserVisible` and `testSelectionUncertain` signals
+without adding those signals to task packets, and bind behavior-mapper evidence
+to the packet's exact reviewed commit. Record, status, recovery, and binding
+reads all verify the receipt and the packet's task ID, digest, specialization,
+risk tags, and canonical route.
+Post-integration plans cover the exact bound packets and required reviewers for
+one integration HEAD. They reuse each verified pre-bind signal set and route,
+while reviewer requirements still select review-phase risk reviewers only;
+planning-phase behavior mapping is not rerun against the integration HEAD.
+`specialist-record` accepts only the planned reviewer and exact HEAD/revision.
+`specialist-context` is read-only and produces the guarded input for the final
+verifier, including every exact immutable packet, phase-qualified pre-bind
+signals, route, and reviewed-HEAD mapper result, separate exact-integration-HEAD
+risk results, and targeted-validation proof. Any
+HEAD change makes the prior bundle stale; clean specialist evidence is not
+task-resolution, GitHub, review-request, or Done evidence.
 
 `targeted-validation-plan.json` is a resumable sidecar, not trusted input to a
 generic checkpoint. `validation-plan` derives its deterministic, de-duplicated
@@ -150,8 +212,10 @@ Validate tasks against `.agents/skills/pr-review-cycle/schemas/review-fix-task.s
 contract is called a task packet; human guidance calls it fixed task
 instructions. It must include the Review commit, finding and evidence, decisions,
 dependencies, affected areas, owned and forbidden paths, acceptance criteria,
-and exact validation commands. When E2E is relevant, record exact scenario
-selectors, browser projects, and the reason for each selection.
+one specialization from the canonical registry, a unique compatible `riskTags`
+array, and exact validation commands. Empty risk arrays are valid. When E2E is
+relevant, record exact scenario selectors, browser projects, and the reason for
+each selection.
 
 `affectedAreas` must include at least one recognized code or policy area: `api`,
 `web`, `shared`, `workflow`, `documentation`, `release`, or `migration`. Worker
@@ -167,12 +231,20 @@ Instructions do not change after delegation. An unknown related command,
 selector, or project is a planning error. Fix the plan instead of asking a
 worker to choose tests or run a full local fallback.
 
+Every affected area and risk must be compatible with the selected primary
+profile. Split cross-domain work into dependent tasks normally. Use the broad
+`data-integrity` profile only for an unsplittable highest-risk root cause whose
+existing packet evidence documents why it cannot be split. Profile guidance
+never expands ownership or validation.
+
 ## Worker results
 
 Validate results against `.agents/skills/pr-review-cycle/schemas/review-fix-result.schema.json`. A worker
 returns one raw JSON object with status `implemented`, `blocked`,
 `not-applicable`, or `failed`. `implemented` requires a commit SHA. Each
 validation entry records only its exact command, result, and concise summary.
+The schema-v3 result echoes the packet specialization exactly and does not
+repeat risk tags.
 `validate-result` proves that the Review commit and worker commit exist, proves
 ancestry, and derives the NUL-delimited, no-renames tree diff between them.
 Implemented work requires a nonempty diff. Reject any mismatch between those

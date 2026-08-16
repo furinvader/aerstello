@@ -75,6 +75,10 @@ remain separately owned capabilities consumed by the review skill.
   for exact-commit gates, role boundaries, thread resolution, validation,
   recovery, and loop breakers. The main orchestrator owns state, integration,
   and GitHub writes; fix workers and the verifier stay within their fixed roles.
+- Apply the profile selected from the
+  [Aerstello specialist registry](./.agents/skills/aerstello-specialists/README.md)
+  as guidance only. The bound task packet remains authoritative for paths,
+  dependencies, acceptance criteria, and validation.
 
 ## Validation
 

@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "skillRoot": ".agents/skills/aerstello-specialists",
+  "canonicalFiles": [
+    "README.md",
+    "SKILL.md",
+    "agents/openai.yaml",
+    "ownership.json",
+    "profiles/api.md",
+    "profiles/behavior-tests.md",
+    "profiles/contracts.md",
+    "profiles/data-integrity.md",
+    "profiles/ops-workflow.md",
+    "profiles/web.md",
+    "references/reviewer-contracts.md",
+    "references/routing.md",
+    "registry.json",
+    "schemas/registry.schema.json",
+    "scripts/paths.mjs",
+    "scripts/structure.test.mjs",
+    "scripts/validate-registry.mjs",
+    "scripts/validate-registry.test.mjs"
+  ],
+  "permittedExternalAdapters": [
+    { "path": ".codex/agents/behavior-mapper.toml", "targets": ["references/routing.md", "references/reviewer-contracts.md"] },
+    { "path": ".codex/agents/security-reviewer.toml", "targets": ["references/reviewer-contracts.md"] },
+    { "path": ".codex/agents/offline-realtime-reviewer.toml", "targets": ["references/reviewer-contracts.md"] },
+    { "path": ".codex/agents/integration-verifier.toml", "targets": ["references/reviewer-contracts.md"] },
+    { "path": ".codex/agents/review-fix-worker.toml", "targets": ["registry.json"] },
+    { "path": ".codex/config.toml", "targets": [] },
+    { "path": "AGENTS.md", "targets": ["README.md"] },
+    { "path": ".agents/skills/pr-review-cycle/ownership.json", "targets": [] }
+  ],
+  "consumedCapabilities": {
+    "releaseState": ["scripts/lib/release-state.mjs"],
+    "relatedE2E": ["scripts/run-related-e2e.mjs", "specs/features/**"]
+  },
+  "obsoletePaths": [
+    ".agents/skills/pr-review-cycle/profiles",
+    ".agents/skills/pr-review-cycle/schemas/specialist-registry.schema.json",
+    ".agents/skills/pr-review-cycle/specialist-registry.json",
+    ".codex/specialist-registry.json",
+    "docs/agents/aerstello-specialists.md",
+    "docs/agents/specialist-registry.json"
+  ]
+}
