@@ -25,11 +25,11 @@ dependency, acceptance, or validation authority.
 
 Before binding, supply both explicit planning signals, `browserVisible` and
 `testSelectionUncertain`, through `specialist-plan`. Run `behavior_mapper` when
-the registry routes it, resolve any scenario/selector uncertainty, and record
-its concise clean result. Binding rejects behavior-mapped packets unless their
-system validation includes a non-empty exact `npm run test:e2e:related -- ...`
-selection with explicit selectors and browser projects. The signals are
-planning evidence and are not packet fields.
+it appears in the route's `planningHelpers`, resolve any scenario/selector
+uncertainty, and record its concise clean result. Binding rejects
+behavior-mapped packets unless their system validation includes a non-empty
+exact `npm run test:e2e:related -- ...` selection with explicit selectors and
+browser projects. The signals are planning evidence and are not packet fields.
 
 The instructions are fixed after delegation. If a related command, selector, or
 project cannot be determined, stop and repair the plan. Neither a worker nor the
@@ -223,21 +223,23 @@ of a full-suite CI failure, or a release investigation while CI is unavailable.
 
 After integration and targeted validation, build the exact-HEAD post-integration
 specialist plan from the immutable packet and binding-provenance sidecars. The
-canonical route reuses the verified pre-bind `browserVisible` and
+workflow-neutral route supplies `planningHelpers`, `riskReviewers`,
+`supplementalGuidance`, and `finalVerificationPriority`; it never selects the PR
+verifier. It reuses the verified pre-bind `browserVisible` and
 `testSelectionUncertain` values, including a mapper routed only by one of those
-signals. Planning-phase mapper evidence stays bound to the reviewed HEAD and is
-passed to the final verifier; it is not rerun at integration HEAD. Run only the
-routed review-phase risk reviewers:
+signals. In this PR caller, the generic planning subject SHA is the packet's
+Review commit, so mapper evidence stays bound there and is not rerun at
+integration HEAD. Run only the routed `riskReviewers`:
 
 - `security_reviewer` for `authentication` or `authorization`;
 - `offline_realtime_reviewer` for `offline` or `realtime`.
 
-Billing, money, migration, and release risks add data-integrity guidance and
-priority final verification. Deployment and workflow risks add ops/workflow
-guidance and normal final verification. Localization, responsive behavior,
-browser-visible work, `behavior-tests`, or uncertain selection must already
-have exact related-E2E planning through `behavior_mapper`. The canonical rules
-and reviewer contracts live under
+Billing, money, migration, and release risks add data-integrity guidance and set
+final-verification priority to `high`. Deployment and workflow risks add
+ops/workflow guidance without changing priority. Localization, responsive
+behavior, browser-visible work, `behavior-tests`, or uncertain selection must
+already have exact related-E2E planning through `behavior_mapper`. The canonical
+rules and reviewer contracts live under
 `.agents/skills/aerstello-specialists/references/`.
 
 Record each concise reviewer result against the exact plan HEAD and revision.
@@ -246,13 +248,16 @@ pre-bind planning and immutable packet treatment. A clean result cannot resolve
 any task, close a thread, request review, or satisfy Done. Any HEAD advance
 invalidates the bundle and requires the routed reviewers again.
 
-Then generate `specialist-context` and run `integration_verifier` read-only and
-alone. Its pre-bind planning section contains phase-qualified signals, route,
-and mapper result for each packet; its post-integration section separately
-contains exact-current-HEAD risk requirements and results. Give it the findings,
-outcomes, fixed task instructions, worker results, Review commit, integrated
-commit, targeted validation, profiles and risks, and all applicable specialist
-results. It checks correctness, security, data
+Only after `specialist-context` reports `readyForIntegrationVerifier` does this
+PR workflow select the `integration_verifier` named in its own
+`finalVerification` descriptor. Run it read-only, separately, and alone, with
+the descriptor's aggregated priority. The pre-bind planning section contains
+phase-qualified signals, route, and mapper result for each packet; the
+post-integration section separately contains exact-current-HEAD risk
+requirements and results. Give it the findings, outcomes, fixed task
+instructions, worker results, Review commit, integrated commit, targeted
+validation, profiles and risks, and all applicable specialist results. It
+checks correctness, security, data
 integrity, regressions, ownership, inconsistent assumptions, selected-test
 sufficiency, released migrations, missing required reviews, and profile misuse.
 It does not edit, delegate, or write to GitHub.

@@ -7,3 +7,5 @@ All planning helpers and risk reviewers are read-only, non-delegating, and forbi
 - `offline_realtime_reviewer`: review the exact integrated HEAD for IndexedDB host partitioning and UUID retention, quarantine rather than silent retry, billing conflicts and online-only edges, SSE ordering/cursors/reconnect/authorization, revalidation and authoritative refetch, cache clearing, and revocation.
 
 Specialist evidence keeps the persisted fields `reviewerId`, `headSha`, `status` (`clean` or `findings`), and a non-empty `summary`. Callers validate it with an explicit `planning` or `review` phase and the exact `subjectSha`. Planning evidence is bound to the caller's planning subject; review evidence is bound to the integrated HEAD and becomes stale after that HEAD advances. A clean result is advisory, grants no permission, and cannot by itself satisfy a workflow completion gate.
+
+Workflow-specific final verifiers may consume this evidence, profiles, and priority, but they are not reusable specialist roles. The router never selects them, and their output is never accepted through the specialist evidence helpers.

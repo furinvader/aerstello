@@ -107,18 +107,21 @@ pending evidence and the same exact guarded plan may finish it; changed packets,
 signals, or routes conflict. Pre-bind plans carry the full canonical
 packet plus the explicit `browserVisible` and `testSelectionUncertain` signals
 without adding those signals to task packets, and bind behavior-mapper evidence
-to the packet's exact reviewed commit. Record, status, recovery, and binding
-reads all verify the receipt and the packet's task ID, digest, specialization,
-risk tags, and canonical route.
-Post-integration plans cover the exact bound packets and required reviewers for
-one integration HEAD. They reuse each verified pre-bind signal set and route,
-while reviewer requirements still select review-phase risk reviewers only;
-planning-phase behavior mapping is not rerun against the integration HEAD.
-`specialist-record` accepts only the planned reviewer and exact HEAD/revision.
-`specialist-context` is read-only and produces the guarded input for the final
-verifier, including every exact immutable packet, phase-qualified pre-bind
-signals, route, and reviewed-HEAD mapper result, separate exact-integration-HEAD
-risk results, and targeted-validation proof. Any
+to the packet's exact reviewed commit. This is the PR workflow's translation of
+the reusable planning `subjectSha`; the persisted `reviewedHeadSha` contract is
+unchanged. Record, status, recovery, and binding reads all verify the receipt
+and the packet's task ID, digest, specialization, risk tags, and canonical
+workflow-neutral route.
+Post-integration plans cover the exact bound packets and required risk reviewers
+for one integration HEAD. They reuse each verified pre-bind signal set and
+route, while `riskReviewers` select review-phase evidence only; planning-phase
+behavior mapping is not rerun against the integration HEAD.
+`specialist-record` accepts only a planned reusable role and exact HEAD/revision;
+it never accepts `integration_verifier`. `specialist-context` is read-only and
+produces the guarded input for the PR workflow's final verifier, including every
+exact immutable packet, phase-qualified pre-bind signals, route, reviewed-HEAD
+mapper result, separate exact-integration-HEAD risk results, targeted-validation
+proof, and `finalVerification` descriptor. Any
 HEAD change makes the prior bundle stale; clean specialist evidence is not
 task-resolution, GitHub, review-request, or Done evidence.
 
