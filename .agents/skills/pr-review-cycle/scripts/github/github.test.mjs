@@ -26,10 +26,10 @@ const BOT = {
   url: 'https://github.com/apps/chatgpt-codex-connector', id: 'BOT_codex',
 };
 const VIEWER = { __typename: 'User', login: 'maintainer', url: 'https://github.com/maintainer', id: 'USER_1' };
-const CLEAN_COMMENT_BODY = `${githubReviewConstants.CLEAN_ISSUE_COMMENT_TEMPLATE}\n\n**Reviewed commit:** \`${HEAD.slice(0, 10)}\`\n\n<details>About Codex</details>`;
-const CLEAN_TADA_COMMENT_BODY = `Codex Review: Didn't find any major issues. :tada:\n\n**Reviewed commit:** \`${HEAD}\`\n\n<details>About Codex</details>`;
+const STRUCTURAL_COMMENT_BODY = `Chef's kiss.\n\n**Reviewed commit:** \`${HEAD.slice(0, 10)}\`\n\n<details>About Codex</details>`;
+const ALTERNATE_STRUCTURAL_COMMENT_BODY = `Review finished with different prose.\n\n**Reviewed commit:** \`${HEAD}\`\n\n<details>About Codex</details>`;
 
-function withDuplicateCleanAnchor(body, sha) {
+function withDuplicateReviewedCommitAnchor(body, sha) {
   return `${body}\n\n**Reviewed commit:** \`${sha}\``;
 }
 
@@ -179,7 +179,7 @@ function cleanIssueComment(overrides = {}) {
   return {
     id: 'IC_clean', databaseId: 202,
     url: 'https://github.com/example/aerstello/pull/2#issuecomment-202',
-    body: CLEAN_COMMENT_BODY, createdAt: AT, lastEditedAt: null, author: BOT, ...overrides,
+    body: STRUCTURAL_COMMENT_BODY, createdAt: AT, lastEditedAt: null, author: BOT, ...overrides,
   };
 }
 
@@ -2176,7 +2176,7 @@ test('collect rejects canonical reviews with missing or non-string bodies as uns
   }
 });
 
-test('collect records a unique canonical exact-head clean issue comment at the request-time boundary', async () => {
+test('collect records a unique canonical exact-head structural comment at the request boundary', async () => {
   const client = new FakeClient();
   client.comments.push(cleanIssueComment());
   const setup = workflow(pendingState('discovery'), client);
@@ -2190,12 +2190,12 @@ test('collect records a unique canonical exact-head clean issue comment at the r
   assert.equal(setup.state.current.ciValidationStatus.status, 'not-run');
 });
 
-test('collect records the literal :tada: clean issue comment with exact immutable identity', async () => {
+test('collect records changed surrounding prose with exact immutable identity', async () => {
   const client = new FakeClient();
   const observed = cleanIssueComment({
     id: 'IC_kwDOTqOdrM8AAAABNuD83Q', databaseId: 5215681757,
     url: 'https://github.com/example/aerstello/pull/2#issuecomment-5215681757',
-    body: CLEAN_TADA_COMMENT_BODY,
+    body: ALTERNATE_STRUCTURAL_COMMENT_BODY,
   });
   client.comments.push(observed);
   const setup = workflow(pendingState('discovery'), client);
@@ -2207,20 +2207,23 @@ test('collect records the literal :tada: clean issue comment with exact immutabl
     reviewerNodeId: BOT.id, reviewerType: BOT.__typename, reviewerUrl: BOT.url,
     reactionContent: null, reactionCommentId: null,
   });
-  assert.equal(client.comments.find((comment) => comment.id === observed.id).body, CLEAN_TADA_COMMENT_BODY);
+  assert.equal(
+    client.comments.find((comment) => comment.id === observed.id).body,
+    ALTERNATE_STRUCTURAL_COMMENT_BODY,
+  );
   assert.equal(setup.state.calls.at(-1).name, 'checkpointReviewOutcome');
 });
 
-test('collect rejects same-SHA and conflicting duplicate clean-comment anchors for both formats', async () => {
+test('collect rejects same-SHA and conflicting duplicate structural anchors', async () => {
   const formats = [
-    { body: CLEAN_COMMENT_BODY, anchorSha: HEAD.slice(0, 10), conflictingSha: OTHER_HEAD.slice(0, 10) },
-    { body: CLEAN_TADA_COMMENT_BODY, anchorSha: HEAD, conflictingSha: OTHER_HEAD },
+    { body: STRUCTURAL_COMMENT_BODY, anchorSha: HEAD.slice(0, 10), conflictingSha: OTHER_HEAD.slice(0, 10) },
+    { body: ALTERNATE_STRUCTURAL_COMMENT_BODY, anchorSha: HEAD, conflictingSha: OTHER_HEAD },
   ];
   for (const format of formats) {
     for (const duplicateSha of [format.anchorSha, format.conflictingSha]) {
       const client = new FakeClient();
       client.comments.push(cleanIssueComment({
-        body: withDuplicateCleanAnchor(format.body, duplicateSha),
+        body: withDuplicateReviewedCommitAnchor(format.body, duplicateSha),
       }));
       const setup = workflow(pendingState('discovery'), client);
       await assert.rejects(() => setup.api.collect(2), {
@@ -2233,7 +2236,7 @@ test('collect rejects same-SHA and conflicting duplicate clean-comment anchors f
 
   const unsupportedClient = new FakeClient();
   const unsupportedComment = cleanIssueComment({
-    body: withDuplicateCleanAnchor(CLEAN_TADA_COMMENT_BODY, HEAD),
+    body: withDuplicateReviewedCommitAnchor(ALTERNATE_STRUCTURAL_COMMENT_BODY, HEAD),
   });
   unsupportedClient.comments.push(unsupportedComment);
   const unsupported = await workflow(pendingState('verification'), unsupportedClient).api.collect(2);
@@ -2242,11 +2245,11 @@ test('collect rejects same-SHA and conflicting duplicate clean-comment anchors f
   assert.deepEqual(unsupported.escalation.evidenceIds, [`issue-comment:${unsupportedComment.id}`]);
 });
 
-test('collect ignores historical clean comments from prior requests', async () => {
+test('collect ignores historical structural comments from prior requests', async () => {
   const historical = cleanIssueComment({
     id: 'IC_historical', databaseId: 199, createdAt: '2026-08-04T23:59:59Z',
     author: { ...BOT, id: null },
-    body: CLEAN_COMMENT_BODY.replace(HEAD.slice(0, 10), OTHER_HEAD.slice(0, 10)),
+    body: STRUCTURAL_COMMENT_BODY.replace(HEAD.slice(0, 10), OTHER_HEAD.slice(0, 10)),
   });
   const historicalOnlyClient = new FakeClient();
   historicalOnlyClient.comments.push(historical);
@@ -2273,12 +2276,14 @@ test('collect ignores historical clean comments from prior requests', async () =
   assert.equal(currentSetup.state.calls[0].name, 'checkpointReviewOutcome');
 });
 
-test('clean issue comments fail closed for actors, time, anchors, and Git resolution', async () => {
+test('structural issue comments fail closed for identity, marker, and Git resolution', async () => {
   const cases = [
     { comment: cleanIssueComment({ author: VIEWER }) },
-    { comment: cleanIssueComment({ body: `${githubReviewConstants.CLEAN_ISSUE_COMMENT_TEMPLATE}\n\nNo anchor` }) },
-    { comment: cleanIssueComment({ body: `${githubReviewConstants.CLEAN_ISSUE_COMMENT_TEMPLATE}\n\n**Reviewed commit:** \`not-a-sha\`` }) },
-    { comment: cleanIssueComment({ body: CLEAN_COMMENT_BODY.replace(HEAD.slice(0, 10), OTHER_HEAD.slice(0, 10)) }) },
+    { comment: cleanIssueComment({ body: 'Prose.\n\n**Reviewed commit:** `not-a-sha`' }) },
+    { comment: cleanIssueComment({ body: STRUCTURAL_COMMENT_BODY.replace(HEAD.slice(0, 10), OTHER_HEAD.slice(0, 10)) }) },
+    { comment: cleanIssueComment({ body: STRUCTURAL_COMMENT_BODY.replace('Reviewed commit', 'Reviewed Commit') }) },
+    { comment: cleanIssueComment({ body: STRUCTURAL_COMMENT_BODY.replace(HEAD.slice(0, 10), HEAD.slice(0, 10).toUpperCase()) }) },
+    { comment: cleanIssueComment({ body: STRUCTURAL_COMMENT_BODY.replace('`\n\n<details>', '` trailing\n\n<details>') }) },
     { comment: cleanIssueComment({ lastEditedAt: '2026-08-05T00:00:01Z' }) },
     { comment: cleanIssueComment(), git: fakeGit({ resolveCommitPrefix: async () => [] }) },
     { comment: cleanIssueComment(), git: fakeGit({ resolveCommitPrefix: async () => [HEAD, OTHER_HEAD] }) },
@@ -2299,45 +2304,81 @@ test('clean issue comments fail closed for actors, time, anchors, and Git resolu
   });
 });
 
-test('unknown canonical no-major-issues wording and anchor variants are unsupported evidence', async () => {
-  const prefix = "Codex Review: Didn't find any major issues.";
+test('surrounding structural-comment prose does not affect clean classification', async () => {
   const anchor = `**Reviewed commit:** \`${HEAD.slice(0, 10)}\``;
   const variants = [
-    `${prefix} Good work!\n\n${anchor}`,
-    `${prefix} 🎉\n\n${anchor}`,
-    `${prefix}  Nice work!\n\n${anchor}`,
-    `${prefix} Nice work.\n\n${anchor}`,
-    `${prefix} nice work!\n\n${anchor}`,
-    `${prefix} :TADA:\n\n${anchor}`,
-    `${prefix} Nice work!\n${anchor}`,
-    `${prefix} Nice work!\r\n\r\n${anchor}`,
-    `${prefix} :tada:\n\n**Reviewed Commit:** \`${HEAD.slice(0, 10)}\``,
-    `${prefix} :tada:\n\n**Reviewed commit:** \`${HEAD.slice(0, 10).toUpperCase()}\``,
+    anchor,
+    `Chef's kiss.\n\n${anchor}`,
+    `Codex Review: Didn't find any major issues. :tada:\n\n${anchor}`,
+    `Arbitrary heading\n${anchor}\nArbitrary footer`,
   ];
   for (const [index, body] of variants.entries()) {
     const client = new FakeClient();
     const comment = cleanIssueComment({ id: `IC_variant_${index}`, databaseId: 300 + index, body });
     client.comments.push(comment);
-    const setup = workflow(pendingState('verification'), client);
+    const setup = workflow(pendingState('discovery'), client);
     const result = await setup.api.collect(2);
-    assert.equal(result.escalated, true);
-    assert.equal(result.escalation.reason, 'ambiguous-canonical-evidence');
-    assert.deepEqual(result.escalation.evidenceIds, [`issue-comment:${comment.id}`]);
-    assert.equal(setup.state.calls.at(-1).name, 'checkpointVerificationEscalation');
+    assert.equal(result.escalated, false);
+    assert.equal(result.outcome.id, comment.id);
+    assert.equal(result.outcome.outcome, 'clean');
+    assert.equal(setup.state.calls.at(-1).name, 'checkpointReviewOutcome');
   }
 });
 
-test('either clean issue-comment format remains ambiguous beside any second canonical evidence', async () => {
+test('unrelated and foreign top-level comments do not create structural evidence', async () => {
+  const ignoredOnly = new FakeClient();
+  ignoredOnly.comments.push(cleanIssueComment({
+    body: 'Canonical status prose without a reviewed-commit marker.',
+  }));
+  await assert.rejects(() => workflow(pendingState('verification'), ignoredOnly).api.collect(2), {
+    code: 'REVIEW_NOT_AVAILABLE',
+  });
+
+  const client = new FakeClient();
+  const exact = cleanIssueComment({ id: 'IC_exact', databaseId: 204 });
+  client.comments.push(
+    cleanIssueComment({ id: 'IC_unrelated', databaseId: 202, body: 'Unrelated canonical status.' }),
+    cleanIssueComment({ id: 'IC_foreign', databaseId: 203, author: VIEWER }),
+    exact,
+  );
+  const result = await workflow(pendingState('discovery'), client).api.collect(2);
+  assert.equal(result.outcome.id, exact.id);
+  assert.equal(result.outcome.outcome, 'clean');
+});
+
+test('post-request canonical roots prevent structural clean evidence after resolution', async () => {
+  for (const resolved of [false, true]) {
+    const client = new FakeClient();
+    const comment = cleanIssueComment({ id: `IC_root_${resolved}`, databaseId: resolved ? 204 : 203 });
+    client.comments.push(comment);
+    addThread(client, { resolved });
+    const result = await workflow(pendingState('verification'), client).api.collect(2);
+    assert.equal(result.escalated, true);
+    assert.equal(result.escalation.reason, 'ambiguous-canonical-evidence');
+    assert.deepEqual(result.escalation.evidenceIds, [`issue-comment:${comment.id}`]);
+  }
+
+  const historicalRoot = new FakeClient();
+  historicalRoot.comments.push(cleanIssueComment());
+  addThread(historicalRoot, {
+    resolved: true,
+    root: rootComment('THREAD_1', { createdAt: '2026-08-04T23:59:59Z' }),
+  });
+  const collected = await workflow(pendingState('discovery'), historicalRoot).api.collect(2);
+  assert.equal(collected.outcome.outcome, 'clean');
+});
+
+test('structural issue comments remain ambiguous beside any second canonical evidence', async () => {
   const mixed = new FakeClient();
   mixed.comments.push(
     cleanIssueComment(),
-    cleanIssueComment({ id: 'IC_clean_tada', databaseId: 203, body: CLEAN_TADA_COMMENT_BODY }),
+    cleanIssueComment({ id: 'IC_clean_alternate', databaseId: 203, body: ALTERNATE_STRUCTURAL_COMMENT_BODY }),
   );
   await assert.rejects(() => workflow(pendingState('discovery'), mixed).api.collect(2), {
     code: 'DISCOVERY_COLLECTION_UNRESOLVED',
   });
 
-  for (const body of [CLEAN_COMMENT_BODY, CLEAN_TADA_COMMENT_BODY]) {
+  for (const body of [STRUCTURAL_COMMENT_BODY, ALTERNATE_STRUCTURAL_COMMENT_BODY]) {
     for (const second of ['review', 'reaction']) {
       const client = new FakeClient();
       client.comments.push(cleanIssueComment({ body }));
@@ -2481,14 +2522,17 @@ test('complete freshly revalidates the recorded clean review submission body', a
   }
 });
 
-test('complete freshly revalidates clean issue-comment identity and content', async () => {
+test('complete freshly revalidates structural-comment identity and content', async () => {
   const goodClient = new FakeClient();
   goodClient.comments.push(cleanIssueComment());
   assert.equal((await workflow(issueCommentCompletedState(), goodClient).api.complete(2)).phase, 'complete');
 
-  const tadaClient = new FakeClient();
-  tadaClient.comments.push(cleanIssueComment({ body: CLEAN_TADA_COMMENT_BODY }));
-  assert.equal((await workflow(issueCommentCompletedState(), tadaClient).api.complete(2)).phase, 'complete');
+  const changedProseClient = new FakeClient();
+  changedProseClient.comments.push(cleanIssueComment({ body: ALTERNATE_STRUCTURAL_COMMENT_BODY }));
+  assert.equal(
+    (await workflow(issueCommentCompletedState(), changedProseClient).api.complete(2)).phase,
+    'complete',
+  );
 
   const mutations = [
     null,
@@ -2499,11 +2543,11 @@ test('complete freshly revalidates clean issue-comment identity and content', as
     cleanIssueComment({ author: { ...BOT, id: 'BOT_changed' } }),
     cleanIssueComment({ author: { ...BOT, login: 'chatgpt-codex-connector-renamed' } }),
     cleanIssueComment({ author: { ...BOT, url: 'https://github.com/apps/another-app' } }),
-    cleanIssueComment({ body: CLEAN_TADA_COMMENT_BODY, lastEditedAt: '2026-08-05T00:00:01Z' }),
-    cleanIssueComment({ body: CLEAN_COMMENT_BODY.replace('Nice work!', 'Good work!') }),
-    cleanIssueComment({ body: CLEAN_TADA_COMMENT_BODY.replace(':tada:', '🎉') }),
-    cleanIssueComment({ body: CLEAN_TADA_COMMENT_BODY.replace('**Reviewed commit:**', '**Reviewed Commit:**') }),
-    cleanIssueComment({ body: CLEAN_COMMENT_BODY.replace(HEAD.slice(0, 10), OTHER_HEAD.slice(0, 10)) }),
+    cleanIssueComment({ body: ALTERNATE_STRUCTURAL_COMMENT_BODY, lastEditedAt: '2026-08-05T00:00:01Z' }),
+    cleanIssueComment({ body: STRUCTURAL_COMMENT_BODY.replace('**Reviewed commit:**', '**Reviewed Commit:**') }),
+    cleanIssueComment({ body: STRUCTURAL_COMMENT_BODY.replace(HEAD.slice(0, 10), HEAD.slice(0, 10).toUpperCase()) }),
+    cleanIssueComment({ body: STRUCTURAL_COMMENT_BODY.replace(HEAD.slice(0, 10), OTHER_HEAD.slice(0, 10)) }),
+    cleanIssueComment({ body: STRUCTURAL_COMMENT_BODY.replace('`\n\n<details>', '` trailing\n\n<details>') }),
   ];
   for (const comment of mutations) {
     const client = new FakeClient();
@@ -2514,16 +2558,49 @@ test('complete freshly revalidates clean issue-comment identity and content', as
   }
 });
 
-test('complete rejects same-SHA and conflicting duplicate clean-comment anchors for both formats', async () => {
+test('complete rejects a later-resolved root from the structural review request', async () => {
+  const operationId = `reply:2:THREAD_1:${HEAD}`;
+  const reply = {
+    id: 'REPLY_resolved', databaseId: 901, url: 'https://x/reply', createdAt: AT, author: VIEWER,
+    replyTo: { id: 'ROOT_THREAD_1' }, pullRequestReview: null,
+    body: `Aerstello review resolution at ${HEAD}.\nTasks:\n- task-thread: ${HEAD}\nValidation: npm run check.\n${markerFor(operationId)}`,
+  };
+  const state = issueCommentCompletedState({
+    tasks: [{
+      id: 'task-thread', sourceIds: ['thread:THREAD_1'], sourceType: 'github-thread',
+      fingerprint: 'fp-thread', summary: 'Fix canonical finding.', severity: 'P1',
+      disposition: 'actionable', status: 'completed', integratedCommitSha: HEAD,
+      resolutionSummary: 'Fixed the finding.',
+    }],
+    threadResolutionStatus: {
+      status: 'passed', headSha: HEAD,
+      threads: [{
+        threadNodeId: 'THREAD_1', rootCommentNodeId: 'ROOT_THREAD_1', rootCommentDatabaseId: 41,
+        taskIds: ['task-thread'], disposition: 'fixed', replyId: reply.id, replyUrl: reply.url,
+        isResolved: true, resolvedAt: AT, resolvedBy: VIEWER.login, observedHeadSha: HEAD,
+      }],
+      threadlessVerification: proof('not-run').threadlessVerification,
+      updatedAt: AT,
+    },
+  });
+  const client = new FakeClient();
+  client.comments.push(cleanIssueComment());
+  addThread(client, { resolved: true, replies: [reply] });
+  await assert.rejects(() => workflow(state, client).api.complete(2), {
+    code: 'COMPLETION_NOT_READY',
+  });
+});
+
+test('complete rejects same-SHA and conflicting duplicate structural anchors', async () => {
   const formats = [
-    { body: CLEAN_COMMENT_BODY, anchorSha: HEAD.slice(0, 10), conflictingSha: OTHER_HEAD.slice(0, 10) },
-    { body: CLEAN_TADA_COMMENT_BODY, anchorSha: HEAD, conflictingSha: OTHER_HEAD },
+    { body: STRUCTURAL_COMMENT_BODY, anchorSha: HEAD.slice(0, 10), conflictingSha: OTHER_HEAD.slice(0, 10) },
+    { body: ALTERNATE_STRUCTURAL_COMMENT_BODY, anchorSha: HEAD, conflictingSha: OTHER_HEAD },
   ];
   for (const format of formats) {
     for (const duplicateSha of [format.anchorSha, format.conflictingSha]) {
       const client = new FakeClient();
       client.comments.push(cleanIssueComment({
-        body: withDuplicateCleanAnchor(format.body, duplicateSha),
+        body: withDuplicateReviewedCommitAnchor(format.body, duplicateSha),
       }));
       const setup = workflow(issueCommentCompletedState(), client);
       await assert.rejects(() => setup.api.complete(2), { code: 'COMPLETION_NOT_READY' });
