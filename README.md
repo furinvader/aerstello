@@ -10,8 +10,8 @@ Requirements: Node 24, npm 11, Docker with Compose.
 
 ```bash
 cp .env.example .env
-docker compose up -d db
 npm install
+npm run db:start:dev
 npm run assets:generate
 npm run build
 npm run db:migrate
@@ -49,6 +49,7 @@ The development seed creates `admin@aerstello.test`, requires an explicit passwo
 | `npm run test:e2e:full` | Run every E2E scenario and browser project (CI gate) |
 | `npm run review:status` | Show the active PR review state and next action |
 | `npm run lint:commit -- --last` | Validate the latest commit message |
+| `npm run db:start:dev` | Start a healthy loopback-only development PostgreSQL service |
 | `npm run db:migrate` | Apply pending PostgreSQL migrations |
 | `npm run admin:create -- …` | Create or recover the initial administrator |
 | `npm run db:migrate:dev -w @aerstello/api` | Apply migrations directly from TypeScript during API development |
@@ -57,7 +58,7 @@ The development seed creates `admin@aerstello.test`, requires an explicit passwo
 | `npm run check:release-state` | Fail on stale or inconsistent release metadata |
 | `npm run check:released-migrations` | Enforce immutable released migration blobs |
 
-Before E2E tests, start PostgreSQL with `docker compose up -d db` and install the
+Before E2E tests, start PostgreSQL with `npm run db:start:dev` and install the
 Playwright browsers with `npx playwright install`. Related E2E requires an
 explicit scenario selector and defaults to `tablet-chromium`; it never falls
 back to the full suite.
