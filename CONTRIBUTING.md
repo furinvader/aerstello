@@ -35,6 +35,13 @@ Follow these rules:
 - Use Git trailers for issue references and other metadata.
 - Mark breaking changes with `!` and explain them using `BREAKING CHANGE:`.
 
+Pull requests are squash-merged using the pull request title as the commit
+header and the pull request body as the commit body. The pull request title must
+therefore also follow this Conventional Commit format. Leave room for GitHub's
+appended ` (#<number>)` so the resulting header remains at or below 72
+characters. For a breaking change, include `!` in the title and a
+`BREAKING CHANGE:` footer in the pull request body.
+
 Stable scopes include `web`, `api`, `shared`, `db`, `pwa`, `e2e`, `docs`, and
 `ci`. This list is illustrative rather than exhaustive; prefer an existing
 scope when it accurately describes the change.
