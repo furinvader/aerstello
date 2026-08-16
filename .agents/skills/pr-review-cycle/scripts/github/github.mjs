@@ -5,10 +5,8 @@ import { reviewRequestGate, validatePrReviewState } from '../contracts/contracts
 const CANONICAL_LOGIN = 'chatgpt-codex-connector';
 const CANONICAL_URL = 'https://github.com/apps/chatgpt-codex-connector';
 const REQUEST_BODY = '@codex review';
-const CLEAN_ISSUE_COMMENT_PREFIX = "Codex Review: Didn't find any major issues.";
-const CLEAN_ISSUE_COMMENT_TEMPLATE = "Codex Review: Didn't find any major issues. Nice work!";
-const CLEAN_ISSUE_COMMENT_PATTERN = /^Codex Review: Didn't find any major issues\. (?:Nice work!|:tada:)\n\n\*\*Reviewed commit:\*\* `([0-9a-f]{7,40})`(?:\n|$)/u;
-const CLEAN_ISSUE_COMMENT_ANCHOR_PATTERN = /\*\*Reviewed commit:\*\*/gu;
+const REVIEWED_COMMIT_MARKER_LINE_PATTERN = /^\*\*Reviewed commit:\*\*.*$/gimu;
+const REVIEWED_COMMIT_ANCHOR_PATTERN = /^\*\*Reviewed commit:\*\* `([0-9a-f]{7,40})`$/gmu;
 const PAGE_SIZE = 50;
 const MAX_PAGES = 100;
 const MAX_NODES = 10_000;
@@ -822,35 +820,39 @@ function classifyReviewSubmission(review, threads) {
   return review.body.trim().length > 0 || hasAttachedCanonicalRoot ? 'findings' : 'clean';
 }
 
-async function classifyCleanIssueComments({ comments, request, git, cwd, expectedHeads }) {
+async function classifyStructuralIssueComments({ comments, request, threads, git, cwd, expectedHeads }) {
   const exact = [];
   const unsupported = [];
   for (const comment of comments) {
-    if (typeof comment.body !== 'string' || !comment.body.startsWith(CLEAN_ISSUE_COMMENT_PREFIX)) continue;
+    if (typeof comment.body !== 'string') continue;
+    const markerLines = [...comment.body.matchAll(REVIEWED_COMMIT_MARKER_LINE_PATTERN)];
+    if (markerLines.length === 0) continue;
     if (!evidenceAtOrAfter(comment.createdAt, request.at)) continue;
     if (!isCanonicalActor(comment.author)) continue;
     if (comment.lastEditedAt !== null) {
       unsupported.push(comment);
       continue;
     }
-    if ((comment.body.match(CLEAN_ISSUE_COMMENT_ANCHOR_PATTERN) ?? []).length !== 1) {
-      unsupported.push(comment);
-      continue;
-    }
-    const match = CLEAN_ISSUE_COMMENT_PATTERN.exec(comment.body);
-    if (!match) {
+    const anchors = [...comment.body.matchAll(REVIEWED_COMMIT_ANCHOR_PATTERN)];
+    if (markerLines.length !== 1 || anchors.length !== 1) {
       unsupported.push(comment);
       continue;
     }
     let candidates;
     try {
-      candidates = await git.resolveCommitPrefix(match[1], cwd);
+      candidates = await git.resolveCommitPrefix(anchors[0][1], cwd);
     } catch {
       candidates = [];
     }
     if (!Array.isArray(candidates) || candidates.length !== 1
         || !/^[0-9a-f]{40}$/u.test(candidates[0])
         || expectedHeads.some((head) => candidates[0] !== head)) {
+      unsupported.push(comment);
+      continue;
+    }
+    const hasPostRequestCanonicalRoot = threads.some((thread) => thread.canonical
+      && evidenceAtOrAfter(thread.root.createdAt, request.at));
+    if (hasPostRequestCanonicalRoot) {
       unsupported.push(comment);
       continue;
     }
@@ -1444,19 +1446,19 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       && isCanonicalActor(reaction.user) && evidenceAtOrAfter(reaction.createdAt, request.at));
     const unsupportedReactions = live.reactions.filter((reaction) => reaction.content === 'THUMBS_UP'
       && isCanonicalActor(reaction.user) && !evidenceAtOrAfter(reaction.createdAt, request.at));
-    const cleanComments = await classifyCleanIssueComments({
-      comments: live.comments, request, git, cwd: active.integrationWorktree,
+    const structuralComments = await classifyStructuralIssueComments({
+      comments: live.comments, request, threads: live.threads, git, cwd: active.integrationWorktree,
       expectedHeads: [request.headSha, active.currentIntegrationHeadSha, heads.pushedHeadSha,
         live.metadata.headRefOid],
     });
     const evidence = [
       ...exactReviews.map((review) => ({ type: 'review', value: review })),
       ...exactReactions.map((reaction) => ({ type: 'reaction', value: reaction })),
-      ...cleanComments.exact.map((item) => ({ type: 'issue-comment', value: item })),
+      ...structuralComments.exact.map((item) => ({ type: 'issue-comment', value: item })),
     ];
     if (evidence.length !== 1 || staleReviews.length > 0
         || unsupportedReviews.length > 0 || unsupportedReactions.length > 0
-        || cleanComments.unsupported.length > 0) {
+        || structuralComments.unsupported.length > 0) {
       if (request.kind !== 'verification') {
         throw new GitHubWorkflowError('Discovery review evidence is stale or ambiguous', 'DISCOVERY_COLLECTION_UNRESOLVED');
       }
@@ -1466,14 +1468,14 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
         ...unsupportedReviews.map((item) => canonicalEvidenceId(item, 'review')),
         ...exactReactions.map((item) => canonicalEvidenceId(item, 'reaction')),
         ...unsupportedReactions.map((item) => canonicalEvidenceId(item, 'reaction')),
-        ...cleanComments.exact.map((item) => canonicalEvidenceId(item.comment, 'issue-comment')),
-        ...cleanComments.unsupported.map((item) => canonicalEvidenceId(item, 'issue-comment')),
+        ...structuralComments.exact.map((item) => canonicalEvidenceId(item.comment, 'issue-comment')),
+        ...structuralComments.unsupported.map((item) => canonicalEvidenceId(item, 'issue-comment')),
       ];
       if (ids.length === 0) {
         throw new GitHubWorkflowError('Canonical review evidence is not available yet', 'REVIEW_NOT_AVAILABLE');
       }
       const reason = unsupportedReviews.length > 0 || unsupportedReactions.length > 0
-        || cleanComments.unsupported.length > 0
+        || structuralComments.unsupported.length > 0
         || evidence.length > 1 || (evidence.length === 1 && ids.length > 1)
         ? 'ambiguous-canonical-evidence' : 'stale-canonical-evidence';
       active = await stateAdapter.checkpointVerificationEscalation({
@@ -1545,9 +1547,9 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
           && reaction.content === 'THUMBS_UP' && isCanonicalActor(reaction.user)
           && evidenceAtOrAfter(reaction.createdAt, state.reviewRequest.at));
       } else {
-        const classified = await classifyCleanIssueComments({
+        const classified = await classifyStructuralIssueComments({
           comments: live.comments.filter((comment) => comment.id === state.reviewOutcome.id),
-          request: state.reviewRequest, git, cwd: state.integrationWorktree,
+          request: state.reviewRequest, threads: live.threads, git, cwd: state.integrationWorktree,
           expectedHeads: [state.reviewRequest.headSha, state.currentIntegrationHeadSha,
             heads.pushedHeadSha, live.metadata.headRefOid],
         });
@@ -1606,5 +1608,5 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
 
 export const githubReviewConstants = {
   CANONICAL_LOGIN, CANONICAL_URL, REQUEST_BODY, PAGE_SIZE, FULL_VALIDATION_CHECK, GITHUB_ACTIONS_APP,
-  FULL_VALIDATION_WORKFLOW, FULL_VALIDATION_WORKFLOW_PATH, CLEAN_ISSUE_COMMENT_TEMPLATE,
+  FULL_VALIDATION_WORKFLOW, FULL_VALIDATION_WORKFLOW_PATH,
 };

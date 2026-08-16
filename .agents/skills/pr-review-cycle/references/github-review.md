@@ -69,19 +69,21 @@ any attached canonical root is findings even when the body is empty. A missing
 or non-string body is unsupported evidence and fails closed; never parse prose,
 badge text, or severity wording to weaken that classification. Completion
 rechecks the recorded clean review against these same live body and root rules.
-Codex's official top-level comment may prove clean only when its first line is
-exactly `Codex Review: Didn't find any major issues. Nice work!` or
-`Codex Review: Didn't find any major issues. :tada:`, it follows the recorded
-request, its body has never been edited, and it has exactly one structured
-`**Reviewed commit:** \`<abbreviated-sha>\`` anchor line, whose prefix resolves
-uniquely through complete local Git history to the recorded request,
-integration, pushed, and live PR commit. Record its immutable comment identity
-as `issue-comment` evidence. A clean thumbs-up on the recorded request may also
-be accepted while its commit remains current. Multiple canonical reviews,
-clean comments, or reactions are ambiguous; foreign, pre-request, malformed,
-unresolvable, or stale evidence fails closed. Any other canonical post-request
-comment beginning with the shared no-major-issues prefix is unsupported clean
-evidence and fails closed rather than being treated as absent.
+Codex's official top-level comment may prove clean when it follows the recorded
+request, its body has never been edited, and it contains exactly one full
+structured `**Reviewed commit:** \`<lowercase-sha-prefix>\`` anchor line. The
+prefix must resolve uniquely through complete local Git history to the recorded
+request, integration, pushed, and live PR commit. Surrounding prose does not
+participate in classification. Record the immutable comment identity as
+`issue-comment` evidence only when no canonical review root was created at or
+after the request. Count resolved as well as unresolved roots so later
+resolution cannot erase findings history; unresolved threads remain the final
+review-ready and Done gate. Ignore unrelated canonical comments without the
+marker. Edited, malformed, duplicate, case-changed, unresolvable, ambiguous, or
+wrong-head marker evidence fails closed. A clean thumbs-up on the recorded
+request may also be accepted while its commit remains current. Multiple
+canonical reviews, structural comments, or reactions are ambiguous; foreign or
+pre-request evidence is not applicable.
 
 ## Resolve findings
 

@@ -90,11 +90,14 @@ Only the orchestrator posts exactly `@codex review`. Record the Review commit
 and request evidence. After targeted validation and push, Codex review and full
 CI may run concurrently. Accept ordinary review evidence only when the review
 commit, recorded request commit, and current PR head all match. Clean evidence
-may also be the canonical Bot's official top-level no-major-issues comment when
-its structured `Reviewed commit` anchor resolves uniquely through complete
-local Git history to every current head, or a thumbs-up on the recorded request.
-Either form must follow the request; multiple canonical evidence items are
-ambiguous.
+may also be the canonical Bot's immutable post-request top-level comment when
+it contains exactly one full structured `Reviewed commit` anchor whose
+lowercase Git prefix resolves uniquely through complete local history to every
+current head. Surrounding prose is not classified. This structural marker is
+clean only when no canonical review root was created at or after the request,
+including a root that was later resolved; unresolved threads remain separate
+review-ready and Done gates. A thumbs-up on the recorded request is also
+eligible. Multiple canonical evidence items are ambiguous.
 
 ## Phase 6: Finish or recover
 
