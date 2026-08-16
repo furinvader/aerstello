@@ -40,11 +40,11 @@ import {
   taskPacketDirectory,
 } from '../paths.mjs';
 import {
-  isReviewerEvidenceApplicable,
+  isSpecialistEvidenceApplicable,
   loadRegistry,
-  requiredReviewerIds,
+  requiredSpecialistIds,
   routeSpecialists,
-  validateReviewerEvidence,
+  validateSpecialistEvidence,
 } from '../../../aerstello-specialists/scripts/validate-registry.mjs';
 
 export { completionGate, reviewRequestGate } from '../contracts/contracts.mjs';
@@ -53,6 +53,7 @@ export { gitCommonDirectory, repositoryRoot, reviewRoot } from '../paths.mjs';
 export const ACTIVE_STATE_LIMIT_BYTES = 64 * 1024;
 const DEFAULT_LOCK_TIMEOUT_MS = 5000;
 const DEFAULT_STALE_LOCK_MS = 5 * 60 * 1000;
+const PR_FINAL_VERIFIER_ID = 'integration_verifier';
 const TRANSITION_AUTHORIZATION = Symbol('guarded PR review transition');
 
 export class StateError extends Error {
@@ -381,10 +382,13 @@ function specialistRouteFor(packet, planningSignals = {}) {
   });
 }
 
-function normalizedRequiredReviewerIds(route, { stage }) {
-  const ids = requiredReviewerIds(route, { phase: stage === 'post-integration' ? 'review' : 'planning' });
-  return [...new Set(stage === 'post-integration'
-    ? ids.filter((id) => id !== 'integration_verifier') : ids)].sort();
+function specialistPhaseForStage(stage) {
+  return stage === 'post-integration' ? 'review' : 'planning';
+}
+
+function normalizedRequiredSpecialistIds(route, { stage }) {
+  const ids = requiredSpecialistIds(route, { phase: specialistPhaseForStage(stage) });
+  return [...new Set(ids)].sort();
 }
 
 function canonicalBundleTaskRoute(task, stage) {
@@ -540,7 +544,7 @@ function validateSpecialistBundle(bundle, state) {
   else {
     const reviewers = [];
     const required = new Set(bundle.tasks?.flatMap((task) =>
-      normalizedRequiredReviewerIds(task.route, { stage: bundle.stage })) ?? []);
+      normalizedRequiredSpecialistIds(task.route, { stage: bundle.stage })) ?? []);
     for (const record of bundle.records) {
       if (!record || typeof record !== 'object' || Array.isArray(record)) {
         errors.push('bundle record must be an object');
@@ -555,7 +559,11 @@ function validateSpecialistBundle(bundle, state) {
       }
       if (typeof record?.reviewerId === 'string') reviewers.push(record.reviewerId);
       if (!required.has(record?.reviewerId)) errors.push(`bundle record ${record?.reviewerId ?? 'unknown'} is not routed`);
-      if (!isReviewerEvidenceApplicable({ evidence: record, integratedHeadSha: bundle.headSha })) {
+      if (!isSpecialistEvidenceApplicable({
+        evidence: record,
+        subjectSha: bundle.headSha,
+        phase: specialistPhaseForStage(bundle.stage),
+      })) {
         errors.push(`bundle record ${record?.reviewerId ?? 'unknown'} is stale`);
       }
       if (record?.schemaVersion !== 1 || record?.planRevision !== bundle.stateRevision) {
@@ -708,7 +716,7 @@ function validateTaskBindingProvenance(provenance, state, task, packet) {
   }
   let requiredPlanning = [];
   try {
-    requiredPlanning = normalizedRequiredReviewerIds(canonicalRoute ?? provenance.route, { stage: 'pre-bind' });
+    requiredPlanning = normalizedRequiredSpecialistIds(canonicalRoute ?? provenance.route, { stage: 'pre-bind' });
   } catch (error) {
     errors.push(`provenance planning reviewers are invalid: ${error.message}`);
   }
@@ -741,7 +749,9 @@ function validateTaskBindingProvenance(provenance, state, task, packet) {
             || evidence.reviewerId !== 'behavior_mapper' || evidence.status !== 'clean') {
           errors.push('provenance behavior mapper evidence does not match its clean exact plan');
         }
-        if (!isReviewerEvidenceApplicable({ evidence, integratedHeadSha: provenance.reviewedHeadSha })) {
+        if (!isSpecialistEvidenceApplicable({
+          evidence, subjectSha: provenance.reviewedHeadSha, phase: 'planning',
+        })) {
           errors.push('provenance behavior mapper evidence is stale for the reviewed HEAD');
         }
         errors.push(...conciseSpecialistPayloadErrors({
@@ -1010,16 +1020,25 @@ export function recordSpecialistReview({ cwd = process.cwd(), prNumber, input, e
       }
       assertPostIntegrationBundleCoverage(cwd, state, bundle);
     }
-    const required = new Set(bundle.tasks.flatMap((task) => normalizedRequiredReviewerIds(task.route, { stage: bundle.stage })));
+    const required = new Set(bundle.tasks.flatMap((task) =>
+      normalizedRequiredSpecialistIds(task.route, { stage: bundle.stage })));
     if (!required.has(input.reviewerId)) throw new StateError(`Reviewer ${input.reviewerId} is not routed by this plan`, 'SPECIALIST_REVIEWER_MISMATCH');
     const evidence = {
       schemaVersion: 1, planRevision: input.planRevision, headSha: input.headSha,
       reviewerId: input.reviewerId, status: input.outcome, summary: input.summary,
       findings: input.findings, recordedAt: now(),
     };
-    const route = bundle.tasks.find((task) => normalizedRequiredReviewerIds(task.route, { stage: bundle.stage }).includes(input.reviewerId)).route;
-    const oneReviewerRoute = { ...route, reviewers: route.reviewers.filter((reviewer) => reviewer.id === input.reviewerId) };
-    const evidenceErrors = validateReviewerEvidence({ evidence: [evidence], route: oneReviewerRoute, integratedHeadSha: bundle.headSha });
+    const phase = specialistPhaseForStage(bundle.stage);
+    const route = bundle.tasks.find((task) =>
+      normalizedRequiredSpecialistIds(task.route, { stage: bundle.stage }).includes(input.reviewerId)).route;
+    const routeField = phase === 'planning' ? 'planningHelpers' : 'riskReviewers';
+    const oneSpecialistRoute = {
+      ...route,
+      [routeField]: route[routeField].filter((specialist) => specialist.id === input.reviewerId),
+    };
+    const evidenceErrors = validateSpecialistEvidence({
+      evidence: [evidence], route: oneSpecialistRoute, subjectSha: bundle.headSha, phase,
+    });
     if (evidenceErrors.length > 0) {
       throw new StateError(`Invalid specialist reviewer evidence:\n- ${evidenceErrors.join('\n- ')}`, 'INVALID_SPECIALIST_REVIEW');
     }
@@ -1052,10 +1071,12 @@ function assertBehaviorMapperBundleComplete(bundle, packet) {
   if (canonicalSerializedJson(planned.taskPacket) !== canonicalSerializedJson(packet)) {
     throw new StateError(`Task ${packet.taskId} differs from its exact pre-bind specialist packet`, 'SPECIALIST_PLAN_TASK_MISMATCH');
   }
-  const required = normalizedRequiredReviewerIds(planned.route, { stage: 'pre-bind' });
+  const required = normalizedRequiredSpecialistIds(planned.route, { stage: 'pre-bind' });
   if (required.includes('behavior_mapper')) {
     const mapper = bundle.records.find((record) => record.reviewerId === 'behavior_mapper');
-    if (!mapper || mapper.status !== 'clean' || !isReviewerEvidenceApplicable({ evidence: mapper, integratedHeadSha: packet.reviewedHeadSha })) {
+    if (!mapper || mapper.status !== 'clean' || !isSpecialistEvidenceApplicable({
+      evidence: mapper, subjectSha: packet.reviewedHeadSha, phase: 'planning',
+    })) {
       throw new StateError('Behavior mapper must record a current-plan clean result before packet binding', 'BEHAVIOR_MAPPING_REQUIRED');
     }
     const hasExactRelatedE2E = packet.requiredValidation.system.some((entry) =>
@@ -1134,14 +1155,19 @@ export function specialistContext({ cwd = process.cwd(), prNumber } = {}) {
   const bundle = readSpecialistBundle(cwd, state);
   if (bundle.stage !== 'post-integration') throw new StateError('Current specialist bundle is not a post-integration review plan', 'SPECIALIST_EVIDENCE_MISSING');
   const { entries, packets, expectedTasks } = assertPostIntegrationBundleCoverage(cwd, state, bundle);
-  const required = [...new Set(bundle.tasks.flatMap((task) => normalizedRequiredReviewerIds(task.route, { stage: 'post-integration' })))].sort();
+  const required = [...new Set(bundle.tasks.flatMap((task) =>
+    normalizedRequiredSpecialistIds(task.route, { stage: 'post-integration' })))].sort();
   const records = new Map(bundle.records.map((record) => [record.reviewerId, record]));
   const missing = required.filter((id) => !records.has(id));
   const stale = required.filter((id) => records.has(id)
-    && !isReviewerEvidenceApplicable({ evidence: records.get(id), integratedHeadSha: state.currentIntegrationHeadSha }));
+    && !isSpecialistEvidenceApplicable({
+      evidence: records.get(id), subjectSha: state.currentIntegrationHeadSha, phase: 'review',
+    }));
   const findings = required.filter((id) => records.get(id)?.status === 'findings')
     .map((id) => records.get(id));
   const routes = expectedTasks.map(({ taskId, route }) => ({ phase: 'post-integration', taskId, route }));
+  const finalVerificationPriority = expectedTasks.some(({ route }) =>
+    route.finalVerificationPriority === 'high') ? 'high' : 'standard';
   const specialistResults = required.filter((id) => records.has(id)).map((id) => records.get(id));
   const preBindPlanning = entries.map(({ provenance }) => canonicalJson({
     phase: 'pre-bind',
@@ -1163,6 +1189,10 @@ export function specialistContext({ cwd = process.cwd(), prNumber } = {}) {
     packets: packets.map((packet) => canonicalJson(packet)),
     preBindPlanning,
     routes,
+    finalVerification: {
+      verifierId: PR_FINAL_VERIFIER_ID,
+      priority: finalVerificationPriority,
+    },
     requiredReviewerIds: required,
     missingReviewerIds: missing,
     staleReviewerIds: stale,
@@ -1240,11 +1270,14 @@ export function readSpecialistStatus({ cwd = process.cwd(), prNumber } = {}) {
   try {
     const bundle = readSpecialistBundle(cwd, state, { headSha });
     assertPostIntegrationBundleCoverage(cwd, state, bundle);
-    const required = [...new Set(bundle.tasks.flatMap((task) => normalizedRequiredReviewerIds(task.route, { stage: bundle.stage })))].sort();
+    const required = [...new Set(bundle.tasks.flatMap((task) =>
+      normalizedRequiredSpecialistIds(task.route, { stage: bundle.stage })))].sort();
     const recorded = bundle.records.map((record) => record.reviewerId).sort();
     const missing = required.filter((id) => !recorded.includes(id));
-    const stale = bundle.records.filter((record) => !isReviewerEvidenceApplicable({
-      evidence: record, integratedHeadSha: bundle.headSha,
+    const stale = bundle.records.filter((record) => !isSpecialistEvidenceApplicable({
+      evidence: record,
+      subjectSha: bundle.headSha,
+      phase: specialistPhaseForStage(bundle.stage),
     })).map((record) => record.reviewerId).sort();
     const findings = bundle.records.filter((record) => record.status === 'findings').map((record) => record.reviewerId).sort();
     return {
