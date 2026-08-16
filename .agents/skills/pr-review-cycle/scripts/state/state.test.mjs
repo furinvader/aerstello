@@ -3400,9 +3400,13 @@ test('behavior mapping gates binding and exact-head risk evidence feeds only ver
   assert.deepEqual(context.packets, [browserPacket]);
   assert.deepEqual(context.routes.map(({ taskId }) => taskId), ['browser-task']);
   assert.equal(context.routes[0].route.profileGuidePath, 'profiles/web.md');
-  assert.deepEqual(context.routes[0].route.reviewers.map(({ id }) => id), [
-    'behavior_mapper', 'integration_verifier',
-  ]);
+  assert.equal(context.routes[0].route.schemaVersion, 2);
+  assert.deepEqual(context.routes[0].route.planningHelpers.map(({ id }) => id), ['behavior_mapper']);
+  assert.deepEqual(context.routes[0].route.riskReviewers, []);
+  assert.equal(JSON.stringify(context.routes[0].route).includes('integration_verifier'), false);
+  assert.deepEqual(context.finalVerification, {
+    verifierId: 'integration_verifier', priority: 'standard',
+  });
   assert.deepEqual(context.requiredReviewerIds, []);
   assert.equal(readSpecialistStatus({ cwd }).status, 'clean');
 });
@@ -3436,6 +3440,8 @@ test('signal-only behavior mapping survives binding and compound provenance tamp
   assert.deepEqual(provenance.planningSignals, {
     browserVisible: false, testSelectionUncertain: true,
   });
+  assert.equal(provenance.route.schemaVersion, 2);
+  assert.equal(JSON.stringify(provenance.route).includes('integration_verifier'), false);
   assert.equal(provenance.behaviorMapperResult.phase, 'planning');
   assert.equal(provenance.behaviorMapperResult.evidence.headSha, packet.reviewedHeadSha);
 
@@ -3447,16 +3453,18 @@ test('signal-only behavior mapping survives binding and compound provenance tamp
   };
   const post = planSpecialists({ cwd, input: postInput, expectedRevision: state.revision, now: () => AT });
   assert.deepEqual(post.tasks[0].planningSignals, provenance.planningSignals);
-  assert.deepEqual(post.tasks[0].route.reviewers.map(({ id }) => id), [
-    'behavior_mapper', 'integration_verifier',
-  ]);
+  assert.deepEqual(post.tasks[0].route.planningHelpers.map(({ id }) => id), ['behavior_mapper']);
+  assert.deepEqual(post.tasks[0].route.riskReviewers, []);
   assert.deepEqual(post.records, []);
   const context = specialistContext({ cwd });
   assert.equal(context.readyForIntegrationVerifier, true);
   assert.deepEqual(context.requiredReviewerIds, []);
+  assert.deepEqual(context.finalVerification, {
+    verifierId: 'integration_verifier', priority: 'standard',
+  });
   assert.equal(context.preBindPlanning[0].phase, 'pre-bind');
   assert.equal(context.preBindPlanning[0].behaviorMapperResult.phase, 'planning');
-  assert.equal(context.preBindPlanning[0].route.reviewers[0].reasons[0], 'signal:testSelectionUncertain');
+  assert.equal(context.preBindPlanning[0].route.planningHelpers[0].reasons[0], 'signal:testSelectionUncertain');
   assert.equal(context.routes[0].phase, 'post-integration');
   assert.equal(context.postIntegrationReview.phase, 'review');
   assert.deepEqual(context.postIntegrationReview.specialistResults, []);
@@ -3660,9 +3668,85 @@ test('behavior mapping remains bound to the reviewed commit after dependent inte
   });
   assert.equal(postRoute.phase, 'post-integration');
   assert.equal(postRoute.route.signals.browserVisible, true);
-  assert.ok(postRoute.route.reviewers.some(({ id }) => id === 'behavior_mapper'));
+  assert.ok(postRoute.route.planningHelpers.some(({ id }) => id === 'behavior_mapper'));
   assert.equal(context.headSha, laterIntegratedHead);
   assert.notEqual(context.headSha, preBind.reviewedHeadSha);
+});
+
+test('PR context selects its own final verifier and aggregates high priority across routes', () => {
+  const cwd = repo();
+  let state = integratedTasks(cwd, ['security-task', 'billing-task']);
+  const securityPacket = taskPacket(state.currentIntegrationHeadSha, 'security-task', {
+    specialization: 'api', riskTags: ['authorization'],
+  });
+  const billingPacket = taskPacket(state.currentIntegrationHeadSha, 'billing-task', {
+    specialization: 'api', riskTags: ['billing'],
+  });
+  state = bindPackets(cwd, state, [securityPacket, billingPacket]);
+  assert.equal(state.schemaVersion, 3);
+  buildTargetedValidationPlan({ cwd, now: () => AT });
+  state = executeTargetedValidationPlan({
+    cwd, runCommand: () => ({ status: 0 }), now: () => AT,
+  }).state;
+  const bundle = planSpecialists({
+    cwd, expectedRevision: state.revision, now: () => AT,
+    input: {
+      schemaVersion: 1, stage: 'post-integration', headSha: state.currentIntegrationHeadSha,
+      tasks: [{ taskPacket: securityPacket }, { taskPacket: billingPacket }],
+    },
+  });
+  assert.deepEqual(bundle.tasks.map(({ route: taskRoute }) =>
+    taskRoute.finalVerificationPriority), ['high', 'standard']);
+  assert.equal(bundle.tasks.every(({ route: taskRoute }) =>
+    JSON.stringify(taskRoute).includes('integration_verifier') === false), true);
+
+  let context = specialistContext({ cwd });
+  assert.deepEqual(context.finalVerification, {
+    verifierId: 'integration_verifier', priority: 'high',
+  });
+  assert.deepEqual(context.requiredReviewerIds, ['security_reviewer']);
+  assert.equal(context.requiredReviewerIds.includes('integration_verifier'), false);
+  assert.equal(context.readyForIntegrationVerifier, false);
+  assert.deepEqual(readSpecialistStatus({ cwd }), {
+    status: 'pending',
+    headSha: state.currentIntegrationHeadSha,
+    stateRevision: state.revision,
+    bundlePath: specialistReviewBundlePath(
+      cwd, state.prNumber, state.currentIntegrationHeadSha, state.revision,
+    ),
+    stage: 'post-integration',
+    requiredReviewerIds: ['security_reviewer'],
+    recordedReviewerIds: [],
+    missingReviewerIds: ['security_reviewer'],
+    staleReviewerIds: [],
+    findingReviewerIds: [],
+  });
+  assert.throws(() => recordSpecialistReview({
+    cwd, expectedRevision: state.revision, now: () => AT,
+    input: {
+      schemaVersion: 1, planRevision: state.revision, headSha: state.currentIntegrationHeadSha,
+      reviewerId: 'integration_verifier', outcome: 'clean', summary: 'Not reusable evidence.', findings: [],
+    },
+  }), { code: 'SPECIALIST_REVIEWER_MISMATCH' });
+
+  recordSpecialistReview({
+    cwd, expectedRevision: state.revision, now: () => AT,
+    input: {
+      schemaVersion: 1, planRevision: state.revision, headSha: state.currentIntegrationHeadSha,
+      reviewerId: 'security_reviewer', outcome: 'clean', summary: 'No authorization finding.', findings: [],
+    },
+  });
+  context = specialistContext({ cwd });
+  assert.equal(context.readyForIntegrationVerifier, true);
+  assert.deepEqual(context.finalVerification, {
+    verifierId: 'integration_verifier', priority: 'high',
+  });
+  const status = readSpecialistStatus({ cwd });
+  assert.equal(status.status, 'clean');
+  assert.deepEqual(status.requiredReviewerIds, ['security_reviewer']);
+  assert.deepEqual(status.recordedReviewerIds, ['security_reviewer']);
+  assert.equal(status.requiredReviewerIds.includes('integration_verifier'), false);
+  assert.equal(status.requiredReviewerIds.includes('behavior_mapper'), false);
 });
 
 test('specialist risk evidence is exact reviewer/head/revision, deduplicated, tamper-proof, and stale after HEAD change', () => {
@@ -3681,7 +3765,12 @@ test('specialist risk evidence is exact reviewer/head/revision, deduplicated, ta
       tasks: [{ taskPacket: packet }],
     },
   });
-  assert.equal(specialistContext({ cwd }).status, 'incomplete');
+  const pendingContext = specialistContext({ cwd });
+  assert.equal(pendingContext.status, 'incomplete');
+  assert.deepEqual(pendingContext.requiredReviewerIds, ['security_reviewer']);
+  assert.deepEqual(pendingContext.finalVerification, {
+    verifierId: 'integration_verifier', priority: 'standard',
+  });
   assert.equal(readSpecialistStatus({ cwd }).status, 'pending');
   const record = {
     schemaVersion: 1, planRevision: state.revision, headSha: state.currentIntegrationHeadSha,
@@ -3723,7 +3812,7 @@ test('specialist risk evidence is exact reviewer/head/revision, deduplicated, ta
   writeFileSync(bundlePath, `${JSON.stringify(bundle)}\n`);
   writeFileSync(bundlePath, `${JSON.stringify({
     ...bundle,
-    tasks: bundle.tasks.map((item) => ({ ...item, route: { ...item.route, reviewers: [] } })),
+    tasks: bundle.tasks.map((item) => ({ ...item, route: { ...item.route, riskReviewers: [] } })),
   })}\n`);
   assert.throws(() => specialistContext({ cwd }), { code: 'INVALID_SPECIALIST_REVIEW' });
   writeFileSync(bundlePath, `${JSON.stringify(bundle)}\n`);

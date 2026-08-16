@@ -22,6 +22,20 @@ const EXPECTED_FILES = [
   'scripts/validate-registry.mjs', 'scripts/validate-registry.test.mjs',
 ];
 
+const EXPECTED_EXTERNAL_ADAPTERS = [
+  { path: '.codex/agents/behavior-mapper.toml', targets: ['references/routing.md', 'references/reviewer-contracts.md'] },
+  { path: '.codex/agents/security-reviewer.toml', targets: ['references/reviewer-contracts.md'] },
+  { path: '.codex/agents/offline-realtime-reviewer.toml', targets: ['references/reviewer-contracts.md'] },
+  { path: '.codex/config.toml', targets: [] },
+  { path: 'AGENTS.md', targets: ['README.md'] },
+];
+
+const EXPECTED_WORKFLOW_CONSUMERS = [
+  { path: '.codex/agents/integration-verifier.toml', targets: ['references/reviewer-contracts.md'] },
+  { path: '.codex/agents/review-fix-worker.toml', targets: ['registry.json'] },
+  { path: '.agents/skills/pr-review-cycle/ownership.json', targets: [] },
+];
+
 function filesBelow(directory) {
   const files = [];
   const pending = [directory];
@@ -52,10 +66,14 @@ test('ownership manifest covers every canonical file and keeps duplicate locatio
   assert.equal(ownership.skillRoot, '.agents/skills/aerstello-specialists');
   assert.deepEqual(ownership.canonicalFiles, EXPECTED_FILES);
   assert.deepEqual(filesBelow(skillDirectory), EXPECTED_FILES);
+  assert.deepEqual(ownership.permittedExternalAdapters, EXPECTED_EXTERNAL_ADAPTERS);
+  assert.deepEqual(ownership.permittedWorkflowConsumers, EXPECTED_WORKFLOW_CONSUMERS);
   for (const obsoletePath of ownership.obsoletePaths) {
     assert.equal(existsSync(join(repositoryRoot(), obsoletePath)), false, `obsolete specialist path exists: ${obsoletePath}`);
   }
-  for (const adapter of ownership.permittedExternalAdapters) {
+  for (const adapter of [
+    ...ownership.permittedExternalAdapters, ...ownership.permittedWorkflowConsumers,
+  ]) {
     const adapterPath = join(repositoryRoot(), adapter.path);
     assert.equal(existsSync(adapterPath), true, `missing external adapter ${adapter.path}`);
     const adapterSource = readFileSync(adapterPath, 'utf8');
@@ -105,11 +123,25 @@ function assertReadOnlyAgent(path, expectedName) {
   assert.match(source, /Never[^.]*\bdelegate\b/u);
 }
 
-test('specialist adapters and integration verifier remain read-only and non-delegating', () => {
+test('the three reusable specialist adapters remain read-only and non-delegating', () => {
   assertReadOnlyAgent('.codex/agents/behavior-mapper.toml', 'behavior_mapper');
   assertReadOnlyAgent('.codex/agents/security-reviewer.toml', 'security_reviewer');
   assertReadOnlyAgent('.codex/agents/offline-realtime-reviewer.toml', 'offline_realtime_reviewer');
+  assert.deepEqual(
+    EXPECTED_EXTERNAL_ADAPTERS.filter(({ path }) => path.startsWith('.codex/agents/'))
+      .map(({ path }) => path),
+    [
+      '.codex/agents/behavior-mapper.toml',
+      '.codex/agents/security-reviewer.toml',
+      '.codex/agents/offline-realtime-reviewer.toml',
+    ],
+  );
+});
+
+test('the PR integration verifier remains a read-only workflow consumer', () => {
   assertReadOnlyAgent('.codex/agents/integration-verifier.toml', 'integration_verifier');
+  assert.ok(EXPECTED_WORKFLOW_CONSUMERS.some(({ path }) =>
+    path === '.codex/agents/integration-verifier.toml'));
 });
 
 test('hook role boundary and four-thread cap remain authoritative', () => {
