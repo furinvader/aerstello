@@ -1,4 +1,4 @@
 interface:
   display_name: "Aerstello Specialists"
-  short_description: "Route Aerstello review work by risk"
-  default_prompt: "Use $aerstello-specialists to classify this review work and select the required specialist guidance."
+  short_description: "Route Aerstello work by profile and risk"
+  default_prompt: "Use $aerstello-specialists to classify this work and select reusable planning, risk-review, and profile guidance."
