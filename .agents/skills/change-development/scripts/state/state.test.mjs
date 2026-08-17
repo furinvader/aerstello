@@ -493,6 +493,8 @@ test('pointerless uncommitted transition staging and empty shells roll back safe
   await initializeState({ cwd: later.cwd, changeId: 'later-staging', mode: 'plan-only', baseBranch: 'main', planningRef: later.sha, source: descriptor });
   mkdirSync(join(changeDirectory(later.cwd, 'later-staging'), 'transitions',
     '.00000001.2147483647.00000000-0000-4000-8000-000000000007.pending'));
+  assert.throws(() => validateState({ cwd: later.cwd }), (error) => error.code === 'RECOVERY_REQUIRED');
+  assert.match(renderStatus({ cwd: later.cwd }), /Phase: recovering[\s\S]*change:state recover/u);
   const laterRecovery = recoverState({ cwd: later.cwd });
   assert.equal(laterRecovery.recovered, true);
   assert.equal(laterRecovery.rolledBack, true);
@@ -527,6 +529,19 @@ test('recovery rejects tampered predecessor events and semantically mismatched r
   assert.throws(() => validateState({ cwd: other.cwd }), (error) => error.code === 'RECOVERY_EVIDENCE_INVALID');
   writeFileSync(join(changeDirectory(other.cwd, 'receipt-semantics'), 'transitions', 'junk'), 'orphan');
   assert.throws(() => validateState({ cwd: other.cwd }), (error) => error.code === 'RECOVERY_EVIDENCE_INVALID');
+  assert.throws(() => recoverState({ cwd: other.cwd }), (error) => error.code === 'RECOVERY_EVIDENCE_INVALID');
+});
+
+test('validateState reports branch-only Git drift at the same clean commit', async () => {
+  const { cwd, sha } = repository('branch drift');
+  const state = await initializeState({ cwd, changeId: 'branch-drift', mode: 'plan-only', baseBranch: 'main', planningRef: sha, source: descriptor });
+  assert.equal(state.git.branch, 'main');
+  git(cwd, 'switch', '-c', 'same-commit-branch');
+  assert.equal(git(cwd, 'rev-parse', 'HEAD'), state.git.headSha);
+  assert.equal(git(cwd, 'status', '--porcelain'), '');
+  const validation = validateState({ cwd });
+  assert.equal(validation.git.branch, 'same-commit-branch');
+  assert.equal(validation.gitDrift, true);
 });
 
 test('detached HEAD observations remain schema-valid', async () => {

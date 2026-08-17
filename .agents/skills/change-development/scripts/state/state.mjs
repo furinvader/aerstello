@@ -1002,15 +1002,22 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
   }, lockOptions);
 }
 
-function transitionEntries(cwd, changeId) {
+function transitionInventory(cwd, changeId) {
   const root = join(changeDirectory(cwd, changeId), 'transitions');
-  if (!existsSync(root)) return [];
+  if (!existsSync(root)) return { committed: [], pending: [] };
   const entries = readdirSync(root, { withFileTypes: true });
   const stagingPattern = /^\.\d{8}\.\d+\.[0-9a-f-]{36}\.pending$/u;
   const unexpected = entries.find((entry) => !entry.isDirectory()
     || (!/^\d{8}$/u.test(entry.name) && !stagingPattern.test(entry.name)));
   if (unexpected) throw new StateError(`Unexpected transition evidence entry ${unexpected.name}`, 'RECOVERY_EVIDENCE_INVALID');
-  return entries.filter((entry) => /^\d{8}$/u.test(entry.name)).map((entry) => join(root, entry.name)).sort();
+  return {
+    committed: entries.filter((entry) => /^\d{8}$/u.test(entry.name)).map((entry) => join(root, entry.name)).sort(),
+    pending: entries.filter((entry) => stagingPattern.test(entry.name)).map((entry) => join(root, entry.name)).sort(),
+  };
+}
+
+function transitionEntries(cwd, changeId) {
+  return transitionInventory(cwd, changeId).committed;
 }
 
 function cleanupUncommittedTransitionStaging(cwd, changeId) {
@@ -1138,7 +1145,11 @@ export function validateState({ cwd = process.cwd(), changeId } = {}) {
   const root = repositoryRoot(cwd);
   const state = loadState(root, changeId);
   if (!state) throw new StateError('No active change state', 'STATE_NOT_FOUND');
-  const entries = transitionEntries(root, state.changeId);
+  const inventory = transitionInventory(root, state.changeId);
+  if (inventory.pending.length > 0) {
+    throw new StateError('Uncommitted transition staging is pending; run recover', 'RECOVERY_REQUIRED');
+  }
+  const entries = inventory.committed;
   if (entries.length !== state.revision + 1) throw new StateError('Transition revisions are not contiguous with active state', 'RECOVERY_EVIDENCE_INVALID');
   let previousDigest = null;
   const transitionIntents = [];
@@ -1224,7 +1235,12 @@ export function validateState({ cwd = process.cwd(), changeId } = {}) {
   }
   verifyEventHistory(root, state.changeId, transitionIntents);
   const git = gitObservation(root);
-  return { valid: true, state, git, gitDrift: git.headSha !== state.git.headSha || git.clean !== state.git.clean };
+  return {
+    valid: true,
+    state,
+    git,
+    gitDrift: git.headSha !== state.git.headSha || git.clean !== state.git.clean || git.branch !== state.git.branch,
+  };
 }
 
 function verifyReceiptTree(root, digests = new Set()) {
@@ -1734,7 +1750,9 @@ function recoverableChangeId(cwd) {
   const pointerExists = existsSync(activePointerPath(cwd));
   const candidates = readdirSync(changes, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name)
     .filter((changeId) => {
-      const entries = transitionEntries(cwd, changeId);
+      const inventory = transitionInventory(cwd, changeId);
+      if (inventory.pending.length > 0) return true;
+      const entries = inventory.committed;
       if (entries.length === 0) return true;
       if (entries.some((directory) => !existsSync(join(directory, 'complete')))) return true;
       return !pointerExists && entries.length === 1 && existsSync(join(changeDirectory(cwd, changeId), 'state.json'));
