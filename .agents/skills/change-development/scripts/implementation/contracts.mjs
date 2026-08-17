@@ -219,6 +219,7 @@ export function validateImplementationTask(value) {
         subjectSha: value.planningSha, phase: 'planning' }).map((error) => `$.behaviorMapperEvidence: ${error}`));
       if (value.behaviorMapperEvidence.planRevision !== value.planRevision) errors.push('$.behaviorMapperEvidence.planRevision must equal the packet planRevision');
       if (value.behaviorMapperEvidence.status !== 'clean') errors.push('$.behaviorMapperEvidence.status must be clean before binding');
+      if (value.behaviorMapperEvidence.status === 'clean' && value.behaviorMapperEvidence.findings.length !== 0) errors.push('$.behaviorMapperEvidence.findings must be empty when status is clean');
     }
   } else if (value.behaviorMapperEvidence !== null) errors.push('$.behaviorMapperEvidence must be null when the specialist route does not require behavior_mapper');
   if (!sameJson(value.decisionContext.map(({ id }) => id), value.decisionIds)) {
@@ -235,7 +236,7 @@ export function validateImplementationResult(value) {
   const errors = schemaErrors(validateResultSchema, value);
   findRawFields(value, '$', errors);
   if (errors.length > 0) return [...new Set(errors)];
-  if (value.status === 'implemented' && value.validation.some(({ result }) => result !== 'passed')) errors.push('$.validation must contain only passed commands for an implemented result');
+  if (['implemented', 'no-change'].includes(value.status) && value.validation.some(({ result }) => result !== 'passed')) errors.push('$.validation must contain only passed commands for a successful result');
   if (new Set(value.validation.map(({ command }) => command)).size !== value.validation.length) errors.push('$.validation must not report a command more than once');
   return [...new Set(errors)];
 }
@@ -277,7 +278,7 @@ export function validateImplementationResultAgainstTask(packet, result, actualCh
   for (const command of reported.keys()) if (!declared.has(command)) errors.push(`worker result reports undeclared command: ${command}`);
   for (const command of declared) {
     if (!reported.has(command)) errors.push(`required validation was not reported: ${command}`);
-    else if (result.status === 'implemented' && reported.get(command) !== 'passed') errors.push(`required validation did not pass: ${command}`);
+    else if (['implemented', 'no-change'].includes(result.status) && reported.get(command) !== 'passed') errors.push(`required validation did not pass: ${command}`);
   }
   return [...new Set(errors)];
 }

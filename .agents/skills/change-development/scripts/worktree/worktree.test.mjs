@@ -18,7 +18,7 @@ import {
   implementationWorktreeTombstonePath,
 } from '../paths.mjs';
 import {
-  acceptPlan, acceptResult, amendPlan, bindTask, initializeState, rejectTask, scheduleWave, startTask, StateError,
+  acceptPlan, acceptResult, amendPlan, archiveState, bindTask, initializeState, rejectTask, scheduleWave, startTask, StateError,
 } from '../state/state.mjs';
 import {
   createTaskWorktree, inspectTaskWorktree, recoverTaskWorktree, removeTaskWorktree,
@@ -304,6 +304,16 @@ test('removal intent recovers interruption after Git removal and preserves manif
   assert.ok(existsSync(implementationWorktreeTombstonePath(context.cwd, 'issue-23', context.taskId)));
   assert.equal(git(context.cwd, ['show-ref', '--verify', `refs/heads/${created.branch}`]).split(' ')[0], context.base);
   assert.equal(removeTaskWorktree({ cwd: context.cwd, changeId: 'issue-23', taskId: context.taskId }).status, 'removed');
+});
+
+test('archived state never authorizes worktree deletion', async () => {
+  const context = await boundRepository(); const created = create(context);
+  const terminal = authorizeNoChangeRemoval(context, created);
+  assert.equal(removeTaskWorktree({ cwd: context.cwd, changeId: 'issue-23', taskId: context.taskId }).status, 'removed');
+  assert.equal(archiveState({ cwd: context.cwd, changeId: 'issue-23', expectedRevision: terminal.revision,
+    abandonReason: 'Archive after active-state cleanup.' }).archived, true);
+  assert.throws(() => removeTaskWorktree({ cwd: context.cwd, changeId: 'issue-23', taskId: context.taskId }),
+    (error) => error instanceof StateError && ['STATE_NOT_FOUND', 'ARCHIVE_NOT_ACTIVE'].includes(error.code));
 });
 
 test('removal repairs exact JSON-only intent and tombstone crash boundaries', async () => {

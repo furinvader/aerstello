@@ -33,7 +33,10 @@ and dependencies must already be `integrated` or `no-change`. The canonical
 packet and SHA-256 receipt live below
 `implementation/tasks/<task-id>/<binding>.json[.sha256]`. Separate immutable
 provenance, planning-signal, specialist-route, and required behavior-mapper
-sidecars repeat its plan-bound evidence. A changed packet requires explicit
+sidecars repeat its plan-bound evidence. Routed behavior-mapper evidence must
+exactly equal the receipt-protected clean evidence selected by both the packet's
+plan revision and digest; a clean report cannot contain findings, and amendment
+replay never substitutes evidence from a later revision. A changed packet requires explicit
 rejection and a plan amendment; no sidecar is rewritten.
 
 When related E2E validation names a selector that the task itself will add, the
@@ -113,7 +116,9 @@ checkout must be clean and still exactly at the task base; a packet declaring
 were proven absent at binding and must be realized by an implementation.
 `blocked` and `failed` remain valid fail-closed outcomes, carry no worker commit,
 and move durable state to `blocked`; do not claim success or silently expand
-the packet. Each attempt result is preserved at
+the packet. Both successful outcomes, `implemented` and `no-change`, require
+every exact packet validation command to report `passed`; rejected success
+evidence cannot advance the task or satisfy dependencies. Each attempt result is preserved at
 `implementation/results/<task-id>/<attempt>.json[.sha256]`.
 
 ## Central integration
@@ -133,6 +138,11 @@ commit only from that branch. It then reacquires
 the lock and accepts only a clean, single-parent central commit whose delta is
 equivalent to the worker commit. A failed cherry-pick leaves the durable intent
 in `integrating` for inspection; never discard or overwrite it.
+
+If one wave member reports `blocked` or `failed`, a dependency-ready accepted
+sibling remains integrable after the active wave closes. Its exact delta is
+reconciled normally, while the task failure and blocked reasons remain durable
+and state returns to `blocked`. A task whose dependency failed is never eligible.
 
 If the process stops after intent persistence or after a successful
 cherry-pick, use the exact revision reported by status:
@@ -173,3 +183,9 @@ npm run change:state -- finalize-integration \
 Only this tombstone-verified transition reaches `integrated`. Stop there:
 integrated-HEAD specialist verification, PR preparation, GitHub writes,
 CI/review gates, and delivery are owned by issue #24 and later workflows.
+
+Abandonment follows the same cleanup authority boundary. Reject active work,
+recover any partial creation or removal, remove it while active state still
+authorizes cleanup, and verify receipt-valid tombstones plus physical path and
+Git worktree-registration absence before archiving. Archived state never grants
+worktree deletion authority.

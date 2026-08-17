@@ -57,9 +57,11 @@ Large immutable evidence stays outside `state.json`. Initial and refreshed sourc
 
 Development-state v1 remains a valid historical format so its immutable
 transition intents can still be replayed. New records are v2. An accepted v1
-record moves to v2 only through the explicit `upgrade-state` transition at the
+record accepts and preserves its plan without synthesizing `execution`; it
+moves to v2 only through the explicit `upgrade-state` transition at the
 exact recorded clean Git observation; ordinary execution writes never perform
-an implicit upgrade.
+an implicit upgrade. That transition preserves plan and Git identity while
+creating receipt-valid unbound execution summaries.
 
 ## Phases
 
@@ -122,3 +124,12 @@ that rejected worktree, and append the explicit new-ID plan amendment. Do not
 reset, repeat, or broaden work based on guesswork.
 
 `SessionStart` may report bounded recovery context. `PreCompact` performs only local filesystem and Git observation, may append a revision-guarded Git checkpoint under the change lock, and performs no source refresh or network work. It refuses to checkpoint from a non-owning linked worktree and directs an active integration intent to `reconcile-integration`. Its durable state preserves the exact next action so a resumed session can continue safely.
+
+An execution checkpoint validates the exact durable owning branch, HEAD, and
+cleanliness. Branch drift, detached HEAD, an advanced commit, or dirtiness is
+stored as receipt-protected observation evidence and blocks without replacing
+the expected Git identity. Recovery uses the same derivation and requires that
+exact recorded observation. Restoring identity clears only Git reasons:
+plan-only or never-started execution returns to `ready-to-implement`, active or
+terminal-but-unfinalized execution returns to `implementing`, and a finalized
+state remains `integrated`. No checkpoint can synthesize finalization.

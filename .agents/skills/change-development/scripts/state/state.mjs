@@ -533,7 +533,9 @@ export function nextActionFor(state) {
   if (state.phase === 'recovering') return 'Run change:state recover to finish the exact interrupted transition.';
   if (state.phase === 'blocked') return state.execution?.activeWave.length
     ? 'Resolve the listed blocking evidence by accepting or finishing every active-wave task result, then reject/replan.'
-    : 'Resolve the listed blocking evidence by rejecting/replanning the blocked work, or explicitly abandon the change.';
+    : state.execution?.tasks.some((task) => task.status === 'accepted')
+      ? 'Integrate the next dependency-ready accepted task, then resolve the remaining blocked or failed work.'
+      : 'Resolve the listed blocking evidence by rejecting/replanning the blocked work, or explicitly abandon the change.';
   if (state.phase === 'abandoned') return 'Archive the explicitly abandoned change.';
   return 'Inspect durable state.';
 }
@@ -878,7 +880,7 @@ export function acceptPlan({ cwd = process.cwd(), changeId, plan, planningEviden
       source: { ...state.source, classification: 'unchanged' },
       blockedReasons: [],
       git: currentGit,
-      execution: executionFromPlan(plan, currentGit.headSha),
+      ...(state.schemaVersion === 2 ? { execution: executionFromPlan(plan, currentGit.headSha) } : {}),
     }, () => new Date(timestamp));
     return commitTransition({
       cwd: root, previousState: state, nextState: next, type: 'plan-accepted',
@@ -1060,6 +1062,31 @@ function assertPacketPlanBinding(packet, plan, state, currentSha, expectedPlanDi
   }
 }
 
+function acceptedPlanningEvidence(cwd, state, planRevision, planDigest) {
+  const directory = join(changeDirectory(cwd, state.changeId), 'plan');
+  const original = verifyReceipt(join(directory, 'plan.json'), 'accepted plan');
+  if (original.value.planRevision === planRevision && original.digest === planDigest) {
+    return verifyReceipt(join(directory, 'planning-evidence.json'), 'accepted-plan planning evidence').value;
+  }
+  for (let number = 1; number <= state.plan.amendmentCount; number += 1) {
+    const stem = join(directory, 'amendments', String(number).padStart(4, '0'));
+    const amendment = verifyReceipt(`${stem}.json`, `plan amendment ${number}`).value;
+    if (amendment.resultingPlan.planRevision === planRevision && amendment.newDigest === planDigest) {
+      return verifyReceipt(`${stem}.evidence.json`, `plan amendment ${number} evidence`).value;
+    }
+  }
+  throw new StateError('Task packet plan revision/digest has no receipt-protected accepted planning evidence', 'TASK_PROVENANCE_MISMATCH');
+}
+
+function assertPacketMapperProvenance(cwd, state, packet) {
+  const evidence = acceptedPlanningEvidence(cwd, state, packet.planRevision, packet.planDigest);
+  const accepted = evidence.filter((entry) => entry.reviewerId === 'behavior_mapper');
+  if (packet.behaviorMapperEvidence === null) return;
+  if (accepted.length !== 1 || serialized(accepted[0]) !== serialized(packet.behaviorMapperEvidence)) {
+    throw new StateError('Task packet behavior-mapper evidence does not exactly match its receipt-protected plan revision and digest', 'TASK_PROVENANCE_MISMATCH');
+  }
+}
+
 export function bindTask({ cwd = process.cwd(), changeId, packet, expectedRevision, clock, crashStep, lockOptions } = {}) {
   const root = repositoryRoot(cwd); const selected = selectedChangeId(root, changeId);
   return withChangeLock(root, selected, () => {
@@ -1076,6 +1103,7 @@ export function bindTask({ cwd = process.cwd(), changeId, packet, expectedRevisi
     const current = gitObservation(root, clock);
     assertExactCentralObservation(current, state, 'Task binding');
     const plan = readEffectivePlan(root, state); assertPacketPlanBinding(packet, plan, state, current.headSha);
+    assertPacketMapperProvenance(root, state, packet);
     assertPacketSelectorsAtBase(root, packet);
     const packetDigest = implementationTaskDigest(packet); const binding = task.binding + 1;
     const next = revised(state, { phase: 'implementing', git: current,
@@ -1222,17 +1250,24 @@ function prepareIntegration({ root, selected, taskId, expectedRevision, clock, c
   return withChangeLock(root, selected, () => {
     const state = loadState(root, selected); assertWritableV2(state); assertRevision(state, expectedRevision);
     validateState({ cwd: root, changeId: selected });
-    if (state.phase !== 'implementing' || state.execution.activeWave.length) throw new StateError('Integration requires implementing with no active wave', 'INVALID_PHASE');
+    if (!['implementing', 'blocked'].includes(state.phase) || state.execution.activeWave.length) throw new StateError('Integration requires implementing or failed-wave blocked state with no active wave', 'INVALID_PHASE');
     const task = executionTask(state, taskId);
     if (task.status !== 'accepted' || !task.workerCommit) throw new StateError(`Task ${taskId} has no accepted worker commit`, 'TASK_STATE_CONFLICT');
     if (!task.dependsOn.every((id) => ['integrated', 'no-change'].includes(executionTask(state, id).status))) {
       throw new StateError(`Task ${taskId} dependencies are not integrated`, 'DEPENDENCY_NOT_INTEGRATED');
     }
+    const failureReasons = state.execution.tasks.filter((entry) => ['blocked', 'failed'].includes(entry.status)).map((entry) => {
+      const result = verifyReceipt(join(changeDirectory(root, state.changeId), resultEvidencePath(entry.id, entry.attempt)), `implementation result ${entry.id}`).value;
+      return `Task ${entry.id} reported ${entry.status}: ${result.summary}`;
+    });
+    if (state.phase === 'blocked' && serialized(failureReasons) !== serialized(state.blockedReasons)) {
+      throw new StateError('Integration from blocked state is limited to an accepted sibling of exact receipt-backed task failures', 'INVALID_PHASE');
+    }
     const current = gitObservation(root, clock);
     assertExactCentralObservation(current, state, 'Integration');
     const intent = { taskId, workerCommit: task.workerCommit, centralBaseSha: current.headSha };
     const execution = replaceExecutionTask(state, taskId, { status: 'integration-pending' }, { integrationIntent: intent });
-    const next = revised(state, { phase: 'integrating', execution, git: current }, clock);
+    const next = revised(state, { phase: 'integrating', execution, git: current, blockedReasons: [] }, clock);
     return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'integration-intent',
       summary: `Persisted integration intent for ${taskId}`, crashStep });
   }, lockOptions);
@@ -1256,7 +1291,14 @@ function reconcileIntegrationLocked({ root, selected, expectedRevision, clock, c
       throw new StateError('Central HEAD contains unrelated or non-equivalent work for the persisted integration intent', 'INTEGRATION_HEAD_MISMATCH');
     }
     const execution = replaceExecutionTask(state, task.id, { status: 'integrated', integratedCommit: current.headSha }, { integrationIntent: null });
-    const next = revised(state, { phase: 'implementing', execution, git: current, blockedReasons: [] }, clock);
+    const failedTasks = execution.tasks.filter((entry) => ['blocked', 'failed'].includes(entry.status));
+    const failuresRemain = failedTasks.length > 0;
+    const failureReasons = failedTasks.map((entry) => {
+      const result = verifyReceipt(join(changeDirectory(root, state.changeId), resultEvidencePath(entry.id, entry.attempt)), `implementation result ${entry.id}`).value;
+      return `Task ${entry.id} reported ${entry.status}: ${result.summary}`;
+    });
+    const next = revised(state, { phase: failuresRemain ? 'blocked' : 'implementing', execution, git: current,
+      blockedReasons: failuresRemain ? failureReasons : [] }, clock);
     return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'task-integrated',
       summary: `Reconciled integrated task ${task.id} at ${current.headSha}`, crashStep });
   }, lockOptions);
@@ -1895,6 +1937,7 @@ function validateLoadedState(root, state) {
           assertPacketPlanBinding(packet.value, effective, state, task.taskBaseSha,
             completed ? packet.value.planDigest : state.plan.effectiveDigest,
             completed ? packet.value.planRevision : effective.planRevision);
+          assertPacketMapperProvenance(root, state, packet.value);
           const suffix = `${task.id}/${String(task.binding).padStart(4, '0')}.json`;
           const provenance = verifyReceipt(join(changeDirectory(root, state.changeId), 'implementation/provenance', suffix), `task provenance ${task.id}`).value;
           if (provenance.planDigest !== packet.value.planDigest || provenance.taskBaseSha !== packet.value.taskBaseSha
@@ -2222,30 +2265,70 @@ function decisionDispositionForRecovery(intent, predecessor) {
   return record.disposition;
 }
 
-function isSemanticGitCheckpoint(intent, predecessor) {
-  if (intent.type !== 'git-checkpoint' || !predecessor
-      || intent.summary !== 'Checkpointed local Git observation before compaction'
-      || Object.keys(intent.evidence ?? {}).length !== 0) return false;
-  const observed = intent.nextState.git;
-  const planningSnapshotValid = observed.headSha === predecessor.planningSha && observed.clean;
-  const gitBlock = !planningSnapshotValid
-    ? `Git observation is not clean at Planning SHA ${predecessor.planningSha}` : null;
-  const wasGitBlocked = predecessor.phase === 'blocked'
-    && predecessor.blockedReasons.every((reason) => reason.startsWith('Git observation is not clean at Planning SHA'));
-  const restoredPhase = predecessor.source.classification === 'unreviewed-material'
-    ? 'awaiting-decision' : predecessor.plan ? 'ready-to-implement' : 'planning';
+const GIT_BLOCK_PREFIXES = [
+  'Git observation is not clean at Planning SHA',
+  'Central Git observation does not match exact clean durable identity',
+];
+
+function isGitBlock(reason) {
+  return GIT_BLOCK_PREFIXES.some((prefix) => reason.startsWith(prefix));
+}
+
+function restoredCheckpointPhase(state) {
+  if (state.source.classification === 'unreviewed-material') return 'awaiting-decision';
+  if (!state.plan) return 'planning';
+  if (!state.execution) return 'ready-to-implement';
+  if (state.phase === 'integrated') return 'integrated';
+  if (state.execution.tasks.every((task) => task.status === 'unbound')) return 'ready-to-implement';
+  return 'implementing';
+}
+
+function deriveGitCheckpoint(predecessor, observed, updatedAt) {
+  const executionActive = predecessor.schemaVersion === 2 && predecessor.execution !== null;
+  const valid = executionActive
+    ? observed.clean && observed.headSha === predecessor.git.headSha
+      && observed.branch === predecessor.git.branch && observed.branch !== '(detached)'
+    : observed.clean && observed.headSha === predecessor.planningSha;
+  const gitBlock = valid ? null : executionActive
+    ? `Central Git observation does not match exact clean durable identity ${predecessor.git.branch}@${predecessor.git.headSha}`
+    : `Git observation is not clean at Planning SHA ${predecessor.planningSha}`;
+  const nonGitReasons = predecessor.blockedReasons.filter((reason) => !isGitBlock(reason));
+  const hadGitBlock = nonGitReasons.length !== predecessor.blockedReasons.length;
   const immutableTerminal = predecessor.phase === 'abandoned';
+  const blockedReasons = immutableTerminal ? predecessor.blockedReasons
+    : gitBlock ? [...nonGitReasons, gitBlock] : hadGitBlock ? nonGitReasons : predecessor.blockedReasons;
+  const phase = immutableTerminal ? predecessor.phase
+    : gitBlock || nonGitReasons.length > 0 ? 'blocked'
+      : hadGitBlock ? restoredCheckpointPhase(predecessor) : predecessor.phase;
   const expected = {
     ...predecessor,
-    git: observed,
-    phase: immutableTerminal ? predecessor.phase : gitBlock ? 'blocked' : wasGitBlocked ? restoredPhase : predecessor.phase,
-    blockedReasons: immutableTerminal ? predecessor.blockedReasons : gitBlock ? [gitBlock]
-      : wasGitBlocked ? [] : predecessor.blockedReasons,
+    // An invalid execution observation is evidence, never a replacement for the durable integration identity.
+    git: executionActive && !valid ? predecessor.git : observed,
+    phase,
+    blockedReasons,
     revision: predecessor.revision + 1,
-    updatedAt: intent.nextState.updatedAt,
+    updatedAt,
   };
   expected.nextAction = nextActionFor(expected);
-  return serialized(expected) === serialized(intent.nextState);
+  return expected;
+}
+
+function checkpointObservation(intent) {
+  const record = intent.authoritativeEvidence?.gitCheckpointObservationDigest;
+  if (record?.path === `implementation/git-checkpoints/${String(intent.revision).padStart(8, '0')}.json`
+      && record.digest === intent.evidence?.gitCheckpointObservationDigest
+      && objectDigest(record.value) === record.digest) return record.value;
+  // Compatibility for checkpoints written before observation evidence was introduced.
+  if (Object.keys(intent.evidence ?? {}).length === 0) return intent.nextState.git;
+  return null;
+}
+
+function isSemanticGitCheckpoint(intent, predecessor) {
+  if (intent.type !== 'git-checkpoint' || !predecessor
+      || intent.summary !== 'Checkpointed local Git observation before compaction') return false;
+  const observed = checkpointObservation(intent);
+  if (!observed) return false;
+  return serialized(deriveGitCheckpoint(predecessor, observed, intent.nextState.updatedAt)) === serialized(intent.nextState);
 }
 
 function verifyEventHistory(cwd, changeId, intentsOrLatestRevision) {
@@ -2390,10 +2473,11 @@ export function recoverState({ cwd = process.cwd(), changeId, crashStep, lockOpt
     const executionTransition = ['state-upgraded', 'task-bound', 'wave-scheduled', 'task-started',
       'result-accepted', 'integration-intent', 'task-integrated', 'task-rejected', 'implementation-finalized'].includes(intent.type);
     const exactDecisionObservation = decisionDisposition === 'resolve';
+    const recordedGit = semanticGitCheckpoint ? checkpointObservation(intent) : intent.nextState.git;
     const exactRecordedObservation = (semanticGitCheckpoint || semanticAbandonment || exactDecisionObservation || executionTransition)
-      && currentGit.headSha === intent.nextState.git.headSha
-      && currentGit.branch === intent.nextState.git.branch
-      && currentGit.clean === intent.nextState.git.clean;
+      && currentGit.headSha === recordedGit.headSha
+      && currentGit.branch === recordedGit.branch
+      && currentGit.clean === recordedGit.clean;
     const recoveryGitInvalid = semanticAbandonment || exactDecisionObservation || executionTransition
       ? !exactRecordedObservation
       : !exactRecordedObservation && (!currentGit.clean || currentGit.headSha !== intent.nextState.planningSha);
@@ -2430,6 +2514,52 @@ export function recoverState({ cwd = process.cwd(), changeId, crashStep, lockOpt
   }, lockOptions);
 }
 
+function assertCreatedWorktreesRemoved(cwd, state) {
+  if (state.schemaVersion !== 2 || !state.execution) return;
+  const registrations = registeredWorktrees(cwd);
+  const taskById = new Map(state.execution.tasks.map((task) => [task.id, task]));
+  const evidenceDirectories = [
+    dirname(implementationWorktreeCreationIntentPath(cwd, state.changeId, 'evidence-probe')),
+    dirname(implementationWorktreeTombstonePath(cwd, state.changeId, 'evidence-probe')),
+  ];
+  const evidenceTaskIds = new Set(evidenceDirectories.flatMap((directory) => existsSync(directory)
+    ? readdirSync(directory).map((name) => name.replace(/\.sha256$/u, '.json'))
+      .map((name) => name.replace(/\.(?:creation|removal)\.json$/u, '').replace(/\.json$/u, ''))
+      .filter(nonemptyString) : []));
+  for (const taskId of new Set([...taskById.keys(), ...evidenceTaskIds])) {
+    const task = taskById.get(taskId) ?? { id: taskId, packetDigest: null, taskBaseSha: null };
+    const paths = {
+      creation: implementationWorktreeCreationIntentPath(cwd, state.changeId, taskId),
+      manifest: implementationWorktreeManifestPath(cwd, state.changeId, taskId),
+      removal: implementationWorktreeRemovalIntentPath(cwd, state.changeId, taskId),
+      tombstone: implementationWorktreeTombstonePath(cwd, state.changeId, taskId),
+    };
+    const artifacts = Object.values(paths).some((path) => existsSync(path) || existsSync(path.replace(/\.json$/u, '.sha256')));
+    const canonicalPath = resolve(implementationWorktreePath(cwd, state.changeId, taskId));
+    const branchRef = `refs/heads/codex/change-${state.changeId}/${taskId}`;
+    const physical = existsSync(canonicalPath)
+      || registrations.some((entry) => entry.path === canonicalPath || entry.branchRef === branchRef);
+    if (!artifacts && !physical) continue;
+    const creation = verifyReceipt(paths.creation, `worktree creation intent ${taskId}`);
+    const manifest = verifyReceipt(paths.manifest, `worktree manifest ${taskId}`);
+    const removal = verifyReceipt(paths.removal, `worktree removal intent ${taskId}`);
+    const tombstone = verifyReceipt(paths.tombstone, `worktree tombstone ${taskId}`).value;
+    const expectedPacketDigest = task.packetDigest ?? creation.value.packetDigest;
+    const expectedBaseSha = task.taskBaseSha ?? creation.value.baseSha;
+    const identity = [creation.value, manifest.value, removal.value, tombstone];
+    const mismatch = identity.some((record) => record.changeId !== state.changeId || record.taskId !== taskId
+      || record.packetDigest !== expectedPacketDigest || record.baseSha !== expectedBaseSha
+      || resolve(record.path) !== canonicalPath || record.repository !== gitCommonDirectory(cwd));
+    if (creation.value.status !== 'creating' || manifest.value.status !== 'active'
+        || manifest.value.creationIntentDigest !== creation.digest || removal.value.status !== 'removing'
+        || removal.value.manifestDigest !== manifest.digest || tombstone.status !== 'removed'
+        || tombstone.manifestDigest !== manifest.digest || tombstone.removalIntentDigest !== removal.digest
+        || tombstone.removedAt !== removal.value.removedAt || mismatch || physical) {
+      throw new StateError(`Task ${taskId} worktree must be receipt-valid and physically removed before abandonment`, 'WORKTREE_TOMBSTONE_MISMATCH');
+    }
+  }
+}
+
 export function archiveState({ cwd = process.cwd(), changeId, abandonReason, expectedRevision, clock, crashStep, lockOptions } = {}) {
   const root = repositoryRoot(cwd);
   const selected = selectedChangeId(root, changeId);
@@ -2441,6 +2571,7 @@ export function archiveState({ cwd = process.cwd(), changeId, abandonReason, exp
     let state = loadState(root, selected);
     assertRevision(state, expectedRevision);
     validateState({ cwd: root, changeId: selected });
+    assertCreatedWorktreesRemoved(root, state);
     const normal = state.mode === 'plan-only' && state.phase === 'ready-to-implement';
     const alreadyAbandoned = state.phase === 'abandoned' && nonemptyString(state.abandonmentReason);
     if (!normal && !alreadyAbandoned && (!abandonReason || !abandonReason.trim())) {
@@ -2619,32 +2750,22 @@ export function checkpointGitMetadata({ cwd = process.cwd(), clock, crashStep, l
       return { checkpointed: false, warning: 'A persisted integration intent is active; run reconcile-integration before checkpointing Git metadata.' };
     }
     const observed = gitObservation(root, clock);
-    if (observed.headSha === state.git.headSha && observed.branch === state.git.branch && observed.clean === state.git.clean) {
+    const hasGitBlock = state.phase === 'blocked' && state.blockedReasons.some(isGitBlock);
+    if (!hasGitBlock && observed.headSha === state.git.headSha && observed.branch === state.git.branch && observed.clean === state.git.clean) {
       return { checkpointed: false };
     }
-    const executionActive = state.schemaVersion === 2 && state.execution !== null;
-    const planningSnapshotValid = executionActive
-      ? observed.headSha === state.git.headSha && observed.clean
-      : observed.headSha === state.planningSha && observed.clean;
-    const gitBlock = !planningSnapshotValid
-      ? executionActive ? `Central Git observation does not match clean durable HEAD ${state.git.headSha}`
-        : `Git observation is not clean at Planning SHA ${state.planningSha}` : null;
-    const wasGitBlocked = state.phase === 'blocked'
-      && state.blockedReasons.every((reason) => reason.startsWith('Git observation is not clean at Planning SHA')
-        || reason.startsWith('Central Git observation does not match clean durable HEAD'));
-    const restoredPhase = state.source.classification === 'unreviewed-material'
-      ? 'awaiting-decision' : state.execution?.tasks.every((task) => ['integrated', 'no-change'].includes(task.status))
-        ? 'integrated' : state.execution ? 'implementing' : state.plan ? 'ready-to-implement' : 'planning';
-    const immutableTerminal = state.phase === 'abandoned';
-    const next = revised(state, {
-      git: observed,
-      phase: immutableTerminal ? state.phase : gitBlock ? 'blocked' : wasGitBlocked ? restoredPhase : state.phase,
-      blockedReasons: immutableTerminal ? state.blockedReasons : gitBlock ? [gitBlock] : wasGitBlocked ? [] : state.blockedReasons,
-    }, clock);
+    const timestamp = now(clock);
+    const next = deriveGitCheckpoint(state, observed, timestamp);
     commitTransition({
       cwd: root, previousState: state, nextState: next, type: 'git-checkpoint',
       summary: 'Checkpointed local Git observation before compaction',
       crashStep,
+      pendingEvidence: [{
+        key: 'gitCheckpointObservationDigest',
+        path: `implementation/git-checkpoints/${String(next.revision).padStart(8, '0')}.json`,
+        value: observed,
+        label: `Git checkpoint observation ${next.revision}`,
+      }],
     });
     return { checkpointed: true, state: next };
   }, { timeoutMs: 250, ...lockOptions });

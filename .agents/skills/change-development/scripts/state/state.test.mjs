@@ -33,6 +33,7 @@ import {
   startTask,
   StateError,
   tasksConflict,
+  upgradeState,
   validateState,
   withChangeLock,
   changeRoot,
@@ -93,6 +94,96 @@ test('two same-base workers integrate by delta, resume intent-only integration, 
   state = finalizeIntegration({ cwd, expectedRevision: 12 });
   assert.equal(state.phase, 'integrated');
   assert.equal(validateState({ cwd }).valid, true);
+});
+
+test('execution Git checkpoints preserve durable identity and restore lifecycle phase exactly', async () => {
+  const { cwd, sha } = repository('execution checkpoint identity');
+  const planning = await initializeState({ cwd, changeId: 'execution-checkpoint', mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
+  let state = acceptPlan({ cwd, plan: planFor(planning), expectedRevision: 0 });
+  const durableGit = structuredClone(state.git);
+  git(cwd, 'switch', '-c', 'same-sha-drift');
+  state = checkpointGitMetadata({ cwd }).state;
+  assert.equal(state.phase, 'blocked');
+  assert.deepEqual(state.git, durableGit, 'invalid execution observations must not replace durable identity');
+  git(cwd, 'switch', 'main');
+  state = checkpointGitMetadata({ cwd }).state;
+  assert.equal(state.phase, 'ready-to-implement');
+  const packet = packetFor(state, planFor(planning), 'state-task');
+  state = bindTask({ cwd, packet, expectedRevision: state.revision });
+  writeFileSync(join(cwd, 'checkpoint-dirty.txt'), 'dirty');
+  state = checkpointGitMetadata({ cwd }).state;
+  assert.equal(state.phase, 'blocked');
+  unlinkSync(join(cwd, 'checkpoint-dirty.txt'));
+  state = checkpointGitMetadata({ cwd }).state;
+  assert.equal(state.phase, 'implementing');
+});
+
+test('interrupted execution checkpoint recovers against evidence without replacing expected Git identity', async () => {
+  const { cwd, sha } = repository('execution checkpoint recovery');
+  const planning = await initializeState({ cwd, changeId: 'execution-checkpoint-recovery', mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
+  const accepted = acceptPlan({ cwd, plan: planFor(planning), expectedRevision: 0 });
+  git(cwd, 'switch', '-c', 'checkpoint-drift');
+  assert.throws(() => checkpointGitMetadata({ cwd,
+    crashStep(step) { if (step === 'after-state') throw new Error('execution checkpoint crash'); } }), /checkpoint crash/u);
+  const recovered = recoverState({ cwd });
+  assert.equal(recovered.state.phase, 'blocked');
+  assert.deepEqual(recovered.state.git, accepted.git);
+});
+
+test('accepted sibling integrates after a failed wave and preserves failure evidence', async () => {
+  const { cwd, sha } = repository('failed wave sibling integration');
+  const planning = await initializeState({ cwd, changeId: 'failed-wave-sibling', mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
+  const plan = executionPlanFor(planning); let state = acceptPlan({ cwd, plan, expectedRevision: 0 });
+  const first = packetFor(state, plan, 'state-task'); state = bindTask({ cwd, packet: first, expectedRevision: state.revision });
+  const firstWorker = createWorkerFixture(cwd, state, first);
+  const second = packetFor(state, plan, 'second-task'); state = bindTask({ cwd, packet: second, expectedRevision: state.revision });
+  const secondWorker = createWorkerFixture(cwd, state, second);
+  state = scheduleWave({ cwd, expectedRevision: state.revision });
+  state = startTask({ cwd, taskId: first.taskId, workerId: 'successful-worker', expectedRevision: state.revision });
+  state = startTask({ cwd, taskId: second.taskId, workerId: 'failed-worker', expectedRevision: state.revision });
+  writeFileSync(join(firstWorker.path, 'first.txt'), 'accepted sibling\n'); git(firstWorker.path, 'add', 'first.txt'); git(firstWorker.path, 'commit', '-m', 'test: accepted sibling');
+  const firstCommit = git(firstWorker.path, 'rev-parse', 'HEAD');
+  state = acceptResult({ cwd, workerCwd: firstWorker.path, expectedRevision: state.revision,
+    result: resultFor(first, 'implemented', firstCommit, ['first.txt']) });
+  state = acceptResult({ cwd, workerCwd: secondWorker.path, expectedRevision: state.revision,
+    result: { ...resultFor(second, 'failed'), validation: second.requiredValidation.unit.map(({ command }) => ({
+      command, result: 'failed', summary: 'Worker validation failed.',
+    })), unexpectedDependencies: ['Worker validation failed.'], summary: 'Worker validation failed.' } });
+  const failureReasons = [...state.blockedReasons];
+  state = integrateTask({ cwd, taskId: first.taskId, expectedRevision: state.revision });
+  assert.equal(state.phase, 'blocked');
+  assert.deepEqual(state.blockedReasons, failureReasons);
+  assert.equal(state.execution.tasks.find(({ id }) => id === first.taskId).status, 'integrated');
+  assert.equal(state.execution.tasks.find(({ id }) => id === second.taskId).status, 'failed');
+});
+
+test('v1 accepts a plan without execution and upgrades explicitly with unchanged identities', async () => {
+  const { cwd, sha } = repository('historical v1 acceptance');
+  const planningV2 = await initializeState({ cwd, changeId: 'historical-v1', mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
+  const planning = downgradeInitialStateToV1(cwd);
+  let state = acceptPlan({ cwd, plan: planFor(planningV2), expectedRevision: planning.revision });
+  assert.equal(state.schemaVersion, 1);
+  assert.equal(Object.hasOwn(state, 'execution'), false);
+  const planIdentity = structuredClone(state.plan); const gitIdentity = structuredClone(state.git);
+  state = upgradeState({ cwd, expectedRevision: state.revision });
+  assert.equal(state.schemaVersion, 2);
+  assert.deepEqual(state.plan, planIdentity);
+  assert.deepEqual({ ...state.git, observedAt: gitIdentity.observedAt }, gitIdentity);
+  assert.equal(state.execution.tasks[0].status, 'unbound');
+});
+
+test('abandonment refuses created worktrees until active-state cleanup is tombstoned', async () => {
+  const { cwd, sha } = repository('abandon cleanup ordering');
+  const planning = await initializeState({ cwd, changeId: 'abandon-cleanup', mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
+  const plan = planFor(planning); let state = acceptPlan({ cwd, plan, expectedRevision: 0 });
+  const packet = packetFor(state, plan, 'state-task'); state = bindTask({ cwd, packet, expectedRevision: state.revision });
+  createWorkerFixture(cwd, state, packet);
+  assert.throws(() => archiveState({ cwd, expectedRevision: state.revision, abandonReason: 'Stop.' }),
+    (error) => ['RECEIPT_MISSING', 'WORKTREE_TOMBSTONE_MISMATCH'].includes(error.code));
+  assert.equal(loadState(cwd).revision, state.revision);
+  state = rejectTask({ cwd, taskId: packet.taskId, reason: 'Stop the work.', expectedRevision: state.revision });
+  removeTaskWorktree({ cwd, changeId: state.changeId, taskId: packet.taskId });
+  assert.equal(archiveState({ cwd, expectedRevision: state.revision, abandonReason: 'Stop.' }).archived, true);
 });
 
 test('result acceptance rejects wrong worktree identity, branch, dirtiness, and HEAD', async () => {
@@ -367,6 +458,27 @@ function installLegacyPreacceptDecision(cwd, decisionId = 'legacy-preaccept') {
   events.push(JSON.stringify({ revision: next.revision, type: intent.type, summary: intent.summary, at: recordedAt }));
   writeFileSync(eventsPath, `${events.join('\n')}\n`);
   return next;
+}
+
+function downgradeInitialStateToV1(cwd) {
+  const state = loadState(cwd);
+  const legacy = { ...state, schemaVersion: 1 };
+  delete legacy.execution;
+  legacy.nextAction = nextActionFor(legacy);
+  const transition = join(changeDirectory(cwd, state.changeId), 'transitions', '00000000');
+  const intentPath = join(transition, 'intent.json');
+  const intent = JSON.parse(readFileSync(intentPath, 'utf8'));
+  intent.nextState = legacy;
+  intent.nextStateDigest = digestJson(legacy);
+  const receipt = {
+    schemaVersion: 1, revision: 0, intentDigest: digestJson(intent), stateDigest: digestJson(legacy),
+    evidence: intent.evidence, completedAt: legacy.updatedAt,
+  };
+  writeReceiptJson(intentPath, intent);
+  writeReceiptJson(join(transition, 'receipt.json'), receipt);
+  writeFileSync(join(transition, 'complete'), `${digestJson(receipt)}\n`);
+  writeFileSync(join(changeDirectory(cwd, state.changeId), 'state.json'), `${JSON.stringify(legacy)}\n`);
+  return legacy;
 }
 
 test('initialization persists valid shared state and receipts', async () => {

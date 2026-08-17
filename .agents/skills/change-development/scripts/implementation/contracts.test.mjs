@@ -161,6 +161,13 @@ test('specialist metadata and the exact canonical route are validated', () => {
   assert.match(validateImplementationTask(changedRoute).join('\n'), /canonical specialist route/u);
   const browser = packet({ planningSignals: { browserVisible: true, relatedTestSelectionUncertain: false } });
   assert.match(validateImplementationTask(browser).join('\n'), /behaviorMapperEvidence is required/u);
+  const contradictory = structuredClone(browser);
+  contradictory.behaviorMapperEvidence = {
+    schemaVersion: 1, reviewerId: 'behavior_mapper', status: 'clean', planRevision: browser.planRevision,
+    headSha: browser.planningSha, findings: ['Clean evidence cannot carry findings.'],
+    summary: 'Contradictory evidence.', recordedAt: '2026-08-18T10:00:00.000Z',
+  };
+  assert.match(validateImplementationTask(contradictory).join('\n'), /findings must be empty/u);
   const uncertain = packet({ planningSignals: { browserVisible: false, relatedTestSelectionUncertain: true } });
   assert.match(validateImplementationTask(uncertain).join('\n'), /must be resolved before binding/u);
 });
@@ -248,6 +255,10 @@ test('implemented, blocked, failed, and no-change outcomes are explicit and raw 
   assert.deepEqual(validateImplementationResult(result(task, {
     status: 'no-change', workerCommit: null, changedPaths: [], validation: [],
   })), []);
+  assert.match(validateImplementationResult(result(task, {
+    status: 'no-change', workerCommit: null, changedPaths: [],
+    validation: [{ command: task.requiredValidation.unit[0].command, result: 'failed', summary: 'Did not pass.' }],
+  })).join('\n'), /successful result/u);
   assert.ok(validateImplementationResult(result(task, {
     status: 'no-change', workerCommit: null, changedPaths: [], validation: [],
     unexpectedDependencies: ['No-change cannot claim an unexpected dependency.'],
@@ -286,7 +297,8 @@ test('planned E2E selectors require implementation while blocked and failed rema
     command, result: 'skipped', summary: 'The worker could not realize the planned selector.',
   }));
   const noChange = result(planned, {
-    status: 'no-change', workerCommit: null, changedPaths: [], validation, unexpectedDependencies: [],
+    status: 'no-change', workerCommit: null, changedPaths: [],
+    validation: validation.map((entry) => ({ ...entry, result: 'passed' })), unexpectedDependencies: [],
   });
   assert.match(validateImplementationResultAgainstTask(planned, noChange, []).join('\n'), /cannot be no-change/u);
   for (const status of ['blocked', 'failed']) {
