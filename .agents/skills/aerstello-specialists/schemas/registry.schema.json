@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://aerstello.local/schemas/specialist-registry-v1.schema.json",
-  "title": "Aerstello specialist registry v1",
+  "$id": "https://aerstello.local/schemas/specialist-registry-v2.schema.json",
+  "title": "Aerstello specialist registry v2",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "affectedAreas", "riskTags", "profiles", "reviewers", "routing"],
   "properties": {
     "$schema": { "type": "string", "const": "./schemas/registry.schema.json" },
-    "schemaVersion": { "const": 1 },
+    "schemaVersion": { "const": 2 },
     "affectedAreas": {
       "type": "array", "minItems": 7, "maxItems": 7, "uniqueItems": true,
       "items": { "enum": ["api", "web", "shared", "workflow", "documentation", "release", "migration"] }
@@ -36,24 +36,24 @@
       }
     },
     "reviewers": {
-      "type": "array", "minItems": 4, "maxItems": 4,
+      "type": "array", "minItems": 3, "maxItems": 3,
       "items": {
         "type": "object", "additionalProperties": false,
-        "required": ["id", "phase", "readOnly", "nonDelegating", "githubWrites", "headBinding", "guidance"],
+        "required": ["id", "phase", "readOnly", "nonDelegating", "githubWrites", "subjectBinding", "guidance"],
         "properties": {
-          "id": { "enum": ["behavior_mapper", "security_reviewer", "offline_realtime_reviewer", "integration_verifier"] },
+          "id": { "enum": ["behavior_mapper", "security_reviewer", "offline_realtime_reviewer"] },
           "phase": { "enum": ["planning", "review"] },
           "readOnly": { "const": true },
           "nonDelegating": { "const": true },
           "githubWrites": { "const": false },
-          "headBinding": { "enum": ["reviewed", "integrated"] },
+          "subjectBinding": { "enum": ["planning", "integrated"] },
           "guidance": { "type": "string", "minLength": 1 }
         }
       }
     },
     "routing": {
       "type": "object", "additionalProperties": false,
-      "required": ["behaviorMapper", "securityReviewerRiskTags", "offlineRealtimeReviewerRiskTags", "dataIntegrityGuidanceRiskTags", "opsWorkflowGuidanceRiskTags", "integrationVerifierHighPriorityRiskTags"],
+      "required": ["behaviorMapper", "securityReviewerRiskTags", "offlineRealtimeReviewerRiskTags", "dataIntegrityGuidanceRiskTags", "opsWorkflowGuidanceRiskTags", "finalVerificationHighPriorityRiskTags"],
       "properties": {
         "behaviorMapper": {
           "type": "object", "additionalProperties": false,
@@ -68,7 +68,7 @@
         "offlineRealtimeReviewerRiskTags": { "type": "array", "items": { "enum": ["offline", "realtime"] } },
         "dataIntegrityGuidanceRiskTags": { "type": "array", "items": { "enum": ["billing", "money", "migration", "release"] } },
         "opsWorkflowGuidanceRiskTags": { "type": "array", "items": { "enum": ["deployment", "workflow"] } },
-        "integrationVerifierHighPriorityRiskTags": { "type": "array", "items": { "enum": ["billing", "money", "migration", "release"] } }
+        "finalVerificationHighPriorityRiskTags": { "type": "array", "items": { "enum": ["billing", "money", "migration", "release"] } }
       }
     }
   }

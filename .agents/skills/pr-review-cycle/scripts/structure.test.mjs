@@ -210,6 +210,24 @@ test('ownership manifest names the complete canonical skill and no obsolete path
   assert.deepEqual(ownership.separateCapabilities, EXPECTED_SEPARATE_CAPABILITIES);
   assert.deepEqual(sorted(ownership.obsoletePaths), EXPECTED_OBSOLETE_PATHS);
 
+  const specialistOwnership = JSON.parse(readRepositoryFile(
+    '.agents/skills/aerstello-specialists/ownership.json',
+  ));
+  assert.deepEqual(specialistOwnership.permittedWorkflowConsumers, [
+    {
+      path: '.codex/agents/integration-verifier.toml',
+      targets: ['references/reviewer-contracts.md'],
+    },
+    {
+      path: '.codex/agents/review-fix-worker.toml',
+      targets: ['registry.json'],
+    },
+    {
+      path: '.agents/skills/pr-review-cycle/ownership.json',
+      targets: [],
+    },
+  ]);
+
   for (const path of ownership.canonicalFiles) {
     assert.equal(statSync(join(skillDirectory, path)).isFile(), true, `missing canonical file ${path}`);
   }

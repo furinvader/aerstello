@@ -1,6 +1,6 @@
 {
   "$schema": "./schemas/registry.schema.json",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "affectedAreas": ["api", "web", "shared", "workflow", "documentation", "release", "migration"],
   "riskTags": ["authentication", "authorization", "billing", "money", "migration", "release", "offline", "realtime", "localization", "responsive", "deployment", "workflow"],
   "profiles": [
@@ -12,10 +12,9 @@
     { "id": "ops-workflow", "guidePath": "profiles/ops-workflow.md", "compatibleAffectedAreas": ["workflow", "release", "documentation"], "supportedRiskTags": ["migration", "release", "deployment", "workflow"] }
   ],
   "reviewers": [
-    { "id": "behavior_mapper", "phase": "planning", "readOnly": true, "nonDelegating": true, "githubWrites": false, "headBinding": "reviewed", "guidance": "Map relevant feature and scenario IDs, tags, existing steps, exact targeted commands, and browser projects; report missing specifications, selectors, or unresolved selection uncertainty." },
-    { "id": "security_reviewer", "phase": "review", "readOnly": true, "nonDelegating": true, "githubWrites": false, "headBinding": "integrated", "guidance": "Review cookie flags, session lifecycle, authorization boundaries, capability replay and rotation, rate limits, idempotency, and token or identity leakage." },
-    { "id": "offline_realtime_reviewer", "phase": "review", "readOnly": true, "nonDelegating": true, "githubWrites": false, "headBinding": "integrated", "guidance": "Review identity-partitioned storage, mutation UUID replay, conflict quarantine, online-only boundaries, SSE ordering and cursor safety, session revalidation, refetch, cache clearing, and revocation." },
-    { "id": "integration_verifier", "phase": "review", "readOnly": true, "nonDelegating": true, "githubWrites": false, "headBinding": "integrated", "guidance": "Perform the final combined-change review with task profiles, risks, specialist evidence, targeted validation, ownership, and reviewed and integrated commits; reject missing or stale required evidence." }
+    { "id": "behavior_mapper", "phase": "planning", "readOnly": true, "nonDelegating": true, "githubWrites": false, "subjectBinding": "planning", "guidance": "Map relevant feature and scenario IDs, tags, existing steps, exact targeted commands, and browser projects; report missing specifications, selectors, or unresolved selection uncertainty." },
+    { "id": "security_reviewer", "phase": "review", "readOnly": true, "nonDelegating": true, "githubWrites": false, "subjectBinding": "integrated", "guidance": "Review cookie flags, session lifecycle, authorization boundaries, capability replay and rotation, rate limits, idempotency, and token or identity leakage." },
+    { "id": "offline_realtime_reviewer", "phase": "review", "readOnly": true, "nonDelegating": true, "githubWrites": false, "subjectBinding": "integrated", "guidance": "Review identity-partitioned storage, mutation UUID replay, conflict quarantine, online-only boundaries, SSE ordering and cursor safety, session revalidation, refetch, cache clearing, and revocation." }
   ],
   "routing": {
     "behaviorMapper": { "specializations": ["behavior-tests"], "riskTags": ["localization", "responsive"], "signals": ["browserVisible", "testSelectionUncertain"] },
@@ -23,6 +22,6 @@
     "offlineRealtimeReviewerRiskTags": ["offline", "realtime"],
     "dataIntegrityGuidanceRiskTags": ["billing", "money", "migration", "release"],
     "opsWorkflowGuidanceRiskTags": ["deployment", "workflow"],
-    "integrationVerifierHighPriorityRiskTags": ["billing", "money", "migration", "release"]
+    "finalVerificationHighPriorityRiskTags": ["billing", "money", "migration", "release"]
   }
 }

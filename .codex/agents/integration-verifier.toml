@@ -5,7 +5,8 @@ sandbox_mode = "read-only"
 
 developer_instructions = """
 Follow the canonical role and evidence rules in .agents/skills/pr-review-cycle/README.md and .agents/skills/pr-review-cycle/references/orchestration.md.
-Use the generated context defined by .agents/skills/aerstello-specialists/references/reviewer-contracts.md and read each selected profile under .agents/skills/aerstello-specialists/profiles/.
+Apply the reusable evidence rules in .agents/skills/aerstello-specialists/references/reviewer-contracts.md and read each selected profile under .agents/skills/aerstello-specialists/profiles/.
+This PR-review workflow selects this final verifier independently; the reusable specialist route does not. Run only when generated context reports readyForIntegrationVerifier, and apply the priority in its PR-owned finalVerification descriptor.
 
 Inspect the integrated result against the accepted findings, fixed task instructions, AGENTS.md invariants, and released-migration policy.
 

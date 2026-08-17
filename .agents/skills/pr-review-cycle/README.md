@@ -21,8 +21,8 @@ Use $pr-review-cycle to continue the current PR remediation session.
 4. **Plan the findings.** The main agent groups comments with one root cause and
    creates independent, fixed tasks. Each task names its owned paths, acceptance
    criteria, one specialist profile, compatible risks, exact related tests, E2E
-   selectors, browser projects, and reasons. Required behavior mapping runs
-   before the immutable packet is bound.
+   selectors, browser projects, and reasons. A `behavior_mapper` listed in the
+   reusable route's `planningHelpers` runs before the immutable packet is bound.
 5. **Run isolated fix workers.** Each worker starts from the Review commit in a
    separate worktree, edits only its assigned paths, runs only its recorded
    validation, and returns one structured result. Workers never push, integrate,
@@ -31,7 +31,9 @@ Use $pr-review-cycle to continue the current PR remediation session.
    integrates them in dependency order, and runs the union of related checks.
    Browser checks use selected scenarios and normally `tablet-chromium`. It then
    runs only routed exact-HEAD risk reviewers, converts findings into ordinary
-   tasks, and gives their context to the final read-only verifier.
+   tasks, and confirms their evidence is current and clean. The PR workflow then
+   selects and runs its own read-only `integration_verifier` alone, using the
+   generated context's aggregated final-verification priority.
 7. **Push and run review plus CI.** The main agent pushes the new Review commit,
    posts evidence, closes fixed Codex threads, and confirms none remain open.
    After targeted local checks pass, Codex review and full GitHub Actions may run
@@ -100,6 +102,12 @@ Missing, altered, pending, stale, clean, or finding specialist evidence is
 reported explicitly; no profile, risk, or planning signal is inferred for
 legacy bound tasks. These sidecars keep the active state schema at v3 and move
 with the PR directory when it is archived.
+
+Nested specialist routes use the workflow-neutral v2 shape: `planningHelpers`,
+`riskReviewers`, `supplementalGuidance`, and `finalVerificationPriority`. They
+never contain the PR verifier. Read-only `specialist-context` adds the PR-owned
+`finalVerification` descriptor for `integration_verifier` and reports it ready
+only after every routed exact-current-HEAD risk result is present and clean.
 
 A task in neutral `proposed`, `blocked`, or `failed` execution—or already
 `integrated`—whose packet digest came directly from an immutable schema-v2
@@ -308,7 +316,7 @@ Next action: Integrate the remaining result and run the selected tests.
   fallback.
 - **Specialist evidence is missing or stale:** verify every packet sidecar,
   its binding provenance and historical pre-bind receipt, rebuild the
-  exact-current-HEAD plan, and rerun only its required review-phase reviewers.
+  exact-current-HEAD plan, and rerun only its required `riskReviewers`.
   Do not infer legacy planning signals, rerun a reviewed-HEAD behavior mapper at
   integration HEAD, or treat an earlier risk-review clean result as current.
 - **CI failed:** inspect the exact-commit workflow and its artifacts. Run full

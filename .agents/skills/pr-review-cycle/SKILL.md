@@ -49,8 +49,9 @@ planning error, never permission to run a full local suite.
 Use the [Aerstello specialist registry](../aerstello-specialists/SKILL.md) to
 select one primary profile and compatible risk tags for each task. Record the
 explicit pre-bind `browserVisible` and `testSelectionUncertain` signals and run
-`behavior_mapper` before binding whenever routing requires it. Profiles guide
-the work; they never grant paths, commands, selectors, projects, or criteria.
+`behavior_mapper` before binding whenever it appears in `planningHelpers`.
+Profiles guide the work; they never grant paths, commands, selectors, projects,
+or criteria.
 
 Use at most four independent implementation workers. Parallel writers require
 separate worktrees from the reviewed commit and non-overlapping ownership.
@@ -63,10 +64,12 @@ four-thread session capacity for required post-integration reviewers.
 Validate each structured worker result before cherry-picking it centrally in
 dependency order. Integrated means only that the code has landed; the finding
 is not yet Resolved. Run the union of related checks after each batch, then run
-only the risk reviewers selected for the exact integrated HEAD. Turn their valid
-findings into ordinary fixed tasks. Finally run `integration_verifier` alone
-with generated specialist context. A clean specialist result cannot resolve a
-task or satisfy Done.
+only the reusable `riskReviewers` selected for the exact integrated HEAD. Turn
+their valid findings into ordinary fixed tasks. After all required evidence is
+current and clean, this PR workflow independently selects and runs
+`integration_verifier` alone with generated specialist context and the routed
+final-verification priority. A clean specialist result cannot resolve a task or
+satisfy Done.
 
 For browser changes, run selected scenarios with `tablet-chromium` by default.
 Add projects only for responsive, touch, installation, or browser-specific

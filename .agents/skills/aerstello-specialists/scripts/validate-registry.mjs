@@ -15,8 +15,12 @@ export const RISK_TAG_IDS = Object.freeze([
   'authentication', 'authorization', 'billing', 'money', 'migration', 'release',
   'offline', 'realtime', 'localization', 'responsive', 'deployment', 'workflow',
 ]);
-export const REVIEWER_IDS = Object.freeze([
-  'behavior_mapper', 'security_reviewer', 'offline_realtime_reviewer', 'integration_verifier',
+export const PLANNING_HELPER_IDS = Object.freeze(['behavior_mapper']);
+export const RISK_REVIEWER_IDS = Object.freeze([
+  'security_reviewer', 'offline_realtime_reviewer',
+]);
+export const SPECIALIST_ROLE_IDS = Object.freeze([
+  ...PLANNING_HELPER_IDS, ...RISK_REVIEWER_IDS,
 ]);
 
 const SHA_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
@@ -63,7 +67,7 @@ export function validateRegistry(registry) {
     '$schema', 'schemaVersion', 'affectedAreas', 'riskTags', 'profiles', 'reviewers', 'routing',
   ]);
   if (registry.$schema !== './schemas/registry.schema.json') errors.push('$schema must reference the canonical registry schema');
-  if (registry.schemaVersion !== 1) errors.push('schemaVersion must be 1');
+  if (registry.schemaVersion !== 2) errors.push('schemaVersion must be 2');
   exactArray(errors, 'affectedAreas', registry.affectedAreas, AFFECTED_AREA_IDS);
   exactArray(errors, 'riskTags', registry.riskTags, RISK_TAG_IDS);
 
@@ -96,26 +100,25 @@ export function validateRegistry(registry) {
   if (!Array.isArray(registry.reviewers)) {
     errors.push('reviewers must be an array');
   } else {
-    exactArray(errors, 'reviewer IDs', registry.reviewers.map((reviewer) => reviewer?.id), REVIEWER_IDS);
+    exactArray(errors, 'reviewer IDs', registry.reviewers.map((reviewer) => reviewer?.id), SPECIALIST_ROLE_IDS);
     const expectedBindings = new Map([
-      ['behavior_mapper', { phase: 'planning', headBinding: 'reviewed' }],
-      ['security_reviewer', { phase: 'review', headBinding: 'integrated' }],
-      ['offline_realtime_reviewer', { phase: 'review', headBinding: 'integrated' }],
-      ['integration_verifier', { phase: 'review', headBinding: 'integrated' }],
+      ['behavior_mapper', { phase: 'planning', subjectBinding: 'planning' }],
+      ['security_reviewer', { phase: 'review', subjectBinding: 'integrated' }],
+      ['offline_realtime_reviewer', { phase: 'review', subjectBinding: 'integrated' }],
     ]);
     for (const reviewer of registry.reviewers) {
       if (!isRecord(reviewer)) continue;
       rejectUnknownKeys(errors, `reviewers.${reviewer.id ?? 'unknown'}`, reviewer, [
-        'id', 'phase', 'readOnly', 'nonDelegating', 'githubWrites', 'headBinding', 'guidance',
+        'id', 'phase', 'readOnly', 'nonDelegating', 'githubWrites', 'subjectBinding', 'guidance',
       ]);
       if (reviewer.readOnly !== true || reviewer.nonDelegating !== true || reviewer.githubWrites !== false) {
         errors.push(`${reviewer.id} must be read-only, non-delegating, and forbidden from GitHub writes`);
       }
       if (!['planning', 'review'].includes(reviewer.phase)) errors.push(`${reviewer.id} has an invalid phase`);
-      if (!['reviewed', 'integrated'].includes(reviewer.headBinding)) errors.push(`${reviewer.id} has an invalid headBinding`);
+      if (!['planning', 'integrated'].includes(reviewer.subjectBinding)) errors.push(`${reviewer.id} has an invalid subjectBinding`);
       const expected = expectedBindings.get(reviewer.id);
-      if (expected && (reviewer.phase !== expected.phase || reviewer.headBinding !== expected.headBinding)) {
-        errors.push(`${reviewer.id} must use ${expected.phase} phase and ${expected.headBinding}-HEAD binding`);
+      if (expected && (reviewer.phase !== expected.phase || reviewer.subjectBinding !== expected.subjectBinding)) {
+        errors.push(`${reviewer.id} must use ${expected.phase} phase and ${expected.subjectBinding} subject binding`);
       }
       if (typeof reviewer.guidance !== 'string' || reviewer.guidance.trim() === '') errors.push(`${reviewer.id} guidance is required`);
     }
@@ -128,7 +131,7 @@ export function validateRegistry(registry) {
     rejectUnknownKeys(errors, 'routing', routing, [
       'behaviorMapper', 'securityReviewerRiskTags', 'offlineRealtimeReviewerRiskTags',
       'dataIntegrityGuidanceRiskTags', 'opsWorkflowGuidanceRiskTags',
-      'integrationVerifierHighPriorityRiskTags',
+      'finalVerificationHighPriorityRiskTags',
     ]);
     rejectUnknownKeys(errors, 'routing.behaviorMapper', routing.behaviorMapper, [
       'specializations', 'riskTags', 'signals',
@@ -140,7 +143,7 @@ export function validateRegistry(registry) {
     exactArray(errors, 'offline/realtime reviewer risk tags', routing.offlineRealtimeReviewerRiskTags, ['offline', 'realtime']);
     exactArray(errors, 'data-integrity guidance risk tags', routing.dataIntegrityGuidanceRiskTags, ['billing', 'money', 'migration', 'release']);
     exactArray(errors, 'ops/workflow guidance risk tags', routing.opsWorkflowGuidanceRiskTags, ['deployment', 'workflow']);
-    exactArray(errors, 'integration verifier high-priority risk tags', routing.integrationVerifierHighPriorityRiskTags, ['billing', 'money', 'migration', 'release']);
+    exactArray(errors, 'final verification high-priority risk tags', routing.finalVerificationHighPriorityRiskTags, ['billing', 'money', 'migration', 'release']);
   }
   return errors;
 }
@@ -207,29 +210,37 @@ export function routeSpecialists({
     requireRoutingInput(profile.supportedRiskTags.includes(risk), `specialization ${specialization} does not support risk tag ${risk}`);
   }
 
-  const reasons = new Map();
-  const add = (reviewerId, reason) => {
-    if (!reasons.has(reviewerId)) reasons.set(reviewerId, []);
-    if (!reasons.get(reviewerId).includes(reason)) reasons.get(reviewerId).push(reason);
+  const planningReasons = new Map();
+  const riskReasons = new Map();
+  const add = (reasons, specialistId, reason) => {
+    if (!reasons.has(specialistId)) reasons.set(specialistId, []);
+    if (!reasons.get(specialistId).includes(reason)) reasons.get(specialistId).push(reason);
   };
   const behavior = registry.routing.behaviorMapper;
-  if (behavior.specializations.includes(specialization)) add('behavior_mapper', `specialization:${specialization}`);
-  for (const risk of behavior.riskTags) if (risks.includes(risk)) add('behavior_mapper', `risk:${risk}`);
-  if (browserVisible) add('behavior_mapper', 'signal:browserVisible');
-  if (testSelectionUncertain) add('behavior_mapper', 'signal:testSelectionUncertain');
-  for (const risk of registry.routing.securityReviewerRiskTags) if (risks.includes(risk)) add('security_reviewer', `risk:${risk}`);
-  for (const risk of registry.routing.offlineRealtimeReviewerRiskTags) if (risks.includes(risk)) add('offline_realtime_reviewer', `risk:${risk}`);
-  add('integration_verifier', 'final-combined-review');
-  const highPriority = registry.routing.integrationVerifierHighPriorityRiskTags.some((risk) => risks.includes(risk));
-  if (highPriority) add('integration_verifier', 'high-priority:data-integrity');
+  if (behavior.specializations.includes(specialization)) {
+    add(planningReasons, 'behavior_mapper', `specialization:${specialization}`);
+  }
+  for (const risk of behavior.riskTags) {
+    if (risks.includes(risk)) add(planningReasons, 'behavior_mapper', `risk:${risk}`);
+  }
+  if (browserVisible) add(planningReasons, 'behavior_mapper', 'signal:browserVisible');
+  if (testSelectionUncertain) {
+    add(planningReasons, 'behavior_mapper', 'signal:testSelectionUncertain');
+  }
+  for (const risk of registry.routing.securityReviewerRiskTags) {
+    if (risks.includes(risk)) add(riskReasons, 'security_reviewer', `risk:${risk}`);
+  }
+  for (const risk of registry.routing.offlineRealtimeReviewerRiskTags) {
+    if (risks.includes(risk)) add(riskReasons, 'offline_realtime_reviewer', `risk:${risk}`);
+  }
+  const highPriority = registry.routing.finalVerificationHighPriorityRiskTags
+    .some((risk) => risks.includes(risk));
 
   const supplementalGuidance = [];
   const addSupplementalGuidance = (id, routedRisks) => {
     if (id === specialization || routedRisks.length === 0) return;
-    const supplementalProfile = registry.profiles.find((candidate) => candidate.id === id);
     supplementalGuidance.push({
       id,
-      guidePath: supplementalProfile.guidePath,
       reasons: routedRisks.map((risk) => `risk:${risk}`),
     });
   };
@@ -242,59 +253,99 @@ export function routeSpecialists({
     registry.routing.opsWorkflowGuidanceRiskTags.filter((risk) => risks.includes(risk)),
   );
 
-  const reviewers = registry.reviewers
-    .filter(({ id }) => reasons.has(id))
-    .map(({ id, phase, headBinding, guidance }) => ({
-      id, phase, headBinding, guidance, reasons: [...reasons.get(id)],
-    }));
+  const planningHelpers = registry.reviewers
+    .filter(({ id }) => planningReasons.has(id))
+    .map(({ id }) => ({ id, reasons: [...planningReasons.get(id)] }));
+  const riskReviewers = registry.reviewers
+    .filter(({ id }) => riskReasons.has(id))
+    .map(({ id }) => ({ id, reasons: [...riskReasons.get(id)] }));
   return {
     schemaVersion: registry.schemaVersion,
     specialization,
     profileGuidePath: profile.guidePath,
     riskTags: risks,
     signals: { browserVisible, testSelectionUncertain },
-    integrationVerifierPriority: highPriority ? 'high' : 'standard',
+    planningHelpers,
+    riskReviewers,
     supplementalGuidance,
-    reviewers,
+    finalVerificationPriority: highPriority ? 'high' : 'standard',
   };
 }
 
-export function requiredReviewerIds(route, { phase } = {}) {
-  if (!isRecord(route) || !Array.isArray(route.reviewers)) throw new TypeError('route.reviewers must be an array');
-  return route.reviewers.filter((reviewer) => phase === undefined || reviewer.phase === phase).map(({ id }) => id);
+function phaseSpecialistIds(phase) {
+  if (phase === 'planning') return PLANNING_HELPER_IDS;
+  if (phase === 'review') return RISK_REVIEWER_IDS;
+  throw new TypeError('phase must be planning or review');
 }
 
-export function isReviewerEvidenceApplicable({ evidence, integratedHeadSha } = {}) {
+export function requiredSpecialistIds(route, { phase } = {}) {
+  const allowedIds = phaseSpecialistIds(phase);
+  const field = phase === 'planning' ? 'planningHelpers' : 'riskReviewers';
+  if (!isRecord(route) || !Array.isArray(route[field])) {
+    throw new TypeError(`route.${field} must be an array`);
+  }
+  const ids = [];
+  for (const specialist of route[field]) {
+    if (!isRecord(specialist) || !allowedIds.includes(specialist.id)) {
+      throw new TypeError(`route.${field} contains an invalid specialist`);
+    }
+    if (ids.includes(specialist.id)) {
+      throw new TypeError(`route.${field} contains duplicate specialist ${specialist.id}`);
+    }
+    ids.push(specialist.id);
+  }
+  return ids;
+}
+
+export function isSpecialistEvidenceApplicable({ evidence, subjectSha, phase } = {}) {
   return isRecord(evidence)
-    && SHA_PATTERN.test(integratedHeadSha ?? '')
-    && evidence.headSha === integratedHeadSha;
+    && ['planning', 'review'].includes(phase)
+    && phaseSpecialistIds(phase).includes(evidence.reviewerId)
+    && SHA_PATTERN.test(subjectSha ?? '')
+    && evidence.headSha === subjectSha;
 }
 
-export function validateReviewerEvidence({ evidence, route, integratedHeadSha } = {}) {
+export function validateSpecialistEvidence({ evidence, route, subjectSha, phase } = {}) {
   const errors = [];
-  if (!SHA_PATTERN.test(integratedHeadSha ?? '')) errors.push('integratedHeadSha must be a 40- or 64-character lowercase hexadecimal SHA');
+  if (!['planning', 'review'].includes(phase)) errors.push('phase must be planning or review');
+  if (!SHA_PATTERN.test(subjectSha ?? '')) {
+    errors.push('subjectSha must be a 40- or 64-character lowercase hexadecimal SHA');
+  }
   if (!Array.isArray(evidence)) return [...errors, 'evidence must be an array'];
+  if (!['planning', 'review'].includes(phase)) return errors;
+  const phaseIds = phaseSpecialistIds(phase);
   let required;
   try {
-    required = requiredReviewerIds(route, { phase: 'review' });
+    required = requiredSpecialistIds(route, { phase });
   } catch (error) {
     return [...errors, error.message];
   }
+  const requiredSet = new Set(required);
   const seen = new Set();
   for (const item of evidence) {
     if (!isRecord(item)) {
       errors.push('each evidence entry must be an object');
       continue;
     }
-    if (!REVIEWER_IDS.includes(item.reviewerId)) errors.push(`unknown reviewer evidence: ${item.reviewerId}`);
-    if (seen.has(item.reviewerId)) errors.push(`duplicate reviewer evidence: ${item.reviewerId}`);
+    if (!SPECIALIST_ROLE_IDS.includes(item.reviewerId)) {
+      errors.push(`unknown specialist evidence: ${item.reviewerId}`);
+    } else if (!phaseIds.includes(item.reviewerId)) {
+      errors.push(`${item.reviewerId} evidence does not apply to ${phase} phase`);
+    } else if (!requiredSet.has(item.reviewerId)) {
+      errors.push(`${item.reviewerId} evidence is not routed for ${phase} phase`);
+    }
+    if (seen.has(item.reviewerId)) errors.push(`duplicate specialist evidence: ${item.reviewerId}`);
     seen.add(item.reviewerId);
     if (!SHA_PATTERN.test(item.headSha ?? '')) errors.push(`${item.reviewerId} evidence has an invalid headSha`);
-    else if (!isReviewerEvidenceApplicable({ evidence: item, integratedHeadSha })) errors.push(`${item.reviewerId} evidence is stale for integrated HEAD`);
+    else if (!isSpecialistEvidenceApplicable({ evidence: item, subjectSha, phase })) {
+      errors.push(`${item.reviewerId} evidence is stale or inapplicable for the ${phase} subject`);
+    }
     if (!EVIDENCE_STATUSES.has(item.status)) errors.push(`${item.reviewerId} evidence has an invalid status`);
     if (typeof item.summary !== 'string' || item.summary.trim() === '') errors.push(`${item.reviewerId} evidence requires a summary`);
   }
-  for (const reviewerId of required) if (!seen.has(reviewerId)) errors.push(`missing required reviewer evidence: ${reviewerId}`);
+  for (const specialistId of required) {
+    if (!seen.has(specialistId)) errors.push(`missing required specialist evidence: ${specialistId}`);
+  }
   return errors;
 }
 
