@@ -394,6 +394,7 @@ test('schema and contract accept unambiguous whitespace-free anticipated paths',
     const value = plan(); value.tasks[0].anticipatedPaths = [path];
     assert.equal(validateSchema(value), true, path);
     assert.deepEqual(validateImplementationPlan(value), [], path);
+    assert.deepEqual(planReadiness(value), { ready: true, errors: [] }, path);
   }
 });
 
@@ -414,6 +415,21 @@ test('schema and contract reject ambiguous whitespace-bearing anticipated paths'
     const value = plan(); value.tasks[0].anticipatedPaths = [path];
     assert.equal(validateSchema(value), false, path);
     assert.ok(validateImplementationPlan(value).length > 0, path);
+  }
+});
+
+test('schema, contract, and readiness reject whitespace-free shell-shaped anticipated paths', () => {
+  const schema = JSON.parse(readFileSync(contractPaths.implementationPlanSchema, 'utf8'));
+  const ajv = new Ajv2020({ strict: true, allErrors: true }); addFormats(ajv);
+  const validateSchema = ajv.compile(schema);
+  for (const path of [
+    'FOO=bar', 'foo;bar', 'foo|bar', 'foo&&bar', 'foo||bar',
+    'foo$(bar)', 'foo`bar`', 'foo>bar', 'foo<bar',
+  ]) {
+    const value = plan(); value.tasks[0].anticipatedPaths = [path];
+    assert.equal(validateSchema(value), false, path);
+    assert.ok(validateImplementationPlan(value).length > 0, path);
+    assert.equal(planReadiness(value).ready, false, path);
   }
 });
 

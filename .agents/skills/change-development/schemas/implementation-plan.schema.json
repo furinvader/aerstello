@@ -56,7 +56,7 @@
     "sha": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
     "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
     "repositoryPath": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "^(?!/)(?!.*//)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*[\\u0000-\\u001f\\u007f-\\u009f])[^/*?\\[\\]{}]+(?:/[^/*?\\[\\]{}]+)*$" },
-    "anticipatedPath": { "type": "string", "pattern": "^\\S+$", "allOf": [{ "$ref": "#/$defs/repositoryPath" }] },
+    "anticipatedPath": { "type": "string", "pattern": "^(?![A-Za-z_][A-Za-z0-9_]*=)(?!.*(?:&&|\\|\\||[;|`<>]|\\$\\())\\S+$", "allOf": [{ "$ref": "#/$defs/repositoryPath" }] },
     "idList": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
     "textList": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/text" } },
     "source": { "type": "object", "additionalProperties": false, "required": ["kind", "reference", "relationship", "captureDigest"], "properties": { "kind": { "enum": ["github-issue", "direct-request", "repository-plan", "partial-implementation"] }, "reference": { "$ref": "#/$defs/text" }, "relationship": { "enum": ["reference-only", "partial", "resolves"] }, "captureDigest": { "$ref": "#/$defs/digest" } } },

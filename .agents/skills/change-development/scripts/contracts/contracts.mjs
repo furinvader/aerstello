@@ -217,7 +217,6 @@ function isExecutableIntent(value) {
 }
 
 function isCommandShapedAnticipatedPath(value) {
-  if (SHELL_SYNTAX.test(value) || ENVIRONMENT_ASSIGNMENT_PREFIX.test(value)) return true;
   return !anticipatedPathPattern.test(value);
 }
 
