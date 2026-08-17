@@ -94,6 +94,12 @@ test('two same-base workers integrate by delta, resume intent-only integration, 
   state = finalizeIntegration({ cwd, expectedRevision: 12 });
   assert.equal(state.phase, 'integrated');
   assert.equal(validateState({ cwd }).valid, true);
+  git(cwd, 'switch', 'alternate-central');
+  state = checkpointGitMetadata({ cwd }).state;
+  assert.equal(state.phase, 'blocked');
+  git(cwd, 'switch', 'main');
+  state = checkpointGitMetadata({ cwd }).state;
+  assert.equal(state.phase, 'integrated', 'restoring finalized identity must preserve explicit finalization');
 });
 
 test('execution Git checkpoints preserve durable identity and restore lifecycle phase exactly', async () => {
@@ -125,6 +131,11 @@ test('interrupted execution checkpoint recovers against evidence without replaci
   git(cwd, 'switch', '-c', 'checkpoint-drift');
   assert.throws(() => checkpointGitMetadata({ cwd,
     crashStep(step) { if (step === 'after-state') throw new Error('execution checkpoint crash'); } }), /checkpoint crash/u);
+  const interruptedState = readFileSync(join(changeDirectory(cwd, 'execution-checkpoint-recovery'), 'state.json'), 'utf8');
+  git(cwd, 'switch', 'main');
+  assert.throws(() => recoverState({ cwd }), (error) => error.code === 'PLANNING_SNAPSHOT_MISMATCH');
+  assert.equal(readFileSync(join(changeDirectory(cwd, 'execution-checkpoint-recovery'), 'state.json'), 'utf8'), interruptedState);
+  git(cwd, 'switch', 'checkpoint-drift');
   const recovered = recoverState({ cwd });
   assert.equal(recovered.state.phase, 'blocked');
   assert.deepEqual(recovered.state.git, accepted.git);
@@ -133,28 +144,44 @@ test('interrupted execution checkpoint recovers against evidence without replaci
 test('accepted sibling integrates after a failed wave and preserves failure evidence', async () => {
   const { cwd, sha } = repository('failed wave sibling integration');
   const planning = await initializeState({ cwd, changeId: 'failed-wave-sibling', mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
-  const plan = executionPlanFor(planning); let state = acceptPlan({ cwd, plan, expectedRevision: 0 });
+  const plan = executionPlanFor(planning);
+  plan.criteria.push({ id: 'third-change', description: 'Third task remains independent.', disposition: 'owned', ownerTaskId: 'third-task', deferredReason: null });
+  plan.tasks.push({ ...plan.tasks[0], id: 'third-task', title: 'Implement third', objective: 'Persist third file.',
+    criterionIds: ['third-change'], checklistItemIds: [], anticipatedPaths: ['third.txt'] });
+  let state = acceptPlan({ cwd, plan, expectedRevision: 0 });
   const first = packetFor(state, plan, 'state-task'); state = bindTask({ cwd, packet: first, expectedRevision: state.revision });
   const firstWorker = createWorkerFixture(cwd, state, first);
   const second = packetFor(state, plan, 'second-task'); state = bindTask({ cwd, packet: second, expectedRevision: state.revision });
   const secondWorker = createWorkerFixture(cwd, state, second);
+  const third = packetFor(state, plan, 'third-task'); state = bindTask({ cwd, packet: third, expectedRevision: state.revision });
+  const thirdWorker = createWorkerFixture(cwd, state, third);
   state = scheduleWave({ cwd, expectedRevision: state.revision });
   state = startTask({ cwd, taskId: first.taskId, workerId: 'successful-worker', expectedRevision: state.revision });
   state = startTask({ cwd, taskId: second.taskId, workerId: 'failed-worker', expectedRevision: state.revision });
+  state = startTask({ cwd, taskId: third.taskId, workerId: 'third-failed-worker', expectedRevision: state.revision });
   writeFileSync(join(firstWorker.path, 'first.txt'), 'accepted sibling\n'); git(firstWorker.path, 'add', 'first.txt'); git(firstWorker.path, 'commit', '-m', 'test: accepted sibling');
   const firstCommit = git(firstWorker.path, 'rev-parse', 'HEAD');
   state = acceptResult({ cwd, workerCwd: firstWorker.path, expectedRevision: state.revision,
     result: resultFor(first, 'implemented', firstCommit, ['first.txt']) });
+  state = acceptResult({ cwd, workerCwd: thirdWorker.path, expectedRevision: state.revision,
+    result: { ...resultFor(third, 'failed'), validation: third.requiredValidation.unit.map(({ command }) => ({
+      command, result: 'failed', summary: 'Third validation failed.',
+    })), unexpectedDependencies: ['Third worker validation failed.'], summary: 'Third worker validation failed.' } });
   state = acceptResult({ cwd, workerCwd: secondWorker.path, expectedRevision: state.revision,
     result: { ...resultFor(second, 'failed'), validation: second.requiredValidation.unit.map(({ command }) => ({
       command, result: 'failed', summary: 'Worker validation failed.',
     })), unexpectedDependencies: ['Worker validation failed.'], summary: 'Worker validation failed.' } });
   const failureReasons = [...state.blockedReasons];
+  assert.deepEqual(failureReasons, [
+    'Task second-task reported failed: Worker validation failed.',
+    'Task third-task reported failed: Third worker validation failed.',
+  ], 'failure reasons follow accepted plan task order, not arrival order');
   state = integrateTask({ cwd, taskId: first.taskId, expectedRevision: state.revision });
   assert.equal(state.phase, 'blocked');
   assert.deepEqual(state.blockedReasons, failureReasons);
   assert.equal(state.execution.tasks.find(({ id }) => id === first.taskId).status, 'integrated');
   assert.equal(state.execution.tasks.find(({ id }) => id === second.taskId).status, 'failed');
+  assert.equal(state.execution.tasks.find(({ id }) => id === third.taskId).status, 'failed');
 });
 
 test('v1 accepts a plan without execution and upgrades explicitly with unchanged identities', async () => {
@@ -170,6 +197,41 @@ test('v1 accepts a plan without execution and upgrades explicitly with unchanged
   assert.deepEqual(state.plan, planIdentity);
   assert.deepEqual({ ...state.git, observedAt: gitIdentity.observedAt }, gitIdentity);
   assert.equal(state.execution.tasks[0].status, 'unbound');
+});
+
+test('mapper packets bind exact original or amendment evidence and mismatch leaves no sidecars', async () => {
+  const { cwd, sha } = repository('mapper history');
+  const planning = await initializeState({ cwd, changeId: 'mapper-history', mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
+  const plan = executionPlanFor(planning); const profile = behaviorSpecialization();
+  plan.specialization = profile;
+  plan.tasks = plan.tasks.map((task) => ({ ...task, specialization: profile }));
+  const originalEvidence = mapperEvidence(sha, 1, 'Original mapping is clean.');
+  let state = acceptPlan({ cwd, plan, planningEvidence: [originalEvidence], expectedRevision: 0 });
+  const first = packetFor(state, plan, 'state-task'); first.behaviorMapperEvidence = { ...originalEvidence, summary: 'Unaccepted mapping.' };
+  const statePath = join(changeDirectory(cwd, state.changeId), 'state.json');
+  const before = readFileSync(statePath, 'utf8');
+  assert.throws(() => bindTask({ cwd, packet: first, expectedRevision: state.revision }),
+    (error) => error.code === 'TASK_PROVENANCE_MISMATCH');
+  assert.equal(readFileSync(statePath, 'utf8'), before);
+  assert.equal(existsSync(join(changeDirectory(cwd, state.changeId), 'implementation')), false);
+
+  first.behaviorMapperEvidence = originalEvidence;
+  state = bindTask({ cwd, packet: first, expectedRevision: state.revision });
+  const worker = createWorkerFixture(cwd, state, first);
+  state = scheduleWave({ cwd, expectedRevision: state.revision });
+  state = startTask({ cwd, taskId: first.taskId, workerId: 'mapper-worker', expectedRevision: state.revision });
+  state = acceptResult({ cwd, result: resultFor(first, 'no-change'), workerCwd: worker.path, expectedRevision: state.revision });
+  removeTaskWorktree({ cwd, changeId: state.changeId, taskId: first.taskId });
+
+  const amendedPlan = structuredClone(plan); amendedPlan.planRevision = 2; amendedPlan.title = 'Mapper history amended';
+  const amendedEvidence = mapperEvidence(sha, 2, 'Amended mapping is clean.');
+  state = amendPlan({ cwd, resultingPlan: amendedPlan, planningEvidence: [amendedEvidence], expectedRevision: state.revision,
+    amendment: { id: 'mapper-history-amendment', reason: 'Exercise historical mapper replay.', authorization: 'operator',
+      trigger: 'operator-decision', delta: { title: amendedPlan.title }, invalidatedEvidence: [] } });
+  const second = packetFor(state, amendedPlan, 'second-task'); second.behaviorMapperEvidence = amendedEvidence;
+  state = bindTask({ cwd, packet: second, expectedRevision: state.revision });
+  assert.equal(validateState({ cwd }).valid, true, 'replay must select original evidence for task one and amendment evidence for task two');
+  assert.equal(state.execution.tasks.find(({ id }) => id === 'state-task').status, 'no-change');
 });
 
 test('abandonment refuses created worktrees until active-state cleanup is tombstoned', async () => {
@@ -283,6 +345,17 @@ function specialization() {
   const value = { specialization: 'ops-workflow', affectedAreas: ['workflow'], riskTags: ['workflow'],
     browserVisible: false, relatedTestSelectionUncertain: false };
   return { ...value, route: routeSpecialists({ ...value, testSelectionUncertain: false }, registry) };
+}
+
+function behaviorSpecialization() {
+  const value = { specialization: 'ops-workflow', affectedAreas: ['workflow'], riskTags: ['workflow'],
+    browserVisible: true, relatedTestSelectionUncertain: false };
+  return { ...value, route: routeSpecialists({ ...value, testSelectionUncertain: false }, registry) };
+}
+
+function mapperEvidence(headSha, planRevision, summary) {
+  return { schemaVersion: 1, planRevision, reviewerId: 'behavior_mapper', headSha, status: 'clean',
+    summary, findings: [], recordedAt: '2026-08-18T10:00:00.000Z' };
 }
 
 function planFor(state, revision = 1) {

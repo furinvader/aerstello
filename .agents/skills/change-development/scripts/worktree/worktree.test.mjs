@@ -10,6 +10,8 @@ import { commit, createRepository, git } from '../../../../../tests/support/git-
 import { implementationTaskDigest } from '../implementation/contracts.mjs';
 import {
   implementationTaskPacketPath,
+  activePointerPath,
+  archiveDirectory,
   implementationWorktreeCreationIntentPath,
   implementationWorktreeManifestPath,
   implementationWorktreePath,
@@ -18,7 +20,7 @@ import {
   implementationWorktreeTombstonePath,
 } from '../paths.mjs';
 import {
-  acceptPlan, acceptResult, amendPlan, archiveState, bindTask, initializeState, rejectTask, scheduleWave, startTask, StateError,
+  acceptPlan, acceptResult, amendPlan, archiveState, bindTask, initializeState, loadState, rejectTask, scheduleWave, startTask, StateError,
 } from '../state/state.mjs';
 import {
   createTaskWorktree, inspectTaskWorktree, recoverTaskWorktree, removeTaskWorktree,
@@ -314,6 +316,41 @@ test('archived state never authorizes worktree deletion', async () => {
     abandonReason: 'Archive after active-state cleanup.' }).archived, true);
   assert.throws(() => removeTaskWorktree({ cwd: context.cwd, changeId: 'issue-23', taskId: context.taskId }),
     (error) => error instanceof StateError && ['STATE_NOT_FOUND', 'ARCHIVE_NOT_ACTIVE'].includes(error.code));
+});
+
+test('archive refuses partial creation until active recovery and removal complete', async () => {
+  const context = await boundRepository();
+  assert.throws(() => create(context, { crashStep: 'creation-after-intent' }),
+    (error) => error instanceof StateError && error.code === 'SIMULATED_WORKTREE_CRASH');
+  const revision = loadState(context.cwd).revision;
+  const pointerBefore = readFileSync(activePointerPath(context.cwd), 'utf8');
+  assert.throws(() => archiveState({ cwd: context.cwd, changeId: 'issue-23', expectedRevision: revision,
+    abandonReason: 'Stop after partial creation.' }), (error) => error.code === 'RECEIPT_MISSING');
+  assert.equal(loadState(context.cwd).revision, revision);
+  assert.equal(readFileSync(activePointerPath(context.cwd), 'utf8'), pointerBefore);
+  assert.equal(existsSync(archiveDirectory(context.cwd, 'issue-23')), false);
+  assert.equal(recoverTaskWorktree({ cwd: context.cwd, changeId: 'issue-23', taskId: context.taskId }).status, 'active');
+  const rejected = rejectTask({ cwd: context.cwd, changeId: 'issue-23', taskId: context.taskId,
+    reason: 'Stop after recovering creation.', expectedRevision: revision });
+  assert.equal(removeTaskWorktree({ cwd: context.cwd, changeId: 'issue-23', taskId: context.taskId }).status, 'removed');
+  assert.equal(archiveState({ cwd: context.cwd, changeId: 'issue-23', expectedRevision: rejected.revision,
+    abandonReason: 'Stop after safe cleanup.' }).archived, true);
+});
+
+test('archive refuses partial removal until active recovery writes its tombstone', async () => {
+  const context = await boundRepository(); const created = create(context);
+  const terminal = authorizeNoChangeRemoval(context, created);
+  assert.throws(() => removeTaskWorktree({ cwd: context.cwd, changeId: 'issue-23', taskId: context.taskId,
+    crashStep: 'removal-after-intent' }), (error) => error instanceof StateError && error.code === 'SIMULATED_WORKTREE_CRASH');
+  const pointerBefore = readFileSync(activePointerPath(context.cwd), 'utf8');
+  assert.throws(() => archiveState({ cwd: context.cwd, changeId: 'issue-23', expectedRevision: terminal.revision,
+    abandonReason: 'Stop after partial removal.' }), (error) => error.code === 'RECEIPT_MISSING');
+  assert.equal(loadState(context.cwd).revision, terminal.revision);
+  assert.equal(readFileSync(activePointerPath(context.cwd), 'utf8'), pointerBefore);
+  assert.equal(existsSync(archiveDirectory(context.cwd, 'issue-23')), false);
+  assert.equal(recoverTaskWorktree({ cwd: context.cwd, changeId: 'issue-23', taskId: context.taskId }).status, 'removed');
+  assert.equal(archiveState({ cwd: context.cwd, changeId: 'issue-23', expectedRevision: terminal.revision,
+    abandonReason: 'Stop after safe cleanup.' }).archived, true);
 });
 
 test('removal repairs exact JSON-only intent and tombstone crash boundaries', async () => {

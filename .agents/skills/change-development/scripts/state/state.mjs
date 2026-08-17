@@ -1193,6 +1193,18 @@ function nulChangedPaths(cwd, baseSha, commitSha) {
   return bytes.toString('utf8').split('\0').filter(Boolean);
 }
 
+function canonicalFailureReasons(cwd, state, execution, inFlight = null) {
+  return execution.tasks.filter((task) => ['blocked', 'failed'].includes(task.status)).map((task) => {
+    const result = inFlight?.taskId === task.id
+      ? inFlight.result
+      : verifyReceipt(join(changeDirectory(cwd, state.changeId), resultEvidencePath(task.id, task.attempt)), `implementation result ${task.id}`).value;
+    if (objectDigest(result) !== task.resultDigest || result.taskId !== task.id || result.status !== task.status) {
+      throw new StateError(`Task ${task.id} failure evidence does not match its execution summary`, 'TASK_RESULT_MISMATCH');
+    }
+    return `Task ${task.id} reported ${task.status}: ${result.summary}`;
+  });
+}
+
 export function acceptResult({ cwd = process.cwd(), changeId, result, workerCwd, expectedRevision, clock, crashStep, lockOptions } = {}) {
   const root = repositoryRoot(cwd); const selected = selectedChangeId(root, changeId);
   return withChangeLock(root, selected, () => {
@@ -1238,8 +1250,8 @@ export function acceptResult({ cwd = process.cwd(), changeId, result, workerCwd,
     const execution = replaceExecutionTask(state, task.id, { status: terminal, resultDigest: objectDigest(result), workerCommit: result.workerCommit }, { activeWave });
     const hasFailure = execution.tasks.some((entry) => ['blocked', 'failed'].includes(entry.status));
     const nextPhase = hasFailure ? 'blocked' : 'implementing';
-    const blockedReasons = [...state.blockedReasons];
-    if (['blocked', 'failed'].includes(terminal)) blockedReasons.push(`Task ${task.id} reported ${terminal}: ${result.summary}`);
+    const blockedReasons = hasFailure
+      ? canonicalFailureReasons(root, state, execution, { taskId: task.id, result }) : [];
     const next = revised(state, { phase: nextPhase, blockedReasons, execution }, clock);
     return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'result-accepted', summary: `Accepted ${terminal} result for ${task.id}`, crashStep,
       pendingEvidence: [{ key: 'implementationResultDigest', path: resultEvidencePath(task.id, task.attempt), value: result, label: `implementation result ${task.id} attempt ${task.attempt}` }] });
@@ -1256,10 +1268,7 @@ function prepareIntegration({ root, selected, taskId, expectedRevision, clock, c
     if (!task.dependsOn.every((id) => ['integrated', 'no-change'].includes(executionTask(state, id).status))) {
       throw new StateError(`Task ${taskId} dependencies are not integrated`, 'DEPENDENCY_NOT_INTEGRATED');
     }
-    const failureReasons = state.execution.tasks.filter((entry) => ['blocked', 'failed'].includes(entry.status)).map((entry) => {
-      const result = verifyReceipt(join(changeDirectory(root, state.changeId), resultEvidencePath(entry.id, entry.attempt)), `implementation result ${entry.id}`).value;
-      return `Task ${entry.id} reported ${entry.status}: ${result.summary}`;
-    });
+    const failureReasons = canonicalFailureReasons(root, state, state.execution);
     if (state.phase === 'blocked' && serialized(failureReasons) !== serialized(state.blockedReasons)) {
       throw new StateError('Integration from blocked state is limited to an accepted sibling of exact receipt-backed task failures', 'INVALID_PHASE');
     }
@@ -1291,12 +1300,8 @@ function reconcileIntegrationLocked({ root, selected, expectedRevision, clock, c
       throw new StateError('Central HEAD contains unrelated or non-equivalent work for the persisted integration intent', 'INTEGRATION_HEAD_MISMATCH');
     }
     const execution = replaceExecutionTask(state, task.id, { status: 'integrated', integratedCommit: current.headSha }, { integrationIntent: null });
-    const failedTasks = execution.tasks.filter((entry) => ['blocked', 'failed'].includes(entry.status));
-    const failuresRemain = failedTasks.length > 0;
-    const failureReasons = failedTasks.map((entry) => {
-      const result = verifyReceipt(join(changeDirectory(root, state.changeId), resultEvidencePath(entry.id, entry.attempt)), `implementation result ${entry.id}`).value;
-      return `Task ${entry.id} reported ${entry.status}: ${result.summary}`;
-    });
+    const failuresRemain = execution.tasks.some((entry) => ['blocked', 'failed'].includes(entry.status));
+    const failureReasons = canonicalFailureReasons(root, state, execution);
     const next = revised(state, { phase: failuresRemain ? 'blocked' : 'implementing', execution, git: current,
       blockedReasons: failuresRemain ? failureReasons : [] }, clock);
     return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'task-integrated',
@@ -2274,16 +2279,16 @@ function isGitBlock(reason) {
   return GIT_BLOCK_PREFIXES.some((prefix) => reason.startsWith(prefix));
 }
 
-function restoredCheckpointPhase(state) {
+function restoredCheckpointPhase(state, finalizedIntegration) {
   if (state.source.classification === 'unreviewed-material') return 'awaiting-decision';
   if (!state.plan) return 'planning';
   if (!state.execution) return 'ready-to-implement';
-  if (state.phase === 'integrated') return 'integrated';
+  if (state.phase === 'integrated' || finalizedIntegration) return 'integrated';
   if (state.execution.tasks.every((task) => task.status === 'unbound')) return 'ready-to-implement';
   return 'implementing';
 }
 
-function deriveGitCheckpoint(predecessor, observed, updatedAt) {
+function deriveGitCheckpoint(predecessor, observed, updatedAt, { finalizedIntegration = false } = {}) {
   const executionActive = predecessor.schemaVersion === 2 && predecessor.execution !== null;
   const valid = executionActive
     ? observed.clean && observed.headSha === predecessor.git.headSha
@@ -2299,7 +2304,7 @@ function deriveGitCheckpoint(predecessor, observed, updatedAt) {
     : gitBlock ? [...nonGitReasons, gitBlock] : hadGitBlock ? nonGitReasons : predecessor.blockedReasons;
   const phase = immutableTerminal ? predecessor.phase
     : gitBlock || nonGitReasons.length > 0 ? 'blocked'
-      : hadGitBlock ? restoredCheckpointPhase(predecessor) : predecessor.phase;
+      : hadGitBlock ? restoredCheckpointPhase(predecessor, finalizedIntegration) : predecessor.phase;
   const expected = {
     ...predecessor,
     // An invalid execution observation is evidence, never a replacement for the durable integration identity.
@@ -2323,12 +2328,12 @@ function checkpointObservation(intent) {
   return null;
 }
 
-function isSemanticGitCheckpoint(intent, predecessor) {
+function isSemanticGitCheckpoint(intent, predecessor, finalizedIntegration) {
   if (intent.type !== 'git-checkpoint' || !predecessor
       || intent.summary !== 'Checkpointed local Git observation before compaction') return false;
   const observed = checkpointObservation(intent);
   if (!observed) return false;
-  return serialized(deriveGitCheckpoint(predecessor, observed, intent.nextState.updatedAt)) === serialized(intent.nextState);
+  return serialized(deriveGitCheckpoint(predecessor, observed, intent.nextState.updatedAt, { finalizedIntegration })) === serialized(intent.nextState);
 }
 
 function verifyEventHistory(cwd, changeId, intentsOrLatestRevision) {
@@ -2454,7 +2459,8 @@ export function recoverState({ cwd = process.cwd(), changeId, crashStep, lockOpt
       }
     }
     const decisionDisposition = decisionDispositionForRecovery(intent, predecessor);
-    const semanticGitCheckpoint = isSemanticGitCheckpoint(intent, predecessor);
+    const finalizedIntegration = prefix.intents.some((item) => item.type === 'implementation-finalized');
+    const semanticGitCheckpoint = isSemanticGitCheckpoint(intent, predecessor, finalizedIntegration);
     if (intent.type === 'git-checkpoint' && !semanticGitCheckpoint) {
       throw new StateError('Interrupted Git checkpoint is semantically inconsistent', 'RECOVERY_EVIDENCE_INVALID');
     }
@@ -2478,11 +2484,13 @@ export function recoverState({ cwd = process.cwd(), changeId, crashStep, lockOpt
       && currentGit.headSha === recordedGit.headSha
       && currentGit.branch === recordedGit.branch
       && currentGit.clean === recordedGit.clean;
-    const recoveryGitInvalid = semanticAbandonment || exactDecisionObservation || executionTransition
+    const recoveryGitInvalid = semanticGitCheckpoint || semanticAbandonment || exactDecisionObservation || executionTransition
       ? !exactRecordedObservation
       : !exactRecordedObservation && (!currentGit.clean || currentGit.headSha !== intent.nextState.planningSha);
     if (recoveryGitInvalid) {
-      const requirement = semanticAbandonment
+      const requirement = semanticGitCheckpoint
+        ? 'the exact branch, HEAD, and cleanliness recorded by the Git checkpoint'
+        : semanticAbandonment
         ? 'the exact Git observation recorded by the abandonment transition'
         : exactDecisionObservation || executionTransition
           ? 'the exact Git observation recorded by the decision transition'
@@ -2755,7 +2763,8 @@ export function checkpointGitMetadata({ cwd = process.cwd(), clock, crashStep, l
       return { checkpointed: false };
     }
     const timestamp = now(clock);
-    const next = deriveGitCheckpoint(state, observed, timestamp);
+    const finalizedIntegration = eventHistory(root, state.changeId).some((event) => event.type === 'implementation-finalized');
+    const next = deriveGitCheckpoint(state, observed, timestamp, { finalizedIntegration });
     commitTransition({
       cwd: root, previousState: state, nextState: next, type: 'git-checkpoint',
       summary: 'Checkpointed local Git observation before compaction',
