@@ -59,6 +59,13 @@ capability-neutral utilities outside it. Do not add compatibility wrappers or
 duplicate canonical schemas or operator guides. Release-state and related-E2E
 remain separately owned capabilities consumed by the review skill.
 
+## Change development
+
+- Follow the [canonical change-development guide](./.agents/skills/change-development/README.md)
+  when planning or resuming a durable change from an issue, direct request,
+  repository plan, or committed partial implementation. Accepted plans are
+  immutable; implementation workers and GitHub writes belong to later workflows.
+
 ## Code Review Rules
 
 ### Release and migration compatibility

@@ -43,11 +43,14 @@ The development seed creates `admin@aerstello.test`, requires an explicit passwo
 | `npm run check:web` | Build shared code and run related web type and unit checks |
 | `npm run check:workflow` | Check review and repository tooling |
 | `npm run test:specialists` | Check Aerstello specialist profiles and routing |
+| `npm run test:change-development` | Check durable change planning and recovery tooling |
 | `npm run check:full` | Type-check, test, and production-build all workspaces |
 | `npm test` | Run unit and component tests |
 | `npm run test:e2e:related -- …` | Run selected Gherkin scenarios and browser projects |
 | `npm run test:e2e:full` | Run every E2E scenario and browser project (CI gate) |
 | `npm run review:status` | Show the active PR review state and next action |
+| `npm run change:status` | Show the active change-development phase and exact next action |
+| `npm run change:state -- <command>` | Initialize, validate, refresh, decide, amend, recover, or archive durable planning state |
 | `npm run lint:commit -- --last` | Validate the latest commit message |
 | `npm run db:start:dev` | Start a healthy loopback-only development PostgreSQL service |
 | `npm run db:migrate` | Apply pending PostgreSQL migrations |
@@ -78,6 +81,11 @@ npm run test:e2e:related -- --tag area-auth --project mobile-webkit
 - `docs`: architecture, operations, and product/test conventions.
 
 Read [AGENTS.md](./AGENTS.md) before making automated changes and [docs/architecture.md](./docs/architecture.md) before changing financial, authentication, or offline behavior.
+
+For durable planning from an issue, direct request, repository plan, or partial
+implementation, use the repository `$change-development` skill and its
+[canonical operator guide](./.agents/skills/change-development/README.md). It
+preserves source evidence and an immutable accepted plan for later execution.
 
 For long-running pull-request review remediation, use the repository
 `$pr-review-cycle` skill and follow the concise

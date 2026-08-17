@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -89,6 +90,49 @@ function isDateTime(value, nullable = false) {
   return nullable && value === null
     ? true
     : typeof value === 'string' && DATE_TIME_PATTERN.test(value) && !Number.isNaN(Date.parse(value));
+}
+
+function canonicalContractJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalContractJson);
+  if (isObject(value)) {
+    return Object.fromEntries(Object.keys(value).sort()
+      .map((key) => [key, canonicalContractJson(value[key])]));
+  }
+  return value;
+}
+
+export function staleDiscoveryDispositionId(disposition) {
+  if (!isObject(disposition)) return null;
+  const { dispositionId: _dispositionId, ...identity } = disposition;
+  return createHash('sha256')
+    .update(JSON.stringify(canonicalContractJson(identity)))
+    .digest('hex');
+}
+
+export function buildStaleDiscoveryDisposition({
+  request, liveHeadSha, evidence, responseFingerprint, disposedAt,
+} = {}) {
+  const disposition = {
+    schemaVersion: 1,
+    requestId: request?.id,
+    requestHeadSha: request?.headSha,
+    liveHeadSha,
+    evidence,
+    responseFingerprint,
+    reason: 'head-drift',
+    disposedAt,
+  };
+  return {
+    schemaVersion: disposition.schemaVersion,
+    dispositionId: staleDiscoveryDispositionId(disposition),
+    requestId: disposition.requestId,
+    requestHeadSha: disposition.requestHeadSha,
+    liveHeadSha: disposition.liveHeadSha,
+    evidence: disposition.evidence,
+    responseFingerprint: disposition.responseFingerprint,
+    reason: disposition.reason,
+    disposedAt: disposition.disposedAt,
+  };
 }
 
 function isHttpsUrl(value) {
@@ -762,6 +806,100 @@ function validateReviewOutcome(value, path, errors) {
   }
 }
 
+function validateStaleDiscoveryDispositions(value, state, errors) {
+  const path = '$.staleDiscoveryDispositions';
+  if (value === undefined) return;
+  if (!Array.isArray(value)) {
+    errors.push(`${path} must be an array`);
+    return;
+  }
+  if (value.length > 3) errors.push(`${path} must contain at most three discovery dispositions`);
+  const dispositionIds = [];
+  const requestIds = [];
+  const evidenceIds = [];
+  const historyIndexes = [];
+  value.forEach((disposition, index) => {
+    const itemPath = `${path}[${index}]`;
+    const fields = [
+      'schemaVersion', 'dispositionId', 'requestId', 'requestHeadSha', 'liveHeadSha',
+      'evidence', 'responseFingerprint', 'reason', 'disposedAt',
+    ];
+    if (!requireFields(disposition, fields, itemPath, errors)) return;
+    rejectUnknownFields(disposition, fields, itemPath, errors);
+    if (disposition.schemaVersion !== 1) errors.push(`${itemPath}.schemaVersion must be 1`);
+    if (!isString(disposition.dispositionId, { min: 64, max: 64 })
+        || !/^[0-9a-f]{64}$/u.test(disposition.dispositionId)) {
+      errors.push(`${itemPath}.dispositionId is invalid`);
+    } else {
+      dispositionIds.push(disposition.dispositionId);
+    }
+    if (!isString(disposition.requestId, { min: 1, max: 256 })) {
+      errors.push(`${itemPath}.requestId is invalid`);
+    } else {
+      requestIds.push(disposition.requestId);
+    }
+    for (const field of ['requestHeadSha', 'liveHeadSha']) {
+      if (!isSha(disposition[field])) errors.push(`${itemPath}.${field} is invalid`);
+    }
+    if (disposition.requestHeadSha === disposition.liveHeadSha) {
+      errors.push(`${itemPath} requires distinct request and live HEADs`);
+    }
+    if (disposition.reason !== 'head-drift') errors.push(`${itemPath}.reason must be head-drift`);
+    if (!isString(disposition.responseFingerprint, { min: 64, max: 64 })
+        || !/^[0-9a-f]{64}$/u.test(disposition.responseFingerprint)) {
+      errors.push(`${itemPath}.responseFingerprint is invalid`);
+    }
+    if (!isDateTime(disposition.disposedAt)) errors.push(`${itemPath}.disposedAt is invalid`);
+    validateReviewOutcome(disposition.evidence, `${itemPath}.evidence`, errors);
+    if (isObject(disposition.evidence)) {
+      if (typeof disposition.evidence.id === 'string') evidenceIds.push(disposition.evidence.id);
+      if (disposition.evidence.kind !== 'discovery') {
+        errors.push(`${itemPath}.evidence must be a discovery response`);
+      }
+      if (disposition.evidence.requestId !== disposition.requestId
+          || disposition.evidence.headSha !== disposition.requestHeadSha) {
+        errors.push(`${itemPath}.evidence must bind to the exact request and prior HEAD`);
+      }
+      if (isDateTime(disposition.evidence.at) && isDateTime(disposition.disposedAt)
+          && Date.parse(disposition.disposedAt) < Date.parse(disposition.evidence.at)) {
+        errors.push(`${itemPath}.disposedAt cannot precede the canonical response`);
+      }
+    }
+    if (staleDiscoveryDispositionId(disposition) !== disposition.dispositionId) {
+      errors.push(`${itemPath}.dispositionId does not match its immutable evidence`);
+    }
+    const matches = Array.isArray(state.reviewHistory)
+      ? state.reviewHistory.map((entry, historyIndex) => ({ entry, historyIndex }))
+        .filter(({ entry }) => entry?.request?.id === disposition.requestId)
+      : [];
+    if (matches.length !== 1) {
+      errors.push(`${itemPath} must bind to exactly one durable request history row`);
+    } else {
+      const [{ entry, historyIndex }] = matches;
+      historyIndexes.push(historyIndex);
+      if (entry.request.kind !== 'discovery' || entry.request.headSha !== disposition.requestHeadSha
+          || entry.outcome !== null) {
+        errors.push(`${itemPath} requires an exact null-outcome discovery history row`);
+      }
+      if (isDateTime(entry.request.at) && isDateTime(disposition.evidence?.at)
+          && Date.parse(disposition.evidence.at) < Date.parse(entry.request.at)) {
+        errors.push(`${itemPath}.evidence predates its request`);
+      }
+    }
+  });
+  for (const [label, values] of [
+    ['disposition IDs', dispositionIds], ['request IDs', requestIds], ['evidence IDs', evidenceIds],
+  ]) {
+    if (new Set(values).size !== values.length) errors.push(`${path} contains duplicate ${label}`);
+  }
+  if (historyIndexes.some((historyIndex, index) => index > 0 && historyIndex <= historyIndexes[index - 1])) {
+    errors.push(`${path} must follow durable request-history order`);
+  }
+  if (value.length > 0 && state.legacyReviewProvenance !== null) {
+    errors.push(`${path} is available only to native schema-v3 request provenance`);
+  }
+}
+
 function validateVerificationEscalation(value, request, errors) {
   const path = '$.verificationEscalation';
   if (value === null) return;
@@ -1104,7 +1242,26 @@ function exactHeadReason(label, actual, expected) {
   return actual === expected ? null : `${label} must equal currentIntegrationHeadSha`;
 }
 
-function reviewRequestStateGate(state) {
+export function reviewRequestUsage(state) {
+  const legacyRequests = Number.isInteger(state?.legacyReviewProvenance?.discoveryRounds)
+    ? state.legacyReviewProvenance.discoveryRounds : 0;
+  const nativeRequests = Array.isArray(state?.reviewHistory) ? state.reviewHistory.length : 0;
+  const used = legacyRequests + nativeRequests;
+  const limit = Number.isSafeInteger(state?.reviewRequestLimit) && state.reviewRequestLimit > 0
+    ? state.reviewRequestLimit : null;
+  return {
+    used,
+    limit,
+    remaining: limit === null ? null : Math.max(0, limit - used),
+    exhausted: limit !== null && used >= limit,
+  };
+}
+
+function nextReviewKind(state) {
+  return reviewRequestUsage(state).used < 3 ? 'discovery' : 'verification';
+}
+
+function reviewReadyStateGate(state) {
   const reasons = [];
   const head = state?.currentIntegrationHeadSha;
   if (state?.phase !== 'ready-for-review') reasons.push('phase must be exactly ready-for-review');
@@ -1127,12 +1284,24 @@ function reviewRequestStateGate(state) {
   if (state?.verificationEscalation !== null) reasons.push('verification collection escalation requires human decision');
   if (!Array.isArray(state?.tasks) || state.tasks.some((task) => task.status !== 'completed')) reasons.push('all prior tasks must be completed');
   if (state?.tasks?.some((task) => task.disposition === 'needs-human-decision')) reasons.push('needs-human-decision findings require a human');
+  const latest = state?.reviewHistory?.at(-1);
+  const latestStaleDiscovery = (state?.staleDiscoveryDispositions ?? [])
+    .find((disposition) => disposition.requestId === latest?.request?.id);
+  if (latest?.outcome === null && latestStaleDiscovery?.evidence?.outcome === 'findings'
+      && (state?.tasks?.length ?? 0) === 0) {
+    reasons.push('dispositioned stale discovery findings require ordinary triage');
+  }
   if ((state?.blockedReasons?.length ?? 0) !== 0) reasons.push('blocked reasons must be cleared');
-  let kind = null;
-  if (Number.isInteger(state?.reviewRound) && state.reviewRound < 3) kind = 'discovery';
-  else if (state?.reviewRound === 3 && state?.verificationReviewUsed === false) kind = 'verification';
-  else reasons.push('the three discovery rounds and one verification review are exhausted');
-  return { kind, reasons };
+  return reasons;
+}
+
+function reviewRequestStateGate(state) {
+  const reasons = reviewReadyStateGate(state);
+  const usage = reviewRequestUsage(state);
+  if (usage.exhausted) {
+    reasons.push(`explicit review request limit ${usage.limit} is exhausted after ${usage.used} durable requests`);
+  }
+  return { kind: nextReviewKind(state), reasons };
 }
 
 function validateExternalHeads(state, external, reasons) {
@@ -1210,9 +1379,9 @@ export function completionGate(state, external) {
   return { allowed: reasons.length === 0, reasons };
 }
 
-function validateReviewHistory(value, errors) {
-  if (!Array.isArray(value) || value.length > 4) {
-    errors.push('$.reviewHistory must contain at most four entries');
+function validateReviewHistory(value, legacyDiscoveryCount, errors) {
+  if (!Array.isArray(value)) {
+    errors.push('$.reviewHistory must be an array');
     return;
   }
   value.forEach((entry, index) => {
@@ -1229,22 +1398,28 @@ function validateReviewHistory(value, errors) {
     }
   });
   const discoveryCount = value.filter((entry) => entry.request?.kind === 'discovery').length;
-  const verificationCount = value.filter((entry) => entry.request?.kind === 'verification').length;
-  if (discoveryCount > 3 || verificationCount > 1) errors.push('$.reviewHistory exceeds the 3+1 review limit');
+  if (discoveryCount > 3) errors.push('$.reviewHistory exceeds three discovery requests');
+  value.forEach((entry, index) => {
+    const expectedKind = legacyDiscoveryCount + index < 3 ? 'discovery' : 'verification';
+    if (entry.request?.kind && entry.request.kind !== expectedKind) {
+      errors.push(`$.reviewHistory[${index}].request.kind must be ${expectedKind} at this durable request ordinal`);
+    }
+  });
   const requestIds = value.map((entry) => entry.request?.id);
   if (new Set(requestIds).size !== requestIds.length) errors.push('$.reviewHistory contains duplicate request IDs');
 }
 
 export function validatePrReviewState(value) {
   const errors = [];
-  const fields = [
+  const requiredFields = [
     'schemaVersion', 'revision', 'repository', 'prNumber', 'phase', 'baseSha', 'requestedHeadSha',
     'reviewedHeadSha', 'currentIntegrationHeadSha', 'reviewRound', 'verificationReviewUsed', 'legacyReviewProvenance',
     'releaseBaseline', 'decisions', 'tasks', 'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
     'threadResolutionStatus', 'blockedReasons', 'validationStatus', 'ciValidationStatus', 'ciValidationHistory', 'nextAction',
     'integrationWorktree', 'orchestratorSessionId', 'abandonmentReason', 'git', 'updatedAt',
   ];
-  if (!requireFields(value, fields, '$', errors)) return errors;
+  const fields = [...requiredFields, 'reviewRequestLimit', 'staleDiscoveryDispositions'];
+  if (!requireFields(value, requiredFields, '$', errors)) return errors;
   rejectUnknownFields(value, fields, '$', errors);
   if (value.schemaVersion !== 3) errors.push('$.schemaVersion must equal 3');
   if (!Number.isInteger(value.revision) || value.revision < 0) errors.push('$.revision must be non-negative');
@@ -1256,6 +1431,11 @@ export function validatePrReviewState(value) {
   if (!Number.isInteger(value.reviewRound) || value.reviewRound < 0 || value.reviewRound > 3) errors.push('$.reviewRound must be 0-3');
   if (typeof value.verificationReviewUsed !== 'boolean') errors.push('$.verificationReviewUsed must be boolean');
   if (value.verificationReviewUsed && value.reviewRound !== 3) errors.push('$.verificationReviewUsed requires reviewRound 3');
+  if (Object.hasOwn(value, 'reviewRequestLimit')
+      && !(value.reviewRequestLimit === null
+        || (Number.isSafeInteger(value.reviewRequestLimit) && value.reviewRequestLimit > 0))) {
+    errors.push(`$.reviewRequestLimit must be null or a positive safe integer up to ${Number.MAX_SAFE_INTEGER}`);
+  }
   if (!(value.legacyReviewProvenance === null || (
     isObject(value.legacyReviewProvenance)
     && Object.keys(value.legacyReviewProvenance).length === 3
@@ -1286,21 +1466,26 @@ export function validatePrReviewState(value) {
   if (value.reviewRequest !== null) validateReviewRequest(value.reviewRequest, '$.reviewRequest', errors);
   if (value.reviewOutcome !== null) validateReviewOutcome(value.reviewOutcome, '$.reviewOutcome', errors);
   validateVerificationEscalation(value.verificationEscalation, value.reviewRequest, errors);
-  validateReviewHistory(value.reviewHistory, errors);
+  const legacyDiscoveryCount = value.legacyReviewProvenance?.discoveryRounds ?? 0;
+  validateReviewHistory(value.reviewHistory, legacyDiscoveryCount, errors);
+  validateStaleDiscoveryDispositions(value.staleDiscoveryDispositions, value, errors);
   const latest = Array.isArray(value.reviewHistory) ? value.reviewHistory.at(-1) : null;
   if ((latest?.request ?? null)?.id !== value.reviewRequest?.id) errors.push('$.reviewRequest must equal the latest history request');
   if ((latest?.outcome ?? null)?.id !== value.reviewOutcome?.id) errors.push('$.reviewOutcome must equal the latest history outcome');
   const discoveryCount = value.reviewHistory?.filter((entry) => entry.request?.kind === 'discovery').length;
   const verificationCount = value.reviewHistory?.filter((entry) => entry.request?.kind === 'verification').length;
-  const legacyDiscoveryCount = value.legacyReviewProvenance?.discoveryRounds ?? 0;
   if (Number.isInteger(discoveryCount) && legacyDiscoveryCount + discoveryCount > 3) {
     errors.push('$.reviewHistory plus migrated discovery count exceeds three rounds');
   }
   if (Number.isInteger(discoveryCount) && value.reviewRound !== legacyDiscoveryCount + discoveryCount) {
     errors.push('$.reviewRound must equal durable migrated and native discovery request count');
   }
-  if (Number.isInteger(verificationCount) && value.verificationReviewUsed !== (verificationCount === 1)) {
+  if (Number.isInteger(verificationCount) && value.verificationReviewUsed !== (verificationCount > 0)) {
     errors.push('$.verificationReviewUsed must equal durable verification request use');
+  }
+  const usage = reviewRequestUsage(value);
+  if (usage.limit !== null && usage.limit < usage.used) {
+    errors.push('$.reviewRequestLimit cannot be lower than the durable request count');
   }
   if (value.reviewRequest && value.requestedHeadSha !== value.reviewRequest.headSha) errors.push('$.requestedHeadSha must equal request HEAD');
   if (value.reviewOutcome && value.reviewedHeadSha !== value.reviewOutcome.headSha) errors.push('$.reviewedHeadSha must equal outcome HEAD');
@@ -1356,19 +1541,20 @@ export function validatePrReviewState(value) {
   }
   if (latest && latest.outcome === null) {
     const stale = latest.request.headSha !== value.currentIntegrationHeadSha;
+    const staleDisposition = (value.staleDiscoveryDispositions ?? [])
+      .find((disposition) => disposition.requestId === latest.request.id);
+    const dispositionedFindingPhase = stale && staleDisposition?.evidence?.outcome === 'findings'
+      && ['triaging', 'implementing', 'integrating', 'verifying', 'validating', 'blocked',
+        'awaiting-human-decision'].includes(value.phase);
     const allowedPhase = value.phase === 'awaiting-review'
-      || (stale && latest.request.kind === 'discovery' && value.phase === 'recovering')
-      || (stale && latest.request.kind === 'discovery' && value.phase === 'ready-for-review')
+      || (stale && ['recovering', 'ready-for-review'].includes(value.phase))
+      || dispositionedFindingPhase
       || (latest.request.kind === 'verification' && value.phase === 'awaiting-human-decision'
-        && (stale || value.verificationEscalation !== null));
+        && value.verificationEscalation !== null);
     if (!allowedPhase) errors.push('$.phase is invalid for the pending current or stale review request');
   }
-  if (value.reviewOutcome?.kind === 'verification' && value.reviewOutcome.outcome === 'findings'
-      && value.phase !== 'awaiting-human-decision') {
-    errors.push('$.phase must be awaiting-human-decision after verification findings');
-  }
   if (value.phase === 'ready-for-review') {
-    errors.push(...reviewRequestStateGate(value).reasons.map((reason) => `$.phase ready-for-review requires: ${reason}`));
+    errors.push(...reviewReadyStateGate(value).map((reason) => `$.phase ready-for-review requires: ${reason}`));
   }
   if (value.phase === 'complete') errors.push(...completionStateGate(value).map((reason) => `$.phase complete requires: ${reason}`));
   findRawFields(value, '$', errors);

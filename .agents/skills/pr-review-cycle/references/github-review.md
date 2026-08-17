@@ -49,11 +49,19 @@ npm run review:github -- status --human
 npm run review:github -- reply-resolve --pr 123 --task finding-a
 npm run review:github -- verify-resolve --pr 123 --task local-finding
 npm run review:github -- verify-resolve --pr 123 --task-set-json '["threadless-a","threadless-b"]'
-npm run review:github -- request --pr 123 --kind discovery
+npm run review:github -- request --pr 123
 npm run review:github -- collect --pr 123
 npm run review:github -- collect-ci --pr 123
 npm run review:github -- complete --pr 123
 ```
+
+The state gate selects `discovery` for the first three durable requests and
+repeatable `verification` thereafter. By default there is no configured
+request-count cap. If the operator configured a finite total limit, every
+persisted request—including pending or later-stale evidence—consumes one slot,
+and the gate rejects the next request before journaling or GitHub mutation once
+the limit is reached. Findings from any allowed request return to triage. A
+clean result from the final allowed request can still satisfy Done.
 
 Read structured GitHub data. An ordinary review applies only when:
 
@@ -179,6 +187,47 @@ mutation. Any live root, evidence mismatch, exhausted allowance, or state/head
 race fails closed; the historical clean review remains stale and must not be
 used for Done.
 
+It is also available after native-v3 taskless pending-request HEAD drift. First
+checkpoint the new clean HEAD and rerun an explicit nonempty current-HEAD
+targeted selection. The active request must exactly equal the latest immutable
+history request, both outcomes and `reviewedHeadSha` must remain `null`, and no
+task, blocker, escalation, or human decision may exist. The pending row remains
+unchanged and counts toward any finite total limit.
+
+`refresh-threads` then fully rereads the original request anchor, request
+reactions, canonical reviews/comments/roots, local and pushed Git, and the live
+PR head. Missing, edited, foreign, conflicting, or otherwise ambiguous evidence
+cannot enter recovery; verification ambiguity is durably escalated to a human.
+
+For a discovery request, status and refresh distinguish four cases:
+
+- `pure-head-drift`: no canonical response exists. No disposition is written;
+  with no root, the existing empty-proof recovery applies.
+- `disposition-ready` or `dispositioned`: exactly one supported response is
+  bound durably to the original request/prior HEAD and the different current
+  live HEAD. Its fingerprint covers exact response content and immutable
+  attached-root source evidence. A clean response may restore readiness after
+  final proof.
+- `actionable-stale-findings`: the unique response contains findings or its own
+  canonical roots. Append the disposition, then use ordinary triage, task
+  mapping, reply, and resolution; never auto-resolve those roots.
+- `ambiguous-human-decision`: the anchor or response is missing, edited,
+  duplicated, foreign, unsupported, multiple, conflicting, same-head,
+  migrated, or inconsistently bound. Stop for a human.
+
+Disposition refresh takes a second fully paginated snapshot and compares the
+exact response identity and root state, then repeats checkout,
+local/pushed/live-head, and state-revision guards before its state-only
+checkpoint. A request anchor with any edit timestamp fails the immutable-anchor
+check even if its current text was restored. It never writes GitHub, creates a
+request journal, synthesizes a current-head outcome, fills the original null
+history outcome, or changes the request ordinal. Identical disposition/proof
+retries lock state and atomically reread the current revision without writing;
+any evidence, root, head, or revision race fails closed. The
+next `request` derives its kind from full durable history. If that history has
+exhausted a finite limit, disposition and proof remain, and only the replacement
+request is blocked with the exact command to raise or remove the limit.
+
 ## Done gate
 
 The cycle is Done only when all of these facts apply to one Review commit:
@@ -199,11 +248,16 @@ normally only after this gate passes.
 
 ## Loop breakers
 
-Run at most three discovery reviews. If the third needs fixes, Integrate and
-Resolve them, confirm review-ready state, then allow one verification review for
-that exact commit. A stale verification result or any new verification finding
-moves the cycle to `awaiting-human-decision`. Report the evidence and required
-decision; do not request another review automatically.
+Continue exact-commit review, remediation, and verification until Codex returns
+clean. The first three durable requests are discovery reviews; every later
+request is a repeatable verification review. An optional durable operator limit
+is the only request-count stop, and exhaustion pauses only a new request until
+the operator raises/removes the limit or stops the cycle.
+
+An exact recorded request that becomes stale because the live HEAD advances is
+recoverable for either kind. Missing, edited, duplicated, foreign, unsupported,
+multiple, conflicting, or otherwise ambiguous canonical evidence remains a
+fail-closed human escalation and is not cleared by changing a request limit.
 
 If the same stable finding returns in two consecutive rounds, pause repeated
 patching and investigate the root cause.

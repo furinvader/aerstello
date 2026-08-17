@@ -1,0 +1,4 @@
+interface:
+  display_name: "Change Development"
+  short_description: "Plan and resume durable Aerstello changes"
+  default_prompt: "Use $change-development to plan or resume this Aerstello change with durable state and an immutable accepted plan."

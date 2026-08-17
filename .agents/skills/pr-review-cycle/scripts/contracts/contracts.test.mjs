@@ -8,7 +8,11 @@ import { fileURLToPath } from 'node:url';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import {
+  buildStaleDiscoveryDisposition,
   parseTargetedValidationCommand,
+  reviewRequestGate,
+  reviewRequestUsage,
+  staleDiscoveryDispositionId,
   validateInitialValidationSelection,
   validatePrReviewState,
   validateTaskPacket,
@@ -134,6 +138,42 @@ function completeStateFixture(overrides = {}) {
   });
 }
 
+function staleDiscoveryStateFixture({ outcome = 'clean', stateOverrides = {} } = {}) {
+  const liveHead = 'a'.repeat(40);
+  const requestHead = 'b'.repeat(40);
+  const request = {
+    id: 'stale-discovery-request', databaseId: 301,
+    url: 'https://github.com/example/aerstello/pull/17#issuecomment-301',
+    headSha: requestHead, at: AT, kind: 'discovery', body: '@codex review',
+    authorLogin: 'maintainer', authorNodeId: 'USER_maintainer',
+  };
+  const evidence = {
+    id: 'stale-discovery-response', databaseId: 302,
+    url: 'https://github.com/example/aerstello/pull/17#pullrequestreview-302',
+    headSha: requestHead, at: AT, requestId: request.id, kind: 'discovery', outcome,
+    evidenceType: 'review-submission', reviewerLogin: 'chatgpt-codex-connector',
+    reviewerNodeId: 'BOT_codex', reviewerType: 'Bot',
+    reviewerUrl: 'https://github.com/apps/chatgpt-codex-connector',
+    reactionContent: null, reactionCommentId: null,
+  };
+  const disposition = buildStaleDiscoveryDisposition({
+    request, liveHeadSha: liveHead, evidence, responseFingerprint: 'd'.repeat(64), disposedAt: AT,
+  });
+  return stateFixture({
+    phase: outcome === 'findings' ? 'triaging' : 'recovering',
+    requestedHeadSha: requestHead, reviewedHeadSha: null,
+    currentIntegrationHeadSha: liveHead, reviewRound: 1,
+    reviewRequest: request, reviewOutcome: null, reviewHistory: [{ request, outcome: null }],
+    staleDiscoveryDispositions: [disposition],
+    validationStatus: {
+      source: 'orchestrator', scope: 'targeted', status: 'passed', headSha: liveHead,
+      checks: ['npm run check:workflow'], updatedAt: AT,
+    },
+    git: { branch: 'main', headSha: liveHead, dirty: false },
+    ...stateOverrides,
+  });
+}
+
 test('checked-in JSON contracts parse and declare Draft 2020-12', () => {
   const registry = loadRegistry();
   const paths = [
@@ -154,6 +194,11 @@ test('checked-in JSON contracts parse and declare Draft 2020-12', () => {
       assert.ok(document.properties.phase.enum.includes('awaiting-human-decision'));
       assert.ok(document.$defs.threadResolutionStatus.properties.localVerification);
       assert.equal(document.$defs.threadResolutionStatus.required.includes('localVerification'), false);
+      assert.equal(document.required.includes('staleDiscoveryDispositions'), false);
+      assert.equal(document.properties.staleDiscoveryDispositions.maxItems, 3);
+      assert.equal(document.$defs.staleDiscoveryDisposition.properties.evidence
+        .allOf[1].properties.kind.const, 'discovery');
+      assert.ok(document.$defs.staleDiscoveryDisposition.required.includes('responseFingerprint'));
     }
     if (path === reviewFixTaskSchemaPath || path === reviewFixResultSchemaPath) {
       assert.equal(document.properties.schemaVersion.const, 3);
@@ -296,6 +341,76 @@ test('state JSON Schema compiles with Ajv and shares representative fixtures wit
     assert.equal(validateSchema(fixture), false, 'schema should reject shared invalid fixture');
     assert.notDeepEqual(validatePrReviewState(fixture), [], 'manual validator should reject shared invalid fixture');
   }
+});
+
+test('stale discovery dispositions have strict schema shape and exact manual bindings', () => {
+  const schema = JSON.parse(readFileSync(prReviewStateSchemaPath, 'utf8'));
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajv);
+  const validateSchema = ajv.compile(schema);
+  const valid = staleDiscoveryStateFixture();
+  const findings = staleDiscoveryStateFixture({ outcome: 'findings' });
+  for (const fixture of [valid, findings]) {
+    assert.equal(validateSchema(fixture), true, JSON.stringify(validateSchema.errors));
+    assert.deepEqual(validatePrReviewState(fixture), []);
+  }
+  const legacyWithoutLedger = structuredClone(valid);
+  delete legacyWithoutLedger.staleDiscoveryDispositions;
+  assert.equal(validateSchema(legacyWithoutLedger), true, JSON.stringify(validateSchema.errors));
+  assert.deepEqual(validatePrReviewState(legacyWithoutLedger), []);
+
+  const verificationEvidence = structuredClone(valid);
+  verificationEvidence.staleDiscoveryDispositions[0].evidence.kind = 'verification';
+  verificationEvidence.staleDiscoveryDispositions[0].dispositionId = staleDiscoveryDispositionId(
+    verificationEvidence.staleDiscoveryDispositions[0],
+  );
+  assert.equal(validateSchema(verificationEvidence), false);
+  assert.match(validatePrReviewState(verificationEvidence).join('\n'), /discovery response/u);
+
+  const migrated = structuredClone(valid);
+  migrated.legacyReviewProvenance = { schemaVersion: 1, discoveryRounds: 1, migratedAt: AT };
+  migrated.reviewRound = 2;
+  assert.equal(validateSchema(migrated), false);
+  assert.match(validatePrReviewState(migrated).join('\n'), /native schema-v3/u);
+
+  const unknownField = structuredClone(valid);
+  unknownField.staleDiscoveryDispositions[0].repairHint = 'guess';
+  assert.equal(validateSchema(unknownField), false);
+  assert.match(validatePrReviewState(unknownField).join('\n'), /repairHint is not supported/u);
+
+  const invalidFingerprint = structuredClone(valid);
+  invalidFingerprint.staleDiscoveryDispositions[0].responseFingerprint = 'not-a-fingerprint';
+  invalidFingerprint.staleDiscoveryDispositions[0].dispositionId = staleDiscoveryDispositionId(
+    invalidFingerprint.staleDiscoveryDispositions[0],
+  );
+  assert.equal(validateSchema(invalidFingerprint), false);
+  assert.match(validatePrReviewState(invalidFingerprint).join('\n'), /responseFingerprint/u);
+
+  const overBound = structuredClone(valid);
+  overBound.staleDiscoveryDispositions = Array.from(
+    { length: 4 },
+    (_, index) => ({ ...valid.staleDiscoveryDispositions[0], dispositionId: `${index}`.repeat(64) }),
+  );
+  assert.equal(validateSchema(overBound), false);
+  assert.match(validatePrReviewState(overBound).join('\n'), /at most three/u);
+
+  for (const mutate of [
+    (fixture) => { fixture.staleDiscoveryDispositions[0].liveHeadSha = 'b'.repeat(40); },
+    (fixture) => { fixture.staleDiscoveryDispositions[0].evidence.requestId = 'foreign-request'; },
+    (fixture) => { fixture.staleDiscoveryDispositions[0].disposedAt = '2026-08-04T23:59:59Z'; },
+    (fixture) => { fixture.reviewHistory[0].outcome = fixture.staleDiscoveryDispositions[0].evidence; },
+  ]) {
+    const invalid = structuredClone(valid);
+    mutate(invalid);
+    invalid.staleDiscoveryDispositions[0].dispositionId = staleDiscoveryDispositionId(
+      invalid.staleDiscoveryDispositions[0],
+    );
+    assert.notDeepEqual(validatePrReviewState(invalid), []);
+  }
+
+  const tamperedIdentity = structuredClone(valid);
+  tamperedIdentity.staleDiscoveryDispositions[0].evidence.id = 'edited-response';
+  assert.match(validatePrReviewState(tamperedIdentity).join('\n'), /immutable evidence/u);
 });
 
 test('local verifier proof is backward-readable, source-bound, and mandatory for completed local readiness', () => {
@@ -447,7 +562,6 @@ test('state JSON Schema rejects terminal and review-ready states missing current
     readyStateFixture({ blockedReasons: ['Still blocked.'] }),
     readyStateFixture({ git: { branch: 'main', headSha: 'a'.repeat(40), dirty: true } }),
     readyStateFixture({ tasks: [{ ...completedTask, status: 'integrated' }] }),
-    readyStateFixture({ reviewRound: 3, verificationReviewUsed: true }),
     completeStateFixture({ ciValidationStatus: stateFixture().ciValidationStatus, ciValidationHistory: [] }),
     completeStateFixture({ requestedHeadSha: null }),
     completeStateFixture({ reviewedHeadSha: null }),
@@ -461,6 +575,77 @@ test('state JSON Schema rejects terminal and review-ready states missing current
     assert.equal(validateSchema(fixture), false, 'schema must reject an unready terminal/readiness state');
     assert.notDeepEqual(validatePrReviewState(fixture), [], 'manual validator must reject the same state');
   }
+});
+
+test('review requests are unlimited by default and an explicit positive limit counts every durable request', () => {
+  const schema = JSON.parse(readFileSync(prReviewStateSchemaPath, 'utf8'));
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajv);
+  const validateSchema = ajv.compile(schema);
+  const head = 'a'.repeat(40);
+  const entries = Array.from({ length: 6 }, (_, index) => {
+    const kind = index < 3 ? 'discovery' : 'verification';
+    const request = {
+      id: `request-${index + 1}`, databaseId: 100 + index,
+      url: `https://github.com/example/aerstello/pull/17#issuecomment-${100 + index}`,
+      headSha: head, at: AT, kind, body: '@codex review',
+      authorLogin: 'maintainer', authorNodeId: 'USER_maintainer',
+    };
+    const outcome = {
+      id: `review-${index + 1}`, databaseId: 200 + index,
+      url: `https://github.com/example/aerstello/pull/17#pullrequestreview-${200 + index}`,
+      headSha: head, at: AT, requestId: request.id, kind, outcome: 'findings',
+      evidenceType: 'review-submission', reviewerLogin: 'chatgpt-codex-connector',
+      reviewerNodeId: 'BOT_codex', reviewerType: 'Bot',
+      reviewerUrl: 'https://github.com/apps/chatgpt-codex-connector',
+      reactionContent: null, reactionCommentId: null,
+    };
+    return { request, outcome };
+  });
+  const latest = entries.at(-1);
+  const unlimited = readyStateFixture({
+    requestedHeadSha: head, reviewedHeadSha: head, reviewRound: 3, verificationReviewUsed: true,
+    reviewRequest: latest.request, reviewOutcome: latest.outcome, reviewHistory: entries,
+  });
+  assert.equal(validateSchema(unlimited), true, JSON.stringify(validateSchema.errors));
+  assert.deepEqual(validatePrReviewState(unlimited), []);
+  assert.deepEqual(reviewRequestUsage(unlimited), {
+    used: 6, limit: null, remaining: null, exhausted: false,
+  });
+  const external = {
+    localHeadSha: head, localDirty: false, pushedHeadSha: head, prHeadSha: head,
+    isAncestor: () => true,
+  };
+  assert.deepEqual(reviewRequestGate(unlimited, external), { allowed: true, kind: 'verification', reasons: [] });
+
+  const finite = { ...unlimited, reviewRequestLimit: 6 };
+  assert.equal(validateSchema(finite), true, JSON.stringify(validateSchema.errors));
+  assert.deepEqual(validatePrReviewState(finite), []);
+  assert.equal(reviewRequestGate(finite, external).allowed, false);
+  assert.match(reviewRequestGate(finite, external).reasons.join('\n'), /explicit review request limit 6/u);
+
+  for (const reviewRequestLimit of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '6']) {
+    const invalid = { ...unlimited, reviewRequestLimit };
+    assert.equal(validateSchema(invalid), false);
+    assert.match(validatePrReviewState(invalid).join('\n'), /reviewRequestLimit/u);
+  }
+  assert.match(validatePrReviewState({ ...unlimited, reviewRequestLimit: 5 }).join('\n'), /lower than/u);
+
+  const outOfOrder = structuredClone(unlimited);
+  outOfOrder.reviewHistory[3].request.kind = 'discovery';
+  outOfOrder.reviewHistory[3].outcome.kind = 'discovery';
+  assert.match(validatePrReviewState(outOfOrder).join('\n'), /must be verification/u);
+
+  const legacyEntries = entries.slice(2);
+  const legacy = {
+    ...unlimited,
+    legacyReviewProvenance: { schemaVersion: 1, discoveryRounds: 2, migratedAt: AT },
+    reviewHistory: legacyEntries,
+    reviewRequest: legacyEntries.at(-1).request,
+    reviewOutcome: legacyEntries.at(-1).outcome,
+  };
+  assert.equal(reviewRequestUsage(legacy).used, 6);
+  assert.deepEqual(validatePrReviewState(legacy), []);
 });
 
 test('superseded null-outcome requests remain valid when the integration HEAD returns', () => {

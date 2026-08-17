@@ -226,6 +226,15 @@ test('ownership manifest names the complete canonical skill and no obsolete path
       path: '.agents/skills/pr-review-cycle/ownership.json',
       targets: [],
     },
+    {
+      path: '.agents/skills/change-development/ownership.json',
+      targets: [
+        'SKILL.md',
+        'references/reviewer-contracts.md',
+        'registry.json',
+        'scripts/validate-registry.mjs',
+      ],
+    },
   ]);
 
   for (const path of ownership.canonicalFiles) {
@@ -293,7 +302,7 @@ test('hooks and npm façades target only canonical skill entrypoints', () => {
   );
   assert.equal(
     scripts['test:tooling'],
-    'npm run test:pr-review && npm run test:specialists && node --test "scripts/**/*.test.mjs" && npm run test:e2e:structure',
+    'npm run test:change-development && npm run test:pr-review && npm run test:specialists && node --test "scripts/**/*.test.mjs" && npm run test:e2e:structure',
   );
   assert.equal(scripts['check:workflow'], 'npm run test:tooling');
   assert.equal(scripts.test, 'npm run test:tooling && npm run test --workspaces --if-present');
@@ -387,6 +396,24 @@ test('schemas and operator documentation have one canonical copy', () => {
   const guideCopies = files.filter((path) => path.endsWith('.md')
     && readRepositoryFile(path).split(/\r?\n/u).includes(guideHeading));
   assert.deepEqual(guideCopies, ['.agents/skills/pr-review-cycle/README.md']);
+
+  const stateSchema = JSON.parse(readRepositoryFile(
+    '.agents/skills/pr-review-cycle/schemas/pr-review-state.schema.json',
+  ));
+  assert.ok(Object.hasOwn(stateSchema.properties, 'reviewRequestLimit'));
+  assert.equal(stateSchema.required.includes('reviewRequestLimit'), false);
+  for (const path of [
+    '.agents/skills/pr-review-cycle/SKILL.md',
+    '.agents/skills/pr-review-cycle/README.md',
+    '.agents/skills/pr-review-cycle/references/github-review.md',
+  ]) {
+    const source = readRepositoryFile(path);
+    assert.doesNotMatch(source, /three discovery reviews, only one|Run at most three discovery|round limits/u);
+  }
+  assert.match(
+    readRepositoryFile('.agents/skills/pr-review-cycle/references/state-and-contracts.md'),
+    /missing or\s+`null` means no configured request-count cap/u,
+  );
 });
 
 test('external adapters link to the canonical guide without obsolete references', () => {

@@ -159,17 +159,52 @@ reviews, tasks, and inconsistent history remain ineligible, and the applicable
 clean review is not repeated. An ordinary taskless clean review with existing
 passing validation cannot use this mode to replace that proof.
 
-One native schema-v3 exception handles a taskless clean discovery review whose
+One native schema-v3 exception handles a taskless clean review whose
 four review SHAs still agree with each other but differ from the newer current
 integration HEAD. It requires a `recovering` state, exact latest active review
 evidence, zero tasks and actionable Integrated IDs, a clean exact current
-checkout, no blockers or escalation, and remaining discovery-or-verification
-allowance. Save a nonempty explicit selection for the current HEAD, using
+checkout, no blockers or escalation, and configured review-request allowance.
+Save a nonempty explicit selection for the current HEAD, using
 `--replace` only to replace the stale historical plan sidecar, then run every
 selected check again. The transition changes only targeted-validation proof;
 the prior request, outcome, and history stay immutable and remain stale until a
 new current-HEAD review is requested. A same-HEAD review or an already-passing
 recovery proof is not replaceable through this route.
+
+A distinct native schema-v3 exception covers a taskless pending request whose
+exact request anchor targets the prior HEAD and whose current/latest outcomes
+are still `null`. After Git checkpointing puts the cycle in `recovering`, save
+and run a nonempty explicit selection for the clean current HEAD. Do not edit,
+supersede, or synthesize the pending history row; it continues to consume one
+request slot. This route rejects migrated or malformed identity, same-head
+requests, non-null outcomes, dirty state, tasks, blockers, escalation, and
+human-decision work. An exhausted finite request limit does not prevent the
+validation run.
+
+After validation, use guarded `refresh-threads` to revalidate the immutable
+request comment, fully paginated canonical responses and roots, equal
+local/pushed/live heads, state revision, and final live head. Verification
+evidence keeps its existing human-escalation behavior. A discovery request with
+no canonical response is pure HEAD drift and receives no disposition; with no
+root, the ordinary current empty proof restores readiness. One uniquely
+supported discovery response may append one deterministic disposition whose
+fingerprint covers exact response content and immutable attached-root source
+evidence, and that binds the untouched null history row and prior request HEAD
+to the new live HEAD. A clean disposition may restore readiness; a findings disposition enters
+ordinary triage and leaves its roots for normal mapping and resolution.
+
+Before either disposition checkpoint, reread all evidence and roots and repeat
+the checkout, local/pushed/live-head, and state-revision guards. Do not write a
+GitHub mutation or request journal, synthesize `reviewOutcome`, fill the null
+history outcome, change the request ordinal, or decrement request usage.
+Identical current-revision retries lock and reread state before returning
+without a write. A request anchor with any edit timestamp is ineligible.
+Missing, edited, duplicated,
+foreign, unsupported, multiple, conflicting, same-head, migrated, inconsistent,
+or raced evidence stays a human gate and is never repaired heuristically. The
+ordinary request gate derives the replacement kind from full durable history,
+or retains proof and reports the exact limit setter action when a finite limit
+is exhausted.
 
 Initial selection also has one migration-only completed-task route. An
 immutable `state.v2.backup.json` must prove an exact-head passed, nonempty

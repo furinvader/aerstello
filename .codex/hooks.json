@@ -1,5 +1,5 @@
 {
-  "description": "Durable Aerstello PR-review recovery and worker-result validation.",
+  "description": "Durable Aerstello change-development and PR-review recovery, compaction, and worker-result validation.",
   "hooks": {
     "SessionStart": [
       {
@@ -10,6 +10,13 @@
             "command": "node \"$(git rev-parse --show-toplevel)/.agents/skills/pr-review-cycle/scripts/hooks/session-start.mjs\"",
             "timeout": 10,
             "statusMessage": "Recovering PR review state",
+            "additionalContextLimit": 2500
+          },
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/.agents/skills/change-development/scripts/hooks/session-start.mjs\"",
+            "timeout": 10,
+            "statusMessage": "Recovering change-development state",
             "additionalContextLimit": 2500
           }
         ]
@@ -24,6 +31,12 @@
             "command": "node \"$(git rev-parse --show-toplevel)/.agents/skills/pr-review-cycle/scripts/hooks/pre-compact.mjs\"",
             "timeout": 10,
             "statusMessage": "Checkpointing PR review state"
+          },
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/.agents/skills/change-development/scripts/hooks/pre-compact.mjs\"",
+            "timeout": 10,
+            "statusMessage": "Checkpointing change-development state"
           }
         ]
       }

@@ -20,7 +20,7 @@ import {
 } from '../state/state.mjs';
 
 function baseUsage() {
-  return `Usage: node .agents/skills/pr-review-cycle/scripts/github/cli.mjs <command> [--pr <number>] [options]\n\nCommands:\n  status [--human]               Read live review and CI status (active PR by default)\n  refresh-threads                Record exact-head empty canonical-thread proof for a taskless cycle\n  reply-resolve --task <id>      Reply to and close one task's Codex review threads\n  verify-resolve <selection>     Verify one task or re-attest one complete threadless set\n  request --kind <kind>          Request discovery or verification review\n  collect                        Collect official review evidence for the Review commit\n  collect-ci                     Collect full GitHub Actions evidence for the Review commit\n  complete                       Reconfirm every gate and mark the cycle Done\n\nRequired options:\n  --pr <number>                  Required except for status with an active state\n\nRequest options:\n  --kind discovery|verification\n\nTask resolution options:\n  --task <opaque-task-id>        One byte-for-byte task ID for reply-resolve or verify-resolve\n  --task-set-json <json-array>   Explicit task-ID set for verify-resolve only\n\nSuccessful commands write JSON, except status --human which writes plain English.\n`;
+  return `Usage: node .agents/skills/pr-review-cycle/scripts/github/cli.mjs <command> [--pr <number>] [options]\n\nCommands:\n  status [--human]               Read live review and CI status (active PR by default)\n  refresh-threads                Record exact-head empty canonical-thread proof for a taskless cycle\n  reply-resolve --task <id>      Reply to and close one task's Codex review threads\n  verify-resolve <selection>     Verify one task or re-attest one complete threadless set\n  request [--kind <kind>]        Request the state-selected review kind\n  collect                        Collect official review evidence for the Review commit\n  collect-ci                     Collect full GitHub Actions evidence for the Review commit\n  complete                       Reconfirm every gate and mark the cycle Done\n\nRequired options:\n  --pr <number>                  Required except for status with an active state\n\nRequest options:\n  --kind discovery|verification  Optional compatibility assertion; state selects the kind\n\nTask resolution options:\n  --task <opaque-task-id>        One byte-for-byte task ID for reply-resolve or verify-resolve\n  --task-set-json <json-array>   Explicit task-ID set for verify-resolve only\n\nSuccessful commands write JSON, except status --human which writes plain English.\n`;
 }
 
 export function usage() {
@@ -64,6 +64,7 @@ export function renderHumanStatus(status) {
       : status.statePhase === 'complete' ? 'Stale (recorded Done; PR head changed)'
         : titleCase(status.statePhase)}`,
     `Codex review: ${review}`,
+    `Review requests: ${status.reviewRequests.used}; limit: ${status.reviewRequests.limit ?? 'unlimited'}`,
     `Tasks: ${tasks}`,
     ...taskRows,
     `Targeted local tests: ${targeted}`,
@@ -238,8 +239,9 @@ export async function runCli(argv, {
   } else if (hasTaskSet) {
     throw new UsageError('--task-set-json is only valid for verify-resolve');
   }
-  if (command === 'request' && !['discovery', 'verification'].includes(options.kind)) {
-    throw new UsageError('request requires --kind discovery|verification');
+  if (command === 'request' && options.kind !== undefined
+      && !['discovery', 'verification'].includes(options.kind)) {
+    throw new UsageError('--kind must be discovery or verification when supplied');
   }
   if (command !== 'request' && options.kind !== undefined) throw new UsageError('--kind is only valid for request');
   const workflow = createGitHubReviewWorkflow({

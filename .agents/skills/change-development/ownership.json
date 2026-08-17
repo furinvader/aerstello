@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "skillRoot": ".agents/skills/change-development",
+  "canonicalFiles": [
+    "README.md",
+    "SKILL.md",
+    "agents/openai.yaml",
+    "ownership.json",
+    "references/planning.md",
+    "references/state-and-recovery.md",
+    "schemas/development-state.schema.json",
+    "schemas/implementation-plan.schema.json",
+    "scripts/contracts/contracts.mjs",
+    "scripts/contracts/contracts.test.mjs",
+    "scripts/hooks/hooks.test.mjs",
+    "scripts/hooks/pre-compact.mjs",
+    "scripts/hooks/session-start.mjs",
+    "scripts/paths.mjs",
+    "scripts/source/checklists.mjs",
+    "scripts/source/checklists.test.mjs",
+    "scripts/source/fixtures/issue-22.md",
+    "scripts/source/gh-adapter.mjs",
+    "scripts/source/github.mjs",
+    "scripts/source/github.test.mjs",
+    "scripts/source/source.mjs",
+    "scripts/source/source.test.mjs",
+    "scripts/state/cli.mjs",
+    "scripts/state/fixtures/hold-change-lock.mjs",
+    "scripts/state/state.mjs",
+    "scripts/state/state.test.mjs",
+    "scripts/structure.test.mjs"
+  ],
+  "permittedExternalAdapters": [
+    {
+      "path": ".codex/hooks.json",
+      "targets": [
+        "scripts/hooks/pre-compact.mjs",
+        "scripts/hooks/session-start.mjs"
+      ]
+    },
+    {
+      "path": "AGENTS.md",
+      "targets": [
+        "README.md"
+      ]
+    },
+    {
+      "path": "README.md",
+      "targets": [
+        "README.md"
+      ]
+    },
+    {
+      "path": "package-lock.json",
+      "targets": [
+        "scripts/contracts/contracts.mjs"
+      ]
+    },
+    {
+      "path": "package.json",
+      "targets": [
+        "scripts/contracts/contracts.mjs",
+        "scripts/state/cli.mjs"
+      ]
+    }
+  ],
+  "neutralSharedDependencies": [
+    "scripts/lib/cli.mjs",
+    "scripts/lib/git.mjs",
+    "tests/support/git-fixtures.mjs"
+  ],
+  "consumedCapabilities": {
+    "specialists": [
+      ".agents/skills/aerstello-specialists/SKILL.md",
+      ".agents/skills/aerstello-specialists/references/reviewer-contracts.md",
+      ".agents/skills/aerstello-specialists/registry.json",
+      ".agents/skills/aerstello-specialists/scripts/validate-registry.mjs"
+    ]
+  },
+  "obsoletePaths": [
+    ".codex/hooks/change-pre-compact.mjs",
+    ".codex/hooks/change-session-start.mjs",
+    "docs/agents/change-development.md",
+    "docs/agents/development-state.schema.json",
+    "docs/agents/implementation-plan.schema.json",
+    "scripts/change-development-state.mjs",
+    "scripts/lib/change-development-contracts.mjs",
+    "scripts/lib/change-development-source.mjs",
+    "scripts/lib/change-development-state.mjs",
+    "tests/tooling/change-development.test.mjs"
+  ]
+}

@@ -64,6 +64,31 @@ npm run review:github -- status --human
 npm run review:worktree -- inspect --pr 123 --task finding-a
 ```
 
+New cycles have no configured review-request count cap. To start with a finite
+total limit, pass `--review-limit <positive-safe-integer>` to `review:state init`.
+Change that policy with an exact revision guard:
+
+```bash
+npm run review:state -- set-review-limit --pr 123 --expected-revision 8 --limit 10
+npm run review:state -- set-review-limit --pr 123 --expected-revision 9 --unlimited
+```
+
+Every durable request record counts, including pending or later-stale requests.
+The first three requests retain the historical `discovery` kind; later requests
+use repeatable `verification`. Reaching a finite limit blocks only the next
+GitHub request, not triage, remediation, validation, or completion from a clean
+final allowed review.
+
+Native schema-v3 state may also contain the optional bounded
+`staleDiscoveryDispositions` ledger. Each append-only record binds one latest
+null-outcome discovery request and its uniquely classifiable canonical response
+to the exact request HEAD and the different live recovery HEAD. Its response
+fingerprint covers exact response content and immutable attached-root source
+evidence, so a same-classification edit cannot be adopted. The original
+request and null history row remain unchanged and continue to count toward the
+request limit. Older schema-v3 documents without the ledger remain readable;
+migrated request provenance cannot acquire a disposition.
+
 From a nested npm workspace directory such as `apps/api`, prefix npm with the
 checkout's Git root so npm selects the root package scripts:
 
@@ -222,13 +247,13 @@ SHAs. It rejects pending, finding, stale, dirty, or inconsistent states and does
 not infer checks from a missing legacy plan or replace an existing passing proof
 after an ordinary taskless review.
 
-A separate native schema-v3 route recovers a taskless clean discovery review
+A separate native schema-v3 route recovers a taskless clean review
 after the integration HEAD advances. The clean request, outcome, requested, and
 reviewed SHAs must still agree on one prior commit different from the current
 HEAD, and the latest history entry must exactly equal the active evidence. The
 state must be `recovering`, have no tasks, blockers, escalation, or human
-decision, retain another discovery or verification request allowance, and have
-a clean exact current checkout. Use a nonempty current-HEAD
+decision, retain configured review-request allowance, and have a clean exact
+current checkout. Use a nonempty current-HEAD
 `npm run review:state -- validation-plan --initial-selection` selection
 (`--replace` may replace only
 the stale plan sidecar), then run it normally. The old review ledger is preserved
@@ -242,6 +267,46 @@ HEAD, and succeeds only when no canonical root exists. It records an aggregate
 passed empty-thread proof for the current HEAD while retaining historical
 threadless evidence, with no GitHub or journal mutation. A new exact-current-
 HEAD review is still required; the historical clean result cannot satisfy Done.
+
+A native schema-v3 taskless pending request has a separate guarded recovery
+when its exact immutable request comment still exists but the integration and
+live PR head advance before an outcome is recorded. Checkpoint the new clean
+HEAD, save a nonempty current-HEAD `--initial-selection` (`--replace` may
+replace only the stale plan), and run the selection. The request, its null
+outcome, and the complete history row remain byte-for-byte historical and still
+consume their configured request slot.
+
+Then run `refresh-threads`. It rechecks the request anchor, current validation,
+clean equal local/pushed/live heads, complete canonical evidence, state
+revision, and the final live head. It writes no GitHub mutation or request
+journal. A request anchor with any edit timestamp is not immutable. Missing,
+edited, duplicated, foreign, unsupported, multiple,
+conflicting, same-head, migrated, or inconsistently bound evidence remains a
+human gate; ambiguous verification evidence is durably checkpointed for that
+decision.
+
+For discovery, no canonical response is pure HEAD drift: no disposition is
+written, and the existing guarded empty-proof route restores readiness only
+when the fully paginated canonical root set is empty. Exactly one supported
+response instead receives one immutable disposition. A clean response may
+restore readiness only after a second full evidence/root read plus repeated
+checkout, local/pushed/live-head, and revision checks. A findings response
+enters ordinary triage; its canonical roots are not auto-resolved or converted
+into a current-head outcome. The active `reviewOutcome`, `reviewedHeadSha`, and
+null history outcome remain unchanged in both cases.
+
+An identical disposition/proof retry takes the state lock and atomically
+rechecks its revision without writing another revision; evidence, root, head,
+or revision races fail closed. The ordinary request command derives the
+replacement kind from the complete durable ordinal and appends a new immutable
+row. An exhausted finite limit preserves disposition and thread proof but
+blocks only that request with the exact raise-or-remove command; unlimited
+policy permits the replacement.
+
+`review:github status` reports stale discovery evidence as `pure-head-drift`,
+`disposition-ready` or `dispositioned`, `actionable-stale-findings`, or
+`ambiguous-human-decision`. Treat the last category as a human decision, never
+as permission to repair evidence heuristically.
 
 There is one further migration-only `--initial-selection` route for completed
 tasks. Its immutable `state.v2.backup.json` must contain a nonempty all-completed
@@ -324,9 +389,12 @@ Next action: Integrate the remaining result and run the selected tests.
 - **Release state is inconsistent:** run `npm run release:state`,
   `npm run check:release-state`, and `npm run check:released-migrations`. Fetch
   missing refs or tags; do not assume the project is pre-release.
-- **Review rounds repeat:** investigate a finding that returns twice. After
-  three discovery reviews, only one exact-commit verification review is allowed;
-  new or stale verification evidence needs a human decision.
+- **Review rounds repeat:** investigate a stable finding that returns twice.
+  Otherwise keep requesting exact-commit reviews until Codex is clean. There is
+  no configured request-count cap by default; an explicit durable limit pauses
+  only the next request when exhausted. Exact-anchor HEAD drift is recoverable,
+  while missing, altered, duplicated, foreign, unsupported, multiple,
+  conflicting, or otherwise ambiguous evidence still needs a human decision.
 
 Machine contracts and command details live in the
 [PR review state schema](./schemas/pr-review-state.schema.json),

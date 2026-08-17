@@ -19,6 +19,7 @@ import {
   checkpointCiValidation,
   checkpointGitMetadata,
   checkpointReviewOutcome,
+  checkpointReviewRequestLimit,
   checkpointReviewRequest,
   checkpointState,
   checkpointTaskPacketBinding,
@@ -42,6 +43,7 @@ import {
   recordSpecialistReview,
   renderRecoverySummary,
   reviewRequestGate,
+  reviewRequestUsage,
   reviewRoot,
   stateDirectory,
   statePath,
@@ -56,6 +58,10 @@ import {
   validationPlanPath,
   withStateLock,
 } from './state.mjs';
+import {
+  buildStaleDiscoveryDisposition,
+  staleDiscoveryDispositionId,
+} from '../contracts/contracts.mjs';
 import { routeSpecialists } from '../../../aerstello-specialists/scripts/validate-registry.mjs';
 import { commit, createRepository, git } from '../../../../../tests/support/git-fixtures.mjs';
 
@@ -160,7 +166,8 @@ function external(cwd, state, overrides = {}) {
   });
 }
 
-function request(state, id = `request-${state.reviewRound + 1}`, kind = state.reviewRound < 3 ? 'discovery' : 'verification') {
+function request(state, id = `request-${reviewRequestUsage(state).used + 1}`,
+  kind = reviewRequestUsage(state).used < 3 ? 'discovery' : 'verification') {
   return {
     id, databaseId: 101, url: `https://github.com/example/aerstello/pull/17#issuecomment-${id}`,
     headSha: state.currentIntegrationHeadSha, at: AT, kind, body: '@codex review',
@@ -191,7 +198,9 @@ function ciEvidence(state, overrides = {}) {
 
 function legacyState(state, overrides = {}) {
   const {
+    staleDiscoveryDispositions: _staleDiscoveryDispositions,
     verificationReviewUsed: _verificationReviewUsed,
+    reviewRequestLimit: _reviewRequestLimit,
     legacyReviewProvenance: _legacyReviewProvenance,
     reviewOutcome,
     reviewHistory: _reviewHistory,
@@ -215,8 +224,10 @@ function legacyState(state, overrides = {}) {
 
 function schemaV2State(state) {
   const {
+    staleDiscoveryDispositions: _staleDiscoveryDispositions,
     ciValidationStatus: _ciValidationStatus,
     ciValidationHistory: _ciValidationHistory,
+    reviewRequestLimit: _reviewRequestLimit,
     validationStatus,
     threadResolutionStatus,
     ...currentFields
@@ -352,6 +363,91 @@ function nativeTasklessReview(cwd, { collectOutcome = true, outcomeOverrides = {
   return { initial, prepared, requested, reviewed };
 }
 
+function nativeTasklessPendingVerification(cwd, { reviewRequestLimit = null } = {}) {
+  const initial = init(cwd, { reviewRequestLimit });
+  const threadProofed = checkpointTaskCompletion({
+    cwd,
+    expectedRevision: initial.revision,
+    threadResolutionStatus: ready(initial, []).threadResolutionStatus,
+  });
+  let current = persistReady(cwd, threadProofed, []);
+  for (let round = 0; round < 3; round += 1) {
+    const requested = checkpointReviewRequest({
+      cwd,
+      request: request(current),
+      pushedHeadSha: current.currentIntegrationHeadSha,
+      prHeadSha: current.currentIntegrationHeadSha,
+      expectedRevision: current.revision,
+    });
+    const reviewed = checkpointReviewOutcome({
+      cwd, outcome: outcome(requested), expectedRevision: requested.revision,
+    });
+    current = checkpointState({
+      cwd, nextState: ready(reviewed, []), expectedRevision: reviewed.revision,
+    });
+  }
+  const requested = checkpointReviewRequest({
+    cwd,
+    request: request(current),
+    pushedHeadSha: current.currentIntegrationHeadSha,
+    prHeadSha: current.currentIntegrationHeadSha,
+    expectedRevision: current.revision,
+  });
+  return { initial, requested };
+}
+
+function nativeStaleDiscoveryDisposition(cwd, {
+  dispositionOutcome = 'clean', reviewRequestLimit = null,
+} = {}) {
+  const initial = init(cwd, { reviewRequestLimit });
+  const proofed = checkpointTaskCompletion({
+    cwd,
+    expectedRevision: initial.revision,
+    threadResolutionStatus: ready(initial, []).threadResolutionStatus,
+  });
+  const prepared = persistReady(cwd, proofed, []);
+  const requested = checkpointReviewRequest({
+    cwd,
+    request: request(prepared, 'stale-discovery-request', 'discovery'),
+    pushedHeadSha: prepared.currentIntegrationHeadSha,
+    prHeadSha: prepared.currentIntegrationHeadSha,
+    expectedRevision: prepared.revision,
+  });
+  const requestHeadSha = requested.currentIntegrationHeadSha;
+  const immutableHistory = structuredClone(requested.reviewHistory);
+  const liveHeadSha = commit(cwd, { 'stale-discovery-drift.txt': 'drift\n' }, 'stale discovery drift');
+  const drifted = checkpointGitMetadata({ cwd }).state;
+  const validated = checkpointSyntheticTargetedValidation(cwd, drifted);
+  const evidence = outcome(validated, {
+    id: 'stale-discovery-response',
+    headSha: requestHeadSha,
+    requestId: requested.reviewRequest.id,
+    kind: 'discovery',
+    outcome: dispositionOutcome,
+  });
+  const disposition = buildStaleDiscoveryDisposition({
+    request: requested.reviewRequest,
+    liveHeadSha,
+    evidence,
+    responseFingerprint: 'd'.repeat(64),
+    disposedAt: AT,
+  });
+  const threadResolutionStatus = {
+    status: 'passed', headSha: liveHeadSha, threads: [],
+    threadlessVerification: emptyThreadless(), updatedAt: AT,
+  };
+  const dispositioned = checkpointTaskCompletion({
+    cwd,
+    expectedRevision: validated.revision,
+    threadResolutionStatus,
+    staleDiscoveryDisposition: disposition,
+  });
+  return {
+    requested, immutableHistory, requestHeadSha, liveHeadSha, validated,
+    evidence, disposition, threadResolutionStatus, dispositioned,
+  };
+}
+
 function integratedTasks(cwd, ids) {
   const initial = init(cwd);
   const proposedTasks = ids.map((id) => task(initial.currentIntegrationHeadSha, {
@@ -442,16 +538,59 @@ test('initialization writes the v3 identity and empty durable ledgers', () => {
   const cwd = repo();
   const state = init(cwd);
   assert.equal(state.schemaVersion, 3);
+  assert.equal(state.reviewRequestLimit, null);
   assert.equal(state.legacyReviewProvenance, null);
   assert.deepEqual(state.reviewHistory, []);
+  assert.deepEqual(state.staleDiscoveryDispositions, []);
   assert.deepEqual(state.threadResolutionStatus.threads, []);
   assert.equal(statePath(cwd, 17), join(gitCommonDirectory(cwd), 'codex', 'pr-review', 'pr-17', 'state.json'));
+});
+
+test('initialization accepts only an explicit positive review request limit', () => {
+  const limited = init(repo(), { reviewRequestLimit: 7 });
+  assert.equal(limited.reviewRequestLimit, 7);
+  for (const reviewRequestLimit of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '7']) {
+    assert.throws(
+      () => init(repo(), { reviewRequestLimit }),
+      { code: 'INVALID_REVIEW_REQUEST_LIMIT' },
+    );
+  }
+});
+
+test('state CLI configures and removes a finite review request limit strictly', () => {
+  const cwd = repo();
+  const initialized = spawnSync(process.execPath, [
+    STATE_CLI, 'init', '--pr', '17', '--base', 'main', '--head', 'HEAD', '--release-ref', 'main',
+    '--review-limit', '5',
+  ], { cwd, encoding: 'utf8' });
+  assert.equal(initialized.status, 0, initialized.stderr);
+  assert.equal(JSON.parse(initialized.stdout).reviewRequestLimit, 5);
+
+  const invalid = spawnSync(process.execPath, [
+    STATE_CLI, 'set-review-limit', '--pr', '17', '--expected-revision', '0',
+    '--limit', '6', '--unlimited',
+  ], { cwd, encoding: 'utf8' });
+  assert.equal(invalid.status, 2);
+
+  const unsafe = spawnSync(process.execPath, [
+    STATE_CLI, 'set-review-limit', '--pr', '17', '--expected-revision', '0',
+    '--limit', '9007199254740993',
+  ], { cwd, encoding: 'utf8' });
+  assert.equal(unsafe.status, 2);
+  assert.match(unsafe.stderr, /must not exceed 9007199254740991/u);
+
+  const unlimited = spawnSync(process.execPath, [
+    STATE_CLI, 'set-review-limit', '--pr', '17', '--expected-revision', '0', '--unlimited',
+  ], { cwd, encoding: 'utf8' });
+  assert.equal(unlimited.status, 0, unlimited.stderr);
+  assert.equal(JSON.parse(unlimited.stdout).reviewRequestLimit, null);
 });
 
 test('v2 loading requires explicit migration and writes an exact versioned backup', () => {
   const cwd = repo();
   const initialized = init(cwd);
   const {
+    staleDiscoveryDispositions: _staleDiscoveryDispositions,
     ciValidationStatus: _ciValidationStatus, ciValidationHistory: _ciValidationHistory,
     validationStatus, ...currentFields
   } = initialized;
@@ -471,6 +610,7 @@ test('v2 loading requires explicit migration and writes an exact versioned backu
   assert.throws(() => loadState(cwd), { code: 'STATE_MIGRATION_REQUIRED' });
   const migrated = migrateState({ cwd });
   assert.equal(migrated.state.schemaVersion, 3);
+  assert.deepEqual(migrated.state.staleDiscoveryDispositions, []);
   assert.equal(readFileSync(migrated.backupPath, 'utf8'), source);
   assert.match(migrated.backupPath, /state\.v2\.backup\.json$/u);
 });
@@ -480,6 +620,7 @@ test('v2 migration preserves a pending exact-head review while resetting targete
   const prepared = ready(init(cwd), []);
   const requested = buildReviewRequestTransition(prepared, request(prepared), external(cwd, prepared));
   const {
+    staleDiscoveryDispositions: _staleDiscoveryDispositions,
     ciValidationStatus: _ciValidationStatus,
     ciValidationHistory: _ciValidationHistory,
     validationStatus,
@@ -820,6 +961,99 @@ test('native taskless clean-review HEAD drift rebuilds only current targeted val
     reviewHistory: result.state.reviewHistory,
     threadlessVerification: result.state.threadResolutionStatus.threadlessVerification,
   }, preserved);
+
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd, initialSelection: selection, replace: true,
+  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
+});
+
+test('native taskless pending-review HEAD drift rebuilds current validation without rewriting history', () => {
+  const cwd = repo();
+  const { requested } = nativeTasklessPendingVerification(cwd, { reviewRequestLimit: 4 });
+  const priorHeadSha = requested.currentIntegrationHeadSha;
+  const preserved = {
+    reviewRequest: structuredClone(requested.reviewRequest),
+    reviewOutcome: requested.reviewOutcome,
+    reviewHistory: structuredClone(requested.reviewHistory),
+    threadlessVerification: structuredClone(requested.threadResolutionStatus.threadlessVerification),
+  };
+  assert.deepEqual(reviewRequestUsage(requested), {
+    used: 4, limit: 4, remaining: 0, exhausted: true,
+  });
+  assert.equal(requested.reviewRequest.kind, 'verification');
+  assert.equal(requested.reviewHistory.at(-1).outcome, null);
+
+  const currentHeadSha = commit(cwd, {
+    'pending-review-head-drift.txt': 'current HEAD\n',
+  }, 'pending review HEAD drift');
+  const drifted = checkpointGitMetadata({ cwd }).state;
+  assert.notEqual(currentHeadSha, priorHeadSha);
+  assert.equal(drifted.phase, 'recovering');
+  assert.equal(drifted.validationStatus.status, 'not-run');
+  assert.deepEqual({
+    reviewRequest: drifted.reviewRequest,
+    reviewOutcome: drifted.reviewOutcome,
+    reviewHistory: drifted.reviewHistory,
+    threadlessVerification: drifted.threadResolutionStatus.threadlessVerification,
+  }, preserved);
+
+  const selection = initialSelection(currentHeadSha, {
+    affectedAreas: ['workflow', 'documentation'],
+    requiredValidation: {
+      unit: [{
+        command: 'npm run check:workflow',
+        reason: 'Rebuild taskless validation after the pending Review commit drifted.',
+      }],
+      system: [],
+    },
+  });
+  const plan = buildTargetedValidationPlan({
+    cwd, initialSelection: selection, replace: true, now: () => AT,
+  });
+  assert.equal(plan.headSha, currentHeadSha);
+  assert.deepEqual(plan.taskIds, []);
+
+  const result = executeTargetedValidationPlan({
+    cwd, runCommand: () => ({ status: 0 }), now: () => AT,
+  });
+  assert.equal(result.state.phase, 'recovering');
+  assert.equal(result.state.validationStatus.status, 'passed');
+  assert.equal(result.state.validationStatus.headSha, currentHeadSha);
+  assert.deepEqual(reviewRequestUsage(result.state), {
+    used: 4, limit: 4, remaining: 0, exhausted: true,
+  });
+  assert.deepEqual({
+    reviewRequest: result.state.reviewRequest,
+    reviewOutcome: result.state.reviewOutcome,
+    reviewHistory: result.state.reviewHistory,
+    threadlessVerification: result.state.threadResolutionStatus.threadlessVerification,
+  }, preserved);
+
+  const readyForReplacement = checkpointTaskCompletion({
+    cwd,
+    expectedRevision: result.state.revision,
+    threadResolutionStatus: {
+      ...result.state.threadResolutionStatus,
+      status: 'passed',
+      headSha: currentHeadSha,
+      threads: [],
+      updatedAt: AT,
+    },
+  });
+  assert.equal(readyForReplacement.phase, 'ready-for-review');
+  assert.match(
+    readyForReplacement.nextAction,
+    new RegExp(`Review request limit 4 is exhausted after 4 durable requests; run npm run review:state -- set-review-limit --pr 17 --expected-revision ${readyForReplacement.revision} --limit <higher-number> or --unlimited before the next request\\.`),
+  );
+  assert.deepEqual({
+    reviewRequest: readyForReplacement.reviewRequest,
+    reviewOutcome: readyForReplacement.reviewOutcome,
+    reviewHistory: readyForReplacement.reviewHistory,
+  }, {
+    reviewRequest: preserved.reviewRequest,
+    reviewOutcome: preserved.reviewOutcome,
+    reviewHistory: preserved.reviewHistory,
+  });
   assert.throws(() => buildTargetedValidationPlan({
     cwd, initialSelection: selection, replace: true,
   }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
@@ -846,14 +1080,31 @@ test('native taskless review HEAD-drift validation recovery fails closed at ever
   }), { code: 'VALIDATION_CHECKOUT_DIRTY' });
   assert.equal(dirtyDrift.validationStatus.status, 'not-run');
 
-  const pendingCwd = repo();
-  nativeTasklessReview(pendingCwd, { collectOutcome: false });
-  const pendingHead = commit(pendingCwd, { 'pending-review-drift.txt': 'drift\n' }, 'pending review drift');
-  const pendingDrift = checkpointGitMetadata({ cwd: pendingCwd }).state;
-  assert.equal(pendingDrift.phase, 'recovering');
+  const sameHeadPendingCwd = repo();
+  const sameHeadPending = nativeTasklessReview(sameHeadPendingCwd, { collectOutcome: false }).requested;
   assert.throws(() => buildTargetedValidationPlan({
-    cwd: pendingCwd, initialSelection: initialSelection(pendingHead), replace: true,
-  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
+    cwd: sameHeadPendingCwd,
+    initialSelection: initialSelection(sameHeadPending.currentIntegrationHeadSha),
+    replace: true,
+  }), { code: 'VALIDATION_PLAN_PHASE_BLOCKED' });
+
+  for (const [name, mutate] of [
+    ['reviewed HEAD', (state, priorHeadSha) => ({ ...state, reviewedHeadSha: priorHeadSha })],
+    ['legacy provenance', (state) => ({
+      ...state,
+      legacyReviewProvenance: { schemaVersion: 1, discoveryRounds: 0, migratedAt: AT },
+    })],
+  ]) {
+    const cwd = repo();
+    const pending = nativeTasklessPendingVerification(cwd).requested;
+    const priorHeadSha = pending.currentIntegrationHeadSha;
+    const headSha = commit(cwd, { [`malformed-${name}.txt`]: 'drift\n' }, `malformed ${name}`);
+    const drifted = checkpointGitMetadata({ cwd }).state;
+    writeFileSync(statePath(cwd, drifted.prNumber), `${JSON.stringify(mutate(drifted, priorHeadSha))}\n`);
+    assert.throws(() => buildTargetedValidationPlan({
+      cwd, initialSelection: initialSelection(headSha), replace: true,
+    }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' }, name);
+  }
 
   const findingsCwd = repo();
   nativeTasklessReview(findingsCwd, { outcomeOverrides: { outcome: 'findings' } });
@@ -936,9 +1187,10 @@ test('native taskless review HEAD-drift validation recovery fails closed at ever
   const exhaustedHead = commit(exhaustedCwd, { 'exhausted-drift.txt': 'drift\n' }, 'exhausted review drift');
   const exhaustedDrift = checkpointGitMetadata({ cwd: exhaustedCwd }).state;
   assert.equal(exhaustedDrift.phase, 'recovering');
-  assert.throws(() => buildTargetedValidationPlan({
+  const unlimitedRecovery = buildTargetedValidationPlan({
     cwd: exhaustedCwd, initialSelection: initialSelection(exhaustedHead), replace: true,
-  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
+  });
+  assert.equal(unlimitedRecovery.headSha, exhaustedHead);
 });
 
 test('v2 completed-task cycles rebuild fresh exact-head validation from immutable migration proof', () => {
@@ -1600,6 +1852,26 @@ test('same-HEAD dirty checkpoints preserve proof while lifecycle gates remain fa
   assert.equal(driftedDirty.threadResolutionStatus.status, 'not-run');
 });
 
+test('cleaning an exhausted finite-limit checkout restores truthful review readiness', () => {
+  const cwd = repo();
+  let state = ready(init(cwd, { reviewRequestLimit: 4 }), []);
+  for (let ordinal = 1; ordinal <= 4; ordinal += 1) {
+    const requested = buildReviewRequestTransition(state, request(state), external(cwd, state));
+    state = ready(buildReviewOutcomeTransition(
+      requested, outcome(requested, { outcome: 'findings' }),
+    ), []);
+  }
+  writeFileSync(statePath(cwd, 17), `${JSON.stringify(state)}\n`);
+  writeFileSync(join(cwd, 'dirty-exhausted.txt'), 'dirty\n');
+  const dirty = checkpointGitMetadata({ cwd }).state;
+  assert.equal(dirty.phase, 'recovering');
+  rmSync(join(cwd, 'dirty-exhausted.txt'));
+  const restored = checkpointGitMetadata({ cwd }).state;
+  assert.equal(restored.phase, 'ready-for-review');
+  assert.match(restored.nextAction, /limit 4 is exhausted[\s\S]*set-review-limit[\s\S]*--unlimited/u);
+  assert.equal(reviewRequestGate(restored, external(cwd, restored)).allowed, false);
+});
+
 test('stale discovery request can be replaced without rewriting its null-outcome ledger entry', () => {
   const cwd = repo();
   const initial = init(cwd);
@@ -1638,7 +1910,142 @@ test('stale discovery request can be replaced without rewriting its null-outcome
   assert.equal(requestedB.reviewHistory[1].request.headSha, headB);
 });
 
-test('stale verification request stops for a human and preserves its evidence', () => {
+test('stale discovery disposition is append-only, exact-bound, retry-idempotent, and ordinal-preserving', () => {
+  const cwd = repo();
+  const recovery = nativeStaleDiscoveryDisposition(cwd);
+  const state = recovery.dispositioned;
+
+  assert.equal(state.phase, 'ready-for-review');
+  assert.equal(state.reviewOutcome, null);
+  assert.equal(state.reviewedHeadSha, null);
+  assert.equal(state.reviewRound, 1);
+  assert.deepEqual(state.reviewHistory, recovery.immutableHistory);
+  assert.deepEqual(state.staleDiscoveryDispositions, [recovery.disposition]);
+  assert.equal(state.staleDiscoveryDispositions[0].responseFingerprint, 'd'.repeat(64));
+  assert.equal(state.threadResolutionStatus.status, 'passed');
+  assert.equal(state.threadResolutionStatus.headSha, recovery.liveHeadSha);
+  assert.deepEqual(reviewRequestUsage(state), {
+    used: 1, limit: null, remaining: null, exhausted: false,
+  });
+  assert.equal(reviewRequestGate(state, external(cwd, state)).kind, 'discovery');
+  assert.match(renderRecoverySummary({ cwd }),
+    /Stale discovery dispositions: 1; latest [0-9a-f]{64} binds request stale-discovery-request [0-9a-f]{40} -> [0-9a-f]{40} \(clean\)/u);
+
+  const retry = checkpointTaskCompletion({
+    cwd,
+    expectedRevision: state.revision,
+    threadResolutionStatus: recovery.threadResolutionStatus,
+    staleDiscoveryDisposition: recovery.disposition,
+  });
+  assert.equal(retry.revision, state.revision);
+  assert.deepEqual(retry, state);
+  assert.throws(() => checkpointTaskCompletion({
+    cwd,
+    expectedRevision: state.revision - 1,
+    threadResolutionStatus: recovery.threadResolutionStatus,
+    staleDiscoveryDisposition: recovery.disposition,
+  }), { code: 'STATE_REVISION_CONFLICT' });
+
+  assert.throws(() => checkpointState({
+    cwd,
+    expectedRevision: state.revision,
+    nextState: { ...state, staleDiscoveryDispositions: [] },
+  }), /staleDiscoveryDispositions/u);
+  const edited = structuredClone(state);
+  edited.staleDiscoveryDispositions[0].evidence.id = 'heuristically-repaired';
+  edited.staleDiscoveryDispositions[0].dispositionId = staleDiscoveryDispositionId(
+    edited.staleDiscoveryDispositions[0],
+  );
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: state.revision, nextState: edited,
+  }), /staleDiscoveryDispositions/u);
+
+  const replacement = checkpointReviewRequest({
+    cwd,
+    expectedRevision: state.revision,
+    request: request(state, 'replacement-discovery', 'discovery'),
+    pushedHeadSha: state.currentIntegrationHeadSha,
+    prHeadSha: state.currentIntegrationHeadSha,
+  });
+  assert.equal(replacement.reviewHistory.length, 2);
+  assert.deepEqual(replacement.reviewHistory[0], recovery.immutableHistory[0]);
+  assert.equal(replacement.reviewHistory[1].request.kind, 'discovery');
+  assert.equal(replacement.reviewHistory[1].outcome, null);
+  assert.deepEqual(replacement.staleDiscoveryDispositions, [recovery.disposition]);
+});
+
+test('dispositioned stale discovery findings enter ordinary triage and retain immutable source evidence', () => {
+  const cwd = repo();
+  const recovery = nativeStaleDiscoveryDisposition(cwd, { dispositionOutcome: 'findings' });
+  const state = recovery.dispositioned;
+
+  assert.equal(state.phase, 'triaging');
+  assert.equal(state.threadResolutionStatus.status, 'not-run');
+  assert.equal(state.threadResolutionStatus.headSha, null);
+  assert.match(state.nextAction, /Triage the actionable findings/u);
+  assert.deepEqual(state.reviewHistory, recovery.immutableHistory);
+  assert.equal(state.reviewOutcome, null);
+  assert.equal(state.reviewedHeadSha, null);
+  assert.equal(state.staleDiscoveryDispositions[0].evidence.outcome, 'findings');
+  assert.equal(state.staleDiscoveryDispositions[0].evidence.headSha, recovery.requestHeadSha);
+
+  const retry = checkpointTaskCompletion({
+    cwd,
+    expectedRevision: state.revision,
+    threadResolutionStatus: state.threadResolutionStatus,
+    staleDiscoveryDisposition: recovery.disposition,
+  });
+  assert.equal(retry.revision, state.revision);
+  assert.deepEqual(retry, state);
+});
+
+test('stale discovery disposition rejects non-native, inconsistent, and tampered evidence', () => {
+  for (const mutate of [
+    (recovery, disposition) => { disposition.liveHeadSha = recovery.requestHeadSha; },
+    (_recovery, disposition) => { disposition.requestId = 'foreign-request'; },
+    (_recovery, disposition) => { disposition.evidence.kind = 'verification'; },
+    (_recovery, disposition) => { disposition.evidence.headSha = 'c'.repeat(40); },
+  ]) {
+    const cwd = repo();
+    const recovery = nativeStaleDiscoveryDisposition(cwd);
+    const disposition = structuredClone(recovery.disposition);
+    mutate(recovery, disposition);
+    disposition.dispositionId = staleDiscoveryDispositionId(disposition);
+    assert.throws(() => completeIntegratedTasks(recovery.validated, {
+      threadResolutionStatus: recovery.threadResolutionStatus,
+      staleDiscoveryDisposition: disposition,
+    }), { code: 'INVALID_STALE_DISCOVERY_DISPOSITION' });
+  }
+
+  const cwd = repo();
+  const recovery = nativeStaleDiscoveryDisposition(cwd);
+  assert.throws(() => completeIntegratedTasks({
+    ...recovery.validated,
+    legacyReviewProvenance: { schemaVersion: 1, discoveryRounds: 0, migratedAt: AT },
+  }, {
+    threadResolutionStatus: recovery.threadResolutionStatus,
+    staleDiscoveryDisposition: recovery.disposition,
+  }), { code: 'STALE_DISCOVERY_DISPOSITION_NOT_ALLOWED' });
+});
+
+test('finite stale discovery allowance keeps proof but blocks replacement with the exact operator action', () => {
+  const cwd = repo();
+  const { dispositioned, immutableHistory, disposition } = nativeStaleDiscoveryDisposition(cwd, {
+    reviewRequestLimit: 1,
+  });
+  assert.equal(dispositioned.phase, 'ready-for-review');
+  assert.equal(dispositioned.threadResolutionStatus.status, 'passed');
+  assert.deepEqual(dispositioned.reviewHistory, immutableHistory);
+  assert.deepEqual(dispositioned.staleDiscoveryDispositions, [disposition]);
+  assert.deepEqual(reviewRequestUsage(dispositioned), {
+    used: 1, limit: 1, remaining: 0, exhausted: true,
+  });
+  assert.equal(reviewRequestGate(dispositioned, external(cwd, dispositioned)).allowed, false);
+  assert.match(dispositioned.nextAction,
+    /limit 1 is exhausted after 1 durable requests; run npm run review:state -- set-review-limit --pr 17 --expected-revision [0-9]+ --limit <higher-number> or --unlimited/u);
+});
+
+test('stale verification request recovers without rewriting its evidence', () => {
   const cwd = repo();
   const initialized = init(cwd);
   const migrated = migratePrReviewStateV1(legacyState(initialized, { reviewRound: 3 }), { migratedAt: AT });
@@ -1654,12 +2061,12 @@ test('stale verification request stops for a human and preserves its evidence', 
   const immutableEvidence = structuredClone(requested.reviewHistory);
   commit(cwd, { 'verification-drift.txt': 'drift\n' }, 'verification request drift');
   const drifted = checkpointGitMetadata({ cwd }).state;
-  assert.equal(drifted.phase, 'awaiting-human-decision');
+  assert.equal(drifted.phase, 'recovering');
   assert.deepEqual(drifted.reviewHistory, immutableEvidence);
   assert.equal(drifted.reviewOutcome, null);
 });
 
-test('verification is consumed once after three migrated discovery rounds and findings stop for a human', () => {
+test('verification repeats after three discovery rounds and findings return to triage', () => {
   const cwd = repo();
   const base = ready(init(cwd));
   const state = {
@@ -1671,11 +2078,152 @@ test('verification is consumed once after three migrated discovery rounds and fi
   assert.equal(requested.reviewRound, 3);
   assert.equal(requested.verificationReviewUsed, true);
   const stopped = buildReviewOutcomeTransition(requested, outcome(requested, { outcome: 'findings' }));
-  assert.equal(stopped.phase, 'awaiting-human-decision');
-  assert.equal(reviewRequestGate({ ...state, verificationReviewUsed: true }, external(cwd, state)).allowed, false);
+  assert.equal(stopped.phase, 'triaging');
+  const preparedAgain = ready(stopped, []);
+  const requestedAgain = buildReviewRequestTransition(
+    preparedAgain, request(preparedAgain), external(cwd, preparedAgain),
+  );
+  assert.equal(requestedAgain.reviewRound, 3);
+  assert.equal(requestedAgain.reviewHistory.length, 2);
+  assert.deepEqual(requestedAgain.reviewHistory.map((entry) => entry.request.kind), [
+    'verification', 'verification',
+  ]);
+  assert.equal(reviewRequestGate(preparedAgain, external(cwd, preparedAgain)).allowed, true);
 });
 
-test('verification collection escalation is guarded, append-only, request-bound, and terminal', () => {
+test('unlimited cycles accept more than four durable requests in ordinal kind order', () => {
+  const cwd = repo();
+  let state = ready(init(cwd), []);
+  const kinds = [];
+  for (let ordinal = 1; ordinal <= 6; ordinal += 1) {
+    const requested = buildReviewRequestTransition(state, request(state), external(cwd, state));
+    kinds.push(requested.reviewRequest.kind);
+    const reviewed = buildReviewOutcomeTransition(requested, outcome(requested, { outcome: 'findings' }));
+    assert.equal(reviewed.phase, 'triaging');
+    state = ready(reviewed, []);
+  }
+  assert.deepEqual(kinds, ['discovery', 'discovery', 'discovery', 'verification', 'verification', 'verification']);
+  assert.deepEqual(reviewRequestUsage(state), {
+    used: 6, limit: null, remaining: null, exhausted: false,
+  });
+  assert.equal(reviewRequestGate(state, external(cwd, state)).allowed, true);
+  assert.equal(reviewRequestGate(state, external(cwd, state)).kind, 'verification');
+});
+
+test('a finite limit blocks only the next request and allows a clean final request to complete', () => {
+  const cwd = repo();
+  let state = ready(init(cwd, { reviewRequestLimit: 4 }), []);
+  for (let ordinal = 1; ordinal <= 3; ordinal += 1) {
+    const requested = buildReviewRequestTransition(state, request(state), external(cwd, state));
+    const reviewed = buildReviewOutcomeTransition(requested, outcome(requested, { outcome: 'findings' }));
+    state = ready(reviewed, []);
+  }
+  const finalRequest = buildReviewRequestTransition(state, request(state), external(cwd, state));
+  assert.equal(finalRequest.reviewRequest.kind, 'verification');
+  const clean = buildReviewOutcomeTransition(finalRequest, outcome(finalRequest));
+  const ciValidated = buildCiValidationTransition(clean, ciEvidence(clean));
+  assert.equal(completionGate(ciValidated, external(cwd, ciValidated)).allowed, true);
+  assert.equal(buildCompletionTransition(ciValidated, external(cwd, ciValidated)).phase, 'complete');
+
+  const findings = buildReviewOutcomeTransition(finalRequest, outcome(finalRequest, { outcome: 'findings' }));
+  assert.equal(findings.phase, 'triaging');
+  assert.match(findings.nextAction, /Triage[\s\S]*set-review-limit[\s\S]*--unlimited/u);
+  const remediated = ready(findings, []);
+  assert.deepEqual(reviewRequestUsage(remediated), {
+    used: 4, limit: 4, remaining: 0, exhausted: true,
+  });
+  assert.equal(reviewRequestGate(remediated, external(cwd, remediated)).allowed, false);
+  assert.ok(reviewRequestGate(remediated, external(cwd, remediated)).reasons.some(
+    (reason) => reason.includes('explicit review request limit 4 is exhausted'),
+  ));
+});
+
+test('guarded review limits preserve history, reject lowering and generic rewrites, and resume legacy findings', () => {
+  const cwd = repo();
+  let state = ready(init(cwd), []);
+  for (let ordinal = 1; ordinal <= 4; ordinal += 1) {
+    const requested = buildReviewRequestTransition(state, request(state), external(cwd, state));
+    const reviewed = buildReviewOutcomeTransition(requested, outcome(requested, { outcome: 'findings' }));
+    state = ordinal === 4 ? reviewed : ready(reviewed, []);
+  }
+  const historical = {
+    ...state,
+    phase: 'awaiting-human-decision',
+    nextAction: 'Historical fixed-limit workflow required an operator decision.',
+  };
+  delete historical.reviewRequestLimit;
+  const immutableHistory = structuredClone(historical.reviewHistory);
+  writeFileSync(statePath(cwd, 17), `${JSON.stringify(historical)}\n`);
+
+  const resumed = checkpointReviewRequestLimit({
+    cwd, expectedRevision: historical.revision, reviewRequestLimit: null,
+  });
+  assert.equal(resumed.phase, 'triaging');
+  assert.equal(resumed.reviewRequestLimit, null);
+  assert.deepEqual(resumed.reviewHistory, immutableHistory);
+  assert.equal(resumed.nextAction, 'Triage the applicable canonical review findings.');
+  assert.throws(() => checkpointReviewRequestLimit({
+    cwd, expectedRevision: historical.revision, reviewRequestLimit: null,
+  }), { code: 'STATE_REVISION_CONFLICT' });
+
+  const exhausted = checkpointReviewRequestLimit({
+    cwd, expectedRevision: resumed.revision, reviewRequestLimit: 4,
+  });
+  assert.equal(exhausted.phase, 'triaging');
+  assert.equal(reviewRequestUsage(exhausted).exhausted, true);
+  assert.match(exhausted.nextAction, /Triage[\s\S]*limit 4 is exhausted[\s\S]*--unlimited/u);
+  assert.throws(() => checkpointReviewRequestLimit({
+    cwd, expectedRevision: exhausted.revision, reviewRequestLimit: 3,
+  }), { code: 'INVALID_REVIEW_REQUEST_LIMIT' });
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: exhausted.revision,
+    nextState: { ...exhausted, reviewRequestLimit: 8 },
+  }), { code: 'IMMUTABLE_STATE_PROVENANCE' });
+
+  const raised = checkpointReviewRequestLimit({
+    cwd, expectedRevision: exhausted.revision, reviewRequestLimit: 8,
+  });
+  assert.equal(reviewRequestUsage(raised).exhausted, false);
+  assert.equal(raised.nextAction, 'Triage the applicable canonical review findings.');
+  const unlimited = checkpointReviewRequestLimit({
+    cwd, expectedRevision: raised.revision, reviewRequestLimit: null,
+  });
+  assert.deepEqual(reviewRequestUsage(unlimited), {
+    used: 4, limit: null, remaining: null, exhausted: false,
+  });
+  assert.equal(unlimited.nextAction, 'Triage the applicable canonical review findings.');
+  assert.deepEqual(unlimited.reviewHistory, immutableHistory);
+});
+
+test('review limit changes cannot exhaust a pending request but may preserve its recovery slot', () => {
+  const cwd = repo();
+  let prepared = ready(init(cwd), []);
+  for (let ordinal = 1; ordinal <= 4; ordinal += 1) {
+    const requested = buildReviewRequestTransition(prepared, request(prepared), external(cwd, prepared));
+    prepared = ready(buildReviewOutcomeTransition(
+      requested, outcome(requested, { outcome: 'findings' }),
+    ), []);
+  }
+  writeFileSync(statePath(cwd, 17), `${JSON.stringify(prepared)}\n`);
+  const eventsPath = join(stateDirectory(cwd, 17), 'events.ndjson');
+  const priorEvents = readFileSync(eventsPath, 'utf8');
+  const operationId = `request:17:verification:5:${prepared.currentIntegrationHeadSha}`;
+  writeFileSync(eventsPath, `${priorEvents}${JSON.stringify({
+    type: 'github-mutation-intent', summary: 'Pending review request.',
+    details: { operationId }, at: AT,
+  })}\n`);
+  assert.throws(() => checkpointReviewRequestLimit({
+    cwd, expectedRevision: prepared.revision, reviewRequestLimit: 4,
+  }), { code: 'REVIEW_REQUEST_INTENT_PENDING' });
+  const raised = checkpointReviewRequestLimit({
+    cwd, expectedRevision: prepared.revision, reviewRequestLimit: 6,
+  });
+  assert.equal(raised.reviewRequestLimit, 6);
+  assert.equal(reviewRequestUsage(raised).remaining, 2);
+  assert.deepEqual(raised.reviewHistory, prepared.reviewHistory);
+});
+
+test('verification collection escalation is guarded, append-only, request-bound, and human-gated', () => {
   const cwd = repo();
   const initialized = init(cwd);
   const migrated = migratePrReviewStateV1(legacyState(initialized, { reviewRound: 3 }), { migratedAt: AT });
@@ -1713,6 +2261,11 @@ test('verification collection escalation is guarded, append-only, request-bound,
   });
   assert.equal(escalated.verificationReviewUsed, true);
   assert.deepEqual(escalated.reviewHistory, requested.reviewHistory);
+  const limitedEscalation = checkpointReviewRequestLimit({
+    cwd, expectedRevision: escalated.revision, reviewRequestLimit: 9,
+  });
+  assert.equal(limitedEscalation.phase, 'awaiting-human-decision');
+  assert.deepEqual(limitedEscalation.verificationEscalation, escalation);
   assert.ok(reviewRequestGate(escalated, external(cwd, escalated)).reasons.some(
     (reason) => reason.includes('verification collection escalation'),
   ));
@@ -1720,19 +2273,19 @@ test('verification collection escalation is guarded, append-only, request-bound,
     (reason) => reason.includes('verification collection escalation'),
   ));
   assert.throws(() => checkpointState({
-    cwd, expectedRevision: escalated.revision,
-    nextState: { ...escalated, verificationEscalation: null },
+    cwd, expectedRevision: limitedEscalation.revision,
+    nextState: { ...limitedEscalation, verificationEscalation: null },
   }), { code: 'IMMUTABLE_STATE_PROVENANCE' });
   assert.throws(() => checkpointState({
-    cwd, expectedRevision: escalated.revision,
+    cwd, expectedRevision: limitedEscalation.revision,
     nextState: {
-      ...escalated,
+      ...limitedEscalation,
       verificationEscalation: { ...escalation, evidenceIds: ['review:rewritten'] },
     },
   }), { code: 'IMMUTABLE_STATE_PROVENANCE' });
   assert.deepEqual(checkpointVerificationEscalation({
-    cwd, expectedRevision: escalated.revision, escalation,
-  }), escalated);
+    cwd, expectedRevision: limitedEscalation.revision, escalation,
+  }), limitedEscalation);
 
   const discovery = {
     ...requested, reviewRound: 2, verificationReviewUsed: false,
@@ -1745,7 +2298,7 @@ test('verification collection escalation is guarded, append-only, request-bound,
   );
 });
 
-test('stale verification HEAD drift accepts truthful guarded collection escalation', () => {
+test('stale verification HEAD drift remains recoverable and cannot be mislabeled as ambiguity', () => {
   const cwd = repo();
   const initialized = init(cwd);
   const migrated = migratePrReviewStateV1(legacyState(initialized, { reviewRound: 3 }), { migratedAt: AT });
@@ -1762,17 +2315,43 @@ test('stale verification HEAD drift accepts truthful guarded collection escalati
   const requestHead = requested.reviewRequest.headSha;
   const observedPrHead = commit(cwd, { 'escalation-drift.txt': 'drift\n' }, 'escalation drift');
   const drifted = checkpointGitMetadata({ cwd }).state;
-  const escalated = checkpointVerificationEscalation({
+  assert.equal(drifted.phase, 'recovering');
+  assert.throws(() => checkpointVerificationEscalation({
     cwd, expectedRevision: drifted.revision,
     escalation: {
       requestId: requested.reviewRequest.id, requestHeadSha: requestHead, observedPrHeadSha: observedPrHead,
       headRelation: 'changed', evidenceIds: [`request:${requested.reviewRequest.id}`],
       reason: 'request-head-drift', at: AT,
     },
+  }), { code: 'VERIFICATION_ESCALATION_NOT_EXPECTED' });
+  assert.equal(drifted.verificationReviewUsed, true);
+  assert.equal(drifted.reviewHistory.at(-1).outcome, null);
+});
+
+test('native stale pending verification escalates only canonical evidence ambiguity', () => {
+  const cwd = repo();
+  const requested = nativeTasklessPendingVerification(cwd).requested;
+  const requestHead = requested.reviewRequest.headSha;
+  const observedPrHead = commit(cwd, {
+    'native-escalation-drift.txt': 'drift\n',
+  }, 'native pending escalation drift');
+  const drifted = checkpointGitMetadata({ cwd }).state;
+  const escalated = checkpointVerificationEscalation({
+    cwd,
+    expectedRevision: drifted.revision,
+    escalation: {
+      requestId: requested.reviewRequest.id,
+      requestHeadSha: requestHead,
+      observedPrHeadSha: observedPrHead,
+      headRelation: 'changed',
+      evidenceIds: ['review:PRR_stale'],
+      reason: 'request-head-drift',
+      at: AT,
+    },
   });
   assert.equal(escalated.phase, 'awaiting-human-decision');
-  assert.equal(escalated.verificationReviewUsed, true);
-  assert.equal(escalated.reviewHistory.at(-1).outcome, null);
+  assert.deepEqual(escalated.reviewHistory, drifted.reviewHistory);
+  assert.equal(escalated.reviewOutcome, null);
 });
 
 test('structured canonical thread proof covers multiple tasks with one reply and completes them once', () => {

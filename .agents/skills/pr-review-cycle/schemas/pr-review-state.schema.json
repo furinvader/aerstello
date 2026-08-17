@@ -29,6 +29,12 @@
     "currentIntegrationHeadSha": { "$ref": "#/$defs/sha" },
     "reviewRound": { "type": "integer", "minimum": 0, "maximum": 3 },
     "verificationReviewUsed": { "type": "boolean" },
+    "reviewRequestLimit": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      ]
+    },
     "legacyReviewProvenance": {
       "oneOf": [
         { "type": "null" },
@@ -72,7 +78,7 @@
     "reviewRequest": { "$ref": "#/$defs/nullableReviewRequest" },
     "reviewOutcome": { "$ref": "#/$defs/nullableReviewOutcome" },
     "reviewHistory": {
-      "type": "array", "maxItems": 4, "uniqueItems": true,
+      "type": "array", "uniqueItems": true,
       "items": {
         "type": "object", "additionalProperties": false, "required": ["request", "outcome"],
         "properties": {
@@ -80,6 +86,11 @@
           "outcome": { "$ref": "#/$defs/nullableReviewOutcome" }
         }
       }
+    },
+    "staleDiscoveryDispositions": {
+      "type": "array", "maxItems": 3, "uniqueItems": true,
+      "$comment": "Optional for backward readability of states written before stale-discovery recovery. The manual validator binds every append-only disposition to one native null-outcome discovery history row and verifies its deterministic identity and distinct prior/live HEADs.",
+      "items": { "$ref": "#/$defs/staleDiscoveryDisposition" }
     },
     "verificationEscalation": { "$ref": "#/$defs/nullableVerificationEscalation" },
     "threadResolutionStatus": { "$ref": "#/$defs/threadResolutionStatus" },
@@ -110,6 +121,13 @@
     "updatedAt": { "type": "string", "format": "date-time" }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": { "staleDiscoveryDispositions": { "type": "array", "minItems": 1 } },
+        "required": ["staleDiscoveryDispositions"]
+      },
+      "then": { "properties": { "legacyReviewProvenance": { "type": "null" } } }
+    },
     {
       "if": { "properties": { "verificationReviewUsed": { "const": true } }, "required": ["verificationReviewUsed"] },
       "then": { "properties": { "reviewRound": { "const": 3 } } }
@@ -153,10 +171,6 @@
           }
         },
         "allOf": [
-          {
-            "if": { "properties": { "reviewRound": { "const": 3 } }, "required": ["reviewRound"] },
-            "then": { "properties": { "verificationReviewUsed": { "const": false } } }
-          },
           {
             "if": {
               "properties": {
@@ -266,18 +280,6 @@
       }
     },
     {
-      "if": {
-        "properties": {
-          "reviewOutcome": {
-            "type": "object", "required": ["kind", "outcome"],
-            "properties": { "kind": { "const": "verification" }, "outcome": { "const": "findings" } }
-          }
-        },
-        "required": ["reviewOutcome"]
-      },
-      "then": { "properties": { "phase": { "const": "awaiting-human-decision" } } }
-    },
-    {
       "if": { "properties": { "verificationEscalation": { "type": "object" } }, "required": ["verificationEscalation"] },
       "then": {
         "properties": {
@@ -364,6 +366,29 @@
       ]
     },
     "nullableReviewOutcome": { "oneOf": [{ "$ref": "#/$defs/reviewOutcome" }, { "type": "null" }] },
+    "staleDiscoveryDisposition": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "schemaVersion", "dispositionId", "requestId", "requestHeadSha", "liveHeadSha",
+        "evidence", "responseFingerprint", "reason", "disposedAt"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "dispositionId": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "requestId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "requestHeadSha": { "$ref": "#/$defs/sha" },
+        "liveHeadSha": { "$ref": "#/$defs/sha" },
+        "evidence": {
+          "allOf": [
+            { "$ref": "#/$defs/reviewOutcome" },
+            { "type": "object", "properties": { "kind": { "const": "discovery" } } }
+          ]
+        },
+        "responseFingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "reason": { "const": "head-drift" },
+        "disposedAt": { "type": "string", "format": "date-time" }
+      }
+    },
     "verificationEscalation": {
       "type": "object", "additionalProperties": false,
       "$comment": "The manual validator binds requestId and requestHeadSha to the current pending verification request because Draft 2020-12 cannot compare sibling property values.",

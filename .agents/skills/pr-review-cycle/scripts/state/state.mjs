@@ -23,6 +23,8 @@ import {
   completionGate,
   parseTargetedValidationCommand,
   reviewRequestGate,
+  reviewRequestUsage,
+  staleDiscoveryDispositionId,
   taskHasCanonicalThreadCoverage,
   unionInitialValidationSelection,
   unionRequiredValidation,
@@ -47,7 +49,7 @@ import {
   validateSpecialistEvidence,
 } from '../../../aerstello-specialists/scripts/validate-registry.mjs';
 
-export { completionGate, reviewRequestGate } from '../contracts/contracts.mjs';
+export { completionGate, reviewRequestGate, reviewRequestUsage } from '../contracts/contracts.mjs';
 export { gitCommonDirectory, repositoryRoot, reviewRoot } from '../paths.mjs';
 
 export const ACTIVE_STATE_LIMIT_BYTES = 64 * 1024;
@@ -125,6 +127,21 @@ function emptyCiValidation() {
     source: 'github-actions', scope: 'full', status: 'not-run', headSha: null,
     checks: [], checkRunId: null, workflowRunId: null, workflowRunUrl: null, updatedAt: null,
   };
+}
+
+function staleDiscoveryDispositionList(state) {
+  return Array.isArray(state?.staleDiscoveryDispositions) ? state.staleDiscoveryDispositions : [];
+}
+
+function staleDiscoveryDispositionForRequest(state, requestId = state?.reviewRequest?.id) {
+  return staleDiscoveryDispositionList(state)
+    .find((disposition) => disposition.requestId === requestId) ?? null;
+}
+
+function activeReviewEvidenceHead(state) {
+  return state.reviewedHeadSha
+    ?? staleDiscoveryDispositionForRequest(state)?.evidence?.headSha
+    ?? null;
 }
 
 function sleep(milliseconds) {
@@ -1420,8 +1437,7 @@ function isCleanTasklessReviewValidationRecovery(state, expectedIds) {
 }
 
 function hasRemainingReviewAllowance(state) {
-  return (Number.isInteger(state.reviewRound) && state.reviewRound < 3)
-    || (state.reviewRound === 3 && state.verificationReviewUsed === false);
+  return !reviewRequestUsage(state).exhausted;
 }
 
 function isNativeTasklessReviewHeadDriftValidationRecovery(state, expectedIds) {
@@ -1433,7 +1449,7 @@ function isNativeTasklessReviewHeadDriftValidationRecovery(state, expectedIds) {
     && state.legacyReviewProvenance === null
     && state.phase === 'recovering'
     && state.tasks.length === 0 && expectedIds.length === 0
-    && request !== null && request.kind === 'discovery'
+    && request !== null
     && outcome?.outcome === 'clean' && latest !== undefined
     && sameEvidence(latest.request, request) && sameEvidence(latest.outcome, outcome)
     && outcome.requestId === request.id && outcome.kind === request.kind
@@ -1444,6 +1460,29 @@ function isNativeTasklessReviewHeadDriftValidationRecovery(state, expectedIds) {
     && state.blockedReasons.length === 0 && state.verificationEscalation === null
     && !state.tasks.some((task) => task.disposition === 'needs-human-decision')
     && hasRemainingReviewAllowance(state);
+}
+
+function isNativeTasklessPendingReviewHeadDriftValidationRecovery(state, expectedIds) {
+  const request = state.reviewRequest;
+  const latest = state.reviewHistory.at(-1);
+  const priorHeadSha = request?.headSha;
+  const disposition = staleDiscoveryDispositionForRequest(state, request?.id);
+  return state.schemaVersion === 3
+    && state.legacyReviewProvenance === null
+    && ['recovering', 'ready-for-review'].includes(state.phase)
+    && state.tasks.length === 0 && expectedIds.length === 0
+    && request !== null && latest !== undefined
+    && state.reviewOutcome === null && latest.outcome === null
+    && sameEvidence(latest.request, request)
+    && state.requestedHeadSha === priorHeadSha && state.reviewedHeadSha === null
+    && priorHeadSha !== state.currentIntegrationHeadSha
+    && state.git.headSha === state.currentIntegrationHeadSha && state.git.dirty === false
+    && state.blockedReasons.length === 0 && state.verificationEscalation === null
+    && !state.tasks.some((task) => task.disposition === 'needs-human-decision')
+    && (disposition === null
+      || (disposition.liveHeadSha === state.currentIntegrationHeadSha
+        && disposition.requestHeadSha === priorHeadSha
+        && disposition.evidence?.requestId === request.id));
 }
 
 function isV2CompletedTaskValidationRecovery(cwd, state, expectedIds) {
@@ -1483,8 +1522,9 @@ function isV2CompletedTaskValidationRecovery(cwd, state, expectedIds) {
 }
 
 function assertTaskPacketHead(state, task, packet, digest) {
-  if (state.reviewedHeadSha !== null) {
-    if (packet.reviewedHeadSha !== state.reviewedHeadSha) {
+  const evidenceHeadSha = activeReviewEvidenceHead(state);
+  if (evidenceHeadSha !== null) {
+    if (packet.reviewedHeadSha !== evidenceHeadSha) {
       throw new StateError(`Task packet ${packet.taskId} does not match the exact reviewed HEAD`, 'TASK_PACKET_HEAD_MISMATCH');
     }
   }
@@ -1520,7 +1560,7 @@ function assertTaskPacketHead(state, task, packet, digest) {
     }
     return;
   }
-  if (state.reviewedHeadSha !== null) return;
+  if (evidenceHeadSha !== null) return;
   if (packet.reviewedHeadSha === state.currentIntegrationHeadSha) return;
   throw new StateError(`Task packet ${packet.taskId} does not match the exact reviewed HEAD`, 'TASK_PACKET_HEAD_MISMATCH');
 }
@@ -1580,10 +1620,14 @@ function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, initi
     const pristineSelection = isPristineTasklessValidationSelection(state, expectedIds);
     const cleanReviewRecovery = isCleanTasklessReviewValidationRecovery(state, expectedIds);
     const headDriftRecovery = isNativeTasklessReviewHeadDriftValidationRecovery(state, expectedIds);
+    const pendingHeadDriftRecovery = isNativeTasklessPendingReviewHeadDriftValidationRecovery(
+      state, expectedIds,
+    );
     const completedTaskRecovery = isV2CompletedTaskValidationRecovery(cwd, state, expectedIds);
-    if (!pristineSelection && !cleanReviewRecovery && !headDriftRecovery && !completedTaskRecovery) {
+    if (!pristineSelection && !cleanReviewRecovery && !headDriftRecovery
+        && !pendingHeadDriftRecovery && !completedTaskRecovery) {
       throw new StateError(
-        'Taskless validation selection requires a pristine cycle, guarded clean-review recovery, or proven v2 completed-task recovery',
+        'Taskless validation selection requires a pristine cycle, guarded stale-review recovery, or proven v2 completed-task recovery',
         'INITIAL_VALIDATION_NOT_ALLOWED',
       );
     }
@@ -1706,7 +1750,10 @@ export function buildTargetedValidationPlan({
   if (initialSelection !== undefined && initialSelection !== null
       && current.validationStatus.status === 'passed'
       && (isCleanTasklessReviewValidationRecovery(current, actionableIntegratedTaskIds(current))
-        || isNativeTasklessReviewHeadDriftValidationRecovery(current, actionableIntegratedTaskIds(current)))) {
+        || isNativeTasklessReviewHeadDriftValidationRecovery(current, actionableIntegratedTaskIds(current))
+        || isNativeTasklessPendingReviewHeadDriftValidationRecovery(
+          current, actionableIntegratedTaskIds(current),
+        ))) {
     throw new StateError(
       'Taskless review recovery cannot replace existing targeted-validation proof',
       'INITIAL_VALIDATION_NOT_ALLOWED',
@@ -1886,10 +1933,18 @@ export function initializeState({
   head = 'HEAD',
   releaseRef = 'origin/main',
   orchestratorSessionId = null,
+  reviewRequestLimit = null,
 } = {}) {
   const selectedPr = parsePrNumber(prNumber);
   const repo = repository ?? originRepository(cwd);
   if (!repo) throw new StateError('Unable to derive owner/name from origin; pass --repository', 'REPOSITORY_REQUIRED');
+  if (!(reviewRequestLimit === null
+      || (Number.isSafeInteger(reviewRequestLimit) && reviewRequestLimit > 0))) {
+    throw new StateError(
+      `Review request limit must be null or a positive safe integer up to ${Number.MAX_SAFE_INTEGER}`,
+      'INVALID_REVIEW_REQUEST_LIMIT',
+    );
+  }
   const root = repositoryRoot(cwd);
   const baseSha = resolveCommit(cwd, base);
   const currentIntegrationHeadSha = resolveCommit(cwd, head);
@@ -1915,6 +1970,7 @@ export function initializeState({
       currentIntegrationHeadSha,
       reviewRound: 0,
       verificationReviewUsed: false,
+      reviewRequestLimit,
       legacyReviewProvenance: null,
       releaseBaseline: releaseState.applicableRelease,
       decisions: [],
@@ -1922,6 +1978,7 @@ export function initializeState({
       reviewRequest: null,
       reviewOutcome: null,
       reviewHistory: [],
+      staleDiscoveryDispositions: [],
       verificationEscalation: null,
       threadResolutionStatus: emptyThreadProof(),
       blockedReasons: [],
@@ -2019,7 +2076,7 @@ export function migratePrReviewStateV2(legacyState, { migratedAt = utcNow() } = 
   }
   const normalized = Object.prototype.hasOwnProperty.call(legacyState, 'verificationEscalation')
     ? legacyState : { ...legacyState, verificationEscalation: null };
-  for (const field of ['ciValidationStatus', 'ciValidationHistory']) {
+  for (const field of ['ciValidationStatus', 'ciValidationHistory', 'staleDiscoveryDispositions']) {
     if (Object.prototype.hasOwnProperty.call(normalized, field)) {
       throw new StateError(`Schema v2 state cannot contain ${field}`, 'INVALID_STATE');
     }
@@ -2040,6 +2097,7 @@ export function migratePrReviewStateV2(legacyState, { migratedAt = utcNow() } = 
     validationStatus: emptyTargetedValidation(),
     ciValidationStatus: emptyCiValidation(),
     ciValidationHistory: [],
+    staleDiscoveryDispositions: [],
     nextAction: pendingReviewMustBePreserved
       ? 'Collect the pending exact-head review, then reconfirm targeted validation and full GitHub Actions.'
       : wasComplete || validationMustBeRebuilt
@@ -2270,6 +2328,110 @@ export function checkpointState({
   }));
 }
 
+function nextReviewKind(state) {
+  return reviewRequestUsage(state).used < 3 ? 'discovery' : 'verification';
+}
+
+function reviewLimitNextAction(state) {
+  const usage = reviewRequestUsage(state);
+  if (usage.exhausted) {
+    return `Review request limit ${usage.limit} is exhausted after ${usage.used} durable requests; run npm run review:state -- set-review-limit --pr ${state.prNumber} --expected-revision ${state.revision + 1} --limit <higher-number> or --unlimited before the next request.`;
+  }
+  return `Request canonical ${nextReviewKind(state)} review.`;
+}
+
+function triageNextAction(state) {
+  const action = 'Triage the applicable canonical review findings.';
+  return reviewRequestUsage(state).exhausted ? `${action} ${reviewLimitNextAction(state)}` : action;
+}
+
+function hasOutstandingReviewRequestIntent(cwd, state) {
+  const path = join(stateDirectory(cwd, state.prNumber), 'events.ndjson');
+  if (!existsSync(path)) return false;
+  let events;
+  try {
+    events = readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  } catch (error) {
+    throw new StateError(`Unable to inspect GitHub mutation intent evidence: ${error.message}`, 'RECOVERY_EVIDENCE_INVALID');
+  }
+  const operationId = `request:${state.prNumber}:${nextReviewKind(state)}:${state.reviewHistory.length + 1}:${state.currentIntegrationHeadSha}`;
+  return events.some((event) => event.type === 'github-mutation-intent'
+    && event.details?.operationId === operationId);
+}
+
+export function checkpointReviewRequestLimit({
+  cwd = process.cwd(), prNumber, reviewRequestLimit, expectedRevision,
+} = {}) {
+  if (!(reviewRequestLimit === null
+      || (Number.isSafeInteger(reviewRequestLimit) && reviewRequestLimit > 0))) {
+    throw new StateError(
+      `Review request limit must be null or a positive safe integer up to ${Number.MAX_SAFE_INTEGER}`,
+      'INVALID_REVIEW_REQUEST_LIMIT',
+    );
+  }
+  const selectedPr = prNumber ?? activePrNumber(cwd);
+  if (selectedPr === null || selectedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  return withStateLock(cwd, selectedPr, () => {
+    const current = loadState(cwd, selectedPr);
+    if (expectedRevision !== current.revision) {
+      throw new StateError(
+        `State revision changed: expected ${expectedRevision}, found ${current.revision}`,
+        'STATE_REVISION_CONFLICT',
+      );
+    }
+    const usage = reviewRequestUsage(current);
+    if (reviewRequestLimit !== null && reviewRequestLimit < usage.used) {
+      throw new StateError(
+        `Review request limit ${reviewRequestLimit} is below ${usage.used} durable requests`,
+        'INVALID_REVIEW_REQUEST_LIMIT',
+      );
+    }
+    if (hasOutstandingReviewRequestIntent(cwd, current)
+        && reviewRequestLimit !== null && reviewRequestLimit <= usage.used) {
+      throw new StateError(
+        'Review request limit cannot exhaust the cycle while an exact next-request mutation intent is recoverable',
+        'REVIEW_REQUEST_INTENT_PENDING',
+      );
+    }
+    const latest = current.reviewHistory.at(-1);
+    const resumesHistoricalFinding = current.phase === 'awaiting-human-decision'
+      && current.verificationEscalation === null
+      && current.blockedReasons.length === 0
+      && !current.tasks.some((task) => task.disposition === 'needs-human-decision')
+      && current.reviewOutcome?.outcome === 'findings'
+      && latest?.outcome?.id === current.reviewOutcome.id;
+    const configured = { ...current, reviewRequestLimit };
+    const nextState = {
+      ...configured,
+      ...(resumesHistoricalFinding ? {
+        phase: 'triaging',
+        nextAction: triageNextAction(configured),
+      } : current.phase === 'triaging' ? {
+          nextAction: triageNextAction(configured),
+      } : current.phase === 'ready-for-review' ? {
+          nextAction: reviewLimitNextAction(configured),
+        } : {}),
+    };
+    const sameLimit = Object.hasOwn(current, 'reviewRequestLimit')
+      && current.reviewRequestLimit === reviewRequestLimit;
+    if (sameLimit && sameEvidence(current, nextState)) return current;
+    return checkpointStateUnlocked({
+      cwd,
+      selectedPr,
+      nextState,
+      expectedRevision,
+      event: {
+        type: 'review-request-limit',
+        summary: reviewRequestLimit === null
+          ? 'Removed the explicit review request limit'
+          : `Set the review request limit to ${reviewRequestLimit}`,
+      },
+      eventWriter: appendEvent,
+      transitionAuthorization: protectedTransition(nextState, 'review-request-limit'),
+    });
+  });
+}
+
 function sameEvidence(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
@@ -2284,6 +2446,26 @@ function assertImmutableValue(current, next, label) {
   }
 }
 
+function assertStaleDiscoveryDispositionProvenance(current, next, guardedKind) {
+  const currentPresent = Object.hasOwn(current, 'staleDiscoveryDispositions');
+  const nextPresent = Object.hasOwn(next, 'staleDiscoveryDispositions');
+  const currentDispositions = staleDiscoveryDispositionList(current);
+  const nextDispositions = staleDiscoveryDispositionList(next);
+  const appended = guardedKind === 'task-completion'
+    && nextDispositions.length === currentDispositions.length + 1;
+  if (!appended) {
+    assertImmutableValue(
+      { present: currentPresent, value: currentDispositions },
+      { present: nextPresent, value: nextDispositions },
+      'staleDiscoveryDispositions',
+    );
+    return;
+  }
+  currentDispositions.forEach((disposition, index) => assertImmutableValue(
+    disposition, nextDispositions[index], `staleDiscoveryDispositions[${index}]`,
+  ));
+}
+
 function assertCheckpointProvenance(current, next, authorization) {
   const guardedKind = authorization?.token === TRANSITION_AUTHORIZATION ? authorization.kind : null;
   if (guardedKind !== null) {
@@ -2291,6 +2473,14 @@ function assertCheckpointProvenance(current, next, authorization) {
       throw new StateError('Guarded transition state does not match its authorization', 'INVALID_TRANSITION_AUTHORIZATION');
     }
   }
+  if (guardedKind !== 'review-request-limit') {
+    assertImmutableValue(
+      { present: Object.hasOwn(current, 'reviewRequestLimit'), value: current.reviewRequestLimit ?? null },
+      { present: Object.hasOwn(next, 'reviewRequestLimit'), value: next.reviewRequestLimit ?? null },
+      'reviewRequestLimit',
+    );
+  }
+  assertStaleDiscoveryDispositionProvenance(current, next, guardedKind);
   if (guardedKind === null) {
     for (const field of [
       'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
@@ -2326,6 +2516,13 @@ function assertCheckpointProvenance(current, next, authorization) {
     for (const field of [
       'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
       'reviewRequest', 'reviewOutcome', 'reviewHistory',
+    ]) assertImmutableValue(current[field], next[field], field);
+  } else if (guardedKind === 'review-request-limit') {
+    for (const field of [
+      'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
+      'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
+      'legacyReviewProvenance', 'tasks', 'decisions', 'validationStatus', 'ciValidationStatus',
+      'ciValidationHistory', 'threadResolutionStatus', 'blockedReasons',
     ]) assertImmutableValue(current[field], next[field], field);
   } else if (guardedKind === 'ci-validation') {
     for (const field of [
@@ -2541,9 +2738,7 @@ export function buildReviewOutcomeTransition(state, outcome) {
       || outcome?.headSha !== request.headSha || outcome?.headSha !== state.currentIntegrationHeadSha) {
     throw new StateError('Review outcome must bind to the pending request, kind, and SHA', 'INVALID_REVIEW_OUTCOME');
   }
-  const phase = outcome.kind === 'verification' && outcome.outcome === 'findings'
-    ? 'awaiting-human-decision'
-    : outcome.outcome === 'findings' ? 'triaging' : 'validating';
+  const phase = outcome.outcome === 'findings' ? 'triaging' : 'validating';
   const reviewHistory = state.reviewHistory.map((entry, index) => (
     index === state.reviewHistory.length - 1 ? { ...entry, outcome } : entry
   ));
@@ -2555,9 +2750,7 @@ export function buildReviewOutcomeTransition(state, outcome) {
     reviewHistory,
     nextAction: phase === 'validating'
       ? 'Confirm fresh local, pushed, and live PR heads, then complete the cycle.'
-      : phase === 'awaiting-human-decision'
-        ? 'Present verification findings for human decision.'
-        : 'Triage the applicable canonical review findings.',
+      : triageNextAction({ ...state, reviewHistory }),
   };
   const errors = validatePrReviewState(next);
   if (errors.length > 0) throw new StateError(`Invalid review outcome transition:\n- ${errors.join('\n- ')}`, 'INVALID_REVIEW_OUTCOME');
@@ -2573,9 +2766,16 @@ export function buildVerificationEscalationTransition(state, escalation) {
   }
   const request = state.reviewRequest;
   const latest = state.reviewHistory.at(-1);
-  if (!['awaiting-review', 'awaiting-human-decision'].includes(state.phase)
+  const stalePendingRecovery = isNativeTasklessPendingReviewHeadDriftValidationRecovery(state, []);
+  const stalePendingAmbiguity = stalePendingRecovery
+    && escalation?.reason === 'request-head-drift'
+    && Array.isArray(escalation?.evidenceIds)
+    && escalation.evidenceIds.some((id) => id !== `request:${request?.id}`);
+  if (!(['awaiting-review', 'awaiting-human-decision'].includes(state.phase) || stalePendingRecovery)
       || request?.kind !== 'verification' || state.verificationReviewUsed !== true
-      || state.reviewOutcome !== null || latest?.request?.id !== request.id || latest?.outcome !== null) {
+      || state.reviewOutcome !== null || latest?.request?.id !== request.id || latest?.outcome !== null
+      || (stalePendingRecovery && escalation?.reason === 'request-head-drift'
+        && !stalePendingAmbiguity)) {
     throw new StateError('No pending canonical verification collection to escalate', 'VERIFICATION_ESCALATION_NOT_EXPECTED');
   }
   if (escalation?.requestId !== request.id || escalation?.requestHeadSha !== request.headSha) {
@@ -2658,7 +2858,10 @@ export function checkpointTargetedValidationReset({ cwd = process.cwd(), prNumbe
   if (current.validationStatus.status === 'not-run') return current;
   if (current.validationStatus.status === 'passed'
       && (isCleanTasklessReviewValidationRecovery(current, actionableIntegratedTaskIds(current))
-        || isNativeTasklessReviewHeadDriftValidationRecovery(current, actionableIntegratedTaskIds(current)))) {
+        || isNativeTasklessReviewHeadDriftValidationRecovery(current, actionableIntegratedTaskIds(current))
+        || isNativeTasklessPendingReviewHeadDriftValidationRecovery(
+          current, actionableIntegratedTaskIds(current),
+        ))) {
     throw new StateError(
       'Taskless review recovery cannot discard existing targeted-validation proof',
       'INITIAL_VALIDATION_NOT_ALLOWED',
@@ -2770,7 +2973,84 @@ function taskIsEligibleForVerifierCompletion(task) {
   return actionable || nonActionable;
 }
 
-export function completeIntegratedTasks(state, { threadResolutionStatus, verifiedLocalTaskIds = [] }) {
+function appendStaleDiscoveryDisposition(state, disposition) {
+  if (disposition === null || disposition === undefined) return state;
+  if (!disposition || typeof disposition !== 'object' || Array.isArray(disposition)) {
+    throw new StateError(
+      'Stale discovery disposition must be a structured evidence record',
+      'INVALID_STALE_DISCOVERY_DISPOSITION',
+    );
+  }
+  const dispositions = staleDiscoveryDispositionList(state);
+  const conflicting = dispositions.find((entry) => entry.dispositionId === disposition.dispositionId
+    || entry.requestId === disposition.requestId
+    || entry.evidence?.id === disposition.evidence?.id);
+  if (conflicting) {
+    if (sameEvidence(conflicting, disposition)) return state;
+    throw new StateError(
+      'Stale discovery disposition identity was reused with different evidence',
+      'STALE_DISCOVERY_DISPOSITION_CONFLICT',
+    );
+  }
+  const request = state.reviewRequest;
+  const latest = state.reviewHistory.at(-1);
+  if (state.schemaVersion !== 3 || state.legacyReviewProvenance !== null
+      || !['recovering', 'ready-for-review'].includes(state.phase)
+      || state.tasks.length !== 0
+      || request === null || request.kind !== 'discovery'
+      || state.reviewOutcome !== null || latest?.outcome !== null
+      || !sameEvidence(latest.request, request)
+      || state.requestedHeadSha !== request.headSha || state.reviewedHeadSha !== null
+      || request.headSha === state.currentIntegrationHeadSha
+      || state.git.headSha !== state.currentIntegrationHeadSha || state.git.dirty !== false
+      || state.validationStatus.status !== 'passed'
+      || state.validationStatus.headSha !== state.currentIntegrationHeadSha
+      || state.blockedReasons.length !== 0 || state.verificationEscalation !== null
+      || state.tasks.some((task) => task.disposition === 'needs-human-decision')) {
+    throw new StateError(
+      'Only the latest native pending discovery request with exact current validation may be dispositioned',
+      'STALE_DISCOVERY_DISPOSITION_NOT_ALLOWED',
+    );
+  }
+  if (disposition.requestId !== request.id
+      || disposition.requestHeadSha !== request.headSha
+      || disposition.liveHeadSha !== state.currentIntegrationHeadSha
+      || disposition.evidence?.requestId !== request.id
+      || disposition.evidence?.kind !== 'discovery'
+      || disposition.evidence?.headSha !== request.headSha
+      || staleDiscoveryDispositionId(disposition) !== disposition.dispositionId) {
+    throw new StateError(
+      'Stale discovery disposition does not bind the exact request, prior HEAD, live HEAD, and response',
+      'INVALID_STALE_DISCOVERY_DISPOSITION',
+    );
+  }
+  const next = {
+    ...state,
+    staleDiscoveryDispositions: [...dispositions, disposition],
+    ...(disposition.evidence.outcome === 'findings' ? {
+      phase: 'triaging',
+      threadResolutionStatus: {
+        ...state.threadResolutionStatus,
+        status: 'not-run',
+        headSha: null,
+        updatedAt: null,
+      },
+      nextAction: 'Triage the actionable findings from the dispositioned stale discovery response.',
+    } : {}),
+  };
+  const errors = validatePrReviewState(next);
+  if (errors.length > 0) {
+    throw new StateError(
+      `Invalid stale discovery disposition:\n- ${errors.join('\n- ')}`,
+      'INVALID_STALE_DISCOVERY_DISPOSITION',
+    );
+  }
+  return next;
+}
+
+export function completeIntegratedTasks(state, {
+  threadResolutionStatus, verifiedLocalTaskIds = [], staleDiscoveryDisposition = null,
+}) {
   if (!threadResolutionStatus || typeof threadResolutionStatus !== 'object'
       || Array.isArray(threadResolutionStatus)) {
     throw new StateError('Thread resolution proof is required for task completion', 'INVALID_TASK_COMPLETION');
@@ -2831,7 +3111,10 @@ export function completeIntegratedTasks(state, { threadResolutionStatus, verifie
         && completionThreadProof.threadlessVerification.taskIds.includes(task.id));
     return eligible ? { ...task, status: 'completed' } : task;
   });
-  const next = { ...state, tasks, threadResolutionStatus: completionThreadProof };
+  const next = appendStaleDiscoveryDisposition(
+    { ...state, tasks, threadResolutionStatus: completionThreadProof },
+    staleDiscoveryDisposition,
+  );
   const errors = validatePrReviewState(next);
   if (errors.length > 0) throw new StateError(`Invalid integrated-to-completed transition:\n- ${errors.join('\n- ')}`, 'INVALID_TASK_COMPLETION');
   return next;
@@ -3096,11 +3379,58 @@ export function checkpointCiValidation({
 }
 
 export function checkpointTaskCompletion({
-  cwd = process.cwd(), prNumber, threadResolutionStatus, verifiedLocalTaskIds = [], expectedRevision, event,
+  cwd = process.cwd(), prNumber, threadResolutionStatus, verifiedLocalTaskIds = [],
+  staleDiscoveryDisposition = null, expectedRevision, event,
 } = {}) {
   const current = loadState(cwd, prNumber);
   if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
-  const nextState = completeIntegratedTasks(current, { threadResolutionStatus, verifiedLocalTaskIds });
+  const priorDispositionCount = staleDiscoveryDispositionList(current).length;
+  let nextState = completeIntegratedTasks(current, {
+    threadResolutionStatus, verifiedLocalTaskIds, staleDiscoveryDisposition,
+  });
+  const dispositionAppended = staleDiscoveryDispositionList(nextState).length === priorDispositionCount + 1;
+  const recoveryDisposition = staleDiscoveryDispositionForRequest(nextState);
+  if (dispositionAppended && recoveryDisposition.evidence.outcome === 'findings') {
+    nextState = {
+      ...nextState,
+      phase: 'triaging',
+      threadResolutionStatus: {
+        ...nextState.threadResolutionStatus,
+        status: 'not-run',
+        headSha: null,
+        updatedAt: null,
+      },
+      nextAction: 'Triage the actionable findings from the dispositioned stale discovery response.',
+    };
+  }
+  const pendingHeadDriftReady = isNativeTasklessPendingReviewHeadDriftValidationRecovery(current, [])
+    && current.validationStatus.status === 'passed'
+    && current.validationStatus.headSha === current.currentIntegrationHeadSha
+    && (recoveryDisposition === null || recoveryDisposition.evidence.outcome === 'clean')
+    && nextState.threadResolutionStatus.status === 'passed'
+    && nextState.threadResolutionStatus.headSha === current.currentIntegrationHeadSha
+    && nextState.threadResolutionStatus.threads.length === 0;
+  if (pendingHeadDriftReady) {
+    nextState = {
+      ...nextState,
+      phase: 'ready-for-review',
+      nextAction: reviewLimitNextAction(nextState),
+    };
+  }
+  if (staleDiscoveryDisposition !== null && sameEvidence(current, nextState)) {
+    const expected = expectedRevision ?? nextState.revision;
+    return withStateLock(cwd, current.prNumber, () => {
+      const locked = loadState(cwd, current.prNumber);
+      if (locked === null || locked.revision !== expected || !sameEvidence(locked, current)) {
+        throw new StateError(
+          `State revision changed during idempotent disposition retry: expected ${expected}, `
+            + `found ${locked?.revision ?? 'missing'}`,
+          'STATE_REVISION_CONFLICT',
+        );
+      }
+      return locked;
+    });
+  }
   return checkpointState({
     cwd, prNumber: current.prNumber, nextState, expectedRevision,
     event, transitionAuthorization: protectedTransition(nextState, 'task-completion'),
@@ -3308,10 +3638,10 @@ export function checkpointGitMetadata({ cwd = process.cwd(), sessionId, backup =
           updatedAt: null,
         },
         ...(state.phase === 'awaiting-review' ? {
-          phase: state.reviewRequest?.kind === 'verification' ? 'awaiting-human-decision' : 'recovering',
-          nextAction: state.reviewRequest?.kind === 'verification'
-            ? 'A verification request became stale; present the stale-request decision to a human.'
-            : 'The discovery request became stale; reconcile the new HEAD before requesting another review.',
+          phase: 'recovering',
+          nextAction: hasRemainingReviewAllowance(state)
+            ? 'The review request became stale; reconcile the new HEAD before requesting another review.'
+            : `The review request became stale and explicit limit ${reviewRequestUsage(state).limit} is exhausted; reconcile the new HEAD, then raise or remove the limit before requesting another review.`,
         } : headSensitivePhases.has(state.phase) ? {
             phase: 'recovering',
             nextAction: 'Reconcile the changed integration checkout and re-establish exact-head proof.',
@@ -3329,7 +3659,7 @@ export function checkpointGitMetadata({ cwd = process.cwd(), sessionId, backup =
       };
     } else if (!git.dirty && state.phase === 'recovering'
       && state.nextAction === 'Clean the integration checkout and checkpoint Git metadata to restore review readiness.') {
-      checkpointUpdate = { phase: 'ready-for-review', nextAction: 'Request canonical review.' };
+      checkpointUpdate = { phase: 'ready-for-review', nextAction: reviewLimitNextAction(state) };
     }
     const nextState = {
       ...state,
@@ -3397,6 +3727,14 @@ function validationPlanRecoverySummary(cwd, state) {
   }
 }
 
+function staleDiscoveryRecoverySummary(state) {
+  const dispositions = staleDiscoveryDispositionList(state);
+  if (dispositions.length === 0) return 'none';
+  const latest = dispositions.at(-1);
+  return `${dispositions.length}; latest ${latest.dispositionId} binds request ${latest.requestId} `
+    + `${latest.requestHeadSha} -> ${latest.liveHeadSha} (${latest.evidence.outcome})`;
+}
+
 export function renderRecoverySummary({ cwd = process.cwd(), prNumber, maxCharacters = 9000 } = {}) {
   const {
     state, warnings, evidenceErrors, packetSidecars, bindingProvenance, specialist,
@@ -3412,9 +3750,11 @@ export function renderRecoverySummary({ cwd = process.cwd(), prNumber, maxCharac
   const lines = [
     `PR review recovery: ${state.repository}#${state.prNumber}`,
     `Phase: ${state.phase}; round: ${state.reviewRound}`,
+    `Review requests: ${reviewRequestUsage(state).used}; limit: ${reviewRequestUsage(state).limit ?? 'unlimited'}`,
     `Release baseline: ${release}`,
     `Base: ${state.baseSha}`,
     `Requested/reviewed: ${state.requestedHeadSha ?? 'none'} / ${state.reviewedHeadSha ?? 'none'}`,
+    `Stale discovery dispositions: ${staleDiscoveryRecoverySummary(state)}`,
     `Verification escalation: ${state.verificationEscalation
       ? `${state.verificationEscalation.reason} at PR ${state.verificationEscalation.observedPrHeadSha}`
       : 'none'}`,

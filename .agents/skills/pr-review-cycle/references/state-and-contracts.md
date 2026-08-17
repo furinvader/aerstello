@@ -34,6 +34,7 @@ rename. Keep raw logs, full diffs, stack traces, and transcripts out of state.
 
 ```bash
 npm run review:state -- init --pr 123 --base origin/main --head HEAD
+npm run review:state -- init --pr 123 --base origin/main --head HEAD --review-limit 8
 npm run review:state -- path
 npm run review:state -- validate
 npm run review:state -- bind-task-packet --task-packet /tmp/task.json --expected-revision 4
@@ -50,6 +51,8 @@ npm run review:state -- show
 npm run review:state -- migrate
 npm run review:state -- recover
 npm run review:state -- checkpoint --input /tmp/state.json --expected-revision 4
+npm run review:state -- set-review-limit --pr 123 --expected-revision 4 --limit 8
+npm run review:state -- set-review-limit --pr 123 --expected-revision 5 --unlimited
 npm run review:state -- archive
 npm run review:state -- archive --abandon-reason "superseded PR"
 ```
@@ -58,6 +61,31 @@ npm run review:state -- archive --abandon-reason "superseded PR"
 guesses a PR number. Pass `--repository owner/name` when needed. `checkpoint`
 replaces the complete document and rejects revision drift. Normal archival
 requires Done; earlier archival requires an explicit durable abandonment reason.
+
+Schema v3's optional `reviewRequestLimit` is a durable policy value: missing or
+`null` means no configured request-count cap, while a finite value is a positive
+safe-integer total limit (at most `9007199254740991`). Used requests equal
+migrated discovery provenance plus the complete
+native `reviewHistory`; every entry counts regardless of its outcome. The
+guarded setter cannot lower the limit below that total, rewrite request history,
+clear an evidence escalation, or exhaust the cycle while the exact next GitHub
+request intent is recoverable. Generic checkpoints cannot change the policy. Reaching the
+limit keeps review-ready state valid but blocks the next request before any
+mutation. Active state remains bounded to 64 KiB, so unlimited describes policy,
+not unbounded storage.
+
+Schema v3 optionally carries `staleDiscoveryDispositions` so documents written
+before this recovery contract remain readable. The array is append-only and
+bounded to the three possible discovery ordinals. Every record has schema
+version 1, a deterministic SHA-256 `dispositionId`, the exact `requestId`,
+`requestHeadSha`, distinct `liveHeadSha`, one complete canonical discovery
+`evidence` object, a SHA-256 `responseFingerprint` over the exact response and
+immutable attached-root source evidence, reason `head-drift`, and `disposedAt`.
+Manual validation binds
+it to exactly one native null-outcome discovery history row, enforces history
+order and unique disposition/request/response identities, and rejects migrated
+provenance. Generic checkpoints cannot add, remove, reorder, or edit the ledger;
+only guarded task completion may append an exact validated record.
 
 State schema v3 upgrades are explicit. Migration from v1 or v2 first saves an
 exact versioned backup and must preserve stable finding/task identities, source
@@ -149,17 +177,50 @@ still-applicable review. It cannot replace an existing passing proof after an
 ordinary taskless review.
 
 A native schema-v3 taskless cycle has one separate fail-closed recovery when a
-clean discovery review remains internally consistent but its reviewed commit is
+clean review remains internally consistent but its reviewed commit is
 now one historical SHA behind the integration HEAD. The active state must be
 `recovering`, contain no tasks, retain an exact latest request/outcome/history
 triple whose clean request, outcome, requested, and reviewed SHAs all equal that
-one prior SHA, and still have a discovery or verification request available.
+one prior SHA, and still have configured review-request allowance.
 The current checkout and recorded Git snapshot must be clean and exact, with no
 blocked reason, verification escalation, or human-decision task. Use a current-
 HEAD `--initial-selection` (and `--replace` when the historical sidecar exists)
 to run a fresh nonempty targeted selection. This preserves the historical
 request, outcome, and review ledger byte-for-byte; it never makes the old review
 current or permits replacement of the resulting current-HEAD validation proof.
+
+A native schema-v3 taskless pending request may likewise recover after pure
+HEAD drift, but it never gains an outcome. The active request must equal the
+latest history request exactly, both outcome fields must be `null`,
+`reviewedHeadSha` must remain `null`, and the request SHA must be the one prior
+HEAD. The state is `recovering`, native rather than migrated, with a clean exact
+current checkout and no tasks, blockers, escalation, or human-decision work.
+Use a nonempty current-HEAD `--initial-selection` and run it normally. A finite
+limit may already be exhausted: the pending history row still counts, while
+validation and empty-proof recovery remain available.
+
+After current validation passes, `refresh-threads` proves the original request
+comment is still immutable and fully paginates responses and canonical roots.
+Verification evidence retains its durable human-escalation route. Discovery
+with no canonical response is pure drift: it receives no disposition and may
+record only current empty-thread proof when no canonical root exists. Exactly
+one supported discovery response may instead append one disposition bound to
+the prior request HEAD and current live HEAD. Missing, edited, duplicated,
+foreign, unsupported, multiple, conflicting, same-head, migrated, or
+inconsistently bound evidence fails closed for human judgment.
+
+A clean disposition restores `ready-for-review` only after a second full
+evidence/root read and repeated clean local, pushed, live, revision, and state
+checks. A findings disposition moves to ordinary `triaging` and invalidates the
+aggregate thread proof; roots still require ordinary task mapping, reply, and
+resolution. Neither path changes `reviewRequest`, `reviewOutcome`,
+`reviewedHeadSha`, its null history outcome, request ordinal, or finite-limit
+usage. Identical current-revision retries take the state lock, reread the
+revision, and return the existing disposition and proof without another
+revision; changed evidence, roots, heads, or revision fail closed. A finite
+exhausted limit retains the proof and exact setter action,
+while unlimited policy permits a replacement whose kind comes from the full
+history ordinal.
 
 A third, migration-only route exists for a schema-v2 source with a nonempty
 all-completed task set and an exact-head passed, nonempty legacy targeted proof.

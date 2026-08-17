@@ -12,6 +12,7 @@ import {
   assertTaskPacketBound,
   buildTargetedValidationPlan,
   checkpointState,
+  checkpointReviewRequestLimit,
   checkpointTaskPacketBinding,
   checkpointTaskPacketReplan,
   executeTargetedValidationPlan,
@@ -44,6 +45,7 @@ Commands:
   run-validation      Run pending checks from the saved plan and record the result
   show                Print active state JSON
   checkpoint          Replace ordinary operational state from --input
+  set-review-limit    Set a positive durable request limit or restore unlimited reviews
   migrate             Explicitly migrate active schema v1 or v2 state to v3
   recover             Print compact recovery context
   archive             Archive a Done or explicitly abandoned cycle
@@ -75,6 +77,14 @@ Validate-result options:
 Checkpoint options:
   --expected-revision <number>
 
+Init options:
+  --review-limit <number>       Optional positive safe-integer limit; omitted means unlimited
+
+Set-review-limit options:
+  --expected-revision <number>
+  --limit <number>              Positive safe-integer total durable request limit
+  --unlimited                   Remove the configured request-count limit
+
 Migrate options:
   --integration-map <file>  JSON task-ID to central integration SHA map (v1 only)
 
@@ -88,7 +98,10 @@ Review, CI, task-resolution, targeted-validation, specialist-evidence, and Done 
 function optionsFor(command, argv) {
   const common = { booleans: ['help'], values: ['pr', 'expected-revision'] };
   if (command === 'init') {
-    common.values.push('repository', 'base', 'head', 'release-ref', 'session-id');
+    common.values.push('repository', 'base', 'head', 'release-ref', 'session-id', 'review-limit');
+  } else if (command === 'set-review-limit') {
+    common.booleans.push('unlimited');
+    common.values.push('limit');
   } else if (command === 'checkpoint') {
     common.values.push('input', 'event-type', 'event-summary');
   } else if (command === 'migrate') {
@@ -106,6 +119,17 @@ function optionsFor(command, argv) {
     common.values.push('input');
   }
   return parseOptions(argv, common);
+}
+
+function positiveSafeInteger(value, option) {
+  if (!/^[1-9]\d*$/u.test(value ?? '')) {
+    throw new UsageError(`${option} must be a positive safe integer`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new UsageError(`${option} must not exceed ${Number.MAX_SAFE_INTEGER}`);
+  }
+  return parsed;
 }
 
 function actualWorkerChangedPaths(packet, result) {
@@ -136,7 +160,7 @@ try {
     process.stdout.write(usage());
     process.exit(0);
   }
-  if (!['init', 'path', 'validate', 'specialist-plan', 'specialist-record', 'specialist-context', 'bind-task-packet', 'replan-task-packet', 'validate-result', 'validation-plan', 'run-validation', 'show', 'checkpoint', 'migrate', 'recover', 'archive'].includes(command)) {
+  if (!['init', 'path', 'validate', 'specialist-plan', 'specialist-record', 'specialist-context', 'bind-task-packet', 'replan-task-packet', 'validate-result', 'validation-plan', 'run-validation', 'show', 'checkpoint', 'set-review-limit', 'migrate', 'recover', 'archive'].includes(command)) {
     throw new UsageError(`Unknown command ${command}`);
   }
   const options = optionsFor(command, argv);
@@ -155,6 +179,8 @@ try {
 
   if (command === 'init') {
     if (!options.pr) throw new UsageError('init requires --pr');
+    const reviewRequestLimit = options['review-limit'] === undefined
+      ? null : positiveSafeInteger(options['review-limit'], '--review-limit');
     const state = initializeState({
       prNumber: options.pr,
       repository: options.repository,
@@ -162,6 +188,7 @@ try {
       head: options.head ?? 'HEAD',
       releaseRef: options['release-ref'] ?? 'origin/main',
       orchestratorSessionId: options['session-id'] ?? null,
+      reviewRequestLimit,
     });
     writeJson(state);
   } else if (command === 'path') {
@@ -265,6 +292,21 @@ try {
         }
       : undefined;
     writeJson(checkpointState({ prNumber: options.pr, nextState, expectedRevision, event }));
+  } else if (command === 'set-review-limit') {
+    if (parsedExpectedRevision === undefined) {
+      throw new UsageError('set-review-limit requires --expected-revision');
+    }
+    const hasLimit = options.limit !== undefined;
+    const unlimited = options.unlimited === true;
+    if (hasLimit === unlimited) {
+      throw new UsageError('set-review-limit requires exactly one of --limit or --unlimited');
+    }
+    const reviewRequestLimit = unlimited ? null : positiveSafeInteger(options.limit, '--limit');
+    writeJson(checkpointReviewRequestLimit({
+      prNumber: options.pr,
+      reviewRequestLimit,
+      expectedRevision: parsedExpectedRevision,
+    }));
   } else if (command === 'migrate') {
     const integrationMap = options['integration-map']
       ? JSON.parse(readFileSync(options['integration-map'], 'utf8'))

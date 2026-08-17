@@ -111,5 +111,6 @@ abandons the cycle with a durable reason.
 
 If work stops earlier, checkpoint the exact next action. Recover from saved
 state, Git, structured GitHub data, and CI artifacts—never from a transcript.
-If the same finding returns twice, investigate its root cause. Stop automatic
-review requests at the round limits in the GitHub reference.
+If the same finding returns twice, investigate its root cause. Continue the
+exact-commit review cycle until clean by default; stop requesting only when an
+explicit durable operator limit is exhausted or evidence requires human review.

@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aerstello.local/schemas/change-development/implementation-plan-v1.schema.json",
+  "title": "Aerstello durable implementation plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "planRevision", "changeId", "source", "title", "objective", "scope", "nonGoals", "planning", "expectedPrBaseBranch", "criteria", "decisions", "scenarios", "productScenarioDisposition", "specialization", "checklistMappings", "tasks"],
+  "properties": {
+    "schemaVersion": { "const": 1 }, "planRevision": { "type": "integer", "minimum": 1 }, "changeId": { "$ref": "#/$defs/id" },
+    "source": { "$ref": "#/$defs/source" }, "title": { "$ref": "#/$defs/text" }, "objective": { "$ref": "#/$defs/text" },
+    "scope": { "$ref": "#/$defs/textList" }, "nonGoals": { "$ref": "#/$defs/textList" },
+    "planning": { "$ref": "#/$defs/planning" }, "expectedPrBaseBranch": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "criteria": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/criterion" } },
+    "decisions": { "type": "array", "items": { "$ref": "#/$defs/decision" } },
+    "scenarios": { "type": "array", "items": { "$ref": "#/$defs/scenario" } },
+    "productScenarioDisposition": { "$ref": "#/$defs/productScenarios" },
+    "specialization": { "$ref": "#/$defs/specialization" },
+    "checklistMappings": { "type": "array", "items": { "$ref": "#/$defs/checklistMapping" } },
+    "tasks": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/task" } }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "type": "object",
+            "properties": { "kind": { "const": "partial-implementation" } },
+            "required": ["kind"]
+          }
+        },
+        "required": ["source"]
+      },
+      "then": {
+        "properties": {
+          "planning": {
+            "type": "object",
+            "properties": { "comparisonBaseSha": { "$ref": "#/$defs/sha" } },
+            "required": ["comparisonBaseSha"]
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "planning": {
+            "type": "object",
+            "properties": { "comparisonBaseSha": { "type": "null" } },
+            "required": ["comparisonBaseSha"]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "text": { "type": "string", "minLength": 1, "maxLength": 4000, "pattern": "\\S" },
+    "id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 128 },
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "repositoryPath": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "^(?!/)(?!.*//)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*[\\u0000-\\u001f\\u007f-\\u009f])[^/*?\\[\\]{}]+(?:/[^/*?\\[\\]{}]+)*$" },
+    "anticipatedPath": { "type": "string", "pattern": "^(?![A-Za-z_][A-Za-z0-9_]*=)(?!.*(?:&&|\\|\\||[;|`<>]|\\$\\())\\S+$", "allOf": [{ "$ref": "#/$defs/repositoryPath" }] },
+    "idList": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+    "textList": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/text" } },
+    "source": { "type": "object", "additionalProperties": false, "required": ["kind", "reference", "relationship", "captureDigest"], "properties": { "kind": { "enum": ["github-issue", "direct-request", "repository-plan", "partial-implementation"] }, "reference": { "$ref": "#/$defs/text" }, "relationship": { "enum": ["reference-only", "partial", "resolves"] }, "captureDigest": { "$ref": "#/$defs/digest" } } },
+    "planning": { "type": "object", "additionalProperties": false, "required": ["planningSha", "baseBranch", "comparisonBaseSha"], "properties": { "planningSha": { "$ref": "#/$defs/sha" }, "baseBranch": { "type": "string", "minLength": 1, "maxLength": 255 }, "comparisonBaseSha": { "oneOf": [{ "$ref": "#/$defs/sha" }, { "type": "null" }] } } },
+    "criterion": { "type": "object", "additionalProperties": false, "required": ["id", "description", "disposition", "ownerTaskId", "deferredReason"], "properties": { "id": { "$ref": "#/$defs/id" }, "description": { "$ref": "#/$defs/text" }, "disposition": { "enum": ["owned", "deferred"] }, "ownerTaskId": { "oneOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] }, "deferredReason": { "oneOf": [{ "$ref": "#/$defs/text" }, { "type": "null" }] } }, "allOf": [{ "if": { "properties": { "disposition": { "const": "owned" } }, "required": ["disposition"] }, "then": { "properties": { "ownerTaskId": { "$ref": "#/$defs/id" }, "deferredReason": { "type": "null" } } } }, { "if": { "properties": { "disposition": { "const": "deferred" } }, "required": ["disposition"] }, "then": { "properties": { "ownerTaskId": { "type": "null" }, "deferredReason": { "$ref": "#/$defs/text" } } } }] },
+    "decision": { "type": "object", "additionalProperties": false, "required": ["id", "question", "rationale", "status", "resolution"], "properties": { "id": { "$ref": "#/$defs/id" }, "question": { "$ref": "#/$defs/text" }, "rationale": { "$ref": "#/$defs/text" }, "status": { "enum": ["resolved", "unresolved", "deferred"] }, "resolution": { "oneOf": [{ "$ref": "#/$defs/text" }, { "type": "null" }] } }, "allOf": [{ "if": { "properties": { "status": { "const": "resolved" } }, "required": ["status"] }, "then": { "properties": { "resolution": { "$ref": "#/$defs/text" } } } }, { "if": { "properties": { "status": { "enum": ["unresolved", "deferred"] } }, "required": ["status"] }, "then": { "properties": { "resolution": { "type": "null" } } } }] },
+    "scenario": { "type": "object", "additionalProperties": false, "required": ["id", "feature", "scenario"], "properties": { "id": { "$ref": "#/$defs/id" }, "feature": { "$ref": "#/$defs/repositoryPath" }, "scenario": { "$ref": "#/$defs/text" } } },
+    "productScenarios": { "type": "object", "additionalProperties": false, "required": ["disposition", "scenarioIds", "rationale"], "properties": { "disposition": { "enum": ["mapped", "not-applicable"] }, "scenarioIds": { "$ref": "#/$defs/idList" }, "rationale": { "$ref": "#/$defs/text" } }, "allOf": [{ "if": { "properties": { "disposition": { "const": "mapped" } }, "required": ["disposition"] }, "then": { "properties": { "scenarioIds": { "type": "array", "minItems": 1 } } } }, { "if": { "properties": { "disposition": { "const": "not-applicable" } }, "required": ["disposition"] }, "then": { "properties": { "scenarioIds": { "type": "array", "maxItems": 0 } } } }] },
+    "specialization": { "type": "object", "additionalProperties": false, "required": ["specialization", "affectedAreas", "riskTags", "browserVisible", "relatedTestSelectionUncertain", "route"], "properties": { "specialization": { "enum": ["web", "api", "contracts", "data-integrity", "behavior-tests", "ops-workflow"] }, "affectedAreas": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["api", "web", "shared", "workflow", "documentation", "release", "migration"] } }, "riskTags": { "type": "array", "uniqueItems": true, "items": { "enum": ["authentication", "authorization", "billing", "money", "migration", "release", "offline", "realtime", "localization", "responsive", "deployment", "workflow"] } }, "browserVisible": { "type": "boolean" }, "relatedTestSelectionUncertain": { "type": "boolean" }, "route": { "$ref": "#/$defs/route" } } },
+    "routeReason": { "type": "object", "additionalProperties": false, "required": ["id", "reasons"], "properties": { "id": { "enum": ["behavior_mapper", "security_reviewer", "offline_realtime_reviewer", "data-integrity", "ops-workflow"] }, "reasons": { "$ref": "#/$defs/textList" } } },
+    "route": { "type": "object", "additionalProperties": false, "required": ["schemaVersion", "specialization", "profileGuidePath", "riskTags", "signals", "planningHelpers", "riskReviewers", "supplementalGuidance", "finalVerificationPriority"], "properties": { "schemaVersion": { "const": 2 }, "specialization": { "$ref": "#/$defs/id" }, "profileGuidePath": { "$ref": "#/$defs/repositoryPath" }, "riskTags": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } }, "signals": { "type": "object", "additionalProperties": false, "required": ["browserVisible", "testSelectionUncertain"], "properties": { "browserVisible": { "type": "boolean" }, "testSelectionUncertain": { "type": "boolean" } } }, "planningHelpers": { "type": "array", "items": { "$ref": "#/$defs/routeReason" } }, "riskReviewers": { "type": "array", "items": { "$ref": "#/$defs/routeReason" } }, "supplementalGuidance": { "type": "array", "items": { "$ref": "#/$defs/routeReason" } }, "finalVerificationPriority": { "enum": ["standard", "high"] } } },
+    "checklistIdentity": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "stableId"],
+          "properties": { "kind": { "const": "stable-marker" }, "stableId": { "$ref": "#/$defs/id" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "text", "position", "line", "section"],
+          "properties": {
+            "kind": { "const": "legacy-position" }, "text": { "$ref": "#/$defs/text" },
+            "position": { "type": "integer", "minimum": 1 }, "line": { "type": "integer", "minimum": 1 },
+            "section": { "oneOf": [{ "$ref": "#/$defs/text" }, { "type": "null" }] }
+          }
+        }
+      ]
+    },
+    "checklistMapping": { "type": "object", "additionalProperties": false, "required": ["id", "identity", "capturedText", "criterionIds", "taskIds", "relationship", "checked", "status", "ambiguity", "externalChange"], "properties": { "id": { "$ref": "#/$defs/id" }, "identity": { "$ref": "#/$defs/checklistIdentity" }, "capturedText": { "$ref": "#/$defs/text" }, "criterionIds": { "$ref": "#/$defs/idList" }, "taskIds": { "$ref": "#/$defs/idList" }, "relationship": { "enum": ["reference-only", "partial", "resolves"] }, "checked": { "type": "boolean" }, "status": { "enum": ["current", "ambiguous", "removed"] }, "ambiguity": { "oneOf": [{ "$ref": "#/$defs/text" }, { "type": "null" }] }, "externalChange": { "type": "boolean" } } },
+    "artifactConsumption": { "type": "object", "additionalProperties": false, "required": ["artifactId", "producerTaskId"], "properties": { "artifactId": { "$ref": "#/$defs/id" }, "producerTaskId": { "$ref": "#/$defs/id" } } },
+    "unsplittable": { "oneOf": [{ "type": "null" }, { "type": "object", "additionalProperties": false, "required": ["reason", "serializedDomains", "highestRiskSpecialization"], "properties": { "reason": { "$ref": "#/$defs/text" }, "serializedDomains": { "type": "array", "minItems": 2, "uniqueItems": true, "items": { "enum": ["api", "web", "shared", "workflow", "documentation", "release", "migration"] } }, "highestRiskSpecialization": { "enum": ["web", "api", "contracts", "data-integrity", "behavior-tests", "ops-workflow"] } } }] },
+    "task": { "type": "object", "additionalProperties": false, "required": ["id", "title", "objective", "rationale", "specialization", "criterionIds", "decisionIds", "scenarioIds", "checklistItemIds", "dependsOn", "anticipatedPaths", "produces", "consumes", "validationIntent", "unsplittable"], "properties": { "id": { "$ref": "#/$defs/id" }, "title": { "$ref": "#/$defs/text" }, "objective": { "$ref": "#/$defs/text" }, "rationale": { "$ref": "#/$defs/text" }, "specialization": { "$ref": "#/$defs/specialization" }, "criterionIds": { "$ref": "#/$defs/idList" }, "decisionIds": { "$ref": "#/$defs/idList" }, "scenarioIds": { "$ref": "#/$defs/idList" }, "checklistItemIds": { "$ref": "#/$defs/idList" }, "dependsOn": { "$ref": "#/$defs/idList" }, "anticipatedPaths": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/anticipatedPath" } }, "produces": { "$ref": "#/$defs/idList" }, "consumes": { "type": "array", "items": { "$ref": "#/$defs/artifactConsumption" } }, "validationIntent": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/text" } }, "unsplittable": { "$ref": "#/$defs/unsplittable" } } }
+  }
+}
