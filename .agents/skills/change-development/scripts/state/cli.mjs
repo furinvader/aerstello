@@ -143,7 +143,7 @@ try {
       const root = repositoryRoot(process.cwd());
       const readPlanningFile = ({ planningSha, path }) => readTreeFile(root, planningSha, path);
       const contractErrors = validateImplementationPlan(plan, { planningEvidence, sourceObservation, readPlanningFile });
-      const identityErrors = active ? validatePlanStateIdentity(plan, active) : [];
+      const identityErrors = validatePlanStateIdentity(plan, active);
       const errors = [...new Set([...contractErrors, ...identityErrors])];
       const candidateReadiness = planReadiness(plan, { planningEvidence, sourceObservation, readPlanningFile });
       const readiness = identityErrors.length === 0 ? candidateReadiness : {

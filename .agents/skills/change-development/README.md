@@ -74,6 +74,8 @@ Use the following lifecycle commands through `npm run change:state --`:
 
 Pass the current state revision with `--expected-revision` to `refresh-source`, `accept-plan`, `record-decision`, `amend-plan`, and `archive`. Revision conflicts fail closed. `recover` instead verifies the exact committed interrupted intent and receipt chain; it does not accept a guessed revision. Uncommitted hidden transition staging is rollback-only. An intact committed intent may restore only its exactly embedded evidence and deterministic receipts; conflicting or tampered artifacts block.
 
+`validate --plan` proves acceptance readiness only against the active durable state. It first validates that state's complete receipt, transition, and source-observation chain, then binds the candidate to the exact change, source capture, and Planning SHA. Without an active state it may report candidate schema errors, but readiness is always false and the command fails with a durable-state-required error.
+
 A decision input is a strict JSON object. Use `resolve` before incorporating material drift into an amendment, or `retain-plan` to authorize the unchanged accepted plan when the repository is still clean at the Planning SHA:
 
 ```json
@@ -85,6 +87,8 @@ A decision input is a strict JSON object. Use `resolve` before incorporating mat
   "disposition": "resolve"
 }
 ```
+
+A non-retain decision records the initiating Git observation in the next durable state. If that transition is interrupted, recovery requires the same HEAD, branch (including detached state), and cleanliness before completing it. This exception is limited to a semantically valid `decision-recorded` transition whose immutable decision evidence matches its predecessor; relabeling an intent cannot grant it. `retain-plan` recovery remains stricter and requires clean HEAD at the Planning SHA.
 
 An amendment input records provenance separately from the complete resulting plan passed with `--plan`. Its `delta` must be a nonempty object; `invalidatedEvidence` is a unique string list and may be empty:
 

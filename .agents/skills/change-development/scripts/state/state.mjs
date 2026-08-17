@@ -947,7 +947,7 @@ export function recordDecision({ cwd = process.cwd(), changeId, decision, expect
       unresolvedDecisionIds: unresolved,
       phase: retainPlan && unresolved.length === 0 ? 'ready-to-implement' : resolvedPhase,
       source: retainPlan ? { ...state.source, classification: 'unchanged' } : state.source,
-      git: retainPlan ? currentGit : state.git,
+      git: currentGit,
       blockedReasons: retainPlan ? [] : state.blockedReasons,
     }, () => new Date(timestamp));
     return commitTransition({
@@ -1537,6 +1537,92 @@ function canonicalEvent(intent) {
   return { revision: intent.revision, type: intent.type, summary: intent.summary, at: intent.nextState.updatedAt };
 }
 
+function decisionDispositionForRecovery(intent, predecessor) {
+  const decisionPaths = Object.values(intent.evidencePaths ?? {})
+    .filter((path) => typeof path === 'string' && path.startsWith('decisions/'));
+  if (intent.type !== 'decision-recorded') {
+    if (decisionPaths.length > 0) {
+      throw new StateError('Decision evidence is attached to a non-decision transition', 'RECOVERY_EVIDENCE_INVALID');
+    }
+    return null;
+  }
+  const records = authoritativeEvidenceRecords(intent);
+  const record = records.decisionDigest?.value;
+  const recordFields = [
+    'schemaVersion', 'id', 'reason', 'authorization', 'trigger', 'disposition',
+    'changeId', 'stateRevision', 'sourceObservationDigest', 'sourceDigest',
+    'effectivePlanDigest', 'repositorySha', 'recordedAt',
+  ];
+  let validId = true;
+  try { validateChangeId(record?.id); } catch { validId = false; }
+  if (!predecessor || Object.keys(records).length !== 1 || decisionPaths.length !== 1
+      || !isPlainObject(record) || serialized(Object.keys(record).sort()) !== serialized([...recordFields].sort())
+      || record.schemaVersion !== 1 || !validId
+      || !['id', 'reason', 'authorization', 'trigger'].every((key) => nonemptyString(record[key]))
+      || !['resolve', 'retain-plan'].includes(record.disposition)
+      || records.decisionDigest.path !== `decisions/${record.id}.json`
+      || intent.summary !== `Recorded decision ${record.id}` || intent.createdAt !== record.recordedAt
+      || record.changeId !== predecessor.changeId || record.stateRevision !== predecessor.revision
+      || record.sourceObservationDigest !== predecessor.source.observationDigest
+      || record.sourceDigest !== predecessor.source.latestDigest
+      || record.effectivePlanDigest !== (predecessor.plan?.effectiveDigest ?? null)
+      || record.repositorySha !== intent.nextState.git.headSha
+      || !['planning', 'awaiting-decision'].includes(predecessor.phase)) {
+    throw new StateError('Interrupted decision transition is semantically inconsistent', 'RECOVERY_EVIDENCE_INVALID');
+  }
+  const retainPlan = record.disposition === 'retain-plan';
+  if (retainPlan && !(predecessor.phase === 'awaiting-decision' && predecessor.plan
+      && predecessor.source.classification === 'unreviewed-material'
+      && predecessor.blockedReasons.length === 0)) {
+    throw new StateError('Interrupted retain-plan decision is semantically inconsistent', 'RECOVERY_EVIDENCE_INVALID');
+  }
+  const unresolved = predecessor.unresolvedDecisionIds.filter((id) => id !== record.id);
+  const resolvedPhase = predecessor.phase === 'awaiting-decision' && !retainPlan
+    && unresolved.length === 0 && predecessor.source.classification !== 'unreviewed-material'
+    ? 'planning' : predecessor.phase;
+  const expected = {
+    ...predecessor,
+    unresolvedDecisionIds: unresolved,
+    phase: retainPlan && unresolved.length === 0 ? 'ready-to-implement' : resolvedPhase,
+    source: retainPlan ? { ...predecessor.source, classification: 'unchanged' } : predecessor.source,
+    git: intent.nextState.git,
+    blockedReasons: retainPlan ? [] : predecessor.blockedReasons,
+    revision: predecessor.revision + 1,
+    updatedAt: record.recordedAt,
+  };
+  expected.nextAction = nextActionFor(expected);
+  if (serialized(expected) !== serialized(intent.nextState)) {
+    throw new StateError('Interrupted decision transition does not match its recorded operation', 'RECOVERY_EVIDENCE_INVALID');
+  }
+  return record.disposition;
+}
+
+function isSemanticGitCheckpoint(intent, predecessor) {
+  if (intent.type !== 'git-checkpoint' || !predecessor
+      || intent.summary !== 'Checkpointed local Git observation before compaction'
+      || Object.keys(intent.evidence ?? {}).length !== 0) return false;
+  const observed = intent.nextState.git;
+  const planningSnapshotValid = observed.headSha === predecessor.planningSha && observed.clean;
+  const gitBlock = !planningSnapshotValid
+    ? `Git observation is not clean at Planning SHA ${predecessor.planningSha}` : null;
+  const wasGitBlocked = predecessor.phase === 'blocked'
+    && predecessor.blockedReasons.every((reason) => reason.startsWith('Git observation is not clean at Planning SHA'));
+  const restoredPhase = predecessor.source.classification === 'unreviewed-material'
+    ? 'awaiting-decision' : predecessor.plan ? 'ready-to-implement' : 'planning';
+  const immutableTerminal = predecessor.phase === 'abandoned';
+  const expected = {
+    ...predecessor,
+    git: observed,
+    phase: immutableTerminal ? predecessor.phase : gitBlock ? 'blocked' : wasGitBlocked ? restoredPhase : predecessor.phase,
+    blockedReasons: immutableTerminal ? predecessor.blockedReasons : gitBlock ? [gitBlock]
+      : wasGitBlocked ? [] : predecessor.blockedReasons,
+    revision: predecessor.revision + 1,
+    updatedAt: intent.nextState.updatedAt,
+  };
+  expected.nextAction = nextActionFor(expected);
+  return serialized(expected) === serialized(intent.nextState);
+}
+
 function verifyEventHistory(cwd, changeId, intentsOrLatestRevision) {
   const events = eventHistory(cwd, changeId);
   if (!Array.isArray(intentsOrLatestRevision)) {
@@ -1650,7 +1736,6 @@ export function recoverState({ cwd = process.cwd(), changeId, crashStep, lockOpt
     if (!lockedActive && terminalIndex > 0) {
       throw new StateError('Pointerless interrupted state beyond initialization cannot be recovered automatically', 'RECOVERY_STATE_CONFLICT');
     }
-    materializeIntentEvidence(root, selected, intent);
     const predecessor = prefix.intents.at(-1)?.nextState;
     if (predecessor) {
       for (const key of ['changeId', 'mode', 'baseBranch', 'expectedPrBaseBranch', 'planningRef', 'planningSha', 'createdAt']) {
@@ -1660,6 +1745,12 @@ export function recoverState({ cwd = process.cwd(), changeId, crashStep, lockOpt
         if (intent.nextState.source[key] !== predecessor.source[key]) throw new StateError(`Interrupted transition changed immutable source.${key}`, 'RECOVERY_EVIDENCE_INVALID');
       }
     }
+    const decisionDisposition = decisionDispositionForRecovery(intent, predecessor);
+    const semanticGitCheckpoint = isSemanticGitCheckpoint(intent, predecessor);
+    if (intent.type === 'git-checkpoint' && !semanticGitCheckpoint) {
+      throw new StateError('Interrupted Git checkpoint is semantically inconsistent', 'RECOVERY_EVIDENCE_INVALID');
+    }
+    materializeIntentEvidence(root, selected, intent);
     const evidenceDigests = new Set();
     for (const name of ['source', 'plan', 'decisions']) verifyReceiptTree(join(changeDirectory(root, selected), name), evidenceDigests);
     evidenceDigests.add(verifyReceipt(join(changeDirectory(root, selected), 'worktree.json'), 'owning worktree identity').digest);
@@ -1671,16 +1762,19 @@ export function recoverState({ cwd = process.cwd(), changeId, crashStep, lockOpt
     const currentGit = gitObservation(root);
     const semanticAbandonment = intent.type === 'abandoned' && predecessor !== undefined
       && intent.nextState.phase === 'abandoned' && nonemptyString(intent.nextState.abandonmentReason);
-    const exactRecordedObservation = (intent.type === 'git-checkpoint' || semanticAbandonment)
+    const exactDecisionObservation = decisionDisposition === 'resolve';
+    const exactRecordedObservation = (semanticGitCheckpoint || semanticAbandonment || exactDecisionObservation)
       && currentGit.headSha === intent.nextState.git.headSha
       && currentGit.branch === intent.nextState.git.branch
       && currentGit.clean === intent.nextState.git.clean;
-    const recoveryGitInvalid = semanticAbandonment
+    const recoveryGitInvalid = semanticAbandonment || exactDecisionObservation
       ? !exactRecordedObservation
       : !exactRecordedObservation && (!currentGit.clean || currentGit.headSha !== intent.nextState.planningSha);
     if (recoveryGitInvalid) {
       const requirement = semanticAbandonment
         ? 'the exact Git observation recorded by the abandonment transition'
+        : exactDecisionObservation
+          ? 'the exact Git observation recorded by the decision transition'
         : 'clean HEAD at the transition Planning SHA';
       throw new StateError(`Recovery requires ${requirement}`, 'PLANNING_SNAPSHOT_MISMATCH');
     }

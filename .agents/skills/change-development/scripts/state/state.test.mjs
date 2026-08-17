@@ -754,6 +754,105 @@ test('detached HEAD observations remain schema-valid', async () => {
   assert.equal(validateState({ cwd }).valid, true);
 });
 
+test('interrupted resolve decisions recover only at their exact initiating Git observation', async () => {
+  const cases = [
+    ['dirty-planning-head', ({ cwd }) => writeFileSync(join(cwd, 'dirty-decision.txt'), 'dirty')],
+    ['advanced-branch', ({ cwd }) => {
+      git(cwd, 'switch', '-c', 'decision-branch');
+      writeFileSync(join(cwd, 'decision-commit.txt'), 'advanced');
+      git(cwd, 'add', 'decision-commit.txt');
+      git(cwd, 'commit', '-m', 'test: advance decision head');
+    }],
+    ['detached-head', ({ cwd, sha }) => git(cwd, 'checkout', '--detach', sha)],
+  ];
+  for (const [label, prepare] of cases) {
+    const fixture = repository(`decision recovery ${label}`);
+    await initializeState({ cwd: fixture.cwd, changeId: `decision-${label}`, mode: 'plan-only',
+      baseBranch: 'main', planningRef: fixture.sha, source: descriptor });
+    prepare(fixture);
+    const expected = {
+      headSha: git(fixture.cwd, 'rev-parse', 'HEAD'),
+      branch: git(fixture.cwd, 'branch', '--show-current') || '(detached)',
+      clean: git(fixture.cwd, 'status', '--porcelain') === '',
+    };
+    assert.throws(() => recordDecision({ cwd: fixture.cwd, expectedRevision: 0,
+      decision: { id: `resolve-${label}`, reason: 'Bind the initiating Git observation.', authorization: 'operator',
+        trigger: 'request', disposition: 'resolve' },
+      crashStep(step) { if (step === 'after-state') throw new Error('decision crash'); },
+    }), /decision crash/u);
+    const interrupted = loadState(fixture.cwd);
+    assert.deepEqual({ headSha: interrupted.git.headSha, branch: interrupted.git.branch, clean: interrupted.git.clean }, expected);
+    const recovered = recoverState({ cwd: fixture.cwd });
+    assert.deepEqual({ headSha: recovered.state.git.headSha, branch: recovered.state.git.branch, clean: recovered.state.git.clean }, expected);
+    assert.equal(recovered.state.revision, 1);
+  }
+});
+
+test('decision recovery rejects HEAD branch and cleanliness drift from the recorded observation', async () => {
+  const cases = [
+    ['head', ({ cwd }) => {
+      writeFileSync(join(cwd, 'later-head.txt'), 'later');
+      git(cwd, 'add', 'later-head.txt');
+      git(cwd, 'commit', '-m', 'test: move after decision');
+    }],
+    ['branch', ({ cwd }) => git(cwd, 'switch', '-c', 'after-decision')],
+    ['cleanliness', ({ cwd }) => writeFileSync(join(cwd, 'later-dirty.txt'), 'dirty')],
+  ];
+  for (const [label, drift] of cases) {
+    const fixture = repository(`decision mismatch ${label}`);
+    await initializeState({ cwd: fixture.cwd, changeId: `decision-mismatch-${label}`, mode: 'plan-only',
+      baseBranch: 'main', planningRef: fixture.sha, source: descriptor });
+    assert.throws(() => recordDecision({ cwd: fixture.cwd, expectedRevision: 0,
+      decision: { id: `resolve-mismatch-${label}`, reason: 'Record before drift.', authorization: 'operator',
+        trigger: 'request', disposition: 'resolve' },
+      crashStep(step) { if (step === 'after-state') throw new Error('decision crash'); },
+    }), /decision crash/u);
+    drift(fixture);
+    assert.throws(() => recoverState({ cwd: fixture.cwd }),
+      (error) => error.code === 'PLANNING_SNAPSHOT_MISMATCH');
+  }
+});
+
+test('relabeled transition intent cannot claim decision-observation recovery', async () => {
+  const { cwd, sha } = repository('relabeled decision recovery');
+  await initializeState({ cwd, changeId: 'relabeled-decision', mode: 'plan-only', baseBranch: 'main', planningRef: sha, source: descriptor });
+  writeFileSync(join(cwd, 'decision-dirty.txt'), 'dirty');
+  assert.throws(() => recordDecision({ cwd, expectedRevision: 0,
+    decision: { id: 'resolve-relabeled', reason: 'Record dirty state.', authorization: 'operator', trigger: 'request', disposition: 'resolve' },
+    crashStep(step) { if (step === 'after-state') throw new Error('decision crash'); },
+  }), /decision crash/u);
+  const intentPath = join(changeDirectory(cwd, 'relabeled-decision'), 'transitions', '00000001', 'intent.json');
+  const intent = JSON.parse(readFileSync(intentPath, 'utf8'));
+  intent.type = 'git-checkpoint';
+  intent.summary = 'Checkpointed local Git observation before compaction';
+  writeFileSync(intentPath, `${JSON.stringify(intent)}\n`);
+  writeFileSync(intentPath.replace(/\.json$/u, '.sha256'), `${digestJson(intent)}\n`);
+  assert.throws(() => recoverState({ cwd }), (error) => error.code === 'RECOVERY_EVIDENCE_INVALID');
+});
+
+test('retain-plan recovery still requires clean HEAD at the Planning SHA', async () => {
+  const { cwd, sha } = repository('retain recovery');
+  const issue = {
+    id: 'I_retain', number: 25, title: 'Retain recovery',
+    body: '- [ ] <!-- aerstello:item=durable-state --> State remains durable', state: 'OPEN',
+    author: { login: 'operator', id: 'U_test' }, createdAt: '2026-08-17T10:00:00Z', updatedAt: '2026-08-17T10:00:00Z',
+    comments: [], commentsComplete: true,
+  };
+  const adapter = { async readIssue() { return structuredClone(issue); } };
+  const planning = await initializeState({ cwd, changeId: 'retain-recovery', mode: 'plan-only', baseBranch: 'main', planningRef: sha,
+    source: { type: 'github-issue', repository: 'owner/repo', issueNumber: 25, relationshipIntent: 'resolves' }, sourceAdapter: adapter });
+  acceptPlan({ cwd, expectedRevision: 0, plan: planFor(planning) });
+  issue.body += '\n\nMaterial change.'; issue.updatedAt = '2026-08-17T10:01:00Z';
+  await refreshSource({ cwd, expectedRevision: 1, sourceAdapter: adapter });
+  assert.throws(() => recordDecision({ cwd, expectedRevision: 2,
+    decision: { id: 'retain-interrupted', reason: 'The accepted plan remains sufficient.', authorization: 'operator',
+      trigger: 'source-refresh', disposition: 'retain-plan' },
+    crashStep(step) { if (step === 'after-state') throw new Error('retain crash'); },
+  }), /retain crash/u);
+  writeFileSync(join(cwd, 'post-retain-dirty.txt'), 'dirty');
+  assert.throws(() => recoverState({ cwd }), (error) => error.code === 'PLANNING_SNAPSHOT_MISMATCH');
+});
+
 test('an interrupted Git checkpoint recovers against its exact recorded dirty observation', async () => {
   const { cwd, sha } = repository('checkpoint crash');
   await initializeState({ cwd, changeId: 'checkpoint-crash', mode: 'plan-only', baseBranch: 'main', planningRef: sha, source: descriptor });
@@ -839,6 +938,29 @@ test('CLI rejects command-irrelevant options as usage errors', () => {
   const result = spawnSync(process.execPath, [cli, 'status', '--plan', 'irrelevant.json'], { cwd, encoding: 'utf8' });
   assert.equal(result.status, 2);
   assert.match(result.stderr, /status does not accept --plan/u);
+});
+
+test('CLI state-free candidate validation never claims receipt-bound readiness', () => {
+  const { cwd, sha } = repository('cli state free');
+  const candidateState = {
+    changeId: 'state-free-candidate', planningSha: sha, baseBranch: 'main', expectedPrBaseBranch: 'main',
+    source: {
+      kind: 'direct-request', reference: 'request.md', relationship: 'reference-only',
+      latestDigest: `sha256:${'a'.repeat(64)}`,
+    },
+    checklist: [{ id: 'durable-state', checked: false, status: 'current', externalChange: false }],
+  };
+  const planPath = join(cwd, 'state-free-plan.json');
+  writeFileSync(planPath, `${JSON.stringify(planFor(candidateState))}\n`);
+  const cli = fileURLToPath(new URL('./cli.mjs', import.meta.url));
+  const result = spawnSync(process.execPath, [cli, 'validate', '--plan', planPath], { cwd, encoding: 'utf8' });
+  assert.equal(result.status, 1, result.stderr);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.activeState, null);
+  assert.equal(output.valid, false);
+  assert.equal(output.readiness.ready, false);
+  assert.ok(output.errors.includes('An active durable state is required to validate plan identity.'));
+  assert.ok(output.readiness.errors.includes('An active durable state is required to validate plan identity.'));
 });
 
 test('CLI candidate-plan validation fails closed on corrupt durable event evidence', async () => {
