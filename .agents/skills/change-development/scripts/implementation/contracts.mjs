@@ -254,6 +254,9 @@ export function validateImplementationResultAgainstTask(packet, result, actualCh
     if (result[field] !== packet[field]) errors.push(`worker result ${field} must equal task packet ${field}`);
   }
   if (result.packetDigest !== implementationTaskDigest(packet)) errors.push('worker result packetDigest must equal the canonical task packet digest');
+  if (result.status === 'no-change' && (packet.plannedE2ESelectors?.length ?? 0) > 0) {
+    errors.push('worker result cannot be no-change when the task packet declares planned E2E selectors');
+  }
   const paths = result.status === 'implemented' && Array.isArray(actualChangedPaths) ? actualChangedPaths : result.changedPaths;
   if (result.status === 'implemented') {
     if (!Array.isArray(actualChangedPaths)) errors.push('implemented worker result requires actual Git changed paths');

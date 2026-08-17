@@ -359,6 +359,34 @@ test('result acceptance rejects an unrealized planned selector without advancing
   assert.equal(loadState(context.cwd).revision, revision);
 });
 
+test('result acceptance rejects planned-selector no-change without terminal evidence', async () => {
+  const plannedTask = task('no-change-selector', ['specs/features/planned.feature']);
+  const context = await fixture([plannedTask]);
+  const packet = packetFor(context, plannedTask.id, {
+    plannedE2ESelectors: [{ selector: 'id-planned-flow', featurePath: 'specs/features/planned.feature' }],
+    requiredValidation: { unit: [], system: [{
+      command: 'npm run test:e2e:related -- --id planned-flow', reason: 'Exercise planned flow.',
+      selectors: ['id-planned-flow'], projects: ['tablet-chromium'],
+    }] },
+  });
+  context.state = bindTask({ cwd: context.cwd, changeId: context.changeId, packet,
+    expectedRevision: context.state.revision });
+  const worker = createWorker(context, packet);
+  startWave(context, [packet]);
+  const revision = context.state.revision;
+  const noChange = {
+    ...resultFor(packet, null, []), status: 'no-change', workerCommit: null, changedPaths: [],
+  };
+  assert.throws(() => acceptResult({ cwd: context.cwd, changeId: context.changeId, result: noChange,
+    workerCwd: worker.path, expectedRevision: revision }),
+  (error) => error instanceof StateError && error.code === 'INVALID_IMPLEMENTATION_RESULT');
+  const unchanged = loadState(context.cwd);
+  assert.equal(unchanged.revision, revision);
+  assert.equal(unchanged.execution.tasks[0].status, 'running');
+  assert.equal(existsSync(join(changeDirectory(context.cwd, context.changeId), 'implementation', 'results',
+    plannedTask.id, '0001.json')), false);
+});
+
 test('wave scheduling waits for accepted integration but not terminal no-change work', async () => {
   const tasks = [task('first', ['.agents/first.txt']), task('second', ['output/second.txt'])];
   const context = await fixture(tasks);

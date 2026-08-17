@@ -108,10 +108,13 @@ base, and must report the exact required validation commands. For
 `implemented`, Git must prove exactly one direct descendant commit from the
 task base; NUL-delimited changed paths must exactly match the result and remain
 inside allowed paths and outside forbidden paths. For `no-change`, the worker
-checkout must be clean and still exactly at the task base. `blocked` and
-`failed` carry no worker commit and move durable state to `blocked`; do not
-claim success or silently expand the packet. Each attempt result is preserved
-at `implementation/results/<task-id>/<attempt>.json[.sha256]`.
+checkout must be clean and still exactly at the task base; a packet declaring
+`plannedE2ESelectors` cannot complete as `no-change` because those selectors
+were proven absent at binding and must be realized by an implementation.
+`blocked` and `failed` remain valid fail-closed outcomes, carry no worker commit,
+and move durable state to `blocked`; do not claim success or silently expand
+the packet. Each attempt result is preserved at
+`implementation/results/<task-id>/<attempt>.json[.sha256]`.
 
 ## Central integration
 

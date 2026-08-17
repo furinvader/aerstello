@@ -264,3 +264,36 @@ test('implemented, blocked, failed, and no-change outcomes are explicit and raw 
   const errors = validateImplementationResult(raw).join('\n');
   assert.match(errors, /stackTrace is not allowed/u);
 });
+
+test('planned E2E selectors require implementation while blocked and failed remain valid', () => {
+  const planned = packet({
+    allowedPaths: ['.agents/skills/change-development/scripts/implementation/**', 'specs/features/planned.feature'],
+    plannedE2ESelectors: [{ selector: 'id-planned-flow', featurePath: 'specs/features/planned.feature' }],
+    requiredValidation: {
+      unit: [{
+        command: 'node --test .agents/skills/change-development/scripts/implementation/contracts.test.mjs',
+        reason: 'Exercise only the implementation contracts.',
+      }],
+      system: [{
+        command: 'npm run test:e2e:related -- --id planned-flow',
+        reason: 'Exercise the task-owned scenario.',
+        selectors: ['id-planned-flow'],
+        projects: ['tablet-chromium'],
+      }],
+    },
+  });
+  const validation = [...planned.requiredValidation.unit, ...planned.requiredValidation.system].map(({ command }) => ({
+    command, result: 'skipped', summary: 'The worker could not realize the planned selector.',
+  }));
+  const noChange = result(planned, {
+    status: 'no-change', workerCommit: null, changedPaths: [], validation, unexpectedDependencies: [],
+  });
+  assert.match(validateImplementationResultAgainstTask(planned, noChange, []).join('\n'), /cannot be no-change/u);
+  for (const status of ['blocked', 'failed']) {
+    const failClosed = result(planned, {
+      status, workerCommit: null, changedPaths: [], validation,
+      unexpectedDependencies: ['The planned selector could not be realized.'],
+    });
+    assert.deepEqual(validateImplementationResultAgainstTask(planned, failClosed, []), [], status);
+  }
+});
