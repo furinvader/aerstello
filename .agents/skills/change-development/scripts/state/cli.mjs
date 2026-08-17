@@ -18,6 +18,7 @@ import {
   renderStatus,
   repositoryRoot,
   StateError,
+  validatePlanStateIdentity,
   validateState,
 } from './state.mjs';
 
@@ -140,8 +141,15 @@ try {
       const sourceObservation = active ? loadLatestSourceObservation(process.cwd(), active.changeId) : undefined;
       const root = repositoryRoot(process.cwd());
       const readPlanningFile = ({ planningSha, path }) => readTreeFile(root, planningSha, path);
-      const errors = validateImplementationPlan(plan, { planningEvidence, sourceObservation, readPlanningFile });
-      const readiness = planReadiness(plan, { planningEvidence, sourceObservation, readPlanningFile });
+      const contractErrors = validateImplementationPlan(plan, { planningEvidence, sourceObservation, readPlanningFile });
+      const identityErrors = active ? validatePlanStateIdentity(plan, active) : [];
+      const errors = [...new Set([...contractErrors, ...identityErrors])];
+      const candidateReadiness = planReadiness(plan, { planningEvidence, sourceObservation, readPlanningFile });
+      const readiness = identityErrors.length === 0 ? candidateReadiness : {
+        ...candidateReadiness,
+        ready: false,
+        errors: [...new Set([...(candidateReadiness.errors ?? []), ...identityErrors])],
+      };
       writeJson({
         valid: errors.length === 0,
         errors,

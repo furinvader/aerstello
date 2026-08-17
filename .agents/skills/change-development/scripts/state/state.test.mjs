@@ -15,6 +15,7 @@ import {
   changeDirectory,
   checkpointGitMetadata,
   initializeState,
+  loadLatestSourceObservation,
   loadState,
   locateState,
   nextActionFor,
@@ -29,7 +30,7 @@ import {
 } from './state.mjs';
 import { archiveDirectory } from '../paths.mjs';
 import { loadRegistry, routeSpecialists } from '../../../aerstello-specialists/scripts/validate-registry.mjs';
-import { digestJson } from '../contracts/contracts.mjs';
+import { digestJson, sourceChecklistBinding } from '../contracts/contracts.mjs';
 
 function git(cwd, ...args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -91,6 +92,16 @@ function scenarioPlanFor(state, revision = 1) {
   return value;
 }
 
+function planForObservation(state, observation, revision = 1) {
+  const value = planFor(state, revision);
+  value.checklistMappings = observation.source.checklist.map((item) => ({
+    ...sourceChecklistBinding(item),
+    criterionIds: ['durable-state'], taskIds: ['state-task'], relationship: state.source.relationship,
+  }));
+  value.tasks[0].checklistItemIds = value.checklistMappings.map(({ id }) => id);
+  return value;
+}
+
 test('initialization persists valid shared state and receipts', async () => {
   const { cwd, sha } = repository();
   const state = await initializeState({
@@ -134,6 +145,54 @@ test('pointerless completed initialization is discoverable without a remembered 
     (error) => error.code === 'LIFECYCLE_RECOVERY_REQUIRED');
   assert.equal(recoverState({ cwd }).recovered, true);
   assert.equal(loadState(cwd).changeId, 'pointerless-change');
+});
+
+test('pointerless state is recovery-only and later completed revisions fail closed unchanged', async () => {
+  const initialization = repository('pointerless ordinary commands');
+  const issue = {
+    id: 'I_pointerless', number: 22, title: 'Pointerless state',
+    body: '- [ ] <!-- aerstello:item=durable-state --> State remains durable', state: 'OPEN',
+    author: { login: 'operator', id: 'U_test' }, createdAt: '2026-08-17T10:00:00Z', updatedAt: '2026-08-17T10:00:00Z',
+    comments: [], commentsComplete: true,
+  };
+  let reads = 0;
+  const adapter = { async readIssue() { reads += 1; return structuredClone(issue); } };
+  const planning = await initializeState({ cwd: initialization.cwd, changeId: 'pointerless-ordinary', mode: 'plan-only',
+    baseBranch: 'main', planningRef: initialization.sha,
+    source: { type: 'github-issue', repository: 'owner/repo', issueNumber: 22, relationshipIntent: 'resolves' }, sourceAdapter: adapter });
+  unlinkSync(activePointerPath(initialization.cwd));
+  const statePath = join(changeDirectory(initialization.cwd, planning.changeId), 'state.json');
+  const eventsPath = join(changeDirectory(initialization.cwd, planning.changeId), 'events.jsonl');
+  const durableBefore = [readFileSync(statePath, 'utf8'), readFileSync(eventsPath, 'utf8')];
+  const ordinary = [
+    () => acceptPlan({ cwd: initialization.cwd, changeId: planning.changeId, plan: planFor(planning), expectedRevision: 0 }),
+    () => recordDecision({ cwd: initialization.cwd, changeId: planning.changeId, expectedRevision: 0,
+      decision: { id: 'pointerless-decision', reason: 'No pointer.', authorization: 'operator', trigger: 'test', disposition: 'resolve' } }),
+    () => amendPlan({ cwd: initialization.cwd, changeId: planning.changeId, expectedRevision: 0, resultingPlan: planFor(planning, 2),
+      amendment: { id: 'pointerless-amendment', reason: 'No pointer.', authorization: 'operator', trigger: 'test',
+        delta: { changed: ['title'] }, invalidatedEvidence: [] } }),
+    () => archiveState({ cwd: initialization.cwd, changeId: planning.changeId, expectedRevision: 0, abandonReason: 'No pointer.' }),
+  ];
+  for (const operation of ordinary) assert.throws(operation, (error) => error.code === 'STATE_NOT_FOUND');
+  await assert.rejects(refreshSource({ cwd: initialization.cwd, changeId: planning.changeId, expectedRevision: 0, sourceAdapter: adapter }),
+    (error) => error.code === 'STATE_NOT_FOUND');
+  assert.equal(reads, 1, 'pointerless refresh must not perform another connector read');
+  assert.equal(checkpointGitMetadata({ cwd: initialization.cwd }).checkpointed, false);
+  assert.deepEqual([readFileSync(statePath, 'utf8'), readFileSync(eventsPath, 'utf8')], durableBefore);
+  assert.equal(recoverState({ cwd: initialization.cwd, changeId: planning.changeId }).recovered, true);
+
+  const later = repository('pointerless completed revision');
+  await initializeState({ cwd: later.cwd, changeId: 'pointerless-later', mode: 'plan-only', baseBranch: 'main', planningRef: later.sha, source: descriptor });
+  recordDecision({ cwd: later.cwd, expectedRevision: 0, decision: {
+    id: 'completed-decision', reason: 'Advance revision.', authorization: 'operator', trigger: 'test', disposition: 'resolve',
+  } });
+  unlinkSync(activePointerPath(later.cwd));
+  const laterState = join(changeDirectory(later.cwd, 'pointerless-later'), 'state.json');
+  const laterEvents = join(changeDirectory(later.cwd, 'pointerless-later'), 'events.jsonl');
+  const laterBefore = [readFileSync(laterState, 'utf8'), readFileSync(laterEvents, 'utf8')];
+  assert.throws(() => recoverState({ cwd: later.cwd, changeId: 'pointerless-later' }),
+    (error) => error.code === 'RECOVERY_STATE_CONFLICT');
+  assert.deepEqual([readFileSync(laterState, 'utf8'), readFileSync(laterEvents, 'utf8')], laterBefore);
 });
 
 test('dangling active pointers and completed transitions without state fail closed', async () => {
@@ -288,6 +347,86 @@ test('refresh separates progress from material drift and requires explicit retai
   } }), (error) => error.code === 'INVALID_PHASE');
 });
 
+test('refresh rejects abandoned and blocked phases before connector I/O and preserves terminal state', async () => {
+  for (const terminal of ['abandoned', 'blocked']) {
+    const { cwd, sha } = repository(`${terminal} refresh`);
+    const issue = {
+      id: `I_${terminal}`, number: 23, title: 'Terminal refresh',
+      body: '- [ ] <!-- aerstello:item=durable-state --> State remains durable', state: 'OPEN',
+      author: { login: 'operator', id: 'U_test' }, createdAt: '2026-08-17T10:00:00Z', updatedAt: '2026-08-17T10:00:00Z',
+      comments: [], commentsComplete: true,
+    };
+    let reads = 0;
+    const adapter = { async readIssue() { reads += 1; return structuredClone(issue); } };
+    await initializeState({ cwd, changeId: `${terminal}-refresh`, mode: 'plan-only', baseBranch: 'main', planningRef: sha,
+      source: { type: 'github-issue', repository: 'owner/repo', issueNumber: 23, relationshipIntent: 'reference-only' }, sourceAdapter: adapter });
+    if (terminal === 'abandoned') {
+      assert.throws(() => archiveState({ cwd, expectedRevision: 0, abandonReason: 'Stop this change.',
+        crashStep(step) { if (step === 'after-complete') throw new Error('stop before archive'); } }), /stop before archive/u);
+    } else {
+      writeFileSync(join(cwd, 'dirty.txt'), 'dirty');
+      assert.equal(checkpointGitMetadata({ cwd }).state.phase, 'blocked');
+    }
+    const stateBefore = readFileSync(join(changeDirectory(cwd, `${terminal}-refresh`), 'state.json'), 'utf8');
+    const eventsBefore = readFileSync(join(changeDirectory(cwd, `${terminal}-refresh`), 'events.jsonl'), 'utf8');
+    await assert.rejects(refreshSource({ cwd, expectedRevision: 1, sourceAdapter: adapter }),
+      (error) => error.code === 'INVALID_PHASE');
+    assert.equal(reads, 1, `${terminal} refresh must not perform connector I/O`);
+    assert.equal(readFileSync(join(changeDirectory(cwd, `${terminal}-refresh`), 'state.json'), 'utf8'), stateBefore);
+    assert.equal(readFileSync(join(changeDirectory(cwd, `${terminal}-refresh`), 'events.jsonl'), 'utf8'), eventsBefore);
+    if (terminal === 'abandoned') assert.equal(archiveState({ cwd, expectedRevision: 1 }).archived, true);
+  }
+});
+
+test('material amendments require the exact current bound resolve-decision trigger', async () => {
+  const { cwd, sha } = repository('exact amendment decision');
+  const issue = {
+    id: 'I_decision', number: 24, title: 'Decision binding',
+    body: '- [ ] <!-- aerstello:item=durable-state --> State remains durable', state: 'OPEN',
+    author: { login: 'operator', id: 'U_test' }, createdAt: '2026-08-17T10:00:00Z', updatedAt: '2026-08-17T10:00:00Z',
+    comments: [], commentsComplete: true,
+  };
+  const adapter = { async readIssue() { return structuredClone(issue); } };
+  const planning = await initializeState({ cwd, changeId: 'decision-binding', mode: 'plan-only', baseBranch: 'main', planningRef: sha,
+    source: { type: 'github-issue', repository: 'owner/repo', issueNumber: 24, relationshipIntent: 'resolves' }, sourceAdapter: adapter });
+  acceptPlan({ cwd, expectedRevision: 0, plan: planFor(planning) });
+  issue.body += '\n\nMaterial one.'; issue.updatedAt = '2026-08-17T10:01:00Z';
+  const drift = await refreshSource({ cwd, expectedRevision: 1, sourceAdapter: adapter });
+  const decided = recordDecision({ cwd, expectedRevision: 2, decision: {
+    id: 'resolve-current', reason: 'Incorporate current drift.', authorization: 'operator', trigger: 'source-refresh', disposition: 'resolve',
+  } });
+  const amendment = (id, trigger) => ({ id, reason: 'Incorporate reviewed drift.', authorization: 'operator', trigger,
+    delta: { changed: ['source'] }, invalidatedEvidence: [] });
+  const revisionTwo = planForObservation(decided, loadLatestSourceObservation(cwd), 2);
+  assert.throws(() => amendPlan({ cwd, expectedRevision: 3, resultingPlan: revisionTwo,
+    amendment: amendment('wrong-trigger-amendment', 'does-not-exist') }), (error) => error.code === 'DECISION_REQUIRED');
+  const amended = amendPlan({ cwd, expectedRevision: 3, resultingPlan: revisionTwo,
+    amendment: amendment('exact-trigger-amendment', 'resolve-current') });
+  assert.equal(amended.phase, 'ready-to-implement');
+
+  issue.body += '\n\nMaterial two.'; issue.updatedAt = '2026-08-17T10:02:00Z';
+  await refreshSource({ cwd, expectedRevision: 4, sourceAdapter: adapter });
+  recordDecision({ cwd, expectedRevision: 5, decision: {
+    id: 'resolve-stale', reason: 'Review second drift.', authorization: 'operator', trigger: 'source-refresh', disposition: 'resolve',
+  } });
+  await refreshSource({ cwd, expectedRevision: 6, sourceAdapter: adapter });
+  const revisionThree = planForObservation(loadState(cwd), loadLatestSourceObservation(cwd), 3);
+  for (const trigger of ['resolve-current', 'resolve-stale']) {
+    assert.throws(() => amendPlan({ cwd, expectedRevision: 7, resultingPlan: revisionThree,
+      amendment: amendment(`reject-${trigger}`, trigger) }), (error) => error.code === 'DECISION_REQUIRED');
+  }
+
+  recordDecision({ cwd, expectedRevision: 7, decision: {
+    id: 'retain-second', reason: 'Existing amendment covers second drift.', authorization: 'operator', trigger: 'source-refresh', disposition: 'retain-plan',
+  } });
+  issue.body += '\n\nMaterial three.'; issue.updatedAt = '2026-08-17T10:03:00Z';
+  await refreshSource({ cwd, expectedRevision: 8, sourceAdapter: adapter });
+  const afterRetain = planForObservation(loadState(cwd), loadLatestSourceObservation(cwd), 3);
+  assert.throws(() => amendPlan({ cwd, expectedRevision: 9, resultingPlan: afterRetain,
+    amendment: amendment('reject-retain', 'retain-second') }), (error) => error.code === 'DECISION_REQUIRED');
+  assert.equal(drift.phase, 'awaiting-decision');
+});
+
 test('decision records enforce strict provenance and reject duplicate IDs', async () => {
   const { cwd, sha } = repository('decision state');
   await initializeState({ cwd, changeId: 'decision-change', mode: 'plan-only', baseBranch: 'main', planningRef: sha, source: descriptor });
@@ -300,6 +439,31 @@ test('decision records enforce strict provenance and reject duplicate IDs', asyn
   assert.throws(() => recordDecision({ cwd, expectedRevision: 1, decision: {
     id: 'scope-decision', reason: 'Repeat.', authorization: 'operator', trigger: 'request', disposition: 'resolve',
   } }), (error) => error.code === 'DECISION_ID_CONFLICT');
+});
+
+test('one pre-accept refresh rebases unambiguous stable additions removals text and moves', async () => {
+  const { cwd, sha } = repository('stable checklist rebase');
+  const issue = {
+    id: 'I_stable', number: 8, title: 'Stable list',
+    body: '- [ ] <!-- aerstello:item=keep-item --> Keep text\n- [ ] <!-- aerstello:item=remove-item --> Remove text', state: 'OPEN',
+    author: { login: 'operator', id: 'U_test' }, createdAt: '2026-08-17T10:00:00Z', updatedAt: '2026-08-17T10:00:00Z',
+    comments: [], commentsComplete: true,
+  };
+  const adapter = { async readIssue() { return structuredClone(issue); } };
+  await initializeState({ cwd, changeId: 'stable-rebase', mode: 'plan-only', baseBranch: 'main', planningRef: sha,
+    source: { type: 'github-issue', repository: 'owner/repo', issueNumber: 8, relationshipIntent: 'resolves' }, sourceAdapter: adapter });
+  issue.body = '- [ ] <!-- aerstello:item=added-item --> Added text\n- [x] <!-- aerstello:item=keep-item --> Updated keep text';
+  issue.updatedAt = '2026-08-17T10:01:00Z';
+  const refreshed = await refreshSource({ cwd, expectedRevision: 0, sourceAdapter: adapter });
+  assert.equal(refreshed.phase, 'planning');
+  assert.equal(refreshed.source.classification, 'unreviewed-material');
+  assert.deepEqual(refreshed.checklist, [
+    { id: 'added-item', checked: false, status: 'current', externalChange: false },
+    { id: 'keep-item', checked: true, status: 'current', externalChange: false },
+  ]);
+  const observation = loadLatestSourceObservation(cwd);
+  const ready = acceptPlan({ cwd, expectedRevision: 1, plan: planForObservation(refreshed, observation) });
+  assert.equal(ready.phase, 'ready-to-implement');
 });
 
 test('legacy checklist reorder remains ambiguous and external after refresh', async () => {
@@ -316,6 +480,9 @@ test('legacy checklist reorder remains ambiguous and external after refresh', as
   const refreshed = await refreshSource({ cwd, expectedRevision: 0, sourceAdapter: adapter });
   assert.ok(refreshed.checklist.some((item) => item.status === 'ambiguous' && item.externalChange));
   assert.ok(refreshed.checklist.some((item) => item.status === 'removed'));
+  assert.throws(() => acceptPlan({ cwd, expectedRevision: 1,
+    plan: planForObservation(refreshed, loadLatestSourceObservation(cwd)) }),
+  (error) => ['PLAN_NOT_READY', 'PLAN_CHECKLIST_MISMATCH'].includes(error.code));
 });
 
 test('every phase exposes one exact next action', () => {
@@ -672,6 +839,43 @@ test('CLI rejects command-irrelevant options as usage errors', () => {
   const result = spawnSync(process.execPath, [cli, 'status', '--plan', 'irrelevant.json'], { cwd, encoding: 'utf8' });
   assert.equal(result.status, 2);
   assert.match(result.stderr, /status does not accept --plan/u);
+});
+
+test('CLI plan validation rejects every active-state identity mismatch and accepts a matching control', async () => {
+  const { cwd, sha } = repository('cli identity validation');
+  const planning = await initializeState({ cwd, changeId: 'cli-identity', mode: 'plan-only', baseBranch: 'main', planningRef: sha, source: descriptor });
+  const cli = fileURLToPath(new URL('./cli.mjs', import.meta.url));
+  const cases = [
+    ['change-id', (plan) => { plan.changeId = 'another-change'; }],
+    ['planning-sha', (plan) => { plan.planning.planningSha = 'f'.repeat(40); }],
+    ['base-branch', (plan) => { plan.planning.baseBranch = 'develop'; }],
+    ['expected-pr-base', (plan) => { plan.expectedPrBaseBranch = 'release'; }],
+    ['source-kind', (plan) => { plan.source.kind = 'repository-plan'; }],
+    ['source-reference', (plan) => { plan.source.reference = 'another-request.md'; }],
+    ['source-relationship', (plan) => {
+      plan.source.relationship = 'partial';
+      for (const mapping of plan.checklistMappings) mapping.relationship = 'partial';
+    }],
+    ['source-capture', (plan) => { plan.source.captureDigest = `sha256:${'f'.repeat(64)}`; }],
+  ];
+  const run = (label, plan) => {
+    const path = join(cwd, `${label}.json`);
+    writeFileSync(path, `${JSON.stringify(plan)}\n`);
+    return spawnSync(process.execPath, [cli, 'validate', '--plan', path], { cwd, encoding: 'utf8' });
+  };
+  const control = run('matching-control', planFor(planning));
+  assert.equal(control.status, 0, control.stderr);
+  assert.equal(JSON.parse(control.stdout).readiness.ready, true);
+  for (const [label, mutate] of cases) {
+    const candidate = structuredClone(planFor(planning));
+    mutate(candidate);
+    const result = run(label, candidate);
+    assert.equal(result.status, 1, `${label}: ${result.stderr}`);
+    const output = JSON.parse(result.stdout);
+    assert.equal(output.valid, false, label);
+    assert.equal(output.readiness.ready, false, label);
+    assert.ok(output.errors.some((error) => /does not match active state/u.test(error)), label);
+  }
 });
 
 test('CLI plan validation reads scenarios from the immutable Planning SHA', async () => {
