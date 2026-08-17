@@ -51,7 +51,7 @@
     }
   ],
   "$defs": {
-    "text": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "text": { "type": "string", "minLength": 1, "maxLength": 4000, "pattern": "\\S" },
     "id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 128 },
     "sha": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
     "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },

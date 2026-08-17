@@ -205,12 +205,14 @@ function pathOverlaps(left, right) {
   return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
 }
 
-const EXACT_COMMAND_PREFIX = /^\s*(?:(?:npm|npx|node|git|gh|bash|sh|zsh|fish|source|export|command|exec|xargs|pnpm|yarn|bun|deno|tsx|tsc|vitest|jest|mocha|ava|tap|playwright|eslint|prettier|biome|vite|turbo|c8|nyc|python|python3|pytest|ruff|ruby|perl|php|java|mvn|gradle|dotnet|cargo|go|make|just|cmake|meson|ninja|docker|docker-compose|kubectl|helm|terraform|env|cd)(?:\s|$)|\.\/|\/)/u;
+const EXECUTABLE_SHAPED_PREFIX = /^\s*(?:[a-z0-9][a-z0-9._+-]*|\.{0,2}\/\S*|\/\S*)(?:\s|$)/u;
+const COMMAND_ARGUMENT_PREFIX = /^\s*\S+\s+(?:-{1,2}[A-Za-z0-9]|https?:\/\/|\.{0,2}\/|\/)/u;
 const ENVIRONMENT_ASSIGNMENT_PREFIX = /^\s*[A-Za-z_][A-Za-z0-9_]*=\S+(?:\s|$)/u;
 const SHELL_SYNTAX = /(?:&&|\|\||[;|`<>]|\$\()/u;
 
 function isExecutableIntent(value) {
-  return EXACT_COMMAND_PREFIX.test(value) || ENVIRONMENT_ASSIGNMENT_PREFIX.test(value) || SHELL_SYNTAX.test(value);
+  return EXECUTABLE_SHAPED_PREFIX.test(value) || COMMAND_ARGUMENT_PREFIX.test(value)
+    || ENVIRONMENT_ASSIGNMENT_PREFIX.test(value) || SHELL_SYNTAX.test(value);
 }
 
 function validatePlanningEvidence(evidence, errors) {

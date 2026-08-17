@@ -129,6 +129,22 @@ test('schema and manual validation fail closed for malformed and contradictory p
   assert.equal(validateImplementationPlan(deferred).length, 0); assert.equal(planReadiness(deferred).ready, true);
 });
 
+test('shared semantic text rejects whitespace in schema and manual validation', () => {
+  const schema = JSON.parse(readFileSync(contractPaths.implementationPlanSchema, 'utf8'));
+  const ajv = new Ajv2020({ strict: true, allErrors: true }); addFormats(ajv);
+  const validateSchema = ajv.compile(schema);
+  assert.equal(schema.$defs.text.pattern, '\\S');
+  for (const [label, mutate] of [
+    ['title', (value) => { value.title = ' \t '; }],
+    ['criterion description', (value) => { value.criteria[0].description = '\n '; }],
+    ['validation intent', (value) => { value.tasks[0].validationIntent = ['  ']; }],
+  ]) {
+    const value = plan(); mutate(value);
+    assert.equal(validateSchema(value), false, `${label} must fail the strict schema`);
+    assert.ok(validateImplementationPlan(value).length > 0, `${label} must fail contract validation`);
+  }
+});
+
 test('DAG, producer ordering, ownership overlap, and cross-domain serialization are enforced', () => {
   const cyclic = plan();
   cyclic.tasks.push({ ...structuredClone(cyclic.tasks[0]), id: 'consumer', criterionIds: [], checklistItemIds: [], anticipatedPaths: ['other/path'], produces: [], consumes: [{ artifactId: 'plan-contract', producerTaskId: 'contracts' }], dependsOn: ['contracts'] });
@@ -375,11 +391,23 @@ test('planning evidence recordedAt uses strict Ajv RFC3339 semantics', () => {
   }
 });
 
-test('validation intent rejects exact tool commands while preserving prose intent', () => {
-  for (const command of ['vitest run contracts', 'playwright test --project tablet-chromium', 'tsc --noEmit', 'eslint .', 'python3 scripts/check.py', 'NODE_ENV=test vitest run', './scripts/check.sh']) {
+test('validation intent rejects executable-shaped prefixes while preserving prose intent', () => {
+  for (const command of [
+    'vitest run contracts', 'playwright test --project tablet-chromium', 'tsc --noEmit',
+    'eslint .', 'python3 scripts/check.py', 'curl https://example.test', 'wget artifact.json',
+    'sed -n 1p file', 'rm generated-file', 'future-tool validate contracts',
+    'NODE_ENV=test vitest run', './scripts/check.sh', 'CustomTool --check contracts',
+  ]) {
     const value = plan(); value.tasks[0].validationIntent = [command];
     assert.match(validateImplementationPlan(value).join('\n'), /not an executable command/u, command);
   }
-  const prose = plan(); prose.tasks[0].validationIntent = ['Validate behavior with Playwright on the selected project'];
-  assert.deepEqual(validateImplementationPlan(prose), []);
+  for (const intent of [
+    'Validate behavior with Playwright on the selected project',
+    'Verify curl integration against a local fixture',
+    'Confirm generated files are removed without invoking rm',
+    'Exercise artifact downloads through the wget adapter',
+  ]) {
+    const prose = plan(); prose.tasks[0].validationIntent = [intent];
+    assert.deepEqual(validateImplementationPlan(prose), [], intent);
+  }
 });
