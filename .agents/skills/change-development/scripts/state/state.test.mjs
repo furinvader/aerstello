@@ -466,7 +466,7 @@ test('one pre-accept refresh rebases unambiguous stable additions removals text 
   assert.equal(ready.phase, 'ready-to-implement');
 });
 
-test('legacy checklist reorder remains ambiguous and external after refresh', async () => {
+test('legacy checklist drift remains ambiguous across refreshes and exact restoration clears it', async () => {
   const { cwd, sha } = repository('legacy refresh');
   const issue = {
     id: 'I_legacy', number: 7, title: 'Legacy list', body: '- [ ] First item\n- [ ] Second item', state: 'OPEN',
@@ -480,9 +480,32 @@ test('legacy checklist reorder remains ambiguous and external after refresh', as
   const refreshed = await refreshSource({ cwd, expectedRevision: 0, sourceAdapter: adapter });
   assert.ok(refreshed.checklist.some((item) => item.status === 'ambiguous' && item.externalChange));
   assert.ok(refreshed.checklist.some((item) => item.status === 'removed'));
-  assert.throws(() => acceptPlan({ cwd, expectedRevision: 1,
-    plan: planForObservation(refreshed, loadLatestSourceObservation(cwd)) }),
+  const repeated = await refreshSource({ cwd, expectedRevision: 1, sourceAdapter: adapter });
+  assert.deepEqual(repeated.checklist, refreshed.checklist);
+  assert.ok(repeated.checklist.some((item) => item.status === 'ambiguous' && item.externalChange));
+  assert.ok(repeated.checklist.some((item) => item.status === 'removed' && item.externalChange));
+  assert.throws(() => acceptPlan({ cwd, expectedRevision: 2,
+    plan: planForObservation(repeated, loadLatestSourceObservation(cwd)) }),
   (error) => ['PLAN_NOT_READY', 'PLAN_CHECKLIST_MISMATCH'].includes(error.code));
+
+  issue.body = '- [ ] First item\n- [ ] Second item'; issue.updatedAt = '2026-08-17T10:02:00Z';
+  const restored = await refreshSource({ cwd, expectedRevision: 2, sourceAdapter: adapter });
+  assert.equal(restored.checklist.length, 2);
+  assert.ok(restored.checklist.every((item) => item.status === 'current' && item.externalChange === false));
+  const ready = acceptPlan({ cwd, expectedRevision: 3,
+    plan: planForObservation(restored, loadLatestSourceObservation(cwd)) });
+  assert.equal(ready.phase, 'ready-to-implement');
+});
+
+test('lifecycle is a valid change ID isolated from the global lifecycle lock', async () => {
+  const { cwd, sha } = repository('lifecycle lock namespace');
+  const state = await initializeState({
+    cwd, changeId: 'lifecycle', mode: 'plan-only', baseBranch: 'main', planningRef: sha, source: descriptor,
+    lockOptions: { timeoutMs: 25 },
+  });
+  assert.equal(state.changeId, 'lifecycle');
+  assert.equal(state.revision, 0);
+  assert.equal(validateState({ cwd, changeId: 'lifecycle' }).valid, true);
 });
 
 test('every phase exposes one exact next action', () => {

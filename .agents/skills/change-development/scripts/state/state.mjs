@@ -24,6 +24,7 @@ import {
   validateDevelopmentState,
   validateImplementationPlan,
 } from '../contracts/contracts.mjs';
+import { compareChecklistMappings } from '../source/checklists.mjs';
 import { captureSource, refreshSource as captureSourceRefresh } from '../source/source.mjs';
 import { createGhGraphqlAdapter } from '../source/gh-adapter.mjs';
 import { readGithubIssue } from '../source/github.mjs';
@@ -242,7 +243,7 @@ function acquireLock(path, { timeoutMs = DEFAULT_LOCK_TIMEOUT_MS, staleMs = DEFA
 }
 
 function lifecycleLockPath(cwd) {
-  return join(changeRoot(cwd), 'locks', 'lifecycle.lock');
+  return join(changeRoot(cwd), 'locks', 'global', 'lifecycle.lock');
 }
 
 function changeLockPath(cwd, changeId) {
@@ -711,6 +712,19 @@ function readEffectivePlan(cwd, state) {
   return verifyReceipt(join(changeDirectory(cwd, state.changeId), 'plan', 'amendments', name), 'latest plan amendment').value.resultingPlan;
 }
 
+function readInitialObservation(cwd, state) {
+  const verified = verifyReceipt(
+    join(changeDirectory(cwd, state.changeId), 'source', 'initial.json'),
+    'initial source observation',
+  );
+  const observation = verified.value;
+  const full = observation.fullDigest ?? observation.digest ?? observation.sourceDigest ?? objectDigest(observation);
+  if (full !== state.source.initialDigest) {
+    throw new StateError('Initial source observation does not match state summary', 'SOURCE_OBSERVATION_INVALID');
+  }
+  return observation;
+}
+
 function readObservationByDigest(cwd, state) {
   const sourceDirectory = join(changeDirectory(cwd, state.changeId), 'source');
   const candidates = [join(sourceDirectory, 'initial.json')];
@@ -874,6 +888,11 @@ export async function refreshSource({ cwd = process.cwd(), changeId, expectedRev
     const progress = observation.progressDigest ?? full;
     const observationPath = `source/observations/${String(state.revision + 1).padStart(8, '0')}.json`;
     const observationDigest = objectDigest(observation);
+    const planningBaseline = state.plan ? null : readInitialObservation(root, state);
+    const planningComparison = planningBaseline ? compareChecklistMappings(
+      planningBaseline.source?.checklist ?? [],
+      observation.source?.checklist ?? [],
+    ) : null;
     const next = revised(state, {
       phase: state.plan && classification === 'unreviewed-material' ? 'awaiting-decision' : state.phase,
       source: {
@@ -889,7 +908,7 @@ export async function refreshSource({ cwd = process.cwd(), changeId, expectedRev
       },
       checklist: state.plan
         ? refreshedChecklist(previousObservation, observation, refreshed.checklistComparison)
-        : planningChecklist(previousObservation, observation, refreshed.checklistComparison),
+        : planningChecklist(planningBaseline, observation, planningComparison),
     }, () => new Date(timestamp));
     return commitTransition({
       cwd: root, previousState: state, nextState: next, type: 'source-refreshed',
