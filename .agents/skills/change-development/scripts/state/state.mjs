@@ -1205,6 +1205,23 @@ function canonicalFailureReasons(cwd, state, execution, inFlight = null) {
   });
 }
 
+function nonTaskBlockers(cwd, state) {
+  const taskFailures = new Map();
+  for (const reason of canonicalFailureReasons(cwd, state, state.execution)) {
+    taskFailures.set(reason, (taskFailures.get(reason) ?? 0) + 1);
+  }
+  const preserved = [];
+  for (const reason of state.blockedReasons) {
+    const remaining = taskFailures.get(reason) ?? 0;
+    if (remaining > 0) taskFailures.set(reason, remaining - 1);
+    else preserved.push(reason);
+  }
+  if ([...taskFailures.values()].some((remaining) => remaining !== 0)) {
+    throw new StateError('Blocked state is missing receipt-backed task failure evidence', 'TASK_RESULT_MISMATCH');
+  }
+  return preserved;
+}
+
 export function acceptResult({ cwd = process.cwd(), changeId, result, workerCwd, expectedRevision, clock, crashStep, lockOptions } = {}) {
   const root = repositoryRoot(cwd); const selected = selectedChangeId(root, changeId);
   return withChangeLock(root, selected, () => {
@@ -1245,13 +1262,13 @@ export function acceptResult({ cwd = process.cwd(), changeId, result, workerCwd,
     }
     const errors = validateImplementationResultAgainstTask(packet, result, actualPaths);
     if (errors.length) throw new StateError(`Implementation result does not match its packet/Git evidence:\n- ${errors.join('\n- ')}`, 'INVALID_IMPLEMENTATION_RESULT');
+    const preservedBlockers = nonTaskBlockers(root, state);
     const terminal = result.status === 'implemented' ? 'accepted' : result.status;
     const activeWave = state.execution.activeWave.filter((id) => id !== task.id);
     const execution = replaceExecutionTask(state, task.id, { status: terminal, resultDigest: objectDigest(result), workerCommit: result.workerCommit }, { activeWave });
-    const hasFailure = execution.tasks.some((entry) => ['blocked', 'failed'].includes(entry.status));
-    const nextPhase = hasFailure ? 'blocked' : 'implementing';
-    const blockedReasons = hasFailure
-      ? canonicalFailureReasons(root, state, execution, { taskId: task.id, result }) : [];
+    const failureReasons = canonicalFailureReasons(root, state, execution, { taskId: task.id, result });
+    const blockedReasons = [...preservedBlockers, ...failureReasons];
+    const nextPhase = blockedReasons.length ? 'blocked' : 'implementing';
     const next = revised(state, { phase: nextPhase, blockedReasons, execution }, clock);
     return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'result-accepted', summary: `Accepted ${terminal} result for ${task.id}`, crashStep,
       pendingEvidence: [{ key: 'implementationResultDigest', path: resultEvidencePath(task.id, task.attempt), value: result, label: `implementation result ${task.id} attempt ${task.attempt}` }] });

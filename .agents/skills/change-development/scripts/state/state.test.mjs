@@ -184,6 +184,98 @@ test('accepted sibling integrates after a failed wave and preserves failure evid
   assert.equal(state.execution.tasks.find(({ id }) => id === third.taskId).status, 'failed');
 });
 
+test('reverse-order sibling results preserve Git drift until exact restoration and failed-wave integration', async () => {
+  const { cwd, sha } = repository('git blocked sibling acceptance');
+  const planning = await initializeState({ cwd, changeId: 'git-blocked-siblings', mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
+  const plan = executionPlanFor(planning); let state = acceptPlan({ cwd, plan, expectedRevision: 0 });
+  const first = packetFor(state, plan, 'state-task'); state = bindTask({ cwd, packet: first, expectedRevision: state.revision });
+  const firstWorker = createWorkerFixture(cwd, state, first);
+  const second = packetFor(state, plan, 'second-task'); state = bindTask({ cwd, packet: second, expectedRevision: state.revision });
+  const secondWorker = createWorkerFixture(cwd, state, second);
+  state = scheduleWave({ cwd, expectedRevision: state.revision });
+  state = startTask({ cwd, taskId: first.taskId, workerId: 'git-blocked-first', expectedRevision: state.revision });
+  state = startTask({ cwd, taskId: second.taskId, workerId: 'git-blocked-second', expectedRevision: state.revision });
+  writeFileSync(join(firstWorker.path, 'first.txt'), 'accepted after Git restoration\n');
+  git(firstWorker.path, 'add', 'first.txt'); git(firstWorker.path, 'commit', '-m', 'test: Git-blocked sibling');
+  const firstCommit = git(firstWorker.path, 'rev-parse', 'HEAD');
+
+  git(cwd, 'switch', '-c', 'same-sha-result-drift');
+  state = checkpointGitMetadata({ cwd }).state;
+  const gitReason = state.blockedReasons[0];
+  assert.match(gitReason, /^Central Git observation does not match exact clean durable identity/u);
+  state = acceptResult({ cwd, workerCwd: secondWorker.path, expectedRevision: state.revision,
+    result: { ...resultFor(second, 'failed'), validation: second.requiredValidation.unit.map(({ command }) => ({
+      command, result: 'failed', summary: 'Second validation failed.',
+    })), unexpectedDependencies: ['Second worker validation failed.'], summary: 'Second worker validation failed.' } });
+  assert.deepEqual(state.blockedReasons, [gitReason, 'Task second-task reported failed: Second worker validation failed.']);
+  state = acceptResult({ cwd, workerCwd: firstWorker.path, expectedRevision: state.revision,
+    result: resultFor(first, 'implemented', firstCommit, ['first.txt']) });
+  assert.deepEqual(state.blockedReasons, [gitReason, 'Task second-task reported failed: Second worker validation failed.']);
+  assert.throws(() => integrateTask({ cwd, taskId: first.taskId, expectedRevision: state.revision }),
+    (error) => error.code === 'INVALID_PHASE');
+
+  git(cwd, 'switch', 'main');
+  state = checkpointGitMetadata({ cwd }).state;
+  assert.deepEqual(state.blockedReasons, ['Task second-task reported failed: Second worker validation failed.']);
+  state = integrateTask({ cwd, taskId: first.taskId, expectedRevision: state.revision });
+  assert.equal(state.execution.tasks.find(({ id }) => id === first.taskId).status, 'integrated');
+  assert.deepEqual(state.blockedReasons, ['Task second-task reported failed: Second worker validation failed.']);
+});
+
+test('explicit rejection survives a successful active-wave sibling result', async () => {
+  const { cwd, sha } = repository('rejected sibling acceptance');
+  const planning = await initializeState({ cwd, changeId: 'rejected-siblings', mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
+  const plan = executionPlanFor(planning); let state = acceptPlan({ cwd, plan, expectedRevision: 0 });
+  const first = packetFor(state, plan, 'state-task'); state = bindTask({ cwd, packet: first, expectedRevision: state.revision });
+  createWorkerFixture(cwd, state, first);
+  const second = packetFor(state, plan, 'second-task'); state = bindTask({ cwd, packet: second, expectedRevision: state.revision });
+  const secondWorker = createWorkerFixture(cwd, state, second);
+  state = scheduleWave({ cwd, expectedRevision: state.revision });
+  state = startTask({ cwd, taskId: first.taskId, workerId: 'rejected-first', expectedRevision: state.revision });
+  state = startTask({ cwd, taskId: second.taskId, workerId: 'successful-second', expectedRevision: state.revision });
+  state = rejectTask({ cwd, taskId: first.taskId, reason: 'Operator rejected the first result.', expectedRevision: state.revision });
+  const rejectionReason = 'Task state-task was explicitly rejected: Operator rejected the first result.';
+  assert.deepEqual(state.blockedReasons, [rejectionReason]);
+  state = acceptResult({ cwd, result: resultFor(second, 'no-change'), workerCwd: secondWorker.path, expectedRevision: state.revision });
+  assert.equal(state.phase, 'blocked');
+  assert.deepEqual(state.blockedReasons, [rejectionReason]);
+  assert.throws(() => integrateTask({ cwd, taskId: second.taskId, expectedRevision: state.revision }),
+    (error) => ['INVALID_PHASE', 'TASK_STATE_CONFLICT'].includes(error.code));
+});
+
+test('result acceptance fails closed when a prior task failure blocker is missing', async () => {
+  const { cwd, sha } = repository('missing prior task failure blocker');
+  const planning = await initializeState({ cwd, changeId: 'missing-task-failure', mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
+  const plan = executionPlanFor(planning);
+  plan.criteria.push({ id: 'third-change', description: 'Third task remains independent.', disposition: 'owned', ownerTaskId: 'third-task', deferredReason: null });
+  plan.tasks.push({ ...plan.tasks[0], id: 'third-task', title: 'Implement third', objective: 'Persist third file.',
+    criterionIds: ['third-change'], checklistItemIds: [], anticipatedPaths: ['third.txt'] });
+  let state = acceptPlan({ cwd, plan, expectedRevision: 0 });
+  const packets = [];
+  const workers = new Map();
+  for (const taskId of ['state-task', 'second-task', 'third-task']) {
+    const packet = packetFor(state, plan, taskId); packets.push(packet);
+    state = bindTask({ cwd, packet, expectedRevision: state.revision });
+    workers.set(taskId, createWorkerFixture(cwd, state, packet));
+  }
+  state = scheduleWave({ cwd, expectedRevision: state.revision });
+  for (const taskId of ['state-task', 'second-task', 'third-task']) {
+    state = startTask({ cwd, taskId, workerId: `worker-${taskId}`, expectedRevision: state.revision });
+  }
+  const [first, second, third] = packets;
+  state = acceptResult({ cwd, workerCwd: workers.get(first.taskId).path, expectedRevision: state.revision,
+    result: { ...resultFor(first, 'failed'), validation: first.requiredValidation.unit.map(({ command }) => ({
+      command, result: 'failed', summary: 'First validation failed.',
+    })), unexpectedDependencies: ['First worker validation failed.'], summary: 'First worker validation failed.' } });
+  state = rejectTask({ cwd, taskId: second.taskId, reason: 'Replace the second task.', expectedRevision: state.revision });
+  const statePath = join(changeDirectory(cwd, state.changeId), 'state.json');
+  const before = readFileSync(statePath, 'utf8');
+  assert.throws(() => acceptResult({ cwd, result: resultFor(third, 'no-change'), workerCwd: workers.get(third.taskId).path,
+    expectedRevision: state.revision }), (error) => error.code === 'TASK_RESULT_MISMATCH');
+  assert.equal(readFileSync(statePath, 'utf8'), before);
+  assert.equal(existsSync(join(changeDirectory(cwd, state.changeId), 'implementation', 'results', third.taskId, '0001.json')), false);
+});
+
 test('v1 accepts a plan without execution and upgrades explicitly with unchanged identities', async () => {
   const { cwd, sha } = repository('historical v1 acceptance');
   const planningV2 = await initializeState({ cwd, changeId: 'historical-v1', mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
