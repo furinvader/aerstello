@@ -379,7 +379,6 @@ export function validateImplementationPlan(value, { planningEvidence = [], sourc
     for (const intent of task.validationIntent) if (isExecutableIntent(intent)) errors.push(`${label}.validationIntent must describe intent, not an executable command`);
     for (const path of task.anticipatedPaths) {
       if (!repositoryPathPattern.test(path)) errors.push(`${label}.anticipatedPaths contains an unsafe repository path: ${JSON.stringify(path)}`);
-      if (isExecutableIntent(path)) errors.push(`${label}.anticipatedPaths must be descriptive repository paths`);
     }
   }
 

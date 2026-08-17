@@ -382,6 +382,13 @@ test('repository paths reject trailing separators and control-character overlap 
   assert.match(validateImplementationPlan(overlap).join('\n'), /overlapping anticipated paths/u);
 });
 
+test('schema-valid root-level anticipated paths remain valid planning data', () => {
+  for (const path of ['package.json', 'scripts', 'README.md', 'AGENTS.md']) {
+    const value = plan(); value.tasks[0].anticipatedPaths = [path];
+    assert.deepEqual(validateImplementationPlan(value), [], path);
+  }
+});
+
 test('planning evidence recordedAt uses strict Ajv RFC3339 semantics', () => {
   const value = plan(); value.specialization = metadata({ browserVisible: true }); value.tasks[0].specialization = metadata({ browserVisible: true });
   const evidence = { schemaVersion: 1, reviewerId: 'behavior_mapper', headSha: SHA, status: 'clean', summary: 'Mapped.', findings: [], recordedAt: NOW, planRevision: 1 };
