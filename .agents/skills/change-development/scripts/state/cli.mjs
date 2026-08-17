@@ -137,7 +137,8 @@ try {
     if (parsed.plan) {
       const plan = json(parsed.plan, '--plan');
       const planningEvidence = parsed['planning-evidence'] ? json(parsed['planning-evidence'], '--planning-evidence') : [];
-      const active = loadState(process.cwd(), parsed['change-id']);
+      const located = locateState(process.cwd(), parsed['change-id']);
+      const active = located ? validateState(common).state : null;
       const sourceObservation = active ? loadLatestSourceObservation(process.cwd(), active.changeId) : undefined;
       const root = repositoryRoot(process.cwd());
       const readPlanningFile = ({ planningSha, path }) => readTreeFile(root, planningSha, path);

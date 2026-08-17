@@ -841,6 +841,24 @@ test('CLI rejects command-irrelevant options as usage errors', () => {
   assert.match(result.stderr, /status does not accept --plan/u);
 });
 
+test('CLI candidate-plan validation fails closed on corrupt durable event evidence', async () => {
+  const { cwd, sha } = repository('cli durable corruption');
+  const planning = await initializeState({ cwd, changeId: 'cli-durable-corruption', mode: 'plan-only',
+    baseBranch: 'main', planningRef: sha, source: descriptor });
+  const planPath = join(cwd, 'candidate-plan.json');
+  writeFileSync(planPath, `${JSON.stringify(planFor(planning))}\n`);
+  const eventsPath = join(changeDirectory(cwd, planning.changeId), 'events.jsonl');
+  const events = readFileSync(eventsPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  events[0].summary = 'Tampered durable lifecycle event';
+  writeFileSync(eventsPath, `${events.map((event) => JSON.stringify(event)).join('\n')}\n`);
+
+  const cli = fileURLToPath(new URL('./cli.mjs', import.meta.url));
+  const result = spawnSync(process.execPath, [cli, 'validate', '--plan', planPath], { cwd, encoding: 'utf8' });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '', 'corrupt durable state must not emit positive candidate validation JSON');
+  assert.match(result.stderr, /^RECOVERY_EVIDENCE_INVALID:/u);
+});
+
 test('CLI plan validation rejects every active-state identity mismatch and accepts a matching control', async () => {
   const { cwd, sha } = repository('cli identity validation');
   const planning = await initializeState({ cwd, changeId: 'cli-identity', mode: 'plan-only', baseBranch: 'main', planningRef: sha, source: descriptor });
