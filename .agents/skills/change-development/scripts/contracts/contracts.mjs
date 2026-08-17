@@ -216,17 +216,30 @@ function isExecutableIntent(value) {
 }
 
 const REPOSITORY_PATH_SHAPE = /(?:\/|\.[A-Za-z0-9][A-Za-z0-9._-]*$)/u;
-const CLEAR_COMMAND_NAMES = new Set([
-  'bash', 'bun', 'cat', 'chmod', 'cp', 'curl', 'deno', 'docker', 'eslint', 'find',
-  'git', 'grep', 'jest', 'make', 'mv', 'node', 'npm', 'npx', 'pnpm', 'python',
-  'python3', 'rm', 'sed', 'sh', 'tar', 'tsc', 'tsx', 'vitest', 'wget', 'yarn',
+// This path-specific vocabulary intentionally stays independent from the broad
+// validation-intent executable predicate above. It identifies only an exact
+// first token and never consults PATH or executes planned input.
+const ANTICIPATED_PATH_COMMAND_NAMES = new Set([
+  // Repository package and test tools.
+  'bddgen', 'bun', 'concurrently', 'corepack', 'jest', 'npm', 'npx', 'playwright',
+  'pnpm', 'vitest', 'yarn',
+  // Git, GitHub, shells, and shell builtins/utilities.
+  'bash', 'cd', 'env', 'gh', 'git', 'pwd', 'sh', 'source', 'xargs', 'zsh',
+  // File and search tools used by repository workflows.
+  'awk', 'cat', 'chmod', 'cp', 'curl', 'find', 'grep', 'ln', 'ls', 'mkdir', 'mv',
+  'rg', 'rm', 'rmdir', 'sed', 'tar', 'touch', 'wget',
+  // Formatting and build tools.
+  'biome', 'commitlint', 'docker', 'eslint', 'just', 'make', 'prettier', 'tsc',
+  'vite',
+  // Script runners.
+  'deno', 'node', 'python', 'python3', 'tsx',
 ]);
 
 function isCommandShapedAnticipatedPath(value) {
   if (SHELL_SYNTAX.test(value) || ENVIRONMENT_ASSIGNMENT_PREFIX.test(value)) return true;
   if (!/\s/u.test(value)) return false;
   const command = value.trim().split(/\s+/u, 1)[0].replace(/^(?:"|')|(?:"|')$/gu, '').toLowerCase();
-  return CLEAR_COMMAND_NAMES.has(command) || !REPOSITORY_PATH_SHAPE.test(value);
+  return ANTICIPATED_PATH_COMMAND_NAMES.has(command) || !REPOSITORY_PATH_SHAPE.test(value);
 }
 
 const FEATURE_PATH = /^specs\/features\/(?:[^/]+\/)*[^/]+\.feature$/u;

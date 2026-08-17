@@ -387,6 +387,8 @@ test('schema-valid root-level anticipated paths remain valid planning data', () 
     'package.json', 'scripts', 'README.md', 'AGENTS.md',
     'Release Notes.md', 'Root file.txt', 'RM-generated.json', 'docs/Operator Guide.md',
     'directory with spaces/file', 'directory with spaces/file.test.js',
+    'Playwright-notes.md', 'justifications/check.workflow',
+    'Tooling Commands/playwright test.md',
   ]) {
     const value = plan(); value.tasks[0].anticipatedPaths = [path];
     assert.deepEqual(validateImplementationPlan(value), [], path);
@@ -397,6 +399,10 @@ test('anticipated paths reject command-shaped word sequences', () => {
   for (const path of [
     'npm run test', 'rm generated-file', 'CustomTool validate contracts',
     'rm generated.json', 'RM generated.json', 'sed -n file.txt', 'npm run test.js',
+    'playwright test specs/features/example.feature', 'cd specs/features',
+    'just check.workflow', 'git diff package.json', 'gh api repos/owner/name',
+    'rg TODO scripts/check.mjs',
+    'prettier --write package.json', 'tsx scripts/release-state.mjs',
   ]) {
     const value = plan(); value.tasks[0].anticipatedPaths = [path];
     assert.match(validateImplementationPlan(value).join('\n'), /repository paths, not commands/u, path);
