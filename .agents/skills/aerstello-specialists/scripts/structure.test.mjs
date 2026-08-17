@@ -34,6 +34,10 @@ const EXPECTED_WORKFLOW_CONSUMERS = [
   { path: '.codex/agents/integration-verifier.toml', targets: ['references/reviewer-contracts.md'] },
   { path: '.codex/agents/review-fix-worker.toml', targets: ['registry.json'] },
   { path: '.agents/skills/pr-review-cycle/ownership.json', targets: [] },
+  {
+    path: '.agents/skills/change-development/ownership.json',
+    targets: ['SKILL.md', 'references/reviewer-contracts.md', 'registry.json', 'scripts/validate-registry.mjs'],
+  },
 ];
 
 function filesBelow(directory) {

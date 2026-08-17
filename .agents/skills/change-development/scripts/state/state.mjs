@@ -1,0 +1,1791 @@
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmdirSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { hostname } from 'node:os';
+import { basename, dirname, join, relative } from 'node:path';
+
+import { gitText, resolveCommit, runGit } from '../../../../../scripts/lib/git.mjs';
+import {
+  digestJson,
+  planReadiness,
+  validateDevelopmentState,
+  validateImplementationPlan,
+} from '../contracts/contracts.mjs';
+import { captureSource, refreshSource as captureSourceRefresh } from '../source/source.mjs';
+import { createGhGraphqlAdapter } from '../source/gh-adapter.mjs';
+import { readGithubIssue } from '../source/github.mjs';
+import {
+  activePointerPath,
+  archiveDirectory,
+  changeDirectory,
+  changeRoot,
+  gitCommonDirectory,
+  repositoryRoot,
+  validateChangeId,
+} from '../paths.mjs';
+
+export { activePointerPath, changeDirectory, changeRoot, gitCommonDirectory, repositoryRoot } from '../paths.mjs';
+
+export const STATE_LIMIT_BYTES = 64 * 1024;
+export const HOOK_CONTEXT_LIMIT = 9000;
+const SIDECAR_LIMIT_BYTES = 4 * 1024 * 1024;
+const TRANSITION_INTENT_LIMIT_BYTES = 16 * 1024 * 1024;
+const DEFAULT_LOCK_TIMEOUT_MS = 5000;
+const DEFAULT_STALE_LOCK_MS = 5 * 60 * 1000;
+const MODES = new Set(['plan-only', 'implement', 'full']);
+
+export class StateError extends Error {
+  constructor(message, code = 'STATE_ERROR') {
+    super(message);
+    this.name = 'StateError';
+    this.code = code;
+  }
+}
+
+function now(clock) {
+  return (clock ? clock() : new Date()).toISOString();
+}
+
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
+  }
+  return value;
+}
+
+function serialized(value) {
+  return `${JSON.stringify(canonical(value))}\n`;
+}
+
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function objectDigest(value) {
+  if (typeof digestJson === 'function') return digestJson(value);
+  return sha256(JSON.stringify(canonical(value)));
+}
+
+function fsyncDirectory(path) {
+  try {
+    const handle = openSync(path, 'r');
+    fsyncSync(handle);
+    closeSync(handle);
+  } catch {
+    // Some filesystems do not support directory fsync.
+  }
+}
+
+export function atomicWriteText(path, contents, { beforeRename } = {}) {
+  mkdirSync(dirname(path), { recursive: true });
+  const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
+  let handle;
+  try {
+    handle = openSync(temporary, 'wx', 0o600);
+    writeFileSync(handle, contents, 'utf8');
+    fsyncSync(handle);
+    closeSync(handle);
+    handle = undefined;
+    if (beforeRename) beforeRename(temporary);
+    renameSync(temporary, path);
+    fsyncDirectory(dirname(path));
+  } finally {
+    if (handle !== undefined) closeSync(handle);
+    if (existsSync(temporary)) rmSync(temporary, { force: true });
+  }
+}
+
+export function atomicWriteJson(path, value) {
+  const text = serialized(value);
+  if (Buffer.byteLength(text) > SIDECAR_LIMIT_BYTES) {
+    throw new StateError(`JSON sidecar exceeds ${SIDECAR_LIMIT_BYTES} bytes`, 'SIDECAR_TOO_LARGE');
+  }
+  atomicWriteText(path, text);
+}
+
+function readJson(path, label = 'JSON', limit = SIDECAR_LIMIT_BYTES) {
+  try {
+    const text = readFileSync(path, 'utf8');
+    if (Buffer.byteLength(text) > limit) throw new Error(`exceeds ${limit} bytes`);
+    return JSON.parse(text);
+  } catch (error) {
+    throw new StateError(`Unable to read ${label} at ${path}: ${error.message}`, 'INVALID_DURABLE_EVIDENCE');
+  }
+}
+
+function writeImmutableJson(path, value, label, { limit = SIDECAR_LIMIT_BYTES, afterJson } = {}) {
+  const text = serialized(value);
+  if (Buffer.byteLength(text) > limit) {
+    throw new StateError(`${label} exceeds ${limit} bytes`, 'SIDECAR_TOO_LARGE');
+  }
+  const digest = objectDigest(value);
+  const receiptPath = path.replace(/\.json$/u, '.sha256');
+  if (existsSync(path) || existsSync(receiptPath)) {
+    if (!existsSync(path) || !existsSync(receiptPath)) {
+      throw new StateError(`${label} has incomplete durable evidence`, 'IMMUTABLE_EVIDENCE_CONFLICT');
+    }
+    const existing = readJson(path, label);
+    const receipt = readFileSync(receiptPath, 'utf8').trim();
+    if (objectDigest(existing) !== digest || receipt !== digest || serialized(existing) !== text) {
+      throw new StateError(`${label} already exists with different or tampered content`, 'IMMUTABLE_EVIDENCE_CONFLICT');
+    }
+    return digest;
+  }
+  atomicWriteText(path, text);
+  if (afterJson) afterJson();
+  atomicWriteText(receiptPath, `${digest}\n`);
+  verifyReceipt(path, label, limit);
+  return digest;
+}
+
+export function verifyReceipt(path, label = 'sidecar', limit = SIDECAR_LIMIT_BYTES) {
+  const receiptPath = path.replace(/\.json$/u, '.sha256');
+  if (!existsSync(path) || !existsSync(receiptPath)) {
+    throw new StateError(`${label} or its receipt is missing`, 'RECEIPT_MISSING');
+  }
+  const value = readJson(path, label, limit);
+  const expected = readFileSync(receiptPath, 'utf8').trim();
+  const actual = objectDigest(value);
+  if (!/^sha256:[0-9a-f]{64}$/u.test(expected) || expected !== actual) {
+    throw new StateError(`${label} receipt does not match its canonical content`, 'RECEIPT_TAMPERED');
+  }
+  return { value, digest: actual };
+}
+
+function sleep(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function processAlive(pid) {
+  if (!Number.isInteger(pid) || pid < 1) return false;
+  try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
+}
+
+function removeLock(path, token, { forceIncomplete = false } = {}) {
+  const ownerPath = join(path, 'owner.json');
+  if (existsSync(ownerPath)) {
+    let owner;
+    try { owner = readJson(ownerPath, 'lock owner', 4096); } catch { return false; }
+    if (owner.token !== token) return false;
+    try { unlinkSync(ownerPath); } catch { return false; }
+  } else if (!forceIncomplete) return false;
+  try { rmdirSync(path); return true; } catch { return false; }
+}
+
+function reclaimStaleLock(path, expectedToken = null) {
+  let entries;
+  try { entries = readdirSync(path); } catch { return false; }
+  const temporary = [];
+  for (const name of entries) {
+    if (name === 'owner.json') continue;
+    const match = name.match(/^\.owner\.json\.(\d+)\.[0-9a-f-]{36}\.tmp$/u);
+    if (!match) return false;
+    const pid = Number(match[1]);
+    if (processAlive(pid)) return false;
+    temporary.push(name);
+  }
+  const ownerPath = join(path, 'owner.json');
+  if (expectedToken !== null) {
+    let owner;
+    try { owner = readJson(ownerPath, 'stale lock owner', 4096); } catch { return false; }
+    if (owner.token !== expectedToken) return false;
+  }
+  try {
+    for (const name of temporary) unlinkSync(join(path, name));
+    if (existsSync(ownerPath)) unlinkSync(ownerPath);
+    rmdirSync(path);
+    return true;
+  } catch { return false; }
+}
+
+function acquireLock(path, { timeoutMs = DEFAULT_LOCK_TIMEOUT_MS, staleMs = DEFAULT_STALE_LOCK_MS, clock } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  mkdirSync(dirname(path), { recursive: true });
+  while (true) {
+    try {
+      mkdirSync(path);
+      const token = randomUUID();
+      atomicWriteJson(join(path, 'owner.json'), { token, pid: process.pid, hostname: hostname(), acquiredAt: now(clock) });
+      return () => removeLock(path, token);
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      try {
+        const owner = readJson(join(path, 'owner.json'), 'lock owner', 4096);
+        const age = Date.now() - statSync(path).mtimeMs;
+        if (age > staleMs && owner.hostname === hostname() && !processAlive(owner.pid)) {
+          if (reclaimStaleLock(path, owner.token)) continue;
+        }
+      } catch {
+        // An incomplete lock is reclaimed only after the stale threshold.
+        if (Date.now() - statSync(path).mtimeMs > staleMs) {
+          if (reclaimStaleLock(path)) continue;
+        }
+      }
+      if (Date.now() >= deadline) throw new StateError(`Timed out waiting for lock ${path}`, 'LOCK_TIMEOUT');
+      sleep(Math.min(25, Math.max(1, deadline - Date.now())));
+    }
+  }
+}
+
+function lifecycleLockPath(cwd) {
+  return join(changeRoot(cwd), 'locks', 'lifecycle.lock');
+}
+
+function changeLockPath(cwd, changeId) {
+  return join(changeRoot(cwd), 'locks', `${validateChangeId(changeId)}.lock`);
+}
+
+export function withChangeLock(cwd, changeId, callback, options = {}) {
+  const release = acquireLock(changeLockPath(cwd, changeId), options);
+  try { return callback(); } finally { release(); }
+}
+
+function withLifecycleAndChangeLocks(cwd, changeId, callback, options = {}) {
+  const releaseGlobal = acquireLock(lifecycleLockPath(cwd), options);
+  try {
+    const releaseChange = acquireLock(changeLockPath(cwd, changeId), options);
+    try { return callback(); } finally { releaseChange(); }
+  } finally { releaseGlobal(); }
+}
+
+export function gitObservation(cwd = process.cwd(), clock) {
+  const root = repositoryRoot(cwd);
+  const status = gitText(['status', '--porcelain=v1', '--untracked-files=normal'], { cwd: root });
+  return {
+    headSha: resolveCommit(root, 'HEAD'),
+    branch: gitText(['branch', '--show-current'], { cwd: root }) || '(detached)',
+    clean: status === '',
+    observedAt: now(clock),
+  };
+}
+
+function worktreeIdentity(cwd) {
+  return { gitDirectory: gitText(['rev-parse', '--path-format=absolute', '--git-dir'], { cwd: repositoryRoot(cwd) }) };
+}
+
+function normalizeErrors(result) {
+  if (!result) return [];
+  if (Array.isArray(result)) return result;
+  if (result.valid === false) return result.errors ?? ['validation failed'];
+  return [];
+}
+
+function assertValidState(state) {
+  const errors = normalizeErrors(validateDevelopmentState(state));
+  if (errors.length > 0) throw new StateError(`Invalid development state:\n- ${errors.join('\n- ')}`, 'INVALID_STATE');
+  const text = serialized(state);
+  if (Buffer.byteLength(text) > STATE_LIMIT_BYTES) throw new StateError('Active state exceeds 64 KiB', 'STATE_TOO_LARGE');
+}
+
+function stateFile(cwd, changeId) { return join(changeDirectory(cwd, changeId), 'state.json'); }
+function transitionDirectory(cwd, changeId, revision) {
+  return join(changeDirectory(cwd, changeId), 'transitions', String(revision).padStart(8, '0'));
+}
+
+function callCrash(callback, step, details) {
+  if (callback) callback(step, details);
+}
+
+function appendEvent(cwd, changeId, event, crashStep) {
+  const path = join(changeDirectory(cwd, changeId), 'events.jsonl');
+  const events = eventHistory(cwd, changeId);
+  const text = `${[...events, event].map((item) => JSON.stringify(item)).join('\n')}\n`;
+  atomicWriteText(path, text, {
+    beforeRename: () => callCrash(crashStep, 'before-event-commit', { revision: event.revision }),
+  });
+}
+
+function commitTransition({ cwd, previousState, nextState, type, summary, pendingEvidence = [], crashStep }) {
+  assertValidState(nextState);
+  if (previousState && nextState.revision !== previousState.revision + 1) {
+    throw new StateError('Transition revision must increment exactly once', 'REVISION_CONFLICT');
+  }
+  if (!nonemptyString(type) || !nonemptyString(summary)) {
+    throw new StateError('Transition type and summary must be nonempty strings', 'TRANSITION_CONFLICT');
+  }
+  const evidenceKeys = new Set();
+  const evidencePathsSet = new Set();
+  for (const record of pendingEvidence) {
+    if (!nonemptyString(record.key) || !nonemptyString(record.path) || !nonemptyString(record.label)
+        || evidenceKeys.has(record.key) || evidencePathsSet.has(record.path)
+        || !record.path.endsWith('.json') || record.path.split('/').includes('..')) {
+      throw new StateError('Transition evidence records require unique keys and safe JSON paths', 'TRANSITION_CONFLICT');
+    }
+    evidenceKeys.add(record.key);
+    evidencePathsSet.add(record.path);
+    const text = serialized(record.value);
+    if (Buffer.byteLength(text) > SIDECAR_LIMIT_BYTES) {
+      throw new StateError(`${record.label} exceeds ${SIDECAR_LIMIT_BYTES} bytes`, 'SIDECAR_TOO_LARGE');
+    }
+  }
+  const evidence = Object.fromEntries(pendingEvidence.map(({ key, value }) => [key, objectDigest(value)]));
+  const evidencePaths = Object.fromEntries(pendingEvidence.map(({ key, path }) => [key, path]));
+  const authoritativeEvidence = Object.fromEntries(pendingEvidence.map(({ key, path, label, value }) => [key, {
+    path, label, digest: evidence[key], value,
+  }]));
+  const intent = {
+    schemaVersion: 1,
+    changeId: nextState.changeId,
+    revision: nextState.revision,
+    type,
+    summary,
+    previousStateDigest: previousState ? objectDigest(previousState) : null,
+    nextStateDigest: objectDigest(nextState),
+    nextState,
+    evidence,
+    evidencePaths,
+    authoritativeEvidence,
+    createdAt: nextState.updatedAt,
+  };
+  const directory = transitionDirectory(cwd, nextState.changeId, nextState.revision);
+  if (existsSync(directory)) throw new StateError(`Transition revision ${nextState.revision} already exists`, 'TRANSITION_CONFLICT');
+  callCrash(crashStep, 'before-intent', { revision: nextState.revision });
+  const parent = dirname(directory);
+  mkdirSync(parent, { recursive: true });
+  const staging = join(parent, `.${basename(directory)}.${process.pid}.${randomUUID()}.pending`);
+  mkdirSync(staging);
+  try {
+    writeImmutableJson(join(staging, 'intent.json'), intent, 'transition intent', { limit: TRANSITION_INTENT_LIMIT_BYTES });
+    fsyncDirectory(staging);
+    callCrash(crashStep, 'before-intent-commit', { revision: nextState.revision });
+    renameSync(staging, directory);
+    fsyncDirectory(parent);
+  } finally {
+    if (existsSync(staging)) rmSync(staging, { recursive: true, force: true });
+  }
+  callCrash(crashStep, 'after-intent', { revision: nextState.revision });
+  for (const record of pendingEvidence) {
+    const digest = writeImmutableJson(
+      join(changeDirectory(cwd, nextState.changeId), record.path), record.value, record.label,
+      { afterJson: () => callCrash(crashStep, 'after-evidence-json', { revision: nextState.revision, key: record.key }) },
+    );
+    if (digest !== evidence[record.key]) throw new StateError(`Evidence digest changed for ${record.key}`, 'TRANSITION_CONFLICT');
+  }
+  callCrash(crashStep, 'after-evidence', { revision: nextState.revision });
+  atomicWriteJson(stateFile(cwd, nextState.changeId), nextState);
+  callCrash(crashStep, 'after-state', { revision: nextState.revision });
+  const receipt = transitionReceiptFor(intent);
+  writeImmutableJson(join(directory, 'receipt.json'), receipt, 'transition receipt', {
+    afterJson: () => callCrash(crashStep, 'after-receipt-json', { revision: nextState.revision }),
+  });
+  callCrash(crashStep, 'after-receipt', { revision: nextState.revision });
+  appendEvent(cwd, nextState.changeId, {
+    revision: nextState.revision, type, summary, at: nextState.updatedAt,
+  }, crashStep);
+  callCrash(crashStep, 'after-event', { revision: nextState.revision });
+  atomicWriteText(join(directory, 'complete'), `${objectDigest(receipt)}\n`);
+  fsyncDirectory(directory);
+  callCrash(crashStep, 'after-complete', { revision: nextState.revision });
+  return nextState;
+}
+
+function descriptorKind(descriptor) { return descriptor?.kind ?? descriptor?.type; }
+
+function descriptorReference(descriptor) {
+  if (descriptor?.type === 'github-issue') return `${descriptor.repository}#${descriptor.issueNumber}`;
+  return descriptor?.reference ?? descriptor?.path ?? descriptor?.repository
+    ?? descriptor?.file ?? descriptor?.comparisonBase ?? null;
+}
+
+function sourceFields(observation, descriptor, timestamp, classification = 'unchanged') {
+  const full = observation.fullDigest ?? observation.digest ?? observation.sourceDigest ?? objectDigest(observation);
+  const material = observation.materialDigest ?? full;
+  const progress = observation.progressDigest ?? full;
+  return {
+    kind: observation.sourceType ?? observation.kind ?? descriptorKind(descriptor),
+    reference: observation.reference ?? descriptorReference(descriptor),
+    relationship: observation.relationship ?? descriptor.relationshipIntent ?? descriptor.relationship ?? 'reference-only',
+    initialDigest: full,
+    latestDigest: full,
+    fullDigest: full,
+    materialDigest: material,
+    progressDigest: progress,
+    classification,
+    observationDigest: objectDigest(observation),
+    latestCommentIdentity: observation.source?.latestCommentIdentity ?? observation.latestCommentIdentity ?? observation.latestObservedCommentId ?? null,
+    refreshedAt: observation.capturedAt ?? timestamp,
+  };
+}
+
+function githubReaderFor(adapter) {
+  if (typeof adapter === 'function') return adapter;
+  const selected = adapter ?? createGhGraphqlAdapter();
+  return (options) => readGithubIssue({ ...options, adapter: selected });
+}
+
+function checklistState(observation) {
+  const byId = new Map();
+  for (const item of observation.source?.checklist ?? observation.checklist ?? observation.checklistEntries ?? []) {
+    const id = item.checklistItemId ?? item.id ?? item.identity;
+    const existing = byId.get(id);
+    byId.set(id, {
+      id,
+      checked: existing ? existing.checked && item.checked === true : item.checked === true,
+      status: existing || item.ambiguous ? 'ambiguous' : (item.removed ? 'removed' : 'current'),
+      externalChange: existing?.externalChange === true || item.externalChange === true,
+    });
+  }
+  return [...byId.values()];
+}
+
+function refreshedChecklist(previousObservation, observation, comparison) {
+  const current = checklistState(observation);
+  if (!comparison) return current;
+  const previousRaw = previousObservation.source?.checklist ?? [];
+  const currentRaw = observation.source?.checklist ?? [];
+  const allRaw = [...previousRaw, ...currentRaw];
+  const durableIdsFor = (internalId) => allRaw.filter((item) => item.id === internalId).map((item) => item.checklistItemId);
+  const ambiguous = new Set(currentRaw.filter((item) => item.ambiguous).map((item) => item.checklistItemId));
+  for (const item of comparison.ambiguous ?? []) {
+    const matches = [
+      ...durableIdsFor(item.id),
+      ...currentRaw.filter((raw) => item.position !== undefined && raw.position === item.position).map((raw) => raw.checklistItemId),
+    ];
+    for (const id of matches.length > 0 ? matches : [item.id]) ambiguous.add(id);
+  }
+  const external = new Set();
+  for (const change of comparison.changes ?? []) {
+    const raw = change.after ?? change.before;
+    const id = raw?.checklistItemId ?? durableIdsFor(change.id)[0] ?? change.id;
+    if (change.kind !== 'progress') external.add(id);
+    if ((change.kind === 'removed' || change.kind === 'legacy-removed') && raw
+        && !current.some((item) => item.id === raw.checklistItemId)) {
+      current.push({ id: raw.checklistItemId, checked: raw.checked === true, status: 'removed', externalChange: true });
+    }
+    if (change.kind === 'legacy-text-or-order-changed' && change.before
+        && change.before.checklistItemId !== change.after?.checklistItemId
+        && !current.some((item) => item.id === change.before.checklistItemId)) {
+      current.push({ id: change.before.checklistItemId, checked: change.before.checked === true, status: 'removed', externalChange: true });
+    }
+  }
+  return current.map((item) => ({
+    ...item,
+    status: item.status === 'removed' ? 'removed' : item.status === 'ambiguous' || ambiguous.has(item.id) ? 'ambiguous' : 'current',
+    externalChange: item.externalChange || external.has(item.id) || ambiguous.has(item.id),
+  }));
+}
+
+export function nextActionFor(state) {
+  if (state.phase === 'initializing') return 'Complete source capture and enter planning.';
+  if (state.phase === 'planning') return state.unresolvedDecisionIds.length > 0
+    ? 'Record or resolve every unresolved decision before accepting the plan.'
+    : 'Validate and accept an implementation plan.';
+  if (state.phase === 'awaiting-decision') return 'Record a decision, then amend or retain the accepted plan explicitly.';
+  if (state.phase === 'ready-to-implement') return state.mode === 'plan-only'
+    ? 'Archive this completed plan-only change.'
+    : 'Continue with the implementation capability using the immutable accepted plan.';
+  if (state.phase === 'recovering') return 'Run change:state recover to finish the exact interrupted transition.';
+  if (state.phase === 'blocked') return 'Resolve the listed blocking evidence, then recover or explicitly abandon the change.';
+  if (state.phase === 'abandoned') return 'Archive the explicitly abandoned change.';
+  return 'Inspect durable state.';
+}
+
+function buildInitialState({ changeId, mode, baseBranch, expectedPrBaseBranch, planningRef, planningSha, observation, descriptor, git, timestamp }) {
+  const state = {
+    schemaVersion: 1,
+    changeId,
+    mode,
+    phase: 'planning',
+    revision: 0,
+    baseBranch,
+    expectedPrBaseBranch: expectedPrBaseBranch ?? baseBranch,
+    planningRef,
+    planningSha,
+    source: sourceFields(observation, descriptor, timestamp),
+    plan: null,
+    git,
+    unresolvedDecisionIds: [],
+    checklist: checklistState(observation),
+    blockedReasons: [],
+    abandonmentReason: null,
+    nextAction: '',
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  state.nextAction = nextActionFor(state);
+  return state;
+}
+
+function assertExactlyOneSource(source, sources) {
+  const values = [source, ...Object.values(sources ?? {})].filter((value) => value !== undefined && value !== null);
+  if (values.length !== 1 || !descriptorKind(values[0])) {
+    throw new StateError('Initialization requires exactly one source descriptor', 'INVALID_SOURCE');
+  }
+  return values[0];
+}
+
+function lifecycleChangeIds(cwd) {
+  const changes = join(changeRoot(cwd), 'changes');
+  if (!existsSync(changes)) return [];
+  return readdirSync(changes, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+}
+
+function readArchiveIntent(cwd) {
+  const root = changeRoot(cwd);
+  const path = join(root, 'archive-lifecycle.json');
+  if (existsSync(join(root, 'archive-intent.json')) || existsSync(join(root, 'archive-intent.sha256'))) {
+    throw new StateError('Obsolete or partial archive lifecycle evidence is present', 'ARCHIVE_CONFLICT');
+  }
+  if (!existsSync(path)) return null;
+  const envelope = readJson(path, 'archive lifecycle envelope');
+  if (serialized(Object.keys(envelope).sort()) !== serialized(['intent', 'intentDigest', 'schemaVersion'])
+      || envelope.schemaVersion !== 1 || !envelope.intent || envelope.intentDigest !== objectDigest(envelope.intent)) {
+    throw new StateError('Archive lifecycle envelope is invalid', 'ARCHIVE_CONFLICT');
+  }
+  return envelope.intent;
+}
+
+function writeArchiveIntent(cwd, intent) {
+  const path = join(changeRoot(cwd), 'archive-lifecycle.json');
+  if (existsSync(path)) throw new StateError('An archive lifecycle is already pending', 'ARCHIVE_CONFLICT');
+  atomicWriteJson(path, { schemaVersion: 1, intent, intentDigest: objectDigest(intent) });
+  const persisted = readArchiveIntent(cwd);
+  if (serialized(persisted) !== serialized(intent)) throw new StateError('Archive lifecycle commit failed', 'ARCHIVE_CONFLICT');
+}
+
+function clearArchiveIntent(cwd) {
+  const path = join(changeRoot(cwd), 'archive-lifecycle.json');
+  unlinkSync(path);
+  fsyncDirectory(dirname(path));
+}
+
+export async function initializeState({
+  cwd = process.cwd(), changeId, mode, baseBranch, expectedPrBaseBranch, planningRef,
+  source, sources, sourceAdapter, clock, crashStep, lockOptions,
+}) {
+  validateChangeId(changeId);
+  if (!MODES.has(mode)) throw new StateError(`Unsupported mode ${mode}`, 'INVALID_MODE');
+  if (!baseBranch || !planningRef) throw new StateError('baseBranch and explicit planningRef are required', 'INVALID_INITIALIZATION');
+  const descriptor = assertExactlyOneSource(source, sources);
+  const root = repositoryRoot(cwd);
+  const planningSha = resolveCommit(root, planningRef);
+  const baseSha = resolveCommit(root, baseBranch);
+  resolveCommit(root, expectedPrBaseBranch ?? baseBranch);
+  if (runGit(['merge-base', '--is-ancestor', baseSha, planningSha], { cwd: root, allowFailure: true }).status !== 0) {
+    throw new StateError('baseBranch must resolve to an ancestor of the Planning SHA', 'INVALID_PLANNING_BASE');
+  }
+  const git = gitObservation(root, clock);
+  if (git.headSha !== planningSha || !git.clean) {
+    throw new StateError('Initialization requires clean HEAD exactly at the Planning SHA', 'PLANNING_SNAPSHOT_MISMATCH');
+  }
+  // Potentially networked source capture deliberately happens before any state lock.
+  const observation = await captureSource({
+    cwd: root, planningSha, descriptor, githubReader: githubReaderFor(sourceAdapter),
+    now: () => (clock ? clock() : new Date()),
+  });
+  const timestamp = now(clock);
+  const initial = buildInitialState({
+    changeId, mode, baseBranch, expectedPrBaseBranch, planningRef, planningSha,
+    observation, descriptor, git, timestamp,
+  });
+  return withLifecycleAndChangeLocks(root, changeId, () => {
+    const lockedGit = gitObservation(root, clock);
+    if (lockedGit.headSha !== planningSha || !lockedGit.clean) {
+      throw new StateError('Planning snapshot changed during source capture', 'PLANNING_SNAPSHOT_MISMATCH');
+    }
+    initial.git = lockedGit;
+    const active = activePointerPath(root);
+    if (readArchiveIntent(root)) {
+      throw new StateError('A pending archive lifecycle must be recovered before initialization', 'LIFECYCLE_RECOVERY_REQUIRED');
+    }
+    if (existsSync(active)) throw new StateError('Another change-development session is active', 'ACTIVE_CHANGE_EXISTS');
+    if (lifecycleChangeIds(root).length > 0) {
+      throw new StateError('Existing pointerless, interrupted, or orphan change state must be recovered before initialization', 'LIFECYCLE_RECOVERY_REQUIRED');
+    }
+    const directory = changeDirectory(root, changeId);
+    if (existsSync(directory) || existsSync(archiveDirectory(root, changeId))) {
+      throw new StateError(`Change ${changeId} already has durable state`, 'CHANGE_EXISTS');
+    }
+    const worktree = worktreeIdentity(root);
+    commitTransition({
+      cwd: root, previousState: null, nextState: initial, type: 'initialized',
+      summary: 'Captured source and entered planning', crashStep,
+      pendingEvidence: [
+        { key: 'observationDigest', path: 'source/initial.json', value: observation, label: 'initial source observation' },
+        { key: 'worktreeDigest', path: 'worktree.json', value: worktree, label: 'owning worktree identity' },
+      ],
+    });
+    atomicWriteJson(active, { schemaVersion: 1, changeId, statePath: stateFile(root, changeId), updatedAt: timestamp });
+    return initial;
+  }, lockOptions);
+}
+
+export function locateState(cwd = process.cwd(), changeId) {
+  const root = repositoryRoot(cwd);
+  if (changeId) {
+    const path = stateFile(root, changeId);
+    return existsSync(path) ? { changeId, path } : null;
+  }
+  const pointer = activePointerPath(root);
+  if (!existsSync(pointer)) return null;
+  const active = readJson(pointer, 'active change pointer', 8192);
+  validateChangeId(active.changeId);
+  const expected = stateFile(root, active.changeId);
+  if (active.statePath !== expected) throw new StateError('Active pointer does not name the canonical state path', 'ACTIVE_POINTER_INVALID');
+  return existsSync(expected) ? { changeId: active.changeId, path: expected } : null;
+}
+
+export function loadState(cwd = process.cwd(), changeId) {
+  const located = locateState(cwd, changeId);
+  if (!located) return null;
+  const state = readJson(located.path, 'development state', STATE_LIMIT_BYTES);
+  assertValidState(state);
+  return state;
+}
+
+function assertRevision(state, expectedRevision) {
+  if (!Number.isInteger(expectedRevision) || expectedRevision !== state.revision) {
+    throw new StateError(`Expected revision ${expectedRevision}; active revision is ${state.revision}`, 'REVISION_CONFLICT');
+  }
+}
+
+function selectedChangeId(cwd, changeId) {
+  const selected = changeId ?? locateState(cwd)?.changeId;
+  if (!selected) throw new StateError('No active change state', 'STATE_NOT_FOUND');
+  return selected;
+}
+
+function revised(state, changes, clock) {
+  const next = { ...state, ...changes, revision: state.revision + 1, updatedAt: now(clock) };
+  next.nextAction = nextActionFor(next);
+  return next;
+}
+
+function readEffectivePlan(cwd, state) {
+  if (!state.plan) return null;
+  if (state.plan.amendmentCount === 0) return verifyReceipt(join(changeDirectory(cwd, state.changeId), 'plan', 'plan.json'), 'accepted plan').value;
+  const name = `${String(state.plan.amendmentCount).padStart(4, '0')}.json`;
+  return verifyReceipt(join(changeDirectory(cwd, state.changeId), 'plan', 'amendments', name), 'latest plan amendment').value.resultingPlan;
+}
+
+function readObservationByDigest(cwd, state) {
+  const sourceDirectory = join(changeDirectory(cwd, state.changeId), 'source');
+  const candidates = [join(sourceDirectory, 'initial.json')];
+  const observations = join(sourceDirectory, 'observations');
+  if (existsSync(observations)) {
+    candidates.push(...readdirSync(observations)
+      .filter((name) => name.endsWith('.json'))
+      .sort().reverse().map((name) => join(observations, name)));
+  }
+  for (const path of candidates) {
+    const verified = verifyReceipt(path, 'source observation');
+    if (verified.digest === state.source.observationDigest) return verified.value;
+  }
+  throw new StateError('Latest source observation receipt cannot be located', 'SOURCE_OBSERVATION_MISSING');
+}
+
+function readinessErrors(plan, evidence, sourceObservation) {
+  const errors = normalizeErrors(validateImplementationPlan(plan, { planningEvidence: evidence, sourceObservation }));
+  if (errors.length > 0) return errors;
+  const gate = planReadiness(plan, { planningEvidence: evidence, sourceObservation });
+  if (Array.isArray(gate)) return gate;
+  if (gate?.ready === false || gate?.allowed === false) return gate.reasons ?? gate.errors ?? ['plan is not ready'];
+  return [];
+}
+
+export function loadLatestSourceObservation(cwd = process.cwd(), changeId) {
+  const root = repositoryRoot(cwd);
+  const state = loadState(root, changeId);
+  if (!state) return null;
+  return readObservationByDigest(root, state);
+}
+
+export function acceptPlan({ cwd = process.cwd(), changeId, plan, planningEvidence = [], expectedRevision, clock, crashStep, lockOptions }) {
+  const root = repositoryRoot(cwd);
+  const selected = selectedChangeId(root, changeId);
+  return withChangeLock(root, selected, () => {
+    const state = loadState(root, changeId);
+    if (!state) throw new StateError('No active change state', 'STATE_NOT_FOUND');
+    assertRevision(state, expectedRevision);
+    validateState({ cwd: root, changeId: state.changeId });
+    if (state.plan) throw new StateError('The accepted plan is immutable; use amend-plan', 'PLAN_ALREADY_ACCEPTED');
+    if (!['planning', 'awaiting-decision'].includes(state.phase)) throw new StateError(`Cannot accept a plan in ${state.phase}`, 'INVALID_PHASE');
+    if (plan.changeId !== state.changeId || plan.planning?.planningSha !== state.planningSha
+      || plan.planning?.baseBranch !== state.baseBranch || plan.expectedPrBaseBranch !== state.expectedPrBaseBranch
+      || plan.source?.kind !== state.source.kind || plan.source?.reference !== state.source.reference
+      || plan.source?.relationship !== state.source.relationship || plan.source?.captureDigest !== state.source.latestDigest) {
+      throw new StateError('Plan identity, Planning SHA, base branch, or source capture does not match state', 'PLAN_STATE_MISMATCH');
+    }
+    const currentGit = gitObservation(root, clock);
+    if (!currentGit.clean || currentGit.headSha !== state.planningSha) {
+      throw new StateError('Plan acceptance requires clean HEAD at the Planning SHA', 'PLANNING_SNAPSHOT_MISMATCH');
+    }
+    const sourceObservation = readObservationByDigest(root, state);
+    const errors = readinessErrors(plan, planningEvidence, sourceObservation);
+    if (errors.length > 0) throw new StateError(`Plan is not implementation-ready:\n- ${errors.join('\n- ')}`, 'PLAN_NOT_READY');
+    const stateChecklist = new Map(state.checklist.map((item) => [item.id, item]));
+    if (plan.checklistMappings.length !== stateChecklist.size || plan.checklistMappings.some((mapping) => {
+      const item = stateChecklist.get(mapping.id);
+      return !item || item.checked !== mapping.checked || item.status !== mapping.status
+        || item.externalChange !== mapping.externalChange;
+    })) throw new StateError('Plan checklist mappings must exactly match the latest source observation', 'PLAN_CHECKLIST_MISMATCH');
+    const planDigest = objectDigest(plan);
+    const timestamp = now(clock);
+    const next = revised(state, {
+      phase: 'ready-to-implement',
+      plan: {
+        revision: plan.planRevision,
+        originalDigest: planDigest,
+        effectiveDigest: planDigest,
+        sourceCaptureDigest: plan.source.captureDigest,
+        amendmentCount: 0,
+        acceptedAt: timestamp,
+      },
+      unresolvedDecisionIds: [],
+      source: { ...state.source, classification: 'unchanged' },
+      blockedReasons: [],
+      git: currentGit,
+    }, () => new Date(timestamp));
+    return commitTransition({
+      cwd: root, previousState: state, nextState: next, type: 'plan-accepted',
+      summary: 'Accepted immutable implementation plan', crashStep,
+      pendingEvidence: [
+        { key: 'planDigest', path: 'plan/plan.json', value: plan, label: 'accepted plan' },
+        { key: 'planningEvidenceDigest', path: 'plan/planning-evidence.json', value: planningEvidence, label: 'planning evidence' },
+      ],
+    });
+  }, lockOptions);
+}
+
+function classifyRefresh(previous, observation, supplied) {
+  if (supplied) return supplied;
+  const full = observation.fullDigest ?? observation.digest ?? observation.sourceDigest ?? objectDigest(observation);
+  const material = observation.materialDigest ?? full;
+  const progress = observation.progressDigest ?? full;
+  if (full === previous.fullDigest) return 'unchanged';
+  if (material === previous.materialDigest && progress !== previous.progressDigest) return 'progress-only';
+  return 'unreviewed-material';
+}
+
+export async function refreshSource({ cwd = process.cwd(), changeId, expectedRevision, sourceAdapter, clock, crashStep, lockOptions }) {
+  const root = repositoryRoot(cwd);
+  const before = loadState(root, changeId);
+  if (!before) throw new StateError('No active change state', 'STATE_NOT_FOUND');
+  // The live read is intentionally outside the state lock.
+  const previousObservation = readObservationByDigest(root, before);
+  const refreshed = await captureSourceRefresh({
+    cwd: root,
+    planningSha: before.planningSha,
+    descriptor: previousObservation.descriptor,
+    previousObservation,
+    githubReader: githubReaderFor(sourceAdapter),
+    now: () => (clock ? clock() : new Date()),
+  });
+  const observation = refreshed.observation ?? refreshed.source ?? refreshed;
+  const suppliedClassification = refreshed.classification ?? refreshed.drift;
+  return withChangeLock(root, before.changeId, () => {
+    const state = loadState(root, before.changeId);
+    if (!state) throw new StateError('No active change state', 'STATE_NOT_FOUND');
+    assertRevision(state, expectedRevision);
+    validateState({ cwd: root, changeId: state.changeId });
+    const lockedGit = gitObservation(root, clock);
+    if (!lockedGit.clean || lockedGit.headSha !== state.planningSha) {
+      throw new StateError('Source refresh requires clean HEAD at the Planning SHA', 'PLANNING_SNAPSHOT_MISMATCH');
+    }
+    const observedClassification = classifyRefresh(state.source, observation, suppliedClassification);
+    const classification = state.plan && state.source.classification === 'unreviewed-material'
+      ? 'unreviewed-material'
+      : state.plan && state.source.classification === 'progress-only' && observedClassification === 'unchanged'
+        ? 'progress-only' : observedClassification;
+    const timestamp = now(clock);
+    const full = observation.fullDigest ?? observation.digest ?? observation.sourceDigest ?? objectDigest(observation);
+    const material = observation.materialDigest ?? full;
+    const progress = observation.progressDigest ?? full;
+    const observationPath = `source/observations/${String(state.revision + 1).padStart(8, '0')}.json`;
+    const observationDigest = objectDigest(observation);
+    const next = revised(state, {
+      phase: state.plan && classification === 'unreviewed-material' ? 'awaiting-decision' : state.phase,
+      source: {
+        ...state.source,
+        latestDigest: full,
+        fullDigest: full,
+        materialDigest: material,
+        progressDigest: progress,
+        classification,
+        observationDigest,
+        latestCommentIdentity: observation.source?.latestCommentIdentity ?? observation.latestCommentIdentity ?? observation.latestObservedCommentId ?? state.source.latestCommentIdentity,
+        refreshedAt: observation.capturedAt ?? timestamp,
+      },
+      checklist: refreshedChecklist(previousObservation, observation, refreshed.checklistComparison),
+    }, () => new Date(timestamp));
+    return commitTransition({
+      cwd: root, previousState: state, nextState: next, type: 'source-refreshed',
+      summary: `Source refresh classified ${classification}`, crashStep,
+      pendingEvidence: [{ key: 'observationDigest', path: observationPath, value: observation, label: 'source observation' }],
+    });
+  }, lockOptions);
+}
+
+export function recordDecision({ cwd = process.cwd(), changeId, decision, expectedRevision, clock, crashStep, lockOptions }) {
+  const root = repositoryRoot(cwd);
+  const selected = selectedChangeId(root, changeId);
+  return withChangeLock(root, selected, () => {
+    const state = loadState(root, changeId);
+    if (!state) throw new StateError('No active change state', 'STATE_NOT_FOUND');
+    assertRevision(state, expectedRevision);
+    validateState({ cwd: root, changeId: state.changeId });
+    const allowedDecisionKeys = ['id', 'reason', 'authorization', 'trigger', 'disposition'];
+    if (!isPlainObject(decision) || !allowedDecisionKeys.every((key) => nonemptyString(decision[key]))
+        || Object.keys(decision).some((key) => !allowedDecisionKeys.includes(key))
+        || !['resolve', 'retain-plan'].includes(decision.disposition)) {
+      throw new StateError('Decision requires strict nonempty id, reason, authorization, trigger, and resolve|retain-plan disposition', 'INVALID_DECISION');
+    }
+    validateChangeId(decision.id);
+    if (!['planning', 'awaiting-decision'].includes(state.phase)) {
+      throw new StateError(`Decisions are not permitted in phase ${state.phase}`, 'INVALID_PHASE');
+    }
+    const decisionPath = join(changeDirectory(root, state.changeId), 'decisions', `${decision.id}.json`);
+    if (existsSync(decisionPath) || existsSync(decisionPath.replace(/\.json$/u, '.sha256'))) {
+      throw new StateError(`Decision ID ${decision.id} already exists`, 'DECISION_ID_CONFLICT');
+    }
+    const retainPlan = decision.disposition === 'retain-plan';
+    if (retainPlan && !(state.phase === 'awaiting-decision' && state.plan
+        && state.source.classification === 'unreviewed-material' && state.blockedReasons.length === 0)) {
+      throw new StateError('retain-plan requires accepted material drift in awaiting-decision', 'INVALID_DECISION');
+    }
+    const currentGit = gitObservation(root, clock);
+    if (retainPlan && (!currentGit.clean || currentGit.headSha !== state.planningSha)) {
+      throw new StateError('retain-plan requires clean HEAD at the Planning SHA', 'PLANNING_SNAPSHOT_MISMATCH');
+    }
+    const timestamp = now(clock);
+    const record = {
+      schemaVersion: 1, ...decision, changeId: state.changeId,
+      stateRevision: state.revision,
+      sourceObservationDigest: state.source.observationDigest,
+      sourceDigest: state.source.latestDigest,
+      effectivePlanDigest: state.plan?.effectiveDigest ?? null,
+      repositorySha: currentGit.headSha, recordedAt: timestamp,
+    };
+    const unresolved = state.unresolvedDecisionIds.filter((id) => id !== decision.id);
+    const resolvedPhase = state.phase === 'awaiting-decision' && !retainPlan
+      && unresolved.length === 0 && state.source.classification !== 'unreviewed-material'
+      ? 'planning' : state.phase;
+    const next = revised(state, {
+      unresolvedDecisionIds: unresolved,
+      phase: retainPlan && unresolved.length === 0 ? 'ready-to-implement' : resolvedPhase,
+      source: retainPlan ? { ...state.source, classification: 'unchanged' } : state.source,
+      git: retainPlan ? currentGit : state.git,
+      blockedReasons: retainPlan ? [] : state.blockedReasons,
+    }, () => new Date(timestamp));
+    return commitTransition({
+      cwd: root, previousState: state, nextState: next, type: 'decision-recorded',
+      summary: `Recorded decision ${decision.id}`, crashStep,
+      pendingEvidence: [{ key: 'decisionDigest', path: `decisions/${decision.id}.json`, value: record, label: `decision ${decision.id}` }],
+    });
+  }, lockOptions);
+}
+
+function nonemptyString(value) {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+}
+
+function validUniqueStrings(values) {
+  return Array.isArray(values) && values.every(nonemptyString) && new Set(values).size === values.length;
+}
+
+function hasBoundResolveDecision(cwd, state) {
+  const directory = join(changeDirectory(cwd, state.changeId), 'decisions');
+  if (!existsSync(directory)) return false;
+  return readdirSync(directory).filter((name) => name.endsWith('.json')).some((name) => {
+    const record = verifyReceipt(join(directory, name), 'amendment prerequisite decision').value;
+    return record.disposition === 'resolve'
+      && record.stateRevision <= state.revision
+      && record.sourceObservationDigest === state.source.observationDigest
+      && record.sourceDigest === state.source.latestDigest
+      && record.effectivePlanDigest === state.plan.effectiveDigest;
+  });
+}
+
+export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingPlan, planningEvidence = [], expectedRevision, clock, crashStep, lockOptions }) {
+  const root = repositoryRoot(cwd);
+  const selected = selectedChangeId(root, changeId);
+  return withChangeLock(root, selected, () => {
+    const state = loadState(root, changeId);
+    if (!state?.plan) throw new StateError('An accepted plan is required before amendment', 'PLAN_NOT_ACCEPTED');
+    assertRevision(state, expectedRevision);
+    validateState({ cwd: root, changeId: state.changeId });
+    if (!['ready-to-implement', 'awaiting-decision'].includes(state.phase)) {
+      throw new StateError(`Plan amendment is not permitted in phase ${state.phase}`, 'INVALID_PHASE');
+    }
+    if (state.phase === 'awaiting-decision' && !hasBoundResolveDecision(root, state)) {
+      throw new StateError('Material-drift amendment requires a bound resolve decision for the current source and effective plan', 'DECISION_REQUIRED');
+    }
+    if (!isPlainObject(amendment) || !['id', 'reason', 'authorization', 'trigger'].every((key) => nonemptyString(amendment[key]))
+        || !isPlainObject(amendment.delta) || Object.keys(amendment.delta).length === 0
+        || !validUniqueStrings(amendment.invalidatedEvidence)
+        || Object.keys(amendment).some((key) => !['id', 'reason', 'authorization', 'trigger', 'delta', 'invalidatedEvidence'].includes(key))) {
+      throw new StateError('Amendment requires strict id, reason, trigger, authorization, delta, and invalidatedEvidence', 'INVALID_AMENDMENT');
+    }
+    validateChangeId(amendment.id);
+    for (let existingNumber = 1; existingNumber <= state.plan.amendmentCount; existingNumber += 1) {
+      const existingPath = join(changeDirectory(root, state.changeId), 'plan', 'amendments', `${String(existingNumber).padStart(4, '0')}.json`);
+      if (verifyReceipt(existingPath, `plan amendment ${existingNumber}`).value.amendmentId === amendment.id) {
+        throw new StateError(`Amendment ID ${amendment.id} already exists`, 'AMENDMENT_ID_CONFLICT');
+      }
+    }
+    const currentGit = gitObservation(root, clock);
+    if (!currentGit.clean || resultingPlan.planning?.planningSha !== currentGit.headSha) {
+      throw new StateError('Amendment resulting plan must use the current clean repository SHA', 'PLANNING_SNAPSHOT_MISMATCH');
+    }
+    if (resultingPlan.changeId !== state.changeId || resultingPlan.planning?.planningSha !== state.planningSha
+      || resultingPlan.planning?.baseBranch !== state.baseBranch
+      || resultingPlan.expectedPrBaseBranch !== state.expectedPrBaseBranch
+      || resultingPlan.source?.kind !== state.source.kind || resultingPlan.source?.reference !== state.source.reference
+      || resultingPlan.source?.relationship !== state.source.relationship
+      || resultingPlan.source?.captureDigest !== state.source.latestDigest
+      || resultingPlan.planRevision !== state.plan.revision + 1) {
+      throw new StateError('Resulting plan does not match the change or Planning SHA', 'PLAN_STATE_MISMATCH');
+    }
+    const sourceObservation = readObservationByDigest(root, state);
+    const errors = readinessErrors(resultingPlan, planningEvidence, sourceObservation);
+    if (errors.length > 0) throw new StateError(`Amended plan is not ready:\n- ${errors.join('\n- ')}`, 'PLAN_NOT_READY');
+    const prior = readEffectivePlan(root, state);
+    if (objectDigest(prior) !== state.plan.effectiveDigest) throw new StateError('Effective plan receipt is inconsistent', 'PLAN_TAMPERED');
+    const repositorySha = currentGit.headSha;
+    const newDigest = objectDigest(resultingPlan);
+    const timestamp = now(clock);
+    const record = {
+      schemaVersion: 1,
+      amendmentId: amendment.id,
+      reason: amendment.reason,
+      trigger: amendment.trigger ?? null,
+      delta: amendment.delta,
+      previousDigest: state.plan.effectiveDigest,
+      newDigest,
+      repositorySha,
+      authorization: amendment.authorization,
+      invalidatedEvidence: amendment.invalidatedEvidence ?? [],
+      resultingPlan,
+      createdAt: timestamp,
+    };
+    const number = state.plan.amendmentCount + 1;
+    const next = revised(state, {
+      phase: 'ready-to-implement',
+      plan: { ...state.plan, revision: resultingPlan.planRevision, effectiveDigest: newDigest, amendmentCount: number,
+        sourceCaptureDigest: resultingPlan.source.captureDigest },
+      source: { ...state.source, classification: 'unchanged' },
+      git: currentGit,
+      unresolvedDecisionIds: resultingPlan.decisions.filter((decision) => decision.status !== 'resolved').map((decision) => decision.id),
+      checklist: resultingPlan.checklistMappings.map((mapping) => ({
+        id: mapping.id, checked: mapping.checked, status: mapping.status, externalChange: mapping.externalChange,
+      })),
+      blockedReasons: [],
+    }, () => new Date(timestamp));
+    return commitTransition({
+      cwd: root, previousState: state, nextState: next, type: 'plan-amended',
+      summary: `Appended plan amendment ${amendment.id}`, crashStep,
+      pendingEvidence: [
+        { key: 'amendmentDigest', path: `plan/amendments/${String(number).padStart(4, '0')}.json`, value: record, label: `plan amendment ${number}` },
+        { key: 'planningEvidenceDigest', path: `plan/amendments/${String(number).padStart(4, '0')}.evidence.json`, value: planningEvidence,
+          label: `plan amendment ${number} planning evidence` },
+      ],
+    });
+  }, lockOptions);
+}
+
+function transitionEntries(cwd, changeId) {
+  const root = join(changeDirectory(cwd, changeId), 'transitions');
+  if (!existsSync(root)) return [];
+  const entries = readdirSync(root, { withFileTypes: true });
+  const stagingPattern = /^\.\d{8}\.\d+\.[0-9a-f-]{36}\.pending$/u;
+  const unexpected = entries.find((entry) => !entry.isDirectory()
+    || (!/^\d{8}$/u.test(entry.name) && !stagingPattern.test(entry.name)));
+  if (unexpected) throw new StateError(`Unexpected transition evidence entry ${unexpected.name}`, 'RECOVERY_EVIDENCE_INVALID');
+  return entries.filter((entry) => /^\d{8}$/u.test(entry.name)).map((entry) => join(root, entry.name)).sort();
+}
+
+function cleanupUncommittedTransitionStaging(cwd, changeId) {
+  const root = join(changeDirectory(cwd, changeId), 'transitions');
+  if (!existsSync(root)) return 0;
+  const stagingPattern = /^\.\d{8}\.\d+\.[0-9a-f-]{36}\.pending$/u;
+  const staging = readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory() && stagingPattern.test(entry.name));
+  for (const entry of staging) {
+    const directory = join(root, entry.name);
+    const children = readdirSync(directory, { withFileTypes: true });
+    const valid = children.every((child) => !child.isDirectory() && (child.name === 'intent.json' || child.name === 'intent.sha256'
+      || /^\.intent\.(?:json|sha256)\.\d+\.[0-9a-f-]{36}\.tmp$/u.test(child.name)));
+    if (!valid) throw new StateError(`Uncommitted transition staging ${entry.name} contains unexpected evidence`, 'RECOVERY_EVIDENCE_INVALID');
+    for (const child of children) unlinkSync(join(directory, child.name));
+    rmdirSync(directory);
+  }
+  if (staging.length > 0) fsyncDirectory(root);
+  return staging.length;
+}
+
+function isUncommittedTransitionShell(cwd, changeId) {
+  const directory = changeDirectory(cwd, changeId);
+  const root = join(directory, 'transitions');
+  if (!existsSync(directory)) return false;
+  const directoryEntries = readdirSync(directory);
+  if (directoryEntries.length === 0) return true;
+  if (!existsSync(root) || directoryEntries.some((name) => name !== 'transitions')) return false;
+  const stagingPattern = /^\.\d{8}\.\d+\.[0-9a-f-]{36}\.pending$/u;
+  return readdirSync(root, { withFileTypes: true }).every((entry) => {
+    if (!entry.isDirectory() || !stagingPattern.test(entry.name)) return false;
+    return readdirSync(join(root, entry.name), { withFileTypes: true }).every((child) => !child.isDirectory()
+      && (child.name === 'intent.json' || child.name === 'intent.sha256'
+        || /^\.intent\.(?:json|sha256)\.\d+\.[0-9a-f-]{36}\.tmp$/u.test(child.name)));
+  });
+}
+
+function cleanupAtomicEventTemps(cwd, changeId) {
+  const directory = changeDirectory(cwd, changeId);
+  if (!existsSync(directory)) return 0;
+  const names = readdirSync(directory).filter((name) => /^\.events\.jsonl\.\d+\.[0-9a-f-]{36}\.tmp$/u.test(name));
+  for (const name of names) unlinkSync(join(directory, name));
+  if (names.length > 0) fsyncDirectory(directory);
+  return names.length;
+}
+
+function authoritativeEvidenceRecords(intent) {
+  const records = intent.authoritativeEvidence;
+  if (!records || typeof records !== 'object' || Array.isArray(records)
+      || serialized(Object.keys(records).sort()) !== serialized(Object.keys(intent.evidence ?? {}).sort())) {
+    throw new StateError(`Transition ${intent.revision} lacks authoritative pending evidence`, 'RECOVERY_EVIDENCE_INVALID');
+  }
+  const paths = new Set();
+  for (const [key, record] of Object.entries(records)) {
+    const segments = typeof record?.path === 'string' ? record.path.split('/') : [];
+    const canonicalRoot = record?.path === 'worktree.json'
+      || /^(?:source|plan|decisions)\//u.test(record?.path ?? '');
+    if (!record || typeof record !== 'object' || Array.isArray(record)
+        || !nonemptyString(record.path) || !nonemptyString(record.label)
+        || record.path !== intent.evidencePaths?.[key] || record.digest !== intent.evidence[key]
+        || objectDigest(record.value) !== record.digest || paths.has(record.path)
+        || !record.path.endsWith('.json') || !canonicalRoot || record.path.includes('\\')
+        || segments.some((segment) => segment === '' || segment === '.' || segment === '..')) {
+      throw new StateError(`Transition ${intent.revision} authoritative evidence ${key} is inconsistent`, 'RECOVERY_EVIDENCE_INVALID');
+    }
+    paths.add(record.path);
+  }
+  return records;
+}
+
+function cleanupAtomicWriteTemps(path) {
+  const name = basename(path).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const pattern = new RegExp(`^\\.${name}\\.\\d+\\.[0-9a-f-]{36}\\.tmp$`, 'u');
+  const directory = dirname(path);
+  if (!existsSync(directory)) return;
+  const temporary = readdirSync(directory).filter((entry) => pattern.test(entry));
+  for (const entry of temporary) unlinkSync(join(directory, entry));
+  if (temporary.length > 0) fsyncDirectory(directory);
+}
+
+function materializeIntentEvidence(cwd, changeId, intent) {
+  const directory = changeDirectory(cwd, changeId);
+  for (const [key, record] of Object.entries(authoritativeEvidenceRecords(intent))) {
+    const path = join(directory, record.path);
+    const receiptPath = path.replace(/\.json$/u, '.sha256');
+    cleanupAtomicWriteTemps(path);
+    cleanupAtomicWriteTemps(receiptPath);
+    const hasJson = existsSync(path);
+    const hasReceipt = existsSync(receiptPath);
+    if (hasJson) {
+      const value = readJson(path, `transition ${intent.revision} evidence ${key}`);
+      if (serialized(value) !== serialized(record.value) || objectDigest(value) !== record.digest) {
+        throw new StateError(`Transition ${intent.revision} evidence ${key} conflicts with its intent`, 'RECOVERY_EVIDENCE_INVALID');
+      }
+    }
+    if (hasReceipt) {
+      const receipt = readFileSync(receiptPath, 'utf8').trim();
+      if (receipt !== record.digest) {
+        throw new StateError(`Transition ${intent.revision} evidence ${key} receipt conflicts with its intent`, 'RECOVERY_EVIDENCE_INVALID');
+      }
+    }
+    if (!hasJson) atomicWriteText(path, serialized(record.value));
+    if (!hasReceipt) atomicWriteText(receiptPath, `${record.digest}\n`);
+    verifyReceipt(path, `transition ${intent.revision} evidence ${key}`);
+  }
+}
+
+function verifyCompleteTransition(directory) {
+  const intent = verifyReceipt(join(directory, 'intent.json'), 'transition intent', TRANSITION_INTENT_LIMIT_BYTES).value;
+  const receipt = verifyReceipt(join(directory, 'receipt.json'), 'transition receipt').value;
+  const marker = readFileSync(join(directory, 'complete'), 'utf8').trim();
+  if (!nonemptyString(intent.changeId) || !nonemptyString(intent.type) || !nonemptyString(intent.summary)
+    || intent.nextState?.changeId !== intent.changeId || intent.nextState?.revision !== intent.revision
+    || receipt.revision !== intent.revision || receipt.intentDigest !== objectDigest(intent) || receipt.stateDigest !== intent.nextStateDigest
+    || serialized(receipt.evidence) !== serialized(intent.evidence)
+    || receipt.completedAt !== intent.nextState.updatedAt
+    || objectDigest(intent.nextState) !== intent.nextStateDigest || marker !== objectDigest(receipt)) {
+    throw new StateError(`Transition evidence is tampered at ${directory}`, 'RECOVERY_EVIDENCE_INVALID');
+  }
+  assertValidState(intent.nextState);
+  authoritativeEvidenceRecords(intent);
+  return { intent, receipt };
+}
+
+export function validateState({ cwd = process.cwd(), changeId } = {}) {
+  const root = repositoryRoot(cwd);
+  const state = loadState(root, changeId);
+  if (!state) throw new StateError('No active change state', 'STATE_NOT_FOUND');
+  const entries = transitionEntries(root, state.changeId);
+  if (entries.length !== state.revision + 1) throw new StateError('Transition revisions are not contiguous with active state', 'RECOVERY_EVIDENCE_INVALID');
+  let previousDigest = null;
+  const transitionIntents = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const directory = entries[index];
+    if (basename(directory) !== String(index).padStart(8, '0')) {
+      throw new StateError('Transition revision sequence has a gap', 'RECOVERY_EVIDENCE_INVALID');
+    }
+    const children = new Set(readdirSync(directory));
+    if (!children.has('intent.json')) throw new StateError(`Orphaned transition evidence at ${directory}`, 'RECOVERY_EVIDENCE_INVALID');
+    if (children.has('complete')) {
+      const verified = verifyCompleteTransition(directory);
+      if (verified.intent.revision !== index || verified.intent.changeId !== state.changeId) throw new StateError('Transition intent identity does not match directory/state', 'RECOVERY_EVIDENCE_INVALID');
+      if (verified.intent.previousStateDigest !== previousDigest) throw new StateError('Transition predecessor digest chain is broken', 'RECOVERY_EVIDENCE_INVALID');
+      previousDigest = verified.intent.nextStateDigest;
+      transitionIntents.push(verified.intent);
+      if (index === entries.length - 1 && verified.intent.nextStateDigest !== objectDigest(state)) {
+        throw new StateError('Latest transition does not produce active state', 'RECOVERY_STATE_CONFLICT');
+      }
+    }
+    else if (children.has('receipt.json')) {
+      const intent = verifyReceipt(join(directory, 'intent.json'), 'transition intent', TRANSITION_INTENT_LIMIT_BYTES).value;
+      const receipt = verifyReceipt(join(directory, 'receipt.json'), 'transition receipt').value;
+      if (receipt.revision !== intent.revision || receipt.intentDigest !== objectDigest(intent)
+          || receipt.stateDigest !== intent.nextStateDigest
+          || serialized(receipt.evidence) !== serialized(intent.evidence)
+          || receipt.completedAt !== intent.nextState.updatedAt) {
+        throw new StateError(`Interrupted transition receipt is invalid at ${directory}`, 'RECOVERY_EVIDENCE_INVALID');
+      }
+      throw new StateError(`Transition ${index} is incomplete; run recover`, 'RECOVERY_REQUIRED');
+    } else throw new StateError(`Transition ${index} is incomplete; run recover`, 'RECOVERY_REQUIRED');
+  }
+  const receiptRoots = ['source', 'plan', 'decisions'].map((name) => join(changeDirectory(root, state.changeId), name));
+  const evidenceDigests = new Set();
+  for (const receiptRoot of receiptRoots) verifyReceiptTree(receiptRoot, evidenceDigests);
+  evidenceDigests.add(verifyReceipt(join(changeDirectory(root, state.changeId), 'worktree.json'), 'owning worktree identity').digest);
+  const referencedPaths = new Set();
+  for (const intent of transitionIntents) {
+    for (const [key, digest] of Object.entries(intent.evidence ?? {})) {
+      const evidencePath = intent.evidencePaths?.[key];
+      if (typeof evidencePath !== 'string') throw new StateError(`Transition ${intent.revision} lacks a path for ${key}`, 'RECOVERY_EVIDENCE_INVALID');
+      const absolute = join(changeDirectory(root, state.changeId), evidencePath);
+      if (relative(changeDirectory(root, state.changeId), absolute).startsWith('..')) throw new StateError('Transition evidence path escapes change directory', 'RECOVERY_EVIDENCE_INVALID');
+      if (verifyReceipt(absolute, `transition ${intent.revision} evidence ${key}`).digest !== digest) {
+        throw new StateError(`Transition ${intent.revision} evidence ${key} digest differs`, 'RECOVERY_EVIDENCE_INVALID');
+      }
+      referencedPaths.add(evidencePath);
+    }
+  }
+  for (const path of immutableEvidencePaths(root, state.changeId)) {
+    if (!referencedPaths.has(path)) throw new StateError(`Immutable evidence is orphaned: ${path}`, 'RECOVERY_EVIDENCE_INVALID');
+  }
+  const latestObservation = readObservationByDigest(root, state);
+  if ((latestObservation.digest ?? objectDigest(latestObservation)) !== state.source.latestDigest) {
+    throw new StateError('Latest source observation does not match state summary', 'SOURCE_OBSERVATION_INVALID');
+  }
+  if (state.plan) {
+    const original = verifyReceipt(join(changeDirectory(root, state.changeId), 'plan', 'plan.json'), 'accepted plan');
+    if (original.digest !== state.plan.originalDigest) throw new StateError('Accepted plan digest does not match state', 'PLAN_TAMPERED');
+    verifyReceipt(join(changeDirectory(root, state.changeId), 'plan', 'planning-evidence.json'), 'accepted-plan planning evidence');
+    let priorDigest = original.digest;
+    let effective = original.value;
+    for (let number = 1; number <= state.plan.amendmentCount; number += 1) {
+      const stem = join(changeDirectory(root, state.changeId), 'plan', 'amendments', String(number).padStart(4, '0'));
+      const record = verifyReceipt(`${stem}.json`, `plan amendment ${number}`).value;
+      verifyReceipt(`${stem}.evidence.json`, `plan amendment ${number} evidence`);
+      if (record.previousDigest !== priorDigest || record.newDigest !== objectDigest(record.resultingPlan)
+          || record.resultingPlan.planRevision !== original.value.planRevision + number) {
+        throw new StateError(`Plan amendment ${number} does not replay from its predecessor`, 'AMENDMENT_CHAIN_INVALID');
+      }
+      priorDigest = record.newDigest;
+      effective = record.resultingPlan;
+    }
+    if (objectDigest(effective) !== state.plan.effectiveDigest || priorDigest !== state.plan.effectiveDigest) {
+      throw new StateError('Effective plan digest does not match amendment replay', 'PLAN_TAMPERED');
+    }
+    if (effective.changeId !== state.changeId || effective.planning.planningSha !== state.planningSha
+        || effective.source.kind !== state.source.kind || effective.source.reference !== state.source.reference
+        || effective.source.relationship !== state.source.relationship
+        || effective.source.captureDigest !== state.plan.sourceCaptureDigest) {
+      throw new StateError('Effective plan identity does not reconcile with active state', 'PLAN_STATE_MISMATCH');
+    }
+  }
+  verifyEventHistory(root, state.changeId, transitionIntents);
+  const git = gitObservation(root);
+  return { valid: true, state, git, gitDrift: git.headSha !== state.git.headSha || git.clean !== state.git.clean };
+}
+
+function verifyReceiptTree(root, digests = new Set()) {
+  if (!existsSync(root)) return;
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) verifyReceiptTree(path, digests);
+    else if (entry.name.endsWith('.json')) {
+      if (!existsSync(path.replace(/\.json$/u, '.sha256'))) {
+        throw new StateError(`Orphaned immutable JSON sidecar at ${path}`, 'RECOVERY_EVIDENCE_INVALID');
+      }
+      digests.add(verifyReceipt(path, 'immutable evidence').digest);
+    } else if (entry.name.endsWith('.sha256')) {
+      const json = path.replace(/\.sha256$/u, '.json');
+      if (!existsSync(json)) throw new StateError(`Orphaned receipt at ${path}`, 'RECOVERY_EVIDENCE_INVALID');
+    }
+  }
+  return digests;
+}
+
+function immutableEvidencePaths(cwd, changeId) {
+  const directory = changeDirectory(cwd, changeId);
+  const result = [];
+  function visit(root) {
+    if (!existsSync(root)) return;
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      const path = join(root, entry.name);
+      if (entry.isDirectory()) visit(path);
+      else if (entry.name.endsWith('.json')) result.push(relative(directory, path));
+    }
+  }
+  for (const name of ['source', 'plan', 'decisions']) visit(join(directory, name));
+  result.push('worktree.json');
+  return result;
+}
+
+function verifyIntentEvidence(cwd, changeId, intent) {
+  authoritativeEvidenceRecords(intent);
+  for (const [key, digest] of Object.entries(intent.evidence ?? {})) {
+    const evidencePath = intent.evidencePaths?.[key];
+    if (typeof evidencePath !== 'string') throw new StateError(`Transition ${intent.revision} lacks evidence path ${key}`, 'RECOVERY_EVIDENCE_INVALID');
+    const absolute = join(changeDirectory(cwd, changeId), evidencePath);
+    if (relative(changeDirectory(cwd, changeId), absolute).startsWith('..')
+        || verifyReceipt(absolute, `transition ${intent.revision} evidence ${key}`).digest !== digest) {
+      throw new StateError(`Transition ${intent.revision} evidence ${key} is invalid`, 'RECOVERY_EVIDENCE_INVALID');
+    }
+  }
+}
+
+function verifyCompletedPrefix(cwd, changeId, entries, terminalIndex) {
+  let previousDigest = null;
+  const intents = [];
+  for (let index = 0; index < terminalIndex; index += 1) {
+    const directory = entries[index];
+    if (basename(directory) !== String(index).padStart(8, '0') || !existsSync(join(directory, 'complete'))) {
+      throw new StateError('Recovery predecessor transition sequence is incomplete', 'RECOVERY_EVIDENCE_INVALID');
+    }
+    const { intent } = verifyCompleteTransition(directory);
+    if (intent.revision !== index || intent.changeId !== changeId || intent.previousStateDigest !== previousDigest) {
+      throw new StateError(`Recovery predecessor ${index} is inconsistent`, 'RECOVERY_EVIDENCE_INVALID');
+    }
+    verifyIntentEvidence(cwd, changeId, intent);
+    previousDigest = intent.nextStateDigest;
+    intents.push(intent);
+  }
+  const events = eventHistory(cwd, changeId);
+  if (events.length < intents.length || intents.some((intent, index) => serialized(events[index]) !== serialized(canonicalEvent(intent)))) {
+    throw new StateError('Recovery predecessor event history is inconsistent', 'RECOVERY_EVIDENCE_INVALID');
+  }
+  return { previousDigest, intents, events };
+}
+
+function archiveReceiptFor(intent) {
+  return {
+    schemaVersion: 1,
+    intentDigest: objectDigest(intent),
+    changeId: intent.changeId,
+    stateDigest: intent.stateDigest,
+    archivedAt: intent.archivedAt,
+  };
+}
+
+function transitionReceiptFor(intent) {
+  return {
+    schemaVersion: 1,
+    revision: intent.revision,
+    intentDigest: objectDigest(intent),
+    stateDigest: intent.nextStateDigest,
+    evidence: intent.evidence,
+    completedAt: intent.nextState.updatedAt,
+  };
+}
+
+function materializeTransitionReceipt(directory, intent) {
+  const path = join(directory, 'receipt.json');
+  const receiptPath = join(directory, 'receipt.sha256');
+  cleanupAtomicWriteTemps(path);
+  cleanupAtomicWriteTemps(receiptPath);
+  const expected = transitionReceiptFor(intent);
+  if (existsSync(path) && serialized(readJson(path, 'transition receipt')) !== serialized(expected)) {
+    throw new StateError('Interrupted transition receipt conflicts with committed intent', 'RECOVERY_EVIDENCE_INVALID');
+  }
+  if (existsSync(receiptPath) && readFileSync(receiptPath, 'utf8').trim() !== objectDigest(expected)) {
+    throw new StateError('Interrupted transition receipt digest conflicts with committed intent', 'RECOVERY_EVIDENCE_INVALID');
+  }
+  if (!existsSync(path)) atomicWriteText(path, serialized(expected));
+  if (!existsSync(receiptPath)) atomicWriteText(receiptPath, `${objectDigest(expected)}\n`);
+  verifyReceipt(path, 'transition receipt');
+  return expected;
+}
+
+function materializeArchiveReceipt(path, intent) {
+  const expected = archiveReceiptFor(intent);
+  const receiptPath = path.replace(/\.json$/u, '.sha256');
+  cleanupAtomicWriteTemps(path);
+  cleanupAtomicWriteTemps(receiptPath);
+  const hasJson = existsSync(path);
+  const hasReceipt = existsSync(receiptPath);
+  if (hasJson && serialized(readJson(path, 'archive receipt')) !== serialized(expected)) {
+    throw new StateError('Archive receipt conflicts with lifecycle intent', 'ARCHIVE_CONFLICT');
+  }
+  if (hasReceipt && readFileSync(receiptPath, 'utf8').trim() !== objectDigest(expected)) {
+    throw new StateError('Archive receipt digest conflicts with lifecycle intent', 'ARCHIVE_CONFLICT');
+  }
+  if (!hasJson) atomicWriteText(path, serialized(expected));
+  if (!hasReceipt) atomicWriteText(receiptPath, `${objectDigest(expected)}\n`);
+  verifyReceipt(path, 'archive receipt');
+}
+
+function archivedEventHistory(directory) {
+  const path = join(directory, 'events.jsonl');
+  try { return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)); }
+  catch (error) { throw new StateError(`Archived event history is invalid: ${error.message}`, 'ARCHIVE_CONFLICT'); }
+}
+
+function validateArchivedTree(directory, intent) {
+  const state = readJson(join(directory, 'state.json'), 'archived state', STATE_LIMIT_BYTES);
+  assertValidState(state);
+  if (state.changeId !== intent.changeId || objectDigest(state) !== intent.stateDigest) {
+    throw new StateError('Archived state does not match archive intent', 'ARCHIVE_CONFLICT');
+  }
+  const transitionsRoot = join(directory, 'transitions');
+  const entries = existsSync(transitionsRoot) ? readdirSync(transitionsRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && /^\d{8}$/u.test(entry.name)).map((entry) => join(transitionsRoot, entry.name)).sort() : [];
+  if (entries.length !== state.revision + 1) throw new StateError('Archived transition sequence is incomplete', 'ARCHIVE_CONFLICT');
+  let previous = null;
+  const intents = [];
+  const referenced = new Set();
+  for (let index = 0; index < entries.length; index += 1) {
+    const { intent: transitionIntent } = verifyCompleteTransition(entries[index]);
+    if (basename(entries[index]) !== String(index).padStart(8, '0') || transitionIntent.revision !== index
+        || transitionIntent.changeId !== state.changeId || transitionIntent.previousStateDigest !== previous) {
+      throw new StateError('Archived transition chain is inconsistent', 'ARCHIVE_CONFLICT');
+    }
+    for (const [key, digest] of Object.entries(transitionIntent.evidence ?? {})) {
+      const relativePath = transitionIntent.evidencePaths?.[key];
+      if (!nonemptyString(relativePath) || verifyReceipt(join(directory, relativePath), 'archived transition evidence').digest !== digest) {
+        throw new StateError('Archived transition evidence is invalid', 'ARCHIVE_CONFLICT');
+      }
+      referenced.add(relativePath);
+    }
+    previous = transitionIntent.nextStateDigest;
+    intents.push(transitionIntent);
+  }
+  if (previous !== objectDigest(state)) throw new StateError('Archived transitions do not produce archived state', 'ARCHIVE_CONFLICT');
+  const events = archivedEventHistory(directory);
+  if (events.length !== intents.length || events.some((event, index) => serialized(event) !== serialized(canonicalEvent(intents[index])))) {
+    throw new StateError('Archived events do not match transition intents', 'ARCHIVE_CONFLICT');
+  }
+  for (const rootName of ['source', 'plan', 'decisions']) verifyReceiptTree(join(directory, rootName));
+  verifyReceipt(join(directory, 'worktree.json'), 'archived worktree identity');
+  const sourceFiles = [];
+  function collectJson(root, output) {
+    if (!existsSync(root)) return;
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      const path = join(root, entry.name);
+      if (entry.isDirectory()) collectJson(path, output);
+      else if (entry.name.endsWith('.json')) output.push(path);
+    }
+  }
+  collectJson(join(directory, 'source'), sourceFiles);
+  const latestSource = sourceFiles.map((path) => verifyReceipt(path, 'archived source observation'))
+    .find(({ digest }) => digest === state.source.observationDigest)?.value;
+  if (!latestSource || latestSource.digest !== state.source.latestDigest) {
+    throw new StateError('Archived latest source observation does not match state', 'ARCHIVE_CONFLICT');
+  }
+  if (state.plan) {
+    const original = verifyReceipt(join(directory, 'plan', 'plan.json'), 'archived accepted plan');
+    if (original.digest !== state.plan.originalDigest) throw new StateError('Archived accepted plan does not match state', 'ARCHIVE_CONFLICT');
+    let effective = original.value;
+    for (let number = 1; number <= state.plan.amendmentCount; number += 1) {
+      effective = verifyReceipt(join(directory, 'plan', 'amendments', `${String(number).padStart(4, '0')}.json`), 'archived amendment').value.resultingPlan;
+    }
+    if (objectDigest(effective) !== state.plan.effectiveDigest || effective.source.captureDigest !== state.plan.sourceCaptureDigest) {
+      throw new StateError('Archived effective plan does not match state', 'ARCHIVE_CONFLICT');
+    }
+  }
+  const evidence = [];
+  function visit(root) {
+    if (!existsSync(root)) return;
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      const path = join(root, entry.name);
+      if (entry.isDirectory()) visit(path);
+      else if (entry.name.endsWith('.json')) evidence.push(relative(directory, path));
+    }
+  }
+  for (const rootName of ['source', 'plan', 'decisions']) visit(join(directory, rootName));
+  evidence.push('worktree.json');
+  if (evidence.some((path) => !referenced.has(path))) throw new StateError('Archived tree contains orphan immutable evidence', 'ARCHIVE_CONFLICT');
+  return state;
+}
+
+function eventHistory(cwd, changeId) {
+  const path = join(changeDirectory(cwd, changeId), 'events.jsonl');
+  if (!existsSync(path)) return [];
+  try { return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)); }
+  catch (error) { throw new StateError(`Event history is invalid: ${error.message}`, 'RECOVERY_EVIDENCE_INVALID'); }
+}
+
+function canonicalEvent(intent) {
+  return { revision: intent.revision, type: intent.type, summary: intent.summary, at: intent.nextState.updatedAt };
+}
+
+function verifyEventHistory(cwd, changeId, intentsOrLatestRevision) {
+  const events = eventHistory(cwd, changeId);
+  if (!Array.isArray(intentsOrLatestRevision)) {
+    if (events.length !== intentsOrLatestRevision + 1) throw new StateError('Event count does not match revisions', 'RECOVERY_EVIDENCE_INVALID');
+    return;
+  }
+  if (events.length !== intentsOrLatestRevision.length) throw new StateError('Event count does not match completed transitions', 'RECOVERY_EVIDENCE_INVALID');
+  for (let index = 0; index < intentsOrLatestRevision.length; index += 1) {
+    if (serialized(events[index]) !== serialized(canonicalEvent(intentsOrLatestRevision[index]))) {
+      throw new StateError(`Event ${index} does not canonically match its transition intent`, 'RECOVERY_EVIDENCE_INVALID');
+    }
+  }
+}
+
+export function recoverState({ cwd = process.cwd(), changeId, crashStep, lockOptions } = {}) {
+  const root = repositoryRoot(cwd);
+  const pendingArchive = readArchiveIntent(root);
+  const selected = changeId ?? pendingArchive?.changeId ?? locateState(root)?.changeId ?? recoverableChangeId(root);
+  if (!selected) throw new StateError('No active change state', 'STATE_NOT_FOUND');
+  return withLifecycleAndChangeLocks(root, selected, () => {
+    const lockedArchiveIntent = readArchiveIntent(root);
+    if (pendingArchive && (!lockedArchiveIntent || objectDigest(lockedArchiveIntent) !== objectDigest(pendingArchive))) {
+      throw new StateError('Archive lifecycle changed while recovery waited for its lock', 'ARCHIVE_CONFLICT');
+    }
+    if (lockedArchiveIntent) {
+      if (lockedArchiveIntent.changeId !== selected) {
+        throw new StateError('Archive intent conflicts with requested change', 'ARCHIVE_CONFLICT');
+      }
+      const source = changeDirectory(root, selected);
+      const target = archiveDirectory(root, selected);
+      if (existsSync(source) === existsSync(target)) throw new StateError('Archive recovery requires exactly one source or target directory', 'ARCHIVE_CONFLICT');
+      if (existsSync(source)) {
+        validateState({ cwd: root, changeId: selected });
+        const archiveStateValue = readJson(join(source, 'state.json'), 'archive state', STATE_LIMIT_BYTES);
+        if (objectDigest(archiveStateValue) !== lockedArchiveIntent.stateDigest) throw new StateError('Archive state does not match intent', 'ARCHIVE_CONFLICT');
+        mkdirSync(dirname(target), { recursive: true });
+        renameSync(source, target);
+        fsyncDirectory(dirname(source));
+        fsyncDirectory(dirname(target));
+      }
+      const archivedState = validateArchivedTree(target, lockedArchiveIntent);
+      const pointer = activePointerPath(root);
+      if (existsSync(pointer)) {
+        const active = readJson(pointer, 'active change pointer', 8192);
+        if (active.changeId !== selected) throw new StateError('Archive recovery would clear another active change', 'ARCHIVE_CONFLICT');
+        unlinkSync(pointer);
+        fsyncDirectory(dirname(pointer));
+      }
+      const archiveReceiptPath = join(target, 'archive-receipt.json');
+      materializeArchiveReceipt(archiveReceiptPath, lockedArchiveIntent);
+      clearArchiveIntent(root);
+      return { recovered: true, archived: true, state: archivedState, path: target };
+    }
+    const stagedTransitions = cleanupUncommittedTransitionStaging(root, selected);
+    cleanupAtomicEventTemps(root, selected);
+    const entries = transitionEntries(root, selected);
+    if (entries.length === 0) {
+      const transitions = join(changeDirectory(root, selected), 'transitions');
+      const rollbackOnlyShell = isUncommittedTransitionShell(root, selected);
+      if (stagedTransitions === 0 && !rollbackOnlyShell) {
+        throw new StateError('Change directory has no transition intent', 'RECOVERY_EVIDENCE_INVALID');
+      }
+      if (existsSync(transitions) && readdirSync(transitions).length === 0) rmdirSync(transitions);
+      const directory = changeDirectory(root, selected);
+      if (readdirSync(directory).length !== 0) {
+        throw new StateError('Uncommitted transition staging has conflicting durable evidence', 'RECOVERY_EVIDENCE_INVALID');
+      }
+      rmdirSync(directory);
+      fsyncDirectory(dirname(directory));
+      return { recovered: true, rolledBack: true, state: null };
+    }
+    const incomplete = entries.filter((directory) => !existsSync(join(directory, 'complete')));
+    if (incomplete.length === 0) {
+      const state = loadState(root, selected);
+      const pointer = activePointerPath(root);
+      if (!existsSync(pointer) && state?.revision === 0) {
+        validateState({ cwd: root, changeId: selected });
+        atomicWriteJson(pointer, { schemaVersion: 1, changeId: selected, statePath: stateFile(root, selected), updatedAt: now() });
+        return { recovered: true, state };
+      }
+      if (!existsSync(pointer)) throw new StateError('Pointerless completed state is recoverable only at initialization revision 0', 'RECOVERY_STATE_CONFLICT');
+      if (stagedTransitions > 0) {
+        validateState({ cwd: root, changeId: selected });
+        return { recovered: true, rolledBack: true, state };
+      }
+      return { recovered: false, state };
+    }
+    if (incomplete.length !== 1 || incomplete[0] !== entries.at(-1)) {
+      throw new StateError('Recovery found orphaned or non-terminal incomplete transitions', 'RECOVERY_EVIDENCE_INVALID');
+    }
+    const directory = incomplete[0];
+    if (!existsSync(join(directory, 'intent.json'))) throw new StateError('Interrupted transition has no intent', 'RECOVERY_EVIDENCE_INVALID');
+    const intent = verifyReceipt(join(directory, 'intent.json'), 'transition intent', TRANSITION_INTENT_LIMIT_BYTES).value;
+    const terminalIndex = entries.length - 1;
+    const prefix = verifyCompletedPrefix(root, selected, entries, terminalIndex);
+    if (basename(directory) !== String(terminalIndex).padStart(8, '0')
+        || intent.revision !== terminalIndex || intent.changeId !== selected
+        || intent.previousStateDigest !== prefix.previousDigest
+        || intent.nextState?.revision !== intent.revision || intent.nextState?.changeId !== selected
+        || !nonemptyString(intent.type) || !nonemptyString(intent.summary)
+        || objectDigest(intent.nextState) !== intent.nextStateDigest) {
+      throw new StateError('Interrupted transition intent is inconsistent', 'RECOVERY_EVIDENCE_INVALID');
+    }
+    assertValidState(intent.nextState);
+    materializeIntentEvidence(root, selected, intent);
+    const predecessor = prefix.intents.at(-1)?.nextState;
+    if (predecessor) {
+      for (const key of ['changeId', 'mode', 'baseBranch', 'expectedPrBaseBranch', 'planningRef', 'planningSha', 'createdAt']) {
+        if (intent.nextState[key] !== predecessor[key]) throw new StateError(`Interrupted transition changed immutable ${key}`, 'RECOVERY_EVIDENCE_INVALID');
+      }
+      for (const key of ['kind', 'reference', 'relationship', 'initialDigest']) {
+        if (intent.nextState.source[key] !== predecessor.source[key]) throw new StateError(`Interrupted transition changed immutable source.${key}`, 'RECOVERY_EVIDENCE_INVALID');
+      }
+    }
+    const evidenceDigests = new Set();
+    for (const name of ['source', 'plan', 'decisions']) verifyReceiptTree(join(changeDirectory(root, selected), name), evidenceDigests);
+    evidenceDigests.add(verifyReceipt(join(changeDirectory(root, selected), 'worktree.json'), 'owning worktree identity').digest);
+    verifyIntentEvidence(root, selected, intent);
+    const referencedPaths = new Set([...prefix.intents, intent].flatMap((item) => Object.values(item.evidencePaths ?? {})));
+    for (const path of immutableEvidencePaths(root, selected)) {
+      if (!referencedPaths.has(path)) throw new StateError(`Recovery found orphan immutable evidence ${path}`, 'RECOVERY_EVIDENCE_INVALID');
+    }
+    const currentGit = gitObservation(root);
+    const exactCheckpointObservation = intent.type === 'git-checkpoint'
+      && currentGit.headSha === intent.nextState.git.headSha
+      && currentGit.branch === intent.nextState.git.branch
+      && currentGit.clean === intent.nextState.git.clean;
+    if (!exactCheckpointObservation && (!currentGit.clean || currentGit.headSha !== intent.nextState.planningSha)) {
+      throw new StateError('Recovery requires clean HEAD at the transition Planning SHA', 'PLANNING_SNAPSHOT_MISMATCH');
+    }
+    let current = loadState(root, selected);
+    const currentDigest = current ? objectDigest(current) : null;
+    if (currentDigest === intent.previousStateDigest) {
+      atomicWriteJson(stateFile(root, selected), intent.nextState);
+      current = intent.nextState;
+    } else if (currentDigest !== intent.nextStateDigest) {
+      throw new StateError('Current state matches neither side of interrupted transition', 'RECOVERY_STATE_CONFLICT');
+    }
+    const receipt = materializeTransitionReceipt(directory, intent);
+    callCrash(crashStep, 'recovery-before-complete', { revision: intent.revision });
+    const events = eventHistory(root, selected);
+    if (events.length === prefix.intents.length) appendEvent(root, selected, canonicalEvent(intent));
+    else if (events.length !== prefix.intents.length + 1
+        || serialized(events.at(-1)) !== serialized(canonicalEvent(intent))) {
+      throw new StateError('Interrupted transition event evidence is inconsistent', 'RECOVERY_EVIDENCE_INVALID');
+    }
+    atomicWriteText(join(directory, 'complete'), `${objectDigest(receipt)}\n`);
+    const pointer = activePointerPath(root);
+    if (!existsSync(pointer) && intent.revision === 0) {
+      atomicWriteJson(pointer, { schemaVersion: 1, changeId: selected, statePath: stateFile(root, selected), updatedAt: now() });
+    }
+    return { recovered: true, state: current };
+  }, lockOptions);
+}
+
+export function archiveState({ cwd = process.cwd(), changeId, abandonReason, expectedRevision, clock, crashStep, lockOptions } = {}) {
+  const root = repositoryRoot(cwd);
+  const selected = changeId ?? locateState(root)?.changeId;
+  if (!selected) throw new StateError('No active change state', 'STATE_NOT_FOUND');
+  return withLifecycleAndChangeLocks(root, selected, () => {
+    const pointerPath = activePointerPath(root);
+    if (!existsSync(pointerPath) || readJson(pointerPath, 'active change pointer', 8192).changeId !== selected) {
+      throw new StateError('Only the active change may be archived', 'ARCHIVE_NOT_ACTIVE');
+    }
+    let state = loadState(root, selected);
+    assertRevision(state, expectedRevision);
+    validateState({ cwd: root, changeId: selected });
+    const normal = state.mode === 'plan-only' && state.phase === 'ready-to-implement';
+    if (!normal && (!abandonReason || !abandonReason.trim())) {
+      throw new StateError('Only completed plan-only state archives normally; abandonment requires a reason', 'ARCHIVE_NOT_ALLOWED');
+    }
+    if (!normal) {
+      const timestamp = now(clock);
+      const next = revised(state, { phase: 'abandoned', abandonmentReason: abandonReason.trim(), blockedReasons: [] }, () => new Date(timestamp));
+      state = commitTransition({
+        cwd: root, previousState: state, nextState: next, type: 'abandoned',
+        summary: `Abandoned change: ${abandonReason.trim()}`, crashStep,
+      });
+    }
+    const source = changeDirectory(root, selected);
+    const target = archiveDirectory(root, selected);
+    if (existsSync(target)) throw new StateError('Archive target already exists', 'ARCHIVE_CONFLICT');
+    const archiveTimestamp = now(clock);
+    const archiveIntent = {
+      schemaVersion: 1, changeId: selected, stateDigest: objectDigest(state),
+      createdAt: archiveTimestamp, archivedAt: archiveTimestamp,
+    };
+    writeArchiveIntent(root, archiveIntent);
+    callCrash(crashStep, 'archive-after-intent', {});
+    mkdirSync(dirname(target), { recursive: true });
+    renameSync(source, target);
+    fsyncDirectory(dirname(source));
+    fsyncDirectory(dirname(target));
+    callCrash(crashStep, 'archive-after-rename', {});
+    if (existsSync(pointerPath)) { unlinkSync(pointerPath); fsyncDirectory(dirname(pointerPath)); }
+    validateArchivedTree(target, archiveIntent);
+    materializeArchiveReceipt(join(target, 'archive-receipt.json'), archiveIntent);
+    clearArchiveIntent(root);
+    return { archived: true, changeId: selected, path: target, state };
+  }, lockOptions);
+}
+
+export function statusObject({ cwd = process.cwd(), changeId } = {}) {
+  const root = repositoryRoot(cwd);
+  const state = loadState(root, changeId);
+  if (!state) return null;
+  const git = gitObservation(root);
+  const tasks = state.plan ? (readEffectivePlan(root, state)?.tasks ?? []) : [];
+  return {
+    changeId: state.changeId,
+    source: `${state.source.kind}:${state.source.reference}`,
+    phase: state.phase,
+    revision: state.revision,
+    planningSha: state.planningSha,
+    currentHeadSha: git.headSha,
+    gitClean: git.clean,
+    gitDrift: git.headSha !== state.git.headSha || git.clean !== state.git.clean || git.branch !== state.git.branch,
+    sourceDrift: state.source.classification,
+    checklist: {
+      current: state.checklist.filter((item) => item.status === 'current').length,
+      ambiguous: state.checklist.filter((item) => item.status === 'ambiguous').length,
+      removed: state.checklist.filter((item) => item.status === 'removed').length,
+    },
+    unresolvedDecisionIds: state.unresolvedDecisionIds,
+    taskGraph: { tasks: tasks.length, dependencies: tasks.reduce((sum, task) => sum + (task.dependsOn?.length ?? 0), 0) },
+    nextAction: state.nextAction,
+  };
+}
+
+export function renderStatus(options = {}) {
+  const root = repositoryRoot(options.cwd ?? process.cwd());
+  const pendingArchive = readArchiveIntent(root);
+  const candidate = pendingArchive?.changeId ?? recoverableChangeId(root);
+  if (candidate) {
+    const orphaned = !pendingArchive && transitionEntries(root, candidate).length === 0
+      && !isUncommittedTransitionShell(root, candidate);
+    return boundedStatus([
+    `Change: ${candidate}`,
+    `Phase: ${orphaned ? 'blocked' : 'recovering'}`,
+    orphaned ? 'Durable evidence exists without a transition intent.' : 'Durable transition evidence is incomplete.',
+    orphaned ? 'Next action: Inspect the orphan durable evidence; automatic recovery is not permitted.'
+      : `Next action: Run change:state recover --change-id ${candidate}.`,
+    ]);
+  }
+  const active = locateState(root, options.changeId);
+  if (active) {
+    try { validateState({ cwd: root, changeId: active.changeId }); }
+    catch (error) {
+      return boundedStatus([
+        `Change: ${active.changeId}`,
+        'Phase: blocked',
+        `Durable evidence validation failed (${error.code ?? 'STATE_ERROR'}).`,
+        'Next action: Inspect or restore the durable evidence; automatic recovery and archive are blocked.',
+      ]);
+    }
+  }
+  const status = statusObject(options);
+  if (!status) return 'No active change-development state.';
+  return boundedStatus([
+    `Change: ${status.changeId} (${status.source})`,
+    `Phase: ${status.phase}; revision: ${status.revision}`,
+    `Planning SHA: ${status.planningSha}`,
+    `Current HEAD: ${status.currentHeadSha} (${status.gitClean ? 'clean' : 'dirty'})`,
+    `Git observation: ${status.gitDrift ? 'drifted from durable state' : 'matches durable state'}`,
+    `Source drift: ${status.sourceDrift}`,
+    `Checklist: ${status.checklist.current} current, ${status.checklist.ambiguous} ambiguous, ${status.checklist.removed} removed`,
+    `Unresolved decisions: ${status.unresolvedDecisionIds.length ? status.unresolvedDecisionIds.join(', ') : 'none'}`,
+    `Task graph: ${status.taskGraph.tasks} tasks, ${status.taskGraph.dependencies} dependencies`,
+    `Next action: ${status.gitDrift ? 'Run the local PreCompact checkpoint or reconcile Git before continuing.' : status.nextAction}`,
+  ]);
+}
+
+export function boundedStatus(lines, limit = 2500) {
+  const text = lines.join('\n');
+  if (text.length <= limit) return text;
+  const nextAction = lines.at(-1);
+  const suffix = `\n[status truncated]\n${nextAction}`;
+  return `${lines.slice(0, -1).join('\n').slice(0, Math.max(0, limit - suffix.length))}${suffix}`;
+}
+
+function recoverableChangeId(cwd) {
+  const changes = join(changeRoot(cwd), 'changes');
+  if (!existsSync(changes)) return null;
+  const pointerExists = existsSync(activePointerPath(cwd));
+  const candidates = readdirSync(changes, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name)
+    .filter((changeId) => {
+      const entries = transitionEntries(cwd, changeId);
+      if (entries.length === 0) return true;
+      if (entries.some((directory) => !existsSync(join(directory, 'complete')))) return true;
+      return !pointerExists && entries.length === 1 && existsSync(join(changeDirectory(cwd, changeId), 'state.json'));
+    });
+  if (candidates.length > 1) throw new StateError('Multiple interrupted changes require an explicit --change-id', 'RECOVERY_AMBIGUOUS');
+  return candidates[0] ?? null;
+}
+
+export function renderRecoverySummary({ cwd = process.cwd(), maxCharacters = HOOK_CONTEXT_LIMIT } = {}) {
+  const status = renderStatus({ cwd });
+  if (status === 'No active change-development state.') return null;
+  const prefix = 'Durable change-development recovery context:\n';
+  const bounded = `${prefix}${status}`;
+  return bounded.length <= maxCharacters ? bounded : `${bounded.slice(0, Math.max(0, maxCharacters - 15))}\n[truncated]`;
+}
+
+export function checkpointGitMetadata({ cwd = process.cwd(), clock, crashStep, lockOptions } = {}) {
+  const root = repositoryRoot(cwd);
+  const located = locateState(root);
+  if (!located) return { checkpointed: false };
+  // PreCompact is local-only: this function performs Git and filesystem reads only.
+  return withChangeLock(root, located.changeId, () => {
+    const state = loadState(root, located.changeId);
+    if (!state) throw new StateError('No active change state', 'STATE_NOT_FOUND');
+    validateState({ cwd: root, changeId: state.changeId });
+    const owner = verifyReceipt(join(changeDirectory(root, state.changeId), 'worktree.json'), 'owning worktree identity').value;
+    if (owner.gitDirectory !== worktreeIdentity(root).gitDirectory) {
+      return { checkpointed: false, warning: 'Active change-development state belongs to another linked worktree; local Git metadata was not checkpointed.' };
+    }
+    const observed = gitObservation(root, clock);
+    if (observed.headSha === state.git.headSha && observed.branch === state.git.branch && observed.clean === state.git.clean) {
+      return { checkpointed: false };
+    }
+    const planningSnapshotValid = observed.headSha === state.planningSha && observed.clean;
+    const gitBlock = !planningSnapshotValid
+      ? `Git observation is not clean at Planning SHA ${state.planningSha}` : null;
+    const wasGitBlocked = state.phase === 'blocked'
+      && state.blockedReasons.every((reason) => reason.startsWith('Git observation is not clean at Planning SHA'));
+    const restoredPhase = state.source.classification === 'unreviewed-material'
+      ? 'awaiting-decision' : state.plan ? 'ready-to-implement' : 'planning';
+    const immutableTerminal = state.phase === 'abandoned';
+    const next = revised(state, {
+      git: observed,
+      phase: immutableTerminal ? state.phase : gitBlock ? 'blocked' : wasGitBlocked ? restoredPhase : state.phase,
+      blockedReasons: immutableTerminal ? state.blockedReasons : gitBlock ? [gitBlock] : wasGitBlocked ? [] : state.blockedReasons,
+    }, clock);
+    commitTransition({
+      cwd: root, previousState: state, nextState: next, type: 'git-checkpoint',
+      summary: 'Checkpointed local Git observation before compaction',
+      crashStep,
+    });
+    return { checkpointed: true, state: next };
+  }, { timeoutMs: 250, ...lockOptions });
+}

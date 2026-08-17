@@ -226,6 +226,15 @@ test('ownership manifest names the complete canonical skill and no obsolete path
       path: '.agents/skills/pr-review-cycle/ownership.json',
       targets: [],
     },
+    {
+      path: '.agents/skills/change-development/ownership.json',
+      targets: [
+        'SKILL.md',
+        'references/reviewer-contracts.md',
+        'registry.json',
+        'scripts/validate-registry.mjs',
+      ],
+    },
   ]);
 
   for (const path of ownership.canonicalFiles) {
@@ -293,7 +302,7 @@ test('hooks and npm façades target only canonical skill entrypoints', () => {
   );
   assert.equal(
     scripts['test:tooling'],
-    'npm run test:pr-review && npm run test:specialists && node --test "scripts/**/*.test.mjs" && npm run test:e2e:structure',
+    'npm run test:change-development && npm run test:pr-review && npm run test:specialists && node --test "scripts/**/*.test.mjs" && npm run test:e2e:structure',
   );
   assert.equal(scripts['check:workflow'], 'npm run test:tooling');
   assert.equal(scripts.test, 'npm run test:tooling && npm run test --workspaces --if-present');
