@@ -383,9 +383,19 @@ test('repository paths reject trailing separators and control-character overlap 
 });
 
 test('schema-valid root-level anticipated paths remain valid planning data', () => {
-  for (const path of ['package.json', 'scripts', 'README.md', 'AGENTS.md']) {
+  for (const path of [
+    'package.json', 'scripts', 'README.md', 'AGENTS.md',
+    'Release Notes.md', 'docs/Operator Guide.md', 'directory with spaces/file',
+  ]) {
     const value = plan(); value.tasks[0].anticipatedPaths = [path];
     assert.deepEqual(validateImplementationPlan(value), [], path);
+  }
+});
+
+test('anticipated paths reject command-shaped word sequences', () => {
+  for (const path of ['npm run test', 'rm generated-file', 'CustomTool validate contracts']) {
+    const value = plan(); value.tasks[0].anticipatedPaths = [path];
+    assert.match(validateImplementationPlan(value).join('\n'), /repository paths, not commands/u, path);
   }
 });
 
