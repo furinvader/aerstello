@@ -397,6 +397,8 @@ test('validation intent rejects executable-shaped prefixes while preserving pros
     'eslint .', 'python3 scripts/check.py', 'curl https://example.test', 'wget artifact.json',
     'sed -n 1p file', 'rm generated-file', 'future-tool validate contracts',
     'NODE_ENV=test vitest run', './scripts/check.sh', 'CustomTool --check contracts',
+    'CustomTool validate contracts', 'customTool validate contracts', 'CUSTOMTOOL validate contracts',
+    '"CustomTool" validate contracts', "'CustomTool' validate contracts",
   ]) {
     const value = plan(); value.tasks[0].validationIntent = [command];
     assert.match(validateImplementationPlan(value).join('\n'), /not an executable command/u, command);
@@ -406,6 +408,8 @@ test('validation intent rejects executable-shaped prefixes while preserving pros
     'Verify curl integration against a local fixture',
     'Confirm generated files are removed without invoking rm',
     'Exercise artifact downloads through the wget adapter',
+    'Validate CustomTool behavior through the planning contract',
+    'Review Playwright behavior through the selected scenarios',
   ]) {
     const prose = plan(); prose.tasks[0].validationIntent = [intent];
     assert.deepEqual(validateImplementationPlan(prose), [], intent);

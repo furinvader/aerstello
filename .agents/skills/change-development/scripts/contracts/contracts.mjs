@@ -205,7 +205,7 @@ function pathOverlaps(left, right) {
   return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
 }
 
-const EXECUTABLE_SHAPED_PREFIX = /^\s*(?:[a-z0-9][a-z0-9._+-]*|\.{0,2}\/\S*|\/\S*)(?:\s|$)/u;
+const EXECUTABLE_SHAPED_PREFIX = /^\s*(?:[a-z0-9][a-z0-9._+-]*|[a-z0-9._+-]+[A-Z][A-Za-z0-9._+-]*|[A-Z][A-Za-z0-9._+-]*[A-Z][A-Za-z0-9._+-]*|"[A-Za-z0-9][A-Za-z0-9._+-]*"|'[A-Za-z0-9][A-Za-z0-9._+-]*'|\.{0,2}\/\S*|\/\S*)(?:\s|$)/u;
 const COMMAND_ARGUMENT_PREFIX = /^\s*\S+\s+(?:-{1,2}[A-Za-z0-9]|https?:\/\/|\.{0,2}\/|\/)/u;
 const ENVIRONMENT_ASSIGNMENT_PREFIX = /^\s*[A-Za-z_][A-Za-z0-9_]*=\S+(?:\s|$)/u;
 const SHELL_SYNTAX = /(?:&&|\|\||[;|`<>]|\$\()/u;
