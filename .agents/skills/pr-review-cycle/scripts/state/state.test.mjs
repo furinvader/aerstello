@@ -19,6 +19,7 @@ import {
   checkpointCiValidation,
   checkpointGitMetadata,
   checkpointReviewOutcome,
+  checkpointReviewRequestLimit,
   checkpointReviewRequest,
   checkpointState,
   checkpointTaskPacketBinding,
@@ -42,6 +43,7 @@ import {
   recordSpecialistReview,
   renderRecoverySummary,
   reviewRequestGate,
+  reviewRequestUsage,
   reviewRoot,
   stateDirectory,
   statePath,
@@ -160,7 +162,8 @@ function external(cwd, state, overrides = {}) {
   });
 }
 
-function request(state, id = `request-${state.reviewRound + 1}`, kind = state.reviewRound < 3 ? 'discovery' : 'verification') {
+function request(state, id = `request-${reviewRequestUsage(state).used + 1}`,
+  kind = reviewRequestUsage(state).used < 3 ? 'discovery' : 'verification') {
   return {
     id, databaseId: 101, url: `https://github.com/example/aerstello/pull/17#issuecomment-${id}`,
     headSha: state.currentIntegrationHeadSha, at: AT, kind, body: '@codex review',
@@ -192,6 +195,7 @@ function ciEvidence(state, overrides = {}) {
 function legacyState(state, overrides = {}) {
   const {
     verificationReviewUsed: _verificationReviewUsed,
+    reviewRequestLimit: _reviewRequestLimit,
     legacyReviewProvenance: _legacyReviewProvenance,
     reviewOutcome,
     reviewHistory: _reviewHistory,
@@ -217,6 +221,7 @@ function schemaV2State(state) {
   const {
     ciValidationStatus: _ciValidationStatus,
     ciValidationHistory: _ciValidationHistory,
+    reviewRequestLimit: _reviewRequestLimit,
     validationStatus,
     threadResolutionStatus,
     ...currentFields
@@ -442,10 +447,51 @@ test('initialization writes the v3 identity and empty durable ledgers', () => {
   const cwd = repo();
   const state = init(cwd);
   assert.equal(state.schemaVersion, 3);
+  assert.equal(state.reviewRequestLimit, null);
   assert.equal(state.legacyReviewProvenance, null);
   assert.deepEqual(state.reviewHistory, []);
   assert.deepEqual(state.threadResolutionStatus.threads, []);
   assert.equal(statePath(cwd, 17), join(gitCommonDirectory(cwd), 'codex', 'pr-review', 'pr-17', 'state.json'));
+});
+
+test('initialization accepts only an explicit positive review request limit', () => {
+  const limited = init(repo(), { reviewRequestLimit: 7 });
+  assert.equal(limited.reviewRequestLimit, 7);
+  for (const reviewRequestLimit of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '7']) {
+    assert.throws(
+      () => init(repo(), { reviewRequestLimit }),
+      { code: 'INVALID_REVIEW_REQUEST_LIMIT' },
+    );
+  }
+});
+
+test('state CLI configures and removes a finite review request limit strictly', () => {
+  const cwd = repo();
+  const initialized = spawnSync(process.execPath, [
+    STATE_CLI, 'init', '--pr', '17', '--base', 'main', '--head', 'HEAD', '--release-ref', 'main',
+    '--review-limit', '5',
+  ], { cwd, encoding: 'utf8' });
+  assert.equal(initialized.status, 0, initialized.stderr);
+  assert.equal(JSON.parse(initialized.stdout).reviewRequestLimit, 5);
+
+  const invalid = spawnSync(process.execPath, [
+    STATE_CLI, 'set-review-limit', '--pr', '17', '--expected-revision', '0',
+    '--limit', '6', '--unlimited',
+  ], { cwd, encoding: 'utf8' });
+  assert.equal(invalid.status, 2);
+
+  const unsafe = spawnSync(process.execPath, [
+    STATE_CLI, 'set-review-limit', '--pr', '17', '--expected-revision', '0',
+    '--limit', '9007199254740993',
+  ], { cwd, encoding: 'utf8' });
+  assert.equal(unsafe.status, 2);
+  assert.match(unsafe.stderr, /must not exceed 9007199254740991/u);
+
+  const unlimited = spawnSync(process.execPath, [
+    STATE_CLI, 'set-review-limit', '--pr', '17', '--expected-revision', '0', '--unlimited',
+  ], { cwd, encoding: 'utf8' });
+  assert.equal(unlimited.status, 0, unlimited.stderr);
+  assert.equal(JSON.parse(unlimited.stdout).reviewRequestLimit, null);
 });
 
 test('v2 loading requires explicit migration and writes an exact versioned backup', () => {
@@ -936,9 +982,10 @@ test('native taskless review HEAD-drift validation recovery fails closed at ever
   const exhaustedHead = commit(exhaustedCwd, { 'exhausted-drift.txt': 'drift\n' }, 'exhausted review drift');
   const exhaustedDrift = checkpointGitMetadata({ cwd: exhaustedCwd }).state;
   assert.equal(exhaustedDrift.phase, 'recovering');
-  assert.throws(() => buildTargetedValidationPlan({
+  const unlimitedRecovery = buildTargetedValidationPlan({
     cwd: exhaustedCwd, initialSelection: initialSelection(exhaustedHead), replace: true,
-  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
+  });
+  assert.equal(unlimitedRecovery.headSha, exhaustedHead);
 });
 
 test('v2 completed-task cycles rebuild fresh exact-head validation from immutable migration proof', () => {
@@ -1600,6 +1647,26 @@ test('same-HEAD dirty checkpoints preserve proof while lifecycle gates remain fa
   assert.equal(driftedDirty.threadResolutionStatus.status, 'not-run');
 });
 
+test('cleaning an exhausted finite-limit checkout restores truthful review readiness', () => {
+  const cwd = repo();
+  let state = ready(init(cwd, { reviewRequestLimit: 4 }), []);
+  for (let ordinal = 1; ordinal <= 4; ordinal += 1) {
+    const requested = buildReviewRequestTransition(state, request(state), external(cwd, state));
+    state = ready(buildReviewOutcomeTransition(
+      requested, outcome(requested, { outcome: 'findings' }),
+    ), []);
+  }
+  writeFileSync(statePath(cwd, 17), `${JSON.stringify(state)}\n`);
+  writeFileSync(join(cwd, 'dirty-exhausted.txt'), 'dirty\n');
+  const dirty = checkpointGitMetadata({ cwd }).state;
+  assert.equal(dirty.phase, 'recovering');
+  rmSync(join(cwd, 'dirty-exhausted.txt'));
+  const restored = checkpointGitMetadata({ cwd }).state;
+  assert.equal(restored.phase, 'ready-for-review');
+  assert.match(restored.nextAction, /limit 4 is exhausted[\s\S]*set-review-limit[\s\S]*--unlimited/u);
+  assert.equal(reviewRequestGate(restored, external(cwd, restored)).allowed, false);
+});
+
 test('stale discovery request can be replaced without rewriting its null-outcome ledger entry', () => {
   const cwd = repo();
   const initial = init(cwd);
@@ -1638,7 +1705,7 @@ test('stale discovery request can be replaced without rewriting its null-outcome
   assert.equal(requestedB.reviewHistory[1].request.headSha, headB);
 });
 
-test('stale verification request stops for a human and preserves its evidence', () => {
+test('stale verification request recovers without rewriting its evidence', () => {
   const cwd = repo();
   const initialized = init(cwd);
   const migrated = migratePrReviewStateV1(legacyState(initialized, { reviewRound: 3 }), { migratedAt: AT });
@@ -1654,12 +1721,12 @@ test('stale verification request stops for a human and preserves its evidence', 
   const immutableEvidence = structuredClone(requested.reviewHistory);
   commit(cwd, { 'verification-drift.txt': 'drift\n' }, 'verification request drift');
   const drifted = checkpointGitMetadata({ cwd }).state;
-  assert.equal(drifted.phase, 'awaiting-human-decision');
+  assert.equal(drifted.phase, 'recovering');
   assert.deepEqual(drifted.reviewHistory, immutableEvidence);
   assert.equal(drifted.reviewOutcome, null);
 });
 
-test('verification is consumed once after three migrated discovery rounds and findings stop for a human', () => {
+test('verification repeats after three discovery rounds and findings return to triage', () => {
   const cwd = repo();
   const base = ready(init(cwd));
   const state = {
@@ -1671,11 +1738,152 @@ test('verification is consumed once after three migrated discovery rounds and fi
   assert.equal(requested.reviewRound, 3);
   assert.equal(requested.verificationReviewUsed, true);
   const stopped = buildReviewOutcomeTransition(requested, outcome(requested, { outcome: 'findings' }));
-  assert.equal(stopped.phase, 'awaiting-human-decision');
-  assert.equal(reviewRequestGate({ ...state, verificationReviewUsed: true }, external(cwd, state)).allowed, false);
+  assert.equal(stopped.phase, 'triaging');
+  const preparedAgain = ready(stopped, []);
+  const requestedAgain = buildReviewRequestTransition(
+    preparedAgain, request(preparedAgain), external(cwd, preparedAgain),
+  );
+  assert.equal(requestedAgain.reviewRound, 3);
+  assert.equal(requestedAgain.reviewHistory.length, 2);
+  assert.deepEqual(requestedAgain.reviewHistory.map((entry) => entry.request.kind), [
+    'verification', 'verification',
+  ]);
+  assert.equal(reviewRequestGate(preparedAgain, external(cwd, preparedAgain)).allowed, true);
 });
 
-test('verification collection escalation is guarded, append-only, request-bound, and terminal', () => {
+test('unlimited cycles accept more than four durable requests in ordinal kind order', () => {
+  const cwd = repo();
+  let state = ready(init(cwd), []);
+  const kinds = [];
+  for (let ordinal = 1; ordinal <= 6; ordinal += 1) {
+    const requested = buildReviewRequestTransition(state, request(state), external(cwd, state));
+    kinds.push(requested.reviewRequest.kind);
+    const reviewed = buildReviewOutcomeTransition(requested, outcome(requested, { outcome: 'findings' }));
+    assert.equal(reviewed.phase, 'triaging');
+    state = ready(reviewed, []);
+  }
+  assert.deepEqual(kinds, ['discovery', 'discovery', 'discovery', 'verification', 'verification', 'verification']);
+  assert.deepEqual(reviewRequestUsage(state), {
+    used: 6, limit: null, remaining: null, exhausted: false,
+  });
+  assert.equal(reviewRequestGate(state, external(cwd, state)).allowed, true);
+  assert.equal(reviewRequestGate(state, external(cwd, state)).kind, 'verification');
+});
+
+test('a finite limit blocks only the next request and allows a clean final request to complete', () => {
+  const cwd = repo();
+  let state = ready(init(cwd, { reviewRequestLimit: 4 }), []);
+  for (let ordinal = 1; ordinal <= 3; ordinal += 1) {
+    const requested = buildReviewRequestTransition(state, request(state), external(cwd, state));
+    const reviewed = buildReviewOutcomeTransition(requested, outcome(requested, { outcome: 'findings' }));
+    state = ready(reviewed, []);
+  }
+  const finalRequest = buildReviewRequestTransition(state, request(state), external(cwd, state));
+  assert.equal(finalRequest.reviewRequest.kind, 'verification');
+  const clean = buildReviewOutcomeTransition(finalRequest, outcome(finalRequest));
+  const ciValidated = buildCiValidationTransition(clean, ciEvidence(clean));
+  assert.equal(completionGate(ciValidated, external(cwd, ciValidated)).allowed, true);
+  assert.equal(buildCompletionTransition(ciValidated, external(cwd, ciValidated)).phase, 'complete');
+
+  const findings = buildReviewOutcomeTransition(finalRequest, outcome(finalRequest, { outcome: 'findings' }));
+  assert.equal(findings.phase, 'triaging');
+  assert.match(findings.nextAction, /Triage[\s\S]*set-review-limit[\s\S]*--unlimited/u);
+  const remediated = ready(findings, []);
+  assert.deepEqual(reviewRequestUsage(remediated), {
+    used: 4, limit: 4, remaining: 0, exhausted: true,
+  });
+  assert.equal(reviewRequestGate(remediated, external(cwd, remediated)).allowed, false);
+  assert.ok(reviewRequestGate(remediated, external(cwd, remediated)).reasons.some(
+    (reason) => reason.includes('explicit review request limit 4 is exhausted'),
+  ));
+});
+
+test('guarded review limits preserve history, reject lowering and generic rewrites, and resume legacy findings', () => {
+  const cwd = repo();
+  let state = ready(init(cwd), []);
+  for (let ordinal = 1; ordinal <= 4; ordinal += 1) {
+    const requested = buildReviewRequestTransition(state, request(state), external(cwd, state));
+    const reviewed = buildReviewOutcomeTransition(requested, outcome(requested, { outcome: 'findings' }));
+    state = ordinal === 4 ? reviewed : ready(reviewed, []);
+  }
+  const historical = {
+    ...state,
+    phase: 'awaiting-human-decision',
+    nextAction: 'Historical fixed-limit workflow required an operator decision.',
+  };
+  delete historical.reviewRequestLimit;
+  const immutableHistory = structuredClone(historical.reviewHistory);
+  writeFileSync(statePath(cwd, 17), `${JSON.stringify(historical)}\n`);
+
+  const resumed = checkpointReviewRequestLimit({
+    cwd, expectedRevision: historical.revision, reviewRequestLimit: null,
+  });
+  assert.equal(resumed.phase, 'triaging');
+  assert.equal(resumed.reviewRequestLimit, null);
+  assert.deepEqual(resumed.reviewHistory, immutableHistory);
+  assert.equal(resumed.nextAction, 'Triage the applicable canonical review findings.');
+  assert.throws(() => checkpointReviewRequestLimit({
+    cwd, expectedRevision: historical.revision, reviewRequestLimit: null,
+  }), { code: 'STATE_REVISION_CONFLICT' });
+
+  const exhausted = checkpointReviewRequestLimit({
+    cwd, expectedRevision: resumed.revision, reviewRequestLimit: 4,
+  });
+  assert.equal(exhausted.phase, 'triaging');
+  assert.equal(reviewRequestUsage(exhausted).exhausted, true);
+  assert.match(exhausted.nextAction, /Triage[\s\S]*limit 4 is exhausted[\s\S]*--unlimited/u);
+  assert.throws(() => checkpointReviewRequestLimit({
+    cwd, expectedRevision: exhausted.revision, reviewRequestLimit: 3,
+  }), { code: 'INVALID_REVIEW_REQUEST_LIMIT' });
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: exhausted.revision,
+    nextState: { ...exhausted, reviewRequestLimit: 8 },
+  }), { code: 'IMMUTABLE_STATE_PROVENANCE' });
+
+  const raised = checkpointReviewRequestLimit({
+    cwd, expectedRevision: exhausted.revision, reviewRequestLimit: 8,
+  });
+  assert.equal(reviewRequestUsage(raised).exhausted, false);
+  assert.equal(raised.nextAction, 'Triage the applicable canonical review findings.');
+  const unlimited = checkpointReviewRequestLimit({
+    cwd, expectedRevision: raised.revision, reviewRequestLimit: null,
+  });
+  assert.deepEqual(reviewRequestUsage(unlimited), {
+    used: 4, limit: null, remaining: null, exhausted: false,
+  });
+  assert.equal(unlimited.nextAction, 'Triage the applicable canonical review findings.');
+  assert.deepEqual(unlimited.reviewHistory, immutableHistory);
+});
+
+test('review limit changes cannot exhaust a pending request but may preserve its recovery slot', () => {
+  const cwd = repo();
+  let prepared = ready(init(cwd), []);
+  for (let ordinal = 1; ordinal <= 4; ordinal += 1) {
+    const requested = buildReviewRequestTransition(prepared, request(prepared), external(cwd, prepared));
+    prepared = ready(buildReviewOutcomeTransition(
+      requested, outcome(requested, { outcome: 'findings' }),
+    ), []);
+  }
+  writeFileSync(statePath(cwd, 17), `${JSON.stringify(prepared)}\n`);
+  const eventsPath = join(stateDirectory(cwd, 17), 'events.ndjson');
+  const priorEvents = readFileSync(eventsPath, 'utf8');
+  const operationId = `request:17:verification:5:${prepared.currentIntegrationHeadSha}`;
+  writeFileSync(eventsPath, `${priorEvents}${JSON.stringify({
+    type: 'github-mutation-intent', summary: 'Pending review request.',
+    details: { operationId }, at: AT,
+  })}\n`);
+  assert.throws(() => checkpointReviewRequestLimit({
+    cwd, expectedRevision: prepared.revision, reviewRequestLimit: 4,
+  }), { code: 'REVIEW_REQUEST_INTENT_PENDING' });
+  const raised = checkpointReviewRequestLimit({
+    cwd, expectedRevision: prepared.revision, reviewRequestLimit: 6,
+  });
+  assert.equal(raised.reviewRequestLimit, 6);
+  assert.equal(reviewRequestUsage(raised).remaining, 2);
+  assert.deepEqual(raised.reviewHistory, prepared.reviewHistory);
+});
+
+test('verification collection escalation is guarded, append-only, request-bound, and human-gated', () => {
   const cwd = repo();
   const initialized = init(cwd);
   const migrated = migratePrReviewStateV1(legacyState(initialized, { reviewRound: 3 }), { migratedAt: AT });
@@ -1713,6 +1921,11 @@ test('verification collection escalation is guarded, append-only, request-bound,
   });
   assert.equal(escalated.verificationReviewUsed, true);
   assert.deepEqual(escalated.reviewHistory, requested.reviewHistory);
+  const limitedEscalation = checkpointReviewRequestLimit({
+    cwd, expectedRevision: escalated.revision, reviewRequestLimit: 9,
+  });
+  assert.equal(limitedEscalation.phase, 'awaiting-human-decision');
+  assert.deepEqual(limitedEscalation.verificationEscalation, escalation);
   assert.ok(reviewRequestGate(escalated, external(cwd, escalated)).reasons.some(
     (reason) => reason.includes('verification collection escalation'),
   ));
@@ -1720,19 +1933,19 @@ test('verification collection escalation is guarded, append-only, request-bound,
     (reason) => reason.includes('verification collection escalation'),
   ));
   assert.throws(() => checkpointState({
-    cwd, expectedRevision: escalated.revision,
-    nextState: { ...escalated, verificationEscalation: null },
+    cwd, expectedRevision: limitedEscalation.revision,
+    nextState: { ...limitedEscalation, verificationEscalation: null },
   }), { code: 'IMMUTABLE_STATE_PROVENANCE' });
   assert.throws(() => checkpointState({
-    cwd, expectedRevision: escalated.revision,
+    cwd, expectedRevision: limitedEscalation.revision,
     nextState: {
-      ...escalated,
+      ...limitedEscalation,
       verificationEscalation: { ...escalation, evidenceIds: ['review:rewritten'] },
     },
   }), { code: 'IMMUTABLE_STATE_PROVENANCE' });
   assert.deepEqual(checkpointVerificationEscalation({
-    cwd, expectedRevision: escalated.revision, escalation,
-  }), escalated);
+    cwd, expectedRevision: limitedEscalation.revision, escalation,
+  }), limitedEscalation);
 
   const discovery = {
     ...requested, reviewRound: 2, verificationReviewUsed: false,
@@ -1745,7 +1958,7 @@ test('verification collection escalation is guarded, append-only, request-bound,
   );
 });
 
-test('stale verification HEAD drift accepts truthful guarded collection escalation', () => {
+test('stale verification HEAD drift remains recoverable and cannot be mislabeled as ambiguity', () => {
   const cwd = repo();
   const initialized = init(cwd);
   const migrated = migratePrReviewStateV1(legacyState(initialized, { reviewRound: 3 }), { migratedAt: AT });
@@ -1762,17 +1975,17 @@ test('stale verification HEAD drift accepts truthful guarded collection escalati
   const requestHead = requested.reviewRequest.headSha;
   const observedPrHead = commit(cwd, { 'escalation-drift.txt': 'drift\n' }, 'escalation drift');
   const drifted = checkpointGitMetadata({ cwd }).state;
-  const escalated = checkpointVerificationEscalation({
+  assert.equal(drifted.phase, 'recovering');
+  assert.throws(() => checkpointVerificationEscalation({
     cwd, expectedRevision: drifted.revision,
     escalation: {
       requestId: requested.reviewRequest.id, requestHeadSha: requestHead, observedPrHeadSha: observedPrHead,
       headRelation: 'changed', evidenceIds: [`request:${requested.reviewRequest.id}`],
       reason: 'request-head-drift', at: AT,
     },
-  });
-  assert.equal(escalated.phase, 'awaiting-human-decision');
-  assert.equal(escalated.verificationReviewUsed, true);
-  assert.equal(escalated.reviewHistory.at(-1).outcome, null);
+  }), { code: 'VERIFICATION_ESCALATION_NOT_EXPECTED' });
+  assert.equal(drifted.verificationReviewUsed, true);
+  assert.equal(drifted.reviewHistory.at(-1).outcome, null);
 });
 
 test('structured canonical thread proof covers multiple tasks with one reply and completes them once', () => {

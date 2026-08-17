@@ -49,11 +49,19 @@ npm run review:github -- status --human
 npm run review:github -- reply-resolve --pr 123 --task finding-a
 npm run review:github -- verify-resolve --pr 123 --task local-finding
 npm run review:github -- verify-resolve --pr 123 --task-set-json '["threadless-a","threadless-b"]'
-npm run review:github -- request --pr 123 --kind discovery
+npm run review:github -- request --pr 123
 npm run review:github -- collect --pr 123
 npm run review:github -- collect-ci --pr 123
 npm run review:github -- complete --pr 123
 ```
+
+The state gate selects `discovery` for the first three durable requests and
+repeatable `verification` thereafter. By default there is no configured
+request-count cap. If the operator configured a finite total limit, every
+persisted request—including pending or later-stale evidence—consumes one slot,
+and the gate rejects the next request before journaling or GitHub mutation once
+the limit is reached. Findings from any allowed request return to triage. A
+clean result from the final allowed request can still satisfy Done.
 
 Read structured GitHub data. An ordinary review applies only when:
 
@@ -199,11 +207,16 @@ normally only after this gate passes.
 
 ## Loop breakers
 
-Run at most three discovery reviews. If the third needs fixes, Integrate and
-Resolve them, confirm review-ready state, then allow one verification review for
-that exact commit. A stale verification result or any new verification finding
-moves the cycle to `awaiting-human-decision`. Report the evidence and required
-decision; do not request another review automatically.
+Continue exact-commit review, remediation, and verification until Codex returns
+clean. The first three durable requests are discovery reviews; every later
+request is a repeatable verification review. An optional durable operator limit
+is the only request-count stop, and exhaustion pauses only a new request until
+the operator raises/removes the limit or stops the cycle.
+
+An exact recorded request that becomes stale because the live HEAD advances is
+recoverable for either kind. Missing, edited, foreign, conflicting, or otherwise
+ambiguous canonical evidence remains a fail-closed human escalation and is not
+cleared by changing a request limit.
 
 If the same stable finding returns in two consecutive rounds, pause repeated
 patching and investigate the root cause.

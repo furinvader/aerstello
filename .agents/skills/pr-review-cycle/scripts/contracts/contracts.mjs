@@ -1104,7 +1104,26 @@ function exactHeadReason(label, actual, expected) {
   return actual === expected ? null : `${label} must equal currentIntegrationHeadSha`;
 }
 
-function reviewRequestStateGate(state) {
+export function reviewRequestUsage(state) {
+  const legacyRequests = Number.isInteger(state?.legacyReviewProvenance?.discoveryRounds)
+    ? state.legacyReviewProvenance.discoveryRounds : 0;
+  const nativeRequests = Array.isArray(state?.reviewHistory) ? state.reviewHistory.length : 0;
+  const used = legacyRequests + nativeRequests;
+  const limit = Number.isSafeInteger(state?.reviewRequestLimit) && state.reviewRequestLimit > 0
+    ? state.reviewRequestLimit : null;
+  return {
+    used,
+    limit,
+    remaining: limit === null ? null : Math.max(0, limit - used),
+    exhausted: limit !== null && used >= limit,
+  };
+}
+
+function nextReviewKind(state) {
+  return reviewRequestUsage(state).used < 3 ? 'discovery' : 'verification';
+}
+
+function reviewReadyStateGate(state) {
   const reasons = [];
   const head = state?.currentIntegrationHeadSha;
   if (state?.phase !== 'ready-for-review') reasons.push('phase must be exactly ready-for-review');
@@ -1128,11 +1147,16 @@ function reviewRequestStateGate(state) {
   if (!Array.isArray(state?.tasks) || state.tasks.some((task) => task.status !== 'completed')) reasons.push('all prior tasks must be completed');
   if (state?.tasks?.some((task) => task.disposition === 'needs-human-decision')) reasons.push('needs-human-decision findings require a human');
   if ((state?.blockedReasons?.length ?? 0) !== 0) reasons.push('blocked reasons must be cleared');
-  let kind = null;
-  if (Number.isInteger(state?.reviewRound) && state.reviewRound < 3) kind = 'discovery';
-  else if (state?.reviewRound === 3 && state?.verificationReviewUsed === false) kind = 'verification';
-  else reasons.push('the three discovery rounds and one verification review are exhausted');
-  return { kind, reasons };
+  return reasons;
+}
+
+function reviewRequestStateGate(state) {
+  const reasons = reviewReadyStateGate(state);
+  const usage = reviewRequestUsage(state);
+  if (usage.exhausted) {
+    reasons.push(`explicit review request limit ${usage.limit} is exhausted after ${usage.used} durable requests`);
+  }
+  return { kind: nextReviewKind(state), reasons };
 }
 
 function validateExternalHeads(state, external, reasons) {
@@ -1210,9 +1234,9 @@ export function completionGate(state, external) {
   return { allowed: reasons.length === 0, reasons };
 }
 
-function validateReviewHistory(value, errors) {
-  if (!Array.isArray(value) || value.length > 4) {
-    errors.push('$.reviewHistory must contain at most four entries');
+function validateReviewHistory(value, legacyDiscoveryCount, errors) {
+  if (!Array.isArray(value)) {
+    errors.push('$.reviewHistory must be an array');
     return;
   }
   value.forEach((entry, index) => {
@@ -1229,22 +1253,28 @@ function validateReviewHistory(value, errors) {
     }
   });
   const discoveryCount = value.filter((entry) => entry.request?.kind === 'discovery').length;
-  const verificationCount = value.filter((entry) => entry.request?.kind === 'verification').length;
-  if (discoveryCount > 3 || verificationCount > 1) errors.push('$.reviewHistory exceeds the 3+1 review limit');
+  if (discoveryCount > 3) errors.push('$.reviewHistory exceeds three discovery requests');
+  value.forEach((entry, index) => {
+    const expectedKind = legacyDiscoveryCount + index < 3 ? 'discovery' : 'verification';
+    if (entry.request?.kind && entry.request.kind !== expectedKind) {
+      errors.push(`$.reviewHistory[${index}].request.kind must be ${expectedKind} at this durable request ordinal`);
+    }
+  });
   const requestIds = value.map((entry) => entry.request?.id);
   if (new Set(requestIds).size !== requestIds.length) errors.push('$.reviewHistory contains duplicate request IDs');
 }
 
 export function validatePrReviewState(value) {
   const errors = [];
-  const fields = [
+  const requiredFields = [
     'schemaVersion', 'revision', 'repository', 'prNumber', 'phase', 'baseSha', 'requestedHeadSha',
     'reviewedHeadSha', 'currentIntegrationHeadSha', 'reviewRound', 'verificationReviewUsed', 'legacyReviewProvenance',
     'releaseBaseline', 'decisions', 'tasks', 'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
     'threadResolutionStatus', 'blockedReasons', 'validationStatus', 'ciValidationStatus', 'ciValidationHistory', 'nextAction',
     'integrationWorktree', 'orchestratorSessionId', 'abandonmentReason', 'git', 'updatedAt',
   ];
-  if (!requireFields(value, fields, '$', errors)) return errors;
+  const fields = [...requiredFields, 'reviewRequestLimit'];
+  if (!requireFields(value, requiredFields, '$', errors)) return errors;
   rejectUnknownFields(value, fields, '$', errors);
   if (value.schemaVersion !== 3) errors.push('$.schemaVersion must equal 3');
   if (!Number.isInteger(value.revision) || value.revision < 0) errors.push('$.revision must be non-negative');
@@ -1256,6 +1286,11 @@ export function validatePrReviewState(value) {
   if (!Number.isInteger(value.reviewRound) || value.reviewRound < 0 || value.reviewRound > 3) errors.push('$.reviewRound must be 0-3');
   if (typeof value.verificationReviewUsed !== 'boolean') errors.push('$.verificationReviewUsed must be boolean');
   if (value.verificationReviewUsed && value.reviewRound !== 3) errors.push('$.verificationReviewUsed requires reviewRound 3');
+  if (Object.hasOwn(value, 'reviewRequestLimit')
+      && !(value.reviewRequestLimit === null
+        || (Number.isSafeInteger(value.reviewRequestLimit) && value.reviewRequestLimit > 0))) {
+    errors.push(`$.reviewRequestLimit must be null or a positive safe integer up to ${Number.MAX_SAFE_INTEGER}`);
+  }
   if (!(value.legacyReviewProvenance === null || (
     isObject(value.legacyReviewProvenance)
     && Object.keys(value.legacyReviewProvenance).length === 3
@@ -1286,21 +1321,25 @@ export function validatePrReviewState(value) {
   if (value.reviewRequest !== null) validateReviewRequest(value.reviewRequest, '$.reviewRequest', errors);
   if (value.reviewOutcome !== null) validateReviewOutcome(value.reviewOutcome, '$.reviewOutcome', errors);
   validateVerificationEscalation(value.verificationEscalation, value.reviewRequest, errors);
-  validateReviewHistory(value.reviewHistory, errors);
+  const legacyDiscoveryCount = value.legacyReviewProvenance?.discoveryRounds ?? 0;
+  validateReviewHistory(value.reviewHistory, legacyDiscoveryCount, errors);
   const latest = Array.isArray(value.reviewHistory) ? value.reviewHistory.at(-1) : null;
   if ((latest?.request ?? null)?.id !== value.reviewRequest?.id) errors.push('$.reviewRequest must equal the latest history request');
   if ((latest?.outcome ?? null)?.id !== value.reviewOutcome?.id) errors.push('$.reviewOutcome must equal the latest history outcome');
   const discoveryCount = value.reviewHistory?.filter((entry) => entry.request?.kind === 'discovery').length;
   const verificationCount = value.reviewHistory?.filter((entry) => entry.request?.kind === 'verification').length;
-  const legacyDiscoveryCount = value.legacyReviewProvenance?.discoveryRounds ?? 0;
   if (Number.isInteger(discoveryCount) && legacyDiscoveryCount + discoveryCount > 3) {
     errors.push('$.reviewHistory plus migrated discovery count exceeds three rounds');
   }
   if (Number.isInteger(discoveryCount) && value.reviewRound !== legacyDiscoveryCount + discoveryCount) {
     errors.push('$.reviewRound must equal durable migrated and native discovery request count');
   }
-  if (Number.isInteger(verificationCount) && value.verificationReviewUsed !== (verificationCount === 1)) {
+  if (Number.isInteger(verificationCount) && value.verificationReviewUsed !== (verificationCount > 0)) {
     errors.push('$.verificationReviewUsed must equal durable verification request use');
+  }
+  const usage = reviewRequestUsage(value);
+  if (usage.limit !== null && usage.limit < usage.used) {
+    errors.push('$.reviewRequestLimit cannot be lower than the durable request count');
   }
   if (value.reviewRequest && value.requestedHeadSha !== value.reviewRequest.headSha) errors.push('$.requestedHeadSha must equal request HEAD');
   if (value.reviewOutcome && value.reviewedHeadSha !== value.reviewOutcome.headSha) errors.push('$.reviewedHeadSha must equal outcome HEAD');
@@ -1357,18 +1396,13 @@ export function validatePrReviewState(value) {
   if (latest && latest.outcome === null) {
     const stale = latest.request.headSha !== value.currentIntegrationHeadSha;
     const allowedPhase = value.phase === 'awaiting-review'
-      || (stale && latest.request.kind === 'discovery' && value.phase === 'recovering')
-      || (stale && latest.request.kind === 'discovery' && value.phase === 'ready-for-review')
+      || (stale && ['recovering', 'ready-for-review'].includes(value.phase))
       || (latest.request.kind === 'verification' && value.phase === 'awaiting-human-decision'
-        && (stale || value.verificationEscalation !== null));
+        && value.verificationEscalation !== null);
     if (!allowedPhase) errors.push('$.phase is invalid for the pending current or stale review request');
   }
-  if (value.reviewOutcome?.kind === 'verification' && value.reviewOutcome.outcome === 'findings'
-      && value.phase !== 'awaiting-human-decision') {
-    errors.push('$.phase must be awaiting-human-decision after verification findings');
-  }
   if (value.phase === 'ready-for-review') {
-    errors.push(...reviewRequestStateGate(value).reasons.map((reason) => `$.phase ready-for-review requires: ${reason}`));
+    errors.push(...reviewReadyStateGate(value).map((reason) => `$.phase ready-for-review requires: ${reason}`));
   }
   if (value.phase === 'complete') errors.push(...completionStateGate(value).map((reason) => `$.phase complete requires: ${reason}`));
   findRawFields(value, '$', errors);

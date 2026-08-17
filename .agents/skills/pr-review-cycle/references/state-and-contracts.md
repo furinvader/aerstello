@@ -34,6 +34,7 @@ rename. Keep raw logs, full diffs, stack traces, and transcripts out of state.
 
 ```bash
 npm run review:state -- init --pr 123 --base origin/main --head HEAD
+npm run review:state -- init --pr 123 --base origin/main --head HEAD --review-limit 8
 npm run review:state -- path
 npm run review:state -- validate
 npm run review:state -- bind-task-packet --task-packet /tmp/task.json --expected-revision 4
@@ -50,6 +51,8 @@ npm run review:state -- show
 npm run review:state -- migrate
 npm run review:state -- recover
 npm run review:state -- checkpoint --input /tmp/state.json --expected-revision 4
+npm run review:state -- set-review-limit --pr 123 --expected-revision 4 --limit 8
+npm run review:state -- set-review-limit --pr 123 --expected-revision 5 --unlimited
 npm run review:state -- archive
 npm run review:state -- archive --abandon-reason "superseded PR"
 ```
@@ -58,6 +61,18 @@ npm run review:state -- archive --abandon-reason "superseded PR"
 guesses a PR number. Pass `--repository owner/name` when needed. `checkpoint`
 replaces the complete document and rejects revision drift. Normal archival
 requires Done; earlier archival requires an explicit durable abandonment reason.
+
+Schema v3's optional `reviewRequestLimit` is a durable policy value: missing or
+`null` means no configured request-count cap, while a finite value is a positive
+safe-integer total limit (at most `9007199254740991`). Used requests equal
+migrated discovery provenance plus the complete
+native `reviewHistory`; every entry counts regardless of its outcome. The
+guarded setter cannot lower the limit below that total, rewrite request history,
+clear an evidence escalation, or exhaust the cycle while the exact next GitHub
+request intent is recoverable. Generic checkpoints cannot change the policy. Reaching the
+limit keeps review-ready state valid but blocks the next request before any
+mutation. Active state remains bounded to 64 KiB, so unlimited describes policy,
+not unbounded storage.
 
 State schema v3 upgrades are explicit. Migration from v1 or v2 first saves an
 exact versioned backup and must preserve stable finding/task identities, source
@@ -149,11 +164,11 @@ still-applicable review. It cannot replace an existing passing proof after an
 ordinary taskless review.
 
 A native schema-v3 taskless cycle has one separate fail-closed recovery when a
-clean discovery review remains internally consistent but its reviewed commit is
+clean review remains internally consistent but its reviewed commit is
 now one historical SHA behind the integration HEAD. The active state must be
 `recovering`, contain no tasks, retain an exact latest request/outcome/history
 triple whose clean request, outcome, requested, and reviewed SHAs all equal that
-one prior SHA, and still have a discovery or verification request available.
+one prior SHA, and still have configured review-request allowance.
 The current checkout and recorded Git snapshot must be clean and exact, with no
 blocked reason, verification escalation, or human-decision task. Use a current-
 HEAD `--initial-selection` (and `--replace` when the historical sidecar exists)

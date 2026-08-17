@@ -401,8 +401,7 @@ function fakeState(initial) {
         reviewHistory: current.reviewHistory.map((entry, index) => (
           index === current.reviewHistory.length - 1 ? { ...entry, outcome } : entry
         )),
-        phase: outcome.kind === 'verification' && outcome.outcome === 'findings'
-          ? 'awaiting-human-decision' : outcome.outcome === 'findings' ? 'triaging' : 'validating',
+        phase: outcome.outcome === 'findings' ? 'triaging' : 'validating',
       };
       return structuredClone(current);
     },
@@ -505,6 +504,16 @@ test('status uses split fully paginated reads and filters canonical roots', asyn
   assert.equal(client.calls.filter((call) => call.name === 'PullRequestChecks').length, 1);
   assert.equal(result.statePhase, 'recovering');
   assert.equal(result.liveCiValidation.status, 'passed');
+  assert.deepEqual(result.reviewRequests, { used: 0, limit: null });
+  assert.match(renderHumanStatus(result), /Review requests: 0; limit: unlimited/u);
+
+  const finite = await workflow(stateFixture({
+    reviewRound: 3,
+    legacyReviewProvenance: { schemaVersion: 1, discoveryRounds: 3, migratedAt: AT },
+    reviewRequestLimit: 5,
+  })).api.status(2);
+  assert.deepEqual(finite.reviewRequests, { used: 3, limit: 5 });
+  assert.match(renderHumanStatus(finite), /Review requests: 3; limit: 5/u);
 });
 
 test('status marks preserved review evidence stale after both recorded and live HEAD advance', async () => {
@@ -821,6 +830,7 @@ test('taskless clean-review HEAD-drift refresh fails closed at lifecycle and liv
     reviewRequest: exhaustedLatest.request,
     reviewOutcome: exhaustedLatest.outcome,
     reviewHistory: exhaustedHistory,
+    reviewRequestLimit: 4,
   });
   await assert.rejects(() => workflow(exhausted).api.refreshThreads(2), {
     code: 'TASKLESS_REFRESH_NOT_ALLOWED',
@@ -1135,6 +1145,35 @@ test('request journals before exact mutation, proves live result, and checkpoint
   assert.equal(mutation.variables.body, '@codex review');
   assert.match(mutation.variables.clientMutationId, /^aerstello-/u);
   assert.equal(state.calls.at(-1).name, 'checkpointReviewRequest');
+});
+
+test('request posts a fifth durable request as repeatable verification by default', async () => {
+  const history = [
+    cleanReviewEntry(1, 'discovery', HEAD),
+    cleanReviewEntry(2, 'discovery', HEAD),
+    cleanReviewEntry(3, 'discovery', HEAD),
+    cleanReviewEntry(4, 'verification', HEAD),
+  ];
+  const latest = history.at(-1);
+  const state = readyState({
+    reviewRound: 3,
+    verificationReviewUsed: true,
+    requestedHeadSha: HEAD,
+    reviewedHeadSha: HEAD,
+    reviewRequest: latest.request,
+    reviewOutcome: latest.outcome,
+    reviewHistory: history,
+  });
+  const events = [];
+  const client = new FakeClient({ events });
+  const setup = workflow(state, client);
+  const result = await setup.api.request(2);
+  assert.equal(result.request.kind, 'verification');
+  assert.equal(setup.state.current.reviewHistory.length, 5);
+  assert.deepEqual(setup.state.current.reviewHistory.map((entry) => entry.request.kind), [
+    'discovery', 'discovery', 'discovery', 'verification', 'verification',
+  ]);
+  assert.deepEqual(events.slice(0, 2), ['intent:request', 'mutation:AddReviewRequest']);
 });
 
 test('request recovers a concurrent intent using its returned exclusion baseline without mutation', async () => {
@@ -2114,7 +2153,7 @@ test('collect accepts only canonical exact request THUMBS_UP and ignores noncano
 test('collect conservatively classifies canonical review bodies and attached roots', async () => {
   for (const [kind, expectedPhase] of [
     ['discovery', 'triaging'],
-    ['verification', 'awaiting-human-decision'],
+    ['verification', 'triaging'],
   ]) {
     const client = new FakeClient();
     client.reviews.push(canonicalReview({
@@ -2396,15 +2435,12 @@ test('structural issue comments remain ambiguous beside any second canonical evi
   }
 });
 
-test('collect escalates verification live drift, stale evidence, and exact-head ambiguity truthfully', async () => {
+test('collect recovers exact-anchor live drift but escalates stale or ambiguous evidence', async () => {
   const driftClient = new FakeClient();
   driftClient.metadata.headRefOid = OTHER_HEAD;
   const drift = workflow(pendingState(), driftClient);
-  const drifted = await drift.api.collect(2);
-  assert.deepEqual(
-    { reason: drifted.escalation.reason, relation: drifted.escalation.headRelation },
-    { reason: 'request-head-drift', relation: 'changed' },
-  );
+  await assert.rejects(() => drift.api.collect(2), { code: 'REVIEW_COLLECTION_STALE' });
+  assert.equal(drift.state.calls.some((call) => call.name === 'checkpointVerificationEscalation'), false);
 
   const staleClient = new FakeClient();
   staleClient.reviews.push({
@@ -2430,11 +2466,11 @@ test('collect escalates verification live drift, stale evidence, and exact-head 
   assert.equal(absent.state.calls.length, 0);
 });
 
-test('discovery stale collection stays separate and verification findings stop for a human', async () => {
+test('exact-anchor stale collection recovers for either kind and verification findings return to triage', async () => {
   const staleDiscovery = new FakeClient();
   staleDiscovery.metadata.headRefOid = OTHER_HEAD;
   const discovery = workflow(pendingState('discovery'), staleDiscovery);
-  await assert.rejects(() => discovery.api.collect(2), { code: 'DISCOVERY_COLLECTION_UNRESOLVED' });
+  await assert.rejects(() => discovery.api.collect(2), { code: 'REVIEW_COLLECTION_STALE' });
   assert.equal(discovery.state.calls.some((call) => call.name === 'checkpointVerificationEscalation'), false);
 
   const findingsClient = new FakeClient();
@@ -2445,7 +2481,7 @@ test('discovery stale collection stays separate and verification findings stop f
   addThread(findingsClient, { root: rootComment('THREAD_1', { pullRequestReview: { id: 'PRR_review' } }) });
   const findings = await workflow(pendingState(), findingsClient).api.collect(2);
   assert.equal(findings.outcome.outcome, 'findings');
-  assert.equal(findings.phase, 'awaiting-human-decision');
+  assert.equal(findings.phase, 'triaging');
 });
 
 test('bounded request allowance is checked before GitHub mutation', async () => {
@@ -2458,6 +2494,36 @@ test('bounded request allowance is checked before GitHub mutation', async () => 
     await assert.rejects(() => api.request(2, 'verification'), { code: 'REQUEST_NOT_READY' });
     assert.equal(client.calls.some((call) => call.name === 'AddReviewRequest'), false);
   }
+
+  const history = [
+    cleanReviewEntry(1, 'discovery', HEAD),
+    cleanReviewEntry(2, 'discovery', HEAD),
+    cleanReviewEntry(3, 'discovery', HEAD),
+    cleanReviewEntry(4, 'verification', HEAD),
+  ];
+  const latest = history.at(-1);
+  const exhausted = readyState({
+    reviewRound: 3,
+    verificationReviewUsed: true,
+    reviewRequestLimit: 4,
+    requestedHeadSha: HEAD,
+    reviewedHeadSha: HEAD,
+    reviewRequest: latest.request,
+    reviewOutcome: latest.outcome,
+    reviewHistory: history,
+  });
+  const journalEvents = [];
+  const client = new FakeClient();
+  const setup = workflow(exhausted, client, { journal: fakeJournal(journalEvents) });
+  await assert.rejects(() => setup.api.request(2, 'verification'), { code: 'REQUEST_NOT_READY' });
+  assert.deepEqual(journalEvents, []);
+  assert.equal(client.calls.some((call) => call.name === 'AddReviewRequest'), false);
+  assert.equal(setup.state.calls.some((call) => call.name === 'checkpointReviewRequest'), false);
+  const status = await setup.api.status(2);
+  assert.match(
+    status.nextAction,
+    /set-review-limit --pr 2 --expected-revision 1 --limit <higher-number> or --unlimited/u,
+  );
 });
 
 test('complete performs fresh live proof and uses guarded completion only when exact clean state applies', async () => {
@@ -2950,7 +3016,12 @@ test('CLI exposes exactly the documented explicit-PR command surface and JSON-re
   await assert.rejects(() => runCli(['refresh-threads', '--pr', '2', '--kind', 'discovery'], {}), /--kind is only valid/u);
   await assert.rejects(() => runCli(['refresh-threads', '--pr', '2', '--human'], {}), /--human is only valid/u);
   await assert.rejects(() => runCli(['unknown', '--pr', '2'], {}), /Unknown command/u);
-  await assert.rejects(() => runCli(['request', '--pr', '2', '--kind', 'other'], {}), /discovery\|verification/u);
+  await assert.rejects(() => runCli(['request', '--pr', '2', '--kind', 'other'], {}), /discovery or verification/u);
+  const requested = await runCli(['request', '--pr', '2'], {
+    client: new FakeClient(), state: fakeState(readyState()), git: fakeGit(), clock: { now: () => AT },
+    journal: fakeJournal(),
+  });
+  assert.equal(requested.request.kind, 'discovery');
   const client = new FakeClient();
   const state = fakeState(stateFixture());
   const result = await runCli(['status', '--pr', '2'], {
@@ -3239,7 +3310,7 @@ test('malformed pre-existing resolve intents cannot adopt a live resolved root',
   }
 });
 
-test('verification request anchor drift escalates while discovery remains fail-closed', async () => {
+test('altered verification anchors remain ambiguous even when the live HEAD changes', async () => {
   for (const changedHead of [false, true]) {
     const client = new FakeClient();
     const setup = workflow(pendingState('verification'), client);
@@ -3247,7 +3318,8 @@ test('verification request anchor drift escalates while discovery remains fail-c
     if (changedHead) client.metadata.headRefOid = OTHER_HEAD;
     const result = await setup.api.collect(2);
     assert.equal(result.escalated, true);
-    assert.equal(result.escalation.reason, changedHead ? 'request-head-drift' : 'ambiguous-canonical-evidence');
+    assert.equal(result.escalation.reason, 'ambiguous-canonical-evidence');
+    assert.equal(result.escalation.headRelation, changedHead ? 'changed' : 'same');
   }
   const discovery = workflow(pendingState('discovery'));
   discovery.client.comments[0].createdAt = '2026-08-05T00:00:00.001Z';

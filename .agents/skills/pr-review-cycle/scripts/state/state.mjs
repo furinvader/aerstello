@@ -23,6 +23,7 @@ import {
   completionGate,
   parseTargetedValidationCommand,
   reviewRequestGate,
+  reviewRequestUsage,
   taskHasCanonicalThreadCoverage,
   unionInitialValidationSelection,
   unionRequiredValidation,
@@ -47,7 +48,7 @@ import {
   validateSpecialistEvidence,
 } from '../../../aerstello-specialists/scripts/validate-registry.mjs';
 
-export { completionGate, reviewRequestGate } from '../contracts/contracts.mjs';
+export { completionGate, reviewRequestGate, reviewRequestUsage } from '../contracts/contracts.mjs';
 export { gitCommonDirectory, repositoryRoot, reviewRoot } from '../paths.mjs';
 
 export const ACTIVE_STATE_LIMIT_BYTES = 64 * 1024;
@@ -1420,8 +1421,7 @@ function isCleanTasklessReviewValidationRecovery(state, expectedIds) {
 }
 
 function hasRemainingReviewAllowance(state) {
-  return (Number.isInteger(state.reviewRound) && state.reviewRound < 3)
-    || (state.reviewRound === 3 && state.verificationReviewUsed === false);
+  return !reviewRequestUsage(state).exhausted;
 }
 
 function isNativeTasklessReviewHeadDriftValidationRecovery(state, expectedIds) {
@@ -1433,7 +1433,7 @@ function isNativeTasklessReviewHeadDriftValidationRecovery(state, expectedIds) {
     && state.legacyReviewProvenance === null
     && state.phase === 'recovering'
     && state.tasks.length === 0 && expectedIds.length === 0
-    && request !== null && request.kind === 'discovery'
+    && request !== null
     && outcome?.outcome === 'clean' && latest !== undefined
     && sameEvidence(latest.request, request) && sameEvidence(latest.outcome, outcome)
     && outcome.requestId === request.id && outcome.kind === request.kind
@@ -1886,10 +1886,18 @@ export function initializeState({
   head = 'HEAD',
   releaseRef = 'origin/main',
   orchestratorSessionId = null,
+  reviewRequestLimit = null,
 } = {}) {
   const selectedPr = parsePrNumber(prNumber);
   const repo = repository ?? originRepository(cwd);
   if (!repo) throw new StateError('Unable to derive owner/name from origin; pass --repository', 'REPOSITORY_REQUIRED');
+  if (!(reviewRequestLimit === null
+      || (Number.isSafeInteger(reviewRequestLimit) && reviewRequestLimit > 0))) {
+    throw new StateError(
+      `Review request limit must be null or a positive safe integer up to ${Number.MAX_SAFE_INTEGER}`,
+      'INVALID_REVIEW_REQUEST_LIMIT',
+    );
+  }
   const root = repositoryRoot(cwd);
   const baseSha = resolveCommit(cwd, base);
   const currentIntegrationHeadSha = resolveCommit(cwd, head);
@@ -1915,6 +1923,7 @@ export function initializeState({
       currentIntegrationHeadSha,
       reviewRound: 0,
       verificationReviewUsed: false,
+      reviewRequestLimit,
       legacyReviewProvenance: null,
       releaseBaseline: releaseState.applicableRelease,
       decisions: [],
@@ -2270,6 +2279,110 @@ export function checkpointState({
   }));
 }
 
+function nextReviewKind(state) {
+  return reviewRequestUsage(state).used < 3 ? 'discovery' : 'verification';
+}
+
+function reviewLimitNextAction(state) {
+  const usage = reviewRequestUsage(state);
+  if (usage.exhausted) {
+    return `Review request limit ${usage.limit} is exhausted after ${usage.used} durable requests; run npm run review:state -- set-review-limit --pr ${state.prNumber} --expected-revision ${state.revision + 1} --limit <higher-number> or --unlimited before the next request.`;
+  }
+  return `Request canonical ${nextReviewKind(state)} review.`;
+}
+
+function triageNextAction(state) {
+  const action = 'Triage the applicable canonical review findings.';
+  return reviewRequestUsage(state).exhausted ? `${action} ${reviewLimitNextAction(state)}` : action;
+}
+
+function hasOutstandingReviewRequestIntent(cwd, state) {
+  const path = join(stateDirectory(cwd, state.prNumber), 'events.ndjson');
+  if (!existsSync(path)) return false;
+  let events;
+  try {
+    events = readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  } catch (error) {
+    throw new StateError(`Unable to inspect GitHub mutation intent evidence: ${error.message}`, 'RECOVERY_EVIDENCE_INVALID');
+  }
+  const operationId = `request:${state.prNumber}:${nextReviewKind(state)}:${state.reviewHistory.length + 1}:${state.currentIntegrationHeadSha}`;
+  return events.some((event) => event.type === 'github-mutation-intent'
+    && event.details?.operationId === operationId);
+}
+
+export function checkpointReviewRequestLimit({
+  cwd = process.cwd(), prNumber, reviewRequestLimit, expectedRevision,
+} = {}) {
+  if (!(reviewRequestLimit === null
+      || (Number.isSafeInteger(reviewRequestLimit) && reviewRequestLimit > 0))) {
+    throw new StateError(
+      `Review request limit must be null or a positive safe integer up to ${Number.MAX_SAFE_INTEGER}`,
+      'INVALID_REVIEW_REQUEST_LIMIT',
+    );
+  }
+  const selectedPr = prNumber ?? activePrNumber(cwd);
+  if (selectedPr === null || selectedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  return withStateLock(cwd, selectedPr, () => {
+    const current = loadState(cwd, selectedPr);
+    if (expectedRevision !== current.revision) {
+      throw new StateError(
+        `State revision changed: expected ${expectedRevision}, found ${current.revision}`,
+        'STATE_REVISION_CONFLICT',
+      );
+    }
+    const usage = reviewRequestUsage(current);
+    if (reviewRequestLimit !== null && reviewRequestLimit < usage.used) {
+      throw new StateError(
+        `Review request limit ${reviewRequestLimit} is below ${usage.used} durable requests`,
+        'INVALID_REVIEW_REQUEST_LIMIT',
+      );
+    }
+    if (hasOutstandingReviewRequestIntent(cwd, current)
+        && reviewRequestLimit !== null && reviewRequestLimit <= usage.used) {
+      throw new StateError(
+        'Review request limit cannot exhaust the cycle while an exact next-request mutation intent is recoverable',
+        'REVIEW_REQUEST_INTENT_PENDING',
+      );
+    }
+    const latest = current.reviewHistory.at(-1);
+    const resumesHistoricalFinding = current.phase === 'awaiting-human-decision'
+      && current.verificationEscalation === null
+      && current.blockedReasons.length === 0
+      && !current.tasks.some((task) => task.disposition === 'needs-human-decision')
+      && current.reviewOutcome?.outcome === 'findings'
+      && latest?.outcome?.id === current.reviewOutcome.id;
+    const configured = { ...current, reviewRequestLimit };
+    const nextState = {
+      ...configured,
+      ...(resumesHistoricalFinding ? {
+        phase: 'triaging',
+        nextAction: triageNextAction(configured),
+      } : current.phase === 'triaging' ? {
+          nextAction: triageNextAction(configured),
+      } : current.phase === 'ready-for-review' ? {
+          nextAction: reviewLimitNextAction(configured),
+        } : {}),
+    };
+    const sameLimit = Object.hasOwn(current, 'reviewRequestLimit')
+      && current.reviewRequestLimit === reviewRequestLimit;
+    if (sameLimit && sameEvidence(current, nextState)) return current;
+    return checkpointStateUnlocked({
+      cwd,
+      selectedPr,
+      nextState,
+      expectedRevision,
+      event: {
+        type: 'review-request-limit',
+        summary: reviewRequestLimit === null
+          ? 'Removed the explicit review request limit'
+          : `Set the review request limit to ${reviewRequestLimit}`,
+      },
+      eventWriter: appendEvent,
+      transitionAuthorization: protectedTransition(nextState, 'review-request-limit'),
+    });
+  });
+}
+
 function sameEvidence(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
@@ -2290,6 +2403,13 @@ function assertCheckpointProvenance(current, next, authorization) {
     if (!sameEvidence(next, authorization.expectedState)) {
       throw new StateError('Guarded transition state does not match its authorization', 'INVALID_TRANSITION_AUTHORIZATION');
     }
+  }
+  if (guardedKind !== 'review-request-limit') {
+    assertImmutableValue(
+      { present: Object.hasOwn(current, 'reviewRequestLimit'), value: current.reviewRequestLimit ?? null },
+      { present: Object.hasOwn(next, 'reviewRequestLimit'), value: next.reviewRequestLimit ?? null },
+      'reviewRequestLimit',
+    );
   }
   if (guardedKind === null) {
     for (const field of [
@@ -2326,6 +2446,13 @@ function assertCheckpointProvenance(current, next, authorization) {
     for (const field of [
       'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
       'reviewRequest', 'reviewOutcome', 'reviewHistory',
+    ]) assertImmutableValue(current[field], next[field], field);
+  } else if (guardedKind === 'review-request-limit') {
+    for (const field of [
+      'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
+      'reviewRequest', 'reviewOutcome', 'reviewHistory', 'verificationEscalation',
+      'legacyReviewProvenance', 'tasks', 'decisions', 'validationStatus', 'ciValidationStatus',
+      'ciValidationHistory', 'threadResolutionStatus', 'blockedReasons',
     ]) assertImmutableValue(current[field], next[field], field);
   } else if (guardedKind === 'ci-validation') {
     for (const field of [
@@ -2541,9 +2668,7 @@ export function buildReviewOutcomeTransition(state, outcome) {
       || outcome?.headSha !== request.headSha || outcome?.headSha !== state.currentIntegrationHeadSha) {
     throw new StateError('Review outcome must bind to the pending request, kind, and SHA', 'INVALID_REVIEW_OUTCOME');
   }
-  const phase = outcome.kind === 'verification' && outcome.outcome === 'findings'
-    ? 'awaiting-human-decision'
-    : outcome.outcome === 'findings' ? 'triaging' : 'validating';
+  const phase = outcome.outcome === 'findings' ? 'triaging' : 'validating';
   const reviewHistory = state.reviewHistory.map((entry, index) => (
     index === state.reviewHistory.length - 1 ? { ...entry, outcome } : entry
   ));
@@ -2555,9 +2680,7 @@ export function buildReviewOutcomeTransition(state, outcome) {
     reviewHistory,
     nextAction: phase === 'validating'
       ? 'Confirm fresh local, pushed, and live PR heads, then complete the cycle.'
-      : phase === 'awaiting-human-decision'
-        ? 'Present verification findings for human decision.'
-        : 'Triage the applicable canonical review findings.',
+      : triageNextAction({ ...state, reviewHistory }),
   };
   const errors = validatePrReviewState(next);
   if (errors.length > 0) throw new StateError(`Invalid review outcome transition:\n- ${errors.join('\n- ')}`, 'INVALID_REVIEW_OUTCOME');
@@ -3308,10 +3431,10 @@ export function checkpointGitMetadata({ cwd = process.cwd(), sessionId, backup =
           updatedAt: null,
         },
         ...(state.phase === 'awaiting-review' ? {
-          phase: state.reviewRequest?.kind === 'verification' ? 'awaiting-human-decision' : 'recovering',
-          nextAction: state.reviewRequest?.kind === 'verification'
-            ? 'A verification request became stale; present the stale-request decision to a human.'
-            : 'The discovery request became stale; reconcile the new HEAD before requesting another review.',
+          phase: 'recovering',
+          nextAction: hasRemainingReviewAllowance(state)
+            ? 'The review request became stale; reconcile the new HEAD before requesting another review.'
+            : `The review request became stale and explicit limit ${reviewRequestUsage(state).limit} is exhausted; reconcile the new HEAD, then raise or remove the limit before requesting another review.`,
         } : headSensitivePhases.has(state.phase) ? {
             phase: 'recovering',
             nextAction: 'Reconcile the changed integration checkout and re-establish exact-head proof.',
@@ -3329,7 +3452,7 @@ export function checkpointGitMetadata({ cwd = process.cwd(), sessionId, backup =
       };
     } else if (!git.dirty && state.phase === 'recovering'
       && state.nextAction === 'Clean the integration checkout and checkpoint Git metadata to restore review readiness.') {
-      checkpointUpdate = { phase: 'ready-for-review', nextAction: 'Request canonical review.' };
+      checkpointUpdate = { phase: 'ready-for-review', nextAction: reviewLimitNextAction(state) };
     }
     const nextState = {
       ...state,
@@ -3412,6 +3535,7 @@ export function renderRecoverySummary({ cwd = process.cwd(), prNumber, maxCharac
   const lines = [
     `PR review recovery: ${state.repository}#${state.prNumber}`,
     `Phase: ${state.phase}; round: ${state.reviewRound}`,
+    `Review requests: ${reviewRequestUsage(state).used}; limit: ${reviewRequestUsage(state).limit ?? 'unlimited'}`,
     `Release baseline: ${release}`,
     `Base: ${state.baseSha}`,
     `Requested/reviewed: ${state.requestedHeadSha ?? 'none'} / ${state.reviewedHeadSha ?? 'none'}`,

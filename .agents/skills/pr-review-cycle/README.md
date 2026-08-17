@@ -64,6 +64,21 @@ npm run review:github -- status --human
 npm run review:worktree -- inspect --pr 123 --task finding-a
 ```
 
+New cycles have no configured review-request count cap. To start with a finite
+total limit, pass `--review-limit <positive-safe-integer>` to `review:state init`.
+Change that policy with an exact revision guard:
+
+```bash
+npm run review:state -- set-review-limit --pr 123 --expected-revision 8 --limit 10
+npm run review:state -- set-review-limit --pr 123 --expected-revision 9 --unlimited
+```
+
+Every durable request record counts, including pending or later-stale requests.
+The first three requests retain the historical `discovery` kind; later requests
+use repeatable `verification`. Reaching a finite limit blocks only the next
+GitHub request, not triage, remediation, validation, or completion from a clean
+final allowed review.
+
 From a nested npm workspace directory such as `apps/api`, prefix npm with the
 checkout's Git root so npm selects the root package scripts:
 
@@ -222,13 +237,13 @@ SHAs. It rejects pending, finding, stale, dirty, or inconsistent states and does
 not infer checks from a missing legacy plan or replace an existing passing proof
 after an ordinary taskless review.
 
-A separate native schema-v3 route recovers a taskless clean discovery review
+A separate native schema-v3 route recovers a taskless clean review
 after the integration HEAD advances. The clean request, outcome, requested, and
 reviewed SHAs must still agree on one prior commit different from the current
 HEAD, and the latest history entry must exactly equal the active evidence. The
 state must be `recovering`, have no tasks, blockers, escalation, or human
-decision, retain another discovery or verification request allowance, and have
-a clean exact current checkout. Use a nonempty current-HEAD
+decision, retain configured review-request allowance, and have a clean exact
+current checkout. Use a nonempty current-HEAD
 `npm run review:state -- validation-plan --initial-selection` selection
 (`--replace` may replace only
 the stale plan sidecar), then run it normally. The old review ledger is preserved
@@ -324,9 +339,12 @@ Next action: Integrate the remaining result and run the selected tests.
 - **Release state is inconsistent:** run `npm run release:state`,
   `npm run check:release-state`, and `npm run check:released-migrations`. Fetch
   missing refs or tags; do not assume the project is pre-release.
-- **Review rounds repeat:** investigate a finding that returns twice. After
-  three discovery reviews, only one exact-commit verification review is allowed;
-  new or stale verification evidence needs a human decision.
+- **Review rounds repeat:** investigate a stable finding that returns twice.
+  Otherwise keep requesting exact-commit reviews until Codex is clean. There is
+  no configured request-count cap by default; an explicit durable limit pauses
+  only the next request when exhausted. Exact-anchor HEAD drift is recoverable,
+  while missing, altered, conflicting, or otherwise ambiguous evidence still
+  needs a human decision.
 
 Machine contracts and command details live in the
 [PR review state schema](./schemas/pr-review-state.schema.json),

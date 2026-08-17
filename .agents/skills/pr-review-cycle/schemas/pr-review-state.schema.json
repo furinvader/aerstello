@@ -29,6 +29,12 @@
     "currentIntegrationHeadSha": { "$ref": "#/$defs/sha" },
     "reviewRound": { "type": "integer", "minimum": 0, "maximum": 3 },
     "verificationReviewUsed": { "type": "boolean" },
+    "reviewRequestLimit": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      ]
+    },
     "legacyReviewProvenance": {
       "oneOf": [
         { "type": "null" },
@@ -72,7 +78,7 @@
     "reviewRequest": { "$ref": "#/$defs/nullableReviewRequest" },
     "reviewOutcome": { "$ref": "#/$defs/nullableReviewOutcome" },
     "reviewHistory": {
-      "type": "array", "maxItems": 4, "uniqueItems": true,
+      "type": "array", "uniqueItems": true,
       "items": {
         "type": "object", "additionalProperties": false, "required": ["request", "outcome"],
         "properties": {
@@ -153,10 +159,6 @@
           }
         },
         "allOf": [
-          {
-            "if": { "properties": { "reviewRound": { "const": 3 } }, "required": ["reviewRound"] },
-            "then": { "properties": { "verificationReviewUsed": { "const": false } } }
-          },
           {
             "if": {
               "properties": {
@@ -264,18 +266,6 @@
           }
         ]
       }
-    },
-    {
-      "if": {
-        "properties": {
-          "reviewOutcome": {
-            "type": "object", "required": ["kind", "outcome"],
-            "properties": { "kind": { "const": "verification" }, "outcome": { "const": "findings" } }
-          }
-        },
-        "required": ["reviewOutcome"]
-      },
-      "then": { "properties": { "phase": { "const": "awaiting-human-decision" } } }
     },
     {
       "if": { "properties": { "verificationEscalation": { "type": "object" } }, "required": ["verificationEscalation"] },

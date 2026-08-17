@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { reviewRequestGate, validatePrReviewState } from '../contracts/contracts.mjs';
+import { reviewRequestGate, reviewRequestUsage, validatePrReviewState } from '../contracts/contracts.mjs';
 
 const CANONICAL_LOGIN = 'chatgpt-codex-connector';
 const CANONICAL_URL = 'https://github.com/apps/chatgpt-codex-connector';
@@ -895,13 +895,12 @@ function tasklessReviewHeadDriftRefreshAllowed(state) {
   const outcome = state.reviewOutcome;
   const latest = state.reviewHistory.at(-1);
   const priorHeadSha = request?.headSha;
-  const reviewAllowanceRemains = (Number.isInteger(state.reviewRound) && state.reviewRound < 3)
-    || (state.reviewRound === 3 && state.verificationReviewUsed === false);
+  const reviewAllowanceRemains = !reviewRequestUsage(state).exhausted;
   return state.schemaVersion === 3
     && state.legacyReviewProvenance === null
     && state.phase === 'recovering'
     && state.tasks.length === 0
-    && request !== null && request.kind === 'discovery'
+    && request !== null
     && outcome?.outcome === 'clean' && latest !== undefined
     && JSON.stringify(latest.request) === JSON.stringify(request)
     && JSON.stringify(latest.outcome) === JSON.stringify(outcome)
@@ -948,6 +947,7 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       liveCi = { status: error.code === 'CI_CHECK_MISSING' ? 'missing' : 'pending', message: error.message };
     }
     const openThreads = live.threads.filter((thread) => thread.canonical && !thread.isResolved).length;
+    const requestUsage = reviewRequestUsage(active);
     const specialistReviews = stateAdapter.specialistStatus
       ? await stateAdapter.specialistStatus(active.prNumber)
       : {
@@ -966,6 +966,7 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
         isResolved: thread.isResolved,
       })),
       reviewCount: live.reviews.length,
+      reviewRequests: { used: requestUsage.used, limit: requestUsage.limit },
       requestReactionCount: live.reactions.length,
       codexReview: codexReviewStatus(active, live.metadata.headRefOid),
       taskStatus: {
@@ -986,7 +987,9 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       recordedCiValidation: active.ciValidationStatus,
       liveCiValidation: liveCi,
       openCodexThreads: openThreads,
-      nextAction: active.nextAction,
+      nextAction: active.phase === 'ready-for-review' && requestUsage.exhausted
+        ? `Review request limit ${requestUsage.limit} is exhausted after ${requestUsage.used} durable requests; run npm run review:state -- set-review-limit --pr ${active.prNumber} --expected-revision ${active.revision} --limit <higher-number> or --unlimited before the next request.`
+        : active.nextAction,
     };
   }
 
@@ -1060,18 +1063,24 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
 
   async function request(prNumber, kind) {
     let active = await load(prNumber);
-    if (!['discovery', 'verification'].includes(kind)) throw new GitHubWorkflowError('Review kind is invalid', 'INVALID_REVIEW_KIND');
+    if (kind !== undefined && !['discovery', 'verification'].includes(kind)) {
+      throw new GitHubWorkflowError('Review kind is invalid', 'INVALID_REVIEW_KIND');
+    }
     let live = await readLiveSnapshot(client, active);
     const heads = await assertMutationReady({ state: active, git }, live);
     const gate = reviewRequestGate(active, { ...heads, prHeadSha: live.metadata.headRefOid });
-    if (!gate.allowed || gate.kind !== kind) {
-      throw new GitHubWorkflowError(`State gate does not allow ${kind}: ${gate.reasons.join('; ')}`, 'REQUEST_NOT_READY');
+    const selectedKind = kind ?? gate.kind;
+    if (!gate.allowed || gate.kind !== selectedKind) {
+      throw new GitHubWorkflowError(
+        `State gate does not allow ${selectedKind ?? 'a review request'}: ${gate.reasons.join('; ')}`,
+        'REQUEST_NOT_READY',
+      );
     }
     if (live.threads.some((thread) => thread.canonical && !thread.isResolved)) {
       throw new GitHubWorkflowError('Canonical review threads remain unresolved', 'REQUEST_NOT_READY');
     }
     assertLiveThreadProof(active, live);
-    const operationId = `request:${prNumber}:${kind}:${active.reviewHistory.length + 1}:${active.currentIntegrationHeadSha}`;
+    const operationId = `request:${prNumber}:${selectedKind}:${active.reviewHistory.length + 1}:${active.currentIntegrationHeadSha}`;
     const priorRequestIds = new Set(active.reviewHistory.map((entry) => entry.request.id));
     const intendedAt = clock.now();
     const baselineComments = live.comments.filter((comment) => comment.body === REQUEST_BODY
@@ -1116,7 +1125,7 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       prNumber, expectedRevision: active.revision,
       request: {
         id: comment.id, databaseId: comment.databaseId ?? null, url: comment.url,
-        headSha: active.currentIntegrationHeadSha, at: comment.createdAt, kind, body: REQUEST_BODY,
+        headSha: active.currentIntegrationHeadSha, at: comment.createdAt, kind: selectedKind, body: REQUEST_BODY,
         authorLogin: comment.author.login, authorNodeId: comment.author.id,
       },
       pushedHeadSha: heads.pushedHeadSha, prHeadSha: live.metadata.headRefOid,
@@ -1404,9 +1413,8 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     try {
       assertRecordedRequestComment(active, live);
     } catch (error) {
-      if (!(error instanceof GitHubWorkflowError) || error.code !== 'REQUEST_PROOF_STALE'
-          || active.reviewRequest.kind !== 'verification') throw error;
-      const changed = live.metadata.headRefOid !== active.reviewRequest.headSha;
+      if (!(error instanceof GitHubWorkflowError) || error.code !== 'REQUEST_PROOF_STALE') throw error;
+      if (active.reviewRequest.kind !== 'verification') throw error;
       const ids = [
         `request:${active.reviewRequest.id}`,
         ...live.comments.filter((comment) => comment.id === active.reviewRequest.id)
@@ -1415,20 +1423,15 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       active = await stateAdapter.checkpointVerificationEscalation({
         prNumber, expectedRevision: active.revision,
         escalation: escalationFor(active, live.metadata.headRefOid, ids,
-          changed ? 'request-head-drift' : 'ambiguous-canonical-evidence', clock.now()),
+          'ambiguous-canonical-evidence', clock.now()),
       });
       return { escalated: true, escalation: active.verificationEscalation };
     }
     if (live.metadata.headRefOid !== active.reviewRequest.headSha) {
-      if (active.reviewRequest.kind !== 'verification') {
-        throw new GitHubWorkflowError('Discovery request became stale at the live PR head', 'DISCOVERY_COLLECTION_UNRESOLVED');
-      }
-      const ids = [`request:${active.reviewRequest.id}`];
-      active = await stateAdapter.checkpointVerificationEscalation({
-        prNumber, expectedRevision: active.revision,
-        escalation: escalationFor(active, live.metadata.headRefOid, ids, 'request-head-drift', clock.now()),
-      });
-      return { escalated: true, escalation: active.verificationEscalation };
+      throw new GitHubWorkflowError(
+        'The exact recorded review request became stale at the live PR head',
+        'REVIEW_COLLECTION_STALE',
+      );
     }
     const heads = await assertMutationReady({ state: active, git }, live);
     const request = active.reviewRequest;

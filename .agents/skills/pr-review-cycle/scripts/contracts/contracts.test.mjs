@@ -9,6 +9,8 @@ import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import {
   parseTargetedValidationCommand,
+  reviewRequestGate,
+  reviewRequestUsage,
   validateInitialValidationSelection,
   validatePrReviewState,
   validateTaskPacket,
@@ -447,7 +449,6 @@ test('state JSON Schema rejects terminal and review-ready states missing current
     readyStateFixture({ blockedReasons: ['Still blocked.'] }),
     readyStateFixture({ git: { branch: 'main', headSha: 'a'.repeat(40), dirty: true } }),
     readyStateFixture({ tasks: [{ ...completedTask, status: 'integrated' }] }),
-    readyStateFixture({ reviewRound: 3, verificationReviewUsed: true }),
     completeStateFixture({ ciValidationStatus: stateFixture().ciValidationStatus, ciValidationHistory: [] }),
     completeStateFixture({ requestedHeadSha: null }),
     completeStateFixture({ reviewedHeadSha: null }),
@@ -461,6 +462,77 @@ test('state JSON Schema rejects terminal and review-ready states missing current
     assert.equal(validateSchema(fixture), false, 'schema must reject an unready terminal/readiness state');
     assert.notDeepEqual(validatePrReviewState(fixture), [], 'manual validator must reject the same state');
   }
+});
+
+test('review requests are unlimited by default and an explicit positive limit counts every durable request', () => {
+  const schema = JSON.parse(readFileSync(prReviewStateSchemaPath, 'utf8'));
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajv);
+  const validateSchema = ajv.compile(schema);
+  const head = 'a'.repeat(40);
+  const entries = Array.from({ length: 6 }, (_, index) => {
+    const kind = index < 3 ? 'discovery' : 'verification';
+    const request = {
+      id: `request-${index + 1}`, databaseId: 100 + index,
+      url: `https://github.com/example/aerstello/pull/17#issuecomment-${100 + index}`,
+      headSha: head, at: AT, kind, body: '@codex review',
+      authorLogin: 'maintainer', authorNodeId: 'USER_maintainer',
+    };
+    const outcome = {
+      id: `review-${index + 1}`, databaseId: 200 + index,
+      url: `https://github.com/example/aerstello/pull/17#pullrequestreview-${200 + index}`,
+      headSha: head, at: AT, requestId: request.id, kind, outcome: 'findings',
+      evidenceType: 'review-submission', reviewerLogin: 'chatgpt-codex-connector',
+      reviewerNodeId: 'BOT_codex', reviewerType: 'Bot',
+      reviewerUrl: 'https://github.com/apps/chatgpt-codex-connector',
+      reactionContent: null, reactionCommentId: null,
+    };
+    return { request, outcome };
+  });
+  const latest = entries.at(-1);
+  const unlimited = readyStateFixture({
+    requestedHeadSha: head, reviewedHeadSha: head, reviewRound: 3, verificationReviewUsed: true,
+    reviewRequest: latest.request, reviewOutcome: latest.outcome, reviewHistory: entries,
+  });
+  assert.equal(validateSchema(unlimited), true, JSON.stringify(validateSchema.errors));
+  assert.deepEqual(validatePrReviewState(unlimited), []);
+  assert.deepEqual(reviewRequestUsage(unlimited), {
+    used: 6, limit: null, remaining: null, exhausted: false,
+  });
+  const external = {
+    localHeadSha: head, localDirty: false, pushedHeadSha: head, prHeadSha: head,
+    isAncestor: () => true,
+  };
+  assert.deepEqual(reviewRequestGate(unlimited, external), { allowed: true, kind: 'verification', reasons: [] });
+
+  const finite = { ...unlimited, reviewRequestLimit: 6 };
+  assert.equal(validateSchema(finite), true, JSON.stringify(validateSchema.errors));
+  assert.deepEqual(validatePrReviewState(finite), []);
+  assert.equal(reviewRequestGate(finite, external).allowed, false);
+  assert.match(reviewRequestGate(finite, external).reasons.join('\n'), /explicit review request limit 6/u);
+
+  for (const reviewRequestLimit of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '6']) {
+    const invalid = { ...unlimited, reviewRequestLimit };
+    assert.equal(validateSchema(invalid), false);
+    assert.match(validatePrReviewState(invalid).join('\n'), /reviewRequestLimit/u);
+  }
+  assert.match(validatePrReviewState({ ...unlimited, reviewRequestLimit: 5 }).join('\n'), /lower than/u);
+
+  const outOfOrder = structuredClone(unlimited);
+  outOfOrder.reviewHistory[3].request.kind = 'discovery';
+  outOfOrder.reviewHistory[3].outcome.kind = 'discovery';
+  assert.match(validatePrReviewState(outOfOrder).join('\n'), /must be verification/u);
+
+  const legacyEntries = entries.slice(2);
+  const legacy = {
+    ...unlimited,
+    legacyReviewProvenance: { schemaVersion: 1, discoveryRounds: 2, migratedAt: AT },
+    reviewHistory: legacyEntries,
+    reviewRequest: legacyEntries.at(-1).request,
+    reviewOutcome: legacyEntries.at(-1).outcome,
+  };
+  assert.equal(reviewRequestUsage(legacy).used, 6);
+  assert.deepEqual(validatePrReviewState(legacy), []);
 });
 
 test('superseded null-outcome requests remain valid when the integration HEAD returns', () => {
