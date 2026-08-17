@@ -17,7 +17,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 
-import { gitBuffer, gitText, readTreeFile, resolveCommit, runGit } from '../../../../../scripts/lib/git.mjs';
+import { gitBuffer, gitText, listTree, readTreeFile, resolveCommit, runGit } from '../../../../../scripts/lib/git.mjs';
 import {
   digestJson,
   planReadiness,
@@ -954,6 +954,45 @@ function assertExactCentralObservation(current, state, operation) {
     throw new StateError(`${operation} requires the exact clean owning central branch and durable HEAD`, 'CENTRAL_GIT_MISMATCH');
   }
 }
+
+function selectorsAtCommit(cwd, commit) {
+  const selectors = new Map();
+  for (const entry of listTree(cwd, commit, 'specs/features')) {
+    if (entry.type !== 'blob' || !entry.path.endsWith('.feature')) continue;
+    const contents = readTreeFile(cwd, commit, entry.path)?.toString('utf8') ?? '';
+    for (const match of contents.matchAll(/(?:^|\s)@([a-z0-9]+(?:-[a-z0-9]+)*)/gmu)) {
+      const paths = selectors.get(match[1]) ?? new Set();
+      paths.add(entry.path);
+      selectors.set(match[1], paths);
+    }
+  }
+  return selectors;
+}
+
+function assertPacketSelectorsAtBase(cwd, packet) {
+  const existing = selectorsAtCommit(cwd, packet.taskBaseSha);
+  const planned = new Map((packet.plannedE2ESelectors ?? []).map((entry) => [entry.selector, entry.featurePath]));
+  for (const selector of planned.keys()) {
+    if (existing.has(selector)) throw new StateError(`Planned E2E selector ${selector} already exists at the exact task base`, 'PLANNED_E2E_SELECTOR_MISMATCH');
+  }
+  for (const validation of packet.requiredValidation.system) {
+    for (const rawSelector of validation.selectors) {
+      const selector = rawSelector.startsWith('@') ? rawSelector.slice(1) : rawSelector;
+      if (!existing.has(selector) && !planned.has(selector)) {
+        throw new StateError(`Required E2E selector ${selector} is unknown at the exact task base and is not planned`, 'PLANNED_E2E_SELECTOR_MISMATCH');
+      }
+    }
+  }
+}
+
+function assertPlannedSelectorsRealized(cwd, packet, commit) {
+  const realized = selectorsAtCommit(cwd, commit);
+  for (const { selector, featurePath } of packet.plannedE2ESelectors ?? []) {
+    if (!realized.get(selector)?.has(featurePath)) {
+      throw new StateError(`Planned E2E selector ${selector} was not realized in ${featurePath} at the worker commit`, 'PLANNED_E2E_SELECTOR_MISMATCH');
+    }
+  }
+}
 function verifiedWorkerTombstone(cwd, state, task) {
   const received = verifyReceipt(implementationWorktreeTombstonePath(cwd, state.changeId, task.id), `worktree tombstone ${task.id}`);
   if (received.value.status !== 'removed' || received.value.manifestDigest !== task.worktreeManifestDigest
@@ -1035,8 +1074,9 @@ export function bindTask({ cwd = process.cwd(), changeId, packet, expectedRevisi
     const errors = validateImplementationTask(packet);
     if (errors.length) throw new StateError(`Invalid implementation task packet:\n- ${errors.join('\n- ')}`, 'INVALID_TASK_PACKET');
     const current = gitObservation(root, clock);
-    if (!current.clean || current.headSha !== state.git.headSha) throw new StateError('Task binding requires clean central HEAD at the durable Git observation', 'CENTRAL_GIT_MISMATCH');
+    assertExactCentralObservation(current, state, 'Task binding');
     const plan = readEffectivePlan(root, state); assertPacketPlanBinding(packet, plan, state, current.headSha);
+    assertPacketSelectorsAtBase(root, packet);
     const packetDigest = implementationTaskDigest(packet); const binding = task.binding + 1;
     const next = revised(state, { phase: 'implementing', git: current,
       execution: replaceExecutionTask(state, task.id, { status: 'bound', binding, packetDigest, taskBaseSha: packet.taskBaseSha }) }, clock);
@@ -1065,7 +1105,7 @@ function pathsOverlap(left, right) {
 export function tasksConflict(left, right) {
   if (left.anticipatedPaths.some((a) => right.anticipatedPaths.some((b) => pathsOverlap(a, b)))) return true;
   if (left.produces.some((id) => right.consumes.includes(id) || right.produces.includes(id)) || right.produces.some((id) => left.consumes.includes(id))) return true;
-  const sharedSurface = (task) => task.anticipatedPaths.some((path) => /^(?:package(?:-lock)?\.json|\.agents\/|\.codex\/|\.github\/|packages\/shared\/src\/contracts\.ts|apps\/api\/src\/schema\.ts|apps\/api\/migrations\/|tests\/e2e\/fixtures(?:\/|$)|tests\/e2e\/[^/]+\.steps\.ts$)/u.test(path));
+  const sharedSurface = (task) => task.anticipatedPaths.some((path) => /^(?:package(?:-lock)?\.json|\.agents\/|\.codex\/|\.github\/|packages\/shared\/src\/contracts\.ts|apps\/api\/src\/schema\.ts|apps\/api\/migrations\/|tests\/e2e\/fixtures(?:\/|$)|tests\/e2e\/(?:[^/]+\/)*[^/]+\.steps\.ts$)/u.test(path));
   if (sharedSurface(left) || sharedSurface(right)) return true;
   return false;
 }
@@ -1076,6 +1116,9 @@ export function scheduleWave({ cwd = process.cwd(), changeId, expectedRevision, 
     const state = loadState(root, selected); assertWritableV2(state); assertRevision(state, expectedRevision);
     validateState({ cwd: root, changeId: selected });
     if (state.phase !== 'implementing' || state.execution.activeWave.length) throw new StateError('Scheduling requires implementing with no active wave', 'INVALID_PHASE');
+    if (state.execution.tasks.some((task) => task.status === 'accepted')) {
+      throw new StateError('Integrate every accepted result before scheduling another wave', 'TASK_STATE_CONFLICT');
+    }
     const current = gitObservation(root, clock);
     assertExactCentralObservation(current, state, 'Wave scheduling');
     const complete = new Set(state.execution.tasks.filter((task) => ['integrated', 'no-change'].includes(task.status)).map(({ id }) => id));
@@ -1154,6 +1197,8 @@ export function acceptResult({ cwd = process.cwd(), changeId, result, workerCwd,
         throw new StateError('Worker result must name exactly one descendant commit of the packet base', 'WORKER_COMMIT_INVALID');
       }
       actualPaths = nulChangedPaths(workerCwd, task.taskBaseSha, workerCommit);
+      assertPacketSelectorsAtBase(workerCwd, packet);
+      assertPlannedSelectorsRealized(workerCwd, packet, workerCommit);
     } else {
       if (workerGit.headSha !== task.taskBaseSha) throw new StateError(`${result.status} result requires worker HEAD at the packet base`, 'WORKTREE_HEAD_MISMATCH');
       if (result.status === 'no-change' && result.unexpectedDependencies.length) throw new StateError('No-change cannot conceal unexpected dependencies; report blocked', 'INVALID_IMPLEMENTATION_RESULT');

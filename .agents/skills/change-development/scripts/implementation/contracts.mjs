@@ -1,8 +1,6 @@
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import {
   loadRegistry, routeSpecialists, validateSpecialistEvidence, validateSpecialization,
@@ -36,7 +34,6 @@ const WORKSPACES = new Set(['@aerstello/api', '@aerstello/web', '@aerstello/shar
 const WRAPPERS = new Set(['env', 'bash', 'sh', 'zsh', 'fish', 'command', 'exec', 'xargs']);
 const SHELL_SYNTAX = /[;&|<>`$()'"\\*?\[\]{}!#~\t\v\f\r\n]/u;
 const NODE_TEST_PATH = /(?:^|\/)[^/]+\.(?:test|spec)\.(?:[cm]?[jt]s|[jt]sx)$/u;
-const featureDirectory = fileURLToPath(new URL('../../../../../specs/features/', import.meta.url));
 
 function schemaErrors(validator, value) {
   if (validator(value)) return [];
@@ -117,23 +114,6 @@ function normalizeSelector(value, option = null) {
   const slug = value.startsWith('@') ? value.slice(1) : value;
   return option === '--id' && !slug.startsWith('id-') ? `id-${slug}` : slug;
 }
-let knownSelectors;
-function getKnownSelectors() {
-  if (knownSelectors) return knownSelectors;
-  knownSelectors = new Set();
-  const pending = [featureDirectory];
-  while (pending.length > 0) {
-    const directory = pending.pop();
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) pending.push(path);
-      else if (entry.isFile() && entry.name.endsWith('.feature')) {
-        for (const match of readFileSync(path, 'utf8').matchAll(/(?:^|\s)@([a-z0-9]+(?:-[a-z0-9]+)*)/gmu)) knownSelectors.add(match[1]);
-      }
-    }
-  }
-  return knownSelectors;
-}
 function parseRelatedE2E(command) {
   const prefix = 'npm run test:e2e:related -- ';
   if (!command.startsWith(prefix)) return null;
@@ -172,7 +152,7 @@ export function parseImplementationValidationCommand(command) {
   return null;
 }
 
-function validateRequiredValidation(value, errors) {
+function validateRequiredValidation(value, errors, packet) {
   if (!isRecord(value) || !Array.isArray(value.unit) || !Array.isArray(value.system)) return;
   const commands = [];
   for (const kind of ['unit', 'system']) for (const [index, entry] of value[kind].entries()) {
@@ -188,17 +168,35 @@ function validateRequiredValidation(value, errors) {
     if (kind !== 'system') continue;
     if (e2e) {
       const selectors = Array.isArray(entry.selectors) ? entry.selectors.map((item) => normalizeSelector(item)) : [];
-      if (selectors.some((item) => !item || !getKnownSelectors().has(item))) errors.push(`${path}.selectors contains an unsafe or unknown E2E selector`);
+      if (selectors.some((item) => !item)) errors.push(`${path}.selectors contains an unsafe E2E selector`);
       if (!Array.isArray(entry.projects) || entry.projects.some((item) => !E2E_PROJECTS.has(item))) errors.push(`${path}.projects contains an unsafe or unknown E2E project`);
       if (!sameJson(selectors, e2e.selectors)) errors.push(`${path}.selectors must exactly match the command's repeatable --id/--tag scope`);
       if (!sameJson(entry.projects, e2e.projects)) errors.push(`${path}.projects must exactly match the command's effective --project scope`);
       if (e2e.projects.some((item) => !E2E_PROJECTS.has(item))) errors.push(`${path}.command contains an unsafe or unknown E2E project`);
-      if (e2e.selectors.some((item) => !getKnownSelectors().has(item))) errors.push(`${path}.command contains an unsafe or unknown E2E selector`);
+      if (e2e.selectors.some((item) => !item)) errors.push(`${path}.command contains an unsafe E2E selector`);
     } else if (mentionsE2E) errors.push(`${path}.command must be a targeted related command, not a full-suite or local fallback`);
     else if ((entry.selectors?.length ?? 0) !== 0 || (entry.projects?.length ?? 0) !== 0) errors.push(`${path} non-E2E commands require empty selector and project metadata`);
   }
   if (commands.length === 0) errors.push('$.requiredValidation must contain at least one unit or system command');
   if (new Set(commands).size !== commands.length) errors.push('$.requiredValidation contains duplicate commands');
+  const planned = packet.plannedE2ESelectors ?? [];
+  const plannedNames = planned.map(({ selector }) => selector);
+  if (new Set(plannedNames).size !== plannedNames.length) errors.push('$.plannedE2ESelectors contains a duplicate selector');
+  const usedSelectors = value.system.flatMap((entry) => Array.isArray(entry.selectors)
+    ? entry.selectors.map((selector) => normalizeSelector(selector)).filter(Boolean) : []);
+  for (const [index, entry] of planned.entries()) {
+    const path = `$.plannedE2ESelectors[${index}]`;
+    if (!entry.featurePath.startsWith('specs/features/') || !entry.featurePath.endsWith('.feature')) {
+      errors.push(`${path}.featurePath must name a feature file below specs/features`);
+    }
+    if (!packet.allowedPaths.some((pattern) => pathMatchesOwnership(entry.featurePath, pattern))) {
+      errors.push(`${path}.featurePath must be owned by allowedPaths`);
+    }
+    if (packet.forbiddenPaths.some((pattern) => pathMatchesOwnership(entry.featurePath, pattern))) {
+      errors.push(`${path}.featurePath must not be forbidden`);
+    }
+    if (!usedSelectors.includes(entry.selector)) errors.push(`${path}.selector must be used by required system validation`);
+  }
 }
 
 export function validateImplementationTask(value) {
@@ -229,7 +227,7 @@ export function validateImplementationTask(value) {
   if (!sameJson(value.acceptanceCriteria.map(({ id }) => id), value.acceptanceCriteriaIds)) {
     errors.push('$.acceptanceCriteria IDs must exactly match acceptanceCriteriaIds');
   }
-  validateRequiredValidation(value.requiredValidation, errors);
+  validateRequiredValidation(value.requiredValidation, errors, value);
   return [...new Set(errors)];
 }
 

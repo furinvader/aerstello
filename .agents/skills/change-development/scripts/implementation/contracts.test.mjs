@@ -112,6 +112,46 @@ test('valid packet has a canonical digest that binds every packet field', () => 
   assert.equal(implementationTaskDigest(reordered), implementationTaskDigest(value));
   assert.notEqual(implementationTaskDigest({ ...value, objective: 'A changed objective.' }), implementationTaskDigest(value));
   assert.notEqual(implementationTaskDigest({ ...value, taskBaseSha: 'd'.repeat(40) }), implementationTaskDigest(value));
+  const planned = {
+    ...value,
+    allowedPaths: [...value.allowedPaths, 'specs/features/planned.feature'],
+    plannedE2ESelectors: [{ selector: 'id-planned-flow', featurePath: 'specs/features/planned.feature' }],
+    requiredValidation: { unit: [], system: [{
+      command: 'npm run test:e2e:related -- --id planned-flow',
+      reason: 'Exercise the task-owned scenario.',
+      selectors: ['id-planned-flow'],
+      projects: ['tablet-chromium'],
+    }] },
+  };
+  assert.deepEqual(validateImplementationTask(planned), []);
+  assert.notEqual(implementationTaskDigest(planned), implementationTaskDigest(value));
+});
+
+test('planned E2E selector declarations are structurally bounded without reading a checkout', () => {
+  const requiredValidation = { unit: [], system: [{
+    command: 'npm run test:e2e:related -- --id planned-flow',
+    reason: 'Exercise the task-owned scenario.',
+    selectors: ['id-planned-flow'],
+    projects: ['tablet-chromium'],
+  }] };
+  const valid = packet({
+    allowedPaths: ['specs/features/planned.feature'],
+    plannedE2ESelectors: [{ selector: 'id-planned-flow', featurePath: 'specs/features/planned.feature' }],
+    requiredValidation,
+  });
+  assert.deepEqual(validateImplementationTask(valid), []);
+  for (const [label, change, pattern] of [
+    ['unused', { plannedE2ESelectors: [{ selector: 'id-unused-flow', featurePath: 'specs/features/planned.feature' }] }, /must be used/u],
+    ['unowned', { allowedPaths: ['apps/web/src/owned.ts'] }, /must be owned/u],
+    ['forbidden', { forbiddenPaths: ['specs/features/planned.feature'] }, /must not be forbidden/u],
+    ['unsafe path', { plannedE2ESelectors: [{ selector: 'id-planned-flow', featurePath: 'specs/features/planned.txt' }] }, /feature file/u],
+    ['duplicate', { plannedE2ESelectors: [
+      { selector: 'id-planned-flow', featurePath: 'specs/features/planned.feature' },
+      { selector: 'id-planned-flow', featurePath: 'specs/features/other.feature' },
+    ], allowedPaths: ['specs/features/**'] }, /duplicate selector/u],
+  ]) {
+    assert.match(validateImplementationTask({ ...valid, ...change }).join('\n'), pattern, label);
+  }
 });
 
 test('specialist metadata and the exact canonical route are validated', () => {

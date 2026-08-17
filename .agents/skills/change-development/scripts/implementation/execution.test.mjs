@@ -213,7 +213,7 @@ function resultFor(packet, workerCommit, changedPaths) {
     status: 'implemented',
     workerCommit,
     changedPaths,
-    validation: packet.requiredValidation.unit.map(({ command }) => ({
+    validation: [...packet.requiredValidation.unit, ...packet.requiredValidation.system].map(({ command }) => ({
       command,
       result: 'passed',
       summary: 'Focused validation passed.',
@@ -252,8 +252,137 @@ test('binding rejects unready dependencies and any taskBaseSha other than the ex
     expectedRevision: context.state.revision,
   }), (error) => error instanceof StateError && error.code === 'DEPENDENCY_NOT_INTEGRATED');
 
+  writeFiles(context.cwd, { 'dirty.txt': 'dirty\n' });
+  assert.throws(() => bindTask({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    packet: packetFor(context, 'prerequisite'),
+    expectedRevision: context.state.revision,
+  }), (error) => error instanceof StateError && error.code === 'CENTRAL_GIT_MISMATCH');
+  rmSync(join(context.cwd, 'dirty.txt'));
+  commit(context.cwd, { 'advanced.txt': 'advanced\n' }, 'test: advance central head');
+  assert.throws(() => bindTask({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    packet: packetFor(context, 'prerequisite'),
+    expectedRevision: context.state.revision,
+  }), (error) => error instanceof StateError && error.code === 'CENTRAL_GIT_MISMATCH');
+  git(context.cwd, ['reset', '--hard', context.state.git.headSha]);
+  git(context.cwd, ['switch', '-c', 'alternate-central']);
+  assert.throws(() => bindTask({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    packet: packetFor(context, 'prerequisite'),
+    expectedRevision: context.state.revision,
+  }), (error) => error instanceof StateError && error.code === 'CENTRAL_GIT_MISMATCH');
+  git(context.cwd, ['switch', 'main']);
+  git(context.cwd, ['switch', '--detach', context.state.git.headSha]);
+  assert.throws(() => bindTask({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    packet: packetFor(context, 'prerequisite'),
+    expectedRevision: context.state.revision,
+  }), (error) => error instanceof StateError && error.code === 'CENTRAL_GIT_MISMATCH');
+  git(context.cwd, ['switch', 'main']);
+
   assert.equal(loadState(context.cwd).revision, context.state.revision);
   assert.equal(validateState({ cwd: context.cwd }).valid, true);
+});
+
+test('planned E2E selectors bind and replay against exact Git trees', async () => {
+  const plannedTask = task('planned-selector', ['specs/features/planned.feature']);
+  const context = await fixture([plannedTask], {
+    'specs/features/existing.feature': 'Feature: Existing\n\n  @id-existing-flow\n  Scenario: Existing flow\n',
+  });
+  const validation = { unit: [], system: [{
+    command: 'npm run test:e2e:related -- --id planned-flow', reason: 'Exercise planned flow.',
+    selectors: ['id-planned-flow'], projects: ['tablet-chromium'],
+  }] };
+  const planned = packetFor(context, plannedTask.id, {
+    plannedE2ESelectors: [{ selector: 'id-planned-flow', featurePath: 'specs/features/planned.feature' }],
+    requiredValidation: validation,
+  });
+  context.state = bindTask({ cwd: context.cwd, changeId: context.changeId, packet: planned,
+    expectedRevision: context.state.revision });
+  const worker = createWorker(context, planned);
+  startWave(context, [planned]);
+  const workerCommit = commit(worker.path, {
+    'specs/features/planned.feature': 'Feature: Planned\n\n  @id-planned-flow\n  Scenario: Planned flow\n',
+  }, 'test: add planned selector');
+  accept(context, planned, worker, workerCommit, ['specs/features/planned.feature']);
+  assert.equal(context.state.execution.tasks[0].status, 'accepted');
+
+  for (const [label, overrides] of [
+    ['unknown', { requiredValidation: { unit: [], system: [{
+      command: 'npm run test:e2e:related -- --id unknown-flow', reason: 'Unknown selector.',
+      selectors: ['id-unknown-flow'], projects: ['tablet-chromium'],
+    }] } }],
+    ['already existing', {
+      plannedE2ESelectors: [{ selector: 'id-existing-flow', featurePath: 'specs/features/planned.feature' }],
+      requiredValidation: { unit: [], system: [{
+        command: 'npm run test:e2e:related -- --id existing-flow', reason: 'Existing selector.',
+        selectors: ['id-existing-flow'], projects: ['tablet-chromium'],
+      }] },
+    }],
+  ]) {
+    const rejected = await fixture([plannedTask], {
+      'specs/features/existing.feature': 'Feature: Existing\n\n  @id-existing-flow\n  Scenario: Existing flow\n',
+    });
+    const revision = rejected.state.revision;
+    assert.throws(() => bindTask({ cwd: rejected.cwd, changeId: rejected.changeId,
+      packet: packetFor(rejected, plannedTask.id, overrides), expectedRevision: revision }),
+    (error) => error instanceof StateError && error.code === 'PLANNED_E2E_SELECTOR_MISMATCH', label);
+    assert.equal(loadState(rejected.cwd).revision, revision, label);
+  }
+});
+
+test('result acceptance rejects an unrealized planned selector without advancing state', async () => {
+  const plannedTask = task('unrealized-selector', ['specs/features/planned.feature']);
+  const context = await fixture([plannedTask]);
+  const packet = packetFor(context, plannedTask.id, {
+    plannedE2ESelectors: [{ selector: 'id-planned-flow', featurePath: 'specs/features/planned.feature' }],
+    requiredValidation: { unit: [], system: [{
+      command: 'npm run test:e2e:related -- --id planned-flow', reason: 'Exercise planned flow.',
+      selectors: ['id-planned-flow'], projects: ['tablet-chromium'],
+    }] },
+  });
+  context.state = bindTask({ cwd: context.cwd, changeId: context.changeId, packet,
+    expectedRevision: context.state.revision });
+  const worker = createWorker(context, packet);
+  startWave(context, [packet]);
+  const workerCommit = commit(worker.path, {
+    'specs/features/planned.feature': 'Feature: Planned\n\n  Scenario: Missing tag\n',
+  }, 'test: omit planned selector');
+  const revision = context.state.revision;
+  assert.throws(() => accept(context, packet, worker, workerCommit, ['specs/features/planned.feature']),
+    (error) => error instanceof StateError && error.code === 'PLANNED_E2E_SELECTOR_MISMATCH');
+  assert.equal(loadState(context.cwd).revision, revision);
+});
+
+test('wave scheduling waits for accepted integration but not terminal no-change work', async () => {
+  const tasks = [task('first', ['.agents/first.txt']), task('second', ['output/second.txt'])];
+  const context = await fixture(tasks);
+  const first = bind(context, 'first'); const second = bind(context, 'second');
+  const firstWorker = createWorker(context, first); createWorker(context, second);
+  startWave(context, [first, second]);
+  const firstCommit = commit(firstWorker.path, { '.agents/first.txt': 'first\n' }, 'test: accepted result');
+  accept(context, first, firstWorker, firstCommit, ['.agents/first.txt']);
+  const revision = context.state.revision;
+  assert.throws(() => scheduleWave({ cwd: context.cwd, changeId: context.changeId, expectedRevision: revision }),
+    (error) => error instanceof StateError && error.code === 'TASK_STATE_CONFLICT');
+  assert.equal(loadState(context.cwd).revision, revision);
+
+  const noChangeContext = await fixture(tasks);
+  const noChangeFirst = bind(noChangeContext, 'first'); const noChangeSecond = bind(noChangeContext, 'second');
+  const noChangeWorker = createWorker(noChangeContext, noChangeFirst); createWorker(noChangeContext, noChangeSecond);
+  startWave(noChangeContext, [noChangeFirst, noChangeSecond]);
+  noChangeContext.state = acceptResult({ cwd: noChangeContext.cwd, changeId: noChangeContext.changeId,
+    workerCwd: noChangeWorker.path, expectedRevision: noChangeContext.state.revision,
+    result: { ...resultFor(noChangeFirst, null, []), status: 'no-change', workerCommit: null,
+      changedPaths: [] } });
+  noChangeContext.state = scheduleWave({ cwd: noChangeContext.cwd, changeId: noChangeContext.changeId,
+    expectedRevision: noChangeContext.state.revision });
+  assert.deepEqual(noChangeContext.state.execution.activeWave, ['second']);
 });
 
 test('wave scheduling deterministically admits at most the first three non-conflicting writers', async () => {

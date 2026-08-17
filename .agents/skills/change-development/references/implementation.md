@@ -36,6 +36,17 @@ provenance, planning-signal, specialist-route, and required behavior-mapper
 sidecars repeat its plan-bound evidence. A changed packet requires explicit
 rejection and a plan amendment; no sidecar is rewritten.
 
+When related E2E validation names a selector that the task itself will add, the
+packet may declare `plannedE2ESelectors` entries binding each selector to one
+owned, non-forbidden `specs/features/**/*.feature` path. This optional field is
+part of the canonical packet digest, while structural validation remains
+checkout-independent. Binding proves existing selectors against the exact task
+base Git tree and rejects planned selectors that already exist. Result
+acceptance proves every planned selector was introduced at its declared path in
+the exact worker commit. Unknown, unsafe, duplicate, unused, unowned,
+forbidden, or unrealized declarations fail closed. Packets without the field
+retain the original contract.
+
 ## Isolated worktrees and waves
 
 Create, inspect, and remove the packet-bound worker worktree through the facade:
@@ -59,7 +70,9 @@ or explicit rejection; it refuses a dirty or unregistered worktree, records a
 receipt-protected tombstone, and preserves the task branch for audit.
 
 Bind only the dependency-ready tasks intended for the next non-conflicting
-wave, then create their worktrees and schedule the wave. A conflicting task
+wave, then create their worktrees and schedule the wave. Integrate every
+accepted result before scheduling a later wave; terminal `no-change` work does
+not require integration. A conflicting task
 waits to bind until earlier integration advances the central base:
 
 ```bash

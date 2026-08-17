@@ -44,6 +44,7 @@ test('wave conflicts serialize shared and producer surfaces while permitting dis
   assert.equal(tasksConflict(task(['.agents/skills/a/file.mjs']), task(['apps/api/src/b.ts'])), true);
   assert.equal(tasksConflict(task(['package-lock.json']), task(['apps/web/src/b.ts'])), true);
   assert.equal(tasksConflict(task(['tests/e2e/venue.steps.ts']), task(['apps/web/src/b.ts'])), true);
+  assert.equal(tasksConflict(task(['tests/e2e/steps/catalog/venue.steps.ts']), task(['apps/web/src/b.ts'])), true);
   assert.equal(tasksConflict(task(['apps/web/src/a.ts'], ['catalog']), task(['apps/api/src/b.ts'], ['catalog'])), true);
   assert.equal(tasksConflict(task(['apps/web/src'], ['catalog']), task(['apps/web/src/file.ts'], [], ['catalog'])), true);
 });
