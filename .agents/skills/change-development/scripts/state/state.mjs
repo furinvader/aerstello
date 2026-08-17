@@ -780,6 +780,19 @@ export function loadLatestSourceObservation(cwd = process.cwd(), changeId) {
   return readObservationByDigest(root, state);
 }
 
+function assertNoLegacyPreacceptDecisionEvidence(cwd, state) {
+  const directory = join(changeDirectory(cwd, state.changeId), 'decisions');
+  if (!existsSync(directory)) return;
+  const decisionIds = readdirSync(directory)
+    .filter((name) => name.endsWith('.json'))
+    .map((name) => name.slice(0, -'.json'.length));
+  if (decisionIds.length === 0) return;
+  throw new StateError(
+    `Legacy pre-accept decision evidence (${decisionIds.sort().join(', ')}) must be reconciled into candidate plan decisions before acceptance; automatic prose reconciliation is not permitted`,
+    'PREACCEPT_DECISION_RECONCILIATION_REQUIRED',
+  );
+}
+
 export function acceptPlan({ cwd = process.cwd(), changeId, plan, planningEvidence = [], expectedRevision, clock, crashStep, lockOptions }) {
   const root = repositoryRoot(cwd);
   const selected = selectedChangeId(root, changeId);
@@ -790,6 +803,7 @@ export function acceptPlan({ cwd = process.cwd(), changeId, plan, planningEviden
     validateState({ cwd: root, changeId: state.changeId });
     if (state.plan) throw new StateError('The accepted plan is immutable; use amend-plan', 'PLAN_ALREADY_ACCEPTED');
     if (!['planning', 'awaiting-decision'].includes(state.phase)) throw new StateError(`Cannot accept a plan in ${state.phase}`, 'INVALID_PHASE');
+    assertNoLegacyPreacceptDecisionEvidence(root, state);
     assertPlanStateIdentity(plan, state);
     const currentGit = gitObservation(root, clock);
     if (!currentGit.clean || currentGit.headSha !== state.planningSha) {
@@ -933,8 +947,8 @@ export function recordDecision({ cwd = process.cwd(), changeId, decision, expect
       throw new StateError('Decision requires strict nonempty id, reason, authorization, trigger, and resolve|retain-plan disposition', 'INVALID_DECISION');
     }
     validateChangeId(decision.id);
-    if (!['planning', 'awaiting-decision'].includes(state.phase)) {
-      throw new StateError(`Decisions are not permitted in phase ${state.phase}`, 'INVALID_PHASE');
+    if (state.phase !== 'awaiting-decision' || !state.plan) {
+      throw new StateError('record-decision requires an accepted plan in awaiting-decision', 'INVALID_PHASE');
     }
     const decisionPath = join(changeDirectory(root, state.changeId), 'decisions', `${decision.id}.json`);
     if (existsSync(decisionPath) || existsSync(decisionPath.replace(/\.json$/u, '.sha256'))) {
@@ -1586,7 +1600,7 @@ function decisionDispositionForRecovery(intent, predecessor) {
       || record.sourceDigest !== predecessor.source.latestDigest
       || record.effectivePlanDigest !== (predecessor.plan?.effectiveDigest ?? null)
       || record.repositorySha !== intent.nextState.git.headSha
-      || !['planning', 'awaiting-decision'].includes(predecessor.phase)) {
+      || predecessor.phase !== 'awaiting-decision' || !predecessor.plan) {
     throw new StateError('Interrupted decision transition is semantically inconsistent', 'RECOVERY_EVIDENCE_INVALID');
   }
   const retainPlan = record.disposition === 'retain-plan';

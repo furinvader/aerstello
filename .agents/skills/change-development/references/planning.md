@@ -20,6 +20,12 @@ The initial observation is immutable. Each refresh writes another observation an
 - **unreviewed/material drift** when body, comment, or checklist identity/content changed in a way that can affect intent.
 
 After acceptance, material drift moves state to `awaiting-decision`; it never edits `plan.json`.
+Before acceptance, all choices belong in the candidate plan's normalized
+`decisions`, including their authoritative resolutions. `record-decision` is
+reserved for accepted-plan source drift and cannot create planning-phase
+sidecars. If receipt-valid legacy pre-accept decision evidence exists,
+acceptance stops for explicit reconciliation rather than inferring a plan
+resolution from its prose.
 
 ## Checklist identities
 
@@ -48,4 +54,4 @@ Validate both JSON Schema and semantic contracts. Load the canonical specialist 
 
 Reject a plan with unresolved test selection, duplicate IDs, invalid criterion or decision references, missing criterion ownership, unknown dependencies, dependency cycles, consumer work ordered before its producer, overlapping planned ownership, or cross-domain work marked unsplittable without a reason. Require clean current Planning-SHA `behavior_mapper` evidence whenever the final route requires it.
 
-Acceptance requires every readiness gate to pass and writes immutable canonical JSON plus its SHA-256 receipt. Record each later decision independently. An amendment must include authorization, provenance and delta, the previous plan digest, current repository SHA, invalidated evidence, the new digest, and the complete resulting normalized plan. Never rewrite the original plan or prior amendments.
+Acceptance requires every readiness gate to pass and writes immutable canonical JSON plus its SHA-256 receipt. Record each later accepted-source-drift decision independently. An amendment must include authorization, provenance and delta, the previous plan digest, current repository SHA, invalidated evidence, the new digest, and the complete resulting normalized plan. Never rewrite the original plan or prior amendments.

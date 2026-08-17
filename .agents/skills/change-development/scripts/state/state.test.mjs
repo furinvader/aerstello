@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -102,6 +102,88 @@ function planForObservation(state, observation, revision = 1) {
   return value;
 }
 
+function issueSource(number, id = `I_${number}`) {
+  return {
+    id, number, title: 'Decision source',
+    body: '- [ ] <!-- aerstello:item=durable-state --> State remains durable', state: 'OPEN',
+    author: { login: 'operator', id: 'U_test' }, createdAt: '2026-08-17T10:00:00Z',
+    updatedAt: '2026-08-17T10:00:00Z', comments: [], commentsComplete: true,
+  };
+}
+
+async function acceptedMaterialDrift(cwd, sha, changeId, number) {
+  const issue = issueSource(number, `I_${changeId}`);
+  const adapter = { async readIssue() { return structuredClone(issue); } };
+  const planning = await initializeState({
+    cwd, changeId, mode: 'plan-only', baseBranch: 'main', planningRef: sha,
+    source: { type: 'github-issue', repository: 'owner/repo', issueNumber: number, relationshipIntent: 'resolves' },
+    sourceAdapter: adapter,
+  });
+  acceptPlan({ cwd, expectedRevision: 0, plan: planFor(planning) });
+  issue.body += '\n\nMaterial source drift.';
+  issue.updatedAt = '2026-08-17T10:01:00Z';
+  const drift = await refreshSource({ cwd, expectedRevision: 1, sourceAdapter: adapter });
+  assert.equal(drift.phase, 'awaiting-decision');
+  return { planning, drift, issue, adapter };
+}
+
+function writeReceiptJson(path, value) {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(value)}\n`);
+  writeFileSync(path.replace(/\.json$/u, '.sha256'), `${digestJson(value)}\n`);
+}
+
+function installLegacyPreacceptDecision(cwd, decisionId = 'legacy-preaccept') {
+  const state = loadState(cwd);
+  const recordedAt = new Date(Date.parse(state.updatedAt) + 1_000).toISOString();
+  const observed = {
+    headSha: git(cwd, 'rev-parse', 'HEAD'),
+    branch: git(cwd, 'branch', '--show-current') || '(detached)',
+    clean: git(cwd, 'status', '--porcelain') === '',
+    observedAt: recordedAt,
+  };
+  const record = {
+    schemaVersion: 1, id: decisionId, reason: 'Legacy planning prose.',
+    authorization: 'operator', trigger: 'request', disposition: 'resolve',
+    changeId: state.changeId, stateRevision: state.revision,
+    sourceObservationDigest: state.source.observationDigest,
+    sourceDigest: state.source.latestDigest, effectivePlanDigest: null,
+    repositorySha: observed.headSha, recordedAt,
+  };
+  const next = {
+    ...state, git: observed, revision: state.revision + 1, updatedAt: recordedAt,
+  };
+  next.nextAction = nextActionFor(next);
+  const decisionDigest = digestJson(record);
+  const decisionPath = `decisions/${decisionId}.json`;
+  const intent = {
+    schemaVersion: 1, changeId: state.changeId, revision: next.revision,
+    type: 'decision-recorded', summary: `Recorded decision ${decisionId}`,
+    previousStateDigest: digestJson(state), nextStateDigest: digestJson(next), nextState: next,
+    evidence: { decisionDigest }, evidencePaths: { decisionDigest: decisionPath },
+    authoritativeEvidence: {
+      decisionDigest: { path: decisionPath, label: `decision ${decisionId}`, digest: decisionDigest, value: record },
+    },
+    createdAt: recordedAt,
+  };
+  const receipt = {
+    schemaVersion: 1, revision: next.revision, intentDigest: digestJson(intent),
+    stateDigest: digestJson(next), evidence: intent.evidence, completedAt: recordedAt,
+  };
+  const root = changeDirectory(cwd, state.changeId);
+  const transition = join(root, 'transitions', String(next.revision).padStart(8, '0'));
+  writeReceiptJson(join(root, decisionPath), record);
+  writeReceiptJson(join(transition, 'intent.json'), intent);
+  writeReceiptJson(join(transition, 'receipt.json'), receipt);
+  writeFileSync(join(transition, 'complete'), `${digestJson(receipt)}\n`);
+  writeFileSync(join(root, 'state.json'), `${JSON.stringify(next)}\n`);
+  const eventsPath = join(root, 'events.jsonl');
+  const events = readFileSync(eventsPath, 'utf8').trim().split('\n').filter(Boolean);
+  events.push(JSON.stringify({ revision: next.revision, type: intent.type, summary: intent.summary, at: recordedAt }));
+  writeFileSync(eventsPath, `${events.join('\n')}\n`);
+  return next;
+}
+
 test('initialization persists valid shared state and receipts', async () => {
   const { cwd, sha } = repository();
   const state = await initializeState({
@@ -182,10 +264,9 @@ test('pointerless state is recovery-only and later completed revisions fail clos
   assert.equal(recoverState({ cwd: initialization.cwd, changeId: planning.changeId }).recovered, true);
 
   const later = repository('pointerless completed revision');
-  await initializeState({ cwd: later.cwd, changeId: 'pointerless-later', mode: 'plan-only', baseBranch: 'main', planningRef: later.sha, source: descriptor });
-  recordDecision({ cwd: later.cwd, expectedRevision: 0, decision: {
-    id: 'completed-decision', reason: 'Advance revision.', authorization: 'operator', trigger: 'test', disposition: 'resolve',
-  } });
+  const laterPlanning = await initializeState({ cwd: later.cwd, changeId: 'pointerless-later', mode: 'plan-only',
+    baseBranch: 'main', planningRef: later.sha, source: descriptor });
+  acceptPlan({ cwd: later.cwd, expectedRevision: 0, plan: planFor(laterPlanning) });
   unlinkSync(activePointerPath(later.cwd));
   const laterState = join(changeDirectory(later.cwd, 'pointerless-later'), 'state.json');
   const laterEvents = join(changeDirectory(later.cwd, 'pointerless-later'), 'events.jsonl');
@@ -427,18 +508,77 @@ test('material amendments require the exact current bound resolve-decision trigg
   assert.equal(drift.phase, 'awaiting-decision');
 });
 
-test('decision records enforce strict provenance and reject duplicate IDs', async () => {
+test('pre-accept decisions fail without side effects and legacy evidence blocks acceptance', async () => {
   const { cwd, sha } = repository('decision state');
-  await initializeState({ cwd, changeId: 'decision-change', mode: 'plan-only', baseBranch: 'main', planningRef: sha, source: descriptor });
+  const planning = await initializeState({ cwd, changeId: 'decision-change', mode: 'plan-only', baseBranch: 'main', planningRef: sha, source: descriptor });
   assert.throws(() => recordDecision({ cwd, expectedRevision: 0, decision: {
     id: 'bad-decision', reason: '', authorization: 'operator', trigger: 'request', disposition: 'resolve',
   } }), (error) => error.code === 'INVALID_DECISION');
-  recordDecision({ cwd, expectedRevision: 0, decision: {
+  writeFileSync(join(cwd, 'preaccept-dirty.txt'), 'dirty');
+  const root = changeDirectory(cwd, planning.changeId);
+  const stateBefore = readFileSync(join(root, 'state.json'), 'utf8');
+  const eventsBefore = readFileSync(join(root, 'events.jsonl'), 'utf8');
+  const transitionsBefore = [...readdirSync(join(root, 'transitions'))];
+  assert.throws(() => recordDecision({ cwd, expectedRevision: 0, decision: {
     id: 'scope-decision', reason: 'Clarify scope.', authorization: 'operator', trigger: 'request', disposition: 'resolve',
+  } }), (error) => error.code === 'INVALID_PHASE');
+  assert.equal(existsSync(join(root, 'decisions')), false);
+  assert.equal(readFileSync(join(root, 'state.json'), 'utf8'), stateBefore);
+  assert.equal(readFileSync(join(root, 'events.jsonl'), 'utf8'), eventsBefore);
+  assert.deepEqual(readdirSync(join(root, 'transitions')), transitionsBefore);
+  assert.equal(loadState(cwd).revision, 0);
+  unlinkSync(join(cwd, 'preaccept-dirty.txt'));
+
+  const legacy = repository('legacy preaccept decision');
+  const legacyPlanning = await initializeState({ cwd: legacy.cwd, changeId: 'legacy-preaccept-change', mode: 'plan-only',
+    baseBranch: 'main', planningRef: legacy.sha, source: descriptor });
+  installLegacyPreacceptDecision(legacy.cwd);
+  assert.equal(validateState({ cwd: legacy.cwd }).valid, true);
+  const legacyRoot = changeDirectory(legacy.cwd, legacyPlanning.changeId);
+  const legacyStateBefore = readFileSync(join(legacyRoot, 'state.json'), 'utf8');
+  const legacyEventsBefore = readFileSync(join(legacyRoot, 'events.jsonl'), 'utf8');
+  assert.throws(() => acceptPlan({ cwd: legacy.cwd, expectedRevision: 1, plan: planFor(loadState(legacy.cwd)) }),
+    (error) => error.code === 'PREACCEPT_DECISION_RECONCILIATION_REQUIRED'
+      && /candidate plan decisions[\s\S]*prose reconciliation/u.test(error.message));
+  assert.equal(existsSync(join(legacyRoot, 'plan')), false);
+  assert.equal(readFileSync(join(legacyRoot, 'state.json'), 'utf8'), legacyStateBefore);
+  assert.equal(readFileSync(join(legacyRoot, 'events.jsonl'), 'utf8'), legacyEventsBefore);
+});
+
+test('post-accept decision records enforce strict provenance and reject duplicate IDs', async () => {
+  const { cwd, sha } = repository('postaccept decision state');
+  await acceptedMaterialDrift(cwd, sha, 'postaccept-decision', 31);
+  recordDecision({ cwd, expectedRevision: 2, decision: {
+    id: 'scope-decision', reason: 'Incorporate source drift.', authorization: 'operator', trigger: 'source-refresh', disposition: 'resolve',
   } });
-  assert.throws(() => recordDecision({ cwd, expectedRevision: 1, decision: {
-    id: 'scope-decision', reason: 'Repeat.', authorization: 'operator', trigger: 'request', disposition: 'resolve',
+  assert.throws(() => recordDecision({ cwd, expectedRevision: 3, decision: {
+    id: 'scope-decision', reason: 'Repeat.', authorization: 'operator', trigger: 'source-refresh', disposition: 'resolve',
   } }), (error) => error.code === 'DECISION_ID_CONFLICT');
+});
+
+test('recovery rejects an interrupted legacy planning-phase decision intent', async () => {
+  const { cwd, sha } = repository('legacy preaccept recovery');
+  const predecessor = await initializeState({ cwd, changeId: 'legacy-preaccept-recovery', mode: 'plan-only',
+    baseBranch: 'main', planningRef: sha, source: descriptor });
+  installLegacyPreacceptDecision(cwd, 'legacy-interrupted');
+  const root = changeDirectory(cwd, predecessor.changeId);
+  const transition = join(root, 'transitions', '00000001');
+  unlinkSync(join(transition, 'receipt.json'));
+  unlinkSync(join(transition, 'receipt.sha256'));
+  unlinkSync(join(transition, 'complete'));
+  writeFileSync(join(root, 'state.json'), `${JSON.stringify(predecessor)}\n`);
+  const initialEvent = readFileSync(join(root, 'events.jsonl'), 'utf8').trim().split('\n')[0];
+  writeFileSync(join(root, 'events.jsonl'), `${initialEvent}\n`);
+
+  const stateBefore = readFileSync(join(root, 'state.json'), 'utf8');
+  const eventsBefore = readFileSync(join(root, 'events.jsonl'), 'utf8');
+  assert.throws(() => recoverState({ cwd }),
+    (error) => error.code === 'RECOVERY_EVIDENCE_INVALID'
+      && /Interrupted decision transition is semantically inconsistent/u.test(error.message));
+  assert.equal(readFileSync(join(root, 'state.json'), 'utf8'), stateBefore);
+  assert.equal(readFileSync(join(root, 'events.jsonl'), 'utf8'), eventsBefore);
+  assert.equal(existsSync(join(transition, 'receipt.json')), false);
+  assert.equal(existsSync(join(transition, 'complete')), false);
 });
 
 test('one pre-accept refresh rebases unambiguous stable additions removals text and moves', async () => {
@@ -788,26 +928,25 @@ test('interrupted resolve decisions recover only at their exact initiating Git o
     }],
     ['detached-head', ({ cwd, sha }) => git(cwd, 'checkout', '--detach', sha)],
   ];
-  for (const [label, prepare] of cases) {
+  for (const [index, [label, prepare]] of cases.entries()) {
     const fixture = repository(`decision recovery ${label}`);
-    await initializeState({ cwd: fixture.cwd, changeId: `decision-${label}`, mode: 'plan-only',
-      baseBranch: 'main', planningRef: fixture.sha, source: descriptor });
+    await acceptedMaterialDrift(fixture.cwd, fixture.sha, `decision-${label}`, 40 + index);
     prepare(fixture);
     const expected = {
       headSha: git(fixture.cwd, 'rev-parse', 'HEAD'),
       branch: git(fixture.cwd, 'branch', '--show-current') || '(detached)',
       clean: git(fixture.cwd, 'status', '--porcelain') === '',
     };
-    assert.throws(() => recordDecision({ cwd: fixture.cwd, expectedRevision: 0,
+    assert.throws(() => recordDecision({ cwd: fixture.cwd, expectedRevision: 2,
       decision: { id: `resolve-${label}`, reason: 'Bind the initiating Git observation.', authorization: 'operator',
-        trigger: 'request', disposition: 'resolve' },
+        trigger: 'source-refresh', disposition: 'resolve' },
       crashStep(step) { if (step === 'after-state') throw new Error('decision crash'); },
     }), /decision crash/u);
     const interrupted = loadState(fixture.cwd);
     assert.deepEqual({ headSha: interrupted.git.headSha, branch: interrupted.git.branch, clean: interrupted.git.clean }, expected);
     const recovered = recoverState({ cwd: fixture.cwd });
     assert.deepEqual({ headSha: recovered.state.git.headSha, branch: recovered.state.git.branch, clean: recovered.state.git.clean }, expected);
-    assert.equal(recovered.state.revision, 1);
+    assert.equal(recovered.state.revision, 3);
   }
 });
 
@@ -821,13 +960,12 @@ test('decision recovery rejects HEAD branch and cleanliness drift from the recor
     ['branch', ({ cwd }) => git(cwd, 'switch', '-c', 'after-decision')],
     ['cleanliness', ({ cwd }) => writeFileSync(join(cwd, 'later-dirty.txt'), 'dirty')],
   ];
-  for (const [label, drift] of cases) {
+  for (const [index, [label, drift]] of cases.entries()) {
     const fixture = repository(`decision mismatch ${label}`);
-    await initializeState({ cwd: fixture.cwd, changeId: `decision-mismatch-${label}`, mode: 'plan-only',
-      baseBranch: 'main', planningRef: fixture.sha, source: descriptor });
-    assert.throws(() => recordDecision({ cwd: fixture.cwd, expectedRevision: 0,
+    await acceptedMaterialDrift(fixture.cwd, fixture.sha, `decision-mismatch-${label}`, 50 + index);
+    assert.throws(() => recordDecision({ cwd: fixture.cwd, expectedRevision: 2,
       decision: { id: `resolve-mismatch-${label}`, reason: 'Record before drift.', authorization: 'operator',
-        trigger: 'request', disposition: 'resolve' },
+        trigger: 'source-refresh', disposition: 'resolve' },
       crashStep(step) { if (step === 'after-state') throw new Error('decision crash'); },
     }), /decision crash/u);
     drift(fixture);
@@ -838,13 +976,13 @@ test('decision recovery rejects HEAD branch and cleanliness drift from the recor
 
 test('relabeled transition intent cannot claim decision-observation recovery', async () => {
   const { cwd, sha } = repository('relabeled decision recovery');
-  await initializeState({ cwd, changeId: 'relabeled-decision', mode: 'plan-only', baseBranch: 'main', planningRef: sha, source: descriptor });
+  await acceptedMaterialDrift(cwd, sha, 'relabeled-decision', 60);
   writeFileSync(join(cwd, 'decision-dirty.txt'), 'dirty');
-  assert.throws(() => recordDecision({ cwd, expectedRevision: 0,
-    decision: { id: 'resolve-relabeled', reason: 'Record dirty state.', authorization: 'operator', trigger: 'request', disposition: 'resolve' },
+  assert.throws(() => recordDecision({ cwd, expectedRevision: 2,
+    decision: { id: 'resolve-relabeled', reason: 'Record dirty state.', authorization: 'operator', trigger: 'source-refresh', disposition: 'resolve' },
     crashStep(step) { if (step === 'after-state') throw new Error('decision crash'); },
   }), /decision crash/u);
-  const intentPath = join(changeDirectory(cwd, 'relabeled-decision'), 'transitions', '00000001', 'intent.json');
+  const intentPath = join(changeDirectory(cwd, 'relabeled-decision'), 'transitions', '00000003', 'intent.json');
   const intent = JSON.parse(readFileSync(intentPath, 'utf8'));
   intent.type = 'git-checkpoint';
   intent.summary = 'Checkpointed local Git observation before compaction';

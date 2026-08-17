@@ -43,7 +43,7 @@ Large immutable evidence stays outside `state.json`. Initial and refreshed sourc
 
 - `initializing`: durable creation has started but has not completed.
 - `planning`: source is stable and the plan is being prepared or validated.
-- `awaiting-decision`: an explicit decision is required, including accepted-source material drift.
+- `awaiting-decision`: an accepted plan requires an explicit source-drift decision.
 - `ready-to-implement`: accepted plan and readiness evidence are complete.
 - `blocked`: integrity, evidence, or repository state prevents safe continuation.
 - `recovering`: an exact interrupted transition is being verified and completed.
@@ -63,7 +63,14 @@ Run `npm run change:status` first. Use `recover` only when its exact next action
 
 Candidate-plan readiness is likewise receipt-bound: `validate --plan` first validates the active durable state and source evidence, then requires exact candidate identity at that state's Planning SHA. With no active state, schema inspection is possible but acceptance readiness is false.
 
-An interrupted non-retain `decision-recorded` transition may resume only at its exact initiating Git observation: HEAD, branch or detached state, and cleanliness must all match the observation already bound into the intended next state. Recovery verifies the immutable decision record and reconstructs the transition semantics before allowing that exception. A relabeled or inconsistent intent is rejected, and `retain-plan` continues to require clean HEAD at the Planning SHA.
+An interrupted non-retain `decision-recorded` transition may resume only when
+its predecessor contains an accepted plan in `awaiting-decision` and at its
+exact initiating Git observation: HEAD, branch or detached state, and
+cleanliness must all match the observation already bound into the intended next
+state. Recovery verifies the immutable decision record and reconstructs the
+transition semantics before allowing that exception. Planning-phase decision
+intents, relabeled intents, and inconsistent evidence are rejected;
+`retain-plan` continues to require clean HEAD at the Planning SHA.
 
 A missing or tampered committed intent, its SHA-256 receipt, or its authoritative evidence bundle blocks recovery. Existing domain evidence or receipts that conflict with the embedded path, value, or digest also block; orphan evidence is never attached heuristically. Recovery does not invent evidence beyond an intact authoritative intent, skip revisions, or delete locks. A recognized transient pending directory is uncommitted and rollback-only. Resolve other integrity failures through an explicit authorized decision or amendment when the state machine permits it; otherwise abandon while retaining evidence.
 

@@ -11,7 +11,7 @@ This capability stops at planning readiness. It does not execute planned tasks, 
 - **Source**: exactly one issue, UTF-8 direct-request file, repository-plan path at the Planning SHA, or committed partial implementation compared with an explicit base.
 - **Observation**: normalized, immutable evidence of source and Git state at a point in time.
 - **Accepted plan**: canonical validated `plan.json`. Acceptance freezes it permanently.
-- **Decision**: append-only operator resolution of an unresolved planning question or material source drift.
+- **Decision**: a normalized candidate-plan resolution before acceptance, or an append-only operator resolution of accepted-plan source drift afterward.
 - **Amendment**: authorized append-only plan evolution containing provenance, delta, the complete resulting normalized plan, and old/new digest receipts.
 - **Exact next action**: one bounded command or operator action stored in state and emitted by status/hooks.
 
@@ -67,7 +67,7 @@ Use the following lifecycle commands through `npm run change:state --`:
 | `validate` | Validate the candidate or accepted plan and its evidence |
 | `refresh-source` | Read the source outside the lock, then classify drift |
 | `accept-plan` | Persist the immutable accepted plan and receipts |
-| `record-decision` | Append an explicit operator decision |
+| `record-decision` | Resolve accepted-plan source drift while `awaiting-decision` |
 | `amend-plan` | Append an authorized complete resulting plan without rewriting history |
 | `recover` | Finish only an exact matching interrupted transition |
 | `archive` | Archive an abandoned change or normally completed `plan-only` change |
@@ -76,7 +76,18 @@ Pass the current state revision with `--expected-revision` to `refresh-source`, 
 
 `validate --plan` proves acceptance readiness only against the active durable state. It first validates that state's complete receipt, transition, and source-observation chain, then binds the candidate to the exact change, source capture, and Planning SHA. Without an active state it may report candidate schema errors, but readiness is always false and the command fails with a durable-state-required error.
 
-A decision input is a strict JSON object. Use `resolve` before incorporating material drift into an amendment, or `retain-plan` to authorize the unchanged accepted plan when the repository is still clean at the Planning SHA:
+Before acceptance, put every planning choice and its resolution in the
+candidate plan's normalized `decisions`; `record-decision` is not a substitute
+for that plan payload. The command is reserved for an accepted plan that moved
+to `awaiting-decision` after source drift. Receipt-valid decision evidence from
+the former pre-accept behavior blocks `accept-plan` for explicit reconciliation;
+the capability never guesses that a legacy reason or other prose equals a plan
+resolution.
+
+A post-accept decision input is a strict JSON object. Use `resolve` before
+incorporating material drift into an amendment, or `retain-plan` to authorize
+the unchanged accepted plan when the repository is still clean at the Planning
+SHA:
 
 ```json
 {
@@ -88,7 +99,7 @@ A decision input is a strict JSON object. Use `resolve` before incorporating mat
 }
 ```
 
-A non-retain decision records the initiating Git observation in the next durable state. If that transition is interrupted, recovery requires the same HEAD, branch (including detached state), and cleanliness before completing it. This exception is limited to a semantically valid `decision-recorded` transition whose immutable decision evidence matches its predecessor; relabeling an intent cannot grant it. `retain-plan` recovery remains stricter and requires clean HEAD at the Planning SHA.
+A non-retain decision records the initiating Git observation in the next durable state. If that transition is interrupted, recovery requires the same HEAD, branch (including detached state), and cleanliness before completing it. This exception is limited to a semantically valid `decision-recorded` transition whose predecessor is an accepted plan in `awaiting-decision` and whose immutable decision evidence matches that predecessor; an old planning-phase intent or relabeled intent cannot grant it. `retain-plan` recovery remains stricter and requires clean HEAD at the Planning SHA.
 
 An amendment input records provenance separately from the complete resulting plan passed with `--plan`. Its `delta` must be a nonempty object; `invalidatedEvidence` is a unique string list and may be empty:
 
