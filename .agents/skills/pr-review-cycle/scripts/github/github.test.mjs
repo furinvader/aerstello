@@ -18,6 +18,7 @@ import {
 
 const HEAD = 'a'.repeat(40);
 const OTHER_HEAD = 'b'.repeat(40);
+const ADVANCED_HEAD = 'c'.repeat(40);
 const PRIOR_INTEGRATION_HEAD = '4b8d4d36dd6ea4da9d1c1a0e39033a829e1852f9';
 const SELECTED_TASK_HEAD = '7ea9bbccc60725dcfd0cfefcb0caff742145b8ec';
 const AT = '2026-08-05T00:00:00Z';
@@ -48,6 +49,7 @@ function stateFixture(overrides = {}) {
     baseSha: HEAD, requestedHeadSha: null, reviewedHeadSha: null, currentIntegrationHeadSha: HEAD,
     reviewRound: 0, verificationReviewUsed: false, legacyReviewProvenance: null, releaseBaseline: null,
     decisions: [], tasks: [], reviewRequest: null, reviewOutcome: null, reviewHistory: [],
+    staleDiscoveryDispositions: [],
     verificationEscalation: null, threadResolutionStatus: proof('not-run'), blockedReasons: [],
     validationStatus: { source: 'orchestrator', scope: 'targeted', status: 'not-run', headSha: null, checks: [], updatedAt: null },
     ciValidationStatus: { source: 'github-actions', scope: 'full', status: 'not-run', headSha: null,
@@ -199,6 +201,32 @@ function tasklessPendingReviewHeadDriftState(overrides = {}) {
   });
 }
 
+function tasklessPendingDiscoveryHeadDriftState(overrides = {}) {
+  const request = requestEvidence('discovery', {
+    id: 'IC_discovery_stale',
+    databaseId: 105,
+    url: 'https://github.com/example/aerstello/pull/2#issuecomment-105',
+    headSha: OTHER_HEAD,
+  });
+  return stateFixture({
+    phase: 'recovering',
+    requestedHeadSha: OTHER_HEAD,
+    reviewedHeadSha: null,
+    reviewRound: 1,
+    verificationReviewUsed: false,
+    reviewRequest: request,
+    reviewOutcome: null,
+    reviewHistory: [{ request, outcome: null }],
+    validationStatus: {
+      source: 'orchestrator', scope: 'targeted', status: 'passed', headSha: HEAD,
+      checks: ['npm run check:workflow'], updatedAt: AT,
+    },
+    threadResolutionStatus: proof('not-run'),
+    nextAction: 'Classify the stale discovery response before the replacement review.',
+    ...overrides,
+  });
+}
+
 function canonicalReview(overrides = {}) {
   return {
     id: 'PRR_clean', databaseId: 201, url: 'https://x/clean', body: '', state: 'COMMENTED',
@@ -332,7 +360,7 @@ class FakeClient {
       this.comments.push({
         id: `IC_${this.comments.length + 1}`, databaseId: 500 + this.comments.length,
         url: 'https://github.com/example/aerstello/pull/2#issuecomment-new', body: variables.body,
-        createdAt: AT, author: this.metadata.viewer,
+        createdAt: AT, lastEditedAt: null, author: this.metadata.viewer,
       });
     }
     if (name === 'AddThreadReply' && !this.noEffect.has(name)) {
@@ -400,6 +428,7 @@ function fakeState(initial) {
   return {
     calls,
     get current() { return current; },
+    advanceRevisionForTest() { current = { ...current, revision: current.revision + 1 }; },
     async load() { return structuredClone(current); },
     async checkpointReviewRequest(input) {
       calls.push({ name: 'checkpointReviewRequest', input });
@@ -444,7 +473,20 @@ function fakeState(initial) {
     },
     async checkpointTaskCompletion(input) {
       calls.push({ name: 'checkpointTaskCompletion', input });
-      const stalePendingRecovery = current.phase === 'recovering'
+      if (input.expectedRevision !== current.revision) {
+        const error = new Error('State revision changed during task completion');
+        error.code = 'STATE_REVISION_CONFLICT';
+        throw error;
+      }
+      const dispositions = current.staleDiscoveryDispositions ?? [];
+      const existingDisposition = input.staleDiscoveryDisposition === undefined ? null
+        : dispositions.find((entry) => entry.requestId === input.staleDiscoveryDisposition.requestId) ?? null;
+      if (existingDisposition !== null
+          && JSON.stringify(existingDisposition) === JSON.stringify(input.staleDiscoveryDisposition)
+          && JSON.stringify(current.threadResolutionStatus) === JSON.stringify(input.threadResolutionStatus)) {
+        return structuredClone(current);
+      }
+      const stalePendingRecovery = ['recovering', 'triaging'].includes(current.phase)
         && current.tasks.length === 0
         && current.reviewRequest !== null
         && current.reviewOutcome === null
@@ -483,18 +525,30 @@ function fakeState(initial) {
         + current.reviewHistory.length;
       const exhausted = Number.isSafeInteger(current.reviewRequestLimit)
         && usedRequests >= current.reviewRequestLimit;
+      const staleDiscoveryDispositions = input.staleDiscoveryDisposition === undefined
+        ? dispositions : [...dispositions, input.staleDiscoveryDisposition];
+      const dispositionFindings = input.staleDiscoveryDisposition?.evidence?.outcome === 'findings';
       current = {
         ...next,
         revision: nextRevision,
+        staleDiscoveryDispositions,
         ...(stalePendingRecovery
+          && !dispositionFindings
           && threadResolutionStatus.status === 'passed'
           && threadResolutionStatus.headSha === current.currentIntegrationHeadSha
           && threadResolutionStatus.threads.length === 0 ? {
             phase: 'ready-for-review',
             nextAction: exhausted
               ? `Review request limit ${current.reviewRequestLimit} is exhausted after ${usedRequests} durable requests; run npm run review:state -- set-review-limit --pr ${current.prNumber} --expected-revision ${nextRevision} --limit <higher-number> or --unlimited before the next request.`
-              : 'Request canonical verification review.',
+              : `Request canonical ${usedRequests < 3 ? 'discovery' : 'verification'} review.`,
           } : {}),
+        ...(dispositionFindings ? {
+          phase: 'triaging',
+          threadResolutionStatus: {
+            ...threadResolutionStatus, status: 'not-run', headSha: null, updatedAt: null,
+          },
+          nextAction: 'Triage the actionable findings from the dispositioned stale discovery response.',
+        } : {}),
       };
       return structuredClone(current);
     },
@@ -511,7 +565,7 @@ function workflow(initial, client = new FakeClient(), options = {}) {
     client.comments.push({
       id: initial.reviewRequest.id, databaseId: initial.reviewRequest.databaseId,
       url: initial.reviewRequest.url, body: initial.reviewRequest.body,
-      createdAt: initial.reviewRequest.at,
+      createdAt: initial.reviewRequest.at, lastEditedAt: null,
       author: { ...VIEWER, login: initial.reviewRequest.authorLogin, id: initial.reviewRequest.authorNodeId },
     });
   }
@@ -876,6 +930,156 @@ test('taskless thread refresh recovers exact stale pending evidence and preserve
   assert.deepEqual(exhausted.state.current.reviewHistory, preserved.reviewHistory);
 });
 
+test('pure stale discovery drift keeps the null history row and uses the existing proof recovery', async () => {
+  const initial = tasklessPendingDiscoveryHeadDriftState();
+  const immutableHistory = structuredClone(initial.reviewHistory);
+  const setup = workflow(initial, new FakeClient({ pageSize: 1 }));
+
+  const before = await setup.api.status(2);
+  assert.deepEqual(before.staleDiscoveryEvidence, {
+    category: 'pure-head-drift', dispositionId: null, canonicalRootCount: 0,
+  });
+  const result = await setup.api.refreshThreads(2);
+  assert.equal(result.staleDiscoveryDisposition, undefined);
+  assert.equal(setup.state.current.phase, 'ready-for-review');
+  assert.equal(setup.state.current.nextAction, 'Request canonical discovery review.');
+  assert.deepEqual(setup.state.current.staleDiscoveryDispositions, []);
+  assert.deepEqual(setup.state.current.reviewHistory, immutableHistory);
+  assert.equal(setup.state.current.reviewOutcome, null);
+  assert.equal(setup.state.current.reviewedHeadSha, null);
+  assert.equal(setup.client.events.length, 0);
+});
+
+test('unique stale discovery clean evidence is dispositioned without rewriting history or mutating GitHub', async () => {
+  const initial = tasklessPendingDiscoveryHeadDriftState();
+  const immutableHistory = structuredClone(initial.reviewHistory);
+  const client = new FakeClient({ pageSize: 1 });
+  client.reviews.push(canonicalReview({ id: 'PRR_stale_clean', commit: { oid: OTHER_HEAD } }));
+  const setup = workflow(initial, client);
+
+  const before = await setup.api.status(2);
+  assert.equal(before.staleDiscoveryEvidence.category, 'disposition-ready');
+  assert.equal(before.staleDiscoveryEvidence.dispositionId, null);
+  const result = await setup.api.refreshThreads(2);
+  const disposition = result.staleDiscoveryDisposition;
+  assert.match(disposition.dispositionId, /^[0-9a-f]{64}$/u);
+  assert.equal(disposition.requestId, initial.reviewRequest.id);
+  assert.equal(disposition.requestHeadSha, OTHER_HEAD);
+  assert.equal(disposition.liveHeadSha, HEAD);
+  assert.equal(disposition.evidence.id, 'PRR_stale_clean');
+  assert.equal(disposition.evidence.outcome, 'clean');
+  assert.match(disposition.responseFingerprint, /^[0-9a-f]{64}$/u);
+  assert.equal(setup.state.current.phase, 'ready-for-review');
+  assert.equal(setup.state.current.reviewOutcome, null);
+  assert.equal(setup.state.current.reviewedHeadSha, null);
+  assert.deepEqual(setup.state.current.reviewHistory, immutableHistory);
+  assert.deepEqual(setup.state.current.staleDiscoveryDispositions, [disposition]);
+  assert.equal(setup.state.current.threadResolutionStatus.status, 'passed');
+  assert.equal(setup.state.current.threadResolutionStatus.headSha, HEAD);
+  assert.equal(client.events.length, 0);
+  assert.ok(client.calls.filter((call) => call.name === 'PullRequestReviews').length >= 2);
+  assert.ok(client.calls.filter((call) => call.name === 'PullRequestThreads').length >= 2);
+
+  const after = await setup.api.status(2);
+  assert.equal(after.staleDiscoveryEvidence.category, 'dispositioned');
+  assert.equal(after.staleDiscoveryEvidence.dispositionId, disposition.dispositionId);
+  const dispositionRevision = setup.state.current.revision;
+  const retry = await setup.api.refreshThreads(2);
+  assert.equal(retry.stateRevision, dispositionRevision);
+  assert.equal(setup.state.current.revision, dispositionRevision);
+  assert.deepEqual(setup.state.calls.map((call) => call.name), [
+    'checkpointTaskCompletion', 'checkpointTaskCompletion',
+  ]);
+
+  const replacement = await setup.api.request(2);
+  assert.equal(replacement.request.kind, 'discovery');
+  assert.equal(setup.state.current.reviewHistory.length, 2);
+  assert.deepEqual(setup.state.current.reviewHistory[0], immutableHistory[0]);
+  assert.equal(setup.state.current.reviewHistory[1].outcome, null);
+});
+
+test('stale discovery findings are dispositioned into ordinary triage and retry without mutation', async () => {
+  const initial = tasklessPendingDiscoveryHeadDriftState();
+  const immutableHistory = structuredClone(initial.reviewHistory);
+  const client = new FakeClient({ pageSize: 1 });
+  client.reviews.push(canonicalReview({
+    id: 'PRR_review', body: 'Please address the inline finding.', commit: { oid: OTHER_HEAD },
+  }));
+  addThread(client, { root: rootComment() });
+  const setup = workflow(initial, client);
+
+  const before = await setup.api.status(2);
+  assert.equal(before.staleDiscoveryEvidence.category, 'actionable-stale-findings');
+  assert.equal(before.staleDiscoveryEvidence.dispositionId, null);
+  assert.equal(before.staleDiscoveryEvidence.canonicalRootCount, 1);
+  const result = await setup.api.refreshThreads(2);
+  assert.equal(result.actionable, true);
+  assert.equal(result.staleDiscoveryDisposition.evidence.outcome, 'findings');
+  assert.equal(setup.state.current.phase, 'triaging');
+  assert.equal(setup.state.current.threadResolutionStatus.status, 'not-run');
+  assert.deepEqual(setup.state.current.reviewHistory, immutableHistory);
+  assert.equal(setup.state.current.reviewOutcome, null);
+  assert.equal(setup.state.current.reviewedHeadSha, null);
+  assert.equal(client.events.length, 0);
+
+  const after = await setup.api.status(2);
+  assert.equal(after.staleDiscoveryEvidence.category, 'actionable-stale-findings');
+  assert.equal(after.staleDiscoveryEvidence.dispositionId,
+    result.staleDiscoveryDisposition.dispositionId);
+  const dispositionRevision = setup.state.current.revision;
+  const retry = await setup.api.refreshThreads(2);
+  assert.equal(retry.stateRevision, dispositionRevision);
+  assert.equal(setup.state.current.revision, dispositionRevision);
+  assert.deepEqual(setup.state.calls.map((call) => call.name), ['checkpointTaskCompletion', 'checkpointTaskCompletion']);
+  assert.equal(client.events.length, 0);
+
+  const advancedState = {
+    ...setup.state.current,
+    phase: 'implementing',
+    currentIntegrationHeadSha: ADVANCED_HEAD,
+    git: { ...setup.state.current.git, headSha: ADVANCED_HEAD },
+    validationStatus: {
+      source: 'orchestrator', scope: 'targeted', status: 'not-run', headSha: null,
+      checks: [], updatedAt: null,
+    },
+    tasks: [{
+      id: 'stale-root-task', sourceIds: ['thread:THREAD_1'], sourceType: 'github-thread',
+      fingerprint: 'stale-root-task', summary: 'Resolve the stale review root.', severity: 'P1',
+      disposition: 'actionable', status: 'proposed', integratedCommitSha: null,
+      resolutionSummary: null,
+      execution: {
+        dependencies: [], ownedPaths: ['src/example.ts'], worker: 'review_fix_worker',
+        branch: null, worktree: null, workerCommitSha: null, validationSummaries: [], lastError: null,
+      },
+    }],
+    nextAction: 'Continue ordinary remediation for the mapped stale root.',
+  };
+  const advancedClient = new FakeClient();
+  advancedClient.metadata.headRefOid = ADVANCED_HEAD;
+  advancedClient.reviews.push(structuredClone(client.reviews[0]));
+  addThread(advancedClient, { root: rootComment() });
+  const advancedStatus = await workflow(advancedState, advancedClient).api.status(2);
+  assert.equal(advancedStatus.staleDiscoveryEvidence.category, 'actionable-stale-findings');
+  assert.equal(advancedStatus.nextAction, advancedState.nextAction);
+});
+
+test('finite stale discovery recovery retains proof and blocks a replacement request', async () => {
+  const initial = tasklessPendingDiscoveryHeadDriftState({ reviewRequestLimit: 1 });
+  const client = new FakeClient();
+  client.reviews.push(canonicalReview({ id: 'PRR_finite', commit: { oid: OTHER_HEAD } }));
+  const setup = workflow(initial, client);
+  await setup.api.refreshThreads(2);
+
+  assert.equal(setup.state.current.phase, 'ready-for-review');
+  assert.equal(setup.state.current.threadResolutionStatus.status, 'passed');
+  assert.match(setup.state.current.nextAction,
+    /limit 1 is exhausted after 1 durable requests; run npm run review:state -- set-review-limit --pr 2 --expected-revision 2 --limit <higher-number> or --unlimited/u);
+  await assert.rejects(() => setup.api.request(2), { code: 'REQUEST_NOT_READY' });
+  assert.equal(client.events.length, 0);
+  assert.equal(setup.state.current.reviewHistory.length, 1);
+  assert.equal(setup.state.current.reviewHistory[0].outcome, null);
+});
+
 test('taskless pending-review HEAD-drift refresh requires the exact immutable request anchor', async () => {
   for (const mutate of [
     (client) => { client.comments = []; },
@@ -893,6 +1097,229 @@ test('taskless pending-review HEAD-drift refresh requires the exact immutable re
       'checkpointVerificationEscalation',
     ]);
   }
+});
+
+test('stale discovery disposition requires one exact immutable request anchor', async () => {
+  for (const [label, mutate] of [
+    ['missing', (client) => { client.comments = []; }],
+    ['edited', (client) => { client.comments[0] = { ...client.comments[0], body: '@codex review edited' }; }],
+    ['edit history', (client) => {
+      client.comments[0] = { ...client.comments[0], lastEditedAt: '2026-08-05T00:00:01Z' };
+    }],
+    ['foreign', (client) => { client.comments[0] = { ...client.comments[0], author: BOT }; }],
+    ['duplicated', (client) => { client.comments.push(structuredClone(client.comments[0])); }],
+  ]) {
+    const setup = workflow(tasklessPendingDiscoveryHeadDriftState());
+    setup.client.reviews.push(canonicalReview({ commit: { oid: OTHER_HEAD } }));
+    mutate(setup.client);
+    await assert.rejects(() => setup.api.refreshThreads(2), { code: 'REQUEST_PROOF_STALE' }, label);
+    assert.equal(setup.state.calls.length, 0, label);
+    assert.equal(setup.client.events.length, 0, label);
+  }
+});
+
+test('multiple, conflicting, and unsupported stale discovery responses remain human-gated', async () => {
+  const cases = [
+    ['multiple reviews', (client) => client.reviews.push(
+      canonicalReview({ id: 'PRR_one', commit: { oid: OTHER_HEAD } }),
+      canonicalReview({ id: 'PRR_two', commit: { oid: OTHER_HEAD } }),
+    )],
+    ['current-head review', (client) => client.reviews.push(canonicalReview({ commit: { oid: HEAD } }))],
+    ['unsupported review state', (client) => client.reviews.push(canonicalReview({
+      state: 'APPROVED', commit: { oid: OTHER_HEAD },
+    }))],
+    ['review and reaction', (client, requestId) => {
+      client.reviews.push(canonicalReview({ commit: { oid: OTHER_HEAD } }));
+      client.reactions.set(requestId, [{
+        id: 'REACTION_conflict', content: 'THUMBS_UP', createdAt: AT, user: BOT,
+      }]);
+    }],
+    ['unmatched canonical root', (client) => addThread(client)],
+    ['unsupported structural marker', (client) => client.comments.push(cleanIssueComment())],
+  ];
+  for (const [label, prepare] of cases) {
+    const initial = tasklessPendingDiscoveryHeadDriftState();
+    const client = new FakeClient();
+    prepare(client, initial.reviewRequest.id);
+    const setup = workflow(initial, client);
+    const status = await setup.api.status(2);
+    assert.equal(status.staleDiscoveryEvidence.category, 'ambiguous-human-decision', label);
+    await assert.rejects(() => setup.api.refreshThreads(2), {
+      code: 'DISCOVERY_COLLECTION_UNRESOLVED',
+    }, label);
+    assert.equal(setup.state.calls.length, 0, label);
+    assert.equal(client.events.length, 0, label);
+  }
+});
+
+test('status human-gates same-head, migrated, task-bearing, unvalidated, and dirty recovery states', async () => {
+  const sameHead = pendingState('discovery');
+  const sameHeadStatus = await workflow(sameHead).api.status(2);
+  assert.equal(sameHeadStatus.staleDiscoveryEvidence.category, 'not-applicable');
+  await assert.rejects(() => workflow(sameHead).api.refreshThreads(2), {
+    code: 'TASKLESS_REFRESH_NOT_ALLOWED',
+  });
+
+  const task = {
+    id: 'existing-task', sourceIds: ['local:audit'], sourceType: 'local', fingerprint: 'existing-task',
+    summary: 'Already present.', severity: 'P1', disposition: 'actionable', status: 'completed',
+    integratedCommitSha: HEAD, resolutionSummary: 'Completed.',
+  };
+  const states = [
+    tasklessPendingDiscoveryHeadDriftState({
+      legacyReviewProvenance: { schemaVersion: 1, discoveryRounds: 1, migratedAt: AT },
+      reviewRound: 2,
+    }),
+    tasklessPendingDiscoveryHeadDriftState({ tasks: [task] }),
+    tasklessPendingDiscoveryHeadDriftState({ validationStatus: stateFixture().validationStatus }),
+  ];
+  for (const state of states) {
+    const client = new FakeClient();
+    client.reviews.push(canonicalReview({ commit: { oid: OTHER_HEAD } }));
+    const setup = workflow(state, client);
+    const status = await setup.api.status(2);
+    assert.equal(status.staleDiscoveryEvidence.category, 'ambiguous-human-decision');
+    await assert.rejects(() => setup.api.refreshThreads(2), { code: 'TASKLESS_REFRESH_NOT_ALLOWED' });
+    assert.equal(setup.state.calls.length, 0);
+  }
+
+  const dirtyClient = new FakeClient();
+  dirtyClient.reviews.push(canonicalReview({ commit: { oid: OTHER_HEAD } }));
+  const dirty = workflow(tasklessPendingDiscoveryHeadDriftState(), dirtyClient, {
+    git: fakeGit({ snapshot: async () => ({ headSha: HEAD, dirty: true }) }),
+  });
+  const dirtyStatus = await dirty.api.status(2);
+  assert.equal(dirtyStatus.staleDiscoveryEvidence.category, 'ambiguous-human-decision');
+  await assert.rejects(() => dirty.api.refreshThreads(2), { code: 'MUTATION_NOT_READY' });
+  assert.equal(dirty.state.calls.length, 0);
+});
+
+test('stale discovery evidence, root, head, and revision races fail before checkpoint', async () => {
+  class SecondSnapshotRaceClient extends FakeClient {
+    constructor(mutate) {
+      super();
+      this.metadataReads = 0;
+      this.mutateSecondSnapshot = mutate;
+    }
+
+    async graphql(input) {
+      if (input.name === 'PullRequestMetadata') {
+        this.metadataReads += 1;
+        if (this.metadataReads === 2) this.mutateSecondSnapshot(this);
+      }
+      return super.graphql(input);
+    }
+  }
+
+  for (const [label, prepare, mutate, code] of [
+    ['evidence',
+      (client) => client.reviews.push(canonicalReview({
+        body: 'Initial finding.', commit: { oid: OTHER_HEAD },
+      })),
+      (client) => { client.reviews[0] = { ...client.reviews[0], body: 'Changed response.' }; },
+      'STALE_DISCOVERY_EVIDENCE_CHANGED'],
+    ['root',
+      (client) => {
+        client.reviews.push(canonicalReview({ id: 'PRR_review', body: 'Finding.', commit: { oid: OTHER_HEAD } }));
+        addThread(client);
+      },
+      (client) => { client.threads[0] = { ...client.threads[0], isResolved: true }; },
+      'STALE_DISCOVERY_EVIDENCE_CHANGED'],
+    ['root body',
+      (client) => {
+        client.reviews.push(canonicalReview({ id: 'PRR_review', commit: { oid: OTHER_HEAD } }));
+        addThread(client);
+      },
+      (client) => {
+        const comments = client.threadComments.get('THREAD_1');
+        comments[0] = { ...comments[0], body: 'Edited canonical finding.' };
+      },
+      'STALE_DISCOVERY_EVIDENCE_CHANGED'],
+    ['head',
+      (client) => client.reviews.push(canonicalReview({ commit: { oid: OTHER_HEAD } })),
+      (client) => { client.metadata.headRefOid = OTHER_HEAD; },
+      'MUTATION_NOT_READY'],
+  ]) {
+    const client = new SecondSnapshotRaceClient(mutate);
+    prepare(client);
+    const setup = workflow(tasklessPendingDiscoveryHeadDriftState(), client);
+    await assert.rejects(() => setup.api.refreshThreads(2), { code }, label);
+    assert.equal(setup.state.calls.length, 0, label);
+    assert.equal(client.events.length, 0, label);
+  }
+
+  const initial = tasklessPendingDiscoveryHeadDriftState();
+  const client = new FakeClient();
+  client.reviews.push(canonicalReview({ commit: { oid: OTHER_HEAD } }));
+  client.comments.push({
+    id: initial.reviewRequest.id, databaseId: initial.reviewRequest.databaseId,
+    url: initial.reviewRequest.url, body: initial.reviewRequest.body,
+    createdAt: initial.reviewRequest.at, lastEditedAt: null,
+    author: { ...VIEWER, login: initial.reviewRequest.authorLogin, id: initial.reviewRequest.authorNodeId },
+  });
+  const state = fakeState(initial);
+  const originalLoad = state.load.bind(state);
+  let loads = 0;
+  state.load = async () => {
+    const loaded = await originalLoad();
+    loads += 1;
+    return loads > 1 ? { ...loaded, revision: loaded.revision + 1 } : loaded;
+  };
+  await assert.rejects(() => createGitHubReviewWorkflow({
+    client, state, git: fakeGit(), clock: { now: () => AT }, journal: fakeJournal(client.events),
+  }).refreshThreads(2), { code: 'STATE_REVISION_CHANGED' });
+  assert.equal(state.calls.length, 0);
+  assert.equal(client.events.length, 0);
+
+  const retryClient = new FakeClient();
+  retryClient.reviews.push(canonicalReview({ id: 'PRR_retry_race', commit: { oid: OTHER_HEAD } }));
+  const retrySetup = workflow(tasklessPendingDiscoveryHeadDriftState(), retryClient);
+  await retrySetup.api.refreshThreads(2);
+  const checkpoint = retrySetup.state.checkpointTaskCompletion.bind(retrySetup.state);
+  retrySetup.state.checkpointTaskCompletion = async (input) => {
+    retrySetup.state.advanceRevisionForTest();
+    return checkpoint(input);
+  };
+  await assert.rejects(() => retrySetup.api.refreshThreads(2), {
+    code: 'STATE_REVISION_CONFLICT',
+  });
+  assert.equal(retryClient.events.length, 0);
+});
+
+test('an immutable stale discovery disposition is never heuristically repaired from changed live evidence', async () => {
+  const client = new FakeClient();
+  client.reviews.push(canonicalReview({
+    id: 'PRR_immutable', body: 'Original threadless finding.', commit: { oid: OTHER_HEAD },
+  }));
+  const setup = workflow(tasklessPendingDiscoveryHeadDriftState(), client);
+  await setup.api.refreshThreads(2);
+  const immutableDisposition = structuredClone(setup.state.current.staleDiscoveryDispositions[0]);
+  client.reviews[0] = { ...client.reviews[0], body: 'Edited threadless finding.' };
+
+  const status = await setup.api.status(2);
+  assert.equal(status.staleDiscoveryEvidence.category, 'ambiguous-human-decision');
+  await assert.rejects(() => setup.api.refreshThreads(2), {
+    code: 'STALE_DISCOVERY_EVIDENCE_CHANGED',
+  });
+  assert.deepEqual(setup.state.current.staleDiscoveryDispositions, [immutableDisposition]);
+  assert.deepEqual(setup.state.calls.map((call) => call.name), ['checkpointTaskCompletion']);
+  assert.equal(client.events.length, 0);
+
+  const rootClient = new FakeClient();
+  rootClient.reviews.push(canonicalReview({ id: 'PRR_review', commit: { oid: OTHER_HEAD } }));
+  addThread(rootClient);
+  const rooted = workflow(tasklessPendingDiscoveryHeadDriftState(), rootClient);
+  await rooted.api.refreshThreads(2);
+  const immutableRootDisposition = structuredClone(rooted.state.current.staleDiscoveryDispositions[0]);
+  const rootComments = rootClient.threadComments.get('THREAD_1');
+  rootComments[0] = { ...rootComments[0], body: 'Edited canonical root finding.' };
+  const rootedStatus = await rooted.api.status(2);
+  assert.equal(rootedStatus.staleDiscoveryEvidence.category, 'ambiguous-human-decision');
+  await assert.rejects(() => rooted.api.refreshThreads(2), {
+    code: 'STALE_DISCOVERY_EVIDENCE_CHANGED',
+  });
+  assert.deepEqual(rooted.state.current.staleDiscoveryDispositions, [immutableRootDisposition]);
+  assert.equal(rootClient.events.length, 0);
 });
 
 test('taskless pending-review HEAD-drift refresh escalates canonical outcome evidence', async () => {
@@ -1245,7 +1672,7 @@ test('canonical review, reaction, and matching viewer actors without node IDs th
 
   const viewerClient = new FakeClient();
   viewerClient.comments.push({ id: 'IC_missing', databaseId: 2, url: 'https://x/request',
-    body: '@codex review', createdAt: AT, author: { ...VIEWER, id: undefined } });
+    body: '@codex review', createdAt: AT, lastEditedAt: null, author: { ...VIEWER, id: undefined } });
   await assert.rejects(() => workflow(readyState(), viewerClient).api.request(2, 'discovery'), {
     code: 'CANONICAL_ACTOR_INCOMPLETE',
   });
@@ -1355,9 +1782,9 @@ test('request recovers a concurrent intent using its returned exclusion baseline
   };
   const comments = [
     { id: 'IC_excluded', databaseId: 8, url: 'https://x/excluded', body: '@codex review',
-      createdAt: AT, author: VIEWER },
+      createdAt: AT, lastEditedAt: null, author: VIEWER },
     { id: 'IC_recovered', databaseId: 9, url: 'https://x/recovered', body: '@codex review',
-      createdAt: AT, author: VIEWER },
+      createdAt: AT, lastEditedAt: null, author: VIEWER },
   ];
   const events = [];
   const client = new CommentsBetweenSnapshotsClient(events, comments);
@@ -1385,7 +1812,7 @@ test('concurrent request intent fails closed for missing or ambiguous candidates
   assert.equal(missingClient.calls.some((call) => call.name === 'AddReviewRequest'), false);
   assert.equal(missing.state.calls.some((call) => call.name === 'checkpointReviewRequest'), false);
   missingClient.comments.push({ id: 'IC_later', databaseId: 10, url: 'https://x/later', body: '@codex review',
-    createdAt: AT, author: VIEWER });
+    createdAt: AT, lastEditedAt: null, author: VIEWER });
   assert.equal((await missing.api.request(2, 'discovery')).request.id, 'IC_later');
   assert.equal(missingClient.calls.some((call) => call.name === 'AddReviewRequest'), false);
 
@@ -1397,8 +1824,8 @@ test('concurrent request intent fails closed for missing or ambiguous candidates
     if (input.name === 'PullRequestComments') {
       commentReads += 1;
       if (commentReads === 2) ambiguousClient.comments.push(
-        { id: 'IC_first', databaseId: 11, url: 'https://x/first', body: '@codex review', createdAt: AT, author: VIEWER },
-        { id: 'IC_second', databaseId: 12, url: 'https://x/second', body: '@codex review', createdAt: AT, author: VIEWER },
+        { id: 'IC_first', databaseId: 11, url: 'https://x/first', body: '@codex review', createdAt: AT, lastEditedAt: null, author: VIEWER },
+        { id: 'IC_second', databaseId: 12, url: 'https://x/second', body: '@codex review', createdAt: AT, lastEditedAt: null, author: VIEWER },
       );
     }
     return graphql(input);
@@ -1489,7 +1916,7 @@ test('request recovers one exact viewer comment and fails closed on ambiguous or
   const recoveredClient = new FakeClient();
   recoveredClient.comments.push({
     id: 'IC_recovered', databaseId: 9, url: 'https://github.com/example/aerstello/pull/2#issuecomment-9',
-    body: '@codex review', createdAt: AT, author: VIEWER,
+    body: '@codex review', createdAt: AT, lastEditedAt: null, author: VIEWER,
   });
   const operationId = `request:2:discovery:1:${HEAD}`;
   const recoveryJournal = fakeJournal([], [priorIntent('request', operationId)]);
@@ -3379,7 +3806,7 @@ test('pre-resolved root is adopted only from its pre-existing resolve intent tim
 test('request recovery uses numeric timestamps, viewer node identity, and logical ordinal', async () => {
   const client = new FakeClient();
   client.comments.push({ id: 'IC_numeric', databaseId: 8, url: 'https://x/8', body: '@codex review',
-    createdAt: '2026-08-04T23:59:59.500Z', author: VIEWER });
+    createdAt: '2026-08-04T23:59:59.500Z', lastEditedAt: null, author: VIEWER });
   const operationId = `request:2:discovery:1:${HEAD}`;
   const journal = fakeJournal([], [priorIntent('request', operationId)]);
   const { api } = workflow(readyState(), client, { journal, clock: { now: () => AT } });
@@ -3396,6 +3823,7 @@ test('collect rejects altered or foreign recorded request comments', async () =>
   for (const mutate of [
     (comment) => { comment.body = 'altered'; },
     (comment) => { comment.author = BOT; },
+    (comment) => { comment.lastEditedAt = '2026-08-05T00:00:01Z'; },
   ]) {
     const client = new FakeClient();
     const state = pendingState('discovery');
@@ -3421,7 +3849,7 @@ test('verification treats unsupported review states and stale-plus-exact evidenc
 test('fresh request intent never adopts an earlier same-head viewer comment', async () => {
   const client = new FakeClient();
   client.comments.push({ id: 'IC_manual', databaseId: 8, url: 'https://x/manual', body: '@codex review',
-    createdAt: '2026-08-04T23:59:59.500Z', author: VIEWER });
+    createdAt: '2026-08-04T23:59:59.500Z', lastEditedAt: null, author: VIEWER });
   const journal = fakeJournal();
   const setup = workflow(readyState(), client, { journal });
   await assert.rejects(() => setup.api.request(2, 'discovery'), { code: 'REQUEST_BASELINE_COLLISION' });
@@ -3438,7 +3866,7 @@ test('a fresh later ordinal excludes prior review-history request IDs', async ()
   const client = new FakeClient();
   client.comments.push({ id: 'IC_request', databaseId: 101,
     url: 'https://github.com/example/aerstello/pull/2#issuecomment-101', body: '@codex review',
-    createdAt: AT, author: VIEWER });
+    createdAt: AT, lastEditedAt: null, author: VIEWER });
   const journal = fakeJournal();
   const setup = workflow(state, client, { journal });
   const result = await setup.api.request(2, 'discovery');

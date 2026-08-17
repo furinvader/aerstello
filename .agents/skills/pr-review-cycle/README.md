@@ -79,6 +79,16 @@ use repeatable `verification`. Reaching a finite limit blocks only the next
 GitHub request, not triage, remediation, validation, or completion from a clean
 final allowed review.
 
+Native schema-v3 state may also contain the optional bounded
+`staleDiscoveryDispositions` ledger. Each append-only record binds one latest
+null-outcome discovery request and its uniquely classifiable canonical response
+to the exact request HEAD and the different live recovery HEAD. Its response
+fingerprint covers exact response content and immutable attached-root source
+evidence, so a same-classification edit cannot be adopted. The original
+request and null history row remain unchanged and continue to count toward the
+request limit. Older schema-v3 documents without the ledger remain readable;
+migrated request provenance cannot acquire a disposition.
+
 From a nested npm workspace directory such as `apps/api`, prefix npm with the
 checkout's Git root so npm selects the root package scripts:
 
@@ -269,14 +279,34 @@ consume their configured request slot.
 Then run `refresh-threads`. It rechecks the request anchor, current validation,
 clean equal local/pushed/live heads, complete canonical evidence, state
 revision, and the final live head. It writes no GitHub mutation or request
-journal. Missing, edited, foreign, conflicting, or canonical outcome evidence
-fails closed; ambiguous verification evidence is checkpointed for human review.
-With an exact anchor, no outcome evidence, and no canonical roots, the guarded
-empty proof restores review readiness. A retry of the already-current proof is
-idempotent. The ordinary request command derives the replacement kind and
-appends a new immutable row. An exhausted finite limit preserves all recovery
-proof but blocks that request with the exact raise-or-remove command; it does
-not block validation or the read-only refresh.
+journal. A request anchor with any edit timestamp is not immutable. Missing,
+edited, duplicated, foreign, unsupported, multiple,
+conflicting, same-head, migrated, or inconsistently bound evidence remains a
+human gate; ambiguous verification evidence is durably checkpointed for that
+decision.
+
+For discovery, no canonical response is pure HEAD drift: no disposition is
+written, and the existing guarded empty-proof route restores readiness only
+when the fully paginated canonical root set is empty. Exactly one supported
+response instead receives one immutable disposition. A clean response may
+restore readiness only after a second full evidence/root read plus repeated
+checkout, local/pushed/live-head, and revision checks. A findings response
+enters ordinary triage; its canonical roots are not auto-resolved or converted
+into a current-head outcome. The active `reviewOutcome`, `reviewedHeadSha`, and
+null history outcome remain unchanged in both cases.
+
+An identical disposition/proof retry takes the state lock and atomically
+rechecks its revision without writing another revision; evidence, root, head,
+or revision races fail closed. The ordinary request command derives the
+replacement kind from the complete durable ordinal and appends a new immutable
+row. An exhausted finite limit preserves disposition and thread proof but
+blocks only that request with the exact raise-or-remove command; unlimited
+policy permits the replacement.
+
+`review:github status` reports stale discovery evidence as `pure-head-drift`,
+`disposition-ready` or `dispositioned`, `actionable-stale-findings`, or
+`ambiguous-human-decision`. Treat the last category as a human decision, never
+as permission to repair evidence heuristically.
 
 There is one further migration-only `--initial-selection` route for completed
 tasks. Its immutable `state.v2.backup.json` must contain a nonempty all-completed
@@ -363,8 +393,8 @@ Next action: Integrate the remaining result and run the selected tests.
   Otherwise keep requesting exact-commit reviews until Codex is clean. There is
   no configured request-count cap by default; an explicit durable limit pauses
   only the next request when exhausted. Exact-anchor HEAD drift is recoverable,
-  while missing, altered, conflicting, or otherwise ambiguous evidence still
-  needs a human decision.
+  while missing, altered, duplicated, foreign, unsupported, multiple,
+  conflicting, or otherwise ambiguous evidence still needs a human decision.
 
 Machine contracts and command details live in the
 [PR review state schema](./schemas/pr-review-state.schema.json),

@@ -58,6 +58,10 @@ import {
   validationPlanPath,
   withStateLock,
 } from './state.mjs';
+import {
+  buildStaleDiscoveryDisposition,
+  staleDiscoveryDispositionId,
+} from '../contracts/contracts.mjs';
 import { routeSpecialists } from '../../../aerstello-specialists/scripts/validate-registry.mjs';
 import { commit, createRepository, git } from '../../../../../tests/support/git-fixtures.mjs';
 
@@ -194,6 +198,7 @@ function ciEvidence(state, overrides = {}) {
 
 function legacyState(state, overrides = {}) {
   const {
+    staleDiscoveryDispositions: _staleDiscoveryDispositions,
     verificationReviewUsed: _verificationReviewUsed,
     reviewRequestLimit: _reviewRequestLimit,
     legacyReviewProvenance: _legacyReviewProvenance,
@@ -219,6 +224,7 @@ function legacyState(state, overrides = {}) {
 
 function schemaV2State(state) {
   const {
+    staleDiscoveryDispositions: _staleDiscoveryDispositions,
     ciValidationStatus: _ciValidationStatus,
     ciValidationHistory: _ciValidationHistory,
     reviewRequestLimit: _reviewRequestLimit,
@@ -390,6 +396,58 @@ function nativeTasklessPendingVerification(cwd, { reviewRequestLimit = null } = 
   return { initial, requested };
 }
 
+function nativeStaleDiscoveryDisposition(cwd, {
+  dispositionOutcome = 'clean', reviewRequestLimit = null,
+} = {}) {
+  const initial = init(cwd, { reviewRequestLimit });
+  const proofed = checkpointTaskCompletion({
+    cwd,
+    expectedRevision: initial.revision,
+    threadResolutionStatus: ready(initial, []).threadResolutionStatus,
+  });
+  const prepared = persistReady(cwd, proofed, []);
+  const requested = checkpointReviewRequest({
+    cwd,
+    request: request(prepared, 'stale-discovery-request', 'discovery'),
+    pushedHeadSha: prepared.currentIntegrationHeadSha,
+    prHeadSha: prepared.currentIntegrationHeadSha,
+    expectedRevision: prepared.revision,
+  });
+  const requestHeadSha = requested.currentIntegrationHeadSha;
+  const immutableHistory = structuredClone(requested.reviewHistory);
+  const liveHeadSha = commit(cwd, { 'stale-discovery-drift.txt': 'drift\n' }, 'stale discovery drift');
+  const drifted = checkpointGitMetadata({ cwd }).state;
+  const validated = checkpointSyntheticTargetedValidation(cwd, drifted);
+  const evidence = outcome(validated, {
+    id: 'stale-discovery-response',
+    headSha: requestHeadSha,
+    requestId: requested.reviewRequest.id,
+    kind: 'discovery',
+    outcome: dispositionOutcome,
+  });
+  const disposition = buildStaleDiscoveryDisposition({
+    request: requested.reviewRequest,
+    liveHeadSha,
+    evidence,
+    responseFingerprint: 'd'.repeat(64),
+    disposedAt: AT,
+  });
+  const threadResolutionStatus = {
+    status: 'passed', headSha: liveHeadSha, threads: [],
+    threadlessVerification: emptyThreadless(), updatedAt: AT,
+  };
+  const dispositioned = checkpointTaskCompletion({
+    cwd,
+    expectedRevision: validated.revision,
+    threadResolutionStatus,
+    staleDiscoveryDisposition: disposition,
+  });
+  return {
+    requested, immutableHistory, requestHeadSha, liveHeadSha, validated,
+    evidence, disposition, threadResolutionStatus, dispositioned,
+  };
+}
+
 function integratedTasks(cwd, ids) {
   const initial = init(cwd);
   const proposedTasks = ids.map((id) => task(initial.currentIntegrationHeadSha, {
@@ -483,6 +541,7 @@ test('initialization writes the v3 identity and empty durable ledgers', () => {
   assert.equal(state.reviewRequestLimit, null);
   assert.equal(state.legacyReviewProvenance, null);
   assert.deepEqual(state.reviewHistory, []);
+  assert.deepEqual(state.staleDiscoveryDispositions, []);
   assert.deepEqual(state.threadResolutionStatus.threads, []);
   assert.equal(statePath(cwd, 17), join(gitCommonDirectory(cwd), 'codex', 'pr-review', 'pr-17', 'state.json'));
 });
@@ -531,6 +590,7 @@ test('v2 loading requires explicit migration and writes an exact versioned backu
   const cwd = repo();
   const initialized = init(cwd);
   const {
+    staleDiscoveryDispositions: _staleDiscoveryDispositions,
     ciValidationStatus: _ciValidationStatus, ciValidationHistory: _ciValidationHistory,
     validationStatus, ...currentFields
   } = initialized;
@@ -550,6 +610,7 @@ test('v2 loading requires explicit migration and writes an exact versioned backu
   assert.throws(() => loadState(cwd), { code: 'STATE_MIGRATION_REQUIRED' });
   const migrated = migrateState({ cwd });
   assert.equal(migrated.state.schemaVersion, 3);
+  assert.deepEqual(migrated.state.staleDiscoveryDispositions, []);
   assert.equal(readFileSync(migrated.backupPath, 'utf8'), source);
   assert.match(migrated.backupPath, /state\.v2\.backup\.json$/u);
 });
@@ -559,6 +620,7 @@ test('v2 migration preserves a pending exact-head review while resetting targete
   const prepared = ready(init(cwd), []);
   const requested = buildReviewRequestTransition(prepared, request(prepared), external(cwd, prepared));
   const {
+    staleDiscoveryDispositions: _staleDiscoveryDispositions,
     ciValidationStatus: _ciValidationStatus,
     ciValidationHistory: _ciValidationHistory,
     validationStatus,
@@ -1846,6 +1908,141 @@ test('stale discovery request can be replaced without rewriting its null-outcome
   assert.equal(requestedB.reviewHistory[0].outcome, null);
   assert.equal(requestedB.reviewHistory[1].request.id, 'discovery-b');
   assert.equal(requestedB.reviewHistory[1].request.headSha, headB);
+});
+
+test('stale discovery disposition is append-only, exact-bound, retry-idempotent, and ordinal-preserving', () => {
+  const cwd = repo();
+  const recovery = nativeStaleDiscoveryDisposition(cwd);
+  const state = recovery.dispositioned;
+
+  assert.equal(state.phase, 'ready-for-review');
+  assert.equal(state.reviewOutcome, null);
+  assert.equal(state.reviewedHeadSha, null);
+  assert.equal(state.reviewRound, 1);
+  assert.deepEqual(state.reviewHistory, recovery.immutableHistory);
+  assert.deepEqual(state.staleDiscoveryDispositions, [recovery.disposition]);
+  assert.equal(state.staleDiscoveryDispositions[0].responseFingerprint, 'd'.repeat(64));
+  assert.equal(state.threadResolutionStatus.status, 'passed');
+  assert.equal(state.threadResolutionStatus.headSha, recovery.liveHeadSha);
+  assert.deepEqual(reviewRequestUsage(state), {
+    used: 1, limit: null, remaining: null, exhausted: false,
+  });
+  assert.equal(reviewRequestGate(state, external(cwd, state)).kind, 'discovery');
+  assert.match(renderRecoverySummary({ cwd }),
+    /Stale discovery dispositions: 1; latest [0-9a-f]{64} binds request stale-discovery-request [0-9a-f]{40} -> [0-9a-f]{40} \(clean\)/u);
+
+  const retry = checkpointTaskCompletion({
+    cwd,
+    expectedRevision: state.revision,
+    threadResolutionStatus: recovery.threadResolutionStatus,
+    staleDiscoveryDisposition: recovery.disposition,
+  });
+  assert.equal(retry.revision, state.revision);
+  assert.deepEqual(retry, state);
+  assert.throws(() => checkpointTaskCompletion({
+    cwd,
+    expectedRevision: state.revision - 1,
+    threadResolutionStatus: recovery.threadResolutionStatus,
+    staleDiscoveryDisposition: recovery.disposition,
+  }), { code: 'STATE_REVISION_CONFLICT' });
+
+  assert.throws(() => checkpointState({
+    cwd,
+    expectedRevision: state.revision,
+    nextState: { ...state, staleDiscoveryDispositions: [] },
+  }), /staleDiscoveryDispositions/u);
+  const edited = structuredClone(state);
+  edited.staleDiscoveryDispositions[0].evidence.id = 'heuristically-repaired';
+  edited.staleDiscoveryDispositions[0].dispositionId = staleDiscoveryDispositionId(
+    edited.staleDiscoveryDispositions[0],
+  );
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: state.revision, nextState: edited,
+  }), /staleDiscoveryDispositions/u);
+
+  const replacement = checkpointReviewRequest({
+    cwd,
+    expectedRevision: state.revision,
+    request: request(state, 'replacement-discovery', 'discovery'),
+    pushedHeadSha: state.currentIntegrationHeadSha,
+    prHeadSha: state.currentIntegrationHeadSha,
+  });
+  assert.equal(replacement.reviewHistory.length, 2);
+  assert.deepEqual(replacement.reviewHistory[0], recovery.immutableHistory[0]);
+  assert.equal(replacement.reviewHistory[1].request.kind, 'discovery');
+  assert.equal(replacement.reviewHistory[1].outcome, null);
+  assert.deepEqual(replacement.staleDiscoveryDispositions, [recovery.disposition]);
+});
+
+test('dispositioned stale discovery findings enter ordinary triage and retain immutable source evidence', () => {
+  const cwd = repo();
+  const recovery = nativeStaleDiscoveryDisposition(cwd, { dispositionOutcome: 'findings' });
+  const state = recovery.dispositioned;
+
+  assert.equal(state.phase, 'triaging');
+  assert.equal(state.threadResolutionStatus.status, 'not-run');
+  assert.equal(state.threadResolutionStatus.headSha, null);
+  assert.match(state.nextAction, /Triage the actionable findings/u);
+  assert.deepEqual(state.reviewHistory, recovery.immutableHistory);
+  assert.equal(state.reviewOutcome, null);
+  assert.equal(state.reviewedHeadSha, null);
+  assert.equal(state.staleDiscoveryDispositions[0].evidence.outcome, 'findings');
+  assert.equal(state.staleDiscoveryDispositions[0].evidence.headSha, recovery.requestHeadSha);
+
+  const retry = checkpointTaskCompletion({
+    cwd,
+    expectedRevision: state.revision,
+    threadResolutionStatus: state.threadResolutionStatus,
+    staleDiscoveryDisposition: recovery.disposition,
+  });
+  assert.equal(retry.revision, state.revision);
+  assert.deepEqual(retry, state);
+});
+
+test('stale discovery disposition rejects non-native, inconsistent, and tampered evidence', () => {
+  for (const mutate of [
+    (recovery, disposition) => { disposition.liveHeadSha = recovery.requestHeadSha; },
+    (_recovery, disposition) => { disposition.requestId = 'foreign-request'; },
+    (_recovery, disposition) => { disposition.evidence.kind = 'verification'; },
+    (_recovery, disposition) => { disposition.evidence.headSha = 'c'.repeat(40); },
+  ]) {
+    const cwd = repo();
+    const recovery = nativeStaleDiscoveryDisposition(cwd);
+    const disposition = structuredClone(recovery.disposition);
+    mutate(recovery, disposition);
+    disposition.dispositionId = staleDiscoveryDispositionId(disposition);
+    assert.throws(() => completeIntegratedTasks(recovery.validated, {
+      threadResolutionStatus: recovery.threadResolutionStatus,
+      staleDiscoveryDisposition: disposition,
+    }), { code: 'INVALID_STALE_DISCOVERY_DISPOSITION' });
+  }
+
+  const cwd = repo();
+  const recovery = nativeStaleDiscoveryDisposition(cwd);
+  assert.throws(() => completeIntegratedTasks({
+    ...recovery.validated,
+    legacyReviewProvenance: { schemaVersion: 1, discoveryRounds: 0, migratedAt: AT },
+  }, {
+    threadResolutionStatus: recovery.threadResolutionStatus,
+    staleDiscoveryDisposition: recovery.disposition,
+  }), { code: 'STALE_DISCOVERY_DISPOSITION_NOT_ALLOWED' });
+});
+
+test('finite stale discovery allowance keeps proof but blocks replacement with the exact operator action', () => {
+  const cwd = repo();
+  const { dispositioned, immutableHistory, disposition } = nativeStaleDiscoveryDisposition(cwd, {
+    reviewRequestLimit: 1,
+  });
+  assert.equal(dispositioned.phase, 'ready-for-review');
+  assert.equal(dispositioned.threadResolutionStatus.status, 'passed');
+  assert.deepEqual(dispositioned.reviewHistory, immutableHistory);
+  assert.deepEqual(dispositioned.staleDiscoveryDispositions, [disposition]);
+  assert.deepEqual(reviewRequestUsage(dispositioned), {
+    used: 1, limit: 1, remaining: 0, exhausted: true,
+  });
+  assert.equal(reviewRequestGate(dispositioned, external(cwd, dispositioned)).allowed, false);
+  assert.match(dispositioned.nextAction,
+    /limit 1 is exhausted after 1 durable requests; run npm run review:state -- set-review-limit --pr 17 --expected-revision [0-9]+ --limit <higher-number> or --unlimited/u);
 });
 
 test('stale verification request recovers without rewriting its evidence', () => {

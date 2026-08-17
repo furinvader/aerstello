@@ -74,6 +74,19 @@ limit keeps review-ready state valid but blocks the next request before any
 mutation. Active state remains bounded to 64 KiB, so unlimited describes policy,
 not unbounded storage.
 
+Schema v3 optionally carries `staleDiscoveryDispositions` so documents written
+before this recovery contract remain readable. The array is append-only and
+bounded to the three possible discovery ordinals. Every record has schema
+version 1, a deterministic SHA-256 `dispositionId`, the exact `requestId`,
+`requestHeadSha`, distinct `liveHeadSha`, one complete canonical discovery
+`evidence` object, a SHA-256 `responseFingerprint` over the exact response and
+immutable attached-root source evidence, reason `head-drift`, and `disposedAt`.
+Manual validation binds
+it to exactly one native null-outcome discovery history row, enforces history
+order and unique disposition/request/response identities, and rejects migrated
+provenance. Generic checkpoints cannot add, remove, reorder, or edit the ledger;
+only guarded task completion may append an exact validated record.
+
 State schema v3 upgrades are explicit. Migration from v1 or v2 first saves an
 exact versioned backup and must preserve stable finding/task identities, source
 IDs, finding keys, and outcomes. Never let an unrelated read silently migrate
@@ -187,14 +200,27 @@ limit may already be exhausted: the pending history row still counts, while
 validation and empty-proof recovery remain available.
 
 After current validation passes, `refresh-threads` proves the original request
-comment is still immutable and that no canonical request outcome or root is
-live. It rechecks local, pushed, and live heads plus state revision before the
-guarded task-completion checkpoint. That checkpoint preserves request/history
-evidence, records only current empty-thread proof, and restores
-`ready-for-review` with either the derived next review kind or the exact
-raise/remove-limit action. Verification ambiguity becomes durable human
-escalation; discovery ambiguity fails closed. Repeating an already-current
-successful refresh returns the existing proof without another revision.
+comment is still immutable and fully paginates responses and canonical roots.
+Verification evidence retains its durable human-escalation route. Discovery
+with no canonical response is pure drift: it receives no disposition and may
+record only current empty-thread proof when no canonical root exists. Exactly
+one supported discovery response may instead append one disposition bound to
+the prior request HEAD and current live HEAD. Missing, edited, duplicated,
+foreign, unsupported, multiple, conflicting, same-head, migrated, or
+inconsistently bound evidence fails closed for human judgment.
+
+A clean disposition restores `ready-for-review` only after a second full
+evidence/root read and repeated clean local, pushed, live, revision, and state
+checks. A findings disposition moves to ordinary `triaging` and invalidates the
+aggregate thread proof; roots still require ordinary task mapping, reply, and
+resolution. Neither path changes `reviewRequest`, `reviewOutcome`,
+`reviewedHeadSha`, its null history outcome, request ordinal, or finite-limit
+usage. Identical current-revision retries take the state lock, reread the
+revision, and return the existing disposition and proof without another
+revision; changed evidence, roots, heads, or revision fail closed. A finite
+exhausted limit retains the proof and exact setter action,
+while unlimited policy permits a replacement whose kind comes from the full
+history ordinal.
 
 A third, migration-only route exists for a schema-v2 source with a nonempty
 all-completed task set and an exact-head passed, nonempty legacy targeted proof.

@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto';
 
-import { reviewRequestGate, reviewRequestUsage, validatePrReviewState } from '../contracts/contracts.mjs';
+import {
+  buildStaleDiscoveryDisposition,
+  reviewRequestGate,
+  reviewRequestUsage,
+  validatePrReviewState,
+} from '../contracts/contracts.mjs';
 
 const CANONICAL_LOGIN = 'chatgpt-codex-connector';
 const CANONICAL_URL = 'https://github.com/apps/chatgpt-codex-connector';
@@ -406,6 +411,7 @@ function sameTimestamp(left, right) {
 
 function exactViewerRequestCandidates(comments, viewer, intent, excludedIds = new Set()) {
   return comments.filter((comment) => comment.body === REQUEST_BODY
+    && comment.lastEditedAt === null
     && !excludedIds.has(comment.id)
     && isViewerActor(comment.author, viewer)
     && requestRecoveryAtOrAfter(comment.createdAt, intent.at));
@@ -869,6 +875,7 @@ function assertRecordedRequestComment(state, live) {
   const comment = matches[0];
   if (comment.body !== request.body || comment.url !== request.url
       || (comment.databaseId ?? null) !== request.databaseId
+      || comment.lastEditedAt !== null
       || comment.author?.login !== request.authorLogin || comment.author?.id !== request.authorNodeId
       || !isViewerActor(comment.author, live.metadata.viewer)
       || !sameTimestamp(comment.createdAt, request.at)) {
@@ -917,9 +924,13 @@ function tasklessPendingReviewHeadDriftRefreshAllowed(state) {
   const request = state.reviewRequest;
   const latest = state.reviewHistory.at(-1);
   const priorHeadSha = request?.headSha;
+  const disposition = (state.staleDiscoveryDispositions ?? [])
+    .find((entry) => entry.requestId === request?.id) ?? null;
+  const recoveryPhase = ['recovering', 'ready-for-review'].includes(state.phase)
+    || (state.phase === 'triaging' && disposition?.evidence?.outcome === 'findings');
   return state.schemaVersion === 3
     && state.legacyReviewProvenance === null
-    && ['recovering', 'ready-for-review'].includes(state.phase)
+    && recoveryPhase
     && state.tasks.length === 0
     && request !== null && latest !== undefined
     && state.reviewOutcome === null && latest.outcome === null
@@ -930,17 +941,165 @@ function tasklessPendingReviewHeadDriftRefreshAllowed(state) {
     && state.validationStatus.status === 'passed'
     && state.validationStatus.headSha === state.currentIntegrationHeadSha
     && state.blockedReasons.length === 0 && state.verificationEscalation === null
-    && !state.tasks.some((task) => task.disposition === 'needs-human-decision');
+    && !state.tasks.some((task) => task.disposition === 'needs-human-decision')
+    && (disposition === null
+      || (disposition.requestHeadSha === priorHeadSha
+        && disposition.liveHeadSha === state.currentIntegrationHeadSha));
 }
 
-async function pendingReviewOutcomeEvidence(state, live, git) {
+function outcomeFromCanonicalResponse(request, selected, threads) {
+  if (selected.type === 'reaction') {
+    const reaction = selected.value;
+    return {
+      id: reaction.id, databaseId: null, url: request.url,
+      headSha: request.headSha, at: reaction.createdAt, requestId: request.id, kind: request.kind,
+      outcome: 'clean', evidenceType: 'request-reaction',
+      reviewerLogin: reaction.user.login, reviewerNodeId: reaction.user.id,
+      reviewerType: reaction.user.__typename, reviewerUrl: reaction.user.url,
+      reactionContent: 'THUMBS_UP', reactionCommentId: request.id,
+    };
+  }
+  if (selected.type === 'issue-comment') {
+    const { comment, headSha } = selected.value;
+    return {
+      id: comment.id, databaseId: comment.databaseId ?? null, url: comment.url,
+      headSha, at: comment.createdAt, requestId: request.id, kind: request.kind,
+      outcome: 'clean', evidenceType: 'issue-comment',
+      reviewerLogin: comment.author.login, reviewerNodeId: comment.author.id,
+      reviewerType: comment.author.__typename, reviewerUrl: comment.author.url,
+      reactionContent: null, reactionCommentId: null,
+    };
+  }
+  const review = selected.value;
+  return {
+    id: review.id, databaseId: review.databaseId ?? null, url: review.url,
+    headSha: review.commit.oid, at: review.submittedAt, requestId: request.id, kind: request.kind,
+    outcome: classifyReviewSubmission(review, threads), evidenceType: 'review-submission',
+    reviewerLogin: review.author.login, reviewerNodeId: review.author.id,
+    reviewerType: review.author.__typename, reviewerUrl: review.author.url,
+    reactionContent: null, reactionCommentId: null,
+  };
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalJson(value[key])]));
+  }
+  return value;
+}
+
+function actorObservation(actor) {
+  return {
+    type: actor?.__typename ?? null,
+    login: actor?.login ?? null,
+    id: actor?.id ?? null,
+    url: actor?.url ?? null,
+  };
+}
+
+function canonicalRootEvidence(live, reviewId = undefined) {
+  return live.threads.filter((thread) => thread.canonical
+    && (reviewId === undefined || thread.root.pullRequestReview?.id === reviewId)).map((thread) => ({
+    threadId: thread.id,
+    rootId: thread.root.id,
+    rootDatabaseId: thread.root.databaseId ?? null,
+    rootUrl: thread.root.url ?? null,
+    rootBody: thread.root.body ?? null,
+    rootCreatedAt: thread.root.createdAt ?? null,
+    rootAuthor: actorObservation(thread.root.author),
+    reviewId: thread.root.pullRequestReview?.id ?? null,
+  })).sort((left, right) => left.threadId.localeCompare(right.threadId));
+}
+
+function canonicalRootState(live) {
+  const evidenceByThread = new Map(canonicalRootEvidence(live)
+    .map((evidence) => [evidence.threadId, evidence]));
+  return live.threads.filter((thread) => thread.canonical).map((thread) => ({
+    ...evidenceByThread.get(thread.id),
+    isResolved: thread.isResolved,
+    comments: thread.comments.map((comment) => ({
+      id: comment.id,
+      databaseId: comment.databaseId ?? null,
+      url: comment.url ?? null,
+      body: comment.body ?? null,
+      createdAt: comment.createdAt ?? null,
+      authorType: comment.author?.__typename ?? null,
+      authorLogin: comment.author?.login ?? null,
+      authorId: comment.author?.id ?? null,
+      authorUrl: comment.author?.url ?? null,
+      replyToId: comment.replyTo?.id ?? null,
+      reviewId: comment.pullRequestReview?.id ?? null,
+    })).sort((left, right) => left.id.localeCompare(right.id)),
+  })).sort((left, right) => left.threadId.localeCompare(right.threadId));
+}
+
+function responseObservation(candidate) {
+  if (candidate.type === 'review') {
+    const review = candidate.value;
+    return {
+      type: candidate.type,
+      id: review.id,
+      databaseId: review.databaseId ?? null,
+      url: review.url,
+      body: review.body,
+      state: review.state,
+      submittedAt: review.submittedAt,
+      commitOid: review.commit?.oid ?? null,
+      actor: actorObservation(review.author),
+    };
+  }
+  if (candidate.type === 'reaction') {
+    const reaction = candidate.value;
+    return {
+      type: candidate.type,
+      id: reaction.id,
+      content: reaction.content,
+      createdAt: reaction.createdAt,
+      actor: actorObservation(reaction.user),
+    };
+  }
+  const { comment, headSha } = candidate.value;
+  return {
+    type: candidate.type,
+    id: comment.id,
+    databaseId: comment.databaseId ?? null,
+    url: comment.url,
+    body: comment.body,
+    createdAt: comment.createdAt,
+    lastEditedAt: comment.lastEditedAt,
+    headSha,
+    actor: actorObservation(comment.author),
+  };
+}
+
+function responseFingerprint(candidate, live) {
+  const observation = {
+    response: responseObservation(candidate),
+    roots: candidate.type === 'review'
+      ? canonicalRootEvidence(live, candidate.value.id) : [],
+  };
+  return createHash('sha256').update(JSON.stringify(canonicalJson(observation))).digest('hex');
+}
+
+async function classifyPendingReviewResponse(state, live, git) {
   const request = state.reviewRequest;
   const reviews = live.reviews.filter((review) => isCanonicalActor(review.author)
     && evidenceAtOrAfter(review.submittedAt, request.at));
-  const reactions = live.reactions.filter((reaction) => reaction.content === 'THUMBS_UP'
-    && isCanonicalActor(reaction.user) && evidenceAtOrAfter(reaction.createdAt, request.at));
+  const exactReviews = reviews.filter((review) => review.state === 'COMMENTED'
+    && typeof review.body === 'string' && review.commit?.oid === request.headSha);
+  const unsupportedReviews = reviews.filter((review) => !exactReviews.includes(review));
+  const canonicalReactions = live.reactions.filter((reaction) => reaction.content === 'THUMBS_UP'
+    && isCanonicalActor(reaction.user));
+  const reactions = canonicalReactions.filter((reaction) =>
+    evidenceAtOrAfter(reaction.createdAt, request.at));
+  const unsupportedReactions = canonicalReactions.filter((reaction) =>
+    !evidenceAtOrAfter(reaction.createdAt, request.at));
   const roots = live.threads.filter((thread) => thread.canonical
     && evidenceAtOrAfter(thread.root.createdAt, request.at));
+  const exactReviewIds = new Set(exactReviews.map((review) => review.id));
+  const unmatchedRoots = roots.filter((thread) =>
+    !exactReviewIds.has(thread.root.pullRequestReview?.id));
   const structural = await classifyStructuralIssueComments({
     comments: live.comments,
     request,
@@ -949,20 +1108,148 @@ async function pendingReviewOutcomeEvidence(state, live, git) {
     cwd: state.integrationWorktree,
     expectedHeads: [request.headSha],
   });
-  const ids = [
-    ...reviews.map((item) => canonicalEvidenceId(item, 'review')),
-    ...reactions.map((item) => canonicalEvidenceId(item, 'reaction')),
-    ...roots.map((item) => canonicalEvidenceId(item.root, 'review-root')),
-    ...structural.exact.map((item) => canonicalEvidenceId(item.comment, 'issue-comment')),
+  const candidates = [
+    ...exactReviews.map((value) => ({ type: 'review', value })),
+    ...reactions.map((value) => ({ type: 'reaction', value })),
+    ...structural.exact.map((value) => ({ type: 'issue-comment', value })),
+  ];
+  const unsupportedIds = [
+    ...unsupportedReviews.map((item) => canonicalEvidenceId(item, 'review')),
+    ...unsupportedReactions.map((item) => canonicalEvidenceId(item, 'reaction')),
+    ...unmatchedRoots.map((item) => canonicalEvidenceId(item.root, 'review-root')),
     ...structural.unsupported.map((item) => canonicalEvidenceId(item, 'issue-comment')),
   ];
-  const unsupportedReview = reviews.some((review) => review.state !== 'COMMENTED'
-    || typeof review.body !== 'string' || review.commit?.oid !== request.headSha);
+  const candidateIds = candidates.map((candidate) => canonicalEvidenceId(
+    candidate.type === 'issue-comment' ? candidate.value.comment : candidate.value,
+    candidate.type,
+  ));
+  const rootState = canonicalRootState(live);
+  if (candidates.length === 0 && unsupportedIds.length === 0) {
+    return {
+      status: 'none', evidence: null, responseFingerprint: null, evidenceIds: [], rootState,
+    };
+  }
+  if (candidates.length !== 1 || unsupportedIds.length > 0) {
+    return {
+      status: 'ambiguous', evidence: null,
+      responseFingerprint: null,
+      evidenceIds: [...new Set([...candidateIds, ...unsupportedIds])],
+      rootState,
+    };
+  }
+  const evidence = outcomeFromCanonicalResponse(request, candidates[0], live.threads);
   return {
-    ids,
-    reason: ids.length === 1 && !unsupportedReview && structural.unsupported.length === 0
-      ? 'stale-canonical-evidence' : 'ambiguous-canonical-evidence',
+    status: 'supported', evidence,
+    responseFingerprint: responseFingerprint(candidates[0], live),
+    evidenceIds: candidateIds, rootState,
   };
+}
+
+function dispositionForPendingResponse(state, response, disposedAt) {
+  const existing = (state.staleDiscoveryDispositions ?? [])
+    .find((entry) => entry.requestId === state.reviewRequest.id) ?? null;
+  if (response.status !== 'supported') {
+    if (existing !== null) {
+      throw new GitHubWorkflowError(
+        'Dispositioned stale discovery evidence is missing or no longer uniquely classifiable',
+        'STALE_DISCOVERY_EVIDENCE_CHANGED',
+      );
+    }
+    return null;
+  }
+  const disposition = buildStaleDiscoveryDisposition({
+    request: state.reviewRequest,
+    liveHeadSha: state.currentIntegrationHeadSha,
+    evidence: response.evidence,
+    responseFingerprint: response.responseFingerprint,
+    disposedAt: existing?.disposedAt ?? disposedAt,
+  });
+  if (existing !== null && JSON.stringify(existing) !== JSON.stringify(disposition)) {
+    throw new GitHubWorkflowError(
+      'Live stale discovery evidence differs from its immutable disposition',
+      'STALE_DISCOVERY_EVIDENCE_CHANGED',
+    );
+  }
+  return disposition;
+}
+
+function samePendingResponseObservation(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+async function staleDiscoveryStatus(state, live, git) {
+  const request = state.reviewRequest;
+  const latest = state.reviewHistory.at(-1);
+  if (request?.kind !== 'discovery' || state.reviewOutcome !== null || latest?.outcome !== null
+      || latest?.request?.id !== request.id || request.headSha === live.metadata.headRefOid) {
+    return { category: 'not-applicable', dispositionId: null, canonicalRootCount: 0 };
+  }
+  if (live.metadata.headRefOid !== state.currentIntegrationHeadSha) {
+    return { category: 'ambiguous-human-decision', dispositionId: null, canonicalRootCount: 0 };
+  }
+  const existing = (state.staleDiscoveryDispositions ?? [])
+    .find((entry) => entry.requestId === request.id) ?? null;
+  if (existing === null && !tasklessPendingReviewHeadDriftRefreshAllowed(state)) {
+    return { category: 'ambiguous-human-decision', dispositionId: null, canonicalRootCount: 0 };
+  }
+  try {
+    assertRecordedRequestComment(state, live);
+    if (existing === null) await assertMutationReady({ state, git }, live);
+  } catch {
+    return { category: 'ambiguous-human-decision', dispositionId: null, canonicalRootCount: 0 };
+  }
+  let response;
+  try {
+    response = await classifyPendingReviewResponse(state, live, git);
+  } catch {
+    return { category: 'ambiguous-human-decision', dispositionId: null, canonicalRootCount: 0 };
+  }
+  if (existing !== null) {
+    if (response.status !== 'supported'
+        || JSON.stringify(existing.evidence) !== JSON.stringify(response.evidence)
+        || existing.responseFingerprint !== response.responseFingerprint
+        || (existing.evidence.outcome === 'clean'
+          && existing.liveHeadSha !== live.metadata.headRefOid)) {
+      return {
+        category: 'ambiguous-human-decision', dispositionId: existing.dispositionId,
+        canonicalRootCount: response.rootState.length,
+      };
+    }
+    return {
+      category: response.evidence.outcome === 'findings'
+        ? 'actionable-stale-findings' : 'dispositioned',
+      dispositionId: existing.dispositionId,
+      canonicalRootCount: response.rootState.length,
+    };
+  }
+  if (response.status === 'none') {
+    return { category: 'pure-head-drift', dispositionId: null, canonicalRootCount: 0 };
+  }
+  if (response.status === 'ambiguous') {
+    return {
+      category: 'ambiguous-human-decision', dispositionId: null,
+      canonicalRootCount: response.rootState.length,
+    };
+  }
+  return {
+    category: response.evidence.outcome === 'findings'
+      ? 'actionable-stale-findings' : 'disposition-ready',
+    dispositionId: null,
+    canonicalRootCount: response.rootState.length,
+  };
+}
+
+function staleDiscoveryNextAction(status, fallback) {
+  if (status.category === 'disposition-ready') {
+    return 'Run refresh-threads to disposition the unique stale discovery response and prove the current empty root set.';
+  }
+  if (status.category === 'actionable-stale-findings' && status.dispositionId === null) {
+    return 'Run refresh-threads to disposition the unique stale discovery response, then triage its actionable findings.';
+  }
+  if (status.category === 'ambiguous-human-decision') {
+    return 'Present the ambiguous stale discovery evidence and exact request/head identities to a human.';
+  }
+  return fallback;
 }
 
 export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, clock, journal }) {
@@ -1019,6 +1306,7 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     }
     const openThreads = live.threads.filter((thread) => thread.canonical && !thread.isResolved).length;
     const requestUsage = reviewRequestUsage(active);
+    const staleDiscoveryEvidence = await staleDiscoveryStatus(active, live, git);
     const specialistReviews = stateAdapter.specialistStatus
       ? await stateAdapter.specialistStatus(active.prNumber)
       : {
@@ -1039,6 +1327,7 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       reviewCount: live.reviews.length,
       reviewRequests: { used: requestUsage.used, limit: requestUsage.limit },
       requestReactionCount: live.reactions.length,
+      staleDiscoveryEvidence,
       codexReview: codexReviewStatus(active, live.metadata.headRefOid),
       taskStatus: {
         resolved: active.tasks.filter((task) => task.status === 'completed').length,
@@ -1058,9 +1347,10 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       recordedCiValidation: active.ciValidationStatus,
       liveCiValidation: liveCi,
       openCodexThreads: openThreads,
-      nextAction: active.phase === 'ready-for-review' && requestUsage.exhausted
+      nextAction: staleDiscoveryNextAction(staleDiscoveryEvidence,
+        active.phase === 'ready-for-review' && requestUsage.exhausted
         ? `Review request limit ${requestUsage.limit} is exhausted after ${requestUsage.used} durable requests; run npm run review:state -- set-review-limit --pr ${active.prNumber} --expected-revision ${active.revision} --limit <higher-number> or --unlimited before the next request.`
-        : active.nextAction,
+        : active.nextAction),
     };
   }
 
@@ -1106,7 +1396,11 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     if (!stateAdapter.checkpointTaskCompletion) {
       throw new GitHubWorkflowError('The guarded thread-proof checkpoint is unavailable', 'INVALID_ADAPTERS');
     }
-    let live = await readLiveSnapshot(client, active);
+    let live = await readLiveSnapshot(client, active, {
+      reactionsFor: pendingHeadDriftRecovery ? active.reviewRequest.id : null,
+    });
+    let pendingResponse = null;
+    let staleDiscoveryDisposition = null;
     if (pendingHeadDriftRecovery) {
       try {
         assertRecordedRequestComment(active, live);
@@ -1117,23 +1411,57 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
           active, live, [`request-proof:${active.reviewRequest.id}`], 'ambiguous-canonical-evidence',
         );
       }
-      live = {
-        ...live,
-        reactions: await readRequestReactions(client, active.reviewRequest.id),
-      };
-      const outcomeEvidence = await pendingReviewOutcomeEvidence(active, live, git);
-      if (outcomeEvidence.ids.length > 0) {
-        if (active.reviewRequest.kind !== 'verification') {
+      pendingResponse = await classifyPendingReviewResponse(active, live, git);
+      if (active.reviewRequest.kind === 'verification' && pendingResponse.status !== 'none') {
+        return checkpointPendingRecoveryEscalation(
+          active,
+          live,
+          pendingResponse.evidenceIds,
+          pendingResponse.status === 'supported'
+            ? 'stale-canonical-evidence' : 'ambiguous-canonical-evidence',
+        );
+      }
+      if (active.reviewRequest.kind === 'discovery') {
+        if (pendingResponse.status === 'ambiguous') {
           throw new GitHubWorkflowError(
-            'Discovery review evidence is stale or ambiguous', 'DISCOVERY_COLLECTION_UNRESOLVED',
+            'Discovery review evidence is multiple, conflicting, or unsupported and requires a human',
+            'DISCOVERY_COLLECTION_UNRESOLVED',
           );
         }
-        return checkpointPendingRecoveryEscalation(
-          active, live, outcomeEvidence.ids, outcomeEvidence.reason,
+        staleDiscoveryDisposition = dispositionForPendingResponse(
+          active, pendingResponse, clock.now(),
         );
       }
     }
     await assertMutationReady({ state: active, git }, live);
+    if (staleDiscoveryDisposition?.evidence.outcome === 'findings') {
+      const finalLive = await readLiveSnapshot(client, active, {
+        reactionsFor: active.reviewRequest.id,
+      });
+      assertRecordedRequestComment(active, finalLive);
+      const finalResponse = await classifyPendingReviewResponse(active, finalLive, git);
+      if (!samePendingResponseObservation(pendingResponse, finalResponse)) {
+        throw new GitHubWorkflowError(
+          'Stale discovery evidence or canonical root state changed during disposition',
+          'STALE_DISCOVERY_EVIDENCE_CHANGED',
+        );
+      }
+      dispositionForPendingResponse(active, finalResponse, staleDiscoveryDisposition.disposedAt);
+      await assertMutationReady({ state: active, git }, finalLive);
+      await assertCurrent(active);
+      active = await stateAdapter.checkpointTaskCompletion({
+        prNumber: active.prNumber,
+        expectedRevision: active.revision,
+        threadResolutionStatus: active.threadResolutionStatus,
+        staleDiscoveryDisposition,
+      });
+      return {
+        stateRevision: active.revision,
+        threadResolutionStatus: active.threadResolutionStatus,
+        staleDiscoveryDisposition,
+        actionable: true,
+      };
+    }
     const { plan } = buildCanonicalRootPlan(active, live);
     if (plan.length !== 0 || live.threads.some((thread) => thread.canonical)) {
       throw new GitHubWorkflowError('Canonical Codex roots exist; triage them before refreshing empty proof', 'TASKLESS_THREADS_NOT_EMPTY');
@@ -1148,24 +1476,69 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       } : {}),
       updatedAt: clock.now(),
     };
-    await assertCurrent(active);
-    const finalMetadata = await readPullRequestMetadata(client, active.repository, active.prNumber);
-    if (finalMetadata.headRefOid !== active.currentIntegrationHeadSha) {
-      throw new GitHubWorkflowError('Live PR HEAD changed while refreshing empty thread proof', 'MUTATION_NOT_READY');
+    if (pendingHeadDriftRecovery) {
+      const finalLive = await readLiveSnapshot(client, active, {
+        reactionsFor: active.reviewRequest.id,
+      });
+      assertRecordedRequestComment(active, finalLive);
+      const finalResponse = await classifyPendingReviewResponse(active, finalLive, git);
+      if (!samePendingResponseObservation(pendingResponse, finalResponse)) {
+        throw new GitHubWorkflowError(
+          'Pending review evidence or canonical root state changed while refreshing proof',
+          'STALE_DISCOVERY_EVIDENCE_CHANGED',
+        );
+      }
+      if (active.reviewRequest.kind === 'discovery') {
+        dispositionForPendingResponse(
+          active,
+          finalResponse,
+          staleDiscoveryDisposition?.disposedAt ?? clock.now(),
+        );
+      }
+      await assertMutationReady({ state: active, git }, finalLive);
+      const { plan: finalPlan } = buildCanonicalRootPlan(active, finalLive);
+      if (finalPlan.length !== 0 || finalLive.threads.some((thread) => thread.canonical)) {
+        throw new GitHubWorkflowError(
+          'Canonical Codex roots changed while refreshing empty proof',
+          'TASKLESS_THREADS_NOT_EMPTY',
+        );
+      }
+    } else {
+      const finalMetadata = await readPullRequestMetadata(client, active.repository, active.prNumber);
+      if (finalMetadata.headRefOid !== active.currentIntegrationHeadSha) {
+        throw new GitHubWorkflowError('Live PR HEAD changed while refreshing empty thread proof', 'MUTATION_NOT_READY');
+      }
     }
+    await assertCurrent(active);
     if (pendingHeadDriftRecovery
         && active.threadResolutionStatus.status === 'passed'
         && active.threadResolutionStatus.headSha === active.currentIntegrationHeadSha
         && active.threadResolutionStatus.threads.length === 0) {
+      if (staleDiscoveryDisposition !== null) {
+        active = await stateAdapter.checkpointTaskCompletion({
+          prNumber: active.prNumber,
+          expectedRevision: active.revision,
+          threadResolutionStatus: active.threadResolutionStatus,
+          staleDiscoveryDisposition,
+        });
+      }
       return {
         stateRevision: active.revision,
         threadResolutionStatus: active.threadResolutionStatus,
+        ...(staleDiscoveryDisposition ? { staleDiscoveryDisposition } : {}),
       };
     }
     active = await stateAdapter.checkpointTaskCompletion({
-      prNumber: active.prNumber, expectedRevision: active.revision, threadResolutionStatus,
+      prNumber: active.prNumber,
+      expectedRevision: active.revision,
+      threadResolutionStatus,
+      ...(staleDiscoveryDisposition ? { staleDiscoveryDisposition } : {}),
     });
-    return { stateRevision: active.revision, threadResolutionStatus: active.threadResolutionStatus };
+    return {
+      stateRevision: active.revision,
+      threadResolutionStatus: active.threadResolutionStatus,
+      ...(staleDiscoveryDisposition ? { staleDiscoveryDisposition } : {}),
+    };
   }
 
   async function request(prNumber, kind) {
@@ -1595,38 +1968,7 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       return { escalated: true, escalation: active.verificationEscalation };
     }
     const selected = evidence[0];
-    let outcome;
-    if (selected.type === 'reaction') {
-      const reaction = selected.value;
-      outcome = {
-        id: reaction.id, databaseId: null, url: request.url,
-        headSha: request.headSha, at: reaction.createdAt, requestId: request.id, kind: request.kind,
-        outcome: 'clean', evidenceType: 'request-reaction',
-        reviewerLogin: reaction.user.login, reviewerNodeId: reaction.user.id,
-        reviewerType: reaction.user.__typename, reviewerUrl: reaction.user.url,
-        reactionContent: 'THUMBS_UP', reactionCommentId: request.id,
-      };
-    } else if (selected.type === 'issue-comment') {
-      const { comment, headSha } = selected.value;
-      outcome = {
-        id: comment.id, databaseId: comment.databaseId ?? null, url: comment.url,
-        headSha, at: comment.createdAt, requestId: request.id, kind: request.kind,
-        outcome: 'clean', evidenceType: 'issue-comment',
-        reviewerLogin: comment.author.login, reviewerNodeId: comment.author.id,
-        reviewerType: comment.author.__typename, reviewerUrl: comment.author.url,
-        reactionContent: null, reactionCommentId: null,
-      };
-    } else {
-      const review = selected.value;
-      outcome = {
-        id: review.id, databaseId: review.databaseId ?? null, url: review.url,
-        headSha: review.commit.oid, at: review.submittedAt, requestId: request.id, kind: request.kind,
-        outcome: classifyReviewSubmission(review, live.threads), evidenceType: 'review-submission',
-        reviewerLogin: review.author.login, reviewerNodeId: review.author.id,
-        reviewerType: review.author.__typename, reviewerUrl: review.author.url,
-        reactionContent: null, reactionCommentId: null,
-      };
-    }
+    const outcome = outcomeFromCanonicalResponse(request, selected, live.threads);
     active = await stateAdapter.checkpointReviewOutcome({
       prNumber, expectedRevision: active.revision, outcome,
     });

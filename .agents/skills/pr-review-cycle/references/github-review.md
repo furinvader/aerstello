@@ -198,12 +198,35 @@ unchanged and counts toward any finite total limit.
 reactions, canonical reviews/comments/roots, local and pushed Git, and the live
 PR head. Missing, edited, foreign, conflicting, or otherwise ambiguous evidence
 cannot enter recovery; verification ambiguity is durably escalated to a human.
-With no outcome evidence or roots, it rechecks state revision and live head,
-records only the current empty-thread proof, and restores review readiness
-without a GitHub mutation or request journal. Repeating the current proof is
-idempotent. The next `request` derives its kind from durable history. If that
-history has exhausted a finite limit, only the replacement request is blocked,
-with the exact command to raise or remove the limit.
+
+For a discovery request, status and refresh distinguish four cases:
+
+- `pure-head-drift`: no canonical response exists. No disposition is written;
+  with no root, the existing empty-proof recovery applies.
+- `disposition-ready` or `dispositioned`: exactly one supported response is
+  bound durably to the original request/prior HEAD and the different current
+  live HEAD. Its fingerprint covers exact response content and immutable
+  attached-root source evidence. A clean response may restore readiness after
+  final proof.
+- `actionable-stale-findings`: the unique response contains findings or its own
+  canonical roots. Append the disposition, then use ordinary triage, task
+  mapping, reply, and resolution; never auto-resolve those roots.
+- `ambiguous-human-decision`: the anchor or response is missing, edited,
+  duplicated, foreign, unsupported, multiple, conflicting, same-head,
+  migrated, or inconsistently bound. Stop for a human.
+
+Disposition refresh takes a second fully paginated snapshot and compares the
+exact response identity and root state, then repeats checkout,
+local/pushed/live-head, and state-revision guards before its state-only
+checkpoint. A request anchor with any edit timestamp fails the immutable-anchor
+check even if its current text was restored. It never writes GitHub, creates a
+request journal, synthesizes a current-head outcome, fills the original null
+history outcome, or changes the request ordinal. Identical disposition/proof
+retries lock state and atomically reread the current revision without writing;
+any evidence, root, head, or revision race fails closed. The
+next `request` derives its kind from full durable history. If that history has
+exhausted a finite limit, disposition and proof remain, and only the replacement
+request is blocked with the exact command to raise or remove the limit.
 
 ## Done gate
 
@@ -232,9 +255,9 @@ is the only request-count stop, and exhaustion pauses only a new request until
 the operator raises/removes the limit or stops the cycle.
 
 An exact recorded request that becomes stale because the live HEAD advances is
-recoverable for either kind. Missing, edited, foreign, conflicting, or otherwise
-ambiguous canonical evidence remains a fail-closed human escalation and is not
-cleared by changing a request limit.
+recoverable for either kind. Missing, edited, duplicated, foreign, unsupported,
+multiple, conflicting, or otherwise ambiguous canonical evidence remains a
+fail-closed human escalation and is not cleared by changing a request limit.
 
 If the same stable finding returns in two consecutive rounds, pause repeated
 patching and investigate the root cause.

@@ -182,13 +182,29 @@ human-decision work. An exhausted finite request limit does not prevent the
 validation run.
 
 After validation, use guarded `refresh-threads` to revalidate the immutable
-request comment, absence of canonical outcome evidence and roots, equal
-local/pushed/live heads, state revision, and final live head. Successful proof
-restores review readiness without GitHub mutation or request journaling; an
-already-current retry is idempotent. The ordinary request gate then derives the
-replacement ordinal kind, or reports the exact limit setter action when the
-durable request count has exhausted a finite limit. Ambiguous evidence stays a
-human gate and is never converted into a synthetic outcome.
+request comment, fully paginated canonical responses and roots, equal
+local/pushed/live heads, state revision, and final live head. Verification
+evidence keeps its existing human-escalation behavior. A discovery request with
+no canonical response is pure HEAD drift and receives no disposition; with no
+root, the ordinary current empty proof restores readiness. One uniquely
+supported discovery response may append one deterministic disposition whose
+fingerprint covers exact response content and immutable attached-root source
+evidence, and that binds the untouched null history row and prior request HEAD
+to the new live HEAD. A clean disposition may restore readiness; a findings disposition enters
+ordinary triage and leaves its roots for normal mapping and resolution.
+
+Before either disposition checkpoint, reread all evidence and roots and repeat
+the checkout, local/pushed/live-head, and state-revision guards. Do not write a
+GitHub mutation or request journal, synthesize `reviewOutcome`, fill the null
+history outcome, change the request ordinal, or decrement request usage.
+Identical current-revision retries lock and reread state before returning
+without a write. A request anchor with any edit timestamp is ineligible.
+Missing, edited, duplicated,
+foreign, unsupported, multiple, conflicting, same-head, migrated, inconsistent,
+or raced evidence stays a human gate and is never repaired heuristically. The
+ordinary request gate derives the replacement kind from full durable history,
+or retains proof and reports the exact limit setter action when a finite limit
+is exhausted.
 
 Initial selection also has one migration-only completed-task route. An
 immutable `state.v2.backup.json` must prove an exact-head passed, nonempty

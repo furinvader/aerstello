@@ -24,6 +24,7 @@ import {
   parseTargetedValidationCommand,
   reviewRequestGate,
   reviewRequestUsage,
+  staleDiscoveryDispositionId,
   taskHasCanonicalThreadCoverage,
   unionInitialValidationSelection,
   unionRequiredValidation,
@@ -126,6 +127,21 @@ function emptyCiValidation() {
     source: 'github-actions', scope: 'full', status: 'not-run', headSha: null,
     checks: [], checkRunId: null, workflowRunId: null, workflowRunUrl: null, updatedAt: null,
   };
+}
+
+function staleDiscoveryDispositionList(state) {
+  return Array.isArray(state?.staleDiscoveryDispositions) ? state.staleDiscoveryDispositions : [];
+}
+
+function staleDiscoveryDispositionForRequest(state, requestId = state?.reviewRequest?.id) {
+  return staleDiscoveryDispositionList(state)
+    .find((disposition) => disposition.requestId === requestId) ?? null;
+}
+
+function activeReviewEvidenceHead(state) {
+  return state.reviewedHeadSha
+    ?? staleDiscoveryDispositionForRequest(state)?.evidence?.headSha
+    ?? null;
 }
 
 function sleep(milliseconds) {
@@ -1450,6 +1466,7 @@ function isNativeTasklessPendingReviewHeadDriftValidationRecovery(state, expecte
   const request = state.reviewRequest;
   const latest = state.reviewHistory.at(-1);
   const priorHeadSha = request?.headSha;
+  const disposition = staleDiscoveryDispositionForRequest(state, request?.id);
   return state.schemaVersion === 3
     && state.legacyReviewProvenance === null
     && ['recovering', 'ready-for-review'].includes(state.phase)
@@ -1461,7 +1478,11 @@ function isNativeTasklessPendingReviewHeadDriftValidationRecovery(state, expecte
     && priorHeadSha !== state.currentIntegrationHeadSha
     && state.git.headSha === state.currentIntegrationHeadSha && state.git.dirty === false
     && state.blockedReasons.length === 0 && state.verificationEscalation === null
-    && !state.tasks.some((task) => task.disposition === 'needs-human-decision');
+    && !state.tasks.some((task) => task.disposition === 'needs-human-decision')
+    && (disposition === null
+      || (disposition.liveHeadSha === state.currentIntegrationHeadSha
+        && disposition.requestHeadSha === priorHeadSha
+        && disposition.evidence?.requestId === request.id));
 }
 
 function isV2CompletedTaskValidationRecovery(cwd, state, expectedIds) {
@@ -1501,8 +1522,9 @@ function isV2CompletedTaskValidationRecovery(cwd, state, expectedIds) {
 }
 
 function assertTaskPacketHead(state, task, packet, digest) {
-  if (state.reviewedHeadSha !== null) {
-    if (packet.reviewedHeadSha !== state.reviewedHeadSha) {
+  const evidenceHeadSha = activeReviewEvidenceHead(state);
+  if (evidenceHeadSha !== null) {
+    if (packet.reviewedHeadSha !== evidenceHeadSha) {
       throw new StateError(`Task packet ${packet.taskId} does not match the exact reviewed HEAD`, 'TASK_PACKET_HEAD_MISMATCH');
     }
   }
@@ -1538,7 +1560,7 @@ function assertTaskPacketHead(state, task, packet, digest) {
     }
     return;
   }
-  if (state.reviewedHeadSha !== null) return;
+  if (evidenceHeadSha !== null) return;
   if (packet.reviewedHeadSha === state.currentIntegrationHeadSha) return;
   throw new StateError(`Task packet ${packet.taskId} does not match the exact reviewed HEAD`, 'TASK_PACKET_HEAD_MISMATCH');
 }
@@ -1956,6 +1978,7 @@ export function initializeState({
       reviewRequest: null,
       reviewOutcome: null,
       reviewHistory: [],
+      staleDiscoveryDispositions: [],
       verificationEscalation: null,
       threadResolutionStatus: emptyThreadProof(),
       blockedReasons: [],
@@ -2053,7 +2076,7 @@ export function migratePrReviewStateV2(legacyState, { migratedAt = utcNow() } = 
   }
   const normalized = Object.prototype.hasOwnProperty.call(legacyState, 'verificationEscalation')
     ? legacyState : { ...legacyState, verificationEscalation: null };
-  for (const field of ['ciValidationStatus', 'ciValidationHistory']) {
+  for (const field of ['ciValidationStatus', 'ciValidationHistory', 'staleDiscoveryDispositions']) {
     if (Object.prototype.hasOwnProperty.call(normalized, field)) {
       throw new StateError(`Schema v2 state cannot contain ${field}`, 'INVALID_STATE');
     }
@@ -2074,6 +2097,7 @@ export function migratePrReviewStateV2(legacyState, { migratedAt = utcNow() } = 
     validationStatus: emptyTargetedValidation(),
     ciValidationStatus: emptyCiValidation(),
     ciValidationHistory: [],
+    staleDiscoveryDispositions: [],
     nextAction: pendingReviewMustBePreserved
       ? 'Collect the pending exact-head review, then reconfirm targeted validation and full GitHub Actions.'
       : wasComplete || validationMustBeRebuilt
@@ -2422,6 +2446,26 @@ function assertImmutableValue(current, next, label) {
   }
 }
 
+function assertStaleDiscoveryDispositionProvenance(current, next, guardedKind) {
+  const currentPresent = Object.hasOwn(current, 'staleDiscoveryDispositions');
+  const nextPresent = Object.hasOwn(next, 'staleDiscoveryDispositions');
+  const currentDispositions = staleDiscoveryDispositionList(current);
+  const nextDispositions = staleDiscoveryDispositionList(next);
+  const appended = guardedKind === 'task-completion'
+    && nextDispositions.length === currentDispositions.length + 1;
+  if (!appended) {
+    assertImmutableValue(
+      { present: currentPresent, value: currentDispositions },
+      { present: nextPresent, value: nextDispositions },
+      'staleDiscoveryDispositions',
+    );
+    return;
+  }
+  currentDispositions.forEach((disposition, index) => assertImmutableValue(
+    disposition, nextDispositions[index], `staleDiscoveryDispositions[${index}]`,
+  ));
+}
+
 function assertCheckpointProvenance(current, next, authorization) {
   const guardedKind = authorization?.token === TRANSITION_AUTHORIZATION ? authorization.kind : null;
   if (guardedKind !== null) {
@@ -2436,6 +2480,7 @@ function assertCheckpointProvenance(current, next, authorization) {
       'reviewRequestLimit',
     );
   }
+  assertStaleDiscoveryDispositionProvenance(current, next, guardedKind);
   if (guardedKind === null) {
     for (const field of [
       'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
@@ -2928,7 +2973,84 @@ function taskIsEligibleForVerifierCompletion(task) {
   return actionable || nonActionable;
 }
 
-export function completeIntegratedTasks(state, { threadResolutionStatus, verifiedLocalTaskIds = [] }) {
+function appendStaleDiscoveryDisposition(state, disposition) {
+  if (disposition === null || disposition === undefined) return state;
+  if (!disposition || typeof disposition !== 'object' || Array.isArray(disposition)) {
+    throw new StateError(
+      'Stale discovery disposition must be a structured evidence record',
+      'INVALID_STALE_DISCOVERY_DISPOSITION',
+    );
+  }
+  const dispositions = staleDiscoveryDispositionList(state);
+  const conflicting = dispositions.find((entry) => entry.dispositionId === disposition.dispositionId
+    || entry.requestId === disposition.requestId
+    || entry.evidence?.id === disposition.evidence?.id);
+  if (conflicting) {
+    if (sameEvidence(conflicting, disposition)) return state;
+    throw new StateError(
+      'Stale discovery disposition identity was reused with different evidence',
+      'STALE_DISCOVERY_DISPOSITION_CONFLICT',
+    );
+  }
+  const request = state.reviewRequest;
+  const latest = state.reviewHistory.at(-1);
+  if (state.schemaVersion !== 3 || state.legacyReviewProvenance !== null
+      || !['recovering', 'ready-for-review'].includes(state.phase)
+      || state.tasks.length !== 0
+      || request === null || request.kind !== 'discovery'
+      || state.reviewOutcome !== null || latest?.outcome !== null
+      || !sameEvidence(latest.request, request)
+      || state.requestedHeadSha !== request.headSha || state.reviewedHeadSha !== null
+      || request.headSha === state.currentIntegrationHeadSha
+      || state.git.headSha !== state.currentIntegrationHeadSha || state.git.dirty !== false
+      || state.validationStatus.status !== 'passed'
+      || state.validationStatus.headSha !== state.currentIntegrationHeadSha
+      || state.blockedReasons.length !== 0 || state.verificationEscalation !== null
+      || state.tasks.some((task) => task.disposition === 'needs-human-decision')) {
+    throw new StateError(
+      'Only the latest native pending discovery request with exact current validation may be dispositioned',
+      'STALE_DISCOVERY_DISPOSITION_NOT_ALLOWED',
+    );
+  }
+  if (disposition.requestId !== request.id
+      || disposition.requestHeadSha !== request.headSha
+      || disposition.liveHeadSha !== state.currentIntegrationHeadSha
+      || disposition.evidence?.requestId !== request.id
+      || disposition.evidence?.kind !== 'discovery'
+      || disposition.evidence?.headSha !== request.headSha
+      || staleDiscoveryDispositionId(disposition) !== disposition.dispositionId) {
+    throw new StateError(
+      'Stale discovery disposition does not bind the exact request, prior HEAD, live HEAD, and response',
+      'INVALID_STALE_DISCOVERY_DISPOSITION',
+    );
+  }
+  const next = {
+    ...state,
+    staleDiscoveryDispositions: [...dispositions, disposition],
+    ...(disposition.evidence.outcome === 'findings' ? {
+      phase: 'triaging',
+      threadResolutionStatus: {
+        ...state.threadResolutionStatus,
+        status: 'not-run',
+        headSha: null,
+        updatedAt: null,
+      },
+      nextAction: 'Triage the actionable findings from the dispositioned stale discovery response.',
+    } : {}),
+  };
+  const errors = validatePrReviewState(next);
+  if (errors.length > 0) {
+    throw new StateError(
+      `Invalid stale discovery disposition:\n- ${errors.join('\n- ')}`,
+      'INVALID_STALE_DISCOVERY_DISPOSITION',
+    );
+  }
+  return next;
+}
+
+export function completeIntegratedTasks(state, {
+  threadResolutionStatus, verifiedLocalTaskIds = [], staleDiscoveryDisposition = null,
+}) {
   if (!threadResolutionStatus || typeof threadResolutionStatus !== 'object'
       || Array.isArray(threadResolutionStatus)) {
     throw new StateError('Thread resolution proof is required for task completion', 'INVALID_TASK_COMPLETION');
@@ -2989,7 +3111,10 @@ export function completeIntegratedTasks(state, { threadResolutionStatus, verifie
         && completionThreadProof.threadlessVerification.taskIds.includes(task.id));
     return eligible ? { ...task, status: 'completed' } : task;
   });
-  const next = { ...state, tasks, threadResolutionStatus: completionThreadProof };
+  const next = appendStaleDiscoveryDisposition(
+    { ...state, tasks, threadResolutionStatus: completionThreadProof },
+    staleDiscoveryDisposition,
+  );
   const errors = validatePrReviewState(next);
   if (errors.length > 0) throw new StateError(`Invalid integrated-to-completed transition:\n- ${errors.join('\n- ')}`, 'INVALID_TASK_COMPLETION');
   return next;
@@ -3254,14 +3379,34 @@ export function checkpointCiValidation({
 }
 
 export function checkpointTaskCompletion({
-  cwd = process.cwd(), prNumber, threadResolutionStatus, verifiedLocalTaskIds = [], expectedRevision, event,
+  cwd = process.cwd(), prNumber, threadResolutionStatus, verifiedLocalTaskIds = [],
+  staleDiscoveryDisposition = null, expectedRevision, event,
 } = {}) {
   const current = loadState(cwd, prNumber);
   if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
-  let nextState = completeIntegratedTasks(current, { threadResolutionStatus, verifiedLocalTaskIds });
+  const priorDispositionCount = staleDiscoveryDispositionList(current).length;
+  let nextState = completeIntegratedTasks(current, {
+    threadResolutionStatus, verifiedLocalTaskIds, staleDiscoveryDisposition,
+  });
+  const dispositionAppended = staleDiscoveryDispositionList(nextState).length === priorDispositionCount + 1;
+  const recoveryDisposition = staleDiscoveryDispositionForRequest(nextState);
+  if (dispositionAppended && recoveryDisposition.evidence.outcome === 'findings') {
+    nextState = {
+      ...nextState,
+      phase: 'triaging',
+      threadResolutionStatus: {
+        ...nextState.threadResolutionStatus,
+        status: 'not-run',
+        headSha: null,
+        updatedAt: null,
+      },
+      nextAction: 'Triage the actionable findings from the dispositioned stale discovery response.',
+    };
+  }
   const pendingHeadDriftReady = isNativeTasklessPendingReviewHeadDriftValidationRecovery(current, [])
     && current.validationStatus.status === 'passed'
     && current.validationStatus.headSha === current.currentIntegrationHeadSha
+    && (recoveryDisposition === null || recoveryDisposition.evidence.outcome === 'clean')
     && nextState.threadResolutionStatus.status === 'passed'
     && nextState.threadResolutionStatus.headSha === current.currentIntegrationHeadSha
     && nextState.threadResolutionStatus.threads.length === 0;
@@ -3271,6 +3416,20 @@ export function checkpointTaskCompletion({
       phase: 'ready-for-review',
       nextAction: reviewLimitNextAction(nextState),
     };
+  }
+  if (staleDiscoveryDisposition !== null && sameEvidence(current, nextState)) {
+    const expected = expectedRevision ?? nextState.revision;
+    return withStateLock(cwd, current.prNumber, () => {
+      const locked = loadState(cwd, current.prNumber);
+      if (locked === null || locked.revision !== expected || !sameEvidence(locked, current)) {
+        throw new StateError(
+          `State revision changed during idempotent disposition retry: expected ${expected}, `
+            + `found ${locked?.revision ?? 'missing'}`,
+          'STATE_REVISION_CONFLICT',
+        );
+      }
+      return locked;
+    });
   }
   return checkpointState({
     cwd, prNumber: current.prNumber, nextState, expectedRevision,
@@ -3568,6 +3727,14 @@ function validationPlanRecoverySummary(cwd, state) {
   }
 }
 
+function staleDiscoveryRecoverySummary(state) {
+  const dispositions = staleDiscoveryDispositionList(state);
+  if (dispositions.length === 0) return 'none';
+  const latest = dispositions.at(-1);
+  return `${dispositions.length}; latest ${latest.dispositionId} binds request ${latest.requestId} `
+    + `${latest.requestHeadSha} -> ${latest.liveHeadSha} (${latest.evidence.outcome})`;
+}
+
 export function renderRecoverySummary({ cwd = process.cwd(), prNumber, maxCharacters = 9000 } = {}) {
   const {
     state, warnings, evidenceErrors, packetSidecars, bindingProvenance, specialist,
@@ -3587,6 +3754,7 @@ export function renderRecoverySummary({ cwd = process.cwd(), prNumber, maxCharac
     `Release baseline: ${release}`,
     `Base: ${state.baseSha}`,
     `Requested/reviewed: ${state.requestedHeadSha ?? 'none'} / ${state.reviewedHeadSha ?? 'none'}`,
+    `Stale discovery dispositions: ${staleDiscoveryRecoverySummary(state)}`,
     `Verification escalation: ${state.verificationEscalation
       ? `${state.verificationEscalation.reason} at PR ${state.verificationEscalation.observedPrHeadSha}`
       : 'none'}`,
