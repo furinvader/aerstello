@@ -17,7 +17,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { basename, dirname, join, relative } from 'node:path';
 
-import { gitText, resolveCommit, runGit } from '../../../../../scripts/lib/git.mjs';
+import { gitText, readTreeFile, resolveCommit, runGit } from '../../../../../scripts/lib/git.mjs';
 import {
   digestJson,
   planReadiness,
@@ -572,6 +572,10 @@ export async function initializeState({
   if (!baseBranch || !planningRef) throw new StateError('baseBranch and explicit planningRef are required', 'INVALID_INITIALIZATION');
   const descriptor = assertExactlyOneSource(source, sources);
   const root = repositoryRoot(cwd);
+  if (readArchiveIntent(root)) {
+    throw new StateError('A pending archive lifecycle must be recovered before initialization', 'LIFECYCLE_RECOVERY_REQUIRED');
+  }
+  if (locateState(root)) throw new StateError('Another change-development session is active', 'ACTIVE_CHANGE_EXISTS');
   const planningSha = resolveCommit(root, planningRef);
   const baseSha = resolveCommit(root, baseBranch);
   resolveCommit(root, expectedPrBaseBranch ?? baseBranch);
@@ -602,7 +606,7 @@ export async function initializeState({
     if (readArchiveIntent(root)) {
       throw new StateError('A pending archive lifecycle must be recovered before initialization', 'LIFECYCLE_RECOVERY_REQUIRED');
     }
-    if (existsSync(active)) throw new StateError('Another change-development session is active', 'ACTIVE_CHANGE_EXISTS');
+    if (locateState(root)) throw new StateError('Another change-development session is active', 'ACTIVE_CHANGE_EXISTS');
     if (lifecycleChangeIds(root).length > 0) {
       throw new StateError('Existing pointerless, interrupted, or orphan change state must be recovered before initialization', 'LIFECYCLE_RECOVERY_REQUIRED');
     }
@@ -636,7 +640,8 @@ export function locateState(cwd = process.cwd(), changeId) {
   validateChangeId(active.changeId);
   const expected = stateFile(root, active.changeId);
   if (active.statePath !== expected) throw new StateError('Active pointer does not name the canonical state path', 'ACTIVE_POINTER_INVALID');
-  return existsSync(expected) ? { changeId: active.changeId, path: expected } : null;
+  if (!existsSync(expected)) throw new StateError('Active pointer names a missing canonical state path', 'ACTIVE_POINTER_INVALID');
+  return { changeId: active.changeId, path: expected };
 }
 
 export function loadState(cwd = process.cwd(), changeId) {
@@ -688,10 +693,12 @@ function readObservationByDigest(cwd, state) {
   throw new StateError('Latest source observation receipt cannot be located', 'SOURCE_OBSERVATION_MISSING');
 }
 
-function readinessErrors(plan, evidence, sourceObservation) {
-  const errors = normalizeErrors(validateImplementationPlan(plan, { planningEvidence: evidence, sourceObservation }));
+function readinessErrors(plan, evidence, sourceObservation, readPlanningFile) {
+  const errors = normalizeErrors(validateImplementationPlan(plan, {
+    planningEvidence: evidence, sourceObservation, readPlanningFile,
+  }));
   if (errors.length > 0) return errors;
-  const gate = planReadiness(plan, { planningEvidence: evidence, sourceObservation });
+  const gate = planReadiness(plan, { planningEvidence: evidence, sourceObservation, readPlanningFile });
   if (Array.isArray(gate)) return gate;
   if (gate?.ready === false || gate?.allowed === false) return gate.reasons ?? gate.errors ?? ['plan is not ready'];
   return [];
@@ -725,7 +732,8 @@ export function acceptPlan({ cwd = process.cwd(), changeId, plan, planningEviden
       throw new StateError('Plan acceptance requires clean HEAD at the Planning SHA', 'PLANNING_SNAPSHOT_MISMATCH');
     }
     const sourceObservation = readObservationByDigest(root, state);
-    const errors = readinessErrors(plan, planningEvidence, sourceObservation);
+    const errors = readinessErrors(plan, planningEvidence, sourceObservation,
+      ({ planningSha, path }) => readTreeFile(root, planningSha, path));
     if (errors.length > 0) throw new StateError(`Plan is not implementation-ready:\n- ${errors.join('\n- ')}`, 'PLAN_NOT_READY');
     const stateChecklist = new Map(state.checklist.map((item) => [item.id, item]));
     if (plan.checklistMappings.length !== stateChecklist.size || plan.checklistMappings.some((mapping) => {
@@ -956,7 +964,8 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
       throw new StateError('Resulting plan does not match the change or Planning SHA', 'PLAN_STATE_MISMATCH');
     }
     const sourceObservation = readObservationByDigest(root, state);
-    const errors = readinessErrors(resultingPlan, planningEvidence, sourceObservation);
+    const errors = readinessErrors(resultingPlan, planningEvidence, sourceObservation,
+      ({ planningSha, path }) => readTreeFile(root, planningSha, path));
     if (errors.length > 0) throw new StateError(`Amended plan is not ready:\n- ${errors.join('\n- ')}`, 'PLAN_NOT_READY');
     const prior = readEffectivePlan(root, state);
     if (objectDigest(prior) !== state.plan.effectiveDigest) throw new StateError('Effective plan receipt is inconsistent', 'PLAN_TAMPERED');
@@ -1481,7 +1490,8 @@ function verifyEventHistory(cwd, changeId, intentsOrLatestRevision) {
 export function recoverState({ cwd = process.cwd(), changeId, crashStep, lockOptions } = {}) {
   const root = repositoryRoot(cwd);
   const pendingArchive = readArchiveIntent(root);
-  const selected = changeId ?? pendingArchive?.changeId ?? locateState(root)?.changeId ?? recoverableChangeId(root);
+  const active = pendingArchive ? null : locateState(root);
+  const selected = changeId ?? pendingArchive?.changeId ?? active?.changeId ?? recoverableChangeId(root);
   if (!selected) throw new StateError('No active change state', 'STATE_NOT_FOUND');
   return withLifecycleAndChangeLocks(root, selected, () => {
     const lockedArchiveIntent = readArchiveIntent(root);
@@ -1538,6 +1548,7 @@ export function recoverState({ cwd = process.cwd(), changeId, crashStep, lockOpt
     const incomplete = entries.filter((directory) => !existsSync(join(directory, 'complete')));
     if (incomplete.length === 0) {
       const state = loadState(root, selected);
+      if (!state) throw new StateError('Completed transitions have no matching durable state', 'RECOVERY_STATE_CONFLICT');
       const pointer = activePointerPath(root);
       if (!existsSync(pointer) && state?.revision === 0) {
         validateState({ cwd: root, changeId: selected });
@@ -1587,12 +1598,20 @@ export function recoverState({ cwd = process.cwd(), changeId, crashStep, lockOpt
       if (!referencedPaths.has(path)) throw new StateError(`Recovery found orphan immutable evidence ${path}`, 'RECOVERY_EVIDENCE_INVALID');
     }
     const currentGit = gitObservation(root);
-    const exactCheckpointObservation = intent.type === 'git-checkpoint'
+    const semanticAbandonment = intent.type === 'abandoned' && predecessor !== undefined
+      && intent.nextState.phase === 'abandoned' && nonemptyString(intent.nextState.abandonmentReason);
+    const exactRecordedObservation = (intent.type === 'git-checkpoint' || semanticAbandonment)
       && currentGit.headSha === intent.nextState.git.headSha
       && currentGit.branch === intent.nextState.git.branch
       && currentGit.clean === intent.nextState.git.clean;
-    if (!exactCheckpointObservation && (!currentGit.clean || currentGit.headSha !== intent.nextState.planningSha)) {
-      throw new StateError('Recovery requires clean HEAD at the transition Planning SHA', 'PLANNING_SNAPSHOT_MISMATCH');
+    const recoveryGitInvalid = semanticAbandonment
+      ? !exactRecordedObservation
+      : !exactRecordedObservation && (!currentGit.clean || currentGit.headSha !== intent.nextState.planningSha);
+    if (recoveryGitInvalid) {
+      const requirement = semanticAbandonment
+        ? 'the exact Git observation recorded by the abandonment transition'
+        : 'clean HEAD at the transition Planning SHA';
+      throw new StateError(`Recovery requires ${requirement}`, 'PLANNING_SNAPSHOT_MISMATCH');
     }
     let current = loadState(root, selected);
     const currentDigest = current ? objectDigest(current) : null;
@@ -1632,12 +1651,15 @@ export function archiveState({ cwd = process.cwd(), changeId, abandonReason, exp
     assertRevision(state, expectedRevision);
     validateState({ cwd: root, changeId: selected });
     const normal = state.mode === 'plan-only' && state.phase === 'ready-to-implement';
-    if (!normal && (!abandonReason || !abandonReason.trim())) {
+    const alreadyAbandoned = state.phase === 'abandoned' && nonemptyString(state.abandonmentReason);
+    if (!normal && !alreadyAbandoned && (!abandonReason || !abandonReason.trim())) {
       throw new StateError('Only completed plan-only state archives normally; abandonment requires a reason', 'ARCHIVE_NOT_ALLOWED');
     }
-    if (!normal) {
+    if (!normal && !alreadyAbandoned) {
       const timestamp = now(clock);
-      const next = revised(state, { phase: 'abandoned', abandonmentReason: abandonReason.trim(), blockedReasons: [] }, () => new Date(timestamp));
+      const next = revised(state, {
+        phase: 'abandoned', abandonmentReason: abandonReason.trim(), blockedReasons: [], git: gitObservation(root, clock),
+      }, () => new Date(timestamp));
       state = commitTransition({
         cwd: root, previousState: state, nextState: next, type: 'abandoned',
         summary: `Abandoned change: ${abandonReason.trim()}`, crashStep,
@@ -1696,6 +1718,19 @@ export function statusObject({ cwd = process.cwd(), changeId } = {}) {
 export function renderStatus(options = {}) {
   const root = repositoryRoot(options.cwd ?? process.cwd());
   const pendingArchive = readArchiveIntent(root);
+  let active;
+  try {
+    const canonicalActive = pendingArchive ? null : locateState(root);
+    active = options.changeId ? locateState(root, options.changeId) : canonicalActive;
+  }
+  catch (error) {
+    return boundedStatus([
+      'Change: active pointer',
+      'Phase: blocked',
+      `Active pointer validation failed (${error.code ?? 'STATE_ERROR'}).`,
+      'Next action: Inspect or restore the active pointer and its canonical state; automatic recovery is blocked.',
+    ]);
+  }
   const candidate = pendingArchive?.changeId ?? recoverableChangeId(root);
   if (candidate) {
     const orphaned = !pendingArchive && transitionEntries(root, candidate).length === 0
@@ -1708,7 +1743,6 @@ export function renderStatus(options = {}) {
       : `Next action: Run change:state recover --change-id ${candidate}.`,
     ]);
   }
-  const active = locateState(root, options.changeId);
   if (active) {
     try { validateState({ cwd: root, changeId: active.changeId }); }
     catch (error) {

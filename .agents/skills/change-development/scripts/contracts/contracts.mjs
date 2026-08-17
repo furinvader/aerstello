@@ -216,10 +216,87 @@ function isExecutableIntent(value) {
 }
 
 const REPOSITORY_PATH_SHAPE = /(?:\/|\.[A-Za-z0-9][A-Za-z0-9._-]*$)/u;
+const CLEAR_COMMAND_NAMES = new Set([
+  'bash', 'bun', 'cat', 'chmod', 'cp', 'curl', 'deno', 'docker', 'eslint', 'find',
+  'git', 'grep', 'jest', 'make', 'mv', 'node', 'npm', 'npx', 'pnpm', 'python',
+  'python3', 'rm', 'sed', 'sh', 'tar', 'tsc', 'tsx', 'vitest', 'wget', 'yarn',
+]);
 
 function isCommandShapedAnticipatedPath(value) {
   if (SHELL_SYNTAX.test(value) || ENVIRONMENT_ASSIGNMENT_PREFIX.test(value)) return true;
-  return /\s/u.test(value) && !REPOSITORY_PATH_SHAPE.test(value);
+  if (!/\s/u.test(value)) return false;
+  const command = value.trim().split(/\s+/u, 1)[0].replace(/^(?:"|')|(?:"|')$/gu, '').toLowerCase();
+  return CLEAR_COMMAND_NAMES.has(command) || !REPOSITORY_PATH_SHAPE.test(value);
+}
+
+const FEATURE_PATH = /^specs\/features\/(?:[^/]+\/)*[^/]+\.feature$/u;
+const SCENARIO_HEADING = /^\s*Scenario(?: Outline| Template)?:\s*(.*?)\s*$/u;
+const DOC_STRING_DELIMITER = /^\s*("""|```)/u;
+
+function scenarioHeadings(bytes, scenario, errors) {
+  if (!(bytes instanceof Uint8Array)) {
+    errors.push(`scenario ${scenario.id} feature reader must return bytes or null`);
+    return [];
+  }
+  let text;
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+  catch { errors.push(`scenario ${scenario.id} feature is not valid UTF-8: ${scenario.feature}`); return []; }
+  const names = [];
+  let docString = null;
+  for (const line of text.split(/\r?\n/u)) {
+    const delimiter = line.match(DOC_STRING_DELIMITER)?.[1] ?? null;
+    if (delimiter !== null) {
+      if (docString === null) docString = delimiter;
+      else if (delimiter === docString) docString = null;
+      continue;
+    }
+    if (docString !== null) continue;
+    const heading = line.match(SCENARIO_HEADING);
+    if (heading && heading[1] !== '') names.push(heading[1]);
+  }
+  return names;
+}
+
+function validateScenarioContext(plan, readPlanningFile, errors) {
+  if (plan.scenarios.length === 0) return;
+  if (typeof readPlanningFile !== 'function') {
+    errors.push('nonempty scenario mappings require synchronous Planning-SHA repository context');
+    return;
+  }
+  const files = new Map();
+  for (const scenario of plan.scenarios) {
+    if (!FEATURE_PATH.test(scenario.feature)) {
+      errors.push(`scenario ${scenario.id} feature must be under specs/features and end in .feature`);
+      continue;
+    }
+    let headings = files.get(scenario.feature);
+    if (headings === undefined) {
+      let bytes;
+      try {
+        bytes = readPlanningFile({ planningSha: plan.planning.planningSha, path: scenario.feature });
+      } catch {
+        errors.push(`scenario ${scenario.id} feature read failed at the Planning SHA: ${scenario.feature}`);
+        files.set(scenario.feature, null);
+        continue;
+      }
+      if (bytes && typeof bytes.then === 'function') {
+        errors.push(`scenario ${scenario.id} feature reader must be synchronous`);
+        files.set(scenario.feature, null);
+        continue;
+      }
+      if (bytes === null || bytes === undefined) {
+        errors.push(`scenario ${scenario.id} feature is missing at the Planning SHA: ${scenario.feature}`);
+        files.set(scenario.feature, null);
+        continue;
+      }
+      headings = scenarioHeadings(bytes, scenario, errors);
+      files.set(scenario.feature, headings);
+    }
+    if (headings === null) continue;
+    const matches = headings.filter((name) => name === scenario.scenario).length;
+    if (matches === 0) errors.push(`scenario ${scenario.id} heading is missing at the Planning SHA: ${scenario.scenario}`);
+    else if (matches > 1) errors.push(`scenario ${scenario.id} heading is ambiguous at the Planning SHA: ${scenario.scenario}`);
+  }
 }
 
 function validatePlanningEvidence(evidence, errors) {
@@ -345,11 +422,12 @@ function validateSpecialistAggregate(plan, planningEvidence, errors) {
   }
 }
 
-export function validateImplementationPlan(value, { planningEvidence = [], sourceObservation } = {}) {
+export function validateImplementationPlan(value, { planningEvidence = [], sourceObservation, readPlanningFile } = {}) {
   const errors = schemaErrors(validatePlanSchema, value);
   if (errors.length > 0) return errors;
   validatePlanningEvidence(planningEvidence, errors);
   validateSourceObservationContext(value, sourceObservation, errors);
+  validateScenarioContext(value, readPlanningFile, errors);
 
   validateIds(errors, value.criteria, 'criterion');
   validateIds(errors, value.decisions, 'decision');
@@ -441,8 +519,8 @@ export function validateImplementationPlan(value, { planningEvidence = [], sourc
   return [...new Set(errors)];
 }
 
-export function planReadiness(value, { planningEvidence = [], sourceObservation } = {}) {
-  const errors = validateImplementationPlan(value, { planningEvidence, sourceObservation });
+export function planReadiness(value, { planningEvidence = [], sourceObservation, readPlanningFile } = {}) {
+  const errors = validateImplementationPlan(value, { planningEvidence, sourceObservation, readPlanningFile });
   if (errors.length === 0) {
     for (const decision of value.decisions) if (decision.status !== 'resolved') errors.push(`decision ${decision.id} is ${decision.status}`);
     for (const mapping of value.checklistMappings) {

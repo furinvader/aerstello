@@ -385,7 +385,8 @@ test('repository paths reject trailing separators and control-character overlap 
 test('schema-valid root-level anticipated paths remain valid planning data', () => {
   for (const path of [
     'package.json', 'scripts', 'README.md', 'AGENTS.md',
-    'Release Notes.md', 'docs/Operator Guide.md', 'directory with spaces/file',
+    'Release Notes.md', 'Root file.txt', 'RM-generated.json', 'docs/Operator Guide.md',
+    'directory with spaces/file', 'directory with spaces/file.test.js',
   ]) {
     const value = plan(); value.tasks[0].anticipatedPaths = [path];
     assert.deepEqual(validateImplementationPlan(value), [], path);
@@ -393,10 +394,61 @@ test('schema-valid root-level anticipated paths remain valid planning data', () 
 });
 
 test('anticipated paths reject command-shaped word sequences', () => {
-  for (const path of ['npm run test', 'rm generated-file', 'CustomTool validate contracts']) {
+  for (const path of [
+    'npm run test', 'rm generated-file', 'CustomTool validate contracts',
+    'rm generated.json', 'RM generated.json', 'sed -n file.txt', 'npm run test.js',
+  ]) {
     const value = plan(); value.tasks[0].anticipatedPaths = [path];
     assert.match(validateImplementationPlan(value).join('\n'), /repository paths, not commands/u, path);
   }
+});
+
+test('scenario mappings are proven against exact Planning-SHA feature blobs', () => {
+  const value = plan();
+  value.scenarios = [
+    { id: 'plain', feature: 'specs/features/example.feature', scenario: 'Plain case' },
+    { id: 'outline', feature: 'specs/features/example.feature', scenario: 'Outline case' },
+    { id: 'template', feature: 'specs/features/example.feature', scenario: 'Template case' },
+  ];
+  value.productScenarioDisposition = { disposition: 'mapped', scenarioIds: ['plain', 'outline', 'template'], rationale: 'Mapped behavior.' };
+  value.tasks[0].scenarioIds = ['plain', 'outline', 'template'];
+  const calls = [];
+  const feature = Buffer.from(`Feature: Example
+  Scenario: Plain case
+    Then it works
+
+  """
+  Scenario: Plain case
+  """
+
+  Scenario Outline: Outline case
+    Then it works
+
+  Scenario Template: Template case
+    Then it works
+`, 'utf8');
+  const readPlanningFile = (request) => { calls.push(request); return feature; };
+  assert.deepEqual(validateImplementationPlan(value, { readPlanningFile }), []);
+  assert.deepEqual(calls, [{ planningSha: SHA, path: 'specs/features/example.feature' }]);
+  assert.deepEqual(planReadiness(value, { readPlanningFile }), { ready: true, errors: [] });
+
+  assert.match(validateImplementationPlan(value).join('\n'), /require synchronous Planning-SHA repository context/u);
+  const outside = structuredClone(value); outside.scenarios[0].feature = 'specs/example.feature';
+  assert.match(validateImplementationPlan(outside, { readPlanningFile }).join('\n'), /must be under specs\/features/u);
+});
+
+test('scenario repository context fails closed for missing, ambiguous, invalid, and unreadable blobs', () => {
+  const value = plan();
+  value.scenarios = [{ id: 'mapped', feature: 'specs/features/example.feature', scenario: 'Mapped case' }];
+  value.productScenarioDisposition = { disposition: 'mapped', scenarioIds: ['mapped'], rationale: 'Mapped behavior.' };
+  value.tasks[0].scenarioIds = ['mapped'];
+  const errorsFor = (readPlanningFile) => validateImplementationPlan(value, { readPlanningFile }).join('\n');
+  assert.match(errorsFor(() => null), /feature is missing at the Planning SHA/u);
+  assert.match(errorsFor(() => Buffer.from('Feature: Example\n  Scenario: Other case\n')), /heading is missing at the Planning SHA/u);
+  assert.match(errorsFor(() => Buffer.from('Feature: Example\n  Scenario: Mapped case\n  Scenario Outline: Mapped case\n')), /heading is ambiguous/u);
+  assert.match(errorsFor(() => Buffer.from([0xff, 0xfe])), /not valid UTF-8/u);
+  assert.match(errorsFor(() => { throw new Error('unavailable'); }), /feature read failed at the Planning SHA/u);
+  assert.match(errorsFor(() => Promise.resolve(Buffer.from(''))), /reader must be synchronous/u);
 });
 
 test('planning evidence recordedAt uses strict Ajv RFC3339 semantics', () => {

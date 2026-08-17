@@ -2,6 +2,7 @@
 import { readFileSync } from 'node:fs';
 
 import { parseOptions, UsageError, writeJson } from '../../../../../scripts/lib/cli.mjs';
+import { readTreeFile } from '../../../../../scripts/lib/git.mjs';
 import { planReadiness, validateImplementationPlan } from '../contracts/contracts.mjs';
 import {
   acceptPlan,
@@ -15,6 +16,7 @@ import {
   recoverState,
   refreshSource,
   renderStatus,
+  repositoryRoot,
   StateError,
   validateState,
 } from './state.mjs';
@@ -136,8 +138,10 @@ try {
       const planningEvidence = parsed['planning-evidence'] ? json(parsed['planning-evidence'], '--planning-evidence') : [];
       const active = loadState(process.cwd(), parsed['change-id']);
       const sourceObservation = active ? loadLatestSourceObservation(process.cwd(), active.changeId) : undefined;
-      const errors = validateImplementationPlan(plan, { planningEvidence, sourceObservation });
-      const readiness = planReadiness(plan, { planningEvidence, sourceObservation });
+      const root = repositoryRoot(process.cwd());
+      const readPlanningFile = ({ planningSha, path }) => readTreeFile(root, planningSha, path);
+      const errors = validateImplementationPlan(plan, { planningEvidence, sourceObservation, readPlanningFile });
+      const readiness = planReadiness(plan, { planningEvidence, sourceObservation, readPlanningFile });
       writeJson({
         valid: errors.length === 0,
         errors,

@@ -16,6 +16,7 @@ import {
   checkpointGitMetadata,
   initializeState,
   loadState,
+  locateState,
   nextActionFor,
   recoverState,
   recordDecision,
@@ -40,7 +41,9 @@ function repository(label = 'change state') {
   git(cwd, 'config', 'user.name', 'State Test');
   git(cwd, 'config', 'user.email', 'state@example.invalid');
   writeFileSync(join(cwd, 'request.md'), '# Request\n\n- [ ] <!-- aerstello:item=durable-state --> Add durable state\n');
-  git(cwd, 'add', 'request.md');
+  mkdirSync(join(cwd, 'specs', 'features'), { recursive: true });
+  writeFileSync(join(cwd, 'specs', 'features', 'state.feature'), 'Feature: State\n\n  Scenario: Durable planning scenario\n    Then state is durable\n');
+  git(cwd, 'add', 'request.md', 'specs/features/state.feature');
   git(cwd, 'commit', '-m', 'test: seed repository');
   return { cwd, sha: git(cwd, 'rev-parse', 'HEAD') };
 }
@@ -76,6 +79,16 @@ function planFor(state, revision = 1) {
       checklistItemIds: state.checklist.map((item) => item.id), dependsOn: [], anticipatedPaths: ['.agents/skills/change-development/scripts/state'],
       produces: [], consumes: [], validationIntent: ['Exercise state transitions'], unsplittable: null }],
   };
+}
+
+function scenarioPlanFor(state, revision = 1) {
+  const value = planFor(state, revision);
+  value.scenarios = [{ id: 'durable-scenario', feature: 'specs/features/state.feature', scenario: 'Durable planning scenario' }];
+  value.productScenarioDisposition = {
+    disposition: 'mapped', scenarioIds: ['durable-scenario'], rationale: 'The exact product scenario is mapped.',
+  };
+  value.tasks[0].scenarioIds = ['durable-scenario'];
+  return value;
 }
 
 test('initialization persists valid shared state and receipts', async () => {
@@ -123,6 +136,28 @@ test('pointerless completed initialization is discoverable without a remembered 
   assert.equal(loadState(cwd).changeId, 'pointerless-change');
 });
 
+test('dangling active pointers and completed transitions without state fail closed', async () => {
+  const dangling = repository('dangling pointer');
+  await initializeState({ cwd: dangling.cwd, changeId: 'dangling-change', mode: 'plan-only', baseBranch: 'main', planningRef: dangling.sha, source: descriptor });
+  unlinkSync(join(changeDirectory(dangling.cwd, 'dangling-change'), 'state.json'));
+  assert.throws(() => locateState(dangling.cwd), (error) => error.code === 'ACTIVE_POINTER_INVALID');
+  await assert.rejects(initializeState({ cwd: dangling.cwd, changeId: 'replacement-change', mode: 'plan-only', baseBranch: 'main',
+    planningRef: dangling.sha, source: descriptor }), (error) => error.code === 'ACTIVE_POINTER_INVALID');
+  assert.throws(() => recoverState({ cwd: dangling.cwd }), (error) => error.code === 'ACTIVE_POINTER_INVALID');
+  const status = renderStatus({ cwd: dangling.cwd });
+  assert.ok(status.length <= 2500);
+  assert.match(status, /Phase: blocked[\s\S]*ACTIVE_POINTER_INVALID[\s\S]*automatic recovery is blocked/u);
+  assert.match(renderStatus({ cwd: dangling.cwd, changeId: 'dangling-change' }),
+    /Phase: blocked[\s\S]*ACTIVE_POINTER_INVALID/u);
+
+  const missing = repository('completed missing state');
+  await initializeState({ cwd: missing.cwd, changeId: 'missing-state', mode: 'plan-only', baseBranch: 'main', planningRef: missing.sha, source: descriptor });
+  unlinkSync(activePointerPath(missing.cwd));
+  unlinkSync(join(changeDirectory(missing.cwd, 'missing-state'), 'state.json'));
+  assert.throws(() => recoverState({ cwd: missing.cwd, changeId: 'missing-state' }),
+    (error) => error.code === 'RECOVERY_STATE_CONFLICT');
+});
+
 test('initialization rejects dirty and non-ancestor planning snapshots', async () => {
   const { cwd, sha } = repository('snapshot state');
   writeFileSync(join(cwd, 'untracked.txt'), 'dirty');
@@ -135,11 +170,11 @@ test('initialization rejects dirty and non-ancestor planning snapshots', async (
 test('acceptance is immutable, revision guarded, receipt protected, and mode-gated for archive', async () => {
   const { cwd, sha } = repository('accept state');
   const planning = await initializeState({ cwd, changeId: 'accept-change', mode: 'plan-only', baseBranch: 'main', planningRef: sha, source: descriptor });
-  assert.throws(() => acceptPlan({ cwd, plan: planFor(planning), expectedRevision: 9 }), (error) => error.code === 'REVISION_CONFLICT');
-  const ready = acceptPlan({ cwd, plan: planFor(planning), expectedRevision: 0 });
+  assert.throws(() => acceptPlan({ cwd, plan: scenarioPlanFor(planning), expectedRevision: 9 }), (error) => error.code === 'REVISION_CONFLICT');
+  const ready = acceptPlan({ cwd, plan: scenarioPlanFor(planning), expectedRevision: 0 });
   assert.equal(ready.phase, 'ready-to-implement');
   assert.match(renderStatus({ cwd }), /Archive this completed plan-only change/u);
-  assert.throws(() => acceptPlan({ cwd, plan: planFor(planning), expectedRevision: 1 }), (error) => error.code === 'PLAN_ALREADY_ACCEPTED');
+  assert.throws(() => acceptPlan({ cwd, plan: scenarioPlanFor(planning), expectedRevision: 1 }), (error) => error.code === 'PLAN_ALREADY_ACCEPTED');
   const archived = archiveState({ cwd, expectedRevision: 1 });
   assert.equal(archived.archived, true);
 
@@ -156,7 +191,7 @@ test('acceptance is immutable, revision guarded, receipt protected, and mode-gat
 test('plan receipt tampering and transition orphans fail closed', async () => {
   const { cwd, sha } = repository('tamper state');
   const planning = await initializeState({ cwd, changeId: 'tamper-change', mode: 'plan-only', baseBranch: 'main', planningRef: sha, source: descriptor });
-  acceptPlan({ cwd, plan: planFor(planning), expectedRevision: 0 });
+  acceptPlan({ cwd, plan: scenarioPlanFor(planning), expectedRevision: 0 });
   const path = join(changeDirectory(cwd, 'tamper-change'), 'plan', 'plan.json');
   const changed = JSON.parse(readFileSync(path, 'utf8')); changed.title = 'Tampered'; writeFileSync(path, JSON.stringify(changed));
   assert.throws(() => validateState({ cwd }), (error) => error.code === 'RECEIPT_TAMPERED');
@@ -183,7 +218,7 @@ test('amendments append a replayable complete plan without rewriting the accepte
   acceptPlan({ cwd, plan: planFor(planning), expectedRevision: 0 });
   const originalPath = join(changeDirectory(cwd, 'amend-change'), 'plan', 'plan.json');
   const original = readFileSync(originalPath, 'utf8');
-  const resultingPlan = planFor(planning, 2); resultingPlan.title = 'Durable state, amended';
+  const resultingPlan = scenarioPlanFor(planning, 2); resultingPlan.title = 'Durable state, amended';
   const amended = amendPlan({ cwd, expectedRevision: 1, resultingPlan,
     amendment: { id: 'clarify-title', reason: 'Clarify plan title.', authorization: 'operator-confirmed',
       delta: { changed: ['title'] }, trigger: 'operator-decision', invalidatedEvidence: [] } });
@@ -563,6 +598,55 @@ test('an interrupted Git checkpoint recovers against its exact recorded dirty ob
   assert.equal(recovered.state.git.clean, false);
 });
 
+test('a mislabeled unrelated transition cannot use dirty abandonment recovery', async () => {
+  const { cwd, sha } = repository('mislabeled abandonment');
+  await initializeState({ cwd, changeId: 'mislabeled-abandonment', mode: 'plan-only', baseBranch: 'main', planningRef: sha, source: descriptor });
+  writeFileSync(join(cwd, 'dirty.txt'), 'drift');
+  assert.throws(() => checkpointGitMetadata({ cwd,
+    crashStep(step) { if (step === 'after-state') throw new Error('checkpoint crash'); } }), /checkpoint crash/u);
+  const intentPath = join(changeDirectory(cwd, 'mislabeled-abandonment'), 'transitions', '00000001', 'intent.json');
+  const intent = JSON.parse(readFileSync(intentPath, 'utf8'));
+  intent.type = 'abandoned';
+  writeFileSync(intentPath, `${JSON.stringify(intent)}\n`);
+  writeFileSync(intentPath.replace(/\.json$/u, '.sha256'), `${digestJson(intent)}\n`);
+  assert.throws(() => recoverState({ cwd }), (error) => error.code === 'PLANNING_SNAPSHOT_MISMATCH');
+});
+
+test('abandonment recovery binds exact dirty and non-Planning Git observations', async () => {
+  const dirty = repository('dirty abandonment');
+  await initializeState({ cwd: dirty.cwd, changeId: 'dirty-abandonment', mode: 'plan-only', baseBranch: 'main', planningRef: dirty.sha, source: descriptor });
+  writeFileSync(join(dirty.cwd, 'dirty.txt'), 'dirty');
+  assert.throws(() => archiveState({ cwd: dirty.cwd, expectedRevision: 0, abandonReason: 'Operator stopped planning.',
+    crashStep(step) { if (step === 'after-state') throw new Error('abandonment crash'); } }), /abandonment crash/u);
+  const interrupted = loadState(dirty.cwd);
+  assert.equal(interrupted.phase, 'abandoned');
+  assert.equal(interrupted.git.clean, false);
+  const recovered = recoverState({ cwd: dirty.cwd });
+  assert.equal(recovered.state.phase, 'abandoned');
+  const archived = archiveState({ cwd: dirty.cwd, expectedRevision: 1 });
+  assert.equal(archived.archived, true);
+  assert.equal(archived.state.revision, 1);
+
+  const advanced = repository('advanced abandonment');
+  await initializeState({ cwd: advanced.cwd, changeId: 'advanced-abandonment', mode: 'plan-only', baseBranch: 'main', planningRef: advanced.sha, source: descriptor });
+  writeFileSync(join(advanced.cwd, 'advance.txt'), 'advance');
+  git(advanced.cwd, 'add', 'advance.txt');
+  git(advanced.cwd, 'commit', '-m', 'test: advance from planning sha');
+  const advancedHead = git(advanced.cwd, 'rev-parse', 'HEAD');
+  assert.throws(() => archiveState({ cwd: advanced.cwd, expectedRevision: 0, abandonReason: 'Planning was superseded.',
+    crashStep(step) { if (step === 'after-state') throw new Error('advanced abandonment crash'); } }), /advanced abandonment crash/u);
+  assert.equal(loadState(advanced.cwd).git.headSha, advancedHead);
+  assert.equal(recoverState({ cwd: advanced.cwd }).state.phase, 'abandoned');
+
+  const drifted = repository('drifted abandonment');
+  await initializeState({ cwd: drifted.cwd, changeId: 'drifted-abandonment', mode: 'plan-only', baseBranch: 'main', planningRef: drifted.sha, source: descriptor });
+  writeFileSync(join(drifted.cwd, 'dirty.txt'), 'dirty');
+  assert.throws(() => archiveState({ cwd: drifted.cwd, expectedRevision: 0, abandonReason: 'Stop after drift.',
+    crashStep(step) { if (step === 'after-state') throw new Error('drift abandonment crash'); } }), /drift abandonment crash/u);
+  git(drifted.cwd, 'switch', '-c', 'later-drift');
+  assert.throws(() => recoverState({ cwd: drifted.cwd }), (error) => error.code === 'PLANNING_SNAPSHOT_MISMATCH');
+});
+
 test('archive resumes exactly after the directory rename boundary', async () => {
   const { cwd, sha } = repository('archive crash');
   const planning = await initializeState({ cwd, changeId: 'archive-crash', mode: 'plan-only', baseBranch: 'main', planningRef: sha, source: descriptor });
@@ -588,4 +672,18 @@ test('CLI rejects command-irrelevant options as usage errors', () => {
   const result = spawnSync(process.execPath, [cli, 'status', '--plan', 'irrelevant.json'], { cwd, encoding: 'utf8' });
   assert.equal(result.status, 2);
   assert.match(result.stderr, /status does not accept --plan/u);
+});
+
+test('CLI plan validation reads scenarios from the immutable Planning SHA', async () => {
+  const { cwd, sha } = repository('cli planning reader');
+  const planning = await initializeState({ cwd, changeId: 'cli-planning-reader', mode: 'plan-only', baseBranch: 'main', planningRef: sha, source: descriptor });
+  const planPath = join(cwd, 'candidate-plan.json');
+  writeFileSync(planPath, `${JSON.stringify(scenarioPlanFor(planning))}\n`);
+  writeFileSync(join(cwd, 'specs', 'features', 'state.feature'), 'Feature: Mutable worktree\n\n  Scenario: Different mutable scenario\n');
+  const cli = fileURLToPath(new URL('./cli.mjs', import.meta.url));
+  const result = spawnSync(process.execPath, [cli, 'validate', '--plan', planPath], { cwd, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.valid, true);
+  assert.equal(output.readiness.ready, true);
 });
