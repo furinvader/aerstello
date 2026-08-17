@@ -357,6 +357,39 @@ function nativeTasklessReview(cwd, { collectOutcome = true, outcomeOverrides = {
   return { initial, prepared, requested, reviewed };
 }
 
+function nativeTasklessPendingVerification(cwd, { reviewRequestLimit = null } = {}) {
+  const initial = init(cwd, { reviewRequestLimit });
+  const threadProofed = checkpointTaskCompletion({
+    cwd,
+    expectedRevision: initial.revision,
+    threadResolutionStatus: ready(initial, []).threadResolutionStatus,
+  });
+  let current = persistReady(cwd, threadProofed, []);
+  for (let round = 0; round < 3; round += 1) {
+    const requested = checkpointReviewRequest({
+      cwd,
+      request: request(current),
+      pushedHeadSha: current.currentIntegrationHeadSha,
+      prHeadSha: current.currentIntegrationHeadSha,
+      expectedRevision: current.revision,
+    });
+    const reviewed = checkpointReviewOutcome({
+      cwd, outcome: outcome(requested), expectedRevision: requested.revision,
+    });
+    current = checkpointState({
+      cwd, nextState: ready(reviewed, []), expectedRevision: reviewed.revision,
+    });
+  }
+  const requested = checkpointReviewRequest({
+    cwd,
+    request: request(current),
+    pushedHeadSha: current.currentIntegrationHeadSha,
+    prHeadSha: current.currentIntegrationHeadSha,
+    expectedRevision: current.revision,
+  });
+  return { initial, requested };
+}
+
 function integratedTasks(cwd, ids) {
   const initial = init(cwd);
   const proposedTasks = ids.map((id) => task(initial.currentIntegrationHeadSha, {
@@ -866,6 +899,99 @@ test('native taskless clean-review HEAD drift rebuilds only current targeted val
     reviewHistory: result.state.reviewHistory,
     threadlessVerification: result.state.threadResolutionStatus.threadlessVerification,
   }, preserved);
+
+  assert.throws(() => buildTargetedValidationPlan({
+    cwd, initialSelection: selection, replace: true,
+  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
+});
+
+test('native taskless pending-review HEAD drift rebuilds current validation without rewriting history', () => {
+  const cwd = repo();
+  const { requested } = nativeTasklessPendingVerification(cwd, { reviewRequestLimit: 4 });
+  const priorHeadSha = requested.currentIntegrationHeadSha;
+  const preserved = {
+    reviewRequest: structuredClone(requested.reviewRequest),
+    reviewOutcome: requested.reviewOutcome,
+    reviewHistory: structuredClone(requested.reviewHistory),
+    threadlessVerification: structuredClone(requested.threadResolutionStatus.threadlessVerification),
+  };
+  assert.deepEqual(reviewRequestUsage(requested), {
+    used: 4, limit: 4, remaining: 0, exhausted: true,
+  });
+  assert.equal(requested.reviewRequest.kind, 'verification');
+  assert.equal(requested.reviewHistory.at(-1).outcome, null);
+
+  const currentHeadSha = commit(cwd, {
+    'pending-review-head-drift.txt': 'current HEAD\n',
+  }, 'pending review HEAD drift');
+  const drifted = checkpointGitMetadata({ cwd }).state;
+  assert.notEqual(currentHeadSha, priorHeadSha);
+  assert.equal(drifted.phase, 'recovering');
+  assert.equal(drifted.validationStatus.status, 'not-run');
+  assert.deepEqual({
+    reviewRequest: drifted.reviewRequest,
+    reviewOutcome: drifted.reviewOutcome,
+    reviewHistory: drifted.reviewHistory,
+    threadlessVerification: drifted.threadResolutionStatus.threadlessVerification,
+  }, preserved);
+
+  const selection = initialSelection(currentHeadSha, {
+    affectedAreas: ['workflow', 'documentation'],
+    requiredValidation: {
+      unit: [{
+        command: 'npm run check:workflow',
+        reason: 'Rebuild taskless validation after the pending Review commit drifted.',
+      }],
+      system: [],
+    },
+  });
+  const plan = buildTargetedValidationPlan({
+    cwd, initialSelection: selection, replace: true, now: () => AT,
+  });
+  assert.equal(plan.headSha, currentHeadSha);
+  assert.deepEqual(plan.taskIds, []);
+
+  const result = executeTargetedValidationPlan({
+    cwd, runCommand: () => ({ status: 0 }), now: () => AT,
+  });
+  assert.equal(result.state.phase, 'recovering');
+  assert.equal(result.state.validationStatus.status, 'passed');
+  assert.equal(result.state.validationStatus.headSha, currentHeadSha);
+  assert.deepEqual(reviewRequestUsage(result.state), {
+    used: 4, limit: 4, remaining: 0, exhausted: true,
+  });
+  assert.deepEqual({
+    reviewRequest: result.state.reviewRequest,
+    reviewOutcome: result.state.reviewOutcome,
+    reviewHistory: result.state.reviewHistory,
+    threadlessVerification: result.state.threadResolutionStatus.threadlessVerification,
+  }, preserved);
+
+  const readyForReplacement = checkpointTaskCompletion({
+    cwd,
+    expectedRevision: result.state.revision,
+    threadResolutionStatus: {
+      ...result.state.threadResolutionStatus,
+      status: 'passed',
+      headSha: currentHeadSha,
+      threads: [],
+      updatedAt: AT,
+    },
+  });
+  assert.equal(readyForReplacement.phase, 'ready-for-review');
+  assert.match(
+    readyForReplacement.nextAction,
+    new RegExp(`Review request limit 4 is exhausted after 4 durable requests; run npm run review:state -- set-review-limit --pr 17 --expected-revision ${readyForReplacement.revision} --limit <higher-number> or --unlimited before the next request\\.`),
+  );
+  assert.deepEqual({
+    reviewRequest: readyForReplacement.reviewRequest,
+    reviewOutcome: readyForReplacement.reviewOutcome,
+    reviewHistory: readyForReplacement.reviewHistory,
+  }, {
+    reviewRequest: preserved.reviewRequest,
+    reviewOutcome: preserved.reviewOutcome,
+    reviewHistory: preserved.reviewHistory,
+  });
   assert.throws(() => buildTargetedValidationPlan({
     cwd, initialSelection: selection, replace: true,
   }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
@@ -892,14 +1018,31 @@ test('native taskless review HEAD-drift validation recovery fails closed at ever
   }), { code: 'VALIDATION_CHECKOUT_DIRTY' });
   assert.equal(dirtyDrift.validationStatus.status, 'not-run');
 
-  const pendingCwd = repo();
-  nativeTasklessReview(pendingCwd, { collectOutcome: false });
-  const pendingHead = commit(pendingCwd, { 'pending-review-drift.txt': 'drift\n' }, 'pending review drift');
-  const pendingDrift = checkpointGitMetadata({ cwd: pendingCwd }).state;
-  assert.equal(pendingDrift.phase, 'recovering');
+  const sameHeadPendingCwd = repo();
+  const sameHeadPending = nativeTasklessReview(sameHeadPendingCwd, { collectOutcome: false }).requested;
   assert.throws(() => buildTargetedValidationPlan({
-    cwd: pendingCwd, initialSelection: initialSelection(pendingHead), replace: true,
-  }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
+    cwd: sameHeadPendingCwd,
+    initialSelection: initialSelection(sameHeadPending.currentIntegrationHeadSha),
+    replace: true,
+  }), { code: 'VALIDATION_PLAN_PHASE_BLOCKED' });
+
+  for (const [name, mutate] of [
+    ['reviewed HEAD', (state, priorHeadSha) => ({ ...state, reviewedHeadSha: priorHeadSha })],
+    ['legacy provenance', (state) => ({
+      ...state,
+      legacyReviewProvenance: { schemaVersion: 1, discoveryRounds: 0, migratedAt: AT },
+    })],
+  ]) {
+    const cwd = repo();
+    const pending = nativeTasklessPendingVerification(cwd).requested;
+    const priorHeadSha = pending.currentIntegrationHeadSha;
+    const headSha = commit(cwd, { [`malformed-${name}.txt`]: 'drift\n' }, `malformed ${name}`);
+    const drifted = checkpointGitMetadata({ cwd }).state;
+    writeFileSync(statePath(cwd, drifted.prNumber), `${JSON.stringify(mutate(drifted, priorHeadSha))}\n`);
+    assert.throws(() => buildTargetedValidationPlan({
+      cwd, initialSelection: initialSelection(headSha), replace: true,
+    }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' }, name);
+  }
 
   const findingsCwd = repo();
   nativeTasklessReview(findingsCwd, { outcomeOverrides: { outcome: 'findings' } });
@@ -1986,6 +2129,32 @@ test('stale verification HEAD drift remains recoverable and cannot be mislabeled
   }), { code: 'VERIFICATION_ESCALATION_NOT_EXPECTED' });
   assert.equal(drifted.verificationReviewUsed, true);
   assert.equal(drifted.reviewHistory.at(-1).outcome, null);
+});
+
+test('native stale pending verification escalates only canonical evidence ambiguity', () => {
+  const cwd = repo();
+  const requested = nativeTasklessPendingVerification(cwd).requested;
+  const requestHead = requested.reviewRequest.headSha;
+  const observedPrHead = commit(cwd, {
+    'native-escalation-drift.txt': 'drift\n',
+  }, 'native pending escalation drift');
+  const drifted = checkpointGitMetadata({ cwd }).state;
+  const escalated = checkpointVerificationEscalation({
+    cwd,
+    expectedRevision: drifted.revision,
+    escalation: {
+      requestId: requested.reviewRequest.id,
+      requestHeadSha: requestHead,
+      observedPrHeadSha: observedPrHead,
+      headRelation: 'changed',
+      evidenceIds: ['review:PRR_stale'],
+      reason: 'request-head-drift',
+      at: AT,
+    },
+  });
+  assert.equal(escalated.phase, 'awaiting-human-decision');
+  assert.deepEqual(escalated.reviewHistory, drifted.reviewHistory);
+  assert.equal(escalated.reviewOutcome, null);
 });
 
 test('structured canonical thread proof covers multiple tasks with one reply and completes them once', () => {

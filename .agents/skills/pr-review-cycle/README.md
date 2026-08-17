@@ -258,6 +258,26 @@ passed empty-thread proof for the current HEAD while retaining historical
 threadless evidence, with no GitHub or journal mutation. A new exact-current-
 HEAD review is still required; the historical clean result cannot satisfy Done.
 
+A native schema-v3 taskless pending request has a separate guarded recovery
+when its exact immutable request comment still exists but the integration and
+live PR head advance before an outcome is recorded. Checkpoint the new clean
+HEAD, save a nonempty current-HEAD `--initial-selection` (`--replace` may
+replace only the stale plan), and run the selection. The request, its null
+outcome, and the complete history row remain byte-for-byte historical and still
+consume their configured request slot.
+
+Then run `refresh-threads`. It rechecks the request anchor, current validation,
+clean equal local/pushed/live heads, complete canonical evidence, state
+revision, and the final live head. It writes no GitHub mutation or request
+journal. Missing, edited, foreign, conflicting, or canonical outcome evidence
+fails closed; ambiguous verification evidence is checkpointed for human review.
+With an exact anchor, no outcome evidence, and no canonical roots, the guarded
+empty proof restores review readiness. A retry of the already-current proof is
+idempotent. The ordinary request command derives the replacement kind and
+appends a new immutable row. An exhausted finite limit preserves all recovery
+proof but blocks that request with the exact raise-or-remove command; it does
+not block validation or the read-only refresh.
+
 There is one further migration-only `--initial-selection` route for completed
 tasks. Its immutable `state.v2.backup.json` must contain a nonempty all-completed
 task set and an exact-head passed, nonempty legacy targeted proof. A schema-v2

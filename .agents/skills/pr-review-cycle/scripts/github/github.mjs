@@ -885,7 +885,7 @@ function escalationFor(state, liveHead, evidenceIds, reason, at) {
     observedPrHeadSha: liveHead,
     headRelation: same ? 'same' : 'changed',
     evidenceIds: [...new Set(evidenceIds)].slice(0, 8),
-    reason,
+    reason: !same && reason !== 'request-head-drift' ? 'request-head-drift' : reason,
     at,
   };
 }
@@ -913,6 +913,58 @@ function tasklessReviewHeadDriftRefreshAllowed(state) {
     && reviewAllowanceRemains;
 }
 
+function tasklessPendingReviewHeadDriftRefreshAllowed(state) {
+  const request = state.reviewRequest;
+  const latest = state.reviewHistory.at(-1);
+  const priorHeadSha = request?.headSha;
+  return state.schemaVersion === 3
+    && state.legacyReviewProvenance === null
+    && ['recovering', 'ready-for-review'].includes(state.phase)
+    && state.tasks.length === 0
+    && request !== null && latest !== undefined
+    && state.reviewOutcome === null && latest.outcome === null
+    && JSON.stringify(latest.request) === JSON.stringify(request)
+    && state.requestedHeadSha === priorHeadSha && state.reviewedHeadSha === null
+    && priorHeadSha !== state.currentIntegrationHeadSha
+    && state.git.headSha === state.currentIntegrationHeadSha && state.git.dirty === false
+    && state.validationStatus.status === 'passed'
+    && state.validationStatus.headSha === state.currentIntegrationHeadSha
+    && state.blockedReasons.length === 0 && state.verificationEscalation === null
+    && !state.tasks.some((task) => task.disposition === 'needs-human-decision');
+}
+
+async function pendingReviewOutcomeEvidence(state, live, git) {
+  const request = state.reviewRequest;
+  const reviews = live.reviews.filter((review) => isCanonicalActor(review.author)
+    && evidenceAtOrAfter(review.submittedAt, request.at));
+  const reactions = live.reactions.filter((reaction) => reaction.content === 'THUMBS_UP'
+    && isCanonicalActor(reaction.user) && evidenceAtOrAfter(reaction.createdAt, request.at));
+  const roots = live.threads.filter((thread) => thread.canonical
+    && evidenceAtOrAfter(thread.root.createdAt, request.at));
+  const structural = await classifyStructuralIssueComments({
+    comments: live.comments,
+    request,
+    threads: live.threads,
+    git,
+    cwd: state.integrationWorktree,
+    expectedHeads: [request.headSha],
+  });
+  const ids = [
+    ...reviews.map((item) => canonicalEvidenceId(item, 'review')),
+    ...reactions.map((item) => canonicalEvidenceId(item, 'reaction')),
+    ...roots.map((item) => canonicalEvidenceId(item.root, 'review-root')),
+    ...structural.exact.map((item) => canonicalEvidenceId(item.comment, 'issue-comment')),
+    ...structural.unsupported.map((item) => canonicalEvidenceId(item, 'issue-comment')),
+  ];
+  const unsupportedReview = reviews.some((review) => review.state !== 'COMMENTED'
+    || typeof review.body !== 'string' || review.commit?.oid !== request.headSha);
+  return {
+    ids,
+    reason: ids.length === 1 && !unsupportedReview && structural.unsupported.length === 0
+      ? 'stale-canonical-evidence' : 'ambiguous-canonical-evidence',
+  };
+}
+
 export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, clock, journal }) {
   if (!client?.graphql || !stateAdapter?.load || !git || !clock?.now) {
     throw new GitHubWorkflowError('Client, state, Git, and clock adapters are required', 'INVALID_ADAPTERS');
@@ -930,6 +982,25 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     if (current.revision !== expected.revision) {
       throw new GitHubWorkflowError('Active state changed after preflight', 'STATE_REVISION_CHANGED');
     }
+  }
+
+  async function checkpointPendingRecoveryEscalation(active, live, evidenceIds, reason) {
+    if (!stateAdapter.checkpointVerificationEscalation) {
+      throw new GitHubWorkflowError('The verification escalation checkpoint is unavailable', 'INVALID_ADAPTERS');
+    }
+    await assertCurrent(active);
+    const escalated = await stateAdapter.checkpointVerificationEscalation({
+      prNumber: active.prNumber,
+      expectedRevision: active.revision,
+      escalation: escalationFor(
+        active,
+        live.metadata.headRefOid,
+        evidenceIds.length > 0 ? evidenceIds : [`request:${active.reviewRequest.id}`],
+        reason,
+        clock.now(),
+      ),
+    });
+    return { escalated: true, escalation: escalated.verificationEscalation };
   }
 
   async function status(prNumber) {
@@ -1025,16 +1096,43 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       && active.verificationReviewUsed === false
       && active.verificationEscalation === null;
     const headDriftRecovery = tasklessReviewHeadDriftRefreshAllowed(active);
-    if (!pristine && !headDriftRecovery) {
+    const pendingHeadDriftRecovery = tasklessPendingReviewHeadDriftRefreshAllowed(active);
+    if (!pristine && !headDriftRecovery && !pendingHeadDriftRecovery) {
       throw new GitHubWorkflowError(
-        'Empty-thread refresh requires a pristine taskless cycle or guarded clean-review HEAD-drift recovery',
+        'Empty-thread refresh requires a pristine taskless cycle or guarded review HEAD-drift recovery',
         'TASKLESS_REFRESH_NOT_ALLOWED',
       );
     }
     if (!stateAdapter.checkpointTaskCompletion) {
       throw new GitHubWorkflowError('The guarded thread-proof checkpoint is unavailable', 'INVALID_ADAPTERS');
     }
-    const live = await readLiveSnapshot(client, active);
+    let live = await readLiveSnapshot(client, active);
+    if (pendingHeadDriftRecovery) {
+      try {
+        assertRecordedRequestComment(active, live);
+      } catch (error) {
+        if (!(error instanceof GitHubWorkflowError) || error.code !== 'REQUEST_PROOF_STALE'
+            || active.reviewRequest.kind !== 'verification') throw error;
+        return checkpointPendingRecoveryEscalation(
+          active, live, [`request-proof:${active.reviewRequest.id}`], 'ambiguous-canonical-evidence',
+        );
+      }
+      live = {
+        ...live,
+        reactions: await readRequestReactions(client, active.reviewRequest.id),
+      };
+      const outcomeEvidence = await pendingReviewOutcomeEvidence(active, live, git);
+      if (outcomeEvidence.ids.length > 0) {
+        if (active.reviewRequest.kind !== 'verification') {
+          throw new GitHubWorkflowError(
+            'Discovery review evidence is stale or ambiguous', 'DISCOVERY_COLLECTION_UNRESOLVED',
+          );
+        }
+        return checkpointPendingRecoveryEscalation(
+          active, live, outcomeEvidence.ids, outcomeEvidence.reason,
+        );
+      }
+    }
     await assertMutationReady({ state: active, git }, live);
     const { plan } = buildCanonicalRootPlan(active, live);
     if (plan.length !== 0 || live.threads.some((thread) => thread.canonical)) {
@@ -1054,6 +1152,15 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     const finalMetadata = await readPullRequestMetadata(client, active.repository, active.prNumber);
     if (finalMetadata.headRefOid !== active.currentIntegrationHeadSha) {
       throw new GitHubWorkflowError('Live PR HEAD changed while refreshing empty thread proof', 'MUTATION_NOT_READY');
+    }
+    if (pendingHeadDriftRecovery
+        && active.threadResolutionStatus.status === 'passed'
+        && active.threadResolutionStatus.headSha === active.currentIntegrationHeadSha
+        && active.threadResolutionStatus.threads.length === 0) {
+      return {
+        stateRevision: active.revision,
+        threadResolutionStatus: active.threadResolutionStatus,
+      };
     }
     active = await stateAdapter.checkpointTaskCompletion({
       prNumber: active.prNumber, expectedRevision: active.revision, threadResolutionStatus,
@@ -1416,7 +1523,7 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       if (!(error instanceof GitHubWorkflowError) || error.code !== 'REQUEST_PROOF_STALE') throw error;
       if (active.reviewRequest.kind !== 'verification') throw error;
       const ids = [
-        `request:${active.reviewRequest.id}`,
+        `request-proof:${active.reviewRequest.id}`,
         ...live.comments.filter((comment) => comment.id === active.reviewRequest.id)
           .map((comment) => `live-request:${comment.id}`),
       ];

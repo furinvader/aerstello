@@ -1446,6 +1446,24 @@ function isNativeTasklessReviewHeadDriftValidationRecovery(state, expectedIds) {
     && hasRemainingReviewAllowance(state);
 }
 
+function isNativeTasklessPendingReviewHeadDriftValidationRecovery(state, expectedIds) {
+  const request = state.reviewRequest;
+  const latest = state.reviewHistory.at(-1);
+  const priorHeadSha = request?.headSha;
+  return state.schemaVersion === 3
+    && state.legacyReviewProvenance === null
+    && ['recovering', 'ready-for-review'].includes(state.phase)
+    && state.tasks.length === 0 && expectedIds.length === 0
+    && request !== null && latest !== undefined
+    && state.reviewOutcome === null && latest.outcome === null
+    && sameEvidence(latest.request, request)
+    && state.requestedHeadSha === priorHeadSha && state.reviewedHeadSha === null
+    && priorHeadSha !== state.currentIntegrationHeadSha
+    && state.git.headSha === state.currentIntegrationHeadSha && state.git.dirty === false
+    && state.blockedReasons.length === 0 && state.verificationEscalation === null
+    && !state.tasks.some((task) => task.disposition === 'needs-human-decision');
+}
+
 function isV2CompletedTaskValidationRecovery(cwd, state, expectedIds) {
   if (!['recovering', 'validating'].includes(state.phase) || state.validationStatus.status !== 'not-run'
       || expectedIds.length !== 0 || state.tasks.length === 0
@@ -1580,10 +1598,14 @@ function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, initi
     const pristineSelection = isPristineTasklessValidationSelection(state, expectedIds);
     const cleanReviewRecovery = isCleanTasklessReviewValidationRecovery(state, expectedIds);
     const headDriftRecovery = isNativeTasklessReviewHeadDriftValidationRecovery(state, expectedIds);
+    const pendingHeadDriftRecovery = isNativeTasklessPendingReviewHeadDriftValidationRecovery(
+      state, expectedIds,
+    );
     const completedTaskRecovery = isV2CompletedTaskValidationRecovery(cwd, state, expectedIds);
-    if (!pristineSelection && !cleanReviewRecovery && !headDriftRecovery && !completedTaskRecovery) {
+    if (!pristineSelection && !cleanReviewRecovery && !headDriftRecovery
+        && !pendingHeadDriftRecovery && !completedTaskRecovery) {
       throw new StateError(
-        'Taskless validation selection requires a pristine cycle, guarded clean-review recovery, or proven v2 completed-task recovery',
+        'Taskless validation selection requires a pristine cycle, guarded stale-review recovery, or proven v2 completed-task recovery',
         'INITIAL_VALIDATION_NOT_ALLOWED',
       );
     }
@@ -1706,7 +1728,10 @@ export function buildTargetedValidationPlan({
   if (initialSelection !== undefined && initialSelection !== null
       && current.validationStatus.status === 'passed'
       && (isCleanTasklessReviewValidationRecovery(current, actionableIntegratedTaskIds(current))
-        || isNativeTasklessReviewHeadDriftValidationRecovery(current, actionableIntegratedTaskIds(current)))) {
+        || isNativeTasklessReviewHeadDriftValidationRecovery(current, actionableIntegratedTaskIds(current))
+        || isNativeTasklessPendingReviewHeadDriftValidationRecovery(
+          current, actionableIntegratedTaskIds(current),
+        ))) {
     throw new StateError(
       'Taskless review recovery cannot replace existing targeted-validation proof',
       'INITIAL_VALIDATION_NOT_ALLOWED',
@@ -2696,9 +2721,16 @@ export function buildVerificationEscalationTransition(state, escalation) {
   }
   const request = state.reviewRequest;
   const latest = state.reviewHistory.at(-1);
-  if (!['awaiting-review', 'awaiting-human-decision'].includes(state.phase)
+  const stalePendingRecovery = isNativeTasklessPendingReviewHeadDriftValidationRecovery(state, []);
+  const stalePendingAmbiguity = stalePendingRecovery
+    && escalation?.reason === 'request-head-drift'
+    && Array.isArray(escalation?.evidenceIds)
+    && escalation.evidenceIds.some((id) => id !== `request:${request?.id}`);
+  if (!(['awaiting-review', 'awaiting-human-decision'].includes(state.phase) || stalePendingRecovery)
       || request?.kind !== 'verification' || state.verificationReviewUsed !== true
-      || state.reviewOutcome !== null || latest?.request?.id !== request.id || latest?.outcome !== null) {
+      || state.reviewOutcome !== null || latest?.request?.id !== request.id || latest?.outcome !== null
+      || (stalePendingRecovery && escalation?.reason === 'request-head-drift'
+        && !stalePendingAmbiguity)) {
     throw new StateError('No pending canonical verification collection to escalate', 'VERIFICATION_ESCALATION_NOT_EXPECTED');
   }
   if (escalation?.requestId !== request.id || escalation?.requestHeadSha !== request.headSha) {
@@ -2781,7 +2813,10 @@ export function checkpointTargetedValidationReset({ cwd = process.cwd(), prNumbe
   if (current.validationStatus.status === 'not-run') return current;
   if (current.validationStatus.status === 'passed'
       && (isCleanTasklessReviewValidationRecovery(current, actionableIntegratedTaskIds(current))
-        || isNativeTasklessReviewHeadDriftValidationRecovery(current, actionableIntegratedTaskIds(current)))) {
+        || isNativeTasklessReviewHeadDriftValidationRecovery(current, actionableIntegratedTaskIds(current))
+        || isNativeTasklessPendingReviewHeadDriftValidationRecovery(
+          current, actionableIntegratedTaskIds(current),
+        ))) {
     throw new StateError(
       'Taskless review recovery cannot discard existing targeted-validation proof',
       'INITIAL_VALIDATION_NOT_ALLOWED',
@@ -3223,7 +3258,20 @@ export function checkpointTaskCompletion({
 } = {}) {
   const current = loadState(cwd, prNumber);
   if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
-  const nextState = completeIntegratedTasks(current, { threadResolutionStatus, verifiedLocalTaskIds });
+  let nextState = completeIntegratedTasks(current, { threadResolutionStatus, verifiedLocalTaskIds });
+  const pendingHeadDriftReady = isNativeTasklessPendingReviewHeadDriftValidationRecovery(current, [])
+    && current.validationStatus.status === 'passed'
+    && current.validationStatus.headSha === current.currentIntegrationHeadSha
+    && nextState.threadResolutionStatus.status === 'passed'
+    && nextState.threadResolutionStatus.headSha === current.currentIntegrationHeadSha
+    && nextState.threadResolutionStatus.threads.length === 0;
+  if (pendingHeadDriftReady) {
+    nextState = {
+      ...nextState,
+      phase: 'ready-for-review',
+      nextAction: reviewLimitNextAction(nextState),
+    };
+  }
   return checkpointState({
     cwd, prNumber: current.prNumber, nextState, expectedRevision,
     event, transitionAuthorization: protectedTransition(nextState, 'task-completion'),

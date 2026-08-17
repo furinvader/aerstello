@@ -187,6 +187,24 @@ mutation. Any live root, evidence mismatch, exhausted allowance, or state/head
 race fails closed; the historical clean review remains stale and must not be
 used for Done.
 
+It is also available after native-v3 taskless pending-request HEAD drift. First
+checkpoint the new clean HEAD and rerun an explicit nonempty current-HEAD
+targeted selection. The active request must exactly equal the latest immutable
+history request, both outcomes and `reviewedHeadSha` must remain `null`, and no
+task, blocker, escalation, or human decision may exist. The pending row remains
+unchanged and counts toward any finite total limit.
+
+`refresh-threads` then fully rereads the original request anchor, request
+reactions, canonical reviews/comments/roots, local and pushed Git, and the live
+PR head. Missing, edited, foreign, conflicting, or otherwise ambiguous evidence
+cannot enter recovery; verification ambiguity is durably escalated to a human.
+With no outcome evidence or roots, it rechecks state revision and live head,
+records only the current empty-thread proof, and restores review readiness
+without a GitHub mutation or request journal. Repeating the current proof is
+idempotent. The next `request` derives its kind from durable history. If that
+history has exhausted a finite limit, only the replacement request is blocked,
+with the exact command to raise or remove the limit.
+
 ## Done gate
 
 The cycle is Done only when all of these facts apply to one Review commit:

@@ -176,6 +176,26 @@ to run a fresh nonempty targeted selection. This preserves the historical
 request, outcome, and review ledger byte-for-byte; it never makes the old review
 current or permits replacement of the resulting current-HEAD validation proof.
 
+A native schema-v3 taskless pending request may likewise recover after pure
+HEAD drift, but it never gains an outcome. The active request must equal the
+latest history request exactly, both outcome fields must be `null`,
+`reviewedHeadSha` must remain `null`, and the request SHA must be the one prior
+HEAD. The state is `recovering`, native rather than migrated, with a clean exact
+current checkout and no tasks, blockers, escalation, or human-decision work.
+Use a nonempty current-HEAD `--initial-selection` and run it normally. A finite
+limit may already be exhausted: the pending history row still counts, while
+validation and empty-proof recovery remain available.
+
+After current validation passes, `refresh-threads` proves the original request
+comment is still immutable and that no canonical request outcome or root is
+live. It rechecks local, pushed, and live heads plus state revision before the
+guarded task-completion checkpoint. That checkpoint preserves request/history
+evidence, records only current empty-thread proof, and restores
+`ready-for-review` with either the derived next review kind or the exact
+raise/remove-limit action. Verification ambiguity becomes durable human
+escalation; discovery ambiguity fails closed. Repeating an already-current
+successful refresh returns the existing proof without another revision.
+
 A third, migration-only route exists for a schema-v2 source with a nonempty
 all-completed task set and an exact-head passed, nonempty legacy targeted proof.
 For a `ready-for-review` or `complete` source, canonical migration of the

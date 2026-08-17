@@ -171,6 +171,25 @@ the prior request, outcome, and history stay immutable and remain stale until a
 new current-HEAD review is requested. A same-HEAD review or an already-passing
 recovery proof is not replaceable through this route.
 
+A distinct native schema-v3 exception covers a taskless pending request whose
+exact request anchor targets the prior HEAD and whose current/latest outcomes
+are still `null`. After Git checkpointing puts the cycle in `recovering`, save
+and run a nonempty explicit selection for the clean current HEAD. Do not edit,
+supersede, or synthesize the pending history row; it continues to consume one
+request slot. This route rejects migrated or malformed identity, same-head
+requests, non-null outcomes, dirty state, tasks, blockers, escalation, and
+human-decision work. An exhausted finite request limit does not prevent the
+validation run.
+
+After validation, use guarded `refresh-threads` to revalidate the immutable
+request comment, absence of canonical outcome evidence and roots, equal
+local/pushed/live heads, state revision, and final live head. Successful proof
+restores review readiness without GitHub mutation or request journaling; an
+already-current retry is idempotent. The ordinary request gate then derives the
+replacement ordinal kind, or reports the exact limit setter action when the
+durable request count has exhausted a finite limit. Ambiguous evidence stays a
+human gate and is never converted into a synthetic outcome.
+
 Initial selection also has one migration-only completed-task route. An
 immutable `state.v2.backup.json` must prove an exact-head passed, nonempty
 legacy targeted proof and a nonempty all-completed task set. A

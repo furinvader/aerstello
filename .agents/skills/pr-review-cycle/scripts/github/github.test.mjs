@@ -168,6 +168,37 @@ function cleanReviewEntry(index, kind, headSha = OTHER_HEAD) {
   return { request, outcome };
 }
 
+function tasklessPendingReviewHeadDriftState(overrides = {}) {
+  const completedHistory = [
+    cleanReviewEntry(1, 'discovery'),
+    cleanReviewEntry(2, 'discovery'),
+    cleanReviewEntry(3, 'discovery'),
+  ];
+  const request = requestEvidence('verification', {
+    id: 'IC_verification_4',
+    databaseId: 104,
+    url: 'https://github.com/example/aerstello/pull/2#issuecomment-104',
+    headSha: OTHER_HEAD,
+  });
+  return stateFixture({
+    phase: 'recovering',
+    requestedHeadSha: OTHER_HEAD,
+    reviewedHeadSha: null,
+    reviewRound: 3,
+    verificationReviewUsed: true,
+    reviewRequest: request,
+    reviewOutcome: null,
+    reviewHistory: [...completedHistory, { request, outcome: null }],
+    validationStatus: {
+      source: 'orchestrator', scope: 'targeted', status: 'passed', headSha: HEAD,
+      checks: ['npm run check:workflow'], updatedAt: AT,
+    },
+    threadResolutionStatus: proof('not-run'),
+    nextAction: 'Rebuild current-head empty-thread proof before the replacement review.',
+    ...overrides,
+  });
+}
+
 function canonicalReview(overrides = {}) {
   return {
     id: 'PRR_clean', databaseId: 201, url: 'https://x/clean', body: '', state: 'COMMENTED',
@@ -374,7 +405,8 @@ function fakeState(initial) {
       calls.push({ name: 'checkpointReviewRequest', input });
       const request = input.request;
       current = {
-        ...current, revision: current.revision + 1, phase: 'awaiting-review', requestedHeadSha: request.headSha,
+        ...current, revision: current.revision + 1, phase: 'awaiting-review',
+        requestedHeadSha: request.headSha, reviewedHeadSha: null,
         reviewRound: request.kind === 'discovery' ? current.reviewRound + 1 : current.reviewRound,
         verificationReviewUsed: request.kind === 'verification' ? true : current.verificationReviewUsed,
         reviewRequest: request, reviewOutcome: null,
@@ -412,6 +444,15 @@ function fakeState(initial) {
     },
     async checkpointTaskCompletion(input) {
       calls.push({ name: 'checkpointTaskCompletion', input });
+      const stalePendingRecovery = current.phase === 'recovering'
+        && current.tasks.length === 0
+        && current.reviewRequest !== null
+        && current.reviewOutcome === null
+        && current.reviewHistory.at(-1)?.outcome === null
+        && current.reviewedHeadSha === null
+        && current.reviewRequest.headSha !== current.currentIntegrationHeadSha
+        && current.validationStatus.status === 'passed'
+        && current.validationStatus.headSha === current.currentIntegrationHeadSha;
       const verifiedLocal = new Set(input.verifiedLocalTaskIds ?? []);
       const priorLocal = current.threadResolutionStatus.localVerification ?? proof('not-run').localVerification;
       const retainedLocalIds = priorLocal.status === 'passed'
@@ -437,8 +478,23 @@ function fakeState(initial) {
           ? { ...task, status: 'completed' } : task
       ));
       const next = { ...current, threadResolutionStatus, tasks };
+      const nextRevision = current.revision + 1;
+      const usedRequests = (current.legacyReviewProvenance?.discoveryRounds ?? 0)
+        + current.reviewHistory.length;
+      const exhausted = Number.isSafeInteger(current.reviewRequestLimit)
+        && usedRequests >= current.reviewRequestLimit;
       current = {
-        ...next, revision: current.revision + 1,
+        ...next,
+        revision: nextRevision,
+        ...(stalePendingRecovery
+          && threadResolutionStatus.status === 'passed'
+          && threadResolutionStatus.headSha === current.currentIntegrationHeadSha
+          && threadResolutionStatus.threads.length === 0 ? {
+            phase: 'ready-for-review',
+            nextAction: exhausted
+              ? `Review request limit ${current.reviewRequestLimit} is exhausted after ${usedRequests} durable requests; run npm run review:state -- set-review-limit --pr ${current.prNumber} --expected-revision ${nextRevision} --limit <higher-number> or --unlimited before the next request.`
+              : 'Request canonical verification review.',
+          } : {}),
       };
       return structuredClone(current);
     },
@@ -763,7 +819,116 @@ test('taskless thread refresh restores empty proof after guarded clean-review HE
   assert.deepEqual(setup.state.calls.map((call) => call.name), ['checkpointTaskCompletion']);
 });
 
+test('taskless thread refresh recovers exact stale pending evidence and preserves its request slot', async () => {
+  const initial = tasklessPendingReviewHeadDriftState();
+  const preserved = {
+    reviewRequest: structuredClone(initial.reviewRequest),
+    reviewOutcome: initial.reviewOutcome,
+    reviewHistory: structuredClone(initial.reviewHistory),
+  };
+  const client = new FakeClient({ pageSize: 1 });
+  addThread(client, {
+    id: 'THREAD_noncanonical_pending',
+    root: rootComment('THREAD_noncanonical_pending', { author: VIEWER }),
+  });
+  const setup = workflow(initial, client);
+  const result = await setup.api.refreshThreads(2);
+
+  assert.equal(result.threadResolutionStatus.status, 'passed');
+  assert.equal(result.threadResolutionStatus.headSha, HEAD);
+  assert.deepEqual(result.threadResolutionStatus.threads, []);
+  assert.deepEqual({
+    reviewRequest: setup.state.current.reviewRequest,
+    reviewOutcome: setup.state.current.reviewOutcome,
+    reviewHistory: setup.state.current.reviewHistory,
+  }, preserved);
+  assert.equal(client.events.length, 0);
+  assert.deepEqual(setup.state.calls.map((call) => call.name), ['checkpointTaskCompletion']);
+  assert.equal(setup.state.current.phase, 'ready-for-review');
+  assert.equal(setup.state.current.nextAction, 'Request canonical verification review.');
+
+  const firstRevision = setup.state.current.revision;
+  const retry = await setup.api.refreshThreads(2);
+  assert.equal(retry.stateRevision, firstRevision);
+  assert.equal(setup.state.current.revision, firstRevision);
+  assert.deepEqual(setup.state.calls.map((call) => call.name), ['checkpointTaskCompletion']);
+  assert.deepEqual(setup.state.current.reviewHistory, preserved.reviewHistory);
+
+  const replacement = workflow(setup.state.current);
+  const requested = await replacement.api.request(2);
+  assert.equal(requested.request.kind, 'verification');
+  assert.equal(replacement.state.current.reviewHistory.length, 5);
+  assert.deepEqual(replacement.state.current.reviewHistory.slice(0, 4), preserved.reviewHistory);
+  assert.equal(replacement.state.current.reviewHistory.at(-1).outcome, null);
+  assert.deepEqual(replacement.client.events.slice(0, 2), [
+    'intent:request', 'mutation:AddReviewRequest',
+  ]);
+
+  const finite = workflow(tasklessPendingReviewHeadDriftState({ reviewRequestLimit: 4 }));
+  await finite.api.refreshThreads(2);
+  assert.equal(finite.state.current.phase, 'ready-for-review');
+  assert.match(finite.state.current.nextAction,
+    /set-review-limit --pr 2 --expected-revision 2 --limit <higher-number> or --unlimited/u);
+  const exhausted = workflow(finite.state.current);
+  await assert.rejects(() => exhausted.api.request(2), { code: 'REQUEST_NOT_READY' });
+  assert.equal(exhausted.client.events.length, 0);
+  assert.equal(exhausted.state.calls.length, 0);
+  assert.deepEqual(exhausted.state.current.reviewHistory, preserved.reviewHistory);
+});
+
+test('taskless pending-review HEAD-drift refresh requires the exact immutable request anchor', async () => {
+  for (const mutate of [
+    (client) => { client.comments = []; },
+    (client) => { client.comments[0] = { ...client.comments[0], body: '@codex review edited' }; },
+    (client) => { client.comments[0] = { ...client.comments[0], author: BOT }; },
+  ]) {
+    const setup = workflow(tasklessPendingReviewHeadDriftState());
+    mutate(setup.client);
+    const result = await setup.api.refreshThreads(2);
+    assert.equal(result.escalated, true);
+    assert.equal(result.escalation.reason, 'request-head-drift');
+    assert.equal(setup.state.current.phase, 'awaiting-human-decision');
+    assert.equal(setup.client.events.length, 0);
+    assert.deepEqual(setup.state.calls.map((call) => call.name), [
+      'checkpointVerificationEscalation',
+    ]);
+  }
+});
+
+test('taskless pending-review HEAD-drift refresh escalates canonical outcome evidence', async () => {
+  for (const [label, prepare] of [
+    ['stale exact review', (client) => client.reviews.push(canonicalReview({ commit: { oid: OTHER_HEAD } }))],
+    ['foreign-head review', (client) => client.reviews.push(canonicalReview({ commit: { oid: HEAD } }))],
+    ['canonical request reaction', (client) => client.reactions.set('IC_verification_4', [{
+      id: 'REACTION_1', content: 'THUMBS_UP', createdAt: AT, user: BOT,
+    }])],
+    ['canonical review root', (client) => addThread(client)],
+  ]) {
+    const client = new FakeClient();
+    prepare(client);
+    const setup = workflow(tasklessPendingReviewHeadDriftState(), client);
+    const result = await setup.api.refreshThreads(2);
+    assert.equal(result.escalated, true, label);
+    assert.equal(result.escalation.reason, 'request-head-drift', label);
+    assert.equal(setup.state.current.phase, 'awaiting-human-decision', label);
+    assert.equal(client.events.length, 0, label);
+    assert.deepEqual(setup.state.calls.map((call) => call.name), [
+      'checkpointVerificationEscalation',
+    ], label);
+  }
+});
+
 test('taskless clean-review HEAD-drift refresh fails closed at lifecycle and live-proof boundaries', async () => {
+  await assert.rejects(() => workflow(tasklessPendingReviewHeadDriftState({
+    validationStatus: stateFixture().validationStatus,
+  })).api.refreshThreads(2), { code: 'TASKLESS_REFRESH_NOT_ALLOWED' });
+  await assert.rejects(() => workflow(tasklessPendingReviewHeadDriftState({
+    reviewedHeadSha: OTHER_HEAD,
+  })).api.refreshThreads(2), { code: 'TASKLESS_REFRESH_NOT_ALLOWED' });
+  await assert.rejects(() => workflow(tasklessPendingReviewHeadDriftState({
+    legacyReviewProvenance: { schemaVersion: 1, discoveryRounds: 0, migratedAt: AT },
+  })).api.refreshThreads(2), { code: 'TASKLESS_REFRESH_NOT_ALLOWED' });
+
   const unvalidated = tasklessReviewHeadDriftState({
     validationStatus: stateFixture().validationStatus,
   });
@@ -796,15 +961,6 @@ test('taskless clean-review HEAD-drift refresh fails closed at lifecycle and liv
   findings.reviewOutcome = { ...findings.reviewOutcome, outcome: 'findings' };
   findings.reviewHistory = [{ request: findings.reviewRequest, outcome: findings.reviewOutcome }];
   await assert.rejects(() => workflow(findings).api.refreshThreads(2), {
-    code: 'TASKLESS_REFRESH_NOT_ALLOWED',
-  });
-
-  const pending = tasklessReviewHeadDriftState({
-    reviewedHeadSha: null,
-    reviewOutcome: null,
-  });
-  pending.reviewHistory = [{ request: pending.reviewRequest, outcome: null }];
-  await assert.rejects(() => workflow(pending).api.refreshThreads(2), {
     code: 'TASKLESS_REFRESH_NOT_ALLOWED',
   });
 
@@ -3318,7 +3474,8 @@ test('altered verification anchors remain ambiguous even when the live HEAD chan
     if (changedHead) client.metadata.headRefOid = OTHER_HEAD;
     const result = await setup.api.collect(2);
     assert.equal(result.escalated, true);
-    assert.equal(result.escalation.reason, 'ambiguous-canonical-evidence');
+    assert.equal(result.escalation.reason,
+      changedHead ? 'request-head-drift' : 'ambiguous-canonical-evidence');
     assert.equal(result.escalation.headRelation, changedHead ? 'changed' : 'same');
   }
   const discovery = workflow(pendingState('discovery'));
