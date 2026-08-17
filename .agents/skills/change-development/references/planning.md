@@ -46,7 +46,7 @@ An implementation-plan v1 records:
 - checklist mappings; and
 - a planned dependency DAG with anticipated paths, ownership, validation intent, and specialist-routing signals.
 
-Anticipated paths and validation intent are non-executable planning data. Implementation-plan v1 represents anticipated paths as unambiguous, whitespace-free repository-relative ownership prefixes; it does not accept whitespace-bearing path strings, environment assignments, or shell syntax that could instead be executable input. Exact binding ownership and commands belong to the later implementation workflow.
+Anticipated paths and validation intent are non-executable planning data. Implementation-plan v1 represents anticipated paths as unambiguous, whitespace-free repository-relative ownership prefixes; it does not accept whitespace-bearing path strings, environment assignments, or shell syntax that could instead be executable input. `bind-task` converts one dependency-ready planned task into a narrower immutable packet with exact allowed and forbidden paths and direct validation commands; it cannot expand the accepted plan.
 
 ## Validation and specialist evidence
 
@@ -55,3 +55,16 @@ Validate both JSON Schema and semantic contracts. Load the canonical specialist 
 Reject a plan with unresolved test selection, duplicate IDs, invalid criterion or decision references, missing criterion ownership, unknown dependencies, dependency cycles, consumer work ordered before its producer, overlapping planned ownership, or cross-domain work marked unsplittable without a reason. Require clean current Planning-SHA `behavior_mapper` evidence whenever the final route requires it.
 
 Acceptance requires every readiness gate to pass and writes immutable canonical JSON plus its SHA-256 receipt. Record each later accepted-source-drift decision independently. An amendment must include authorization, provenance and delta, the previous plan digest, current repository SHA, invalidated evidence, the new digest, and the complete resulting normalized plan. Never rewrite the original plan or prior amendments.
+
+After execution starts, an amendment retains the original Planning SHA. It may
+record a later clean central integration HEAD only through the explicit replan
+path: active work is rejected first, its worktree is safely removed, every
+stale packet/result/provenance path is named in `invalidatedEvidence`, and the
+replacement uses a new task ID. Already `integrated` or `no-change` task
+definitions and their referenced criteria and decisions are immutable. New
+packets bind the amended plan to the then-current central task base.
+
+For `implement` and `full`, acceptance also initializes bounded execution
+summaries from the effective plan. Existing v1 records remain historically
+valid, but execution writes require the explicit receipt-protected
+`upgrade-state` transition described in [implementation](implementation.md).

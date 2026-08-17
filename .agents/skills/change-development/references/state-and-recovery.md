@@ -13,6 +13,14 @@ change-development/
 ├── archive-lifecycle.json            # atomic self-digesting envelope; present only during archive
 ├── archives/<change-id>/
 │   └── archive-receipt.json[.sha256]
+├── worktrees/
+│   ├── changes/<change-id>/<task-id>/     # registered worker worktree
+│   ├── manifests/<change-id>/
+│   │   ├── <task-id>.creation.json[.sha256]
+│   │   └── <task-id>.json[.sha256]
+│   └── tombstones/<change-id>/
+│       ├── <task-id>.removal.json[.sha256]
+│       └── <task-id>.json[.sha256]
 └── changes/<change-id>/
     ├── state.json
     ├── events.jsonl
@@ -27,6 +35,14 @@ change-development/
     │       ├── <number>.json[.sha256]
     │       └── <number>.evidence.json[.sha256]
     ├── decisions/<decision-id>.json[.sha256]
+    ├── implementation/
+    │   ├── tasks/<task-id>/<binding>.json[.sha256]
+    │   ├── provenance/<task-id>/<binding>.json[.sha256]
+    │   ├── planning-signals/<task-id>/<binding>.json[.sha256]
+    │   ├── specialist-routes/<task-id>/<binding>.json[.sha256]
+    │   ├── behavior-mapper/<task-id>/<binding>.json[.sha256] # when routed
+    │   ├── results/<task-id>/<attempt>.json[.sha256]
+    │   └── rejections/<task-id>/<revision>.json[.sha256]
     └── transitions/
         ├── .<eight-digit-revision>.<pid>.<uuid>.pending/ # uncommitted; rollback-only
         └── <eight-digit-revision>/
@@ -37,7 +53,13 @@ change-development/
 
 Source observations and committed transition directories use eight-digit revision names; amendments use four-digit sequence names. A pending transition directory is transient staging and does not establish an intent. Recovery may remove only a recognized pending directory with the expected staging contents; it never promotes one. The root archive lifecycle is one atomically written envelope whose `intentDigest` binds its embedded intent, with no companion receipt. An archived change separately receives the immutable `archive-receipt.json` and its SHA-256 receipt. Bracketed `.sha256` denotes the canonical receipt beside its JSON artifact. `worktree.json` binds local Git checkpointing to the linked worktree that initialized the change: all linked worktrees share the common-directory state, but `PreCompact` from another worktree warns and leaves its Git observation unchanged.
 
-Large immutable evidence stays outside `state.json`. Initial and refreshed source observations, accepted plan, decision records, and amendments use canonical JSON SHA-256 receipts. `state.json` contains bounded mutable coordination data: mode, phase, revision, source/plan digests, current Git observation, unresolved decisions, checklist status, and the exact next action.
+Large immutable evidence stays outside `state.json`. Initial and refreshed source observations, accepted plan, decision records, amendments, task packets, worker results, and worktree manifests/tombstones use canonical JSON SHA-256 receipts. `state.json` contains bounded mutable coordination data: mode, phase, revision, source/plan digests, current Git observation, unresolved decisions, checklist status, compact execution task summaries, the active wave of at most three task IDs, an optional integration intent, and the exact next action.
+
+Development-state v1 remains a valid historical format so its immutable
+transition intents can still be replayed. New records are v2. An accepted v1
+record moves to v2 only through the explicit `upgrade-state` transition at the
+exact recorded clean Git observation; ordinary execution writes never perform
+an implicit upgrade.
 
 ## Phases
 
@@ -45,17 +67,32 @@ Large immutable evidence stays outside `state.json`. Initial and refreshed sourc
 - `planning`: source is stable and the plan is being prepared or validated.
 - `awaiting-decision`: an accepted plan requires an explicit source-drift decision.
 - `ready-to-implement`: accepted plan and readiness evidence are complete.
+- `implementing`: v2 task packets, waves, worker results, or dependency-ordered integration are in progress.
+- `integrating`: a durable central integration intent exists and must be reconciled exactly.
+- `integrated`: every planned task is integrated or receipt-backed `no-change`; this capability stops before integrated-HEAD verification.
 - `blocked`: integrity, evidence, or repository state prevents safe continuation.
 - `recovering`: an exact interrupted transition is being verified and completed.
 - `abandoned`: the operator intentionally ended the change without implementation readiness.
 
-`plan-only` reaches normal completion at `ready-to-implement` and may be archived. `implement` and `full` remain active there for the later implementation workflow.
+`plan-only` reaches normal completion at `ready-to-implement` and may be
+archived. `implement` and `full` continue through bounded execution to
+`integrated`; issue #24 owns the next verification and delivery stage.
 
 ## Locking and transitions
 
 Initialization, `active.json`, and archive operations take the global lifecycle lock. State transitions take the per-change lock. If both are needed, always acquire global then change; never invert that order. A stale lock is reclaimed only after the fixed threshold when its recorded process is dead on the current host, or when an incomplete lock has remained stale for that threshold. Other contention times out; never delete a lock heuristically.
 
 Every transition has a proposed revision, intent record, receipt, concise event, and completion marker. The intent becomes committed only when its fully written staging directory is atomically renamed to the eight-digit revision directory. It embeds `authoritativeEvidence` entries with each domain sidecar's exact path, label, canonical digest, and complete value. State, receipts, and completion markers use atomic `fsync` plus rename writes. `events.jsonl` is canonically reconstructed and atomically rewritten instead of appended in place. Revision mismatches fail closed. Network work is never performed while a state lock is held.
+
+Central integration is a deliberate exception to a single locked filesystem
+transition: `integrate-task` first commits the intent under the lock, runs
+`git cherry-pick --no-edit` outside it, then reconciles under the lock. The
+persisted intent is the only authority for an interrupted integration. The
+owning central branch is part of that authority. A clean single-parent central
+commit on that exact branch must have the recorded base as parent and an
+equivalent delta to the recorded worker commit. `integrated` is a separate
+receipt-protected finalization transition that also proves every terminal
+worker manifest has a matching removal tombstone.
 
 ## Recovery
 
@@ -74,4 +111,14 @@ intents, relabeled intents, and inconsistent evidence are rejected;
 
 A missing or tampered committed intent, its SHA-256 receipt, or its authoritative evidence bundle blocks recovery. Existing domain evidence or receipts that conflict with the embedded path, value, or digest also block; orphan evidence is never attached heuristically. Recovery does not invent evidence beyond an intact authoritative intent, skip revisions, or delete locks. A recognized transient pending directory is uncommitted and rollback-only. Resolve other integrity failures through an explicit authorized decision or amendment when the state machine permits it; otherwise abandon while retaining evidence.
 
-`SessionStart` may report bounded recovery context. `PreCompact` performs only local filesystem and Git observation, may append a revision-guarded Git checkpoint under the change lock, and performs no source refresh or network work. Its durable state preserves the exact next action so a resumed session can continue safely.
+When state is `integrating`, use `reconcile-integration` rather than generic
+`recover`. On the exact owning branch at the clean recorded base it applies the
+persisted worker commit; at its clean resulting commit it verifies and records
+the delta. A detached or different branch, dirty checkout, or
+unrelated/non-equivalent commit fails closed and preserves the
+intent for inspection. If inspection proves a real unplanned dependency, abort
+only the in-progress cherry-pick to the intent base, record `reject-task`, remove
+that rejected worktree, and append the explicit new-ID plan amendment. Do not
+reset, repeat, or broaden work based on guesswork.
+
+`SessionStart` may report bounded recovery context. `PreCompact` performs only local filesystem and Git observation, may append a revision-guarded Git checkpoint under the change lock, and performs no source refresh or network work. It refuses to checkpoint from a non-owning linked worktree and directs an active integration intent to `reconcile-integration`. Its durable state preserves the exact next action so a resumed session can continue safely.

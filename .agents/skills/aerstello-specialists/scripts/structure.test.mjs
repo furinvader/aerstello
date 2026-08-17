@@ -31,6 +31,7 @@ const EXPECTED_EXTERNAL_ADAPTERS = [
 ];
 
 const EXPECTED_WORKFLOW_CONSUMERS = [
+  { path: '.codex/agents/implementation-worker.toml', targets: ['registry.json'] },
   { path: '.codex/agents/integration-verifier.toml', targets: ['references/reviewer-contracts.md'] },
   { path: '.codex/agents/review-fix-worker.toml', targets: ['registry.json'] },
   { path: '.agents/skills/pr-review-cycle/ownership.json', targets: [] },
@@ -148,9 +149,25 @@ test('the PR integration verifier remains a read-only workflow consumer', () => 
     path === '.codex/agents/integration-verifier.toml'));
 });
 
+test('the implementation worker consumes one profile as guidance without lifecycle authority', () => {
+  const source = readFileSync(join(repositoryRoot(), '.codex/agents/implementation-worker.toml'), 'utf8');
+  assert.match(source, /^name = "implementation_worker"$/mu);
+  assert.match(source, /^model_reasoning_effort = "medium"$/mu);
+  assert.match(source, /^\[agents\]\nenabled = false$/mu);
+  assert.match(source, /exactly the Aerstello specialist profile named by the packet/u);
+  assert.match(source, /guidance only/u);
+  assert.match(source, /Do not delegate/u);
+  assert.match(source, /Do not integrate commits/u);
+  assert.match(source, /edit central change-development state/u);
+  assert.match(source, /push/u);
+  assert.match(source, /GitHub/u);
+});
+
 test('hook role boundary and four-thread cap remain authoritative', () => {
   const hooks = JSON.parse(readFileSync(join(repositoryRoot(), '.codex', 'hooks.json'), 'utf8'));
-  assert.deepEqual(hooks.hooks.SubagentStop.map(({ matcher }) => matcher), ['^review_fix_worker$']);
+  assert.deepEqual(hooks.hooks.SubagentStop.map(({ matcher }) => matcher), [
+    '^review_fix_worker$', '^implementation_worker$',
+  ]);
   const config = readFileSync(join(repositoryRoot(), '.codex', 'config.toml'), 'utf8');
   assert.match(config, /^max_concurrent_threads_per_session = 4$/mu);
   const registrations = [
@@ -159,6 +176,7 @@ test('hook role boundary and four-thread cap remain authoritative', () => {
     ['behavior_mapper', 'agents/behavior-mapper.toml'],
     ['security_reviewer', 'agents/security-reviewer.toml'],
     ['offline_realtime_reviewer', 'agents/offline-realtime-reviewer.toml'],
+    ['implementation_worker', 'agents/implementation-worker.toml'],
   ];
   for (const [role, configFile] of registrations) {
     assert.match(

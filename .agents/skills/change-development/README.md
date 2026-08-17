@@ -1,8 +1,15 @@
 # How change development works
 
-The `$change-development` capability creates and resumes a durable implementation plan for one Aerstello change. It preserves the exact planning source, Git observation, decisions, specialist evidence, and accepted plan so another session can continue without reconstructing intent.
+The `$change-development` capability plans, implements, and resumes one durable
+Aerstello change. It preserves the exact source, Git observations, decisions,
+specialist evidence, accepted plan, immutable worker packets and results, and
+central integration receipts so another session can continue without
+reconstructing intent.
 
-This capability stops at planning readiness. It does not execute planned tasks, start implementation workers, conduct a PR review cycle, merge, or write to GitHub. Issue reads through the standalone adapter are read-only.
+This capability stops when the planned task graph is `integrated`. It does not
+perform issue #24's integrated-HEAD verification, prepare or review a pull
+request, merge, or write to GitHub. Issue reads through the standalone adapter
+are read-only.
 
 ## Terms
 
@@ -13,6 +20,10 @@ This capability stops at planning readiness. It does not execute planned tasks, 
 - **Accepted plan**: canonical validated `plan.json`. Acceptance freezes it permanently.
 - **Decision**: a normalized candidate-plan resolution before acceptance, or an append-only operator resolution of accepted-plan source drift afterward.
 - **Amendment**: authorized append-only plan evolution containing provenance, delta, the complete resulting normalized plan, and old/new digest receipts.
+- **Task packet**: immutable, receipt-protected binding of one accepted-plan task to its exact base SHA, paths, decisions, criteria, specialist route, and validation commands.
+- **Implementation result**: one worker's schema-valid `implemented`, `blocked`, `failed`, or `no-change` report, checked against its packet and Git evidence.
+- **Wave**: at most three dependency-ready bound tasks whose ownership and produced/consumed artifacts do not conflict.
+- **Integration intent**: durable record of one accepted worker commit and the exact clean central base, written before cherry-pick.
 - **Exact next action**: one bounded command or operator action stored in state and emitted by status/hooks.
 
 ## Start or resume
@@ -71,8 +82,22 @@ Use the following lifecycle commands through `npm run change:state --`:
 | `amend-plan` | Append an authorized complete resulting plan without rewriting history |
 | `recover` | Finish only an exact matching interrupted transition |
 | `archive` | Archive an abandoned change or normally completed `plan-only` change |
+| `upgrade-state` | Explicitly receipt-protect a v1 accepted record as execution-capable v2 |
+| `bind-task` | Bind one immutable task packet to the effective plan and clean central base |
+| `schedule-wave` | Select up to three dependency-ready, non-conflicting bound tasks |
+| `start-task` | Record one scheduled worker attempt as running |
+| `accept-result` | Validate and preserve one worker result against packet and Git evidence |
+| `integrate-task` | Persist integration intent, cherry-pick the worker commit, and reconcile |
+| `reconcile-integration` | Apply or finish an interrupted integration from the persisted intent |
+| `reject-task` | Receipt-record a bounded rejection before worktree cleanup and replan |
+| `finalize-integration` | Prove all terminal worktrees removed and enter `integrated` |
 
-Pass the current state revision with `--expected-revision` to `refresh-source`, `accept-plan`, `record-decision`, `amend-plan`, and `archive`. Revision conflicts fail closed. `recover` instead verifies the exact committed interrupted intent and receipt chain; it does not accept a guessed revision. Uncommitted hidden transition staging is rollback-only. An intact committed intent may restore only its exactly embedded evidence and deterministic receipts; conflicting or tampered artifacts block.
+Pass the current state revision with `--expected-revision` to every mutating
+state command. Revision conflicts fail closed. `recover` instead verifies the
+exact committed interrupted intent and receipt chain; it does not accept a
+guessed revision. Uncommitted hidden transition staging is rollback-only. An
+intact committed intent may restore only its exactly embedded evidence and
+deterministic receipts; conflicting or tampered artifacts block.
 
 `validate --plan` proves acceptance readiness only against the active durable state. It first validates that state's complete receipt, transition, and source-observation chain, then binds the candidate to the exact change, source capture, and Planning SHA. Without an active state it may report candidate schema errors, but readiness is always false and the command fails with a durable-state-required error.
 
@@ -114,14 +139,36 @@ An amendment input records provenance separately from the complete resulting pla
 }
 ```
 
-Read [planning](references/planning.md) for source, checklist, validation, and drift rules. Read [state and recovery](references/state-and-recovery.md) before recovery, abandonment, or archival.
+Read [planning](references/planning.md) for source, checklist, validation, and
+drift rules. Read [implementation](references/implementation.md) for packet,
+worktree, result, wave, and integration rules. Read
+[state and recovery](references/state-and-recovery.md) before recovery,
+abandonment, or archival.
 
 ## Hooks and trust
 
 `SessionStart` and `PreCompact` run independent change-development handlers beside the PR-review handlers in the same matcher groups. Matching commands may run independently and concurrently; neither capability depends on handler order. The change handlers are no-op-safe when no change is active, emit bounded context, and perform no network work during compaction.
 
-After `.codex/hooks.json` changes, inspect and renew project hook trust with `/hooks`. No new `SubagentStop` handler or agent adapter belongs to this capability.
+`SubagentStop` has a separate exact `^implementation_worker$` matcher. Its
+handler accepts only the worker's raw schema-valid result object and validates
+its document shape; guarded `accept-result` later cross-validates the object
+against the immutable packet, worktree, and Git. The handler is independent of
+the existing exact `^review_fix_worker$` matcher. The implementation worker
+adapter may not delegate, integrate, mutate central state, push, or write to
+GitHub.
+
+After `.codex/hooks.json` changes, inspect and renew project hook trust with
+`/hooks`. Do not use implementation workers until that exact hook configuration
+is trusted.
 
 ## Handoff boundary
 
-At `ready-to-implement`, verify `npm run change:status` reports no unresolved decision and one exact next action. For `plan-only`, archive when desired. For `implement` or `full`, leave the active record in place for the separate implementation capability introduced by later work.
+At `ready-to-implement`, verify `npm run change:status` reports no unresolved
+decision and one exact next action. For `plan-only`, archive when desired. For
+`implement` or `full`, upgrade an inherited v1 record if required, then follow
+the dependency graph through binding, worktree execution, result acceptance,
+and central integration.
+
+Stop when status reaches `integrated`. Do not start issue #24 verification,
+open or update a PR, resolve review threads, push, or otherwise mutate GitHub as
+part of this capability.

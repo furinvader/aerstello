@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aerstello.local/schemas/change-development/implementation-result-v1.schema.json",
+  "title": "Aerstello implementation worker result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "changeId", "taskId", "planDigest", "packetDigest", "specialization",
+    "taskBaseSha", "status", "workerCommit", "changedPaths", "validation",
+    "unexpectedDependencies", "summary"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "changeId": { "$ref": "#/$defs/id" },
+    "taskId": { "$ref": "#/$defs/id" },
+    "planDigest": { "$ref": "#/$defs/digest" },
+    "packetDigest": { "$ref": "#/$defs/digest" },
+    "specialization": { "enum": ["web", "api", "contracts", "data-integrity", "behavior-tests", "ops-workflow"] },
+    "taskBaseSha": { "$ref": "#/$defs/sha" },
+    "status": { "enum": ["implemented", "blocked", "failed", "no-change"] },
+    "workerCommit": { "oneOf": [{ "$ref": "#/$defs/sha" }, { "type": "null" }] },
+    "changedPaths": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/repositoryPath" } },
+    "validation": { "type": "array", "items": { "$ref": "#/$defs/validationResult" } },
+    "unexpectedDependencies": { "$ref": "#/$defs/textList" },
+    "summary": { "$ref": "#/$defs/text" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "implemented" } }, "required": ["status"] },
+      "then": {
+        "properties": {
+          "workerCommit": { "$ref": "#/$defs/sha" },
+          "changedPaths": { "type": "array", "minItems": 1 },
+          "unexpectedDependencies": { "type": "array", "maxItems": 0 }
+        }
+      },
+      "else": {
+        "properties": {
+          "workerCommit": { "type": "null" },
+          "changedPaths": { "type": "array", "maxItems": 0 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "no-change" } }, "required": ["status"] },
+      "then": {
+        "properties": {
+          "changedPaths": { "type": "array", "maxItems": 0 },
+          "unexpectedDependencies": { "type": "array", "maxItems": 0 }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "text": { "type": "string", "minLength": 1, "maxLength": 4000, "pattern": "\\S" },
+    "id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 128 },
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "repositoryPath": {
+      "type": "string", "minLength": 1, "maxLength": 500,
+      "pattern": "^(?!/)(?!.*//)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*(?:^|/)\\.git(?:/|$))(?!.*[\\u0000-\\u001f\\u007f-\\u009f])[^/*?\\[\\]{}]+(?:/[^/*?\\[\\]{}]+)*$"
+    },
+    "textList": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/text" } },
+    "validationResult": {
+      "type": "object", "additionalProperties": false, "required": ["command", "result", "summary"],
+      "properties": {
+        "command": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "result": { "enum": ["passed", "failed", "skipped"] },
+        "summary": { "$ref": "#/$defs/text" }
+      }
+    }
+  }
+}

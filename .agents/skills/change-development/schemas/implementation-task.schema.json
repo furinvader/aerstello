@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aerstello.local/schemas/change-development/implementation-task-v1.schema.json",
+  "title": "Aerstello immutable implementation task packet v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "changeId", "taskId", "planRevision", "planDigest", "planningSha",
+    "taskBaseSha", "specialization", "riskTags", "affectedAreas", "planningSignals",
+    "specialistRoute", "behaviorMapperEvidence", "objective", "evidence", "decisionIds",
+    "decisionContext", "acceptanceCriteriaIds", "acceptanceCriteria", "allowedPaths",
+    "forbiddenPaths", "dependencies", "requiredValidation"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "changeId": { "$ref": "#/$defs/id" },
+    "taskId": { "$ref": "#/$defs/id" },
+    "planRevision": { "type": "integer", "minimum": 1 },
+    "planDigest": { "$ref": "#/$defs/digest" },
+    "planningSha": { "$ref": "#/$defs/sha" },
+    "taskBaseSha": { "$ref": "#/$defs/sha" },
+    "specialization": { "enum": ["web", "api", "contracts", "data-integrity", "behavior-tests", "ops-workflow"] },
+    "riskTags": { "$ref": "#/$defs/riskTags" },
+    "affectedAreas": { "$ref": "#/$defs/affectedAreas" },
+    "planningSignals": { "$ref": "#/$defs/planningSignals" },
+    "specialistRoute": { "$ref": "#/$defs/route" },
+    "behaviorMapperEvidence": {
+      "oneOf": [{ "$ref": "#/$defs/behaviorMapperEvidence" }, { "type": "null" }]
+    },
+    "objective": { "$ref": "#/$defs/text" },
+    "evidence": { "$ref": "#/$defs/text" },
+    "decisionIds": { "$ref": "#/$defs/idList" },
+    "decisionContext": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/decisionContext" } },
+    "acceptanceCriteriaIds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+    "acceptanceCriteria": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/acceptanceCriterion" } },
+    "allowedPaths": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/ownershipPath" } },
+    "forbiddenPaths": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/ownershipPath" } },
+    "dependencies": { "$ref": "#/$defs/idList" },
+    "requiredValidation": { "$ref": "#/$defs/requiredValidation" }
+  },
+  "$defs": {
+    "text": { "type": "string", "minLength": 1, "maxLength": 4000, "pattern": "\\S" },
+    "id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 128 },
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "idList": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+    "textList": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/text" } },
+    "decisionContext": {
+      "type": "object", "additionalProperties": false, "required": ["id", "resolution"],
+      "properties": { "id": { "$ref": "#/$defs/id" }, "resolution": { "$ref": "#/$defs/text" } }
+    },
+    "acceptanceCriterion": {
+      "type": "object", "additionalProperties": false, "required": ["id", "description"],
+      "properties": { "id": { "$ref": "#/$defs/id" }, "description": { "$ref": "#/$defs/text" } }
+    },
+    "riskTags": {
+      "type": "array", "uniqueItems": true,
+      "items": { "enum": ["authentication", "authorization", "billing", "money", "migration", "release", "offline", "realtime", "localization", "responsive", "deployment", "workflow"] }
+    },
+    "affectedAreas": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": { "enum": ["api", "web", "shared", "workflow", "documentation", "release", "migration"] }
+    },
+    "repositoryPath": {
+      "type": "string", "minLength": 1, "maxLength": 500,
+      "pattern": "^(?!/)(?!.*//)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*(?:^|/)\\.git(?:/|$))(?!.*[\\u0000-\\u001f\\u007f-\\u009f])[^/*?\\[\\]{}]+(?:/[^/*?\\[\\]{}]+)*$"
+    },
+    "ownershipPath": {
+      "type": "string", "minLength": 1, "maxLength": 500,
+      "pattern": "^(?!/)(?!.*//)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*(?:^|/)\\.git(?:/|$))(?!.*[\\u0000-\\u001f\\u007f-\\u009f])[^/*?\\[\\]{}]+(?:/[^/*?\\[\\]{}]+)*(?:/\\*\\*)?$"
+    },
+    "planningSignals": {
+      "type": "object", "additionalProperties": false,
+      "required": ["browserVisible", "relatedTestSelectionUncertain"],
+      "properties": {
+        "browserVisible": { "type": "boolean" },
+        "relatedTestSelectionUncertain": { "type": "boolean" }
+      }
+    },
+    "routeReason": {
+      "type": "object", "additionalProperties": false, "required": ["id", "reasons"],
+      "properties": {
+        "id": { "enum": ["behavior_mapper", "security_reviewer", "offline_realtime_reviewer", "data-integrity", "ops-workflow"] },
+        "reasons": { "$ref": "#/$defs/textList" }
+      }
+    },
+    "route": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "specialization", "profileGuidePath", "riskTags", "signals", "planningHelpers", "riskReviewers", "supplementalGuidance", "finalVerificationPriority"],
+      "properties": {
+        "schemaVersion": { "const": 2 },
+        "specialization": { "$ref": "#/$defs/id" },
+        "profileGuidePath": { "$ref": "#/$defs/repositoryPath" },
+        "riskTags": { "$ref": "#/$defs/idList" },
+        "signals": {
+          "type": "object", "additionalProperties": false, "required": ["browserVisible", "testSelectionUncertain"],
+          "properties": { "browserVisible": { "type": "boolean" }, "testSelectionUncertain": { "type": "boolean" } }
+        },
+        "planningHelpers": { "type": "array", "items": { "$ref": "#/$defs/routeReason" } },
+        "riskReviewers": { "type": "array", "items": { "$ref": "#/$defs/routeReason" } },
+        "supplementalGuidance": { "type": "array", "items": { "$ref": "#/$defs/routeReason" } },
+        "finalVerificationPriority": { "enum": ["standard", "high"] }
+      }
+    },
+    "behaviorMapperEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "reviewerId", "headSha", "status", "summary", "findings", "recordedAt", "planRevision"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "reviewerId": { "const": "behavior_mapper" },
+        "headSha": { "$ref": "#/$defs/sha" },
+        "status": { "enum": ["clean", "findings"] },
+        "summary": { "$ref": "#/$defs/text" },
+        "findings": { "$ref": "#/$defs/textList" },
+        "recordedAt": { "type": "string", "format": "date-time" },
+        "planRevision": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "validationCommand": {
+      "type": "object", "additionalProperties": false, "required": ["command", "reason"],
+      "properties": { "command": { "type": "string", "minLength": 1, "maxLength": 500 }, "reason": { "$ref": "#/$defs/text" } }
+    },
+    "systemValidationCommand": {
+      "type": "object", "additionalProperties": false, "required": ["command", "reason", "selectors", "projects"],
+      "properties": {
+        "command": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "reason": { "$ref": "#/$defs/text" },
+        "selectors": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^@?[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 200 } },
+        "projects": { "type": "array", "uniqueItems": true, "items": { "enum": ["tablet-chromium", "mobile-webkit", "desktop-firefox"] } }
+      },
+      "oneOf": [
+        { "properties": { "selectors": { "type": "array", "minItems": 1 }, "projects": { "type": "array", "minItems": 1 } } },
+        { "properties": { "selectors": { "type": "array", "maxItems": 0 }, "projects": { "type": "array", "maxItems": 0 } } }
+      ]
+    },
+    "requiredValidation": {
+      "type": "object", "additionalProperties": false, "required": ["unit", "system"],
+      "properties": {
+        "unit": { "type": "array", "items": { "$ref": "#/$defs/validationCommand" } },
+        "system": { "type": "array", "items": { "$ref": "#/$defs/systemValidationCommand" } }
+      },
+      "anyOf": [
+        { "properties": { "unit": { "type": "array", "minItems": 1 } } },
+        { "properties": { "system": { "type": "array", "minItems": 1 } } }
+      ]
+    }
+  }
+}

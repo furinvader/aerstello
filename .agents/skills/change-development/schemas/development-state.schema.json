@@ -1,16 +1,17 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://aerstello.local/schemas/change-development/development-state-v1.schema.json",
-  "title": "Aerstello durable change-development state v1",
+  "$id": "https://aerstello.local/schemas/change-development/development-state-v2.schema.json",
+  "title": "Aerstello durable change-development state v1/v2",
   "type": "object", "additionalProperties": false,
   "required": ["schemaVersion", "changeId", "mode", "phase", "revision", "baseBranch", "expectedPrBaseBranch", "planningRef", "planningSha", "source", "plan", "git", "unresolvedDecisionIds", "checklist", "blockedReasons", "abandonmentReason", "nextAction", "createdAt", "updatedAt"],
   "properties": {
-    "schemaVersion": { "const": 1 }, "changeId": { "$ref": "#/$defs/id" },
+    "schemaVersion": { "enum": [1, 2] }, "changeId": { "$ref": "#/$defs/id" },
     "mode": { "enum": ["plan-only", "implement", "full"] },
-    "phase": { "enum": ["initializing", "planning", "awaiting-decision", "ready-to-implement", "blocked", "recovering", "abandoned"] },
+    "phase": { "enum": ["initializing", "planning", "awaiting-decision", "ready-to-implement", "implementing", "integrating", "integrated", "blocked", "recovering", "abandoned"] },
     "revision": { "type": "integer", "minimum": 0 }, "baseBranch": { "type": "string", "minLength": 1, "maxLength": 255 }, "expectedPrBaseBranch": { "type": "string", "minLength": 1, "maxLength": 255 }, "planningRef": { "type": "string", "minLength": 1, "maxLength": 255 }, "planningSha": { "$ref": "#/$defs/sha" },
     "source": { "$ref": "#/$defs/sourceSummary" }, "plan": { "$ref": "#/$defs/planSummary" }, "git": { "$ref": "#/$defs/gitObservation" },
     "unresolvedDecisionIds": { "$ref": "#/$defs/idList" }, "checklist": { "type": "array", "items": { "$ref": "#/$defs/checklistStatus" } }, "blockedReasons": { "$ref": "#/$defs/textList" }, "abandonmentReason": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 2000 }, { "type": "null" }] },
+    "execution": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/executionSummary" }] },
     "nextAction": { "type": "string", "minLength": 1, "maxLength": 1000 }, "createdAt": { "type": "string", "format": "date-time" }, "updatedAt": { "type": "string", "format": "date-time" }
   },
   "$defs": {
@@ -19,6 +20,42 @@
     "sourceSummary": { "type": "object", "additionalProperties": false, "required": ["kind", "reference", "relationship", "initialDigest", "latestDigest", "fullDigest", "materialDigest", "progressDigest", "classification", "observationDigest", "latestCommentIdentity", "refreshedAt"], "properties": { "kind": { "enum": ["github-issue", "direct-request", "repository-plan", "partial-implementation"] }, "reference": { "type": "string", "minLength": 1, "maxLength": 1000 }, "relationship": { "enum": ["reference-only", "partial", "resolves"] }, "initialDigest": { "$ref": "#/$defs/digest" }, "latestDigest": { "$ref": "#/$defs/digest" }, "fullDigest": { "$ref": "#/$defs/digest" }, "materialDigest": { "$ref": "#/$defs/digest" }, "progressDigest": { "$ref": "#/$defs/digest" }, "classification": { "enum": ["unchanged", "progress-only", "unreviewed-material"] }, "observationDigest": { "$ref": "#/$defs/digest" }, "latestCommentIdentity": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 500 }, { "type": "null" }] }, "refreshedAt": { "type": "string", "format": "date-time" } } },
     "planSummary": { "oneOf": [{ "type": "null" }, { "type": "object", "additionalProperties": false, "required": ["revision", "originalDigest", "effectiveDigest", "sourceCaptureDigest", "amendmentCount", "acceptedAt"], "properties": { "revision": { "type": "integer", "minimum": 1 }, "originalDigest": { "$ref": "#/$defs/digest" }, "effectiveDigest": { "$ref": "#/$defs/digest" }, "sourceCaptureDigest": { "$ref": "#/$defs/digest" }, "amendmentCount": { "type": "integer", "minimum": 0 }, "acceptedAt": { "type": "string", "format": "date-time" } } }] },
     "gitObservation": { "type": "object", "additionalProperties": false, "required": ["headSha", "branch", "clean", "observedAt"], "properties": { "headSha": { "$ref": "#/$defs/sha" }, "branch": { "type": "string", "minLength": 1, "maxLength": 255 }, "clean": { "type": "boolean" }, "observedAt": { "type": "string", "format": "date-time" } } },
-    "checklistStatus": { "type": "object", "additionalProperties": false, "required": ["id", "checked", "status", "externalChange"], "properties": { "id": { "$ref": "#/$defs/id" }, "checked": { "type": "boolean" }, "status": { "enum": ["current", "ambiguous", "removed"] }, "externalChange": { "type": "boolean" } } }
+    "checklistStatus": { "type": "object", "additionalProperties": false, "required": ["id", "checked", "status", "externalChange"], "properties": { "id": { "$ref": "#/$defs/id" }, "checked": { "type": "boolean" }, "status": { "enum": ["current", "ambiguous", "removed"] }, "externalChange": { "type": "boolean" } } },
+    "nullableDigest": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+    "nullableSha": { "oneOf": [{ "$ref": "#/$defs/sha" }, { "type": "null" }] },
+    "taskSummary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "dependsOn", "anticipatedPaths", "produces", "consumes", "status", "binding", "attempt", "packetDigest", "taskBaseSha", "resultDigest", "workerCommit", "integratedCommit", "workerId", "worktreePath", "branch", "worktreeManifestDigest"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" }, "dependsOn": { "$ref": "#/$defs/idList" },
+        "anticipatedPaths": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
+        "produces": { "$ref": "#/$defs/idList" },
+        "consumes": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "status": { "enum": ["unbound", "bound", "scheduled", "running", "accepted", "integration-pending", "integrated", "blocked", "failed", "rejected", "no-change"] },
+        "binding": { "type": "integer", "minimum": 0 }, "attempt": { "type": "integer", "minimum": 0 }, "packetDigest": { "$ref": "#/$defs/nullableDigest" },
+        "taskBaseSha": { "$ref": "#/$defs/nullableSha" }, "resultDigest": { "$ref": "#/$defs/nullableDigest" },
+        "workerCommit": { "$ref": "#/$defs/nullableSha" }, "integratedCommit": { "$ref": "#/$defs/nullableSha" },
+        "workerId": { "oneOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "worktreePath": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 2000 }, { "type": "null" }] },
+        "branch": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 500 }, { "type": "null" }] },
+        "worktreeManifestDigest": { "$ref": "#/$defs/nullableDigest" }
+      }
+    },
+    "integrationIntent": {
+      "oneOf": [{ "type": "null" }, { "type": "object", "additionalProperties": false,
+        "required": ["taskId", "workerCommit", "centralBaseSha"],
+        "properties": { "taskId": { "$ref": "#/$defs/id" }, "workerCommit": { "$ref": "#/$defs/sha" }, "centralBaseSha": { "$ref": "#/$defs/sha" } }
+      }]
+    },
+    "executionSummary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["planDigest", "baseSha", "tasks", "activeWave", "integrationIntent"],
+      "properties": {
+        "planDigest": { "$ref": "#/$defs/digest" }, "baseSha": { "$ref": "#/$defs/sha" },
+        "tasks": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/taskSummary" } },
+        "activeWave": { "type": "array", "maxItems": 3, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "integrationIntent": { "$ref": "#/$defs/integrationIntent" }
+      }
+    }
   }
 }

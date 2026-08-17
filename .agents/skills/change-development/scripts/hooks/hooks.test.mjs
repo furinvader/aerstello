@@ -11,12 +11,30 @@ import { initializeState as initializePrState, loadState as loadPrState } from '
 
 const directory = new URL('.', import.meta.url);
 
-function hook(name, cwd) {
+function hook(name, cwd, input = { cwd }) {
   return spawnSync(process.execPath, [fileURLToPath(new URL(name, directory))], {
     cwd,
-    input: JSON.stringify({ cwd }),
+    input: JSON.stringify(input),
     encoding: 'utf8',
   });
+}
+
+function validImplementationResult() {
+  return {
+    schemaVersion: 1,
+    changeId: 'issue-23',
+    taskId: 'worker-layer',
+    planDigest: `sha256:${'a'.repeat(64)}`,
+    packetDigest: `sha256:${'b'.repeat(64)}`,
+    specialization: 'ops-workflow',
+    taskBaseSha: 'c'.repeat(40),
+    status: 'implemented',
+    workerCommit: 'd'.repeat(40),
+    changedPaths: ['scripts/example.mjs'],
+    validation: [{ command: 'node --test scripts/example.test.mjs', result: 'passed', summary: 'Focused test passed.' }],
+    unexpectedDependencies: [],
+    summary: 'Implemented the bound worker layer.',
+  };
 }
 
 function git(cwd, ...args) { return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim(); }
@@ -113,4 +131,29 @@ test('PreCompact fails open without advancing state when durable evidence is cor
   assert.equal(output.continue, true);
   assert.match(output.systemMessage, /not checkpointed/u);
   assert.deepEqual(loadState(cwd), before);
+});
+
+test('implementation worker stop hook accepts exact raw result JSON', () => {
+  const output = JSON.parse(hook('subagent-stop.mjs', process.cwd(), {
+    agent_type: 'implementation_worker', last_assistant_message: JSON.stringify(validImplementationResult()),
+  }).stdout);
+  assert.deepEqual(output, { continue: true });
+});
+
+test('implementation worker stop hook requests one correction and then warns without looping', () => {
+  const first = JSON.parse(hook('subagent-stop.mjs', process.cwd(), {
+    agent_type: 'implementation_worker', stop_hook_active: false, last_assistant_message: 'not json',
+  }).stdout);
+  assert.equal(first.decision, 'block'); assert.match(first.reason, /corrected raw JSON implementation-result/u);
+  const second = JSON.parse(hook('subagent-stop.mjs', process.cwd(), {
+    agent_type: 'implementation_worker', stop_hook_active: true, last_assistant_message: '{}',
+  }).stdout);
+  assert.equal(second.continue, true); assert.match(second.systemMessage, /after one correction attempt/u);
+});
+
+test('implementation worker stop hook ignores every other exact agent type', () => {
+  for (const agent_type of ['review_fix_worker', 'behavior_mapper', 'implementation-worker', '']) {
+    const output = JSON.parse(hook('subagent-stop.mjs', process.cwd(), { agent_type, last_assistant_message: 'not json' }).stdout);
+    assert.deepEqual(output, { continue: true });
+  }
 });

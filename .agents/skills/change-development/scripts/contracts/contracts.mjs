@@ -20,11 +20,12 @@ const Ajv2020 = require('ajv/dist/2020').default;
 const addFormats = require('ajv-formats').default;
 
 export const IMPLEMENTATION_PLAN_SCHEMA_VERSION = 1;
-export const DEVELOPMENT_STATE_SCHEMA_VERSION = 1;
+export const DEVELOPMENT_STATE_SCHEMA_VERSION = 2;
+export const HISTORICAL_DEVELOPMENT_STATE_SCHEMA_VERSIONS = Object.freeze([1, 2]);
 export const CHANGE_MODES = Object.freeze(['plan-only', 'implement', 'full']);
 export const DEVELOPMENT_PHASES = Object.freeze([
   'initializing', 'planning', 'awaiting-decision', 'ready-to-implement',
-  'blocked', 'recovering', 'abandoned',
+  'implementing', 'integrating', 'integrated', 'blocked', 'recovering', 'abandoned',
 ]);
 export const SOURCE_KINDS = Object.freeze([
   'github-issue', 'direct-request', 'repository-plan', 'partial-implementation',
@@ -529,6 +530,42 @@ export function validateDevelopmentState(value) {
   const errors = schemaErrors(validateStateSchema, value);
   if (errors.length > 0) return errors;
   for (const id of duplicates(value.checklist.map(({ id }) => id))) errors.push(`duplicate checklist status ID: ${id}`);
+  if (value.schemaVersion === 1 && !['initializing', 'planning', 'awaiting-decision', 'ready-to-implement', 'blocked', 'recovering', 'abandoned'].includes(value.phase)) {
+    errors.push(`development-state v1 cannot use phase ${value.phase}`);
+  }
+  if (value.schemaVersion === 1 && Object.hasOwn(value, 'execution')) errors.push('development-state v1 cannot contain execution state');
+  if (value.schemaVersion === 2) {
+    if (!Object.hasOwn(value, 'execution')) errors.push('development-state v2 requires execution state');
+    if (value.plan === null && value.execution !== null) errors.push('execution state requires an accepted plan');
+    if (value.plan !== null && value.execution === null) errors.push('development-state v2 with an accepted plan requires execution summaries');
+    if (value.execution) {
+      const taskIds = value.execution.tasks.map(({ id }) => id);
+      for (const id of duplicates(taskIds)) errors.push(`duplicate execution task ID: ${id}`);
+      if (value.execution.planDigest !== value.plan?.effectiveDigest) errors.push('execution planDigest must equal the effective accepted-plan digest');
+      for (const id of value.execution.activeWave) if (!taskIds.includes(id)) errors.push(`active wave names unknown task ${id}`);
+      const active = new Set(value.execution.activeWave);
+      for (const field of ['workerId', 'worktreePath', 'branch']) for (const duplicate of duplicates(value.execution.tasks.map((task) => task[field]).filter((entry) => entry !== null))) errors.push(`duplicate execution ${field}: ${duplicate}`);
+      for (const task of value.execution.tasks) {
+        if (task.dependsOn.includes(task.id)) errors.push(`execution task ${task.id} depends on itself`);
+        for (const dependency of task.dependsOn) if (!taskIds.includes(dependency)) errors.push(`execution task ${task.id} has unknown dependency ${dependency}`);
+        if (['scheduled', 'running'].includes(task.status) !== active.has(task.id)) errors.push(`execution task ${task.id} active-wave membership does not match status`);
+        if (task.status === 'unbound' && (task.packetDigest !== null || task.taskBaseSha !== null || task.workerId !== null
+            || task.worktreePath !== null || task.branch !== null || task.worktreeManifestDigest !== null)) errors.push(`unbound task ${task.id} cannot retain packet/worker binding`);
+        const workerFields = [task.workerId, task.worktreePath, task.branch, task.worktreeManifestDigest];
+        if (workerFields.some((value) => value !== null) && workerFields.some((value) => value === null)) errors.push(`execution task ${task.id} has a partial worker binding`);
+        if (['running', 'accepted', 'integration-pending', 'integrated', 'blocked', 'failed', 'no-change'].includes(task.status)
+            && workerFields.some((value) => value === null)) errors.push(`execution task ${task.id} status ${task.status} requires a worker binding`);
+        if (['integrated', 'no-change'].includes(task.status) && task.status === 'integrated' && task.integratedCommit === null) errors.push(`integrated task ${task.id} requires an integrated commit`);
+        if (['bound', 'scheduled', 'running', 'accepted', 'integration-pending', 'integrated', 'blocked', 'failed', 'rejected', 'no-change'].includes(task.status)
+            && (task.packetDigest === null || task.taskBaseSha === null)) errors.push(`execution task ${task.id} status ${task.status} requires packet binding`);
+        if (['accepted', 'integration-pending', 'integrated'].includes(task.status) && (task.resultDigest === null || task.workerCommit === null)) errors.push(`execution task ${task.id} status ${task.status} requires implemented result evidence`);
+        if (['blocked', 'failed', 'no-change'].includes(task.status) && task.resultDigest === null) errors.push(`execution task ${task.id} status ${task.status} requires result evidence`);
+      }
+      if (value.phase === 'integrating' && value.execution.integrationIntent === null) errors.push('integrating requires an integration intent');
+      if (value.execution.integrationIntent !== null && value.phase !== 'integrating') errors.push('integration intent is valid only while integrating');
+      if (value.phase === 'integrated' && value.execution.tasks.some((task) => !['integrated', 'no-change'].includes(task.status))) errors.push('integrated phase requires every task to be integrated or no-change');
+    }
+  }
   if (value.plan === null && ['ready-to-implement'].includes(value.phase)) errors.push(`${value.phase} requires an accepted plan`);
   if (value.source.fullDigest !== value.source.latestDigest) errors.push('source fullDigest must equal latestDigest');
   if (value.phase === 'ready-to-implement') {

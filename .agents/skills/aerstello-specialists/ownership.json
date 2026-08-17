@@ -29,6 +29,7 @@
     { "path": "AGENTS.md", "targets": ["README.md"] }
   ],
   "permittedWorkflowConsumers": [
+    { "path": ".codex/agents/implementation-worker.toml", "targets": ["registry.json"] },
     { "path": ".codex/agents/integration-verifier.toml", "targets": ["references/reviewer-contracts.md"] },
     { "path": ".codex/agents/review-fix-worker.toml", "targets": ["registry.json"] },
     { "path": ".agents/skills/pr-review-cycle/ownership.json", "targets": [] },

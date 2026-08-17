@@ -62,9 +62,13 @@ remain separately owned capabilities consumed by the review skill.
 ## Change development
 
 - Follow the [canonical change-development guide](./.agents/skills/change-development/README.md)
-  when planning or resuming a durable change from an issue, direct request,
-  repository plan, or committed partial implementation. Accepted plans are
-  immutable; implementation workers and GitHub writes belong to later workflows.
+  when planning, implementing, or resuming a durable change from an issue,
+  direct request, repository plan, or committed partial implementation.
+  Accepted plans and bound worker packets are immutable. Workers stay in their
+  assigned worktrees and exact path/validation scope; the central orchestrator
+  alone accepts results and integrates exact commits. Stop at `integrated`:
+  integrated-HEAD verification, PR work, and GitHub writes belong to the next
+  workflow.
 
 ## Code Review Rules
 

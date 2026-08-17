@@ -72,6 +72,23 @@ Commit messages are checked in CI. To validate a commit locally, run:
 npm run lint:commit -- --last --verbose
 ```
 
+Durable changes from issues, direct requests, repository plans, or partial
+implementations use the
+[canonical change-development guide](./.agents/skills/change-development/README.md).
+An accepted plan is immutable. The central orchestrator binds each
+dependency-ready task to an immutable packet, schedules at most three
+non-conflicting workers per wave, and assigns each worker an isolated worktree.
+Workers may change only packet-owned paths, run only packet-bound validation,
+and return one schema-valid result. An implemented result must contain exactly
+one direct descendant commit from its packet base. The orchestrator validates
+that Git evidence, persists integration intent for the exact owning central
+branch and base before cherry-pick, and reconciles the exact central commit
+afterward.
+
+Change development stops at `integrated`. Integrated-HEAD specialist
+verification, PR preparation, GitHub mutations, CI/review gates, and delivery
+belong to the next workflow; implementation workers must not perform them.
+
 Long-running pull-request remediation uses the repository-local Codex workflow
 documented in the [canonical PR review-cycle guide](./.agents/skills/pr-review-cycle/README.md).
 The main orchestrator owns GitHub review requests and integration; fix workers
