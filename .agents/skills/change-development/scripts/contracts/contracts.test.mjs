@@ -382,30 +382,38 @@ test('repository paths reject trailing separators and control-character overlap 
   assert.match(validateImplementationPlan(overlap).join('\n'), /overlapping anticipated paths/u);
 });
 
-test('schema-valid root-level anticipated paths remain valid planning data', () => {
+test('schema and contract accept unambiguous whitespace-free anticipated paths', () => {
+  const schema = JSON.parse(readFileSync(contractPaths.implementationPlanSchema, 'utf8'));
+  const ajv = new Ajv2020({ strict: true, allErrors: true }); addFormats(ajv);
+  const validateSchema = ajv.compile(schema);
   for (const path of [
-    'package.json', 'scripts', 'README.md', 'AGENTS.md',
-    'Release Notes.md', 'Root file.txt', 'RM-generated.json', 'docs/Operator Guide.md',
-    'directory with spaces/file', 'directory with spaces/file.test.js',
+    'package.json', 'scripts', 'README.md', 'AGENTS.md', 'RM-generated.json',
+    '.agents/skills/change-development', 'specs/features/example.feature',
     'Playwright-notes.md', 'justifications/check.workflow',
-    'Tooling Commands/playwright test.md',
   ]) {
     const value = plan(); value.tasks[0].anticipatedPaths = [path];
+    assert.equal(validateSchema(value), true, path);
     assert.deepEqual(validateImplementationPlan(value), [], path);
   }
 });
 
-test('anticipated paths reject command-shaped word sequences', () => {
+test('schema and contract reject ambiguous whitespace-bearing anticipated paths', () => {
+  const schema = JSON.parse(readFileSync(contractPaths.implementationPlanSchema, 'utf8'));
+  const ajv = new Ajv2020({ strict: true, allErrors: true }); addFormats(ajv);
+  const validateSchema = ajv.compile(schema);
   for (const path of [
     'npm run test', 'rm generated-file', 'CustomTool validate contracts',
     'rm generated.json', 'RM generated.json', 'sed -n file.txt', 'npm run test.js',
+    'CustomTool --check file.js', 'customTool verify artifact.json',
+    'CUSTOMTOOL build generated/output.js', 'future-tool run specs/features/example.feature',
     'playwright test specs/features/example.feature', 'cd specs/features',
     'just check.workflow', 'git diff package.json', 'gh api repos/owner/name',
-    'rg TODO scripts/check.mjs',
-    'prettier --write package.json', 'tsx scripts/release-state.mjs',
+    'rg TODO scripts/check.mjs', 'prettier --write package.json', 'tsx scripts/release-state.mjs',
+    'Release Notes.md', 'docs/Operator Guide.md', 'directory with spaces/file',
   ]) {
     const value = plan(); value.tasks[0].anticipatedPaths = [path];
-    assert.match(validateImplementationPlan(value).join('\n'), /repository paths, not commands/u, path);
+    assert.equal(validateSchema(value), false, path);
+    assert.ok(validateImplementationPlan(value).length > 0, path);
   }
 });
 
@@ -455,6 +463,47 @@ test('scenario repository context fails closed for missing, ambiguous, invalid, 
   assert.match(errorsFor(() => Buffer.from([0xff, 0xfe])), /not valid UTF-8/u);
   assert.match(errorsFor(() => { throw new Error('unavailable'); }), /feature read failed at the Planning SHA/u);
   assert.match(errorsFor(() => Promise.resolve(Buffer.from(''))), /reader must be synchronous/u);
+});
+
+test('every mapped scenario has task coverage while shared coverage remains valid', () => {
+  const value = plan();
+  value.scenarios = [
+    { id: 'covered', feature: 'specs/features/example.feature', scenario: 'Covered case' },
+    { id: 'uncovered', feature: 'specs/features/example.feature', scenario: 'Uncovered case' },
+  ];
+  value.productScenarioDisposition = {
+    disposition: 'mapped', scenarioIds: ['covered', 'uncovered'], rationale: 'Mapped behavior.',
+  };
+  value.tasks[0].scenarioIds = ['covered'];
+  const feature = Buffer.from(`Feature: Example
+  Scenario: Covered case
+    Then it works
+
+  Scenario: Uncovered case
+    Then it also works
+`, 'utf8');
+  const readPlanningFile = () => feature;
+  const coverageError = 'mapped scenario uncovered is not referenced by any planned task';
+  assert.deepEqual(validateImplementationPlan(value, { readPlanningFile }), [coverageError]);
+  assert.deepEqual(planReadiness(value, { readPlanningFile }), { ready: false, errors: [coverageError] });
+
+  value.tasks[0].scenarioIds.push('uncovered');
+  assert.deepEqual(planReadiness(value, { readPlanningFile }), { ready: true, errors: [] });
+
+  value.tasks.push({
+    ...structuredClone(value.tasks[0]), id: 'shared-scenario-task', criterionIds: [], decisionIds: [],
+    checklistItemIds: [], scenarioIds: ['uncovered'], anticipatedPaths: ['specs/steps/example.ts'],
+    produces: [], consumes: [],
+  });
+  assert.deepEqual(validateImplementationPlan(value, { readPlanningFile }), []);
+
+  const unknown = structuredClone(value);
+  unknown.productScenarioDisposition.scenarioIds.push('missing-scenario');
+  assert.deepEqual(validateImplementationPlan(unknown, { readPlanningFile }), [
+    'product scenario disposition references unknown scenario missing-scenario',
+  ]);
+
+  assert.deepEqual(planReadiness(plan()), { ready: true, errors: [] });
 });
 
 test('planning evidence recordedAt uses strict Ajv RFC3339 semantics', () => {

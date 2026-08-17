@@ -40,7 +40,7 @@ An implementation-plan v1 records:
 - checklist mappings; and
 - a planned dependency DAG with anticipated paths, ownership, validation intent, and specialist-routing signals.
 
-Anticipated paths and validation intent are non-executable planning data. Exact binding ownership and commands belong to the later implementation workflow.
+Anticipated paths and validation intent are non-executable planning data. Implementation-plan v1 represents anticipated paths as unambiguous, whitespace-free repository-relative ownership prefixes; it does not accept whitespace-bearing path strings that could instead be commands with arguments. Exact binding ownership and commands belong to the later implementation workflow.
 
 ## Validation and specialist evidence
 
