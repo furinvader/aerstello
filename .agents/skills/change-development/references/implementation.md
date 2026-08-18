@@ -46,7 +46,10 @@ part of the canonical packet digest, while structural validation remains
 checkout-independent. Binding proves existing selectors against the exact task
 base Git tree and rejects planned selectors that already exist. Result
 acceptance proves every planned selector was introduced at its declared path in
-the exact worker commit. Unknown, unsafe, duplicate, unused, unowned,
+the exact worker commit. Exact-tree indexing follows related-E2E semantics: only
+canonical `@tag-token` values on trimmed lines beginning with `@` count, so
+selector-like text in comments and step prose is ignored during binding,
+acceptance, and durable replay. Unknown, unsafe, duplicate, unused, unowned,
 forbidden, or unrealized declarations fail closed. Packets without the field
 retain the original contract.
 
@@ -88,6 +91,12 @@ npm run change:state -- start-task \
 
 Scheduling is deterministic, caps a wave at three tasks, and serializes tasks
 whose path ownership overlaps or whose produced/consumed artifacts conflict.
+Repository-root and nested `package.json` or `package-lock.json` paths are shared
+surfaces. Scheduling also transiently reads every eligible receipt-bound packet
+in accepted-plan order and admits only the first task that declares a given
+planned E2E selector; a later duplicate owner stays bound for a later wave while
+tasks with distinct selectors may run together. Selector ownership is not added
+to the durable execution summary or schemas.
 Every task in a wave shares the recorded clean central base and must already
 have a complete receipt-valid active worktree manifest; an interrupted creation
 remains bound until `change:worktree recover` completes it. Start each scheduled

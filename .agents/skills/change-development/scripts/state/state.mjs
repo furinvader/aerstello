@@ -962,10 +962,16 @@ function selectorsAtCommit(cwd, commit) {
   for (const entry of listTree(cwd, commit, 'specs/features')) {
     if (entry.type !== 'blob' || !entry.path.endsWith('.feature')) continue;
     const contents = readTreeFile(cwd, commit, entry.path)?.toString('utf8') ?? '';
-    for (const match of contents.matchAll(/(?:^|\s)@([a-z0-9]+(?:-[a-z0-9]+)*)/gmu)) {
-      const paths = selectors.get(match[1]) ?? new Set();
-      paths.add(entry.path);
-      selectors.set(match[1], paths);
+    for (const line of contents.split(/\r?\n/u)) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('@')) continue;
+      for (const token of trimmed.split(/\s+/u)) {
+        const match = /^@([a-z0-9]+(?:-[a-z0-9]+)*)$/u.exec(token);
+        if (!match) continue;
+        const paths = selectors.get(match[1]) ?? new Set();
+        paths.add(entry.path);
+        selectors.set(match[1], paths);
+      }
     }
   }
   return selectors;
@@ -1133,7 +1139,7 @@ function pathsOverlap(left, right) {
 export function tasksConflict(left, right) {
   if (left.anticipatedPaths.some((a) => right.anticipatedPaths.some((b) => pathsOverlap(a, b)))) return true;
   if (left.produces.some((id) => right.consumes.includes(id) || right.produces.includes(id)) || right.produces.some((id) => left.consumes.includes(id))) return true;
-  const sharedSurface = (task) => task.anticipatedPaths.some((path) => /^(?:package(?:-lock)?\.json|\.agents\/|\.codex\/|\.github\/|packages\/shared\/src\/contracts\.ts|apps\/api\/src\/schema\.ts|apps\/api\/migrations\/|tests\/e2e\/fixtures(?:\/|$)|tests\/e2e\/(?:[^/]+\/)*[^/]+\.steps\.ts$)/u.test(path));
+  const sharedSurface = (task) => task.anticipatedPaths.some((path) => /^(?:(?:[^/]+\/)*package(?:-lock)?\.json$|\.agents\/|\.codex\/|\.github\/|packages\/shared\/src\/contracts\.ts|apps\/api\/src\/schema\.ts|apps\/api\/migrations\/|tests\/e2e\/fixtures(?:\/|$)|tests\/e2e\/(?:[^/]+\/)*[^/]+\.steps\.ts$)/u.test(path));
   if (sharedSurface(left) || sharedSurface(right)) return true;
   return false;
 }
@@ -1154,8 +1160,23 @@ export function scheduleWave({ cwd = process.cwd(), changeId, expectedRevision, 
     const stale = dependencyReady.find((task) => task.taskBaseSha !== current.headSha);
     if (stale) throw new StateError(`Task ${stale.id} packet base is not current central HEAD; stale immutable packets cannot be rebound`, 'TASK_BASE_STALE');
     const eligible = dependencyReady.filter((task) => task.taskBaseSha === current.headSha);
+    const packets = new Map();
+    const selectorOwners = new Map();
+    for (const task of eligible) {
+      const receipt = verifyReceipt(implementationTaskPacketPath(root, state.changeId, task.id, task.binding), `task packet ${task.id}`);
+      if (receipt.digest !== task.packetDigest || implementationTaskDigest(receipt.value) !== task.packetDigest) {
+        throw new StateError(`Task ${task.id} packet summary/receipt mismatch`, 'TASK_PACKET_MISMATCH');
+      }
+      assertPacketSelectorsAtBase(root, receipt.value);
+      packets.set(task.id, receipt.value);
+      for (const { selector } of receipt.value.plannedE2ESelectors ?? []) {
+        if (!selectorOwners.has(selector)) selectorOwners.set(selector, task.id);
+      }
+    }
     const wave = [];
-    for (const task of eligible) if (wave.length < 3 && wave.every((other) => !tasksConflict(task, other))) {
+    for (const task of eligible) if (wave.length < 3
+        && (packets.get(task.id).plannedE2ESelectors ?? []).every(({ selector }) => selectorOwners.get(selector) === task.id)
+        && wave.every((other) => !tasksConflict(task, other))) {
       verifiedSchedulableWorktree(root, state, task);
       wave.push(task);
     }
@@ -1960,6 +1981,7 @@ function validateLoadedState(root, state) {
             completed ? packet.value.planDigest : state.plan.effectiveDigest,
             completed ? packet.value.planRevision : effective.planRevision);
           assertPacketMapperProvenance(root, state, packet.value);
+          assertPacketSelectorsAtBase(root, packet.value);
           const suffix = `${task.id}/${String(task.binding).padStart(4, '0')}.json`;
           const provenance = verifyReceipt(join(changeDirectory(root, state.changeId), 'implementation/provenance', suffix), `task provenance ${task.id}`).value;
           if (provenance.planDigest !== packet.value.planDigest || provenance.taskBaseSha !== packet.value.taskBaseSha
@@ -1981,6 +2003,7 @@ function validateLoadedState(root, state) {
             const parent = gitText(['rev-list', '--parents', '-n', '1', result.workerCommit], { cwd: root }).split(/\s+/u);
             if (parent.length !== 2 || parent[1] !== task.taskBaseSha) throw new StateError(`Task ${task.id} worker commit is not the exact direct child of its base`, 'TASK_RESULT_MISMATCH');
             actualPaths = nulChangedPaths(root, task.taskBaseSha, result.workerCommit);
+            assertPlannedSelectorsRealized(root, packetReceipt.value, result.workerCommit);
           }
           const replayErrors = validateImplementationResultAgainstTask(packetReceipt.value, result, actualPaths);
           if (replayErrors.length) throw new StateError(`Task ${task.id} result replay failed:\n- ${replayErrors.join('\n- ')}`, 'TASK_RESULT_MISMATCH');

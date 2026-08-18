@@ -292,7 +292,10 @@ test('binding rejects unready dependencies and any taskBaseSha other than the ex
 test('planned E2E selectors bind and replay against exact Git trees', async () => {
   const plannedTask = task('planned-selector', ['specs/features/planned.feature']);
   const context = await fixture([plannedTask], {
-    'specs/features/existing.feature': 'Feature: Existing\n\n  @id-existing-flow\n  Scenario: Existing flow\n',
+    'specs/features/existing.feature': [
+      'Feature: Existing', '', '  # @id-comment-decoy', '  @id-existing-flow',
+      '  Scenario: Existing flow', '    Given step prose mentions @id-step-decoy', '',
+    ].join('\n'),
   });
   const validation = { unit: [], system: [{
     command: 'npm run test:e2e:related -- --id planned-flow', reason: 'Exercise planned flow.',
@@ -311,6 +314,8 @@ test('planned E2E selectors bind and replay against exact Git trees', async () =
   }, 'test: add planned selector');
   accept(context, planned, worker, workerCommit, ['specs/features/planned.feature']);
   assert.equal(context.state.execution.tasks[0].status, 'accepted');
+  assert.equal(validateState({ cwd: context.cwd }).valid, true,
+    'durable replay reads the exact base and worker trees after the worker checkout advances');
 
   for (const [label, overrides] of [
     ['unknown', { requiredValidation: { unit: [], system: [{
@@ -324,9 +329,20 @@ test('planned E2E selectors bind and replay against exact Git trees', async () =
         selectors: ['id-existing-flow'], projects: ['tablet-chromium'],
       }] },
     }],
+    ['comment decoy', { requiredValidation: { unit: [], system: [{
+      command: 'npm run test:e2e:related -- --id comment-decoy', reason: 'Comment text is not a tag.',
+      selectors: ['id-comment-decoy'], projects: ['tablet-chromium'],
+    }] } }],
+    ['step-text decoy', { requiredValidation: { unit: [], system: [{
+      command: 'npm run test:e2e:related -- --id step-decoy', reason: 'Step text is not a tag.',
+      selectors: ['id-step-decoy'], projects: ['tablet-chromium'],
+    }] } }],
   ]) {
     const rejected = await fixture([plannedTask], {
-      'specs/features/existing.feature': 'Feature: Existing\n\n  @id-existing-flow\n  Scenario: Existing flow\n',
+      'specs/features/existing.feature': [
+        'Feature: Existing', '', '  # @id-comment-decoy', '  @id-existing-flow',
+        '  Scenario: Existing flow', '    Given step prose mentions @id-step-decoy', '',
+      ].join('\n'),
     });
     const revision = rejected.state.revision;
     assert.throws(() => bindTask({ cwd: rejected.cwd, changeId: rejected.changeId,
@@ -351,7 +367,10 @@ test('result acceptance rejects an unrealized planned selector without advancing
   const worker = createWorker(context, packet);
   startWave(context, [packet]);
   const workerCommit = commit(worker.path, {
-    'specs/features/planned.feature': 'Feature: Planned\n\n  Scenario: Missing tag\n',
+    'specs/features/planned.feature': [
+      'Feature: Planned', '', '  # @id-planned-flow', '  Scenario: Missing tag',
+      '    Given step prose mentions @id-planned-flow', '',
+    ].join('\n'),
   }, 'test: omit planned selector');
   const revision = context.state.revision;
   assert.throws(() => accept(context, packet, worker, workerCommit, ['specs/features/planned.feature']),
@@ -423,6 +442,38 @@ test('wave scheduling deterministically admits at most the first three non-confl
   assert.deepEqual(context.state.execution.activeWave, ['alpha', 'bravo', 'charlie']);
   assert.equal(context.state.execution.tasks.find(({ id }) => id === 'delta').status, 'bound');
   assert.equal(validateState({ cwd: context.cwd }).valid, true);
+});
+
+test('wave scheduling serializes duplicate planned selectors while admitting distinct selectors', async () => {
+  const tasks = [
+    task('first-selector-owner', ['specs/features/first.feature']),
+    task('later-selector-owner', ['specs/features/later.feature']),
+    task('distinct-selector-owner', ['specs/features/distinct.feature']),
+  ];
+  const context = await fixture(tasks);
+  const selectorPacket = (taskId, selector, featurePath) => packetFor(context, taskId, {
+    plannedE2ESelectors: [{ selector, featurePath }],
+    requiredValidation: { unit: [], system: [{
+      command: `npm run test:e2e:related -- --id ${selector.slice(3)}`,
+      reason: `Exercise ${selector}.`, selectors: [selector], projects: ['tablet-chromium'],
+    }] },
+  });
+  const packets = [
+    selectorPacket('first-selector-owner', 'id-shared-flow', 'specs/features/first.feature'),
+    selectorPacket('later-selector-owner', 'id-shared-flow', 'specs/features/later.feature'),
+    selectorPacket('distinct-selector-owner', 'id-distinct-flow', 'specs/features/distinct.feature'),
+  ];
+  for (const packet of packets) {
+    context.state = bindTask({ cwd: context.cwd, changeId: context.changeId, packet,
+      expectedRevision: context.state.revision });
+    createWorker(context, packet);
+  }
+
+  context.state = scheduleWave({ cwd: context.cwd, changeId: context.changeId,
+    expectedRevision: context.state.revision });
+  assert.deepEqual(context.state.execution.activeWave, ['first-selector-owner', 'distinct-selector-owner']);
+  assert.equal(context.state.execution.tasks.find(({ id }) => id === 'later-selector-owner').status, 'bound');
+  assert.equal(context.state.execution.tasks.every((entry) => !Object.hasOwn(entry, 'plannedE2ESelectors')), true);
 });
 
 test('implemented results reject missing, non-descendant, and empty worker commits without advancing durable state', async () => {

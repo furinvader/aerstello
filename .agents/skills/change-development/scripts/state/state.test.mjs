@@ -44,10 +44,42 @@ test('wave conflicts serialize shared and producer surfaces while permitting dis
   assert.equal(tasksConflict(task(['apps/web/src/a.ts']), task(['apps/api/src/b.ts'])), false);
   assert.equal(tasksConflict(task(['.agents/skills/a/file.mjs']), task(['apps/api/src/b.ts'])), true);
   assert.equal(tasksConflict(task(['package-lock.json']), task(['apps/web/src/b.ts'])), true);
+  assert.equal(tasksConflict(task(['apps/web/package.json']), task(['apps/api/src/b.ts'])), true);
+  assert.equal(tasksConflict(task(['packages/shared/package-lock.json']), task(['apps/web/src/b.ts'])), true);
   assert.equal(tasksConflict(task(['tests/e2e/venue.steps.ts']), task(['apps/web/src/b.ts'])), true);
   assert.equal(tasksConflict(task(['tests/e2e/steps/catalog/venue.steps.ts']), task(['apps/web/src/b.ts'])), true);
   assert.equal(tasksConflict(task(['apps/web/src/a.ts'], ['catalog']), task(['apps/api/src/b.ts'], ['catalog'])), true);
   assert.equal(tasksConflict(task(['apps/web/src'], ['catalog']), task(['apps/web/src/file.ts'], [], ['catalog'])), true);
+});
+
+test('oversized plan acceptance fails before durable transition or evidence writes', async () => {
+  const { cwd, sha } = repository('oversized plan acceptance');
+  const planning = await initializeState({ cwd, changeId: 'oversized-plan', mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
+  const plan = planFor(planning);
+  const template = plan.tasks[0];
+  for (let index = 1; index < 180; index += 1) {
+    const taskId = `oversized-task-${index}`;
+    const criterionId = `oversized-criterion-${index}`;
+    plan.criteria.push({ id: criterionId, description: `Task ${index} remains durable.`, disposition: 'owned', ownerTaskId: taskId, deferredReason: null });
+    plan.tasks.push({ ...template, id: taskId, title: `Implement oversized task ${index}`,
+      objective: `Persist oversized task ${index}.`, criterionIds: [criterionId], checklistItemIds: [],
+      anticipatedPaths: [`generated/${String(index).padStart(3, '0')}-${'x'.repeat(430)}.txt`] });
+  }
+  const directory = changeDirectory(cwd, planning.changeId);
+  const statePath = join(directory, 'state.json');
+  const eventsPath = join(directory, 'events.jsonl');
+  const durableBefore = {
+    state: readFileSync(statePath, 'utf8'),
+    events: readFileSync(eventsPath, 'utf8'),
+    transitions: readdirSync(join(directory, 'transitions')),
+  };
+
+  assert.throws(() => acceptPlan({ cwd, plan, expectedRevision: planning.revision }),
+    (error) => error instanceof StateError && error.code === 'STATE_TOO_LARGE');
+  assert.equal(readFileSync(statePath, 'utf8'), durableBefore.state);
+  assert.equal(readFileSync(eventsPath, 'utf8'), durableBefore.events);
+  assert.deepEqual(readdirSync(join(directory, 'transitions')), durableBefore.transitions);
+  assert.equal(existsSync(join(directory, 'plan')), false);
 });
 
 test('two same-base workers integrate by delta, resume intent-only integration, clean up, and finalize', async () => {
