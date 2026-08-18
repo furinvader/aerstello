@@ -48,6 +48,14 @@ An implementation-plan v1 records:
 
 Anticipated paths and validation intent are non-executable planning data. Implementation-plan v1 represents anticipated paths as unambiguous, whitespace-free repository-relative ownership prefixes; it does not accept whitespace-bearing path strings, environment assignments, or shell syntax that could instead be executable input. `bind-task` converts one dependency-ready planned task into a narrower immutable packet with exact allowed and forbidden paths and direct validation commands; it cannot expand the accepted plan.
 
+Repository-relative ownership excludes any root or nested exact `.git` path
+segment because Git metadata is never an implementation surface. `.gitignore`,
+`.github/workflows`, and nested `.gitkeep` names are not `.git` segments and
+remain valid. Candidate validation, readiness, acceptance, and amendments apply
+this rule before durable evidence changes. Existing receipt-valid accepted
+plans remain immutable historical evidence; replace unsafe historical
+ownership through an explicit append-only amendment before binding a packet.
+
 ## Validation and specialist evidence
 
 Validate both JSON Schema and semantic contracts. Load the canonical specialist registry and use its validation, routing, and planning-evidence helpers. Recompute every task route with explicit `browserVisible` and `relatedTestSelectionUncertain` signals; stored routes are never trusted without recomputation.

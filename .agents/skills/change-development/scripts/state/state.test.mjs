@@ -986,6 +986,106 @@ test('amendments append a replayable complete plan without rewriting the accepte
   (error) => error.code === 'AMENDMENT_ID_CONFLICT');
 });
 
+test('Git metadata ownership is rejected before plan acceptance or amendment evidence mutates', async () => {
+  const acceptance = repository('git metadata acceptance');
+  const planning = await initializeState({ cwd: acceptance.cwd, changeId: 'git-metadata-acceptance', mode: 'implement',
+    baseBranch: 'main', planningRef: acceptance.sha, source: descriptor });
+  const unsafe = planFor(planning); unsafe.tasks[0].anticipatedPaths = ['.git/config'];
+  const acceptanceRoot = changeDirectory(acceptance.cwd, planning.changeId);
+  const acceptanceBefore = {
+    state: readFileSync(join(acceptanceRoot, 'state.json'), 'utf8'),
+    events: readFileSync(join(acceptanceRoot, 'events.jsonl'), 'utf8'),
+    transitions: readdirSync(join(acceptanceRoot, 'transitions')),
+  };
+  assert.throws(() => acceptPlan({ cwd: acceptance.cwd, expectedRevision: planning.revision, plan: unsafe }),
+    (error) => error instanceof StateError && error.code === 'PLAN_NOT_READY');
+  assert.equal(readFileSync(join(acceptanceRoot, 'state.json'), 'utf8'), acceptanceBefore.state);
+  assert.equal(readFileSync(join(acceptanceRoot, 'events.jsonl'), 'utf8'), acceptanceBefore.events);
+  assert.deepEqual(readdirSync(join(acceptanceRoot, 'transitions')), acceptanceBefore.transitions);
+  assert.equal(existsSync(join(acceptanceRoot, 'plan')), false);
+
+  const amendment = repository('git metadata amendment');
+  const amendmentPlanning = await initializeState({ cwd: amendment.cwd, changeId: 'git-metadata-amendment', mode: 'implement',
+    baseBranch: 'main', planningRef: amendment.sha, source: descriptor });
+  const acceptedPlan = planFor(amendmentPlanning); acceptedPlan.tasks[0].anticipatedPaths = ['.gitignore'];
+  const accepted = acceptPlan({ cwd: amendment.cwd, expectedRevision: amendmentPlanning.revision, plan: acceptedPlan });
+  const amendmentRoot = changeDirectory(amendment.cwd, accepted.changeId);
+  const resultingPlan = structuredClone(acceptedPlan); resultingPlan.planRevision = 2;
+  resultingPlan.tasks[0].anticipatedPaths = ['nested/.git/hooks'];
+  const amendmentBefore = {
+    state: readFileSync(join(amendmentRoot, 'state.json'), 'utf8'),
+    events: readFileSync(join(amendmentRoot, 'events.jsonl'), 'utf8'),
+    transitions: readdirSync(join(amendmentRoot, 'transitions')),
+    plan: readFileSync(join(amendmentRoot, 'plan', 'plan.json'), 'utf8'),
+  };
+  assert.throws(() => amendPlan({ cwd: amendment.cwd, expectedRevision: accepted.revision, resultingPlan,
+    amendment: { id: 'unsafe-git-metadata', reason: 'Unsafe ownership must fail.', authorization: 'operator',
+      trigger: 'operator-decision', delta: { changed: ['anticipatedPaths'] }, invalidatedEvidence: [] } }),
+  (error) => error instanceof StateError && error.code === 'PLAN_NOT_READY');
+  assert.equal(readFileSync(join(amendmentRoot, 'state.json'), 'utf8'), amendmentBefore.state);
+  assert.equal(readFileSync(join(amendmentRoot, 'events.jsonl'), 'utf8'), amendmentBefore.events);
+  assert.deepEqual(readdirSync(join(amendmentRoot, 'transitions')), amendmentBefore.transitions);
+  assert.equal(readFileSync(join(amendmentRoot, 'plan', 'plan.json'), 'utf8'), amendmentBefore.plan);
+  assert.equal(existsSync(join(amendmentRoot, 'plan', 'amendments')), false);
+
+  const packet = packetFor(accepted, acceptedPlan, 'state-task');
+  const bound = bindTask({ cwd: amendment.cwd, packet, expectedRevision: accepted.revision });
+  assert.equal(bound.execution.tasks[0].status, 'bound');
+  assert.equal(validateState({ cwd: amendment.cwd }).valid, true);
+});
+
+test('historical accepted Git metadata ownership replays but requires an explicit safe amendment before binding', async () => {
+  const fixture = repository('historical git metadata plan');
+  const planning = await initializeState({ cwd: fixture.cwd, changeId: 'historical-git-metadata', mode: 'implement',
+    baseBranch: 'main', planningRef: fixture.sha, source: descriptor });
+  const safePlan = planFor(planning);
+  const accepted = acceptPlan({ cwd: fixture.cwd, expectedRevision: planning.revision, plan: safePlan });
+  const root = changeDirectory(fixture.cwd, accepted.changeId);
+  const historicalPlan = structuredClone(safePlan); historicalPlan.tasks[0].anticipatedPaths = ['.git/config'];
+  const historicalDigest = digestJson(historicalPlan);
+  const historicalState = structuredClone(accepted);
+  historicalState.plan.originalDigest = historicalDigest;
+  historicalState.plan.effectiveDigest = historicalDigest;
+  historicalState.execution.planDigest = historicalDigest;
+  historicalState.execution.tasks[0].anticipatedPaths = ['.git/config'];
+  writeReceiptJson(join(root, 'plan', 'plan.json'), historicalPlan);
+  const transition = join(root, 'transitions', '00000001');
+  const intentPath = join(transition, 'intent.json');
+  const intent = JSON.parse(readFileSync(intentPath, 'utf8'));
+  intent.nextState = historicalState;
+  intent.nextStateDigest = digestJson(historicalState);
+  intent.evidence.planDigest = historicalDigest;
+  intent.authoritativeEvidence.planDigest = {
+    ...intent.authoritativeEvidence.planDigest, digest: historicalDigest, value: historicalPlan,
+  };
+  writeReceiptJson(intentPath, intent);
+  const receiptPath = join(transition, 'receipt.json');
+  const receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
+  receipt.intentDigest = digestJson(intent);
+  receipt.stateDigest = digestJson(historicalState);
+  receipt.evidence = intent.evidence;
+  writeReceiptJson(receiptPath, receipt);
+  writeFileSync(join(transition, 'complete'), `${digestJson(receipt)}\n`);
+  writeFileSync(join(root, 'state.json'), `${JSON.stringify(historicalState)}\n`);
+
+  assert.equal(validateState({ cwd: fixture.cwd }).valid, true);
+  const unsafePacket = packetFor(historicalState, historicalPlan, 'state-task');
+  const revision = historicalState.revision;
+  assert.throws(() => bindTask({ cwd: fixture.cwd, packet: unsafePacket, expectedRevision: revision }),
+    (error) => error instanceof StateError && error.code === 'INVALID_TASK_PACKET');
+  assert.equal(loadState(fixture.cwd).revision, revision);
+
+  const amendedPlan = structuredClone(historicalPlan); amendedPlan.planRevision = 2;
+  amendedPlan.tasks[0].anticipatedPaths = ['.gitignore'];
+  const amended = amendPlan({ cwd: fixture.cwd, expectedRevision: revision, resultingPlan: amendedPlan,
+    amendment: { id: 'replace-git-metadata', reason: 'Replace historical unsafe ownership.', authorization: 'operator',
+      trigger: 'operator-decision', delta: { changed: ['anticipatedPaths'] }, invalidatedEvidence: [] } });
+  const safePacket = packetFor(amended, amendedPlan, 'state-task');
+  const bound = bindTask({ cwd: fixture.cwd, packet: safePacket, expectedRevision: amended.revision });
+  assert.equal(bound.execution.tasks[0].status, 'bound');
+  assert.equal(validateState({ cwd: fixture.cwd }).valid, true);
+});
+
 test('concurrent initialization admits exactly one active change', async () => {
   const { cwd, sha } = repository('concurrent state');
   const settled = await Promise.allSettled(['first-change', 'second-change'].map((changeId) => initializeState({

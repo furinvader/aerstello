@@ -17,7 +17,7 @@ import {
   validateTaskId,
 } from '../paths.mjs';
 import {
-  atomicWriteJson, atomicWriteText, loadState, StateError, validateState, verifyReceipt,
+  atomicWriteJson, atomicWriteText, loadState, StateError, validateState, verifyReceipt, withChangeLock,
 } from '../state/state.mjs';
 
 const FULL_SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
@@ -356,26 +356,30 @@ function finishCreation(cwd, record, crashStep) {
 }
 
 export function createTaskWorktree({ cwd = process.cwd(), changeId: rawChangeId, taskId: rawTaskId,
-  base, packetDigest, crashStep } = {}) {
+  base, packetDigest, crashStep, lockOptions } = {}) {
   const change = changeId(rawChangeId); const task = sanitizeTaskId(rawTaskId);
   if (typeof base !== 'string' || !FULL_SHA.test(base)) throw new StateError('Worktree base must be an explicit full commit SHA', 'INVALID_WORKTREE_BASE');
   if (typeof packetDigest !== 'string' || !PACKET_DIGEST.test(packetDigest)) throw new StateError('Packet digest must be an explicit sha256 digest', 'INVALID_PACKET_DIGEST');
   const baseSha = resolveCommit(cwd, base);
   if (baseSha !== base) throw new StateError('Worktree base did not resolve to the supplied commit SHA', 'INVALID_WORKTREE_BASE');
   const identity = canonicalIdentity(cwd, change, task, baseSha, packetDigest);
-  verifyBoundTask(cwd, identity);
-  const paths = evidencePaths(cwd, change, task);
-  if (hasArtifact(paths.creation)) {
-    const record = repairCreationEvidence(cwd, identity, crashStep);
-    if (!sameIdentity(record.identity, identity)) throw new StateError('Requested worktree identity conflicts with durable creation intent', 'WORKTREE_IDENTITY_COLLISION');
-    return finishCreation(cwd, record, crashStep);
-  }
-  if ([paths.manifest, paths.removal, paths.tombstone].some(hasArtifact)) {
-    throw new StateError('Worktree evidence exists without its creation intent', 'INCOMPLETE_WORKTREE_EVIDENCE');
-  }
-  assertNoOrphanPhysical(cwd, identity);
-  const record = repairCreationEvidence(cwd, identity, crashStep);
-  callCrash(crashStep, 'creation-after-intent');
+  const record = withChangeLock(cwd, change, () => {
+    verifyBoundTask(cwd, identity);
+    const paths = evidencePaths(cwd, change, task);
+    if (hasArtifact(paths.creation)) {
+      const existing = repairCreationEvidence(cwd, identity, crashStep);
+      if (!sameIdentity(existing.identity, identity)) throw new StateError('Requested worktree identity conflicts with durable creation intent', 'WORKTREE_IDENTITY_COLLISION');
+      callCrash(crashStep, 'creation-after-intent');
+      return existing;
+    }
+    if ([paths.manifest, paths.removal, paths.tombstone].some(hasArtifact)) {
+      throw new StateError('Worktree evidence exists without its creation intent', 'INCOMPLETE_WORKTREE_EVIDENCE');
+    }
+    assertNoOrphanPhysical(cwd, identity);
+    const created = repairCreationEvidence(cwd, identity, crashStep);
+    callCrash(crashStep, 'creation-after-intent');
+    return created;
+  }, lockOptions);
   return finishCreation(cwd, record, crashStep);
 }
 

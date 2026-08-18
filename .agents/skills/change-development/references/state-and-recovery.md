@@ -94,6 +94,16 @@ inverted. Operation locks use the same owner-token, dead-owner, incomplete-lock,
 timeout, and stale-reclaim rules. Failure releases live ownership, while a dead
 owner is reclaimed only through those rules before exact reconciliation.
 
+Worker creation takes only the per-change lock while it revalidates the active
+bound packet and completes the receipt-protected creation intent. Physical Git
+worktree creation happens after releasing that lock and may resume only from
+the exact intent. Archive continues to take the global lifecycle lock before
+the change lock. Thus creation cannot race archive before authority is durable:
+creation-first makes archive wait and then requires normal worktree cleanup,
+while archive-first removes active authorization so later creation leaves no
+intent or Git identity. This does not invert the canonical lifecycle-then-change
+order for operations that require both locks.
+
 Every transition has a proposed revision, intent record, receipt, concise event, and completion marker. The intent becomes committed only when its fully written staging directory is atomically renamed to the eight-digit revision directory. It embeds `authoritativeEvidence` entries with each domain sidecar's exact path, label, canonical digest, and complete value. State, receipts, and completion markers use atomic `fsync` plus rename writes. `events.jsonl` is canonically reconstructed and atomically rewritten instead of appended in place. Revision mismatches fail closed. Network work is never performed while a state lock is held.
 
 Central integration is a deliberate exception to a single locked filesystem

@@ -48,6 +48,14 @@ plan revision and digest; a clean report cannot contain findings, and amendment
 replay never substitutes evidence from a later revision. A changed packet requires explicit
 rejection and a plan amendment; no sidecar is rewritten.
 
+Plan ownership can never name `.git` as a root or nested exact path segment;
+`.git`, `.git/config`, and `nested/.git/hooks` are repository metadata rather
+than implementation surfaces. Lookalikes such as `.gitignore`, `.github`, and
+`nested/.gitkeep` remain ordinary repository paths. Receipt-valid historical
+plans are replayed unchanged, but an unsafe historical ownership entry cannot
+bind an executable packet: append an explicit amendment replacing it with safe
+ownership before binding.
+
 When related E2E validation names a selector that the task itself will add, the
 packet may declare `plannedE2ESelectors` entries binding each selector to one
 owned, non-forbidden `specs/features/**/*.feature` path. This optional field is
@@ -92,8 +100,12 @@ Creation is allowed only for the receipt-valid bound packet named by active v2
 state. It uses the deterministic branch `codex/change-<change-id>/<task-id>` and
 an owned path below the shared change-development root. Immutable manifest and
 receipt evidence prevent identity, repository, path, base, or packet collisions.
-Receipt-backed creation/removal intents make interruption recoverable without
-guessing. Removal is allowed only after state records integration, `no-change`,
+Creation takes the per-change state lock while it revalidates bound-task
+authorization and writes the complete receipt-protected creation intent. It
+releases that lock before physical `git worktree add`; interruption after the
+intent is recovered only from that exact durable identity. Receipt-backed
+creation/removal intents make interruption recoverable without guessing.
+Removal is allowed only after state records integration, `no-change`,
 or explicit rejection; it refuses a dirty or unregistered worktree, records a
 receipt-protected tombstone, and preserves the task branch for audit.
 

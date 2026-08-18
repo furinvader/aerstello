@@ -169,6 +169,67 @@ test('receipt-bound creation intent precedes Git mutation and exact retry recove
   assert.equal(recovered.status, 'active'); assert.equal(recovered.baseSha, context.base);
 });
 
+test('creation intent serialization closes both worktree and archive race orderings', async () => {
+  const creationFirst = await boundRepository('creation-first');
+  let archiveContended = false;
+  const created = create(creationFirst, {
+    lockOptions: { timeoutMs: 100 },
+    crashStep(step) {
+      if (step !== 'creation-after-intent') return;
+      assert.throws(() => archiveState({
+        cwd: creationFirst.cwd, changeId: 'issue-23', expectedRevision: creationFirst.bound.revision,
+        abandonReason: 'Archive must wait for creation intent ownership.', lockOptions: { timeoutMs: 10 },
+      }), (error) => error instanceof StateError && error.code === 'LOCK_TIMEOUT');
+      archiveContended = true;
+    },
+  });
+  assert.equal(archiveContended, true);
+  assert.equal(created.status, 'active');
+  assert.throws(() => archiveState({
+    cwd: creationFirst.cwd, changeId: 'issue-23', expectedRevision: creationFirst.bound.revision,
+    abandonReason: 'Active worktree must be cleaned up first.',
+  }), (error) => error instanceof StateError && error.code === 'RECEIPT_MISSING');
+  assert.equal(existsSync(archiveDirectory(creationFirst.cwd, 'issue-23')), false);
+
+  const retry = await boundRepository('creation-retry');
+  assert.throws(() => create(retry, { crashStep: 'creation-after-intent' }),
+    (error) => error instanceof StateError && error.code === 'SIMULATED_WORKTREE_CRASH');
+  let retryContended = false;
+  const retried = create(retry, {
+    lockOptions: { timeoutMs: 100 },
+    crashStep(step) {
+      if (step !== 'creation-after-intent') return;
+      assert.throws(() => archiveState({
+        cwd: retry.cwd, changeId: 'issue-23', expectedRevision: retry.bound.revision,
+        abandonReason: 'Retry must retain creation lock authority.', lockOptions: { timeoutMs: 10 },
+      }), (error) => error instanceof StateError && error.code === 'LOCK_TIMEOUT');
+      retryContended = true;
+    },
+  });
+  assert.equal(retryContended, true);
+  assert.equal(retried.status, 'active');
+
+  const archiveFirst = await boundRepository('archive-first');
+  assert.equal(archiveState({
+    cwd: archiveFirst.cwd, changeId: 'issue-23', expectedRevision: archiveFirst.bound.revision,
+    abandonReason: 'Archive before any creation intent.',
+  }).archived, true);
+  assert.throws(() => create(archiveFirst, { lockOptions: { timeoutMs: 100 } }),
+    (error) => error instanceof StateError && ['STATE_NOT_FOUND', 'ARCHIVE_NOT_ACTIVE'].includes(error.code));
+  assert.equal(existsSync(implementationWorktreeCreationIntentPath(archiveFirst.cwd, 'issue-23', archiveFirst.taskId)), false);
+  assert.equal(existsSync(implementationWorktreePath(archiveFirst.cwd, 'issue-23', archiveFirst.taskId)), false);
+  assert.equal(git(archiveFirst.cwd, ['branch', '--list', `codex/change-issue-23/${archiveFirst.taskId}`]), '');
+});
+
+test('invalid creation authorization releases the per-change lock for an exact retry', async () => {
+  const context = await boundRepository('released-creation-lock');
+  assert.throws(() => createTaskWorktree({
+    cwd: context.cwd, changeId: 'issue-23', taskId: context.taskId, base: context.base,
+    packetDigest: `sha256:${'f'.repeat(64)}`, lockOptions: { timeoutMs: 100 },
+  }), (error) => error instanceof StateError && error.code === 'WORKTREE_TASK_NOT_BOUND');
+  assert.equal(create(context, { lockOptions: { timeoutMs: 100 } }).status, 'active');
+});
+
 test('an incomplete creation cannot be scheduled and remains recoverable while bound', async () => {
   const context = await boundRepository();
   assert.throws(() => create(context, { crashStep: 'creation-after-intent' }),
