@@ -204,6 +204,22 @@ function verifyRemovableTask(cwd, record) {
   return { state, task };
 }
 
+function authorizedTerminalSha(task) {
+  if (typeof task.workerCommit === 'string' && FULL_SHA.test(task.workerCommit)) return task.workerCommit;
+  if (task.status === 'no-change') return task.taskBaseSha;
+  if (task.status === 'rejected') return null;
+  throw new StateError('Terminal task state does not identify its authorized worker commit', 'WORKTREE_TERMINAL_IDENTITY_MISMATCH');
+}
+
+function assertTerminalBranchTip(identity, physical, terminalSha) {
+  if (terminalSha !== null && physical.branchTip !== terminalSha) {
+    throw new StateError(
+      `Worktree branch ${identity.branch} does not point to its receipt-authorized terminal commit`,
+      'WORKTREE_TERMINAL_IDENTITY_MISMATCH',
+    );
+  }
+}
+
 function evidencePaths(cwd, change, task) {
   return {
     creation: implementationWorktreeCreationIntentPath(cwd, change, task),
@@ -402,7 +418,9 @@ export function removeTaskWorktree({ cwd = process.cwd(), changeId: rawChangeId,
   const change = changeId(rawChangeId); const task = sanitizeTaskId(rawTaskId);
   const baseRecord = loadRecord(cwd, change, task, { ignoreRemovalEvidence: true });
   if (!baseRecord) throw new StateError('Unknown implementation worktree; refusing cleanup', 'UNKNOWN_WORKTREE');
-  verifyRemovableTask(cwd, baseRecord);
+  const terminal = verifyRemovableTask(cwd, baseRecord);
+  const terminalSha = authorizedTerminalSha(terminal.task);
+  assertTerminalBranchTip(baseRecord.identity, physicalState(cwd, baseRecord.identity), terminalSha);
   repairRemovalEvidence(baseRecord, crashStep);
   let record = loadRecord(cwd, change, task);
   if (record.tombstone) return inspectRecord(cwd, record);
@@ -423,11 +441,13 @@ export function removeTaskWorktree({ cwd = process.cwd(), changeId: rawChangeId,
   if (physical.pathExists || physical.pathRegistration || physical.branchRegistration) {
     assertPhysicalActive(record.identity, physical);
     if (gitText(['status', '--porcelain'], { cwd: record.identity.path })) throw new StateError(`Worktree ${record.identity.path} is dirty`, 'DIRTY_WORKTREE');
+    assertTerminalBranchTip(record.identity, physical, terminalSha);
     runGit(['worktree', 'remove', record.identity.path], { cwd });
   }
   physical = physicalState(cwd, record.identity);
   assertPhysicalRemoved(record.identity, physical);
   callCrash(crashStep, 'removal-after-worktree-remove');
+  assertTerminalBranchTip(record.identity, physical, terminalSha);
   const tombstone = { ...record.identity, status: 'removed', manifestDigest: record.manifest.digest,
     removalIntentDigest: record.removal.digest, removedAt: record.removal.value.removedAt };
   persistExactEvidence(record.paths.tombstone, tombstone, 'worktree tombstone', {

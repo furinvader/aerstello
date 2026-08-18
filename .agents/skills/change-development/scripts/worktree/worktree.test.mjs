@@ -20,7 +20,7 @@ import {
   implementationWorktreeTombstonePath,
 } from '../paths.mjs';
 import {
-  acceptPlan, acceptResult, amendPlan, archiveState, bindTask, initializeState, loadState, rejectTask, scheduleWave, startTask, StateError,
+  acceptPlan, acceptResult, amendPlan, archiveState, bindTask, initializeState, integrateTask, loadState, rejectTask, scheduleWave, startTask, StateError,
 } from '../state/state.mjs';
 import {
   createTaskWorktree, inspectTaskWorktree, recoverTaskWorktree, removeTaskWorktree,
@@ -97,6 +97,22 @@ function authorizeNoChangeRemoval(context, worktree) {
     workerId: 'implementation-worker', expectedRevision: scheduled.revision });
   return acceptResult({ cwd: context.cwd, changeId: 'issue-23', result: noChangeResult(context),
     workerCwd: worktree.path, expectedRevision: started.revision });
+}
+
+function authorizeImplementedRemoval(context, worktree) {
+  const scheduled = scheduleWave({ cwd: context.cwd, changeId: 'issue-23', expectedRevision: context.bound.revision });
+  const started = startTask({ cwd: context.cwd, changeId: 'issue-23', taskId: context.taskId,
+    workerId: 'implementation-worker', expectedRevision: scheduled.revision });
+  const workerCommit = commit(worktree.path, { 'src/implemented.txt': 'implemented\n' }, 'test: implement worker change');
+  const result = {
+    ...noChangeResult(context), status: 'implemented', workerCommit, changedPaths: ['src/implemented.txt'],
+    summary: 'The worker implemented the bounded repository change.',
+  };
+  const accepted = acceptResult({ cwd: context.cwd, changeId: 'issue-23', result,
+    workerCwd: worktree.path, expectedRevision: started.revision });
+  const integrated = integrateTask({ cwd: context.cwd, changeId: 'issue-23', taskId: context.taskId,
+    expectedRevision: accepted.revision });
+  return { integrated, workerCommit };
 }
 
 afterEach(() => { while (repositories.length > 0) rmSync(repositories.pop(), { recursive: true, force: true }); });
@@ -244,6 +260,67 @@ test('removal rejects dirty and pre-terminal worktrees', async () => {
     (error) => error instanceof StateError && error.code === 'DIRTY_WORKTREE');
   assert.equal(inspectTaskWorktree({ cwd: dirty.cwd, changeId: 'issue-23', taskId: dirty.taskId }).status, 'active');
   assert.equal(earlyWorktree.status, 'active');
+});
+
+test('integrated implemented and no-change work require their exact terminal branch tips', async () => {
+  const implemented = await boundRepository(); const implementedWorktree = create(implemented);
+  const terminal = authorizeImplementedRemoval(implemented, implementedWorktree);
+  assert.equal(removeTaskWorktree({ cwd: implemented.cwd, changeId: 'issue-23', taskId: implemented.taskId }).status, 'removed');
+  assert.equal(git(implemented.cwd, ['rev-parse', implementedWorktree.branch]), terminal.workerCommit);
+
+  const noChange = await boundRepository(); const noChangeWorktree = create(noChange);
+  authorizeNoChangeRemoval(noChange, noChangeWorktree);
+  assert.equal(removeTaskWorktree({ cwd: noChange.cwd, changeId: 'issue-23', taskId: noChange.taskId }).status, 'removed');
+  assert.equal(git(noChange.cwd, ['rev-parse', noChangeWorktree.branch]), noChange.base);
+});
+
+test('clean terminal branch advance and reset drift refuse removal without evidence mutation', async () => {
+  const advanced = await boundRepository(); const advancedWorktree = create(advanced);
+  authorizeNoChangeRemoval(advanced, advancedWorktree);
+  commit(advancedWorktree.path, { 'src/advanced.txt': 'advanced\n' }, 'test: advance terminal branch');
+  assert.throws(() => removeTaskWorktree({ cwd: advanced.cwd, changeId: 'issue-23', taskId: advanced.taskId }),
+    (error) => error instanceof StateError && error.code === 'WORKTREE_TERMINAL_IDENTITY_MISMATCH');
+  assert.equal(existsSync(implementationWorktreeRemovalIntentPath(advanced.cwd, 'issue-23', advanced.taskId)), false);
+  assert.equal(existsSync(implementationWorktreeTombstonePath(advanced.cwd, 'issue-23', advanced.taskId)), false);
+  assert.equal(inspectTaskWorktree({ cwd: advanced.cwd, changeId: 'issue-23', taskId: advanced.taskId }).status, 'active');
+  git(advancedWorktree.path, ['reset', '--hard', advanced.base]);
+  assert.equal(removeTaskWorktree({ cwd: advanced.cwd, changeId: 'issue-23', taskId: advanced.taskId }).status, 'removed');
+
+  const reset = await boundRepository(); const resetWorktree = create(reset);
+  const terminal = authorizeImplementedRemoval(reset, resetWorktree);
+  git(resetWorktree.path, ['reset', '--hard', reset.base]);
+  assert.throws(() => removeTaskWorktree({ cwd: reset.cwd, changeId: 'issue-23', taskId: reset.taskId }),
+    (error) => error instanceof StateError && error.code === 'WORKTREE_TERMINAL_IDENTITY_MISMATCH');
+  assert.equal(existsSync(implementationWorktreeRemovalIntentPath(reset.cwd, 'issue-23', reset.taskId)), false);
+  assert.equal(inspectTaskWorktree({ cwd: reset.cwd, changeId: 'issue-23', taskId: reset.taskId }).status, 'active');
+  git(resetWorktree.path, ['reset', '--hard', terminal.workerCommit]);
+  assert.equal(removeTaskWorktree({ cwd: reset.cwd, changeId: 'issue-23', taskId: reset.taskId }).status, 'removed');
+});
+
+test('removal recovery rechecks terminal identity before deletion and before tombstoning', async () => {
+  const beforeDeletion = await boundRepository(); const beforeWorktree = create(beforeDeletion);
+  authorizeNoChangeRemoval(beforeDeletion, beforeWorktree);
+  assert.throws(() => removeTaskWorktree({ cwd: beforeDeletion.cwd, changeId: 'issue-23', taskId: beforeDeletion.taskId,
+    crashStep: 'removal-after-intent' }), (error) => error.code === 'SIMULATED_WORKTREE_CRASH');
+  commit(beforeWorktree.path, { 'src/drift.txt': 'drift\n' }, 'test: drift during removal recovery');
+  assert.throws(() => recoverTaskWorktree({ cwd: beforeDeletion.cwd, changeId: 'issue-23', taskId: beforeDeletion.taskId }),
+    (error) => error.code === 'WORKTREE_TERMINAL_IDENTITY_MISMATCH');
+  assert.equal(existsSync(beforeWorktree.path), true);
+  assert.equal(existsSync(implementationWorktreeTombstonePath(beforeDeletion.cwd, 'issue-23', beforeDeletion.taskId)), false);
+  git(beforeWorktree.path, ['reset', '--hard', beforeDeletion.base]);
+  assert.equal(recoverTaskWorktree({ cwd: beforeDeletion.cwd, changeId: 'issue-23', taskId: beforeDeletion.taskId }).status, 'removed');
+
+  const afterDeletion = await boundRepository(); const afterWorktree = create(afterDeletion);
+  authorizeNoChangeRemoval(afterDeletion, afterWorktree);
+  assert.throws(() => removeTaskWorktree({ cwd: afterDeletion.cwd, changeId: 'issue-23', taskId: afterDeletion.taskId,
+    crashStep: 'removal-after-worktree-remove' }), (error) => error.code === 'SIMULATED_WORKTREE_CRASH');
+  git(afterDeletion.cwd, ['branch', '-f', afterWorktree.branch, afterDeletion.priorBase]);
+  assert.throws(() => recoverTaskWorktree({ cwd: afterDeletion.cwd, changeId: 'issue-23', taskId: afterDeletion.taskId }),
+    (error) => error.code === 'WORKTREE_TERMINAL_IDENTITY_MISMATCH');
+  assert.equal(existsSync(afterWorktree.path), false);
+  assert.equal(existsSync(implementationWorktreeTombstonePath(afterDeletion.cwd, 'issue-23', afterDeletion.taskId)), false);
+  git(afterDeletion.cwd, ['branch', '-f', afterWorktree.branch, afterDeletion.base]);
+  assert.equal(recoverTaskWorktree({ cwd: afterDeletion.cwd, changeId: 'issue-23', taskId: afterDeletion.taskId }).status, 'removed');
 });
 
 test('explicitly rejected bound task authorizes cleanup without a started worker', async () => {
