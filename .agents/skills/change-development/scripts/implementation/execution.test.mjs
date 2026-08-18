@@ -392,6 +392,15 @@ test('related E2E packets reject malformed whole base catalogs while unit-only p
     const bound = bindTask({ cwd: unitContext.cwd, changeId: unitContext.changeId,
       packet: packetFor(unitContext, catalogTask.id), expectedRevision: unitContext.state.revision });
     assert.equal(bound.execution.tasks[0].status, 'bound', `${label} unit-only isolation`);
+
+    const systemContext = await fixture([catalogTask], { 'specs/features/catalog.feature': contents });
+    const systemPacket = packetFor(systemContext, catalogTask.id, { requiredValidation: { unit: [], system: [{
+      command: 'node --test .agents/skills/change-development/scripts/implementation/execution.test.mjs',
+      reason: 'Exercise a non-E2E system boundary.', selectors: [], projects: [],
+    }] } });
+    const systemBound = bindTask({ cwd: systemContext.cwd, changeId: systemContext.changeId,
+      packet: systemPacket, expectedRevision: systemContext.state.revision });
+    assert.equal(systemBound.execution.tasks[0].status, 'bound', `${label} non-E2E system isolation`);
   }
 });
 

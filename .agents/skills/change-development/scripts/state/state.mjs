@@ -1055,7 +1055,7 @@ function assertValidationCatalog(catalog, validation, allowedUnknown = new Set()
 
 function assertPacketSelectorsAtBase(cwd, packet) {
   const existing = selectorEvidenceAtCommit(cwd, packet.taskBaseSha);
-  if (packet.requiredValidation.system.length > 0) assertValidScenarioCatalog(existing);
+  if (packet.requiredValidation.system.some(({ selectors }) => selectors.length > 0)) assertValidScenarioCatalog(existing);
   const planned = new Map((packet.plannedE2ESelectors ?? []).map((entry) => [entry.selector, entry.featurePath]));
   for (const selector of planned.keys()) {
     if (existing.all.has(selector)) throw new StateError(`Planned E2E selector ${selector} already exists at the exact task base`, 'PLANNED_E2E_SELECTOR_MISMATCH');
@@ -1067,7 +1067,7 @@ function assertPacketSelectorsAtBase(cwd, packet) {
 
 function assertPlannedSelectorsRealized(cwd, packet, commit) {
   const catalog = selectorEvidenceAtCommit(cwd, commit);
-  if (packet.requiredValidation.system.length > 0) assertValidScenarioCatalog(catalog);
+  if (packet.requiredValidation.system.some(({ selectors }) => selectors.length > 0)) assertValidScenarioCatalog(catalog);
   for (const { selector, featurePath } of packet.plannedE2ESelectors ?? []) {
     if (!catalog.runnable.get(selector)?.has(featurePath)) {
       throw new StateError(`Planned E2E selector ${selector} was not realized in ${featurePath} at the worker commit`, 'PLANNED_E2E_SELECTOR_MISMATCH');
