@@ -20,11 +20,12 @@ const Ajv2020 = require('ajv/dist/2020').default;
 const addFormats = require('ajv-formats').default;
 
 export const IMPLEMENTATION_PLAN_SCHEMA_VERSION = 1;
-export const DEVELOPMENT_STATE_SCHEMA_VERSION = 1;
+export const DEVELOPMENT_STATE_SCHEMA_VERSION = 2;
+export const HISTORICAL_DEVELOPMENT_STATE_SCHEMA_VERSIONS = Object.freeze([1, 2]);
 export const CHANGE_MODES = Object.freeze(['plan-only', 'implement', 'full']);
 export const DEVELOPMENT_PHASES = Object.freeze([
   'initializing', 'planning', 'awaiting-decision', 'ready-to-implement',
-  'blocked', 'recovering', 'abandoned',
+  'implementing', 'integrating', 'integrated', 'blocked', 'recovering', 'abandoned',
 ]);
 export const SOURCE_KINDS = Object.freeze([
   'github-issue', 'direct-request', 'repository-plan', 'partial-implementation',
@@ -47,7 +48,6 @@ const validateStateSchema = ajv.compile(developmentStateSchema);
 const validateRfc3339DateTime = ajv.compile({ type: 'string', format: 'date-time' });
 const repositoryPathPattern = new RegExp(implementationPlanSchema.$defs.repositoryPath.pattern, 'u');
 const anticipatedPathPattern = new RegExp(implementationPlanSchema.$defs.anticipatedPath.pattern, 'u');
-const registry = loadRegistry();
 
 function sortedJson(value, seen = new Set()) {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value);
@@ -156,7 +156,7 @@ function validateIds(errors, records, label) {
   for (const id of duplicates(records.map((entry) => entry.id))) errors.push(`duplicate ${label} ID: ${id}`);
 }
 
-function computedRoute(metadata, errors, label) {
+function computedRoute(metadata, errors, label, registry) {
   const specializationErrors = validateSpecialization(metadata, registry);
   errors.push(...specializationErrors.map((error) => `${label}: ${error}`));
   if (specializationErrors.length > 0) return null;
@@ -173,8 +173,8 @@ function computedRoute(metadata, errors, label) {
   }
 }
 
-function validateRouteAndEvidence(metadata, evidence, planningSha, planRevision, errors, label) {
-  const route = computedRoute(metadata, errors, label);
+function validateRouteAndEvidence(metadata, evidence, planningSha, planRevision, errors, label, registry) {
+  const route = computedRoute(metadata, errors, label, registry);
   if (!route) return;
   if (!sameJson(metadata.route, route)) errors.push(`${label}.route does not equal the canonical specialist route`);
   if (metadata.relatedTestSelectionUncertain) errors.push(`${label} has unresolved related-test selection`);
@@ -384,7 +384,7 @@ function validateSourceObservationContext(plan, sourceObservation, errors) {
   }
 }
 
-function validateSpecialistAggregate(plan, planningEvidence, errors) {
+function validateSpecialistAggregate(plan, planningEvidence, errors, registry) {
   // A single registry profile cannot necessarily represent the union of a
   // split workflow + product DAG. Treat global metadata as the change's own
   // independently validated classification, then derive final requirements
@@ -398,7 +398,7 @@ function validateSpecialistAggregate(plan, planningEvidence, errors) {
   const persistedPlanningHelpers = new Set();
   const persistedRiskReviewers = new Set();
   for (const [label, metadata] of metadataEntries) {
-    const route = computedRoute(metadata, [], label);
+    const route = computedRoute(metadata, [], label, registry);
     for (const { id } of route?.planningHelpers ?? []) requiredPlanningHelpers.add(id);
     for (const { id } of route?.riskReviewers ?? []) requiredRiskReviewers.add(id);
     for (const { id } of metadata.route.planningHelpers) persistedPlanningHelpers.add(id);
@@ -413,7 +413,9 @@ function validateSpecialistAggregate(plan, planningEvidence, errors) {
   }
 }
 
-export function validateImplementationPlan(value, { planningEvidence = [], sourceObservation, readPlanningFile } = {}) {
+export function validateImplementationPlan(value, {
+  planningEvidence = [], sourceObservation, readPlanningFile, registry = loadRegistry(),
+} = {}) {
   const errors = schemaErrors(validatePlanSchema, value);
   if (errors.length > 0) return errors;
   validatePlanningEvidence(planningEvidence, errors);
@@ -439,11 +441,11 @@ export function validateImplementationPlan(value, { planningEvidence = [], sourc
   const taskIds = new Set(value.tasks.map(({ id }) => id));
   const byId = new Map(value.tasks.map((task) => [task.id, task]));
 
-  validateRouteAndEvidence(value.specialization, planningEvidence, value.planning.planningSha, value.planRevision, errors, '$.specialization');
-  validateSpecialistAggregate(value, planningEvidence, errors);
+  validateRouteAndEvidence(value.specialization, planningEvidence, value.planning.planningSha, value.planRevision, errors, '$.specialization', registry);
+  validateSpecialistAggregate(value, planningEvidence, errors, registry);
   for (const task of value.tasks) {
     const label = `task ${task.id}`;
-    validateRouteAndEvidence(task.specialization, planningEvidence, value.planning.planningSha, value.planRevision, errors, label);
+    validateRouteAndEvidence(task.specialization, planningEvidence, value.planning.planningSha, value.planRevision, errors, label, registry);
     for (const [ids, known, kind] of [[task.criterionIds, criterionIds, 'criterion'], [task.decisionIds, decisionIds, 'decision'], [task.scenarioIds, scenarioIds, 'scenario'], [task.checklistItemIds, checklistIds, 'checklist item']]) {
       for (const id of ids) if (!known.has(id)) errors.push(`${label} references unknown ${kind} ${id}`);
     }
@@ -514,8 +516,10 @@ export function validateImplementationPlan(value, { planningEvidence = [], sourc
   return [...new Set(errors)];
 }
 
-export function planReadiness(value, { planningEvidence = [], sourceObservation, readPlanningFile } = {}) {
-  const errors = validateImplementationPlan(value, { planningEvidence, sourceObservation, readPlanningFile });
+export function planReadiness(value, {
+  planningEvidence = [], sourceObservation, readPlanningFile, registry = loadRegistry(),
+} = {}) {
+  const errors = validateImplementationPlan(value, { planningEvidence, sourceObservation, readPlanningFile, registry });
   if (errors.length === 0) {
     for (const decision of value.decisions) if (decision.status !== 'resolved') errors.push(`decision ${decision.id} is ${decision.status}`);
     for (const mapping of value.checklistMappings) {
@@ -529,6 +533,42 @@ export function validateDevelopmentState(value) {
   const errors = schemaErrors(validateStateSchema, value);
   if (errors.length > 0) return errors;
   for (const id of duplicates(value.checklist.map(({ id }) => id))) errors.push(`duplicate checklist status ID: ${id}`);
+  if (value.schemaVersion === 1 && !['initializing', 'planning', 'awaiting-decision', 'ready-to-implement', 'blocked', 'recovering', 'abandoned'].includes(value.phase)) {
+    errors.push(`development-state v1 cannot use phase ${value.phase}`);
+  }
+  if (value.schemaVersion === 1 && Object.hasOwn(value, 'execution')) errors.push('development-state v1 cannot contain execution state');
+  if (value.schemaVersion === 2) {
+    if (!Object.hasOwn(value, 'execution')) errors.push('development-state v2 requires execution state');
+    if (value.plan === null && value.execution !== null) errors.push('execution state requires an accepted plan');
+    if (value.plan !== null && value.execution === null) errors.push('development-state v2 with an accepted plan requires execution summaries');
+    if (value.execution) {
+      const taskIds = value.execution.tasks.map(({ id }) => id);
+      for (const id of duplicates(taskIds)) errors.push(`duplicate execution task ID: ${id}`);
+      if (value.execution.planDigest !== value.plan?.effectiveDigest) errors.push('execution planDigest must equal the effective accepted-plan digest');
+      for (const id of value.execution.activeWave) if (!taskIds.includes(id)) errors.push(`active wave names unknown task ${id}`);
+      const active = new Set(value.execution.activeWave);
+      for (const field of ['workerId', 'worktreePath', 'branch']) for (const duplicate of duplicates(value.execution.tasks.map((task) => task[field]).filter((entry) => entry !== null))) errors.push(`duplicate execution ${field}: ${duplicate}`);
+      for (const task of value.execution.tasks) {
+        if (task.dependsOn.includes(task.id)) errors.push(`execution task ${task.id} depends on itself`);
+        for (const dependency of task.dependsOn) if (!taskIds.includes(dependency)) errors.push(`execution task ${task.id} has unknown dependency ${dependency}`);
+        if (['scheduled', 'running'].includes(task.status) !== active.has(task.id)) errors.push(`execution task ${task.id} active-wave membership does not match status`);
+        if (task.status === 'unbound' && (task.packetDigest !== null || task.taskBaseSha !== null || task.workerId !== null
+            || task.worktreePath !== null || task.branch !== null || task.worktreeManifestDigest !== null)) errors.push(`unbound task ${task.id} cannot retain packet/worker binding`);
+        const workerFields = [task.workerId, task.worktreePath, task.branch, task.worktreeManifestDigest];
+        if (workerFields.some((value) => value !== null) && workerFields.some((value) => value === null)) errors.push(`execution task ${task.id} has a partial worker binding`);
+        if (['running', 'accepted', 'integration-pending', 'integrated', 'blocked', 'failed', 'no-change'].includes(task.status)
+            && workerFields.some((value) => value === null)) errors.push(`execution task ${task.id} status ${task.status} requires a worker binding`);
+        if (['integrated', 'no-change'].includes(task.status) && task.status === 'integrated' && task.integratedCommit === null) errors.push(`integrated task ${task.id} requires an integrated commit`);
+        if (['bound', 'scheduled', 'running', 'accepted', 'integration-pending', 'integrated', 'blocked', 'failed', 'rejected', 'no-change'].includes(task.status)
+            && (task.packetDigest === null || task.taskBaseSha === null)) errors.push(`execution task ${task.id} status ${task.status} requires packet binding`);
+        if (['accepted', 'integration-pending', 'integrated'].includes(task.status) && (task.resultDigest === null || task.workerCommit === null)) errors.push(`execution task ${task.id} status ${task.status} requires implemented result evidence`);
+        if (['blocked', 'failed', 'no-change'].includes(task.status) && task.resultDigest === null) errors.push(`execution task ${task.id} status ${task.status} requires result evidence`);
+      }
+      if (value.phase === 'integrating' && value.execution.integrationIntent === null) errors.push('integrating requires an integration intent');
+      if (value.execution.integrationIntent !== null && value.phase !== 'integrating') errors.push('integration intent is valid only while integrating');
+      if (value.phase === 'integrated' && value.execution.tasks.some((task) => !['integrated', 'no-change'].includes(task.status))) errors.push('integrated phase requires every task to be integrated or no-change');
+    }
+  }
   if (value.plan === null && ['ready-to-implement'].includes(value.phase)) errors.push(`${value.phase} requires an accepted plan`);
   if (value.source.fullDigest !== value.source.latestDigest) errors.push('source fullDigest must equal latestDigest');
   if (value.phase === 'ready-to-implement') {

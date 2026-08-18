@@ -21,3 +21,7 @@ config_file = "agents/security-reviewer.toml"
 [agents.offline_realtime_reviewer]
 description = "Read-only Aerstello offline and realtime risk reviewer."
 config_file = "agents/offline-realtime-reviewer.toml"
+
+[agents.implementation_worker]
+description = "Implementation worker for one immutable Aerstello change-development task packet."
+config_file = "agents/implementation-worker.toml"

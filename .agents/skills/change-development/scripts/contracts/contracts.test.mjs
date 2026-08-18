@@ -113,6 +113,16 @@ test('canonical JSON is stable and its receipt includes the canonical newline', 
   assert.throws(() => canonicalJsonText({ bad: undefined }), /cannot contain undefined/u);
 });
 
+test('plan validation applies the registry supplied for each acceptance or amendment call', () => {
+  const value = plan();
+  assert.deepEqual(validateImplementationPlan(value, { registry }), []);
+  const changedRegistry = structuredClone(registry);
+  changedRegistry.profiles.find(({ id }) => id === 'ops-workflow').compatibleAffectedAreas = ['documentation'];
+  assert.match(validateImplementationPlan(value, { registry: changedRegistry }).join('\n'), /incompatible with affected area workflow/u);
+  assert.equal(planReadiness(value, { registry: changedRegistry }).ready, false);
+  assert.deepEqual(validateImplementationPlan(value, { registry }), []);
+});
+
 test('valid plan is schema-valid, manually valid, and ready', () => {
   assert.deepEqual(validateImplementationPlan(plan()), []);
   assert.deepEqual(planReadiness(plan()), { ready: true, errors: [] });
@@ -390,11 +400,24 @@ test('schema and contract accept unambiguous whitespace-free anticipated paths',
     'package.json', 'scripts', 'README.md', 'AGENTS.md', 'RM-generated.json',
     '.agents/skills/change-development', 'specs/features/example.feature',
     'Playwright-notes.md', 'justifications/check.workflow',
+    '.gitignore', '.github/workflows', 'nested/.gitkeep',
   ]) {
     const value = plan(); value.tasks[0].anticipatedPaths = [path];
     assert.equal(validateSchema(value), true, path);
     assert.deepEqual(validateImplementationPlan(value), [], path);
     assert.deepEqual(planReadiness(value), { ready: true, errors: [] }, path);
+  }
+});
+
+test('schema, contract, and readiness reject exact Git metadata path segments', () => {
+  const schema = JSON.parse(readFileSync(contractPaths.implementationPlanSchema, 'utf8'));
+  const ajv = new Ajv2020({ strict: true, allErrors: true }); addFormats(ajv);
+  const validateSchema = ajv.compile(schema);
+  for (const path of ['.git', '.git/config', 'nested/.git/hooks', 'nested/.git/hooks/pre-commit']) {
+    const value = plan(); value.tasks[0].anticipatedPaths = [path];
+    assert.equal(validateSchema(value), false, path);
+    assert.match(validateImplementationPlan(value).join('\n'), /must match pattern|unsafe repository path/u, path);
+    assert.equal(planReadiness(value).ready, false, path);
   }
 });
 

@@ -1,0 +1,954 @@
+import assert from 'node:assert/strict';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { afterEach, test } from 'node:test';
+
+import { loadRegistry, routeSpecialists } from '../../../aerstello-specialists/scripts/validate-registry.mjs';
+import { commit, createRepository, git, writeFiles } from '../../../../../tests/support/git-fixtures.mjs';
+import { changeDirectory } from '../paths.mjs';
+import {
+  acceptPlan,
+  acceptResult,
+  bindTask,
+  initializeState,
+  integrateTask,
+  loadState,
+  reconcileIntegration,
+  rejectTask,
+  scheduleWave,
+  startTask,
+  StateError,
+  validateState,
+} from '../state/state.mjs';
+import { createTaskWorktree } from '../worktree/worktree.mjs';
+import { implementationTaskDigest } from './contracts.mjs';
+
+const repositories = [];
+const registry = loadRegistry();
+
+afterEach(() => {
+  while (repositories.length > 0) rmSync(repositories.pop(), { recursive: true, force: true });
+});
+
+function profile() {
+  const value = {
+    specialization: 'ops-workflow',
+    affectedAreas: ['workflow'],
+    riskTags: ['workflow'],
+    browserVisible: false,
+    relatedTestSelectionUncertain: false,
+  };
+  return {
+    ...value,
+    route: routeSpecialists({
+      specialization: value.specialization,
+      riskTags: value.riskTags,
+      browserVisible: value.browserVisible,
+      testSelectionUncertain: value.relatedTestSelectionUncertain,
+    }, registry),
+  };
+}
+
+function task(id, anticipatedPaths, dependsOn = []) {
+  return {
+    id,
+    title: `Implement ${id}`,
+    objective: `Produce the exact ${id} repository change.`,
+    rationale: 'The implementation lifecycle needs deterministic execution evidence.',
+    specialization: profile(),
+    criterionIds: [`criterion-${id}`],
+    decisionIds: [],
+    scenarioIds: [],
+    checklistItemIds: [],
+    dependsOn,
+    anticipatedPaths,
+    produces: [],
+    consumes: [],
+    validationIntent: [`Exercise ${id} through the public lifecycle API.`],
+    unsplittable: null,
+  };
+}
+
+async function fixture(tasks, initialFiles = {}) {
+  const cwd = createRepository();
+  repositories.push(cwd);
+  const base = commit(cwd, {
+    'request.md': '# Execution request\n',
+    ...initialFiles,
+  }, 'test: seed execution fixture');
+  const planning = await initializeState({
+    cwd,
+    changeId: `execution-${repositories.length}`,
+    mode: 'implement',
+    baseBranch: 'main',
+    planningRef: base,
+    source: { type: 'direct-request', path: 'request.md', relationshipIntent: 'resolves' },
+  });
+  const specialization = profile();
+  const plan = {
+    schemaVersion: 1,
+    planRevision: 1,
+    changeId: planning.changeId,
+    source: {
+      kind: planning.source.kind,
+      reference: planning.source.reference,
+      relationship: planning.source.relationship,
+      captureDigest: planning.source.latestDigest,
+    },
+    title: 'Execution lifecycle fixture',
+    objective: 'Exercise bounded worker execution and central integration.',
+    scope: ['Repository workflow'],
+    nonGoals: ['Product behavior'],
+    planning: { planningSha: base, baseBranch: 'main', comparisonBaseSha: null },
+    expectedPrBaseBranch: 'main',
+    criteria: tasks.map(({ id }) => ({
+      id: `criterion-${id}`,
+      description: `The ${id} task is executed with exact durable evidence.`,
+      disposition: 'owned',
+      ownerTaskId: id,
+      deferredReason: null,
+    })),
+    decisions: [],
+    scenarios: [],
+    productScenarioDisposition: {
+      disposition: 'not-applicable',
+      scenarioIds: [],
+      rationale: 'This fixture exercises repository workflow only.',
+    },
+    specialization,
+    checklistMappings: [],
+    tasks,
+  };
+  const accepted = acceptPlan({ cwd, expectedRevision: planning.revision, plan, planningEvidence: [] });
+  return { cwd, base, plan, state: accepted, changeId: planning.changeId };
+}
+
+function packetFor(context, taskId, overrides = {}) {
+  const planned = context.plan.tasks.find(({ id }) => id === taskId);
+  return {
+    schemaVersion: 1,
+    changeId: context.changeId,
+    taskId,
+    planRevision: context.plan.planRevision,
+    planDigest: context.state.plan.effectiveDigest,
+    planningSha: context.base,
+    taskBaseSha: context.state.git.headSha,
+    specialization: planned.specialization.specialization,
+    riskTags: planned.specialization.riskTags,
+    affectedAreas: planned.specialization.affectedAreas,
+    planningSignals: {
+      browserVisible: planned.specialization.browserVisible,
+      relatedTestSelectionUncertain: planned.specialization.relatedTestSelectionUncertain,
+    },
+    specialistRoute: planned.specialization.route,
+    behaviorMapperEvidence: null,
+    objective: planned.objective,
+    evidence: 'The accepted plan binds this exact public-API execution test task.',
+    decisionIds: [],
+    decisionContext: [],
+    acceptanceCriteriaIds: planned.criterionIds,
+    acceptanceCriteria: planned.criterionIds.map((id) => ({
+      id,
+      description: context.plan.criteria.find((criterion) => criterion.id === id).description,
+    })),
+    allowedPaths: planned.anticipatedPaths.map((path) => path.includes('.') ? path : `${path}/**`),
+    forbiddenPaths: [],
+    dependencies: planned.dependsOn,
+    requiredValidation: {
+      unit: [{ command: 'node --test tests/execution.test.mjs', reason: 'Exercise the exact worker result.' }],
+      system: [],
+    },
+    ...overrides,
+  };
+}
+
+function bind(context, taskId) {
+  const packet = packetFor(context, taskId);
+  context.state = bindTask({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    packet,
+    expectedRevision: context.state.revision,
+  });
+  return packet;
+}
+
+function createWorker(context, packet) {
+  return createTaskWorktree({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    taskId: packet.taskId,
+    base: packet.taskBaseSha,
+    packetDigest: implementationTaskDigest(packet),
+  });
+}
+
+function startWave(context, packets) {
+  context.state = scheduleWave({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    expectedRevision: context.state.revision,
+  });
+  const scheduled = new Set(context.state.execution.activeWave);
+  for (const packet of packets.filter(({ taskId }) => scheduled.has(taskId))) {
+    context.state = startTask({
+      cwd: context.cwd,
+      changeId: context.changeId,
+      taskId: packet.taskId,
+      workerId: `worker-${packet.taskId}`,
+      expectedRevision: context.state.revision,
+    });
+  }
+}
+
+function resultFor(packet, workerCommit, changedPaths) {
+  return {
+    schemaVersion: 1,
+    changeId: packet.changeId,
+    taskId: packet.taskId,
+    planDigest: packet.planDigest,
+    packetDigest: implementationTaskDigest(packet),
+    specialization: packet.specialization,
+    taskBaseSha: packet.taskBaseSha,
+    status: 'implemented',
+    workerCommit,
+    changedPaths,
+    validation: [...packet.requiredValidation.unit, ...packet.requiredValidation.system].map(({ command }) => ({
+      command,
+      result: 'passed',
+      summary: 'Focused validation passed.',
+    })),
+    unexpectedDependencies: [],
+    summary: 'Implemented the exact immutable task packet.',
+  };
+}
+
+function accept(context, packet, worker, workerCommit, changedPaths) {
+  context.state = acceptResult({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    result: resultFor(packet, workerCommit, changedPaths),
+    workerCwd: worker.path,
+    expectedRevision: context.state.revision,
+  });
+}
+
+test('binding rejects unready dependencies and any taskBaseSha other than the exact durable central HEAD', async () => {
+  const prerequisite = task('prerequisite', ['output/prerequisite.txt']);
+  const dependent = task('dependent', ['output/dependent.txt'], ['prerequisite']);
+  const context = await fixture([prerequisite, dependent]);
+  const wrongBase = git(context.cwd, ['rev-parse', `${context.base}^`]);
+
+  assert.throws(() => bindTask({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    packet: packetFor(context, 'prerequisite', { taskBaseSha: wrongBase }),
+    expectedRevision: context.state.revision,
+  }), (error) => error instanceof StateError && error.code === 'PACKET_PLAN_MISMATCH');
+  assert.throws(() => bindTask({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    packet: packetFor(context, 'dependent'),
+    expectedRevision: context.state.revision,
+  }), (error) => error instanceof StateError && error.code === 'DEPENDENCY_NOT_INTEGRATED');
+
+  writeFiles(context.cwd, { 'dirty.txt': 'dirty\n' });
+  assert.throws(() => bindTask({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    packet: packetFor(context, 'prerequisite'),
+    expectedRevision: context.state.revision,
+  }), (error) => error instanceof StateError && error.code === 'CENTRAL_GIT_MISMATCH');
+  rmSync(join(context.cwd, 'dirty.txt'));
+  commit(context.cwd, { 'advanced.txt': 'advanced\n' }, 'test: advance central head');
+  assert.throws(() => bindTask({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    packet: packetFor(context, 'prerequisite'),
+    expectedRevision: context.state.revision,
+  }), (error) => error instanceof StateError && error.code === 'CENTRAL_GIT_MISMATCH');
+  git(context.cwd, ['reset', '--hard', context.state.git.headSha]);
+  git(context.cwd, ['switch', '-c', 'alternate-central']);
+  assert.throws(() => bindTask({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    packet: packetFor(context, 'prerequisite'),
+    expectedRevision: context.state.revision,
+  }), (error) => error instanceof StateError && error.code === 'CENTRAL_GIT_MISMATCH');
+  git(context.cwd, ['switch', 'main']);
+  git(context.cwd, ['switch', '--detach', context.state.git.headSha]);
+  assert.throws(() => bindTask({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    packet: packetFor(context, 'prerequisite'),
+    expectedRevision: context.state.revision,
+  }), (error) => error instanceof StateError && error.code === 'CENTRAL_GIT_MISMATCH');
+  git(context.cwd, ['switch', 'main']);
+
+  assert.equal(loadState(context.cwd).revision, context.state.revision);
+  assert.equal(validateState({ cwd: context.cwd }).valid, true);
+});
+
+test('runnable direct, feature-inherited, and outline selectors bind and replay against exact Git trees', async () => {
+  const plannedTask = task('planned-selector', ['specs/features/planned.feature']);
+  const context = await fixture([plannedTask], {
+    'specs/features/existing.feature': [
+      'Feature: Existing', '', '  # @id-comment-decoy', '  @id-existing-flow',
+      '  Scenario: Existing flow', '    Given step prose mentions @id-step-decoy', '',
+    ].join('\n'),
+  });
+  const selectors = ['id-feature-flow', 'id-planned-flow', 'id-outline-flow'];
+  const validation = { unit: [], system: [{
+    command: 'npm run test:e2e:related -- --id feature-flow --id planned-flow --id outline-flow',
+    reason: 'Exercise inherited, direct, and outline flows.', selectors, projects: ['tablet-chromium'],
+  }] };
+  const planned = packetFor(context, plannedTask.id, {
+    plannedE2ESelectors: selectors.map((selector) => ({ selector, featurePath: 'specs/features/planned.feature' })),
+    requiredValidation: validation,
+  });
+  context.state = bindTask({ cwd: context.cwd, changeId: context.changeId, packet: planned,
+    expectedRevision: context.state.revision });
+  const worker = createWorker(context, planned);
+  startWave(context, [planned]);
+  const workerCommit = commit(worker.path, {
+    'specs/features/planned.feature': [
+      '@id-feature-flow', 'Feature: Planned', '', '  @id-feature-scenario', '  Scenario: Feature inherited flow', '',
+      '  @id-planned-flow', '  Scenario: Direct planned flow', '',
+      '  @id-outline-flow', '  Scenario Outline: Planned outline', '    Given <value>', '',
+      '    Examples:', '      | value |', '      | one   |', '',
+    ].join('\n'),
+  }, 'test: add planned selector');
+  accept(context, planned, worker, workerCommit, ['specs/features/planned.feature']);
+  assert.equal(context.state.execution.tasks[0].status, 'accepted');
+  assert.equal(validateState({ cwd: context.cwd }).valid, true,
+    'durable replay reads the exact base and worker trees after the worker checkout advances');
+
+  for (const [label, overrides] of [
+    ['unknown', { requiredValidation: { unit: [], system: [{
+      command: 'npm run test:e2e:related -- --id unknown-flow', reason: 'Unknown selector.',
+      selectors: ['id-unknown-flow'], projects: ['tablet-chromium'],
+    }] } }],
+    ['already existing', {
+      plannedE2ESelectors: [{ selector: 'id-existing-flow', featurePath: 'specs/features/planned.feature' }],
+      requiredValidation: { unit: [], system: [{
+        command: 'npm run test:e2e:related -- --id existing-flow', reason: 'Existing selector.',
+        selectors: ['id-existing-flow'], projects: ['tablet-chromium'],
+      }] },
+    }],
+    ['comment decoy', { requiredValidation: { unit: [], system: [{
+      command: 'npm run test:e2e:related -- --id comment-decoy', reason: 'Comment text is not a tag.',
+      selectors: ['id-comment-decoy'], projects: ['tablet-chromium'],
+    }] } }],
+    ['step-text decoy', { requiredValidation: { unit: [], system: [{
+      command: 'npm run test:e2e:related -- --id step-decoy', reason: 'Step text is not a tag.',
+      selectors: ['id-step-decoy'], projects: ['tablet-chromium'],
+    }] } }],
+  ]) {
+    const rejected = await fixture([plannedTask], {
+      'specs/features/existing.feature': [
+        'Feature: Existing', '', '  # @id-comment-decoy', '  @id-existing-flow',
+        '  Scenario: Existing flow', '    Given step prose mentions @id-step-decoy', '',
+      ].join('\n'),
+    });
+    const revision = rejected.state.revision;
+    assert.throws(() => bindTask({ cwd: rejected.cwd, changeId: rejected.changeId,
+      packet: packetFor(rejected, plannedTask.id, overrides), expectedRevision: revision }),
+    (error) => error instanceof StateError && error.code === 'PLANNED_E2E_SELECTOR_MISMATCH', label);
+    assert.equal(loadState(rejected.cwd).revision, revision, label);
+  }
+});
+
+test('related E2E packets reject malformed whole base catalogs while unit-only packets remain isolated', async () => {
+  for (const [label, malformedScenario] of [
+    ['missing stable ID', ['  Scenario: Missing stable ID', '    Given a malformed scenario']],
+    ['multiple stable IDs', ['  @id-first-malformed @id-second-malformed',
+      '  Scenario Outline: Duplicate stable IDs', '    Given <value>', '    Examples:', '      | value |', '      | one |']],
+  ]) {
+    const catalogTask = task(`base-catalog-${label.toLowerCase().replaceAll(' ', '-')}`, ['output/catalog.txt']);
+    const contents = [
+      'Feature: Base catalog', '', '  @id-valid-flow', '  Scenario: Valid flow', '    Given a valid scenario', '',
+      ...malformedScenario, '',
+    ].join('\n');
+    const context = await fixture([catalogTask], { 'specs/features/catalog.feature': contents });
+    const packet = packetFor(context, catalogTask.id, { requiredValidation: { unit: [], system: [{
+      command: 'npm run test:e2e:related -- --id valid-flow', reason: 'Exercise the valid flow.',
+      selectors: ['id-valid-flow'], projects: ['tablet-chromium'],
+    }] } });
+    const root = changeDirectory(context.cwd, context.changeId);
+    const before = {
+      state: readFileSync(join(root, 'state.json'), 'utf8'),
+      events: readFileSync(join(root, 'events.jsonl'), 'utf8'),
+      transitions: readdirSync(join(root, 'transitions')),
+    };
+    assert.throws(() => bindTask({ cwd: context.cwd, changeId: context.changeId, packet,
+      expectedRevision: context.state.revision }),
+    (error) => error instanceof StateError && error.code === 'RELATED_E2E_CATALOG_INVALID', label);
+    assert.equal(readFileSync(join(root, 'state.json'), 'utf8'), before.state, label);
+    assert.equal(readFileSync(join(root, 'events.jsonl'), 'utf8'), before.events, label);
+    assert.deepEqual(readdirSync(join(root, 'transitions')), before.transitions, label);
+    assert.equal(existsSync(join(root, 'implementation', 'tasks', catalogTask.id)), false, label);
+
+    const unitContext = await fixture([catalogTask], { 'specs/features/catalog.feature': contents });
+    const bound = bindTask({ cwd: unitContext.cwd, changeId: unitContext.changeId,
+      packet: packetFor(unitContext, catalogTask.id), expectedRevision: unitContext.state.revision });
+    assert.equal(bound.execution.tasks[0].status, 'bound', `${label} unit-only isolation`);
+
+    const systemContext = await fixture([catalogTask], { 'specs/features/catalog.feature': contents });
+    const systemPacket = packetFor(systemContext, catalogTask.id, { requiredValidation: { unit: [], system: [{
+      command: 'node --test .agents/skills/change-development/scripts/implementation/execution.test.mjs',
+      reason: 'Exercise a non-E2E system boundary.', selectors: [], projects: [],
+    }] } });
+    const systemBound = bindTask({ cwd: systemContext.cwd, changeId: systemContext.changeId,
+      packet: systemPacket, expectedRevision: systemContext.state.revision });
+    assert.equal(systemBound.execution.tasks[0].status, 'bound', `${label} non-E2E system isolation`);
+  }
+});
+
+test('implemented results reject malformed worker catalogs and replay the exact accepted worker tree', async () => {
+  const catalogTask = task('worker-catalog', ['specs/features/worker-catalog.feature']);
+  const existing = [
+    'Feature: Existing catalog', '', '  @id-existing-flow', '  Scenario: Existing flow', '    Given a valid scenario', '',
+  ].join('\n');
+  const validation = { unit: [], system: [{
+    command: 'npm run test:e2e:related -- --id existing-flow', reason: 'Exercise the existing flow.',
+    selectors: ['id-existing-flow'], projects: ['tablet-chromium'],
+  }] };
+
+  const rejected = await fixture([catalogTask], { 'specs/features/existing.feature': existing });
+  const rejectedPacket = packetFor(rejected, catalogTask.id, { requiredValidation: validation });
+  rejected.state = bindTask({ cwd: rejected.cwd, changeId: rejected.changeId, packet: rejectedPacket,
+    expectedRevision: rejected.state.revision });
+  const rejectedWorker = createWorker(rejected, rejectedPacket); startWave(rejected, [rejectedPacket]);
+  const malformedCommit = commit(rejectedWorker.path, { 'specs/features/worker-catalog.feature': [
+    'Feature: Worker catalog', '', '  Scenario: Missing stable ID', '    Given malformed worker content', '',
+  ].join('\n') }, 'test: malformed worker catalog');
+  const rejectedRoot = changeDirectory(rejected.cwd, rejected.changeId);
+  const rejectedRevision = rejected.state.revision;
+  assert.throws(() => accept(rejected, rejectedPacket, rejectedWorker, malformedCommit,
+    ['specs/features/worker-catalog.feature']),
+  (error) => error instanceof StateError && error.code === 'RELATED_E2E_CATALOG_INVALID');
+  assert.equal(loadState(rejected.cwd).revision, rejectedRevision);
+  assert.equal(existsSync(join(rejectedRoot, 'implementation', 'results', catalogTask.id, '0001.json')), false);
+
+  const accepted = await fixture([catalogTask], { 'specs/features/existing.feature': existing });
+  const acceptedPacket = packetFor(accepted, catalogTask.id, { requiredValidation: validation });
+  accepted.state = bindTask({ cwd: accepted.cwd, changeId: accepted.changeId, packet: acceptedPacket,
+    expectedRevision: accepted.state.revision });
+  const acceptedWorker = createWorker(accepted, acceptedPacket); startWave(accepted, [acceptedPacket]);
+  const validCommit = commit(acceptedWorker.path, { 'specs/features/worker-catalog.feature': [
+    '@area-worker', 'Feature: Worker catalog', '', '  @id-worker-flow',
+    '  Scenario Outline: Valid worker outline', '    Given <value>', '    Examples:', '      | value |', '      | one |', '',
+  ].join('\n') }, 'test: valid worker catalog');
+  accept(accepted, acceptedPacket, acceptedWorker, validCommit, ['specs/features/worker-catalog.feature']);
+  commit(acceptedWorker.path, { 'specs/features/worker-catalog.feature': [
+    'Feature: Mutable checkout', '', '  @id-first @id-second', '  Scenario: Later malformed scenario', '',
+  ].join('\n') }, 'test: advance mutable worker checkout');
+  assert.equal(validateState({ cwd: accepted.cwd }).valid, true,
+    'durable replay must re-read the receipt-bound worker commit, not the mutable worker checkout');
+});
+
+test('related E2E browser projects are the canonical union for OR-matched exact-tree scenarios', async () => {
+  const browserFeature = [
+    '@area-browser @browser-webkit', 'Feature: Browser catalog', '',
+    '  @id-webkit-flow', '  Scenario: Inherited WebKit flow', '',
+    '  @id-dual-flow @browser-firefox', '  Scenario: Dual browser flow', '',
+    '  @id-plain-flow', '  Scenario: Plain flow', '',
+  ].join('\n');
+  const makePacket = (context, selectors, projects) => packetFor(context, 'catalog-task', {
+    requiredValidation: { unit: [], system: [{
+      command: `npm run test:e2e:related -- ${selectors.map((selector) => `--id ${selector.slice(3)}`).join(' ')} ${projects.map((project) => `--project ${project}`).join(' ')}`,
+      reason: 'Exercise the exact OR-matched browser catalog.', selectors, projects,
+    }] },
+  });
+  for (const [label, selectors, projects, code] of [
+    ['missing inherited WebKit', ['id-webkit-flow'], ['tablet-chromium'], 'RELATED_E2E_PROJECT_MISMATCH'],
+    ['missing Firefox from the OR union', ['id-dual-flow'], ['mobile-webkit'], 'RELATED_E2E_PROJECT_MISMATCH'],
+    ['canonical union', ['id-webkit-flow', 'id-dual-flow'], ['tablet-chromium', 'mobile-webkit', 'desktop-firefox'], null],
+    ['harmless extra project', ['id-plain-flow'], ['tablet-chromium', 'desktop-firefox', 'mobile-webkit'], null],
+  ]) {
+    const context = await fixture([task('catalog-task', ['output/catalog.txt'])], {
+      'specs/features/browser-catalog.feature': browserFeature,
+    });
+    const revision = context.state.revision;
+    const action = () => bindTask({ cwd: context.cwd, changeId: context.changeId,
+      packet: makePacket(context, selectors, projects), expectedRevision: revision });
+    if (code) {
+      assert.throws(action, (error) => error instanceof StateError && error.code === code, label);
+      assert.equal(loadState(context.cwd).revision, revision, label);
+    } else {
+      const bound = action();
+      assert.equal(bound.execution.tasks[0].status, 'bound', label);
+      assert.equal(validateState({ cwd: context.cwd }).valid, true, label);
+    }
+  }
+});
+
+test('planned browser tags must realize the canonical worker-tree project union before evidence advances', async () => {
+  for (const [label, projects, succeeds] of [
+    ['missing WebKit project', ['tablet-chromium'], false],
+    ['canonical WebKit project', ['tablet-chromium', 'mobile-webkit'], true],
+  ]) {
+    const plannedTask = task(`planned-browser-${succeeds ? 'valid' : 'invalid'}`, ['specs/features/planned-browser.feature']);
+    const context = await fixture([plannedTask]);
+    const packet = packetFor(context, plannedTask.id, {
+      plannedE2ESelectors: [{ selector: 'id-planned-browser-flow', featurePath: 'specs/features/planned-browser.feature' }],
+      requiredValidation: { unit: [], system: [{
+        command: `npm run test:e2e:related -- --id planned-browser-flow ${projects.map((project) => `--project ${project}`).join(' ')}`,
+        reason: 'Exercise the planned browser flow.',
+        selectors: ['id-planned-browser-flow'], projects,
+      }] },
+    });
+    context.state = bindTask({ cwd: context.cwd, changeId: context.changeId, packet,
+      expectedRevision: context.state.revision });
+    const worker = createWorker(context, packet); startWave(context, [packet]);
+    const workerCommit = commit(worker.path, {
+      'specs/features/planned-browser.feature': [
+        'Feature: Planned browser', '', '  @id-planned-browser-flow @browser-webkit',
+        '  Scenario: Planned WebKit flow', '',
+      ].join('\n'),
+    }, 'test: add planned browser selector');
+    const revision = context.state.revision;
+    const action = () => accept(context, packet, worker, workerCommit, ['specs/features/planned-browser.feature']);
+    if (!succeeds) {
+      assert.throws(action, (error) => error instanceof StateError
+        && error.code === 'RELATED_E2E_PROJECT_MISMATCH', label);
+      assert.equal(loadState(context.cwd).revision, revision, label);
+      assert.equal(existsSync(join(changeDirectory(context.cwd, context.changeId), 'implementation', 'results',
+        plannedTask.id, '0001.json')), false, label);
+    } else {
+      action();
+      assert.equal(validateState({ cwd: context.cwd }).valid, true, label);
+    }
+  }
+});
+
+test('result acceptance rejects orphan, unsupported, and mixed selector associations without evidence mutation', async () => {
+  const cases = [
+    ['missing directly attached stable ID', 'RELATED_E2E_CATALOG_INVALID', ['id-feature-flow'], [
+      '@id-feature-flow', 'Feature: Planned', '', '  Scenario: Inherited selector without stable scenario ID', '',
+    ].join('\n')],
+    ['duplicate directly attached stable IDs', 'RELATED_E2E_CATALOG_INVALID', ['area-feature-flow'], [
+      '@area-feature-flow', 'Feature: Planned', '', '  @id-first-flow @id-second-flow',
+      '  Scenario: Inherited selector with duplicate stable scenario IDs', '',
+    ].join('\n')],
+    ['orphan', 'RELATED_E2E_CATALOG_INVALID', ['id-orphan-flow'], [
+      'Feature: Planned', '', '  Scenario: Runnable without selector', '', '  @id-orphan-flow', '',
+    ].join('\n')],
+    ['unsupported construct', 'RELATED_E2E_CATALOG_INVALID', ['id-unsupported-flow'], [
+      'Feature: Planned', '', '  @id-unsupported-flow', '  Background:', '    Given setup', '',
+      '  Scenario: Runnable without selector', '',
+    ].join('\n')],
+    ['mixed runnable and orphan', 'PLANNED_E2E_SELECTOR_MISMATCH', ['id-runnable-flow', 'id-orphan-flow'], [
+      'Feature: Planned', '', '  @id-runnable-flow', '  Scenario: Runnable selector', '',
+      '  @id-orphan-flow', '',
+    ].join('\n')],
+  ];
+  for (const [label, expectedCode, selectors, contents] of cases) {
+    const plannedTask = task(`unrealized-${label.toLowerCase().replaceAll(' ', '-')}`, ['specs/features/planned.feature']);
+    const context = await fixture([plannedTask]);
+    const packet = packetFor(context, plannedTask.id, {
+      plannedE2ESelectors: selectors.map((selector) => ({ selector, featurePath: 'specs/features/planned.feature' })),
+      requiredValidation: { unit: [], system: [{
+        command: `npm run test:e2e:related -- ${selectors.map((selector) => (
+          selector.startsWith('id-') ? `--id ${selector.slice(3)}` : `--tag ${selector}`
+        )).join(' ')}`,
+        reason: `Exercise ${label} association.`, selectors, projects: ['tablet-chromium'],
+      }] },
+    });
+    context.state = bindTask({ cwd: context.cwd, changeId: context.changeId, packet,
+      expectedRevision: context.state.revision });
+    const worker = createWorker(context, packet);
+    startWave(context, [packet]);
+    const workerCommit = commit(worker.path, { 'specs/features/planned.feature': contents }, `test: ${label} selector`);
+    const revision = context.state.revision;
+    assert.throws(() => accept(context, packet, worker, workerCommit, ['specs/features/planned.feature']),
+      (error) => error instanceof StateError && error.code === expectedCode, label);
+    assert.equal(loadState(context.cwd).revision, revision, label);
+    assert.equal(existsSync(join(changeDirectory(context.cwd, context.changeId), 'implementation', 'results',
+      plannedTask.id, '0001.json')), false, label);
+  }
+});
+
+test('result acceptance rejects planned-selector no-change without terminal evidence', async () => {
+  const plannedTask = task('no-change-selector', ['specs/features/planned.feature']);
+  const context = await fixture([plannedTask]);
+  const packet = packetFor(context, plannedTask.id, {
+    plannedE2ESelectors: [{ selector: 'id-planned-flow', featurePath: 'specs/features/planned.feature' }],
+    requiredValidation: { unit: [], system: [{
+      command: 'npm run test:e2e:related -- --id planned-flow', reason: 'Exercise planned flow.',
+      selectors: ['id-planned-flow'], projects: ['tablet-chromium'],
+    }] },
+  });
+  context.state = bindTask({ cwd: context.cwd, changeId: context.changeId, packet,
+    expectedRevision: context.state.revision });
+  const worker = createWorker(context, packet);
+  startWave(context, [packet]);
+  const revision = context.state.revision;
+  const noChange = {
+    ...resultFor(packet, null, []), status: 'no-change', workerCommit: null, changedPaths: [],
+  };
+  assert.throws(() => acceptResult({ cwd: context.cwd, changeId: context.changeId, result: noChange,
+    workerCwd: worker.path, expectedRevision: revision }),
+  (error) => error instanceof StateError && error.code === 'INVALID_IMPLEMENTATION_RESULT');
+  const unchanged = loadState(context.cwd);
+  assert.equal(unchanged.revision, revision);
+  assert.equal(unchanged.execution.tasks[0].status, 'running');
+  assert.equal(existsSync(join(changeDirectory(context.cwd, context.changeId), 'implementation', 'results',
+    plannedTask.id, '0001.json')), false);
+});
+
+test('wave scheduling waits for accepted integration but not terminal no-change work', async () => {
+  const tasks = [task('first', ['.agents/first.txt']), task('second', ['output/second.txt'])];
+  const context = await fixture(tasks);
+  const first = bind(context, 'first'); const second = bind(context, 'second');
+  const firstWorker = createWorker(context, first); createWorker(context, second);
+  startWave(context, [first, second]);
+  const firstCommit = commit(firstWorker.path, { '.agents/first.txt': 'first\n' }, 'test: accepted result');
+  accept(context, first, firstWorker, firstCommit, ['.agents/first.txt']);
+  const revision = context.state.revision;
+  assert.throws(() => scheduleWave({ cwd: context.cwd, changeId: context.changeId, expectedRevision: revision }),
+    (error) => error instanceof StateError && error.code === 'TASK_STATE_CONFLICT');
+  assert.equal(loadState(context.cwd).revision, revision);
+
+  const noChangeContext = await fixture(tasks);
+  const noChangeFirst = bind(noChangeContext, 'first'); const noChangeSecond = bind(noChangeContext, 'second');
+  const noChangeWorker = createWorker(noChangeContext, noChangeFirst); createWorker(noChangeContext, noChangeSecond);
+  startWave(noChangeContext, [noChangeFirst, noChangeSecond]);
+  noChangeContext.state = acceptResult({ cwd: noChangeContext.cwd, changeId: noChangeContext.changeId,
+    workerCwd: noChangeWorker.path, expectedRevision: noChangeContext.state.revision,
+    result: { ...resultFor(noChangeFirst, null, []), status: 'no-change', workerCommit: null,
+      changedPaths: [] } });
+  noChangeContext.state = scheduleWave({ cwd: noChangeContext.cwd, changeId: noChangeContext.changeId,
+    expectedRevision: noChangeContext.state.revision });
+  assert.deepEqual(noChangeContext.state.execution.activeWave, ['second']);
+});
+
+test('wave scheduling deterministically admits at most the first three non-conflicting writers', async () => {
+  const tasks = ['alpha', 'bravo', 'charlie', 'delta'].map((id) => task(id, [`output/${id}.txt`]));
+  const context = await fixture(tasks);
+  const packets = tasks.map(({ id }) => bind(context, id));
+  packets.forEach((packet) => createWorker(context, packet));
+
+  context.state = scheduleWave({ cwd: context.cwd, changeId: context.changeId, expectedRevision: context.state.revision });
+  assert.deepEqual(context.state.execution.activeWave, ['alpha', 'bravo', 'charlie']);
+  assert.equal(context.state.execution.tasks.find(({ id }) => id === 'delta').status, 'bound');
+  assert.equal(validateState({ cwd: context.cwd }).valid, true);
+});
+
+test('wave scheduling serializes duplicate planned selectors while admitting distinct selectors', async () => {
+  const tasks = [
+    task('first-selector-owner', ['specs/features/first.feature']),
+    task('later-selector-owner', ['specs/features/later.feature']),
+    task('distinct-selector-owner', ['specs/features/distinct.feature']),
+  ];
+  const context = await fixture(tasks);
+  const selectorPacket = (taskId, selector, featurePath) => packetFor(context, taskId, {
+    plannedE2ESelectors: [{ selector, featurePath }],
+    requiredValidation: { unit: [], system: [{
+      command: `npm run test:e2e:related -- --id ${selector.slice(3)}`,
+      reason: `Exercise ${selector}.`, selectors: [selector], projects: ['tablet-chromium'],
+    }] },
+  });
+  const packets = [
+    selectorPacket('first-selector-owner', 'id-shared-flow', 'specs/features/first.feature'),
+    selectorPacket('later-selector-owner', 'id-shared-flow', 'specs/features/later.feature'),
+    selectorPacket('distinct-selector-owner', 'id-distinct-flow', 'specs/features/distinct.feature'),
+  ];
+  const workers = new Map();
+  for (const packet of packets) {
+    context.state = bindTask({ cwd: context.cwd, changeId: context.changeId, packet,
+      expectedRevision: context.state.revision });
+    workers.set(packet.taskId, createWorker(context, packet));
+  }
+
+  startWave(context, packets);
+  assert.deepEqual(context.state.execution.activeWave, ['first-selector-owner', 'distinct-selector-owner']);
+  assert.equal(context.state.execution.tasks.find(({ id }) => id === 'later-selector-owner').status, 'bound');
+  assert.equal(context.state.execution.tasks.every((entry) => !Object.hasOwn(entry, 'plannedE2ESelectors')), true);
+
+  const firstPacket = packets[0]; const distinctPacket = packets[2];
+  const firstCommit = commit(workers.get(firstPacket.taskId).path, {
+    'specs/features/first.feature': 'Feature: First\n\n  @id-shared-flow\n  Scenario: First owner\n',
+  }, 'test: add first selector owner');
+  const distinctCommit = commit(workers.get(distinctPacket.taskId).path, {
+    'specs/features/distinct.feature': 'Feature: Distinct\n\n  @id-distinct-flow\n  Scenario: Distinct owner\n',
+  }, 'test: add distinct selector owner');
+  accept(context, firstPacket, workers.get(firstPacket.taskId), firstCommit, ['specs/features/first.feature']);
+  accept(context, distinctPacket, workers.get(distinctPacket.taskId), distinctCommit,
+    ['specs/features/distinct.feature']);
+  context.state = integrateTask({ cwd: context.cwd, changeId: context.changeId,
+    taskId: firstPacket.taskId, expectedRevision: context.state.revision });
+  assert.notEqual(context.state.git.headSha, firstPacket.taskBaseSha);
+  context.state = integrateTask({ cwd: context.cwd, changeId: context.changeId,
+    taskId: distinctPacket.taskId, expectedRevision: context.state.revision });
+
+  const staleRevision = context.state.revision;
+  assert.throws(() => scheduleWave({ cwd: context.cwd, changeId: context.changeId,
+    expectedRevision: staleRevision }),
+  (error) => error instanceof StateError && error.code === 'TASK_BASE_STALE');
+  assert.equal(loadState(context.cwd).revision, staleRevision);
+  assert.throws(() => startTask({ cwd: context.cwd, changeId: context.changeId,
+    taskId: 'later-selector-owner', workerId: 'worker-later-selector-owner',
+    expectedRevision: staleRevision }),
+  (error) => error instanceof StateError && error.code === 'TASK_STATE_CONFLICT');
+  assert.equal(loadState(context.cwd).revision, staleRevision);
+
+  context.state = rejectTask({ cwd: context.cwd, changeId: context.changeId,
+    taskId: 'later-selector-owner', reason: 'First selector owner integration made the duplicate packet stale.',
+    expectedRevision: staleRevision });
+  assert.equal(context.state.execution.tasks.find(({ id }) => id === 'later-selector-owner').status, 'rejected');
+  assert.match(context.state.nextAction, /rejecting\/replanning/u);
+  assert.equal(validateState({ cwd: context.cwd }).valid, true);
+});
+
+test('implemented results reject missing, non-descendant, and empty worker commits without advancing durable state', async () => {
+  for (const variant of ['missing', 'non-descendant', 'empty']) {
+    const context = await fixture([task('worker-result', ['output/result.txt'])]);
+    const packet = bind(context, 'worker-result');
+    const worker = createWorker(context, packet);
+    startWave(context, [packet]);
+    let workerCommit = null;
+    const changedPaths = ['output/result.txt'];
+
+    if (variant === 'non-descendant') {
+      workerCommit = git(worker.path, ['commit-tree', `${packet.taskBaseSha}^{tree}`, '-m', 'test: unrelated root']);
+      git(worker.path, ['reset', '--hard', workerCommit]);
+    } else if (variant === 'empty') {
+      git(worker.path, ['commit', '--allow-empty', '-m', 'test: empty worker result']);
+      workerCommit = git(worker.path, ['rev-parse', 'HEAD']);
+    }
+
+    const revision = context.state.revision;
+    assert.throws(() => acceptResult({
+      cwd: context.cwd,
+      changeId: context.changeId,
+      result: resultFor(packet, workerCommit, changedPaths),
+      workerCwd: worker.path,
+      expectedRevision: revision,
+    }), variant === 'non-descendant'
+      ? (error) => error instanceof StateError && error.code === 'WORKER_COMMIT_INVALID'
+      : (error) => error instanceof StateError && error.code === 'INVALID_IMPLEMENTATION_RESULT');
+    assert.equal(loadState(context.cwd).revision, revision, variant);
+    assert.equal(validateState({ cwd: context.cwd }).valid, true, variant);
+  }
+});
+
+test('a bound packet becomes durably stale after a conflicting earlier writer advances central HEAD', async () => {
+  const first = task('first-writer', ['.agents/first.txt']);
+  const stale = task('stale-writer', ['.agents/stale.txt']);
+  const context = await fixture([first, stale]);
+  const firstPacket = bind(context, 'first-writer');
+  const stalePacket = bind(context, 'stale-writer');
+  const firstWorker = createWorker(context, firstPacket);
+  createWorker(context, stalePacket);
+  startWave(context, [firstPacket, stalePacket]);
+  assert.deepEqual(context.state.execution.activeWave, ['first-writer']);
+
+  const firstCommit = commit(firstWorker.path, { '.agents/first.txt': 'first\n' }, 'test: first writer');
+  accept(context, firstPacket, firstWorker, firstCommit, ['.agents/first.txt']);
+  context.state = integrateTask({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    taskId: firstPacket.taskId,
+    expectedRevision: context.state.revision,
+  });
+  const revision = context.state.revision;
+  assert.throws(() => scheduleWave({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    expectedRevision: revision,
+  }), (error) => error instanceof StateError && error.code === 'TASK_BASE_STALE');
+  assert.equal(loadState(context.cwd).revision, revision);
+  assert.equal(validateState({ cwd: context.cwd }).valid, true);
+});
+
+test('integration and clean-base reconciliation serialize same-change rejection across Git mutation', async () => {
+  async function acceptedPair(label) {
+    const tasks = [task(`${label}-first`, [`output/${label}-first.txt`]), task(`${label}-second`, [`output/${label}-second.txt`])];
+    const context = await fixture(tasks);
+    const packets = tasks.map(({ id }) => bind(context, id));
+    const workers = packets.map((packet) => createWorker(context, packet));
+    startWave(context, packets);
+    for (let index = 0; index < packets.length; index += 1) {
+      const path = `output/${label}-${index === 0 ? 'first' : 'second'}.txt`;
+      const workerCommit = commit(workers[index].path, { [path]: `${label}-${index}\n` }, `test: ${label} ${index}`);
+      accept(context, packets[index], workers[index], workerCommit, [path]);
+    }
+    return { context, packets };
+  }
+
+  const direct = await acceptedPair('direct-lock');
+  let directBoundary = false;
+  direct.context.state = integrateTask({
+    cwd: direct.context.cwd, changeId: direct.context.changeId, taskId: direct.packets[0].taskId,
+    expectedRevision: direct.context.state.revision,
+    crashStep(step) {
+      if (step !== 'integration-operation-after-intent') return;
+      directBoundary = true;
+      const revision = loadState(direct.context.cwd).revision;
+      for (const packet of direct.packets) {
+        assert.throws(() => rejectTask({ cwd: direct.context.cwd, changeId: direct.context.changeId,
+          taskId: packet.taskId, reason: 'Must wait for integration.', expectedRevision: revision,
+          lockOptions: { timeoutMs: 10 } }),
+        (error) => error instanceof StateError && error.code === 'LOCK_TIMEOUT');
+      }
+    },
+  });
+  assert.equal(directBoundary, true);
+  assert.equal(direct.context.state.execution.tasks.find(({ id }) => id === direct.packets[0].taskId).status, 'integrated');
+  assert.equal(direct.context.state.execution.tasks.find(({ id }) => id === direct.packets[1].taskId).status, 'accepted');
+
+  const recovery = await acceptedPair('reconcile-lock');
+  assert.throws(() => integrateTask({
+    cwd: recovery.context.cwd, changeId: recovery.context.changeId, taskId: recovery.packets[0].taskId,
+    expectedRevision: recovery.context.state.revision,
+    crashStep(step) { if (step === 'integration-operation-after-intent') throw new Error('pause after intent'); },
+  }), /pause after intent/u);
+  const integrating = loadState(recovery.context.cwd);
+  let reconcileBoundary = false;
+  recovery.context.state = reconcileIntegration({
+    cwd: recovery.context.cwd, changeId: recovery.context.changeId, expectedRevision: integrating.revision,
+    crashStep(step) {
+      if (step !== 'integration-operation-before-reconcile-cherry-pick') return;
+      reconcileBoundary = true;
+      const revision = loadState(recovery.context.cwd).revision;
+      for (const packet of recovery.packets) {
+        assert.throws(() => rejectTask({ cwd: recovery.context.cwd, changeId: recovery.context.changeId,
+          taskId: packet.taskId, reason: 'Must wait for reconciliation.', expectedRevision: revision,
+          lockOptions: { timeoutMs: 10 } }),
+        (error) => error instanceof StateError && error.code === 'LOCK_TIMEOUT');
+      }
+    },
+  });
+  assert.equal(reconcileBoundary, true);
+  assert.equal(recovery.context.state.execution.tasks.find(({ id }) => id === recovery.packets[0].taskId).status, 'integrated');
+  assert.equal(validateState({ cwd: recovery.context.cwd }).valid, true);
+});
+
+test('a real central cherry-pick conflict preserves its intent and requires abort plus receipt-backed rejection/replan', async () => {
+  const rename = task('rename-directory', ['old/a.txt', 'new/a.txt']);
+  const add = task('add-to-renamed-directory', ['old/b.txt']);
+  const sibling = task('independent-sibling', ['sibling.txt']);
+  const context = await fixture([rename, add, sibling], { 'old/a.txt': 'base\n' });
+  const renamePacket = bind(context, rename.id);
+  const addPacket = bind(context, add.id);
+  const siblingPacket = bind(context, sibling.id);
+  const renameWorker = createWorker(context, renamePacket);
+  const addWorker = createWorker(context, addPacket);
+  const siblingWorker = createWorker(context, siblingPacket);
+  startWave(context, [renamePacket, addPacket, siblingPacket]);
+
+  mkdirSync(join(renameWorker.path, 'new'), { recursive: true });
+  git(renameWorker.path, ['mv', 'old/a.txt', 'new/a.txt']);
+  git(renameWorker.path, ['commit', '-m', 'test: rename directory']);
+  const renameCommit = git(renameWorker.path, ['rev-parse', 'HEAD']);
+  writeFiles(addWorker.path, { 'old/b.txt': 'added on original directory\n' });
+  git(addWorker.path, ['add', 'old/b.txt']);
+  git(addWorker.path, ['commit', '-m', 'test: add to original directory']);
+  const addCommit = git(addWorker.path, ['rev-parse', 'HEAD']);
+  accept(context, renamePacket, renameWorker, renameCommit, ['new/a.txt', 'old/a.txt']);
+  accept(context, addPacket, addWorker, addCommit, ['old/b.txt']);
+  context.state = acceptResult({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    workerCwd: siblingWorker.path,
+    expectedRevision: context.state.revision,
+    result: {
+      ...resultFor(siblingPacket, null, []),
+      status: 'failed',
+      workerCommit: null,
+      changedPaths: [],
+      validation: siblingPacket.requiredValidation.unit.map(({ command }) => ({
+        command, result: 'failed', summary: 'Sibling validation failed.',
+      })),
+      unexpectedDependencies: ['Sibling validation exposed an unrelated dependency.'],
+      summary: 'Sibling validation failed.',
+    },
+  });
+  context.state = integrateTask({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    taskId: rename.id,
+    expectedRevision: context.state.revision,
+  });
+  const centralBase = context.state.git.headSha;
+  assert.throws(() => integrateTask({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    taskId: add.id,
+    expectedRevision: context.state.revision,
+  }), (error) => error instanceof StateError && error.code === 'INTEGRATION_CHERRY_PICK_FAILED');
+
+  const integrating = loadState(context.cwd);
+  assert.equal(integrating.phase, 'integrating');
+  assert.deepEqual(integrating.execution.integrationIntent, {
+    taskId: add.id,
+    workerCommit: addCommit,
+    centralBaseSha: centralBase,
+  });
+  assert.equal(existsSync(join(context.cwd, '.git', 'CHERRY_PICK_HEAD')), true);
+  assert.throws(() => reconcileIntegration({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    expectedRevision: integrating.revision,
+  }), (error) => error instanceof StateError && error.code === 'INTEGRATION_DIRTY');
+  assert.equal(loadState(context.cwd).revision, integrating.revision);
+
+  git(context.cwd, ['rm', 'new/b.txt']);
+  assert.equal(git(context.cwd, ['status', '--porcelain']), '', 'an empty conflict resolution can leave only CHERRY_PICK_HEAD');
+
+  const statePath = join(changeDirectory(context.cwd, context.changeId), 'state.json');
+  const stateBeforeRejection = readFileSync(statePath, 'utf8');
+  for (const taskId of [add.id, sibling.id]) {
+    assert.throws(() => rejectTask({
+      cwd: context.cwd,
+      changeId: context.changeId,
+      taskId,
+      reason: 'Rejection must wait for explicit sequencer cleanup.',
+      expectedRevision: integrating.revision,
+    }), (error) => error instanceof StateError && error.code === 'CHERRY_PICK_IN_PROGRESS');
+  }
+  assert.equal(readFileSync(statePath, 'utf8'), stateBeforeRejection);
+  assert.equal(existsSync(join(context.cwd, '.git', 'CHERRY_PICK_HEAD')), true);
+  assert.equal(existsSync(join(changeDirectory(context.cwd, context.changeId), 'implementation', 'rejections', add.id)), false);
+  assert.deepEqual(loadState(context.cwd).execution.integrationIntent, integrating.execution.integrationIntent);
+
+  git(context.cwd, ['cherry-pick', '--abort']);
+  assert.equal(git(context.cwd, ['rev-parse', 'HEAD']), centralBase);
+  const stateAfterAbort = readFileSync(statePath, 'utf8');
+  const siblingResultPath = join(changeDirectory(context.cwd, context.changeId), 'implementation', 'results', sibling.id, '0001.json');
+  const siblingResult = readFileSync(siblingResultPath, 'utf8');
+  assert.throws(() => rejectTask({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    taskId: sibling.id,
+    reason: 'Sibling rejection must not clear another task intent.',
+    expectedRevision: integrating.revision,
+  }), (error) => error instanceof StateError && error.code === 'INTEGRATION_INTENT_TASK_MISMATCH');
+  assert.equal(readFileSync(statePath, 'utf8'), stateAfterAbort);
+  assert.equal(readFileSync(siblingResultPath, 'utf8'), siblingResult);
+  assert.deepEqual(loadState(context.cwd).execution.integrationIntent, integrating.execution.integrationIntent);
+  assert.throws(() => reconcileIntegration({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    expectedRevision: integrating.revision,
+  }), (error) => error instanceof StateError && error.code === 'INTEGRATION_CHERRY_PICK_FAILED');
+  assert.deepEqual(loadState(context.cwd).execution.integrationIntent, integrating.execution.integrationIntent);
+  git(context.cwd, ['cherry-pick', '--abort']);
+  const rejected = rejectTask({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    taskId: add.id,
+    reason: 'Directory rename exposed an unplanned dependency.',
+    expectedRevision: integrating.revision,
+  });
+  assert.equal(rejected.phase, 'blocked');
+  assert.equal(rejected.execution.tasks.find(({ id }) => id === add.id).status, 'rejected');
+  assert.equal(rejected.execution.tasks.find(({ id }) => id === sibling.id).status, 'failed');
+  assert.match(rejected.nextAction, /rejecting\/replanning/u);
+  const rejectionPath = join(changeDirectory(context.cwd, context.changeId), 'implementation', 'rejections', add.id,
+    `${String(rejected.revision).padStart(8, '0')}.json`);
+  assert.equal(JSON.parse(readFileSync(rejectionPath, 'utf8')).reason, 'Directory rename exposed an unplanned dependency.');
+  assert.equal(existsSync(rejectionPath.replace(/\.json$/u, '.sha256')), true);
+  assert.equal(validateState({ cwd: context.cwd }).valid, true);
+});

@@ -28,6 +28,7 @@
     "review:worktree": "node .agents/skills/pr-review-cycle/scripts/worktree/cli.mjs",
     "review:status": "node .agents/skills/pr-review-cycle/scripts/github/cli.mjs status --human",
     "change:state": "node .agents/skills/change-development/scripts/state/cli.mjs",
+    "change:worktree": "node .agents/skills/change-development/scripts/worktree/cli.mjs",
     "change:status": "node .agents/skills/change-development/scripts/state/cli.mjs status --human",
     "lint:commit": "commitlint",
     "assets:generate": "node scripts/generate-icons.mjs",

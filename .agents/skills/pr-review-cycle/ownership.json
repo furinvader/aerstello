@@ -92,6 +92,10 @@
     "tests/support/git-fixtures.mjs"
   ],
   "separateCapabilities": {
+    "changeDevelopment": [
+      ".agents/skills/change-development/**",
+      ".codex/agents/implementation-worker.toml"
+    ],
     "specialists": [
       ".agents/skills/aerstello-specialists/**",
       ".codex/agents/behavior-mapper.toml",

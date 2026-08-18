@@ -6,13 +6,19 @@ import { readTreeFile } from '../../../../../scripts/lib/git.mjs';
 import { planReadiness, validateImplementationPlan } from '../contracts/contracts.mjs';
 import {
   acceptPlan,
+  acceptResult,
   amendPlan,
   archiveState,
+  bindTask,
   initializeState,
+  integrateTask,
+  finalizeIntegration,
   loadLatestSourceObservation,
   loadState,
   locateState,
   recordDecision,
+  reconcileIntegration,
+  rejectTask,
   recoverState,
   refreshSource,
   renderStatus,
@@ -20,11 +26,18 @@ import {
   StateError,
   validatePlanStateIdentity,
   validateState,
+  scheduleWave,
+  startTask,
+  upgradeState,
 } from './state.mjs';
 
 const COMMANDS = new Set([
   'init', 'path', 'show', 'validate', 'refresh-source', 'accept-plan',
   'record-decision', 'amend-plan', 'recover', 'archive', 'status',
+  'upgrade-state', 'bind-task', 'schedule-wave', 'start-task', 'accept-result',
+  'integrate-task', 'reconcile-integration',
+  'finalize-integration',
+  'reject-task',
 ]);
 
 function usage() {
@@ -42,6 +55,15 @@ Commands:
   recover           Finish one exact matching interrupted transition
   archive           Archive completed plan-only or explicitly abandoned state
   status            Print bounded human-readable status
+  upgrade-state     Receipt-protect the explicit v1 to v2 execution-state upgrade
+  bind-task         Bind one immutable task packet to the effective plan and clean base
+  schedule-wave     Schedule up to three dependency-ready non-conflicting tasks
+  start-task        Record one scheduled task attempt as running
+  accept-result     Cross-check and preserve one structured worker result
+  integrate-task    Persist intent, cherry-pick, and reconcile one accepted task
+  reconcile-integration  Reconcile an interrupted persisted integration intent
+  finalize-integration   Prove all worker worktrees removed and enter integrated
+  reject-task       Durably reject packet-bound work before cleanup and replan
 
 Init options:
   --change-id <id> --mode <plan-only|implement|full>
@@ -77,7 +99,7 @@ function options(argv) {
     values: [
       'change-id', 'mode', 'base-branch', 'expected-pr-base-branch', 'planning-ref',
       'source', 'expected-revision', 'plan', 'planning-evidence', 'decision',
-      'amendment', 'abandon-reason',
+      'amendment', 'abandon-reason', 'packet', 'result', 'task-id', 'worker-id', 'worker-cwd', 'reason',
     ],
   });
 }
@@ -92,6 +114,15 @@ const COMMAND_OPTIONS = Object.freeze({
   'amend-plan': ['change-id', 'expected-revision', 'amendment', 'plan', 'planning-evidence'],
   recover: ['change-id'], archive: ['change-id', 'expected-revision', 'abandon-reason'],
   status: ['change-id', 'human'],
+  'upgrade-state': ['change-id', 'expected-revision'],
+  'bind-task': ['change-id', 'expected-revision', 'packet'],
+  'schedule-wave': ['change-id', 'expected-revision'],
+  'start-task': ['change-id', 'expected-revision', 'task-id', 'worker-id'],
+  'accept-result': ['change-id', 'expected-revision', 'result', 'worker-cwd'],
+  'integrate-task': ['change-id', 'expected-revision', 'task-id'],
+  'reconcile-integration': ['change-id', 'expected-revision'],
+  'finalize-integration': ['change-id', 'expected-revision'],
+  'reject-task': ['change-id', 'expected-revision', 'task-id', 'reason'],
 });
 
 function assertCommandOptions(command, parsed) {
@@ -190,6 +221,27 @@ try {
       expectedRevision: parseRevision(parsed['expected-revision'], true),
       abandonReason: parsed['abandon-reason'],
     }));
+  } else if (command === 'upgrade-state') {
+    writeJson(upgradeState({ ...common, expectedRevision: parseRevision(parsed['expected-revision'], true) }));
+  } else if (command === 'bind-task') {
+    writeJson(bindTask({ ...common, expectedRevision: parseRevision(parsed['expected-revision'], true), packet: json(parsed.packet, '--packet') }));
+  } else if (command === 'schedule-wave') {
+    writeJson(scheduleWave({ ...common, expectedRevision: parseRevision(parsed['expected-revision'], true) }));
+  } else if (command === 'start-task') {
+    if (!parsed['task-id'] || !parsed['worker-id']) throw new UsageError('start-task requires --task-id and --worker-id');
+    writeJson(startTask({ ...common, taskId: parsed['task-id'], workerId: parsed['worker-id'], expectedRevision: parseRevision(parsed['expected-revision'], true) }));
+  } else if (command === 'accept-result') {
+    writeJson(acceptResult({ ...common, result: json(parsed.result, '--result'), workerCwd: parsed['worker-cwd'], expectedRevision: parseRevision(parsed['expected-revision'], true) }));
+  } else if (command === 'integrate-task') {
+    if (!parsed['task-id']) throw new UsageError('integrate-task requires --task-id');
+    writeJson(integrateTask({ ...common, taskId: parsed['task-id'], expectedRevision: parseRevision(parsed['expected-revision'], true) }));
+  } else if (command === 'reconcile-integration') {
+    writeJson(reconcileIntegration({ ...common, expectedRevision: parseRevision(parsed['expected-revision'], true) }));
+  } else if (command === 'finalize-integration') {
+    writeJson(finalizeIntegration({ ...common, expectedRevision: parseRevision(parsed['expected-revision'], true) }));
+  } else if (command === 'reject-task') {
+    if (!parsed['task-id'] || !parsed.reason) throw new UsageError('reject-task requires --task-id and --reason');
+    writeJson(rejectTask({ ...common, taskId: parsed['task-id'], reason: parsed.reason, expectedRevision: parseRevision(parsed['expected-revision'], true) }));
   } else {
     process.stdout.write(`${renderStatus(common)}\n`);
   }

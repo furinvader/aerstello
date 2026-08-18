@@ -14,15 +14,22 @@ const EXPECTED_CANONICAL_FILES = [
   'SKILL.md',
   'agents/openai.yaml',
   'ownership.json',
+  'references/implementation.md',
   'references/planning.md',
   'references/state-and-recovery.md',
   'schemas/development-state.schema.json',
   'schemas/implementation-plan.schema.json',
+  'schemas/implementation-result.schema.json',
+  'schemas/implementation-task.schema.json',
   'scripts/contracts/contracts.mjs',
   'scripts/contracts/contracts.test.mjs',
   'scripts/hooks/hooks.test.mjs',
   'scripts/hooks/pre-compact.mjs',
   'scripts/hooks/session-start.mjs',
+  'scripts/hooks/subagent-stop.mjs',
+  'scripts/implementation/contracts.mjs',
+  'scripts/implementation/contracts.test.mjs',
+  'scripts/implementation/execution.test.mjs',
   'scripts/paths.mjs',
   'scripts/source/checklists.mjs',
   'scripts/source/checklists.test.mjs',
@@ -37,24 +44,39 @@ const EXPECTED_CANONICAL_FILES = [
   'scripts/state/state.mjs',
   'scripts/state/state.test.mjs',
   'scripts/structure.test.mjs',
+  'scripts/worktree/cli.mjs',
+  'scripts/worktree/worktree.mjs',
+  'scripts/worktree/worktree.test.mjs',
 ];
 
 const DOCUMENTATION_FILES = [
   'README.md',
   'SKILL.md',
+  'references/implementation.md',
   'references/planning.md',
   'references/state-and-recovery.md',
 ];
 
 const EXPECTED_ADAPTERS = {
+  '.codex/agents/implementation-worker.toml': [
+    'schemas/implementation-result.schema.json',
+    'schemas/implementation-task.schema.json',
+  ],
+  '.codex/config.toml': [],
   '.codex/hooks.json': [
     'scripts/hooks/pre-compact.mjs',
     'scripts/hooks/session-start.mjs',
+    'scripts/hooks/subagent-stop.mjs',
   ],
   'AGENTS.md': ['README.md'],
+  'CONTRIBUTING.md': ['README.md'],
   'README.md': ['README.md'],
   'package-lock.json': ['scripts/contracts/contracts.mjs'],
-  'package.json': ['scripts/contracts/contracts.mjs', 'scripts/state/cli.mjs'],
+  'package.json': [
+    'scripts/contracts/contracts.mjs',
+    'scripts/state/cli.mjs',
+    'scripts/worktree/cli.mjs',
+  ],
 };
 
 const EXPECTED_NEUTRAL_DEPENDENCIES = [
@@ -222,6 +244,8 @@ test('schema identifiers and the operator guide each have one canonical copy', (
   const schemaPaths = [
     '.agents/skills/change-development/schemas/development-state.schema.json',
     '.agents/skills/change-development/schemas/implementation-plan.schema.json',
+    '.agents/skills/change-development/schemas/implementation-result.schema.json',
+    '.agents/skills/change-development/schemas/implementation-task.schema.json',
   ];
   const ids = schemaPaths.map((path) => JSON.parse(readRepositoryFile(path)).$id);
   assert.equal(ids.every((id) => typeof id === 'string' && id.length > 0), true);
@@ -256,7 +280,27 @@ test('skill and generated interface metadata satisfy the public contract', () =>
   assert.equal(skill.includes('TODO'), false);
 
   const metadata = readFileSync(join(skillDirectory, 'agents', 'openai.yaml'), 'utf8');
-  assert.equal(metadata, `interface:\n  display_name: "Change Development"\n  short_description: "Plan and resume durable Aerstello changes"\n  default_prompt: "Use $change-development to plan or resume this Aerstello change with durable state and an immutable accepted plan."\n`);
+  assert.equal(metadata, `interface:\n  display_name: "Change Development"\n  short_description: "Plan and implement durable Aerstello changes"\n  default_prompt: "Use $change-development to plan, implement, or resume this Aerstello change with durable provenance, immutable task packets, isolated workers, and exact integration."\n`);
+});
+
+test('one thin implementation worker is the only ordinary development writer', () => {
+  const agentDirectory = join(repositoryDirectory, '.codex', 'agents');
+  const developmentWriters = readdirSync(agentDirectory)
+    .filter((name) => name.endsWith('.toml'))
+    .filter((name) => readFileSync(join(agentDirectory, name), 'utf8')
+      .includes('.agents/skills/change-development/schemas/implementation-task.schema.json'));
+  assert.deepEqual(developmentWriters, ['implementation-worker.toml']);
+
+  const worker = readFileSync(join(agentDirectory, developmentWriters[0]), 'utf8');
+  assert.match(worker, /^name = "implementation_worker"$/mu);
+  assert.match(worker, /^model_reasoning_effort = "medium"$/mu);
+  assert.match(worker, /^\[agents\]\nenabled = false$/mu);
+  assert.match(worker, /Read root AGENTS\.md and exactly the Aerstello specialist profile/u);
+  assert.match(worker, /Do not delegate/u);
+  assert.match(worker, /Do not integrate commits/u);
+  assert.match(worker, /edit central change-development state/u);
+  assert.match(worker, /push/u);
+  assert.match(worker, /GitHub/u);
 });
 
 test('change hooks share matcher groups with unchanged first PR handlers', () => {
@@ -279,12 +323,20 @@ test('change hooks share matcher groups with unchanged first PR handlers', () =>
     'node "$(git rev-parse --show-toplevel)/.agents/skills/change-development/scripts/hooks/pre-compact.mjs"',
   ]);
   assert.equal(hooks.hooks.PreCompact[0].hooks.every((hook) => !('additionalContextLimit' in hook)), true);
-  assert.deepEqual(hooks.hooks.SubagentStop.map(({ matcher }) => matcher), ['^review_fix_worker$']);
+  assert.deepEqual(hooks.hooks.SubagentStop.map(({ matcher }) => matcher), [
+    '^review_fix_worker$',
+    '^implementation_worker$',
+  ]);
+  assert.equal(
+    hooks.hooks.SubagentStop[1].hooks[0].command,
+    'node "$(git rev-parse --show-toplevel)/.agents/skills/change-development/scripts/hooks/subagent-stop.mjs"',
+  );
 });
 
 test('root npm façades target the canonical CLI and run bounded commands from a nested workspace', () => {
   const scripts = JSON.parse(readRepositoryFile('package.json')).scripts;
   assert.equal(scripts['change:state'], 'node .agents/skills/change-development/scripts/state/cli.mjs');
+  assert.equal(scripts['change:worktree'], 'node .agents/skills/change-development/scripts/worktree/cli.mjs');
   assert.equal(scripts['change:status'], 'node .agents/skills/change-development/scripts/state/cli.mjs status --human');
   assert.equal(scripts['test:change-development'], 'node --test ".agents/skills/change-development/scripts/**/*.test.mjs"');
   assert.match(scripts['test:tooling'], /npm run test:change-development/u);
@@ -298,6 +350,15 @@ test('root npm façades target the canonical CLI and run bounded commands from a
   assert.equal(stateResult.status, 0, stateResult.stderr);
   assert.match(stateResult.stdout, /change-development\/scripts\/state\/cli\.mjs/u);
 
+  const worktreeResult = spawnSync(
+    'npm',
+    ['--prefix', repositoryDirectory, 'run', 'change:worktree', '--', '--help'],
+    { cwd: join(repositoryDirectory, 'apps', 'api'), encoding: 'utf8' },
+  );
+  assert.equal(worktreeResult.error, undefined);
+  assert.equal(worktreeResult.status, 0, worktreeResult.stderr);
+  assert.match(worktreeResult.stdout, /change-development\/scripts\/worktree\/cli\.mjs/u);
+
   const statusResult = spawnSync(
     'npm',
     [
@@ -308,6 +369,6 @@ test('root npm façades target the canonical CLI and run bounded commands from a
   );
   assert.equal(statusResult.error, undefined);
   assert.equal(statusResult.status, 0, statusResult.stderr);
-  assert.match(statusResult.stdout, /No active change-development state\./u);
+  assert.match(statusResult.stdout, /(?:No active change-development state\.|Change: )/u);
   assert.ok(statusResult.stdout.length < 2500, 'human status façade must remain bounded');
 });

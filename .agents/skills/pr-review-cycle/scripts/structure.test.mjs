@@ -97,6 +97,10 @@ const EXPECTED_NEUTRAL_DEPENDENCIES = [
 ];
 
 const EXPECTED_SEPARATE_CAPABILITIES = {
+  changeDevelopment: [
+    '.agents/skills/change-development/**',
+    '.codex/agents/implementation-worker.toml',
+  ],
   specialists: [
     '.agents/skills/aerstello-specialists/**',
     '.codex/agents/behavior-mapper.toml',
@@ -215,6 +219,10 @@ test('ownership manifest names the complete canonical skill and no obsolete path
   ));
   assert.deepEqual(specialistOwnership.permittedWorkflowConsumers, [
     {
+      path: '.codex/agents/implementation-worker.toml',
+      targets: ['registry.json'],
+    },
+    {
       path: '.codex/agents/integration-verifier.toml',
       targets: ['references/reviewer-contracts.md'],
     },
@@ -269,7 +277,9 @@ test('ownership manifest names the complete canonical skill and no obsolete path
 
 test('hooks and npm façades target only canonical skill entrypoints', () => {
   const hooks = JSON.parse(readRepositoryFile('.codex/hooks.json'));
-  assert.equal(hooks.hooks.SubagentStop.length, 1);
+  assert.deepEqual(hooks.hooks.SubagentStop.map(({ matcher }) => matcher), [
+    '^review_fix_worker$', '^implementation_worker$',
+  ]);
   assert.equal(hooks.hooks.SubagentStop[0].matcher, '^review_fix_worker$');
   assert.equal(
     hooks.hooks.SessionStart[0].hooks[0].command,
@@ -282,6 +292,10 @@ test('hooks and npm façades target only canonical skill entrypoints', () => {
   assert.equal(
     hooks.hooks.SubagentStop[0].hooks[0].command,
     'node "$(git rev-parse --show-toplevel)/.agents/skills/pr-review-cycle/scripts/hooks/subagent-stop.mjs"',
+  );
+  assert.equal(
+    hooks.hooks.SubagentStop[1].hooks[0].command,
+    'node "$(git rev-parse --show-toplevel)/.agents/skills/change-development/scripts/hooks/subagent-stop.mjs"',
   );
 
   const scripts = JSON.parse(readRepositoryFile('package.json')).scripts;
@@ -329,6 +343,7 @@ test('agent configuration preserves the global thread cap and read-only verifier
     ['behavior_mapper', 'agents/behavior-mapper.toml'],
     ['security_reviewer', 'agents/security-reviewer.toml'],
     ['offline_realtime_reviewer', 'agents/offline-realtime-reviewer.toml'],
+    ['implementation_worker', 'agents/implementation-worker.toml'],
   ]) {
     assert.match(
       config,

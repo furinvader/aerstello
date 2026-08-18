@@ -46,12 +46,33 @@ An implementation-plan v1 records:
 - checklist mappings; and
 - a planned dependency DAG with anticipated paths, ownership, validation intent, and specialist-routing signals.
 
-Anticipated paths and validation intent are non-executable planning data. Implementation-plan v1 represents anticipated paths as unambiguous, whitespace-free repository-relative ownership prefixes; it does not accept whitespace-bearing path strings, environment assignments, or shell syntax that could instead be executable input. Exact binding ownership and commands belong to the later implementation workflow.
+Anticipated paths and validation intent are non-executable planning data. Implementation-plan v1 represents anticipated paths as unambiguous, whitespace-free repository-relative ownership prefixes; it does not accept whitespace-bearing path strings, environment assignments, or shell syntax that could instead be executable input. `bind-task` converts one dependency-ready planned task into a narrower immutable packet with exact allowed and forbidden paths and direct validation commands; it cannot expand the accepted plan.
+
+Repository-relative ownership excludes any root or nested exact `.git` path
+segment because Git metadata is never an implementation surface. `.gitignore`,
+`.github/workflows`, and nested `.gitkeep` names are not `.git` segments and
+remain valid. Candidate validation, readiness, acceptance, and amendments apply
+this rule before durable evidence changes. Existing receipt-valid accepted
+plans remain immutable historical evidence; replace unsafe historical
+ownership through an explicit append-only amendment before binding a packet.
 
 ## Validation and specialist evidence
 
-Validate both JSON Schema and semantic contracts. Load the canonical specialist registry and use its validation, routing, and planning-evidence helpers. Recompute every task route with explicit `browserVisible` and `relatedTestSelectionUncertain` signals; stored routes are never trusted without recomputation.
+Validate both JSON Schema and semantic contracts. Load the canonical specialist registry anew for each candidate-plan acceptance and amendment validation, and use its validation, routing, and planning-evidence helpers. Recompute every task route with explicit `browserVisible` and `relatedTestSelectionUncertain` signals; stored routes are never trusted for new acceptance. Receipt-valid historical accepted plans and amendments remain immutable replay evidence and are not reinterpreted through a later registry revision.
 
 Reject a plan with unresolved test selection, duplicate IDs, invalid criterion or decision references, missing criterion ownership, unknown dependencies, dependency cycles, consumer work ordered before its producer, overlapping planned ownership, or cross-domain work marked unsplittable without a reason. Require clean current Planning-SHA `behavior_mapper` evidence whenever the final route requires it.
 
 Acceptance requires every readiness gate to pass and writes immutable canonical JSON plus its SHA-256 receipt. Record each later accepted-source-drift decision independently. An amendment must include authorization, provenance and delta, the previous plan digest, current repository SHA, invalidated evidence, the new digest, and the complete resulting normalized plan. Never rewrite the original plan or prior amendments.
+
+After execution starts, an amendment retains the original Planning SHA. It may
+record a later clean central integration HEAD only through the explicit replan
+path: active work is rejected first, its worktree is safely removed, every
+stale packet/result/provenance path is named in `invalidatedEvidence`, and the
+replacement uses a new task ID. Already `integrated` or `no-change` task
+definitions and their referenced criteria and decisions are immutable. New
+packets bind the amended plan to the then-current central task base.
+
+For `implement` and `full`, acceptance also initializes bounded execution
+summaries from the effective plan. Existing v1 records remain historically
+valid, but execution writes require the explicit receipt-protected
+`upgrade-state` transition described in [implementation](implementation.md).

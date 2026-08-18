@@ -52,6 +52,17 @@
             "statusMessage": "Validating review worker result"
           }
         ]
+      },
+      {
+        "matcher": "^implementation_worker$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/.agents/skills/change-development/scripts/hooks/subagent-stop.mjs\"",
+            "timeout": 10,
+            "statusMessage": "Validating implementation worker result"
+          }
+        ]
       }
     ]
   }
