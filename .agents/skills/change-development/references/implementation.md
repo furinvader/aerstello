@@ -15,6 +15,13 @@ The upgrade requires the exact clean central HEAD and branch recorded by v1
 state. It writes a receipt-protected transition and derives compact task
 summaries from the effective accepted plan.
 
+Execution advancement is authoritative only for changes initialized in
+`implement` or `full` mode. Upgrade, binding, wave scheduling, task start,
+result acceptance, integration, reconciliation, and finalization all enforce
+that same gate. A `plan-only` change stops at its accepted plan; previously
+invalid plan-only execution can still be rejected, cleaned up, amended, or
+archived so operators can unwind it without granting further execution authority.
+
 Create one implementation-task v1 JSON packet for a dependency-ready task,
 then bind it:
 
@@ -46,12 +53,16 @@ part of the canonical packet digest, while structural validation remains
 checkout-independent. Binding proves existing selectors against the exact task
 base Git tree and rejects planned selectors that already exist. Result
 acceptance proves every planned selector was introduced at its declared path in
-the exact worker commit. Exact-tree indexing follows related-E2E semantics: only
-canonical `@tag-token` values on trimmed lines beginning with `@` count, so
-selector-like text in comments and step prose is ignored during binding,
-acceptance, and durable replay. Unknown, unsafe, duplicate, unused, unowned,
-forbidden, or unrealized declarations fail closed. Packets without the field
-retain the original contract.
+the exact worker commit. Exact-tree indexing retains every canonical
+`@tag-token` occurrence for base-collision detection, but realization follows
+related-E2E runnable association: feature tags inherited by a `Scenario` or
+`Scenario Outline`, and tags directly attached to either declaration, count as
+runnable. Orphan tags and tags cleared by unsupported constructs do not realize
+a selector, even if the same packet realizes a different selector. Selector-like
+text in comments and step prose is ignored during binding, acceptance, and
+durable replay. Unknown, unsafe, duplicate, unused, unowned, forbidden, or
+unrealized declarations fail closed. Packets without the field retain the
+original contract.
 
 ## Isolated worktrees and waves
 
@@ -152,10 +163,15 @@ the lock and accepts only a clean, single-parent central commit whose delta is
 equivalent to the worker commit. A failed cherry-pick leaves the durable intent
 in `integrating` for inspection; never discard or overwrite it.
 
-If one wave member reports `blocked` or `failed`, a dependency-ready accepted
-sibling remains integrable after the active wave closes. Its exact delta is
-reconciled normally, while the task failure and blocked reasons remain durable
-and state returns to `blocked`. A task whose dependency failed is never eligible.
+If one wave member reports `blocked` or `failed`, or is explicitly rejected, a
+dependency-ready accepted sibling remains integrable after the active wave
+closes. The complete blocked-reason list must exactly equal canonical
+receipt-backed task blockers in accepted-plan order; any Git, integrity, or
+other non-task blocker prevents integration. Reconciliation restores every
+remaining failure and rejection blocker and returns state to `blocked`.
+Rejection evidence is immutable and identity-bound to the task packet; missing,
+duplicate, or mismatched evidence fails closed. A task whose dependency failed
+or was rejected is never eligible.
 
 If the process stops after intent persistence or after a successful
 cherry-pick, use the exact revision reported by status:

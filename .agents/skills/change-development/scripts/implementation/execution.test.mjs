@@ -289,7 +289,7 @@ test('binding rejects unready dependencies and any taskBaseSha other than the ex
   assert.equal(validateState({ cwd: context.cwd }).valid, true);
 });
 
-test('planned E2E selectors bind and replay against exact Git trees', async () => {
+test('runnable direct, feature-inherited, and outline selectors bind and replay against exact Git trees', async () => {
   const plannedTask = task('planned-selector', ['specs/features/planned.feature']);
   const context = await fixture([plannedTask], {
     'specs/features/existing.feature': [
@@ -297,12 +297,13 @@ test('planned E2E selectors bind and replay against exact Git trees', async () =
       '  Scenario: Existing flow', '    Given step prose mentions @id-step-decoy', '',
     ].join('\n'),
   });
+  const selectors = ['id-feature-flow', 'id-planned-flow', 'id-outline-flow'];
   const validation = { unit: [], system: [{
-    command: 'npm run test:e2e:related -- --id planned-flow', reason: 'Exercise planned flow.',
-    selectors: ['id-planned-flow'], projects: ['tablet-chromium'],
+    command: 'npm run test:e2e:related -- --id feature-flow --id planned-flow --id outline-flow',
+    reason: 'Exercise inherited, direct, and outline flows.', selectors, projects: ['tablet-chromium'],
   }] };
   const planned = packetFor(context, plannedTask.id, {
-    plannedE2ESelectors: [{ selector: 'id-planned-flow', featurePath: 'specs/features/planned.feature' }],
+    plannedE2ESelectors: selectors.map((selector) => ({ selector, featurePath: 'specs/features/planned.feature' })),
     requiredValidation: validation,
   });
   context.state = bindTask({ cwd: context.cwd, changeId: context.changeId, packet: planned,
@@ -310,7 +311,12 @@ test('planned E2E selectors bind and replay against exact Git trees', async () =
   const worker = createWorker(context, planned);
   startWave(context, [planned]);
   const workerCommit = commit(worker.path, {
-    'specs/features/planned.feature': 'Feature: Planned\n\n  @id-planned-flow\n  Scenario: Planned flow\n',
+    'specs/features/planned.feature': [
+      '@id-feature-flow', 'Feature: Planned', '', '  Scenario: Feature inherited flow', '',
+      '  @id-planned-flow', '  Scenario: Direct planned flow', '',
+      '  @id-outline-flow', '  Scenario Outline: Planned outline', '    Given <value>', '',
+      '    Examples:', '      | value |', '      | one   |', '',
+    ].join('\n'),
   }, 'test: add planned selector');
   accept(context, planned, worker, workerCommit, ['specs/features/planned.feature']);
   assert.equal(context.state.execution.tasks[0].status, 'accepted');
@@ -352,30 +358,42 @@ test('planned E2E selectors bind and replay against exact Git trees', async () =
   }
 });
 
-test('result acceptance rejects an unrealized planned selector without advancing state', async () => {
-  const plannedTask = task('unrealized-selector', ['specs/features/planned.feature']);
-  const context = await fixture([plannedTask]);
-  const packet = packetFor(context, plannedTask.id, {
-    plannedE2ESelectors: [{ selector: 'id-planned-flow', featurePath: 'specs/features/planned.feature' }],
-    requiredValidation: { unit: [], system: [{
-      command: 'npm run test:e2e:related -- --id planned-flow', reason: 'Exercise planned flow.',
-      selectors: ['id-planned-flow'], projects: ['tablet-chromium'],
-    }] },
-  });
-  context.state = bindTask({ cwd: context.cwd, changeId: context.changeId, packet,
-    expectedRevision: context.state.revision });
-  const worker = createWorker(context, packet);
-  startWave(context, [packet]);
-  const workerCommit = commit(worker.path, {
-    'specs/features/planned.feature': [
-      'Feature: Planned', '', '  # @id-planned-flow', '  Scenario: Missing tag',
-      '    Given step prose mentions @id-planned-flow', '',
-    ].join('\n'),
-  }, 'test: omit planned selector');
-  const revision = context.state.revision;
-  assert.throws(() => accept(context, packet, worker, workerCommit, ['specs/features/planned.feature']),
-    (error) => error instanceof StateError && error.code === 'PLANNED_E2E_SELECTOR_MISMATCH');
-  assert.equal(loadState(context.cwd).revision, revision);
+test('result acceptance rejects orphan, unsupported, and mixed selector associations without evidence mutation', async () => {
+  const cases = [
+    ['orphan', ['id-orphan-flow'], [
+      'Feature: Planned', '', '  Scenario: Runnable without selector', '', '  @id-orphan-flow', '',
+    ].join('\n')],
+    ['unsupported construct', ['id-unsupported-flow'], [
+      'Feature: Planned', '', '  @id-unsupported-flow', '  Background:', '    Given setup', '',
+      '  Scenario: Runnable without selector', '',
+    ].join('\n')],
+    ['mixed runnable and orphan', ['id-runnable-flow', 'id-orphan-flow'], [
+      'Feature: Planned', '', '  @id-runnable-flow', '  Scenario: Runnable selector', '',
+      '  @id-orphan-flow', '',
+    ].join('\n')],
+  ];
+  for (const [label, selectors, contents] of cases) {
+    const plannedTask = task(`unrealized-${label.replaceAll(' ', '-')}`, ['specs/features/planned.feature']);
+    const context = await fixture([plannedTask]);
+    const packet = packetFor(context, plannedTask.id, {
+      plannedE2ESelectors: selectors.map((selector) => ({ selector, featurePath: 'specs/features/planned.feature' })),
+      requiredValidation: { unit: [], system: [{
+        command: `npm run test:e2e:related -- ${selectors.map((selector) => `--id ${selector.slice(3)}`).join(' ')}`,
+        reason: `Exercise ${label} association.`, selectors, projects: ['tablet-chromium'],
+      }] },
+    });
+    context.state = bindTask({ cwd: context.cwd, changeId: context.changeId, packet,
+      expectedRevision: context.state.revision });
+    const worker = createWorker(context, packet);
+    startWave(context, [packet]);
+    const workerCommit = commit(worker.path, { 'specs/features/planned.feature': contents }, `test: ${label} selector`);
+    const revision = context.state.revision;
+    assert.throws(() => accept(context, packet, worker, workerCommit, ['specs/features/planned.feature']),
+      (error) => error instanceof StateError && error.code === 'PLANNED_E2E_SELECTOR_MISMATCH', label);
+    assert.equal(loadState(context.cwd).revision, revision, label);
+    assert.equal(existsSync(join(changeDirectory(context.cwd, context.changeId), 'implementation', 'results',
+      plannedTask.id, '0001.json')), false, label);
+  }
 });
 
 test('result acceptance rejects planned-selector no-change without terminal evidence', async () => {

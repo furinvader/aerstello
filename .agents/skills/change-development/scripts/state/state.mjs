@@ -899,6 +899,12 @@ function assertWritableV2(state) {
   }
 }
 
+function assertImplementationMode(state, operation) {
+  if (!['implement', 'full'].includes(state.mode)) {
+    throw new StateError(`${operation} requires implement or full mode`, 'IMPLEMENTATION_MODE_REQUIRED');
+  }
+}
+
 function executionTask(state, taskId) {
   const task = state.execution?.tasks.find((entry) => entry.id === taskId);
   if (!task) throw new StateError(`Unknown implementation task ${taskId}`, 'TASK_NOT_FOUND');
@@ -957,36 +963,59 @@ function assertExactCentralObservation(current, state, operation) {
   }
 }
 
-function selectorsAtCommit(cwd, commit) {
-  const selectors = new Map();
+function selectorEvidenceAtCommit(cwd, commit) {
+  const all = new Map();
+  const runnable = new Map();
   for (const entry of listTree(cwd, commit, 'specs/features')) {
     if (entry.type !== 'blob' || !entry.path.endsWith('.feature')) continue;
     const contents = readTreeFile(cwd, commit, entry.path)?.toString('utf8') ?? '';
+    let featureTags = [];
+    let pendingTags = [];
     for (const line of contents.split(/\r?\n/u)) {
       const trimmed = line.trim();
-      if (!trimmed.startsWith('@')) continue;
-      for (const token of trimmed.split(/\s+/u)) {
+      const lineTags = [];
+      if (trimmed.startsWith('@')) for (const token of trimmed.split(/\s+/u)) {
         const match = /^@([a-z0-9]+(?:-[a-z0-9]+)*)$/u.exec(token);
         if (!match) continue;
-        const paths = selectors.get(match[1]) ?? new Set();
+        lineTags.push(match[1]);
+        const paths = all.get(match[1]) ?? new Set();
         paths.add(entry.path);
-        selectors.set(match[1], paths);
+        all.set(match[1], paths);
       }
+      if (lineTags.length > 0) {
+        pendingTags.push(...lineTags);
+        continue;
+      }
+      if (/^Feature:/u.test(trimmed)) {
+        featureTags = [...pendingTags];
+        pendingTags = [];
+        continue;
+      }
+      if (/^Scenario(?: Outline)?:/u.test(trimmed)) {
+        for (const selector of new Set([...featureTags, ...pendingTags])) {
+          const paths = runnable.get(selector) ?? new Set();
+          paths.add(entry.path);
+          runnable.set(selector, paths);
+        }
+        pendingTags = [];
+        continue;
+      }
+      if (trimmed && !trimmed.startsWith('#')) pendingTags = [];
     }
   }
-  return selectors;
+  return { all, runnable };
 }
 
 function assertPacketSelectorsAtBase(cwd, packet) {
-  const existing = selectorsAtCommit(cwd, packet.taskBaseSha);
+  const existing = selectorEvidenceAtCommit(cwd, packet.taskBaseSha);
   const planned = new Map((packet.plannedE2ESelectors ?? []).map((entry) => [entry.selector, entry.featurePath]));
   for (const selector of planned.keys()) {
-    if (existing.has(selector)) throw new StateError(`Planned E2E selector ${selector} already exists at the exact task base`, 'PLANNED_E2E_SELECTOR_MISMATCH');
+    if (existing.all.has(selector)) throw new StateError(`Planned E2E selector ${selector} already exists at the exact task base`, 'PLANNED_E2E_SELECTOR_MISMATCH');
   }
   for (const validation of packet.requiredValidation.system) {
     for (const rawSelector of validation.selectors) {
       const selector = rawSelector.startsWith('@') ? rawSelector.slice(1) : rawSelector;
-      if (!existing.has(selector) && !planned.has(selector)) {
+      if (!existing.runnable.has(selector) && !planned.has(selector)) {
         throw new StateError(`Required E2E selector ${selector} is unknown at the exact task base and is not planned`, 'PLANNED_E2E_SELECTOR_MISMATCH');
       }
     }
@@ -994,7 +1023,7 @@ function assertPacketSelectorsAtBase(cwd, packet) {
 }
 
 function assertPlannedSelectorsRealized(cwd, packet, commit) {
-  const realized = selectorsAtCommit(cwd, commit);
+  const realized = selectorEvidenceAtCommit(cwd, commit).runnable;
   for (const { selector, featurePath } of packet.plannedE2ESelectors ?? []) {
     if (!realized.get(selector)?.has(featurePath)) {
       throw new StateError(`Planned E2E selector ${selector} was not realized in ${featurePath} at the worker commit`, 'PLANNED_E2E_SELECTOR_MISMATCH');
@@ -1020,6 +1049,7 @@ export function upgradeState({ cwd = process.cwd(), changeId, expectedRevision, 
     const state = loadState(root, selected);
     assertRevision(state, expectedRevision);
     validateState({ cwd: root, changeId: selected });
+    assertImplementationMode(state, 'State upgrade');
     if (state.schemaVersion !== 1) throw new StateError('Only development-state v1 can be upgraded', 'STATE_ALREADY_CURRENT');
     if (!state.plan || !['ready-to-implement', 'blocked'].includes(state.phase)) {
       throw new StateError('State upgrade requires an accepted plan at the implementation boundary', 'INVALID_PHASE');
@@ -1096,7 +1126,7 @@ function assertPacketMapperProvenance(cwd, state, packet) {
 export function bindTask({ cwd = process.cwd(), changeId, packet, expectedRevision, clock, crashStep, lockOptions } = {}) {
   const root = repositoryRoot(cwd); const selected = selectedChangeId(root, changeId);
   return withChangeLock(root, selected, () => {
-    const state = loadState(root, selected); assertWritableV2(state); assertRevision(state, expectedRevision);
+    const state = loadState(root, selected); assertWritableV2(state); assertImplementationMode(state, 'Task binding'); assertRevision(state, expectedRevision);
     validateState({ cwd: root, changeId: selected });
     if (!['ready-to-implement', 'implementing'].includes(state.phase)) throw new StateError(`Cannot bind a task in ${state.phase}`, 'INVALID_PHASE');
     const task = executionTask(state, packet?.taskId);
@@ -1147,7 +1177,7 @@ export function tasksConflict(left, right) {
 export function scheduleWave({ cwd = process.cwd(), changeId, expectedRevision, clock, crashStep, lockOptions } = {}) {
   const root = repositoryRoot(cwd); const selected = selectedChangeId(root, changeId);
   return withChangeLock(root, selected, () => {
-    const state = loadState(root, selected); assertWritableV2(state); assertRevision(state, expectedRevision);
+    const state = loadState(root, selected); assertWritableV2(state); assertImplementationMode(state, 'Wave scheduling'); assertRevision(state, expectedRevision);
     validateState({ cwd: root, changeId: selected });
     if (state.phase !== 'implementing' || state.execution.activeWave.length) throw new StateError('Scheduling requires implementing with no active wave', 'INVALID_PHASE');
     if (state.execution.tasks.some((task) => task.status === 'accepted')) {
@@ -1193,7 +1223,7 @@ export function scheduleWave({ cwd = process.cwd(), changeId, expectedRevision, 
 export function startTask({ cwd = process.cwd(), changeId, taskId, workerId, expectedRevision, clock, crashStep, lockOptions } = {}) {
   const root = repositoryRoot(cwd); const selected = selectedChangeId(root, changeId);
   return withChangeLock(root, selected, () => {
-    const state = loadState(root, selected); assertWritableV2(state); assertRevision(state, expectedRevision);
+    const state = loadState(root, selected); assertWritableV2(state); assertImplementationMode(state, 'Task start'); assertRevision(state, expectedRevision);
     validateState({ cwd: root, changeId: selected }); const task = executionTask(state, taskId);
     if (task.status !== 'scheduled' || !state.execution.activeWave.includes(taskId)) throw new StateError(`Task ${taskId} is not scheduled`, 'TASK_STATE_CONFLICT');
     validateChangeId(workerId);
@@ -1214,31 +1244,58 @@ function nulChangedPaths(cwd, baseSha, commitSha) {
   return bytes.toString('utf8').split('\0').filter(Boolean);
 }
 
-function canonicalFailureReasons(cwd, state, execution, inFlight = null) {
-  return execution.tasks.filter((task) => ['blocked', 'failed'].includes(task.status)).map((task) => {
-    const result = inFlight?.taskId === task.id
-      ? inFlight.result
-      : verifyReceipt(join(changeDirectory(cwd, state.changeId), resultEvidencePath(task.id, task.attempt)), `implementation result ${task.id}`).value;
-    if (objectDigest(result) !== task.resultDigest || result.taskId !== task.id || result.status !== task.status) {
-      throw new StateError(`Task ${task.id} failure evidence does not match its execution summary`, 'TASK_RESULT_MISMATCH');
+function rejectionEvidence(cwd, state, task, inFlight = null) {
+  const evidence = inFlight?.taskId === task.id ? inFlight.rejection : null;
+  let record = evidence;
+  if (!record) {
+    const directory = join(changeDirectory(cwd, state.changeId), 'implementation', 'rejections', task.id);
+    const candidates = existsSync(directory)
+      ? readdirSync(directory).filter((name) => /^\d{8}\.json$/u.test(name))
+      : [];
+    if (candidates.length !== 1) {
+      throw new StateError(`Task ${task.id} must have exactly one receipt-backed rejection record`, 'TASK_REJECTION_MISMATCH');
     }
-    return `Task ${task.id} reported ${task.status}: ${result.summary}`;
+    record = verifyReceipt(join(directory, candidates[0]), `task rejection ${task.id}`).value;
+  }
+  if (record.schemaVersion !== 1 || record.changeId !== state.changeId || record.taskId !== task.id
+      || record.binding !== task.binding || !nonemptyString(record.reason) || !nonemptyString(record.rejectedAt)) {
+    throw new StateError(`Task ${task.id} rejection evidence does not match its execution summary`, 'TASK_REJECTION_MISMATCH');
+  }
+  return record;
+}
+
+function canonicalTaskBlockers(cwd, state, execution, inFlight = null) {
+  return execution.tasks.flatMap((task) => {
+    if (['blocked', 'failed'].includes(task.status)) {
+      const result = inFlight?.taskId === task.id
+        ? inFlight.result
+        : verifyReceipt(join(changeDirectory(cwd, state.changeId), resultEvidencePath(task.id, task.attempt)), `implementation result ${task.id}`).value;
+      if (objectDigest(result) !== task.resultDigest || result.taskId !== task.id || result.status !== task.status) {
+        throw new StateError(`Task ${task.id} failure evidence does not match its execution summary`, 'TASK_RESULT_MISMATCH');
+      }
+      return [`Task ${task.id} reported ${task.status}: ${result.summary}`];
+    }
+    if (task.status === 'rejected') {
+      const rejection = rejectionEvidence(cwd, state, task, inFlight);
+      return [`Task ${task.id} was explicitly rejected: ${rejection.reason}`];
+    }
+    return [];
   });
 }
 
 function nonTaskBlockers(cwd, state) {
-  const taskFailures = new Map();
-  for (const reason of canonicalFailureReasons(cwd, state, state.execution)) {
-    taskFailures.set(reason, (taskFailures.get(reason) ?? 0) + 1);
+  const taskBlockers = new Map();
+  for (const reason of canonicalTaskBlockers(cwd, state, state.execution)) {
+    taskBlockers.set(reason, (taskBlockers.get(reason) ?? 0) + 1);
   }
   const preserved = [];
   for (const reason of state.blockedReasons) {
-    const remaining = taskFailures.get(reason) ?? 0;
-    if (remaining > 0) taskFailures.set(reason, remaining - 1);
+    const remaining = taskBlockers.get(reason) ?? 0;
+    if (remaining > 0) taskBlockers.set(reason, remaining - 1);
     else preserved.push(reason);
   }
-  if ([...taskFailures.values()].some((remaining) => remaining !== 0)) {
-    throw new StateError('Blocked state is missing receipt-backed task failure evidence', 'TASK_RESULT_MISMATCH');
+  if ([...taskBlockers.values()].some((remaining) => remaining !== 0)) {
+    throw new StateError('Blocked state is missing receipt-backed task blocker evidence', 'TASK_RESULT_MISMATCH');
   }
   return preserved;
 }
@@ -1246,7 +1303,7 @@ function nonTaskBlockers(cwd, state) {
 export function acceptResult({ cwd = process.cwd(), changeId, result, workerCwd, expectedRevision, clock, crashStep, lockOptions } = {}) {
   const root = repositoryRoot(cwd); const selected = selectedChangeId(root, changeId);
   return withChangeLock(root, selected, () => {
-    const state = loadState(root, selected); assertWritableV2(state); assertRevision(state, expectedRevision);
+    const state = loadState(root, selected); assertWritableV2(state); assertImplementationMode(state, 'Result acceptance'); assertRevision(state, expectedRevision);
     validateState({ cwd: root, changeId: selected });
     const shapeErrors = validateImplementationResult(result);
     if (shapeErrors.length) throw new StateError(`Invalid implementation result:\n- ${shapeErrors.join('\n- ')}`, 'INVALID_IMPLEMENTATION_RESULT');
@@ -1287,8 +1344,8 @@ export function acceptResult({ cwd = process.cwd(), changeId, result, workerCwd,
     const terminal = result.status === 'implemented' ? 'accepted' : result.status;
     const activeWave = state.execution.activeWave.filter((id) => id !== task.id);
     const execution = replaceExecutionTask(state, task.id, { status: terminal, resultDigest: objectDigest(result), workerCommit: result.workerCommit }, { activeWave });
-    const failureReasons = canonicalFailureReasons(root, state, execution, { taskId: task.id, result });
-    const blockedReasons = [...preservedBlockers, ...failureReasons];
+    const taskBlockers = canonicalTaskBlockers(root, state, execution, { taskId: task.id, result });
+    const blockedReasons = [...preservedBlockers, ...taskBlockers];
     const nextPhase = blockedReasons.length ? 'blocked' : 'implementing';
     const next = revised(state, { phase: nextPhase, blockedReasons, execution }, clock);
     return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'result-accepted', summary: `Accepted ${terminal} result for ${task.id}`, crashStep,
@@ -1298,7 +1355,7 @@ export function acceptResult({ cwd = process.cwd(), changeId, result, workerCwd,
 
 function prepareIntegration({ root, selected, taskId, expectedRevision, clock, crashStep, lockOptions }) {
   return withChangeLock(root, selected, () => {
-    const state = loadState(root, selected); assertWritableV2(state); assertRevision(state, expectedRevision);
+    const state = loadState(root, selected); assertWritableV2(state); assertImplementationMode(state, 'Task integration'); assertRevision(state, expectedRevision);
     validateState({ cwd: root, changeId: selected });
     if (!['implementing', 'blocked'].includes(state.phase) || state.execution.activeWave.length) throw new StateError('Integration requires implementing or failed-wave blocked state with no active wave', 'INVALID_PHASE');
     const task = executionTask(state, taskId);
@@ -1306,9 +1363,9 @@ function prepareIntegration({ root, selected, taskId, expectedRevision, clock, c
     if (!task.dependsOn.every((id) => ['integrated', 'no-change'].includes(executionTask(state, id).status))) {
       throw new StateError(`Task ${taskId} dependencies are not integrated`, 'DEPENDENCY_NOT_INTEGRATED');
     }
-    const failureReasons = canonicalFailureReasons(root, state, state.execution);
-    if (state.phase === 'blocked' && serialized(failureReasons) !== serialized(state.blockedReasons)) {
-      throw new StateError('Integration from blocked state is limited to an accepted sibling of exact receipt-backed task failures', 'INVALID_PHASE');
+    const taskBlockers = canonicalTaskBlockers(root, state, state.execution);
+    if (state.phase === 'blocked' && serialized(taskBlockers) !== serialized(state.blockedReasons)) {
+      throw new StateError('Integration from blocked state is limited to an accepted sibling of exact receipt-backed task blockers', 'INVALID_PHASE');
     }
     const current = gitObservation(root, clock);
     assertExactCentralObservation(current, state, 'Integration');
@@ -1322,7 +1379,7 @@ function prepareIntegration({ root, selected, taskId, expectedRevision, clock, c
 
 function reconcileIntegrationLocked({ root, selected, expectedRevision, clock, crashStep, lockOptions }) {
   return withChangeLock(root, selected, () => {
-    const state = loadState(root, selected); assertWritableV2(state);
+    const state = loadState(root, selected); assertWritableV2(state); assertImplementationMode(state, 'Integration reconciliation');
     if (expectedRevision !== undefined) assertRevision(state, expectedRevision);
     validateState({ cwd: root, changeId: selected });
     if (state.phase !== 'integrating' || !state.execution.integrationIntent) throw new StateError('No persisted integration intent exists', 'INTEGRATION_INTENT_MISSING');
@@ -1338,10 +1395,9 @@ function reconcileIntegrationLocked({ root, selected, expectedRevision, clock, c
       throw new StateError('Central HEAD contains unrelated or non-equivalent work for the persisted integration intent', 'INTEGRATION_HEAD_MISMATCH');
     }
     const execution = replaceExecutionTask(state, task.id, { status: 'integrated', integratedCommit: current.headSha }, { integrationIntent: null });
-    const failuresRemain = execution.tasks.some((entry) => ['blocked', 'failed'].includes(entry.status));
-    const failureReasons = canonicalFailureReasons(root, state, execution);
-    const next = revised(state, { phase: failuresRemain ? 'blocked' : 'implementing', execution, git: current,
-      blockedReasons: failuresRemain ? failureReasons : [] }, clock);
+    const taskBlockers = canonicalTaskBlockers(root, state, execution);
+    const next = revised(state, { phase: taskBlockers.length ? 'blocked' : 'implementing', execution, git: current,
+      blockedReasons: taskBlockers }, clock);
     return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'task-integrated',
       summary: `Reconciled integrated task ${task.id} at ${current.headSha}`, crashStep });
   }, lockOptions);
@@ -1349,7 +1405,8 @@ function reconcileIntegrationLocked({ root, selected, expectedRevision, clock, c
 
 export function reconcileIntegration({ cwd = process.cwd(), changeId, expectedRevision, clock, crashStep, lockOptions } = {}) {
   const root = repositoryRoot(cwd); const selected = selectedChangeId(root, changeId);
-  const state = loadState(root, selected); assertRevision(state, expectedRevision); validateState({ cwd: root, changeId: selected });
+  const state = loadState(root, selected); assertWritableV2(state); assertImplementationMode(state, 'Integration reconciliation');
+  assertRevision(state, expectedRevision); validateState({ cwd: root, changeId: selected });
   if (state.phase === 'integrating' && state.execution?.integrationIntent) {
     const current = gitObservation(root, clock); const intent = state.execution.integrationIntent;
     if (current.branch !== state.git.branch || current.branch === '(detached)') throw new StateError('Integration reconciliation requires the exact owning central branch', 'CENTRAL_GIT_MISMATCH');
@@ -1376,7 +1433,7 @@ export function integrateTask({ cwd = process.cwd(), changeId, taskId, expectedR
 export function finalizeIntegration({ cwd = process.cwd(), changeId, expectedRevision, clock, crashStep, lockOptions } = {}) {
   const root = repositoryRoot(cwd); const selected = selectedChangeId(root, changeId);
   return withChangeLock(root, selected, () => {
-    const state = loadState(root, selected); assertWritableV2(state); assertRevision(state, expectedRevision);
+    const state = loadState(root, selected); assertWritableV2(state); assertImplementationMode(state, 'Integration finalization'); assertRevision(state, expectedRevision);
     validateState({ cwd: root, changeId: selected });
     if (state.phase !== 'implementing' || state.execution.activeWave.length || state.execution.integrationIntent
         || !state.execution.tasks.every((task) => ['integrated', 'no-change'].includes(task.status))) {
@@ -1401,11 +1458,16 @@ export function rejectTask({ cwd = process.cwd(), changeId, taskId, reason, expe
     const current = gitObservation(root, clock);
     const requiredHead = state.execution.integrationIntent?.taskId === taskId ? state.execution.integrationIntent.centralBaseSha : state.git.headSha;
     if (!current.clean || current.headSha !== requiredHead || current.branch !== state.git.branch || current.branch === '(detached)') throw new StateError('Rejecting work requires the exact clean owning branch at the pre-conflict base', 'CENTRAL_GIT_MISMATCH');
+    const preservedBlockers = nonTaskBlockers(root, state);
     const execution = replaceExecutionTask(state, taskId, { status: 'rejected' }, { activeWave: state.execution.activeWave.filter((id) => id !== taskId), integrationIntent: null });
-    const next = revised(state, { phase: 'blocked', execution, git: current, blockedReasons: [`Task ${taskId} was explicitly rejected: ${reason}`] }, clock);
+    const timestamp = now(clock);
+    const rejection = { schemaVersion: 1, changeId: state.changeId, taskId, binding: task.binding, reason, rejectedAt: timestamp };
+    const taskBlockers = canonicalTaskBlockers(root, state, execution, { taskId, rejection });
+    const next = revised(state, { phase: 'blocked', execution, git: current,
+      blockedReasons: [...preservedBlockers, ...taskBlockers] }, () => new Date(timestamp));
     return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'task-rejected', summary: `Rejected implementation task ${taskId}`, crashStep,
       pendingEvidence: [{ key: 'taskRejectionDigest', path: `implementation/rejections/${taskId}/${String(next.revision).padStart(8, '0')}.json`,
-        value: { schemaVersion: 1, changeId: state.changeId, taskId, binding: task.binding, reason, rejectedAt: next.updatedAt }, label: `task rejection ${taskId}` }] });
+        value: rejection, label: `task rejection ${taskId}` }] });
   }, lockOptions);
 }
 
@@ -2017,6 +2079,8 @@ function validateLoadedState(root, state) {
         }
         if (state.phase === 'integrated') verifiedWorkerTombstone(root, state, task);
       }
+      canonicalTaskBlockers(root, state, state.execution);
+      if (state.phase === 'blocked') nonTaskBlockers(root, state);
     }
   }
   verifyEventHistory(root, state.changeId, transitionIntents);

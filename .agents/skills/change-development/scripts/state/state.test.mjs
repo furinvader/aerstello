@@ -268,14 +268,19 @@ test('explicit rejection survives a successful active-wave sibling result', asyn
   state = rejectTask({ cwd, taskId: first.taskId, reason: 'Operator rejected the first result.', expectedRevision: state.revision });
   const rejectionReason = 'Task state-task was explicitly rejected: Operator rejected the first result.';
   assert.deepEqual(state.blockedReasons, [rejectionReason]);
-  state = acceptResult({ cwd, result: resultFor(second, 'no-change'), workerCwd: secondWorker.path, expectedRevision: state.revision });
+  writeFileSync(join(secondWorker.path, 'second.txt'), 'accepted sibling\n');
+  git(secondWorker.path, 'add', 'second.txt'); git(secondWorker.path, 'commit', '-m', 'test: accepted rejection sibling');
+  const secondCommit = git(secondWorker.path, 'rev-parse', 'HEAD');
+  state = acceptResult({ cwd, result: resultFor(second, 'implemented', secondCommit, ['second.txt']),
+    workerCwd: secondWorker.path, expectedRevision: state.revision });
   assert.equal(state.phase, 'blocked');
   assert.deepEqual(state.blockedReasons, [rejectionReason]);
-  assert.throws(() => integrateTask({ cwd, taskId: second.taskId, expectedRevision: state.revision }),
-    (error) => ['INVALID_PHASE', 'TASK_STATE_CONFLICT'].includes(error.code));
+  state = integrateTask({ cwd, taskId: second.taskId, expectedRevision: state.revision });
+  assert.equal(state.execution.tasks.find(({ id }) => id === second.taskId).status, 'integrated');
+  assert.deepEqual(state.blockedReasons, [rejectionReason]);
 });
 
-test('result acceptance fails closed when a prior task failure blocker is missing', async () => {
+test('failure and rejection blockers replay in plan order and tampering fails closed', async () => {
   const { cwd, sha } = repository('missing prior task failure blocker');
   const planning = await initializeState({ cwd, changeId: 'missing-task-failure', mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
   const plan = executionPlanFor(planning);
@@ -300,12 +305,29 @@ test('result acceptance fails closed when a prior task failure blocker is missin
       command, result: 'failed', summary: 'First validation failed.',
     })), unexpectedDependencies: ['First worker validation failed.'], summary: 'First worker validation failed.' } });
   state = rejectTask({ cwd, taskId: second.taskId, reason: 'Replace the second task.', expectedRevision: state.revision });
+  assert.deepEqual(state.blockedReasons, [
+    'Task state-task reported failed: First worker validation failed.',
+    'Task second-task was explicitly rejected: Replace the second task.',
+  ]);
+  assert.equal(validateState({ cwd }).valid, true);
+  const rejectionDirectory = join(changeDirectory(cwd, state.changeId), 'implementation', 'rejections', second.taskId);
+  const rejectionName = readdirSync(rejectionDirectory).find((name) => name.endsWith('.json'));
+  const rejectionPath = join(rejectionDirectory, rejectionName);
+  const rejection = JSON.parse(readFileSync(rejectionPath, 'utf8'));
+  writeReceiptJson(rejectionPath, { ...rejection, taskId: 'wrong-task' });
   const statePath = join(changeDirectory(cwd, state.changeId), 'state.json');
   const before = readFileSync(statePath, 'utf8');
   assert.throws(() => acceptResult({ cwd, result: resultFor(third, 'no-change'), workerCwd: workers.get(third.taskId).path,
-    expectedRevision: state.revision }), (error) => error.code === 'TASK_RESULT_MISMATCH');
+    expectedRevision: state.revision }), (error) => error instanceof StateError);
   assert.equal(readFileSync(statePath, 'utf8'), before);
   assert.equal(existsSync(join(changeDirectory(cwd, state.changeId), 'implementation', 'results', third.taskId, '0001.json')), false);
+  writeReceiptJson(rejectionPath, rejection);
+  const duplicatePath = join(rejectionDirectory, '99999999.json');
+  writeReceiptJson(duplicatePath, rejection);
+  assert.throws(() => validateState({ cwd }), (error) => error instanceof StateError);
+  unlinkSync(duplicatePath); unlinkSync(duplicatePath.replace(/\.json$/u, '.sha256'));
+  unlinkSync(rejectionPath); unlinkSync(rejectionPath.replace(/\.json$/u, '.sha256'));
+  assert.throws(() => validateState({ cwd }), (error) => error instanceof StateError);
 });
 
 test('v1 accepts a plan without execution and upgrades explicitly with unchanged identities', async () => {
@@ -321,6 +343,51 @@ test('v1 accepts a plan without execution and upgrades explicitly with unchanged
   assert.deepEqual(state.plan, planIdentity);
   assert.deepEqual({ ...state.git, observedAt: gitIdentity.observedAt }, gitIdentity);
   assert.equal(state.execution.tasks[0].status, 'unbound');
+});
+
+test('implementation authority rejects plan-only bind and upgrade without durable mutation', async () => {
+  const modern = repository('plan-only v2 implementation authority');
+  const modernPlanning = await initializeState({ cwd: modern.cwd, changeId: 'plan-only-v2', mode: 'plan-only',
+    baseBranch: 'main', planningRef: modern.sha, source: descriptor });
+  const modernPlan = planFor(modernPlanning);
+  const modernState = acceptPlan({ cwd: modern.cwd, plan: modernPlan, expectedRevision: modernPlanning.revision });
+  const modernRoot = changeDirectory(modern.cwd, modernState.changeId);
+  const modernBefore = {
+    state: readFileSync(join(modernRoot, 'state.json'), 'utf8'),
+    events: readFileSync(join(modernRoot, 'events.jsonl'), 'utf8'),
+    transitions: readdirSync(join(modernRoot, 'transitions')),
+  };
+  assert.throws(() => bindTask({ cwd: modern.cwd, packet: packetFor(modernState, modernPlan, 'state-task'),
+    expectedRevision: modernState.revision }), (error) => error.code === 'IMPLEMENTATION_MODE_REQUIRED');
+  assert.equal(readFileSync(join(modernRoot, 'state.json'), 'utf8'), modernBefore.state);
+  assert.equal(readFileSync(join(modernRoot, 'events.jsonl'), 'utf8'), modernBefore.events);
+  assert.deepEqual(readdirSync(join(modernRoot, 'transitions')), modernBefore.transitions);
+  assert.equal(existsSync(join(modernRoot, 'implementation')), false);
+
+  const legacy = repository('plan-only v1 implementation authority');
+  const legacyV2 = await initializeState({ cwd: legacy.cwd, changeId: 'plan-only-v1', mode: 'plan-only',
+    baseBranch: 'main', planningRef: legacy.sha, source: descriptor });
+  const legacyPlanning = downgradeInitialStateToV1(legacy.cwd);
+  const legacyState = acceptPlan({ cwd: legacy.cwd, plan: planFor(legacyV2), expectedRevision: legacyPlanning.revision });
+  const legacyRoot = changeDirectory(legacy.cwd, legacyState.changeId);
+  const legacyBefore = readFileSync(join(legacyRoot, 'state.json'), 'utf8');
+  const legacyTransitions = readdirSync(join(legacyRoot, 'transitions'));
+  assert.throws(() => upgradeState({ cwd: legacy.cwd, expectedRevision: legacyState.revision }),
+    (error) => error.code === 'IMPLEMENTATION_MODE_REQUIRED');
+  assert.equal(readFileSync(join(legacyRoot, 'state.json'), 'utf8'), legacyBefore);
+  assert.deepEqual(readdirSync(join(legacyRoot, 'transitions')), legacyTransitions);
+});
+
+test('implement and full modes retain implementation authority', async () => {
+  for (const mode of ['implement', 'full']) {
+    const { cwd, sha } = repository(`${mode} implementation authority`);
+    const planning = await initializeState({ cwd, changeId: `${mode}-authority`, mode,
+      baseBranch: 'main', planningRef: sha, source: descriptor });
+    const plan = planFor(planning);
+    let state = acceptPlan({ cwd, plan, expectedRevision: planning.revision });
+    state = bindTask({ cwd, packet: packetFor(state, plan, 'state-task'), expectedRevision: state.revision });
+    assert.equal(state.execution.tasks[0].status, 'bound');
+  }
 });
 
 test('mapper packets bind exact original or amendment evidence and mismatch leaves no sidecars', async () => {
