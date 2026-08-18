@@ -992,10 +992,14 @@ function selectorEvidenceAtCommit(cwd, commit) {
         continue;
       }
       if (/^Scenario(?: Outline)?:/u.test(trimmed)) {
-        for (const selector of new Set([...featureTags, ...pendingTags])) {
-          const paths = runnable.get(selector) ?? new Set();
-          paths.add(entry.path);
-          runnable.set(selector, paths);
+        const scenarioTags = [...pendingTags];
+        const stableIds = scenarioTags.filter((selector) => /^id-[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(selector));
+        if (stableIds.length === 1) {
+          for (const selector of new Set([...featureTags, ...scenarioTags])) {
+            const paths = runnable.get(selector) ?? new Set();
+            paths.add(entry.path);
+            runnable.set(selector, paths);
+          }
         }
         pendingTags = [];
         continue;

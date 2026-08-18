@@ -57,12 +57,15 @@ the exact worker commit. Exact-tree indexing retains every canonical
 `@tag-token` occurrence for base-collision detection, but realization follows
 related-E2E runnable association: feature tags inherited by a `Scenario` or
 `Scenario Outline`, and tags directly attached to either declaration, count as
-runnable. Orphan tags and tags cleared by unsupported constructs do not realize
-a selector, even if the same packet realizes a different selector. Selector-like
-text in comments and step prose is ignored during binding, acceptance, and
-durable replay. Unknown, unsafe, duplicate, unused, unowned, forbidden, or
-unrealized declarations fail closed. Packets without the field retain the
-original contract.
+runnable only when that scenario's directly attached tags contain exactly one
+stable `@id-*` selector. A feature-level ID is inherited as a selector but does
+not satisfy the scenario-ID requirement. Missing or duplicate directly attached
+stable IDs, orphan tags, and tags cleared by unsupported constructs do not
+realize any selector for that scenario, even if the same packet realizes a
+different selector. Selector-like text in comments and step prose is ignored
+during binding, acceptance, and durable replay. Unknown, unsafe, duplicate,
+unused, unowned, forbidden, or unrealized declarations fail closed. Packets
+without the field retain the original contract.
 
 ## Isolated worktrees and waves
 

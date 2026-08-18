@@ -312,7 +312,7 @@ test('runnable direct, feature-inherited, and outline selectors bind and replay 
   startWave(context, [planned]);
   const workerCommit = commit(worker.path, {
     'specs/features/planned.feature': [
-      '@id-feature-flow', 'Feature: Planned', '', '  Scenario: Feature inherited flow', '',
+      '@id-feature-flow', 'Feature: Planned', '', '  @id-feature-scenario', '  Scenario: Feature inherited flow', '',
       '  @id-planned-flow', '  Scenario: Direct planned flow', '',
       '  @id-outline-flow', '  Scenario Outline: Planned outline', '    Given <value>', '',
       '    Examples:', '      | value |', '      | one   |', '',
@@ -360,6 +360,13 @@ test('runnable direct, feature-inherited, and outline selectors bind and replay 
 
 test('result acceptance rejects orphan, unsupported, and mixed selector associations without evidence mutation', async () => {
   const cases = [
+    ['missing directly attached stable ID', ['id-feature-flow'], [
+      '@id-feature-flow', 'Feature: Planned', '', '  Scenario: Inherited selector without stable scenario ID', '',
+    ].join('\n')],
+    ['duplicate directly attached stable IDs', ['area-feature-flow'], [
+      '@area-feature-flow', 'Feature: Planned', '', '  @id-first-flow @id-second-flow',
+      '  Scenario: Inherited selector with duplicate stable scenario IDs', '',
+    ].join('\n')],
     ['orphan', ['id-orphan-flow'], [
       'Feature: Planned', '', '  Scenario: Runnable without selector', '', '  @id-orphan-flow', '',
     ].join('\n')],
@@ -373,12 +380,14 @@ test('result acceptance rejects orphan, unsupported, and mixed selector associat
     ].join('\n')],
   ];
   for (const [label, selectors, contents] of cases) {
-    const plannedTask = task(`unrealized-${label.replaceAll(' ', '-')}`, ['specs/features/planned.feature']);
+    const plannedTask = task(`unrealized-${label.toLowerCase().replaceAll(' ', '-')}`, ['specs/features/planned.feature']);
     const context = await fixture([plannedTask]);
     const packet = packetFor(context, plannedTask.id, {
       plannedE2ESelectors: selectors.map((selector) => ({ selector, featurePath: 'specs/features/planned.feature' })),
       requiredValidation: { unit: [], system: [{
-        command: `npm run test:e2e:related -- ${selectors.map((selector) => `--id ${selector.slice(3)}`).join(' ')}`,
+        command: `npm run test:e2e:related -- ${selectors.map((selector) => (
+          selector.startsWith('id-') ? `--id ${selector.slice(3)}` : `--tag ${selector}`
+        )).join(' ')}`,
         reason: `Exercise ${label} association.`, selectors, projects: ['tablet-chromium'],
       }] },
     });
