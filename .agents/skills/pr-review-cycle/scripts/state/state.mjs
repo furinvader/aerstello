@@ -81,7 +81,7 @@ export function assertCompletionAllowed(state, external) {
   }
 }
 
-export function gitAwareGateContext(state, { pushedHeadSha, prHeadSha } = {}) {
+export function gitAwareGateContext(state, { pushedHeadSha, prHeadSha, prState, isDraft } = {}) {
   const cwd = state.integrationWorktree;
   const local = gitSnapshot(cwd);
   return {
@@ -89,6 +89,8 @@ export function gitAwareGateContext(state, { pushedHeadSha, prHeadSha } = {}) {
     localDirty: local.dirty,
     pushedHeadSha,
     prHeadSha,
+    prState,
+    isDraft,
     isAncestor: (ancestor, descendant) => runGit(
       ['merge-base', '--is-ancestor', ancestor, descendant],
       { cwd, allowFailure: true },
@@ -195,6 +197,10 @@ export function activePointerPath(cwd = process.cwd()) {
 
 function lockPath(cwd, prNumber) {
   return join(reviewRoot(cwd), 'locks', `pr-${parsePrNumber(prNumber)}.lock`);
+}
+
+function requestOwnerLockPath(cwd, prNumber) {
+  return join(reviewRoot(cwd), 'locks', `pr-${parsePrNumber(prNumber)}.github-request.lock`);
 }
 
 function parsePrNumber(value) {
@@ -1831,6 +1837,49 @@ export function withStateLock(cwd, prNumber, callback, {
   }
 }
 
+/**
+ * Unlike withStateLock, this deliberately remains held while an async GitHub
+ * mutation and its reconciliation are in flight.  The state lock is only for
+ * synchronous file transactions; using it around a Promise releases it too
+ * early and permits a second external mutation.
+ */
+export async function withGitHubRequestOwnerLock(cwd, prNumber, callback, {
+  timeoutMs = DEFAULT_LOCK_TIMEOUT_MS,
+  staleMs = DEFAULT_STALE_LOCK_MS,
+} = {}) {
+  const path = requestOwnerLockPath(cwd, prNumber);
+  mkdirSync(dirname(path), { recursive: true });
+  const started = Date.now();
+  const token = randomUUID();
+  while (true) {
+    try {
+      const handle = openSync(path, 'wx', 0o600);
+      writeFileSync(handle, serializeJson({ token, pid: process.pid, hostname: hostname(), createdAt: utcNow() }));
+      fsyncSync(handle);
+      closeSync(handle);
+      break;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      if (lockIsStale(path, staleMs)) {
+        try { unlinkSync(path); } catch (unlinkError) { if (unlinkError.code !== 'ENOENT') throw unlinkError; }
+        continue;
+      }
+      if (Date.now() - started >= timeoutMs) throw new StateError(`Timed out waiting for ${path}`, 'STATE_LOCK_TIMEOUT');
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  try {
+    return await callback();
+  } finally {
+    try {
+      const lock = JSON.parse(readFileSync(path, 'utf8'));
+      if (lock.token === token) unlinkSync(path);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+  }
+}
+
 function validateStateForWrite(state) {
   const errors = validatePrReviewState(state);
   if (errors.length > 0) throw new StateError(`Invalid PR review state:\n- ${errors.join('\n- ')}`, 'INVALID_STATE');
@@ -2267,6 +2316,75 @@ export function appendEvent(cwd, prNumber, input = {}) {
   const path = join(directory, 'events.ndjson');
   const existing = existsSync(path) ? readFileSync(path, 'utf8') : '';
   atomicWriteText(path, `${existing}${JSON.stringify(event)}\n`);
+}
+
+export function ensureGitHubMutationIntent(cwd, prNumber, intent) {
+  if (!intent || typeof intent.operationId !== 'string' || intent.operationId.length === 0
+      || typeof intent.type !== 'string' || intent.type.length === 0
+      || typeof intent.clientMutationId !== 'string' || intent.clientMutationId.length === 0
+      || typeof intent.at !== 'string' || !Number.isFinite(Date.parse(intent.at))) {
+    throw new StateError('GitHub mutation intent is invalid', 'INVALID_EVENT');
+  }
+  return withStateLock(cwd, prNumber, () => {
+    const path = join(stateDirectory(cwd, prNumber), 'events.ndjson');
+    let events = [];
+    if (existsSync(path)) {
+      try {
+        events = readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+      } catch {
+        throw new StateError('GitHub mutation intent journal is malformed', 'INTENT_RECOVERY_INVALID');
+      }
+    }
+    const found = events.find((event) => event.type === 'github-mutation-intent' && event.details?.operationId === intent.operationId);
+    if (found) {
+      if (!found.details || found.details.type !== intent.type
+          || found.details.operationId !== intent.operationId
+          || typeof found.details.clientMutationId !== 'string'
+          || found.details.clientMutationId !== intent.clientMutationId
+          || typeof found.details.at !== 'string' || !Number.isFinite(Date.parse(found.details.at))) {
+        throw new StateError('GitHub mutation intent conflicts', 'INTENT_CONFLICT');
+      }
+      return { ...found.details, isNew: false };
+    }
+    appendEvent(cwd, prNumber, { type: 'github-mutation-intent', summary: `Intent ${intent.type} ${intent.operationId}`.slice(0, 1000), details: intent });
+    return { ...intent, isNew: true };
+  });
+}
+
+export function claimGitHubMutationDispatch(cwd, prNumber, intent, expectedRevision) {
+  return withStateLock(cwd, prNumber, () => {
+    if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
+      throw new StateError('Dispatch claim requires an expected state revision', 'STATE_REVISION_CONFLICT');
+    }
+    if (loadState(cwd, prNumber).revision !== expectedRevision) {
+      throw new StateError('State revision changed before dispatch', 'STATE_REVISION_CONFLICT');
+    }
+    const path = join(stateDirectory(cwd, prNumber), 'events.ndjson');
+    let events = [];
+    try {
+      events = existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').filter(Boolean)
+        .map((line) => JSON.parse(line)) : [];
+    } catch {
+      throw new StateError('GitHub mutation dispatch journal is malformed', 'INTENT_RECOVERY_INVALID');
+    }
+    const correlatedIntent = events.find((event) => event.type === 'github-mutation-intent'
+      && event.details?.operationId === intent.operationId);
+    if (!correlatedIntent || correlatedIntent.details?.type !== intent.type
+        || correlatedIntent.details?.clientMutationId !== intent.clientMutationId) {
+      throw new StateError('GitHub mutation dispatch has no correlated intent', 'INTENT_RECOVERY_INVALID');
+    }
+    const existing = events.find((event) => event.type === 'github-mutation-dispatch'
+      && event.details?.operationId === intent.operationId);
+    if (existing) {
+      if (existing.details.clientMutationId !== intent.clientMutationId) {
+        throw new StateError('GitHub mutation dispatch conflicts', 'INTENT_CONFLICT');
+      }
+      return { ...existing.details, isNew: false };
+    }
+    const details = { operationId: intent.operationId, clientMutationId: intent.clientMutationId };
+    appendEvent(cwd, prNumber, { type: 'github-mutation-dispatch', summary: `Dispatch ${intent.operationId}`, details });
+    return { ...details, isNew: true };
+  });
 }
 
 function checkpointStateUnlocked({
@@ -3308,14 +3426,14 @@ export function checkpointTaskPacketBinding({
 }
 
 export function checkpointReviewRequest({
-  cwd = process.cwd(), prNumber, request, pushedHeadSha, prHeadSha, expectedRevision, event,
+  cwd = process.cwd(), prNumber, request, pushedHeadSha, prHeadSha, prState, isDraft, expectedRevision, event,
 } = {}) {
   const current = loadState(cwd, prNumber);
   if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
   const nextState = buildReviewRequestTransition(
     current,
     request,
-    gitAwareGateContext(current, { pushedHeadSha, prHeadSha }),
+    gitAwareGateContext(current, { pushedHeadSha, prHeadSha, prState, isDraft }),
   );
   if (nextState === current) return current;
   return checkpointState({
@@ -3329,6 +3447,7 @@ export function checkpointReviewOutcome({
 } = {}) {
   const current = loadState(cwd, prNumber);
   if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  if (expectedRevision !== current.revision) throw new StateError('State revision changed', 'STATE_REVISION_CONFLICT');
   const nextState = buildReviewOutcomeTransition(current, outcome);
   if (nextState === current) return current;
   return checkpointState({
@@ -3342,6 +3461,7 @@ export function checkpointVerificationEscalation({
 } = {}) {
   const current = loadState(cwd, prNumber);
   if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  if (expectedRevision !== current.revision) throw new StateError('State revision changed', 'STATE_REVISION_CONFLICT');
   const nextState = buildVerificationEscalationTransition(current, escalation);
   if (nextState === current) return current;
   return checkpointState({
@@ -3351,14 +3471,17 @@ export function checkpointVerificationEscalation({
 }
 
 export function checkpointCompletion({
-  cwd = process.cwd(), prNumber, pushedHeadSha, prHeadSha, expectedRevision, event,
+  cwd = process.cwd(), prNumber, pushedHeadSha, prHeadSha, prState, isDraft, expectedRevision, event,
 } = {}) {
   const current = loadState(cwd, prNumber);
   if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  if (expectedRevision !== current.revision) throw new StateError('State revision changed', 'STATE_REVISION_CONFLICT');
+  if (current.phase === 'complete') return current;
   const nextState = buildCompletionTransition(
     current,
-    gitAwareGateContext(current, { pushedHeadSha, prHeadSha }),
+    gitAwareGateContext(current, { pushedHeadSha, prHeadSha, prState, isDraft }),
   );
+  if (nextState === current) return current;
   return checkpointState({
     cwd, prNumber: current.prNumber, nextState, expectedRevision,
     event, transitionAuthorization: protectedTransition(nextState, 'cycle-completion'),
@@ -3370,6 +3493,7 @@ export function checkpointCiValidation({
 } = {}) {
   const current = loadState(cwd, prNumber);
   if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  if (expectedRevision !== current.revision) throw new StateError('State revision changed', 'STATE_REVISION_CONFLICT');
   const nextState = buildCiValidationTransition(current, evidence);
   if (nextState === current) return current;
   return checkpointState({

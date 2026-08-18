@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
+import { hostname } from 'node:os';
 import { afterEach, test } from 'node:test';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -15,12 +16,12 @@ import {
   buildReviewOutcomeTransition,
   buildReviewRequestTransition,
   buildVerificationEscalationTransition,
-  checkpointCompletion,
+  checkpointCompletion as rawCheckpointCompletion,
   checkpointCiValidation,
   checkpointGitMetadata,
   checkpointReviewOutcome,
   checkpointReviewRequestLimit,
-  checkpointReviewRequest,
+  checkpointReviewRequest as rawCheckpointReviewRequest,
   checkpointState,
   checkpointTaskPacketBinding,
   checkpointTaskPacketReplan,
@@ -29,6 +30,8 @@ import {
   checkpointVerificationEscalation,
   completionGate,
   completeIntegratedTasks,
+  ensureGitHubMutationIntent,
+  claimGitHubMutationDispatch,
   executeTargetedValidationPlan,
   gitAwareGateContext,
   gitCommonDirectory,
@@ -57,6 +60,7 @@ import {
   specialistReviewBundlePath,
   validationPlanPath,
   withStateLock,
+  withGitHubRequestOwnerLock,
 } from './state.mjs';
 import {
   buildStaleDiscoveryDisposition,
@@ -67,6 +71,8 @@ import { commit, createRepository, git } from '../../../../../tests/support/git-
 
 const repositories = [];
 const AT = '2026-08-05T00:00:00Z';
+const checkpointReviewRequest = (input) => rawCheckpointReviewRequest({ prState: 'OPEN', isDraft: false, ...input });
+const checkpointCompletion = (input) => rawCheckpointCompletion({ prState: 'OPEN', isDraft: false, ...input });
 const STATE_CLI = fileURLToPath(new URL('./cli.mjs', import.meta.url));
 
 function repo() {
@@ -159,11 +165,11 @@ function persistReady(cwd, state, tasks = state.tasks) {
 }
 
 function external(cwd, state, overrides = {}) {
-  return gitAwareGateContext(state, {
+  return { ...gitAwareGateContext(state, {
     pushedHeadSha: state.currentIntegrationHeadSha,
     prHeadSha: state.currentIntegrationHeadSha,
     ...overrides,
-  });
+  }), prState: 'OPEN', isDraft: false, ...overrides };
 }
 
 function request(state, id = `request-${reviewRequestUsage(state).used + 1}`,
@@ -2221,6 +2227,79 @@ test('review limit changes cannot exhaust a pending request but may preserve its
   assert.equal(raised.reviewRequestLimit, 6);
   assert.equal(reviewRequestUsage(raised).remaining, 2);
   assert.deepEqual(raised.reviewHistory, prepared.reviewHistory);
+});
+
+test('GitHub mutation intents atomically retain one durable winner across differing retry metadata', () => {
+  const cwd = repo();
+  const operationId = `ready:17:PR_node:${'a'.repeat(40)}`;
+  const winner = ensureGitHubMutationIntent(cwd, 17, {
+    type: 'ready', operationId, clientMutationId: 'mutation-1', at: AT,
+  });
+  const retry = ensureGitHubMutationIntent(cwd, 17, {
+    type: 'ready', operationId, clientMutationId: 'mutation-1', at: '2026-08-05T00:00:01Z',
+    excludedCommentIds: ['irrelevant-retry-baseline'],
+  });
+  assert.equal(winner.isNew, true);
+  assert.equal(retry.isNew, false);
+  assert.equal(retry.at, AT);
+  const events = readFileSync(join(stateDirectory(cwd, 17), 'events.ndjson'), 'utf8')
+    .trim().split('\n').map((line) => JSON.parse(line)).filter((event) => event.type === 'github-mutation-intent');
+  assert.equal(events.length, 1);
+  assert.throws(() => ensureGitHubMutationIntent(cwd, 17, {
+    type: 'request', operationId, clientMutationId: 'mutation-1', at: AT,
+  }), { code: 'INTENT_CONFLICT' });
+  assert.throws(() => ensureGitHubMutationIntent(cwd, 17, {
+    type: 'ready', operationId, clientMutationId: 'different-mutation', at: AT,
+  }), { code: 'INTENT_CONFLICT' });
+});
+
+test('GitHub request owner lock awaits async work and dispatch claims are revision-bound', async () => {
+  const cwd = repo();
+  const initial = init(cwd);
+  let release;
+  const held = withGitHubRequestOwnerLock(cwd, 17, () => new Promise((resolve) => { release = resolve; }));
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await assert.rejects(() => withGitHubRequestOwnerLock(cwd, 17, () => {}, { timeoutMs: 10 }), { code: 'STATE_LOCK_TIMEOUT' });
+  release();
+  await held;
+  await withGitHubRequestOwnerLock(cwd, 17, () => {});
+  await assert.rejects(() => withGitHubRequestOwnerLock(cwd, 17, () => { throw new Error('owner failed'); }), /owner failed/u);
+  await withGitHubRequestOwnerLock(cwd, 17, () => {});
+
+  const intent = { type: 'request', operationId: `request:17:discovery:1:${initial.currentIntegrationHeadSha}`,
+    clientMutationId: 'dispatch-correlation', at: AT, excludedCommentIds: [] };
+  ensureGitHubMutationIntent(cwd, 17, intent);
+  const first = claimGitHubMutationDispatch(cwd, 17, intent, initial.revision);
+  assert.equal(first.isNew, true);
+  assert.equal(claimGitHubMutationDispatch(cwd, 17, intent, initial.revision).isNew, false);
+  assert.throws(() => claimGitHubMutationDispatch(cwd, 17, intent, initial.revision + 1), { code: 'STATE_REVISION_CONFLICT' });
+  assert.throws(() => claimGitHubMutationDispatch(cwd, 17, { ...intent, clientMutationId: 'conflict' }, initial.revision), { code: 'INTENT_RECOVERY_INVALID' });
+
+  const raceCwd = repo();
+  const race = init(raceCwd);
+  ensureGitHubMutationIntent(raceCwd, 17, intent);
+  assert.throws(() => claimGitHubMutationDispatch(raceCwd, 17, intent, race.revision + 1), { code: 'STATE_REVISION_CONFLICT' });
+  const raceEvents = readFileSync(join(stateDirectory(raceCwd, 17), 'events.ndjson'), 'utf8');
+  assert.equal(raceEvents.includes('github-mutation-dispatch'), false);
+
+  const missingCwd = repo();
+  const missing = init(missingCwd);
+  assert.throws(() => claimGitHubMutationDispatch(missingCwd, 17, intent, missing.revision), { code: 'INTENT_RECOVERY_INVALID' });
+  writeFileSync(join(stateDirectory(missingCwd, 17), 'events.ndjson'), '{bad json}\n');
+  assert.throws(() => claimGitHubMutationDispatch(missingCwd, 17, intent, missing.revision), { code: 'INTENT_RECOVERY_INVALID' });
+});
+
+test('GitHub request owner lock reclaims a dead same-host owner', async () => {
+  const cwd = repo();
+  init(cwd);
+  const locks = join(reviewRoot(cwd), 'locks');
+  mkdirSync(locks, { recursive: true });
+  const path = join(locks, 'pr-17.github-request.lock');
+  writeFileSync(path, JSON.stringify({ token: 'dead', pid: 2147483647, hostname: hostname(), createdAt: '2000-01-01T00:00:00Z' }));
+  let ran = false;
+  await withGitHubRequestOwnerLock(cwd, 17, () => { ran = true; }, { timeoutMs: 100, staleMs: 0 });
+  assert.equal(ran, true);
+  assert.equal(existsSync(path), false);
 });
 
 test('verification collection escalation is guarded, append-only, request-bound, and human-gated', () => {

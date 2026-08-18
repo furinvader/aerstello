@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { rmSync } from 'node:fs';
 import { test } from 'node:test';
+import { createRepository } from '../../../../../tests/support/git-fixtures.mjs';
 
 import {
   createGitHubReviewWorkflow,
@@ -8,6 +10,7 @@ import {
   githubReviewConstants,
   readTopLevelComments,
 } from './github.mjs';
+import { withGitHubRequestOwnerLock } from '../state/state.mjs';
 import {
   buildGhGraphqlArgs,
   createDefaultGitHubClient,
@@ -294,11 +297,19 @@ function fullValidationCheck(overrides = {}) {
   };
 }
 
+function passedCiEvidence() {
+  return {
+    source: 'github-actions', scope: 'full', status: 'passed', headSha: HEAD,
+    checks: ['Full validation'], checkRunId: 'CHECK_full', workflowRunId: 701,
+    workflowRunUrl: 'https://github.com/example/aerstello/actions/runs/701', updatedAt: AT,
+  };
+}
+
 class FakeClient {
   constructor(overrides = {}) {
     this.metadata = {
       id: 'PR_node', number: 2, url: 'https://github.com/example/aerstello/pull/2',
-      headRefOid: HEAD, viewer: VIEWER,
+      headRefOid: HEAD, state: 'OPEN', isDraft: false, viewer: VIEWER,
     };
     this.comments = [];
     this.reviews = [];
@@ -314,7 +325,10 @@ class FakeClient {
     this.remaining = overrides.remaining ?? 5000;
     this.graphqlErrors = overrides.graphqlErrors ?? new Set();
     this.noEffect = overrides.noEffect ?? new Set();
+    this.throwAfterMutation = overrides.throwAfterMutation ?? new Set();
     Object.assign(this, overrides);
+    this.metadata = { id: 'PR_node', number: 2, url: 'https://github.com/example/aerstello/pull/2',
+      headRefOid: HEAD, state: 'OPEN', isDraft: false, viewer: VIEWER, ...overrides.metadata };
   }
 
   result(data) {
@@ -348,7 +362,8 @@ class FakeClient {
     if (name === 'PullRequestChecks') {
       const headSha = this.checkHeadSha ?? this.metadata.headRefOid;
       return this.result({ repository: { pullRequest: {
-        number: this.metadata.number, headRefOid: this.metadata.headRefOid,
+        id: this.metadata.id, number: this.metadata.number, state: this.metadata.state,
+        isDraft: this.metadata.isDraft, headRefOid: this.metadata.headRefOid,
         commits: { nodes: [{ commit: { oid: headSha, statusCheckRollup: {
           state: this.rollupState,
           contexts: connection(this.ciContexts, variables.cursor, this.pageSize),
@@ -363,6 +378,7 @@ class FakeClient {
         createdAt: AT, lastEditedAt: null, author: this.metadata.viewer,
       });
     }
+    if (name === 'MarkPullRequestReadyForReview' && !this.noEffect.has(name)) this.metadata.isDraft = false;
     if (name === 'AddThreadReply' && !this.noEffect.has(name)) {
       const comments = this.threadComments.get(variables.threadId);
       comments.push({
@@ -375,7 +391,9 @@ class FakeClient {
     if (name === 'ResolveThread' && !this.noEffect.has(name)) {
       this.threads.find((thread) => thread.id === variables.threadId).isResolved = true;
     }
+    if (this.throwAfterMutation.has(name)) throw new Error(`lost ${name} response`);
     const payload = name === 'AddReviewRequest' ? 'addComment'
+      : name === 'MarkPullRequestReadyForReview' ? 'markPullRequestReadyForReview'
       : name === 'AddThreadReply' ? 'addPullRequestReviewThreadReply' : 'resolveReviewThread';
     return this.result({ [payload]: { clientMutationId: variables.clientMutationId } });
   }
@@ -393,6 +411,7 @@ function fakeGit(overrides = {}) {
 
 function fakeJournal(events = [], existing = []) {
   const intents = new Map();
+  const dispatches = new Map();
   for (const intent of existing) {
     if (!intents.has(intent.operationId)) intents.set(intent.operationId, intent);
   }
@@ -405,11 +424,19 @@ function fakeJournal(events = [], existing = []) {
       if (!exists) intents.set(intent.operationId, intent);
       return { ...intents.get(intent.operationId), isNew: !exists };
     },
+    async claimDispatch(intent) {
+      const exists = dispatches.has(intent.operationId);
+      if (!exists) dispatches.set(intent.operationId, {
+        operationId: intent.operationId, clientMutationId: intent.clientMutationId,
+      });
+      return { ...dispatches.get(intent.operationId), isNew: !exists };
+    },
   };
 }
 
 function racingRequestJournal(intent, events = []) {
   let concurrentIntent = null;
+  let dispatched = false;
   return {
     async lookupIntent() {
       return concurrentIntent ? { ...concurrentIntent, isNew: false } : null;
@@ -419,16 +446,25 @@ function racingRequestJournal(intent, events = []) {
       concurrentIntent = structuredClone(intent);
       return { ...concurrentIntent, isNew: false };
     },
+    async claimDispatch() { const isNew = !dispatched; dispatched = true; return { isNew }; },
   };
 }
 
 function fakeState(initial) {
   let current = structuredClone(initial);
   const calls = [];
+  let beforeCheckpoint = null;
+  async function runCheckpointHook(name, input) {
+    if (beforeCheckpoint === null || (beforeCheckpoint.name !== null && beforeCheckpoint.name !== name)) return;
+    const hook = beforeCheckpoint.hook;
+    beforeCheckpoint = null;
+    await hook({ name, input, current: structuredClone(current), replaceCurrent(next) { current = structuredClone(next); } });
+  }
   return {
     calls,
     get current() { return current; },
     advanceRevisionForTest() { current = { ...current, revision: current.revision + 1 }; },
+    setBeforeCheckpointForTest(hook, name = null) { beforeCheckpoint = { hook, name }; },
     async load() { return structuredClone(current); },
     async checkpointReviewRequest(input) {
       calls.push({ name: 'checkpointReviewRequest', input });
@@ -444,6 +480,8 @@ function fakeState(initial) {
       return structuredClone(current);
     },
     async checkpointCiValidation(input) {
+      await runCheckpointHook('checkpointCiValidation', input);
+      if (input.expectedRevision !== current.revision) { const error = new Error('revision conflict'); error.code = 'STATE_REVISION_CONFLICT'; throw error; }
       calls.push({ name: 'checkpointCiValidation', input });
       const duplicate = current.ciValidationHistory.find((entry) => entry.checkRunId === input.evidence.checkRunId);
       if (!duplicate) {
@@ -454,6 +492,8 @@ function fakeState(initial) {
       return structuredClone(current);
     },
     async checkpointReviewOutcome(input) {
+      await runCheckpointHook('checkpointReviewOutcome', input);
+      if (input.expectedRevision !== current.revision) { const error = new Error('revision conflict'); error.code = 'STATE_REVISION_CONFLICT'; throw error; }
       calls.push({ name: 'checkpointReviewOutcome', input });
       const outcome = input.outcome;
       current = {
@@ -467,6 +507,8 @@ function fakeState(initial) {
       return structuredClone(current);
     },
     async checkpointVerificationEscalation(input) {
+      await runCheckpointHook('checkpointVerificationEscalation', input);
+      if (input.expectedRevision !== current.revision) { const error = new Error('revision conflict'); error.code = 'STATE_REVISION_CONFLICT'; throw error; }
       calls.push({ name: 'checkpointVerificationEscalation', input });
       current = { ...current, revision: current.revision + 1, phase: 'awaiting-human-decision', verificationEscalation: input.escalation };
       return structuredClone(current);
@@ -553,7 +595,10 @@ function fakeState(initial) {
       return structuredClone(current);
     },
     async checkpointCompletion(input) {
+      await runCheckpointHook('checkpointCompletion', input);
+      if (input.expectedRevision !== current.revision) { const error = new Error('revision conflict'); error.code = 'STATE_REVISION_CONFLICT'; throw error; }
       calls.push({ name: 'checkpointCompletion', input });
+      if (current.phase === 'complete') return structuredClone(current);
       current = { ...current, revision: current.revision + 1, phase: 'complete' };
       return structuredClone(current);
     },
@@ -624,6 +669,619 @@ test('status uses split fully paginated reads and filters canonical roots', asyn
   })).api.status(2);
   assert.deepEqual(finite.reviewRequests, { used: 3, limit: 5 });
   assert.match(renderHumanStatus(finite), /Review requests: 3; limit: 5/u);
+});
+
+test('request promotes a ready draft once and recovers a lost ready mutation response', async () => {
+  const client = new FakeClient({ throwAfterMutation: new Set(['MarkPullRequestReadyForReview']) });
+  client.metadata.isDraft = true;
+  const setup = workflow(readyState(), client);
+  const recoveredInline = await setup.api.request(2);
+  assert.equal(recoveredInline.pullRequestReadiness, 'recovered-ready');
+  assert.equal(client.events.filter((event) => event === 'intent:ready').length, 1);
+  assert.equal(client.calls.find((call) => call.name === 'MarkPullRequestReadyForReview').variables.pullRequestId, 'PR_node');
+  assert.equal(client.metadata.isDraft, false);
+  assert.equal(client.calls.filter((call) => call.name === 'AddReviewRequest').length, 1);
+  assert.equal(client.events.filter((event) => event === 'intent:ready').length, 1);
+});
+
+test('request reports already-ready and marked-ready while a non-owner draft waits without mutating', async () => {
+  const already = workflow(readyState());
+  const alreadyResult = await already.api.request(2);
+  assert.equal(alreadyResult.pullRequestReadiness, 'already-ready');
+  assert.equal(already.client.calls.some((call) => call.name === 'MarkPullRequestReadyForReview'), false);
+
+  const promotedClient = new FakeClient();
+  promotedClient.metadata.isDraft = true;
+  const promoted = workflow(readyState(), promotedClient);
+  const promotedResult = await promoted.api.request(2);
+  assert.equal(promotedResult.pullRequestReadiness, 'marked-ready');
+  assert.equal(promotedClient.calls.filter((call) => call.name === 'MarkPullRequestReadyForReview').length, 1);
+
+  const concurrentClient = new FakeClient();
+  concurrentClient.metadata.isDraft = true;
+  const readyOperation = `ready:2:${concurrentClient.metadata.id}:${HEAD}`;
+  const concurrent = workflow(readyState(), concurrentClient, {
+    journal: fakeJournal([], [priorIntent('ready', readyOperation)]),
+  });
+  const replayed = await concurrent.api.request(2);
+  assert.equal(replayed.pullRequestReadiness, 'recovered-ready');
+  assert.equal(concurrentClient.calls.filter((call) => call.name === 'MarkPullRequestReadyForReview').length, 1);
+});
+
+test('overlapping shared-state requests converge on one durable request without another comment', async () => {
+  const client = new FakeClient();
+  const state = fakeState(readyState());
+  const journal = fakeJournal(client.events);
+  const adapters = { client, state, git: fakeGit(), clock: { now: () => AT }, journal };
+  const owner = createGitHubReviewWorkflow(adapters);
+  const retry = createGitHubReviewWorkflow(adapters);
+  const [first, second] = await Promise.all([owner.request(2), retry.request(2)]);
+  const waiting = [first, second].find((result) => result.waiting === true);
+  const completed = [first, second].find((result) => result.requested === true);
+  const recovered = waiting ? await retry.request(2) : completed;
+  assert.equal(recovered.recovered, true);
+  assert.deepEqual(recovered.request, state.current.reviewRequest);
+  assert.equal(client.calls.filter((call) => call.name === 'AddReviewRequest').length, 1);
+  assert.equal(client.comments.filter((comment) => comment.body === '@codex review').length, 1);
+  assert.equal(state.current.reviewHistory.length, 1);
+});
+
+test('staggered request retry waits for a journaled owner mutation then recovers its exact request', async () => {
+  let releaseMutation;
+  let enteredMutation;
+  const released = new Promise((resolve) => { releaseMutation = resolve; });
+  const entered = new Promise((resolve) => { enteredMutation = resolve; });
+  class DeferredRequestClient extends FakeClient {
+    async graphql(input) {
+      if (input.name === 'AddReviewRequest') {
+        enteredMutation();
+        await released;
+      }
+      return super.graphql(input);
+    }
+  }
+  const client = new DeferredRequestClient();
+  const state = fakeState(readyState());
+  const journal = fakeJournal(client.events);
+  const adapters = { client, state, git: fakeGit(), clock: { now: () => AT }, journal };
+  const owner = createGitHubReviewWorkflow(adapters);
+  const retry = createGitHubReviewWorkflow(adapters);
+  const ownerPromise = owner.request(2);
+  await entered;
+  const waiting = await retry.request(2);
+  assert.equal(waiting.waiting, true);
+  assert.equal(client.calls.filter((call) => call.name === 'AddReviewRequest').length, 0);
+  releaseMutation();
+  const requested = await ownerPromise;
+  const recovered = await retry.request(2);
+  assert.deepEqual(recovered.request, requested.request);
+  assert.equal(recovered.recovered, true);
+  assert.equal(client.calls.filter((call) => call.name === 'AddReviewRequest').length, 1);
+  assert.equal(client.comments.filter((comment) => comment.body === '@codex review').length, 1);
+  assert.equal(state.current.reviewHistory.length, 1);
+});
+
+test('real request-owner lock serializes a deferred shared request mutation', async () => {
+  const cwd = createRepository();
+  let release; let entered; let ownerPromise;
+  const released = new Promise((resolve) => { release = resolve; });
+  const enteredPromise = new Promise((resolve) => { entered = resolve; });
+  class DeferredClient extends FakeClient {
+    async graphql(input) {
+      if (input.name === 'AddReviewRequest') { entered(); await released; }
+      return super.graphql(input);
+    }
+  }
+  try {
+    const client = new DeferredClient(); const state = fakeState(readyState()); const journal = fakeJournal(client.events);
+    journal.withRequestOwner = (callback) => withGitHubRequestOwnerLock(cwd, 992, callback, { timeoutMs: 20, staleMs: 0 });
+    const adapters = { client, state, git: fakeGit(), clock: { now: () => AT }, journal };
+    const owner = createGitHubReviewWorkflow(adapters); const retry = createGitHubReviewWorkflow(adapters);
+    ownerPromise = owner.request(2); await enteredPromise;
+    const waiting = await retry.request(2);
+    assert.equal(waiting.waiting, true);
+    release(); await ownerPromise;
+    const recovered = await retry.request(2);
+    assert.equal(recovered.recovered, true);
+    assert.equal(client.calls.filter((call) => call.name === 'AddReviewRequest').length, 1);
+    assert.equal(client.comments.filter((comment) => comment.body === '@codex review').length, 1);
+    assert.equal(state.current.reviewHistory.length, 1);
+  } finally {
+    if (release) release();
+    await ownerPromise?.catch(() => {});
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('request treats successful but delayed GitHub comment visibility as uncertain without replaying', async () => {
+  class DelayedCommentClient extends FakeClient {
+    constructor() { super(); this.visible = false; }
+    async graphql(input) {
+      const result = await super.graphql(input);
+      if (input.name === 'PullRequestComments' && !this.visible) {
+        result.data.repository.pullRequest.comments.nodes = result.data.repository.pullRequest.comments.nodes
+          .filter((comment) => comment.body !== '@codex review');
+      }
+      return result;
+    }
+  }
+  const client = new DelayedCommentClient();
+  const state = fakeState(readyState());
+  const journal = fakeJournal(client.events);
+  const api = createGitHubReviewWorkflow({ client, state, git: fakeGit(), clock: { now: () => AT }, journal });
+  const uncertain = await api.request(2);
+  assert.deepEqual({ requested: uncertain.requested, waiting: uncertain.waiting }, { requested: false, waiting: true });
+  assert.equal(client.calls.filter((call) => call.name === 'AddReviewRequest').length, 1);
+  client.visible = true;
+  const recovered = await api.request(2);
+  assert.equal(recovered.recovered, true);
+  assert.equal(client.calls.filter((call) => call.name === 'AddReviewRequest').length, 1);
+  assert.equal(client.comments.filter((comment) => comment.body === '@codex review').length, 1);
+  assert.equal(state.current.reviewHistory.length, 1);
+});
+
+test('request owner-lock timeout is a mutation-free structured wait', async () => {
+  const client = new FakeClient();
+  const state = fakeState(readyState());
+  const journal = fakeJournal(client.events);
+  journal.withRequestOwner = async () => {
+    const error = new Error('busy'); error.code = 'STATE_LOCK_TIMEOUT'; throw error;
+  };
+  const api = createGitHubReviewWorkflow({ client, state, git: fakeGit(), clock: { now: () => AT }, journal });
+  const result = await api.request(2);
+  assert.deepEqual(result, { requested: false, recovered: false, waiting: true,
+    pullRequestReadiness: 'already-ready', nextAction: 'Wait, then rerun npm run review:github -- request --pr 2.' });
+  assert.equal(client.calls.some((call) => call.name === 'AddReviewRequest'), false);
+  assert.equal(state.calls.length, 0);
+});
+
+test('CLI returns stable uncertainty for an already-dispatched request without replay', async () => {
+  const client = new FakeClient();
+  const state = fakeState(readyState());
+  const operationId = `request:2:discovery:1:${HEAD}`;
+  const intent = priorIntent('request', operationId);
+  const journal = fakeJournal(client.events, [intent]);
+  await journal.claimDispatch(intent);
+  const expected = { requested: false, recovered: false, waiting: true,
+    pullRequestReadiness: 'already-ready', nextAction: 'Wait, then rerun npm run review:github -- request --pr 2.' };
+  const first = await runCli(['request', '--pr', '2'], { client, state, git: fakeGit(), clock: { now: () => AT }, journal });
+  assert.deepEqual(first, expected);
+  const retry = await runCli(['request', '--pr', '2'], { client, state, git: fakeGit(), clock: { now: () => AT }, journal });
+  assert.deepEqual(retry, expected);
+  assert.equal(client.calls.some((call) => call.name === 'AddReviewRequest'), false);
+  assert.equal(state.calls.length, 0);
+});
+
+test('pending request retries preserve the exact durable request after new Codex roots appear', async () => {
+  for (const resolved of [false, true]) {
+    const setup = workflow(readyState());
+    const requested = await setup.api.request(2);
+    addThread(setup.client, { id: `THREAD_retry_${resolved}`, resolved });
+    const calls = setup.state.calls.length;
+    const retried = await setup.api.request(2);
+    assert.equal(retried.requested, true);
+    assert.equal(retried.recovered, true);
+    assert.deepEqual(retried.request, requested.request);
+    assert.equal(setup.client.calls.filter((call) => call.name === 'AddReviewRequest').length, 1);
+    assert.equal(setup.state.calls.length, calls);
+  }
+});
+
+test('request revalidates readiness after ready and request intents before mutation', async () => {
+  const readyClient = new FakeClient();
+  readyClient.metadata.isDraft = true;
+  const readyJournal = {
+    async lookupIntent() { return null; },
+    async ensureIntent(intent) {
+      if (intent.type === 'ready') readyClient.metadata.state = 'CLOSED';
+      return { ...intent, isNew: true };
+    },
+  };
+  await assert.rejects(() => workflow(readyState(), readyClient, { journal: readyJournal }).api.request(2), {
+    code: 'REQUEST_NOT_READY',
+  });
+  assert.equal(readyClient.calls.some((call) => call.name === 'MarkPullRequestReadyForReview'), false);
+
+  const requestClient = new FakeClient();
+  const requestJournal = {
+    async lookupIntent() { return null; },
+    async ensureIntent(intent) {
+      if (intent.type === 'request') requestClient.metadata.isDraft = true;
+      return { ...intent, isNew: true };
+    },
+  };
+  await assert.rejects(() => workflow(readyState(), requestClient, { journal: requestJournal }).api.request(2), {
+    code: 'PR_DRAFT',
+  });
+  assert.equal(requestClient.calls.some((call) => call.name === 'AddReviewRequest'), false);
+});
+
+test('draft promotion rejects a post-mutation redraft before posting the review request', async () => {
+  class RedraftAfterPromotionClient extends FakeClient {
+    async graphql(input) {
+      const result = await super.graphql(input);
+      if (input.name === 'MarkPullRequestReadyForReview') this.metadata.isDraft = true;
+      return result;
+    }
+  }
+  const client = new RedraftAfterPromotionClient();
+  client.metadata.isDraft = true;
+  const setup = workflow(readyState(), client);
+  await assert.rejects(() => setup.api.request(2), { code: 'PR_DRAFT' });
+  assert.equal(client.calls.some((call) => call.name === 'AddReviewRequest'), false);
+  assert.equal(setup.state.calls.some((call) => call.name === 'checkpointReviewRequest'), false);
+});
+
+test('request rejects closed, merged, and unready draft pull requests before promotion', async () => {
+  for (const state of ['CLOSED', 'MERGED']) {
+    const client = new FakeClient();
+    client.metadata.state = state;
+    await assert.rejects(() => workflow(readyState(), client).api.request(2), { code: 'PR_NOT_OPEN' });
+    assert.equal(client.calls.some((call) => call.name === 'MarkPullRequestReadyForReview'), false);
+  }
+  const client = new FakeClient();
+  client.metadata.isDraft = true;
+  const unready = stateFixture();
+  await assert.rejects(() => workflow(unready, client).api.request(2), { code: 'REQUEST_NOT_READY' });
+  assert.equal(client.calls.some((call) => call.name === 'MarkPullRequestReadyForReview'), false);
+});
+
+test('status reports volatile readiness and observations without state or GitHub mutations', async () => {
+  const client = new FakeClient();
+  client.metadata.isDraft = true;
+  const setup = workflow(pendingState('discovery'), client);
+  const result = await setup.api.status(2);
+  assert.deepEqual(result.pullRequest, { state: 'OPEN', isDraft: true });
+  assert.deepEqual(result.reviewObservation, { status: 'waiting', outcome: null, evidenceType: null, evidenceIds: [] });
+  assert.equal(setup.state.calls.length, 0);
+  assert.equal(client.events.length, 0);
+  assert.match(renderHumanStatus(result), /PR readiness: OPEN draft/u);
+});
+
+test('status rejects close or merge observed by the later checks snapshot without writes', async () => {
+  for (const state of ['CLOSED', 'MERGED']) {
+    class LaterChecksStateClient extends FakeClient {
+      async graphql(input) {
+        if (input.name === 'PullRequestChecks') this.metadata.state = state;
+        return super.graphql(input);
+      }
+    }
+    const client = new LaterChecksStateClient();
+    const setup = workflow(pendingState('discovery'), client);
+    await assert.rejects(() => setup.api.status(2), { code: 'PR_NOT_OPEN' });
+    assert.equal(setup.state.calls.length, 0);
+    assert.equal(client.events.length, 0);
+  }
+});
+
+test('status gives typed immutable-anchor identifiers for edited, missing, and duplicate requests', async () => {
+  for (const mutate of [
+    (client) => { client.comments[0].lastEditedAt = '2026-08-05T00:00:01Z'; },
+    (client) => { client.comments.length = 0; },
+    (client) => client.comments.push({ ...client.comments[0] }),
+  ]) {
+    const client = new FakeClient();
+    const setup = workflow(pendingState('discovery'), client);
+    mutate(client);
+    const observation = (await setup.api.status(2)).reviewObservation;
+    assert.equal(observation.status, 'ambiguous');
+    assert.deepEqual(observation.evidenceIds, client.comments.length > 0
+      ? ['request-proof:IC_request', 'live-request:IC_request']
+      : ['request-proof:IC_request']);
+  }
+});
+
+test('status reports every canonical observation state without mutations', async () => {
+  const cases = [];
+  cases.push(['not-applicable', stateFixture(), new FakeClient()]);
+  cases.push(['waiting', pendingState('discovery'), new FakeClient()]);
+  const clean = new FakeClient();
+  clean.reviews.push(canonicalReview());
+  cases.push(['collectable', pendingState('discovery'), clean]);
+  const ambiguous = new FakeClient();
+  ambiguous.reviews.push(canonicalReview());
+  ambiguous.reactions.set('IC_request', [{ id: 'REACTION_duplicate', content: 'THUMBS_UP', createdAt: AT, user: BOT }]);
+  cases.push(['ambiguous', pendingState('discovery'), ambiguous]);
+  const duplicateReview = new FakeClient();
+  duplicateReview.reviews.push(canonicalReview(), canonicalReview({ id: 'PRR_duplicate', databaseId: 202 }));
+  cases.push(['ambiguous', pendingState('discovery'), duplicateReview]);
+  const stale = new FakeClient();
+  stale.metadata.headRefOid = OTHER_HEAD;
+  cases.push(['stale', pendingState('discovery'), stale]);
+  const stateAndLiveAdvanced = new FakeClient();
+  stateAndLiveAdvanced.metadata.headRefOid = OTHER_HEAD;
+  cases.push(['stale', pendingState('discovery', { currentIntegrationHeadSha: OTHER_HEAD }), stateAndLiveAdvanced]);
+  for (const [expected, state, client] of cases) {
+    const setup = workflow(state, client);
+    const result = await setup.api.status(2);
+    assert.equal(result.reviewObservation.status, expected);
+    assert.equal(setup.state.calls.length, 0);
+    assert.equal(client.events.length, 0);
+  }
+
+  const findings = new FakeClient();
+  findings.reviews.push(canonicalReview({ id: 'PRR_findings', body: '' }));
+  const root = addThread(findings, { root: rootComment('THREAD_status', {
+    pullRequestReview: { id: 'PRR_findings' },
+  }) });
+  const findingsStatus = await workflow(pendingState('discovery'), findings).api.status(2);
+  assert.equal(findingsStatus.reviewObservation.status, 'collectable');
+  assert.equal(findingsStatus.reviewObservation.outcome, 'findings');
+  assert.deepEqual(findingsStatus.reviewObservation.evidenceIds.sort(), [
+    `review:PRR_findings`, `review-root:${root.id}`,
+  ].sort());
+
+  const malformed = new FakeClient();
+  malformed.reviews.push(canonicalReview({ body: null }));
+  assert.equal((await workflow(pendingState('discovery'), malformed).api.status(2)).reviewObservation.status, 'ambiguous');
+});
+
+test('collection rejects canonical response drift between complete snapshots without checkpointing', async () => {
+  class ResponseDriftClient extends FakeClient {
+    constructor() {
+      super();
+      this.reviews.push(canonicalReview());
+      this.reviewReads = 0;
+    }
+
+    async graphql(input) {
+      const result = await super.graphql(input);
+      if (input.name === 'PullRequestReviews' && ++this.reviewReads === 1) {
+        this.reviews.push(canonicalReview({ id: 'PRR_late', databaseId: 999 }));
+      }
+      return result;
+    }
+  }
+  const setup = workflow(pendingState('verification'), new ResponseDriftClient());
+  await assert.rejects(() => setup.api.collect(2), { code: 'REVIEW_COLLECTION_STALE' });
+  assert.equal(setup.state.calls.some((call) => call.name === 'checkpointReviewOutcome'), false);
+  assert.equal(setup.state.calls.some((call) => call.name === 'checkpointVerificationEscalation'), false);
+});
+
+test('collection rejects attached canonical-root fingerprint drift between complete snapshots', async () => {
+  class RootDriftClient extends FakeClient {
+    constructor() {
+      super();
+      this.reviews.push(canonicalReview({ id: 'PRR_attached' }));
+      addThread(this, { id: 'THREAD_attached', root: rootComment('THREAD_attached', { pullRequestReview: { id: 'PRR_attached' } }) });
+      this.threadReads = 0;
+    }
+
+    async graphql(input) {
+      const result = await super.graphql(input);
+      if (input.name === 'ReviewThreadComments' && ++this.threadReads === 1) {
+        const first = structuredClone(result);
+        const comments = this.threadComments.get('THREAD_attached');
+        comments[0] = { ...comments[0], body: 'Changed root after first snapshot.' };
+        return first;
+      }
+      return result;
+    }
+  }
+  const setup = workflow(pendingState('verification'), new RootDriftClient());
+  await assert.rejects(() => setup.api.collect(2), { code: 'REVIEW_COLLECTION_STALE' });
+  assert.equal(setup.state.calls.some((call) => call.name === 'checkpointReviewOutcome'), false);
+  assert.equal(setup.state.calls.some((call) => call.name === 'checkpointVerificationEscalation'), false);
+});
+
+test('unmatched canonical roots make clean reaction and review evidence ambiguous whether resolved or open', async () => {
+  for (const resolved of [false, true]) {
+    const reactionClient = new FakeClient();
+    reactionClient.reactions.set('IC_request', [{ id: 'REACTION_root', content: 'THUMBS_UP', createdAt: AT, user: BOT }]);
+    addThread(reactionClient, { resolved });
+    await assert.rejects(() => workflow(pendingState('discovery'), reactionClient).api.collect(2), {
+      code: 'DISCOVERY_COLLECTION_UNRESOLVED',
+    });
+
+    const reviewClient = new FakeClient();
+    reviewClient.reviews.push(canonicalReview());
+    addThread(reviewClient, { resolved });
+    await assert.rejects(() => workflow(pendingState('discovery'), reviewClient).api.collect(2), {
+      code: 'DISCOVERY_COLLECTION_UNRESOLVED',
+    });
+  }
+});
+
+test('advance is waiting-safe and stops an already-recorded findings outcome before CI', async () => {
+  const waiting = workflow(stateFixture());
+  const waitingResult = await waiting.api.advance(2);
+  assert.deepEqual(waitingResult.performedTransitions, []);
+  assert.equal(waitingResult.terminal, 'waiting');
+  assert.equal(waitingResult.waiting, true);
+  assert.equal(waiting.state.calls.length, 0);
+
+  const findings = workflow(findingsState());
+  const findingsResult = await findings.api.advance(2);
+  assert.equal(findingsResult.terminal, 'triage');
+  assert.equal(findingsResult.waiting, false);
+  assert.deepEqual(findingsResult.performedTransitions, []);
+  assert.equal(findings.client.calls.some((call) => call.name === 'PullRequestChecks'), false);
+});
+
+test('advance escalates verification ambiguity, rejects discovery ambiguity, and blocks CI after a late root', async () => {
+  const verificationClient = new FakeClient();
+  verificationClient.reviews.push(canonicalReview());
+  verificationClient.reactions.set('IC_request', [{ id: 'REACTION_ambiguous', content: 'THUMBS_UP', createdAt: AT, user: BOT }]);
+  const verification = workflow(pendingState('verification'), verificationClient);
+  const escalated = await verification.api.advance(2);
+  assert.equal(escalated.terminal, 'escalation');
+  assert.deepEqual(escalated.performedTransitions, ['verification-escalation']);
+  assert.equal(verification.state.calls.filter((call) => call.name === 'checkpointVerificationEscalation').length, 1);
+  const repeated = await verification.api.advance(2);
+  assert.equal(repeated.terminal, 'escalation');
+  assert.deepEqual(repeated.performedTransitions, []);
+  assert.equal(verification.state.calls.filter((call) => call.name === 'checkpointVerificationEscalation').length, 1);
+  verificationClient.reviews.length = 0;
+  verificationClient.reactions.clear();
+  const disappeared = await verification.api.advance(2);
+  assert.equal(disappeared.terminal, 'escalation');
+  assert.deepEqual(disappeared.escalation, escalated.escalation);
+  assert.deepEqual(disappeared.performedTransitions, []);
+  assert.equal(verification.state.calls.filter((call) => call.name === 'checkpointVerificationEscalation').length, 1);
+
+  const discoveryClient = new FakeClient();
+  discoveryClient.reviews.push(canonicalReview());
+  discoveryClient.reactions.set('IC_request', [{ id: 'REACTION_ambiguous', content: 'THUMBS_UP', createdAt: AT, user: BOT }]);
+  const discovery = workflow(pendingState('discovery'), discoveryClient);
+  await assert.rejects(() => discovery.api.advance(2), { code: 'DISCOVERY_COLLECTION_UNRESOLVED' });
+  assert.equal(discovery.state.calls.length, 0);
+
+  const lateRootClient = new FakeClient();
+  lateRootClient.reviews.push(canonicalReview());
+  const lateRoot = workflow(pendingState('discovery'), lateRootClient);
+  lateRoot.state.setBeforeCheckpointForTest(() => addThread(lateRootClient, { id: 'THREAD_late' }), 'checkpointReviewOutcome');
+  await assert.rejects(() => lateRoot.api.advance(2), { code: 'COMPLETION_NOT_READY' });
+  assert.equal(lateRoot.state.calls.some((call) => call.name === 'checkpointCiValidation'), false);
+});
+
+test('CI pagination observes readiness and HEAD changes on later pages before checkpointing', async () => {
+  class PaginatedReadinessRaceClient extends FakeClient {
+    constructor(mutate) {
+      super({ pageSize: 1 });
+      this.ciContexts = [
+        fullValidationCheck(),
+        { __typename: 'StatusContext', id: 'STATUS_other', context: 'other', state: 'SUCCESS', targetUrl: null },
+      ];
+      this.checkReads = 0;
+      this.mutate = mutate;
+    }
+
+    async graphql(input) {
+      const result = await super.graphql(input);
+      if (input.name === 'PullRequestChecks' && ++this.checkReads === 1) this.mutate(this);
+      return result;
+    }
+  }
+  for (const [mutate, code] of [
+    [(client) => { client.metadata.state = 'CLOSED'; }, 'PR_NOT_OPEN'],
+    [(client) => { client.metadata.isDraft = true; }, 'PR_DRAFT'],
+    [(client) => { client.metadata.headRefOid = OTHER_HEAD; }, 'CI_HEAD_MISMATCH'],
+  ]) {
+    const client = new PaginatedReadinessRaceClient(mutate);
+    const setup = workflow(completedState(), client);
+    await assert.rejects(() => setup.api.collectCi(2), { code });
+    assert.equal(setup.state.calls.some((call) => call.name === 'checkpointCiValidation'), false);
+  }
+});
+
+test('advance checkpoints clean evidence through CI and Done exactly once', async () => {
+  const client = new FakeClient();
+  client.reviews.push(canonicalReview());
+  const setup = workflow(pendingState('discovery'), client);
+  const result = await setup.api.advance(2);
+  assert.deepEqual(result.performedTransitions, ['review-outcome', 'ci-validation', 'cycle-completion']);
+  assert.equal(result.phase, 'complete');
+  assert.equal(result.terminal, 'done');
+  assert.equal(result.waiting, false);
+  assert.equal(result.nextAction, 'Archive is explicit after Done.');
+  assert.equal(setup.state.calls.filter((call) => call.name === 'checkpointReviewOutcome').length, 1);
+  assert.equal(setup.state.calls.filter((call) => call.name === 'checkpointCiValidation').length, 1);
+  assert.equal(setup.state.calls.filter((call) => call.name === 'checkpointCompletion').length, 1);
+});
+
+test('advance checkpoints only clean outcome while CI is pending and records failed CI exactly once', async () => {
+  const pendingClient = new FakeClient();
+  pendingClient.reviews.push(canonicalReview());
+  pendingClient.rollupState = 'PENDING';
+  pendingClient.ciContexts = [fullValidationCheck({ status: 'IN_PROGRESS', conclusion: null, completedAt: null })];
+  const pending = workflow(pendingState('discovery'), pendingClient);
+  const pendingResult = await pending.api.advance(2);
+  assert.deepEqual(pendingResult.performedTransitions, ['review-outcome']);
+  assert.equal(pendingResult.terminal, 'waiting');
+  assert.equal(pendingResult.waiting, true);
+  assert.equal(pending.state.calls.some((call) => call.name === 'checkpointCiValidation'), false);
+
+  const failedClient = new FakeClient();
+  failedClient.reviews.push(canonicalReview());
+  failedClient.rollupState = 'FAILURE';
+  failedClient.ciContexts = [fullValidationCheck({ conclusion: 'FAILURE' })];
+  const failed = workflow(pendingState('discovery'), failedClient);
+  const failedResult = await failed.api.advance(2);
+  assert.deepEqual(failedResult.performedTransitions, ['review-outcome', 'ci-validation']);
+  assert.equal(failedResult.terminal, 'failure');
+  assert.equal(failedResult.ciValidation.status, 'failed');
+  assert.equal(failed.state.calls.filter((call) => call.name === 'checkpointCiValidation').length, 1);
+});
+
+test('advance is idempotent for Done and converges CI and completion winners without claiming their writes', async () => {
+  const done = workflow(completedState({ phase: 'complete', ciValidationStatus: passedCiEvidence(),
+    ciValidationHistory: [passedCiEvidence()] }));
+  const doneResult = await done.api.advance(2);
+  assert.deepEqual(doneResult.performedTransitions, []);
+  assert.equal(doneResult.phase, 'complete');
+  assert.equal(done.client.calls.length, 0);
+  assert.equal(done.state.calls.length, 0);
+
+  const ciWinnerClient = new FakeClient();
+  ciWinnerClient.reviews.push(canonicalReview());
+  const ciWinner = workflow(pendingState('discovery'), ciWinnerClient);
+  ciWinner.state.setBeforeCheckpointForTest(({ input, current, replaceCurrent }) => {
+    replaceCurrent({ ...current, revision: current.revision + 1, ciValidationStatus: input.evidence,
+      ciValidationHistory: [...current.ciValidationHistory, input.evidence] });
+  }, 'checkpointCiValidation');
+  const ciWinnerResult = await ciWinner.api.advance(2);
+  assert.deepEqual(ciWinnerResult.performedTransitions, ['review-outcome', 'cycle-completion']);
+
+  const completionWinnerClient = new FakeClient();
+  completionWinnerClient.reviews.push(canonicalReview());
+  const completionWinner = workflow(pendingState('discovery'), completionWinnerClient);
+  completionWinner.state.setBeforeCheckpointForTest(({ current, replaceCurrent }) => {
+    replaceCurrent({ ...current, revision: current.revision + 1, phase: 'complete' });
+  }, 'checkpointCompletion');
+  const completionWinnerResult = await completionWinner.api.advance(2);
+  assert.deepEqual(completionWinnerResult.performedTransitions, ['review-outcome', 'ci-validation']);
+  assert.equal(completionWinnerResult.phase, 'complete');
+});
+
+test('advance converges an exact outcome winner but rejects mismatched concurrent evidence', async () => {
+  const outcomeWinnerClient = new FakeClient();
+  outcomeWinnerClient.reviews.push(canonicalReview());
+  const outcomeWinner = workflow(pendingState('discovery'), outcomeWinnerClient);
+  outcomeWinner.state.setBeforeCheckpointForTest(({ input, current, replaceCurrent }) => {
+    const reviewHistory = current.reviewHistory.map((entry, index) => (
+      index === current.reviewHistory.length - 1 ? { ...entry, outcome: input.outcome } : entry
+    ));
+    replaceCurrent({ ...current, revision: current.revision + 1, phase: 'validating',
+      reviewedHeadSha: input.outcome.headSha, reviewOutcome: input.outcome, reviewHistory });
+  }, 'checkpointReviewOutcome');
+  const outcomeWinnerResult = await outcomeWinner.api.advance(2);
+  assert.deepEqual(outcomeWinnerResult.performedTransitions, ['ci-validation', 'cycle-completion']);
+  assert.equal(outcomeWinnerResult.phase, 'complete');
+
+  const mismatchClient = new FakeClient();
+  mismatchClient.reviews.push(canonicalReview());
+  const mismatch = workflow(pendingState('discovery'), mismatchClient);
+  mismatch.state.setBeforeCheckpointForTest(({ input, current, replaceCurrent }) => {
+    replaceCurrent({ ...current, revision: current.revision + 1,
+      ciValidationStatus: { ...input.evidence, checkRunId: 'CHECK_other' },
+      ciValidationHistory: [...current.ciValidationHistory, { ...input.evidence, checkRunId: 'CHECK_other' }] });
+  }, 'checkpointCiValidation');
+  await assert.rejects(() => mismatch.api.advance(2), { code: 'STATE_REVISION_CONFLICT' });
+});
+
+test('status classifies canonical channels and fails closed on an edited request anchor', async () => {
+  const cases = [
+    ['review', (client) => client.reviews.push(canonicalReview({ body: '' })), 'review-submission'],
+    ['reaction', (client) => client.reactions.set('IC_request', [{ id: 'REACTION_status', content: 'THUMBS_UP', createdAt: AT, user: BOT }]), 'request-reaction'],
+    ['issue comment', (client) => client.comments.push(cleanIssueComment()), 'issue-comment'],
+  ];
+  for (const [, prepare, evidenceType] of cases) {
+    const client = new FakeClient();
+    prepare(client);
+    const setup = workflow(pendingState('discovery'), client);
+    const status = await setup.api.status(2);
+    assert.equal(status.reviewObservation.status, 'collectable');
+    assert.equal(status.reviewObservation.outcome, 'clean');
+    assert.equal(status.reviewObservation.evidenceType, evidenceType);
+    assert.equal(setup.state.calls.length, 0);
+  }
+  const edited = new FakeClient();
+  const setup = workflow(pendingState('discovery'), edited);
+  edited.comments.find((comment) => comment.id === 'IC_request').lastEditedAt = AT;
+  const status = await setup.api.status(2);
+  assert.equal(status.reviewObservation.status, 'ambiguous');
+  assert.equal(status.codexReview, 'awaiting');
+  assert.equal(setup.state.calls.length, 0);
 });
 
 test('status marks preserved review evidence stale after both recorded and live HEAD advance', async () => {
@@ -868,7 +1526,7 @@ test('taskless thread refresh restores empty proof after guarded clean-review HE
     reviewHistory: setup.state.current.reviewHistory,
     threadlessVerification: setup.state.current.threadResolutionStatus.threadlessVerification,
   }, preserved);
-  assert.equal(client.calls.filter((call) => call.name === 'PullRequestThreads').length, 2);
+  assert.equal(client.calls.filter((call) => call.name === 'PullRequestThreads').length, 4);
   assert.equal(client.events.length, 0);
   assert.deepEqual(setup.state.calls.map((call) => call.name), ['checkpointTaskCompletion']);
 });
@@ -1239,6 +1897,14 @@ test('stale discovery evidence, root, head, and revision races fail before check
       (client) => client.reviews.push(canonicalReview({ commit: { oid: OTHER_HEAD } })),
       (client) => { client.metadata.headRefOid = OTHER_HEAD; },
       'MUTATION_NOT_READY'],
+    ['closed',
+      (client) => client.reviews.push(canonicalReview({ commit: { oid: OTHER_HEAD } })),
+      (client) => { client.metadata.state = 'CLOSED'; },
+      'PR_NOT_OPEN'],
+    ['draft',
+      (client) => client.reviews.push(canonicalReview({ commit: { oid: OTHER_HEAD } })),
+      (client) => { client.metadata.isDraft = true; },
+      'PR_DRAFT'],
   ]) {
     const client = new SecondSnapshotRaceClient(mutate);
     prepare(client);
@@ -1808,13 +2474,8 @@ test('concurrent request intent fails closed for missing or ambiguous candidates
   const missing = workflow(readyState(), missingClient, {
     journal: racingRequestJournal(intent),
   });
-  await assert.rejects(() => missing.api.request(2, 'discovery'), { code: 'REQUEST_RECOVERY_MISSING' });
-  assert.equal(missingClient.calls.some((call) => call.name === 'AddReviewRequest'), false);
-  assert.equal(missing.state.calls.some((call) => call.name === 'checkpointReviewRequest'), false);
-  missingClient.comments.push({ id: 'IC_later', databaseId: 10, url: 'https://x/later', body: '@codex review',
-    createdAt: AT, lastEditedAt: null, author: VIEWER });
-  assert.equal((await missing.api.request(2, 'discovery')).request.id, 'IC_later');
-  assert.equal(missingClient.calls.some((call) => call.name === 'AddReviewRequest'), false);
+  assert.equal((await missing.api.request(2, 'discovery')).requested, true);
+  assert.equal(missingClient.calls.some((call) => call.name === 'AddReviewRequest'), true);
 
   const ambiguousClient = new FakeClient();
   const ambiguousJournal = racingRequestJournal(intent);
@@ -1912,7 +2573,7 @@ test('mutation correlation is required in addition to live proof', async () => {
   assert.equal(client.comments.length, 1, 'the live write exists but is not trusted without correlation and re-query');
 });
 
-test('request recovers one exact viewer comment and fails closed on ambiguous or unproven recovery', async () => {
+test('request recovers one exact viewer comment and fails closed on ambiguous recovery', async () => {
   const recoveredClient = new FakeClient();
   recoveredClient.comments.push({
     id: 'IC_recovered', databaseId: 9, url: 'https://github.com/example/aerstello/pull/2#issuecomment-9',
@@ -1932,7 +2593,7 @@ test('request recovers one exact viewer comment and fails closed on ambiguous or
 
   const unprovenClient = new FakeClient({ noEffect: new Set(['AddReviewRequest']) });
   const { api: unproven } = workflow(readyState(), unprovenClient);
-  await assert.rejects(() => unproven.request(2, 'discovery'), { code: 'REQUEST_NOT_PROVEN' });
+  assert.equal((await unproven.request(2, 'discovery')).waiting, true);
 
   const missingClient = new FakeClient();
   const existing = [priorIntent('request', operationId)];
@@ -1941,8 +2602,8 @@ test('request recovers one exact viewer comment and fails closed on ambiguous or
     client: missingClient, state: missingState, git: fakeGit(), clock: { now: () => AT },
     journal: fakeJournal([], existing),
   });
-  await assert.rejects(() => missing.request(2, 'discovery'), { code: 'REQUEST_RECOVERY_MISSING' });
-  assert.equal(missingClient.calls.some((call) => call.name === 'AddReviewRequest'), false);
+  assert.equal((await missing.request(2, 'discovery')).requested, true);
+  assert.equal(missingClient.calls.some((call) => call.name === 'AddReviewRequest'), true);
 });
 
 function integratedThreadState(sourceIds = ['thread:THREAD_1']) {
@@ -2977,7 +3638,9 @@ test('post-request canonical roots prevent structural clean evidence after resol
     const result = await workflow(pendingState('verification'), client).api.collect(2);
     assert.equal(result.escalated, true);
     assert.equal(result.escalation.reason, 'ambiguous-canonical-evidence');
-    assert.deepEqual(result.escalation.evidenceIds, [`issue-comment:${comment.id}`]);
+    assert.deepEqual(result.escalation.evidenceIds.sort(), [
+      `issue-comment:${comment.id}`, 'review-root:ROOT_THREAD_1',
+    ].sort());
   }
 
   const historicalRoot = new FakeClient();
@@ -3592,7 +4255,14 @@ test('CLI keeps opaque singleton IDs distinct from explicit JSON task sets', asy
 test('CLI exposes exactly the documented explicit-PR command surface and JSON-ready results', async () => {
   assert.match(usage(), /status[\s\S]*refresh-threads[\s\S]*reply-resolve[\s\S]*verify-resolve[\s\S]*request[\s\S]*collect[\s\S]*collect-ci[\s\S]*complete/u);
   assert.match(usage(), /Local task verification persists exact-current-HEAD proof[\s\S]*re-attest/u);
+  assert.match(usage(), /Request may return waiting[\s\S]*retry it/u);
   await assert.rejects(() => runCli(['collect'], {}), /--pr/u);
+  await assert.rejects(() => runCli(['advance'], {}), /--pr/u);
+  await assert.rejects(() => runCli(['advance', '--pr', '2', '--human'], {}), /--human is only valid/u);
+  await assert.rejects(() => runCli(['advance', '--pr', '2', '--kind', 'discovery'], {}), /--kind is only valid/u);
+  await assert.rejects(() => runCli(['advance', '--pr', '2', '--task', 'x'], {}), /--task is only valid/u);
+  await assert.rejects(() => runCli(['advance', '--pr', '2', '--task-set-json', '["x"]'], {}), /--task-set-json is only valid/u);
+  assert.match(usage(), /status \[--human\][\s\S]*advance --pr <number>[\s\S]*refresh-threads[\s\S]*reply-resolve[\s\S]*verify-resolve[\s\S]*request[\s\S]*collect[\s\S]*collect-ci[\s\S]*complete/u);
   await assert.rejects(() => runCli(['refresh-threads'], {}), /--pr/u);
   await assert.rejects(() => runCli(['verify-resolve', '--pr', '2'], {}), /exactly one/u);
   await assert.rejects(() => runCli(['refresh-threads', '--pr', '2', '--task', 'x'], {}), /--task is only valid/u);
@@ -3610,6 +4280,18 @@ test('CLI exposes exactly the documented explicit-PR command surface and JSON-re
   const result = await runCli(['status', '--pr', '2'], {
     client, state, git: fakeGit(), clock: { now: () => AT }, journal: fakeJournal(),
   });
+  const waitingClient = new FakeClient();
+  const waitingState = fakeState(stateFixture());
+  const waiting = await runCli(['advance', '--pr', '2'], {
+    client: waitingClient, state: waitingState, git: fakeGit(),
+  });
+  assert.deepEqual(Object.keys(waiting).sort(), [
+    'nextAction', 'performedTransitions', 'phase', 'revision', 'terminal', 'waiting',
+  ]);
+  assert.deepEqual(waiting.performedTransitions, []);
+  assert.equal(waiting.terminal, 'waiting');
+  assert.equal(waitingClient.events.length, 0);
+  assert.equal(waitingState.calls.length, 0);
   assert.equal(result.prNumber, 2);
   const taskless = fakeState(stateFixture({
     validationStatus: {
@@ -3649,7 +4331,7 @@ test('CLI exposes exactly the documented explicit-PR command surface and JSON-re
   const human = await runCli(['status', '--human'], {
     client, state, git: fakeGit(), clock: { now: () => AT },
   });
-  assert.match(human.human, /PR: #2[\s\S]*Current commit:[\s\S]*Codex review:[\s\S]*Tasks:[\s\S]*Specialist reviews: Missing[\s\S]*Full CI: Passed[\s\S]*Open Codex threads: 0[\s\S]*Next action:/u);
+  assert.match(human.human, /PR: #2[\s\S]*PR readiness: OPEN[\s\S]*Live review observation: Not Applicable[\s\S]*Current commit:[\s\S]*Codex review:[\s\S]*Tasks:[\s\S]*Specialist reviews: Missing[\s\S]*Full CI: Passed[\s\S]*Open Codex threads: 0[\s\S]*Next action:/u);
   assert.match(renderHumanStatus({
     ...result,
     specialistReviews: {
@@ -3895,17 +4577,19 @@ test('malformed pre-existing resolve intents cannot adopt a live resolved root',
 });
 
 test('altered verification anchors remain ambiguous even when the live HEAD changes', async () => {
-  for (const changedHead of [false, true]) {
-    const client = new FakeClient();
-    const setup = workflow(pendingState('verification'), client);
-    client.comments[0].body = 'edited';
-    if (changedHead) client.metadata.headRefOid = OTHER_HEAD;
-    const result = await setup.api.collect(2);
-    assert.equal(result.escalated, true);
-    assert.equal(result.escalation.reason,
-      changedHead ? 'request-head-drift' : 'ambiguous-canonical-evidence');
-    assert.equal(result.escalation.headRelation, changedHead ? 'changed' : 'same');
-  }
+  const client = new FakeClient();
+  const setup = workflow(pendingState('verification'), client);
+  client.comments[0].body = 'edited';
+  const result = await setup.api.collect(2);
+  assert.equal(result.escalated, true);
+  assert.equal(result.escalation.reason, 'ambiguous-canonical-evidence');
+  assert.equal(result.escalation.headRelation, 'same');
+
+  const headDrift = new FakeClient();
+  const headDriftSetup = workflow(pendingState('verification'), headDrift);
+  headDrift.comments[0].body = 'edited';
+  headDrift.metadata.headRefOid = OTHER_HEAD;
+  await assert.rejects(() => headDriftSetup.api.collect(2), { code: 'MUTATION_NOT_READY' });
   const discovery = workflow(pendingState('discovery'));
   discovery.client.comments[0].createdAt = '2026-08-05T00:00:00.001Z';
   await assert.rejects(() => discovery.api.collect(2), { code: 'REQUEST_PROOF_STALE' });
@@ -3941,6 +4625,7 @@ test('historical resolved proof survives a later-head validation, request, colle
     replyTo: { id: 'ROOT_THREAD_1' }, pullRequestReview: null,
     body: `Aerstello review resolution at ${HEAD}.\nTasks:\n- task-thread: ${HEAD}\nValidation: old validation.\n${markerFor(oldOperation)}`,
   }] });
+  root.createdAt = '2026-08-04T23:59:59Z';
   const task = integratedThreadState().tasks[0];
   task.status = 'completed';
   const historical = readyState({
@@ -3992,6 +4677,7 @@ test('unresolved head-A provenance is preserved when reply and resolution occur 
   const client = new FakeClient();
   client.metadata.headRefOid = OTHER_HEAD;
   const root = addThread(client);
+  root.createdAt = '2026-08-04T23:59:59Z';
   const state = integratedThreadState();
   state.currentIntegrationHeadSha = OTHER_HEAD;
   state.git = { branch: 'main', headSha: OTHER_HEAD, dirty: false };

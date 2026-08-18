@@ -30,6 +30,26 @@ Only the main orchestrator is the logical writer. Writes are locked,
 revision-checked, schema-validated, limited to 64 KiB, and committed by atomic
 rename. Keep raw logs, full diffs, stack traces, and transcripts out of state.
 
+Pull-request `state` and `isDraft` are volatile GitHub evidence, never durable
+review-state fields. `status` reports them without writing. A review request
+against an otherwise ready draft first journals the deterministic
+`ready:<pr>:<pr-node>:<head>` mutation intent, marks it ready, then rereads and
+revalidates the exact PR before posting `@codex review`; that intent is
+recoverable after a lost mutation response. Issue 25 owns creating ready PRs.
+Monitor pending work with `advance`, not passive `status` polling.
+
+Readiness is volatile GitHub evidence: `pullRequest` exposes `state` and
+`isDraft`; `pullRequestReadiness` is `already-ready`, `marked-ready`, or
+`recovered-ready`. The recoverable ready journal intent is
+`ready:<pr>:<pr-node>:<head>`, not a state schema addition. `status` remains a
+read-only diagnostic and reports the unchanged durable `codexReview` plus a
+canonical `reviewObservation`: `not-applicable`, `waiting`, `collectable`,
+`ambiguous`, or `stale`. Status, collect, and advance share the classifier for
+review submissions, reactions, structural comments, timestamps, SHA, roots,
+and ambiguity; checkpointing requires two equal complete snapshots.
+Issue 25 preparation creates ready PRs; `advance` rejects drafts and never
+performs the ready mutation.
+
 ## State commands
 
 ```bash

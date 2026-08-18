@@ -613,7 +613,7 @@ test('review requests are unlimited by default and an explicit positive limit co
     used: 6, limit: null, remaining: null, exhausted: false,
   });
   const external = {
-    localHeadSha: head, localDirty: false, pushedHeadSha: head, prHeadSha: head,
+    localHeadSha: head, localDirty: false, pushedHeadSha: head, prHeadSha: head, prState: 'OPEN', isDraft: false,
     isAncestor: () => true,
   };
   assert.deepEqual(reviewRequestGate(unlimited, external), { allowed: true, kind: 'verification', reasons: [] });

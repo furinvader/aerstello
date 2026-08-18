@@ -46,6 +46,7 @@ The supported helper commands are:
 ```bash
 npm run review:github -- status --pr 123
 npm run review:github -- status --human
+npm run review:github -- advance --pr 123
 npm run review:github -- reply-resolve --pr 123 --task finding-a
 npm run review:github -- verify-resolve --pr 123 --task local-finding
 npm run review:github -- verify-resolve --pr 123 --task-set-json '["threadless-a","threadless-b"]'
@@ -54,6 +55,27 @@ npm run review:github -- collect --pr 123
 npm run review:github -- collect-ci --pr 123
 npm run review:github -- complete --pr 123
 ```
+
+`status` is read-only diagnostic output. Its `reviewObservation` has status
+`not-applicable` (no pending request), `waiting` (no response), `collectable`
+(one supported response), `ambiguous` (malformed, duplicate, or cross-channel
+evidence), or `stale` (HEAD mismatch). `outcome` is `clean`, `findings`, or
+`null`; `evidenceType` is `review-submission`, `request-reaction`,
+`issue-comment`, or `null`; `evidenceIds` are typed identifiers. Request
+readiness is `already-ready`, `marked-ready`, or `recovered-ready`.
+`already-ready` means the initial exact PR is OPEN and non-draft;
+`marked-ready` means the fresh intent owner confirmed its mark-ready mutation by
+a full reread; `recovered-ready` means a prior/concurrent intent or lost
+response was proven live. A concurrent request non-owner may return waiting;
+retry recovers the one exact durable comment.
+
+`advance` returns `{phase,revision,performedTransitions,terminal,waiting,nextAction}`.
+Its terminals are `waiting`, `triage`, `escalation`, `failure`, and `done`; its
+write names are `review-outcome`, `verification-escalation`, `ci-validation`,
+and `cycle-completion`. It waits for absent review or CI, revalidates two live
+snapshots and every gate between writes, and never requests review, resolves a
+finding, or archives.
+Conditional payloads are `escalation`, `ciValidation`, and `completed`.
 
 The state gate selects `discovery` for the first three durable requests and
 repeatable `verification` thereafter. By default there is no configured
@@ -230,6 +252,38 @@ request is blocked with the exact command to raise or remove the limit.
 
 ## Done gate
 
+Poll pending review work with `npm run review:github -- advance --pr <number>`.
+The supported command surface therefore includes `advance --pr <number>`.
+It records only stable canonical review, CI, and completion transitions; it
+never requests a new review, resolves findings, or archives state. `status`
+remains a read-only observation command.
+
+`status` is diagnostic and non-mutating. It exposes volatile
+`pullRequest.state`/`pullRequest.isDraft`, unchanged durable `codexReview`, and
+`reviewObservation` with `not-applicable`, `waiting`, `collectable`,
+`ambiguous`, or `stale` status plus typed evidence IDs. `request` reports
+`already-ready`, `marked-ready`, or `recovered-ready`; it journals the exact
+`ready:<pr>:<pr-node>:<head>` intent before defensive promotion. Issue 25 PR
+preparation must create ready PRs rather than depending on that recovery path.
+
+`advance` waits for no response or missing/pending CI, stops at findings,
+durably escalates verification ambiguity, rejects discovery ambiguity, records
+failed CI, and only records clean+green Done after repeating all live gates. It
+never creates another request, resolves a finding, or archives state.
+
+The exact observation shape is `reviewObservation: {status, outcome,
+evidenceType, evidenceIds}`. Status, collect, and advance share its canonical
+classifier: actor identity, timestamp, exact SHA, body and root state,
+reaction, structural marker, fingerprint, and duplicate/cross-channel
+ambiguity rules are identical.
+
+Request reads volatile OPEN/non-draft readiness. For a defensively promoted
+draft it journals `ready:<pr>:<pr-node>:<head>` before the exact mark-ready
+mutation, then rereads PR, head, roots, and revision before either mutation.
+Retries recover that intent without duplicate review comments. Collection and
+advancement use the same canonical response classifier and require two matching
+complete response/root snapshots before any checkpoint; races fail closed.
+
 The cycle is Done only when all of these facts apply to one Review commit:
 
 1. The commit remains review-ready and is the current PR head.
@@ -269,3 +323,16 @@ If state is invalid, use `state.backup.json`, Git history, structured GitHub
 metadata, and CI artifacts. Never reconstruct decisions from Codex transcripts.
 Explicitly migrate old state. To abandon a non-Done cycle, record the PR number
 and reason durably before archival.
+# Request dispatch recovery
+
+The request intent is durable before any GitHub write. Immediately before the
+single `AddReviewRequest` attempt, the workflow records a durable dispatch
+marker while holding the PR request-owner lock. An intent without that marker
+may be reclaimed after a dead owner; a marker without a uniquely visible
+comment is intentionally **uncertain** and `request` returns waiting rather
+than replaying a potentially accepted mutation. `clientMutationId` is a
+correlation value, not GitHub idempotency. Wait, then rerun
+`npm run review:github -- request --pr <number>` to checkpoint the one exact
+immutable viewer comment; multiple candidates fail closed. This pre-checkpoint
+uncertainty cannot be reconciled by `advance`; once the request is checkpointed,
+monitor it with `advance`.

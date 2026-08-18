@@ -109,6 +109,25 @@ the same Review commit, every finding with an outcome, and a fresh GitHub query
 showing no open Codex threads. Archive only then, unless the operator explicitly
 abandons the cycle with a durable reason.
 
+Monitor a pending cycle with `npm run review:github -- advance --pr <number>`.
+It is poll-safe and never requests a review, resolves findings, or archives.
+Use `status` only for read-only inspection. PR creation remains outside this
+cycle: issue 25 preparation must create ready PRs. Only `request` may
+defensively promote a draft after journaling `ready:<pr>:<pr-node>:<head>`;
+`advance` rejects drafts and never performs a readiness mutation. It repeatedly
+proves OPEN/non-draft, request-anchor, root, CI, and revision gates. It waits
+for no response or pending CI, triages findings, escalates only verification
+ambiguity, fails discovery ambiguity, records failed CI, and reaches idempotent
+Done without archive or any new review request.
+
+Phase 5 requires fresh OPEN/non-draft PR evidence. Before `@codex review`,
+only `request` may journal the ready intent and promote an otherwise ready
+draft; `advance` is never a readiness-mutation path.
+
+The request result is `already-ready`, `marked-ready`, or `recovered-ready`.
+Diagnostic status reports `not-applicable`, `waiting`, `collectable`,
+`ambiguous`, or `stale` canonical observations without writes.
+
 If work stops earlier, checkpoint the exact next action. Recover from saved
 state, Git, structured GitHub data, and CI artifacts—never from a transcript.
 If the same finding returns twice, investigate its root cause. Continue the
