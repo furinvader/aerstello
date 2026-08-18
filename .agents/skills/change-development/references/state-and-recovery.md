@@ -44,6 +44,17 @@ change-development/
     │   ├── behavior-mapper/<task-id>/<binding>.json[.sha256] # when routed
     │   ├── results/<task-id>/<attempt>.json[.sha256]
     │   └── rejections/<task-id>/<revision>.json[.sha256]
+    ├── verification/
+    │   ├── rounds/<round>/
+    │   │   ├── validation-plan.json[.sha256]
+    │   │   ├── validation-intents/<command-id>.json[.sha256]
+    │   │   ├── validation-results/<command-id>.json[.sha256]
+    │   │   ├── specialist-plan.json[.sha256]
+    │   │   ├── specialists/<reviewer-id>.json[.sha256]
+    │   │   ├── verifier-context.json[.sha256]
+    │   │   ├── verifier-result.json[.sha256]
+    │   │   └── findings/<fingerprint>.json[.sha256]
+    │   └── authorizations/<fingerprint>/<round>.json[.sha256]
     └── transitions/
         ├── .<eight-digit-revision>.<pid>.<uuid>.pending/ # uncommitted; rollback-only
         └── <eight-digit-revision>/
@@ -54,7 +65,7 @@ change-development/
 
 Source observations and committed transition directories use eight-digit revision names; amendments use four-digit sequence names. A pending transition directory is transient staging and does not establish an intent. Recovery may remove only a recognized pending directory with the expected staging contents; it never promotes one. The root archive lifecycle is one atomically written envelope whose `intentDigest` binds its embedded intent, with no companion receipt. An archived change separately receives the immutable `archive-receipt.json` and its SHA-256 receipt. Bracketed `.sha256` denotes the canonical receipt beside its JSON artifact. `worktree.json` binds local Git checkpointing to the linked worktree that initialized the change: all linked worktrees share the common-directory state, but `PreCompact` from another worktree warns and leaves its Git observation unchanged.
 
-Large immutable evidence stays outside `state.json`. Initial and refreshed source observations, accepted plan, decision records, amendments, task packets, worker results, and worktree manifests/tombstones use canonical JSON SHA-256 receipts. `state.json` contains bounded mutable coordination data: mode, phase, revision, source/plan digests, current Git observation, unresolved decisions, checklist status, compact execution task summaries, the active wave of at most three task IDs, an optional integration intent, and the exact next action.
+Large immutable evidence stays outside `state.json`. Initial and refreshed source observations, accepted plan, decision records, amendments, task packets, worker results, worktree manifests/tombstones, and verification rounds use canonical JSON SHA-256 receipts. `state.json` contains bounded mutable coordination data: mode, phase, revision, source/plan digests, current Git observation, unresolved decisions, checklist status, compact execution task summaries, the active wave of at most three task IDs, an optional integration intent, compact verification identities and counts, and the exact next action.
 
 Development-state v1 remains a valid historical format so its immutable
 transition intents can still be replayed. New records are v2. An accepted v1
@@ -72,14 +83,19 @@ creating receipt-valid unbound execution summaries.
 - `ready-to-implement`: accepted plan and readiness evidence are complete.
 - `implementing`: v2 task packets, waves, worker results, or dependency-ordered integration are in progress.
 - `integrating`: a durable central integration intent exists and must be reconciled exactly.
-- `integrated`: every planned task is integrated or receipt-backed `no-change`; this capability stops before integrated-HEAD verification.
+- `integrated`: every planned task is integrated or receipt-backed `no-change`; exact-HEAD validation may start.
+- `validating`: an immutable validation plan is pending, running, failed, or awaiting explicit replacement.
+- `specialist-review`: validation passed and stored-route reviewer planning or canonical-order result collection is active.
+- `verifying`: all routed specialist evidence is complete and the final verifier context/result or Development-ready finalization is pending.
+- `development-ready`: every local exact-HEAD gate is receipt-valid, current, and clean; delivery authority is still absent.
 - `blocked`: integrity, evidence, or repository state prevents safe continuation.
 - `recovering`: an exact interrupted transition is being verified and completed.
 - `abandoned`: the operator intentionally ended the change without implementation readiness.
 
 `plan-only` reaches normal completion at `ready-to-implement` and may be
-archived. `implement` and `full` continue through bounded execution to
-`integrated`; issue #24 owns the next verification and delivery stage.
+archived. `implement` and `full` continue through bounded execution,
+integration, and local verification to `development-ready`. Push, PR, GitHub,
+CI, review-cycle, delivery, and merge work remain outside this state machine.
 
 ## Locking and transitions
 
@@ -140,6 +156,25 @@ intents, relabeled intents, and inconsistent evidence are rejected;
 
 A missing or tampered committed intent, its SHA-256 receipt, or its authoritative evidence bundle blocks recovery. Existing domain evidence or receipts that conflict with the embedded path, value, or digest also block; orphan evidence is never attached heuristically. Recovery does not invent evidence beyond an intact authoritative intent, skip revisions, or delete locks. A recognized transient pending directory is uncommitted and rollback-only. Resolve other integrity failures through an explicit authorized decision or amendment when the state machine permits it; otherwise abandon while retaining evidence.
 
+Validation execution is serialized by the same per-change operation lock used
+to protect integration. A receipt-protected command intent precedes direct
+`shell:false` argv execution. Retry reuses that exact intent and any existing
+append-only result; it never invents another attempt or repeats a completed
+command. Result recording and phase completion recheck the initiating revision,
+plan/task-set identity, and exact clean HEAD. A crash at a normal transition
+boundary is handled by `recover`; an intent whose command has no result is
+resumed by `run-validation`. Failed plan evidence is retained and only
+`validation-plan --replace` creates the next round.
+
+Specialist plans, canonical-order reviewer results, verifier contexts/results,
+finding dispositions, and repeated-finding authorizations are ordinary
+receipt-protected transition evidence. Recovery restores only values named by
+an intact authoritative transition intent. It never reroutes historical
+packets, reclassifies findings, deletes prior rounds, or authorizes remediation.
+If the checkout HEAD changes, checkpointing blocks the current round; restoring
+the exact HEAD may resume it, while an integrated remediation commit requires a
+new round.
+
 When state is `integrating`, use `reconcile-integration` rather than generic
 `recover`. On the exact owning branch at the clean recorded base it applies the
 persisted worker commit; at its clean resulting commit it verifies and records
@@ -161,5 +196,8 @@ stored as receipt-protected observation evidence and blocks without replacing
 the expected Git identity. Recovery uses the same derivation and requires that
 exact recorded observation. Restoring identity clears only Git reasons:
 plan-only or never-started execution returns to `ready-to-implement`, active or
-terminal-but-unfinalized execution returns to `implementing`, and a finalized
-state remains `integrated`. No checkpoint can synthesize finalization.
+terminal-but-unfinalized execution returns to `implementing`, finalized
+integration returns to `integrated`, and receipt-valid verification summaries
+return to their derived `validating`, `specialist-review`, or `verifying`
+phase. A completed `development-ready` transition remains terminal. No
+checkpoint can synthesize integration or development finalization.

@@ -269,9 +269,22 @@ npm run change:state -- finalize-integration \
   --change-id <change-id> --expected-revision <revision>
 ```
 
-Only this tombstone-verified transition reaches `integrated`. Stop there:
-integrated-HEAD specialist verification, PR preparation, GitHub writes,
-CI/review gates, and delivery are owned by issue #24 and later workflows.
+Only this tombstone-verified transition reaches `integrated`. In `implement` or
+`full` mode, continue through the local verification lifecycle described in
+[verification](verification.md): persist and run the exact-HEAD validation
+plan, derive reusable reviewers from receipt-valid stored packet routes, record
+their results in canonical order, run the workflow-owned read-only final
+verifier, and disposition any findings. The validation and specialist phases
+never reinterpret a terminal packet through the live registry.
+
+An actionable finding returns to ordinary implementation only through a
+fingerprint-triggered append-only amendment that adds new remediation criterion
+and task IDs, covers every actionable sibling, and preserves every terminal
+task plus its referenced decisions and criteria. After remediation integration,
+start a new verification round at the new exact HEAD; prior rounds remain
+immutable. Stop at `development-ready`, not `integrated`. That final state is
+local evidence only: push, PR preparation, GitHub writes, official review, CI,
+delivery, and merge remain separate workflows.
 
 Abandonment follows the same cleanup authority boundary. Reject active work,
 recover any partial creation or removal, remove it while active state still

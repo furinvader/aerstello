@@ -50,7 +50,7 @@ The development seed creates `admin@aerstello.test`, requires an explicit passwo
 | `npm run test:e2e:full` | Run every E2E scenario and browser project (CI gate) |
 | `npm run review:status` | Show the active PR review state and next action |
 | `npm run change:status` | Show the active change-development phase and exact next action |
-| `npm run change:state -- <command>` | Plan, bind, schedule, accept, integrate, recover, or archive durable change state |
+| `npm run change:state -- <command>` | Plan, implement, validate, review, remediate, recover, or finalize durable change state |
 | `npm run change:worktree -- <command>` | Create, inspect, or safely remove an isolated implementation worktree |
 | `npm run lint:commit -- --last` | Validate the latest commit message |
 | `npm run db:start:dev` | Start a healthy loopback-only development PostgreSQL service |
@@ -89,8 +89,11 @@ repository plan, or partial implementation, use the repository
 [canonical operator guide](./.agents/skills/change-development/README.md). It
 preserves source and plan provenance, binds immutable task packets, runs
 path-limited workers in isolated worktrees, and integrates exact accepted
-commits. It stops at `integrated`; integrated-HEAD verification, PR preparation,
-and GitHub writes belong to the next workflow.
+commits. For implementation modes it then runs receipt-protected exact-HEAD
+validation, consumes stored specialist routes, records the read-only development
+verifier result, and guards finding remediation until `development-ready`.
+That state is local evidence only; push, PR preparation, GitHub writes,
+official review, CI, delivery, and merge belong to separate workflows.
 
 For long-running pull-request review remediation, use the repository
 `$pr-review-cycle` skill and follow the concise

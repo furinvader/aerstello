@@ -66,9 +66,11 @@ remain separately owned capabilities consumed by the review skill.
   direct request, repository plan, or committed partial implementation.
   Accepted plans and bound worker packets are immutable. Workers stay in their
   assigned worktrees and exact path/validation scope; the central orchestrator
-  alone accepts results and integrates exact commits. Stop at `integrated`:
-  integrated-HEAD verification, PR work, and GitHub writes belong to the next
-  workflow.
+  alone accepts results and integrates exact commits. For `implement` and
+  `full`, continue through receipt-protected exact-HEAD validation, stored-route
+  specialist review, the read-only development verifier, finding remediation,
+  and `development-ready`. Stop there: push, PR work, official review, CI,
+  GitHub writes, delivery, and merge belong to separate workflows.
 
 ## Code Review Rules
 

@@ -72,6 +72,19 @@ replacement uses a new task ID. Already `integrated` or `no-change` task
 definitions and their referenced criteria and decisions are immutable. New
 packets bind the amended plan to the then-current central task base.
 
+When verification is active, an amendment must be finding-driven: its trigger
+is the exact stable fingerprint of an actionable source-role-qualified finding,
+and its disposition names the amendment plus new replacement criterion and task
+IDs. The resulting plan preserves every terminal task definition and the
+completed specialization, adds each disposition-bound ordinary remediation
+criterion/task, and covers every remaining actionable sibling finding in the
+same guarded amendment. It may overlap a terminal task's paths only for that
+exact remediation; overlap among new or active tasks remains invalid. A
+repeated semantic finding requires receipt-protected human authorization before
+disposition. The amendment resets current verification applicability, not its
+append-only history; after remediation integration a new exact-HEAD validation
+and review round is required.
+
 For `implement` and `full`, acceptance also initializes bounded execution
 summaries from the effective plan. Existing v1 records remain historically
 valid, but execution writes require the explicit receipt-protected

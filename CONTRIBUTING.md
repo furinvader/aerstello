@@ -85,9 +85,13 @@ that Git evidence, persists integration intent for the exact owning central
 branch and base before cherry-pick, and reconciles the exact central commit
 afterward.
 
-Change development stops at `integrated`. Integrated-HEAD specialist
-verification, PR preparation, GitHub mutations, CI/review gates, and delivery
-belong to the next workflow; implementation workers must not perform them.
+For `implement` and `full`, change development continues from `integrated`
+through receipt-protected exact-HEAD validation, stored-route specialist review,
+the read-only development verifier, and guarded finding remediation. It stops
+at `development-ready`, which proves only one clean local HEAD. Implementation
+workers still must not perform lifecycle integration or verification. Push, PR
+preparation, GitHub mutations, official review, CI, delivery, and merge belong
+to separate workflows.
 
 Long-running pull-request remediation uses the repository-local Codex workflow
 documented in the [canonical PR review-cycle guide](./.agents/skills/pr-review-cycle/README.md).
