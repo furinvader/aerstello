@@ -3,7 +3,6 @@ import {
   cpSync,
   existsSync,
   fsyncSync,
-  linkSync,
   mkdirSync,
   openSync,
   readdirSync,
@@ -14,10 +13,10 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { hostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
 import { gitText, resolveCommit, runGit } from '../../../../../scripts/lib/git.mjs';
 import { inspectReleaseState } from '../../../../../scripts/lib/release-state.mjs';
 import {
@@ -55,7 +54,8 @@ export { gitCommonDirectory, repositoryRoot, reviewRoot } from '../paths.mjs';
 
 export const ACTIVE_STATE_LIMIT_BYTES = 64 * 1024;
 const DEFAULT_LOCK_TIMEOUT_MS = 5000;
-const DEFAULT_STALE_LOCK_MS = 5 * 60 * 1000;
+const SQLITE_BUSY = 5;
+const LOCK_RETRY_INTERVAL_MS = 25;
 const PR_FINAL_VERIFIER_ID = 'integration_verifier';
 const TRANSITION_AUTHORIZATION = Symbol('guarded PR review transition');
 
@@ -197,11 +197,11 @@ export function activePointerPath(cwd = process.cwd()) {
 }
 
 function lockPath(cwd, prNumber) {
-  return join(reviewRoot(cwd), 'locks', `pr-${parsePrNumber(prNumber)}.lock`);
+  return join(reviewRoot(cwd), 'locks', `pr-${parsePrNumber(prNumber)}.state-lock.sqlite`);
 }
 
 function requestOwnerLockPath(cwd, prNumber) {
-  return join(reviewRoot(cwd), 'locks', `pr-${parsePrNumber(prNumber)}.github-request.lock`);
+  return join(reviewRoot(cwd), 'locks', `pr-${parsePrNumber(prNumber)}.github-request-lock.sqlite`);
 }
 
 function parsePrNumber(value) {
@@ -1777,129 +1777,76 @@ export function buildTargetedValidationPlan({
   }));
 }
 
-function processExists(pid) {
-  if (!Number.isInteger(pid) || pid < 1) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === 'EPERM';
-  }
+function isSqliteBusy(error) {
+  return error?.errcode === SQLITE_BUSY;
 }
 
-const LOCK_MISSING = Symbol('lock missing');
-
-function lockOwnerIdentity(source, stats) {
-  try {
-    const lock = JSON.parse(source);
-    if (typeof lock.token === 'string' && lock.token.length > 0) {
-      return { identity: `token:${lock.token}`, token: lock.token };
-    }
-  } catch {
-    // Malformed legacy locks still receive an inode-bound identity below.
-  }
-  const fingerprint = createHash('sha256').update(source).digest('hex');
-  return {
-    identity: `snapshot:${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}:${fingerprint}`,
-    token: null,
-  };
+function openLockDatabase(path) {
+  mkdirSync(dirname(path), { recursive: true });
+  return new DatabaseSync(path, { timeout: 0 });
 }
 
-function readLockOwner(path) {
-  try {
-    const source = readFileSync(path, 'utf8');
-    const stats = statSync(path, { bigint: true });
-    return lockOwnerIdentity(source, stats);
-  } catch (error) {
-    if (error.code === 'ENOENT') return LOCK_MISSING;
-    throw error;
-  }
+function lockTimeout(path) {
+  return new StateError(`Timed out waiting for ${path}`, 'STATE_LOCK_TIMEOUT');
 }
 
-function staleLockObservation(path, staleMs) {
-  let source;
-  let stats;
-  try {
-    source = readFileSync(path, 'utf8');
-    stats = statSync(path, { bigint: true });
-  } catch (error) {
-    if (error.code === 'ENOENT') return LOCK_MISSING;
-    throw error;
-  }
-  let stale;
-  try {
-    const lock = JSON.parse(source);
-    const age = Date.now() - Date.parse(lock.createdAt);
-    stale = Number.isFinite(age) && age > staleMs
-      && (lock.hostname === hostname() ? !processExists(lock.pid) : age > staleMs * 6);
-  } catch {
-    stale = Date.now() - Number(stats.mtimeMs) > staleMs;
-  }
-  return stale ? lockOwnerIdentity(source, stats) : null;
-}
-
-function retireObservedLockOwner(path, observation) {
-  const digest = createHash('sha256').update(observation.identity).digest('hex');
-  const claimPath = `${path}.retire-${digest}`;
-  try {
-    // The hard link is an atomic, owner-generation-specific transition claim.
-    // Every compliant release/reclaimer must win this claim before unlinking
-    // the shared pathname, so a replacement owner cannot appear between the
-    // identity proof and unlink.
-    linkSync(path, claimPath);
-  } catch (error) {
-    if (error.code === 'ENOENT') return 'missing';
-    if (error.code === 'EEXIST') return 'contended';
-    throw error;
-  }
-  try {
-    const claimedOwner = readLockOwner(claimPath);
-    if (claimedOwner === LOCK_MISSING || claimedOwner.identity !== observation.identity) return 'changed';
+function beginExclusiveSync(database, path, timeoutMs) {
+  const started = Date.now();
+  while (true) {
     try {
-      unlinkSync(path);
+      database.exec('BEGIN EXCLUSIVE');
+      return;
     } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
+      if (!isSqliteBusy(error)) throw error;
+      if (Date.now() - started >= timeoutMs) throw lockTimeout(path);
+      sleep(LOCK_RETRY_INTERVAL_MS);
     }
-    return 'retired';
-  } finally {
-    try { unlinkSync(claimPath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
+}
+
+async function beginExclusiveAsync(database, path, timeoutMs) {
+  const started = Date.now();
+  while (true) {
+    try {
+      database.exec('BEGIN EXCLUSIVE');
+      return;
+    } catch (error) {
+      if (!isSqliteBusy(error)) throw error;
+      if (Date.now() - started >= timeoutMs) throw lockTimeout(path);
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, LOCK_RETRY_INTERVAL_MS));
+    }
+  }
+}
+
+function rollbackQuietly(database) {
+  try { database.exec('ROLLBACK'); } catch { /* Preserve the triggering error. */ }
+}
+
+function closeQuietly(database) {
+  try { database.close(); } catch { /* Preserve the triggering error. */ }
 }
 
 export function withStateLock(cwd, prNumber, callback, {
   timeoutMs = DEFAULT_LOCK_TIMEOUT_MS,
-  staleMs = DEFAULT_STALE_LOCK_MS,
-  onStaleLockObserved,
 } = {}) {
   const path = lockPath(cwd, prNumber);
-  mkdirSync(dirname(path), { recursive: true });
-  const started = Date.now();
-  const token = randomUUID();
-
-  while (true) {
-    try {
-      const handle = openSync(path, 'wx', 0o600);
-      writeFileSync(handle, serializeJson({ token, pid: process.pid, hostname: hostname(), createdAt: utcNow() }));
-      fsyncSync(handle);
-      closeSync(handle);
-      break;
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      const observation = staleLockObservation(path, staleMs);
-      if (observation === LOCK_MISSING) continue;
-      if (observation !== null) {
-        onStaleLockObserved?.({ path, token: observation.token });
-        if (retireObservedLockOwner(path, observation) !== 'contended') continue;
-      }
-      if (Date.now() - started >= timeoutMs) throw new StateError(`Timed out waiting for ${path}`, 'STATE_LOCK_TIMEOUT');
-      sleep(25);
-    }
+  const database = openLockDatabase(path);
+  try {
+    beginExclusiveSync(database, path, timeoutMs);
+  } catch (error) {
+    closeQuietly(database);
+    throw error;
   }
 
   try {
-    return callback();
-  } finally {
-    retireObservedLockOwner(path, { identity: `token:${token}`, token });
+    const result = callback();
+    database.exec('COMMIT');
+    database.close();
+    return result;
+  } catch (error) {
+    rollbackQuietly(database);
+    closeQuietly(database);
+    throw error;
   }
 }
 
@@ -1911,36 +1858,25 @@ export function withStateLock(cwd, prNumber, callback, {
  */
 export async function withGitHubRequestOwnerLock(cwd, prNumber, callback, {
   timeoutMs = DEFAULT_LOCK_TIMEOUT_MS,
-  staleMs = DEFAULT_STALE_LOCK_MS,
-  onStaleLockObserved,
 } = {}) {
   const path = requestOwnerLockPath(cwd, prNumber);
-  mkdirSync(dirname(path), { recursive: true });
-  const started = Date.now();
-  const token = randomUUID();
-  while (true) {
-    try {
-      const handle = openSync(path, 'wx', 0o600);
-      writeFileSync(handle, serializeJson({ token, pid: process.pid, hostname: hostname(), createdAt: utcNow() }));
-      fsyncSync(handle);
-      closeSync(handle);
-      break;
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      const observation = staleLockObservation(path, staleMs);
-      if (observation === LOCK_MISSING) continue;
-      if (observation !== null) {
-        onStaleLockObserved?.({ path, token: observation.token });
-        if (retireObservedLockOwner(path, observation) !== 'contended') continue;
-      }
-      if (Date.now() - started >= timeoutMs) throw new StateError(`Timed out waiting for ${path}`, 'STATE_LOCK_TIMEOUT');
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-  }
+  const database = openLockDatabase(path);
   try {
-    return await callback();
-  } finally {
-    retireObservedLockOwner(path, { identity: `token:${token}`, token });
+    await beginExclusiveAsync(database, path, timeoutMs);
+  } catch (error) {
+    closeQuietly(database);
+    throw error;
+  }
+
+  try {
+    const result = await callback();
+    database.exec('COMMIT');
+    database.close();
+    return result;
+  } catch (error) {
+    rollbackQuietly(database);
+    closeQuietly(database);
+    throw error;
   }
 }
 

@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { hostname } from 'node:os';
 import { afterEach, test } from 'node:test';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -74,6 +73,69 @@ const AT = '2026-08-05T00:00:00Z';
 const checkpointReviewRequest = (input) => rawCheckpointReviewRequest({ prState: 'OPEN', isDraft: false, ...input });
 const checkpointCompletion = (input) => rawCheckpointCompletion({ prState: 'OPEN', isDraft: false, ...input });
 const STATE_CLI = fileURLToPath(new URL('./cli.mjs', import.meta.url));
+const STATE_MODULE_URL = new URL('./state.mjs', import.meta.url).href;
+const LOCK_HOLDER_SOURCE = `
+  import { withGitHubRequestOwnerLock, withStateLock } from ${JSON.stringify(STATE_MODULE_URL)};
+  const [cwd, prNumber, kind, holdMilliseconds] = process.argv.slice(1);
+  const hold = Number(holdMilliseconds);
+  if (kind === 'state') {
+    withStateLock(cwd, Number(prNumber), () => {
+      process.stdout.write('locked\\n');
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, hold);
+    });
+  } else {
+    await withGitHubRequestOwnerLock(cwd, Number(prNumber), async () => {
+      process.stdout.write('locked\\n');
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, hold));
+    });
+  }
+`;
+
+function spawnLockHolder(cwd, kind, holdMilliseconds) {
+  return spawn(process.execPath, [
+    '--input-type=module', '--eval', LOCK_HOLDER_SOURCE, cwd, '17', kind, String(holdMilliseconds),
+  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+function waitForLockHolder(child) {
+  return new Promise((resolveLocked, reject) => {
+    let stdout = '';
+    let stderr = '';
+    const onStdout = (chunk) => {
+      stdout += chunk.toString();
+      if (stdout.includes('locked\n')) {
+        cleanup();
+        resolveLocked();
+      }
+    };
+    const onStderr = (chunk) => { stderr += chunk.toString(); };
+    const onError = (error) => { cleanup(); reject(error); };
+    const onExit = (code, signal) => {
+      cleanup();
+      reject(new Error(`lock holder exited before acquisition (${code ?? signal}): ${stderr}`));
+    };
+    const cleanup = () => {
+      child.stdout.off('data', onStdout);
+      child.stderr.off('data', onStderr);
+      child.off('error', onError);
+      child.off('exit', onExit);
+    };
+    child.stdout.on('data', onStdout);
+    child.stderr.on('data', onStderr);
+    child.on('error', onError);
+    child.on('exit', onExit);
+  });
+}
+
+function waitForChildExit(child) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
+  }
+  return new Promise((resolveExit, reject) => {
+    child.once('error', reject);
+    child.once('exit', (code, signal) => resolveExit({ code, signal }));
+  });
+}
 
 function repo() {
   const cwd = createRepository();
@@ -2262,8 +2324,12 @@ test('GitHub request owner lock awaits async work and dispatch claims are revisi
   await assert.rejects(() => withGitHubRequestOwnerLock(cwd, 17, () => {}, { timeoutMs: 10 }), { code: 'STATE_LOCK_TIMEOUT' });
   release();
   await held;
-  await withGitHubRequestOwnerLock(cwd, 17, () => {});
-  await assert.rejects(() => withGitHubRequestOwnerLock(cwd, 17, () => { throw new Error('owner failed'); }), /owner failed/u);
+  assert.equal(await withGitHubRequestOwnerLock(cwd, 17, () => 'owner result'), 'owner result');
+  const ownerFailure = new Error('owner failed');
+  await assert.rejects(
+    () => withGitHubRequestOwnerLock(cwd, 17, () => { throw ownerFailure; }),
+    (error) => error === ownerFailure,
+  );
   await withGitHubRequestOwnerLock(cwd, 17, () => {});
 
   const intent = { type: 'request', operationId: `request:17:discovery:1:${initial.currentIntegrationHeadSha}`,
@@ -2289,81 +2355,69 @@ test('GitHub request owner lock awaits async work and dispatch claims are revisi
   assert.throws(() => claimGitHubMutationDispatch(missingCwd, 17, intent, missing.revision), { code: 'INTENT_RECOVERY_INVALID' });
 });
 
-test('GitHub request owner lock reclaims a dead same-host owner', async () => {
+test('state lock recovers from SIGKILL and keeps the replacement owner exclusive', async () => {
   const cwd = repo();
   init(cwd);
+  const path = join(reviewRoot(cwd), 'locks', 'pr-17.state-lock.sqlite');
+  const crashed = spawnLockHolder(cwd, 'state', 10_000);
+  await waitForLockHolder(crashed);
+  crashed.kill('SIGKILL');
+  assert.deepEqual(await waitForChildExit(crashed), { code: null, signal: 'SIGKILL' });
+  assert.equal(existsSync(path), true);
+
+  const replacement = spawnLockHolder(cwd, 'state', 300);
+  await waitForLockHolder(replacement);
+  assert.throws(
+    () => withStateLock(cwd, 17, () => {}, { timeoutMs: 60 }),
+    { code: 'STATE_LOCK_TIMEOUT' },
+  );
+  assert.deepEqual(await waitForChildExit(replacement), { code: 0, signal: null });
+  assert.equal(withStateLock(cwd, 17, () => 'state result'), 'state result');
+  const stateFailure = new Error('state failed');
+  assert.throws(() => withStateLock(cwd, 17, () => { throw stateFailure; }), (error) => error === stateFailure);
+  assert.equal(existsSync(path), true);
+});
+
+test('GitHub request lock recovers from SIGKILL and keeps the replacement owner exclusive', async () => {
+  const cwd = repo();
+  init(cwd);
+  const path = join(reviewRoot(cwd), 'locks', 'pr-17.github-request-lock.sqlite');
+  const crashed = spawnLockHolder(cwd, 'github', 10_000);
+  await waitForLockHolder(crashed);
+  crashed.kill('SIGKILL');
+  assert.deepEqual(await waitForChildExit(crashed), { code: null, signal: 'SIGKILL' });
+  assert.equal(existsSync(path), true);
+
+  const replacement = spawnLockHolder(cwd, 'github', 300);
+  await waitForLockHolder(replacement);
+  await assert.rejects(
+    () => withGitHubRequestOwnerLock(cwd, 17, () => {}, { timeoutMs: 60 }),
+    { code: 'STATE_LOCK_TIMEOUT' },
+  );
+  assert.deepEqual(await waitForChildExit(replacement), { code: 0, signal: null });
+  assert.equal(await withGitHubRequestOwnerLock(cwd, 17, () => 'request result'), 'request result');
+  assert.equal(existsSync(path), true);
+});
+
+test('legacy JSON locks and orphan retire hardlinks do not block SQLite locks', async () => {
+  const cwd = repo();
   const locks = join(reviewRoot(cwd), 'locks');
   mkdirSync(locks, { recursive: true });
-  const path = join(locks, 'pr-17.github-request.lock');
-  writeFileSync(path, JSON.stringify({ token: 'dead', pid: 2147483647, hostname: hostname(), createdAt: '2000-01-01T00:00:00Z' }));
-  let ran = false;
-  await withGitHubRequestOwnerLock(cwd, 17, () => { ran = true; }, { timeoutMs: 100, staleMs: 0 });
-  assert.equal(ran, true);
-  assert.equal(existsSync(path), false);
-});
+  const legacyState = join(locks, 'pr-17.lock');
+  const legacyRequest = join(locks, 'pr-17.github-request.lock');
+  writeFileSync(legacyState, '{"token":"orphan-state"}\n');
+  writeFileSync(legacyRequest, '{"token":"orphan-request"}\n');
+  linkSync(legacyState, `${legacyState}.retire-orphan`);
+  linkSync(legacyRequest, `${legacyRequest}.retire-orphan`);
 
-test('state-lock stale reclamation preserves a replacement owner installed after observation', () => {
-  const cwd = repo();
-  init(cwd);
-  const locks = join(reviewRoot(cwd), 'locks');
-  const path = join(locks, 'pr-17.lock');
-  writeFileSync(path, JSON.stringify({
-    token: 'stale-state-owner', pid: 2147483647, hostname: hostname(), createdAt: '2000-01-01T00:00:00Z',
-  }));
-  const replacement = {
-    token: 'replacement-state-owner', pid: process.pid, hostname: hostname(), createdAt: new Date().toISOString(),
-  };
-  let observed = 0;
-  let ran = false;
-
-  assert.throws(() => withStateLock(cwd, 17, () => { ran = true; }, {
-    timeoutMs: 60,
-    staleMs: 0,
-    onStaleLockObserved: ({ path: observedPath, token }) => {
-      observed += 1;
-      assert.equal(observedPath, path);
-      assert.equal(token, 'stale-state-owner');
-      rmSync(observedPath, { force: true });
-      writeFileSync(observedPath, JSON.stringify(replacement));
-    },
-  }), { code: 'STATE_LOCK_TIMEOUT' });
-
-  assert.equal(observed, 1);
-  assert.equal(ran, false);
-  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), replacement);
-  assert.deepEqual(readdirSync(locks).filter((name) => name.includes('.retire-')), []);
-});
-
-test('GitHub request-owner stale reclamation preserves a replacement owner installed after observation', async () => {
-  const cwd = repo();
-  init(cwd);
-  const locks = join(reviewRoot(cwd), 'locks');
-  const path = join(locks, 'pr-17.github-request.lock');
-  writeFileSync(path, JSON.stringify({
-    token: 'stale-request-owner', pid: 2147483647, hostname: hostname(), createdAt: '2000-01-01T00:00:00Z',
-  }));
-  const replacement = {
-    token: 'replacement-request-owner', pid: process.pid, hostname: hostname(), createdAt: new Date().toISOString(),
-  };
-  let observed = 0;
-  let ran = false;
-
-  await assert.rejects(() => withGitHubRequestOwnerLock(cwd, 17, () => { ran = true; }, {
-    timeoutMs: 60,
-    staleMs: 0,
-    onStaleLockObserved: ({ path: observedPath, token }) => {
-      observed += 1;
-      assert.equal(observedPath, path);
-      assert.equal(token, 'stale-request-owner');
-      rmSync(observedPath, { force: true });
-      writeFileSync(observedPath, JSON.stringify(replacement));
-    },
-  }), { code: 'STATE_LOCK_TIMEOUT' });
-
-  assert.equal(observed, 1);
-  assert.equal(ran, false);
-  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), replacement);
-  assert.deepEqual(readdirSync(locks).filter((name) => name.includes('.retire-')), []);
+  assert.equal(withStateLock(cwd, 17, () => 'state result'), 'state result');
+  assert.equal(await withGitHubRequestOwnerLock(cwd, 17, () => 'request result'), 'request result');
+  assert.equal(existsSync(join(locks, 'pr-17.state-lock.sqlite')), true);
+  assert.equal(existsSync(join(locks, 'pr-17.github-request-lock.sqlite')), true);
+  assert.equal(existsSync(legacyState), true);
+  assert.equal(existsSync(`${legacyState}.retire-orphan`), true);
+  assert.equal(existsSync(legacyRequest), true);
+  assert.equal(existsSync(`${legacyRequest}.retire-orphan`), true);
 });
 
 test('verification collection escalation is guarded, append-only, request-bound, and human-gated', () => {
@@ -3378,7 +3432,7 @@ test('targeted validation plan durably de-duplicates the integrated task union a
     runCommand: (argv) => { attempted.push(argv.join(' ')); return { status: 0 }; },
     now: () => AT,
     onProofCheckpointed: () => {
-      proofCheckpointHeldLock = existsSync(join(reviewRoot(cwd), 'locks', 'pr-17.lock'));
+      proofCheckpointHeldLock = existsSync(join(reviewRoot(cwd), 'locks', 'pr-17.state-lock.sqlite'));
     },
   });
   assert.deepEqual(attempted, ['npm run check:api', 'npm run check:shared', 'npm run check:web']);
@@ -4595,7 +4649,7 @@ test('concurrent lock attempts time out', async () => {
     child.stdout.once('data', (chunk) => chunk.toString().includes('locked') ? resolveLocked() : reject(new Error('not locked')));
     child.once('error', reject);
   });
-  assert.throws(() => withStateLock(cwd, 17, () => {}, { timeoutMs: 75, staleMs: 1000 }), { code: 'STATE_LOCK_TIMEOUT' });
+  assert.throws(() => withStateLock(cwd, 17, () => {}, { timeoutMs: 75 }), { code: 'STATE_LOCK_TIMEOUT' });
   await new Promise((resolveExit, reject) => child.once('exit', (code) => code === 0 ? resolveExit() : reject(new Error(String(code)))));
 });
 
