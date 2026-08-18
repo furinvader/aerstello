@@ -2268,6 +2268,100 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       performed: active.revision !== priorRevision };
   }
 
+  async function assertCompletionLiveEvidence(state, live, heads) {
+    assertRecordedRequestComment(state, live);
+    if (live.threads.some((thread) => thread.canonical && !thread.isResolved)) {
+      throw new GitHubWorkflowError('Canonical threads are still unresolved', 'COMPLETION_NOT_READY');
+    }
+    assertLiveThreadProof(state, live);
+    if (state.reviewOutcome?.outcome !== 'clean'
+        || state.reviewOutcome.headSha !== live.metadata.headRefOid
+        || state.reviewRequest?.headSha !== live.metadata.headRefOid) {
+      throw new GitHubWorkflowError('Clean canonical outcome does not apply to live PR HEAD', 'COMPLETION_NOT_READY');
+    }
+    let outcomeIsLive;
+    if (state.reviewOutcome.evidenceType === 'review-submission') {
+      outcomeIsLive = live.reviews.some((review) => review.id === state.reviewOutcome.id
+        && review.state === 'COMMENTED' && review.commit?.oid === live.metadata.headRefOid
+        && isCanonicalActor(review.author) && evidenceAtOrAfter(review.submittedAt, state.reviewRequest.at)
+        && classifyReviewSubmission(review, live.threads) === 'clean');
+    } else if (state.reviewOutcome.evidenceType === 'request-reaction') {
+      outcomeIsLive = live.reactions.some((reaction) => reaction.id === state.reviewOutcome.id
+        && reaction.content === 'THUMBS_UP' && isCanonicalActor(reaction.user)
+        && evidenceAtOrAfter(reaction.createdAt, state.reviewRequest.at));
+    } else {
+      const classified = await classifyStructuralIssueComments({
+        comments: live.comments.filter((comment) => comment.id === state.reviewOutcome.id),
+        request: state.reviewRequest, threads: live.threads, git, cwd: state.integrationWorktree,
+        expectedHeads: [state.reviewRequest.headSha, state.currentIntegrationHeadSha,
+          heads.pushedHeadSha, live.metadata.headRefOid],
+      });
+      outcomeIsLive = classified.exact.length === 1 && classified.unsupported.length === 0;
+      if (outcomeIsLive) {
+        const comment = classified.exact[0].comment;
+        outcomeIsLive = (comment.databaseId ?? null) === state.reviewOutcome.databaseId
+          && comment.url === state.reviewOutcome.url
+          && sameTimestamp(comment.createdAt, state.reviewOutcome.at)
+          && comment.author.login === state.reviewOutcome.reviewerLogin
+          && comment.author.id === state.reviewOutcome.reviewerNodeId
+          && comment.author.__typename === state.reviewOutcome.reviewerType
+          && comment.author.url === state.reviewOutcome.reviewerUrl;
+      }
+    }
+    if (!outcomeIsLive) {
+      throw new GitHubWorkflowError('Recorded clean outcome is not proven live', 'COMPLETION_NOT_READY');
+    }
+    const response = await classifyPendingReviewResponse(
+      { ...state, reviewOutcome: null }, live, git,
+    );
+    if (response.status !== 'supported' || response.evidence.outcome !== 'clean'
+        || JSON.stringify(response.evidence) !== JSON.stringify(state.reviewOutcome)) {
+      throw new GitHubWorkflowError(
+        'Recorded clean canonical response or root evidence changed before completion',
+        'COMPLETION_NOT_READY',
+      );
+    }
+    return response;
+  }
+
+  async function revalidateCompletedState(active) {
+    if (active.phase !== 'complete' || active.ciValidationStatus?.status !== 'passed') {
+      throw new GitHubWorkflowError('Durable completion evidence is incomplete', 'COMPLETION_NOT_READY');
+    }
+    let priorResponse = null;
+    let priorCiEvidence = null;
+    for (let snapshotIndex = 0; snapshotIndex < 2; snapshotIndex += 1) {
+      const live = await readLiveSnapshot(client, active, { reactionsFor: active.reviewRequest?.id ?? null });
+      const heads = await assertMutationReady({ state: active, git }, live);
+      const response = await assertCompletionLiveEvidence(active, live, heads);
+      const ciEvidence = ciEvidenceFromRollup(await readPullRequestChecks(
+        client, active.repository, active.prNumber, live.metadata.headRefOid,
+      ));
+      if (ciEvidence.status !== 'passed' || !sameCiEvidence(ciEvidence, active.ciValidationStatus)) {
+        throw new GitHubWorkflowError(
+          'Live Full validation evidence differs from durable completion evidence',
+          'COMPLETION_NOT_READY',
+        );
+      }
+      if (priorResponse !== null && (!samePendingResponseObservation(priorResponse, response)
+          || !sameCiEvidence(priorCiEvidence, ciEvidence))) {
+        throw new GitHubWorkflowError(
+          'Live review or CI evidence changed during Done revalidation',
+          'COMPLETION_NOT_READY',
+        );
+      }
+      priorResponse = response;
+      priorCiEvidence = ciEvidence;
+    }
+    await assertCurrent(active);
+    return active;
+  }
+
+  function isTransientCiError(error) {
+    return error instanceof GitHubWorkflowError
+      && ['CI_CHECK_MISSING', 'CI_VALIDATION_PENDING'].includes(error.code);
+  }
+
   async function advance(prNumber) {
     let active = await load(prNumber);
     const performedTransitions = [];
@@ -2278,6 +2372,14 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       return result('escalation', false, active.nextAction, { escalation: active.verificationEscalation });
     }
     if (active.phase === 'complete') {
+      try {
+        await revalidateCompletedState(active);
+      } catch (error) {
+        if (isTransientCiError(error)) {
+          return result('waiting', true, 'Await authoritative Full validation CI evidence.');
+        }
+        throw error;
+      }
       return result('done', false, active.nextAction);
     }
     const initialLive = await readLiveSnapshot(client, active, { reactionsFor: active.reviewRequest?.id ?? null });
@@ -2356,10 +2458,17 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     try {
       collectedCi = await collectCi(prNumber);
     } catch (error) {
-      if (error instanceof GitHubWorkflowError
-          && ['CI_CHECK_MISSING', 'CI_VALIDATION_PENDING'].includes(error.code)) {
+      if (isTransientCiError(error)) {
         active = await load(prNumber);
         if (active.phase === 'complete') {
+          try {
+            await revalidateCompletedState(active);
+          } catch (revalidationError) {
+            if (isTransientCiError(revalidationError)) {
+              return result('waiting', true, 'Await authoritative Full validation CI evidence.');
+            }
+            throw revalidationError;
+          }
           return result('done', false, active.nextAction);
         }
         return result('waiting', true, 'Await authoritative Full validation CI evidence.');
@@ -2371,7 +2480,25 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     if (collectedCi.evidence.status === 'failed') {
       return result('failure', false, active.nextAction, { ciValidation: collectedCi.evidence });
     }
-    const completed = await complete(prNumber, { checkpointCi: false });
+    let completed;
+    try {
+      completed = await complete(prNumber, { checkpointCi: false });
+    } catch (error) {
+      if (!isTransientCiError(error)) throw error;
+      active = await load(prNumber);
+      if (active.phase === 'complete') {
+        try {
+          await revalidateCompletedState(active);
+        } catch (revalidationError) {
+          if (isTransientCiError(revalidationError)) {
+            return result('waiting', true, 'Await authoritative Full validation CI evidence.');
+          }
+          throw revalidationError;
+        }
+        return result('done', false, active.nextAction);
+      }
+      return result('waiting', true, 'Await authoritative Full validation CI evidence.');
+    }
     if (completed.performed) performedTransitions.push('cycle-completion');
     active = await load(prNumber);
     return result('done', false, 'Archive is explicit after Done.', { completed: completed.completed });
@@ -2381,59 +2508,16 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     let active = await load(prNumber);
     const priorRevision = active.revision;
     if (active.phase === 'complete') {
+      await revalidateCompletedState(active);
       return { completed: true, phase: active.phase, revision: active.revision, idempotent: true, performed: false };
     }
     const expectedRequest = structuredClone(active.reviewRequest);
     const expectedOutcome = structuredClone(active.reviewOutcome);
     const expectedHeadSha = active.currentIntegrationHeadSha;
-    async function assertCompletionLiveEvidence(state, live, heads) {
-      assertRecordedRequestComment(state, live);
-      if (live.threads.some((thread) => thread.canonical && !thread.isResolved)) {
-        throw new GitHubWorkflowError('Canonical threads are still unresolved', 'COMPLETION_NOT_READY');
-      }
-      assertLiveThreadProof(state, live);
-      if (state.reviewOutcome?.outcome !== 'clean'
-          || state.reviewOutcome.headSha !== live.metadata.headRefOid
-          || state.reviewRequest?.headSha !== live.metadata.headRefOid) {
-        throw new GitHubWorkflowError('Clean canonical outcome does not apply to live PR HEAD', 'COMPLETION_NOT_READY');
-      }
-      let outcomeIsLive;
-      if (state.reviewOutcome.evidenceType === 'review-submission') {
-        outcomeIsLive = live.reviews.some((review) => review.id === state.reviewOutcome.id
-          && review.state === 'COMMENTED' && review.commit?.oid === live.metadata.headRefOid
-          && isCanonicalActor(review.author) && evidenceAtOrAfter(review.submittedAt, state.reviewRequest.at)
-          && classifyReviewSubmission(review, live.threads) === 'clean');
-      } else if (state.reviewOutcome.evidenceType === 'request-reaction') {
-        outcomeIsLive = live.reactions.some((reaction) => reaction.id === state.reviewOutcome.id
-          && reaction.content === 'THUMBS_UP' && isCanonicalActor(reaction.user)
-          && evidenceAtOrAfter(reaction.createdAt, state.reviewRequest.at));
-      } else {
-        const classified = await classifyStructuralIssueComments({
-          comments: live.comments.filter((comment) => comment.id === state.reviewOutcome.id),
-          request: state.reviewRequest, threads: live.threads, git, cwd: state.integrationWorktree,
-          expectedHeads: [state.reviewRequest.headSha, state.currentIntegrationHeadSha,
-            heads.pushedHeadSha, live.metadata.headRefOid],
-        });
-        outcomeIsLive = classified.exact.length === 1 && classified.unsupported.length === 0;
-        if (outcomeIsLive) {
-          const comment = classified.exact[0].comment;
-          outcomeIsLive = (comment.databaseId ?? null) === state.reviewOutcome.databaseId
-            && comment.url === state.reviewOutcome.url
-            && sameTimestamp(comment.createdAt, state.reviewOutcome.at)
-            && comment.author.login === state.reviewOutcome.reviewerLogin
-            && comment.author.id === state.reviewOutcome.reviewerNodeId
-            && comment.author.__typename === state.reviewOutcome.reviewerType
-            && comment.author.url === state.reviewOutcome.reviewerUrl;
-        }
-      }
-      if (!outcomeIsLive) {
-        throw new GitHubWorkflowError('Recorded clean outcome is not proven live', 'COMPLETION_NOT_READY');
-      }
-    }
 
     let live = await readLiveSnapshot(client, active, { reactionsFor: active.reviewRequest?.id ?? null });
     let completionHeads = await assertMutationReady({ state: active, git }, live);
-    await assertCompletionLiveEvidence(active, live, completionHeads);
+    const initialResponse = await assertCompletionLiveEvidence(active, live, completionHeads);
     const snapshot = await readPullRequestChecks(
       client, active.repository, active.prNumber, live.metadata.headRefOid,
     );
@@ -2453,7 +2537,13 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     live = await readLiveSnapshot(client, active, { reactionsFor: active.reviewRequest?.id ?? null });
     const refreshedHeads = await assertMutationReady({ state: active, git }, live);
     completionHeads = refreshedHeads;
-    await assertCompletionLiveEvidence(active, live, completionHeads);
+    const finalResponse = await assertCompletionLiveEvidence(active, live, completionHeads);
+    if (!samePendingResponseObservation(initialResponse, finalResponse)) {
+      throw new GitHubWorkflowError(
+        'Live review response or root evidence changed before completion',
+        'COMPLETION_NOT_READY',
+      );
+    }
     const finalCiSnapshot = await readPullRequestChecks(
       client, active.repository, active.prNumber, live.metadata.headRefOid,
     );
@@ -2492,8 +2582,11 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       const active = await load(prNumber);
       const live = await readLiveSnapshot(client, active);
       if (live.metadata.state !== 'OPEN') throw new GitHubWorkflowError('Pull request is closed or merged', 'PR_NOT_OPEN');
-      if (live.metadata.headRefOid !== active.currentIntegrationHeadSha) throw new GitHubWorkflowError('Pull request HEAD changed', 'MUTATION_NOT_READY');
-      if (live.metadata.isDraft) throw error;
+      await assertMutationReady({ state: active, git }, live, { requireReady: false });
+      if (live.metadata.isDraft) {
+        return { requested: false, recovered: false, waiting: true,
+          nextAction: `Wait, then rerun npm run review:github -- request --pr ${prNumber}.` };
+      }
       const readyOperationId = `ready:${prNumber}:${live.metadata.id}:${active.currentIntegrationHeadSha}`;
       const readyIntent = await lookupOptionalMutationJournalIntent(journal, 'ready', readyOperationId);
       return { requested: false, recovered: false, waiting: true,

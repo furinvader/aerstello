@@ -232,7 +232,9 @@ function tasklessPendingDiscoveryHeadDriftState(overrides = {}) {
 
 function canonicalReview(overrides = {}) {
   return {
-    id: 'PRR_clean', databaseId: 201, url: 'https://x/clean', body: '', state: 'COMMENTED',
+    id: 'PRR_clean', databaseId: 201,
+    url: 'https://github.com/example/aerstello/pull/2#pullrequestreview-201',
+    body: '', state: 'COMMENTED',
     submittedAt: AT, commit: { oid: HEAD }, author: BOT, ...overrides,
   };
 }
@@ -835,6 +837,48 @@ test('request owner-lock timeout is a mutation-free structured wait', async () =
   assert.equal(state.calls.length, 0);
 });
 
+test('request owner-lock timeout keeps a live draft poll-safe without claiming readiness', async () => {
+  for (const existingReadyIntent of [false, true]) {
+    const client = new FakeClient({ metadata: { isDraft: true } });
+    const state = fakeState(readyState());
+    const readyOperationId = `ready:2:${client.metadata.id}:${HEAD}`;
+    const journal = fakeJournal(client.events, existingReadyIntent
+      ? [priorIntent('ready', readyOperationId)] : []);
+    journal.withRequestOwner = async () => {
+      const error = new Error('busy'); error.code = 'STATE_LOCK_TIMEOUT'; throw error;
+    };
+    const api = createGitHubReviewWorkflow({
+      client, state, git: fakeGit(), clock: { now: () => AT }, journal,
+    });
+    assert.deepEqual(await api.request(2), {
+      requested: false, recovered: false, waiting: true,
+      nextAction: 'Wait, then rerun npm run review:github -- request --pr 2.',
+    });
+    assert.equal(client.calls.some((call) => call.name === 'MarkPullRequestReadyForReview'), false);
+    assert.equal(client.calls.some((call) => call.name === 'AddReviewRequest'), false);
+    assert.equal(state.calls.length, 0);
+  }
+
+  for (const { metadata, git, code } of [
+    { metadata: { state: 'CLOSED' }, git: fakeGit(), code: 'PR_NOT_OPEN' },
+    { metadata: { isDraft: true }, git: fakeGit({ snapshot: async () => ({ headSha: HEAD, dirty: true }) }),
+      code: 'MUTATION_NOT_READY' },
+    { metadata: { isDraft: true, headRefOid: OTHER_HEAD }, git: fakeGit(), code: 'MUTATION_NOT_READY' },
+  ]) {
+    const client = new FakeClient({ metadata });
+    const state = fakeState(readyState());
+    const journal = fakeJournal(client.events);
+    journal.withRequestOwner = async () => {
+      const error = new Error('busy'); error.code = 'STATE_LOCK_TIMEOUT'; throw error;
+    };
+    const api = createGitHubReviewWorkflow({ client, state, git, clock: { now: () => AT }, journal });
+    await assert.rejects(() => api.request(2), { code });
+    assert.equal(client.calls.some((call) => call.name === 'MarkPullRequestReadyForReview'), false);
+    assert.equal(client.calls.some((call) => call.name === 'AddReviewRequest'), false);
+    assert.equal(state.calls.length, 0);
+  }
+});
+
 test('CLI returns stable uncertainty for an already-dispatched request without replay', async () => {
   const client = new FakeClient();
   const state = fakeState(readyState());
@@ -1210,12 +1254,17 @@ test('advance preserves second-snapshot CI waits and converges concurrent comple
       this.code = code;
       this.checkReads = 0;
       this.onSecondRead = null;
+      this.restoreAfterSecondRead = false;
       this.reviews.push(canonicalReview({
         url: 'https://github.com/example/aerstello/pull/2#pullrequestreview-201',
       }));
     }
 
     async graphql(input) {
+      if (input.name === 'PullRequestChecks' && this.restoreAfterSecondRead && this.checkReads >= 2) {
+        this.rollupState = 'SUCCESS';
+        this.ciContexts = [fullValidationCheck()];
+      }
       if (input.name === 'PullRequestChecks' && ++this.checkReads === 2) {
         if (this.code === 'CI_VALIDATION_PENDING') {
           this.rollupState = 'PENDING';
@@ -1245,6 +1294,7 @@ test('advance preserves second-snapshot CI waits and converges concurrent comple
 
     const concurrentClient = new SecondRollupRaceClient(code);
     const concurrent = workflow(completedState(), concurrentClient);
+    concurrentClient.restoreAfterSecondRead = true;
     concurrentClient.onSecondRead = async () => {
       const ciState = await concurrent.state.checkpointCiValidation({
         prNumber: 2, expectedRevision: concurrent.state.current.revision, evidence: passedCiEvidence(),
@@ -1255,7 +1305,7 @@ test('advance preserves second-snapshot CI waits and converges concurrent comple
       });
     };
     const concurrentResult = await concurrent.api.advance(2);
-    assert.equal(concurrentClient.checkReads, 2);
+    assert.equal(concurrentClient.checkReads, 4);
     assert.equal(concurrentResult.phase, 'complete');
     assert.equal(concurrentResult.terminal, 'done');
     assert.equal(concurrentResult.waiting, false);
@@ -1265,13 +1315,88 @@ test('advance preserves second-snapshot CI waits and converges concurrent comple
   }
 });
 
+test('advance treats transient CI during completion as waiting and revalidates a concurrent Done winner', async () => {
+  class CompletionCiRaceClient extends FakeClient {
+    constructor(code, mutateAt) {
+      super();
+      this.code = code;
+      this.mutateAt = mutateAt;
+      this.checkReads = 0;
+      this.restoreAfterTransient = false;
+      this.onTransient = null;
+      this.reviews.push(canonicalReview());
+    }
+
+    async graphql(input) {
+      if (input.name === 'PullRequestChecks') {
+        this.checkReads += 1;
+        if (this.restoreAfterTransient && this.checkReads > this.mutateAt) {
+          this.rollupState = 'SUCCESS';
+          this.ciContexts = [fullValidationCheck()];
+        } else if (this.checkReads === this.mutateAt) {
+          if (this.code === 'CI_VALIDATION_PENDING') {
+            this.rollupState = 'PENDING';
+            this.ciContexts = [fullValidationCheck({
+              status: 'IN_PROGRESS', conclusion: null, completedAt: null,
+            })];
+          } else {
+            this.ciContexts = [fullValidationCheck({ name: 'another check' })];
+          }
+          if (this.onTransient) await this.onTransient();
+        }
+      }
+      return super.graphql(input);
+    }
+  }
+
+  for (const code of ['CI_VALIDATION_PENDING', 'CI_CHECK_MISSING']) {
+    for (const mutateAt of [3, 4]) {
+      const client = new CompletionCiRaceClient(code, mutateAt);
+      const setup = workflow(completedState(), client);
+      const result = await setup.api.advance(2);
+      assert.equal(result.terminal, 'waiting');
+      assert.equal(result.waiting, true);
+      assert.deepEqual(result.performedTransitions, ['ci-validation']);
+      assert.equal(setup.state.calls.filter((call) => call.name === 'checkpointCiValidation').length, 1);
+      assert.equal(setup.state.calls.some((call) => call.name === 'checkpointCompletion'), false);
+    }
+  }
+
+  const concurrentClient = new CompletionCiRaceClient('CI_VALIDATION_PENDING', 3);
+  concurrentClient.restoreAfterTransient = true;
+  const concurrent = workflow(completedState(), concurrentClient);
+  concurrentClient.onTransient = async () => {
+    await concurrent.state.checkpointCompletion({
+      prNumber: 2, expectedRevision: concurrent.state.current.revision,
+      pushedHeadSha: HEAD, prHeadSha: HEAD, prState: 'OPEN', isDraft: false,
+    });
+  };
+  const concurrentResult = await concurrent.api.advance(2);
+  assert.equal(concurrentResult.terminal, 'done');
+  assert.equal(concurrentResult.waiting, false);
+  assert.equal(concurrentResult.phase, 'complete');
+  assert.deepEqual(concurrentResult.performedTransitions, ['ci-validation']);
+  assert.equal(concurrentClient.checkReads, 5);
+  assert.equal(concurrent.state.calls.filter((call) => call.name === 'checkpointCompletion').length, 1);
+});
+
 test('advance is idempotent for Done and converges CI and completion winners without claiming their writes', async () => {
+  const doneClient = new FakeClient();
+  doneClient.reviews.push(canonicalReview());
   const done = workflow(completedState({ phase: 'complete', ciValidationStatus: passedCiEvidence(),
-    ciValidationHistory: [passedCiEvidence()] }));
+    ciValidationHistory: [passedCiEvidence()] }), doneClient);
   const doneResult = await done.api.advance(2);
   assert.deepEqual(doneResult.performedTransitions, []);
   assert.equal(doneResult.phase, 'complete');
-  assert.equal(done.client.calls.length, 0);
+  assert.equal(done.client.calls.filter((call) => call.name === 'PullRequestMetadata').length, 2);
+  assert.equal(done.client.calls.filter((call) => call.name === 'PullRequestChecks').length, 2);
+  assert.equal(done.state.calls.length, 0);
+
+  const manualDone = await done.api.complete(2);
+  assert.equal(manualDone.idempotent, true);
+  assert.equal(manualDone.performed, false);
+  assert.equal(done.client.calls.filter((call) => call.name === 'PullRequestMetadata').length, 4);
+  assert.equal(done.client.calls.filter((call) => call.name === 'PullRequestChecks').length, 4);
   assert.equal(done.state.calls.length, 0);
 
   const ciWinnerClient = new FakeClient();
@@ -1293,6 +1418,90 @@ test('advance is idempotent for Done and converges CI and completion winners wit
   const completionWinnerResult = await completionWinner.api.advance(2);
   assert.deepEqual(completionWinnerResult.performedTransitions, ['review-outcome', 'ci-validation']);
   assert.equal(completionWinnerResult.phase, 'complete');
+});
+
+test('Done revalidation fails closed on stale live evidence and revision races', async () => {
+  const completeState = () => completedState({
+    phase: 'complete', ciValidationStatus: passedCiEvidence(),
+    ciValidationHistory: [passedCiEvidence()],
+  });
+  for (const { metadata, code } of [
+    { metadata: { state: 'CLOSED' }, code: 'PR_NOT_OPEN' },
+    { metadata: { state: 'MERGED' }, code: 'PR_NOT_OPEN' },
+    { metadata: { isDraft: true }, code: 'PR_DRAFT' },
+    { metadata: { headRefOid: OTHER_HEAD }, code: 'MUTATION_NOT_READY' },
+  ]) {
+    const client = new FakeClient({ metadata });
+    client.reviews.push(canonicalReview());
+    const setup = workflow(completeState(), client);
+    await assert.rejects(() => setup.api.advance(2), { code });
+    assert.equal(setup.state.calls.length, 0);
+  }
+
+  const missingReview = workflow(completeState(), new FakeClient());
+  await assert.rejects(() => missingReview.api.advance(2), { code: 'COMPLETION_NOT_READY' });
+  assert.equal(missingReview.state.calls.length, 0);
+
+  class DoneRootRaceClient extends FakeClient {
+    constructor() { super(); this.metadataReads = 0; this.reviews.push(canonicalReview()); }
+    async graphql(input) {
+      if (input.name === 'PullRequestMetadata' && ++this.metadataReads === 2) {
+        addThread(this, { id: 'THREAD_done_race', resolved: true });
+      }
+      return super.graphql(input);
+    }
+  }
+  const rootRace = workflow(completeState(), new DoneRootRaceClient());
+  await assert.rejects(() => rootRace.api.advance(2), (error) =>
+    ['ROOT_IDENTITY_MISMATCH', 'THREAD_PROOF_STALE', 'COMPLETION_NOT_READY'].includes(error.code));
+  assert.equal(rootRace.state.calls.length, 0);
+
+  class DoneRevisionRaceClient extends FakeClient {
+    constructor() { super(); this.checkReads = 0; this.onFinalCheck = null; this.reviews.push(canonicalReview()); }
+    async graphql(input) {
+      const result = await super.graphql(input);
+      if (input.name === 'PullRequestChecks' && ++this.checkReads === 2) this.onFinalCheck();
+      return result;
+    }
+  }
+  const revisionClient = new DoneRevisionRaceClient();
+  const revisionRace = workflow(completeState(), revisionClient);
+  revisionClient.onFinalCheck = () => revisionRace.state.advanceRevisionForTest();
+  await assert.rejects(() => revisionRace.api.advance(2), { code: 'STATE_REVISION_CHANGED' });
+  assert.equal(revisionRace.state.calls.length, 0);
+});
+
+test('advance waits but complete stays strict when durable Done CI is pending or missing', async () => {
+  const completeState = () => completedState({
+    phase: 'complete', ciValidationStatus: passedCiEvidence(),
+    ciValidationHistory: [passedCiEvidence()],
+  });
+  for (const code of ['CI_VALIDATION_PENDING', 'CI_CHECK_MISSING']) {
+    const makeClient = () => {
+      const client = new FakeClient();
+      client.reviews.push(canonicalReview());
+      if (code === 'CI_VALIDATION_PENDING') {
+        client.rollupState = 'PENDING';
+        client.ciContexts = [fullValidationCheck({
+          status: 'IN_PROGRESS', conclusion: null, completedAt: null,
+        })];
+      } else {
+        client.ciContexts = [fullValidationCheck({ name: 'another check' })];
+      }
+      return client;
+    };
+    const advanced = workflow(completeState(), makeClient());
+    const waiting = await advanced.api.advance(2);
+    assert.equal(waiting.phase, 'complete');
+    assert.equal(waiting.terminal, 'waiting');
+    assert.equal(waiting.waiting, true);
+    assert.deepEqual(waiting.performedTransitions, []);
+    assert.equal(advanced.state.calls.length, 0);
+
+    const manual = workflow(completeState(), makeClient());
+    await assert.rejects(() => manual.api.complete(2), { code });
+    assert.equal(manual.state.calls.length, 0);
+  }
 });
 
 test('advance converges an exact outcome winner but rejects mismatched concurrent evidence', async () => {
@@ -3836,10 +4045,7 @@ test('bounded request allowance is checked before GitHub mutation', async () => 
 
 test('complete performs fresh live proof and uses guarded completion only when exact clean state applies', async () => {
   const goodClient = new FakeClient();
-  goodClient.reviews.push({
-    id: 'PRR_clean', databaseId: 201, url: 'https://x/clean', body: '', state: 'COMMENTED',
-    submittedAt: AT, commit: { oid: HEAD }, author: BOT,
-  });
+  goodClient.reviews.push(canonicalReview());
   const good = workflow(completedState(), goodClient);
   const result = await good.api.complete(2);
   assert.equal(result.phase, 'complete');
@@ -3861,10 +4067,7 @@ test('complete performs fresh live proof and uses guarded completion only when e
   });
   const unrecordedResolved = new FakeClient();
   addThread(unrecordedResolved, { resolved: true });
-  unrecordedResolved.reviews.push({
-    id: 'PRR_clean', databaseId: 201, url: 'https://x/clean', body: '', state: 'COMMENTED',
-    submittedAt: AT, commit: { oid: HEAD }, author: BOT,
-  });
+  unrecordedResolved.reviews.push(canonicalReview());
   await assert.rejects(() => workflow(completedState(), unrecordedResolved).api.complete(2), {
     code: 'ROOT_IDENTITY_MISMATCH',
   });
@@ -4020,10 +4223,7 @@ test('complete reruns review and thread proof after checkpointing CI', async () 
     },
   ]) {
     const client = new FinalSnapshotMutationClient(mutate);
-    client.reviews.push({
-      id: 'PRR_clean', databaseId: 201, url: 'https://x/clean', body: '', state: 'COMMENTED',
-      submittedAt: AT, commit: { oid: HEAD }, author: BOT,
-    });
+    client.reviews.push(canonicalReview());
     const setup = workflow(completedState(), client);
     await assert.rejects(() => setup.api.complete(2), { code });
     assert.equal(setup.state.calls.at(-1).name, 'checkpointCiValidation');
@@ -4097,10 +4297,7 @@ test('complete rechecks that the same successful workflow evidence is still auth
     },
   ]) {
     const client = new FinalCiMutationClient(mutate);
-    client.reviews.push({
-      id: 'PRR_clean', databaseId: 201, url: 'https://x/clean', body: '', state: 'COMMENTED',
-      submittedAt: AT, commit: { oid: HEAD }, author: BOT,
-    });
+    client.reviews.push(canonicalReview());
     const setup = workflow(completedState(), client);
     await assert.rejects(() => setup.api.complete(2), { code });
     assert.equal(setup.state.calls.at(-1).name, 'checkpointCiValidation');
@@ -4134,10 +4331,7 @@ test('complete ignores unrelated context changes between authoritative CI reads'
   }
 
   const client = new UnrelatedContextMutationClient();
-  client.reviews.push({
-    id: 'PRR_clean', databaseId: 201, url: 'https://x/clean', body: '', state: 'COMMENTED',
-    submittedAt: AT, commit: { oid: HEAD }, author: BOT,
-  });
+  client.reviews.push(canonicalReview());
   const setup = workflow(completedState(), client);
   const result = await setup.api.complete(2);
   assert.equal(result.phase, 'complete');
