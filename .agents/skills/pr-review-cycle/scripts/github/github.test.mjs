@@ -1203,12 +1203,13 @@ test('advance checkpoints only clean outcome while CI is pending and records fai
   assert.equal(failed.state.calls.filter((call) => call.name === 'checkpointCiValidation').length, 1);
 });
 
-test('advance waits without a CI transition when collect-ci second-snapshot evidence becomes pending or missing', async () => {
+test('advance preserves second-snapshot CI waits and converges concurrent completion', async () => {
   class SecondRollupRaceClient extends FakeClient {
     constructor(code) {
       super();
       this.code = code;
       this.checkReads = 0;
+      this.onSecondRead = null;
       this.reviews.push(canonicalReview({
         url: 'https://github.com/example/aerstello/pull/2#pullrequestreview-201',
       }));
@@ -1224,6 +1225,7 @@ test('advance waits without a CI transition when collect-ci second-snapshot evid
         } else {
           this.ciContexts = [fullValidationCheck({ name: 'another check' })];
         }
+        if (this.onSecondRead) await this.onSecondRead();
       }
       return super.graphql(input);
     }
@@ -1240,6 +1242,26 @@ test('advance waits without a CI transition when collect-ci second-snapshot evid
     assert.deepEqual(result.performedTransitions, []);
     assert.equal(setup.state.calls.some((call) => call.name === 'checkpointCiValidation'), false);
     await assert.rejects(() => setup.api.collectCi(2), { code });
+
+    const concurrentClient = new SecondRollupRaceClient(code);
+    const concurrent = workflow(completedState(), concurrentClient);
+    concurrentClient.onSecondRead = async () => {
+      const ciState = await concurrent.state.checkpointCiValidation({
+        prNumber: 2, expectedRevision: concurrent.state.current.revision, evidence: passedCiEvidence(),
+      });
+      await concurrent.state.checkpointCompletion({
+        prNumber: 2, expectedRevision: ciState.revision,
+        pushedHeadSha: HEAD, prHeadSha: HEAD, prState: 'OPEN', isDraft: false,
+      });
+    };
+    const concurrentResult = await concurrent.api.advance(2);
+    assert.equal(concurrentClient.checkReads, 2);
+    assert.equal(concurrentResult.phase, 'complete');
+    assert.equal(concurrentResult.terminal, 'done');
+    assert.equal(concurrentResult.waiting, false);
+    assert.deepEqual(concurrentResult.performedTransitions, []);
+    assert.equal(concurrent.state.calls.filter((call) => call.name === 'checkpointCiValidation').length, 1);
+    assert.equal(concurrent.state.calls.filter((call) => call.name === 'checkpointCompletion').length, 1);
   }
 });
 

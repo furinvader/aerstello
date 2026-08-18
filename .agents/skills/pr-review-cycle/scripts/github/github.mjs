@@ -2359,6 +2359,9 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       if (error instanceof GitHubWorkflowError
           && ['CI_CHECK_MISSING', 'CI_VALIDATION_PENDING'].includes(error.code)) {
         active = await load(prNumber);
+        if (active.phase === 'complete') {
+          return result('done', false, active.nextAction);
+        }
         return result('waiting', true, 'Await authoritative Full validation CI evidence.');
       }
       throw error;
