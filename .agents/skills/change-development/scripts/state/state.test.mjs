@@ -36,6 +36,7 @@ import {
   upgradeState,
   validateState,
   withChangeLock,
+  withIntegrationOperationLock,
   changeRoot,
 } from './state.mjs';
 
@@ -388,6 +389,55 @@ test('implement and full modes retain implementation authority', async () => {
     state = bindTask({ cwd, packet: packetFor(state, plan, 'state-task'), expectedRevision: state.revision });
     assert.equal(state.execution.tasks[0].status, 'bound');
   }
+});
+
+test('implementation acceptance and v1 upgrade require a named branch while plan-only remains detached-safe', async () => {
+  for (const mode of ['implement', 'full']) {
+    const fixture = repository(`${mode} detached acceptance`);
+    const planning = await initializeState({ cwd: fixture.cwd, changeId: `${mode}-detached`, mode,
+      baseBranch: 'main', planningRef: fixture.sha, source: descriptor });
+    git(fixture.cwd, 'switch', '--detach', fixture.sha);
+    const root = changeDirectory(fixture.cwd, planning.changeId);
+    const before = {
+      state: readFileSync(join(root, 'state.json'), 'utf8'),
+      events: readFileSync(join(root, 'events.jsonl'), 'utf8'),
+      transitions: readdirSync(join(root, 'transitions')),
+    };
+    assert.throws(() => acceptPlan({ cwd: fixture.cwd, plan: planFor(planning), expectedRevision: planning.revision }),
+      (error) => error.code === 'CENTRAL_BRANCH_REQUIRED');
+    assert.equal(readFileSync(join(root, 'state.json'), 'utf8'), before.state);
+    assert.equal(readFileSync(join(root, 'events.jsonl'), 'utf8'), before.events);
+    assert.deepEqual(readdirSync(join(root, 'transitions')), before.transitions);
+    assert.equal(existsSync(join(root, 'plan')), false);
+    git(fixture.cwd, 'switch', 'main');
+    const accepted = acceptPlan({ cwd: fixture.cwd, plan: planFor(planning), expectedRevision: planning.revision });
+    assert.equal(accepted.git.branch, 'main');
+  }
+
+  const planningOnly = repository('plan-only detached acceptance');
+  const planning = await initializeState({ cwd: planningOnly.cwd, changeId: 'plan-only-detached', mode: 'plan-only',
+    baseBranch: 'main', planningRef: planningOnly.sha, source: descriptor });
+  git(planningOnly.cwd, 'switch', '--detach', planningOnly.sha);
+  const accepted = acceptPlan({ cwd: planningOnly.cwd, plan: planFor(planning), expectedRevision: planning.revision });
+  assert.equal(accepted.git.branch, '(detached)');
+  assert.equal(archiveState({ cwd: planningOnly.cwd, expectedRevision: accepted.revision }).archived, true);
+
+  const legacy = repository('v1 detached upgrade');
+  const legacyPlanningV2 = await initializeState({ cwd: legacy.cwd, changeId: 'v1-detached-upgrade', mode: 'implement',
+    baseBranch: 'main', planningRef: legacy.sha, source: descriptor });
+  const legacyPlanning = downgradeInitialStateToV1(legacy.cwd);
+  const legacyAccepted = acceptPlan({ cwd: legacy.cwd, plan: planFor(legacyPlanningV2),
+    expectedRevision: legacyPlanning.revision });
+  git(legacy.cwd, 'switch', '--detach', legacy.sha);
+  const legacyRoot = changeDirectory(legacy.cwd, legacyAccepted.changeId);
+  const legacyBefore = readFileSync(join(legacyRoot, 'state.json'), 'utf8');
+  const legacyTransitions = readdirSync(join(legacyRoot, 'transitions'));
+  assert.throws(() => upgradeState({ cwd: legacy.cwd, expectedRevision: legacyAccepted.revision }),
+    (error) => error.code === 'CENTRAL_GIT_MISMATCH');
+  assert.equal(readFileSync(join(legacyRoot, 'state.json'), 'utf8'), legacyBefore);
+  assert.deepEqual(readdirSync(join(legacyRoot, 'transitions')), legacyTransitions);
+  git(legacy.cwd, 'switch', 'main');
+  assert.equal(upgradeState({ cwd: legacy.cwd, expectedRevision: legacyAccepted.revision }).schemaVersion, 2);
 });
 
 test('mapper packets bind exact original or amendment evidence and mismatch leaves no sidecars', async () => {
@@ -1243,6 +1293,20 @@ test('locks enforce contention and reclaim only stale dead ownership', async () 
   let entered = false;
   withChangeLock(cwd, 'stale-change', () => { entered = true; }, { staleMs: 1, timeoutMs: 100 });
   assert.equal(entered, true);
+
+  assert.throws(() => withIntegrationOperationLock(cwd, 'operation-change', () => (
+    withIntegrationOperationLock(cwd, 'operation-change', () => {}, { timeoutMs: 10 })
+  )), (error) => error.code === 'LOCK_TIMEOUT');
+  const staleOperation = join(changeRoot(cwd), 'locks', 'operations', 'stale-operation.integration.lock');
+  mkdirSync(staleOperation, { recursive: true });
+  writeFileSync(join(staleOperation, 'owner.json'), JSON.stringify({
+    token: 'dead-operation-token', pid: 2_147_483_647, hostname: hostname(), acquiredAt: '2000-01-01T00:00:00Z',
+  }));
+  utimesSync(staleOperation, past, past);
+  let operationEntered = false;
+  withIntegrationOperationLock(cwd, 'stale-operation', () => { operationEntered = true; },
+    { staleMs: 1, timeoutMs: 100 });
+  assert.equal(operationEntered, true);
 
   const malformed = join(changeRoot(cwd), 'locks', 'malformed-change.lock');
   mkdirSync(malformed, { recursive: true });

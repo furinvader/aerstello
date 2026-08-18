@@ -358,6 +358,81 @@ test('runnable direct, feature-inherited, and outline selectors bind and replay 
   }
 });
 
+test('related E2E browser projects are the canonical union for OR-matched exact-tree scenarios', async () => {
+  const browserFeature = [
+    '@area-browser @browser-webkit', 'Feature: Browser catalog', '',
+    '  @id-webkit-flow', '  Scenario: Inherited WebKit flow', '',
+    '  @id-dual-flow @browser-firefox', '  Scenario: Dual browser flow', '',
+    '  @id-plain-flow', '  Scenario: Plain flow', '',
+  ].join('\n');
+  const makePacket = (context, selectors, projects) => packetFor(context, 'catalog-task', {
+    requiredValidation: { unit: [], system: [{
+      command: `npm run test:e2e:related -- ${selectors.map((selector) => `--id ${selector.slice(3)}`).join(' ')} ${projects.map((project) => `--project ${project}`).join(' ')}`,
+      reason: 'Exercise the exact OR-matched browser catalog.', selectors, projects,
+    }] },
+  });
+  for (const [label, selectors, projects, code] of [
+    ['missing inherited WebKit', ['id-webkit-flow'], ['tablet-chromium'], 'RELATED_E2E_PROJECT_MISMATCH'],
+    ['missing Firefox from the OR union', ['id-dual-flow'], ['mobile-webkit'], 'RELATED_E2E_PROJECT_MISMATCH'],
+    ['canonical union', ['id-webkit-flow', 'id-dual-flow'], ['tablet-chromium', 'mobile-webkit', 'desktop-firefox'], null],
+    ['harmless extra project', ['id-plain-flow'], ['tablet-chromium', 'desktop-firefox', 'mobile-webkit'], null],
+  ]) {
+    const context = await fixture([task('catalog-task', ['output/catalog.txt'])], {
+      'specs/features/browser-catalog.feature': browserFeature,
+    });
+    const revision = context.state.revision;
+    const action = () => bindTask({ cwd: context.cwd, changeId: context.changeId,
+      packet: makePacket(context, selectors, projects), expectedRevision: revision });
+    if (code) {
+      assert.throws(action, (error) => error instanceof StateError && error.code === code, label);
+      assert.equal(loadState(context.cwd).revision, revision, label);
+    } else {
+      const bound = action();
+      assert.equal(bound.execution.tasks[0].status, 'bound', label);
+      assert.equal(validateState({ cwd: context.cwd }).valid, true, label);
+    }
+  }
+});
+
+test('planned browser tags must realize the canonical worker-tree project union before evidence advances', async () => {
+  for (const [label, projects, succeeds] of [
+    ['missing WebKit project', ['tablet-chromium'], false],
+    ['canonical WebKit project', ['tablet-chromium', 'mobile-webkit'], true],
+  ]) {
+    const plannedTask = task(`planned-browser-${succeeds ? 'valid' : 'invalid'}`, ['specs/features/planned-browser.feature']);
+    const context = await fixture([plannedTask]);
+    const packet = packetFor(context, plannedTask.id, {
+      plannedE2ESelectors: [{ selector: 'id-planned-browser-flow', featurePath: 'specs/features/planned-browser.feature' }],
+      requiredValidation: { unit: [], system: [{
+        command: `npm run test:e2e:related -- --id planned-browser-flow ${projects.map((project) => `--project ${project}`).join(' ')}`,
+        reason: 'Exercise the planned browser flow.',
+        selectors: ['id-planned-browser-flow'], projects,
+      }] },
+    });
+    context.state = bindTask({ cwd: context.cwd, changeId: context.changeId, packet,
+      expectedRevision: context.state.revision });
+    const worker = createWorker(context, packet); startWave(context, [packet]);
+    const workerCommit = commit(worker.path, {
+      'specs/features/planned-browser.feature': [
+        'Feature: Planned browser', '', '  @id-planned-browser-flow @browser-webkit',
+        '  Scenario: Planned WebKit flow', '',
+      ].join('\n'),
+    }, 'test: add planned browser selector');
+    const revision = context.state.revision;
+    const action = () => accept(context, packet, worker, workerCommit, ['specs/features/planned-browser.feature']);
+    if (!succeeds) {
+      assert.throws(action, (error) => error instanceof StateError
+        && error.code === 'RELATED_E2E_PROJECT_MISMATCH', label);
+      assert.equal(loadState(context.cwd).revision, revision, label);
+      assert.equal(existsSync(join(changeDirectory(context.cwd, context.changeId), 'implementation', 'results',
+        plannedTask.id, '0001.json')), false, label);
+    } else {
+      action();
+      assert.equal(validateState({ cwd: context.cwd }).valid, true, label);
+    }
+  }
+});
+
 test('result acceptance rejects orphan, unsupported, and mixed selector associations without evidence mutation', async () => {
   const cases = [
     ['missing directly attached stable ID', ['id-feature-flow'], [
@@ -596,6 +671,69 @@ test('a bound packet becomes durably stale after a conflicting earlier writer ad
   }), (error) => error instanceof StateError && error.code === 'TASK_BASE_STALE');
   assert.equal(loadState(context.cwd).revision, revision);
   assert.equal(validateState({ cwd: context.cwd }).valid, true);
+});
+
+test('integration and clean-base reconciliation serialize same-change rejection across Git mutation', async () => {
+  async function acceptedPair(label) {
+    const tasks = [task(`${label}-first`, [`output/${label}-first.txt`]), task(`${label}-second`, [`output/${label}-second.txt`])];
+    const context = await fixture(tasks);
+    const packets = tasks.map(({ id }) => bind(context, id));
+    const workers = packets.map((packet) => createWorker(context, packet));
+    startWave(context, packets);
+    for (let index = 0; index < packets.length; index += 1) {
+      const path = `output/${label}-${index === 0 ? 'first' : 'second'}.txt`;
+      const workerCommit = commit(workers[index].path, { [path]: `${label}-${index}\n` }, `test: ${label} ${index}`);
+      accept(context, packets[index], workers[index], workerCommit, [path]);
+    }
+    return { context, packets };
+  }
+
+  const direct = await acceptedPair('direct-lock');
+  let directBoundary = false;
+  direct.context.state = integrateTask({
+    cwd: direct.context.cwd, changeId: direct.context.changeId, taskId: direct.packets[0].taskId,
+    expectedRevision: direct.context.state.revision,
+    crashStep(step) {
+      if (step !== 'integration-operation-after-intent') return;
+      directBoundary = true;
+      const revision = loadState(direct.context.cwd).revision;
+      for (const packet of direct.packets) {
+        assert.throws(() => rejectTask({ cwd: direct.context.cwd, changeId: direct.context.changeId,
+          taskId: packet.taskId, reason: 'Must wait for integration.', expectedRevision: revision,
+          lockOptions: { timeoutMs: 10 } }),
+        (error) => error instanceof StateError && error.code === 'LOCK_TIMEOUT');
+      }
+    },
+  });
+  assert.equal(directBoundary, true);
+  assert.equal(direct.context.state.execution.tasks.find(({ id }) => id === direct.packets[0].taskId).status, 'integrated');
+  assert.equal(direct.context.state.execution.tasks.find(({ id }) => id === direct.packets[1].taskId).status, 'accepted');
+
+  const recovery = await acceptedPair('reconcile-lock');
+  assert.throws(() => integrateTask({
+    cwd: recovery.context.cwd, changeId: recovery.context.changeId, taskId: recovery.packets[0].taskId,
+    expectedRevision: recovery.context.state.revision,
+    crashStep(step) { if (step === 'integration-operation-after-intent') throw new Error('pause after intent'); },
+  }), /pause after intent/u);
+  const integrating = loadState(recovery.context.cwd);
+  let reconcileBoundary = false;
+  recovery.context.state = reconcileIntegration({
+    cwd: recovery.context.cwd, changeId: recovery.context.changeId, expectedRevision: integrating.revision,
+    crashStep(step) {
+      if (step !== 'integration-operation-before-reconcile-cherry-pick') return;
+      reconcileBoundary = true;
+      const revision = loadState(recovery.context.cwd).revision;
+      for (const packet of recovery.packets) {
+        assert.throws(() => rejectTask({ cwd: recovery.context.cwd, changeId: recovery.context.changeId,
+          taskId: packet.taskId, reason: 'Must wait for reconciliation.', expectedRevision: revision,
+          lockOptions: { timeoutMs: 10 } }),
+        (error) => error instanceof StateError && error.code === 'LOCK_TIMEOUT');
+      }
+    },
+  });
+  assert.equal(reconcileBoundary, true);
+  assert.equal(recovery.context.state.execution.tasks.find(({ id }) => id === recovery.packets[0].taskId).status, 'integrated');
+  assert.equal(validateState({ cwd: recovery.context.cwd }).valid, true);
 });
 
 test('a real central cherry-pick conflict preserves its intent and requires abort plus receipt-backed rejection/replan', async () => {

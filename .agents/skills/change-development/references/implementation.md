@@ -11,8 +11,10 @@ npm run change:state -- upgrade-state \
   --change-id <change-id> --expected-revision <revision>
 ```
 
-The upgrade requires the exact clean central HEAD and branch recorded by v1
-state. It writes a receipt-protected transition and derives compact task
+The upgrade requires the exact clean central HEAD and named branch recorded by
+v1 state. Plan acceptance in `implement` and `full` mode has the same
+named-branch requirement; detached plan acceptance and archival remain valid
+for `plan-only`. It writes a receipt-protected transition and derives compact task
 summaries from the effective accepted plan.
 
 Execution advancement is authoritative only for changes initialized in
@@ -63,7 +65,13 @@ not satisfy the scenario-ID requirement. Missing or duplicate directly attached
 stable IDs, orphan tags, and tags cleared by unsupported constructs do not
 realize any selector for that scenario, even if the same packet realizes a
 different selector. Selector-like text in comments and step prose is ignored
-during binding, acceptance, and durable replay. Unknown, unsafe, duplicate,
+during binding, acceptance, and durable replay. For the OR-union of scenarios
+matched by a validation's selectors, `@browser-webkit` requires
+`mobile-webkit` and `@browser-firefox` requires `desktop-firefox`; every
+required project must be present, while extra projects are allowed. Existing
+selectors are checked in the exact task-base tree, and planned selectors plus
+their browser-project union are re-evaluated in the exact worker tree during
+acceptance and durable replay. Unknown, unsafe, duplicate,
 unused, unowned, forbidden, or unrealized declarations fail closed. Packets
 without the field retain the original contract.
 
@@ -164,7 +172,12 @@ central base, and owning central branch. Outside the lock it cherry-picks that
 commit only from that branch. It then reacquires
 the lock and accepts only a clean, single-parent central commit whose delta is
 equivalent to the worker commit. A failed cherry-pick leaves the durable intent
-in `integrating` for inspection; never discard or overwrite it.
+in `integrating` for inspection; never discard or overwrite it. One
+per-change integration-operation lock spans all three stages, and
+`reject-task` takes the same lock before its state lock. Consequently same-task
+and sibling rejection cannot race integration or clean-base reconciliation;
+normal failure releases ownership and interrupted ownership follows the exact
+dead-owner reclaim and reconciliation path.
 
 If one wave member reports `blocked` or `failed`, or is explicitly rejected, a
 dependency-ready accepted sibling remains integrable after the active wave

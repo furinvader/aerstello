@@ -9,7 +9,8 @@ change-development/
 ├── active.json
 ├── locks/
 │   ├── lifecycle.lock/
-│   └── <change-id>.lock/
+│   ├── <change-id>.lock/
+│   └── operations/<change-id>.integration.lock/
 ├── archive-lifecycle.json            # atomic self-digesting envelope; present only during archive
 ├── archives/<change-id>/
 │   └── archive-receipt.json[.sha256]
@@ -59,8 +60,8 @@ Development-state v1 remains a valid historical format so its immutable
 transition intents can still be replayed. New records are v2. An accepted v1
 record accepts and preserves its plan without synthesizing `execution`; it
 moves to v2 only through the explicit `upgrade-state` transition at the
-exact recorded clean Git observation; ordinary execution writes never perform
-an implicit upgrade. That transition preserves plan and Git identity while
+exact recorded clean, named-branch Git observation; ordinary execution writes
+never perform an implicit upgrade. That transition preserves plan and Git identity while
 creating receipt-valid unbound execution summaries.
 
 ## Phases
@@ -83,6 +84,15 @@ archived. `implement` and `full` continue through bounded execution to
 ## Locking and transitions
 
 Initialization, `active.json`, and archive operations take the global lifecycle lock. State transitions take the per-change lock. If both are needed, always acquire global then change; never invert that order. A stale lock is reclaimed only after the fixed threshold when its recorded process is dead on the current host, or when an incomplete lock has remained stale for that threshold. Other contention times out; never delete a lock heuristically.
+
+Integration and integration reconciliation additionally hold the per-change
+integration-operation lock across intent persistence, external Git mutation,
+and state reconciliation. Task rejection takes that same operation lock before
+the ordinary change lock, so rejection cannot erase or reinterpret an intent
+while Git is changing; this operation-before-change order must never be
+inverted. Operation locks use the same owner-token, dead-owner, incomplete-lock,
+timeout, and stale-reclaim rules. Failure releases live ownership, while a dead
+owner is reclaimed only through those rules before exact reconciliation.
 
 Every transition has a proposed revision, intent record, receipt, concise event, and completion marker. The intent becomes committed only when its fully written staging directory is atomically renamed to the eight-digit revision directory. It embeds `authoritativeEvidence` entries with each domain sidecar's exact path, label, canonical digest, and complete value. State, receipts, and completion markers use atomic `fsync` plus rename writes. `events.jsonl` is canonically reconstructed and atomically rewritten instead of appended in place. Revision mismatches fail closed. Network work is never performed while a state lock is held.
 

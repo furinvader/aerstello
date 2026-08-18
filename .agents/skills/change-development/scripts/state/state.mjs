@@ -262,8 +262,17 @@ function changeLockPath(cwd, changeId) {
   return join(changeRoot(cwd), 'locks', `${validateChangeId(changeId)}.lock`);
 }
 
+function integrationOperationLockPath(cwd, changeId) {
+  return join(changeRoot(cwd), 'locks', 'operations', `${validateChangeId(changeId)}.integration.lock`);
+}
+
 export function withChangeLock(cwd, changeId, callback, options = {}) {
   const release = acquireLock(changeLockPath(cwd, changeId), options);
+  try { return callback(); } finally { release(); }
+}
+
+export function withIntegrationOperationLock(cwd, changeId, callback, options = {}) {
+  const release = acquireLock(integrationOperationLockPath(cwd, changeId), options);
   try { return callback(); } finally { release(); }
 }
 
@@ -854,6 +863,9 @@ export function acceptPlan({ cwd = process.cwd(), changeId, plan, planningEviden
     if (!currentGit.clean || currentGit.headSha !== state.planningSha) {
       throw new StateError('Plan acceptance requires clean HEAD at the Planning SHA', 'PLANNING_SNAPSHOT_MISMATCH');
     }
+    if (['implement', 'full'].includes(state.mode) && currentGit.branch === '(detached)') {
+      throw new StateError('Implementation plan acceptance requires a named central branch', 'CENTRAL_BRANCH_REQUIRED');
+    }
     const sourceObservation = readObservationByDigest(root, state);
     const errors = readinessErrors(plan, planningEvidence, sourceObservation,
       ({ planningSha, path }) => readTreeFile(root, planningSha, path));
@@ -966,6 +978,7 @@ function assertExactCentralObservation(current, state, operation) {
 function selectorEvidenceAtCommit(cwd, commit) {
   const all = new Map();
   const runnable = new Map();
+  const scenarios = [];
   for (const entry of listTree(cwd, commit, 'specs/features')) {
     if (entry.type !== 'blob' || !entry.path.endsWith('.feature')) continue;
     const contents = readTreeFile(cwd, commit, entry.path)?.toString('utf8') ?? '';
@@ -995,7 +1008,9 @@ function selectorEvidenceAtCommit(cwd, commit) {
         const scenarioTags = [...pendingTags];
         const stableIds = scenarioTags.filter((selector) => /^id-[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(selector));
         if (stableIds.length === 1) {
-          for (const selector of new Set([...featureTags, ...scenarioTags])) {
+          const tags = new Set([...featureTags, ...scenarioTags]);
+          scenarios.push({ path: entry.path, tags });
+          for (const selector of tags) {
             const paths = runnable.get(selector) ?? new Set();
             paths.add(entry.path);
             runnable.set(selector, paths);
@@ -1007,7 +1022,30 @@ function selectorEvidenceAtCommit(cwd, commit) {
       if (trimmed && !trimmed.startsWith('#')) pendingTags = [];
     }
   }
-  return { all, runnable };
+  return { all, runnable, scenarios };
+}
+
+
+const BROWSER_PROJECT_TAGS = Object.freeze([
+  ['browser-webkit', 'mobile-webkit'],
+  ['browser-firefox', 'desktop-firefox'],
+]);
+
+function assertValidationCatalog(catalog, validation, allowedUnknown = new Set()) {
+  const selectors = validation.selectors.map((raw) => raw.startsWith('@') ? raw.slice(1) : raw);
+  for (const selector of selectors) {
+    if (!catalog.runnable.has(selector) && !allowedUnknown.has(selector)) {
+      throw new StateError(`Required E2E selector ${selector} is unknown in the exact Git tree`, 'PLANNED_E2E_SELECTOR_MISMATCH');
+    }
+  }
+  const matching = catalog.scenarios.filter(({ tags }) => selectors.some((selector) => tags.has(selector)));
+  const requiredProjects = BROWSER_PROJECT_TAGS
+    .filter(([tag]) => matching.some(({ tags }) => tags.has(tag)))
+    .map(([, project]) => project);
+  const missing = requiredProjects.filter((project) => !validation.projects.includes(project));
+  if (missing.length > 0) {
+    throw new StateError(`Related E2E validation is missing required browser projects: ${missing.join(', ')}`, 'RELATED_E2E_PROJECT_MISMATCH');
+  }
 }
 
 function assertPacketSelectorsAtBase(cwd, packet) {
@@ -1017,22 +1055,18 @@ function assertPacketSelectorsAtBase(cwd, packet) {
     if (existing.all.has(selector)) throw new StateError(`Planned E2E selector ${selector} already exists at the exact task base`, 'PLANNED_E2E_SELECTOR_MISMATCH');
   }
   for (const validation of packet.requiredValidation.system) {
-    for (const rawSelector of validation.selectors) {
-      const selector = rawSelector.startsWith('@') ? rawSelector.slice(1) : rawSelector;
-      if (!existing.runnable.has(selector) && !planned.has(selector)) {
-        throw new StateError(`Required E2E selector ${selector} is unknown at the exact task base and is not planned`, 'PLANNED_E2E_SELECTOR_MISMATCH');
-      }
-    }
+    assertValidationCatalog(existing, validation, new Set(planned.keys()));
   }
 }
 
 function assertPlannedSelectorsRealized(cwd, packet, commit) {
-  const realized = selectorEvidenceAtCommit(cwd, commit).runnable;
+  const catalog = selectorEvidenceAtCommit(cwd, commit);
   for (const { selector, featurePath } of packet.plannedE2ESelectors ?? []) {
-    if (!realized.get(selector)?.has(featurePath)) {
+    if (!catalog.runnable.get(selector)?.has(featurePath)) {
       throw new StateError(`Planned E2E selector ${selector} was not realized in ${featurePath} at the worker commit`, 'PLANNED_E2E_SELECTOR_MISMATCH');
     }
   }
+  for (const validation of packet.requiredValidation.system) assertValidationCatalog(catalog, validation);
 }
 function verifiedWorkerTombstone(cwd, state, task) {
   const received = verifyReceipt(implementationWorktreeTombstonePath(cwd, state.changeId, task.id), `worktree tombstone ${task.id}`);
@@ -1059,7 +1093,8 @@ export function upgradeState({ cwd = process.cwd(), changeId, expectedRevision, 
       throw new StateError('State upgrade requires an accepted plan at the implementation boundary', 'INVALID_PHASE');
     }
     const current = gitObservation(root, clock);
-    if (!current.clean || current.headSha !== state.git.headSha || current.branch !== state.git.branch) {
+    if (!current.clean || current.headSha !== state.git.headSha || current.branch !== state.git.branch
+        || current.branch === '(detached)') {
       throw new StateError('State upgrade requires the exact clean central Git observation recorded by v1 state', 'CENTRAL_GIT_MISMATCH');
     }
     const plan = readEffectivePlan(root, state);
@@ -1409,29 +1444,39 @@ function reconcileIntegrationLocked({ root, selected, expectedRevision, clock, c
 
 export function reconcileIntegration({ cwd = process.cwd(), changeId, expectedRevision, clock, crashStep, lockOptions } = {}) {
   const root = repositoryRoot(cwd); const selected = selectedChangeId(root, changeId);
-  const state = loadState(root, selected); assertWritableV2(state); assertImplementationMode(state, 'Integration reconciliation');
-  assertRevision(state, expectedRevision); validateState({ cwd: root, changeId: selected });
-  if (state.phase === 'integrating' && state.execution?.integrationIntent) {
-    const current = gitObservation(root, clock); const intent = state.execution.integrationIntent;
-    if (current.branch !== state.git.branch || current.branch === '(detached)') throw new StateError('Integration reconciliation requires the exact owning central branch', 'CENTRAL_GIT_MISMATCH');
-    if (current.clean && current.headSha === intent.centralBaseSha) {
-      const result = runGit(['cherry-pick', '--no-edit', intent.workerCommit], { cwd: root, allowFailure: true });
-      if (result.status !== 0) throw new StateError('Cherry-pick did not complete; durable integration intent remains for inspection', 'INTEGRATION_CHERRY_PICK_FAILED');
+  return withIntegrationOperationLock(root, selected, () => {
+    const state = withChangeLock(root, selected, () => {
+      const currentState = loadState(root, selected); assertWritableV2(currentState);
+      assertImplementationMode(currentState, 'Integration reconciliation'); assertRevision(currentState, expectedRevision);
+      validateState({ cwd: root, changeId: selected });
+      return currentState;
+    }, lockOptions);
+    if (state.phase === 'integrating' && state.execution?.integrationIntent) {
+      const current = gitObservation(root, clock); const intent = state.execution.integrationIntent;
+      if (current.branch !== state.git.branch || current.branch === '(detached)') throw new StateError('Integration reconciliation requires the exact owning central branch', 'CENTRAL_GIT_MISMATCH');
+      if (current.clean && current.headSha === intent.centralBaseSha) {
+        callCrash(crashStep, 'integration-operation-before-reconcile-cherry-pick', { taskId: intent.taskId });
+        const result = runGit(['cherry-pick', '--no-edit', intent.workerCommit], { cwd: root, allowFailure: true });
+        if (result.status !== 0) throw new StateError('Cherry-pick did not complete; durable integration intent remains for inspection', 'INTEGRATION_CHERRY_PICK_FAILED');
+      }
     }
-  }
-  return reconcileIntegrationLocked({ root, selected, expectedRevision, clock, crashStep, lockOptions });
+    return reconcileIntegrationLocked({ root, selected, expectedRevision, clock, crashStep, lockOptions });
+  }, lockOptions);
 }
 
 export function integrateTask({ cwd = process.cwd(), changeId, taskId, expectedRevision, clock, crashStep, lockOptions } = {}) {
   const root = repositoryRoot(cwd); const selected = selectedChangeId(root, changeId);
-  const intentState = prepareIntegration({ root, selected, taskId, expectedRevision, clock, crashStep, lockOptions });
-  const intent = intentState.execution.integrationIntent;
-  assertExactCentralObservation(gitObservation(root, clock), intentState, 'Integration cherry-pick');
-  const result = runGit(['cherry-pick', '--no-edit', intent.workerCommit], { cwd: root, allowFailure: true });
-  if (result.status !== 0) {
-    throw new StateError('Cherry-pick did not complete; durable integration intent remains for inspection and reconciliation', 'INTEGRATION_CHERRY_PICK_FAILED');
-  }
-  return reconcileIntegrationLocked({ root, selected, expectedRevision: intentState.revision, clock, crashStep, lockOptions });
+  return withIntegrationOperationLock(root, selected, () => {
+    const intentState = prepareIntegration({ root, selected, taskId, expectedRevision, clock, crashStep, lockOptions });
+    const intent = intentState.execution.integrationIntent;
+    callCrash(crashStep, 'integration-operation-after-intent', { taskId: intent.taskId });
+    assertExactCentralObservation(gitObservation(root, clock), intentState, 'Integration cherry-pick');
+    const result = runGit(['cherry-pick', '--no-edit', intent.workerCommit], { cwd: root, allowFailure: true });
+    if (result.status !== 0) {
+      throw new StateError('Cherry-pick did not complete; durable integration intent remains for inspection and reconciliation', 'INTEGRATION_CHERRY_PICK_FAILED');
+    }
+    return reconcileIntegrationLocked({ root, selected, expectedRevision: intentState.revision, clock, crashStep, lockOptions });
+  }, lockOptions);
 }
 
 export function finalizeIntegration({ cwd = process.cwd(), changeId, expectedRevision, clock, crashStep, lockOptions } = {}) {
@@ -1454,25 +1499,25 @@ export function finalizeIntegration({ cwd = process.cwd(), changeId, expectedRev
 
 export function rejectTask({ cwd = process.cwd(), changeId, taskId, reason, expectedRevision, clock, crashStep, lockOptions } = {}) {
   const root = repositoryRoot(cwd); const selected = selectedChangeId(root, changeId);
-  return withChangeLock(root, selected, () => {
-    const state = loadState(root, selected); assertWritableV2(state); assertRevision(state, expectedRevision);
-    validateState({ cwd: root, changeId: selected }); const task = executionTask(state, taskId);
-    if (!nonemptyString(reason) || reason.length > 2000) throw new StateError('Task rejection requires a concise reason', 'INVALID_REJECTION');
-    if (!['bound', 'scheduled', 'running', 'accepted', 'integration-pending', 'blocked', 'failed'].includes(task.status)) throw new StateError(`Task ${taskId} cannot be rejected from ${task.status}`, 'TASK_STATE_CONFLICT');
-    const current = gitObservation(root, clock);
-    const requiredHead = state.execution.integrationIntent?.taskId === taskId ? state.execution.integrationIntent.centralBaseSha : state.git.headSha;
-    if (!current.clean || current.headSha !== requiredHead || current.branch !== state.git.branch || current.branch === '(detached)') throw new StateError('Rejecting work requires the exact clean owning branch at the pre-conflict base', 'CENTRAL_GIT_MISMATCH');
-    const preservedBlockers = nonTaskBlockers(root, state);
-    const execution = replaceExecutionTask(state, taskId, { status: 'rejected' }, { activeWave: state.execution.activeWave.filter((id) => id !== taskId), integrationIntent: null });
-    const timestamp = now(clock);
-    const rejection = { schemaVersion: 1, changeId: state.changeId, taskId, binding: task.binding, reason, rejectedAt: timestamp };
-    const taskBlockers = canonicalTaskBlockers(root, state, execution, { taskId, rejection });
-    const next = revised(state, { phase: 'blocked', execution, git: current,
-      blockedReasons: [...preservedBlockers, ...taskBlockers] }, () => new Date(timestamp));
-    return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'task-rejected', summary: `Rejected implementation task ${taskId}`, crashStep,
-      pendingEvidence: [{ key: 'taskRejectionDigest', path: `implementation/rejections/${taskId}/${String(next.revision).padStart(8, '0')}.json`,
-        value: rejection, label: `task rejection ${taskId}` }] });
-  }, lockOptions);
+  return withIntegrationOperationLock(root, selected, () => withChangeLock(root, selected, () => {
+      const state = loadState(root, selected); assertWritableV2(state); assertRevision(state, expectedRevision);
+      validateState({ cwd: root, changeId: selected }); const task = executionTask(state, taskId);
+      if (!nonemptyString(reason) || reason.length > 2000) throw new StateError('Task rejection requires a concise reason', 'INVALID_REJECTION');
+      if (!['bound', 'scheduled', 'running', 'accepted', 'integration-pending', 'blocked', 'failed'].includes(task.status)) throw new StateError(`Task ${taskId} cannot be rejected from ${task.status}`, 'TASK_STATE_CONFLICT');
+      const current = gitObservation(root, clock);
+      const requiredHead = state.execution.integrationIntent?.taskId === taskId ? state.execution.integrationIntent.centralBaseSha : state.git.headSha;
+      if (!current.clean || current.headSha !== requiredHead || current.branch !== state.git.branch || current.branch === '(detached)') throw new StateError('Rejecting work requires the exact clean owning branch at the pre-conflict base', 'CENTRAL_GIT_MISMATCH');
+      const preservedBlockers = nonTaskBlockers(root, state);
+      const execution = replaceExecutionTask(state, taskId, { status: 'rejected' }, { activeWave: state.execution.activeWave.filter((id) => id !== taskId), integrationIntent: null });
+      const timestamp = now(clock);
+      const rejection = { schemaVersion: 1, changeId: state.changeId, taskId, binding: task.binding, reason, rejectedAt: timestamp };
+      const taskBlockers = canonicalTaskBlockers(root, state, execution, { taskId, rejection });
+      const next = revised(state, { phase: 'blocked', execution, git: current,
+        blockedReasons: [...preservedBlockers, ...taskBlockers] }, () => new Date(timestamp));
+      return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'task-rejected', summary: `Rejected implementation task ${taskId}`, crashStep,
+        pendingEvidence: [{ key: 'taskRejectionDigest', path: `implementation/rejections/${taskId}/${String(next.revision).padStart(8, '0')}.json`,
+          value: rejection, label: `task rejection ${taskId}` }] });
+    }, lockOptions), lockOptions);
 }
 
 // Descriptive aliases keep the programmatic API explicit while the CLI uses
