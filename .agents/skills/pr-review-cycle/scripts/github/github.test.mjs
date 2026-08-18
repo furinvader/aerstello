@@ -1255,6 +1255,46 @@ test('advance revalidates durable findings before returning triage', async () =>
   await assert.rejects(() => revisionRace.api.advance(2), { code: 'STATE_REVISION_CHANGED' });
 });
 
+test('advance rejects findings response and attached-root fingerprint drift between snapshots', async () => {
+  class FindingsDriftClient extends FakeClient {
+    constructor(mutate) {
+      super();
+      this.metadataReads = 0;
+      this.mutateFindings = mutate;
+    }
+
+    async graphql(input) {
+      if (input.name === 'PullRequestMetadata' && ++this.metadataReads === 2) {
+        this.mutateFindings(this);
+      }
+      return super.graphql(input);
+    }
+  }
+
+  const reviewBodyClient = new FindingsDriftClient((client) => {
+    client.reviews[0] = { ...client.reviews[0], body: 'Changed canonical finding.' };
+  });
+  reviewBodyClient.reviews.push(canonicalReview({ body: 'Canonical finding.' }));
+  const reviewBodyDrift = workflow(findingsState(), reviewBodyClient);
+  await assert.rejects(() => reviewBodyDrift.api.advance(2), { code: 'REVIEW_COLLECTION_STALE' });
+  assert.equal(reviewBodyDrift.client.calls.some((call) => call.name === 'PullRequestChecks'), false);
+  assert.equal(reviewBodyDrift.state.calls.length, 0);
+
+  const attachedRootClient = new FindingsDriftClient((client) => {
+    const comments = client.threadComments.get('THREAD_attached');
+    comments[0] = { ...comments[0], body: 'Changed attached canonical root.' };
+  });
+  attachedRootClient.reviews.push(canonicalReview());
+  addThread(attachedRootClient, {
+    id: 'THREAD_attached',
+    root: rootComment('THREAD_attached', { pullRequestReview: { id: 'PRR_clean' } }),
+  });
+  const attachedRootDrift = workflow(findingsState(), attachedRootClient);
+  await assert.rejects(() => attachedRootDrift.api.advance(2), { code: 'REVIEW_COLLECTION_STALE' });
+  assert.equal(attachedRootDrift.client.calls.some((call) => call.name === 'PullRequestChecks'), false);
+  assert.equal(attachedRootDrift.state.calls.length, 0);
+});
+
 test('advance escalates verification ambiguity, rejects discovery ambiguity, and blocks CI after a late root', async () => {
   const verificationClient = new FakeClient();
   verificationClient.reviews.push(canonicalReview());

@@ -2456,7 +2456,17 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       if (initialLive.metadata.headRefOid !== active.currentIntegrationHeadSha) {
         return result('waiting', true, 'Review findings are stale at the live PR head; reconcile before triage.');
       }
-      await assertFindingsLiveEvidence(active, initialLive);
+      const initialFindingsResponse = await assertFindingsLiveEvidence(active, initialLive);
+      const finalFindingsLive = await readLiveSnapshot(
+        client, active, { reactionsFor: active.reviewRequest.id },
+      );
+      const finalFindingsResponse = await assertFindingsLiveEvidence(active, finalFindingsLive);
+      if (!samePendingResponseObservation(initialFindingsResponse, finalFindingsResponse)) {
+        throw new GitHubWorkflowError(
+          'Canonical findings response or root evidence changed before triage',
+          'REVIEW_COLLECTION_STALE',
+        );
+      }
       return result('triage', false, active.nextAction);
     }
     const live = await readLiveSnapshot(client, active, { reactionsFor: active.reviewRequest?.id ?? null });
