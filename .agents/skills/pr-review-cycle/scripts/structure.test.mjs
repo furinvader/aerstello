@@ -385,6 +385,7 @@ test('root npm façades remain available from a nested workspace directory', () 
     assert.equal(result.status, 0, `${script} failed:\n${result.stderr}`);
     assert.equal(result.signal, null, `${script} terminated by ${result.signal}`);
     assert.ok(result.stdout.includes(`${usage}\n`), `${script} did not print canonical usage`);
+    if (script === 'review:github') assert.match(result.stdout, /advance --pr <number>/u);
   }
 });
 
@@ -417,6 +418,9 @@ test('schemas and operator documentation have one canonical copy', () => {
   ));
   assert.ok(Object.hasOwn(stateSchema.properties, 'reviewRequestLimit'));
   assert.equal(stateSchema.required.includes('reviewRequestLimit'), false);
+  for (const volatile of ['pullRequest', 'state', 'isDraft', 'reviewObservation', 'pullRequestReadiness']) {
+    assert.equal(Object.hasOwn(stateSchema.properties, volatile), false);
+  }
   for (const path of [
     '.agents/skills/pr-review-cycle/SKILL.md',
     '.agents/skills/pr-review-cycle/README.md',
@@ -429,6 +433,30 @@ test('schemas and operator documentation have one canonical copy', () => {
     readRepositoryFile('.agents/skills/pr-review-cycle/references/state-and-contracts.md'),
     /missing or\s+`null` means no configured request-count cap/u,
   );
+  const githubUsage = readRepositoryFile('.agents/skills/pr-review-cycle/scripts/github/cli.mjs');
+  assert.match(githubUsage, /advance --pr <number>/u);
+  assert.match(githubUsage, /Read-only diagnostic/u);
+  const readme = readRepositoryFile('.agents/skills/pr-review-cycle/README.md');
+  const skill = readRepositoryFile('.agents/skills/pr-review-cycle/SKILL.md');
+  const githubGuide = readRepositoryFile('.agents/skills/pr-review-cycle/references/github-review.md');
+  const stateGuide = readRepositoryFile('.agents/skills/pr-review-cycle/references/state-and-contracts.md');
+  for (const source of [readme, skill, githubGuide]) {
+    assert.match(source, /npm run review:github -- advance --pr/u);
+  }
+  assert.match(githubGuide, /supported helper commands/u);
+  assert.match(githubGuide, /request-owner lock/u);
+  assert.match(githubGuide, /durable dispatch\s+marker/u);
+  assert.match(githubGuide, /intentionally \*\*uncertain\*\*[\s\S]*returns waiting/u);
+  assert.match(githubGuide, /clientMutationId` is a\s+correlation value, not GitHub idempotency/u);
+  assert.match(githubGuide, /npm run review:github -- request --pr <number>/u);
+  assert.match(githubGuide, /cannot be reconciled by `advance`/u);
+  for (const value of ['not-applicable', 'waiting', 'collectable', 'ambiguous', 'stale', 'already-ready', 'marked-ready', 'recovered-ready', 'performedTransitions', 'cycle-completion']) {
+    assert.match(githubGuide, new RegExp(value, 'u'));
+  }
+  assert.match(stateGuide, /volatile GitHub evidence/u);
+  assert.match(stateGuide, /not a state schema addition/u);
+  assert.match(stateGuide, /ready:<pr>:<pr-node>:<head>/u);
+  assert.match(readme, /issue\s+25/iu);
 });
 
 test('external adapters link to the canonical guide without obsolete references', () => {

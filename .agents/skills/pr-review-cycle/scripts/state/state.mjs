@@ -3,6 +3,7 @@ import {
   cpSync,
   existsSync,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readdirSync,
@@ -13,10 +14,10 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { hostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
 import { gitText, resolveCommit, runGit } from '../../../../../scripts/lib/git.mjs';
 import { inspectReleaseState } from '../../../../../scripts/lib/release-state.mjs';
 import {
@@ -54,7 +55,8 @@ export { gitCommonDirectory, repositoryRoot, reviewRoot } from '../paths.mjs';
 
 export const ACTIVE_STATE_LIMIT_BYTES = 64 * 1024;
 const DEFAULT_LOCK_TIMEOUT_MS = 5000;
-const DEFAULT_STALE_LOCK_MS = 5 * 60 * 1000;
+const SQLITE_BUSY = 5;
+const LOCK_RETRY_INTERVAL_MS = 25;
 const PR_FINAL_VERIFIER_ID = 'integration_verifier';
 const TRANSITION_AUTHORIZATION = Symbol('guarded PR review transition');
 
@@ -81,7 +83,7 @@ export function assertCompletionAllowed(state, external) {
   }
 }
 
-export function gitAwareGateContext(state, { pushedHeadSha, prHeadSha } = {}) {
+export function gitAwareGateContext(state, { pushedHeadSha, prHeadSha, prState, isDraft } = {}) {
   const cwd = state.integrationWorktree;
   const local = gitSnapshot(cwd);
   return {
@@ -89,6 +91,8 @@ export function gitAwareGateContext(state, { pushedHeadSha, prHeadSha } = {}) {
     localDirty: local.dirty,
     pushedHeadSha,
     prHeadSha,
+    prState,
+    isDraft,
     isAncestor: (ancestor, descendant) => runGit(
       ['merge-base', '--is-ancestor', ancestor, descendant],
       { cwd, allowFailure: true },
@@ -194,7 +198,19 @@ export function activePointerPath(cwd = process.cwd()) {
 }
 
 function lockPath(cwd, prNumber) {
+  return join(reviewRoot(cwd), 'locks', `pr-${parsePrNumber(prNumber)}.state-lock.sqlite`);
+}
+
+function requestOwnerLockPath(cwd, prNumber) {
+  return join(reviewRoot(cwd), 'locks', `pr-${parsePrNumber(prNumber)}.github-request-lock.sqlite`);
+}
+
+function legacyLockPath(cwd, prNumber) {
   return join(reviewRoot(cwd), 'locks', `pr-${parsePrNumber(prNumber)}.lock`);
+}
+
+function legacyRequestOwnerLockPath(cwd, prNumber) {
+  return join(reviewRoot(cwd), 'locks', `pr-${parsePrNumber(prNumber)}.github-request.lock`);
 }
 
 function parsePrNumber(value) {
@@ -1770,64 +1786,166 @@ export function buildTargetedValidationPlan({
   }));
 }
 
-function processExists(pid) {
-  if (!Number.isInteger(pid) || pid < 1) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === 'EPERM';
+function isSqliteBusy(error) {
+  return error?.errcode === SQLITE_BUSY;
+}
+
+function openLockDatabase(path) {
+  mkdirSync(dirname(path), { recursive: true });
+  return new DatabaseSync(path, { timeout: 0 });
+}
+
+function lockTimeout(path) {
+  return new StateError(`Timed out waiting for ${path}`, 'STATE_LOCK_TIMEOUT');
+}
+
+function ensureLegacyBarrierSync(path, timeoutMs) {
+  const started = Date.now();
+  while (true) {
+    try {
+      // A directory is an atomic, permanent cutover sentinel at the exact
+      // pathname used by the immediately previous JSON lock protocol. Older
+      // clients can neither create their lock file nor retire this sentinel as
+      // an observed file generation, so the two protocols cannot overlap.
+      mkdirSync(path, { mode: 0o700 });
+      return;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+    }
+    try {
+      if (lstatSync(path).isDirectory()) return;
+    } catch (error) {
+      if (error.code === 'ENOENT') continue;
+      throw error;
+    }
+    // A legacy file may belong to a process already running the previous
+    // release. Never inspect-and-unlink it: waiting lets that owner release
+    // normally, while stale, malformed, foreign, or otherwise unverifiable
+    // ownership fails closed for explicit operator reconciliation.
+    if (Date.now() - started >= timeoutMs) throw lockTimeout(path);
+    sleep(LOCK_RETRY_INTERVAL_MS);
   }
 }
 
-function lockIsStale(path, staleMs) {
-  try {
-    const lock = JSON.parse(readFileSync(path, 'utf8'));
-    const age = Date.now() - Date.parse(lock.createdAt);
-    if (!Number.isFinite(age) || age <= staleMs) return false;
-    if (lock.hostname === hostname()) return !processExists(lock.pid);
-    return age > staleMs * 6;
-  } catch {
-    return Date.now() - statSync(path).mtimeMs > staleMs;
+async function ensureLegacyBarrierAsync(path, timeoutMs) {
+  const started = Date.now();
+  while (true) {
+    try {
+      mkdirSync(path, { mode: 0o700 });
+      return;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+    }
+    try {
+      if (lstatSync(path).isDirectory()) return;
+    } catch (error) {
+      if (error.code === 'ENOENT') continue;
+      throw error;
+    }
+    if (Date.now() - started >= timeoutMs) throw lockTimeout(path);
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, LOCK_RETRY_INTERVAL_MS));
   }
+}
+
+function beginExclusiveSync(database, path, timeoutMs) {
+  const started = Date.now();
+  while (true) {
+    try {
+      database.exec('BEGIN EXCLUSIVE');
+      return;
+    } catch (error) {
+      if (!isSqliteBusy(error)) throw error;
+      if (Date.now() - started >= timeoutMs) throw lockTimeout(path);
+      sleep(LOCK_RETRY_INTERVAL_MS);
+    }
+  }
+}
+
+async function beginExclusiveAsync(database, path, timeoutMs) {
+  const started = Date.now();
+  while (true) {
+    try {
+      database.exec('BEGIN EXCLUSIVE');
+      return;
+    } catch (error) {
+      if (!isSqliteBusy(error)) throw error;
+      if (Date.now() - started >= timeoutMs) throw lockTimeout(path);
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, LOCK_RETRY_INTERVAL_MS));
+    }
+  }
+}
+
+function rollbackQuietly(database) {
+  try { database.exec('ROLLBACK'); } catch { /* Preserve the triggering error. */ }
+}
+
+function closeQuietly(database) {
+  try { database.close(); } catch { /* Preserve the triggering error. */ }
 }
 
 export function withStateLock(cwd, prNumber, callback, {
   timeoutMs = DEFAULT_LOCK_TIMEOUT_MS,
-  staleMs = DEFAULT_STALE_LOCK_MS,
 } = {}) {
   const path = lockPath(cwd, prNumber);
-  mkdirSync(dirname(path), { recursive: true });
   const started = Date.now();
-  const token = randomUUID();
-
-  while (true) {
-    try {
-      const handle = openSync(path, 'wx', 0o600);
-      writeFileSync(handle, serializeJson({ token, pid: process.pid, hostname: hostname(), createdAt: utcNow() }));
-      fsyncSync(handle);
-      closeSync(handle);
-      break;
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      if (lockIsStale(path, staleMs)) {
-        try { unlinkSync(path); } catch (unlinkError) { if (unlinkError.code !== 'ENOENT') throw unlinkError; }
-        continue;
-      }
-      if (Date.now() - started >= timeoutMs) throw new StateError(`Timed out waiting for ${path}`, 'STATE_LOCK_TIMEOUT');
-      sleep(25);
-    }
+  const database = openLockDatabase(path);
+  try {
+    beginExclusiveSync(database, path, timeoutMs);
+    ensureLegacyBarrierSync(
+      legacyLockPath(cwd, prNumber),
+      Math.max(0, timeoutMs - (Date.now() - started)),
+    );
+  } catch (error) {
+    rollbackQuietly(database);
+    closeQuietly(database);
+    throw error;
   }
 
   try {
-    return callback();
-  } finally {
-    try {
-      const lock = JSON.parse(readFileSync(path, 'utf8'));
-      if (lock.token === token) unlinkSync(path);
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-    }
+    const result = callback();
+    database.exec('COMMIT');
+    database.close();
+    return result;
+  } catch (error) {
+    rollbackQuietly(database);
+    closeQuietly(database);
+    throw error;
+  }
+}
+
+/**
+ * Unlike withStateLock, this deliberately remains held while an async GitHub
+ * mutation and its reconciliation are in flight.  The state lock is only for
+ * synchronous file transactions; using it around a Promise releases it too
+ * early and permits a second external mutation.
+ */
+export async function withGitHubRequestOwnerLock(cwd, prNumber, callback, {
+  timeoutMs = DEFAULT_LOCK_TIMEOUT_MS,
+} = {}) {
+  const path = requestOwnerLockPath(cwd, prNumber);
+  const started = Date.now();
+  const database = openLockDatabase(path);
+  try {
+    await beginExclusiveAsync(database, path, timeoutMs);
+    await ensureLegacyBarrierAsync(
+      legacyRequestOwnerLockPath(cwd, prNumber),
+      Math.max(0, timeoutMs - (Date.now() - started)),
+    );
+  } catch (error) {
+    rollbackQuietly(database);
+    closeQuietly(database);
+    throw error;
+  }
+
+  try {
+    const result = await callback();
+    database.exec('COMMIT');
+    database.close();
+    return result;
+  } catch (error) {
+    rollbackQuietly(database);
+    closeQuietly(database);
+    throw error;
   }
 }
 
@@ -2267,6 +2385,75 @@ export function appendEvent(cwd, prNumber, input = {}) {
   const path = join(directory, 'events.ndjson');
   const existing = existsSync(path) ? readFileSync(path, 'utf8') : '';
   atomicWriteText(path, `${existing}${JSON.stringify(event)}\n`);
+}
+
+export function ensureGitHubMutationIntent(cwd, prNumber, intent) {
+  if (!intent || typeof intent.operationId !== 'string' || intent.operationId.length === 0
+      || typeof intent.type !== 'string' || intent.type.length === 0
+      || typeof intent.clientMutationId !== 'string' || intent.clientMutationId.length === 0
+      || typeof intent.at !== 'string' || !Number.isFinite(Date.parse(intent.at))) {
+    throw new StateError('GitHub mutation intent is invalid', 'INVALID_EVENT');
+  }
+  return withStateLock(cwd, prNumber, () => {
+    const path = join(stateDirectory(cwd, prNumber), 'events.ndjson');
+    let events = [];
+    if (existsSync(path)) {
+      try {
+        events = readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+      } catch {
+        throw new StateError('GitHub mutation intent journal is malformed', 'INTENT_RECOVERY_INVALID');
+      }
+    }
+    const found = events.find((event) => event.type === 'github-mutation-intent' && event.details?.operationId === intent.operationId);
+    if (found) {
+      if (!found.details || found.details.type !== intent.type
+          || found.details.operationId !== intent.operationId
+          || typeof found.details.clientMutationId !== 'string'
+          || found.details.clientMutationId !== intent.clientMutationId
+          || typeof found.details.at !== 'string' || !Number.isFinite(Date.parse(found.details.at))) {
+        throw new StateError('GitHub mutation intent conflicts', 'INTENT_CONFLICT');
+      }
+      return { ...found.details, isNew: false };
+    }
+    appendEvent(cwd, prNumber, { type: 'github-mutation-intent', summary: `Intent ${intent.type} ${intent.operationId}`.slice(0, 1000), details: intent });
+    return { ...intent, isNew: true };
+  });
+}
+
+export function claimGitHubMutationDispatch(cwd, prNumber, intent, expectedRevision) {
+  return withStateLock(cwd, prNumber, () => {
+    if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
+      throw new StateError('Dispatch claim requires an expected state revision', 'STATE_REVISION_CONFLICT');
+    }
+    if (loadState(cwd, prNumber).revision !== expectedRevision) {
+      throw new StateError('State revision changed before dispatch', 'STATE_REVISION_CONFLICT');
+    }
+    const path = join(stateDirectory(cwd, prNumber), 'events.ndjson');
+    let events = [];
+    try {
+      events = existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').filter(Boolean)
+        .map((line) => JSON.parse(line)) : [];
+    } catch {
+      throw new StateError('GitHub mutation dispatch journal is malformed', 'INTENT_RECOVERY_INVALID');
+    }
+    const correlatedIntent = events.find((event) => event.type === 'github-mutation-intent'
+      && event.details?.operationId === intent.operationId);
+    if (!correlatedIntent || correlatedIntent.details?.type !== intent.type
+        || correlatedIntent.details?.clientMutationId !== intent.clientMutationId) {
+      throw new StateError('GitHub mutation dispatch has no correlated intent', 'INTENT_RECOVERY_INVALID');
+    }
+    const existing = events.find((event) => event.type === 'github-mutation-dispatch'
+      && event.details?.operationId === intent.operationId);
+    if (existing) {
+      if (existing.details.clientMutationId !== intent.clientMutationId) {
+        throw new StateError('GitHub mutation dispatch conflicts', 'INTENT_CONFLICT');
+      }
+      return { ...existing.details, isNew: false };
+    }
+    const details = { operationId: intent.operationId, clientMutationId: intent.clientMutationId };
+    appendEvent(cwd, prNumber, { type: 'github-mutation-dispatch', summary: `Dispatch ${intent.operationId}`, details });
+    return { ...details, isNew: true };
+  });
 }
 
 function checkpointStateUnlocked({
@@ -3308,14 +3495,14 @@ export function checkpointTaskPacketBinding({
 }
 
 export function checkpointReviewRequest({
-  cwd = process.cwd(), prNumber, request, pushedHeadSha, prHeadSha, expectedRevision, event,
+  cwd = process.cwd(), prNumber, request, pushedHeadSha, prHeadSha, prState, isDraft, expectedRevision, event,
 } = {}) {
   const current = loadState(cwd, prNumber);
   if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
   const nextState = buildReviewRequestTransition(
     current,
     request,
-    gitAwareGateContext(current, { pushedHeadSha, prHeadSha }),
+    gitAwareGateContext(current, { pushedHeadSha, prHeadSha, prState, isDraft }),
   );
   if (nextState === current) return current;
   return checkpointState({
@@ -3329,6 +3516,7 @@ export function checkpointReviewOutcome({
 } = {}) {
   const current = loadState(cwd, prNumber);
   if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  if (expectedRevision !== current.revision) throw new StateError('State revision changed', 'STATE_REVISION_CONFLICT');
   const nextState = buildReviewOutcomeTransition(current, outcome);
   if (nextState === current) return current;
   return checkpointState({
@@ -3342,6 +3530,7 @@ export function checkpointVerificationEscalation({
 } = {}) {
   const current = loadState(cwd, prNumber);
   if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  if (expectedRevision !== current.revision) throw new StateError('State revision changed', 'STATE_REVISION_CONFLICT');
   const nextState = buildVerificationEscalationTransition(current, escalation);
   if (nextState === current) return current;
   return checkpointState({
@@ -3351,14 +3540,17 @@ export function checkpointVerificationEscalation({
 }
 
 export function checkpointCompletion({
-  cwd = process.cwd(), prNumber, pushedHeadSha, prHeadSha, expectedRevision, event,
+  cwd = process.cwd(), prNumber, pushedHeadSha, prHeadSha, prState, isDraft, expectedRevision, event,
 } = {}) {
   const current = loadState(cwd, prNumber);
   if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  if (expectedRevision !== current.revision) throw new StateError('State revision changed', 'STATE_REVISION_CONFLICT');
+  if (current.phase === 'complete') return current;
   const nextState = buildCompletionTransition(
     current,
-    gitAwareGateContext(current, { pushedHeadSha, prHeadSha }),
+    gitAwareGateContext(current, { pushedHeadSha, prHeadSha, prState, isDraft }),
   );
+  if (nextState === current) return current;
   return checkpointState({
     cwd, prNumber: current.prNumber, nextState, expectedRevision,
     event, transitionAuthorization: protectedTransition(nextState, 'cycle-completion'),
@@ -3370,6 +3562,7 @@ export function checkpointCiValidation({
 } = {}) {
   const current = loadState(cwd, prNumber);
   if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  if (expectedRevision !== current.revision) throw new StateError('State revision changed', 'STATE_REVISION_CONFLICT');
   const nextState = buildCiValidationTransition(current, evidence);
   if (nextState === current) return current;
   return checkpointState({

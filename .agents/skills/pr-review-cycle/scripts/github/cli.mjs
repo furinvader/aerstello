@@ -7,24 +7,26 @@ import { pathToFileURL } from 'node:url';
 import { parseOptions, UsageError, writeJson } from '../../../../../scripts/lib/cli.mjs';
 import { createGitHubReviewWorkflow, GitHubWorkflowError } from './github.mjs';
 import {
-  appendEvent,
   checkpointCiValidation,
   checkpointCompletion,
   checkpointReviewOutcome,
   checkpointReviewRequest,
   checkpointTaskCompletion,
   checkpointVerificationEscalation,
+  ensureGitHubMutationIntent,
+  claimGitHubMutationDispatch,
+  withGitHubRequestOwnerLock,
   loadState,
   readSpecialistStatus,
   stateDirectory,
 } from '../state/state.mjs';
 
 function baseUsage() {
-  return `Usage: node .agents/skills/pr-review-cycle/scripts/github/cli.mjs <command> [--pr <number>] [options]\n\nCommands:\n  status [--human]               Read live review and CI status (active PR by default)\n  refresh-threads                Record exact-head empty canonical-thread proof for a taskless cycle\n  reply-resolve --task <id>      Reply to and close one task's Codex review threads\n  verify-resolve <selection>     Verify one task or re-attest one complete threadless set\n  request [--kind <kind>]        Request the state-selected review kind\n  collect                        Collect official review evidence for the Review commit\n  collect-ci                     Collect full GitHub Actions evidence for the Review commit\n  complete                       Reconfirm every gate and mark the cycle Done\n\nRequired options:\n  --pr <number>                  Required except for status with an active state\n\nRequest options:\n  --kind discovery|verification  Optional compatibility assertion; state selects the kind\n\nTask resolution options:\n  --task <opaque-task-id>        One byte-for-byte task ID for reply-resolve or verify-resolve\n  --task-set-json <json-array>   Explicit task-ID set for verify-resolve only\n\nSuccessful commands write JSON, except status --human which writes plain English.\n`;
+  return `Usage: node .agents/skills/pr-review-cycle/scripts/github/cli.mjs <command> [--pr <number>] [options]\n\nCommands:\n  status [--human]               Read-only diagnostic live review and CI status (active PR by default)\n  advance --pr <number>          Safely checkpoint available review and CI progress\n  refresh-threads                Record exact-head empty canonical-thread proof for a taskless cycle\n  reply-resolve --task <id>      Reply to and close one task's Codex review threads\n  verify-resolve <selection>     Verify one task or re-attest one complete threadless set\n  request [--kind <kind>]        Request the state-selected review kind\n  collect                        Collect official review evidence for the Review commit\n  collect-ci                     Collect full GitHub Actions evidence for the Review commit\n  complete                       Reconfirm every gate and mark the cycle Done\n\nRequired options:\n  --pr <number>                  Required except for status with an active state\n\nRequest options:\n  --kind discovery|verification  Optional compatibility assertion; state selects the kind\n\nTask resolution options:\n  --task <opaque-task-id>        One byte-for-byte task ID for reply-resolve or verify-resolve\n  --task-set-json <json-array>   Explicit task-ID set for verify-resolve only\n\nSuccessful commands write JSON, except status --human which writes plain English.\n`;
 }
 
 export function usage() {
-  return `${baseUsage().trimEnd()}\n\nLocal task verification persists exact-current-HEAD proof; rerun it to re-attest a completed local task after HEAD drift.\n`;
+  return `${baseUsage().trimEnd()}\n\nadvance safely records available review and CI progress without requesting review or archiving. Request may return waiting while a durable GitHub dispatch is reconciled; retry it rather than posting another comment.\n\nLocal task verification persists exact-current-HEAD proof; rerun it to re-attest a completed local task after HEAD drift.\n`;
 }
 
 function titleCase(value) {
@@ -59,6 +61,8 @@ export function renderHumanStatus(status) {
     ? ` (required: ${specialistReviewers.join(', ')})` : ''}`;
   return [
     `PR: #${status.prNumber}`,
+    `PR readiness: ${status.pullRequest?.state ?? 'unknown'}${status.pullRequest?.isDraft ? ' draft' : ''}`,
+    `Live review observation: ${titleCase(status.reviewObservation?.status)}`,
     `Current commit: ${status.stateHeadSha} (${headRelation})`,
     `Phase: ${status.statePhase === 'complete' && headMatches ? 'Done'
       : status.statePhase === 'complete' ? 'Stale (recorded Done; PR head changed)'
@@ -155,15 +159,10 @@ function defaultJournal(cwd, prNumber) {
   return {
     lookupIntent,
     ensureIntent(intent) {
-      const existing = lookupIntent(intent.operationId);
-      if (existing) return existing;
-      appendEvent(cwd, prNumber, {
-        type: 'github-mutation-intent',
-        summary: `Intent ${intent.type} ${intent.operationId}`.slice(0, 1000),
-        details: intent,
-      });
-      return { ...intent, isNew: true };
+      return ensureGitHubMutationIntent(cwd, prNumber, intent);
     },
+    claimDispatch(intent, expectedRevision) { return claimGitHubMutationDispatch(cwd, prNumber, intent, expectedRevision); },
+    withRequestOwner(callback) { return withGitHubRequestOwnerLock(cwd, prNumber, callback); },
   };
 }
 
@@ -202,7 +201,7 @@ export async function runCli(argv, {
 } = {}) {
   const [command, ...args] = argv;
   if (!command || command === 'help' || command === '--help') return { help: usage() };
-  if (!['status', 'refresh-threads', 'reply-resolve', 'verify-resolve', 'request', 'collect', 'collect-ci', 'complete'].includes(command)) {
+  if (!['status', 'refresh-threads', 'reply-resolve', 'verify-resolve', 'request', 'collect', 'collect-ci', 'complete', 'advance'].includes(command)) {
     throw new UsageError(`Unknown command ${command}`);
   }
   const options = parseOptions(args, {
@@ -249,7 +248,7 @@ export async function runCli(argv, {
     state: state ?? defaultState(cwd),
     git,
     clock,
-    journal: journal ?? (['status', 'refresh-threads', 'verify-resolve'].includes(command)
+    journal: journal ?? (['status', 'advance', 'refresh-threads', 'verify-resolve'].includes(command)
       ? null : defaultJournal(cwd, prNumber)),
   });
   if (command === 'status') {
@@ -264,6 +263,7 @@ export async function runCli(argv, {
   if (command === 'request') return workflow.request(prNumber, options.kind);
   if (command === 'collect') return workflow.collect(prNumber);
   if (command === 'collect-ci') return workflow.collectCi(prNumber);
+  if (command === 'advance') return workflow.advance(prNumber);
   return workflow.complete(prNumber);
 }
 

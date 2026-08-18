@@ -1304,7 +1304,7 @@ function reviewRequestStateGate(state) {
   return { kind: nextReviewKind(state), reasons };
 }
 
-function validateExternalHeads(state, external, reasons) {
+function validateExternalHeads(state, external, reasons, { promotionPreflight = false } = {}) {
   const head = state?.currentIntegrationHeadSha;
   for (const [label, field] of [
     ['fresh local HEAD', 'localHeadSha'],
@@ -1315,6 +1315,11 @@ function validateExternalHeads(state, external, reasons) {
     if (reason) reasons.push(reason);
   }
   if (external?.localDirty !== false) reasons.push('fresh integration checkout must be clean');
+  if (external?.prState !== 'OPEN') reasons.push('live pull request must be OPEN');
+  if (typeof external?.isDraft !== 'boolean') reasons.push('live pull request draft evidence is required');
+  else if (promotionPreflight ? external.isDraft !== true : external.isDraft !== false) {
+    reasons.push(promotionPreflight ? 'promotion preflight requires a live draft pull request' : 'live pull request must not be a draft');
+  }
   if (typeof external?.isAncestor !== 'function') {
     reasons.push('a Git-aware integrated-commit ancestry check is required');
   } else {
@@ -1327,9 +1332,9 @@ function validateExternalHeads(state, external, reasons) {
   }
 }
 
-export function reviewRequestGate(state, external) {
+export function reviewRequestGate(state, external, options = {}) {
   const { kind, reasons } = reviewRequestStateGate(state);
-  validateExternalHeads(state, external, reasons);
+  validateExternalHeads(state, external, reasons, options);
   return { allowed: reasons.length === 0, kind: reasons.length === 0 ? kind : null, reasons };
 }
 

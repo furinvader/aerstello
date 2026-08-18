@@ -61,6 +61,7 @@ Use the npm façades directly from the repository root:
 ```bash
 npm run review:state -- show
 npm run review:github -- status --human
+npm run review:github -- advance --pr 123
 npm run review:worktree -- inspect --pr 123 --task finding-a
 ```
 
@@ -169,6 +170,34 @@ tests use explicit stable selectors and default to `tablet-chromium`; add a
 project only when responsive, touch, installation, cross-device, or
 browser-specific behavior needs it. Unknown related-test selection is a
 planning error, never permission to fall back to the full local suite.
+
+Use `advance --pr <number>` for polling: it records a uniquely stable review
+outcome, authoritative CI result, and Done transition only when every live gate
+still applies. `status` is deliberately read-only. New PR preparation (issue
+25) must create a ready, non-draft pull request; request-time draft promotion is
+only a defensive recovery boundary.
+
+`status` is diagnostic: it reports volatile `pullRequest.state` and `isDraft`,
+the unchanged durable `codexReview`, and one `reviewObservation` of
+`not-applicable`, `waiting`, `collectable`, `ambiguous`, or `stale` with exact
+evidence identities. `advance` is the operational poller. It waits without a
+write for review or missing/pending CI, stops in triage for findings, preserves
+verification escalation, records failed CI, and reaches Done only after clean
+review and CI are repeatedly re-proven. It never requests review, resolves
+findings, or archives.
+
+`request` returns `pullRequestReadiness` as `already-ready`, `marked-ready`,
+or `recovered-ready`. Draft promotion proves the ordinary gates, journals
+`ready:<pr>:<pr-node>:<head>`, rereads OPEN/non-draft PR, HEAD, roots, and
+revision before posting the request, and recovers that intent after a lost
+response. This volatile readiness is not a review-state schema field.
+
+`advance` is the monitoring command: no response and missing/pending CI wait;
+findings stop in triage; verification ambiguity escalates while discovery
+ambiguity fails closed; failed CI is recorded; clean plus green CI records
+outcome, CI, and Done; Done is idempotent and never archives. It repeatedly
+re-proves OPEN/non-draft state, HEAD, request anchor, roots, CI, and revision
+between writes, and never requests another review or resolves findings.
 
 When collecting an exact-head canonical `COMMENTED` review submission, treat it
 as clean only if its body is a string whose trimmed content is empty and no
@@ -331,18 +360,22 @@ head, the no-open-thread check, and passed exact-current-HEAD coverage for every
 completed local task must all refer to the same Review commit. Review requests
 use that same local-proof gate.
 
-## Read the current status
+## Diagnostic status and operational monitoring
 
 Run:
 
 ```bash
 npm run review:status
+npm run review:github -- advance --pr 123
 ```
 
-The output translates machine state into plain English. For example:
+`review:status` is read-only diagnostic output. Use `advance` as the operational
+poller. The human diagnostic output translates machine state into plain English:
 
 ```text
 PR: #24
+PR readiness: OPEN
+Live review observation: Waiting
 Current commit: abc1234 (matches PR head)
 Phase: Fixing
 Codex review: Findings need resolution
