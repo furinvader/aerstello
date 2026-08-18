@@ -2324,6 +2324,31 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     return response;
   }
 
+  async function assertFindingsLiveEvidence(state, live) {
+    if (state.reviewOutcome?.outcome !== 'findings'
+        || state.reviewRequest?.headSha !== state.currentIntegrationHeadSha
+        || state.reviewOutcome.headSha !== state.currentIntegrationHeadSha) {
+      throw new GitHubWorkflowError(
+        'Recorded findings do not apply to the current integration HEAD',
+        'REVIEW_COLLECTION_STALE',
+      );
+    }
+    await assertMutationReady({ state, git }, live);
+    assertRecordedRequestComment(state, live);
+    const response = await classifyPendingReviewResponse(
+      { ...state, reviewOutcome: null }, live, git,
+    );
+    if (response.status !== 'supported' || response.evidence.outcome !== 'findings'
+        || JSON.stringify(response.evidence) !== JSON.stringify(state.reviewOutcome)) {
+      throw new GitHubWorkflowError(
+        'Recorded canonical findings evidence changed before triage',
+        'REVIEW_COLLECTION_STALE',
+      );
+    }
+    await assertCurrent(state);
+    return response;
+  }
+
   async function revalidateCompletedState(active) {
     if (active.phase !== 'complete' || active.ciValidationStatus?.status !== 'passed') {
       throw new GitHubWorkflowError('Durable completion evidence is incomplete', 'COMPLETION_NOT_READY');
@@ -2421,6 +2446,17 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       }
     }
     if (active.reviewOutcome?.outcome === 'findings') {
+      if (active.reviewRequest?.headSha !== active.currentIntegrationHeadSha
+          || active.reviewOutcome.headSha !== active.currentIntegrationHeadSha) {
+        throw new GitHubWorkflowError(
+          'Recorded findings do not apply to the current integration HEAD',
+          'REVIEW_COLLECTION_STALE',
+        );
+      }
+      if (initialLive.metadata.headRefOid !== active.currentIntegrationHeadSha) {
+        return result('waiting', true, 'Review findings are stale at the live PR head; reconcile before triage.');
+      }
+      await assertFindingsLiveEvidence(active, initialLive);
       return result('triage', false, active.nextAction);
     }
     const live = await readLiveSnapshot(client, active, { reactionsFor: active.reviewRequest?.id ?? null });
@@ -2575,10 +2611,14 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
 
   async function request(prNumber, kind) {
     if (!journal?.withRequestOwner) return requestUnlocked(prNumber, kind);
+    let requestOwnerEntered = false;
     try {
-      return await journal.withRequestOwner(() => requestUnlocked(prNumber, kind));
+      return await journal.withRequestOwner(() => {
+        requestOwnerEntered = true;
+        return requestUnlocked(prNumber, kind);
+      });
     } catch (error) {
-      if (error?.code !== 'STATE_LOCK_TIMEOUT') throw error;
+      if (error?.code !== 'STATE_LOCK_TIMEOUT' || requestOwnerEntered) throw error;
       const active = await load(prNumber);
       const live = await readLiveSnapshot(client, active);
       if (live.metadata.state !== 'OPEN') throw new GitHubWorkflowError('Pull request is closed or merged', 'PR_NOT_OPEN');

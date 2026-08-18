@@ -879,6 +879,54 @@ test('request owner-lock timeout keeps a live draft poll-safe without claiming r
   }
 });
 
+test('request propagates state-lock timeouts after request-owner callback entry', async () => {
+  for (const failurePoint of ['ensureIntent', 'claimDispatch']) {
+    const client = new FakeClient();
+    const state = fakeState(readyState());
+    const journal = fakeJournal(client.events);
+    journal.withRequestOwner = async (callback) => callback();
+    const timeout = new Error(`${failurePoint} state lock is busy`);
+    timeout.code = 'STATE_LOCK_TIMEOUT';
+    journal[failurePoint] = async () => { throw timeout; };
+    const api = createGitHubReviewWorkflow({
+      client, state, git: fakeGit(), clock: { now: () => AT }, journal,
+    });
+    await assert.rejects(() => api.request(2), (error) => error === timeout);
+    assert.equal(client.calls.some((call) => call.name === 'AddReviewRequest'), false);
+    assert.equal(state.calls.length, 0);
+  }
+});
+
+test('request preserves a checkpoint state-lock timeout and recovers its one live comment', async () => {
+  const client = new FakeClient();
+  const state = fakeState(readyState());
+  const journal = fakeJournal(client.events);
+  journal.withRequestOwner = async (callback) => callback();
+  const checkpointReviewRequest = state.checkpointReviewRequest.bind(state);
+  const timeout = new Error('checkpoint state lock is busy');
+  timeout.code = 'STATE_LOCK_TIMEOUT';
+  let failCheckpoint = true;
+  state.checkpointReviewRequest = async (input) => {
+    if (failCheckpoint) {
+      failCheckpoint = false;
+      throw timeout;
+    }
+    return checkpointReviewRequest(input);
+  };
+  const api = createGitHubReviewWorkflow({
+    client, state, git: fakeGit(), clock: { now: () => AT }, journal,
+  });
+  await assert.rejects(() => api.request(2), (error) => error === timeout);
+  assert.equal(client.calls.filter((call) => call.name === 'AddReviewRequest').length, 1);
+  assert.equal(state.calls.length, 0);
+
+  const recovered = await api.request(2);
+  assert.equal(recovered.recovered, true);
+  assert.equal(client.calls.filter((call) => call.name === 'AddReviewRequest').length, 1);
+  assert.equal(client.comments.filter((comment) => comment.body === '@codex review').length, 1);
+  assert.equal(state.calls.filter((call) => call.name === 'checkpointReviewRequest').length, 1);
+});
+
 test('CLI returns stable uncertainty for an already-dispatched request without replay', async () => {
   const client = new FakeClient();
   const state = fakeState(readyState());
@@ -1126,20 +1174,85 @@ test('unmatched canonical roots make clean reaction and review evidence ambiguou
   }
 });
 
-test('advance is waiting-safe and stops an already-recorded findings outcome before CI', async () => {
+test('advance is waiting-safe before a canonical response exists', async () => {
   const waiting = workflow(stateFixture());
   const waitingResult = await waiting.api.advance(2);
   assert.deepEqual(waitingResult.performedTransitions, []);
   assert.equal(waitingResult.terminal, 'waiting');
   assert.equal(waitingResult.waiting, true);
   assert.equal(waiting.state.calls.length, 0);
+});
 
-  const findings = workflow(findingsState());
+test('advance revalidates durable findings before returning triage', async () => {
+  const exactClient = new FakeClient();
+  exactClient.reviews.push(canonicalReview({ body: 'Canonical finding.' }));
+  const findings = workflow(findingsState(), exactClient);
   const findingsResult = await findings.api.advance(2);
   assert.equal(findingsResult.terminal, 'triage');
   assert.equal(findingsResult.waiting, false);
   assert.deepEqual(findingsResult.performedTransitions, []);
   assert.equal(findings.client.calls.some((call) => call.name === 'PullRequestChecks'), false);
+  assert.equal(findings.state.calls.length, 0);
+
+  const driftClient = new FakeClient({ metadata: { headRefOid: OTHER_HEAD } });
+  driftClient.reviews.push(canonicalReview({ body: 'Canonical finding.' }));
+  const drift = workflow(findingsState(), driftClient);
+  const waiting = await drift.api.advance(2);
+  assert.equal(waiting.terminal, 'waiting');
+  assert.equal(waiting.waiting, true);
+  assert.match(waiting.nextAction, /stale at the live PR head; reconcile before triage/u);
+  assert.equal(drift.client.calls.some((call) => call.name === 'PullRequestChecks'), false);
+  assert.equal(drift.state.calls.length, 0);
+
+  const editedClient = new FakeClient();
+  editedClient.reviews.push(canonicalReview({ body: 'Canonical finding.' }));
+  const edited = workflow(findingsState(), editedClient);
+  edited.client.comments.find((comment) => comment.id === 'IC_request').body = '@codex review edited';
+  await assert.rejects(() => edited.api.advance(2), { code: 'REQUEST_PROOF_STALE' });
+
+  const missing = workflow(findingsState());
+  await assert.rejects(() => missing.api.advance(2), { code: 'REVIEW_COLLECTION_STALE' });
+
+  const ambiguousClient = new FakeClient();
+  ambiguousClient.reviews.push(
+    canonicalReview({ body: 'Canonical finding.' }),
+    canonicalReview({
+      id: 'PRR_duplicate', databaseId: 202,
+      url: 'https://github.com/example/aerstello/pull/2#pullrequestreview-202',
+      body: 'Second canonical finding.',
+    }),
+  );
+  const ambiguous = workflow(findingsState(), ambiguousClient);
+  await assert.rejects(() => ambiguous.api.advance(2), { code: 'REVIEW_COLLECTION_STALE' });
+
+  const rootClient = new FakeClient();
+  rootClient.reviews.push(canonicalReview({ body: 'Canonical finding.' }));
+  addThread(rootClient, { id: 'THREAD_unmatched' });
+  const unmatchedRoot = workflow(findingsState(), rootClient);
+  await assert.rejects(() => unmatchedRoot.api.advance(2), { code: 'REVIEW_COLLECTION_STALE' });
+
+  for (const git of [
+    fakeGit({ snapshot: async () => ({ headSha: HEAD, dirty: true }) }),
+    fakeGit({ snapshot: async () => ({ headSha: OTHER_HEAD, dirty: false }) }),
+    fakeGit({ pushedHead: async () => OTHER_HEAD }),
+  ]) {
+    const gitDriftClient = new FakeClient();
+    gitDriftClient.reviews.push(canonicalReview({ body: 'Canonical finding.' }));
+    const gitDrift = workflow(findingsState(), gitDriftClient, { git });
+    await assert.rejects(() => gitDrift.api.advance(2), { code: 'MUTATION_NOT_READY' });
+  }
+
+  const revisionClient = new FakeClient();
+  revisionClient.reviews.push(canonicalReview({ body: 'Canonical finding.' }));
+  const revisionRace = workflow(findingsState(), revisionClient);
+  const load = revisionRace.state.load.bind(revisionRace.state);
+  let loads = 0;
+  revisionRace.state.load = async () => {
+    loads += 1;
+    if (loads === 2) revisionRace.state.advanceRevisionForTest();
+    return load();
+  };
+  await assert.rejects(() => revisionRace.api.advance(2), { code: 'STATE_REVISION_CHANGED' });
 });
 
 test('advance escalates verification ambiguity, rejects discovery ambiguity, and blocks CI after a late root', async () => {
