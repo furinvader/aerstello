@@ -10,6 +10,10 @@ config_file = "agents/review-fix-worker.toml"
 description = "Read-only verifier for integrated Aerstello PR-review fixes."
 config_file = "agents/integration-verifier.toml"
 
+[agents.development_integration_verifier]
+description = "Read-only final verifier for an exact Aerstello change-development HEAD."
+config_file = "agents/development-integration-verifier.toml"
+
 [agents.behavior_mapper]
 description = "Read-only Aerstello behavior and related-test planning helper."
 config_file = "agents/behavior-mapper.toml"

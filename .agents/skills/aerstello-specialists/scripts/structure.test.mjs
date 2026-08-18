@@ -31,6 +31,7 @@ const EXPECTED_EXTERNAL_ADAPTERS = [
 ];
 
 const EXPECTED_WORKFLOW_CONSUMERS = [
+  { path: '.codex/agents/development-integration-verifier.toml', targets: ['references/reviewer-contracts.md'] },
   { path: '.codex/agents/implementation-worker.toml', targets: ['registry.json'] },
   { path: '.codex/agents/integration-verifier.toml', targets: ['references/reviewer-contracts.md'] },
   { path: '.codex/agents/review-fix-worker.toml', targets: ['registry.json'] },
@@ -149,6 +150,13 @@ test('the PR integration verifier remains a read-only workflow consumer', () => 
     path === '.codex/agents/integration-verifier.toml'));
 });
 
+test('the development integration verifier is a distinct read-only workflow consumer', () => {
+  assertReadOnlyAgent('.codex/agents/development-integration-verifier.toml', 'development_integration_verifier');
+  assert.ok(EXPECTED_WORKFLOW_CONSUMERS.some(({ path }) =>
+    path === '.codex/agents/development-integration-verifier.toml'));
+  assert.equal(readFileSync(registryPath, 'utf8').includes('development_integration_verifier'), false);
+});
+
 test('the implementation worker consumes one profile as guidance without lifecycle authority', () => {
   const source = readFileSync(join(repositoryRoot(), '.codex/agents/implementation-worker.toml'), 'utf8');
   assert.match(source, /^name = "implementation_worker"$/mu);
@@ -173,6 +181,7 @@ test('hook role boundary and four-thread cap remain authoritative', () => {
   const registrations = [
     ['review_fix_worker', 'agents/review-fix-worker.toml'],
     ['integration_verifier', 'agents/integration-verifier.toml'],
+    ['development_integration_verifier', 'agents/development-integration-verifier.toml'],
     ['behavior_mapper', 'agents/behavior-mapper.toml'],
     ['security_reviewer', 'agents/security-reviewer.toml'],
     ['offline_realtime_reviewer', 'agents/offline-realtime-reviewer.toml'],

@@ -9,7 +9,14 @@
     "references/implementation.md",
     "references/planning.md",
     "references/state-and-recovery.md",
+    "references/verification.md",
+    "schemas/development-finding-disposition.schema.json",
+    "schemas/development-specialist-result.schema.json",
     "schemas/development-state.schema.json",
+    "schemas/development-validation-plan.schema.json",
+    "schemas/development-validation-result.schema.json",
+    "schemas/development-verification-result.schema.json",
+    "schemas/development-verifier-context.schema.json",
     "schemas/implementation-plan.schema.json",
     "schemas/implementation-result.schema.json",
     "schemas/implementation-task.schema.json",
@@ -36,11 +43,22 @@
     "scripts/state/state.mjs",
     "scripts/state/state.test.mjs",
     "scripts/structure.test.mjs",
+    "scripts/verification/contracts.mjs",
+    "scripts/verification/contracts.test.mjs",
     "scripts/worktree/cli.mjs",
     "scripts/worktree/worktree.mjs",
     "scripts/worktree/worktree.test.mjs"
   ],
   "permittedExternalAdapters": [
+    {
+      "path": ".codex/agents/development-integration-verifier.toml",
+      "targets": [
+        "README.md",
+        "references/verification.md",
+        "schemas/development-verification-result.schema.json",
+        "schemas/development-verifier-context.schema.json"
+      ]
+    },
     {
       "path": ".codex/agents/implementation-worker.toml",
       "targets": [
