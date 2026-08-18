@@ -87,14 +87,16 @@ matched by a validation's selectors, `@browser-webkit` requires
 required project must be present, while extra projects are allowed. Existing
 selectors are checked in the exact task-base tree, and planned selectors plus
 their browser-project union are re-evaluated in the exact worker tree during
-acceptance and durable replay. Any packet with related-E2E validation first
-proves the whole exact-tree feature catalog is valid: every `Scenario` and
+acceptance and durable replay. A packet carrying related-E2E selector validation
+first proves the whole exact-tree feature catalog is valid: every `Scenario` and
 `Scenario Outline` must have exactly one directly attached stable `@id-*`,
 including scenarios unrelated to the packet selectors. Feature-level tags may
 still be inherited, but do not satisfy that direct stable-ID requirement. The
 same whole-catalog proof runs at the worker commit before result evidence is
 accepted and is repeated from the immutable base and worker commits during
-durable replay; unit-only packets do not depend on feature-catalog validity.
+durable replay. Packets without related-E2E selectors remain independent of
+unrelated feature-catalog validity; this includes unit-only packets and valid
+non-E2E system validations whose selector and project metadata are both empty.
 Unknown, unsafe, duplicate,
 unused, unowned, forbidden, or unrealized declarations fail closed. Packets
 without the field retain the original contract.
