@@ -94,9 +94,13 @@ whose path ownership overlaps or whose produced/consumed artifacts conflict.
 Repository-root and nested `package.json` or `package-lock.json` paths are shared
 surfaces. Scheduling also transiently reads every eligible receipt-bound packet
 in accepted-plan order and admits only the first task that declares a given
-planned E2E selector; a later duplicate owner stays bound for a later wave while
-tasks with distinct selectors may run together. Selector ownership is not added
-to the durable execution summary or schemas.
+planned E2E selector; a later duplicate owner stays bound only until the first
+owner integrates, while tasks with distinct selectors may run together. That
+integration advances central HEAD, so the duplicate owner's old-base packet is
+then stale: scheduling rejects it with `TASK_BASE_STALE`, and it must be
+explicitly rejected and replaced through the amendment/replan flow before the
+replacement is bound at the advanced central HEAD. Selector ownership is not
+added to the durable execution summary or schemas.
 Every task in a wave shares the recorded clean central base and must already
 have a complete receipt-valid active worktree manifest; an interrupted creation
 remains bound until `change:worktree recover` completes it. Start each scheduled

@@ -463,17 +463,51 @@ test('wave scheduling serializes duplicate planned selectors while admitting dis
     selectorPacket('later-selector-owner', 'id-shared-flow', 'specs/features/later.feature'),
     selectorPacket('distinct-selector-owner', 'id-distinct-flow', 'specs/features/distinct.feature'),
   ];
+  const workers = new Map();
   for (const packet of packets) {
     context.state = bindTask({ cwd: context.cwd, changeId: context.changeId, packet,
       expectedRevision: context.state.revision });
-    createWorker(context, packet);
+    workers.set(packet.taskId, createWorker(context, packet));
   }
 
-  context.state = scheduleWave({ cwd: context.cwd, changeId: context.changeId,
-    expectedRevision: context.state.revision });
+  startWave(context, packets);
   assert.deepEqual(context.state.execution.activeWave, ['first-selector-owner', 'distinct-selector-owner']);
   assert.equal(context.state.execution.tasks.find(({ id }) => id === 'later-selector-owner').status, 'bound');
   assert.equal(context.state.execution.tasks.every((entry) => !Object.hasOwn(entry, 'plannedE2ESelectors')), true);
+
+  const firstPacket = packets[0]; const distinctPacket = packets[2];
+  const firstCommit = commit(workers.get(firstPacket.taskId).path, {
+    'specs/features/first.feature': 'Feature: First\n\n  @id-shared-flow\n  Scenario: First owner\n',
+  }, 'test: add first selector owner');
+  const distinctCommit = commit(workers.get(distinctPacket.taskId).path, {
+    'specs/features/distinct.feature': 'Feature: Distinct\n\n  @id-distinct-flow\n  Scenario: Distinct owner\n',
+  }, 'test: add distinct selector owner');
+  accept(context, firstPacket, workers.get(firstPacket.taskId), firstCommit, ['specs/features/first.feature']);
+  accept(context, distinctPacket, workers.get(distinctPacket.taskId), distinctCommit,
+    ['specs/features/distinct.feature']);
+  context.state = integrateTask({ cwd: context.cwd, changeId: context.changeId,
+    taskId: firstPacket.taskId, expectedRevision: context.state.revision });
+  assert.notEqual(context.state.git.headSha, firstPacket.taskBaseSha);
+  context.state = integrateTask({ cwd: context.cwd, changeId: context.changeId,
+    taskId: distinctPacket.taskId, expectedRevision: context.state.revision });
+
+  const staleRevision = context.state.revision;
+  assert.throws(() => scheduleWave({ cwd: context.cwd, changeId: context.changeId,
+    expectedRevision: staleRevision }),
+  (error) => error instanceof StateError && error.code === 'TASK_BASE_STALE');
+  assert.equal(loadState(context.cwd).revision, staleRevision);
+  assert.throws(() => startTask({ cwd: context.cwd, changeId: context.changeId,
+    taskId: 'later-selector-owner', workerId: 'worker-later-selector-owner',
+    expectedRevision: staleRevision }),
+  (error) => error instanceof StateError && error.code === 'TASK_STATE_CONFLICT');
+  assert.equal(loadState(context.cwd).revision, staleRevision);
+
+  context.state = rejectTask({ cwd: context.cwd, changeId: context.changeId,
+    taskId: 'later-selector-owner', reason: 'First selector owner integration made the duplicate packet stale.',
+    expectedRevision: staleRevision });
+  assert.equal(context.state.execution.tasks.find(({ id }) => id === 'later-selector-owner').status, 'rejected');
+  assert.match(context.state.nextAction, /rejecting\/replanning/u);
+  assert.equal(validateState({ cwd: context.cwd }).valid, true);
 });
 
 test('implemented results reject missing, non-descendant, and empty worker commits without advancing durable state', async () => {
