@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import { loadRegistry, routeSpecialists } from '../../../aerstello-specialists/scripts/validate-registry.mjs';
 import { commit, createRepository, git } from '../../../../../tests/support/git-fixtures.mjs';
-import { implementationTaskDigest } from '../implementation/contracts.mjs';
+import { implementationTaskDigest, validateImplementationTask } from '../implementation/contracts.mjs';
 import {
   implementationTaskPacketPath,
   activePointerPath,
@@ -20,7 +20,7 @@ import {
   implementationWorktreeTombstonePath,
 } from '../paths.mjs';
 import {
-  acceptPlan, acceptResult, amendPlan, archiveState, bindTask, initializeState, integrateTask, loadState, rejectTask, scheduleWave, startTask, StateError,
+  acceptPlan, acceptResult, amendPlan, archiveState, bindTask, finalizeIntegration, initializeState, integrateTask, loadState, rejectTask, scheduleWave, startTask, StateError,
 } from '../state/state.mjs';
 import {
   createTaskWorktree, inspectTaskWorktree, recoverTaskWorktree, removeTaskWorktree,
@@ -124,6 +124,18 @@ test('canonical path helpers keep task evidence and worktrees below the shared r
   assert.equal(implementationWorktreeManifestPath(context.cwd, 'issue-23', context.taskId),
     join(implementationWorktreeRoot(context.cwd), 'manifests', 'issue-23', `${context.taskId}.json`));
   assert.ok(implementationTaskPacketPath(context.cwd, 'issue-23', context.taskId, 1).endsWith('/implementation/tasks/worker-layer/0001.json'));
+});
+
+test('receipt-bound historical packet remains removable and finalizable after live registry policy changes', async () => {
+  const context = await boundRepository('registry-history');
+  const worktree = create(context);
+  const changedRegistry = structuredClone(registry);
+  changedRegistry.profiles.find(({ id }) => id === 'ops-workflow').supportedRiskTags = [];
+  assert.match(validateImplementationTask(context.packet, { registry: changedRegistry }).join('\n'), /current specialist registry|does not support risk tag/u);
+  const terminal = authorizeNoChangeRemoval(context, worktree);
+  removeTaskWorktree({ cwd: context.cwd, changeId: 'issue-23', taskId: context.taskId });
+  const finalized = finalizeIntegration({ cwd: context.cwd, changeId: 'issue-23', expectedRevision: terminal.revision });
+  assert.equal(finalized.phase, 'integrated');
 });
 
 test('creation binds receipt-valid active state, packet, exact full base, and active manifest', async () => {

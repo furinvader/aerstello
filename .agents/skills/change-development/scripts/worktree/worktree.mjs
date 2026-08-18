@@ -3,7 +3,7 @@ import { relative, resolve } from 'node:path';
 
 import { gitText, resolveCommit, runGit } from '../../../../../scripts/lib/git.mjs';
 import { digestJson } from '../contracts/contracts.mjs';
-import { implementationTaskDigest, validateImplementationTask } from '../implementation/contracts.mjs';
+import { implementationTaskDigest, validateImplementationTaskStructure } from '../implementation/contracts.mjs';
 import {
   implementationTaskPacketPath,
   implementationWorktreeCreationIntentPath,
@@ -166,7 +166,7 @@ function verifyApplicableTask(cwd, identity, allowedStatuses, errorCode, require
     implementationTaskPacketPath(cwd, identity.changeId, identity.taskId, task.binding),
     `implementation packet ${identity.taskId}`,
   );
-  const errors = validateImplementationTask(received.value);
+  const errors = validateImplementationTaskStructure(received.value);
   if (errors.length > 0 || received.value.changeId !== identity.changeId
       || received.value.taskId !== identity.taskId || received.value.taskBaseSha !== identity.baseSha
       || received.value.planDigest !== state.plan?.effectiveDigest

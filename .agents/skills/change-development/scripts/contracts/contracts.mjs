@@ -48,7 +48,6 @@ const validateStateSchema = ajv.compile(developmentStateSchema);
 const validateRfc3339DateTime = ajv.compile({ type: 'string', format: 'date-time' });
 const repositoryPathPattern = new RegExp(implementationPlanSchema.$defs.repositoryPath.pattern, 'u');
 const anticipatedPathPattern = new RegExp(implementationPlanSchema.$defs.anticipatedPath.pattern, 'u');
-const registry = loadRegistry();
 
 function sortedJson(value, seen = new Set()) {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value);
@@ -157,7 +156,7 @@ function validateIds(errors, records, label) {
   for (const id of duplicates(records.map((entry) => entry.id))) errors.push(`duplicate ${label} ID: ${id}`);
 }
 
-function computedRoute(metadata, errors, label) {
+function computedRoute(metadata, errors, label, registry) {
   const specializationErrors = validateSpecialization(metadata, registry);
   errors.push(...specializationErrors.map((error) => `${label}: ${error}`));
   if (specializationErrors.length > 0) return null;
@@ -174,8 +173,8 @@ function computedRoute(metadata, errors, label) {
   }
 }
 
-function validateRouteAndEvidence(metadata, evidence, planningSha, planRevision, errors, label) {
-  const route = computedRoute(metadata, errors, label);
+function validateRouteAndEvidence(metadata, evidence, planningSha, planRevision, errors, label, registry) {
+  const route = computedRoute(metadata, errors, label, registry);
   if (!route) return;
   if (!sameJson(metadata.route, route)) errors.push(`${label}.route does not equal the canonical specialist route`);
   if (metadata.relatedTestSelectionUncertain) errors.push(`${label} has unresolved related-test selection`);
@@ -385,7 +384,7 @@ function validateSourceObservationContext(plan, sourceObservation, errors) {
   }
 }
 
-function validateSpecialistAggregate(plan, planningEvidence, errors) {
+function validateSpecialistAggregate(plan, planningEvidence, errors, registry) {
   // A single registry profile cannot necessarily represent the union of a
   // split workflow + product DAG. Treat global metadata as the change's own
   // independently validated classification, then derive final requirements
@@ -399,7 +398,7 @@ function validateSpecialistAggregate(plan, planningEvidence, errors) {
   const persistedPlanningHelpers = new Set();
   const persistedRiskReviewers = new Set();
   for (const [label, metadata] of metadataEntries) {
-    const route = computedRoute(metadata, [], label);
+    const route = computedRoute(metadata, [], label, registry);
     for (const { id } of route?.planningHelpers ?? []) requiredPlanningHelpers.add(id);
     for (const { id } of route?.riskReviewers ?? []) requiredRiskReviewers.add(id);
     for (const { id } of metadata.route.planningHelpers) persistedPlanningHelpers.add(id);
@@ -414,7 +413,9 @@ function validateSpecialistAggregate(plan, planningEvidence, errors) {
   }
 }
 
-export function validateImplementationPlan(value, { planningEvidence = [], sourceObservation, readPlanningFile } = {}) {
+export function validateImplementationPlan(value, {
+  planningEvidence = [], sourceObservation, readPlanningFile, registry = loadRegistry(),
+} = {}) {
   const errors = schemaErrors(validatePlanSchema, value);
   if (errors.length > 0) return errors;
   validatePlanningEvidence(planningEvidence, errors);
@@ -440,11 +441,11 @@ export function validateImplementationPlan(value, { planningEvidence = [], sourc
   const taskIds = new Set(value.tasks.map(({ id }) => id));
   const byId = new Map(value.tasks.map((task) => [task.id, task]));
 
-  validateRouteAndEvidence(value.specialization, planningEvidence, value.planning.planningSha, value.planRevision, errors, '$.specialization');
-  validateSpecialistAggregate(value, planningEvidence, errors);
+  validateRouteAndEvidence(value.specialization, planningEvidence, value.planning.planningSha, value.planRevision, errors, '$.specialization', registry);
+  validateSpecialistAggregate(value, planningEvidence, errors, registry);
   for (const task of value.tasks) {
     const label = `task ${task.id}`;
-    validateRouteAndEvidence(task.specialization, planningEvidence, value.planning.planningSha, value.planRevision, errors, label);
+    validateRouteAndEvidence(task.specialization, planningEvidence, value.planning.planningSha, value.planRevision, errors, label, registry);
     for (const [ids, known, kind] of [[task.criterionIds, criterionIds, 'criterion'], [task.decisionIds, decisionIds, 'decision'], [task.scenarioIds, scenarioIds, 'scenario'], [task.checklistItemIds, checklistIds, 'checklist item']]) {
       for (const id of ids) if (!known.has(id)) errors.push(`${label} references unknown ${kind} ${id}`);
     }
@@ -515,8 +516,10 @@ export function validateImplementationPlan(value, { planningEvidence = [], sourc
   return [...new Set(errors)];
 }
 
-export function planReadiness(value, { planningEvidence = [], sourceObservation, readPlanningFile } = {}) {
-  const errors = validateImplementationPlan(value, { planningEvidence, sourceObservation, readPlanningFile });
+export function planReadiness(value, {
+  planningEvidence = [], sourceObservation, readPlanningFile, registry = loadRegistry(),
+} = {}) {
+  const errors = validateImplementationPlan(value, { planningEvidence, sourceObservation, readPlanningFile, registry });
   if (errors.length === 0) {
     for (const decision of value.decisions) if (decision.status !== 'resolved') errors.push(`decision ${decision.id} is ${decision.status}`);
     for (const mapping of value.checklistMappings) {

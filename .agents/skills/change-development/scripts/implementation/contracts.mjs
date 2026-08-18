@@ -20,7 +20,6 @@ const ajv = new Ajv2020({ allErrors: true, strict: true });
 addFormats(ajv);
 const validateTaskSchema = ajv.compile(implementationTaskSchema);
 const validateResultSchema = ajv.compile(implementationResultSchema);
-const registry = loadRegistry();
 const RAW_FIELD_PATTERN = /^(?:raw[_-]?(?:log|diff|output)|logs?|full[_-]?(?:diff|transcript)|stack(?:trace)?|transcript)$/iu;
 const SAFE_PATH_SEGMENT = /^[^/\\\0*?\[\]{}]+$/u;
 const SAFE_SELECTOR = /^@?[a-z0-9]+(?:-[a-z0-9]+)*$/u;
@@ -199,29 +198,22 @@ function validateRequiredValidation(value, errors, packet) {
   }
 }
 
-export function validateImplementationTask(value) {
+export function validateImplementationTaskStructure(value) {
   const errors = schemaErrors(validateTaskSchema, value);
   findRawFields(value, '$', errors);
   if (errors.length > 0) return [...new Set(errors)];
-  errors.push(...validateSpecialization({ specialization: value.specialization,
-    affectedAreas: value.affectedAreas, riskTags: value.riskTags }, registry)
-    .map((error) => `$.specialization: ${error}`));
-  const route = routeSpecialists({ specialization: value.specialization, riskTags: value.riskTags,
-    browserVisible: value.planningSignals.browserVisible,
-    testSelectionUncertain: value.planningSignals.relatedTestSelectionUncertain }, registry);
-  if (!sameJson(value.specialistRoute, route)) errors.push('$.specialistRoute must equal the canonical specialist route');
   if (value.planningSignals.relatedTestSelectionUncertain) errors.push('$.planningSignals.relatedTestSelectionUncertain must be resolved before binding');
-  const needsMapper = route.planningHelpers.some(({ id }) => id === 'behavior_mapper');
+  const needsMapper = value.specialistRoute.planningHelpers.some(({ id }) => id === 'behavior_mapper');
   if (needsMapper) {
-    if (value.behaviorMapperEvidence === null) errors.push('$.behaviorMapperEvidence is required by the specialist route');
+    if (value.behaviorMapperEvidence === null) errors.push('$.behaviorMapperEvidence is required by the receipt-bound specialist route');
     else {
-      errors.push(...validateSpecialistEvidence({ evidence: [value.behaviorMapperEvidence], route,
+      errors.push(...validateSpecialistEvidence({ evidence: [value.behaviorMapperEvidence], route: value.specialistRoute,
         subjectSha: value.planningSha, phase: 'planning' }).map((error) => `$.behaviorMapperEvidence: ${error}`));
       if (value.behaviorMapperEvidence.planRevision !== value.planRevision) errors.push('$.behaviorMapperEvidence.planRevision must equal the packet planRevision');
       if (value.behaviorMapperEvidence.status !== 'clean') errors.push('$.behaviorMapperEvidence.status must be clean before binding');
       if (value.behaviorMapperEvidence.status === 'clean' && value.behaviorMapperEvidence.findings.length !== 0) errors.push('$.behaviorMapperEvidence.findings must be empty when status is clean');
     }
-  } else if (value.behaviorMapperEvidence !== null) errors.push('$.behaviorMapperEvidence must be null when the specialist route does not require behavior_mapper');
+  } else if (value.behaviorMapperEvidence !== null) errors.push('$.behaviorMapperEvidence must be null when the receipt-bound specialist route does not require behavior_mapper');
   if (!sameJson(value.decisionContext.map(({ id }) => id), value.decisionIds)) {
     errors.push('$.decisionContext IDs must exactly match decisionIds');
   }
@@ -229,6 +221,25 @@ export function validateImplementationTask(value) {
     errors.push('$.acceptanceCriteria IDs must exactly match acceptanceCriteriaIds');
   }
   validateRequiredValidation(value.requiredValidation, errors, value);
+  return [...new Set(errors)];
+}
+
+export function validateImplementationTask(value, { registry = loadRegistry() } = {}) {
+  const errors = validateImplementationTaskStructure(value);
+  if (errors.length > 0) return errors;
+  errors.push(...validateSpecialization({ specialization: value.specialization,
+    affectedAreas: value.affectedAreas, riskTags: value.riskTags }, registry)
+    .map((error) => `$.specialization: ${error}`));
+  let route;
+  try {
+    route = routeSpecialists({ specialization: value.specialization, riskTags: value.riskTags,
+      browserVisible: value.planningSignals.browserVisible,
+      testSelectionUncertain: value.planningSignals.relatedTestSelectionUncertain }, registry);
+  } catch (error) {
+    errors.push(`$.specialistRoute cannot be derived from the current specialist registry: ${error.message}`);
+    return [...new Set(errors)];
+  }
+  if (!sameJson(value.specialistRoute, route)) errors.push('$.specialistRoute must equal the canonical specialist route');
   return [...new Set(errors)];
 }
 
@@ -242,13 +253,13 @@ export function validateImplementationResult(value) {
 }
 
 export function implementationTaskDigest(packet) {
-  const errors = validateImplementationTask(packet);
+  const errors = validateImplementationTaskStructure(packet);
   if (errors.length > 0) throw new TypeError(`invalid implementation task packet: ${errors.join('; ')}`);
   return digestJson(packet);
 }
 
 export function validateImplementationResultAgainstTask(packet, result, actualChangedPaths) {
-  const errors = [...validateImplementationTask(packet).map((error) => `task packet: ${error}`),
+  const errors = [...validateImplementationTaskStructure(packet).map((error) => `task packet: ${error}`),
     ...validateImplementationResult(result).map((error) => `worker result: ${error}`)];
   if (errors.length > 0) return [...new Set(errors)];
   for (const field of ['changeId', 'taskId', 'planDigest', 'specialization', 'taskBaseSha']) {

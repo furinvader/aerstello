@@ -11,6 +11,7 @@ import {
   validateImplementationResult,
   validateImplementationResultAgainstTask,
   validateImplementationTask,
+  validateImplementationTaskStructure,
 } from './contracts.mjs';
 import { implementationResultSchemaPath, implementationTaskSchemaPath } from '../paths.mjs';
 
@@ -125,6 +126,17 @@ test('valid packet has a canonical digest that binds every packet field', () => 
   };
   assert.deepEqual(validateImplementationTask(planned), []);
   assert.notEqual(implementationTaskDigest(planned), implementationTaskDigest(value));
+});
+
+test('immutable packet digest and replay use structural authority while new binding uses the supplied live registry', () => {
+  const value = packet();
+  const digest = implementationTaskDigest(value);
+  const changedRegistry = structuredClone(registry);
+  changedRegistry.profiles.find(({ id }) => id === 'ops-workflow').supportedRiskTags = [];
+  assert.deepEqual(validateImplementationTaskStructure(value), []);
+  assert.equal(implementationTaskDigest(value), digest);
+  assert.deepEqual(validateImplementationResultAgainstTask(value, result(value), result(value).changedPaths), []);
+  assert.match(validateImplementationTask(value, { registry: changedRegistry }).join('\n'), /current specialist registry|does not support risk tag/u);
 });
 
 test('planned E2E selector declarations are structurally bounded without reading a checkout', () => {

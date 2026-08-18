@@ -44,6 +44,13 @@ test('wave conflicts serialize shared and producer surfaces while permitting dis
   const task = (anticipatedPaths, produces = [], consumes = []) => ({ anticipatedPaths, produces, consumes });
   assert.equal(tasksConflict(task(['apps/web/src/a.ts']), task(['apps/api/src/b.ts'])), false);
   assert.equal(tasksConflict(task(['.agents/skills/a/file.mjs']), task(['apps/api/src/b.ts'])), true);
+  assert.equal(tasksConflict(task(['.agents']), task(['apps/api/src/b.ts'])), true);
+  assert.equal(tasksConflict(task(['.codex']), task(['apps/api/src/b.ts'])), true);
+  assert.equal(tasksConflict(task(['.github']), task(['apps/api/src/b.ts'])), true);
+  assert.equal(tasksConflict(task(['apps/api/migrations']), task(['apps/web/src/b.ts'])), true);
+  for (const lookalike of ['.agentsx', '.codex-notes', '.githubish', 'apps/api/migrations-old']) {
+    assert.equal(tasksConflict(task([lookalike]), task(['apps/web/src/b.ts'])), false, `${lookalike} is not a shared root`);
+  }
   assert.equal(tasksConflict(task(['package-lock.json']), task(['apps/web/src/b.ts'])), true);
   assert.equal(tasksConflict(task(['apps/web/package.json']), task(['apps/api/src/b.ts'])), true);
   assert.equal(tasksConflict(task(['packages/shared/package-lock.json']), task(['apps/web/src/b.ts'])), true);
@@ -172,6 +179,26 @@ test('interrupted execution checkpoint recovers against evidence without replaci
   const recovered = recoverState({ cwd });
   assert.equal(recovered.state.phase, 'blocked');
   assert.deepEqual(recovered.state.git, accepted.git);
+});
+
+test('plan-only execution summaries checkpoint detached Planning-SHA identity and recover without named-branch authority', async () => {
+  const { cwd, sha } = repository('plan-only execution checkpoint');
+  const planning = await initializeState({ cwd, changeId: 'plan-only-execution-checkpoint', mode: 'plan-only',
+    baseBranch: 'main', planningRef: sha, source: descriptor });
+  git(cwd, 'switch', '--detach', sha);
+  const accepted = acceptPlan({ cwd, plan: planFor(planning), expectedRevision: planning.revision });
+  assert.ok(accepted.execution, 'native v2 plan-only state retains its non-null execution summary');
+  git(cwd, 'switch', '-c', 'plan-only-checkpoint');
+  assert.throws(() => checkpointGitMetadata({ cwd,
+    crashStep(step) { if (step === 'after-state') throw new Error('plan-only checkpoint crash'); } }), /plan-only checkpoint crash/u);
+  const recovered = recoverState({ cwd }).state;
+  assert.equal(recovered.phase, 'ready-to-implement');
+  assert.equal(recovered.git.branch, 'plan-only-checkpoint');
+  git(cwd, 'switch', '--detach', sha);
+  const detached = checkpointGitMetadata({ cwd }).state;
+  assert.equal(detached.phase, 'ready-to-implement');
+  assert.equal(detached.git.branch, '(detached)');
+  assert.equal(archiveState({ cwd, expectedRevision: detached.revision }).archived, true);
 });
 
 test('accepted sibling integrates after a failed wave and preserves failure evidence', async () => {
@@ -329,6 +356,38 @@ test('failure and rejection blockers replay in plan order and tampering fails cl
   unlinkSync(duplicatePath); unlinkSync(duplicatePath.replace(/\.json$/u, '.sha256'));
   unlinkSync(rejectionPath); unlinkSync(rejectionPath.replace(/\.json$/u, '.sha256'));
   assert.throws(() => validateState({ cwd }), (error) => error instanceof StateError);
+});
+
+test('task blockers cap Unicode code points while immutable failure and rejection prose remains complete', async () => {
+  const { cwd, sha } = repository('bounded Unicode task blockers');
+  const planning = await initializeState({ cwd, changeId: 'bounded-unicode-blockers', mode: 'implement',
+    baseBranch: 'main', planningRef: sha, source: descriptor });
+  const plan = executionPlanFor(planning); let state = acceptPlan({ cwd, plan, expectedRevision: planning.revision });
+  const first = packetFor(state, plan, 'state-task'); state = bindTask({ cwd, packet: first, expectedRevision: state.revision });
+  const firstWorker = createWorkerFixture(cwd, state, first);
+  const second = packetFor(state, plan, 'second-task'); state = bindTask({ cwd, packet: second, expectedRevision: state.revision });
+  createWorkerFixture(cwd, state, second);
+  state = scheduleWave({ cwd, expectedRevision: state.revision });
+  state = startTask({ cwd, taskId: first.taskId, workerId: 'long-failure', expectedRevision: state.revision });
+  state = startTask({ cwd, taskId: second.taskId, workerId: 'long-rejection', expectedRevision: state.revision });
+  const failureSummary = `Failure ${'😀'.repeat(2100)} complete`;
+  state = acceptResult({ cwd, workerCwd: firstWorker.path, expectedRevision: state.revision,
+    result: { ...resultFor(first, 'failed'), validation: first.requiredValidation.unit.map(({ command }) => ({
+      command, result: 'failed', summary: 'Validation failed.',
+    })), unexpectedDependencies: ['Unexpected dependency.'], summary: failureSummary } });
+  const rejectionReason = `Reject ${'🛠️'.repeat(1200)} complete`;
+  state = rejectTask({ cwd, taskId: second.taskId, reason: rejectionReason, expectedRevision: state.revision });
+  assert.equal(state.blockedReasons.length, 2);
+  for (const blocker of state.blockedReasons) {
+    assert.equal(Array.from(blocker).length, 2000);
+    assert.match(blocker, /full evidence retained\]$/u);
+  }
+  const resultPath = join(changeDirectory(cwd, state.changeId), 'implementation', 'results', first.taskId, '0001.json');
+  assert.equal(JSON.parse(readFileSync(resultPath, 'utf8')).summary, failureSummary);
+  const rejectionDirectory = join(changeDirectory(cwd, state.changeId), 'implementation', 'rejections', second.taskId);
+  const rejectionPath = join(rejectionDirectory, readdirSync(rejectionDirectory).find((name) => name.endsWith('.json')));
+  assert.equal(JSON.parse(readFileSync(rejectionPath, 'utf8')).reason, rejectionReason);
+  assert.equal(validateState({ cwd }).valid, true);
 });
 
 test('v1 accepts a plan without execution and upgrades explicitly with unchanged identities', async () => {

@@ -48,6 +48,14 @@ plan revision and digest; a clean report cannot contain findings, and amendment
 replay never substitutes evidence from a later revision. A changed packet requires explicit
 rejection and a plan amendment; no sidecar is rewritten.
 
+Binding is the live-policy boundary: every new binding reloads the current
+specialist registry and rejects a stale specialization or route before writing
+packet, provenance, event, or transition evidence. After binding, the packet's
+canonical digest and durable replay use its immutable structural contract plus
+the receipt-bound route, planning-signal, and behavior-mapper sidecars. Results,
+recovery, cleanup, and finalization never reinterpret historical packet authority
+through a later registry revision; a packet bound after that revision must obey it.
+
 Plan ownership can never name `.git` as a root or nested exact path segment;
 `.git`, `.git/config`, and `nested/.git/hooks` are repository metadata rather
 than implementation surfaces. Lookalikes such as `.gitignore`, `.github`, and
@@ -126,7 +134,10 @@ npm run change:state -- start-task \
 Scheduling is deterministic, caps a wave at three tasks, and serializes tasks
 whose path ownership overlaps or whose produced/consumed artifacts conflict.
 Repository-root and nested `package.json` or `package-lock.json` paths are shared
-surfaces. Scheduling also transiently reads every eligible receipt-bound packet
+surfaces. The exact roots and descendants of `.agents`, `.codex`, `.github`, and
+`apps/api/migrations` are also shared and serialize against unrelated writers;
+segment lookalikes such as `.agentsx`, `.codex-notes`, `.githubish`, and
+`apps/api/migrations-old` are ordinary disjoint ownership. Scheduling also transiently reads every eligible receipt-bound packet
 in accepted-plan order and admits only the first task that declares a given
 planned E2E selector; a later duplicate owner stays bound only until the first
 owner integrates, while tasks with distinct selectors may run together. That
@@ -167,6 +178,11 @@ the packet. Both successful outcomes, `implemented` and `no-change`, require
 every exact packet validation command to report `passed`; rejected success
 evidence cannot advance the task or satisfy dependencies. Each attempt result is preserved at
 `implementation/results/<task-id>/<attempt>.json[.sha256]`.
+Failure and explicit-rejection blockers use one deterministic representation
+capped at 2000 Unicode code points. Short blocker text is byte-for-byte
+unchanged; longer text is marked as truncated while the complete prose remains
+unchanged in its immutable result or rejection sidecar and replay regenerates
+the same bounded blocker.
 
 ## Central integration
 
@@ -188,6 +204,9 @@ in `integrating` for inspection; never discard or overwrite it. One
 per-change integration-operation lock spans all three stages, and
 `reject-task` takes the same lock before its state lock. Consequently same-task
 and sibling rejection cannot race integration or clean-base reconciliation;
+rejection also refuses whenever Git still reports `CHERRY_PICK_HEAD`, even when
+the index and porcelain are otherwise clean. The operator must explicitly abort
+or skip the cherry-pick before rejection can preserve or clear integration intent;
 normal failure releases ownership and interrupted ownership follows the exact
 dead-owner reclaim and reconciliation path.
 

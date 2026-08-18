@@ -58,7 +58,7 @@ ownership through an explicit append-only amendment before binding a packet.
 
 ## Validation and specialist evidence
 
-Validate both JSON Schema and semantic contracts. Load the canonical specialist registry and use its validation, routing, and planning-evidence helpers. Recompute every task route with explicit `browserVisible` and `relatedTestSelectionUncertain` signals; stored routes are never trusted without recomputation.
+Validate both JSON Schema and semantic contracts. Load the canonical specialist registry anew for each candidate-plan acceptance and amendment validation, and use its validation, routing, and planning-evidence helpers. Recompute every task route with explicit `browserVisible` and `relatedTestSelectionUncertain` signals; stored routes are never trusted for new acceptance. Receipt-valid historical accepted plans and amendments remain immutable replay evidence and are not reinterpreted through a later registry revision.
 
 Reject a plan with unresolved test selection, duplicate IDs, invalid criterion or decision references, missing criterion ownership, unknown dependencies, dependency cycles, consumer work ordered before its producer, overlapping planned ownership, or cross-domain work marked unsplittable without a reason. Require clean current Planning-SHA `behavior_mapper` evidence whenever the final route requires it.
 

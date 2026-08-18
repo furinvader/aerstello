@@ -113,6 +113,16 @@ test('canonical JSON is stable and its receipt includes the canonical newline', 
   assert.throws(() => canonicalJsonText({ bad: undefined }), /cannot contain undefined/u);
 });
 
+test('plan validation applies the registry supplied for each acceptance or amendment call', () => {
+  const value = plan();
+  assert.deepEqual(validateImplementationPlan(value, { registry }), []);
+  const changedRegistry = structuredClone(registry);
+  changedRegistry.profiles.find(({ id }) => id === 'ops-workflow').compatibleAffectedAreas = ['documentation'];
+  assert.match(validateImplementationPlan(value, { registry: changedRegistry }).join('\n'), /incompatible with affected area workflow/u);
+  assert.equal(planReadiness(value, { registry: changedRegistry }).ready, false);
+  assert.deepEqual(validateImplementationPlan(value, { registry }), []);
+});
+
 test('valid plan is schema-valid, manually valid, and ready', () => {
   assert.deepEqual(validateImplementationPlan(plan()), []);
   assert.deepEqual(planReadiness(plan()), { ready: true, errors: [] });

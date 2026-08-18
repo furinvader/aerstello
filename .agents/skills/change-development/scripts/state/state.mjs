@@ -22,13 +22,13 @@ import {
   digestJson,
   planReadiness,
   validateDevelopmentState,
-  validateImplementationPlan,
 } from '../contracts/contracts.mjs';
 import {
   implementationTaskDigest,
   validateImplementationResult,
   validateImplementationResultAgainstTask,
   validateImplementationTask,
+  validateImplementationTaskStructure,
 } from '../implementation/contracts.mjs';
 import { compareChecklistMappings } from '../source/checklists.mjs';
 import { captureSource, refreshSource as captureSourceRefresh } from '../source/source.mjs';
@@ -796,10 +796,6 @@ function readObservationByDigest(cwd, state) {
 }
 
 function readinessErrors(plan, evidence, sourceObservation, readPlanningFile) {
-  const errors = normalizeErrors(validateImplementationPlan(plan, {
-    planningEvidence: evidence, sourceObservation, readPlanningFile,
-  }));
-  if (errors.length > 0) return errors;
   const gate = planReadiness(plan, { planningEvidence: evidence, sourceObservation, readPlanningFile });
   if (Array.isArray(gate)) return gate;
   if (gate?.ready === false || gate?.allowed === false) return gate.reasons ?? gate.errors ?? ['plan is not ready'];
@@ -1208,7 +1204,7 @@ function pathsOverlap(left, right) {
 export function tasksConflict(left, right) {
   if (left.anticipatedPaths.some((a) => right.anticipatedPaths.some((b) => pathsOverlap(a, b)))) return true;
   if (left.produces.some((id) => right.consumes.includes(id) || right.produces.includes(id)) || right.produces.some((id) => left.consumes.includes(id))) return true;
-  const sharedSurface = (task) => task.anticipatedPaths.some((path) => /^(?:(?:[^/]+\/)*package(?:-lock)?\.json$|\.agents\/|\.codex\/|\.github\/|packages\/shared\/src\/contracts\.ts|apps\/api\/src\/schema\.ts|apps\/api\/migrations\/|tests\/e2e\/fixtures(?:\/|$)|tests\/e2e\/(?:[^/]+\/)*[^/]+\.steps\.ts$)/u.test(path));
+  const sharedSurface = (task) => task.anticipatedPaths.some((path) => /^(?:(?:[^/]+\/)*package(?:-lock)?\.json$|\.agents(?:\/|$)|\.codex(?:\/|$)|\.github(?:\/|$)|packages\/shared\/src\/contracts\.ts$|apps\/api\/src\/schema\.ts$|apps\/api\/migrations(?:\/|$)|tests\/e2e\/fixtures(?:\/|$)|tests\/e2e\/(?:[^/]+\/)*[^/]+\.steps\.ts$)/u.test(path));
   if (sharedSurface(left) || sharedSurface(right)) return true;
   return false;
 }
@@ -1233,7 +1229,8 @@ export function scheduleWave({ cwd = process.cwd(), changeId, expectedRevision, 
     const selectorOwners = new Map();
     for (const task of eligible) {
       const receipt = verifyReceipt(implementationTaskPacketPath(root, state.changeId, task.id, task.binding), `task packet ${task.id}`);
-      if (receipt.digest !== task.packetDigest || implementationTaskDigest(receipt.value) !== task.packetDigest) {
+      if (validateImplementationTaskStructure(receipt.value).length > 0
+          || receipt.digest !== task.packetDigest || implementationTaskDigest(receipt.value) !== task.packetDigest) {
         throw new StateError(`Task ${task.id} packet summary/receipt mismatch`, 'TASK_PACKET_MISMATCH');
       }
       assertPacketSelectorsAtBase(root, receipt.value);
@@ -1303,6 +1300,17 @@ function rejectionEvidence(cwd, state, task, inFlight = null) {
   return record;
 }
 
+const BLOCKER_CODE_POINT_LIMIT = 2000;
+const BLOCKER_TRUNCATION_MARKER = '… [truncated; full evidence retained]';
+
+function boundedTaskBlocker(prefix, prose) {
+  const complete = `${prefix}${prose}`;
+  const points = Array.from(complete);
+  if (points.length <= BLOCKER_CODE_POINT_LIMIT) return complete;
+  const marker = Array.from(BLOCKER_TRUNCATION_MARKER);
+  return `${points.slice(0, BLOCKER_CODE_POINT_LIMIT - marker.length).join('')}${BLOCKER_TRUNCATION_MARKER}`;
+}
+
 function canonicalTaskBlockers(cwd, state, execution, inFlight = null) {
   return execution.tasks.flatMap((task) => {
     if (['blocked', 'failed'].includes(task.status)) {
@@ -1312,11 +1320,11 @@ function canonicalTaskBlockers(cwd, state, execution, inFlight = null) {
       if (objectDigest(result) !== task.resultDigest || result.taskId !== task.id || result.status !== task.status) {
         throw new StateError(`Task ${task.id} failure evidence does not match its execution summary`, 'TASK_RESULT_MISMATCH');
       }
-      return [`Task ${task.id} reported ${task.status}: ${result.summary}`];
+      return [boundedTaskBlocker(`Task ${task.id} reported ${task.status}: `, result.summary)];
     }
     if (task.status === 'rejected') {
       const rejection = rejectionEvidence(cwd, state, task, inFlight);
-      return [`Task ${task.id} was explicitly rejected: ${rejection.reason}`];
+      return [boundedTaskBlocker(`Task ${task.id} was explicitly rejected: `, rejection.reason)];
     }
     return [];
   });
@@ -1502,8 +1510,11 @@ export function rejectTask({ cwd = process.cwd(), changeId, taskId, reason, expe
   return withIntegrationOperationLock(root, selected, () => withChangeLock(root, selected, () => {
       const state = loadState(root, selected); assertWritableV2(state); assertRevision(state, expectedRevision);
       validateState({ cwd: root, changeId: selected }); const task = executionTask(state, taskId);
-      if (!nonemptyString(reason) || reason.length > 2000) throw new StateError('Task rejection requires a concise reason', 'INVALID_REJECTION');
+      if (!nonemptyString(reason)) throw new StateError('Task rejection requires a reason', 'INVALID_REJECTION');
       if (!['bound', 'scheduled', 'running', 'accepted', 'integration-pending', 'blocked', 'failed'].includes(task.status)) throw new StateError(`Task ${taskId} cannot be rejected from ${task.status}`, 'TASK_STATE_CONFLICT');
+      const sequencer = runGit(['rev-parse', '--verify', '--quiet', 'CHERRY_PICK_HEAD'], { cwd: root, allowFailure: true });
+      if (sequencer.status === 0) throw new StateError('Rejecting work requires explicit cherry-pick abort or skip cleanup first', 'CHERRY_PICK_IN_PROGRESS');
+      if (sequencer.status !== 1) throw new StateError('Unable to inspect cherry-pick sequencer state', 'CENTRAL_GIT_MISMATCH');
       const current = gitObservation(root, clock);
       const requiredHead = state.execution.integrationIntent?.taskId === taskId ? state.execution.integrationIntent.centralBaseSha : state.git.headSha;
       if (!current.clean || current.headSha !== requiredHead || current.branch !== state.git.branch || current.branch === '(detached)') throw new StateError('Rejecting work requires the exact clean owning branch at the pre-conflict base', 'CENTRAL_GIT_MISMATCH');
@@ -2086,7 +2097,8 @@ function validateLoadedState(root, state) {
         if (task.packetDigest !== null) {
           packetReceipt = verifyReceipt(implementationTaskPacketPath(root, state.changeId, task.id, task.binding), `task packet ${task.id}`);
           const packet = packetReceipt;
-          if (packet.digest !== task.packetDigest || implementationTaskDigest(packet.value) !== task.packetDigest) throw new StateError(`Task ${task.id} packet summary/receipt mismatch`, 'TASK_PACKET_MISMATCH');
+          if (validateImplementationTaskStructure(packet.value).length > 0
+              || packet.digest !== task.packetDigest || implementationTaskDigest(packet.value) !== task.packetDigest) throw new StateError(`Task ${task.id} packet summary/receipt mismatch`, 'TASK_PACKET_MISMATCH');
           const completed = ['integrated', 'no-change'].includes(task.status);
           assertPacketPlanBinding(packet.value, effective, state, task.taskBaseSha,
             completed ? packet.value.planDigest : state.plan.effectiveDigest,
@@ -2443,11 +2455,12 @@ function restoredCheckpointPhase(state, finalizedIntegration) {
 
 function deriveGitCheckpoint(predecessor, observed, updatedAt, { finalizedIntegration = false } = {}) {
   const executionActive = predecessor.schemaVersion === 2 && predecessor.execution !== null;
-  const valid = executionActive
+  const strictExecutionIdentity = executionActive && predecessor.mode !== 'plan-only';
+  const valid = strictExecutionIdentity
     ? observed.clean && observed.headSha === predecessor.git.headSha
       && observed.branch === predecessor.git.branch && observed.branch !== '(detached)'
     : observed.clean && observed.headSha === predecessor.planningSha;
-  const gitBlock = valid ? null : executionActive
+  const gitBlock = valid ? null : strictExecutionIdentity
     ? `Central Git observation does not match exact clean durable identity ${predecessor.git.branch}@${predecessor.git.headSha}`
     : `Git observation is not clean at Planning SHA ${predecessor.planningSha}`;
   const nonGitReasons = predecessor.blockedReasons.filter((reason) => !isGitBlock(reason));
@@ -2461,7 +2474,7 @@ function deriveGitCheckpoint(predecessor, observed, updatedAt, { finalizedIntegr
   const expected = {
     ...predecessor,
     // An invalid execution observation is evidence, never a replacement for the durable integration identity.
-    git: executionActive && !valid ? predecessor.git : observed,
+    git: strictExecutionIdentity && !valid ? predecessor.git : observed,
     phase,
     blockedReasons,
     revision: predecessor.revision + 1,

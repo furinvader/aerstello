@@ -739,12 +739,15 @@ test('integration and clean-base reconciliation serialize same-change rejection 
 test('a real central cherry-pick conflict preserves its intent and requires abort plus receipt-backed rejection/replan', async () => {
   const rename = task('rename-directory', ['old/a.txt', 'new/a.txt']);
   const add = task('add-to-renamed-directory', ['old/b.txt']);
-  const context = await fixture([rename, add], { 'old/a.txt': 'base\n' });
+  const sibling = task('independent-sibling', ['sibling.txt']);
+  const context = await fixture([rename, add, sibling], { 'old/a.txt': 'base\n' });
   const renamePacket = bind(context, rename.id);
   const addPacket = bind(context, add.id);
+  const siblingPacket = bind(context, sibling.id);
   const renameWorker = createWorker(context, renamePacket);
   const addWorker = createWorker(context, addPacket);
-  startWave(context, [renamePacket, addPacket]);
+  const siblingWorker = createWorker(context, siblingPacket);
+  startWave(context, [renamePacket, addPacket, siblingPacket]);
 
   mkdirSync(join(renameWorker.path, 'new'), { recursive: true });
   git(renameWorker.path, ['mv', 'old/a.txt', 'new/a.txt']);
@@ -754,9 +757,11 @@ test('a real central cherry-pick conflict preserves its intent and requires abor
   git(addWorker.path, ['add', 'old/b.txt']);
   git(addWorker.path, ['commit', '-m', 'test: add to original directory']);
   const addCommit = git(addWorker.path, ['rev-parse', 'HEAD']);
+  const siblingCommit = commit(siblingWorker.path, { 'sibling.txt': 'independent\n' }, 'test: independent sibling');
 
   accept(context, renamePacket, renameWorker, renameCommit, ['new/a.txt', 'old/a.txt']);
   accept(context, addPacket, addWorker, addCommit, ['old/b.txt']);
+  accept(context, siblingPacket, siblingWorker, siblingCommit, ['sibling.txt']);
   context.state = integrateTask({
     cwd: context.cwd,
     changeId: context.changeId,
@@ -786,6 +791,25 @@ test('a real central cherry-pick conflict preserves its intent and requires abor
   }), (error) => error instanceof StateError && error.code === 'INTEGRATION_DIRTY');
   assert.equal(loadState(context.cwd).revision, integrating.revision);
 
+  git(context.cwd, ['rm', 'new/b.txt']);
+  assert.equal(git(context.cwd, ['status', '--porcelain']), '', 'an empty conflict resolution can leave only CHERRY_PICK_HEAD');
+
+  const statePath = join(changeDirectory(context.cwd, context.changeId), 'state.json');
+  const stateBeforeRejection = readFileSync(statePath, 'utf8');
+  for (const taskId of [add.id, sibling.id]) {
+    assert.throws(() => rejectTask({
+      cwd: context.cwd,
+      changeId: context.changeId,
+      taskId,
+      reason: 'Rejection must wait for explicit sequencer cleanup.',
+      expectedRevision: integrating.revision,
+    }), (error) => error instanceof StateError && error.code === 'CHERRY_PICK_IN_PROGRESS');
+  }
+  assert.equal(readFileSync(statePath, 'utf8'), stateBeforeRejection);
+  assert.equal(existsSync(join(context.cwd, '.git', 'CHERRY_PICK_HEAD')), true);
+  assert.equal(existsSync(join(changeDirectory(context.cwd, context.changeId), 'implementation', 'rejections', add.id)), false);
+  assert.deepEqual(loadState(context.cwd).execution.integrationIntent, integrating.execution.integrationIntent);
+
   git(context.cwd, ['cherry-pick', '--abort']);
   assert.equal(git(context.cwd, ['rev-parse', 'HEAD']), centralBase);
   const rejected = rejectTask({
@@ -797,7 +821,7 @@ test('a real central cherry-pick conflict preserves its intent and requires abor
   });
   assert.equal(rejected.phase, 'blocked');
   assert.equal(rejected.execution.tasks.find(({ id }) => id === add.id).status, 'rejected');
-  assert.match(rejected.nextAction, /rejecting\/replanning/u);
+  assert.match(rejected.nextAction, /Integrate the next dependency-ready accepted task/u);
   const rejectionPath = join(changeDirectory(context.cwd, context.changeId), 'implementation', 'rejections', add.id,
     `${String(rejected.revision).padStart(8, '0')}.json`);
   assert.equal(JSON.parse(readFileSync(rejectionPath, 'utf8')).reason, 'Directory rename exposed an unplanned dependency.');
