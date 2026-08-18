@@ -76,7 +76,7 @@ function parseRepositoryPath(value, { allowOwnershipPattern = false } = {}) {
       || !SAFE_PATH_SEGMENT.test(part))) return null;
   return { path, recursive: suffix !== '' };
 }
-function pathMatchesOwnership(changedPath, ownershipPattern) {
+export function pathMatchesOwnership(changedPath, ownershipPattern) {
   const changed = parseRepositoryPath(changedPath);
   const owned = parseRepositoryPath(ownershipPattern, { allowOwnershipPattern: true });
   return Boolean(changed && owned && (changed.path === owned.path

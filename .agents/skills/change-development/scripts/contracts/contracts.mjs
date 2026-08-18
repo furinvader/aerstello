@@ -25,7 +25,8 @@ export const HISTORICAL_DEVELOPMENT_STATE_SCHEMA_VERSIONS = Object.freeze([1, 2]
 export const CHANGE_MODES = Object.freeze(['plan-only', 'implement', 'full']);
 export const DEVELOPMENT_PHASES = Object.freeze([
   'initializing', 'planning', 'awaiting-decision', 'ready-to-implement',
-  'implementing', 'integrating', 'integrated', 'blocked', 'recovering', 'abandoned',
+  'implementing', 'integrating', 'integrated', 'validating', 'specialist-review',
+  'verifying', 'development-ready', 'blocked', 'recovering', 'abandoned',
 ]);
 export const SOURCE_KINDS = Object.freeze([
   'github-issue', 'direct-request', 'repository-plan', 'partial-implementation',
@@ -537,6 +538,7 @@ export function validateDevelopmentState(value) {
     errors.push(`development-state v1 cannot use phase ${value.phase}`);
   }
   if (value.schemaVersion === 1 && Object.hasOwn(value, 'execution')) errors.push('development-state v1 cannot contain execution state');
+  if (value.schemaVersion === 1 && Object.hasOwn(value, 'verification')) errors.push('development-state v1 cannot contain verification state');
   if (value.schemaVersion === 2) {
     if (!Object.hasOwn(value, 'execution')) errors.push('development-state v2 requires execution state');
     if (value.plan === null && value.execution !== null) errors.push('execution state requires an accepted plan');
@@ -567,6 +569,19 @@ export function validateDevelopmentState(value) {
       if (value.phase === 'integrating' && value.execution.integrationIntent === null) errors.push('integrating requires an integration intent');
       if (value.execution.integrationIntent !== null && value.phase !== 'integrating') errors.push('integration intent is valid only while integrating');
       if (value.phase === 'integrated' && value.execution.tasks.some((task) => !['integrated', 'no-change'].includes(task.status))) errors.push('integrated phase requires every task to be integrated or no-change');
+    }
+    const verificationPhases = ['validating', 'specialist-review', 'verifying', 'development-ready'];
+    if (verificationPhases.includes(value.phase) && !value.verification) errors.push(`${value.phase} requires verification state`);
+    if (value.verification) {
+      if (!value.execution?.tasks.every((task) => ['integrated', 'no-change'].includes(task.status))) errors.push('verification requires every implementation task terminal');
+      if ((value.verification.contextDigest === null) !== (value.verification.verifierResultDigest === null)) errors.push('verifier context and result summaries must be recorded together');
+      if (value.verification.specialistResultDigests.length > value.verification.requiredReviewerIds.length) errors.push('specialist results cannot exceed routed reviewers');
+      if (duplicates(value.verification.humanDecisionAuthorizations.map(({ fingerprint }) => fingerprint)).length) errors.push('human finding authorizations must have unique fingerprints');
+      if (value.verification.humanDecisionRequiredFingerprints.some((fingerprint) => !value.verification.unresolvedFindingFingerprints.includes(fingerprint))) errors.push('human-decision findings must remain unresolved');
+      if (value.phase === 'development-ready' && (value.verification.validationStatus !== 'passed'
+          || value.verification.verifierResultDigest === null || value.verification.unresolvedFindingFingerprints.length > 0
+          || value.verification.humanDecisionRequiredFingerprints.length > 0
+          || value.verification.specialistResultDigests.length !== value.verification.requiredReviewerIds.length)) errors.push('development-ready requires complete clean verification summaries');
     }
   }
   if (value.plan === null && ['ready-to-implement'].includes(value.phase)) errors.push(`${value.phase} requires an accepted plan`);

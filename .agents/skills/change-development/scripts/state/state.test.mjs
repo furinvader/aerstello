@@ -12,23 +12,34 @@ import {
   activePointerPath,
   amendPlan,
   archiveState,
+  authorizeRepeatedFinding,
   boundedStatus,
   bindTask,
+  boundVerifierEvidence,
+  buildVerifierContext,
   changeDirectory,
   checkpointGitMetadata,
+  createSpecialistPlan,
+  createValidationPlan,
+  finalizeDevelopment,
   finalizeIntegration,
   initializeState,
   integrateTask,
   loadLatestSourceObservation,
   loadState,
   locateState,
+  mergeLifecycleValidationCommands,
   nextActionFor,
   recoverState,
   recordDecision,
+  recordFindingDisposition,
+  recordSpecialistResult,
+  recordVerifierResult,
   refreshSource,
   renderStatus,
   reconcileIntegration,
   rejectTask,
+  runValidation,
   scheduleWave,
   startTask,
   StateError,
@@ -58,6 +69,78 @@ test('wave conflicts serialize shared and producer surfaces while permitting dis
   assert.equal(tasksConflict(task(['tests/e2e/steps/catalog/venue.steps.ts']), task(['apps/web/src/b.ts'])), true);
   assert.equal(tasksConflict(task(['apps/web/src/a.ts'], ['catalog']), task(['apps/api/src/b.ts'], ['catalog'])), true);
   assert.equal(tasksConflict(task(['apps/web/src'], ['catalog']), task(['apps/web/src/file.ts'], [], ['catalog'])), true);
+});
+
+test('cross-plan validation merge rejects conflicting metadata for identical argv', () => {
+  const command = { id: 'command-shared', kind: 'unit', argv: ['npm', 'run', 'check:workflow'],
+    reasons: ['first'], taskIds: ['first-task'], selectors: [], projects: [] };
+  const merged = mergeLifecycleValidationCommands([{ commands: [command] }, { commands: [{ ...command,
+    reasons: ['second'], taskIds: ['second-task'] }] }]);
+  assert.deepEqual(merged[0].reasons, ['first', 'second']);
+  assert.deepEqual(merged[0].taskIds, ['first-task', 'second-task']);
+  for (const conflicting of [
+    { ...command, kind: 'system' },
+    { ...command, selectors: ['@changed'] },
+    { ...command, projects: ['chromium'] },
+  ]) assert.throws(() => mergeLifecycleValidationCommands([{ commands: [command] }, { commands: [conflicting] }]),
+    (error) => error.code === 'VALIDATION_COMMAND_CONFLICT');
+});
+
+test('verifier evidence remains deterministic and schema-bounded at the upper limit', () => {
+  const evidence = Array.from({ length: 40 }, (_, index) => ({ kind: index % 2 ? 'criterion' : 'decision',
+    id: `item-${index}`, digest: `sha256:${String(index).padStart(64, '0')}`, summary: `${'semantic '.repeat(100)}${index}` }));
+  const first = boundVerifierEvidence(evidence);
+  const second = boundVerifierEvidence(evidence);
+  assert.deepEqual(first, second);
+  assert.ok(first.length <= 500);
+  assert.ok(first.every(({ summary }) => Buffer.byteLength(summary, 'utf8') <= 1800));
+  assert.ok(Buffer.byteLength(JSON.stringify(first), 'utf8') < 256 * 1024);
+  const requiredSemantics = [
+    ['criterion', 'original-plan-objective', `Original objective: ${'€'.repeat(4000)}`],
+    ['criterion', 'original-plan-scope', `Original scope: ${'€scope,'.repeat(2000)}; original non-goals: ${'€non-goal,'.repeat(2000)}`],
+    ['packet', 'task-ownership', `Allowed paths: ${'€/owned/**,'.repeat(500)}; forbidden paths: ${'€/forbidden/**,'.repeat(500)}`],
+    ['packet', 'task-validation', `Required validation: ${'npm run check:workflow;'.repeat(500)}`],
+    ['result', 'task-result', `implemented; ${'€result'.repeat(4000)}; changed paths ${'€/changed,'.repeat(500)}`],
+    ['finding-disposition', 'round-1-finding-summary', `Finding summary: ${'€summary'.repeat(4000)}`],
+    ['finding-disposition', 'round-1-finding-evidence', `Finding evidence: ${'€evidence'.repeat(4000)}`],
+  ].map(([kind, id, summary], index) => ({ kind, id, summary, digest: `sha256:${String(index).padStart(64, '0')}` }));
+  const semantic = boundVerifierEvidence(requiredSemantics);
+  assert.ok(semantic.length > requiredSemantics.length);
+  for (const required of requiredSemantics) {
+    const chunks = semantic.filter(({ digest }) => digest === required.digest);
+    assert.ok(chunks.length > 0, `${required.id} remains present`);
+    assert.equal(chunks.map(({ summary }) => summary).join(''), required.summary, `${required.id} reconstructs exactly`);
+    assert.ok(chunks.every(({ summary }) => Buffer.byteLength(summary, 'utf8') <= 1800));
+  }
+  assert.deepEqual(new Set(semantic.map(({ kind }) => kind)), new Set(['criterion', 'packet', 'result', 'finding-disposition']));
+  assert.throws(() => boundVerifierEvidence(Array.from({ length: 501 }, (_, index) => ({ kind: 'packet', id: `packet-${index}`,
+    digest: `sha256:${String(index).padStart(64, '0')}`, summary: `packet ${index}` }))),
+  (error) => error.code === 'VERIFIER_CONTEXT_TOO_LARGE');
+  assert.throws(() => boundVerifierEvidence(Array.from({ length: 150 }, (_, index) => ({ kind: 'packet', id: `large-${index}`,
+    digest: `sha256:${String(index).padStart(64, '0')}`, summary: '€'.repeat(600) }))),
+  (error) => error.code === 'VERIFIER_CONTEXT_TOO_LARGE');
+
+  const commonPrefix = `task-${'a'.repeat(115)}`;
+  const boundaryItems = [
+    { kind: 'packet', id: `${commonPrefix}-one-two`, digest: `sha256:${'a'.repeat(64)}`, summary: `one-${'€'.repeat(1000)}` },
+    { kind: 'packet', id: `${commonPrefix}-one-six`, digest: `sha256:${'b'.repeat(64)}`, summary: `six-${'€'.repeat(1000)}` },
+    { kind: 'finding-disposition', id: `${'finding-'.repeat(16)}identity-summary-synthetic-suffix`,
+      digest: `sha256:${'c'.repeat(64)}`, summary: `BEGIN-${'€'.repeat(2000)}-END` },
+  ];
+  assert.ok(boundaryItems.slice(0, 2).every(({ id }) => id.length === 128));
+  const boundary = boundVerifierEvidence(boundaryItems);
+  assert.ok(boundary.every(({ id }) => id.length <= 128 && /^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(id)));
+  assert.equal(new Set(boundary.map(({ id }) => id)).size, boundary.length, 'normalized and chunk IDs remain distinct');
+  for (const item of boundaryItems) {
+    const identity = `Evidence identity: ${item.id}\n`;
+    const digestChunks = boundary.filter(({ digest }) => digest === item.digest);
+    assert.ok(digestChunks[0].summary.startsWith(identity), `${item.id} preserves its original identity`);
+    assert.equal(digestChunks.map(({ summary }) => summary).join(''), `${identity}${item.summary}`);
+    assert.ok(digestChunks.every(({ id }) => !id.includes('--part-') && !id.endsWith('-')));
+  }
+  const exactBoundary = { kind: 'packet', id: `task-${'z'.repeat(123)}`, digest: `sha256:${'d'.repeat(64)}`, summary: 'short authority' };
+  assert.equal(exactBoundary.id.length, 128);
+  assert.deepEqual(boundVerifierEvidence([exactBoundary]), [exactBoundary], 'valid unchunked boundary identity remains readable');
 });
 
 test('oversized plan acceptance fails before durable transition or evidence writes', async () => {
@@ -140,6 +223,175 @@ test('two same-base workers integrate by delta, resume intent-only integration, 
   git(cwd, 'switch', 'main');
   state = checkpointGitMetadata({ cwd }).state;
   assert.equal(state.phase, 'integrated', 'restoring finalized identity must preserve explicit finalization');
+  state = createValidationPlan({ cwd, expectedRevision: state.revision });
+  assert.equal(state.phase, 'validating');
+  writeFileSync(join(cwd, 'verification-head-drift.txt'), 'dirty');
+  assert.throws(() => runValidation({ cwd, expectedRevision: state.revision }),
+    (error) => error.code === 'VERIFICATION_HEAD_MISMATCH');
+  unlinkSync(join(cwd, 'verification-head-drift.txt'));
+  let runnerCalled = false;
+  assert.throws(() => runValidation({ cwd, expectedRevision: state.revision,
+    runner() { runnerCalled = true; return { status: 0, signal: null, stdout: '', stderr: '' }; },
+    crashStep(step) { if (step === 'after-complete') throw new Error('resume persisted validation intent'); } }),
+  /resume persisted validation intent/u);
+  assert.equal(runnerCalled, false, 'execution starts only after its immutable intent transition returns');
+  state = loadState(cwd);
+  state = runValidation({ cwd, expectedRevision: state.revision,
+    runner(executable, argv, options) {
+      assert.equal(options.shell, false);
+      assert.ok(executable.length > 0 && argv.length > 0);
+      return { status: 0, signal: null, stdout: 'passed\n', stderr: '' };
+    } });
+  assert.equal(state.phase, 'specialist-review');
+  state = createSpecialistPlan({ cwd, expectedRevision: state.revision });
+  assert.equal(state.phase, 'verifying');
+  const context = buildVerifierContext({ cwd });
+  assert.equal(context.verifierId, 'development_integration_verifier');
+  assert.equal(context.finalVerificationPriority, 'standard');
+  assert.match(context.evidence.find(({ kind, id }) => kind === 'packet' && id === 'state-task-ownership').summary,
+    /Allowed paths: first\.txt; forbidden paths: none/u);
+  assert.match(context.evidence.find(({ kind, id }) => kind === 'packet' && id === 'state-task-validation').summary,
+    /Required validation: node --test/u);
+  assert.ok(context.evidence.some(({ id, summary }) => id === 'original-plan-scope' && summary.includes('Original scope')));
+  assert.ok(context.evidence.some(({ id, summary }) => id === 'effective-plan-profile' && summary.includes('profiles/ops-workflow.md')));
+  assert.ok(context.evidence.some(({ kind, id, summary }) => kind === 'criterion' && id === 'durable-state'
+    && summary.includes('State remains durable.')));
+  assert.ok(context.evidence.some(({ kind }) => kind === 'validation-result'));
+  assert.throws(() => finalizeDevelopment({ cwd, expectedRevision: state.revision }),
+    (error) => error.code === 'INVALID_PHASE');
+  state = recordVerifierResult({ cwd, expectedRevision: state.revision, result: {
+    schemaVersion: 1, headSha: state.verification.headSha, contextDigest: digestJson(context), status: 'clean',
+    summary: 'Exact integrated HEAD satisfies the accepted plan.', findings: [], recordedAt: '2026-08-18T12:00:00.000Z',
+  } });
+  state = finalizeDevelopment({ cwd, expectedRevision: state.revision });
+  assert.equal(state.phase, 'development-ready');
+  assert.equal(validateState({ cwd }).valid, true);
+});
+
+test('failed validation is private, immutable, and explicitly replaced at the next durable round', async () => {
+  const fixture = await integratedSingleTaskFixture('validation replacement');
+  let state = createValidationPlan({ cwd: fixture.cwd, expectedRevision: fixture.state.revision });
+  state = runValidation({ cwd: fixture.cwd, expectedRevision: state.revision,
+    runner: () => ({ status: 7, signal: null, stdout: 'private command output', stderr: 'private failure detail' }) });
+  assert.equal(state.verification.validationStatus, 'failed');
+  const resultDirectory = join(changeDirectory(fixture.cwd, state.changeId), 'verification', 'rounds', '0001', 'validation-results');
+  const stored = readFileSync(join(resultDirectory, readdirSync(resultDirectory).find((name) => name.endsWith('.json'))), 'utf8');
+  assert.doesNotMatch(stored, /private command output|private failure detail/u);
+  state = createValidationPlan({ cwd: fixture.cwd, expectedRevision: state.revision, replace: true });
+  assert.equal(state.verification.round, 2);
+  assert.ok(existsSync(join(changeDirectory(fixture.cwd, state.changeId), 'verification', 'rounds', '0001', 'validation-plan.json')));
+  assert.ok(existsSync(join(changeDirectory(fixture.cwd, state.changeId), 'verification', 'rounds', '0002', 'validation-plan.json')));
+});
+
+test('stored union specialist routes are consumed in canonical reviewer order', async () => {
+  const value = { specialization: 'api', affectedAreas: ['api'], riskTags: ['authorization', 'offline'],
+    browserVisible: false, relatedTestSelectionUncertain: false };
+  const specialize = { ...value, route: routeSpecialists({ ...value, testSelectionUncertain: false }, registry) };
+  const fixture = await integratedSingleTaskFixture('specialist ordering', specialize);
+  let state = createValidationPlan({ cwd: fixture.cwd, expectedRevision: fixture.state.revision });
+  state = runValidation({ cwd: fixture.cwd, expectedRevision: state.revision,
+    runner: () => ({ status: 0, signal: null, stdout: 'passed', stderr: '' }) });
+  state = createSpecialistPlan({ cwd: fixture.cwd, expectedRevision: state.revision });
+  assert.deepEqual(state.verification.requiredReviewerIds, ['security_reviewer', 'offline_realtime_reviewer']);
+  const resultForReviewer = (reviewerId) => ({ schemaVersion: 1, reviewerId, headSha: state.verification.headSha,
+    specialistPlanDigest: state.verification.specialistPlanDigest, status: 'clean', summary: `${reviewerId} is clean.`,
+    findings: [], recordedAt: '2026-08-18T12:00:00.000Z' });
+  assert.throws(() => recordSpecialistResult({ cwd: fixture.cwd, expectedRevision: state.revision,
+    result: resultForReviewer('offline_realtime_reviewer') }), (error) => error.code === 'SPECIALIST_RESULT_ORDER');
+  state = recordSpecialistResult({ cwd: fixture.cwd, expectedRevision: state.revision,
+    result: resultForReviewer('security_reviewer') });
+  assert.equal(state.phase, 'specialist-review');
+  state = recordSpecialistResult({ cwd: fixture.cwd, expectedRevision: state.revision,
+    result: resultForReviewer('offline_realtime_reviewer') });
+  assert.equal(state.phase, 'verifying');
+  assert.equal(buildVerifierContext({ cwd: fixture.cwd }).finalVerificationPriority, specialize.route.finalVerificationPriority);
+});
+
+test('final-verifier finding disposition creates ordinary remediation work without deleting round history', async () => {
+  const fixture = await integratedSingleTaskFixture('finding remediation');
+  let state = createValidationPlan({ cwd: fixture.cwd, expectedRevision: fixture.state.revision });
+  state = runValidation({ cwd: fixture.cwd, expectedRevision: state.revision,
+    runner: () => ({ status: 0, signal: null, stdout: 'passed', stderr: '' }) });
+  state = createSpecialistPlan({ cwd: fixture.cwd, expectedRevision: state.revision });
+  const context = buildVerifierContext({ cwd: fixture.cwd });
+  const finding = { id: 'missing-recovery-check', priority: 'P1', summary: 'Recovery coverage is incomplete.',
+    evidence: 'The exact integrated lifecycle context lacks the required recovery assertion.', affectedAreas: ['workflow'],
+    recommendedSpecialization: 'ops-workflow', riskTags: ['workflow'], criterionIds: ['durable-state'], invariantIds: [] };
+  const siblingFinding = { ...finding, id: 'duplicate-recovery-note', priority: 'P2', summary: 'The same recovery gap was also noted.' };
+  const verifierResult = { schemaVersion: 1, headSha: state.verification.headSha, contextDigest: digestJson(context),
+    status: 'findings', summary: 'Recovery findings require disposition.', findings: [finding, siblingFinding], recordedAt: '2026-08-18T12:00:00.000Z' };
+  state = recordVerifierResult({ cwd: fixture.cwd, expectedRevision: state.revision, result: verifierResult });
+  const fingerprint = findingFingerprint({ sourceKind: 'verifier', sourceRole: 'development_integration_verifier', finding });
+  state = recordFindingDisposition({ cwd: fixture.cwd, expectedRevision: state.revision, disposition: {
+    schemaVersion: 1, sourceKind: 'verifier', sourceRole: 'development_integration_verifier',
+    sourceResultDigest: digestJson(verifierResult), headSha: state.verification.headSha, findingId: finding.id, fingerprint,
+    disposition: 'actionable', reason: 'Add recovery coverage as ordinary planned work.', amendmentId: 'remediate-recovery',
+    replacementCriterionId: 'recovery-remediation', replacementTaskId: 'recovery-remediation-task', recordedAt: '2026-08-18T12:05:00.000Z',
+  } });
+  const resultingPlan = planFor(state, 2);
+  resultingPlan.tasks[0].anticipatedPaths = ['first.txt'];
+  resultingPlan.criteria.push({ id: 'recovery-remediation', description: 'Recovery coverage is complete.', disposition: 'owned',
+    ownerTaskId: 'recovery-remediation-task', deferredReason: null });
+  resultingPlan.tasks.push({ ...resultingPlan.tasks[0], id: 'recovery-remediation-task', title: 'Add recovery coverage',
+    objective: 'Implement the exact finding remediation.', criterionIds: ['recovery-remediation'], checklistItemIds: [],
+    dependsOn: ['state-task'], anticipatedPaths: ['remediation.txt'] });
+  const amendment = {
+    id: 'remediate-recovery', reason: 'Resolve exact verifier finding.', authorization: 'Human-approved remediation.',
+    trigger: fingerprint, delta: { addedTaskIds: ['recovery-remediation-task'] }, invalidatedEvidence: [],
+  };
+  assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+    amendment: { ...amendment, trigger: 'manual-override' }, resultingPlan }),
+  (error) => error.code === 'INVALID_AMENDMENT');
+  assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision, amendment, resultingPlan }),
+    (error) => ['RECEIPT_MISSING', 'INVALID_AMENDMENT'].includes(error.code));
+  const siblingFingerprint = findingFingerprint({ sourceKind: 'verifier', sourceRole: 'development_integration_verifier', finding: siblingFinding });
+  state = recordFindingDisposition({ cwd: fixture.cwd, expectedRevision: state.revision, disposition: {
+    schemaVersion: 1, sourceKind: 'verifier', sourceRole: 'development_integration_verifier', sourceResultDigest: digestJson(verifierResult),
+    headSha: state.verification.headSha, findingId: siblingFinding.id, fingerprint: siblingFingerprint, disposition: 'duplicate',
+    reason: 'Same remediation covers this duplicate note.', amendmentId: null, replacementCriterionId: null, replacementTaskId: null,
+    recordedAt: '2026-08-18T12:06:00.000Z',
+  } });
+  state = amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision, amendment, resultingPlan });
+  assert.equal(state.phase, 'implementing');
+  assert.equal(state.verification, null);
+  assert.equal(state.execution.tasks.find(({ id }) => id === 'state-task').status, 'integrated');
+  assert.equal(state.execution.tasks.find(({ id }) => id === 'recovery-remediation-task').status, 'unbound');
+  assert.ok(existsSync(join(changeDirectory(fixture.cwd, state.changeId), 'verification', 'rounds', '0001', 'verifier-result.json')));
+  const remediationPacket = packetFor(state, resultingPlan, 'recovery-remediation-task');
+  state = bindTask({ cwd: fixture.cwd, packet: remediationPacket, expectedRevision: state.revision });
+  const remediationWorker = createWorkerFixture(fixture.cwd, state, remediationPacket);
+  state = scheduleWave({ cwd: fixture.cwd, expectedRevision: state.revision });
+  state = startTask({ cwd: fixture.cwd, taskId: remediationPacket.taskId, workerId: 'worker-two', expectedRevision: state.revision });
+  writeFileSync(join(remediationWorker.path, 'remediation.txt'), 'covered\n'); git(remediationWorker.path, 'add', 'remediation.txt');
+  git(remediationWorker.path, 'commit', '-m', 'test: remediate finding');
+  state = acceptResult({ cwd: fixture.cwd, expectedRevision: state.revision, workerCwd: remediationWorker.path,
+    result: resultFor(remediationPacket, 'implemented', git(remediationWorker.path, 'rev-parse', 'HEAD'), ['remediation.txt']) });
+  state = integrateTask({ cwd: fixture.cwd, taskId: remediationPacket.taskId, expectedRevision: state.revision });
+  removeTaskWorktree({ cwd: fixture.cwd, changeId: state.changeId, taskId: remediationPacket.taskId });
+  state = finalizeIntegration({ cwd: fixture.cwd, expectedRevision: state.revision });
+  state = createValidationPlan({ cwd: fixture.cwd, expectedRevision: state.revision });
+  assert.equal(state.verification.round, 2, 'round identity comes from immutable history after verification reset');
+  state = runValidation({ cwd: fixture.cwd, expectedRevision: state.revision,
+    runner: () => ({ status: 0, signal: null, stdout: 'passed', stderr: '' }) });
+  state = createSpecialistPlan({ cwd: fixture.cwd, expectedRevision: state.revision });
+  const repeatedContext = buildVerifierContext({ cwd: fixture.cwd });
+  const repeatedResult = { ...verifierResult, findings: [finding], summary: 'The remediation finding repeated.',
+    headSha: state.verification.headSha, contextDigest: digestJson(repeatedContext),
+    recordedAt: '2026-08-18T13:00:00.000Z' };
+  state = recordVerifierResult({ cwd: fixture.cwd, expectedRevision: state.revision, result: repeatedResult });
+  assert.deepEqual(state.verification.humanDecisionRequiredFingerprints, [fingerprint]);
+  const repeatedDisposition = { schemaVersion: 1, sourceKind: 'verifier', sourceRole: 'development_integration_verifier',
+    sourceResultDigest: digestJson(repeatedResult), headSha: state.verification.headSha, findingId: finding.id, fingerprint,
+    disposition: 'actionable', reason: 'A second ordinary remediation is authorized.', amendmentId: 'remediate-recovery-again',
+    replacementCriterionId: 'recovery-remediation-again', replacementTaskId: 'recovery-remediation-task-again', recordedAt: '2026-08-18T13:05:00.000Z' };
+  assert.throws(() => recordFindingDisposition({ cwd: fixture.cwd, expectedRevision: state.revision,
+    disposition: { ...repeatedDisposition, disposition: 'duplicate', amendmentId: null, replacementCriterionId: null, replacementTaskId: null } }),
+  (error) => error.code === 'HUMAN_DECISION_REQUIRED');
+  state = authorizeRepeatedFinding({ cwd: fixture.cwd, expectedRevision: state.revision,
+    authorization: { fingerprint, reason: 'Human reviewed the consecutive applicable finding.', authorizedBy: 'release-owner' } });
+  state = recordFindingDisposition({ cwd: fixture.cwd, expectedRevision: state.revision, disposition: repeatedDisposition });
+  assert.ok(existsSync(join(changeDirectory(fixture.cwd, state.changeId), 'verification', 'rounds', '0001', 'findings', `${fingerprint.slice(7)}.json`)));
+  assert.ok(existsSync(join(changeDirectory(fixture.cwd, state.changeId), 'verification', 'rounds', '0002', 'findings', `${fingerprint.slice(7)}.json`)));
 });
 
 test('execution Git checkpoints preserve durable identity and restore lifecycle phase exactly', async () => {
@@ -654,6 +906,7 @@ import { archiveDirectory } from '../paths.mjs';
 import { loadRegistry, routeSpecialists } from '../../../aerstello-specialists/scripts/validate-registry.mjs';
 import { digestJson, sourceChecklistBinding } from '../contracts/contracts.mjs';
 import { implementationTaskDigest } from '../implementation/contracts.mjs';
+import { findingFingerprint } from '../verification/contracts.mjs';
 import { removeTaskWorktree } from '../worktree/worktree.mjs';
 
 function git(cwd, ...args) {
@@ -764,6 +1017,28 @@ function createWorkerFixture(cwd, state, packet) {
   writeReceiptJson(join(changeRoot(cwd), 'worktrees', 'manifests', state.changeId, `${packet.taskId}.json`),
     { ...identity, status: 'active', creationIntentDigest: digestJson(creation) });
   return { ...identity };
+}
+
+async function integratedSingleTaskFixture(label, specialize = specialization()) {
+  const { cwd, sha } = repository(label);
+  const planning = await initializeState({ cwd, changeId: label.replaceAll(' ', '-'), mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
+  const plan = planFor(planning);
+  plan.specialization = specialize;
+  plan.tasks[0].specialization = specialize;
+  plan.tasks[0].anticipatedPaths = ['first.txt'];
+  let state = acceptPlan({ cwd, plan, expectedRevision: planning.revision });
+  const packet = packetFor(state, plan, 'state-task');
+  state = bindTask({ cwd, packet, expectedRevision: state.revision });
+  const worker = createWorkerFixture(cwd, state, packet);
+  state = scheduleWave({ cwd, expectedRevision: state.revision });
+  state = startTask({ cwd, taskId: 'state-task', workerId: 'worker-one', expectedRevision: state.revision });
+  writeFileSync(join(worker.path, 'first.txt'), 'first\n'); git(worker.path, 'add', 'first.txt'); git(worker.path, 'commit', '-m', 'test: lifecycle worker');
+  state = acceptResult({ cwd, result: resultFor(packet, 'implemented', git(worker.path, 'rev-parse', 'HEAD'), ['first.txt']),
+    workerCwd: worker.path, expectedRevision: state.revision });
+  state = integrateTask({ cwd, taskId: 'state-task', expectedRevision: state.revision });
+  removeTaskWorktree({ cwd, changeId: state.changeId, taskId: 'state-task' });
+  state = finalizeIntegration({ cwd, expectedRevision: state.revision });
+  return { cwd, state };
 }
 
 function scenarioPlanFor(state, revision = 1) {
@@ -1467,6 +1742,11 @@ test('every phase exposes one exact next action', () => {
   ]);
   for (const [phase, pattern] of expected) assert.match(nextActionFor({ ...state, phase }), pattern, phase);
   assert.match(nextActionFor({ ...state, phase: 'ready-to-implement', mode: 'full' }), /implementation capability/u);
+  assert.match(nextActionFor({ ...state, phase: 'blocked', verification: {
+    humanDecisionRequiredFingerprints: ['sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
+  } }), /durable human authorization/u);
+  assert.match(nextActionFor({ ...state, phase: 'blocked', verification: { humanDecisionRequiredFingerprints: [] } }),
+    /Disposition every exact-source verification finding/u);
 });
 
 test('bounded status preserves the exact next action', () => {
