@@ -1,7 +1,17 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { afterEach, test } from 'node:test';
-import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -90,10 +100,21 @@ const LOCK_HOLDER_SOURCE = `
     });
   }
 `;
+const LEGACY_LOCK_RELEASE_SOURCE = `
+  import { unlinkSync } from 'node:fs';
+  const [path, delayMilliseconds] = process.argv.slice(1);
+  setTimeout(() => unlinkSync(path), Number(delayMilliseconds));
+`;
 
 function spawnLockHolder(cwd, kind, holdMilliseconds) {
   return spawn(process.execPath, [
     '--input-type=module', '--eval', LOCK_HOLDER_SOURCE, cwd, '17', kind, String(holdMilliseconds),
+  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+function spawnLegacyLockRelease(path, delayMilliseconds) {
+  return spawn(process.execPath, [
+    '--input-type=module', '--eval', LEGACY_LOCK_RELEASE_SOURCE, path, String(delayMilliseconds),
   ], { stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
@@ -2399,25 +2420,67 @@ test('GitHub request lock recovers from SIGKILL and keeps the replacement owner 
   assert.equal(existsSync(path), true);
 });
 
-test('legacy JSON locks and orphan retire hardlinks do not block SQLite locks', async () => {
+test('SQLite locks permanently seal both legacy protocol paths', async () => {
   const cwd = repo();
   const locks = join(reviewRoot(cwd), 'locks');
   mkdirSync(locks, { recursive: true });
   const legacyState = join(locks, 'pr-17.lock');
   const legacyRequest = join(locks, 'pr-17.github-request.lock');
-  writeFileSync(legacyState, '{"token":"orphan-state"}\n');
-  writeFileSync(legacyRequest, '{"token":"orphan-request"}\n');
-  linkSync(legacyState, `${legacyState}.retire-orphan`);
-  linkSync(legacyRequest, `${legacyRequest}.retire-orphan`);
+  writeFileSync(`${legacyState}.retire-orphan`, 'orphan state claim\n');
+  writeFileSync(`${legacyRequest}.retire-orphan`, 'orphan request claim\n');
 
   assert.equal(withStateLock(cwd, 17, () => 'state result'), 'state result');
   assert.equal(await withGitHubRequestOwnerLock(cwd, 17, () => 'request result'), 'request result');
   assert.equal(existsSync(join(locks, 'pr-17.state-lock.sqlite')), true);
   assert.equal(existsSync(join(locks, 'pr-17.github-request-lock.sqlite')), true);
-  assert.equal(existsSync(legacyState), true);
+  assert.equal(statSync(legacyState).isDirectory(), true);
+  assert.equal(statSync(legacyRequest).isDirectory(), true);
+  assert.throws(() => openSync(legacyState, 'wx'), { code: 'EEXIST' });
+  assert.throws(() => openSync(legacyRequest, 'wx'), { code: 'EEXIST' });
   assert.equal(existsSync(`${legacyState}.retire-orphan`), true);
-  assert.equal(existsSync(legacyRequest), true);
   assert.equal(existsSync(`${legacyRequest}.retire-orphan`), true);
+});
+
+test('legacy file owners block both new lock callbacks until explicit safe release', async () => {
+  const cwd = repo();
+  const locks = join(reviewRoot(cwd), 'locks');
+  mkdirSync(locks, { recursive: true });
+  const legacyState = join(locks, 'pr-17.lock');
+  const legacyRequest = join(locks, 'pr-17.github-request.lock');
+  const liveOwner = `${JSON.stringify({
+    token: 'live-owner', pid: process.pid, hostname: 'same-host', createdAt: AT,
+  })}\n`;
+  writeFileSync(legacyState, liveOwner);
+  writeFileSync(legacyRequest, liveOwner);
+
+  let stateCallbackRan = false;
+  assert.throws(() => withStateLock(cwd, 17, () => {
+    stateCallbackRan = true;
+  }, { timeoutMs: 10 }), { code: 'STATE_LOCK_TIMEOUT' });
+  assert.equal(stateCallbackRan, false);
+  assert.equal(readFileSync(legacyState, 'utf8'), liveOwner);
+
+  let requestCallbackRan = false;
+  await assert.rejects(() => withGitHubRequestOwnerLock(cwd, 17, () => {
+    requestCallbackRan = true;
+  }, { timeoutMs: 10 }), { code: 'STATE_LOCK_TIMEOUT' });
+  assert.equal(requestCallbackRan, false);
+  assert.equal(readFileSync(legacyRequest, 'utf8'), liveOwner);
+
+  const stateRelease = spawnLegacyLockRelease(legacyState, 40);
+  assert.equal(withStateLock(cwd, 17, () => 'state migrated'), 'state migrated');
+  assert.deepEqual(await waitForChildExit(stateRelease), { code: 0, signal: null });
+
+  const requestRelease = new Promise((resolveRelease) => {
+    setTimeout(() => {
+      unlinkSync(legacyRequest);
+      resolveRelease();
+    }, 40);
+  });
+  assert.equal(await withGitHubRequestOwnerLock(cwd, 17, () => 'request migrated'), 'request migrated');
+  await requestRelease;
+  assert.equal(statSync(legacyState).isDirectory(), true);
+  assert.equal(statSync(legacyRequest).isDirectory(), true);
 });
 
 test('verification collection escalation is guarded, append-only, request-bound, and human-gated', () => {

@@ -3,6 +3,7 @@ import {
   cpSync,
   existsSync,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readdirSync,
@@ -202,6 +203,14 @@ function lockPath(cwd, prNumber) {
 
 function requestOwnerLockPath(cwd, prNumber) {
   return join(reviewRoot(cwd), 'locks', `pr-${parsePrNumber(prNumber)}.github-request-lock.sqlite`);
+}
+
+function legacyLockPath(cwd, prNumber) {
+  return join(reviewRoot(cwd), 'locks', `pr-${parsePrNumber(prNumber)}.lock`);
+}
+
+function legacyRequestOwnerLockPath(cwd, prNumber) {
+  return join(reviewRoot(cwd), 'locks', `pr-${parsePrNumber(prNumber)}.github-request.lock`);
 }
 
 function parsePrNumber(value) {
@@ -1790,6 +1799,54 @@ function lockTimeout(path) {
   return new StateError(`Timed out waiting for ${path}`, 'STATE_LOCK_TIMEOUT');
 }
 
+function ensureLegacyBarrierSync(path, timeoutMs) {
+  const started = Date.now();
+  while (true) {
+    try {
+      // A directory is an atomic, permanent cutover sentinel at the exact
+      // pathname used by the immediately previous JSON lock protocol. Older
+      // clients can neither create their lock file nor retire this sentinel as
+      // an observed file generation, so the two protocols cannot overlap.
+      mkdirSync(path, { mode: 0o700 });
+      return;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+    }
+    try {
+      if (lstatSync(path).isDirectory()) return;
+    } catch (error) {
+      if (error.code === 'ENOENT') continue;
+      throw error;
+    }
+    // A legacy file may belong to a process already running the previous
+    // release. Never inspect-and-unlink it: waiting lets that owner release
+    // normally, while stale, malformed, foreign, or otherwise unverifiable
+    // ownership fails closed for explicit operator reconciliation.
+    if (Date.now() - started >= timeoutMs) throw lockTimeout(path);
+    sleep(LOCK_RETRY_INTERVAL_MS);
+  }
+}
+
+async function ensureLegacyBarrierAsync(path, timeoutMs) {
+  const started = Date.now();
+  while (true) {
+    try {
+      mkdirSync(path, { mode: 0o700 });
+      return;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+    }
+    try {
+      if (lstatSync(path).isDirectory()) return;
+    } catch (error) {
+      if (error.code === 'ENOENT') continue;
+      throw error;
+    }
+    if (Date.now() - started >= timeoutMs) throw lockTimeout(path);
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, LOCK_RETRY_INTERVAL_MS));
+  }
+}
+
 function beginExclusiveSync(database, path, timeoutMs) {
   const started = Date.now();
   while (true) {
@@ -1830,10 +1887,16 @@ export function withStateLock(cwd, prNumber, callback, {
   timeoutMs = DEFAULT_LOCK_TIMEOUT_MS,
 } = {}) {
   const path = lockPath(cwd, prNumber);
+  const started = Date.now();
   const database = openLockDatabase(path);
   try {
     beginExclusiveSync(database, path, timeoutMs);
+    ensureLegacyBarrierSync(
+      legacyLockPath(cwd, prNumber),
+      Math.max(0, timeoutMs - (Date.now() - started)),
+    );
   } catch (error) {
+    rollbackQuietly(database);
     closeQuietly(database);
     throw error;
   }
@@ -1860,10 +1923,16 @@ export async function withGitHubRequestOwnerLock(cwd, prNumber, callback, {
   timeoutMs = DEFAULT_LOCK_TIMEOUT_MS,
 } = {}) {
   const path = requestOwnerLockPath(cwd, prNumber);
+  const started = Date.now();
   const database = openLockDatabase(path);
   try {
     await beginExclusiveAsync(database, path, timeoutMs);
+    await ensureLegacyBarrierAsync(
+      legacyRequestOwnerLockPath(cwd, prNumber),
+      Math.max(0, timeoutMs - (Date.now() - started)),
+    );
   } catch (error) {
+    rollbackQuietly(database);
     closeQuietly(database);
     throw error;
   }
