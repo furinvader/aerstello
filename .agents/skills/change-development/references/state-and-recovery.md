@@ -120,6 +120,13 @@ worker manifest has a matching removal tombstone.
 
 Run `npm run change:status` first. Use `recover` only when its exact next action identifies an interrupted transition. Recovery may complete a transition only when its intact committed intent, current revision, digests, repository observation, and enumerated crash boundary match exactly. From the intent's authoritative bundle it may materialize only the exact bound domain sidecar or a missing matching sidecar receipt. It may also reconstruct the exact deterministic transition receipt, canonical event history, and completion marker.
 
+Git-checkpoint recovery has no evidence-free historical fallback. Its
+authoritative bundle must contain the receipt-bound observation sidecar named
+for that exact checkpoint revision, and recovery must match the current branch,
+HEAD, and cleanliness to that observation. A checkpoint intent without that
+exact observation is rejected without completing the transition or changing
+state and event history.
+
 Candidate-plan readiness is likewise receipt-bound: `validate --plan` first validates the active durable state and source evidence, then requires exact candidate identity at that state's Planning SHA. With no active state, schema inspection is possible but acceptance readiness is false.
 
 An interrupted non-retain `decision-recorded` transition may resume only when

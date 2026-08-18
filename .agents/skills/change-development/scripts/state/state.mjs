@@ -1003,9 +1003,9 @@ function selectorEvidenceAtCommit(cwd, commit) {
       if (/^Scenario(?: Outline)?:/u.test(trimmed)) {
         const scenarioTags = [...pendingTags];
         const stableIds = scenarioTags.filter((selector) => /^id-[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(selector));
+        const tags = new Set([...featureTags, ...scenarioTags]);
+        scenarios.push({ path: entry.path, tags, stableIds });
         if (stableIds.length === 1) {
-          const tags = new Set([...featureTags, ...scenarioTags]);
-          scenarios.push({ path: entry.path, tags });
           for (const selector of tags) {
             const paths = runnable.get(selector) ?? new Set();
             paths.add(entry.path);
@@ -1019,6 +1019,15 @@ function selectorEvidenceAtCommit(cwd, commit) {
     }
   }
   return { all, runnable, scenarios };
+}
+
+function assertValidScenarioCatalog(catalog) {
+  const malformed = catalog.scenarios.filter(({ stableIds }) => stableIds.length !== 1);
+  if (malformed.length > 0) {
+    const paths = [...new Set(malformed.map(({ path }) => path))];
+    throw new StateError(`Related E2E catalog contains runnable scenarios without exactly one directly attached stable ID: ${paths.join(', ')}`,
+      'RELATED_E2E_CATALOG_INVALID');
+  }
 }
 
 
@@ -1046,6 +1055,7 @@ function assertValidationCatalog(catalog, validation, allowedUnknown = new Set()
 
 function assertPacketSelectorsAtBase(cwd, packet) {
   const existing = selectorEvidenceAtCommit(cwd, packet.taskBaseSha);
+  if (packet.requiredValidation.system.length > 0) assertValidScenarioCatalog(existing);
   const planned = new Map((packet.plannedE2ESelectors ?? []).map((entry) => [entry.selector, entry.featurePath]));
   for (const selector of planned.keys()) {
     if (existing.all.has(selector)) throw new StateError(`Planned E2E selector ${selector} already exists at the exact task base`, 'PLANNED_E2E_SELECTOR_MISMATCH');
@@ -1057,6 +1067,7 @@ function assertPacketSelectorsAtBase(cwd, packet) {
 
 function assertPlannedSelectorsRealized(cwd, packet, commit) {
   const catalog = selectorEvidenceAtCommit(cwd, commit);
+  if (packet.requiredValidation.system.length > 0) assertValidScenarioCatalog(catalog);
   for (const { selector, featurePath } of packet.plannedE2ESelectors ?? []) {
     if (!catalog.runnable.get(selector)?.has(featurePath)) {
       throw new StateError(`Planned E2E selector ${selector} was not realized in ${featurePath} at the worker commit`, 'PLANNED_E2E_SELECTOR_MISMATCH');
@@ -1515,10 +1526,18 @@ export function rejectTask({ cwd = process.cwd(), changeId, taskId, reason, expe
       const sequencer = runGit(['rev-parse', '--verify', '--quiet', 'CHERRY_PICK_HEAD'], { cwd: root, allowFailure: true });
       if (sequencer.status === 0) throw new StateError('Rejecting work requires explicit cherry-pick abort or skip cleanup first', 'CHERRY_PICK_IN_PROGRESS');
       if (sequencer.status !== 1) throw new StateError('Unable to inspect cherry-pick sequencer state', 'CENTRAL_GIT_MISMATCH');
+      if (state.execution.integrationIntent && state.execution.integrationIntent.taskId !== taskId) {
+        throw new StateError(`Task ${taskId} cannot be rejected while integration intent belongs to ${state.execution.integrationIntent.taskId}`,
+          'INTEGRATION_INTENT_TASK_MISMATCH');
+      }
       const current = gitObservation(root, clock);
       const requiredHead = state.execution.integrationIntent?.taskId === taskId ? state.execution.integrationIntent.centralBaseSha : state.git.headSha;
       if (!current.clean || current.headSha !== requiredHead || current.branch !== state.git.branch || current.branch === '(detached)') throw new StateError('Rejecting work requires the exact clean owning branch at the pre-conflict base', 'CENTRAL_GIT_MISMATCH');
-      const preservedBlockers = nonTaskBlockers(root, state);
+      // Persisting an integration intent is allowed only when blockers are the
+      // exact receipt-backed task blockers, then deliberately clears the
+      // mutable blocker list. Rejection of that intent owner regenerates those
+      // blockers from receipts instead of treating the cleared list as loss.
+      const preservedBlockers = state.execution.integrationIntent ? [] : nonTaskBlockers(root, state);
       const execution = replaceExecutionTask(state, taskId, { status: 'rejected' }, { activeWave: state.execution.activeWave.filter((id) => id !== taskId), integrationIntent: null });
       const timestamp = now(clock);
       const rejection = { schemaVersion: 1, changeId: state.changeId, taskId, binding: task.binding, reason, rejectedAt: timestamp };
@@ -2489,8 +2508,6 @@ function checkpointObservation(intent) {
   if (record?.path === `implementation/git-checkpoints/${String(intent.revision).padStart(8, '0')}.json`
       && record.digest === intent.evidence?.gitCheckpointObservationDigest
       && objectDigest(record.value) === record.digest) return record.value;
-  // Compatibility for checkpoints written before observation evidence was introduced.
-  if (Object.keys(intent.evidence ?? {}).length === 0) return intent.nextState.git;
   return null;
 }
 

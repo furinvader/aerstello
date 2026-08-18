@@ -87,7 +87,15 @@ matched by a validation's selectors, `@browser-webkit` requires
 required project must be present, while extra projects are allowed. Existing
 selectors are checked in the exact task-base tree, and planned selectors plus
 their browser-project union are re-evaluated in the exact worker tree during
-acceptance and durable replay. Unknown, unsafe, duplicate,
+acceptance and durable replay. Any packet with related-E2E validation first
+proves the whole exact-tree feature catalog is valid: every `Scenario` and
+`Scenario Outline` must have exactly one directly attached stable `@id-*`,
+including scenarios unrelated to the packet selectors. Feature-level tags may
+still be inherited, but do not satisfy that direct stable-ID requirement. The
+same whole-catalog proof runs at the worker commit before result evidence is
+accepted and is repeated from the immutable base and worker commits during
+durable replay; unit-only packets do not depend on feature-catalog validity.
+Unknown, unsafe, duplicate,
 unused, unowned, forbidden, or unrealized declarations fail closed. Packets
 without the field retain the original contract.
 
@@ -207,7 +215,10 @@ and sibling rejection cannot race integration or clean-base reconciliation;
 rejection also refuses whenever Git still reports `CHERRY_PICK_HEAD`, even when
 the index and porcelain are otherwise clean. The operator must explicitly abort
 or skip the cherry-pick before rejection can preserve or clear integration intent;
-normal failure releases ownership and interrupted ownership follows the exact
+after sequencer cleanup, rejection still refuses a sibling task while the durable
+intent names another task. Reconcile or reject the intent-owning task first; only
+that task may clear its persisted intent. Normal failure releases ownership and
+interrupted ownership follows the exact
 dead-owner reclaim and reconciliation path.
 
 If one wave member reports `blocked` or `failed`, or is explicitly rejected, a

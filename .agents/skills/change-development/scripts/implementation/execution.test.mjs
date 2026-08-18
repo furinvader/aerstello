@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, test } from 'node:test';
 
@@ -358,6 +358,86 @@ test('runnable direct, feature-inherited, and outline selectors bind and replay 
   }
 });
 
+test('related E2E packets reject malformed whole base catalogs while unit-only packets remain isolated', async () => {
+  for (const [label, malformedScenario] of [
+    ['missing stable ID', ['  Scenario: Missing stable ID', '    Given a malformed scenario']],
+    ['multiple stable IDs', ['  @id-first-malformed @id-second-malformed',
+      '  Scenario Outline: Duplicate stable IDs', '    Given <value>', '    Examples:', '      | value |', '      | one |']],
+  ]) {
+    const catalogTask = task(`base-catalog-${label.toLowerCase().replaceAll(' ', '-')}`, ['output/catalog.txt']);
+    const contents = [
+      'Feature: Base catalog', '', '  @id-valid-flow', '  Scenario: Valid flow', '    Given a valid scenario', '',
+      ...malformedScenario, '',
+    ].join('\n');
+    const context = await fixture([catalogTask], { 'specs/features/catalog.feature': contents });
+    const packet = packetFor(context, catalogTask.id, { requiredValidation: { unit: [], system: [{
+      command: 'npm run test:e2e:related -- --id valid-flow', reason: 'Exercise the valid flow.',
+      selectors: ['id-valid-flow'], projects: ['tablet-chromium'],
+    }] } });
+    const root = changeDirectory(context.cwd, context.changeId);
+    const before = {
+      state: readFileSync(join(root, 'state.json'), 'utf8'),
+      events: readFileSync(join(root, 'events.jsonl'), 'utf8'),
+      transitions: readdirSync(join(root, 'transitions')),
+    };
+    assert.throws(() => bindTask({ cwd: context.cwd, changeId: context.changeId, packet,
+      expectedRevision: context.state.revision }),
+    (error) => error instanceof StateError && error.code === 'RELATED_E2E_CATALOG_INVALID', label);
+    assert.equal(readFileSync(join(root, 'state.json'), 'utf8'), before.state, label);
+    assert.equal(readFileSync(join(root, 'events.jsonl'), 'utf8'), before.events, label);
+    assert.deepEqual(readdirSync(join(root, 'transitions')), before.transitions, label);
+    assert.equal(existsSync(join(root, 'implementation', 'tasks', catalogTask.id)), false, label);
+
+    const unitContext = await fixture([catalogTask], { 'specs/features/catalog.feature': contents });
+    const bound = bindTask({ cwd: unitContext.cwd, changeId: unitContext.changeId,
+      packet: packetFor(unitContext, catalogTask.id), expectedRevision: unitContext.state.revision });
+    assert.equal(bound.execution.tasks[0].status, 'bound', `${label} unit-only isolation`);
+  }
+});
+
+test('implemented results reject malformed worker catalogs and replay the exact accepted worker tree', async () => {
+  const catalogTask = task('worker-catalog', ['specs/features/worker-catalog.feature']);
+  const existing = [
+    'Feature: Existing catalog', '', '  @id-existing-flow', '  Scenario: Existing flow', '    Given a valid scenario', '',
+  ].join('\n');
+  const validation = { unit: [], system: [{
+    command: 'npm run test:e2e:related -- --id existing-flow', reason: 'Exercise the existing flow.',
+    selectors: ['id-existing-flow'], projects: ['tablet-chromium'],
+  }] };
+
+  const rejected = await fixture([catalogTask], { 'specs/features/existing.feature': existing });
+  const rejectedPacket = packetFor(rejected, catalogTask.id, { requiredValidation: validation });
+  rejected.state = bindTask({ cwd: rejected.cwd, changeId: rejected.changeId, packet: rejectedPacket,
+    expectedRevision: rejected.state.revision });
+  const rejectedWorker = createWorker(rejected, rejectedPacket); startWave(rejected, [rejectedPacket]);
+  const malformedCommit = commit(rejectedWorker.path, { 'specs/features/worker-catalog.feature': [
+    'Feature: Worker catalog', '', '  Scenario: Missing stable ID', '    Given malformed worker content', '',
+  ].join('\n') }, 'test: malformed worker catalog');
+  const rejectedRoot = changeDirectory(rejected.cwd, rejected.changeId);
+  const rejectedRevision = rejected.state.revision;
+  assert.throws(() => accept(rejected, rejectedPacket, rejectedWorker, malformedCommit,
+    ['specs/features/worker-catalog.feature']),
+  (error) => error instanceof StateError && error.code === 'RELATED_E2E_CATALOG_INVALID');
+  assert.equal(loadState(rejected.cwd).revision, rejectedRevision);
+  assert.equal(existsSync(join(rejectedRoot, 'implementation', 'results', catalogTask.id, '0001.json')), false);
+
+  const accepted = await fixture([catalogTask], { 'specs/features/existing.feature': existing });
+  const acceptedPacket = packetFor(accepted, catalogTask.id, { requiredValidation: validation });
+  accepted.state = bindTask({ cwd: accepted.cwd, changeId: accepted.changeId, packet: acceptedPacket,
+    expectedRevision: accepted.state.revision });
+  const acceptedWorker = createWorker(accepted, acceptedPacket); startWave(accepted, [acceptedPacket]);
+  const validCommit = commit(acceptedWorker.path, { 'specs/features/worker-catalog.feature': [
+    '@area-worker', 'Feature: Worker catalog', '', '  @id-worker-flow',
+    '  Scenario Outline: Valid worker outline', '    Given <value>', '    Examples:', '      | value |', '      | one |', '',
+  ].join('\n') }, 'test: valid worker catalog');
+  accept(accepted, acceptedPacket, acceptedWorker, validCommit, ['specs/features/worker-catalog.feature']);
+  commit(acceptedWorker.path, { 'specs/features/worker-catalog.feature': [
+    'Feature: Mutable checkout', '', '  @id-first @id-second', '  Scenario: Later malformed scenario', '',
+  ].join('\n') }, 'test: advance mutable worker checkout');
+  assert.equal(validateState({ cwd: accepted.cwd }).valid, true,
+    'durable replay must re-read the receipt-bound worker commit, not the mutable worker checkout');
+});
+
 test('related E2E browser projects are the canonical union for OR-matched exact-tree scenarios', async () => {
   const browserFeature = [
     '@area-browser @browser-webkit', 'Feature: Browser catalog', '',
@@ -435,26 +515,26 @@ test('planned browser tags must realize the canonical worker-tree project union 
 
 test('result acceptance rejects orphan, unsupported, and mixed selector associations without evidence mutation', async () => {
   const cases = [
-    ['missing directly attached stable ID', ['id-feature-flow'], [
+    ['missing directly attached stable ID', 'RELATED_E2E_CATALOG_INVALID', ['id-feature-flow'], [
       '@id-feature-flow', 'Feature: Planned', '', '  Scenario: Inherited selector without stable scenario ID', '',
     ].join('\n')],
-    ['duplicate directly attached stable IDs', ['area-feature-flow'], [
+    ['duplicate directly attached stable IDs', 'RELATED_E2E_CATALOG_INVALID', ['area-feature-flow'], [
       '@area-feature-flow', 'Feature: Planned', '', '  @id-first-flow @id-second-flow',
       '  Scenario: Inherited selector with duplicate stable scenario IDs', '',
     ].join('\n')],
-    ['orphan', ['id-orphan-flow'], [
+    ['orphan', 'RELATED_E2E_CATALOG_INVALID', ['id-orphan-flow'], [
       'Feature: Planned', '', '  Scenario: Runnable without selector', '', '  @id-orphan-flow', '',
     ].join('\n')],
-    ['unsupported construct', ['id-unsupported-flow'], [
+    ['unsupported construct', 'RELATED_E2E_CATALOG_INVALID', ['id-unsupported-flow'], [
       'Feature: Planned', '', '  @id-unsupported-flow', '  Background:', '    Given setup', '',
       '  Scenario: Runnable without selector', '',
     ].join('\n')],
-    ['mixed runnable and orphan', ['id-runnable-flow', 'id-orphan-flow'], [
+    ['mixed runnable and orphan', 'PLANNED_E2E_SELECTOR_MISMATCH', ['id-runnable-flow', 'id-orphan-flow'], [
       'Feature: Planned', '', '  @id-runnable-flow', '  Scenario: Runnable selector', '',
       '  @id-orphan-flow', '',
     ].join('\n')],
   ];
-  for (const [label, selectors, contents] of cases) {
+  for (const [label, expectedCode, selectors, contents] of cases) {
     const plannedTask = task(`unrealized-${label.toLowerCase().replaceAll(' ', '-')}`, ['specs/features/planned.feature']);
     const context = await fixture([plannedTask]);
     const packet = packetFor(context, plannedTask.id, {
@@ -473,7 +553,7 @@ test('result acceptance rejects orphan, unsupported, and mixed selector associat
     const workerCommit = commit(worker.path, { 'specs/features/planned.feature': contents }, `test: ${label} selector`);
     const revision = context.state.revision;
     assert.throws(() => accept(context, packet, worker, workerCommit, ['specs/features/planned.feature']),
-      (error) => error instanceof StateError && error.code === 'PLANNED_E2E_SELECTOR_MISMATCH', label);
+      (error) => error instanceof StateError && error.code === expectedCode, label);
     assert.equal(loadState(context.cwd).revision, revision, label);
     assert.equal(existsSync(join(changeDirectory(context.cwd, context.changeId), 'implementation', 'results',
       plannedTask.id, '0001.json')), false, label);
@@ -757,11 +837,25 @@ test('a real central cherry-pick conflict preserves its intent and requires abor
   git(addWorker.path, ['add', 'old/b.txt']);
   git(addWorker.path, ['commit', '-m', 'test: add to original directory']);
   const addCommit = git(addWorker.path, ['rev-parse', 'HEAD']);
-  const siblingCommit = commit(siblingWorker.path, { 'sibling.txt': 'independent\n' }, 'test: independent sibling');
-
   accept(context, renamePacket, renameWorker, renameCommit, ['new/a.txt', 'old/a.txt']);
   accept(context, addPacket, addWorker, addCommit, ['old/b.txt']);
-  accept(context, siblingPacket, siblingWorker, siblingCommit, ['sibling.txt']);
+  context.state = acceptResult({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    workerCwd: siblingWorker.path,
+    expectedRevision: context.state.revision,
+    result: {
+      ...resultFor(siblingPacket, null, []),
+      status: 'failed',
+      workerCommit: null,
+      changedPaths: [],
+      validation: siblingPacket.requiredValidation.unit.map(({ command }) => ({
+        command, result: 'failed', summary: 'Sibling validation failed.',
+      })),
+      unexpectedDependencies: ['Sibling validation exposed an unrelated dependency.'],
+      summary: 'Sibling validation failed.',
+    },
+  });
   context.state = integrateTask({
     cwd: context.cwd,
     changeId: context.changeId,
@@ -812,6 +906,26 @@ test('a real central cherry-pick conflict preserves its intent and requires abor
 
   git(context.cwd, ['cherry-pick', '--abort']);
   assert.equal(git(context.cwd, ['rev-parse', 'HEAD']), centralBase);
+  const stateAfterAbort = readFileSync(statePath, 'utf8');
+  const siblingResultPath = join(changeDirectory(context.cwd, context.changeId), 'implementation', 'results', sibling.id, '0001.json');
+  const siblingResult = readFileSync(siblingResultPath, 'utf8');
+  assert.throws(() => rejectTask({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    taskId: sibling.id,
+    reason: 'Sibling rejection must not clear another task intent.',
+    expectedRevision: integrating.revision,
+  }), (error) => error instanceof StateError && error.code === 'INTEGRATION_INTENT_TASK_MISMATCH');
+  assert.equal(readFileSync(statePath, 'utf8'), stateAfterAbort);
+  assert.equal(readFileSync(siblingResultPath, 'utf8'), siblingResult);
+  assert.deepEqual(loadState(context.cwd).execution.integrationIntent, integrating.execution.integrationIntent);
+  assert.throws(() => reconcileIntegration({
+    cwd: context.cwd,
+    changeId: context.changeId,
+    expectedRevision: integrating.revision,
+  }), (error) => error instanceof StateError && error.code === 'INTEGRATION_CHERRY_PICK_FAILED');
+  assert.deepEqual(loadState(context.cwd).execution.integrationIntent, integrating.execution.integrationIntent);
+  git(context.cwd, ['cherry-pick', '--abort']);
   const rejected = rejectTask({
     cwd: context.cwd,
     changeId: context.changeId,
@@ -821,7 +935,8 @@ test('a real central cherry-pick conflict preserves its intent and requires abor
   });
   assert.equal(rejected.phase, 'blocked');
   assert.equal(rejected.execution.tasks.find(({ id }) => id === add.id).status, 'rejected');
-  assert.match(rejected.nextAction, /Integrate the next dependency-ready accepted task/u);
+  assert.equal(rejected.execution.tasks.find(({ id }) => id === sibling.id).status, 'failed');
+  assert.match(rejected.nextAction, /rejecting\/replanning/u);
   const rejectionPath = join(changeDirectory(context.cwd, context.changeId), 'implementation', 'rejections', add.id,
     `${String(rejected.revision).padStart(8, '0')}.json`);
   assert.equal(JSON.parse(readFileSync(rejectionPath, 'utf8')).reason, 'Directory rename exposed an unplanned dependency.');

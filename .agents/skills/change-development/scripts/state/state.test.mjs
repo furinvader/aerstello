@@ -181,6 +181,41 @@ test('interrupted execution checkpoint recovers against evidence without replaci
   assert.deepEqual(recovered.state.git, accepted.git);
 });
 
+test('interrupted Git checkpoint without its receipt-bound observation refuses recovery without durable mutation', async () => {
+  const { cwd, sha } = repository('receipt-free checkpoint recovery');
+  const planning = await initializeState({ cwd, changeId: 'receipt-free-checkpoint', mode: 'implement',
+    baseBranch: 'main', planningRef: sha, source: descriptor });
+  acceptPlan({ cwd, plan: planFor(planning), expectedRevision: planning.revision });
+  writeFileSync(join(cwd, 'checkpoint-dirty.txt'), 'dirty');
+  assert.throws(() => checkpointGitMetadata({ cwd,
+    crashStep(step) { if (step === 'after-state') throw new Error('checkpoint crash'); } }), /checkpoint crash/u);
+
+  const root = changeDirectory(cwd, 'receipt-free-checkpoint');
+  const state = loadState(cwd);
+  const transition = join(root, 'transitions', String(state.revision).padStart(8, '0'));
+  const intentPath = join(transition, 'intent.json');
+  const intent = JSON.parse(readFileSync(intentPath, 'utf8'));
+  const observationPath = join(root, intent.evidencePaths.gitCheckpointObservationDigest);
+  unlinkSync(observationPath);
+  unlinkSync(observationPath.replace(/\.json$/u, '.sha256'));
+  intent.evidence = {};
+  intent.evidencePaths = {};
+  intent.authoritativeEvidence = {};
+  writeReceiptJson(intentPath, intent);
+  const before = {
+    state: readFileSync(join(root, 'state.json'), 'utf8'),
+    events: readFileSync(join(root, 'events.jsonl'), 'utf8'),
+    transition: readdirSync(transition),
+  };
+
+  assert.throws(() => recoverState({ cwd }),
+    (error) => error instanceof StateError && error.code === 'RECOVERY_EVIDENCE_INVALID');
+  assert.equal(readFileSync(join(root, 'state.json'), 'utf8'), before.state);
+  assert.equal(readFileSync(join(root, 'events.jsonl'), 'utf8'), before.events);
+  assert.deepEqual(readdirSync(transition), before.transition);
+  assert.equal(existsSync(join(transition, 'complete')), false);
+});
+
 test('plan-only execution summaries checkpoint detached Planning-SHA identity and recover without named-branch authority', async () => {
   const { cwd, sha } = repository('plan-only execution checkpoint');
   const planning = await initializeState({ cwd, changeId: 'plan-only-execution-checkpoint', mode: 'plan-only',
