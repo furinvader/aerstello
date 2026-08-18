@@ -2302,6 +2302,70 @@ test('GitHub request owner lock reclaims a dead same-host owner', async () => {
   assert.equal(existsSync(path), false);
 });
 
+test('state-lock stale reclamation preserves a replacement owner installed after observation', () => {
+  const cwd = repo();
+  init(cwd);
+  const locks = join(reviewRoot(cwd), 'locks');
+  const path = join(locks, 'pr-17.lock');
+  writeFileSync(path, JSON.stringify({
+    token: 'stale-state-owner', pid: 2147483647, hostname: hostname(), createdAt: '2000-01-01T00:00:00Z',
+  }));
+  const replacement = {
+    token: 'replacement-state-owner', pid: process.pid, hostname: hostname(), createdAt: new Date().toISOString(),
+  };
+  let observed = 0;
+  let ran = false;
+
+  assert.throws(() => withStateLock(cwd, 17, () => { ran = true; }, {
+    timeoutMs: 60,
+    staleMs: 0,
+    onStaleLockObserved: ({ path: observedPath, token }) => {
+      observed += 1;
+      assert.equal(observedPath, path);
+      assert.equal(token, 'stale-state-owner');
+      rmSync(observedPath, { force: true });
+      writeFileSync(observedPath, JSON.stringify(replacement));
+    },
+  }), { code: 'STATE_LOCK_TIMEOUT' });
+
+  assert.equal(observed, 1);
+  assert.equal(ran, false);
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), replacement);
+  assert.deepEqual(readdirSync(locks).filter((name) => name.includes('.retire-')), []);
+});
+
+test('GitHub request-owner stale reclamation preserves a replacement owner installed after observation', async () => {
+  const cwd = repo();
+  init(cwd);
+  const locks = join(reviewRoot(cwd), 'locks');
+  const path = join(locks, 'pr-17.github-request.lock');
+  writeFileSync(path, JSON.stringify({
+    token: 'stale-request-owner', pid: 2147483647, hostname: hostname(), createdAt: '2000-01-01T00:00:00Z',
+  }));
+  const replacement = {
+    token: 'replacement-request-owner', pid: process.pid, hostname: hostname(), createdAt: new Date().toISOString(),
+  };
+  let observed = 0;
+  let ran = false;
+
+  await assert.rejects(() => withGitHubRequestOwnerLock(cwd, 17, () => { ran = true; }, {
+    timeoutMs: 60,
+    staleMs: 0,
+    onStaleLockObserved: ({ path: observedPath, token }) => {
+      observed += 1;
+      assert.equal(observedPath, path);
+      assert.equal(token, 'stale-request-owner');
+      rmSync(observedPath, { force: true });
+      writeFileSync(observedPath, JSON.stringify(replacement));
+    },
+  }), { code: 'STATE_LOCK_TIMEOUT' });
+
+  assert.equal(observed, 1);
+  assert.equal(ran, false);
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), replacement);
+  assert.deepEqual(readdirSync(locks).filter((name) => name.includes('.retire-')), []);
+});
+
 test('verification collection escalation is guarded, append-only, request-bound, and human-gated', () => {
   const cwd = repo();
   const initialized = init(cwd);

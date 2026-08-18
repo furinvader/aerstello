@@ -2352,7 +2352,17 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       }
       throw error;
     }
-    const collectedCi = await collectCi(prNumber);
+    let collectedCi;
+    try {
+      collectedCi = await collectCi(prNumber);
+    } catch (error) {
+      if (error instanceof GitHubWorkflowError
+          && ['CI_CHECK_MISSING', 'CI_VALIDATION_PENDING'].includes(error.code)) {
+        active = await load(prNumber);
+        return result('waiting', true, 'Await authoritative Full validation CI evidence.');
+      }
+      throw error;
+    }
     active = await load(prNumber);
     if (collectedCi.performed) performedTransitions.push('ci-validation');
     if (collectedCi.evidence.status === 'failed') {

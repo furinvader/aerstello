@@ -3,6 +3,7 @@ import {
   cpSync,
   existsSync,
   fsyncSync,
+  linkSync,
   mkdirSync,
   openSync,
   readdirSync,
@@ -1786,21 +1787,89 @@ function processExists(pid) {
   }
 }
 
-function lockIsStale(path, staleMs) {
+const LOCK_MISSING = Symbol('lock missing');
+
+function lockOwnerIdentity(source, stats) {
   try {
-    const lock = JSON.parse(readFileSync(path, 'utf8'));
-    const age = Date.now() - Date.parse(lock.createdAt);
-    if (!Number.isFinite(age) || age <= staleMs) return false;
-    if (lock.hostname === hostname()) return !processExists(lock.pid);
-    return age > staleMs * 6;
+    const lock = JSON.parse(source);
+    if (typeof lock.token === 'string' && lock.token.length > 0) {
+      return { identity: `token:${lock.token}`, token: lock.token };
+    }
   } catch {
-    return Date.now() - statSync(path).mtimeMs > staleMs;
+    // Malformed legacy locks still receive an inode-bound identity below.
+  }
+  const fingerprint = createHash('sha256').update(source).digest('hex');
+  return {
+    identity: `snapshot:${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}:${fingerprint}`,
+    token: null,
+  };
+}
+
+function readLockOwner(path) {
+  try {
+    const source = readFileSync(path, 'utf8');
+    const stats = statSync(path, { bigint: true });
+    return lockOwnerIdentity(source, stats);
+  } catch (error) {
+    if (error.code === 'ENOENT') return LOCK_MISSING;
+    throw error;
+  }
+}
+
+function staleLockObservation(path, staleMs) {
+  let source;
+  let stats;
+  try {
+    source = readFileSync(path, 'utf8');
+    stats = statSync(path, { bigint: true });
+  } catch (error) {
+    if (error.code === 'ENOENT') return LOCK_MISSING;
+    throw error;
+  }
+  let stale;
+  try {
+    const lock = JSON.parse(source);
+    const age = Date.now() - Date.parse(lock.createdAt);
+    stale = Number.isFinite(age) && age > staleMs
+      && (lock.hostname === hostname() ? !processExists(lock.pid) : age > staleMs * 6);
+  } catch {
+    stale = Date.now() - Number(stats.mtimeMs) > staleMs;
+  }
+  return stale ? lockOwnerIdentity(source, stats) : null;
+}
+
+function retireObservedLockOwner(path, observation) {
+  const digest = createHash('sha256').update(observation.identity).digest('hex');
+  const claimPath = `${path}.retire-${digest}`;
+  try {
+    // The hard link is an atomic, owner-generation-specific transition claim.
+    // Every compliant release/reclaimer must win this claim before unlinking
+    // the shared pathname, so a replacement owner cannot appear between the
+    // identity proof and unlink.
+    linkSync(path, claimPath);
+  } catch (error) {
+    if (error.code === 'ENOENT') return 'missing';
+    if (error.code === 'EEXIST') return 'contended';
+    throw error;
+  }
+  try {
+    const claimedOwner = readLockOwner(claimPath);
+    if (claimedOwner === LOCK_MISSING || claimedOwner.identity !== observation.identity) return 'changed';
+    try {
+      unlinkSync(path);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    return 'retired';
+  } finally {
+    try { unlinkSync(claimPath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
 }
 
 export function withStateLock(cwd, prNumber, callback, {
   timeoutMs = DEFAULT_LOCK_TIMEOUT_MS,
   staleMs = DEFAULT_STALE_LOCK_MS,
+  onStaleLockObserved,
 } = {}) {
   const path = lockPath(cwd, prNumber);
   mkdirSync(dirname(path), { recursive: true });
@@ -1816,9 +1885,11 @@ export function withStateLock(cwd, prNumber, callback, {
       break;
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
-      if (lockIsStale(path, staleMs)) {
-        try { unlinkSync(path); } catch (unlinkError) { if (unlinkError.code !== 'ENOENT') throw unlinkError; }
-        continue;
+      const observation = staleLockObservation(path, staleMs);
+      if (observation === LOCK_MISSING) continue;
+      if (observation !== null) {
+        onStaleLockObserved?.({ path, token: observation.token });
+        if (retireObservedLockOwner(path, observation) !== 'contended') continue;
       }
       if (Date.now() - started >= timeoutMs) throw new StateError(`Timed out waiting for ${path}`, 'STATE_LOCK_TIMEOUT');
       sleep(25);
@@ -1828,12 +1899,7 @@ export function withStateLock(cwd, prNumber, callback, {
   try {
     return callback();
   } finally {
-    try {
-      const lock = JSON.parse(readFileSync(path, 'utf8'));
-      if (lock.token === token) unlinkSync(path);
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-    }
+    retireObservedLockOwner(path, { identity: `token:${token}`, token });
   }
 }
 
@@ -1846,6 +1912,7 @@ export function withStateLock(cwd, prNumber, callback, {
 export async function withGitHubRequestOwnerLock(cwd, prNumber, callback, {
   timeoutMs = DEFAULT_LOCK_TIMEOUT_MS,
   staleMs = DEFAULT_STALE_LOCK_MS,
+  onStaleLockObserved,
 } = {}) {
   const path = requestOwnerLockPath(cwd, prNumber);
   mkdirSync(dirname(path), { recursive: true });
@@ -1860,9 +1927,11 @@ export async function withGitHubRequestOwnerLock(cwd, prNumber, callback, {
       break;
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
-      if (lockIsStale(path, staleMs)) {
-        try { unlinkSync(path); } catch (unlinkError) { if (unlinkError.code !== 'ENOENT') throw unlinkError; }
-        continue;
+      const observation = staleLockObservation(path, staleMs);
+      if (observation === LOCK_MISSING) continue;
+      if (observation !== null) {
+        onStaleLockObserved?.({ path, token: observation.token });
+        if (retireObservedLockOwner(path, observation) !== 'contended') continue;
       }
       if (Date.now() - started >= timeoutMs) throw new StateError(`Timed out waiting for ${path}`, 'STATE_LOCK_TIMEOUT');
       await new Promise((resolve) => setTimeout(resolve, 25));
@@ -1871,12 +1940,7 @@ export async function withGitHubRequestOwnerLock(cwd, prNumber, callback, {
   try {
     return await callback();
   } finally {
-    try {
-      const lock = JSON.parse(readFileSync(path, 'utf8'));
-      if (lock.token === token) unlinkSync(path);
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-    }
+    retireObservedLockOwner(path, { identity: `token:${token}`, token });
   }
 }
 

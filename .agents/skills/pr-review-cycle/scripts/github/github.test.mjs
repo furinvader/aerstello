@@ -1203,6 +1203,46 @@ test('advance checkpoints only clean outcome while CI is pending and records fai
   assert.equal(failed.state.calls.filter((call) => call.name === 'checkpointCiValidation').length, 1);
 });
 
+test('advance waits without a CI transition when collect-ci second-snapshot evidence becomes pending or missing', async () => {
+  class SecondRollupRaceClient extends FakeClient {
+    constructor(code) {
+      super();
+      this.code = code;
+      this.checkReads = 0;
+      this.reviews.push(canonicalReview({
+        url: 'https://github.com/example/aerstello/pull/2#pullrequestreview-201',
+      }));
+    }
+
+    async graphql(input) {
+      if (input.name === 'PullRequestChecks' && ++this.checkReads === 2) {
+        if (this.code === 'CI_VALIDATION_PENDING') {
+          this.rollupState = 'PENDING';
+          this.ciContexts = [fullValidationCheck({
+            status: 'IN_PROGRESS', conclusion: null, completedAt: null,
+          })];
+        } else {
+          this.ciContexts = [fullValidationCheck({ name: 'another check' })];
+        }
+      }
+      return super.graphql(input);
+    }
+  }
+
+  for (const code of ['CI_VALIDATION_PENDING', 'CI_CHECK_MISSING']) {
+    const client = new SecondRollupRaceClient(code);
+    const setup = workflow(completedState(), client);
+    const result = await setup.api.advance(2);
+    assert.equal(client.checkReads, 2);
+    assert.equal(result.terminal, 'waiting');
+    assert.equal(result.waiting, true);
+    assert.equal(result.nextAction, 'Await authoritative Full validation CI evidence.');
+    assert.deepEqual(result.performedTransitions, []);
+    assert.equal(setup.state.calls.some((call) => call.name === 'checkpointCiValidation'), false);
+    await assert.rejects(() => setup.api.collectCi(2), { code });
+  }
+});
+
 test('advance is idempotent for Done and converges CI and completion winners without claiming their writes', async () => {
   const done = workflow(completedState({ phase: 'complete', ciValidationStatus: passedCiEvidence(),
     ciValidationHistory: [passedCiEvidence()] }));
