@@ -117,7 +117,10 @@ and
 schemas. `finding-authorize --input <json>` takes the exact closed object
 `{ "fingerprint": "…", "reason": "…", "authorizedBy": "…" }`; no other keys
 are accepted. `validation-plan --replace` is valid only after immutable failed
-validation evidence exists. See [verification](references/verification.md) for
+validation evidence exists and means a transient same-HEAD rerun. Corrective
+work instead uses an amendment triggered by
+`validation-failure:<result-digest>` and adds a new owned criterion and task.
+See [verification](references/verification.md) for
 the full lifecycle and evidence constraints.
 
 Pass the current state revision with `--expected-revision` to every mutating
@@ -152,7 +155,7 @@ SHA:
 }
 ```
 
-A non-retain decision records the initiating Git observation in the next durable state. If that transition is interrupted, recovery requires the same HEAD, branch (including detached state), and cleanliness before completing it. This exception is limited to a semantically valid `decision-recorded` transition whose predecessor is an accepted plan in `awaiting-decision` and whose immutable decision evidence matches that predecessor; an old planning-phase intent or relabeled intent cannot grant it. `retain-plan` recovery remains stricter and requires clean HEAD at the Planning SHA.
+A non-retain decision records the initiating Git observation in the next durable state. If that transition is interrupted, recovery requires the same HEAD, branch (including detached state), and cleanliness before completing it. This exception is limited to a semantically valid `decision-recorded` transition whose predecessor is an accepted plan in `awaiting-decision` and whose immutable decision evidence matches that predecessor; an old planning-phase intent or relabeled intent cannot grant it. `retain-plan` recovery remains stricter and requires the clean Planning SHA before execution or the exact clean integrated HEAD after terminal work.
 
 An amendment input records provenance separately from the complete resulting plan passed with `--plan`. Its `delta` must be a nonempty object; `invalidatedEvidence` is a unique string list and may be empty:
 
@@ -181,10 +184,11 @@ plan from terminal packet, result, provenance, and integration identities at
 the current clean HEAD. Its command union is parsed before persistence;
 `run-validation` executes argv directly with `shell:false`, persists intent
 before execution, and stores only exit/signal summaries plus an output digest.
-A failure remains immutable and may be followed only by an explicit
-`validation-plan --replace` round. Release or migration work additionally
-binds release evidence to the Planning SHA, the protected
-`origin/<base-branch>`, and the exact validation HEAD.
+A failure remains immutable and may be followed by an explicit transient
+`validation-plan --replace` round or an exact failed-result corrective
+amendment. Release or migration work always resolves its baseline and release
+authority from protected `origin/main`, independent of the development base,
+and binds that evidence to the exact validation HEAD.
 
 After validation passes, `specialist-plan` consumes each terminal packet's
 receipt-valid stored route without live rerouting. It unions reusable risk
@@ -213,7 +217,11 @@ exact fingerprint, reason, and authorizer before any disposition or amendment.
 Every validation, review, disposition, amendment, and finalization transition
 rechecks the clean verification HEAD. An advance or dirty checkout invalidates
 current applicability without deleting prior round history. Run
-`finalize-development` only after a clean verifier result; it independently
+`finalize-development` only after a clean verifier result. It captures the live
+refreshable source outside the state lock, then rechecks revision and the exact
+clean verification HEAD under lock. Progress-only drift returns terminal work
+to `integrated`; material drift enters the decision/amendment route. Capture
+errors and races leave state unchanged. Finalization independently
 requires current source and checklist evidence, no decisions, blockers,
 findings, active wave, or integration intent, and only `integrated` or
 `no-change` tasks.

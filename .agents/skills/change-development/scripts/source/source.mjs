@@ -108,12 +108,14 @@ export function validateSourceDescriptor(descriptor) {
   return { type: descriptor.type, comparisonBase: requiredString(descriptor.comparisonBase, 'comparisonBase'), relationshipIntent };
 }
 
-function assertPlanningSnapshot(cwd, planningSha) {
+function assertPlanningSnapshot(cwd, planningSha, requireCheckout = true) {
   const resolved = resolveCommit(cwd, requiredString(planningSha, 'planningSha'));
   if (planningSha !== resolved) throw new SourceCaptureError('Planning SHA must be an explicit full commit SHA', 'INVALID_PLANNING_SNAPSHOT');
-  const head = resolveCommit(cwd, 'HEAD');
-  const dirty = gitBuffer(['status', '--porcelain=v1', '-z', '--untracked-files=all'], { cwd });
-  if (head !== resolved || dirty.length > 0) throw new SourceCaptureError('Planning snapshot must be current, committed, and clean', 'INVALID_PLANNING_SNAPSHOT');
+  if (requireCheckout) {
+    const head = resolveCommit(cwd, 'HEAD');
+    const dirty = gitBuffer(['status', '--porcelain=v1', '-z', '--untracked-files=all'], { cwd });
+    if (head !== resolved || dirty.length > 0) throw new SourceCaptureError('Planning snapshot must be current, committed, and clean', 'INVALID_PLANNING_SNAPSHOT');
+  }
   return resolved;
 }
 
@@ -173,8 +175,8 @@ async function captureContent({ cwd, planningSha, descriptor, githubReader, capt
     changes, summaryDigest: digest(changes) };
 }
 
-export async function captureSource({ cwd = process.cwd(), planningSha, descriptor, githubReader, now = () => new Date() }) {
-  const exactPlanningSha = assertPlanningSnapshot(cwd, planningSha);
+export async function captureSource({ cwd = process.cwd(), planningSha, descriptor, githubReader, now = () => new Date(), requirePlanningCheckout = true }) {
+  const exactPlanningSha = assertPlanningSnapshot(cwd, planningSha, requirePlanningCheckout);
   const normalizedDescriptor = validateSourceDescriptor(descriptor);
   const capturedAt = typeof now === 'function' ? now() : now;
   if (capturedAt instanceof Date && !Number.isFinite(capturedAt.getTime())) {

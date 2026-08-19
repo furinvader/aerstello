@@ -38,9 +38,11 @@ import { createGhGraphqlAdapter } from '../source/gh-adapter.mjs';
 import { readGithubIssue } from '../source/github.mjs';
 import { requiredSpecialistIds, validateSpecialistEvidence } from '../../../aerstello-specialists/scripts/validate-registry.mjs';
 import {
+  assertValidationCommandCompatibility,
   captureReleaseEvidence,
   deriveValidationPlan,
   findingFingerprint,
+  PROTECTED_RELEASE_REF,
   validateVerificationContract,
   validationPlanDigest,
 } from '../verification/contracts.mjs';
@@ -550,7 +552,7 @@ export function nextActionFor(state) {
   if (state.phase === 'integrating') return 'Run change:state reconcile-integration for the exact persisted integration intent.';
   if (state.phase === 'integrated') return 'Run change:state validation-plan for the exact integrated HEAD.';
   if (state.phase === 'validating') return state.verification?.validationStatus === 'failed'
-    ? 'Replace the failed validation plan explicitly, or inspect its append-only results.'
+    ? 'Replace the failed validation plan for a transient rerun, or amend the plan from its exact failed-result receipt for corrective work.'
     : 'Run change:state run-validation to resume exact pending validation commands.';
   if (state.phase === 'specialist-review') return state.verification?.specialistPlanDigest
     ? 'Record every routed exact-HEAD specialist result.' : 'Run change:state specialist-plan.';
@@ -894,6 +896,7 @@ export function acceptPlan({ cwd = process.cwd(), changeId, plan, planningEviden
       return !item || item.checked !== mapping.checked || item.status !== mapping.status
         || item.externalChange !== mapping.externalChange;
     })) throw new StateError('Plan checklist mappings must exactly match the latest source observation', 'PLAN_CHECKLIST_MISMATCH');
+    preflightVerifierCapacity({ originalPlan: plan });
     const planDigest = objectDigest(plan);
     const timestamp = now(clock);
     const next = revised(state, {
@@ -1209,6 +1212,15 @@ export function bindTask({ cwd = process.cwd(), changeId, packet, expectedRevisi
     const plan = readEffectivePlan(root, state); assertPacketPlanBinding(packet, plan, state, current.headSha);
     assertPacketMapperProvenance(root, state, packet);
     assertPacketSelectorsAtBase(root, packet);
+    const authoritativePackets = state.execution.tasks
+      .filter((entry) => entry.binding > 0 && entry.status !== 'rejected')
+      .map((entry) => verifyReceipt(implementationTaskPacketPath(root, state.changeId, entry.id, entry.binding),
+        `authoritative task packet ${entry.id}`).value);
+    try { assertValidationCommandCompatibility([...authoritativePackets, packet], { featureDirectory: join(root, 'specs', 'features') }); }
+    catch (error) { throw new StateError(error.message, 'VALIDATION_COMMAND_CONFLICT'); }
+    const originalPlan = verifyReceipt(join(changeDirectory(root, state.changeId), 'plan', 'plan.json'), 'accepted plan').value;
+    preflightVerifierCapacity({ originalPlan, effectivePlan: plan, packets: [...authoritativePackets, packet],
+      amendmentCount: state.plan.amendmentCount });
     const packetDigest = implementationTaskDigest(packet); const binding = task.binding + 1;
     const next = revised(state, { phase: 'implementing', git: current,
       execution: replaceExecutionTask(state, task.id, { status: 'bound', binding, packetDigest, taskBaseSha: packet.taskBaseSha }) }, clock);
@@ -1680,7 +1692,7 @@ export function createValidationPlan({ cwd = process.cwd(), changeId, expectedRe
     const taskEvidence = terminalTaskEvidence(root, state);
     const affectedAreas = new Set(taskEvidence.flatMap(({ packet }) => packet.affectedAreas));
     const releaseEvidence = affectedAreas.has('release') || affectedAreas.has('migration')
-      ? captureReleaseEvidence({ cwd: root, base: state.planningSha, head: current.headSha, releaseRef: `origin/${state.baseBranch}` }) : null;
+      ? captureReleaseEvidence({ cwd: root, base: PROTECTED_RELEASE_REF, head: current.headSha, releaseRef: PROTECTED_RELEASE_REF }) : null;
     const round = nextVerificationRound(root, state);
     const plan = deriveLifecycleValidationPlan({ changeId: state.changeId, effectivePlanDigest: state.plan.effectiveDigest,
       headSha: current.headSha, taskEvidence, createdAt: now(clock), releaseEvidence });
@@ -1921,6 +1933,80 @@ export function boundVerifierEvidence(items, maximum = 500) {
   if (normalized.length > maximum) throw new StateError(`Complete verifier evidence requires ${normalized.length} items; maximum is ${maximum}`, 'VERIFIER_CONTEXT_TOO_LARGE');
   if (Buffer.byteLength(JSON.stringify(normalized), 'utf8') > 256 * 1024) throw new StateError('Complete verifier evidence exceeds 256 KiB', 'VERIFIER_CONTEXT_TOO_LARGE');
   return normalized;
+}
+
+export function preflightVerifierCapacity({ originalPlan, effectivePlan = originalPlan, packets = [], amendmentCount = 0 } = {}) {
+  const packetByTask = new Map(packets.map((packet) => [packet.taskId, packet]));
+  const evidence = [
+    { kind: 'source', id: 'source-observation', digest: objectDigest(effectivePlan.source), summary: `${effectivePlan.source.kind}:${effectivePlan.source.reference}` },
+    { kind: 'criterion', id: 'original-plan-objective', digest: objectDigest(originalPlan.objective), summary: `Original objective: ${originalPlan.objective}` },
+    { kind: 'criterion', id: 'original-plan-scope', digest: objectDigest(originalPlan.scope), summary: `Original scope: ${originalPlan.scope.join(', ')}; original non-goals: ${originalPlan.nonGoals.join(', ')}` },
+    { kind: 'criterion', id: 'effective-plan-objective', digest: objectDigest(effectivePlan.objective), summary: `Effective objective: ${effectivePlan.objective}` },
+    { kind: 'criterion', id: 'effective-plan-scope', digest: objectDigest(effectivePlan.scope), summary: `Effective scope: ${effectivePlan.scope.join(', ')}; effective non-goals: ${effectivePlan.nonGoals.join(', ')}` },
+    { kind: 'specialist-route', id: 'original-plan-profile', digest: objectDigest(originalPlan.specialization), summary: serialized(originalPlan.specialization) },
+    { kind: 'checklist', id: 'original-plan-scenarios', digest: objectDigest(originalPlan.scenarios), summary: serialized(originalPlan.scenarios) },
+    { kind: 'specialist-route', id: 'effective-plan-profile', digest: objectDigest(effectivePlan.specialization), summary: serialized(effectivePlan.specialization) },
+    { kind: 'checklist', id: 'effective-plan-scenarios', digest: objectDigest(effectivePlan.scenarios), summary: serialized(effectivePlan.scenarios) },
+    { kind: 'validation-plan', id: 'targeted-validation', digest: objectDigest(effectivePlan.tasks), summary: 'Projected exact-HEAD validation plan.' },
+    { kind: 'specialist-route', id: 'integrated-route', digest: objectDigest(effectivePlan.specialization.route), summary: serialized(effectivePlan.specialization.route) },
+  ];
+  effectivePlan.criteria.forEach((entry) => evidence.push({ kind: 'criterion', id: entry.id, digest: objectDigest(entry), summary: serialized(entry) }));
+  effectivePlan.decisions.forEach((entry) => evidence.push({ kind: 'decision', id: entry.id, digest: objectDigest(entry), summary: serialized(entry) }));
+  effectivePlan.checklistMappings.forEach((entry) => evidence.push({ kind: 'checklist', id: entry.id, digest: objectDigest(entry), summary: serialized(entry) }));
+  for (const [kind, prefix, entries] of [['criterion', 'original-plan-criterion', originalPlan.criteria],
+    ['decision', 'original-plan-decision', originalPlan.decisions], ['checklist', 'original-plan-checklist', originalPlan.checklistMappings],
+    ['packet', 'original-plan-task', originalPlan.tasks]]) {
+    entries.forEach((entry) => evidence.push({ kind, id: `${prefix}-${entry.id}`, digest: objectDigest(entry), summary: serialized(entry) }));
+  }
+  effectivePlan.tasks.forEach((task) => {
+    const packet = packetByTask.get(task.id); const authority = packet ?? task; const digest = objectDigest(authority);
+    for (const suffix of ['packet', 'ownership', 'profile', 'validation', 'provenance', 'result', 'result-validation',
+      'result-dependencies', 'path-authority', 'integration']) {
+      const summaries = {
+        packet: serialized({ id: task.id, objective: task.objective, dependsOn: task.dependsOn }),
+        ownership: serialized(packet ? { allowedPaths: packet.allowedPaths, forbiddenPaths: packet.forbiddenPaths } : { anticipatedPaths: task.anticipatedPaths }),
+        profile: serialized(packet ? { specialization: packet.specialization, affectedAreas: packet.affectedAreas, riskTags: packet.riskTags, route: packet.specialistRoute } : task.specialization),
+        validation: serialized(packet?.requiredValidation ?? task.validationIntent),
+        provenance: serialized({ decisionIds: task.decisionIds, criterionIds: task.criterionIds }),
+        result: 'Projected terminal implementation result.',
+        'result-validation': 'Projected worker validation evidence.',
+        'result-dependencies': 'Projected unexpected-dependency evidence.',
+        'path-authority': serialized(packet?.allowedPaths ?? task.anticipatedPaths),
+        integration: 'Projected terminal integration authority.',
+      };
+      evidence.push({ kind: suffix === 'integration' ? 'integration' : suffix.startsWith('result') ? 'result' : 'packet',
+        id: `${task.id}-${suffix}`, digest, summary: summaries[suffix] });
+    }
+  });
+  const commandEntries = new Map(); const routedEntries = new Map();
+  packets.forEach((packet) => {
+    [...packet.requiredValidation.unit, ...packet.requiredValidation.system].forEach((entry) => commandEntries.set(entry.command, entry));
+    [...packet.specialistRoute.planningHelpers, ...packet.specialistRoute.riskReviewers,
+      ...packet.specialistRoute.supplementalGuidance].forEach((entry) => routedEntries.set(`${entry.category ?? 'route'}:${entry.id}`, entry));
+  });
+  [...commandEntries].sort(([left], [right]) => left.localeCompare(right)).forEach(([command, entry]) => evidence.push({
+    kind: 'validation-result', id: `projected-command-${objectDigest(command).slice(7, 31)}`, digest: objectDigest(entry), summary: command,
+  }));
+  [...routedEntries].sort(([left], [right]) => left.localeCompare(right)).forEach(([key, entry]) => evidence.push({
+    kind: entry.category === 'risk-reviewer' ? 'specialist-result' : 'planning-helper',
+    id: `projected-route-${objectDigest(key).slice(7, 31)}`, digest: objectDigest(entry), summary: serialized(entry),
+  }));
+  for (let number = 1; number <= amendmentCount; number += 1) {
+    evidence.push({ kind: 'amendment', id: `projected-amendment-${number}`, digest: objectDigest({ number, effectivePlan }), summary: serialized(effectivePlan) });
+    evidence.push({ kind: 'provenance', id: `projected-amendment-${number}-provenance`, digest: objectDigest({ number }), summary: 'Receipt-protected amendment provenance.' });
+  }
+  const bounded = boundVerifierEvidence(evidence);
+  const projectedContext = { schemaVersion: 1, verifierId: 'development_integration_verifier', finalVerificationPriority: 'high',
+    verificationRound: 1, inputIdentityDigest: objectDigest(effectivePlan), changeId: effectivePlan.changeId,
+    headSha: effectivePlan.planning.planningSha, planningSha: effectivePlan.planning.planningSha,
+    originalPlanDigest: objectDigest(originalPlan), effectivePlanDigest: objectDigest(effectivePlan), taskSetDigest: objectDigest(effectivePlan.tasks),
+    sourceIdentity: { kind: effectivePlan.source.kind, reference: effectivePlan.source.reference, digest: effectivePlan.source.captureDigest },
+    validationPlanDigest: objectDigest(effectivePlan.tasks), validationResultDigests: [], specialistResultDigests: [], evidence: bounded,
+    generatedAt: '2000-01-01T00:00:00.000Z' };
+  if (Buffer.byteLength(JSON.stringify(projectedContext), 'utf8') > 256 * 1024) {
+    throw new StateError('Projected complete verifier context exceeds 256 KiB', 'VERIFIER_CONTEXT_TOO_LARGE');
+  }
+  return bounded;
 }
 
 export function buildVerifierContext({ cwd = process.cwd(), changeId } = {}) {
@@ -2164,12 +2250,38 @@ export function authorizeRepeatedFinding({ cwd = process.cwd(), changeId, expect
   }, lockOptions);
 }
 
-export function finalizeDevelopment({ cwd = process.cwd(), changeId, expectedRevision, clock, crashStep, lockOptions } = {}) {
+export async function finalizeDevelopment({ cwd = process.cwd(), changeId, expectedRevision, sourceAdapter, clock, crashStep, lockOptions } = {}) {
   const root = repositoryRoot(cwd); const selected = selectedChangeId(root, changeId);
+  const before = loadState(root, selected); assertRevision(before, expectedRevision); validateState({ cwd: root, changeId: selected });
+  if (before.phase !== 'verifying' || !before.verification?.verifierResultDigest) throw new StateError('Development-ready requires a recorded final verifier result', 'INVALID_PHASE');
+  const previousObservation = readObservationByDigest(root, before);
+  const refreshed = await captureSourceRefresh({ cwd: root, planningSha: before.planningSha,
+    descriptor: previousObservation.descriptor, previousObservation, githubReader: githubReaderFor(sourceAdapter),
+    requirePlanningCheckout: false,
+    now: () => (clock ? clock() : new Date()) });
+  const observation = refreshed.observation ?? refreshed.source ?? refreshed;
+  const suppliedClassification = refreshed.classification ?? refreshed.drift;
   return withChangeLock(root, selected, () => {
     const state = loadState(root, selected); assertRevision(state, expectedRevision); validateState({ cwd: root, changeId: selected });
     if (state.phase !== 'verifying' || !state.verification?.verifierResultDigest) throw new StateError('Development-ready requires a recorded final verifier result', 'INVALID_PHASE');
     const current = assertVerificationHead(root, state, clock, 'Development-ready finalization');
+    const classification = classifyRefresh(state.source, observation, suppliedClassification);
+    const timestamp = now(clock); const full = observation.fullDigest ?? observation.digest ?? observation.sourceDigest ?? objectDigest(observation);
+    const material = observation.materialDigest ?? full; const progress = observation.progressDigest ?? full;
+    const observationPath = `source/observations/${String(state.revision + 1).padStart(8, '0')}.json`;
+    const source = { ...state.source, latestDigest: full, fullDigest: full, materialDigest: material, progressDigest: progress,
+      classification: classification === 'progress-only' ? 'unchanged' : classification, observationDigest: objectDigest(observation),
+      latestCommentIdentity: observation.source?.latestCommentIdentity ?? observation.latestCommentIdentity ?? observation.latestObservedCommentId ?? state.source.latestCommentIdentity,
+      refreshedAt: observation.capturedAt ?? timestamp };
+    const checklist = refreshedChecklist(previousObservation, observation, refreshed.checklistComparison);
+    if (classification !== 'unchanged') {
+      const next = revised(state, { phase: classification === 'progress-only' ? 'integrated' : 'awaiting-decision',
+        source, checklist, git: current, ...(classification === 'progress-only' ? { verification: null, blockedReasons: [] } : {}) },
+      () => new Date(timestamp));
+      return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'source-refreshed',
+        summary: `Final source gate classified ${classification}`, crashStep,
+        pendingEvidence: [{ key: 'observationDigest', path: observationPath, value: observation, label: 'final source observation' }] });
+    }
     const result = verifyReceipt(verifierResultPath(root, state), 'final verifier result');
     const invalid = state.verification.validationStatus !== 'passed'
       || state.verification.requiredReviewerIds.length !== state.verification.specialistResultDigests.length
@@ -2180,9 +2292,10 @@ export function finalizeDevelopment({ cwd = process.cwd(), changeId, expectedRev
       || state.execution.activeWave.length > 0 || state.execution.integrationIntent
       || state.execution.tasks.some(({ status }) => !['integrated', 'no-change'].includes(status));
     if (invalid) throw new StateError('Development-ready gates require one clean exact HEAD and complete clean local evidence', 'DEVELOPMENT_NOT_READY');
-    const next = revised(state, { phase: 'development-ready', git: current, blockedReasons: [] }, clock);
+    const next = revised(state, { phase: 'development-ready', git: current, source, checklist, blockedReasons: [] }, () => new Date(timestamp));
     return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'development-finalized',
-      summary: `Proved Development-ready at exact HEAD ${current.headSha}`, crashStep });
+      summary: `Proved Development-ready at exact HEAD ${current.headSha}`, crashStep,
+      pendingEvidence: [{ key: 'observationDigest', path: observationPath, value: observation, label: 'final source observation' }] });
   }, lockOptions);
 }
 
@@ -2244,7 +2357,8 @@ export async function refreshSource({ cwd = process.cwd(), changeId, expectedRev
   if (!before) throw new StateError('No active change state', 'STATE_NOT_FOUND');
   assertRevision(before, expectedRevision);
   validateState({ cwd: root, changeId: selected });
-  if (!['planning', 'awaiting-decision', 'ready-to-implement'].includes(before.phase)) {
+  const refreshablePhases = ['planning', 'awaiting-decision', 'ready-to-implement', 'integrated', 'validating', 'specialist-review', 'verifying'];
+  if (!refreshablePhases.includes(before.phase)) {
     throw new StateError(`Source refresh is not permitted in phase ${before.phase}`, 'INVALID_PHASE');
   }
   // The live read is intentionally outside the state lock.
@@ -2252,6 +2366,7 @@ export async function refreshSource({ cwd = process.cwd(), changeId, expectedRev
   const refreshed = await captureSourceRefresh({
     cwd: root,
     planningSha: before.planningSha,
+    requirePlanningCheckout: !['integrated', 'validating', 'specialist-review', 'verifying'].includes(before.phase),
     descriptor: previousObservation.descriptor,
     previousObservation,
     githubReader: githubReaderFor(sourceAdapter),
@@ -2264,12 +2379,16 @@ export async function refreshSource({ cwd = process.cwd(), changeId, expectedRev
     if (!state) throw new StateError('No active change state', 'STATE_NOT_FOUND');
     assertRevision(state, expectedRevision);
     validateState({ cwd: root, changeId: state.changeId });
-    if (!['planning', 'awaiting-decision', 'ready-to-implement'].includes(state.phase)) {
+    if (!refreshablePhases.includes(state.phase)) {
       throw new StateError(`Source refresh is not permitted in phase ${state.phase}`, 'INVALID_PHASE');
     }
     const lockedGit = gitObservation(root, clock);
-    if (!lockedGit.clean || lockedGit.headSha !== state.planningSha) {
-      throw new StateError('Source refresh requires clean HEAD at the Planning SHA', 'PLANNING_SNAPSHOT_MISMATCH');
+    const late = ['integrated', 'validating', 'specialist-review', 'verifying'].includes(state.phase);
+    const expectedHead = late ? state.git.headSha : state.planningSha;
+    const expectedBranch = late ? state.git.branch : lockedGit.branch;
+    if (!lockedGit.clean || lockedGit.headSha !== expectedHead || (late && lockedGit.branch !== expectedBranch)) {
+      throw new StateError(late ? 'Late source refresh requires the exact clean integrated HEAD' : 'Source refresh requires clean HEAD at the Planning SHA',
+        late ? 'VERIFICATION_HEAD_MISMATCH' : 'PLANNING_SNAPSHOT_MISMATCH');
     }
     const observedClassification = classifyRefresh(state.source, observation, suppliedClassification);
     const classification = state.plan && state.source.classification === 'unreviewed-material'
@@ -2287,15 +2406,16 @@ export async function refreshSource({ cwd = process.cwd(), changeId, expectedRev
       planningBaseline.source?.checklist ?? [],
       observation.source?.checklist ?? [],
     ) : null;
+    const lateProgress = late && classification === 'progress-only';
     const next = revised(state, {
-      phase: state.plan && classification === 'unreviewed-material' ? 'awaiting-decision' : state.phase,
+      phase: state.plan && classification === 'unreviewed-material' ? 'awaiting-decision' : lateProgress ? 'integrated' : state.phase,
       source: {
         ...state.source,
         latestDigest: full,
         fullDigest: full,
         materialDigest: material,
         progressDigest: progress,
-        classification,
+        classification: lateProgress ? 'unchanged' : classification,
         observationDigest,
         latestCommentIdentity: observation.source?.latestCommentIdentity ?? observation.latestCommentIdentity ?? observation.latestObservedCommentId ?? state.source.latestCommentIdentity,
         refreshedAt: observation.capturedAt ?? timestamp,
@@ -2303,6 +2423,7 @@ export async function refreshSource({ cwd = process.cwd(), changeId, expectedRev
       checklist: state.plan
         ? refreshedChecklist(previousObservation, observation, refreshed.checklistComparison)
         : planningChecklist(planningBaseline, observation, planningComparison),
+      ...(lateProgress ? { verification: null, blockedReasons: [] } : {}),
     }, () => new Date(timestamp));
     return commitTransition({
       cwd: root, previousState: state, nextState: next, type: 'source-refreshed',
@@ -2340,8 +2461,12 @@ export function recordDecision({ cwd = process.cwd(), changeId, decision, expect
       throw new StateError('retain-plan requires accepted material drift in awaiting-decision', 'INVALID_DECISION');
     }
     const currentGit = gitObservation(root, clock);
-    if (retainPlan && (!currentGit.clean || currentGit.headSha !== state.planningSha)) {
-      throw new StateError('retain-plan requires clean HEAD at the Planning SHA', 'PLANNING_SNAPSHOT_MISMATCH');
+    const late = state.schemaVersion === 2 && state.execution?.tasks.every((task) => ['integrated', 'no-change'].includes(task.status));
+    const requiredHead = late ? state.git.headSha : state.planningSha;
+    if (retainPlan && (!currentGit.clean || currentGit.headSha !== requiredHead
+        || (late && currentGit.branch !== state.git.branch))) {
+      throw new StateError(late ? 'Late retain-plan requires the exact clean integrated HEAD' : 'retain-plan requires clean HEAD at the Planning SHA',
+        late ? 'VERIFICATION_HEAD_MISMATCH' : 'PLANNING_SNAPSHOT_MISMATCH');
     }
     const timestamp = now(clock);
     const record = {
@@ -2358,10 +2483,11 @@ export function recordDecision({ cwd = process.cwd(), changeId, decision, expect
       ? 'planning' : state.phase;
     const next = revised(state, {
       unresolvedDecisionIds: unresolved,
-      phase: retainPlan && unresolved.length === 0 ? 'ready-to-implement' : resolvedPhase,
+      phase: retainPlan && unresolved.length === 0 ? late ? 'integrated' : 'ready-to-implement' : resolvedPhase,
       source: retainPlan ? { ...state.source, classification: 'unchanged' } : state.source,
       git: currentGit,
       blockedReasons: retainPlan ? [] : state.blockedReasons,
+      ...(retainPlan && late ? { verification: null } : {}),
     }, () => new Date(timestamp));
     return commitTransition({
       cwd: root, previousState: state, nextState: next, type: 'decision-recorded',
@@ -2405,6 +2531,20 @@ function hasBoundResolveDecision(cwd, state, decisionId) {
     && Object.values(transition.evidencePaths ?? {}).includes(relativePath);
 }
 
+function hasBoundFailedValidation(cwd, state, trigger) {
+  if (state.phase !== 'validating' || state.verification?.validationStatus !== 'failed'
+      || !trigger.startsWith('validation-failure:')) return false;
+  const digest = trigger.slice('validation-failure:'.length);
+  if (!/^sha256:[0-9a-f]{64}$/u.test(digest) || !state.verification.validationResultDigests.includes(digest)) return false;
+  const directory = join(verificationRoundDirectory(cwd, state), 'validation-results');
+  return existsSync(directory) && readdirSync(directory).filter((name) => name.endsWith('.json')).some((name) => {
+    const receipt = verifyReceipt(join(directory, name), `failed validation result ${name}`);
+    return receipt.digest === digest && receipt.value.status === 'failed'
+      && receipt.value.headSha === state.verification.headSha
+      && receipt.value.planDigest === state.verification.validationPlanDigest;
+  });
+}
+
 export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingPlan, planningEvidence = [], expectedRevision, clock, crashStep, lockOptions }) {
   const root = repositoryRoot(cwd);
   const selected = selectedChangeId(root, changeId);
@@ -2413,7 +2553,7 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
     if (!state?.plan) throw new StateError('An accepted plan is required before amendment', 'PLAN_NOT_ACCEPTED');
     assertRevision(state, expectedRevision);
     validateState({ cwd: root, changeId: state.changeId });
-    if (!['ready-to-implement', 'awaiting-decision', 'implementing', 'blocked'].includes(state.phase)) {
+    if (!['ready-to-implement', 'awaiting-decision', 'implementing', 'validating', 'blocked'].includes(state.phase)) {
       throw new StateError(`Plan amendment is not permitted in phase ${state.phase}`, 'INVALID_PHASE');
     }
     if (!isPlainObject(amendment) || !['id', 'reason', 'authorization', 'trigger'].every((key) => nonemptyString(amendment[key]))
@@ -2444,12 +2584,17 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
     const sourceObservation = readObservationByDigest(root, state);
     const prior = readEffectivePlan(root, state);
     if (objectDigest(prior) !== state.plan.effectiveDigest) throw new StateError('Effective plan receipt is inconsistent', 'PLAN_TAMPERED');
+    const validationDriven = hasBoundFailedValidation(root, state, amendment.trigger);
+    if (state.phase === 'validating' && !validationDriven) {
+      throw new StateError('Failed-validation remediation trigger must name an exact receipt-bound failed result', 'INVALID_AMENDMENT');
+    }
     const findingDriven = /^sha256:[0-9a-f]{64}$/u.test(amendment.trigger);
+    const sourceDriven = state.phase === 'awaiting-decision';
     if (findingDriven && !state.verification) throw new StateError('Finding-driven amendment requires active verification evidence', 'INVALID_AMENDMENT');
-    if (state.verification && !findingDriven) throw new StateError('Verification-state amendments must be driven by an exact finding fingerprint', 'INVALID_AMENDMENT');
+    if (state.verification && !findingDriven && !validationDriven && !sourceDriven) throw new StateError('Verification-state amendments require exact finding, failed-validation, or source-decision authority', 'INVALID_AMENDMENT');
     let errors = readinessErrors(resultingPlan, planningEvidence, sourceObservation,
       ({ planningSha, path }) => readTreeFile(root, planningSha, path));
-    if (findingDriven) {
+    if (findingDriven || validationDriven || sourceDriven) {
       if (serialized(resultingPlan.specialization) !== serialized(prior.specialization)) throw new StateError('Finding-driven amendment cannot reinterpret the completed change specialization', 'INVALID_AMENDMENT');
       const terminalIds = state.execution.tasks.filter(({ status }) => ['integrated', 'no-change'].includes(status)).map(({ id }) => id);
       const terminalLabels = terminalIds.map((id) => `task ${id}`);
@@ -2472,6 +2617,20 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
         })()));
     }
     if (errors.length > 0) throw new StateError(`Amended plan is not ready:\n- ${errors.join('\n- ')}`, 'PLAN_NOT_READY');
+    const originalPlan = verifyReceipt(join(changeDirectory(root, state.changeId), 'plan', 'plan.json'), 'accepted plan').value;
+    const retainedPackets = state.schemaVersion === 2 ? state.execution.tasks
+      .filter((task) => task.binding > 0 && task.status !== 'rejected')
+      .map((task) => verifyReceipt(implementationTaskPacketPath(root, state.changeId, task.id, task.binding),
+        `authoritative task packet ${task.id}`).value) : [];
+    preflightVerifierCapacity({ originalPlan, effectivePlan: resultingPlan, packets: retainedPackets,
+      amendmentCount: state.plan.amendmentCount + 1 });
+    if (validationDriven) {
+      const newCriteria = resultingPlan.criteria.filter(({ id }) => !prior.criteria.some((entry) => entry.id === id));
+      const newTasks = resultingPlan.tasks.filter(({ id }) => !prior.tasks.some((entry) => entry.id === id));
+      if (newCriteria.length === 0 || !newTasks.some(({ criterionIds }) => criterionIds.some((id) => newCriteria.some((criterion) => criterion.id === id)))) {
+        throw new StateError('Failed-validation remediation must add an ordinary owned criterion and linked task', 'INVALID_AMENDMENT');
+      }
+    }
     if (findingDriven) {
       const dispositionPath = findingDispositionPath(root, state, amendment.trigger);
       const disposition = verifyReceipt(dispositionPath, 'finding-driven amendment disposition').value;

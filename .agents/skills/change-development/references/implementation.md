@@ -50,7 +50,10 @@ rejection and a plan amendment; no sidecar is rewritten.
 
 Binding is the live-policy boundary: every new binding reloads the current
 specialist registry and rejects a stale specialization or route before writing
-packet, provenance, event, or transition evidence. After binding, the packet's
+packet, provenance, event, or transition evidence. It also preflights final
+verifier capacity and rejects validation metadata conflicts with affected-area
+checks or any still-authoritative packet, including retained terminal packets.
+After binding, the packet's
 canonical digest and durable replay use its immutable structural contract plus
 the receipt-bound route, planning-signal, and behavior-mapper sidecars. Results,
 recovery, cleanup, and finalization never reinterpret historical packet authority

@@ -42,6 +42,7 @@ const AREA_ORDER = Object.freeze([...AREA_COMMANDS.keys()]);
 const PROJECT_ORDER = Object.freeze([...KNOWN_PROJECTS]);
 const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
 const DIGEST = /^sha256:[0-9a-f]{64}$/u;
+export const PROTECTED_RELEASE_REF = 'origin/main';
 
 function schemaErrors(validator, value) {
   if (validator(value)) return [];
@@ -150,6 +151,26 @@ function addCommand(byArgv, ordered, candidate) {
   existing.taskIds = unique([...existing.taskIds, ...candidate.taskIds]);
 }
 
+export function assertValidationCommandCompatibility(packets, { featureDirectory } = {}) {
+  const ordered = []; const byArgv = new Map();
+  for (const packet of packets) {
+    for (const kind of ['unit', 'system']) for (const entry of packet.requiredValidation[kind]) {
+      const argv = parseImplementationValidationCommand(entry.command);
+      const normalized = entry.selectors?.length > 0 || entry.projects?.length > 0
+        ? { argv, selectors: [...entry.selectors], projects: [...entry.projects] }
+        : canonicalizeValidationEntry(entry, { featureDirectory });
+      if (!normalized.argv) throw new TypeError(`unsafe, broad, or unsupported validation command: ${entry.command}`);
+      addCommand(byArgv, ordered, { ...normalized, kind, reasons: [entry.reason], taskIds: [packet.taskId] });
+    }
+    for (const area of AREA_ORDER) if (packet.affectedAreas.includes(area)) for (const command of AREA_COMMANDS.get(area)) {
+      const normalized = canonicalizeValidationEntry({ command, reason: `Affected-area check: ${area}.` }, { featureDirectory });
+      addCommand(byArgv, ordered, { ...normalized, kind: 'unit', reasons: [`Affected-area check: ${area}.`],
+        taskIds: [packet.taskId] });
+    }
+  }
+  return ordered;
+}
+
 export function deriveValidationPlan({ changeId, effectivePlanDigest, headSha, taskEvidence, createdAt,
   featureDirectory, releaseEvidence = null } = {}) {
   if (!SHA.test(headSha ?? '')) throw new TypeError('headSha must be an exact commit');
@@ -181,7 +202,7 @@ export function deriveValidationPlan({ changeId, effectivePlanDigest, headSha, t
   return plan;
 }
 
-export function captureReleaseEvidence({ cwd = process.cwd(), base = 'HEAD', head = 'HEAD', releaseRef = 'origin/main' } = {}) {
+export function captureReleaseEvidence({ cwd = process.cwd(), base = PROTECTED_RELEASE_REF, head = 'HEAD', releaseRef = PROTECTED_RELEASE_REF } = {}) {
   const result = checkReleasedMigrations({ cwd, base, head, releaseRef });
   if (!result.ok || result.releaseState.status === 'inconsistent') throw new TypeError(`release or migration evidence is inconsistent: ${result.violations.map(({ code }) => code).join(', ')}`);
   const state = result.releaseState;

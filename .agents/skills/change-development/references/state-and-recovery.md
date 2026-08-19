@@ -151,8 +151,9 @@ exact initiating Git observation: HEAD, branch or detached state, and
 cleanliness must all match the observation already bound into the intended next
 state. Recovery verifies the immutable decision record and reconstructs the
 transition semantics before allowing that exception. Planning-phase decision
-intents, relabeled intents, and inconsistent evidence are rejected;
-`retain-plan` continues to require clean HEAD at the Planning SHA.
+intents, relabeled intents, and inconsistent evidence are rejected.
+`retain-plan` requires the clean Planning SHA before execution and the exact
+clean integrated HEAD once terminal task authority exists.
 
 A missing or tampered committed intent, its SHA-256 receipt, or its authoritative evidence bundle blocks recovery. Existing domain evidence or receipts that conflict with the embedded path, value, or digest also block; orphan evidence is never attached heuristically. Recovery does not invent evidence beyond an intact authoritative intent, skip revisions, or delete locks. A recognized transient pending directory is uncommitted and rollback-only. Resolve other integrity failures through an explicit authorized decision or amendment when the state machine permits it; otherwise abandon while retaining evidence.
 
@@ -163,8 +164,15 @@ append-only result; it never invents another attempt or repeats a completed
 command. Result recording and phase completion recheck the initiating revision,
 plan/task-set identity, and exact clean HEAD. A crash at a normal transition
 boundary is handled by `recover`; an intent whose command has no result is
-resumed by `run-validation`. Failed plan evidence is retained and only
-`validation-plan --replace` creates the next round.
+resumed by `run-validation`. Failed plan evidence is retained.
+`validation-plan --replace` creates a transient-rerun round; corrective work
+uses the exact failed-result receipt to authorize an ordinary amendment.
+
+A late source capture is receipt-protected at the exact integrated HEAD.
+Progress-only drift clears stale verification proof and returns to `integrated`;
+material drift preserves terminal task authority while entering the existing
+decision/amendment route. Late retain-plan and source-driven amendments cannot
+reuse validation, specialist, context, or verifier evidence from that round.
 
 Specialist plans, canonical-order reviewer results, verifier contexts/results,
 finding dispositions, and repeated-finding authorizations are ordinary

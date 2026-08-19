@@ -18,6 +18,8 @@ must have passed, every reviewer selected by each immutable stored specialist
 route must have supplied exact-HEAD evidence in canonical order, and no
 specialist finding may remain unresolved. Missing, malformed, oversized,
 incomplete, dirty, or stale input is not verifier-ready and must fail closed.
+Plan acceptance, amendment, and packet binding conservatively enforce these
+500-item and 256-KiB limits before consuming later implementation authority.
 
 The caller supplies the generated context and its canonical SHA-256 digest. The
 verifier repeats that exact digest as `contextDigest`; it never substitutes the
@@ -66,4 +68,8 @@ conforming to
 the exact `headSha`, exact `contextDigest`, `clean` or `findings` status, a
 concise summary, stable source-qualified findings, and `recordedAt` timestamp.
 A clean result becomes Development-ready only after the lifecycle independently
-revalidates all exact-HEAD gates. Delivery remains a separate workflow.
+revalidates all exact-HEAD gates. That finalization captures the live source
+outside the lock and rechecks revision plus exact HEAD under lock. Capture
+errors or races do not mutate state; progress drift starts a fresh integrated
+round and material drift follows the decision/amendment route. Delivery remains
+a separate workflow.

@@ -6,9 +6,25 @@ import { test } from 'node:test';
 
 import { digestJson } from '../contracts/contracts.mjs';
 import { implementationTaskDigest } from '../implementation/contracts.mjs';
-import { canonicalizeValidationEntry, deriveValidationPlan, findingFingerprint,
+import { assertValidationCommandCompatibility, canonicalizeValidationEntry, deriveValidationPlan, findingFingerprint,
+  PROTECTED_RELEASE_REF,
   validateVerificationContract, validationPlanDigest, validationPlanReceiptDigest,
 } from './contracts.mjs';
+
+test('release verification authority is the protected main remote ref', () => {
+  assert.equal(PROTECTED_RELEASE_REF, 'origin/main');
+});
+
+test('validation compatibility rejects packet and affected-area command-kind conflicts before derivation', () => {
+  const unitPacket = packet({ taskId: 'unit-workflow' });
+  const systemPacket = packet({ taskId: 'system-workflow', unit: [],
+    system: [{ command: 'npm run check:workflow', reason: 'Incorrect system classification.' }] });
+  assert.doesNotThrow(() => assertValidationCommandCompatibility([unitPacket]));
+  assert.throws(() => assertValidationCommandCompatibility([systemPacket]), /conflicting validation metadata/u);
+  const crossPacket = packet({ taskId: 'cross-packet', areas: ['documentation'], unit: [],
+    system: [{ command: 'npm run check:workflow', reason: 'Conflicts with retained packet.' }] });
+  assert.throws(() => assertValidationCommandCompatibility([unitPacket, crossPacket]), /conflicting validation metadata/u);
+});
 
 const SHA = 'a'.repeat(40); const AT = '2026-08-18T10:00:00Z';
 function packet({ taskId = 'workflow-contracts', areas = ['workflow'], unit, system = [] } = {}) {

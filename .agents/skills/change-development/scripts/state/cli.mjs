@@ -285,7 +285,7 @@ try {
   } else if (command === 'finding-disposition') {
     writeJson(recordFindingDisposition({ ...common, expectedRevision: parseRevision(parsed['expected-revision'], true), disposition: json(parsed.input, '--input') }));
   } else if (command === 'finalize-development') {
-    writeJson(finalizeDevelopment({ ...common, expectedRevision: parseRevision(parsed['expected-revision'], true) }));
+    writeJson(await finalizeDevelopment({ ...common, expectedRevision: parseRevision(parsed['expected-revision'], true) }));
   } else if (command === 'reject-task') {
     if (!parsed['task-id'] || !parsed.reason) throw new UsageError('reject-task requires --task-id and --reason');
     writeJson(rejectTask({ ...common, taskId: parsed['task-id'], reason: parsed.reason, expectedRevision: parseRevision(parsed['expected-revision'], true) }));

@@ -72,6 +72,10 @@ replacement uses a new task ID. Already `integrated` or `no-change` task
 definitions and their referenced criteria and decisions are immutable. New
 packets bind the amended plan to the then-current central task base.
 
+Initial acceptance and every amendment conservatively preflight the complete
+final-verifier context against its 500-item and 256-KiB limits. Inevitable
+overflow fails before durable plan evidence or execution authority changes.
+
 When verification is active, an amendment must be finding-driven: its trigger
 is the exact stable fingerprint of an actionable source-role-qualified finding,
 and its disposition names the amendment plus new replacement criterion and task
