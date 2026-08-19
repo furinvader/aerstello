@@ -248,6 +248,15 @@ test('two same-base workers integrate by delta, resume intent-only integration, 
   const context = buildVerifierContext({ cwd });
   assert.equal(context.verifierId, 'development_integration_verifier');
   assert.equal(context.finalVerificationPriority, 'standard');
+  const integrationEvidence = Object.fromEntries(context.evidence.filter(({ kind }) => kind === 'integration')
+    .map((entry) => [entry.id, entry]));
+  assert.match(integrationEvidence['state-task-integration'].summary, new RegExp(`Integrated exact worker result at ${state.execution.tasks.find(({ id }) => id === 'state-task').integratedCommit}; integration transition revision \\d+;`, 'u'));
+  assert.match(integrationEvidence['second-task-integration'].summary, new RegExp(`Integrated exact worker result at ${state.execution.tasks.find(({ id }) => id === 'second-task').integratedCommit}; integration transition revision \\d+;`, 'u'));
+  const firstIntegrationRevision = Number(/integration transition revision (\d+)/u.exec(integrationEvidence['state-task-integration'].summary)[1]);
+  const secondIntegrationRevision = Number(/integration transition revision (\d+)/u.exec(integrationEvidence['second-task-integration'].summary)[1]);
+  assert.ok(firstIntegrationRevision < secondIntegrationRevision, 'task receipts preserve exact integration order');
+  assert.notEqual(integrationEvidence['state-task-integration'].digest, integrationEvidence['second-task-integration'].digest,
+    'each task binds its own task-integrated transition receipt');
   assert.match(context.evidence.find(({ kind, id }) => kind === 'packet' && id === 'state-task-ownership').summary,
     /Allowed paths: first\.txt; forbidden paths: none/u);
   assert.match(context.evidence.find(({ kind, id }) => kind === 'packet' && id === 'state-task-validation').summary,
@@ -266,6 +275,47 @@ test('two same-base workers integrate by delta, resume intent-only integration, 
   state = finalizeDevelopment({ cwd, expectedRevision: state.revision });
   assert.equal(state.phase, 'development-ready');
   assert.equal(validateState({ cwd }).valid, true);
+});
+
+test('terminal integration authority rejects missing, broken, and ambiguous exact receipt pairs', async () => {
+  const fixture = await integratedSingleTaskFixture('integration receipt authority');
+  let state = createValidationPlan({ cwd: fixture.cwd, expectedRevision: fixture.state.revision });
+  state = runValidation({ cwd: fixture.cwd, expectedRevision: state.revision,
+    runner: () => ({ status: 0, signal: null, stdout: 'passed', stderr: '' }) });
+  state = createSpecialistPlan({ cwd: fixture.cwd, expectedRevision: state.revision });
+  const transitions = join(changeDirectory(fixture.cwd, state.changeId), 'transitions');
+  const taskDirectoryName = readdirSync(transitions).find((name) => {
+    const path = join(transitions, name, 'intent.json');
+    return existsSync(path) && JSON.parse(readFileSync(path, 'utf8')).type === 'task-integrated';
+  });
+  const taskDirectory = join(transitions, taskDirectoryName);
+  const intentPath = join(taskDirectory, 'intent.json');
+  const receiptPath = join(taskDirectory, 'receipt.json');
+  const originalIntent = JSON.parse(readFileSync(intentPath, 'utf8'));
+  const originalReceipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
+
+  unlinkSync(receiptPath.replace(/\.json$/u, '.sha256'));
+  assert.throws(() => buildVerifierContext({ cwd: fixture.cwd }), (error) => error.code === 'RECEIPT_MISSING');
+  writeReceiptJson(receiptPath, originalReceipt);
+
+  writeCompleteTransitionFixture(taskDirectory, { ...originalIntent, type: 'not-task-integrated' });
+  assert.throws(() => buildVerifierContext({ cwd: fixture.cwd }), (error) => error.code === 'INTEGRATION_RECEIPT_MISSING');
+  writeCompleteTransitionFixture(taskDirectory, originalIntent);
+
+  const precedingDirectory = join(transitions, String(originalIntent.revision - 1).padStart(8, '0'));
+  const precedingIntent = JSON.parse(readFileSync(join(precedingDirectory, 'intent.json'), 'utf8'));
+  const clonedPreceding = structuredClone(precedingIntent);
+  clonedPreceding.revision = 90000000;
+  clonedPreceding.nextState.revision = 90000000;
+  clonedPreceding.nextStateDigest = digestJson(clonedPreceding.nextState);
+  const clonedIntegrated = structuredClone(originalIntent);
+  clonedIntegrated.revision = 90000001;
+  clonedIntegrated.previousStateDigest = clonedPreceding.nextStateDigest;
+  clonedIntegrated.nextState.revision = 90000001;
+  clonedIntegrated.nextStateDigest = digestJson(clonedIntegrated.nextState);
+  writeCompleteTransitionFixture(join(transitions, '90000000'), clonedPreceding);
+  writeCompleteTransitionFixture(join(transitions, '90000001'), clonedIntegrated);
+  assert.throws(() => buildVerifierContext({ cwd: fixture.cwd }), (error) => error.code === 'INTEGRATION_RECEIPT_AMBIGUOUS');
 });
 
 test('failed validation is private, immutable, and explicitly replaced at the next durable round', async () => {
@@ -308,7 +358,7 @@ test('stored union specialist routes are consumed in canonical reviewer order', 
 });
 
 test('final-verifier finding disposition creates ordinary remediation work without deleting round history', async () => {
-  const fixture = await integratedSingleTaskFixture('finding remediation');
+  const fixture = await integratedSingleTaskFixture('finding remediation', behaviorSpecialization());
   let state = createValidationPlan({ cwd: fixture.cwd, expectedRevision: fixture.state.revision });
   state = runValidation({ cwd: fixture.cwd, expectedRevision: state.revision,
     runner: () => ({ status: 0, signal: null, stdout: 'passed', stderr: '' }) });
@@ -329,6 +379,8 @@ test('final-verifier finding disposition creates ordinary remediation work witho
     replacementCriterionId: 'recovery-remediation', replacementTaskId: 'recovery-remediation-task', recordedAt: '2026-08-18T12:05:00.000Z',
   } });
   const resultingPlan = planFor(state, 2);
+  resultingPlan.specialization = behaviorSpecialization();
+  resultingPlan.tasks[0].specialization = behaviorSpecialization();
   resultingPlan.tasks[0].anticipatedPaths = ['first.txt'];
   resultingPlan.criteria.push({ id: 'recovery-remediation', description: 'Recovery coverage is complete.', disposition: 'owned',
     ownerTaskId: 'recovery-remediation-task', deferredReason: null });
@@ -339,10 +391,12 @@ test('final-verifier finding disposition creates ordinary remediation work witho
     id: 'remediate-recovery', reason: 'Resolve exact verifier finding.', authorization: 'Human-approved remediation.',
     trigger: fingerprint, delta: { addedTaskIds: ['recovery-remediation-task'] }, invalidatedEvidence: [],
   };
+  const amendmentPlanningEvidence = [mapperEvidence(state.planningSha, 2, 'Remediation behavior coverage is mapped.')];
   assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
-    amendment: { ...amendment, trigger: 'manual-override' }, resultingPlan }),
+    amendment: { ...amendment, trigger: 'manual-override' }, resultingPlan, planningEvidence: amendmentPlanningEvidence }),
   (error) => error.code === 'INVALID_AMENDMENT');
-  assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision, amendment, resultingPlan }),
+  assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision, amendment, resultingPlan,
+    planningEvidence: amendmentPlanningEvidence }),
     (error) => ['RECEIPT_MISSING', 'INVALID_AMENDMENT'].includes(error.code));
   const siblingFingerprint = findingFingerprint({ sourceKind: 'verifier', sourceRole: 'development_integration_verifier', finding: siblingFinding });
   state = recordFindingDisposition({ cwd: fixture.cwd, expectedRevision: state.revision, disposition: {
@@ -351,13 +405,15 @@ test('final-verifier finding disposition creates ordinary remediation work witho
     reason: 'Same remediation covers this duplicate note.', amendmentId: null, replacementCriterionId: null, replacementTaskId: null,
     recordedAt: '2026-08-18T12:06:00.000Z',
   } });
-  state = amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision, amendment, resultingPlan });
+  state = amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision, amendment, resultingPlan,
+    planningEvidence: amendmentPlanningEvidence });
   assert.equal(state.phase, 'implementing');
   assert.equal(state.verification, null);
   assert.equal(state.execution.tasks.find(({ id }) => id === 'state-task').status, 'integrated');
   assert.equal(state.execution.tasks.find(({ id }) => id === 'recovery-remediation-task').status, 'unbound');
   assert.ok(existsSync(join(changeDirectory(fixture.cwd, state.changeId), 'verification', 'rounds', '0001', 'verifier-result.json')));
   const remediationPacket = packetFor(state, resultingPlan, 'recovery-remediation-task');
+  remediationPacket.behaviorMapperEvidence = amendmentPlanningEvidence[0];
   state = bindTask({ cwd: fixture.cwd, packet: remediationPacket, expectedRevision: state.revision });
   const remediationWorker = createWorkerFixture(fixture.cwd, state, remediationPacket);
   state = scheduleWave({ cwd: fixture.cwd, expectedRevision: state.revision });
@@ -375,6 +431,36 @@ test('final-verifier finding disposition creates ordinary remediation work witho
     runner: () => ({ status: 0, signal: null, stdout: 'passed', stderr: '' }) });
   state = createSpecialistPlan({ cwd: fixture.cwd, expectedRevision: state.revision });
   const repeatedContext = buildVerifierContext({ cwd: fixture.cwd });
+  const originalPlan = JSON.parse(readFileSync(join(changeDirectory(fixture.cwd, state.changeId), 'plan', 'plan.json'), 'utf8'));
+  for (const [id, expected] of [
+    ['original-plan-criterion-durable-state', originalPlan.criteria[0]],
+    ['original-plan-decision-storage-root', originalPlan.decisions[0]],
+    [`original-plan-checklist-${originalPlan.checklistMappings[0].id}`, originalPlan.checklistMappings[0]],
+    ['original-plan-task-state-task', originalPlan.tasks[0]],
+  ]) {
+    const record = repeatedContext.evidence.find((entry) => entry.id === id);
+    assert.ok(record, `${id} is projected`);
+    assert.deepEqual(JSON.parse(record.summary.slice(record.summary.indexOf('\n') + 1)), expected,
+      `${id} retains complete original semantics`);
+  }
+  const amendmentRecord = JSON.parse(readFileSync(join(changeDirectory(fixture.cwd, state.changeId), 'plan', 'amendments', '0001.json'), 'utf8'));
+  const amendmentEvidence = repeatedContext.evidence.find(({ kind, id }) => kind === 'amendment' && id === amendment.id);
+  const amendmentAuthority = JSON.parse(amendmentEvidence.summary.slice(amendmentEvidence.summary.indexOf('\n') + 1));
+  assert.equal(amendmentAuthority.authorization, amendment.authorization);
+  assert.equal(amendmentAuthority.previousDigest, amendmentRecord.previousDigest);
+  assert.equal(amendmentAuthority.newDigest, amendmentRecord.newDigest);
+  assert.equal(amendmentAuthority.repositorySha, amendmentRecord.repositorySha);
+  assert.deepEqual(amendmentAuthority.invalidatedEvidence, amendment.invalidatedEvidence);
+  assert.deepEqual(amendmentAuthority.delta, amendment.delta);
+  assert.deepEqual(amendmentAuthority.resultingPlanIdentity,
+    { changeId: resultingPlan.changeId, planRevision: resultingPlan.planRevision, digest: digestJson(resultingPlan) });
+  const projectedProvenance = repeatedContext.evidence.find(({ id }) => id === 'remediate-recovery-provenance-record-1');
+  assert.deepEqual(JSON.parse(projectedProvenance.summary.slice(projectedProvenance.summary.indexOf('\n') + 1)), amendmentPlanningEvidence[0]);
+  const amendmentPath = join(changeDirectory(fixture.cwd, state.changeId), 'plan', 'amendments', '0001.json');
+  writeReceiptJson(amendmentPath, { ...amendmentRecord, previousDigest: `sha256:${'0'.repeat(64)}` });
+  assert.throws(() => buildVerifierContext({ cwd: fixture.cwd }),
+    (error) => ['AMENDMENT_CHAIN_INVALID', 'RECOVERY_EVIDENCE_INVALID'].includes(error.code));
+  writeReceiptJson(amendmentPath, amendmentRecord);
   const repeatedResult = { ...verifierResult, findings: [finding], summary: 'The remediation finding repeated.',
     headSha: state.verification.headSha, contextDigest: digestJson(repeatedContext),
     recordedAt: '2026-08-18T13:00:00.000Z' };
@@ -1026,8 +1112,11 @@ async function integratedSingleTaskFixture(label, specialize = specialization())
   plan.specialization = specialize;
   plan.tasks[0].specialization = specialize;
   plan.tasks[0].anticipatedPaths = ['first.txt'];
-  let state = acceptPlan({ cwd, plan, expectedRevision: planning.revision });
+  const planningEvidence = specialize.browserVisible ? [mapperEvidence(planning.planningSha, plan.planRevision,
+    'Accepted behavior coverage is mapped.')] : [];
+  let state = acceptPlan({ cwd, plan, expectedRevision: planning.revision, planningEvidence });
   const packet = packetFor(state, plan, 'state-task');
+  packet.behaviorMapperEvidence = planningEvidence[0] ?? null;
   state = bindTask({ cwd, packet, expectedRevision: state.revision });
   const worker = createWorkerFixture(cwd, state, packet);
   state = scheduleWave({ cwd, expectedRevision: state.revision });
@@ -1090,6 +1179,14 @@ function writeReceiptJson(path, value) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify(value)}\n`);
   writeFileSync(path.replace(/\.json$/u, '.sha256'), `${digestJson(value)}\n`);
+}
+
+function writeCompleteTransitionFixture(directory, intent) {
+  const receipt = { schemaVersion: 1, revision: intent.revision, intentDigest: digestJson(intent),
+    stateDigest: intent.nextStateDigest, evidence: intent.evidence, completedAt: intent.nextState.updatedAt };
+  writeReceiptJson(join(directory, 'intent.json'), intent);
+  writeReceiptJson(join(directory, 'receipt.json'), receipt);
+  writeFileSync(join(directory, 'complete'), `${digestJson(receipt)}\n`);
 }
 
 function installLegacyPreacceptDecision(cwd, decisionId = 'legacy-preaccept') {

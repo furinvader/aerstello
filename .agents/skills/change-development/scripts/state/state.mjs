@@ -1571,17 +1571,39 @@ function repeatedFindingFingerprints(cwd, state, sourceKind, sourceRole, fingerp
 function integrationReceiptForTask(cwd, state, task) {
   if (task.status === 'no-change') return { integrationReceipt: null, integrationReceiptDigest: null };
   const directories = readdirSync(join(changeDirectory(cwd, state.changeId), 'transitions'), { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && /^\d{8}$/u.test(entry.name)).map((entry) => entry.name).sort().reverse();
+    .filter((entry) => entry.isDirectory() && /^\d{8}$/u.test(entry.name)).map((entry) => entry.name).sort();
+  const matches = [];
   for (const name of directories) {
     const directory = join(changeDirectory(cwd, state.changeId), 'transitions', name);
-    const intent = verifyReceipt(join(directory, 'intent.json'), `transition ${name} intent`).value;
-    const integrated = intent.type === 'task-integrated' && intent.nextState?.execution?.tasks
-      ?.find((entry) => entry.id === task.id)?.integratedCommit === task.integratedCommit;
-    if (!integrated) continue;
-    const receipt = verifyReceipt(join(directory, 'receipt.json'), `transition ${name} receipt`);
-    return { integrationReceipt: receipt.value, integrationReceiptDigest: receipt.digest };
+    const transition = verifyCompleteTransition(directory);
+    if (transition.intent.type !== 'task-integrated') continue;
+    const nextTask = transition.intent.nextState?.execution?.tasks?.find((entry) => entry.id === task.id);
+    if (nextTask?.status !== 'integrated' || nextTask.integratedCommit !== task.integratedCommit) continue;
+    const priorRevision = transition.intent.revision - 1;
+    if (priorRevision < 0) continue;
+    const priorDirectory = transitionDirectory(cwd, state.changeId, priorRevision);
+    if (!existsSync(priorDirectory)) continue;
+    const prior = verifyCompleteTransition(priorDirectory);
+    const priorTask = prior.intent.nextState?.execution?.tasks?.find((entry) => entry.id === task.id);
+    const integrationIntent = prior.intent.nextState?.execution?.integrationIntent;
+    const exactPair = prior.intent.type === 'integration-intent'
+      && transition.intent.previousStateDigest === prior.intent.nextStateDigest
+      && priorTask?.status === 'integration-pending'
+      && priorTask.integratedCommit === null
+      && serialized(nextTask) === serialized({ ...priorTask, status: 'integrated', integratedCommit: task.integratedCommit })
+      && serialized(nextTask) === serialized(task)
+      && nextTask.workerCommit === priorTask.workerCommit
+      && integrationIntent?.taskId === task.id
+      && integrationIntent.workerCommit === nextTask.workerCommit
+      && integrationIntent.centralBaseSha === prior.intent.nextState.git.headSha
+      && transition.intent.nextState.execution.integrationIntent === null
+      && transition.intent.nextState.git.headSha === task.integratedCommit;
+    if (exactPair) matches.push({ integrationReceipt: transition.receipt,
+      integrationReceiptDigest: objectDigest(transition.receipt) });
   }
-  throw new StateError(`Integrated task ${task.id} has no receipt-valid integration transition`, 'INTEGRATION_RECEIPT_MISSING');
+  if (matches.length === 0) throw new StateError(`Integrated task ${task.id} has no exact receipt-valid integration intent/transition pair`, 'INTEGRATION_RECEIPT_MISSING');
+  if (matches.length > 1) throw new StateError(`Integrated task ${task.id} has multiple receipt-valid integration intent/transition pairs`, 'INTEGRATION_RECEIPT_AMBIGUOUS');
+  return matches[0];
 }
 
 function terminalTaskEvidence(cwd, state) {
@@ -1911,6 +1933,7 @@ export function buildVerifierContext({ cwd = process.cwd(), changeId } = {}) {
   const originalPlan = verifyReceipt(join(changeDirectory(root, state.changeId), 'plan', 'plan.json'), 'original accepted plan');
   const effectivePlan = readEffectivePlan(root, state);
   const taskEvidence = terminalTaskEvidence(root, state);
+  validateState({ cwd: root, changeId: state.changeId });
   const evidence = [
     { kind: 'source', id: 'source-observation', digest: state.source.observationDigest, summary: `${state.source.kind}:${state.source.reference}` },
     { kind: 'criterion', id: 'original-plan-objective', digest: originalPlan.digest, summary: `Original objective: ${originalPlan.value.objective}` },
@@ -1931,6 +1954,18 @@ export function buildVerifierContext({ cwd = process.cwd(), changeId } = {}) {
     digest: objectDigest(decision), summary: `${decision.status}: ${decision.resolution ?? decision.rationale}` }));
   effectivePlan.checklistMappings.forEach((mapping) => evidence.push({ kind: 'checklist', id: mapping.id,
     digest: objectDigest(mapping), summary: `${mapping.capturedText} -> criteria ${mapping.criterionIds.join(', ')}; tasks ${mapping.taskIds.join(', ')}.` }));
+  [...originalPlan.value.criteria].sort((left, right) => left.id.localeCompare(right.id)).forEach((criterion) => evidence.push({
+    kind: 'criterion', id: `original-plan-criterion-${criterion.id}`, digest: objectDigest(criterion),
+    summary: `Original accepted-plan criterion ${criterion.id}:\n${serialized(criterion)}` }));
+  [...originalPlan.value.decisions].sort((left, right) => left.id.localeCompare(right.id)).forEach((decision) => evidence.push({
+    kind: 'decision', id: `original-plan-decision-${decision.id}`, digest: objectDigest(decision),
+    summary: `Original accepted-plan decision ${decision.id}:\n${serialized(decision)}` }));
+  [...originalPlan.value.checklistMappings].sort((left, right) => left.id.localeCompare(right.id)).forEach((mapping) => evidence.push({
+    kind: 'checklist', id: `original-plan-checklist-${mapping.id}`, digest: objectDigest(mapping),
+    summary: `Original accepted-plan checklist mapping ${mapping.id}:\n${serialized(mapping)}` }));
+  [...originalPlan.value.tasks].sort((left, right) => left.id.localeCompare(right.id)).forEach((task) => evidence.push({
+    kind: 'packet', id: `original-plan-task-${task.id}`, digest: objectDigest(task),
+    summary: `Original accepted-plan task ${task.id}:\n${serialized(task)}` }));
   taskEvidence.forEach(({ packet, packetDigest, provenanceDigest, result, resultDigest, terminalStatus, integratedCommit, integrationReceipt, integrationReceiptDigest, binding }) => {
     const validations = [...packet.requiredValidation.unit, ...packet.requiredValidation.system].map(({ command }) => command).join('; ');
     evidence.push({ kind: 'packet', id: packet.taskId, digest: packetDigest,
@@ -1959,14 +1994,28 @@ export function buildVerifierContext({ cwd = process.cwd(), changeId } = {}) {
       summary: `${command.argv.join(' ')} => ${receipt.value.status}; exit ${receipt.value.exitCode ?? 'none'}; output ${receipt.value.outputDigest}.` });
   });
   if (state.plan.amendmentCount > 0) {
+    let previousPlanDigest = originalPlan.digest;
     for (let number = 1; number <= state.plan.amendmentCount; number += 1) {
       const receipt = verifyReceipt(join(changeDirectory(root, state.changeId), 'plan', 'amendments', `${String(number).padStart(4, '0')}.json`), `plan amendment ${number}`);
+      const { resultingPlan, ...authority } = receipt.value;
+      const resultingPlanDigest = objectDigest(resultingPlan);
+      if (receipt.value.previousDigest !== previousPlanDigest || receipt.value.newDigest !== resultingPlanDigest) {
+        throw new StateError(`Plan amendment ${number} does not preserve its receipt-bound digest chain`, 'AMENDMENT_CHAIN_INVALID');
+      }
+      const authorityProjection = { amendmentNumber: number, receiptDigest: receipt.digest, ...authority,
+        resultingPlanIdentity: { changeId: resultingPlan.changeId, planRevision: resultingPlan.planRevision,
+          digest: resultingPlanDigest } };
       evidence.push({ kind: 'amendment', id: receipt.value.amendmentId, digest: receipt.digest,
-        summary: `${receipt.value.reason}; trigger ${receipt.value.trigger}; delta fields ${Object.keys(receipt.value.delta).sort().join(', ')}; delta ${objectDigest(receipt.value.delta)}.` });
+        summary: `Complete amendment authority and resulting-plan identity:\n${serialized(authorityProjection)}` });
       const provenance = verifyReceipt(join(changeDirectory(root, state.changeId), 'plan', 'amendments', `${String(number).padStart(4, '0')}.evidence.json`), `plan amendment ${number} evidence`);
       evidence.push({ kind: 'provenance', id: `${receipt.value.amendmentId}-provenance`, digest: provenance.digest,
-        summary: `${provenance.value.length} receipt-bound amendment planning evidence record(s).` });
+        summary: `Amendment provenance receipt ${provenance.digest}; record count ${provenance.value.length}.` });
+      provenance.value.forEach((record, index) => evidence.push({ kind: 'provenance',
+        id: `${receipt.value.amendmentId}-provenance-record-${index + 1}`, digest: provenance.digest,
+        summary: `Amendment provenance record ${index + 1} of ${provenance.value.length}:\n${serialized(record)}` }));
+      previousPlanDigest = resultingPlanDigest;
     }
+    if (previousPlanDigest !== state.plan.effectiveDigest) throw new StateError('Effective plan digest does not match amendment context replay', 'AMENDMENT_CHAIN_INVALID');
   }
   if (validationPlan.value.releaseEvidence) evidence.push({ kind: 'release', id: 'release-state',
     digest: validationPlan.value.releaseEvidence.evidenceDigest,
