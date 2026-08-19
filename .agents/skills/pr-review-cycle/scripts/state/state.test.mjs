@@ -704,6 +704,37 @@ function tasklessVerifierFixture(cwd, definitions = [{
   };
 }
 
+function appendVerifierOutcomeTasks(cwd, state, definitions) {
+  const proposedTasks = definitions.map(({ id, disposition }) => task(state.currentIntegrationHeadSha, {
+    id, sourceIds: [`thread:${id}`, `archive:${id}`], sourceType: 'github-thread',
+    fingerprint: `fingerprint-${id}`, summary: `Retained outcome for ${id}.`,
+    disposition, status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  }));
+  const proposed = checkpointState({
+    cwd, expectedRevision: state.revision,
+    nextState: { ...state, tasks: [...state.tasks, ...proposedTasks] },
+  });
+  const transitioned = proposed.tasks.map((item) => {
+    const definition = definitions.find(({ id }) => id === item.id);
+    if (!definition || definition.status === 'proposed') return item;
+    if (definition.status === 'failed') {
+      return {
+        ...item, status: 'failed',
+        execution: { ...item.execution, lastError: 'Focused worker failed.' },
+      };
+    }
+    const { execution: _execution, ...withoutExecution } = item;
+    return {
+      ...withoutExecution, status: definition.status, integratedCommitSha: null,
+      resolutionSummary: `Evidence retained for ${item.id}.`,
+    };
+  });
+  return definitions.every(({ status }) => status === 'proposed') ? proposed : checkpointState({
+    cwd, expectedRevision: proposed.revision,
+    nextState: { ...proposed, tasks: transitioned },
+  });
+}
+
 function dependentWorkerAcceptanceFixture(cwd, {
   dependencyReference = 'integrated', workerBase = 'dependency', centralBase = 'dependency',
 } = {}) {
@@ -4702,6 +4733,80 @@ test('taskless post-integration planning yields receipt-backed final-verifier co
     },
   }), { code: 'SPECIALIST_REVIEWER_MISMATCH' });
   assert.deepEqual(loadState(cwd).tasks, validated.tasks);
+});
+
+test('mixed specialist context projects uncovered archived outcomes without packet duplication', () => {
+  const cwd = repo();
+  const { packet, integrated } = canonicalBoundIntegratedTask(cwd, 'packet-backed-fix');
+  const retained = appendVerifierOutcomeTasks(cwd, integrated, [
+    { id: 'z-archived-already-fixed', disposition: 'already-fixed', status: 'not-applicable' },
+    { id: 'a-archived-invalid', disposition: 'invalid', status: 'not-applicable' },
+  ]);
+  const validated = checkpointSyntheticTargetedValidation(cwd, retained);
+  planSpecialists({
+    cwd, expectedRevision: validated.revision, now: () => AT,
+    input: {
+      schemaVersion: 1, stage: 'post-integration', headSha: validated.currentIntegrationHeadSha,
+      tasks: [{ taskPacket: packet }],
+    },
+  });
+  const context = specialistContext({ cwd });
+  assert.equal(context.status, 'clean');
+  assert.equal(context.readyForIntegrationVerifier, true);
+  assert.deepEqual(context.packets, [packet]);
+  assert.deepEqual(context.routes.map(({ taskId }) => taskId), ['packet-backed-fix']);
+  assert.deepEqual(context.workerResultEvidence.map(({ taskId, status }) => ({ taskId, status })), [
+    { taskId: 'packet-backed-fix', status: 'valid' },
+  ]);
+  assert.deepEqual(context.taskOutcomes, [
+    {
+      taskId: 'a-archived-invalid',
+      sourceIds: ['thread:a-archived-invalid', 'archive:a-archived-invalid'],
+      sourceType: 'github-thread', fingerprint: 'fingerprint-a-archived-invalid',
+      summary: 'Retained outcome for a-archived-invalid.', severity: 'P1', disposition: 'invalid',
+      status: 'not-applicable', integratedCommitSha: null,
+      resolutionSummary: 'Evidence retained for a-archived-invalid.',
+    },
+    {
+      taskId: 'z-archived-already-fixed',
+      sourceIds: ['thread:z-archived-already-fixed', 'archive:z-archived-already-fixed'],
+      sourceType: 'github-thread', fingerprint: 'fingerprint-z-archived-already-fixed',
+      summary: 'Retained outcome for z-archived-already-fixed.', severity: 'P1',
+      disposition: 'already-fixed', status: 'not-applicable', integratedCommitSha: null,
+      resolutionSummary: 'Evidence retained for z-archived-already-fixed.',
+    },
+  ]);
+  assert.equal(context.taskOutcomes.some(({ taskId }) => taskId === 'packet-backed-fix'), false);
+});
+
+test('mixed specialist planning rejects every ineligible uncovered durable task', () => {
+  const scenarios = [
+    { id: 'uncovered-actionable', disposition: 'actionable', status: 'proposed' },
+    { id: 'uncovered-nonterminal', disposition: 'already-fixed', status: 'proposed' },
+    { id: 'uncovered-failed', disposition: 'already-fixed', status: 'failed' },
+    { id: 'uncovered-human', disposition: 'needs-human-decision', status: 'not-applicable' },
+  ];
+  for (const scenario of scenarios) {
+    const cwd = repo();
+    const { packet, integrated } = canonicalBoundIntegratedTask(cwd, `packet-for-${scenario.id}`);
+    const retained = appendVerifierOutcomeTasks(cwd, integrated, [scenario]);
+    const validated = checkpointSyntheticTargetedValidation(cwd, retained);
+    const bundlePath = specialistReviewBundlePath(
+      cwd, validated.prNumber, validated.currentIntegrationHeadSha, validated.revision,
+    );
+    const receiptPath = specialistPlanReceiptPath(
+      cwd, validated.prNumber, validated.currentIntegrationHeadSha, validated.revision,
+    );
+    assert.throws(() => planSpecialists({
+      cwd, expectedRevision: validated.revision, now: () => AT,
+      input: {
+        schemaVersion: 1, stage: 'post-integration', headSha: validated.currentIntegrationHeadSha,
+        tasks: [{ taskPacket: packet }],
+      },
+    }), { code: 'SPECIALIST_PLAN_TASK_MISMATCH' });
+    assert.equal(existsSync(bundlePath), false);
+    assert.equal(existsSync(receiptPath), false);
+  }
 });
 
 test('taskless specialist planning rejects ineligible states before durable evidence writes', () => {

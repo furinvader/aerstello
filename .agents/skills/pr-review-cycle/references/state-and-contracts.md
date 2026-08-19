@@ -195,7 +195,11 @@ produces the guarded input for the PR workflow's final verifier, including every
 exact immutable packet, every receipt-verified result with packet, Review,
 worker, and integrated commit identities, phase-qualified pre-bind signals, route, reviewed-HEAD
 mapper result, separate exact-integration-HEAD risk results, targeted-validation
-proof, and `finalVerification` descriptor. Any
+proof, and `finalVerification` descriptor. Terminal verifier-eligible tasks not
+represented by a packet-backed Integrated entry appear in deterministic
+`taskOutcomes` alongside the packet evidence; packet-backed tasks are not
+duplicated there. Any uncovered actionable, nonterminal, failed, or human-gated
+task blocks final-verifier readiness. Any
 HEAD change makes the prior bundle stale; clean specialist evidence is not
 task-resolution, GitHub, review-request, or Done evidence.
 

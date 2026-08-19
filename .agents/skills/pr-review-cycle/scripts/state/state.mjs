@@ -1121,17 +1121,19 @@ const TASKLESS_VERIFIER_DISPOSITIONS = new Set([
   'duplicate', 'already-fixed', 'stale', 'invalid', 'policy-conflict', 'out-of-scope',
 ]);
 
-function tasklessVerifierOutcomes(state) {
-  const ineligible = state.tasks.find((task) => task.disposition === 'actionable'
+function uncoveredVerifierOutcomes(state, entries) {
+  const representedTaskIds = new Set(entries.map(({ task }) => task.id));
+  const uncovered = state.tasks.filter((task) => !representedTaskIds.has(task.id));
+  const ineligible = uncovered.find((task) => task.disposition === 'actionable'
     || !TASKLESS_VERIFIER_DISPOSITIONS.has(task.disposition)
     || !['not-applicable', 'completed'].includes(task.status));
   if (ineligible) {
     throw new StateError(
-      `Empty post-integration planning is not allowed while task ${ineligible.id} is actionable, nonterminal, or human-gated`,
+      `Post-integration planning does not cover task ${ineligible.id}, which is actionable, nonterminal, or human-gated`,
       'SPECIALIST_PLAN_TASK_MISMATCH',
     );
   }
-  return [...state.tasks].sort((a, b) => a.id.localeCompare(b.id)).map((task) => canonicalJson({
+  return uncovered.sort((a, b) => a.id.localeCompare(b.id)).map((task) => canonicalJson({
     taskId: task.id,
     sourceIds: task.sourceIds,
     sourceType: task.sourceType,
@@ -1154,9 +1156,9 @@ function assertPostIntegrationBundleCoverage(cwd, state, bundle) {
       'SPECIALIST_VALIDATION_REQUIRED',
     );
   }
-  const taskOutcomes = bundle.tasks.length === 0 ? tasklessVerifierOutcomes(state) : [];
   const entries = loadBoundTaskPacketEntries(cwd, state, { statuses: ['integrated'] })
     .sort((a, b) => a.packet.taskId.localeCompare(b.packet.taskId));
+  const taskOutcomes = uncoveredVerifierOutcomes(state, entries);
   const expectedTasks = entries.map(({ packet, provenance }) => ({
     taskId: packet.taskId,
     packetDigest: taskPacketDigest(packet),
@@ -1215,7 +1217,7 @@ export function planSpecialists({ cwd = process.cwd(), prNumber, input, expected
       boundEntries = loadBoundTaskPacketEntries(cwd, state, { statuses: ['integrated'] })
         .sort((a, b) => a.packet.taskId.localeCompare(b.packet.taskId));
       packets = boundEntries.map(({ packet }) => packet);
-      if (input.tasks.length === 0) tasklessVerifierOutcomes(state);
+      uncoveredVerifierOutcomes(state, boundEntries);
       const supplied = [...input.tasks].map((entry) => entry.taskPacket).sort((a, b) => a.taskId.localeCompare(b.taskId));
       if (canonicalSerializedJson(supplied) !== canonicalSerializedJson(packets)) {
         throw new StateError('Post-integration planning input must exactly cover durable Integrated packet sidecars', 'SPECIALIST_PLAN_TASK_MISMATCH');
