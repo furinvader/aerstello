@@ -2043,7 +2043,10 @@ export function buildVerifierContext({ cwd = process.cwd(), changeId } = {}) {
       evidence.push({ kind: 'finding-disposition', id: `round-${round}-${receipt.value.findingId}-evidence`, digest: source.digest,
         summary: `Finding evidence: ${finding.evidence}` });
       evidence.push({ kind: 'finding-disposition', id: `round-${round}-${receipt.value.findingId}`, digest: receipt.digest,
-        summary: `${receipt.value.sourceRole}:${receipt.value.findingId} -> ${receipt.value.disposition}; ${receipt.value.reason}` });
+        summary: `Finding disposition authority:\n${serialized({ sourceKind: receipt.value.sourceKind,
+          sourceRole: receipt.value.sourceRole, findingId: receipt.value.findingId, fingerprint: receipt.value.fingerprint,
+          disposition: receipt.value.disposition, reason: receipt.value.reason, amendmentId: receipt.value.amendmentId,
+          replacementCriterionId: receipt.value.replacementCriterionId, replacementTaskId: receipt.value.replacementTaskId })}` });
     }
     const authorizations = join(changeDirectory(root, state.changeId), 'verification', 'authorizations');
     if (existsSync(authorizations)) for (const fingerprint of readdirSync(authorizations, { withFileTypes: true }).filter((entry) => entry.isDirectory()).sort((left, right) => left.name.localeCompare(right.name))) {
@@ -2461,8 +2464,11 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
         || error.startsWith('derived specialist aggregate') || terminalLabels.some((label) => error.startsWith(`${label}:`) || error.startsWith(`${label}.route`))
         || (() => {
           const match = /^tasks ([a-z0-9]+(?:-[a-z0-9]+)*) and ([a-z0-9]+(?:-[a-z0-9]+)*) have overlapping anticipated paths:/u.exec(error);
-          return match && ((terminalIds.includes(match[1]) && remediationIds.has(match[2]))
-            || (terminalIds.includes(match[2]) && remediationIds.has(match[1])));
+          if (!match) return false;
+          const leftTerminal = terminalIds.includes(match[1]); const rightTerminal = terminalIds.includes(match[2]);
+          return (leftTerminal && rightTerminal)
+            || (leftTerminal && remediationIds.has(match[2]))
+            || (rightTerminal && remediationIds.has(match[1]));
         })()));
     }
     if (errors.length > 0) throw new StateError(`Amended plan is not ready:\n- ${errors.join('\n- ')}`, 'PLAN_NOT_READY');

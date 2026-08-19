@@ -386,7 +386,7 @@ test('final-verifier finding disposition creates ordinary remediation work witho
     ownerTaskId: 'recovery-remediation-task', deferredReason: null });
   resultingPlan.tasks.push({ ...resultingPlan.tasks[0], id: 'recovery-remediation-task', title: 'Add recovery coverage',
     objective: 'Implement the exact finding remediation.', criterionIds: ['recovery-remediation'], checklistItemIds: [],
-    dependsOn: ['state-task'], anticipatedPaths: ['remediation.txt'] });
+    dependsOn: ['state-task'], anticipatedPaths: ['first.txt'] });
   const amendment = {
     id: 'remediate-recovery', reason: 'Resolve exact verifier finding.', authorization: 'Human-approved remediation.',
     trigger: fingerprint, delta: { addedTaskIds: ['recovery-remediation-task'] }, invalidatedEvidence: [],
@@ -418,10 +418,10 @@ test('final-verifier finding disposition creates ordinary remediation work witho
   const remediationWorker = createWorkerFixture(fixture.cwd, state, remediationPacket);
   state = scheduleWave({ cwd: fixture.cwd, expectedRevision: state.revision });
   state = startTask({ cwd: fixture.cwd, taskId: remediationPacket.taskId, workerId: 'worker-two', expectedRevision: state.revision });
-  writeFileSync(join(remediationWorker.path, 'remediation.txt'), 'covered\n'); git(remediationWorker.path, 'add', 'remediation.txt');
+  writeFileSync(join(remediationWorker.path, 'first.txt'), 'covered\n'); git(remediationWorker.path, 'add', 'first.txt');
   git(remediationWorker.path, 'commit', '-m', 'test: remediate finding');
   state = acceptResult({ cwd: fixture.cwd, expectedRevision: state.revision, workerCwd: remediationWorker.path,
-    result: resultFor(remediationPacket, 'implemented', git(remediationWorker.path, 'rev-parse', 'HEAD'), ['remediation.txt']) });
+    result: resultFor(remediationPacket, 'implemented', git(remediationWorker.path, 'rev-parse', 'HEAD'), ['first.txt']) });
   state = integrateTask({ cwd: fixture.cwd, taskId: remediationPacket.taskId, expectedRevision: state.revision });
   removeTaskWorktree({ cwd: fixture.cwd, changeId: state.changeId, taskId: remediationPacket.taskId });
   state = finalizeIntegration({ cwd: fixture.cwd, expectedRevision: state.revision });
@@ -456,6 +456,19 @@ test('final-verifier finding disposition creates ordinary remediation work witho
     { changeId: resultingPlan.changeId, planRevision: resultingPlan.planRevision, digest: digestJson(resultingPlan) });
   const projectedProvenance = repeatedContext.evidence.find(({ id }) => id === 'remediate-recovery-provenance-record-1');
   assert.deepEqual(JSON.parse(projectedProvenance.summary.slice(projectedProvenance.summary.indexOf('\n') + 1)), amendmentPlanningEvidence[0]);
+  const actionableDispositionEvidence = repeatedContext.evidence.find(({ kind, id }) => kind === 'finding-disposition'
+    && id === 'round-1-missing-recovery-check');
+  const actionableAuthority = JSON.parse(actionableDispositionEvidence.summary.slice(actionableDispositionEvidence.summary.indexOf('\n') + 1));
+  assert.deepEqual({ amendmentId: actionableAuthority.amendmentId, replacementCriterionId: actionableAuthority.replacementCriterionId,
+    replacementTaskId: actionableAuthority.replacementTaskId }, {
+    amendmentId: amendment.id, replacementCriterionId: 'recovery-remediation', replacementTaskId: 'recovery-remediation-task',
+  }, 'historical actionable disposition exposes its exact remediation authority mapping');
+  const duplicateDispositionEvidence = repeatedContext.evidence.find(({ kind, id }) => kind === 'finding-disposition'
+    && id === 'round-1-duplicate-recovery-note');
+  const duplicateAuthority = JSON.parse(duplicateDispositionEvidence.summary.slice(duplicateDispositionEvidence.summary.indexOf('\n') + 1));
+  assert.deepEqual({ amendmentId: duplicateAuthority.amendmentId, replacementCriterionId: duplicateAuthority.replacementCriterionId,
+    replacementTaskId: duplicateAuthority.replacementTaskId }, { amendmentId: null, replacementCriterionId: null, replacementTaskId: null },
+  'non-actionable disposition cannot imply remediation authority');
   const amendmentPath = join(changeDirectory(fixture.cwd, state.changeId), 'plan', 'amendments', '0001.json');
   writeReceiptJson(amendmentPath, { ...amendmentRecord, previousDigest: `sha256:${'0'.repeat(64)}` });
   assert.throws(() => buildVerifierContext({ cwd: fixture.cwd }),
@@ -478,6 +491,31 @@ test('final-verifier finding disposition creates ordinary remediation work witho
   state = recordFindingDisposition({ cwd: fixture.cwd, expectedRevision: state.revision, disposition: repeatedDisposition });
   assert.ok(existsSync(join(changeDirectory(fixture.cwd, state.changeId), 'verification', 'rounds', '0001', 'findings', `${fingerprint.slice(7)}.json`)));
   assert.ok(existsSync(join(changeDirectory(fixture.cwd, state.changeId), 'verification', 'rounds', '0002', 'findings', `${fingerprint.slice(7)}.json`)));
+  const secondPlan = structuredClone(resultingPlan);
+  secondPlan.planRevision = 3;
+  secondPlan.criteria.push({ id: repeatedDisposition.replacementCriterionId, description: 'Repeated recovery coverage is complete.',
+    disposition: 'owned', ownerTaskId: repeatedDisposition.replacementTaskId, deferredReason: null });
+  secondPlan.tasks.push({ ...secondPlan.tasks[0], id: repeatedDisposition.replacementTaskId, title: 'Repeat recovery remediation',
+    objective: 'Resolve the repeated exact finding.', criterionIds: [repeatedDisposition.replacementCriterionId], checklistItemIds: [],
+    dependsOn: ['recovery-remediation-task'], anticipatedPaths: ['second-remediation.txt'] });
+  const secondAmendment = { id: repeatedDisposition.amendmentId, reason: 'Resolve the repeated exact verifier finding.',
+    authorization: 'Human-approved repeated remediation.', trigger: fingerprint,
+    delta: { addedTaskIds: [repeatedDisposition.replacementTaskId] }, invalidatedEvidence: [] };
+  const secondPlanningEvidence = [mapperEvidence(state.planningSha, 3, 'Repeated remediation behavior coverage is mapped.')];
+  const unsafePlan = structuredClone(secondPlan);
+  unsafePlan.criteria.push({ id: 'unplanned-overlap', description: 'Unplanned overlap is rejected.', disposition: 'owned',
+    ownerTaskId: 'unplanned-overlap-task', deferredReason: null });
+  unsafePlan.tasks.push({ ...secondPlan.tasks[0], id: 'unplanned-overlap-task', title: 'Unplanned overlapping work',
+    objective: 'Attempt unrelated overlapping work.', criterionIds: ['unplanned-overlap'], checklistItemIds: [],
+    dependsOn: ['recovery-remediation-task'], anticipatedPaths: ['second-remediation.txt'] });
+  assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision, amendment: secondAmendment,
+    resultingPlan: unsafePlan, planningEvidence: secondPlanningEvidence }),
+  (error) => error.code === 'PLAN_NOT_READY' && error.message.includes('overlapping anticipated paths'));
+  state = amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision, amendment: secondAmendment,
+    resultingPlan: secondPlan, planningEvidence: secondPlanningEvidence });
+  assert.equal(state.phase, 'implementing');
+  assert.equal(state.execution.tasks.find(({ id }) => id === 'recovery-remediation-task').status, 'integrated');
+  assert.equal(state.execution.tasks.find(({ id }) => id === repeatedDisposition.replacementTaskId).status, 'unbound');
 });
 
 test('execution Git checkpoints preserve durable identity and restore lifecycle phase exactly', async () => {
