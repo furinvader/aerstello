@@ -154,8 +154,21 @@ durable, digest-verified sidecars rather than duplicated task fields.
 
 `validate-result` is diagnostic only. Before a bound task becomes Integrated,
 `accept-result` performs the expected-revision guarded durable transition. It
-reloads the immutable packet, validates the complete schema-v3 result, derives
-no-rename changed paths from Git, proves worker ancestry, and writes a canonical
+reloads the immutable packet and runs the shared worker-commit inspector used by
+the CLI, retries, accepted-evidence reads, reconciliation, recovery, backfill,
+and final integration. The inspector requires one non-root, non-merge worker
+commit `W` with sole parent `P`; the packet Review commit must be ancestral to
+`P`, and `P` must already be ancestral to the exact current integration HEAD.
+It separately requires every declared dependency to be durably Integrated or
+Resolved and ancestral to both `P` and that integration HEAD. It derives
+NUL-delimited, no-renames changed paths only from `P` to `W`, with submodule
+ignoring forced off so repository configuration cannot hide gitlink changes.
+Before any authority read, replacement-disabled Git resolves the actual common
+Git directory, including for linked worktrees; a nonempty common-dir
+`info/grafts` fails closed while an absent or empty file is inert. Every
+subsequent Git authority read disables replacement objects so a local
+`refs/replace/*` entry cannot rewrite commit existence, parents, trees,
+ancestry, paths, or patch evidence. The transition then writes a canonical
 envelope of at most 64 KiB under `worker-results/<sha256(taskId)>.json`. The
 envelope binds the PR, task, packet digest, Review commit, canonical result
 digest, and full result. Its adjacent immutable receipt is written first and
@@ -164,13 +177,32 @@ digest. Exact retries finish an interrupted receipt, envelope, or state
 boundary. Different bytes, tampering, missing evidence, and orphans fail closed.
 
 `backfill-result` is limited to native schema-v3 Integrated or completed tasks
-whose original result is supplied. It additionally proves worker and central
-commits have the same stable patch and that the central commit remains on the
-current integration HEAD. `accept-result` supports the bootstrap boundary when
-the old workflow already marked a task implemented and cherry-picked its exact
-patch: worker-to-current-HEAD patch equivalence must hold before the digest is
-bound and ordinary integration proceeds. Schema-v1/v2 migration never
-synthesizes worker-result evidence.
+whose original result is supplied. It additionally proves that the central
+commit remains ancestral to the current integration HEAD and that `P` is
+ancestral to the central commit's sole parent. Exact equivalence emits the
+binary full-index `P`-to-`W` patch with renames, external diffs, text conversion,
+and submodule ignoring disabled, and forces short applyable gitlink deltas. It
+seeds a unique temporary Git directory, index, and object database from the
+central parent, declares the same SHA-1 or SHA-256 object format, and uses the
+real object database only as a read alternate. Its environment contains no
+inherited Git settings, system and user configuration and attributes are
+disabled, and the temporary Git directory's highest-
+precedence `info/attributes` forces the deterministic built-in `merge=text`
+driver. Repository `.gitattributes`, local configuration, and custom merge
+drivers therefore cannot affect the proof or execute. It applies the patch
+cached with three-way semantics and no whitespace relaxation, and requires the
+complete generated tree to equal the central commit's actual tree. Conflicts
+fail closed. The temporary Git directory, index, and objects are removed in
+`finally`, so validation and recovery do not change the checkout, repository
+index, refs, configuration, or repository object database. This proof is
+base-independent for nonoverlapping same-file history while preserving exact
+paths, statuses, modes, gitlink pointers, whitespace, added/deleted bytes, and
+binary content; patch IDs are not authority. `accept-result` applies the same
+proof at the bootstrap boundary when the old workflow already marked a task
+implemented.
+The final Implemented-to-Integrated checkpoint reruns parent, dependency, path,
+central ancestry, and exact-delta checks against the then-current HEAD. Schema-
+v1/v2 migration never synthesizes worker-result evidence.
 
 `specialist-reviews/<head>-r<revision>.json` stores concise guarded planning and
 review evidence. Its immutable planning fields are anchored by the adjacent
@@ -364,9 +396,12 @@ returns one raw JSON object with status `implemented`, `blocked`,
 validation entry records only its exact command, result, and concise summary.
 The schema-v3 result echoes the packet specialization exactly and does not
 repeat risk tags.
-`validate-result` proves that the Review commit and worker commit exist, proves
-ancestry, and derives the NUL-delimited, no-renames tree diff between them.
-Implemented work requires a nonempty diff. Reject any mismatch between those
+`validate-result` proves that the Review commit and worker commit exist, that
+the worker commit is one non-root, non-merge commit `W`, and that its sole
+parent `P` is between the Review commit and current integration HEAD. It derives
+the NUL-delimited, no-renames changed paths only from `P` to `W`; dependency
+ancestry is checked separately and never contributes ownership paths.
+Implemented work requires a nonempty commit-local diff. Reject any mismatch between those
 Git-derived paths and the reported unique `changedPaths`, missing required
 validation, ownership violation, unexpected path, or raw log.
 

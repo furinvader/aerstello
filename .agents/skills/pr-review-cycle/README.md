@@ -135,7 +135,31 @@ canonical schema-v3 result under `worker-results/` before integration. Generic
 checkpoints cannot add or rewrite that digest, and the final verifier context
 includes every receipt-verified result. Native-v3 work already Integrated at
 the contract boundary may use `backfill-result` with its original result and
-stable worker-to-central patch proof; migrated state never fabricates one.
+exact worker-to-central commit-delta proof; migrated state never fabricates one.
+The worker result names one non-root, non-merge commit `W` with sole parent
+`P`. The Review commit may precede `P` because dependencies can already be
+Integrated, but ownership is always the no-renames `P`-to-`W` delta. Integration
+accepts a named central commit `C` only when `P` is ancestral to `C`'s parent.
+Before inspecting any commit, the inspector uses replacement-disabled Git to
+resolve the actual common Git directory, including from a linked worktree. It
+refuses a nonempty `<git-common-dir>/info/grafts`; an absent or empty file is
+inert. All remaining authority reads ignore replacement refs and read the actual
+commit objects. The inspector emits the binary full-index `P`-to-`W` patch
+without renames, external diffs, text conversion, or ignored submodules, and
+forces the applyable short gitlink format. It applies that patch with cached
+three-way semantics inside a unique temporary Git directory, index, and object
+store rooted at `C`'s parent, and requires the complete resulting tree to equal
+`C`'s actual tree. The proof clears inherited Git configuration, disables
+system and user configuration and attributes, and gives temporary
+`info/attributes` highest precedence with the built-in `merge=text` driver, so
+repository attributes and custom merge drivers cannot affect or execute during
+authority inspection. It reads repository objects only through an alternate;
+the temporary repository declares the same SHA-1 or SHA-256 object format. All
+temporary authority files and object writes are removed in `finally`. This
+permits an exact cherry-pick over nonoverlapping same-file history while
+preserving paths, statuses, modes, gitlink pointers, whitespace, added/deleted
+bytes, and binary content. Whitespace-normalizing patch identities are not
+authority.
 
 Nested specialist routes use the workflow-neutral v2 shape: `planningHelpers`,
 `riskReviewers`, `supplementalGuidance`, and `finalVerificationPriority`. They

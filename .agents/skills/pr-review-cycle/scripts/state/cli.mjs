@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
 import { parseOptions, UsageError, writeJson } from '../../../../../scripts/lib/cli.mjs';
 import {
   validateTaskPacket,
@@ -19,6 +18,7 @@ import {
   checkpointWorkerResultBackfill,
   executeTargetedValidationPlan,
   initializeState,
+  inspectWorkerCommitAuthority,
   loadState,
   locateState,
   migrateState,
@@ -141,28 +141,6 @@ function positiveSafeInteger(value, option) {
   return parsed;
 }
 
-function actualWorkerChangedPaths(packet, result) {
-  if (result.status !== 'implemented') return undefined;
-  for (const [label, sha] of [['reviewed HEAD', packet.reviewedHeadSha], ['worker commit', result.commitSha]]) {
-    try {
-      execFileSync('git', ['cat-file', '-e', `${sha}^{commit}`], { cwd: process.cwd(), stdio: 'ignore' });
-    } catch {
-      throw new StateError(`${label} does not name an existing Git commit: ${sha}`, 'INVALID_WORKER_RESULT');
-    }
-  }
-  try {
-    execFileSync('git', ['merge-base', '--is-ancestor', packet.reviewedHeadSha, result.commitSha], {
-      cwd: process.cwd(), stdio: 'ignore',
-    });
-  } catch {
-    throw new StateError('Worker commit must descend from the task packet reviewedHeadSha', 'INVALID_WORKER_RESULT');
-  }
-  const output = execFileSync('git', [
-    'diff', '--name-only', '--no-renames', '-z', packet.reviewedHeadSha, result.commitSha, '--',
-  ], { cwd: process.cwd() });
-  return output.toString('utf8').split('\0').filter((path) => path !== '');
-}
-
 try {
   const [command, ...argv] = process.argv.slice(2);
   if (!command || command === '--help' || command === 'help') {
@@ -267,7 +245,9 @@ try {
     const active = loadState(process.cwd(), options.pr);
     if (!active) throw new StateError('No active PR state for worker-result acceptance', 'STATE_NOT_FOUND');
     assertTaskPacketBound(active, packet);
-    const errors = validateWorkerResultAgainstTask(packet, result, actualWorkerChangedPaths(packet, result));
+    const authority = result.status === 'implemented'
+      ? inspectWorkerCommitAuthority({ cwd: process.cwd(), state: active, packet, result }) : null;
+    const errors = validateWorkerResultAgainstTask(packet, result, authority?.changedPaths);
     if (errors.length > 0) throw new StateError(`Worker result does not satisfy task packet:\n- ${errors.join('\n- ')}`, 'INVALID_WORKER_RESULT');
     writeJson({ valid: true, taskId: packet.taskId });
   } else if (['accept-result', 'backfill-result'].includes(command)) {
