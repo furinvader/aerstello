@@ -51,8 +51,11 @@ rejection and a plan amendment; no sidecar is rewritten.
 Binding is the live-policy boundary: every new binding reloads the current
 specialist registry and rejects a stale specialization or route before writing
 packet, provenance, event, or transition evidence. It also preflights final
-verifier capacity and rejects validation metadata conflicts with affected-area
-checks or any still-authoritative packet, including retained terminal packets.
+verifier capacity through the canonical final-context composer, overlaying the
+pending packet before writing any packet, provenance, route, receipt, event,
+transition, or state. It rejects validation metadata conflicts with
+affected-area checks or any still-authoritative packet, including retained
+terminal packets. No admission path truncates or drops semantic evidence.
 After binding, the packet's
 canonical digest and durable replay use its immutable structural contract plus
 the receipt-bound route, planning-signal, and behavior-mapper sidecars. Results,
@@ -191,6 +194,31 @@ the packet. Both successful outcomes, `implemented` and `no-change`, require
 every exact packet validation command to report `passed`; rejected success
 evidence cannot advance the task or satisfy dependencies. Each attempt result is preserved at
 `implementation/results/<task-id>/<attempt>.json[.sha256]`.
+Before preserving any result, the lifecycle overlays its exact summary,
+validation records, unexpected dependencies, changed-path authority, and
+terminal authority into the canonical verifier projection. A successful result
+retains the larger of deterministic integration and truthful
+integration-conflict rejection/replacement authority already reserved when its
+packet was bound. A `blocked` or `failed` result
+omits impossible integration evidence and instead reserves one viable
+rejection-bound replacement bundle: amendment and provenance, replacement
+criterion and task, potential behavior-mapper evidence, result, validation,
+and integration authority. Explicit rejection repeats this gate with the exact
+rejected task before persistence. An oversized result or rejection leaves the
+result sidecar, receipts, event log, transition inventory, and state
+byte-for-byte unchanged and may be retried with consolidated evidence.
+These remediation envelopes use bounded canonical summaries and exact known
+task IDs, binding/attempt numbers, and invalidated-evidence paths. Their item
+and serialized-byte footprints therefore include required identity
+normalization and UTF-8 chunking before packet or result authority becomes
+immutable.
+The bound-packet projection uses all exact required validation commands and a
+schema-minimal allowed changed path, while also preserving the complete
+direct-rejection replacement branch. Result acceptance keeps the larger
+success-versus-conflict-recovery branch until exact integration completes.
+Integration therefore cannot strand a receipt-valid accepted result by
+expanding the verifier envelope after the last write boundary that can reject
+or consolidate it.
 Failure and explicit-rejection blockers use one deterministic representation
 capped at 2000 Unicode code points. Short blocker text is byte-for-byte
 unchanged; longer text is marked as truncated while the complete prose remains

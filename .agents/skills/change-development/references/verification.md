@@ -18,8 +18,72 @@ must have passed, every reviewer selected by each immutable stored specialist
 route must have supplied exact-HEAD evidence in canonical order, and no
 specialist finding may remain unresolved. Missing, malformed, oversized,
 incomplete, dirty, or stale input is not verifier-ready and must fail closed.
-Plan acceptance, amendment, and packet binding conservatively enforce these
-500-item and 256-KiB limits before consuming later implementation authority.
+One canonical composer defines the semantic item identities, kinds, digests,
+summaries, ordering, UTF-8 chunking, 500-item limit, and 256-KiB full-context
+limit used by both admission and final context construction. It accepts
+receipt-valid durable artifacts and explicit pending overlays. Placeholders are
+allowed only for evidence made inevitable by current accepted authority; no
+path truncates, groups, drops, or invents arbitrary future prose. Plan
+acceptance, amendment, packet binding, implementation-result acceptance,
+validation-plan creation, validation-result recording, specialist-plan
+creation, specialist-result recording, verifier-result recording, finding
+disposition, and repeated-finding authorization all run the composer before
+any sidecar, receipt, transition, event, or state mutation.
+
+Release or migration applicability reserves one release item before capture;
+validation-plan admission substitutes the exact protected `origin/main`
+release evidence without changing that semantic slot. Known validation
+results, routed specialist summaries, mapper records, historical findings and
+dispositions, and human authorizations use the same projection as the final
+context. A finding is admitted only with its full source-qualified identity,
+summary, evidence, inevitable disposition authority, and any required repeated
+authorization reservation. Exact dispositions and authorizations are checked
+again before persistence. The disposition reservation is a schema-minimal
+exact authority object including source, finding, fingerprint, reason, and
+remediation IDs. An actionable exact disposition must also fit one viable
+follow-on amendment, provenance record, replacement criterion, and replacement
+task, including the potential behavior-mapper row for that task's eventual
+route; the guarded exact amendment replaces that reservation. Authorization
+reason and authorizer are limited to 1024 and 256 UTF-8 bytes, and the
+reservation uses the worst JSON-escaped representation so it remains finite
+and conservative for control characters and multibyte input.
+
+Finding-result admission projects the exact current identity, summary,
+evidence, one inevitable disposition slot, and authorization only for an
+actually applicable repeat. It does not guess the later disposition choice,
+amendment, or reset round; each exact disposition, authorization, amendment,
+and last-disposition transition is separately preflighted before persistence.
+Material source refresh uses the exact new source identity and full checklist
+mappings before its observation receipt, rejects captured or legacy identity
+text above the implementation-plan 4000-code-point bound, and lets `resolve`
+substitute and recheck exact decision authority.
+
+Before an execution result can become terminal, the projection reserves a
+64-character integration commit plus the maximum deterministic transition
+revision. Before a validation intent is written, it reserves the exact maximum
+command-result summary shape (status, exit, and output digest). Pre-capture
+release projection reserves the complete protected-ref summary shape (status,
+base/ref SHAs, latest tag, and frozen migration count). Exact later records
+replace these same semantic slots rather than append underestimated evidence.
+
+Plan, packet, worker-result, and specialist-plan projections include their
+known route summaries but no synthetic findings. The first exact specialist
+result activates equal dynamic shares of the remaining 100 source-role-
+qualified fingerprints across still-unrecorded reviewers. Each share includes
+schema-minimal identity, summary, evidence, disposition, and authorization only
+for actually applicable repeats. Later-round applicability skips missing
+same-role rounds and stops at an intervening clean same-role receipt; current-
+round findings alone occupy the aggregate after an amendment reset. For two
+reviewers this admits compact 50 then 50, rejects a 51-finding first result
+without mutation, and lets a clean first reviewer leave 100 slots to the final
+reviewer. Every routed reviewer still records in canonical order before
+disposition becomes available. Capacity rejection is retryable and changes no
+durable byte.
+
+The last non-actionable disposition separately projects the reset next round,
+including every historical finding/disposition and the complete routed
+reviewer allocation inventory, before it may transition back to `integrated`.
+An unfit next round leaves that disposition and all durable state unchanged.
 
 The caller supplies the generated context and its canonical SHA-256 digest. The
 verifier repeats that exact digest as `contextDigest`; it never substitutes the

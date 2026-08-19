@@ -22,6 +22,7 @@ import { gitBuffer, gitText, listTree, readTreeFile, resolveCommit, runGit } fro
 import {
   digestJson,
   planReadiness,
+  sourceChecklistBinding,
   validateDevelopmentState,
 } from '../contracts/contracts.mjs';
 import {
@@ -38,6 +39,7 @@ import { createGhGraphqlAdapter } from '../source/gh-adapter.mjs';
 import { readGithubIssue } from '../source/github.mjs';
 import { requiredSpecialistIds, validateSpecialistEvidence } from '../../../aerstello-specialists/scripts/validate-registry.mjs';
 import {
+  affectedAreaCommands,
   assertValidationCommandCompatibility,
   captureReleaseEvidence,
   deriveValidationPlan,
@@ -896,7 +898,8 @@ export function acceptPlan({ cwd = process.cwd(), changeId, plan, planningEviden
       return !item || item.checked !== mapping.checked || item.status !== mapping.status
         || item.externalChange !== mapping.externalChange;
     })) throw new StateError('Plan checklist mappings must exactly match the latest source observation', 'PLAN_CHECKLIST_MISMATCH');
-    preflightVerifierCapacity({ originalPlan: plan, planningEvidence, featureDirectory: join(root, 'specs', 'features') });
+    preflightVerifierCapacity({ originalPlan: plan, planningEvidence, sourceDigest: state.source.observationDigest,
+      featureDirectory: join(root, 'specs', 'features') });
     const planDigest = objectDigest(plan);
     const timestamp = now(clock);
     const next = revised(state, {
@@ -1218,10 +1221,7 @@ export function bindTask({ cwd = process.cwd(), changeId, packet, expectedRevisi
         `authoritative task packet ${entry.id}`).value);
     try { assertValidationCommandCompatibility([...authoritativePackets, packet], { featureDirectory: join(root, 'specs', 'features') }); }
     catch (error) { throw new StateError(error.message, 'VALIDATION_COMMAND_CONFLICT'); }
-    const originalPlan = verifyReceipt(join(changeDirectory(root, state.changeId), 'plan', 'plan.json'), 'accepted plan').value;
-    preflightVerifierCapacity({ originalPlan, effectivePlan: plan, packets: [...authoritativePackets, packet],
-      results: verifierCapacityResults(root, state), amendments: verifierCapacityAmendments(root, state),
-      featureDirectory: join(root, 'specs', 'features') });
+    assertStateVerifierCapacity(root, state, { packet });
     const packetDigest = implementationTaskDigest(packet); const binding = task.binding + 1;
     const next = revised(state, { phase: 'implementing', git: current,
       execution: replaceExecutionTask(state, task.id, { status: 'bound', binding, packetDigest, taskBaseSha: packet.taskBaseSha }) }, clock);
@@ -1433,14 +1433,7 @@ export function acceptResult({ cwd = process.cwd(), changeId, result, workerCwd,
     }
     const errors = validateImplementationResultAgainstTask(packet, result, actualPaths);
     if (errors.length) throw new StateError(`Implementation result does not match its packet/Git evidence:\n- ${errors.join('\n- ')}`, 'INVALID_IMPLEMENTATION_RESULT');
-    const originalPlan = verifyReceipt(join(changeDirectory(root, state.changeId), 'plan', 'plan.json'), 'accepted plan').value;
-    const effectivePlan = readEffectivePlan(root, state);
-    const authoritativePackets = state.execution.tasks.filter((entry) => entry.binding > 0 && entry.status !== 'rejected')
-      .map((entry) => verifyReceipt(implementationTaskPacketPath(root, state.changeId, entry.id, entry.binding),
-        `authoritative task packet ${entry.id}`).value);
-    preflightVerifierCapacity({ originalPlan, effectivePlan, packets: authoritativePackets,
-      results: verifierCapacityResults(root, state, result), amendments: verifierCapacityAmendments(root, state),
-      featureDirectory: join(root, 'specs', 'features') });
+    assertStateVerifierCapacity(root, state, { result });
     const preservedBlockers = nonTaskBlockers(root, state);
     const terminal = result.status === 'implemented' ? 'accepted' : result.status;
     const activeWave = state.execution.activeWave.filter((id) => id !== task.id);
@@ -1627,21 +1620,23 @@ function integrationReceiptForTask(cwd, state, task) {
   return matches[0];
 }
 
+function terminalTaskEvidenceForTask(cwd, state, task) {
+  if (!['integrated', 'no-change'].includes(task.status) || task.binding < 1 || task.attempt < 1) {
+    throw new StateError(`Task ${task.id} is not receipt-valid terminal validation input`, 'VALIDATION_TASK_SET_INVALID');
+  }
+  const packet = verifyReceipt(implementationTaskPacketPath(cwd, state.changeId, task.id, task.binding), `task packet ${task.id}`);
+  const suffix = `${task.id}/${String(task.binding).padStart(4, '0')}.json`;
+  const provenance = verifyReceipt(join(changeDirectory(cwd, state.changeId), 'implementation', 'provenance', suffix), `task provenance ${task.id}`);
+  const result = verifyReceipt(join(changeDirectory(cwd, state.changeId), resultEvidencePath(task.id, task.attempt)), `task result ${task.id}`);
+  if (packet.digest !== task.packetDigest || result.digest !== task.resultDigest) throw new StateError(`Task ${task.id} summary does not match immutable evidence`, 'VALIDATION_TASK_SET_INVALID');
+  const integration = integrationReceiptForTask(cwd, state, task);
+  return { packet: packet.value, packetDigest: packet.digest, provenance: provenance.value,
+    provenanceDigest: provenance.digest, result: result.value, resultDigest: result.digest,
+    binding: task.binding, terminalStatus: task.status, integratedCommit: task.integratedCommit, ...integration };
+}
+
 function terminalTaskEvidence(cwd, state) {
-  return state.execution.tasks.map((task) => {
-    if (!['integrated', 'no-change'].includes(task.status) || task.binding < 1 || task.attempt < 1) {
-      throw new StateError(`Task ${task.id} is not receipt-valid terminal validation input`, 'VALIDATION_TASK_SET_INVALID');
-    }
-    const packet = verifyReceipt(implementationTaskPacketPath(cwd, state.changeId, task.id, task.binding), `task packet ${task.id}`);
-    const suffix = `${task.id}/${String(task.binding).padStart(4, '0')}.json`;
-    const provenance = verifyReceipt(join(changeDirectory(cwd, state.changeId), 'implementation', 'provenance', suffix), `task provenance ${task.id}`);
-    const result = verifyReceipt(join(changeDirectory(cwd, state.changeId), resultEvidencePath(task.id, task.attempt)), `task result ${task.id}`);
-    if (packet.digest !== task.packetDigest || result.digest !== task.resultDigest) throw new StateError(`Task ${task.id} summary does not match immutable evidence`, 'VALIDATION_TASK_SET_INVALID');
-    const integration = integrationReceiptForTask(cwd, state, task);
-    return { packet: packet.value, packetDigest: packet.digest, provenance: provenance.value,
-      provenanceDigest: provenance.digest, result: result.value, resultDigest: result.digest,
-      binding: task.binding, terminalStatus: task.status, integratedCommit: task.integratedCommit, ...integration };
-  });
+  return state.execution.tasks.map((task) => terminalTaskEvidenceForTask(cwd, state, task));
 }
 
 function assertVerificationHead(cwd, state, clock, operation) {
@@ -1705,6 +1700,7 @@ export function createValidationPlan({ cwd = process.cwd(), changeId, expectedRe
     const round = nextVerificationRound(root, state);
     const plan = deriveLifecycleValidationPlan({ changeId: state.changeId, effectivePlanDigest: state.plan.effectiveDigest,
       headSha: current.headSha, taskEvidence, createdAt: now(clock), releaseEvidence });
+    assertStateVerifierCapacity(root, state, { validationPlan: plan, verificationRound: round });
     const semanticDigest = validationPlanDigest(plan);
     const verification = { round, headSha: current.headSha, taskSetDigest: plan.taskSetDigest,
       validationPlanDigest: semanticDigest, validationStatus: 'pending', validationResultDigests: [], specialistPlanDigest: null,
@@ -1789,6 +1785,7 @@ function runValidationLocked({ cwd = process.cwd(), changeId, expectedRevision, 
       const current = loadState(root, selected); assertRevision(current, intentRevision); assertVerificationHead(root, current, clock, 'Validation result recording');
       const errors = validateVerificationContract('validationResult', result);
       if (errors.length) throw new StateError(`Invalid validation result: ${errors.join('; ')}`, 'VALIDATION_RESULT_INVALID');
+      assertStateVerifierCapacity(root, current, { validationResult: result });
       const digests = [...current.verification.validationResultDigests, objectDigest(result)];
       const verification = { ...current.verification, validationStatus: status === 'failed' ? 'failed' : current.verification.validationStatus,
         validationResultDigests: digests };
@@ -1854,6 +1851,7 @@ export function createSpecialistPlan({ cwd = process.cwd(), changeId, expectedRe
     if (state.phase !== 'specialist-review' || state.verification.validationStatus !== 'passed' || state.verification.specialistPlanDigest) throw new StateError('Specialist planning requires completed validation and no existing plan', 'INVALID_PHASE');
     assertVerificationHead(root, state, clock, 'Specialist planning');
     const plan = routedReviewPlan(root, state); const digest = objectDigest(plan);
+    assertStateVerifierCapacity(root, state, { specialistPlan: plan });
     const verification = { ...state.verification, specialistPlanDigest: digest,
       requiredReviewerIds: plan.reviewers.map(({ id }) => id) };
     const nextPhase = plan.reviewers.length ? 'specialist-review' : 'verifying';
@@ -1862,6 +1860,22 @@ export function createSpecialistPlan({ cwd = process.cwd(), changeId, expectedRe
       summary: plan.reviewers.length ? `Routed ${plan.reviewers.length} exact-HEAD specialist reviewer(s)` : 'No reusable risk reviewer was routed', crashStep,
       pendingEvidence: [{ key: 'specialistPlanDigest', path: relative(changeDirectory(root, state.changeId), specialistPlanPath(root, state)), value: plan, label: 'specialist review plan' }] });
   }, lockOptions);
+}
+
+function assertSpecialistFingerprintCapacity(cwd, state, result, fingerprints) {
+  const existing = new Set(state.verification.unresolvedFindingFingerprints);
+  const newFingerprints = [...new Set(fingerprints)].filter((fingerprint) => !existing.has(fingerprint));
+  const remainingReviewers = state.verification.requiredReviewerIds
+    .filter((id) => !existsSync(specialistResultPath(cwd, state, id))).length;
+  const available = SPECIALIST_FINDING_LIMIT - existing.size;
+  const reservedShare = remainingReviewers > 0 ? Math.floor(available / remainingReviewers) : 0;
+  if (newFingerprints.length > reservedShare) {
+    throw new StateError(
+      `Specialist ${result.reviewerId} contributes ${newFingerprints.length} distinct finding fingerprint(s); `
+        + `${reservedShare} fit while reserving the remaining ${available} slot(s) across ${remainingReviewers} unrecorded reviewer(s)`,
+      'SPECIALIST_FINDING_CAPACITY_EXCEEDED',
+    );
+  }
 }
 
 export function recordSpecialistResult({ cwd = process.cwd(), changeId, expectedRevision, result, clock, crashStep, lockOptions } = {}) {
@@ -1892,6 +1906,12 @@ export function recordSpecialistResult({ cwd = process.cwd(), changeId, expected
       ? digest : verifyReceipt(specialistResultPath(root, state, id), `specialist result ${id}`).digest);
     const fingerprints = result.findings.map((finding) => findingFingerprint({ sourceKind: 'specialist', sourceRole: result.reviewerId, finding }));
     const repeated = repeatedFindingFingerprints(root, state, 'specialist', result.reviewerId, fingerprints);
+    assertSpecialistFingerprintCapacity(root, state, result, fingerprints);
+    const capacityPending = { specialistResult: result,
+      authorizationRequiredFingerprints: [...new Set([
+        ...state.verification.humanDecisionRequiredFingerprints, ...repeated,
+      ])] };
+    assertStateVerifierCapacity(root, state, capacityPending);
     const allRecorded = specialistResultDigests.length === state.verification.requiredReviewerIds.length;
     const verification = { ...state.verification, specialistResultDigests,
       unresolvedFindingFingerprints: [...new Set([...state.verification.unresolvedFindingFingerprints, ...fingerprints])],
@@ -1906,6 +1926,21 @@ export function recordSpecialistResult({ cwd = process.cwd(), changeId, expected
 }
 
 const VERIFIER_EVIDENCE_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
+const FINDING_AUTHORIZATION_REASON_MAX_BYTES = 1024;
+const FINDING_AUTHORIZATION_ACTOR_MAX_BYTES = 256;
+const PROJECTED_GIT_SHA = 'f'.repeat(64);
+const PROJECTED_INTEGRATION_REVISION = Number.MAX_SAFE_INTEGER;
+const PROJECTED_VALIDATION_EXIT_CODE = Number.MIN_SAFE_INTEGER;
+const PROJECTED_OUTPUT_DIGEST = `sha256:${'f'.repeat(64)}`;
+const PROJECTED_RELEASE_VERSION_COMPONENT = '9'.repeat(128);
+const PROJECTED_RELEASE_TAG = `v${PROJECTED_RELEASE_VERSION_COMPONENT}.${PROJECTED_RELEASE_VERSION_COMPONENT}.${PROJECTED_RELEASE_VERSION_COMPONENT}`;
+const REMEDIATION_RESERVATION_SUMMARY_BYTES = 1800;
+const SPECIALIST_FINDING_LIMIT = 100;
+const IMPLEMENTATION_PLAN_TEXT_MAX_CODE_POINTS = 4000;
+
+function authorizationReservationSummary() {
+  return `Human authorization by ${'\u0000'.repeat(FINDING_AUTHORIZATION_ACTOR_MAX_BYTES)}: ${'\u0000'.repeat(FINDING_AUTHORIZATION_REASON_MAX_BYTES)}`;
+}
 
 function splitSemanticEvidence(source, maximumBytes) {
   const chunks = []; let chunk = ''; let chunkBytes = 0;
@@ -1958,91 +1993,473 @@ function verifierCapacityAmendments(cwd, state, pending = null) {
 }
 
 function verifierCapacityResults(cwd, state, pending = null) {
-  const results = state.execution?.tasks.filter((task) => task.resultDigest).map((task) => ({
-    taskId: task.id,
-    value: verifyReceipt(join(changeDirectory(cwd, state.changeId), resultEvidencePath(task.id, task.attempt)),
-      `implementation result ${task.id}`).value,
-  })) ?? [];
+  const results = state.execution?.tasks.filter((task) => task.resultDigest).map((task) => {
+    const receipt = verifyReceipt(join(changeDirectory(cwd, state.changeId), resultEvidencePath(task.id, task.attempt)),
+      `implementation result ${task.id}`);
+    return { taskId: task.id, value: receipt.value, digest: receipt.digest };
+  }) ?? [];
   if (pending) {
     const index = results.findIndex(({ taskId }) => taskId === pending.taskId);
-    const entry = { taskId: pending.taskId, value: pending };
+    const entry = { taskId: pending.taskId, value: pending, digest: objectDigest(pending) };
     if (index >= 0) results[index] = entry; else results.push(entry);
   }
   return results;
 }
 
-export function preflightVerifierCapacity({ originalPlan, effectivePlan = originalPlan, packets = [], results = [],
-  amendments = [], planningEvidence = [], featureDirectory } = {}) {
-  const packetByTask = new Map(packets.map((packet) => [packet.taskId, packet]));
-  const resultByTask = new Map(results.map((entry) => [entry.taskId, entry.value ?? entry]));
-  const evidence = [
-    { kind: 'source', id: 'source-observation', digest: objectDigest(effectivePlan.source), summary: `${effectivePlan.source.kind}:${effectivePlan.source.reference}` },
-    { kind: 'criterion', id: 'original-plan-objective', digest: objectDigest(originalPlan.objective), summary: `Original objective: ${originalPlan.objective}` },
-    { kind: 'criterion', id: 'original-plan-scope', digest: objectDigest(originalPlan.scope), summary: `Original scope: ${originalPlan.scope.join(', ')}; original non-goals: ${originalPlan.nonGoals.join(', ')}` },
-    { kind: 'criterion', id: 'effective-plan-objective', digest: objectDigest(effectivePlan.objective), summary: `Effective objective: ${effectivePlan.objective}` },
-    { kind: 'criterion', id: 'effective-plan-scope', digest: objectDigest(effectivePlan.scope), summary: `Effective scope: ${effectivePlan.scope.join(', ')}; effective non-goals: ${effectivePlan.nonGoals.join(', ')}` },
-    { kind: 'specialist-route', id: 'original-plan-profile', digest: objectDigest(originalPlan.specialization), summary: serialized(originalPlan.specialization) },
-    { kind: 'checklist', id: 'original-plan-scenarios', digest: objectDigest(originalPlan.scenarios), summary: serialized(originalPlan.scenarios) },
-    { kind: 'specialist-route', id: 'effective-plan-profile', digest: objectDigest(effectivePlan.specialization), summary: serialized(effectivePlan.specialization) },
-    { kind: 'checklist', id: 'effective-plan-scenarios', digest: objectDigest(effectivePlan.scenarios), summary: serialized(effectivePlan.scenarios) },
-    { kind: 'validation-plan', id: 'targeted-validation', digest: objectDigest(effectivePlan.tasks), summary: 'Projected exact-HEAD validation plan.' },
-    { kind: 'specialist-route', id: 'integrated-route', digest: objectDigest(effectivePlan.specialization.route), summary: serialized(effectivePlan.specialization.route) },
-  ];
-  effectivePlan.criteria.forEach((entry) => evidence.push({ kind: 'criterion', id: entry.id, digest: objectDigest(entry), summary: serialized(entry) }));
-  effectivePlan.decisions.forEach((entry) => evidence.push({ kind: 'decision', id: entry.id, digest: objectDigest(entry), summary: serialized(entry) }));
-  effectivePlan.checklistMappings.forEach((entry) => evidence.push({ kind: 'checklist', id: entry.id, digest: objectDigest(entry), summary: serialized(entry) }));
-  for (const [kind, prefix, entries] of [['criterion', 'original-plan-criterion', originalPlan.criteria],
-    ['decision', 'original-plan-decision', originalPlan.decisions], ['checklist', 'original-plan-checklist', originalPlan.checklistMappings],
-    ['packet', 'original-plan-task', originalPlan.tasks]]) {
-    entries.forEach((entry) => evidence.push({ kind, id: `${prefix}-${entry.id}`, digest: objectDigest(entry), summary: serialized(entry) }));
-  }
-  effectivePlan.tasks.forEach((task) => {
-    const packet = packetByTask.get(task.id); const result = resultByTask.get(task.id);
-    const authority = packet ?? task; const digest = objectDigest(authority);
-    for (const suffix of ['packet', 'ownership', 'profile', 'validation', 'provenance', 'result', 'result-validation',
-      'result-dependencies', 'path-authority', 'integration']) {
-      const summaries = {
-        packet: packet ? `Plan revision ${packet.planRevision}; plan ${packet.planDigest}; binding 1; objective ${packet.objective}; dependencies ${packet.dependencies.join(', ') || 'none'}.`
-          : serialized({ id: task.id, objective: task.objective, dependsOn: task.dependsOn }),
-        ownership: packet ? `Allowed paths: ${packet.allowedPaths.join(', ')}; forbidden paths: ${packet.forbiddenPaths.join(', ') || 'none'}.`
-          : serialized({ anticipatedPaths: task.anticipatedPaths }),
-        profile: packet ? `Specialization ${packet.specialization}; areas ${packet.affectedAreas.join(', ')}; risks ${packet.riskTags.join(', ') || 'none'}; profile ${packet.specialistRoute.profileGuidePath}; reviewers ${packet.specialistRoute.riskReviewers.map(({ id }) => id).join(', ') || 'none'}; supplemental ${packet.specialistRoute.supplementalGuidance.map(({ id }) => id).join(', ') || 'none'}.`
-          : serialized(task.specialization),
-        validation: packet ? `Required validation: ${[...packet.requiredValidation.unit, ...packet.requiredValidation.system].map(({ command }) => command).join('; ')}; planning signals browser:${packet.planningSignals.browserVisible}, uncertain:${packet.planningSignals.relatedTestSelectionUncertain}.`
-          : serialized(task.validationIntent),
-        provenance: serialized({ decisionIds: task.decisionIds, criterionIds: task.criterionIds }),
-        result: result ? `${result.status}; ${result.summary}; changed paths ${result.changedPaths.join(', ') || 'none'}.` : 'Projected terminal implementation result.',
-        'result-validation': result ? `Worker validation: ${result.validation.map(({ command, result: outcome }) => `${command}:${outcome}`).join(', ')}.` : 'Projected worker validation evidence.',
-        'result-dependencies': result ? `Unexpected dependencies: ${result.unexpectedDependencies.join(', ') || 'none'}.` : 'Projected unexpected-dependency evidence.',
-        'path-authority': result && packet ? `Changed-path authority: ${result.changedPaths.map((path) => { const allowed = packet.allowedPaths.filter((pattern) => pathMatchesOwnership(path, pattern)); const forbidden = packet.forbiddenPaths.filter((pattern) => pathMatchesOwnership(path, pattern)); return `${path}->${forbidden.length ? `forbidden:${forbidden.join('|')}` : allowed.length ? `allowed:${allowed.join('|')}` : 'unowned'}`; }).join(', ') || 'no changed paths'}.`
-          : serialized(packet?.allowedPaths ?? task.anticipatedPaths),
-        integration: 'Projected terminal integration authority.',
-      };
-      evidence.push({ kind: suffix === 'integration' ? 'integration' : suffix.startsWith('result') ? 'result' : 'packet',
-        id: suffix === 'packet' ? task.id : `${task.id}-${suffix}`, digest: result && suffix.startsWith('result') ? objectDigest(result) : digest,
-        summary: summaries[suffix] });
-    }
-    if (packet?.behaviorMapperEvidence) evidence.push({ kind: 'planning-helper', id: `${task.id}-behavior-mapper`,
-      digest: objectDigest(packet.behaviorMapperEvidence), summary: serialized(packet.behaviorMapperEvidence) });
-  });
-  const commandPackets = effectivePlan.tasks.map((task) => packetByTask.get(task.id) ?? {
-    taskId: task.id, affectedAreas: task.specialization.affectedAreas, requiredValidation: { unit: [], system: [] },
-  });
-  const commands = commandPackets.length > 0 ? assertValidationCommandCompatibility(commandPackets, { featureDirectory }) : [];
-  commands.forEach((command) => evidence.push({ kind: 'validation-result', id: `projected-${command.id}`,
-    digest: objectDigest(command), summary: command.argv.join(' ') }));
-  const routedEntries = new Map();
-  effectivePlan.tasks.forEach((task) => {
+function projectedSpecialistPlan(effectivePlan, packetByTask, headSha, validationPlanDigestValue) {
+  const reviewerOrder = ['security_reviewer', 'offline_realtime_reviewer'];
+  const reviewerReasons = new Map(); const planningHelpers = new Map(); const supplemental = new Map();
+  let finalVerificationPriority = 'standard';
+  for (const task of effectivePlan.tasks) {
     const route = packetByTask.get(task.id)?.specialistRoute ?? task.specialization.route;
-    route.planningHelpers.forEach((entry) => routedEntries.set(`planning-helper:${entry.id}`, { kind: 'planning-helper', entry }));
-    route.riskReviewers.forEach((entry) => routedEntries.set(`specialist-result:${entry.id}`, { kind: 'specialist-result', entry }));
-    route.supplementalGuidance.forEach((entry) => routedEntries.set(`supplemental-guidance:${entry.id}`, { kind: 'supplemental-guidance', entry }));
+    if (route.finalVerificationPriority === 'high') finalVerificationPriority = 'high';
+    route.planningHelpers.forEach((entry) => planningHelpers.set(entry.id,
+      [...new Set([...(planningHelpers.get(entry.id) ?? []), ...entry.reasons])]));
+    for (const id of requiredSpecialistIds(route, { phase: 'review' })) {
+      const entry = route.riskReviewers.find((candidate) => candidate.id === id);
+      reviewerReasons.set(id, [...new Set([...(reviewerReasons.get(id) ?? []), ...entry.reasons])]);
+    }
+    route.supplementalGuidance.forEach((entry) => supplemental.set(entry.id,
+      [...new Set([...(supplemental.get(entry.id) ?? []), ...entry.reasons])]));
+  }
+  return { schemaVersion: 1, headSha, validationPlanDigest: validationPlanDigestValue,
+    finalVerificationPriority, routeReceiptDigests: [],
+    planningHelpers: [...planningHelpers].sort(([left], [right]) => left.localeCompare(right))
+      .map(([id, reasons]) => ({ id, reasons })),
+    reviewers: reviewerOrder.filter((id) => reviewerReasons.has(id)).map((id) => ({ id, reasons: reviewerReasons.get(id) })),
+    supplementalGuidance: [...supplemental].sort(([left], [right]) => left.localeCompare(right))
+      .map(([id, reasons]) => ({ id, reasons })) };
+}
+
+function minimumProjectedValidation(task) {
+  const command = task.specialization.affectedAreas
+    .flatMap((area) => affectedAreaCommands.get(area) ?? [])[0] ?? 'npm run check:workflow';
+  return { unit: [{ command, reason: 'Schema-minimal targeted validation authority.' }], system: [] };
+}
+
+function minimumProjectedPacket(task, effectivePlan, effectivePlanDigest, behaviorMapperEvidence) {
+  return {
+    taskId: task.id, planRevision: effectivePlan.planRevision, planDigest: effectivePlanDigest,
+    specialization: task.specialization.specialization,
+    affectedAreas: task.specialization.affectedAreas, riskTags: task.specialization.riskTags,
+    planningSignals: { browserVisible: task.specialization.browserVisible,
+      relatedTestSelectionUncertain: task.specialization.relatedTestSelectionUncertain },
+    specialistRoute: task.specialization.route, behaviorMapperEvidence,
+    objective: task.objective, decisionIds: task.decisionIds,
+    acceptanceCriteriaIds: task.criterionIds, allowedPaths: [task.anticipatedPaths[0]], forbiddenPaths: [],
+    dependencies: task.dependsOn, requiredValidation: minimumProjectedValidation(task),
+  };
+}
+
+function projectedChangedPath(packet) {
+  for (const ownership of packet.allowedPaths) {
+    const base = ownership.replace(/\/\*\*$/u, '');
+    const candidate = ownership.endsWith('/**') ? `${base}/result` : base;
+    if (!packet.forbiddenPaths.some((pattern) => pathMatchesOwnership(candidate, pattern))) return candidate;
+  }
+  return packet.allowedPaths[0].replace(/\/\*\*$/u, '');
+}
+
+function minimumProjectedResult(packet) {
+  return {
+    status: 'implemented', summary: 'x', changedPaths: [projectedChangedPath(packet)],
+    validation: [...packet.requiredValidation.unit, ...packet.requiredValidation.system]
+      .map(({ command }) => ({ command, result: 'passed' })),
+    unexpectedDependencies: [],
+  };
+}
+
+function projectedTaskRecords(effectivePlan, packets, results, planningEvidence) {
+  const packetByTask = new Map(packets.map((packet) => [packet.taskId, packet]));
+  const resultByTask = new Map(results.map((entry) => [entry.taskId, entry]));
+  const effectivePlanDigest = objectDigest(effectivePlan);
+  return effectivePlan.tasks.map((task) => {
+    const packet = packetByTask.get(task.id) ?? null;
+    const resultRecord = resultByTask.get(task.id) ?? null;
+    const result = resultRecord?.value ?? resultRecord;
+    const mapper = packet?.behaviorMapperEvidence
+      ?? (task.specialization.route.planningHelpers.some(({ id }) => id === 'behavior_mapper')
+        ? planningEvidence.find((entry) => entry.reviewerId === 'behavior_mapper'
+          && entry.planRevision === effectivePlan.planRevision) ?? null : null);
+    const authorityPacket = packet ?? minimumProjectedPacket(task, effectivePlan, effectivePlanDigest, mapper);
+    return { task, packet, packetDigest: objectDigest(packet ?? task),
+      provenanceDigest: objectDigest({ decisionIds: task.decisionIds, criterionIds: task.criterionIds }),
+      result, resultDigest: resultRecord?.digest
+        ?? objectDigest(result ?? { taskId: task.id, status: 'projected-terminal' }),
+      authorityPacket, projectedResult: result ?? minimumProjectedResult(authorityPacket),
+      requiresReplacement: ['blocked', 'failed'].includes(result?.status),
+      reservesTaskReplacement: packet !== null,
+      terminalStatus: result?.status === 'no-change' ? 'no-change' : 'integrated', integratedCommit: null,
+      integrationReceipt: null, integrationReceiptDigest: objectDigest({ taskId: task.id, status: 'projected-integration' }),
+      binding: packet ? 1 : 1, behaviorMapperEvidence: mapper };
   });
-  [...routedEntries].sort(([left], [right]) => left.localeCompare(right)).forEach(([key, { kind, entry }]) => evidence.push({
-    kind, id: `projected-route-${objectDigest(key).slice(7, 31)}`, digest: objectDigest(entry), summary: serialized(entry),
+}
+
+function dispositionAuthorityProjection(value) {
+  return { sourceKind: value.sourceKind, sourceRole: value.sourceRole,
+    findingId: value.findingId, fingerprint: value.fingerprint,
+    disposition: value.disposition, reason: value.reason, amendmentId: value.amendmentId,
+    replacementCriterionId: value.replacementCriterionId,
+    replacementTaskId: value.replacementTaskId };
+}
+
+function dispositionAuthoritySummary(value) {
+  return `Finding disposition authority:\n${serialized(dispositionAuthorityProjection(value))}`;
+}
+
+function minimumDispositionAuthority({ sourceKind, sourceRole, findingId, fingerprint }) {
+  const maximumId = 'x'.repeat(128);
+  return { sourceKind, sourceRole, findingId, fingerprint, disposition: 'actionable', reason: 'x',
+    amendmentId: maximumId, replacementCriterionId: maximumId, replacementTaskId: maximumId };
+}
+
+function remediationReservationSummary(label) {
+  const prefix = `Reserved schema-minimal viable remediation authority for ${label}.`;
+  return `${prefix}${'x'.repeat(Math.max(0,
+    REMEDIATION_RESERVATION_SUMMARY_BYTES - Buffer.byteLength(prefix, 'utf8')))}`;
+}
+
+function derivedRemediationId(seed, suffix) {
+  const candidate = `${seed}-${suffix}`;
+  if (candidate.length <= 128) return candidate;
+  const digest = objectDigest({ seed, suffix }).slice('sha256:'.length, 'sha256:'.length + 24);
+  const prefix = seed.slice(0, 128 - suffix.length - digest.length - 2).replace(/-+$/u, '');
+  return `${prefix}-${digest}-${suffix}`;
+}
+
+function viableRemediationEvidence({ authority, seed, amendmentId, criterionId, taskId,
+  checklistEvidence = [], invalidatedEvidence = [] }) {
+  const identities = [
+    ['criterion', criterionId],
+    ['packet', taskId],
+    ['packet', `${taskId}-ownership`],
+    ['packet', `${taskId}-profile`],
+    ['packet', `${taskId}-validation`],
+    ['provenance', `${taskId}-provenance`],
+    ['planning-helper', `${taskId}-behavior-mapper`],
+    ['result', `${taskId}-result`],
+    ['result', `${taskId}-result-validation`],
+    ['result', `${taskId}-result-dependencies`],
+    ['result', `${taskId}-path-authority`],
+    ['integration', `${taskId}-integration`],
+    ['amendment', amendmentId],
+    ['provenance', `${amendmentId}-provenance`],
+    ['provenance', `${amendmentId}-provenance-record-1`],
+  ];
+  return [...checklistEvidence, ...identities.map(([kind, id]) => ({ kind, id,
+    digest: objectDigest({ authority, seed, kind, id }),
+    summary: remediationReservationSummary(`${seed}:${id}${kind === 'amendment'
+      ? `:invalidated-evidence:${invalidatedEvidence.join(',') || 'none'}` : ''}`) }))];
+}
+
+function actionableRemediationReservations(findingRecords, amendments) {
+  const exactAmendmentIds = new Set(amendments.map(({ record }) => record.value.amendmentId));
+  const groups = new Map();
+  for (const record of findingRecords) {
+    const disposition = record.disposition?.value;
+    if (disposition?.disposition !== 'actionable' || exactAmendmentIds.has(disposition.amendmentId)) continue;
+    groups.set(disposition.amendmentId, [...(groups.get(disposition.amendmentId) ?? []), disposition]);
+  }
+  return [...groups].sort(([left], [right]) => left.localeCompare(right)).map(([amendmentId, dispositions]) => ({
+    amendmentId, dispositions: dispositions.sort((left, right) => left.fingerprint.localeCompare(right.fingerprint)),
   }));
-  planningEvidence.forEach((record, index) => evidence.push({ kind: 'planning-helper',
-    id: `accepted-plan-evidence-${index + 1}`, digest: objectDigest(record), summary: serialized(record) }));
+}
+
+function actionableRemediationEvidence(findingRecords, amendments) {
+  const evidence = [];
+  for (const { amendmentId, dispositions } of actionableRemediationReservations(findingRecords, amendments)) {
+    for (const disposition of dispositions) {
+      const identities = [
+        ['criterion', disposition.replacementCriterionId],
+        ['packet', disposition.replacementTaskId],
+        ['packet', `${disposition.replacementTaskId}-ownership`],
+        ['packet', `${disposition.replacementTaskId}-profile`],
+        ['packet', `${disposition.replacementTaskId}-validation`],
+        ['provenance', `${disposition.replacementTaskId}-provenance`],
+        ['planning-helper', `${disposition.replacementTaskId}-behavior-mapper`],
+        ['result', `${disposition.replacementTaskId}-result`],
+        ['result', `${disposition.replacementTaskId}-result-validation`],
+        ['result', `${disposition.replacementTaskId}-result-dependencies`],
+        ['result', `${disposition.replacementTaskId}-path-authority`],
+        ['integration', `${disposition.replacementTaskId}-integration`],
+      ];
+      for (const [kind, id] of identities) evidence.push({ kind, id,
+        digest: objectDigest({ authority: 'viable-finding-remediation', amendmentId,
+          fingerprint: disposition.fingerprint, kind, id }),
+        summary: remediationReservationSummary(`${amendmentId}:${id}`) });
+    }
+    for (const [kind, id] of [['amendment', amendmentId], ['provenance', `${amendmentId}-provenance`],
+      ['provenance', `${amendmentId}-provenance-record-1`]]) evidence.push({ kind, id,
+      digest: objectDigest({ authority: 'viable-finding-remediation', amendmentId, kind, id }),
+      summary: remediationReservationSummary(`${amendmentId}:${id}`) });
+  }
+  return evidence;
+}
+
+function taskReplacementEvidence(record) {
+  const taskId = record.task.id;
+  const replacementTaskId = derivedRemediationId(taskId, 'replacement-task');
+  const amendmentId = derivedRemediationId(taskId, 'replacement-amendment');
+  const criterionId = derivedRemediationId(taskId, 'replacement-criterion');
+  const suffix = `${taskId}/${String(record.binding).padStart(4, '0')}.json`;
+  const invalidatedEvidence = [
+    `implementation/tasks/${suffix}`,
+    `implementation/provenance/${suffix}`,
+    `implementation/planning-signals/${suffix}`,
+    `implementation/specialist-routes/${suffix}`,
+  ];
+  if ((record.packet ?? record.authorityPacket)?.behaviorMapperEvidence !== null) {
+    invalidatedEvidence.push(`implementation/behavior-mapper/${suffix}`);
+  }
+  if (record.result) invalidatedEvidence.push(
+    `implementation/results/${taskId}/${String(record.attempt ?? 1).padStart(4, '0')}.json`);
+  return viableRemediationEvidence({ authority: 'viable-task-replacement', seed: taskId,
+    amendmentId, criterionId, taskId: replacementTaskId, invalidatedEvidence });
+}
+
+function sourceDecisionAmendmentEvidence(decision, effectivePlan, sourceObservation) {
+  const amendmentId = derivedRemediationId(decision.id, 'source-amendment');
+  const criterionId = derivedRemediationId(decision.id, 'source-criterion');
+  const taskId = derivedRemediationId(decision.id, 'source-task');
+  const mapped = new Map(effectivePlan.checklistMappings.map((entry) => [entry.id, entry]));
+  const checklistEvidence = (sourceObservation.source?.checklist ?? []).map((item) => {
+    const binding = sourceChecklistBinding(item);
+    const prior = mapped.get(binding.id);
+    const entry = { ...binding,
+      criterionIds: prior?.criterionIds ?? [criterionId],
+      taskIds: prior?.taskIds ?? [taskId],
+      relationship: effectivePlan.source.relationship };
+    return { prior, entry };
+  }).filter(({ prior, entry }) => serialized(prior) !== serialized(entry))
+    .sort((left, right) => left.entry.id.localeCompare(right.entry.id))
+    .map(({ entry }) => ({ kind: 'checklist', id: entry.id, digest: objectDigest(entry),
+      summary: `${entry.capturedText} -> criteria ${entry.criterionIds.join(', ')}; tasks ${entry.taskIds.join(', ')}.` }));
+  return viableRemediationEvidence({ authority: 'viable-source-amendment', seed: decision.id,
+    amendmentId, criterionId, taskId, checklistEvidence });
+}
+
+function validationFailureRemediationEvidence(validationPlan, validationResults, amendments) {
+  const resolved = new Set(amendments.map(({ record }) => record.value.trigger));
+  const failed = [...validationResults.values()].find(({ value }) => value.status === 'failed');
+  if (failed && resolved.has(`validation-failure:${failed.digest}`)) return [];
+  const candidates = failed ? [{ receipt: failed, command: null }]
+    : validationPlan.commands.filter(({ id }) => validationResults.get(id)?.value.status !== 'passed')
+      .map((command) => ({ command, receipt: null }));
+  const reservations = candidates.map(({ command, receipt }) => {
+    const seed = receipt
+      ? `validation-${receipt.digest.slice('sha256:'.length, 'sha256:'.length + 12)}`
+      : `validation-${command.id}`;
+    const evidence = viableRemediationEvidence({ authority: 'viable-validation-remediation', seed,
+      amendmentId: derivedRemediationId(seed, 'amendment'),
+      criterionId: derivedRemediationId(seed, 'criterion'),
+      taskId: derivedRemediationId(seed, 'task') });
+    const normalized = evidence.flatMap((item) => semanticEvidenceChunks(item));
+    return { evidence, itemCount: normalized.length,
+      byteCount: Buffer.byteLength(JSON.stringify(normalized), 'utf8') };
+  });
+  return reservations.sort((left, right) => right.itemCount - left.itemCount
+    || right.byteCount - left.byteCount)[0]?.evidence ?? [];
+}
+
+function findingProjectionEvidence(record) {
+  const { round, sourceKind, sourceRole, sourceDigest, finding, fingerprint } = record;
+  const role = sourceKind === 'specialist' ? `-${sourceRole.replaceAll('_', '-')}` : '';
+  const base = `round-${round}${role}-${finding.id}`;
+  const evidence = [
+    { kind: 'finding-disposition', id: `${base}-identity`, digest: fingerprint,
+      summary: `Finding source ${sourceRole}; id ${finding.id}; fingerprint ${fingerprint}; priority ${finding.priority}; areas ${finding.affectedAreas.join(', ')}; specialization ${finding.recommendedSpecialization}; risks ${finding.riskTags.join(', ') || 'none'}; criteria ${finding.criterionIds.join(', ') || 'none'}; invariants ${finding.invariantIds.join(', ') || 'none'}.` },
+    { kind: 'finding-disposition', id: `${base}-summary`, digest: fingerprint,
+      summary: `Finding summary: ${finding.summary}` },
+    { kind: 'finding-disposition', id: `${base}-evidence`, digest: sourceDigest,
+      summary: `Finding evidence: ${finding.evidence}` },
+  ];
+  if (record.disposition) {
+    const receipt = record.disposition;
+    evidence.push({ kind: 'finding-disposition', id: base, digest: receipt.digest,
+      summary: dispositionAuthoritySummary(receipt.value) });
+  } else {
+    const reserved = minimumDispositionAuthority({ sourceKind, sourceRole,
+      findingId: finding.id, fingerprint });
+    evidence.push({ kind: 'finding-disposition', id: base,
+      digest: objectDigest({ sourceKind, sourceRole, fingerprint, authority: 'inevitable-disposition' }),
+      summary: dispositionAuthoritySummary(reserved) });
+  }
+  if (record.authorization) {
+    evidence.push({ kind: 'finding-disposition', id: `round-${round}-${fingerprint.slice(7, 19)}-authorization`,
+      digest: record.authorization.digest,
+      summary: `Human authorization by ${record.authorization.value.authorizedBy}: ${record.authorization.value.reason}` });
+  } else if (record.authorizationRequired) {
+    evidence.push({ kind: 'finding-disposition', id: `round-${round}-${fingerprint.slice(7, 19)}-authorization`,
+      digest: objectDigest({ fingerprint, authority: 'inevitable-human-authorization' }),
+      summary: authorizationReservationSummary() });
+  }
+  return evidence;
+}
+
+function projectedIntegrationSummary() {
+  return `Integrated exact worker result at ${PROJECTED_GIT_SHA}; integration transition revision ${PROJECTED_INTEGRATION_REVISION}; status integrated.`;
+}
+
+function validationResultSummary(command, receipt) {
+  return receipt
+    ? `${command.argv.join(' ')} => ${receipt.value.status}; exit ${receipt.value.exitCode ?? 'none'}; output ${receipt.value.outputDigest}.`
+    : `${command.argv.join(' ')} => failed; exit ${PROJECTED_VALIDATION_EXIT_CODE}; output ${PROJECTED_OUTPUT_DIGEST}.`;
+}
+
+function releaseEvidenceSummary(releaseEvidence) {
+  return `Release state ${releaseEvidence.status}; base ${releaseEvidence.baseSha}; ref ${releaseEvidence.releaseRef} at ${releaseEvidence.releaseRefSha}; latest ${releaseEvidence.latestRelease ?? 'none'}; frozen migrations ${releaseEvidence.frozenMigrationCount}.`;
+}
+
+function projectedReleaseEvidence() {
+  return { status: 'pre-release', baseSha: PROJECTED_GIT_SHA, releaseRef: PROTECTED_RELEASE_REF,
+    releaseRefSha: PROJECTED_GIT_SHA, latestRelease: PROJECTED_RELEASE_TAG,
+    frozenMigrationCount: Number.MAX_SAFE_INTEGER };
+}
+
+function composeVerifierProjection(input = {}) {
+  const { originalPlan, originalPlanDigest = objectDigest(originalPlan),
+  effectivePlan, effectivePlanDigest = objectDigest(effectivePlan), taskRecords, amendments = [],
+  validationPlan, validationPlanReceiptDigest = objectDigest(validationPlan),
+  validationPlanDigestValue = objectDigest(validationPlan), validationResults = new Map(),
+  specialistPlan, specialistPlanReceiptDigest = objectDigest(specialistPlan), specialistResults = new Map(),
+  findingRecords = [], specialistResultHistory = null,
+  specialistReservationAllocation = null, specialistReservationOrdering = 'item',
+  checkSpecialistAllocationBranches = true,
+  sourceDigest = effectivePlan.source.captureDigest,
+  headSha = effectivePlan.planning.planningSha, planningSha = effectivePlan.planning.planningSha,
+  verificationRound = 1, taskSetDigest = objectDigest(effectivePlan.tasks),
+  generatedAt = '2000-01-01T00:00:00.000Z', releaseApplicable = false,
+  reservedEvidence = [] } = input;
+  const allocationBranches = specialistReservationAllocations(specialistPlan, specialistResults,
+    findingRecords, verificationRound);
+  const defaultAllocation = allocationBranches.at(-1) ?? [];
+  const selectedAllocation = specialistReservationAllocation ?? defaultAllocation;
+  if (checkSpecialistAllocationBranches && specialistReservationAllocation === null) {
+    const defaultFootprint = specialistReservationFootprint(remainingSpecialistFindingReservations(
+      specialistPlan, specialistResults, findingRecords, verificationRound,
+      specialistResultHistory, defaultAllocation, 'item'));
+    const checked = new Set([serialized(defaultFootprint)]);
+    for (const allocation of allocationBranches) {
+      for (const ordering of ['item', 'byte']) {
+        const reservations = remainingSpecialistFindingReservations(specialistPlan, specialistResults,
+          findingRecords, verificationRound, specialistResultHistory, allocation, ordering);
+        const footprint = specialistReservationFootprint(reservations);
+        const identity = serialized(footprint);
+        if (checked.has(identity)
+            || (footprint.itemCount <= defaultFootprint.itemCount
+              && footprint.byteCount <= defaultFootprint.byteCount)) continue;
+        checked.add(identity);
+        composeVerifierProjection({ ...input, specialistReservationAllocation: allocation,
+          specialistReservationOrdering: ordering, checkSpecialistAllocationBranches: false });
+      }
+    }
+  }
+  const completeFindingRecords = [...findingRecords,
+    ...remainingSpecialistFindingReservations(specialistPlan, specialistResults,
+      findingRecords, verificationRound, specialistResultHistory, selectedAllocation,
+      specialistReservationOrdering)];
+  const evidence = [
+    { kind: 'source', id: 'source-observation', digest: sourceDigest,
+      summary: `${effectivePlan.source.kind}:${effectivePlan.source.reference}` },
+    { kind: 'criterion', id: 'original-plan-objective', digest: originalPlanDigest,
+      summary: `Original objective: ${originalPlan.objective}` },
+    { kind: 'criterion', id: 'original-plan-scope',
+      digest: objectDigest({ scope: originalPlan.scope, nonGoals: originalPlan.nonGoals }),
+      summary: `Original scope: ${originalPlan.scope.join(', ')}; original non-goals: ${originalPlan.nonGoals.join(', ')}` },
+    { kind: 'specialist-route', id: 'original-plan-profile', digest: objectDigest(originalPlan.specialization),
+      summary: `Original specialization ${originalPlan.specialization.specialization}; profile ${originalPlan.specialization.route.profileGuidePath}; areas ${originalPlan.specialization.affectedAreas.join(', ')}; risks ${originalPlan.specialization.riskTags.join(', ') || 'none'}; priority ${originalPlan.specialization.route.finalVerificationPriority}` },
+    { kind: 'checklist', id: 'original-plan-scenarios',
+      digest: objectDigest({ scenarios: originalPlan.scenarios, disposition: originalPlan.productScenarioDisposition }),
+      summary: `Original scenarios ${originalPlan.scenarios.map(({ id }) => id).join(', ') || 'none'}; disposition ${originalPlan.productScenarioDisposition.disposition}: ${originalPlan.productScenarioDisposition.rationale}` },
+    { kind: 'criterion', id: 'effective-plan-objective', digest: effectivePlanDigest,
+      summary: `Effective objective: ${effectivePlan.objective}` },
+    { kind: 'criterion', id: 'effective-plan-scope',
+      digest: objectDigest({ scope: effectivePlan.scope, nonGoals: effectivePlan.nonGoals }),
+      summary: `Effective scope: ${effectivePlan.scope.join(', ')}; effective non-goals: ${effectivePlan.nonGoals.join(', ')}` },
+    { kind: 'specialist-route', id: 'effective-plan-profile', digest: objectDigest(effectivePlan.specialization),
+      summary: `Effective specialization ${effectivePlan.specialization.specialization}; profile ${effectivePlan.specialization.route.profileGuidePath}; areas ${effectivePlan.specialization.affectedAreas.join(', ')}; risks ${effectivePlan.specialization.riskTags.join(', ') || 'none'}; priority ${effectivePlan.specialization.route.finalVerificationPriority}; supplemental ${effectivePlan.specialization.route.supplementalGuidance.map(({ id }) => id).join(', ') || 'none'}` },
+    { kind: 'checklist', id: 'effective-plan-scenarios',
+      digest: objectDigest({ scenarios: effectivePlan.scenarios, disposition: effectivePlan.productScenarioDisposition }),
+      summary: `Effective scenarios ${effectivePlan.scenarios.map(({ id }) => id).join(', ') || 'none'}; disposition ${effectivePlan.productScenarioDisposition.disposition}: ${effectivePlan.productScenarioDisposition.rationale}` },
+    { kind: 'validation-plan', id: 'targeted-validation', digest: validationPlanReceiptDigest,
+      summary: `${validationPlan.commands.length} exact command(s) on ${headSha}.` },
+    { kind: 'specialist-route', id: 'integrated-route', digest: specialistPlanReceiptDigest,
+      summary: `Reviewers: ${specialistPlan.reviewers.map(({ id }) => id).join(', ') || 'none'}; priority ${specialistPlan.finalVerificationPriority}.` },
+  ];
+  effectivePlan.criteria.forEach((entry) => evidence.push({ kind: 'criterion', id: entry.id,
+    digest: objectDigest(entry), summary: `${entry.disposition}: ${entry.description}` }));
+  effectivePlan.decisions.forEach((entry) => evidence.push({ kind: 'decision', id: entry.id,
+    digest: objectDigest(entry), summary: `${entry.status}: ${entry.resolution ?? entry.rationale}` }));
+  effectivePlan.checklistMappings.forEach((entry) => evidence.push({ kind: 'checklist', id: entry.id,
+    digest: objectDigest(entry), summary: `${entry.capturedText} -> criteria ${entry.criterionIds.join(', ')}; tasks ${entry.taskIds.join(', ')}.` }));
+  for (const [kind, prefix, entries] of [['criterion', 'original-plan-criterion', originalPlan.criteria],
+    ['decision', 'original-plan-decision', originalPlan.decisions],
+    ['checklist', 'original-plan-checklist', originalPlan.checklistMappings],
+    ['packet', 'original-plan-task', originalPlan.tasks]]) {
+    [...entries].sort((left, right) => left.id.localeCompare(right.id)).forEach((entry) => evidence.push({
+      kind, id: `${prefix}-${entry.id}`, digest: objectDigest(entry),
+      summary: `Original accepted-plan ${kind === 'packet' ? 'task' : kind}${kind === 'checklist' ? ' mapping' : ''} ${entry.id}:\n${serialized(entry)}` }));
+  }
+  for (const record of taskRecords) {
+    const { task, packet, result } = record;
+    const authorityPacket = packet ?? record.authorityPacket
+      ?? minimumProjectedPacket(task, effectivePlan, effectivePlanDigest, record.behaviorMapperEvidence ?? null);
+    const projectedResult = result ?? record.projectedResult ?? minimumProjectedResult(authorityPacket);
+    const id = authorityPacket.taskId;
+    const route = authorityPacket.specialistRoute;
+    const affectedAreas = authorityPacket.affectedAreas;
+    const riskTags = authorityPacket.riskTags;
+    const validations = [...authorityPacket.requiredValidation.unit, ...authorityPacket.requiredValidation.system]
+      .map(({ command }) => command).join('; ');
+    evidence.push({ kind: 'packet', id, digest: record.packetDigest,
+      summary: `Plan revision ${authorityPacket.planRevision}; plan ${authorityPacket.planDigest}; binding ${record.binding}; objective ${authorityPacket.objective}; dependencies ${authorityPacket.dependencies.join(', ') || 'none'}.` });
+    evidence.push({ kind: 'packet', id: `${id}-ownership`, digest: objectDigest({
+      allowedPaths: authorityPacket.allowedPaths, forbiddenPaths: authorityPacket.forbiddenPaths }),
+    summary: `Allowed paths: ${authorityPacket.allowedPaths.join(', ')}; forbidden paths: ${authorityPacket.forbiddenPaths.join(', ') || 'none'}.` });
+    evidence.push({ kind: 'packet', id: `${id}-profile`, digest: objectDigest({
+      specialization: authorityPacket.specialization, affectedAreas, riskTags, route }),
+    summary: `Specialization ${authorityPacket.specialization}; areas ${affectedAreas.join(', ')}; risks ${riskTags.join(', ') || 'none'}; profile ${route.profileGuidePath}; reviewers ${route.riskReviewers.map(({ id: reviewerId }) => reviewerId).join(', ') || 'none'}; supplemental ${route.supplementalGuidance.map(({ id: guideId }) => guideId).join(', ') || 'none'}.` });
+    evidence.push({ kind: 'packet', id: `${id}-validation`,
+      digest: objectDigest(authorityPacket.requiredValidation),
+      summary: `Required validation: ${validations}; planning signals browser:${authorityPacket.planningSignals.browserVisible}, uncertain:${authorityPacket.planningSignals.relatedTestSelectionUncertain}.` });
+    evidence.push({ kind: 'provenance', id: `${id}-provenance`, digest: record.provenanceDigest,
+      summary: `Decision context ${authorityPacket.decisionIds.join(', ') || 'none'}; criteria ${authorityPacket.acceptanceCriteriaIds.join(', ')}.` });
+    const mapper = authorityPacket.behaviorMapperEvidence ?? record.behaviorMapperEvidence;
+    if (mapper) evidence.push({ kind: 'planning-helper', id: `${id}-behavior-mapper`,
+      digest: objectDigest(mapper), summary: `Behavior mapper at ${mapper.headSha}; status ${mapper.status}; ${mapper.summary}` });
+    evidence.push({ kind: 'result', id: `${id}-result`, digest: record.resultDigest,
+      summary: result ? `${result.status}; ${result.summary}; changed paths ${result.changedPaths.join(', ') || 'none'}.`
+        : `${projectedResult.status}; ${projectedResult.summary}; changed paths ${projectedResult.changedPaths.join(', ') || 'none'}.` });
+    evidence.push({ kind: 'result', id: `${id}-result-validation`,
+      digest: result ? objectDigest(result.validation) : record.resultDigest,
+      summary: result ? `Worker validation: ${result.validation.map(({ command, result: outcome }) => `${command}:${outcome}`).join(', ')}.`
+        : `Worker validation: ${projectedResult.validation.map(({ command, result: outcome }) => `${command}:${outcome}`).join(', ')}.` });
+    evidence.push({ kind: 'result', id: `${id}-result-dependencies`,
+      digest: result ? objectDigest(result.unexpectedDependencies) : record.resultDigest,
+      summary: result ? `Unexpected dependencies: ${result.unexpectedDependencies.join(', ') || 'none'}.`
+        : `Unexpected dependencies: ${projectedResult.unexpectedDependencies.join(', ') || 'none'}.` });
+    const changedPaths = result?.changedPaths ?? projectedResult.changedPaths;
+    evidence.push({ kind: 'result', id: `${id}-path-authority`,
+      digest: objectDigest({ changedPaths, allowedPaths: authorityPacket.allowedPaths }),
+      summary: `Changed-path authority: ${changedPaths.map((path) => { const allowed = authorityPacket.allowedPaths.filter((pattern) => pathMatchesOwnership(path, pattern)); const forbidden = authorityPacket.forbiddenPaths.filter((pattern) => pathMatchesOwnership(path, pattern)); return `${path}->${forbidden.length ? `forbidden:${forbidden.join('|')}` : allowed.length ? `allowed:${allowed.join('|')}` : 'unowned'}`; }).join(', ') || 'no changed paths'}.` });
+    if (record.requiresReplacement || record.reservesTaskReplacement) {
+      evidence.push(...taskReplacementEvidence(record));
+    }
+    else evidence.push({ kind: 'integration', id: `${id}-integration`,
+        digest: record.integrationReceiptDigest ?? record.resultDigest,
+        summary: record.integratedCommit ? `Integrated exact worker result at ${record.integratedCommit}; integration transition revision ${record.integrationReceipt.revision}; status ${record.terminalStatus}.`
+          : record.terminalStatus === 'no-change' && result ? `Terminal receipt-valid no-change result; status ${record.terminalStatus}.`
+            : projectedIntegrationSummary() });
+  }
+  evidence.push(...reservedEvidence);
+  evidence.push(...validationFailureRemediationEvidence(validationPlan, validationResults, amendments));
+  evidence.push(...actionableRemediationEvidence(completeFindingRecords, amendments));
+  validationPlan.commands.forEach((command) => {
+    const receipt = validationResults.get(command.id);
+    evidence.push({ kind: 'validation-result', id: command.id,
+      digest: receipt?.digest ?? objectDigest({ commandId: command.id, authority: 'inevitable-validation-result' }),
+      summary: validationResultSummary(command, receipt) });
+  });
   for (const { number, record, planningEvidence: provenance } of amendments) {
     const { resultingPlan, ...authority } = record.value;
     const authorityProjection = { amendmentNumber: number, receiptDigest: record.digest, ...authority,
@@ -2056,171 +2473,394 @@ export function preflightVerifierCapacity({ originalPlan, effectivePlan = origin
       id: `${record.value.amendmentId}-provenance-record-${index + 1}`, digest: provenance.digest,
       summary: `Amendment provenance record ${index + 1} of ${provenance.value.length}:\n${serialized(entry)}` }));
   }
-  const bounded = boundVerifierEvidence(evidence);
-  const projectedContext = { schemaVersion: 1, verifierId: 'development_integration_verifier', finalVerificationPriority: 'high',
-    verificationRound: 1, inputIdentityDigest: objectDigest(effectivePlan), changeId: effectivePlan.changeId,
-    headSha: effectivePlan.planning.planningSha, planningSha: effectivePlan.planning.planningSha,
-    originalPlanDigest: objectDigest(originalPlan), effectivePlanDigest: objectDigest(effectivePlan), taskSetDigest: objectDigest(effectivePlan.tasks),
-    sourceIdentity: { kind: effectivePlan.source.kind, reference: effectivePlan.source.reference, digest: effectivePlan.source.captureDigest },
-    validationPlanDigest: objectDigest(effectivePlan.tasks), validationResultDigests: [], specialistResultDigests: [], evidence: bounded,
-    generatedAt: '2000-01-01T00:00:00.000Z' };
-  if (Buffer.byteLength(JSON.stringify(projectedContext), 'utf8') > 256 * 1024) {
-    throw new StateError('Projected complete verifier context exceeds 256 KiB', 'VERIFIER_CONTEXT_TOO_LARGE');
+  if (validationPlan.releaseEvidence) evidence.push({ kind: 'release', id: 'release-state',
+    digest: validationPlan.releaseEvidence.evidenceDigest,
+    summary: releaseEvidenceSummary(validationPlan.releaseEvidence) });
+  else if (releaseApplicable) evidence.push({ kind: 'release', id: 'release-state',
+    digest: objectDigest({ authority: 'inevitable-protected-release-evidence' }),
+    summary: releaseEvidenceSummary(projectedReleaseEvidence()) });
+  specialistPlan.planningHelpers.forEach(({ id, reasons }) => evidence.push({ kind: 'planning-helper', id,
+    digest: objectDigest({ id, reasons }), summary: reasons.join(', ') }));
+  specialistPlan.supplementalGuidance.forEach(({ id, reasons }) => evidence.push({ kind: 'supplemental-guidance', id,
+    digest: objectDigest({ id, reasons }), summary: reasons.join(', ') }));
+  specialistPlan.reviewers.forEach(({ id }) => {
+    const receipt = specialistResults.get(id);
+    evidence.push({ kind: 'specialist-result', id: id.replaceAll('_', '-'),
+      digest: receipt?.digest ?? objectDigest({ reviewerId: id, authority: 'inevitable-specialist-result' }),
+      summary: receipt?.value.summary ?? `Reserved exact-HEAD result summary from ${id}.` });
+  });
+  completeFindingRecords.sort((left, right) => left.round - right.round
+    || left.sourceRole.localeCompare(right.sourceRole) || left.finding.id.localeCompare(right.finding.id))
+    .forEach((record) => evidence.push(...findingProjectionEvidence(record)));
+  const boundedEvidence = boundVerifierEvidence(evidence);
+  const validationResultDigests = validationPlan.commands.map((command) => validationResults.get(command.id)?.digest
+    ?? objectDigest({ commandId: command.id, authority: 'inevitable-validation-result' }));
+  const specialistResultDigests = specialistPlan.reviewers.map(({ id }) => specialistResults.get(id)?.digest
+    ?? objectDigest({ reviewerId: id, authority: 'inevitable-specialist-result' }));
+  const contextIdentity = { verifierId: 'development_integration_verifier', verificationRound,
+    headSha, effectivePlanDigest, taskSetDigest, validationPlanDigest: validationPlanDigestValue,
+    specialistResultDigests };
+  const context = { schemaVersion: 1, verifierId: 'development_integration_verifier',
+    finalVerificationPriority: specialistPlan.finalVerificationPriority, verificationRound,
+    inputIdentityDigest: objectDigest(contextIdentity), changeId: effectivePlan.changeId,
+    headSha, planningSha, originalPlanDigest, effectivePlanDigest, taskSetDigest,
+    sourceIdentity: { kind: effectivePlan.source.kind, reference: effectivePlan.source.reference, digest: sourceDigest },
+    validationPlanDigest: validationPlanDigestValue, validationResultDigests, specialistResultDigests,
+    evidence: boundedEvidence, generatedAt };
+  if (Buffer.byteLength(JSON.stringify(context), 'utf8') > 256 * 1024) {
+    throw new StateError('Complete verifier context exceeds 256 KiB', 'VERIFIER_CONTEXT_TOO_LARGE');
   }
-  return bounded;
+  const errors = validateVerificationContract('verifierContext', context);
+  if (errors.length) throw new StateError(`Projected verifier context is invalid: ${errors.join('; ')}`, 'VERIFIER_CONTEXT_INVALID');
+  return { context, evidence: boundedEvidence };
+}
+
+export function preflightVerifierCapacity({ originalPlan, effectivePlan = originalPlan, packets = [], results = [],
+  amendments = [], planningEvidence = [], sourceDigest,
+  featureDirectory, projection } = {}) {
+  if (projection) return composeVerifierProjection(projection);
+  const packetByTask = new Map(packets.map((packet) => [packet.taskId, packet]));
+  const commandPackets = effectivePlan.tasks.map((task) => packetByTask.get(task.id) ?? {
+    taskId: task.id, affectedAreas: task.specialization.affectedAreas,
+    requiredValidation: minimumProjectedValidation(task),
+  });
+  const commands = commandPackets.length > 0
+    ? assertValidationCommandCompatibility(commandPackets, { featureDirectory }) : [];
+  const headSha = effectivePlan.planning.planningSha;
+  const releaseApplicable = commandPackets.some(({ affectedAreas }) =>
+    affectedAreas.some((area) => ['release', 'migration'].includes(area)));
+  const validationPlan = { commands, headSha, releaseEvidence: null };
+  const validationPlanDigestValue = objectDigest({ tasks: effectivePlan.tasks, commands });
+  const specialistPlan = projectedSpecialistPlan(effectivePlan, packetByTask, headSha, validationPlanDigestValue);
+  return composeVerifierProjection({ originalPlan, effectivePlan,
+    taskRecords: projectedTaskRecords(effectivePlan, packets, results, planningEvidence), amendments,
+    validationPlan, validationPlanDigestValue, specialistPlan, releaseApplicable,
+    sourceDigest: sourceDigest ?? effectivePlan.source.captureDigest });
+}
+
+function findingProjectionRecords(cwd, state, pending = {}) {
+  if (!state.verification && !pending.verificationRound) return [];
+  const currentRound = pending.verificationRound ?? state.verification.round;
+  const pendingFindingRound = pending.findingRound ?? currentRound;
+  const pendingDispositions = new Map([
+    ...(pending.dispositions ?? []), ...(pending.disposition ? [pending.disposition] : []),
+  ].map((value) => [value.fingerprint, value]));
+  const records = [];
+  const pendingSources = [pending.specialistResult
+    ? { sourceKind: 'specialist', sourceRole: pending.specialistResult.reviewerId,
+      value: pending.specialistResult, digest: objectDigest(pending.specialistResult) } : null,
+  pending.verifierResult ? { sourceKind: 'verifier', sourceRole: 'development_integration_verifier',
+    value: pending.verifierResult, digest: objectDigest(pending.verifierResult) } : null].filter(Boolean);
+  for (let round = 1; round <= currentRound; round += 1) {
+    const directory = verificationRoundDirectory(cwd, state, round);
+    const sources = [];
+    const specialists = join(directory, 'specialists');
+    if (existsSync(specialists)) {
+      for (const name of readdirSync(specialists).filter((entry) => entry.endsWith('.json')).sort()) {
+        const receipt = verifyReceipt(join(specialists, name), `specialist finding source ${name} round ${round}`);
+        sources.push({ sourceKind: 'specialist', sourceRole: receipt.value.reviewerId,
+          value: receipt.value, digest: receipt.digest });
+      }
+    }
+    const verifierPath = join(directory, 'verifier-result.json');
+    if (existsSync(verifierPath)) {
+      const receipt = verifyReceipt(verifierPath, `verifier finding source round ${round}`);
+      sources.push({ sourceKind: 'verifier', sourceRole: 'development_integration_verifier',
+        value: receipt.value, digest: receipt.digest });
+    }
+    if (round === pendingFindingRound) for (const source of pendingSources) {
+      if (!sources.some(({ sourceKind, sourceRole }) =>
+        sourceKind === source.sourceKind && sourceRole === source.sourceRole)) sources.push(source);
+    }
+    sources.sort((left, right) => left.sourceRole.localeCompare(right.sourceRole));
+    for (const source of sources) for (const finding of source.value.findings) {
+      const fingerprint = findingFingerprint({ sourceKind: source.sourceKind,
+        sourceRole: source.sourceRole, finding });
+      const dispositionPath = findingDispositionPath(cwd, state, fingerprint, round);
+      let disposition = existsSync(dispositionPath)
+        ? verifyReceipt(dispositionPath, `finding disposition ${finding.id} round ${round}`) : null;
+      if (round === pendingFindingRound && pendingDispositions.has(fingerprint)) {
+        const value = pendingDispositions.get(fingerprint);
+        disposition = { value, digest: objectDigest(value) };
+      }
+      const authorizationPath = join(changeDirectory(cwd, state.changeId), 'verification', 'authorizations',
+        fingerprint.slice('sha256:'.length), `${String(round).padStart(4, '0')}.json`);
+      let authorization = existsSync(authorizationPath)
+        ? verifyReceipt(authorizationPath, `finding authorization ${finding.id} round ${round}`) : null;
+      if (round === pendingFindingRound && pending.authorizationRecord?.fingerprint === fingerprint) {
+        authorization = { value: pending.authorizationRecord, digest: objectDigest(pending.authorizationRecord) };
+      }
+      const authorizationRequired = authorization !== null
+        || (round === pendingFindingRound && (pending.authorizationRequiredFingerprints ??
+          state.verification?.humanDecisionRequiredFingerprints ?? []).includes(fingerprint));
+      records.push({ round, sourceKind: source.sourceKind, sourceRole: source.sourceRole,
+        sourceDigest: source.digest, finding, fingerprint, disposition, authorization,
+        authorizationRequired });
+    }
+  }
+  return records;
+}
+
+function specialistReservationAllocations(specialistPlan, specialistResults, findingRecords,
+  verificationRound) {
+  if (specialistResults.size === 0) return [[]];
+  const occupied = new Set(findingRecords.filter(({ round, sourceKind }) =>
+    round === verificationRound && sourceKind === 'specialist').map(({ fingerprint }) => fingerprint));
+  const remainingReviewers = specialistPlan.reviewers.map(({ id }) => id)
+    .filter((id) => !specialistResults.has(id));
+  const allocations = [];
+  const visit = (reviewerIndex, available, allocation) => {
+    if (reviewerIndex === remainingReviewers.length) {
+      allocations.push(allocation); return;
+    }
+    const reviewerCount = remainingReviewers.length - reviewerIndex;
+    const share = Math.floor(available / reviewerCount);
+    const values = share === 0 ? [0] : [0, share];
+    for (const value of values) visit(reviewerIndex + 1, available - value,
+      [...allocation, [remainingReviewers[reviewerIndex], value]]);
+  };
+  visit(0, Math.max(0, SPECIALIST_FINDING_LIMIT - occupied.size), []);
+  return allocations;
+}
+
+function specialistReservationFootprint(records) {
+  const evidence = records.flatMap((record) => findingProjectionEvidence(record))
+    .flatMap((item) => semanticEvidenceChunks(item));
+  return { itemCount: evidence.length,
+    byteCount: Buffer.byteLength(JSON.stringify(evidence), 'utf8') };
+}
+
+function priorSpecialistResultHistory(cwd, state, verificationRound) {
+  const history = [];
+  for (let round = 1; round < verificationRound; round += 1) {
+    const specialists = join(verificationRoundDirectory(cwd, state, round), 'specialists');
+    if (!existsSync(specialists)) continue;
+    for (const name of readdirSync(specialists).filter((entry) => entry.endsWith('.json')).sort()) {
+      const receipt = verifyReceipt(join(specialists, name),
+        `specialist applicability source ${name} round ${round}`);
+      history.push({ round, sourceRole: receipt.value.reviewerId });
+    }
+  }
+  return history;
+}
+
+function remainingSpecialistFindingReservations(specialistPlan, specialistResults, findingRecords,
+  verificationRound, specialistResultHistory = null, specialistReservationAllocation = null,
+  specialistReservationOrdering = 'item') {
+  if (specialistResults.size === 0) return [];
+  const occupied = new Set(findingRecords.filter(({ round, sourceKind }) =>
+    round === verificationRound && sourceKind === 'specialist').map(({ fingerprint }) => fingerprint));
+  const remainingReviewers = specialistPlan.reviewers.map(({ id }) => id)
+    .filter((id) => !specialistResults.has(id));
+  let available = Math.max(0, SPECIALIST_FINDING_LIMIT - occupied.size);
+  const allocated = specialistReservationAllocation === null
+    ? null : new Map(specialistReservationAllocation);
+  const records = [];
+  remainingReviewers.forEach((sourceRole, reviewerIndex) => {
+    const reviewerCount = remainingReviewers.length - reviewerIndex;
+    const reservedShare = allocated?.get(sourceRole) ?? Math.floor(available / reviewerCount);
+    available -= reservedShare;
+    const sourceDigest = objectDigest({ sourceRole, authority: 'inevitable-specialist-finding-result' });
+    const priorByFingerprint = new Map();
+    const applicableRound = specialistResultHistory === null ? verificationRound - 1
+      : specialistResultHistory.filter(({ round, sourceRole: role }) =>
+        round < verificationRound && role === sourceRole).sort((left, right) => right.round - left.round)[0]?.round;
+    for (const record of findingRecords.filter(({ round, sourceKind, sourceRole: role }) =>
+      round === applicableRound && sourceKind === 'specialist' && role === sourceRole)) {
+      if (!priorByFingerprint.has(record.fingerprint)) priorByFingerprint.set(record.fingerprint, record);
+    }
+    const repeats = [...priorByFingerprint.values()].map((record) => {
+      const finding = { ...record.finding, summary: 'x', evidence: 'x' };
+      const reservation = { round: verificationRound, sourceKind: 'specialist', sourceRole,
+        sourceDigest, finding, fingerprint: record.fingerprint,
+        disposition: null, authorization: null, authorizationRequired: true };
+      const normalized = findingProjectionEvidence(reservation)
+        .flatMap((item) => semanticEvidenceChunks(item));
+      return { reservation, itemCount: normalized.length,
+        byteCount: Buffer.byteLength(JSON.stringify(normalized), 'utf8') };
+    }).sort((left, right) => specialistReservationOrdering === 'byte'
+      ? right.byteCount - left.byteCount || right.itemCount - left.itemCount
+        || left.reservation.fingerprint.localeCompare(right.reservation.fingerprint)
+      : right.itemCount - left.itemCount || right.byteCount - left.byteCount
+        || left.reservation.fingerprint.localeCompare(right.reservation.fingerprint))
+      .slice(0, reservedShare).map(({ reservation }) => reservation);
+    records.push(...repeats);
+    const usedIds = new Set([...priorByFingerprint.values()].map(({ finding }) => finding.id));
+    let candidate = 1;
+    while (records.filter(({ sourceRole: role, round }) =>
+      role === sourceRole && round === verificationRound).length < reservedShare) {
+      let id;
+      do { id = `reserved-${String(candidate).padStart(3, '0')}`; candidate += 1; } while (usedIds.has(id));
+      usedIds.add(id);
+      const finding = { id, priority: 'P0',
+        summary: 'x', evidence: 'x', affectedAreas: ['api'], recommendedSpecialization: 'api',
+        riskTags: [], criterionIds: [], invariantIds: [] };
+      records.push({ round: verificationRound, sourceKind: 'specialist', sourceRole,
+        sourceDigest, finding,
+        fingerprint: findingFingerprint({ sourceKind: 'specialist', sourceRole, finding }),
+        disposition: null, authorization: null, authorizationRequired: false });
+    }
+  });
+  return records;
+}
+
+function verifierProjectionFromState(cwd, state, pending = {}) {
+  const originalReceipt = verifyReceipt(join(changeDirectory(cwd, state.changeId), 'plan', 'plan.json'),
+    'accepted plan');
+  const effectivePlan = pending.effectivePlan ?? readEffectivePlan(cwd, state);
+  const effectivePlanDigest = pending.effectivePlanDigest ?? objectDigest(effectivePlan);
+  const resetsVerification = Boolean(pending.effectivePlan || pending.validationPlan
+    || pending.resetsVerification);
+  const projectionRound = pending.verificationRound
+    ?? (pending.effectivePlan ? nextVerificationRound(cwd, state)
+      : state.verification?.round ?? nextVerificationRound(cwd, state));
+  const amendments = pending.amendments ?? verifierCapacityAmendments(cwd, state);
+  const planningEvidence = [
+    ...verifyReceipt(join(changeDirectory(cwd, state.changeId), 'plan', 'planning-evidence.json'),
+      'accepted-plan planning evidence').value,
+    ...amendments.flatMap(({ planningEvidence: receipt }) => receipt.value),
+  ];
+  const packets = state.execution?.tasks.filter((task) => task.binding > 0 && task.status !== 'rejected')
+    .map((task) => verifyReceipt(implementationTaskPacketPath(cwd, state.changeId, task.id, task.binding),
+      `authoritative task packet ${task.id}`).value) ?? [];
+  if (pending.packet) {
+    const index = packets.findIndex(({ taskId }) => taskId === pending.packet.taskId);
+    if (index >= 0) packets[index] = pending.packet; else packets.push(pending.packet);
+  }
+  const results = verifierCapacityResults(cwd, state, pending.result ?? null);
+  const terminal = !pending.effectivePlan && state.execution?.tasks.length > 0
+    && state.execution.tasks.every(({ status }) => ['integrated', 'no-change'].includes(status));
+  const taskRecords = terminal ? terminalTaskEvidence(cwd, state)
+    : projectedTaskRecords(effectivePlan, packets, results, planningEvidence);
+  if (!terminal) for (const record of taskRecords) {
+    const summary = state.execution?.tasks.find(({ id }) => id === record.task.id);
+    if (pending.packet?.taskId === record.task.id) record.binding = (summary?.binding ?? 0) + 1;
+    if (['blocked', 'failed', 'rejected'].includes(summary?.status)
+        || pending.rejectedTaskId === record.task.id) record.requiresReplacement = true;
+    if (!summary || summary.binding < 1 || summary.status === 'rejected') continue;
+    if (['integrated', 'no-change'].includes(summary.status)
+        && pending.packet?.taskId !== summary.id && pending.result?.taskId !== summary.id) {
+      Object.assign(record, terminalTaskEvidenceForTask(cwd, state, summary));
+      record.reservesTaskReplacement = false;
+      continue;
+    }
+    const packet = verifyReceipt(implementationTaskPacketPath(cwd, state.changeId, summary.id, summary.binding),
+      `authoritative task packet ${summary.id}`);
+    const provenance = verifyReceipt(join(changeDirectory(cwd, state.changeId), 'implementation', 'provenance',
+      `${summary.id}/${String(summary.binding).padStart(4, '0')}.json`), `task provenance ${summary.id}`);
+    record.packetDigest = packet.digest; record.provenanceDigest = provenance.digest;
+    record.binding = summary.binding; record.attempt = summary.attempt;
+  }
+  const packetByTask = new Map(packets.map((packet) => [packet.taskId, packet]));
+  let validationPlanReceipt;
+  if (pending.validationPlan) validationPlanReceipt = {
+    value: pending.validationPlan, digest: objectDigest(pending.validationPlan),
+  };
+  else if (!resetsVerification && state.verification && existsSync(validationPlanPath(cwd, state))) {
+    validationPlanReceipt = verifyReceipt(validationPlanPath(cwd, state), 'validation plan');
+  } else {
+    const commandPackets = effectivePlan.tasks.map((task) => packetByTask.get(task.id) ?? {
+      taskId: task.id, affectedAreas: task.specialization.affectedAreas,
+      requiredValidation: minimumProjectedValidation(task),
+    });
+    const commands = commandPackets.length > 0
+      ? assertValidationCommandCompatibility(commandPackets, { featureDirectory: join(cwd, 'specs', 'features') }) : [];
+    validationPlanReceipt = { value: { commands, headSha: state.git.headSha, releaseEvidence: null },
+      digest: objectDigest({ commands, headSha: state.git.headSha }) };
+  }
+  const validationPlanValue = validationPlanReceipt.value;
+  const validationPlanDigestValue = pending.validationPlan
+    ? validationPlanDigest(pending.validationPlan)
+    : (!resetsVerification ? state.verification?.validationPlanDigest : null) ?? objectDigest(validationPlanValue);
+  const validationResults = state.verification && !resetsVerification
+    ? existingCommandResults(cwd, state, validationPlanValue) : new Map();
+  if (pending.validationResult) validationResults.set(pending.validationResult.commandId,
+    { value: pending.validationResult, digest: objectDigest(pending.validationResult) });
+  let specialistPlanReceipt;
+  if (pending.specialistPlan) specialistPlanReceipt = {
+    value: pending.specialistPlan, digest: objectDigest(pending.specialistPlan),
+  };
+  else if (!resetsVerification && state.verification?.specialistPlanDigest
+      && existsSync(specialistPlanPath(cwd, state))) {
+    specialistPlanReceipt = verifyReceipt(specialistPlanPath(cwd, state), 'specialist plan');
+  } else {
+    const value = projectedSpecialistPlan(effectivePlan, packetByTask,
+      validationPlanValue.headSha, validationPlanDigestValue);
+    specialistPlanReceipt = { value, digest: objectDigest(value) };
+  }
+  const specialistResults = new Map();
+  if (!resetsVerification && state.verification?.round === projectionRound) for (const { id } of specialistPlanReceipt.value.reviewers) {
+    const path = specialistResultPath(cwd, state, id);
+    if (existsSync(path)) specialistResults.set(id, verifyReceipt(path, `specialist result ${id}`));
+  }
+  if (pending.specialistResult && (pending.findingRound ?? projectionRound) === projectionRound) {
+    specialistResults.set(pending.specialistResult.reviewerId,
+      { value: pending.specialistResult, digest: objectDigest(pending.specialistResult) });
+  }
+  const affectedAreas = new Set(effectivePlan.tasks.flatMap((task) =>
+    packetByTask.get(task.id)?.affectedAreas ?? task.specialization.affectedAreas));
+  const decisionSourceObservation = pending.sourceObservation
+    ?? (pending.decisionResolution?.disposition === 'resolve'
+      ? readObservationByDigest(cwd, state) : null);
+  const sourceResolution = pending.decisionResolution?.disposition === 'resolve'
+    ? pending.decisionResolution : pending.sourceObservation
+      ? { id: 'x'.repeat(128), disposition: 'resolve' } : null;
+  const specialistResultHistory = priorSpecialistResultHistory(cwd, state, projectionRound);
+  if (pending.specialistResult && (pending.findingRound ?? projectionRound) < projectionRound) {
+    specialistResultHistory.push({ round: pending.findingRound, sourceRole: pending.specialistResult.reviewerId });
+  }
+  return { originalPlan: originalReceipt.value, originalPlanDigest: originalReceipt.digest,
+    effectivePlan, effectivePlanDigest, taskRecords, amendments,
+    validationPlan: validationPlanValue, validationPlanReceiptDigest: validationPlanReceipt.digest,
+    validationPlanDigestValue, validationResults, specialistPlan: specialistPlanReceipt.value,
+    specialistPlanReceiptDigest: specialistPlanReceipt.digest, specialistResults,
+    findingRecords: findingProjectionRecords(cwd, state, { ...pending, verificationRound: projectionRound }),
+    specialistResultHistory,
+    sourceDigest: pending.sourceObservation ? objectDigest(pending.sourceObservation)
+      : state.source.observationDigest,
+    headSha: validationPlanValue.headSha, planningSha: state.planningSha,
+    verificationRound: projectionRound,
+    taskSetDigest: pending.validationPlan?.taskSetDigest ?? state.verification?.taskSetDigest
+      ?? objectDigest(effectivePlan.tasks), generatedAt: validationPlanValue.createdAt
+      ?? '2000-01-01T00:00:00.000Z',
+    reservedEvidence: sourceResolution
+      ? sourceDecisionAmendmentEvidence(sourceResolution, effectivePlan,
+        decisionSourceObservation) : [],
+    releaseApplicable: affectedAreas.has('release') || affectedAreas.has('migration') };
+}
+
+function assertStateVerifierCapacity(cwd, state, pending = {}) {
+  return preflightVerifierCapacity({ projection: verifierProjectionFromState(cwd, state, pending) });
+}
+
+export function preflightStateVerifierCapacity({ cwd = process.cwd(), changeId, pending = {} } = {}) {
+  const root = repositoryRoot(cwd); const state = loadState(root, changeId);
+  validateState({ cwd: root, changeId: state.changeId });
+  return assertStateVerifierCapacity(root, state, pending);
 }
 
 export function buildVerifierContext({ cwd = process.cwd(), changeId } = {}) {
   const root = repositoryRoot(cwd); const state = loadState(root, changeId);
-  if (!state || state.phase !== 'verifying' || state.verification.validationStatus !== 'passed') throw new StateError('Verifier context requires clean targeted validation and specialist review', 'INVALID_PHASE');
+  if (!state || state.phase !== 'verifying' || state.verification.validationStatus !== 'passed') {
+    throw new StateError('Verifier context requires clean targeted validation and specialist review', 'INVALID_PHASE');
+  }
   assertVerificationHead(root, state, undefined, 'Verifier context');
-  if (state.verification.requiredReviewerIds.length !== state.verification.specialistResultDigests.length) throw new StateError('Verifier context requires every routed specialist result', 'SPECIALIST_RESULT_MISSING');
-  const validationPlan = verifyReceipt(validationPlanPath(root, state), 'validation plan');
-  const specialistPlan = verifyReceipt(specialistPlanPath(root, state), 'specialist plan');
-  const originalPlan = verifyReceipt(join(changeDirectory(root, state.changeId), 'plan', 'plan.json'), 'original accepted plan');
-  const effectivePlan = readEffectivePlan(root, state);
-  const taskEvidence = terminalTaskEvidence(root, state);
+  if (state.verification.requiredReviewerIds.length !== state.verification.specialistResultDigests.length) {
+    throw new StateError('Verifier context requires every routed specialist result', 'SPECIALIST_RESULT_MISSING');
+  }
+  const projection = verifierProjectionFromState(root, state);
   validateState({ cwd: root, changeId: state.changeId });
-  const evidence = [
-    { kind: 'source', id: 'source-observation', digest: state.source.observationDigest, summary: `${state.source.kind}:${state.source.reference}` },
-    { kind: 'criterion', id: 'original-plan-objective', digest: originalPlan.digest, summary: `Original objective: ${originalPlan.value.objective}` },
-    { kind: 'criterion', id: 'original-plan-scope', digest: objectDigest({ scope: originalPlan.value.scope, nonGoals: originalPlan.value.nonGoals }), summary: `Original scope: ${originalPlan.value.scope.join(', ')}; original non-goals: ${originalPlan.value.nonGoals.join(', ')}` },
-    { kind: 'specialist-route', id: 'original-plan-profile', digest: objectDigest(originalPlan.value.specialization), summary: `Original specialization ${originalPlan.value.specialization.specialization}; profile ${originalPlan.value.specialization.route.profileGuidePath}; areas ${originalPlan.value.specialization.affectedAreas.join(', ')}; risks ${originalPlan.value.specialization.riskTags.join(', ') || 'none'}; priority ${originalPlan.value.specialization.route.finalVerificationPriority}` },
-    { kind: 'checklist', id: 'original-plan-scenarios', digest: objectDigest({ scenarios: originalPlan.value.scenarios, disposition: originalPlan.value.productScenarioDisposition }), summary: `Original scenarios ${originalPlan.value.scenarios.map(({ id }) => id).join(', ') || 'none'}; disposition ${originalPlan.value.productScenarioDisposition.disposition}: ${originalPlan.value.productScenarioDisposition.rationale}` },
-    { kind: 'criterion', id: 'effective-plan-objective', digest: state.plan.effectiveDigest, summary: `Effective objective: ${effectivePlan.objective}` },
-    { kind: 'criterion', id: 'effective-plan-scope', digest: objectDigest({ scope: effectivePlan.scope, nonGoals: effectivePlan.nonGoals }), summary: `Effective scope: ${effectivePlan.scope.join(', ')}; effective non-goals: ${effectivePlan.nonGoals.join(', ')}` },
-    { kind: 'specialist-route', id: 'effective-plan-profile', digest: objectDigest(effectivePlan.specialization), summary: `Effective specialization ${effectivePlan.specialization.specialization}; profile ${effectivePlan.specialization.route.profileGuidePath}; areas ${effectivePlan.specialization.affectedAreas.join(', ')}; risks ${effectivePlan.specialization.riskTags.join(', ') || 'none'}; priority ${effectivePlan.specialization.route.finalVerificationPriority}; supplemental ${effectivePlan.specialization.route.supplementalGuidance.map(({ id }) => id).join(', ') || 'none'}` },
-    { kind: 'checklist', id: 'effective-plan-scenarios', digest: objectDigest({ scenarios: effectivePlan.scenarios, disposition: effectivePlan.productScenarioDisposition }), summary: `Effective scenarios ${effectivePlan.scenarios.map(({ id }) => id).join(', ') || 'none'}; disposition ${effectivePlan.productScenarioDisposition.disposition}: ${effectivePlan.productScenarioDisposition.rationale}` },
-    { kind: 'validation-plan', id: 'targeted-validation', digest: validationPlan.digest, summary: `${validationPlan.value.commands.length} exact command(s) on ${validationPlan.value.headSha}.` },
-    { kind: 'specialist-route', id: 'integrated-route', digest: specialistPlan.digest,
-      summary: `Reviewers: ${state.verification.requiredReviewerIds.join(', ') || 'none'}; priority ${specialistPlan.value.finalVerificationPriority}.` },
-  ];
-  effectivePlan.criteria.forEach((criterion) => evidence.push({ kind: 'criterion', id: criterion.id,
-    digest: objectDigest(criterion), summary: `${criterion.disposition}: ${criterion.description}` }));
-  effectivePlan.decisions.forEach((decision) => evidence.push({ kind: 'decision', id: decision.id,
-    digest: objectDigest(decision), summary: `${decision.status}: ${decision.resolution ?? decision.rationale}` }));
-  effectivePlan.checklistMappings.forEach((mapping) => evidence.push({ kind: 'checklist', id: mapping.id,
-    digest: objectDigest(mapping), summary: `${mapping.capturedText} -> criteria ${mapping.criterionIds.join(', ')}; tasks ${mapping.taskIds.join(', ')}.` }));
-  [...originalPlan.value.criteria].sort((left, right) => left.id.localeCompare(right.id)).forEach((criterion) => evidence.push({
-    kind: 'criterion', id: `original-plan-criterion-${criterion.id}`, digest: objectDigest(criterion),
-    summary: `Original accepted-plan criterion ${criterion.id}:\n${serialized(criterion)}` }));
-  [...originalPlan.value.decisions].sort((left, right) => left.id.localeCompare(right.id)).forEach((decision) => evidence.push({
-    kind: 'decision', id: `original-plan-decision-${decision.id}`, digest: objectDigest(decision),
-    summary: `Original accepted-plan decision ${decision.id}:\n${serialized(decision)}` }));
-  [...originalPlan.value.checklistMappings].sort((left, right) => left.id.localeCompare(right.id)).forEach((mapping) => evidence.push({
-    kind: 'checklist', id: `original-plan-checklist-${mapping.id}`, digest: objectDigest(mapping),
-    summary: `Original accepted-plan checklist mapping ${mapping.id}:\n${serialized(mapping)}` }));
-  [...originalPlan.value.tasks].sort((left, right) => left.id.localeCompare(right.id)).forEach((task) => evidence.push({
-    kind: 'packet', id: `original-plan-task-${task.id}`, digest: objectDigest(task),
-    summary: `Original accepted-plan task ${task.id}:\n${serialized(task)}` }));
-  taskEvidence.forEach(({ packet, packetDigest, provenanceDigest, result, resultDigest, terminalStatus, integratedCommit, integrationReceipt, integrationReceiptDigest, binding }) => {
-    const validations = [...packet.requiredValidation.unit, ...packet.requiredValidation.system].map(({ command }) => command).join('; ');
-    evidence.push({ kind: 'packet', id: packet.taskId, digest: packetDigest,
-      summary: `Plan revision ${packet.planRevision}; plan ${packet.planDigest}; binding ${binding}; objective ${packet.objective}; dependencies ${packet.dependencies.join(', ') || 'none'}.` });
-    evidence.push({ kind: 'packet', id: `${packet.taskId}-ownership`, digest: objectDigest({ allowedPaths: packet.allowedPaths, forbiddenPaths: packet.forbiddenPaths }), summary: `Allowed paths: ${packet.allowedPaths.join(', ')}; forbidden paths: ${packet.forbiddenPaths.join(', ') || 'none'}.` });
-    evidence.push({ kind: 'packet', id: `${packet.taskId}-profile`, digest: objectDigest({ specialization: packet.specialization, affectedAreas: packet.affectedAreas, riskTags: packet.riskTags, route: packet.specialistRoute }), summary: `Specialization ${packet.specialization}; areas ${packet.affectedAreas.join(', ')}; risks ${packet.riskTags.join(', ') || 'none'}; profile ${packet.specialistRoute.profileGuidePath}; reviewers ${packet.specialistRoute.riskReviewers.map(({ id }) => id).join(', ') || 'none'}; supplemental ${packet.specialistRoute.supplementalGuidance.map(({ id }) => id).join(', ') || 'none'}.` });
-    evidence.push({ kind: 'packet', id: `${packet.taskId}-validation`, digest: objectDigest(packet.requiredValidation), summary: `Required validation: ${validations}; planning signals browser:${packet.planningSignals.browserVisible}, uncertain:${packet.planningSignals.relatedTestSelectionUncertain}.` });
-    evidence.push({ kind: 'provenance', id: `${packet.taskId}-provenance`, digest: provenanceDigest,
-      summary: `Decision context ${packet.decisionIds.join(', ') || 'none'}; criteria ${packet.acceptanceCriteriaIds.join(', ')}.` });
-    if (packet.behaviorMapperEvidence) evidence.push({ kind: 'planning-helper', id: `${packet.taskId}-behavior-mapper`,
-      digest: objectDigest(packet.behaviorMapperEvidence), summary: `Behavior mapper at ${packet.behaviorMapperEvidence.headSha}; status ${packet.behaviorMapperEvidence.status}; ${packet.behaviorMapperEvidence.summary}` });
-    evidence.push({ kind: 'result', id: `${packet.taskId}-result`, digest: resultDigest,
-      summary: `${result.status}; ${result.summary}; changed paths ${result.changedPaths.join(', ') || 'none'}.` });
-    evidence.push({ kind: 'result', id: `${packet.taskId}-result-validation`, digest: objectDigest(result.validation), summary: `Worker validation: ${result.validation.map(({ command, result: outcome }) => `${command}:${outcome}`).join(', ')}.` });
-    evidence.push({ kind: 'result', id: `${packet.taskId}-result-dependencies`, digest: objectDigest(result.unexpectedDependencies), summary: `Unexpected dependencies: ${result.unexpectedDependencies.join(', ') || 'none'}.` });
-    evidence.push({ kind: 'result', id: `${packet.taskId}-path-authority`, digest: objectDigest({ changedPaths: result.changedPaths, allowedPaths: packet.allowedPaths }),
-      summary: `Changed-path authority: ${result.changedPaths.map((path) => { const allowed = packet.allowedPaths.filter((pattern) => pathMatchesOwnership(path, pattern)); const forbidden = packet.forbiddenPaths.filter((pattern) => pathMatchesOwnership(path, pattern)); return `${path}->${forbidden.length ? `forbidden:${forbidden.join('|')}` : allowed.length ? `allowed:${allowed.join('|')}` : 'unowned'}`; }).join(', ') || 'no changed paths'}.` });
-    evidence.push({ kind: 'integration', id: `${packet.taskId}-integration`, digest: integrationReceiptDigest ?? resultDigest,
-      summary: integratedCommit ? `Integrated exact worker result at ${integratedCommit}; integration transition revision ${integrationReceipt.revision}; status ${terminalStatus}.`
-        : `Terminal receipt-valid no-change result; status ${terminalStatus}.` });
-  });
-  const validationResults = existingCommandResults(root, state, validationPlan.value);
-  validationPlan.value.commands.forEach((command) => {
-    const receipt = validationResults.get(command.id);
-    evidence.push({ kind: 'validation-result', id: command.id, digest: receipt.digest,
-      summary: `${command.argv.join(' ')} => ${receipt.value.status}; exit ${receipt.value.exitCode ?? 'none'}; output ${receipt.value.outputDigest}.` });
-  });
-  if (state.plan.amendmentCount > 0) {
-    let previousPlanDigest = originalPlan.digest;
-    for (let number = 1; number <= state.plan.amendmentCount; number += 1) {
-      const receipt = verifyReceipt(join(changeDirectory(root, state.changeId), 'plan', 'amendments', `${String(number).padStart(4, '0')}.json`), `plan amendment ${number}`);
-      const { resultingPlan, ...authority } = receipt.value;
-      const resultingPlanDigest = objectDigest(resultingPlan);
-      if (receipt.value.previousDigest !== previousPlanDigest || receipt.value.newDigest !== resultingPlanDigest) {
-        throw new StateError(`Plan amendment ${number} does not preserve its receipt-bound digest chain`, 'AMENDMENT_CHAIN_INVALID');
-      }
-      const authorityProjection = { amendmentNumber: number, receiptDigest: receipt.digest, ...authority,
-        resultingPlanIdentity: { changeId: resultingPlan.changeId, planRevision: resultingPlan.planRevision,
-          digest: resultingPlanDigest } };
-      evidence.push({ kind: 'amendment', id: receipt.value.amendmentId, digest: receipt.digest,
-        summary: `Complete amendment authority and resulting-plan identity:\n${serialized(authorityProjection)}` });
-      const provenance = verifyReceipt(join(changeDirectory(root, state.changeId), 'plan', 'amendments', `${String(number).padStart(4, '0')}.evidence.json`), `plan amendment ${number} evidence`);
-      evidence.push({ kind: 'provenance', id: `${receipt.value.amendmentId}-provenance`, digest: provenance.digest,
-        summary: `Amendment provenance receipt ${provenance.digest}; record count ${provenance.value.length}.` });
-      provenance.value.forEach((record, index) => evidence.push({ kind: 'provenance',
-        id: `${receipt.value.amendmentId}-provenance-record-${index + 1}`, digest: provenance.digest,
-        summary: `Amendment provenance record ${index + 1} of ${provenance.value.length}:\n${serialized(record)}` }));
-      previousPlanDigest = resultingPlanDigest;
-    }
-    if (previousPlanDigest !== state.plan.effectiveDigest) throw new StateError('Effective plan digest does not match amendment context replay', 'AMENDMENT_CHAIN_INVALID');
+  if (projection.validationPlan.commands.some((command) => !projection.validationResults.has(command.id))) {
+    throw new StateError('Verifier context requires every exact validation result', 'VALIDATION_RESULT_INCOMPLETE');
   }
-  if (validationPlan.value.releaseEvidence) evidence.push({ kind: 'release', id: 'release-state',
-    digest: validationPlan.value.releaseEvidence.evidenceDigest,
-    summary: `Release state ${validationPlan.value.releaseEvidence.status}; base ${validationPlan.value.releaseEvidence.baseSha}; ref ${validationPlan.value.releaseEvidence.releaseRef} at ${validationPlan.value.releaseEvidence.releaseRefSha}; latest ${validationPlan.value.releaseEvidence.latestRelease ?? 'none'}; frozen migrations ${validationPlan.value.releaseEvidence.frozenMigrationCount}.` });
-  specialistPlan.value.planningHelpers.forEach(({ id, reasons }) => evidence.push({ kind: 'planning-helper', id,
-    digest: objectDigest({ id, reasons }), summary: reasons.join(', ') }));
-  specialistPlan.value.supplementalGuidance.forEach(({ id, reasons }) => evidence.push({ kind: 'supplemental-guidance', id,
-    digest: objectDigest({ id, reasons }), summary: reasons.join(', ') }));
-  state.verification.requiredReviewerIds.forEach((id) => {
-    const receipt = verifyReceipt(specialistResultPath(root, state, id), `specialist result ${id}`);
-    evidence.push({ kind: 'specialist-result', id: id.replaceAll('_', '-'), digest: receipt.digest, summary: receipt.value.summary });
-  });
-  for (let round = 1; round <= state.verification.round; round += 1) {
-    const findingsDirectory = join(verificationRoundDirectory(root, state, round), 'findings');
-    if (existsSync(findingsDirectory)) for (const name of readdirSync(findingsDirectory).filter((entry) => entry.endsWith('.json')).sort()) {
-      const receipt = verifyReceipt(join(findingsDirectory, name), `finding disposition ${name}`);
-      const source = receipt.value.sourceKind === 'verifier'
-        ? verifyReceipt(join(verificationRoundDirectory(root, state, round), 'verifier-result.json'), `verifier finding source round ${round}`)
-        : verifyReceipt(join(verificationRoundDirectory(root, state, round), 'specialists', `${receipt.value.sourceRole}.json`), `specialist finding source round ${round}`);
-      const finding = source.value.findings.find(({ id }) => id === receipt.value.findingId);
-      evidence.push({ kind: 'finding-disposition', id: `round-${round}-${receipt.value.findingId}-identity`, digest: receipt.value.fingerprint,
-        summary: `Finding source ${receipt.value.sourceRole}; id ${finding.id}; fingerprint ${receipt.value.fingerprint}; priority ${finding.priority}; areas ${finding.affectedAreas.join(', ')}; specialization ${finding.recommendedSpecialization}; risks ${finding.riskTags.join(', ') || 'none'}; criteria ${finding.criterionIds.join(', ') || 'none'}; invariants ${finding.invariantIds.join(', ') || 'none'}.` });
-      evidence.push({ kind: 'finding-disposition', id: `round-${round}-${receipt.value.findingId}-summary`, digest: receipt.value.fingerprint,
-        summary: `Finding summary: ${finding.summary}` });
-      evidence.push({ kind: 'finding-disposition', id: `round-${round}-${receipt.value.findingId}-evidence`, digest: source.digest,
-        summary: `Finding evidence: ${finding.evidence}` });
-      evidence.push({ kind: 'finding-disposition', id: `round-${round}-${receipt.value.findingId}`, digest: receipt.digest,
-        summary: `Finding disposition authority:\n${serialized({ sourceKind: receipt.value.sourceKind,
-          sourceRole: receipt.value.sourceRole, findingId: receipt.value.findingId, fingerprint: receipt.value.fingerprint,
-          disposition: receipt.value.disposition, reason: receipt.value.reason, amendmentId: receipt.value.amendmentId,
-          replacementCriterionId: receipt.value.replacementCriterionId, replacementTaskId: receipt.value.replacementTaskId })}` });
-    }
-    const authorizations = join(changeDirectory(root, state.changeId), 'verification', 'authorizations');
-    if (existsSync(authorizations)) for (const fingerprint of readdirSync(authorizations, { withFileTypes: true }).filter((entry) => entry.isDirectory()).sort((left, right) => left.name.localeCompare(right.name))) {
-      const path = join(authorizations, fingerprint.name, `${String(round).padStart(4, '0')}.json`);
-      if (!existsSync(path)) continue;
-      const receipt = verifyReceipt(path, `finding authorization round ${round}`);
-      evidence.push({ kind: 'finding-disposition', id: `round-${round}-${fingerprint.name.slice(0, 12)}-authorization`, digest: receipt.digest,
-        summary: `Human authorization by ${receipt.value.authorizedBy}: ${receipt.value.reason}` });
-    }
+  if (projection.specialistPlan.reviewers.some(({ id }) => !projection.specialistResults.has(id))) {
+    throw new StateError('Verifier context requires every routed specialist result', 'SPECIALIST_RESULT_MISSING');
   }
-  const boundedEvidence = boundVerifierEvidence(evidence);
-  const contextIdentity = { verifierId: 'development_integration_verifier', verificationRound: state.verification.round,
-    headSha: state.verification.headSha, effectivePlanDigest: state.plan.effectiveDigest, taskSetDigest: state.verification.taskSetDigest,
-    validationPlanDigest: state.verification.validationPlanDigest, specialistResultDigests: state.verification.specialistResultDigests };
-  const context = { schemaVersion: 1, verifierId: 'development_integration_verifier',
-    finalVerificationPriority: specialistPlan.value.finalVerificationPriority, verificationRound: state.verification.round,
-    inputIdentityDigest: objectDigest(contextIdentity), changeId: state.changeId, headSha: state.verification.headSha, planningSha: state.planningSha,
-    originalPlanDigest: state.plan.originalDigest, effectivePlanDigest: state.plan.effectiveDigest, taskSetDigest: state.verification.taskSetDigest,
-    sourceIdentity: { kind: state.source.kind, reference: state.source.reference, digest: state.source.observationDigest },
-    validationPlanDigest: state.verification.validationPlanDigest, validationResultDigests: state.verification.validationResultDigests,
-    specialistResultDigests: state.verification.specialistResultDigests, evidence: boundedEvidence, generatedAt: validationPlan.value.createdAt };
-  if (Buffer.byteLength(JSON.stringify(context), 'utf8') > 256 * 1024) throw new StateError('Complete verifier context exceeds 256 KiB', 'VERIFIER_CONTEXT_TOO_LARGE');
-  const errors = validateVerificationContract('verifierContext', context);
-  if (errors.length) throw new StateError(`Generated verifier context is invalid: ${errors.join('; ')}`, 'VERIFIER_CONTEXT_INVALID');
-  return context;
+  if (projection.findingRecords.some(({ disposition }) => disposition === null)) {
+    throw new StateError('Verifier context requires every historical finding disposition', 'FINDING_DISPOSITION_INVALID');
+  }
+  return preflightVerifierCapacity({ projection }).context;
 }
-
 export function recordVerifierResult({ cwd = process.cwd(), changeId, expectedRevision, result, clock, crashStep, lockOptions } = {}) {
   const root = repositoryRoot(cwd); const selected = selectedChangeId(root, changeId);
   return withChangeLock(root, selected, () => {
@@ -2232,6 +2872,11 @@ export function recordVerifierResult({ cwd = process.cwd(), changeId, expectedRe
     if (errors.length || result.headSha !== state.verification.headSha || result.contextDigest !== contextDigest) throw new StateError(`Verifier result is malformed or stale: ${errors.join('; ')}`, 'VERIFIER_RESULT_INVALID');
     const fingerprints = result.findings.map((finding) => findingFingerprint({ sourceKind: 'verifier', sourceRole: 'development_integration_verifier', finding }));
     const repeated = repeatedFindingFingerprints(root, state, 'verifier', 'development_integration_verifier', fingerprints);
+    const capacityPending = { verifierResult: result,
+      authorizationRequiredFingerprints: [...new Set([
+        ...state.verification.humanDecisionRequiredFingerprints, ...repeated,
+      ])] };
+    assertStateVerifierCapacity(root, state, capacityPending);
     const verification = { ...state.verification, contextDigest, verifierResultDigest: objectDigest(result),
       unresolvedFindingFingerprints: [...new Set([...state.verification.unresolvedFindingFingerprints, ...fingerprints])],
       humanDecisionRequiredFingerprints: [...new Set([...state.verification.humanDecisionRequiredFingerprints, ...repeated])] };
@@ -2254,6 +2899,30 @@ function findingDispositionPath(cwd, state, fingerprint, round = state.verificat
   return join(verificationRoundDirectory(cwd, state, round), 'findings', `${fingerprint.slice('sha256:'.length)}.json`);
 }
 
+function assertActionableDispositionViability(cwd, state, disposition) {
+  if (disposition.disposition !== 'actionable') return;
+  const plan = readEffectivePlan(cwd, state);
+  if (plan.criteria.some(({ id }) => id === disposition.replacementCriterionId)
+      || plan.tasks.some(({ id }) => id === disposition.replacementTaskId)) {
+    throw new StateError('Actionable finding replacement criterion and task IDs must be new', 'FINDING_DISPOSITION_INVALID');
+  }
+  if (verifierCapacityAmendments(cwd, state)
+    .some(({ record }) => record.value.amendmentId === disposition.amendmentId)) {
+    throw new StateError('Actionable finding amendment ID must be new', 'FINDING_DISPOSITION_INVALID');
+  }
+  const actionables = findingProjectionRecords(cwd, state)
+    .filter(({ round, disposition: receipt }) => round === state.verification.round
+      && receipt?.value.disposition === 'actionable')
+    .map(({ disposition: receipt }) => receipt.value);
+  if (actionables.some((entry) => entry.amendmentId !== disposition.amendmentId)) {
+    throw new StateError('Every actionable finding in one round must share one remediation amendment', 'FINDING_DISPOSITION_INVALID');
+  }
+  if (actionables.some((entry) => entry.replacementCriterionId === disposition.replacementCriterionId
+      || entry.replacementTaskId === disposition.replacementTaskId)) {
+    throw new StateError('Actionable finding replacement IDs must be unique within the remediation amendment', 'FINDING_DISPOSITION_INVALID');
+  }
+}
+
 export function recordFindingDisposition({ cwd = process.cwd(), changeId, expectedRevision, disposition, clock, crashStep, lockOptions } = {}) {
   const root = repositoryRoot(cwd); const selected = selectedChangeId(root, changeId);
   return withChangeLock(root, selected, () => {
@@ -2273,6 +2942,14 @@ export function recordFindingDisposition({ cwd = process.cwd(), changeId, expect
     }
     const path = findingDispositionPath(root, state, fingerprint);
     if (existsSync(path)) throw new StateError('Finding already has an immutable disposition', 'FINDING_DISPOSITION_DUPLICATE');
+    assertActionableDispositionViability(root, state, disposition);
+    assertStateVerifierCapacity(root, state, { disposition });
+    const completesNonActionableRound = disposition.disposition !== 'actionable'
+      && state.verification.unresolvedFindingFingerprints.every((entry) => entry === fingerprint);
+    if (completesNonActionableRound) assertStateVerifierCapacity(root, state, {
+      disposition, findingRound: state.verification.round,
+      verificationRound: nextVerificationRound(root, state), resetsVerification: true,
+    });
     const unresolved = disposition.disposition === 'actionable' ? state.verification.unresolvedFindingFingerprints
       : state.verification.unresolvedFindingFingerprints.filter((entry) => entry !== fingerprint);
     const verification = { ...state.verification, unresolvedFindingFingerprints: unresolved,
@@ -2292,6 +2969,8 @@ export function authorizeRepeatedFinding({ cwd = process.cwd(), changeId, expect
     if (state.phase !== 'blocked' || !state.verification || !isPlainObject(authorization)
         || !/^sha256:[0-9a-f]{64}$/u.test(authorization.fingerprint ?? '')
         || !nonemptyString(authorization.reason) || !nonemptyString(authorization.authorizedBy)
+        || Buffer.byteLength(authorization.reason ?? '', 'utf8') > FINDING_AUTHORIZATION_REASON_MAX_BYTES
+        || Buffer.byteLength(authorization.authorizedBy ?? '', 'utf8') > FINDING_AUTHORIZATION_ACTOR_MAX_BYTES
         || Object.keys(authorization).some((key) => !['fingerprint', 'reason', 'authorizedBy'].includes(key))
         || !state.verification.humanDecisionRequiredFingerprints.includes(authorization.fingerprint)) {
       throw new StateError('Human authorization must name one exact repeated finding with reason and authorizer', 'HUMAN_AUTHORIZATION_INVALID');
@@ -2299,6 +2978,8 @@ export function authorizeRepeatedFinding({ cwd = process.cwd(), changeId, expect
     assertVerificationHead(root, state, clock, 'Finding authorization');
     const record = { schemaVersion: 1, ...authorization, changeId: state.changeId, headSha: state.verification.headSha,
       verificationRound: state.verification.round, recordedAt: now(clock) };
+    assertStateVerifierCapacity(root, state, { authorizationRecord: record,
+      authorizationRequiredFingerprints: state.verification.humanDecisionRequiredFingerprints });
     const digest = objectDigest(record);
     const verification = { ...state.verification,
       humanDecisionRequiredFingerprints: state.verification.humanDecisionRequiredFingerprints.filter((entry) => entry !== authorization.fingerprint),
@@ -2326,9 +3007,14 @@ export async function finalizeDevelopment({ cwd = process.cwd(), changeId, expec
     if (state.phase !== 'verifying' || !state.verification?.verifierResultDigest) throw new StateError('Development-ready requires a recorded final verifier result', 'INVALID_PHASE');
     const current = assertVerificationHead(root, state, clock, 'Development-ready finalization');
     const timestamp = now(clock);
+    assertRefreshChecklistRepresentable(observation);
     const { classification, next: refreshedState } = deriveSourceRefreshTransition(state, {
       previousObservation, observation, timestamp,
     });
+    if (classification === 'unreviewed-material') {
+      assertStateVerifierCapacity(root, state, { sourceObservation: observation,
+        verificationRound: nextVerificationRound(root, state), resetsVerification: true });
+    }
     const full = observation.fullDigest ?? observation.digest ?? observation.sourceDigest ?? objectDigest(observation);
     const material = observation.materialDigest ?? full; const progress = observation.progressDigest ?? full;
     const observationPath = `source/observations/${String(state.revision + 1).padStart(8, '0')}.json`;
@@ -2376,6 +3062,7 @@ export function rejectTask({ cwd = process.cwd(), changeId, taskId, reason, expe
       const current = gitObservation(root, clock);
       const requiredHead = state.execution.integrationIntent?.taskId === taskId ? state.execution.integrationIntent.centralBaseSha : state.git.headSha;
       if (!current.clean || current.headSha !== requiredHead || current.branch !== state.git.branch || current.branch === '(detached)') throw new StateError('Rejecting work requires the exact clean owning branch at the pre-conflict base', 'CENTRAL_GIT_MISMATCH');
+      assertStateVerifierCapacity(root, state, { rejectedTaskId: taskId });
       // Persisting an integration intent is allowed only when blockers are the
       // exact receipt-backed task blockers, then deliberately clears the
       // mutable blocker list. Rejection of that intent owner regenerates those
@@ -2450,6 +3137,23 @@ function deriveSourceRefreshTransition(state, { previousObservation, initialObse
   return { classification, late, next };
 }
 
+function assertRefreshChecklistRepresentable(observation) {
+  for (const item of observation.source?.checklist ?? []) {
+    const fields = [['capturedText', item.text]];
+    if (item.identity?.kind === 'legacy-position') {
+      fields.push(['legacy identity text', item.identity.text ?? item.text]);
+    }
+    for (const [field, value] of fields) {
+      if (typeof value === 'string' && [...value].length > IMPLEMENTATION_PLAN_TEXT_MAX_CODE_POINTS) {
+        throw new StateError(
+          `Source checklist item ${item.checklistItemId ?? item.id ?? 'unknown'} ${field} exceeds the implementation-plan 4000-code-point limit`,
+          'SOURCE_CHECKLIST_UNREPRESENTABLE',
+        );
+      }
+    }
+  }
+}
+
 export async function refreshSource({ cwd = process.cwd(), changeId, expectedRevision, sourceAdapter, clock, crashStep, lockOptions }) {
   const root = repositoryRoot(cwd);
   const selected = selectedChangeId(root, changeId);
@@ -2490,10 +3194,15 @@ export async function refreshSource({ cwd = process.cwd(), changeId, expectedRev
         late ? 'VERIFICATION_HEAD_MISMATCH' : 'PLANNING_SNAPSHOT_MISMATCH');
     }
     const timestamp = now(clock);
+    assertRefreshChecklistRepresentable(observation);
     const observationPath = `source/observations/${String(state.revision + 1).padStart(8, '0')}.json`;
     const planningBaseline = state.plan ? null : readInitialObservation(root, state);
     const { classification, next } = deriveSourceRefreshTransition(state, { previousObservation,
       initialObservation: planningBaseline ?? previousObservation, observation, timestamp });
+    if (state.plan && classification === 'unreviewed-material') {
+      assertStateVerifierCapacity(root, state, { sourceObservation: observation,
+        verificationRound: nextVerificationRound(root, state), resetsVerification: true });
+    }
     return commitTransition({
       cwd: root, previousState: state, nextState: next, type: 'source-refreshed',
       summary: `Source refresh classified ${classification}`, crashStep,
@@ -2555,6 +3264,8 @@ export function recordDecision({ cwd = process.cwd(), changeId, decision, expect
       throw new StateError(late ? 'Late retain-plan requires the exact clean integrated HEAD' : 'retain-plan requires clean HEAD at the Planning SHA',
         late ? 'VERIFICATION_HEAD_MISMATCH' : 'PLANNING_SNAPSHOT_MISMATCH');
     }
+    if (!retainPlan) assertStateVerifierCapacity(root, state, { decisionResolution: decision,
+      verificationRound: nextVerificationRound(root, state), resetsVerification: true });
     const timestamp = now(clock);
     const record = {
       schemaVersion: 1, ...decision, changeId: state.changeId,
@@ -2716,11 +3427,6 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
         })()));
     }
     if (errors.length > 0) throw new StateError(`Amended plan is not ready:\n- ${errors.join('\n- ')}`, 'PLAN_NOT_READY');
-    const originalPlan = verifyReceipt(join(changeDirectory(root, state.changeId), 'plan', 'plan.json'), 'accepted plan').value;
-    const retainedPackets = state.schemaVersion === 2 ? state.execution.tasks
-      .filter((task) => task.binding > 0 && task.status !== 'rejected')
-      .map((task) => verifyReceipt(implementationTaskPacketPath(root, state.changeId, task.id, task.binding),
-        `authoritative task packet ${task.id}`).value) : [];
     if (validationDriven) {
       const newCriteria = resultingPlan.criteria.filter(({ id }) => !prior.criteria.some((entry) => entry.id === id));
       const newTasks = resultingPlan.tasks.filter(({ id }) => !prior.tasks.some((entry) => entry.id === id));
@@ -2820,10 +3526,9 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
     if (state.schemaVersion === 2 && state.execution.tasks.some((task) => !['unbound', 'integrated', 'no-change', 'rejected'].includes(task.status))) {
       throw new StateError('Reject active, accepted, blocked, or failed task evidence before amending the plan', 'EXECUTION_PLAN_IMMUTABLE');
     }
-    preflightVerifierCapacity({ originalPlan, effectivePlan: resultingPlan, packets: retainedPackets,
-      results: verifierCapacityResults(root, state),
-      amendments: verifierCapacityAmendments(root, state, { record, planningEvidence }),
-      featureDirectory: join(root, 'specs', 'features') });
+    assertStateVerifierCapacity(root, state, { effectivePlan: resultingPlan,
+      effectivePlanDigest: newDigest, planningEvidence,
+      amendments: verifierCapacityAmendments(root, state, { record, planningEvidence }) });
     const next = deriveAmendedTransition(state, resultingPlan, currentGit, timestamp, number);
     return commitTransition({
       cwd: root, previousState: state, nextState: next, type: 'plan-amended',

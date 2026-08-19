@@ -155,7 +155,20 @@ SHA:
 }
 ```
 
-A non-retain decision records the initiating Git observation in the next durable state. If that transition is interrupted, recovery requires the same HEAD, branch (including detached state), and cleanliness before completing it. This exception is limited to a semantically valid `decision-recorded` transition whose predecessor is an accepted plan in `awaiting-decision` and whose immutable decision evidence matches that predecessor; an old planning-phase intent or relabeled intent cannot grant it. `retain-plan` recovery remains stricter and requires the clean Planning SHA before execution or the exact clean integrated HEAD after terminal work.
+A material refresh records its new source observation only after the canonical
+projection includes the exact refreshed identity and every changed checklist
+mapping, including complete captured text, plus a viable decision-bound
+criterion, task, amendment, result, integration, and post-amend verification
+lifecycle. The later non-retain decision substitutes its exact decision ID and
+rechecks the same envelope before recording the initiating Git observation in
+the next durable state. If that transition is interrupted, recovery
+requires the same HEAD, branch (including detached state), and cleanliness
+before completing it. This exception is limited to a semantically valid
+`decision-recorded` transition whose predecessor is an accepted plan in
+`awaiting-decision` and whose immutable decision evidence matches that
+predecessor; an old planning-phase intent or relabeled intent cannot grant it.
+`retain-plan` recovery remains stricter and requires the clean Planning SHA
+before execution or the exact clean integrated HEAD after terminal work.
 
 An amendment input records provenance separately from the complete resulting plan passed with `--plan`. Its `delta` must be a nonempty object; `invalidatedEvidence` is a unique string list and may be empty:
 
@@ -179,6 +192,29 @@ the exact final evidence and authority boundary.
 
 ## Exact-HEAD verification and findings
 
+One canonical semantic-evidence composer drives both admission and the final
+`verifier-context`. It fixes item identities, kinds, digests, summaries,
+ordering, UTF-8 chunking, the 500-item ceiling, and the 256-KiB full-envelope
+ceiling. It consumes receipt-valid evidence plus explicit pending overlays and
+uses placeholders only for evidence made inevitable by accepted authority; it
+never truncates, drops, or guesses future prose. Plan acceptance and amendment,
+packet binding, implementation-result acceptance, validation-plan and result
+recording, specialist-plan and result recording, verifier-result recording,
+finding disposition, and repeated-finding authorization all run that same
+projection before writing a sidecar, receipt, transition, event, or state.
+Capacity failure is therefore retryable and leaves durable bytes unchanged.
+Each earlier layer reserves the smallest successful authority already made
+inevitable: accepted tasks include one bindable packet/result shape, bound
+packets substitute their exact ownership and validation commands while
+reserving the larger direct-rejection replacement branch, and implemented
+results retain that branch through integration-conflict recovery. Validation
+plans reserve both the maximum deterministic command-result record and the
+failed-result remediation amendment. Release-aware plans likewise reserve a
+protected-ref release record before capture. Remediation reservations use
+bounded canonical row envelopes and exact known IDs, checklist text, and
+invalidated-evidence paths, so their serialized bytes and UTF-8 chunks dominate
+the smallest truthful follow-on authority rather than a short generic label.
+
 After `finalize-integration`, `validation-plan` derives one receipt-protected
 plan from terminal packet, result, provenance, and integration identities at
 the current clean HEAD. Its command union is parsed before persistence;
@@ -199,6 +235,20 @@ advances directly to `verifying`. The workflow then supplies the generated
 non-delegating `development_integration_verifier`, and records only its raw
 schema-valid result with `verifier-record`.
 
+Plan, packet, worker-result, and specialist-plan admission reserve only their
+known route and result summaries; they do not invent future findings. At each
+`specialist-record` boundary, the exact pending result activates the dynamic
+remaining 100-fingerprint aggregate reservation across still-unrecorded
+reviewers, including schema-minimal identity, summary, evidence, disposition,
+and any actually applicable repeat authorization for each reserved share.
+Later rounds reuse the largest applicable prior same-role identities;
+applicability skips rounds without that reviewer and stops at an intervening
+clean same-role receipt. With two reviewers, compact 50 then 50 records exactly
+100 findings, while a clean first result leaves the schema-v1 maximum of 100 to
+the final reviewer. A 51-finding first result or an over-capacity exact result
+is rejected byte-for-byte before persistence and may be consolidated and
+retried. All reviewers still record before any disposition.
+
 While routed reviewers remain, each accepted specialist result keeps the phase
 at `specialist-review`, even when it contains findings. Recording the final
 routed result advances to `blocked` if any collected specialist finding exists,
@@ -206,13 +256,24 @@ or to `verifying` when all are clean; finding disposition cannot begin before
 that final routed result. Any final-verifier finding moves the lifecycle to
 `blocked`. Every finding receives a stable source-role-qualified fingerprint;
 append a disposition for every exact source finding. Non-actionable
-dispositions may return the state to `integrated` for a new round. Actionable
+dispositions may return the state to `integrated` for a new round only after
+the last disposition proves the complete reset next-round validation and
+routed-review projection can fit. Actionable
 findings remain unresolved until one guarded amendment, triggered by the
 fingerprint, covers every actionable sibling and adds new ordinary remediation
 criteria and task IDs while preserving terminal task definitions. Implement
 and integrate that work, then start a new exact-HEAD round. A semantic finding
 repeated in consecutive applicable rounds requires `finding-authorize` with its
 exact fingerprint, reason, and authorizer before any disposition or amendment.
+Authorization reason and authorizer are bounded to 1024 and 256 UTF-8 bytes,
+respectively, so required authorization evidence can be reserved
+conservatively after JSON escaping and exact text can be rechecked before
+persistence. Finding admission reserves a schema-minimal exact disposition.
+Result admission does not guess a later actionable/non-actionable choice,
+amendment prose, or reset round. Each exact disposition, authorization,
+amendment, and last-disposition next-round transition separately substitutes
+its newly known authority into the canonical projection before persistence and
+fails atomically if it cannot fit.
 
 Every validation, review, disposition, amendment, and finalization transition
 rechecks the clean verification HEAD. An advance or dirty checkout invalidates
