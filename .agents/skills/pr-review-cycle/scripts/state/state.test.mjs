@@ -892,6 +892,45 @@ function durableAcceptanceSnapshot(cwd, taskId) {
   };
 }
 
+function boundWorkerResultFixture(cwd, taskId) {
+  const initial = init(cwd);
+  const proposedTask = task(initial.currentIntegrationHeadSha, {
+    id: taskId, status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [proposedTask] },
+  });
+  const packet = taskPacket(initial.currentIntegrationHeadSha, taskId, {
+    affectedAreas: ['workflow'], command: 'npm run test:pr-review',
+  });
+  const bound = bindPacket(cwd, proposed, packet);
+  git(cwd, ['switch', '-c', `${taskId}-worker`]);
+  const changedPath = `scripts/${taskId}.mjs`;
+  const workerSha = commit(cwd, { [changedPath]: 'export const workerResult = true;\n' },
+    `implement ${taskId}`);
+  git(cwd, ['switch', 'main']);
+  return { bound, packet, result: workerResult(packet, workerSha, [changedPath]) };
+}
+
+function acceptedWorkerStateProjection(state, packet, result) {
+  const validationSummaries = result.validation.map((entry) => {
+    const summary = `${entry.command}: ${entry.result} — ${entry.summary}`;
+    return summary.length <= 1000 ? summary : `${summary.slice(0, 999)}…`;
+  });
+  return {
+    ...state,
+    tasks: state.tasks.map((item) => item.id === packet.taskId ? {
+      ...item,
+      status: 'implemented',
+      workerResultDigest: 'a'.repeat(64),
+      execution: {
+        ...item.execution, workerCommitSha: result.commitSha,
+        validationSummaries, lastError: null,
+      },
+    } : item),
+  };
+}
+
 afterEach(() => {
   while (repositories.length > 0) rmSync(repositories.pop(), { recursive: true, force: true });
 });
@@ -953,6 +992,7 @@ test('worker results are receipt-bound, interruption-safe, immutable, and requir
   }), /interrupt receipt/u);
   assert.equal(existsSync(workerResultReceiptPath(cwd, 17, packet.taskId)), true);
   assert.equal(existsSync(workerResultEnvelopePath(cwd, 17, packet.taskId)), false);
+  const pendingReceipt = readFileSync(workerResultReceiptPath(cwd, 17, packet.taskId), 'utf8');
   const pending = reconcileState({ cwd });
   assert.equal(pending.workerResults[0].status, 'pending-state');
 
@@ -960,6 +1000,8 @@ test('worker results are receipt-bound, interruption-safe, immutable, and requir
     cwd, packet, result, expectedRevision: bound.revision,
     onStep: (step) => { if (step === 'envelope-durable') throw new Error('interrupt envelope'); },
   }), /interrupt envelope/u);
+  assert.equal(readFileSync(workerResultReceiptPath(cwd, 17, packet.taskId), 'utf8'), pendingReceipt,
+    'an exact retry reuses the immutable pending receipt byte-for-byte');
   assert.throws(() => checkpointWorkerResultAcceptance({
     cwd, packet, result, expectedRevision: bound.revision,
     onStep: (step) => { if (step === 'state-checkpointed') throw new Error('interrupt state response'); },
@@ -996,6 +1038,16 @@ test('worker results are receipt-bound, interruption-safe, immutable, and requir
   assert.equal(reconcileState({ cwd }).workerResults[0].status, 'valid');
   assert.equal(integrated.tasks[0].workerResultDigest, accepted.tasks[0].workerResultDigest);
   const envelopePath = workerResultEnvelopePath(cwd, 17, packet.taskId);
+  const receiptPath = workerResultReceiptPath(cwd, 17, packet.taskId);
+  const canonicalReceipt = readFileSync(receiptPath, 'utf8');
+  writeFileSync(receiptPath, `${'0'.repeat(64)}\n`);
+  assert.throws(() => checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: integrated.revision,
+  }), { code: 'INVALID_WORKER_RESULT_EVIDENCE' });
+  assert.equal(reconcileState({ cwd }).workerResults[0].status, 'invalid',
+    'direct receipt tampering is visible to recovery reconciliation');
+  writeFileSync(receiptPath, canonicalReceipt);
+  assert.equal(reconcileState({ cwd }).workerResults[0].status, 'valid');
   const canonicalEnvelope = readFileSync(envelopePath, 'utf8');
   const alteredEnvelope = JSON.parse(canonicalEnvelope);
   alteredEnvelope.result.resolutionSummary = 'Tampered evidence.';
@@ -1009,6 +1061,126 @@ test('worker results are receipt-bound, interruption-safe, immutable, and requir
   const archived = archiveState({ cwd, abandonmentReason: 'Archive durable worker-result fixture.' });
   assert.equal(readdirSync(join(archived, 'worker-results')).filter((name) => name.endsWith('.json')).length, 1);
   assert.equal(readdirSync(join(archived, 'worker-results')).filter((name) => name.endsWith('.sha256')).length, 1);
+});
+
+test('worker result compacts max-valid validation summaries before durable acceptance', () => {
+  const cwd = repo();
+  const { bound, packet, result } = boundWorkerResultFixture(cwd, 'max-validation-summary');
+  result.validation[0].summary = 'x'.repeat(1000);
+  assert.throws(() => checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: bound.revision,
+    onStep: (step) => { if (step === 'receipt-durable') throw new Error('interrupt max summary receipt'); },
+  }), /interrupt max summary receipt/u);
+  const pendingReceipt = readFileSync(workerResultReceiptPath(cwd, bound.prNumber, packet.taskId), 'utf8');
+  assert.equal(existsSync(workerResultEnvelopePath(cwd, bound.prNumber, packet.taskId)), false);
+  const accepted = checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: bound.revision,
+  });
+  assert.equal(readFileSync(workerResultReceiptPath(cwd, bound.prNumber, packet.taskId), 'utf8'), pendingReceipt,
+    'the max-summary retry reuses its exact pending receipt');
+  const compact = accepted.tasks[0].execution.validationSummaries[0];
+  assert.equal(compact.length, 1000);
+  assert.match(compact, /…$/u);
+  const envelope = JSON.parse(readFileSync(
+    workerResultEnvelopePath(cwd, accepted.prNumber, packet.taskId), 'utf8',
+  ));
+  assert.deepEqual(envelope.result, result,
+    'only compact task state is truncated; the immutable result envelope remains exact');
+  assert.equal(envelope.result.validation[0].summary.length, 1000,
+    'the immutable result envelope retains the complete valid worker summary');
+});
+
+test('derived oversized worker state rejects before any result evidence mutation', () => {
+  const cwd = repo();
+  const { bound, packet, result } = boundWorkerResultFixture(cwd, 'derived-state-capacity');
+  result.validation[0].summary = 'y'.repeat(1000);
+  const persistedShape = (state) => ({
+    ...state, revision: bound.revision + 1, updatedAt: bound.updatedAt,
+  });
+  const bytes = (state) => Buffer.byteLength(`${JSON.stringify(state)}\n`, 'utf8');
+  let padded = { ...bound, decisions: [...bound.decisions] };
+  let index = 0;
+  while (true) {
+    const candidate = { ...padded, decisions: [...padded.decisions, {
+      id: `worker-capacity-${index}`, summary: 'd'.repeat(1000),
+    }] };
+    if (bytes(acceptedWorkerStateProjection(persistedShape(candidate), packet, result))
+        > ACTIVE_STATE_LIMIT_BYTES) break;
+    padded = candidate; index += 1;
+  }
+  let fitting = null;
+  for (let length = 1; length <= 1000; length += 1) {
+    const candidate = { ...padded, decisions: [...padded.decisions, {
+      id: `worker-capacity-${index}`, summary: 'd'.repeat(length),
+    }] };
+    const persisted = persistedShape(candidate);
+    if (bytes(persisted) <= ACTIVE_STATE_LIMIT_BYTES
+        && bytes(acceptedWorkerStateProjection(persisted, packet, result))
+          > ACTIVE_STATE_LIMIT_BYTES) fitting = candidate;
+  }
+  assert.ok(fitting, 'constructed a valid current state whose fully derived acceptance state is oversized');
+  const nearLimit = checkpointState({
+    cwd, expectedRevision: bound.revision, nextState: fitting,
+  });
+  assert.ok(bytes(nearLimit) <= ACTIVE_STATE_LIMIT_BYTES);
+  assert.ok(bytes(acceptedWorkerStateProjection(nearLimit, packet, result))
+    > ACTIVE_STATE_LIMIT_BYTES);
+  const before = durableAcceptanceSnapshot(cwd, packet.taskId);
+  assert.throws(() => checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: nearLimit.revision,
+  }), { code: 'STATE_TOO_LARGE' });
+  assert.deepEqual(durableAcceptanceSnapshot(cwd, packet.taskId), before,
+    'invalid derived state writes no envelope, receipt, state, event, or sidecar bytes');
+});
+
+test('worker result preflights revision digit growth before result evidence mutation', () => {
+  const cwd = repo();
+  const fixture = boundWorkerResultFixture(cwd, 'revision-digit-capacity');
+  fixture.result.validation[0].summary = 'z'.repeat(1000);
+  let current = fixture.bound;
+  while (current.revision < 8) {
+    current = checkpointState({ cwd, expectedRevision: current.revision, nextState: current });
+  }
+  assert.equal(current.revision, 8);
+  const bytes = (state) => Buffer.byteLength(`${JSON.stringify(state)}\n`, 'utf8');
+  const revisionNine = (state) => ({ ...state, revision: 9, updatedAt: current.updatedAt });
+  const projectedBytes = (state) => bytes(acceptedWorkerStateProjection(
+    revisionNine(state), fixture.packet, fixture.result,
+  ));
+  let padded = { ...current, nextAction: 'x', decisions: [...current.decisions] };
+  let index = 0;
+  while (true) {
+    const candidate = { ...padded, decisions: [...padded.decisions, {
+      id: `revision-capacity-${index}`, summary: 'r'.repeat(1000),
+    }] };
+    if (projectedBytes(candidate) > ACTIVE_STATE_LIMIT_BYTES) break;
+    padded = candidate; index += 1;
+  }
+  let remaining = ACTIVE_STATE_LIMIT_BYTES - projectedBytes(padded);
+  const nextActionGrowth = Math.min(999, remaining);
+  padded = { ...padded, nextAction: 'x'.repeat(1 + nextActionGrowth) };
+  remaining -= nextActionGrowth;
+  if (remaining > 0) {
+    const lastDecision = padded.decisions.at(-1);
+    assert.ok(lastDecision.id.length + remaining <= 128);
+    padded = { ...padded, decisions: padded.decisions.map((decision) =>
+      decision === lastDecision ? { ...decision, id: `${decision.id}${'x'.repeat(remaining)}` } : decision) };
+  }
+  assert.equal(projectedBytes(padded), ACTIVE_STATE_LIMIT_BYTES,
+    'constructed an exact 64-KiB acceptance state at revision 9');
+  const nearLimit = checkpointState({ cwd, expectedRevision: current.revision, nextState: padded });
+  assert.equal(nearLimit.revision, 9);
+  const revisionNineAcceptance = acceptedWorkerStateProjection(
+    nearLimit, fixture.packet, fixture.result,
+  );
+  assert.equal(bytes(revisionNineAcceptance), ACTIVE_STATE_LIMIT_BYTES);
+  assert.equal(bytes({ ...revisionNineAcceptance, revision: 10 }), ACTIVE_STATE_LIMIT_BYTES + 1);
+  const before = durableAcceptanceSnapshot(cwd, fixture.packet.taskId);
+  assert.throws(() => checkpointWorkerResultAcceptance({
+    cwd, packet: fixture.packet, result: fixture.result, expectedRevision: nearLimit.revision,
+  }), { code: 'STATE_TOO_LARGE' });
+  assert.deepEqual(durableAcceptanceSnapshot(cwd, fixture.packet.taskId), before,
+    'revision-width rejection writes no envelope, receipt, state, event, or sidecar bytes');
 });
 
 test('dependent worker result accepts divergent reviewed descendants and integrates exact patch', () => {

@@ -3887,7 +3887,6 @@ function checkpointWorkerResultEvidence({
       assertOrdinaryWorkerResultAuthority(current, packet, result);
     }
   }
-  persistWorkerResultEvidence(cwd, current, task, envelope, onStep);
   const nextTask = backfill ? { ...task, workerResultDigest: envelope.resultDigest } : {
     ...task,
     status: 'implemented',
@@ -3895,7 +3894,10 @@ function checkpointWorkerResultEvidence({
     execution: {
       ...task.execution,
       workerCommitSha: result.commitSha,
-      validationSummaries: result.validation.map((entry) => `${entry.command}: ${entry.result} — ${entry.summary}`),
+      validationSummaries: result.validation.map((entry) => truncate(
+        `${entry.command}: ${entry.result} — ${entry.summary}`,
+        1000,
+      )),
       lastError: null,
     },
   };
@@ -3903,6 +3905,8 @@ function checkpointWorkerResultEvidence({
     ...current,
     tasks: current.tasks.map((candidate) => candidate.id === task.id ? nextTask : candidate),
   };
+  validateStateForWrite({ ...nextState, revision: current.revision + 1 });
+  persistWorkerResultEvidence(cwd, current, task, envelope, onStep);
   const updated = checkpointStateUnlocked({
     cwd, selectedPr, nextState, expectedRevision: current.revision,
     event: event ?? {
