@@ -377,12 +377,12 @@ function taskPacket(head, taskId, {
   affectedAreas = ['api'], command = 'npm run check:api',
   specialization = affectedAreas.includes('workflow') || affectedAreas.includes('documentation') ? 'ops-workflow'
     : affectedAreas.includes('shared') ? 'contracts' : affectedAreas.includes('web') ? 'web' : 'api',
-  riskTags = [],
+  riskTags = [], dependencies = [],
 } = {}) {
   return {
     schemaVersion: 3, taskId, reviewedHeadSha: head, specialization, riskTags,
     finding: `Finding for ${taskId}.`, evidence: 'Review evidence.',
-    affectedAreas, decisionIds: [], allowedPaths: ['scripts/**'], forbiddenPaths: [], dependencies: [],
+    affectedAreas, decisionIds: [], allowedPaths: ['scripts/**'], forbiddenPaths: [], dependencies,
     acceptanceCriteria: ['The targeted behavior is verified.'],
     requiredValidation: {
       unit: [{ command, reason: 'Direct targeted check.' }],
@@ -667,6 +667,77 @@ function canonicalBoundIntegratedTask(cwd, taskId = 'canonical-ancestry') {
   return { packet, reviewedHead: reviewed.reviewedHeadSha, integratedHead, integrated, bound };
 }
 
+function dependentWorkerAcceptanceFixture(cwd, {
+  dependencyReference = 'integrated', workerBase = 'dependency', centralBase = 'dependency',
+} = {}) {
+  const dependencyId = 'result-dependency';
+  const { reviewedHead, integratedHead, integrated } = canonicalBoundIntegratedTask(cwd, dependencyId);
+  const pendingDependency = task(reviewedHead, {
+    id: 'pending-result-dependency', sourceIds: ['local:pending-result-dependency'],
+    fingerprint: 'pending-result-dependency', status: 'proposed', disposition: 'actionable',
+    integratedCommitSha: null, resolutionSummary: null,
+  });
+  const targetId = 'dependent-result';
+  const target = task(reviewedHead, {
+    id: targetId, sourceIds: [`local:${targetId}`], fingerprint: targetId,
+    status: 'proposed', disposition: 'actionable', integratedCommitSha: null, resolutionSummary: null,
+    execution: { dependencies: [], ownedPaths: ['scripts/**'] },
+  });
+  const dependencies = dependencyReference === 'missing' ? ['missing-result-dependency']
+    : dependencyReference === 'pending' ? [pendingDependency.id] : [dependencyId];
+  target.execution.dependencies = dependencies;
+  const proposedTasks = dependencyReference === 'pending'
+    ? [...integrated.tasks, pendingDependency, target] : [...integrated.tasks, target];
+  const proposed = checkpointState({
+    cwd, expectedRevision: integrated.revision,
+    nextState: { ...integrated, tasks: proposedTasks },
+  });
+  const packet = taskPacket(reviewedHead, targetId, {
+    affectedAreas: ['workflow'], command: 'npm run test:pr-review', dependencies,
+  });
+  const bound = bindPacket(cwd, proposed, packet);
+  const running = checkpointState({
+    cwd, expectedRevision: bound.revision,
+    nextState: {
+      ...bound,
+      tasks: bound.tasks.map((item) => item.id === targetId ? { ...item, status: 'running' } : item),
+    },
+  });
+
+  const workerParent = workerBase === 'review' ? reviewedHead : integratedHead;
+  git(cwd, ['switch', '-c', `worker-${workerBase}`, workerParent]);
+  const workerSha = commit(cwd, {
+    'scripts/dependent-result.mjs': 'export const dependentResult = true;\n',
+  }, 'implement dependent result');
+
+  const centralParent = centralBase === 'review' ? reviewedHead : integratedHead;
+  git(cwd, ['switch', '-C', `central-${centralBase}`, centralParent]);
+  const centralSha = commit(cwd, {
+    'scripts/independent-sibling.mjs': 'export const independentSibling = true;\n',
+  }, 'integrate independent sibling');
+  const advanced = checkpointGitMetadata({ cwd }).state;
+  const changedPaths = git(cwd, [
+    'diff', '--name-only', '--no-renames', reviewedHead, workerSha, '--',
+  ]).split('\n').filter(Boolean);
+  return {
+    packet, result: workerResult(packet, workerSha, changedPaths), workerSha, centralSha,
+    reviewedHead, integratedHead, advanced,
+  };
+}
+
+function durableAcceptanceSnapshot(cwd, taskId) {
+  const directory = join(stateDirectory(cwd, 17), 'worker-results');
+  return {
+    state: readFileSync(statePath(cwd, 17), 'utf8'),
+    events: readFileSync(join(stateDirectory(cwd, 17), 'events.ndjson'), 'utf8'),
+    inventory: existsSync(directory) ? readdirSync(directory).sort() : [],
+    envelope: existsSync(workerResultEnvelopePath(cwd, 17, taskId))
+      ? readFileSync(workerResultEnvelopePath(cwd, 17, taskId), 'utf8') : null,
+    receipt: existsSync(workerResultReceiptPath(cwd, 17, taskId))
+      ? readFileSync(workerResultReceiptPath(cwd, 17, taskId), 'utf8') : null,
+  };
+}
+
 afterEach(() => {
   while (repositories.length > 0) rmSync(repositories.pop(), { recursive: true, force: true });
 });
@@ -784,6 +855,134 @@ test('worker results are receipt-bound, interruption-safe, immutable, and requir
   const archived = archiveState({ cwd, abandonmentReason: 'Archive durable worker-result fixture.' });
   assert.equal(readdirSync(join(archived, 'worker-results')).filter((name) => name.endsWith('.json')).length, 1);
   assert.equal(readdirSync(join(archived, 'worker-results')).filter((name) => name.endsWith('.sha256')).length, 1);
+});
+
+test('dependent worker result accepts divergent reviewed descendants and integrates exact patch', () => {
+  const cwd = repo();
+  const { packet, result, workerSha, centralSha, advanced } = dependentWorkerAcceptanceFixture(cwd);
+  assert.notEqual(workerSha, centralSha);
+  assert.equal(spawnSync('git', ['merge-base', '--is-ancestor', workerSha, centralSha], { cwd }).status, 1);
+  assert.equal(spawnSync('git', ['merge-base', '--is-ancestor', centralSha, workerSha], { cwd }).status, 1);
+
+  const staleSnapshot = durableAcceptanceSnapshot(cwd, packet.taskId);
+  assert.throws(() => checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: advanced.revision - 1,
+  }), { code: 'STATE_REVISION_CONFLICT' });
+  assert.deepEqual(durableAcceptanceSnapshot(cwd, packet.taskId), staleSnapshot);
+
+  const eventPath = join(stateDirectory(cwd, 17), 'events.ndjson');
+  const priorEventCount = readFileSync(eventPath, 'utf8').trim().split('\n').length;
+  const accepted = checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: advanced.revision,
+  });
+  assert.equal(accepted.revision, advanced.revision + 1);
+  assert.equal(accepted.tasks.find((item) => item.id === packet.taskId).status, 'implemented');
+  const envelope = JSON.parse(readFileSync(workerResultEnvelopePath(cwd, 17, packet.taskId), 'utf8'));
+  const receipt = readFileSync(workerResultReceiptPath(cwd, 17, packet.taskId), 'utf8').trim();
+  assert.deepEqual(envelope.result, result);
+  assert.equal(envelope.packetDigest, taskPacketDigest(packet));
+  assert.equal(envelope.resultDigest, accepted.tasks.find((item) => item.id === packet.taskId).workerResultDigest);
+  assert.match(receipt, /^[0-9a-f]{64}$/u);
+  assert.equal(readFileSync(eventPath, 'utf8').trim().split('\n').length, priorEventCount + 1);
+  assert.equal(reconcileState({ cwd }).workerResults.find((entry) => entry.taskId === packet.taskId).status, 'valid');
+
+  const acceptedSnapshot = durableAcceptanceSnapshot(cwd, packet.taskId);
+  assert.equal(checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: accepted.revision,
+  }).revision, accepted.revision);
+  assert.deepEqual(durableAcceptanceSnapshot(cwd, packet.taskId), acceptedSnapshot);
+  assert.throws(() => checkpointWorkerResultAcceptance({
+    cwd, packet, result: { ...result, resolutionSummary: 'Altered result evidence.' },
+    expectedRevision: accepted.revision,
+  }), { code: 'WORKER_RESULT_CONFLICT' });
+  assert.deepEqual(durableAcceptanceSnapshot(cwd, packet.taskId), acceptedSnapshot);
+
+  git(cwd, ['cherry-pick', workerSha]);
+  const integratedCommitSha = git(cwd, ['rev-parse', 'HEAD']);
+  const advancedAfterPick = checkpointGitMetadata({ cwd }).state;
+  const integrated = checkpointState({
+    cwd, expectedRevision: advancedAfterPick.revision,
+    nextState: {
+      ...advancedAfterPick,
+      tasks: advancedAfterPick.tasks.map((item) => {
+        if (item.id !== packet.taskId) return item;
+        const { execution: _execution, ...withoutExecution } = item;
+        return {
+          ...withoutExecution, status: 'integrated', integratedCommitSha,
+          resolutionSummary: 'Integrated exact accepted worker patch.',
+        };
+      }),
+    },
+  });
+  assert.equal(integrated.tasks.find((item) => item.id === packet.taskId).integratedCommitSha, integratedCommitSha);
+});
+
+test('actionable integration requires an ancestral central commit with the accepted worker patch', () => {
+  const cwd = repo();
+  const fixture = dependentWorkerAcceptanceFixture(cwd);
+  const accepted = checkpointWorkerResultAcceptance({
+    cwd, packet: fixture.packet, result: fixture.result,
+    expectedRevision: fixture.advanced.revision,
+  });
+  const tree = git(cwd, ['rev-parse', `${fixture.centralSha}^{tree}`]);
+  const unrelatedSha = git(cwd, ['commit-tree', tree, '-m', 'unrelated integration candidate']);
+  const integrationState = (integratedCommitSha) => ({
+    ...accepted,
+    tasks: accepted.tasks.map((item) => {
+      if (item.id !== fixture.packet.taskId) return item;
+      const { execution: _execution, ...withoutExecution } = item;
+      return {
+        ...withoutExecution, status: 'integrated', integratedCommitSha,
+        resolutionSummary: 'Attempted central integration.',
+      };
+    }),
+  });
+  for (const integratedCommitSha of ['f'.repeat(40), unrelatedSha]) {
+    const before = durableAcceptanceSnapshot(cwd, fixture.packet.taskId);
+    assert.throws(() => checkpointState({
+      cwd, expectedRevision: accepted.revision,
+      nextState: integrationState(integratedCommitSha),
+    }), { code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH' });
+    assert.deepEqual(durableAcceptanceSnapshot(cwd, fixture.packet.taskId), before);
+  }
+  const beforeMismatch = durableAcceptanceSnapshot(cwd, fixture.packet.taskId);
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: accepted.revision,
+    nextState: integrationState(fixture.centralSha),
+  }), { code: 'WORKER_RESULT_PATCH_MISMATCH' });
+  assert.deepEqual(durableAcceptanceSnapshot(cwd, fixture.packet.taskId), beforeMismatch);
+});
+
+test('dependent worker result rejects missing, nonterminal, or absent dependency ancestry without mutation', () => {
+  for (const scenario of [
+    { dependencyReference: 'missing', code: 'WORKER_RESULT_DEPENDENCY_NOT_READY' },
+    { dependencyReference: 'pending', code: 'WORKER_RESULT_DEPENDENCY_NOT_READY' },
+    { centralBase: 'review', code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH' },
+    { workerBase: 'review', code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH' },
+  ]) {
+    const cwd = repo();
+    const fixture = dependentWorkerAcceptanceFixture(cwd, scenario);
+    const before = durableAcceptanceSnapshot(cwd, fixture.packet.taskId);
+    assert.throws(() => checkpointWorkerResultAcceptance({
+      cwd, packet: fixture.packet, result: fixture.result,
+      expectedRevision: fixture.advanced.revision,
+    }), { code: scenario.code });
+    assert.deepEqual(durableAcceptanceSnapshot(cwd, fixture.packet.taskId), before);
+  }
+});
+
+test('dependent worker result rejects a non-descendant central authority without mutation', () => {
+  const cwd = repo();
+  const fixture = dependentWorkerAcceptanceFixture(cwd);
+  const tree = git(cwd, ['rev-parse', `${fixture.centralSha}^{tree}`]);
+  const unrelatedHead = git(cwd, ['commit-tree', tree, '-m', 'unrelated result authority']);
+  git(cwd, ['switch', '--detach', unrelatedHead]);
+  const unrelated = checkpointGitMetadata({ cwd }).state;
+  const before = durableAcceptanceSnapshot(cwd, fixture.packet.taskId);
+  assert.throws(() => checkpointWorkerResultAcceptance({
+    cwd, packet: fixture.packet, result: fixture.result, expectedRevision: unrelated.revision,
+  }), { code: 'WORKER_RESULT_ACCEPTANCE_AUTHORITY_MISMATCH' });
+  assert.deepEqual(durableAcceptanceSnapshot(cwd, fixture.packet.taskId), before);
 });
 
 test('new and unbound actionable tasks cannot pre-seed or bypass result authority', () => {

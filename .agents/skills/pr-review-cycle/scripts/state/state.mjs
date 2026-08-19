@@ -389,6 +389,37 @@ function assertIntegratedPatchEquivalent(cwd, state, task, result) {
   }
 }
 
+function assertOrdinaryWorkerResultAuthority(state, packet, result) {
+  const integrationCwd = state.integrationWorktree;
+  const isAncestor = (ancestor, descendant) => runGit(
+    ['merge-base', '--is-ancestor', ancestor, descendant],
+    { cwd: integrationCwd, allowFailure: true },
+  ).status === 0;
+  if (!isAncestor(packet.reviewedHeadSha, state.currentIntegrationHeadSha)) {
+    throw new StateError(
+      'Current integration HEAD does not descend from the task packet reviewed HEAD',
+      'WORKER_RESULT_ACCEPTANCE_AUTHORITY_MISMATCH',
+    );
+  }
+  for (const dependencyId of packet.dependencies) {
+    const dependency = state.tasks.find((candidate) => candidate.id === dependencyId);
+    if (!dependency || !['integrated', 'completed'].includes(dependency.status)
+        || typeof dependency.integratedCommitSha !== 'string') {
+      throw new StateError(
+        `Task ${packet.taskId} dependency ${dependencyId} is not durably integrated`,
+        'WORKER_RESULT_DEPENDENCY_NOT_READY',
+      );
+    }
+    if (!isAncestor(dependency.integratedCommitSha, state.currentIntegrationHeadSha)
+        || !isAncestor(dependency.integratedCommitSha, result.commitSha)) {
+      throw new StateError(
+        `Task ${packet.taskId} dependency ${dependencyId} is absent from required Git ancestry`,
+        'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+      );
+    }
+  }
+}
+
 function buildWorkerResultEnvelope(state, packet, result) {
   return canonicalJson({
     schemaVersion: 1,
@@ -2997,7 +3028,10 @@ function assertCheckpointProvenance(current, next, authorization, cwd) {
       }
       const packet = readBoundTaskPacketSidecar(cwd, current, task);
       const resultTask = guardedKind === 'worker-result-acceptance' ? updated : task;
-      readAcceptedWorkerResult(cwd, current, resultTask, packet);
+      const acceptedResult = readAcceptedWorkerResult(cwd, current, resultTask, packet);
+      if (entersIntegrated) {
+        assertIntegratedPatchEquivalent(cwd, current, updated, acceptedResult.result);
+      }
     }
     if (task.integratedCommitSha !== null) {
       assertImmutableValue(task.integratedCommitSha, updated.integratedCommitSha, `task ${task.id} integratedCommitSha`);
@@ -3740,6 +3774,17 @@ function checkpointWorkerResultEvidence({
   if (result.status !== 'implemented') {
     throw new StateError('Only an implemented worker result can be durably accepted', 'INVALID_WORKER_RESULT');
   }
+  const envelope = buildWorkerResultEnvelope(current, packet, result);
+  if (typeof task.workerResultDigest === 'string') {
+    if (backfill && !['integrated', 'completed'].includes(task.status)) {
+      throw new StateError('Worker-result backfill requires an Integrated native schema-v3 task', 'WORKER_RESULT_BACKFILL_NOT_ALLOWED');
+    }
+    const existing = readAcceptedWorkerResult(cwd, current, task, packet);
+    if (canonicalSerializedJson(existing) !== canonicalSerializedJson(envelope)) {
+      throw new StateError(`Task ${task.id} already has different accepted worker evidence`, 'WORKER_RESULT_CONFLICT');
+    }
+    return current;
+  }
   if (backfill) {
     if (!['integrated', 'completed'].includes(task.status)) {
       throw new StateError('Worker-result backfill requires an Integrated native schema-v3 task', 'WORKER_RESULT_BACKFILL_NOT_ALLOWED');
@@ -3765,23 +3810,11 @@ function checkpointWorkerResultEvidence({
     if (!['proposed', 'queued', 'running', 'implemented'].includes(task.status)) {
       throw new StateError(`Task ${task.id} cannot accept a worker result while ${task.status}`, 'WORKER_RESULT_ACCEPTANCE_NOT_ALLOWED');
     }
-    if (current.currentIntegrationHeadSha !== packet.reviewedHeadSha) {
-      if (task.status !== 'implemented') {
-        throw new StateError(
-          'Post-cherry-pick result acceptance requires the task to already be implemented',
-          'WORKER_RESULT_ACCEPTANCE_NOT_ALLOWED',
-        );
-      }
+    if (task.status === 'implemented') {
       assertIntegratedPatchEquivalent(cwd, current, task, result);
+    } else {
+      assertOrdinaryWorkerResultAuthority(current, packet, result);
     }
-  }
-  const envelope = buildWorkerResultEnvelope(current, packet, result);
-  if (typeof task.workerResultDigest === 'string') {
-    const existing = readAcceptedWorkerResult(cwd, current, task, packet);
-    if (canonicalSerializedJson(existing) !== canonicalSerializedJson(envelope)) {
-      throw new StateError(`Task ${task.id} already has different accepted worker evidence`, 'WORKER_RESULT_CONFLICT');
-    }
-    return current;
   }
   persistWorkerResultEvidence(cwd, current, task, envelope, onStep);
   const nextTask = backfill ? { ...task, workerResultDigest: envelope.resultDigest } : {
