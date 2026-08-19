@@ -571,8 +571,10 @@ function specialistPlanningErrors(input) {
   if (input.schemaVersion !== 1) errors.push('input.schemaVersion must be 1');
   if (!['pre-bind', 'post-integration'].includes(input.stage)) errors.push('input.stage is invalid');
   if (typeof input.headSha !== 'string' || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(input.headSha)) errors.push('input.headSha is invalid');
-  if (!Array.isArray(input.tasks) || input.tasks.length === 0) errors.push('input.tasks must not be empty');
-  else for (const [index, entry] of input.tasks.entries()) {
+  if (!Array.isArray(input.tasks)
+      || (input.stage === 'pre-bind' && input.tasks.length === 0)) {
+    errors.push('input.tasks must be a non-empty array for pre-bind planning');
+  } else for (const [index, entry] of input.tasks.entries()) {
     const prefix = `input.tasks[${index}]`;
     const entryFields = input.stage === 'pre-bind' ? ['taskPacket', 'planningSignals'] : ['taskPacket'];
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) { errors.push(`${prefix} must be an object`); continue; }
@@ -705,8 +707,10 @@ function validateSpecialistBundle(bundle, state) {
     errors.push('bundle.headSha does not match the reviewed commit');
   }
   if (bundle.stateRevision !== state.revision) errors.push('bundle.stateRevision is stale');
-  if (!Array.isArray(bundle.tasks) || bundle.tasks.length === 0) errors.push('bundle.tasks must not be empty');
-  else {
+  if (!Array.isArray(bundle.tasks)
+      || (bundle.stage === 'pre-bind' && bundle.tasks.length === 0)) {
+    errors.push('bundle.tasks must be a non-empty array for pre-bind planning');
+  } else {
     if (bundle.stage === 'pre-bind' && bundle.tasks.length !== 1) {
       errors.push('pre-bind bundles must contain exactly one task');
     }
@@ -763,8 +767,13 @@ function validateSpecialistBundle(bundle, state) {
   if (!Array.isArray(bundle.records)) errors.push('bundle.records must be an array');
   else {
     const reviewers = [];
-    const required = new Set(bundle.tasks?.flatMap((task) =>
-      normalizedRequiredSpecialistIds(task.route, { stage: bundle.stage })) ?? []);
+    let required = new Set();
+    try {
+      required = new Set(bundle.tasks?.flatMap((task) =>
+        normalizedRequiredSpecialistIds(task.route, { stage: bundle.stage })) ?? []);
+    } catch (error) {
+      errors.push(`bundle task routes are invalid: ${error.message}`);
+    }
     for (const record of bundle.records) {
       if (!record || typeof record !== 'object' || Array.isArray(record)) {
         errors.push('bundle record must be an object');
@@ -1108,8 +1117,44 @@ function loadBoundTaskPacketEntries(cwd, state, { statuses } = {}) {
   });
 }
 
+const TASKLESS_VERIFIER_DISPOSITIONS = new Set([
+  'duplicate', 'already-fixed', 'stale', 'invalid', 'policy-conflict', 'out-of-scope',
+]);
+
+function tasklessVerifierOutcomes(state) {
+  const ineligible = state.tasks.find((task) => task.disposition === 'actionable'
+    || !TASKLESS_VERIFIER_DISPOSITIONS.has(task.disposition)
+    || !['not-applicable', 'completed'].includes(task.status));
+  if (ineligible) {
+    throw new StateError(
+      `Empty post-integration planning is not allowed while task ${ineligible.id} is actionable, nonterminal, or human-gated`,
+      'SPECIALIST_PLAN_TASK_MISMATCH',
+    );
+  }
+  return [...state.tasks].sort((a, b) => a.id.localeCompare(b.id)).map((task) => canonicalJson({
+    taskId: task.id,
+    sourceIds: task.sourceIds,
+    sourceType: task.sourceType,
+    fingerprint: task.fingerprint,
+    summary: task.summary,
+    severity: task.severity,
+    disposition: task.disposition,
+    status: task.status,
+    integratedCommitSha: task.integratedCommitSha,
+    resolutionSummary: task.resolutionSummary,
+  }));
+}
+
 function assertPostIntegrationBundleCoverage(cwd, state, bundle) {
   if (bundle.stage !== 'post-integration') return null;
+  if (state.validationStatus.status !== 'passed'
+      || state.validationStatus.headSha !== state.currentIntegrationHeadSha) {
+    throw new StateError(
+      'Post-integration specialist context requires passed exact-HEAD targeted validation',
+      'SPECIALIST_VALIDATION_REQUIRED',
+    );
+  }
+  const taskOutcomes = bundle.tasks.length === 0 ? tasklessVerifierOutcomes(state) : [];
   const entries = loadBoundTaskPacketEntries(cwd, state, { statuses: ['integrated'] })
     .sort((a, b) => a.packet.taskId.localeCompare(b.packet.taskId));
   const expectedTasks = entries.map(({ packet, provenance }) => ({
@@ -1128,7 +1173,7 @@ function assertPostIntegrationBundleCoverage(cwd, state, bundle) {
       'SPECIALIST_PLAN_TASK_MISMATCH',
     );
   }
-  return { entries, packets: entries.map(({ packet }) => packet), expectedTasks };
+  return { entries, packets: entries.map(({ packet }) => packet), expectedTasks, taskOutcomes };
 }
 
 export function planSpecialists({ cwd = process.cwd(), prNumber, input, expectedRevision, now = utcNow } = {}) {
@@ -1170,6 +1215,7 @@ export function planSpecialists({ cwd = process.cwd(), prNumber, input, expected
       boundEntries = loadBoundTaskPacketEntries(cwd, state, { statuses: ['integrated'] })
         .sort((a, b) => a.packet.taskId.localeCompare(b.packet.taskId));
       packets = boundEntries.map(({ packet }) => packet);
+      if (input.tasks.length === 0) tasklessVerifierOutcomes(state);
       const supplied = [...input.tasks].map((entry) => entry.taskPacket).sort((a, b) => a.taskId.localeCompare(b.taskId));
       if (canonicalSerializedJson(supplied) !== canonicalSerializedJson(packets)) {
         throw new StateError('Post-integration planning input must exactly cover durable Integrated packet sidecars', 'SPECIALIST_PLAN_TASK_MISMATCH');
@@ -1374,7 +1420,9 @@ export function specialistContext({ cwd = process.cwd(), prNumber } = {}) {
   }
   const bundle = readSpecialistBundle(cwd, state);
   if (bundle.stage !== 'post-integration') throw new StateError('Current specialist bundle is not a post-integration review plan', 'SPECIALIST_EVIDENCE_MISSING');
-  const { entries, packets, expectedTasks } = assertPostIntegrationBundleCoverage(cwd, state, bundle);
+  const {
+    entries, packets, expectedTasks, taskOutcomes,
+  } = assertPostIntegrationBundleCoverage(cwd, state, bundle);
   const required = [...new Set(bundle.tasks.flatMap((task) =>
     normalizedRequiredSpecialistIds(task.route, { stage: 'post-integration' })))].sort();
   const records = new Map(bundle.records.map((record) => [record.reviewerId, record]));
@@ -1437,6 +1485,7 @@ export function specialistContext({ cwd = process.cwd(), prNumber } = {}) {
       && findings.length === 0 && invalidWorkerResults.length === 0,
     headSha: state.currentIntegrationHeadSha,
     stateRevision: state.revision,
+    taskOutcomes,
     packets: packets.map((packet) => canonicalJson(packet)),
     workerResultEvidence,
     workerResults,

@@ -667,6 +667,43 @@ function canonicalBoundIntegratedTask(cwd, taskId = 'canonical-ancestry') {
   return { packet, reviewedHead: reviewed.reviewedHeadSha, integratedHead, integrated, bound };
 }
 
+function tasklessVerifierFixture(cwd, definitions = [{
+  id: 'already-fixed-thread', disposition: 'already-fixed', status: 'not-applicable',
+}], { validate = true } = {}) {
+  const initial = init(cwd);
+  const proposedTasks = definitions.map(({ id, disposition }) => task(initial.currentIntegrationHeadSha, {
+    id, sourceIds: [`thread:${id}`], sourceType: 'github-thread', fingerprint: `fingerprint-${id}`,
+    summary: `Retained outcome for ${id}.`, disposition, status: 'proposed',
+    integratedCommitSha: null, resolutionSummary: null,
+  }));
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: proposedTasks },
+  });
+  const transitionedTasks = proposed.tasks.map((item) => {
+    const definition = definitions.find(({ id }) => id === item.id);
+    if (definition.status === 'proposed') return item;
+    if (definition.status === 'failed') {
+      return {
+        ...item, status: 'failed',
+        execution: { ...item.execution, lastError: 'Focused worker failed.' },
+      };
+    }
+    const { execution: _execution, ...withoutExecution } = item;
+    return {
+      ...withoutExecution, status: definition.status, integratedCommitSha: null,
+      resolutionSummary: `Evidence retained for ${item.id}.`,
+    };
+  });
+  const transitioned = definitions.every(({ status }) => status === 'proposed') ? proposed : checkpointState({
+    cwd, expectedRevision: proposed.revision,
+    nextState: { ...proposed, tasks: transitionedTasks },
+  });
+  return {
+    state: transitioned,
+    validated: validate ? checkpointSyntheticTargetedValidation(cwd, transitioned) : transitioned,
+  };
+}
+
 function dependentWorkerAcceptanceFixture(cwd, {
   dependencyReference = 'integrated', workerBase = 'dependency', centralBase = 'dependency',
 } = {}) {
@@ -4594,6 +4631,166 @@ test('archival preserves immutable packet sidecars and specialist bundles', () =
   assert.equal(readdirSync(join(archived, 'task-binding-provenance')).filter((name) => name.endsWith('.sha256')).length, 1);
   assert.equal(readdirSync(join(archived, 'specialist-reviews')).filter((name) => name.endsWith('.json')).length, 2);
   assert.equal(readdirSync(join(archived, 'specialist-reviews')).filter((name) => name.endsWith('.plan.sha256')).length, 2);
+});
+
+test('taskless post-integration planning yields receipt-backed final-verifier context', () => {
+  const cwd = repo();
+  const { validated } = tasklessVerifierFixture(cwd, [
+    { id: 'z-already-fixed', disposition: 'already-fixed', status: 'not-applicable' },
+    { id: 'a-invalid', disposition: 'invalid', status: 'not-applicable' },
+  ]);
+  const input = {
+    schemaVersion: 1, stage: 'post-integration', headSha: validated.currentIntegrationHeadSha, tasks: [],
+  };
+  const stateBefore = readFileSync(statePath(cwd, validated.prNumber), 'utf8');
+  const eventsPath = join(stateDirectory(cwd, validated.prNumber), 'events.ndjson');
+  const eventsBefore = readFileSync(eventsPath, 'utf8');
+  const bundle = planSpecialists({
+    cwd, input, expectedRevision: validated.revision, now: () => AT,
+  });
+  assert.deepEqual(bundle.tasks, []);
+  assert.deepEqual(bundle.records, []);
+  assert.equal(readFileSync(statePath(cwd, validated.prNumber), 'utf8'), stateBefore);
+  assert.equal(readFileSync(eventsPath, 'utf8'), eventsBefore);
+  const bundlePath = specialistReviewBundlePath(
+    cwd, validated.prNumber, validated.currentIntegrationHeadSha, validated.revision,
+  );
+  const receiptPath = specialistPlanReceiptPath(
+    cwd, validated.prNumber, validated.currentIntegrationHeadSha, validated.revision,
+  );
+  assert.equal(existsSync(bundlePath), true);
+  assert.match(readFileSync(receiptPath, 'utf8'), /^[0-9a-f]{64}\n$/u);
+  assert.deepEqual(planSpecialists({
+    cwd, input, expectedRevision: validated.revision, now: () => '2026-08-05T01:00:00Z',
+  }), bundle);
+
+  const context = specialistContext({ cwd });
+  assert.equal(context.status, 'clean');
+  assert.equal(context.readyForIntegrationVerifier, true);
+  assert.deepEqual(context.packets, []);
+  assert.deepEqual(context.routes, []);
+  assert.deepEqual(context.workerResultEvidence, []);
+  assert.deepEqual(context.workerResults, []);
+  assert.deepEqual(context.preBindPlanning, []);
+  assert.deepEqual(context.requiredReviewerIds, []);
+  assert.deepEqual(context.specialistResults, []);
+  assert.deepEqual(context.finalVerification, {
+    verifierId: 'integration_verifier', priority: 'standard',
+  });
+  assert.deepEqual(context.targetedValidation, validated.validationStatus);
+  assert.deepEqual(context.taskOutcomes, [
+    {
+      taskId: 'a-invalid', sourceIds: ['thread:a-invalid'], sourceType: 'github-thread',
+      fingerprint: 'fingerprint-a-invalid', summary: 'Retained outcome for a-invalid.', severity: 'P1',
+      disposition: 'invalid', status: 'not-applicable', integratedCommitSha: null,
+      resolutionSummary: 'Evidence retained for a-invalid.',
+    },
+    {
+      taskId: 'z-already-fixed', sourceIds: ['thread:z-already-fixed'], sourceType: 'github-thread',
+      fingerprint: 'fingerprint-z-already-fixed', summary: 'Retained outcome for z-already-fixed.', severity: 'P1',
+      disposition: 'already-fixed', status: 'not-applicable', integratedCommitSha: null,
+      resolutionSummary: 'Evidence retained for z-already-fixed.',
+    },
+  ]);
+  assert.deepEqual(loadState(cwd).tasks, validated.tasks);
+  assert.equal(readSpecialistStatus({ cwd }).status, 'clean');
+  assert.throws(() => recordSpecialistReview({
+    cwd, expectedRevision: validated.revision, now: () => AT,
+    input: {
+      schemaVersion: 1, planRevision: validated.revision, headSha: validated.currentIntegrationHeadSha,
+      reviewerId: 'security_reviewer', outcome: 'clean', summary: 'No routed review exists.', findings: [],
+    },
+  }), { code: 'SPECIALIST_REVIEWER_MISMATCH' });
+  assert.deepEqual(loadState(cwd).tasks, validated.tasks);
+});
+
+test('taskless specialist planning rejects ineligible states before durable evidence writes', () => {
+  const scenarios = [
+    [{ id: 'actionable-omission', disposition: 'actionable', status: 'proposed' }],
+    [{ id: 'nonterminal-outcome', disposition: 'already-fixed', status: 'proposed' }],
+    [{ id: 'failed-outcome', disposition: 'already-fixed', status: 'failed' }],
+    [{ id: 'human-outcome', disposition: 'needs-human-decision', status: 'not-applicable' }],
+  ];
+  for (const definitions of scenarios) {
+    const cwd = repo();
+    const { validated } = tasklessVerifierFixture(cwd, definitions);
+    const stateBefore = readFileSync(statePath(cwd, validated.prNumber), 'utf8');
+    const eventsPath = join(stateDirectory(cwd, validated.prNumber), 'events.ndjson');
+    const eventsBefore = readFileSync(eventsPath, 'utf8');
+    const bundlePath = specialistReviewBundlePath(
+      cwd, validated.prNumber, validated.currentIntegrationHeadSha, validated.revision,
+    );
+    const receiptPath = specialistPlanReceiptPath(
+      cwd, validated.prNumber, validated.currentIntegrationHeadSha, validated.revision,
+    );
+    assert.throws(() => planSpecialists({
+      cwd, expectedRevision: validated.revision, now: () => AT,
+      input: {
+        schemaVersion: 1, stage: 'post-integration',
+        headSha: validated.currentIntegrationHeadSha, tasks: [],
+      },
+    }), { code: 'SPECIALIST_PLAN_TASK_MISMATCH' });
+    assert.equal(readFileSync(statePath(cwd, validated.prNumber), 'utf8'), stateBefore);
+    assert.equal(readFileSync(eventsPath, 'utf8'), eventsBefore);
+    assert.equal(existsSync(bundlePath), false);
+    assert.equal(existsSync(receiptPath), false);
+  }
+});
+
+test('taskless specialist planning and context fail closed on stale or altered authority', () => {
+  const preBindCwd = repo();
+  const preBind = init(preBindCwd);
+  assert.throws(() => planSpecialists({
+    cwd: preBindCwd, expectedRevision: preBind.revision,
+    input: { schemaVersion: 1, stage: 'pre-bind', headSha: preBind.currentIntegrationHeadSha, tasks: [] },
+  }), { code: 'INVALID_SPECIALIST_PLAN' });
+
+  const missingValidationCwd = repo();
+  const { validated: missingValidation } = tasklessVerifierFixture(missingValidationCwd, undefined, { validate: false });
+  assert.throws(() => planSpecialists({
+    cwd: missingValidationCwd, expectedRevision: missingValidation.revision,
+    input: {
+      schemaVersion: 1, stage: 'post-integration',
+      headSha: missingValidation.currentIntegrationHeadSha, tasks: [],
+    },
+  }), { code: 'SPECIALIST_VALIDATION_REQUIRED' });
+
+  const cwd = repo();
+  const { validated } = tasklessVerifierFixture(cwd);
+  const input = {
+    schemaVersion: 1, stage: 'post-integration', headSha: validated.currentIntegrationHeadSha, tasks: [],
+  };
+  assert.throws(() => planSpecialists({
+    cwd, input, expectedRevision: validated.revision - 1,
+  }), { code: 'STATE_REVISION_CONFLICT' });
+  assert.throws(() => planSpecialists({
+    cwd, expectedRevision: validated.revision,
+    input: { ...input, headSha: 'f'.repeat(40) },
+  }), { code: 'SPECIALIST_PLAN_STALE' });
+  planSpecialists({ cwd, input, expectedRevision: validated.revision, now: () => AT });
+  const bundlePath = specialistReviewBundlePath(
+    cwd, validated.prNumber, validated.currentIntegrationHeadSha, validated.revision,
+  );
+  const receiptPath = specialistPlanReceiptPath(
+    cwd, validated.prNumber, validated.currentIntegrationHeadSha, validated.revision,
+  );
+  const bundle = readFileSync(bundlePath, 'utf8');
+  const receipt = readFileSync(receiptPath, 'utf8');
+  writeFileSync(bundlePath, `${JSON.stringify({ ...JSON.parse(bundle), tasks: [{}] })}\n`);
+  assert.throws(() => specialistContext({ cwd }), { code: 'INVALID_SPECIALIST_REVIEW' });
+  writeFileSync(bundlePath, bundle);
+  writeFileSync(receiptPath, `${'0'.repeat(64)}\n`);
+  assert.throws(() => specialistContext({ cwd }), { code: 'INVALID_SPECIALIST_REVIEW' });
+  writeFileSync(receiptPath, receipt);
+
+  const readme = readFileSync(join(cwd, 'README.md'), 'utf8');
+  writeFileSync(join(cwd, 'README.md'), `${readme}dirty\n`);
+  assert.throws(() => specialistContext({ cwd }), { code: 'SPECIALIST_PLAN_STALE' });
+  writeFileSync(join(cwd, 'README.md'), readme);
+  commit(cwd, { 'scripts/taskless-later.mjs': 'export const later = true;\n' }, 'advance taskless context');
+  assert.throws(() => specialistContext({ cwd }), { code: 'SPECIALIST_PLAN_STALE' });
+  checkpointGitMetadata({ cwd });
+  assert.throws(() => specialistContext({ cwd }), { code: 'SPECIALIST_EVIDENCE_MISSING' });
 });
 
 test('behavior mapping gates binding and exact-head risk evidence feeds only verifier context', () => {

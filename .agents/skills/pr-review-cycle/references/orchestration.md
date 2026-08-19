@@ -239,6 +239,15 @@ interruption. A changed commit, dirty checkout, malformed plan, or incomplete
 task list is an error. After a failed plan, fix the cause and create a fresh
 plan with `validation-plan --replace` rather than substituting a broader check.
 
+When the exact current state has no actionable tasks and every retained finding
+is a terminal, verifier-eligible non-actionable outcome, post-integration
+specialist planning may use an empty task list. This creates the same
+exact-HEAD/revision, receipt-protected final-verification context, including the
+retained task outcomes, without routing reusable reviewers. It still requires a
+clean checkout and passed current-HEAD targeted validation. Pre-bind planning
+never permits an empty task list. Do not fabricate a dummy actionable packet
+solely to obtain integration-verifier context.
+
 | Area | Normal integrated check |
 | --- | --- |
 | API | `npm run check:api` |
