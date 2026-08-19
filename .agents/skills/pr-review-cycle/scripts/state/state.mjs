@@ -1156,8 +1156,9 @@ function assertPostIntegrationBundleCoverage(cwd, state, bundle) {
       'SPECIALIST_VALIDATION_REQUIRED',
     );
   }
-  const entries = loadBoundTaskPacketEntries(cwd, state, { statuses: ['integrated'] })
+  const entries = loadBoundTaskPacketEntries(cwd, state, { statuses: ['integrated', 'completed'] })
     .sort((a, b) => a.packet.taskId.localeCompare(b.packet.taskId));
+  entries.forEach(({ packet }) => assertBoundTaskPacket(state, packet, cwd));
   const taskOutcomes = uncoveredVerifierOutcomes(state, entries);
   const expectedTasks = entries.map(({ packet, provenance }) => ({
     taskId: packet.taskId,
@@ -1171,7 +1172,7 @@ function assertPostIntegrationBundleCoverage(cwd, state, bundle) {
   const actualTasks = [...bundle.tasks].sort((a, b) => a.taskId.localeCompare(b.taskId));
   if (canonicalSerializedJson(actualTasks) !== canonicalSerializedJson(expectedTasks)) {
     throw new StateError(
-      'Specialist bundle does not cover current Integrated packet sidecars',
+      'Specialist bundle does not cover current Integrated or Resolved packet sidecars',
       'SPECIALIST_PLAN_TASK_MISMATCH',
     );
   }
@@ -1214,13 +1215,14 @@ export function planSpecialists({ cwd = process.cwd(), prNumber, input, expected
       if (state.validationStatus.status !== 'passed' || state.validationStatus.headSha !== state.currentIntegrationHeadSha) {
         throw new StateError('Post-integration specialist planning requires passed exact-HEAD targeted validation', 'SPECIALIST_VALIDATION_REQUIRED');
       }
-      boundEntries = loadBoundTaskPacketEntries(cwd, state, { statuses: ['integrated'] })
+      boundEntries = loadBoundTaskPacketEntries(cwd, state, { statuses: ['integrated', 'completed'] })
         .sort((a, b) => a.packet.taskId.localeCompare(b.packet.taskId));
+      boundEntries.forEach(({ packet }) => assertBoundTaskPacket(state, packet, cwd));
       packets = boundEntries.map(({ packet }) => packet);
       uncoveredVerifierOutcomes(state, boundEntries);
       const supplied = [...input.tasks].map((entry) => entry.taskPacket).sort((a, b) => a.taskId.localeCompare(b.taskId));
       if (canonicalSerializedJson(supplied) !== canonicalSerializedJson(packets)) {
-        throw new StateError('Post-integration planning input must exactly cover durable Integrated packet sidecars', 'SPECIALIST_PLAN_TASK_MISMATCH');
+        throw new StateError('Post-integration planning input must exactly cover durable Integrated or Resolved packet sidecars', 'SPECIALIST_PLAN_TASK_MISMATCH');
       }
     }
     const timestamp = now();
@@ -1706,6 +1708,13 @@ function actionableIntegratedTaskIds(state) {
     .map((task) => task.id).sort();
 }
 
+function actionablePacketValidationTaskIds(state) {
+  return state.tasks.filter((task) => task.disposition === 'actionable'
+    && (task.status === 'integrated'
+      || (task.status === 'completed' && typeof task.taskPacketDigest === 'string')))
+    .map((task) => task.id).sort();
+}
+
 function isPristineTasklessValidationSelection(state, expectedIds) {
   return state.reviewRound === 0 && state.reviewRequest === null && state.reviewHistory.length === 0
     && state.tasks.length === 0 && expectedIds.length === 0;
@@ -1811,15 +1820,7 @@ function isV2CompletedTaskValidationRecovery(cwd, state, expectedIds) {
 }
 
 function assertTaskPacketHead(state, task, packet, digest) {
-  const evidenceHeadSha = activeReviewEvidenceHead(state);
-  if (evidenceHeadSha !== null) {
-    if (packet.reviewedHeadSha !== evidenceHeadSha) {
-      throw new StateError(`Task packet ${packet.taskId} does not match the exact reviewed HEAD`, 'TASK_PACKET_HEAD_MISMATCH');
-    }
-  }
-  const boundIntegratedTask = task.status === 'integrated'
-    && typeof task.taskPacketDigest === 'string';
-  if (boundIntegratedTask) {
+  const assertBoundIntegrationHistory = () => {
     if (task.taskPacketDigest !== digest) {
       throw new StateError(`Task packet ${packet.taskId} differs from the accepted packet`, 'TASK_PACKET_CONFLICT');
     }
@@ -1847,6 +1848,23 @@ function assertTaskPacketHead(state, task, packet, digest) {
         'TASK_INTEGRATION_ANCESTRY_MISMATCH',
       );
     }
+  };
+  const boundCompletedTask = task.status === 'completed'
+    && typeof task.taskPacketDigest === 'string';
+  if (boundCompletedTask) {
+    assertBoundIntegrationHistory();
+    return;
+  }
+  const evidenceHeadSha = activeReviewEvidenceHead(state);
+  if (evidenceHeadSha !== null) {
+    if (packet.reviewedHeadSha !== evidenceHeadSha) {
+      throw new StateError(`Task packet ${packet.taskId} does not match the exact reviewed HEAD`, 'TASK_PACKET_HEAD_MISMATCH');
+    }
+  }
+  const boundIntegratedTask = task.status === 'integrated'
+    && typeof task.taskPacketDigest === 'string';
+  if (boundIntegratedTask) {
+    assertBoundIntegrationHistory();
     return;
   }
   if (evidenceHeadSha !== null) return;
@@ -1894,8 +1912,9 @@ function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, initi
     throw new StateError('Targeted validation proof must be reset before planning', 'TARGETED_VALIDATION_RESET_REQUIRED');
   }
   assertCleanExactIntegrationHead(state);
-  const expectedIds = actionableIntegratedTaskIds(state);
   const initialMode = initialSelection !== undefined && initialSelection !== null;
+  const expectedIds = initialMode
+    ? actionableIntegratedTaskIds(state) : actionablePacketValidationTaskIds(state);
   if (initialMode && Array.isArray(taskPackets) && taskPackets.length > 0) {
     throw new StateError('Initial selection and task packets are mutually exclusive', 'INVALID_VALIDATION_PLAN');
   }
@@ -1930,20 +1949,21 @@ function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, initi
     packetIds = [];
   } else {
     const missingBinding = state.tasks.find((task) => task.disposition === 'actionable'
-      && task.status === 'integrated' && typeof task.taskPacketDigest !== 'string');
+      && ['integrated', 'completed'].includes(task.status)
+      && typeof task.taskPacketDigest !== 'string');
     if (missingBinding) {
       throw new StateError(`Task ${missingBinding.id} has not been durably bound`, 'TASK_PACKET_NOT_BOUND');
     }
-    const sortedPackets = loadBoundTaskPackets(cwd, state, { statuses: ['integrated'] })
+    const sortedPackets = loadBoundTaskPackets(cwd, state, { statuses: ['integrated', 'completed'] })
       .sort((left, right) => left.taskId.localeCompare(right.taskId));
     packetIds = sortedPackets.map((packet) => packet.taskId);
     if (new Set(packetIds).size !== packetIds.length || JSON.stringify(packetIds) !== JSON.stringify(expectedIds)) {
-      throw new StateError('Task packets must exactly cover current actionable integrated tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
+      throw new StateError('Task packets must exactly cover current actionable Integrated or Resolved tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
     }
     if (Array.isArray(taskPackets) && taskPackets.length > 0) {
       const supplied = [...taskPackets].sort((left, right) => left.taskId.localeCompare(right.taskId));
       if (JSON.stringify(supplied.map((packet) => packet.taskId)) !== JSON.stringify(expectedIds)) {
-        throw new StateError('Task packets must exactly cover current actionable integrated tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
+        throw new StateError('Task packets must exactly cover current actionable Integrated or Resolved tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
       }
       if (canonicalSerializedJson(supplied) !== canonicalSerializedJson(sortedPackets)) {
         throw new StateError('Supplied packets differ from durable task packet sidecars', 'TASK_PACKET_CONFLICT');
@@ -3327,8 +3347,8 @@ function buildTargetedValidationTransition(state, plan, timestamp = utcNow()) {
   if (plan.commands.some((entry) => entry.status === 'pending')) {
     throw new StateError('Targeted validation plan still has pending commands', 'VALIDATION_PLAN_INCOMPLETE');
   }
-  if (JSON.stringify([...plan.taskIds].sort()) !== JSON.stringify(actionableIntegratedTaskIds(state))) {
-    throw new StateError('Targeted validation plan no longer covers current actionable integrated tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
+  if (JSON.stringify([...plan.taskIds].sort()) !== JSON.stringify(actionablePacketValidationTaskIds(state))) {
+    throw new StateError('Targeted validation plan no longer covers current actionable Integrated or Resolved tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
   }
   const status = plan.commands.every((entry) => entry.status === 'passed') ? 'passed' : 'failed';
   const next = {
@@ -3411,8 +3431,8 @@ export function executeTargetedValidationPlan({
     if (!state) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
     assertCleanExactIntegrationHead(state);
     let plan = readValidationPlan(cwd, state);
-    if (JSON.stringify([...plan.taskIds].sort()) !== JSON.stringify(actionableIntegratedTaskIds(state))) {
-      throw new StateError('Targeted validation plan no longer covers current actionable integrated tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
+    if (JSON.stringify([...plan.taskIds].sort()) !== JSON.stringify(actionablePacketValidationTaskIds(state))) {
+      throw new StateError('Targeted validation plan no longer covers current actionable Integrated or Resolved tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
     }
     for (let index = 0; index < plan.commands.length; index += 1) {
       const entry = plan.commands[index];
@@ -3422,8 +3442,8 @@ export function executeTargetedValidationPlan({
       if (state.currentIntegrationHeadSha !== plan.headSha || state.revision !== plan.stateRevision) {
         throw new StateError('Targeted validation plan is stale', 'VALIDATION_PLAN_STALE');
       }
-      if (JSON.stringify([...plan.taskIds].sort()) !== JSON.stringify(actionableIntegratedTaskIds(state))) {
-        throw new StateError('Targeted validation plan no longer covers current actionable integrated tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
+      if (JSON.stringify([...plan.taskIds].sort()) !== JSON.stringify(actionablePacketValidationTaskIds(state))) {
+        throw new StateError('Targeted validation plan no longer covers current actionable Integrated or Resolved tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
       }
       let result;
       try {

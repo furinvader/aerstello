@@ -185,10 +185,14 @@ the reusable planning `subjectSha`; the persisted `reviewedHeadSha` contract is
 unchanged. Record, status, recovery, and binding reads all verify the receipt
 and the packet's task ID, digest, specialization, risk tags, and canonical
 workflow-neutral route.
-Post-integration plans cover the exact bound packets and required risk reviewers
-for one integration HEAD. They reuse each verified pre-bind signal set and
-route, while `riskReviewers` select review-phase evidence only; planning-phase
-behavior mapping is not rerun against the integration HEAD.
+Post-integration plans cover the exact bound packets for both Integrated and
+Resolved actionable tasks, plus their required risk reviewers, for one
+integration HEAD. A packet-backed Resolved task retains its ancestral integrated
+commit, immutable pre-bind provenance, receipt-valid worker result, and route in
+every later final-verifier context; it is not reclassified as a terminal
+non-packet outcome. Plans reuse each verified pre-bind signal set and route,
+while `riskReviewers` select review-phase evidence only; planning-phase behavior
+mapping is not rerun against the integration HEAD.
 `specialist-record` accepts only a planned reusable role and exact HEAD/revision;
 it never accepts `integration_verifier`. `specialist-context` is read-only and
 produces the guarded input for the PR workflow's final verifier, including every
@@ -206,7 +210,8 @@ task-resolution, GitHub, review-request, or Done evidence.
 `targeted-validation-plan.json` is a resumable sidecar, not trusted input to a
 generic checkpoint. `validation-plan` derives its deterministic, de-duplicated
 commands from fixed task packets and requires those packet IDs to exactly match
-the actionable Integrated tasks. It preserves affected areas plus each check's
+the actionable Integrated and Resolved packet-backed tasks. Thus a later HEAD
+reruns prior fix checks together with newly Integrated checks. It preserves affected areas plus each check's
 kind, reason, E2E selectors, and browser projects, and binds them to the state
 revision and integration commit. `run-validation` serializes execution,
 executes the saved argv directly without a shell, records each attempted command
