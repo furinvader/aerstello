@@ -110,7 +110,8 @@ Remove a worktree only after its commit was Integrated or intentionally rejected
 
 ## Accept and integrate worker results
 
-Before integration, confirm:
+Before integration, durably accept the exact result with `accept-result`; the
+read-only `validate-result` output is not final-verifier evidence. Then confirm:
 
 1. The result matches the fixed task ID and Review commit.
 2. An implemented result names a real descendant commit with a nonempty tree diff from the Review commit.
@@ -118,6 +119,13 @@ Before integration, confirm:
 4. The exact required validations ran and have concise results.
 5. The commit contains no unrelated work.
 6. Unexpected dependencies were reported instead of silently included.
+
+Acceptance is receipt-first, revision-guarded, and idempotent only for the same
+canonical result. A generic checkpoint cannot add, replace, or clear the bound
+result digest, and integration refuses missing or invalid result evidence. For
+an eligible native-v3 task already Integrated before this boundary, use the
+explicit `backfill-result` command with the original result; never reconstruct
+a result from compact task fields or migration data.
 
 Cherry-pick accepted commits centrally in dependency order. Resolve conflicts
 only in the integration checkout. Checkpoint each successful integration.

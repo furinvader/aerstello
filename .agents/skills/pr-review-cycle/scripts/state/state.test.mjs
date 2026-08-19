@@ -12,7 +12,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   ACTIVE_STATE_LIMIT_BYTES,
@@ -34,6 +34,8 @@ import {
   checkpointState,
   checkpointTaskPacketBinding,
   checkpointTaskPacketReplan,
+  checkpointWorkerResultAcceptance,
+  checkpointWorkerResultBackfill,
   checkpointTaskCompletion,
   checkpointTargetedValidation,
   checkpointVerificationEscalation,
@@ -64,6 +66,8 @@ import {
   taskBindingProvenancePath,
   taskBindingProvenanceReceiptPath,
   taskPacketSidecarPath,
+  workerResultEnvelopePath,
+  workerResultReceiptPath,
   specialistContext,
   specialistPlanReceiptPath,
   specialistReviewBundlePath,
@@ -387,6 +391,22 @@ function taskPacket(head, taskId, {
   };
 }
 
+function workerResult(packet, commitSha, changedPaths) {
+  return {
+    schemaVersion: 3,
+    taskId: packet.taskId,
+    specialization: packet.specialization,
+    status: 'implemented',
+    commitSha,
+    changedPaths,
+    validation: [...packet.requiredValidation.unit, ...packet.requiredValidation.system]
+      .map(({ command }) => ({ command, result: 'passed', summary: 'Focused validation passed.' })),
+    resolutionSummary: 'Implemented the fixed task and verified its declared validation.',
+    residualRisks: [],
+    unexpectedDependencies: [],
+  };
+}
+
 function historicalTaskPacketV2(packet) {
   return Object.fromEntries(Object.entries(packet)
     .filter(([key]) => !['specialization', 'riskTags'].includes(key))
@@ -550,7 +570,9 @@ function integratedTasks(cwd, ids) {
       resolutionSummary: 'Integrated centrally; targeted validation remains.',
     };
   });
-  return checkpointState({ cwd, nextState: { ...proposed, tasks: integrated }, expectedRevision: proposed.revision });
+  const preAuthority = { ...proposed, tasks: integrated };
+  writeFileSync(statePath(cwd, preAuthority.prNumber), `${JSON.stringify(preAuthority)}\n`);
+  return loadState(cwd, preAuthority.prNumber);
 }
 
 function bindPackets(cwd, state, packets) {
@@ -567,6 +589,25 @@ function planInput(state, packet, planningSignals = { browserVisible: false, tes
 function bindPacket(cwd, state, packet, planningSignals) {
   planSpecialists({ cwd, input: planInput(state, packet, planningSignals), expectedRevision: state.revision, now: () => AT });
   return checkpointTaskPacketBinding({ cwd, packet, expectedRevision: state.revision });
+}
+
+function writePreAuthorityImplementedState(cwd, state, taskId, workerCommitSha) {
+  const implemented = {
+    ...state,
+    tasks: state.tasks.map((item) => item.id === taskId ? {
+      ...item,
+      status: 'implemented',
+      execution: { ...item.execution, workerCommitSha },
+    } : item),
+  };
+  writeFileSync(statePath(cwd, state.prNumber), `${JSON.stringify(implemented)}\n`);
+  return loadState(cwd, state.prNumber);
+}
+
+function writePreAuthorityTasks(cwd, state, tasks) {
+  const preAuthority = { ...state, tasks };
+  writeFileSync(statePath(cwd, state.prNumber), `${JSON.stringify(preAuthority)}\n`);
+  return loadState(cwd, state.prNumber);
 }
 
 function canonicalBoundIntegratedTask(cwd, taskId = 'canonical-ancestry') {
@@ -602,12 +643,19 @@ function canonicalBoundIntegratedTask(cwd, taskId = 'canonical-ancestry') {
   const integratedHead = commit(cwd, { [`scripts/${taskId}.mjs`]: 'export const integrated = true;\n' }, `integrate ${taskId}`);
   const advanced = checkpointGitMetadata({ cwd }).state;
   rmSync(validationPlanPath(cwd, advanced.prNumber), { force: true });
-  const { execution: _execution, ...boundTask } = advanced.tasks[0];
+  const implementedBeforeAcceptance = writePreAuthorityImplementedState(
+    cwd, advanced, taskId, integratedHead,
+  );
+  const accepted = checkpointWorkerResultAcceptance({
+    cwd, packet, result: workerResult(packet, integratedHead, [`scripts/${taskId}.mjs`]),
+    expectedRevision: implementedBeforeAcceptance.revision,
+  });
+  const { execution: _execution, ...boundTask } = accepted.tasks[0];
   const integrated = checkpointState({
     cwd,
-    expectedRevision: advanced.revision,
+    expectedRevision: accepted.revision,
     nextState: {
-      ...advanced,
+      ...accepted,
       tasks: [{
         ...boundTask,
         status: 'integrated',
@@ -633,6 +681,202 @@ test('initialization writes the v3 identity and empty durable ledgers', () => {
   assert.deepEqual(state.staleDiscoveryDispositions, []);
   assert.deepEqual(state.threadResolutionStatus.threads, []);
   assert.equal(statePath(cwd, 17), join(gitCommonDirectory(cwd), 'codex', 'pr-review', 'pr-17', 'state.json'));
+});
+
+test('worker results are receipt-bound, interruption-safe, immutable, and required for integration', () => {
+  const cwd = repo();
+  const initial = init(cwd);
+  const proposedTask = task(initial.currentIntegrationHeadSha, {
+    id: 'durable-result', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [proposedTask] },
+  });
+  const packet = taskPacket(initial.currentIntegrationHeadSha, proposedTask.id, {
+    affectedAreas: ['workflow'], command: 'npm run check:workflow',
+  });
+  const bound = bindPacket(cwd, proposed, packet);
+  git(cwd, ['switch', '-c', 'worker-result-fixture']);
+  const workerSha = commit(cwd, { 'scripts/durable-result.mjs': 'export const durable = true;\n' }, 'worker result fixture');
+  git(cwd, ['switch', 'main']);
+  const result = workerResult(packet, workerSha, ['scripts/durable-result.mjs']);
+
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: bound.revision,
+    nextState: {
+      ...bound,
+      tasks: bound.tasks.map((item) => ({
+        ...item, status: 'implemented',
+        execution: { ...item.execution, workerCommitSha: workerSha },
+      })),
+    },
+  }), { code: 'WORKER_RESULT_MISSING' });
+
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: bound.revision,
+    nextState: {
+      ...bound,
+      tasks: bound.tasks.map(({ execution: _execution, ...item }) => ({
+        ...item, status: 'integrated', integratedCommitSha: workerSha, resolutionSummary: 'Forged integration.',
+      })),
+    },
+  }), { code: 'WORKER_RESULT_MISSING' });
+
+  assert.throws(() => checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: bound.revision,
+    onStep: (step) => { if (step === 'receipt-durable') throw new Error('interrupt receipt'); },
+  }), /interrupt receipt/u);
+  assert.equal(existsSync(workerResultReceiptPath(cwd, 17, packet.taskId)), true);
+  assert.equal(existsSync(workerResultEnvelopePath(cwd, 17, packet.taskId)), false);
+  const pending = reconcileState({ cwd });
+  assert.equal(pending.workerResults[0].status, 'pending-state');
+
+  assert.throws(() => checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: bound.revision,
+    onStep: (step) => { if (step === 'envelope-durable') throw new Error('interrupt envelope'); },
+  }), /interrupt envelope/u);
+  assert.throws(() => checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: bound.revision,
+    onStep: (step) => { if (step === 'state-checkpointed') throw new Error('interrupt state response'); },
+  }), /interrupt state response/u);
+  const accepted = loadState(cwd);
+  assert.equal(accepted.tasks[0].status, 'implemented');
+  assert.match(accepted.tasks[0].workerResultDigest, /^[0-9a-f]{64}$/u);
+  assert.equal(checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: accepted.revision,
+  }).revision, accepted.revision);
+  assert.throws(() => checkpointWorkerResultAcceptance({
+    cwd, packet, result: { ...result, resolutionSummary: 'Different evidence.' },
+    expectedRevision: accepted.revision,
+  }), { code: 'WORKER_RESULT_CONFLICT' });
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: accepted.revision,
+    nextState: { ...accepted, tasks: accepted.tasks.map(({ workerResultDigest: _digest, ...item }) => item) },
+  }), { code: 'IMMUTABLE_STATE_PROVENANCE' });
+
+  git(cwd, ['cherry-pick', workerSha]);
+  const centralSha = git(cwd, ['rev-parse', 'HEAD']);
+  const advanced = checkpointGitMetadata({ cwd }).state;
+  const { execution: _execution, ...implementedTask } = advanced.tasks[0];
+  const integrated = checkpointState({
+    cwd, expectedRevision: advanced.revision,
+    nextState: {
+      ...advanced,
+      tasks: [{
+        ...implementedTask, status: 'integrated', integratedCommitSha: centralSha,
+        resolutionSummary: 'Integrated accepted evidence.',
+      }],
+    },
+  });
+  assert.equal(reconcileState({ cwd }).workerResults[0].status, 'valid');
+  assert.equal(integrated.tasks[0].workerResultDigest, accepted.tasks[0].workerResultDigest);
+  const envelopePath = workerResultEnvelopePath(cwd, 17, packet.taskId);
+  const canonicalEnvelope = readFileSync(envelopePath, 'utf8');
+  const alteredEnvelope = JSON.parse(canonicalEnvelope);
+  alteredEnvelope.result.resolutionSummary = 'Tampered evidence.';
+  writeFileSync(envelopePath, `${JSON.stringify(alteredEnvelope)}\n`);
+  assert.equal(reconcileState({ cwd }).workerResults[0].status, 'invalid');
+  writeFileSync(envelopePath, canonicalEnvelope);
+  const orphanPath = join(dirname(envelopePath), 'orphan.json');
+  writeFileSync(orphanPath, '{}\n');
+  assert.ok(reconcileState({ cwd }).workerResults.some((entry) => entry.status === 'orphan'));
+  rmSync(orphanPath);
+  const archived = archiveState({ cwd, abandonmentReason: 'Archive durable worker-result fixture.' });
+  assert.equal(readdirSync(join(archived, 'worker-results')).filter((name) => name.endsWith('.json')).length, 1);
+  assert.equal(readdirSync(join(archived, 'worker-results')).filter((name) => name.endsWith('.sha256')).length, 1);
+});
+
+test('new and unbound actionable tasks cannot pre-seed or bypass result authority', () => {
+  const cwd = repo();
+  const initial = init(cwd);
+  const unbound = task(initial.currentIntegrationHeadSha, {
+    id: 'unbound-authority', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: initial.revision,
+    nextState: { ...initial, tasks: [{ ...unbound, workerResultDigest: 'a'.repeat(64) }] },
+  }), { code: 'PROTECTED_TRANSITION_REQUIRED' });
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [unbound] },
+  });
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: proposed.revision,
+    nextState: {
+      ...proposed,
+      tasks: [{
+        ...unbound, status: 'implemented',
+        execution: { ...unbound.execution, workerCommitSha: initial.currentIntegrationHeadSha },
+      }],
+    },
+  }), { code: 'TASK_PACKET_NOT_BOUND' });
+  const { execution: _execution, ...withoutExecution } = unbound;
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: proposed.revision,
+    nextState: {
+      ...proposed,
+      tasks: [{
+        ...withoutExecution, status: 'integrated', integratedCommitSha: initial.currentIntegrationHeadSha,
+        resolutionSummary: 'Forged unbound integration.',
+      }],
+    },
+  }), { code: 'TASK_PACKET_NOT_BOUND' });
+});
+
+test('native-v3 backfill proves central patch equivalence and migrations do not synthesize results', () => {
+  const cwd = repo();
+  const initial = init(cwd);
+  const proposedTask = task(initial.currentIntegrationHeadSha, {
+    id: 'backfill-result', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [proposedTask] },
+  });
+  const packet = taskPacket(initial.currentIntegrationHeadSha, proposedTask.id, {
+    affectedAreas: ['workflow'], command: 'npm run check:workflow',
+  });
+  const bound = bindPacket(cwd, proposed, packet);
+  git(cwd, ['switch', '-c', 'backfill-worker']);
+  const workerSha = commit(cwd, { 'scripts/backfill-result.mjs': 'export const backfill = true;\n' }, 'backfill worker');
+  git(cwd, ['switch', 'main']);
+  git(cwd, ['cherry-pick', workerSha]);
+  const centralSha = git(cwd, ['rev-parse', 'HEAD']);
+  const advanced = checkpointGitMetadata({ cwd }).state;
+  const { execution: _execution, ...boundTask } = advanced.tasks[0];
+  const preBoundary = {
+    ...advanced,
+    tasks: [{
+      ...boundTask, status: 'integrated', integratedCommitSha: centralSha,
+      resolutionSummary: 'Integrated before durable result acceptance existed.',
+    }],
+  };
+  writeFileSync(statePath(cwd, preBoundary.prNumber), `${JSON.stringify(preBoundary)}\n`);
+  const result = workerResult(packet, workerSha, ['scripts/backfill-result.mjs']);
+  const backfilled = checkpointWorkerResultBackfill({
+    cwd, packet, result, expectedRevision: preBoundary.revision,
+  });
+  assert.match(backfilled.tasks[0].workerResultDigest, /^[0-9a-f]{64}$/u);
+  assert.equal(checkpointWorkerResultBackfill({
+    cwd, packet, result, expectedRevision: backfilled.revision,
+  }).revision, backfilled.revision);
+
+  git(cwd, ['switch', '-c', 'mismatched-worker', packet.reviewedHeadSha]);
+  const mismatchSha = commit(cwd, { 'scripts/backfill-result.mjs': 'export const mismatch = true;\n' }, 'mismatched worker');
+  git(cwd, ['switch', 'main']);
+  const mismatchResult = workerResult(packet, mismatchSha, ['scripts/backfill-result.mjs']);
+  const unboundEvidenceState = {
+    ...backfilled,
+    tasks: backfilled.tasks.map(({ workerResultDigest: _digest, ...item }) => item),
+  };
+  writeFileSync(statePath(cwd, unboundEvidenceState.prNumber), `${JSON.stringify(unboundEvidenceState)}\n`);
+  assert.throws(() => checkpointWorkerResultBackfill({
+    cwd, packet, result: mismatchResult, expectedRevision: unboundEvidenceState.revision,
+  }), { code: 'WORKER_RESULT_PATCH_MISMATCH' });
+
+  const migrated = migratePrReviewStateV2(schemaV2State({
+    ...initial,
+    tasks: [task(initial.currentIntegrationHeadSha, { id: 'migrated-no-result' })],
+  }), { migratedAt: AT });
+  assert.equal(Object.hasOwn(migrated.tasks[0], 'workerResultDigest'), false);
 });
 
 test('initialization accepts only an explicit positive review request limit', () => {
@@ -2890,9 +3134,7 @@ test('HEAD drift preserves durable task coverage while invalidating and refreshi
   const integratedTask = task(headA, {
     id: 'thread-task', status: 'integrated', sourceType: 'github-thread', sourceIds: ['thread:PRRT_drift'],
   });
-  const integrated = checkpointState({
-    cwd, nextState: { ...proposed, tasks: [integratedTask] }, expectedRevision: proposed.revision,
-  });
+  const integrated = writePreAuthorityTasks(cwd, proposed, [integratedTask]);
   assert.throws(() => checkpointState({
     cwd, expectedRevision: integrated.revision,
     nextState: { ...integrated, tasks: [{ ...integratedTask, status: 'completed' }] },
@@ -2964,9 +3206,7 @@ test('HEAD drift preserves historical local verifier proof until guarded current
     cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [proposedTask] },
   });
   const integratedTask = task(headA, { id: 'local-drift', status: 'integrated', sourceType: 'local' });
-  const integrated = checkpointState({
-    cwd, expectedRevision: proposed.revision, nextState: { ...proposed, tasks: [integratedTask] },
-  });
+  const integrated = writePreAuthorityTasks(cwd, proposed, [integratedTask]);
   const proofA = {
     status: 'passed', headSha: headA, threads: [], threadlessVerification: emptyThreadless(), updatedAt: AT,
   };
@@ -3035,9 +3275,7 @@ test('generic checkpoint cannot forge zero-thread or threadless successful proof
   const integratedTask = task(threadlessHeadA, {
     id: 'threadless-forgery', status: 'integrated', sourceType: 'github-threadless', sourceIds: ['review:threadless'],
   });
-  const integrated = checkpointState({
-    cwd: threadlessCwd, expectedRevision: proposed.revision, nextState: { ...proposed, tasks: [integratedTask] },
-  });
+  const integrated = writePreAuthorityTasks(threadlessCwd, proposed, [integratedTask]);
   const threadlessProofA = {
     status: 'passed', headSha: threadlessHeadA, threads: [], updatedAt: AT,
     threadlessVerification: {
@@ -3232,13 +3470,20 @@ test('exact bound packet survives null-review central integration HEAD advance o
   const advanced = checkpointGitMetadata({ cwd }).state;
   assert.equal(advanced.currentIntegrationHeadSha, integratedHead);
   assert.throws(() => assertTaskPacketBound(advanced, packet), { code: 'TASK_PACKET_HEAD_MISMATCH' });
-
-  const { execution: _execution, ...boundTask } = advanced.tasks[0];
+  const implementedBeforeAcceptance = writePreAuthorityImplementedState(
+    cwd, advanced, packet.taskId, integratedHead,
+  );
+  const accepted = checkpointWorkerResultAcceptance({
+    cwd, packet,
+    result: workerResult(packet, integratedHead, ['scripts/integrated-task.mjs']),
+    expectedRevision: implementedBeforeAcceptance.revision,
+  });
+  const { execution: _execution, ...boundTask } = accepted.tasks[0];
   const integrated = checkpointState({
     cwd,
-    expectedRevision: advanced.revision,
+    expectedRevision: accepted.revision,
     nextState: {
-      ...advanced,
+      ...accepted,
       tasks: [{
         ...boundTask,
         status: 'integrated',
@@ -3288,12 +3533,20 @@ test('bound packet rejects rollback, unrelated, or missing central integration a
   const bound = bindPacket(cwd, proposed, packet);
   const integratedHead = commit(cwd, { 'scripts/ancestry-task.mjs': 'export const integrated = true;\n' }, 'integrate ancestry task');
   const advanced = checkpointGitMetadata({ cwd }).state;
-  const { execution: _execution, ...boundTask } = advanced.tasks[0];
+  const implementedBeforeAcceptance = writePreAuthorityImplementedState(
+    cwd, advanced, packet.taskId, integratedHead,
+  );
+  const accepted = checkpointWorkerResultAcceptance({
+    cwd, packet,
+    result: workerResult(packet, integratedHead, ['scripts/ancestry-task.mjs']),
+    expectedRevision: implementedBeforeAcceptance.revision,
+  });
+  const { execution: _execution, ...boundTask } = accepted.tasks[0];
   const integrated = checkpointState({
     cwd,
-    expectedRevision: advanced.revision,
+    expectedRevision: accepted.revision,
     nextState: {
-      ...advanced,
+      ...accepted,
       tasks: [{
         ...boundTask,
         status: 'integrated',
@@ -4235,7 +4488,8 @@ test('behavior mapping gates binding and exact-head risk evidence feeds only ver
   const post = planSpecialists({ cwd, input: postInput, expectedRevision: state.revision, now: () => AT });
   assert.deepEqual(post.records, []);
   const context = specialistContext({ cwd });
-  assert.equal(context.readyForIntegrationVerifier, true);
+  assert.equal(context.readyForIntegrationVerifier, false);
+  assert.deepEqual(context.missingWorkerResultTaskIds, ['browser-task']);
   assert.deepEqual(context.packets, [browserPacket]);
   assert.deepEqual(context.routes.map(({ taskId }) => taskId), ['browser-task']);
   assert.equal(context.routes[0].route.profileGuidePath, 'profiles/web.md');
@@ -4296,7 +4550,8 @@ test('signal-only behavior mapping survives binding and compound provenance tamp
   assert.deepEqual(post.tasks[0].route.riskReviewers, []);
   assert.deepEqual(post.records, []);
   const context = specialistContext({ cwd });
-  assert.equal(context.readyForIntegrationVerifier, true);
+  assert.equal(context.readyForIntegrationVerifier, false);
+  assert.deepEqual(context.missingWorkerResultTaskIds, ['signal-only-mapping']);
   assert.deepEqual(context.requiredReviewerIds, []);
   assert.deepEqual(context.finalVerification, {
     verifierId: 'integration_verifier', priority: 'standard',
@@ -4469,7 +4724,17 @@ test('behavior mapping remains bound to the reviewed commit after dependent inte
     'scripts/later-browser-task.mjs': 'export const laterBrowserTask = true;\n',
   }, 'integrate later browser task');
   const advanced = checkpointGitMetadata({ cwd }).state;
-  const integratedTasksAtHead = advanced.tasks.map((taskItem) => {
+  const implementedBeforeAcceptance = writePreAuthorityImplementedState(
+    cwd, advanced, packet.taskId, laterIntegratedHead,
+  );
+  const accepted = checkpointWorkerResultAcceptance({
+    cwd, packet,
+    result: workerResult(packet, laterIntegratedHead, [
+      'scripts/first-dependency.mjs', 'scripts/later-browser-task.mjs',
+    ]),
+    expectedRevision: implementedBeforeAcceptance.revision,
+  });
+  const integratedTasksAtHead = accepted.tasks.map((taskItem) => {
     if (taskItem.id !== packet.taskId) return taskItem;
     const { execution: _execution, ...withoutExecution } = taskItem;
     return {
@@ -4480,8 +4745,8 @@ test('behavior mapping remains bound to the reviewed commit after dependent inte
     };
   });
   let integratedLater = checkpointState({
-    cwd, expectedRevision: advanced.revision,
-    nextState: { ...advanced, tasks: integratedTasksAtHead },
+    cwd, expectedRevision: accepted.revision,
+    nextState: { ...accepted, tasks: integratedTasksAtHead },
   });
   assert.equal(bound.tasks.find((taskItem) => taskItem.id === packet.taskId).taskPacketDigest, taskPacketDigest(packet));
   buildTargetedValidationPlan({ cwd, now: () => AT });
@@ -4510,6 +4775,16 @@ test('behavior mapping remains bound to the reviewed commit after dependent inte
   assert.ok(postRoute.route.planningHelpers.some(({ id }) => id === 'behavior_mapper'));
   assert.equal(context.headSha, laterIntegratedHead);
   assert.notEqual(context.headSha, preBind.reviewedHeadSha);
+  assert.deepEqual(context.missingWorkerResultTaskIds, []);
+  assert.deepEqual(context.invalidWorkerResultTaskIds, []);
+  const laterResult = context.workerResults.find((entry) => entry.taskId === packet.taskId);
+  assert.equal(laterResult.packetDigest, taskPacketDigest(packet));
+  assert.equal(laterResult.reviewedHeadSha, reviewedHead);
+  assert.equal(laterResult.workerCommitSha, laterIntegratedHead);
+  assert.equal(laterResult.integratedCommitSha, laterIntegratedHead);
+  assert.deepEqual(laterResult.result, workerResult(
+    packet, laterIntegratedHead, ['scripts/first-dependency.mjs', 'scripts/later-browser-task.mjs'],
+  ));
 });
 
 test('PR context selects its own final verifier and aggregates high priority across routes', () => {
@@ -4576,7 +4851,8 @@ test('PR context selects its own final verifier and aggregates high priority acr
     },
   });
   context = specialistContext({ cwd });
-  assert.equal(context.readyForIntegrationVerifier, true);
+  assert.equal(context.readyForIntegrationVerifier, false);
+  assert.deepEqual(context.missingWorkerResultTaskIds, ['billing-task', 'security-task']);
   assert.deepEqual(context.finalVerification, {
     verifierId: 'integration_verifier', priority: 'high',
   });
@@ -4628,7 +4904,7 @@ test('specialist risk evidence is exact reviewer/head/revision, deduplicated, ta
   writeFileSync(bundlePath, `${JSON.stringify(plannedBundle)}\n`);
   recordSpecialistReview({ cwd, input: record, expectedRevision: state.revision, now: () => AT });
   recordSpecialistReview({ cwd, input: record, expectedRevision: state.revision, now: () => AT });
-  assert.equal(specialistContext({ cwd }).status, 'findings');
+  assert.equal(specialistContext({ cwd }).status, 'incomplete');
   assert.equal(specialistContext({ cwd }).readyForIntegrationVerifier, false);
   assert.equal(readSpecialistStatus({ cwd }).status, 'finding');
   assert.throws(() => recordSpecialistReview({

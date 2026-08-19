@@ -129,6 +129,14 @@ reported explicitly; no profile, risk, or planning signal is inferred for
 legacy bound tasks. These sidecars keep the active state schema at v3 and move
 with the PR directory when it is archived.
 
+Worker validation output is not durable acceptance. The orchestrator runs the
+revision-guarded `accept-result` transition, which receipt-binds the complete
+canonical schema-v3 result under `worker-results/` before integration. Generic
+checkpoints cannot add or rewrite that digest, and the final verifier context
+includes every receipt-verified result. Native-v3 work already Integrated at
+the contract boundary may use `backfill-result` with its original result and
+stable worker-to-central patch proof; migrated state never fabricates one.
+
 Nested specialist routes use the workflow-neutral v2 shape: `planningHelpers`,
 `riskReviewers`, `supplementalGuidance`, and `finalVerificationPriority`. They
 never contain the PR verifier. Read-only `specialist-context` adds the PR-owned

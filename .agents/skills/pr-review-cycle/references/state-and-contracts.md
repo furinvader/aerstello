@@ -18,6 +18,9 @@ Mutable state is repository-scoped and outside tracked worktrees:
 │   ├── task-binding-provenance/
 │   │   ├── <sha256(taskId)>.json
 │   │   └── <sha256(taskId)>.sha256
+│   ├── worker-results/
+│   │   ├── <sha256(taskId)>.json
+│   │   └── <sha256(taskId)>.sha256
 │   ├── specialist-reviews/
 │   │   ├── <head>-r<revision>.json
 │   │   └── <head>-r<revision>.plan.sha256
@@ -60,6 +63,8 @@ npm run review:state -- validate
 npm run review:state -- bind-task-packet --task-packet /tmp/task.json --expected-revision 4
 npm run review:state -- replan-task-packet --task '<opaque-id>' --expected-revision 4
 npm run review:state -- validate-result --task-packet /tmp/task.json --worker-result /tmp/result.json
+npm run review:state -- accept-result --task-packet /tmp/task.json --worker-result /tmp/result.json --expected-revision 5
+npm run review:state -- backfill-result --task-packet /tmp/task.json --worker-result /tmp/result.json --expected-revision 8
 npm run review:state -- specialist-plan --input /tmp/specialist-plan.json --expected-revision 4
 npm run review:state -- specialist-record --input /tmp/specialist-result.json --expected-revision 4
 npm run review:state -- specialist-context
@@ -147,6 +152,26 @@ spaces, quotes, and backslashes are not separators.
 State remains schema v3 because canonical packets and specialist evidence are
 durable, digest-verified sidecars rather than duplicated task fields.
 
+`validate-result` is diagnostic only. Before a bound task becomes Integrated,
+`accept-result` performs the expected-revision guarded durable transition. It
+reloads the immutable packet, validates the complete schema-v3 result, derives
+no-rename changed paths from Git, proves worker ancestry, and writes a canonical
+envelope of at most 64 KiB under `worker-results/<sha256(taskId)>.json`. The
+envelope binds the PR, task, packet digest, Review commit, canonical result
+digest, and full result. Its adjacent immutable receipt is written first and
+covers the complete envelope; compact task state then records only the result
+digest. Exact retries finish an interrupted receipt, envelope, or state
+boundary. Different bytes, tampering, missing evidence, and orphans fail closed.
+
+`backfill-result` is limited to native schema-v3 Integrated or completed tasks
+whose original result is supplied. It additionally proves worker and central
+commits have the same stable patch and that the central commit remains on the
+current integration HEAD. `accept-result` supports the bootstrap boundary when
+the old workflow already marked a task implemented and cherry-picked its exact
+patch: worker-to-current-HEAD patch equivalence must hold before the digest is
+bound and ordinary integration proceeds. Schema-v1/v2 migration never
+synthesizes worker-result evidence.
+
 `specialist-reviews/<head>-r<revision>.json` stores concise guarded planning and
 review evidence. Its immutable planning fields are anchored by the adjacent
 `.plan.sha256` receipt; reviewer records and operational timestamps are excluded
@@ -167,7 +192,8 @@ behavior mapping is not rerun against the integration HEAD.
 `specialist-record` accepts only a planned reusable role and exact HEAD/revision;
 it never accepts `integration_verifier`. `specialist-context` is read-only and
 produces the guarded input for the PR workflow's final verifier, including every
-exact immutable packet, phase-qualified pre-bind signals, route, reviewed-HEAD
+exact immutable packet, every receipt-verified result with packet, Review,
+worker, and integrated commit identities, phase-qualified pre-bind signals, route, reviewed-HEAD
 mapper result, separate exact-integration-HEAD risk results, targeted-validation
 proof, and `finalVerification` descriptor. Any
 HEAD change makes the prior bundle stale; clean specialist evidence is not

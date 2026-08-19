@@ -109,6 +109,14 @@ export function staleDiscoveryDispositionId(disposition) {
     .digest('hex');
 }
 
+export function workerResultDigest(result) {
+  const errors = validateWorkerResult(result);
+  if (errors.length > 0) throw new Error(`Invalid worker result: ${errors.join('; ')}`);
+  return createHash('sha256')
+    .update(JSON.stringify(canonicalContractJson(result)))
+    .digest('hex');
+}
+
 export function buildStaleDiscoveryDisposition({
   request, liveHeadSha, evidence, responseFingerprint, disposedAt,
 } = {}) {
@@ -959,9 +967,9 @@ function validateTaskV2(task, index, errors) {
   const path = `$.tasks[${index}]`;
   const fields = [
     'id', 'sourceIds', 'sourceType', 'fingerprint', 'summary', 'severity', 'disposition', 'status',
-    'integratedCommitSha', 'resolutionSummary', 'taskPacketDigest', 'execution',
+    'integratedCommitSha', 'resolutionSummary', 'taskPacketDigest', 'workerResultDigest', 'execution',
   ];
-  if (!requireFields(task, fields.filter((field) => !['execution', 'taskPacketDigest'].includes(field)), path, errors)) return;
+  if (!requireFields(task, fields.filter((field) => !['execution', 'taskPacketDigest', 'workerResultDigest'].includes(field)), path, errors)) return;
   rejectUnknownFields(task, fields, path, errors);
   if (!isString(task.id, { min: 1, max: 128 })) errors.push(`${path}.id is invalid`);
   validateStringList(task.sourceIds, `${path}.sourceIds`, errors);
@@ -978,6 +986,10 @@ function validateTaskV2(task, index, errors) {
   if (!(task.taskPacketDigest === undefined || task.taskPacketDigest === null
       || /^[0-9a-f]{64}$/u.test(task.taskPacketDigest))) {
     errors.push(`${path}.taskPacketDigest is invalid`);
+  }
+  if (!(task.workerResultDigest === undefined || task.workerResultDigest === null
+      || /^[0-9a-f]{64}$/u.test(task.workerResultDigest))) {
+    errors.push(`${path}.workerResultDigest is invalid`);
   }
   if (EXECUTION_STATUSES.has(task.status)) {
     if (task.execution === undefined) errors.push(`${path}.execution is required for ${task.status}`);
