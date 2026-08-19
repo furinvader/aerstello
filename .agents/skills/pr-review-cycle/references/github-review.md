@@ -175,6 +175,42 @@ intent lookups, with the prior HEAD proven as an integration ancestor; it
 performs no duplicate GitHub mutation. Extra replies or markers, changed
 resolution, HEAD drift, or state-revision drift fail closed.
 
+One recovery-only batch variant exists for roots already resolved by an
+archived cycle. First use `verify-resolve` to complete the actionable
+GitHub-threadless remediation at the exact current HEAD. With a pristine
+aggregate thread proof, `reply-resolve --task <terminal-non-actionable-id>` may
+then select exactly one immutable archive for the same repository and PR. The
+archived completed task must project exactly to the active `not-applicable`
+task. Every archived proof row, historical HEAD, reply and resolve intent,
+deterministic client ID, live canonical root, root comment, direct reply,
+exact deterministic body, marker, author, parent, URL, timestamp, and resolution
+state must agree, while all other live canonical roots still map uniquely to
+active tasks. Root creation must be no later than logical reply intent, logical
+intent no later than its persisted event, and that reply event no later than
+the exact resolve intent. Resolve intent must be no earlier than the live
+reply's represented-second start, and preserved durable proof no earlier than
+resolve intent; intent events and proof must not postdate archived state or
+terminal evidence. GitHub's second-granular reply timestamp represents an
+interval rather than an exact mutation instant, so logical intent and its event
+may follow the represented second's start. The reply-intent event must still be
+before that second's exclusive end: `.999` is accepted only when it does not
+follow resolve intent, and the next second's `.000` is rejected. When durable
+`resolvedAt` is later than the resolve intent, the resolve-intent event must be
+no later than that proof. Exact equality between `resolvedAt` and the resolve
+intent denotes recovery's logical intent timestamp and may precede the event
+envelope by its persistence latency.
+Archive files are read
+through pinned no-follow directory and file descriptors with stable inode,
+size, and exact-byte checks, and canonical names are bounded before any parse.
+Historical ancestry ignores replacement refs and rejects a nonempty
+common-directory `info/grafts`, including in linked worktrees. The command
+performs two complete evidence and head reads and one guarded state checkpoint;
+it performs no GitHub mutation and no active or archived journal write. Missing,
+duplicate, edited, foreign, raced, non-ancestral, or mixed-archive evidence is
+fatal. Do not manually copy proof or intent data and do not reopen threads.
+Ordinary unresolved roots and the existing single-root prior-HEAD recovery keep
+their existing `reply-resolve` paths.
+
 ## Run Codex and CI together
 
 Once targeted local validation passes and the Review commit is pushed, Codex

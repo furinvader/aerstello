@@ -297,6 +297,44 @@ durable reply and resolve intent lookups and proven prior-HEAD ancestry. It does
 not repeat either GitHub mutation. Extra replies or markers and any resolution,
 live-HEAD, or state-revision drift are rejected.
 
+A separate recovery-only `reply-resolve --task <id>` path may adopt a batch of
+already-resolved roots from one immutable archived cycle. It is available only
+for a terminal non-actionable GitHub-thread task, an otherwise pristine current
+aggregate thread proof, and current-HEAD verifier coverage for a completed
+actionable GitHub-threadless remediation. Every live canonical root must first
+map uniquely to an active task. The command then requires exactly one same-PR,
+same-repository archive whose completed task is the exact projection of the
+active task, whose resolved proof rows share an ancestral historical HEAD, and
+whose reply and resolve intents correlate exactly with the unchanged live
+roots, comments, deterministic reply bodies, markers, authors, timestamps, and
+resolution state. The production reader pins real no-follow archive and
+candidate directory descriptors, opens evidence files read-only and no-follow,
+requires stable pre/post inode and byte evidence, and applies the 10,000-entry
+bound before reading any canonical candidate; `.partial` entries stay ignored.
+Timestamp evidence must place root creation no later than the logical reply
+intent, that intent no later than its persisted event, and the reply event no
+later than the exact resolve intent. Resolve intent must be no earlier than the
+live reply's represented-second start, and the preserved durable proof no
+earlier than resolve intent. Intent events and proof remain bounded by archived
+state and terminal evidence. GitHub's second-granular reply timestamp represents
+an interval, not an exact mutation instant: logical intent and its event may
+occur after the represented second's start, but the event must be before its
+exclusive end. `.999` within that second is valid only when it does not follow
+resolve intent, while the next second's `.000` is not. A resolve proof recorded
+later than its intent must also follow the persisted resolve-intent event; exact
+equality with the resolve intent is the recovery form that deliberately stores
+the logical intent time, so its event envelope may be milliseconds later.
+Historical ancestry
+uses actual Git objects with replacement refs disabled and refuses a nonempty
+common-directory `info/grafts`, including from linked worktrees.
+It rereads archive, GitHub, Git heads, checkout cleanliness, ancestry, and state
+revision before one ordinary task-completion checkpoint. It posts no reply,
+resolves no thread, creates no intent, and appends no mutation-journal event.
+Use `verify-resolve` for the remediation task first; never copy proof rows or
+journal events manually, and never reopen a resolved thread to manufacture a
+normal resolution path. Single-root prior-HEAD recovery and ordinary unresolved
+thread handling remain the normal `reply-resolve` behavior.
+
 A schema-v2 migration may preserve a taskless pending review for the exact
 integration HEAD while deliberately clearing legacy targeted-validation proof.
 After that preserved review is collected as clean,

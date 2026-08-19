@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 
 import {
   buildStaleDiscoveryDisposition,
@@ -30,7 +31,7 @@ const OPERATIONS = {
   PullRequestReviews: `query PullRequestReviews($owner:String!,$repo:String!,$pr:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviews(first:50,after:$cursor){nodes{id databaseId url body state submittedAt commit{oid} author{__typename login url ... on Bot{id} ... on User{id}}} pageInfo{hasNextPage endCursor}}}}}`,
   PullRequestThreads: `query PullRequestThreads($owner:String!,$repo:String!,$pr:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:50,after:$cursor){nodes{id isResolved} pageInfo{hasNextPage endCursor}}}}}`,
   PullRequestChecks: `query PullRequestChecks($owner:String!,$repo:String!,$pr:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){pullRequest(number:$pr){id number state isDraft headRefOid commits(last:1){nodes{commit{oid statusCheckRollup{state contexts(first:50,after:$cursor){nodes{__typename ... on CheckRun{id databaseId name status conclusion completedAt detailsUrl checkSuite{workflowRun{databaseId url file{path} workflow{name}} app{slug}}} ... on StatusContext{id context state targetUrl}} pageInfo{hasNextPage endCursor}}}}}}}}}`,
-  ReviewThreadComments: `query ReviewThreadComments($threadId:ID!,$cursor:String){rateLimit{cost remaining} node(id:$threadId){... on PullRequestReviewThread{comments(first:50,after:$cursor){nodes{id databaseId url body createdAt author{__typename login url ... on Bot{id} ... on User{id}} replyTo{id} pullRequestReview{id}} pageInfo{hasNextPage endCursor}}}}}`,
+  ReviewThreadComments: `query ReviewThreadComments($threadId:ID!,$cursor:String){rateLimit{cost remaining} node(id:$threadId){... on PullRequestReviewThread{comments(first:50,after:$cursor){nodes{id databaseId url body createdAt lastEditedAt author{__typename login url ... on Bot{id} ... on User{id}} replyTo{id} pullRequestReview{id}} pageInfo{hasNextPage endCursor}}}}}`,
   RequestReactions: `query RequestReactions($commentId:ID!,$cursor:String){rateLimit{cost remaining} node(id:$commentId){... on IssueComment{reactions(first:50,after:$cursor){nodes{id content createdAt user{__typename login url id}} pageInfo{hasNextPage endCursor}}}}}`,
   AddReviewRequest: `mutation AddReviewRequest($subjectId:ID!,$body:String!,$clientMutationId:String!){addComment(input:{subjectId:$subjectId,body:$body,clientMutationId:$clientMutationId}){clientMutationId}}`,
   MarkPullRequestReadyForReview: `mutation MarkPullRequestReadyForReview($pullRequestId:ID!,$clientMutationId:String!){markPullRequestReadyForReview(input:{pullRequestId:$pullRequestId,clientMutationId:$clientMutationId}){clientMutationId}}`,
@@ -634,6 +635,315 @@ function completedThreadlessRecoveryReady(state) {
   });
 }
 
+function hasExactKeys(value, expected) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    && isDeepStrictEqual(Object.keys(value).sort(), [...expected].sort());
+}
+
+function archiveBatchAdoptionReady(state, selectedTask, selectedPlan) {
+  const aggregate = state.threadResolutionStatus;
+  const verification = aggregate.threadlessVerification;
+  if (selectedTask?.sourceType !== 'github-thread'
+      || selectedTask.status !== 'not-applicable'
+      || !VERIFIED_NON_ACTIONABLE_DISPOSITIONS.has(selectedTask.disposition)
+      || selectedTask.integratedCommitSha !== null
+      || selectedPlan.length < 2
+      || selectedPlan.some((entry) => !entry.thread.isResolved
+        || entry.tasks.length !== 1 || entry.tasks[0].id !== selectedTask.id)
+      || aggregate.status !== 'not-run' || aggregate.headSha !== null
+      || aggregate.threads.length !== 0 || aggregate.updatedAt !== null
+      || verification.status !== 'passed'
+      || verification.headSha !== state.currentIntegrationHeadSha
+      || verification.taskIds.length === 0 || verification.updatedAt === null) return false;
+  const byId = new Map(state.tasks.map((task) => [task.id, task]));
+  return verification.taskIds.every((taskId) => {
+    const task = byId.get(taskId);
+    return task?.sourceType === 'github-threadless'
+      && task.disposition === 'actionable' && task.status === 'completed'
+      && typeof task.integratedCommitSha === 'string';
+  });
+}
+
+function assertArchiveEventList(events) {
+  if (!Array.isArray(events) || events.length === 0 || events.length > MAX_NODES
+      || events.some((event) => event === null || typeof event !== 'object' || Array.isArray(event))) {
+    throw new GitHubWorkflowError('Archived mutation evidence is missing or malformed', 'ARCHIVE_EVIDENCE_INVALID');
+  }
+}
+
+function assertTerminalArchive(state, events) {
+  const stateUpdatedAt = parsedTime(state.updatedAt, 'Archived state');
+  if (state.phase === 'complete' && state.abandonmentReason === null) {
+    return { stateUpdatedAt, terminalEventAt: null };
+  }
+  if (typeof state.abandonmentReason !== 'string' || state.abandonmentReason.trim().length === 0) {
+    throw new GitHubWorkflowError('Archive lacks terminal completion or abandonment evidence', 'ARCHIVE_EVIDENCE_INVALID');
+  }
+  const terminal = events.filter((event) => event.type === 'abandoned');
+  const event = terminal[0];
+  if (terminal.length !== 1 || events.at(-1) !== event
+      || !hasExactKeys(event, ['schemaVersion', 'type', 'summary', 'at'])
+      || event.schemaVersion !== 1
+      || event.summary !== `Archived without completion: ${state.abandonmentReason}`
+      || parsedTime(event.at, 'Archive terminal event') < stateUpdatedAt) {
+    throw new GitHubWorkflowError('Archive terminal evidence is missing, altered, or ambiguous', 'ARCHIVE_EVIDENCE_INVALID');
+  }
+  return { stateUpdatedAt, terminalEventAt: parsedTime(event.at, 'Archive terminal event') };
+}
+
+function projectedArchivedTask(archivedTask) {
+  return { ...archivedTask, status: 'not-applicable' };
+}
+
+async function selectArchiveForBatch(state, selectedTask, archiveStore) {
+  if (!archiveStore?.list) {
+    throw new GitHubWorkflowError('Immutable archive evidence is unavailable', 'ARCHIVE_EVIDENCE_MISSING');
+  }
+  const archives = await archiveStore.list(state.prNumber);
+  if (!Array.isArray(archives) || archives.length > MAX_NODES) {
+    throw new GitHubWorkflowError('Immutable archive inventory is malformed or unbounded', 'ARCHIVE_EVIDENCE_INVALID');
+  }
+  const archiveIds = archives.map((archive) => archive?.archiveId);
+  if (archiveIds.some((archiveId) => typeof archiveId !== 'string' || archiveId.length === 0)
+      || new Set(archiveIds).size !== archiveIds.length) {
+    throw new GitHubWorkflowError('Immutable archive identity is missing or duplicated', 'ARCHIVE_EVIDENCE_AMBIGUOUS');
+  }
+  const candidates = [];
+  for (const archive of archives) {
+    const archivedState = archive?.state;
+    if (archivedState?.repository !== state.repository || archivedState?.prNumber !== state.prNumber) continue;
+    const matchingTasks = Array.isArray(archivedState.tasks)
+      ? archivedState.tasks.filter((task) => task?.id === selectedTask.id) : [];
+    if (matchingTasks.length === 0) continue;
+    if (matchingTasks.length !== 1) {
+      throw new GitHubWorkflowError('Archived task identity is duplicated', 'ARCHIVE_EVIDENCE_AMBIGUOUS');
+    }
+    const stateErrors = validatePrReviewState(archivedState);
+    if (archivedState.schemaVersion !== 3 || stateErrors.length > 0) {
+      throw new GitHubWorkflowError(
+        `Archived task state is invalid: ${stateErrors.join('; ')}`,
+        'ARCHIVE_EVIDENCE_INVALID',
+      );
+    }
+    assertArchiveEventList(archive.events);
+    const terminalBounds = assertTerminalArchive(archivedState, archive.events);
+    const archivedTask = matchingTasks[0];
+    if (archivedTask.status !== 'completed'
+        || !isDeepStrictEqual(projectedArchivedTask(archivedTask), selectedTask)) {
+      throw new GitHubWorkflowError(
+        'Archived task does not exactly match the active terminal projection',
+        'ARCHIVE_TASK_MISMATCH',
+      );
+    }
+    candidates.push({ archive, archivedState, archivedTask, terminalBounds });
+  }
+  if (candidates.length === 0) {
+    throw new GitHubWorkflowError('No exact immutable archive proves this task', 'ARCHIVE_EVIDENCE_MISSING');
+  }
+  if (candidates.length !== 1) {
+    throw new GitHubWorkflowError('More than one immutable archive proves this task', 'ARCHIVE_EVIDENCE_AMBIGUOUS');
+  }
+  return candidates[0];
+}
+
+function archiveIntent(events, type, operationId) {
+  const expectedClientMutationId = intentFor(type, operationId, null).clientMutationId;
+  const candidates = events.filter((event) => event.details?.operationId === operationId
+    || event.details?.clientMutationId === expectedClientMutationId);
+  if (candidates.length !== 1) {
+    throw new GitHubWorkflowError(
+      `Archived ${type} intent is missing, duplicated, or ambiguous`,
+      'ARCHIVE_INTENT_AMBIGUOUS',
+    );
+  }
+  const event = candidates[0];
+  const intent = event.details;
+  if (!hasExactKeys(event, ['schemaVersion', 'type', 'summary', 'at', 'details'])
+      || !hasExactKeys(intent, ['type', 'operationId', 'clientMutationId', 'at'])
+      || event.schemaVersion !== 1 || event.type !== 'github-mutation-intent'
+      || event.summary !== `Intent ${type} ${operationId}`
+      || !isDeepStrictEqual(intent, intentFor(type, operationId, intent?.at))
+      || parsedTime(event.at, `Archived ${type} event`) < parsedTime(intent?.at, `Archived ${type} intent`)) {
+    throw new GitHubWorkflowError(`Archived ${type} intent lost exact correlation`, 'ARCHIVE_INTENT_INVALID');
+  }
+  return { event, intent };
+}
+
+function assertArchiveReplyBody(archivedState, archivedTask, threadId, historicalHeadSha, body) {
+  if (typeof body !== 'string') {
+    throw new GitHubWorkflowError('Archived live reply body is missing', 'ARCHIVE_REPLY_MISMATCH');
+  }
+  const operationId = `reply:${archivedTask.prNumber ?? ''}:${threadId}:${historicalHeadSha}`;
+  const expectedBody = deterministicReply(
+    { ...archivedState, currentIntegrationHeadSha: historicalHeadSha },
+    { tasks: [archivedTask] },
+    operationId,
+  );
+  if (body !== expectedBody) {
+    throw new GitHubWorkflowError('Archived live reply body or marker is altered', 'ARCHIVE_REPLY_MISMATCH');
+  }
+  return operationId;
+}
+
+function stableCommentEvidence(comment) {
+  return {
+    id: comment.id,
+    databaseId: comment.databaseId ?? null,
+    url: comment.url,
+    body: comment.body,
+    createdAt: comment.createdAt,
+    lastEditedAt: comment.lastEditedAt,
+    author: {
+      type: comment.author?.__typename ?? null,
+      login: comment.author?.login ?? null,
+      url: comment.author?.url ?? null,
+      id: comment.author?.id ?? null,
+    },
+    replyToId: comment.replyTo?.id ?? null,
+    pullRequestReviewId: comment.pullRequestReview?.id ?? null,
+  };
+}
+
+function validateArchiveBatchLive(state, live, selectedTask, selectedPlan, selectedArchive) {
+  const {
+    archivedState, archivedTask, archive, terminalBounds,
+  } = selectedArchive;
+  const sourceThreadIds = selectedTask.sourceIds.map((source) => (
+    /^thread:(.+)$/u.exec(source)?.[1] ?? null
+  ));
+  if (sourceThreadIds.some((threadId) => threadId === null)
+      || new Set(sourceThreadIds).size !== sourceThreadIds.length
+      || sourceThreadIds.length !== selectedPlan.length) {
+    throw new GitHubWorkflowError(
+      'Archive batch requires one unique explicit thread source per root',
+      'ARCHIVE_PROOF_MISMATCH',
+    );
+  }
+  const archivedProofs = archivedState.threadResolutionStatus.threads.filter((proof) => (
+    proof.taskIds.includes(selectedTask.id)
+  ));
+  if (archivedProofs.length !== sourceThreadIds.length
+      || archivedProofs.some((proof) => proof.taskIds.length !== 1
+        || proof.taskIds[0] !== selectedTask.id || proof.isResolved !== true
+        || proof.disposition !== selectedTask.disposition
+        || proof.replyId === null || proof.replyUrl === null
+        || proof.resolvedAt === null || proof.resolvedBy === null)) {
+    throw new GitHubWorkflowError('Archived resolved-root proof is incomplete or ambiguous', 'ARCHIVE_PROOF_MISMATCH');
+  }
+  const historicalHeads = new Set(archivedProofs.map((proof) => proof.observedHeadSha));
+  if (historicalHeads.size !== 1) {
+    throw new GitHubWorkflowError('Archived roots do not share one historical HEAD', 'ARCHIVE_PROOF_MISMATCH');
+  }
+  const historicalHeadSha = [...historicalHeads][0];
+  if (historicalHeadSha === state.currentIntegrationHeadSha) {
+    throw new GitHubWorkflowError('Archive adoption requires a distinct historical HEAD', 'ARCHIVE_PROOF_MISMATCH');
+  }
+  const evidence = [];
+  for (const threadId of sourceThreadIds) {
+    const proofs = archivedProofs.filter((proof) => proof.threadNodeId === threadId);
+    const entries = selectedPlan.filter((entry) => entry.thread.id === threadId);
+    if (proofs.length !== 1 || entries.length !== 1) {
+      throw new GitHubWorkflowError('Archived source root is missing or duplicated', 'ARCHIVE_PROOF_MISMATCH');
+    }
+    const proof = proofs[0];
+    const entry = entries[0];
+    const { thread } = entry;
+    const root = thread.root;
+    const directReplies = thread.comments.filter((comment) => comment.replyTo?.id === root.id);
+    if (!thread.isResolved || thread.comments.length !== 2 || directReplies.length !== 1
+        || proof.rootCommentNodeId !== root.id
+        || proof.rootCommentDatabaseId !== root.databaseId
+        || root.lastEditedAt !== null || !httpsUrl(root.url) || typeof root.body !== 'string'
+        || !isCanonicalActor(root.author)) {
+      throw new GitHubWorkflowError('Live archived root or root comment does not match proof', 'ARCHIVE_LIVE_MISMATCH');
+    }
+    const reply = directReplies[0];
+    if (reply.id !== proof.replyId || reply.url !== proof.replyUrl
+        || reply.replyTo?.id !== root.id || reply.lastEditedAt !== null
+        || !httpsUrl(reply.url) || !isViewerActor(reply.author, live.metadata.viewer)
+        || proof.resolvedBy !== live.metadata.viewer.login) {
+      throw new GitHubWorkflowError('Live archived reply identity does not match proof', 'ARCHIVE_LIVE_MISMATCH');
+    }
+    const replyOperationId = assertArchiveReplyBody(
+      archivedState, { ...archivedTask, prNumber: state.prNumber },
+      thread.id, historicalHeadSha, reply.body,
+    );
+    const resolveOperationId = `resolve:${state.prNumber}:${thread.id}:${historicalHeadSha}`;
+    const replyIntent = archiveIntent(archive.events, 'reply', replyOperationId);
+    const resolveIntent = archiveIntent(archive.events, 'resolve', resolveOperationId);
+    const rootAt = parsedTime(root.createdAt, 'Archived root creation');
+    const replyAt = parsedTime(reply.createdAt, 'Archived reply creation');
+    const replyIntentAt = parsedTime(replyIntent.intent.at, 'Archived reply intent');
+    const resolveIntentAt = parsedTime(resolveIntent.intent.at, 'Archived resolve intent');
+    const replyIntentEventAt = parsedTime(replyIntent.event.at, 'Archived reply intent event');
+    const resolveIntentEventAt = parsedTime(resolveIntent.event.at, 'Archived resolve intent event');
+    const proofResolvedAt = parsedTime(proof.resolvedAt, 'Archived durable resolution proof');
+    // GitHub returns reply.createdAt at second precision. archiveIntent already
+    // proves intent.at <= event.at, so this represented second supplies only an
+    // exclusive upper bound for both values, not an exact mutation instant.
+    const replyRepresentedSecondExclusiveUpperBound = (Math.floor(replyAt / 1_000) * 1_000) + 1_000;
+    // Recovery deliberately records intent.at as resolvedAt; appendEvent timestamps
+    // its enclosing journal record moments later. A later proof is instead a
+    // post-mutation observation and must follow that persisted journal record.
+    const proofUsesResolveIntentTime = proofResolvedAt === resolveIntentAt;
+    if (replyIntentAt < rootAt
+        || replyIntentEventAt >= replyRepresentedSecondExclusiveUpperBound
+        || replyIntentEventAt > resolveIntentAt
+        || resolveIntentAt < replyAt
+        || proofResolvedAt < resolveIntentAt
+        || (!proofUsesResolveIntentTime && resolveIntentEventAt > proofResolvedAt)
+        || replyIntentEventAt > terminalBounds.stateUpdatedAt
+        || resolveIntentEventAt > terminalBounds.stateUpdatedAt
+        || proofResolvedAt > terminalBounds.stateUpdatedAt
+        || (terminalBounds.terminalEventAt !== null
+          && (replyIntentEventAt > terminalBounds.terminalEventAt
+            || resolveIntentEventAt > terminalBounds.terminalEventAt
+            || proofResolvedAt > terminalBounds.terminalEventAt))) {
+      throw new GitHubWorkflowError('Archived reply and resolution timestamps do not correlate', 'ARCHIVE_INTENT_INVALID');
+    }
+    evidence.push({
+      threadNodeId: thread.id,
+      proof: { ...proof },
+      reply: { ...reply },
+      live: {
+        threadNodeId: thread.id,
+        isResolved: thread.isResolved,
+        root: stableCommentEvidence(root),
+        reply: stableCommentEvidence(reply),
+      },
+    });
+  }
+  return {
+    archiveId: archive.archiveId,
+    archive: structuredClone(archive),
+    historicalHeadSha,
+    evidence,
+  };
+}
+
+async function prepareArchiveBatchAdoption({
+  state, live, selectedTask, selectedPlan, archiveStore, git,
+}) {
+  const selectedArchive = await selectArchiveForBatch(state, selectedTask, archiveStore);
+  const adoption = validateArchiveBatchLive(state, live, selectedTask, selectedPlan, selectedArchive);
+  if (!(await git.isAncestor(
+    adoption.historicalHeadSha, state.currentIntegrationHeadSha, state.integrationWorktree,
+  ))) {
+    throw new GitHubWorkflowError('Archived historical HEAD is not an integration ancestor', 'MUTATION_NOT_READY');
+  }
+  return adoption;
+}
+
+function archiveAdoptionEvidenceMap(adoption) {
+  return new Map(adoption.evidence.map((item) => [item.threadNodeId, {
+    archiveAdoption: true,
+    reply: item.reply,
+    resolvedAt: item.proof.resolvedAt,
+    resolvedBy: item.proof.resolvedBy,
+    observedHeadSha: adoption.historicalHeadSha,
+  }]));
+}
+
 function priorHeadRecoveryCandidate(state, live, entry, selectedTask) {
   if (!completedThreadlessRecoveryReady(state) || !entry.thread.isResolved
       || selectedTask?.sourceType !== 'github-thread'
@@ -808,6 +1118,7 @@ function buildThreadProof(state, live, resolvedEvidence, at) {
     const exact = recordedReply ? [recordedReply]
       : fresh?.priorHeadRecovery
         ? [assertPriorHeadRecoveryLive(state, live, entry, fresh.priorHeadRecovery)]
+        : fresh?.archiveAdoption ? [fresh.reply]
         : exactRepliesFor(state, live, entry).exact;
     const reply = recordedReply ?? fresh?.reply ?? exact[0] ?? null;
     if (thread.isResolved && (!fresh || exact.length !== 1)) {
@@ -827,7 +1138,7 @@ function buildThreadProof(state, live, resolvedEvidence, at) {
       isResolved: thread.isResolved,
       resolvedAt: thread.isResolved ? old?.resolvedAt ?? fresh?.resolvedAt ?? null : null,
       resolvedBy: thread.isResolved ? old?.resolvedBy ?? fresh?.resolvedBy ?? null : null,
-      observedHeadSha: old?.observedHeadSha ?? state.currentIntegrationHeadSha,
+      observedHeadSha: old?.observedHeadSha ?? fresh?.observedHeadSha ?? state.currentIntegrationHeadSha,
     };
     return old ? {
       ...old,
@@ -1343,7 +1654,7 @@ function staleDiscoveryNextAction(status, fallback) {
   return fallback;
 }
 
-export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, clock, journal }) {
+export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, clock, journal, archiveStore }) {
   if (!client?.graphql || !stateAdapter?.load || !git || !clock?.now) {
     throw new GitHubWorkflowError('Client, state, Git, and clock adapters are required', 'INVALID_ADAPTERS');
   }
@@ -1907,6 +2218,37 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     let live = await readLiveSnapshot(client, active);
     await assertMutationReady({ state: active, git }, live);
     const { plan, selected: selectedTask, selectedPlan } = buildCanonicalRootPlan(active, live, taskId);
+    if (archiveBatchAdoptionReady(active, selectedTask, selectedPlan)) {
+      const preflightAdoption = await prepareArchiveBatchAdoption({
+        state: active, live, selectedTask, selectedPlan, archiveStore, git,
+      });
+      const finalArchive = await selectArchiveForBatch(active, selectedTask, archiveStore);
+      live = await readLiveSnapshot(client, active);
+      await assertMutationReady({ state: active, git }, live);
+      const finalPlan = buildCanonicalRootPlan(active, live, taskId);
+      if (!archiveBatchAdoptionReady(active, finalPlan.selected, finalPlan.selectedPlan)) {
+        throw new GitHubWorkflowError('Archive adoption prerequisites changed after preflight', 'THREAD_PROOF_STALE');
+      }
+      const finalAdoption = validateArchiveBatchLive(
+        active, live, finalPlan.selected, finalPlan.selectedPlan, finalArchive,
+      );
+      if (!(await git.isAncestor(
+        finalAdoption.historicalHeadSha, active.currentIntegrationHeadSha, active.integrationWorktree,
+      ))) {
+        throw new GitHubWorkflowError('Archived historical HEAD is not an integration ancestor', 'MUTATION_NOT_READY');
+      }
+      if (!isDeepStrictEqual(preflightAdoption, finalAdoption)) {
+        throw new GitHubWorkflowError('Archive or live resolved-root evidence changed after preflight', 'THREAD_PROOF_STALE');
+      }
+      const proof = buildThreadProof(
+        active, live, archiveAdoptionEvidenceMap(finalAdoption), clock.now(),
+      );
+      await assertCurrent(active);
+      active = await stateAdapter.checkpointTaskCompletion({
+        prNumber, expectedRevision: active.revision, threadResolutionStatus: proof,
+      });
+      return { taskId, stateRevision: active.revision, threadResolutionStatus: active.threadResolutionStatus };
+    }
     if (selectedTask?.sourceType === 'github-threadless') {
       const verification = active.threadResolutionStatus.threadlessVerification;
       if (verification.status !== 'passed' || verification.headSha !== active.currentIntegrationHeadSha

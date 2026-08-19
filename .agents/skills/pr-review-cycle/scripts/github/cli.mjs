@@ -1,6 +1,15 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import {
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -18,8 +27,18 @@ import {
   withGitHubRequestOwnerLock,
   loadState,
   readSpecialistStatus,
+  reviewRoot,
   stateDirectory,
 } from '../state/state.mjs';
+
+const MAX_ARCHIVED_STATE_BYTES = 128 * 1024;
+const MAX_ARCHIVED_EVENTS_BYTES = 16 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES = 10_000;
+const ARCHIVE_DIRECTORY_OPEN_FLAGS = fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW;
+const ARCHIVE_FILE_OPEN_FLAGS = fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW;
+const DEFAULT_ARCHIVE_FS = {
+  closeSync, fstatSync, lstatSync, openSync, readdirSync, readFileSync,
+};
 
 function baseUsage() {
   return `Usage: node .agents/skills/pr-review-cycle/scripts/github/cli.mjs <command> [--pr <number>] [options]\n\nCommands:\n  status [--human]               Read-only diagnostic live review and CI status (active PR by default)\n  advance --pr <number>          Safely checkpoint available review and CI progress\n  refresh-threads                Record exact-head empty canonical-thread proof for a taskless cycle\n  reply-resolve --task <id>      Reply to and close one task's Codex review threads\n  verify-resolve <selection>     Verify one task or re-attest one complete threadless set\n  request [--kind <kind>]        Request the state-selected review kind\n  collect                        Collect official review evidence for the Review commit\n  collect-ci                     Collect full GitHub Actions evidence for the Review commit\n  complete                       Reconfirm every gate and mark the cycle Done\n\nRequired options:\n  --pr <number>                  Required except for status with an active state\n\nRequest options:\n  --kind discovery|verification  Optional compatibility assertion; state selects the kind\n\nTask resolution options:\n  --task <opaque-task-id>        One byte-for-byte task ID for reply-resolve or verify-resolve\n  --task-set-json <json-array>   Explicit task-ID set for verify-resolve only\n\nSuccessful commands write JSON, except status --human which writes plain English.\n`;
@@ -124,7 +143,34 @@ function defaultState(cwd) {
   };
 }
 
-function defaultGit() {
+function actualObjectGitText(cwd, args) {
+  return execFileSync('git', ['--no-replace-objects', ...args], {
+    cwd,
+    encoding: 'utf8',
+    env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+}
+
+function assertLegacyGraftsAreInert(cwd) {
+  const commonGitDirectory = actualObjectGitText(
+    cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+  );
+  if (commonGitDirectory.length === 0) throw new Error('Git common directory is unavailable');
+  const graftsPath = join(commonGitDirectory, 'info', 'grafts');
+  let stat;
+  try {
+    stat = lstatSync(graftsPath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return;
+    throw error;
+  }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== 0) {
+    throw new Error(`Actual-object ancestry refuses legacy grafts at ${graftsPath}`);
+  }
+}
+
+export function createDefaultGitAdapter() {
   return {
     snapshot: (cwd) => ({
       headSha: gitText(cwd, ['rev-parse', 'HEAD']),
@@ -133,8 +179,11 @@ function defaultGit() {
     pushedHead: (cwd) => gitText(cwd, ['rev-parse', '@{upstream}']),
     isAncestor: (ancestor, descendant, cwd) => {
       try {
-        execFileSync('git', ['merge-base', '--is-ancestor', ancestor, descendant], {
-          cwd, stdio: ['ignore', 'ignore', 'ignore'],
+        assertLegacyGraftsAreInert(cwd);
+        execFileSync('git', ['--no-replace-objects', 'merge-base', '--is-ancestor', ancestor, descendant], {
+          cwd,
+          env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' },
+          stdio: ['ignore', 'ignore', 'ignore'],
         });
         return true;
       } catch {
@@ -163,6 +212,151 @@ function defaultJournal(cwd, prNumber) {
     },
     claimDispatch(intent, expectedRevision) { return claimGitHubMutationDispatch(cwd, prNumber, intent, expectedRevision); },
     withRequestOwner(callback) { return withGitHubRequestOwnerLock(cwd, prNumber, callback); },
+  };
+}
+
+function sameStableArchiveStat(left, right) {
+  return [
+    'dev', 'ino', 'mode', 'nlink', 'uid', 'gid', 'rdev', 'size', 'blksize', 'blocks', 'mtimeNs', 'ctimeNs',
+  ].every((field) => left[field] === right[field]);
+}
+
+function assertImmutableArchiveDirectory(stat, label) {
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new GitHubWorkflowError(`${label} is not one immutable real directory`, 'ARCHIVE_EVIDENCE_INVALID');
+  }
+}
+
+function openImmutableArchiveDirectory(fileSystem, path, label) {
+  const pathStat = fileSystem.lstatSync(path, { bigint: true });
+  assertImmutableArchiveDirectory(pathStat, label);
+  const fd = fileSystem.openSync(path, ARCHIVE_DIRECTORY_OPEN_FLAGS);
+  try {
+    const fdStat = fileSystem.fstatSync(fd, { bigint: true });
+    assertImmutableArchiveDirectory(fdStat, label);
+    if (!sameStableArchiveStat(pathStat, fdStat)) {
+      throw new GitHubWorkflowError(`${label} changed while it was opened`, 'ARCHIVE_EVIDENCE_INVALID');
+    }
+    return { fd, path, label, initialStat: fdStat };
+  } catch (error) {
+    fileSystem.closeSync(fd);
+    throw error;
+  }
+}
+
+function assertImmutableArchiveDirectoryStable(fileSystem, directory) {
+  const fdStat = fileSystem.fstatSync(directory.fd, { bigint: true });
+  const pathStat = fileSystem.lstatSync(directory.path, { bigint: true });
+  assertImmutableArchiveDirectory(fdStat, directory.label);
+  assertImmutableArchiveDirectory(pathStat, directory.label);
+  if (!sameStableArchiveStat(directory.initialStat, fdStat)
+      || !sameStableArchiveStat(directory.initialStat, pathStat)) {
+    throw new GitHubWorkflowError(`${directory.label} changed during evidence reads`, 'ARCHIVE_EVIDENCE_INVALID');
+  }
+}
+
+function readImmutableArchiveFile(fileSystem, path, label, maxBytes) {
+  const pathStat = fileSystem.lstatSync(path, { bigint: true });
+  if (!pathStat.isFile() || pathStat.isSymbolicLink()
+      || pathStat.size < 1n || pathStat.size > BigInt(maxBytes)) {
+    throw new GitHubWorkflowError(`${label} is not one bounded immutable regular file`, 'ARCHIVE_EVIDENCE_INVALID');
+  }
+  const fd = fileSystem.openSync(path, ARCHIVE_FILE_OPEN_FLAGS);
+  try {
+    const openedStat = fileSystem.fstatSync(fd, { bigint: true });
+    if (!openedStat.isFile() || openedStat.isSymbolicLink()
+        || openedStat.size < 1n || openedStat.size > BigInt(maxBytes)
+        || !sameStableArchiveStat(pathStat, openedStat)) {
+      throw new GitHubWorkflowError(`${label} changed while it was opened`, 'ARCHIVE_EVIDENCE_INVALID');
+    }
+    const bytes = fileSystem.readFileSync(fd);
+    const finalFdStat = fileSystem.fstatSync(fd, { bigint: true });
+    const finalPathStat = fileSystem.lstatSync(path, { bigint: true });
+    if (!Buffer.isBuffer(bytes) || BigInt(bytes.byteLength) !== openedStat.size
+        || !finalFdStat.isFile() || finalFdStat.isSymbolicLink()
+        || !finalPathStat.isFile() || finalPathStat.isSymbolicLink()
+        || !sameStableArchiveStat(openedStat, finalFdStat)
+        || !sameStableArchiveStat(openedStat, finalPathStat)) {
+      throw new GitHubWorkflowError(`${label} changed during its exact read`, 'ARCHIVE_EVIDENCE_INVALID');
+    }
+    return bytes.toString('utf8');
+  } finally {
+    fileSystem.closeSync(fd);
+  }
+}
+
+export function createDefaultArchiveStore(cwd = process.cwd(), fileSystemOverrides = {}) {
+  const fileSystem = { ...DEFAULT_ARCHIVE_FS, ...fileSystemOverrides };
+  return {
+    async list(prNumber) {
+      const archiveRoot = join(reviewRoot(cwd), 'archive');
+      try {
+        fileSystem.lstatSync(archiveRoot, { bigint: true });
+      } catch (error) {
+        if (error?.code === 'ENOENT') return [];
+        throw new GitHubWorkflowError(
+          `Immutable archive root cannot be inspected exactly: ${error.message}`,
+          'ARCHIVE_EVIDENCE_INVALID',
+        );
+      }
+      const namePattern = new RegExp(
+        `^pr-${prNumber}-\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}-\\d{3}Z$`,
+        'u',
+      );
+      let rootDirectory;
+      try {
+        rootDirectory = openImmutableArchiveDirectory(fileSystem, archiveRoot, 'Archive root');
+        const pinnedRoot = `/proc/self/fd/${rootDirectory.fd}`;
+        const entryNames = fileSystem.readdirSync(pinnedRoot, { withFileTypes: true })
+          .map((entry) => entry.name)
+          .filter((name) => namePattern.test(name))
+          .sort((left, right) => left.localeCompare(right));
+        if (entryNames.length > MAX_ARCHIVE_ENTRIES) {
+          throw new GitHubWorkflowError(
+            'Canonical archive inventory exceeded the node limit', 'ARCHIVE_EVIDENCE_INVALID',
+          );
+        }
+        const archives = [];
+        for (const entryName of entryNames) {
+          const directoryPath = join(pinnedRoot, entryName);
+          const directory = openImmutableArchiveDirectory(
+            fileSystem, directoryPath, `Canonical archive ${entryName}`,
+          );
+          let stateText;
+          let eventsText;
+          try {
+            const pinnedDirectory = `/proc/self/fd/${directory.fd}`;
+            stateText = readImmutableArchiveFile(
+              fileSystem,
+              join(pinnedDirectory, 'state.json'), `${entryName}/state.json`, MAX_ARCHIVED_STATE_BYTES,
+            );
+            eventsText = readImmutableArchiveFile(
+              fileSystem,
+              join(pinnedDirectory, 'events.ndjson'), `${entryName}/events.ndjson`, MAX_ARCHIVED_EVENTS_BYTES,
+            );
+            assertImmutableArchiveDirectoryStable(fileSystem, directory);
+          } finally {
+            fileSystem.closeSync(directory.fd);
+          }
+          const eventLines = eventsText.trim().split('\n').filter(Boolean);
+          archives.push({
+            archiveId: entryName,
+            state: JSON.parse(stateText),
+            events: eventLines.map((line) => JSON.parse(line)),
+          });
+        }
+        assertImmutableArchiveDirectoryStable(fileSystem, rootDirectory);
+        return archives;
+      } catch (error) {
+        if (error instanceof GitHubWorkflowError) throw error;
+        throw new GitHubWorkflowError(
+          `Immutable archive evidence cannot be read exactly: ${error.message}`,
+          'ARCHIVE_EVIDENCE_INVALID',
+        );
+      } finally {
+        if (rootDirectory) fileSystem.closeSync(rootDirectory.fd);
+      }
+    },
   };
 }
 
@@ -196,8 +390,8 @@ function parseVerifyTaskSetJson(value) {
 }
 
 export async function runCli(argv, {
-  cwd = process.cwd(), client = createDefaultGitHubClient(), state, git = defaultGit(), clock = { now: () => new Date().toISOString() },
-  journal,
+  cwd = process.cwd(), client = createDefaultGitHubClient(), state, git = createDefaultGitAdapter(), clock = { now: () => new Date().toISOString() },
+  journal, archiveStore,
 } = {}) {
   const [command, ...args] = argv;
   if (!command || command === 'help' || command === '--help') return { help: usage() };
@@ -250,6 +444,7 @@ export async function runCli(argv, {
     clock,
     journal: journal ?? (['status', 'advance', 'refresh-threads', 'verify-resolve'].includes(command)
       ? null : defaultJournal(cwd, prNumber)),
+    archiveStore: archiveStore ?? (command === 'reply-resolve' ? createDefaultArchiveStore(cwd) : null),
   });
   if (command === 'status') {
     const result = await workflow.status(prNumber);

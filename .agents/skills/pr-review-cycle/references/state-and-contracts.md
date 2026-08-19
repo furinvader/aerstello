@@ -33,6 +33,41 @@ Only the main orchestrator is the logical writer. Writes are locked,
 revision-checked, schema-validated, limited to 64 KiB, and committed by atomic
 rename. Keep raw logs, full diffs, stack traces, and transcripts out of state.
 
+Archived state remains read-only recovery evidence. The narrow resolved-root
+batch adoption in `reply-resolve` enumerates only bounded canonical archive
+directories under `<git-common-dir>/codex/pr-review/archive/`. It rejects a
+symlinked root, candidate, or evidence file, pins no-follow directory
+descriptors, opens files read-only and no-follow, and requires stable pre/post
+device, inode, mode, size, timestamps, and exact byte count. The 10,000-name
+limit is applied before any canonical candidate is read or parsed, while
+`.partial` entries are ignored. It rereads its one exact candidate before
+checkpointing. The archived schema-v3 task must be completed and project
+exactly to one active terminal `not-applicable` GitHub-thread task. Terminal
+archive evidence, all resolved proof rows, one shared ancestral historical
+HEAD, and exactly one correlated archived reply intent plus resolve intent per
+root are mandatory. Each live reply must equal the deterministic body rebuilt
+from archived state and task evidence. Root creation must be no later than
+logical reply intent, logical intent no later than its persisted event, and
+that reply event no later than exact resolve intent. Resolve intent must be no
+earlier than the live reply's represented-second start, and preserved durable
+`resolvedAt` no earlier than resolve intent; intent events and proof are bounded
+by archived state and terminal timestamps. GitHub's second-granular reply
+timestamp represents an interval rather than an exact mutation instant, so
+logical intent and its event may follow the represented second's start. The
+reply-intent event must still precede that second's exclusive end: `.999`
+passes only when it does not follow resolve intent, while the next second's
+`.000` fails. A later observation-form `resolvedAt` cannot precede the
+resolve-intent event, while equality with the resolve intent is the canonical
+recovery form and intentionally permits the event envelope's few milliseconds
+of persistence latency.
+Historical ancestry reads actual objects with replacement refs disabled and
+refuses nonempty common-directory `info/grafts`, including for linked
+worktrees. Fully paginated live roots and replies must match those records
+twice. The transition writes only the ordinary current thread proof and
+task completion; it never changes an archive, copies evidence into a sidecar,
+appends a mutation event, or mutates GitHub. Manual state/proof copying and
+thread reopening are not recovery mechanisms.
+
 Pull-request `state` and `isDraft` are volatile GitHub evidence, never durable
 review-state fields. `status` reports them without writing. A review request
 against an otherwise ready draft first journals the deterministic
