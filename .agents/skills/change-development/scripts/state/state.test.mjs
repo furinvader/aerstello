@@ -86,6 +86,47 @@ test('cross-plan validation merge rejects conflicting metadata for identical arg
     (error) => error.code === 'VALIDATION_COMMAND_CONFLICT');
 });
 
+test('binding rejects command-kind conflicts before packet evidence or revision mutation', async () => {
+  const area = repository('packet area command conflict');
+  const areaPlanning = await initializeState({ cwd: area.cwd, changeId: 'packet-area-conflict', mode: 'implement',
+    baseBranch: 'main', planningRef: area.sha, source: descriptor });
+  const areaPlan = planFor(areaPlanning);
+  let areaState = acceptPlan({ cwd: area.cwd, plan: areaPlan, expectedRevision: areaPlanning.revision });
+  const areaPacket = packetFor(areaState, areaPlan, 'state-task');
+  areaPacket.requiredValidation = { unit: [], system: [{ command: 'npm run check:workflow', reason: 'Conflicts with workflow area.',
+    selectors: [], projects: [] }] };
+  const areaBefore = readFileSync(join(changeDirectory(area.cwd, areaState.changeId), 'state.json'), 'utf8');
+  assert.throws(() => bindTask({ cwd: area.cwd, packet: areaPacket, expectedRevision: areaState.revision }),
+    (error) => error.code === 'VALIDATION_COMMAND_CONFLICT');
+  assert.equal(readFileSync(join(changeDirectory(area.cwd, areaState.changeId), 'state.json'), 'utf8'), areaBefore);
+  assert.equal(existsSync(join(changeDirectory(area.cwd, areaState.changeId), 'implementation')), false);
+
+  const historical = repository('terminal packet command conflict');
+  const historicalPlanning = await initializeState({ cwd: historical.cwd, changeId: 'terminal-packet-conflict', mode: 'implement',
+    baseBranch: 'main', planningRef: historical.sha, source: descriptor });
+  const historicalPlan = executionPlanFor(historicalPlanning);
+  historicalPlan.tasks[1].dependsOn = ['state-task'];
+  let state = acceptPlan({ cwd: historical.cwd, plan: historicalPlan, expectedRevision: historicalPlanning.revision });
+  const firstPacket = packetFor(state, historicalPlan, 'state-task');
+  state = bindTask({ cwd: historical.cwd, packet: firstPacket, expectedRevision: state.revision });
+  const worker = createWorkerFixture(historical.cwd, state, firstPacket);
+  state = scheduleWave({ cwd: historical.cwd, expectedRevision: state.revision });
+  state = startTask({ cwd: historical.cwd, taskId: firstPacket.taskId, workerId: 'historical-worker', expectedRevision: state.revision });
+  writeFileSync(join(worker.path, 'first.txt'), 'first\n'); git(worker.path, 'add', 'first.txt');
+  git(worker.path, 'commit', '-m', 'test: historical packet');
+  state = acceptResult({ cwd: historical.cwd,
+    result: resultFor(firstPacket, 'implemented', git(worker.path, 'rev-parse', 'HEAD'), ['first.txt']),
+    workerCwd: worker.path, expectedRevision: state.revision });
+  state = integrateTask({ cwd: historical.cwd, taskId: firstPacket.taskId, expectedRevision: state.revision });
+  const secondPacket = packetFor(state, historicalPlan, 'second-task');
+  secondPacket.requiredValidation = { unit: [], system: [{ ...firstPacket.requiredValidation.unit[0], selectors: [], projects: [] }] };
+  const before = readFileSync(join(changeDirectory(historical.cwd, state.changeId), 'state.json'), 'utf8');
+  assert.throws(() => bindTask({ cwd: historical.cwd, packet: secondPacket, expectedRevision: state.revision }),
+    (error) => error.code === 'VALIDATION_COMMAND_CONFLICT');
+  assert.equal(readFileSync(join(changeDirectory(historical.cwd, state.changeId), 'state.json'), 'utf8'), before);
+  assert.equal(existsSync(join(changeDirectory(historical.cwd, state.changeId), 'implementation', 'tasks', 'second-task')), false);
+});
+
 test('verifier evidence remains deterministic and schema-bounded at the upper limit', () => {
   const evidence = Array.from({ length: 40 }, (_, index) => ({ kind: index % 2 ? 'criterion' : 'decision',
     id: `item-${index}`, digest: `sha256:${String(index).padStart(64, '0')}`, summary: `${'semantic '.repeat(100)}${index}` }));
@@ -394,15 +435,22 @@ test('late source drift preserves terminal authority and invalidates verificatio
   state = finalizeIntegration({ cwd, expectedRevision: state.revision });
 
   issue.body = issue.body.replace('[ ]', '[x]'); issue.updatedAt = '2026-08-18T10:01:00Z';
-  state = await refreshSource({ cwd, expectedRevision: state.revision, sourceAdapter: adapter });
+  await assert.rejects(refreshSource({ cwd, expectedRevision: state.revision, sourceAdapter: adapter,
+    crashStep(step) { if (step === 'after-intent') throw new Error('late progress crash'); } }), /late progress crash/u);
+  state = recoverState({ cwd }).state;
   assert.equal(state.phase, 'integrated'); assert.equal(state.source.classification, 'unchanged');
   assert.equal(state.execution.tasks[0].status, 'integrated');
+  assert.equal(state.verification, null);
 
   issue.body += '\n\nMaterial requirement.'; issue.updatedAt = '2026-08-18T10:02:00Z';
-  state = await refreshSource({ cwd, expectedRevision: state.revision, sourceAdapter: adapter });
+  await assert.rejects(refreshSource({ cwd, expectedRevision: state.revision, sourceAdapter: adapter,
+    crashStep(step) { if (step === 'after-intent') throw new Error('late material crash'); } }), /late material crash/u);
+  state = recoverState({ cwd }).state;
   assert.equal(state.phase, 'awaiting-decision'); assert.equal(state.source.classification, 'unreviewed-material');
-  state = recordDecision({ cwd, expectedRevision: state.revision, decision: { id: 'retain-late-source',
-    reason: 'The terminal implementation already covers this wording.', authorization: 'operator', trigger: 'source-refresh', disposition: 'retain-plan' } });
+  assert.throws(() => recordDecision({ cwd, expectedRevision: state.revision, decision: { id: 'retain-late-source',
+    reason: 'The terminal implementation already covers this wording.', authorization: 'operator', trigger: 'source-refresh', disposition: 'retain-plan' },
+  crashStep(step) { if (step === 'after-intent') throw new Error('late retain crash'); } }), /late retain crash/u);
+  state = recoverState({ cwd }).state;
   assert.equal(state.phase, 'integrated'); assert.equal(state.verification, null);
 
   issue.body += '\n\nAnother material requirement.'; issue.updatedAt = '2026-08-18T10:03:00Z';
@@ -420,12 +468,48 @@ test('late source drift preserves terminal authority and invalidates verificatio
   resultingPlan.tasks.push({ ...plan.tasks[0], id: 'late-source-remediation-task', title: 'Cover late source',
     objective: 'Implement the late source requirement.', criterionIds: ['late-source-remediation'], checklistItemIds: [],
     dependsOn: ['state-task'], anticipatedPaths: ['late-source.txt'] });
-  state = amendPlan({ cwd, expectedRevision: state.revision, resultingPlan,
+  assert.throws(() => amendPlan({ cwd, expectedRevision: state.revision, resultingPlan,
     amendment: { id: 'late-source-amendment', reason: 'Incorporate live material drift.', authorization: 'operator',
-      trigger: 'resolve-late-source', delta: { added: ['late-source-remediation'] }, invalidatedEvidence: [] } });
+      trigger: 'resolve-late-source', delta: { added: ['late-source-remediation'] }, invalidatedEvidence: [] },
+    crashStep(step) { if (step === 'after-intent') throw new Error('late amendment crash'); } }), /late amendment crash/u);
+  state = recoverState({ cwd }).state;
   assert.equal(state.phase, 'implementing'); assert.equal(state.verification, null);
   assert.equal(state.execution.tasks.find(({ id }) => id === 'state-task').status, 'integrated');
   assert.equal(state.execution.tasks.find(({ id }) => id === 'late-source-remediation-task').status, 'unbound');
+});
+
+test('validation planning binds release evidence to protected origin/main for a non-main development base', async () => {
+  const { cwd, sha } = repository('protected release validation');
+  git(cwd, 'update-ref', 'refs/remotes/origin/main', sha);
+  git(cwd, 'branch', 'develop', sha);
+  const planning = await initializeState({ cwd, changeId: 'protected-release-validation', mode: 'implement',
+    baseBranch: 'develop', planningRef: sha, source: descriptor });
+  const releaseValue = { specialization: 'ops-workflow', affectedAreas: ['release'], riskTags: ['release'],
+    browserVisible: false, relatedTestSelectionUncertain: false };
+  const releaseSpecialization = { ...releaseValue,
+    route: routeSpecialists({ ...releaseValue, testSelectionUncertain: false }, registry) };
+  const plan = planFor(planning); plan.specialization = releaseSpecialization;
+  plan.tasks[0].specialization = releaseSpecialization; plan.tasks[0].anticipatedPaths = ['first.txt'];
+  let state = acceptPlan({ cwd, plan, expectedRevision: planning.revision });
+  const packet = packetFor(state, plan, 'state-task'); state = bindTask({ cwd, packet, expectedRevision: state.revision });
+  const worker = createWorkerFixture(cwd, state, packet); state = scheduleWave({ cwd, expectedRevision: state.revision });
+  state = startTask({ cwd, taskId: packet.taskId, workerId: 'release-worker', expectedRevision: state.revision });
+  writeFileSync(join(worker.path, 'first.txt'), 'first\n'); git(worker.path, 'add', 'first.txt'); git(worker.path, 'commit', '-m', 'test: release worker');
+  state = acceptResult({ cwd, result: resultFor(packet, 'implemented', git(worker.path, 'rev-parse', 'HEAD'), ['first.txt']),
+    workerCwd: worker.path, expectedRevision: state.revision });
+  state = integrateTask({ cwd, taskId: packet.taskId, expectedRevision: state.revision });
+  removeTaskWorktree({ cwd, changeId: state.changeId, taskId: packet.taskId });
+  state = finalizeIntegration({ cwd, expectedRevision: state.revision });
+  state = createValidationPlan({ cwd, expectedRevision: state.revision });
+  const storedPlan = JSON.parse(readFileSync(join(changeDirectory(cwd, state.changeId), 'verification', 'rounds', '0001', 'validation-plan.json'), 'utf8'));
+  assert.equal(storedPlan.releaseEvidence.releaseRef, 'origin/main');
+  assert.equal(storedPlan.releaseEvidence.releaseRefSha, sha);
+
+  const missing = await integratedSingleTaskFixture('missing protected release', releaseSpecialization);
+  const before = readFileSync(join(changeDirectory(missing.cwd, missing.state.changeId), 'state.json'), 'utf8');
+  assert.throws(() => createValidationPlan({ cwd: missing.cwd, expectedRevision: missing.state.revision }));
+  assert.equal(readFileSync(join(changeDirectory(missing.cwd, missing.state.changeId), 'state.json'), 'utf8'), before);
+  assert.equal(existsSync(join(changeDirectory(missing.cwd, missing.state.changeId), 'verification')), false);
 });
 
 test('stored union specialist routes are consumed in canonical reviewer order', async () => {

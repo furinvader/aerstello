@@ -74,20 +74,25 @@ packets bind the amended plan to the then-current central task base.
 
 Initial acceptance and every amendment conservatively preflight the complete
 final-verifier context against its 500-item and 256-KiB limits. Inevitable
-overflow fails before durable plan evidence or execution authority changes.
+future integration and validation records plus all then-known semantic evidence
+fail before durable plan evidence or execution authority changes when they
+cannot fit. Packet binding and exact result acceptance repeat that projection
+with their newly known receipt-bound content; initial acceptance cannot promise
+capacity for arbitrarily large future worker summaries that do not yet exist.
 
-When verification is active, an amendment must be finding-driven: its trigger
-is the exact stable fingerprint of an actionable source-role-qualified finding,
-and its disposition names the amendment plus new replacement criterion and task
-IDs. The resulting plan preserves every terminal task definition and the
-completed specialization, adds each disposition-bound ordinary remediation
-criterion/task, and covers every remaining actionable sibling finding in the
-same guarded amendment. It may overlap a terminal task's paths only for that
-exact remediation; overlap among new or active tasks remains invalid. A
-repeated semantic finding requires receipt-protected human authorization before
-disposition. The amendment resets current verification applicability, not its
-append-only history; after remediation integration a new exact-HEAD validation
-and review round is required.
+Post-acceptance amendment authority is one of: an actionable finding's exact
+stable fingerprint; `validation-failure:<receipt-digest>` for an exact failed
+validation result; or the bound resolve-decision ID for late material source
+drift. Finding-disposition mapping applies only to finding-driven remediation:
+its disposition names the amendment plus new replacement criterion and task
+IDs, and the amendment covers every actionable sibling finding. Validation-
+failure and source-decision amendments instead add ordinary owned criteria and
+tasks under their own receipt-bound authority. Every route preserves terminal
+task definitions and the completed specialization. A repeated semantic finding
+requires receipt-protected human authorization before disposition. An
+amendment resets current verification applicability, not its append-only
+history; after remediation integration a new exact-HEAD validation and review
+round is required.
 
 For `implement` and `full`, acceptance also initializes bounded execution
 summaries from the effective plan. Existing v1 records remain historically
