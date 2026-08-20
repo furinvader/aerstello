@@ -315,10 +315,26 @@ or events, but are tolerated only when their selected proof projection is
 identical and they contain zero selected-root mutation intents; partial or
 conflicting intent evidence and every divergent projection fail closed. Archive
 names, timestamps, enumeration order, and latest or earliest position never
-establish authority. The production reader pins real no-follow archive and
-candidate directory descriptors, opens evidence files read-only and no-follow,
-requires stable pre/post inode and byte evidence, and applies the 10,000-entry
-bound before reading any canonical candidate; `.partial` entries stay ignored.
+establish authority. On Linux, the production reader traverses pinned no-follow
+archive and candidate descriptors through `/proc/self/fd/<fd>`. Darwin does not
+use `/proc` or `/dev/fd` child lookup: the standalone main-thread CLI holds one
+process-wide archive owner and uses synchronous verified-working-directory
+scopes. Authorized root and candidate nesting never reacquires that owner, and
+no callback may return a Promise or thenable. Before each Darwin target open or
+`chdir`, the current `.` is first pinned and proved, then the saved absolute
+prior cwd is resolved and opened no-follow; its followed `.`, descriptor, and
+absolute-path identities must agree. A replaced saved path is never entered
+before target traversal: the failure is recoverable only while `.` still proves
+the initial pinned identity, otherwise cwd is poisoned. The target receives the
+same proof immediately after `chdir`. Every scope attempts restoration in
+`finally` and re-proves the saved cwd before descriptor closure. An inner
+failure remains recoverable after the outer caller cwd is proved, while an
+unprovable outer restoration or pre-target cwd poisons cwd and terminates the
+executable without continued workflow work. This is not a generic concurrent-library contract:
+Darwin worker threads and overlapping stores fail closed. Both strategies keep
+read-only/no-follow evidence opens, stable pre/post inode and exact-byte proof,
+the 128-KiB state and 16-MiB events bounds, and the 10,000-entry bound before
+candidate traversal; `.partial` entries stay ignored.
 Timestamp evidence must place root creation no later than the logical reply
 intent, that intent no later than its persisted event, and the reply event no
 later than the exact resolve intent. Resolve intent must be no earlier than the

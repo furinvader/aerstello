@@ -36,10 +36,25 @@ rename. Keep raw logs, full diffs, stack traces, and transcripts out of state.
 Archived state remains read-only recovery evidence. The narrow resolved-root
 batch adoption in `reply-resolve` enumerates only bounded canonical archive
 directories under `<git-common-dir>/codex/pr-review/archive/`. It rejects a
-symlinked root, candidate, or evidence file, pins no-follow directory
-descriptors, opens files read-only and no-follow, and requires stable pre/post
-device, inode, mode, size, timestamps, and exact byte count. The 10,000-name
-limit is applied before any canonical candidate is read or parsed, while
+symlinked root, candidate, or evidence file. Linux pins no-follow directory
+descriptors under `/proc/self/fd/<fd>`. Darwin never traverses `/dev/fd`; its
+standalone main-thread CLI holds one outer process-cwd owner across synchronous
+authorized root and candidate scopes. Each scope first pins and proves its
+current `.`, then resolves and opens the saved prior cwd and requires followed
+`.`, descriptor, and absolute-path identities to agree before target open or
+`chdir`. A replaced saved path is never entered before target traversal; only
+an exact re-proof of the initially pinned cwd makes that failure recoverable,
+otherwise cwd is poisoned. The target identity is proved before the callback,
+Promise and thenable results are rejected, and restoration is attempted and the
+prior cwd re-proved in `finally` before every descriptor close. Nested restoration failures remain
+recoverable only after the outer caller cwd proof. An unprovable outer
+restoration or pre-target cwd poisons cwd and is fatal at the executable
+boundary, so no workflow or mutation continues in-process. Darwin worker threads, overlapping stores,
+unsupported platforms, and generic concurrent-library use fail closed without
+probing another strategy. Files remain read-only and no-follow with stable
+pre/post device, inode, mode, size, timestamps, and exact byte count. The
+10,000-name limit precedes candidate traversal, the 128-KiB state and 16-MiB
+event limits precede read and parse, canonical names remain sorted, and
 `.partial` entries are ignored. Selection requires one canonical immutable
 proof lineage rather than one archive directory. Every matching carrier is
 independently schema-valid and terminal, and its one completed schema-v3 task

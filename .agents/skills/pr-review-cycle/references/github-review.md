@@ -209,9 +209,23 @@ intent denotes recovery's logical intent timestamp and may precede the event
 envelope by its persistence latency.
 Archive-local terminal metadata plus unrelated tasks, proofs, and events do not
 enter the lineage authority, but each carrier still passes its own immutable
-envelope validation. Archive files are read
-through pinned no-follow directory and file descriptors with stable inode,
-size, and exact-byte checks, and canonical names are bounded before any parse.
+envelope validation. Linux reads archive files through pinned no-follow
+directory descriptors rooted at `/proc/self/fd/<fd>`. Darwin instead uses the
+standalone main-thread CLI's one synchronous process-cwd owner; `/dev/fd` child
+traversal is never treated as available. Its authorized nested root and
+candidate scopes pin and prove the current `.` before resolving and opening the
+saved prior cwd, then require followed `.`, descriptor, and absolute-path
+identities to agree before target open or `chdir` and before any scoped read. A
+replaced saved path is not entered before target traversal; only an exact
+re-proof of the initially pinned cwd makes that failure recoverable. Scopes
+reject Promise or thenable callbacks and attempt and prove restoration in
+`finally`. Recoverable nesting failures restore the caller cwd and release the
+owner. An unprovable outer restoration or pre-target cwd poisons cwd and exits
+before any continued workflow action. Worker-thread, overlapping-store, unsupported-
+platform, and generic concurrent-library use fail closed without strategy
+fallback. Both supported paths retain no-follow file opens, stable inode, size,
+exact-byte, 128-KiB state, 16-MiB events, and 10,000-entry checks before parse or
+candidate traversal.
 Historical ancestry ignores replacement refs and rejects a nonempty
 common-directory `info/grafts`, including in linked worktrees. The command
 performs two complete evidence and head reads and one guarded state checkpoint;
