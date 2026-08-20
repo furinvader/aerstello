@@ -494,6 +494,28 @@
         }
       ]
     },
+    "archiveProvenance": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "schemaVersion", "historicalTaskId", "historicalDisposition",
+        "historicalIntegratedCommitSha", "replyBodySha256", "authorityFingerprint"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "historicalTaskId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "historicalDisposition": { "enum": ["fixed", "already-fixed"] },
+        "historicalIntegratedCommitSha": { "$ref": "#/$defs/nullableSha" },
+        "replyBodySha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "authorityFingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "historicalDisposition": { "const": "fixed" } }, "required": ["historicalDisposition"] },
+          "then": { "properties": { "historicalIntegratedCommitSha": { "$ref": "#/$defs/sha" } } },
+          "else": { "properties": { "historicalIntegratedCommitSha": { "type": "null" } } }
+        }
+      ]
+    },
     "threadRecord": {
       "type": "object", "additionalProperties": false,
       "required": [
@@ -513,7 +535,8 @@
         "isResolved": { "type": "boolean" },
         "resolvedAt": { "oneOf": [{ "type": "null" }, { "type": "string", "format": "date-time" }] },
         "resolvedBy": { "$ref": "#/$defs/nullableString" },
-        "observedHeadSha": { "$ref": "#/$defs/sha" }
+        "observedHeadSha": { "$ref": "#/$defs/sha" },
+        "archiveProvenance": { "$ref": "#/$defs/archiveProvenance" }
       },
       "allOf": [
         {
@@ -526,7 +549,13 @@
               "replyUrl": { "type": "string", "format": "uri", "pattern": "^https://", "maxLength": 2000 }
             }
           },
-          "else": { "properties": { "resolvedAt": { "type": "null" }, "resolvedBy": { "type": "null" } } }
+          "else": {
+            "properties": { "resolvedAt": { "type": "null" }, "resolvedBy": { "type": "null" } },
+            "not": {
+              "properties": { "archiveProvenance": {} },
+              "required": ["archiveProvenance"]
+            }
+          }
         },
         {
           "if": { "properties": { "replyId": { "type": "null" } }, "required": ["replyId"] },
@@ -666,6 +695,12 @@
         "integratedCommitSha": { "$ref": "#/$defs/nullableSha" },
         "resolutionSummary": { "$ref": "#/$defs/nullableString" },
         "taskPacketDigest": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            { "type": "null" }
+          ]
+        },
+        "workerResultDigest": {
           "oneOf": [
             { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             { "type": "null" }

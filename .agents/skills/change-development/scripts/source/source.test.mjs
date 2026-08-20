@@ -68,6 +68,18 @@ test('captures direct UTF-8 requests and tracked repository plans at an exact cl
     descriptor: { type: 'repository-plan', path: 'missing.md' }, now: AT }), /not tracked/u);
 });
 
+test('refreshable sources can be captured from a later clean integrated checkout without changing Planning SHA authority', async (t) => {
+  const { cwd, sha } = await repository(t);
+  await writeFile(join(cwd, 'integrated.txt'), 'integrated\n');
+  run(cwd, ['add', '.']); run(cwd, ['commit', '-qm', 'integrated']);
+  const original = await captureSource({ cwd, planningSha: sha, requirePlanningCheckout: false,
+    descriptor: { type: 'repository-plan', path: 'plan.md' }, now: AT });
+  const refreshed = await refreshSource({ cwd, planningSha: sha, requirePlanningCheckout: false,
+    descriptor: original.descriptor, previousObservation: original, now: LATER });
+  assert.equal(refreshed.observation.planningSha, sha);
+  assert.equal(refreshed.classification, 'unchanged');
+});
+
 test('partial implementation captures committed summary metadata but never a raw diff', async (t) => {
   const { cwd, sha: base } = await repository(t);
   await writeFile(join(cwd, 'plan.md'), '# Changed\n');

@@ -1,0 +1,10 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema", "$id":"https://aerstello.local/schemas/change-development/development-finding-disposition-v1.schema.json",
+  "title":"Append-only development finding disposition v1", "type":"object", "additionalProperties":false,
+  "required":["schemaVersion","sourceKind","sourceRole","sourceResultDigest","headSha","findingId","fingerprint","disposition","reason","amendmentId","replacementCriterionId","replacementTaskId","recordedAt"],
+  "properties":{"schemaVersion":{"const":1},"sourceKind":{"enum":["specialist","verifier"]},"sourceRole":{"enum":["development_integration_verifier","security_reviewer","offline_realtime_reviewer"]},"sourceResultDigest":{"$ref":"#/$defs/digest"},"headSha":{"$ref":"#/$defs/sha"},"findingId":{"$ref":"#/$defs/id"},"fingerprint":{"$ref":"#/$defs/digest"},
+    "disposition":{"enum":["actionable","duplicate","already-fixed","stale","invalid","policy-conflict","out-of-scope","needs-human-decision"]},"reason":{"$ref":"#/$defs/text"},
+    "amendmentId":{"oneOf":[{"$ref":"#/$defs/id"},{"type":"null"}]},"replacementCriterionId":{"oneOf":[{"$ref":"#/$defs/id"},{"type":"null"}]},"replacementTaskId":{"oneOf":[{"$ref":"#/$defs/id"},{"type":"null"}]},"recordedAt":{"type":"string","format":"date-time"}},
+  "allOf":[{"if":{"properties":{"disposition":{"const":"actionable"}}},"then":{"properties":{"amendmentId":{"$ref":"#/$defs/id"},"replacementCriterionId":{"$ref":"#/$defs/id"},"replacementTaskId":{"$ref":"#/$defs/id"}}},"else":{"properties":{"amendmentId":{"type":"null"},"replacementCriterionId":{"type":"null"},"replacementTaskId":{"type":"null"}}}}],
+  "$defs":{"id":{"type":"string","pattern":"^[a-z0-9]+(?:-[a-z0-9]+)*$","maxLength":128},"sha":{"type":"string","pattern":"^[0-9a-f]{40}([0-9a-f]{24})?$"},"digest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},"text":{"type":"string","minLength":1,"maxLength":4000,"pattern":"\\S"}}
+}

@@ -219,6 +219,10 @@ test('ownership manifest names the complete canonical skill and no obsolete path
   ));
   assert.deepEqual(specialistOwnership.permittedWorkflowConsumers, [
     {
+      path: '.codex/agents/development-integration-verifier.toml',
+      targets: ['references/reviewer-contracts.md'],
+    },
+    {
       path: '.codex/agents/implementation-worker.toml',
       targets: ['registry.json'],
     },

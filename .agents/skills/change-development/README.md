@@ -2,14 +2,16 @@
 
 The `$change-development` capability plans, implements, and resumes one durable
 Aerstello change. It preserves the exact source, Git observations, decisions,
-specialist evidence, accepted plan, immutable worker packets and results, and
-central integration receipts so another session can continue without
-reconstructing intent.
+specialist evidence, accepted plan, immutable worker packets and results,
+central integration receipts, exact-HEAD validation, review results, and
+finding dispositions so another session can continue without reconstructing
+intent.
 
-This capability stops when the planned task graph is `integrated`. It does not
-perform issue #24's integrated-HEAD verification, prepare or review a pull
-request, merge, or write to GitHub. Issue reads through the standalone adapter
-are read-only.
+For `implement` and `full`, this capability stops at `development-ready` after
+local exact-HEAD validation, stored-route specialist review, and the read-only
+`development_integration_verifier` are clean. It does not push, prepare or
+review a pull request, run CI, merge, or write to GitHub. Issue reads through
+the standalone source adapter are read-only.
 
 ## Terms
 
@@ -24,6 +26,8 @@ are read-only.
 - **Implementation result**: one worker's schema-valid `implemented`, `blocked`, `failed`, or `no-change` report, checked against its packet and Git evidence.
 - **Wave**: at most three dependency-ready bound tasks whose ownership and produced/consumed artifacts do not conflict.
 - **Integration intent**: durable record of one accepted worker commit and the exact clean central base, written before cherry-pick.
+- **Verification round**: immutable validation plan, append-only command intents and results, stored-route specialist evidence, verifier context/result, and finding dispositions bound to one clean integrated HEAD.
+- **Development-ready**: local proof that the exact HEAD, source, plan, task set, validation, specialist evidence, and final verifier result are all current and clean; it is not delivery authority.
 - **Exact next action**: one bounded command or operator action stored in state and emitted by status/hooks.
 
 ## Start or resume
@@ -91,6 +95,33 @@ Use the following lifecycle commands through `npm run change:state --`:
 | `reconcile-integration` | Apply or finish an interrupted integration from the persisted intent |
 | `reject-task` | Receipt-record a bounded rejection before worktree cleanup and replan |
 | `finalize-integration` | Prove all terminal worktrees removed and enter `integrated` |
+| `validation-plan` | Persist the immutable exact-HEAD targeted validation plan; use `--replace` only for a failed plan |
+| `run-validation` | Resume direct `shell:false` execution of pending validation argv and append concise results |
+| `specialist-plan` | Union receipt-valid stored task routes in canonical reviewer order |
+| `specialist-record` | Record one routed exact-HEAD reusable reviewer result |
+| `verifier-context` | Print the deterministic bounded context for `development_integration_verifier` |
+| `verifier-record` | Record one schema-valid result bound to the exact context and HEAD |
+| `finding-authorize` | Receipt-protect a human decision required by a repeated semantic finding |
+| `finding-disposition` | Append one source-kind and source-role-qualified finding disposition |
+| `finalize-development` | Recheck every local exact-HEAD gate and enter `development-ready` |
+
+For these nine verification commands, `verifier-context` is the only read-only
+command and takes `--change-id` only. Every other command mutates lifecycle
+state and requires both `--change-id` and `--expected-revision`.
+`specialist-record`, `verifier-record`, and `finding-disposition` additionally
+take `--input <json>` matching, respectively, the canonical
+[`development-specialist-result.schema.json`](schemas/development-specialist-result.schema.json),
+[`development-verification-result.schema.json`](schemas/development-verification-result.schema.json),
+and
+[`development-finding-disposition.schema.json`](schemas/development-finding-disposition.schema.json)
+schemas. `finding-authorize --input <json>` takes the exact closed object
+`{ "fingerprint": "…", "reason": "…", "authorizedBy": "…" }`; no other keys
+are accepted. `validation-plan --replace` is valid only after immutable failed
+validation evidence exists and means a transient same-HEAD rerun. Corrective
+work instead uses an amendment triggered by
+`validation-failure:<result-digest>` and adds a new owned criterion and task.
+See [verification](references/verification.md) for
+the full lifecycle and evidence constraints.
 
 Pass the current state revision with `--expected-revision` to every mutating
 state command. Revision conflicts fail closed. `recover` instead verifies the
@@ -124,7 +155,20 @@ SHA:
 }
 ```
 
-A non-retain decision records the initiating Git observation in the next durable state. If that transition is interrupted, recovery requires the same HEAD, branch (including detached state), and cleanliness before completing it. This exception is limited to a semantically valid `decision-recorded` transition whose predecessor is an accepted plan in `awaiting-decision` and whose immutable decision evidence matches that predecessor; an old planning-phase intent or relabeled intent cannot grant it. `retain-plan` recovery remains stricter and requires clean HEAD at the Planning SHA.
+A material refresh records its new source observation only after the canonical
+projection includes the exact refreshed identity and every changed checklist
+mapping, including complete captured text, plus a viable decision-bound
+criterion, task, amendment, result, integration, and post-amend verification
+lifecycle. The later non-retain decision substitutes its exact decision ID and
+rechecks the same envelope before recording the initiating Git observation in
+the next durable state. If that transition is interrupted, recovery
+requires the same HEAD, branch (including detached state), and cleanliness
+before completing it. This exception is limited to a semantically valid
+`decision-recorded` transition whose predecessor is an accepted plan in
+`awaiting-decision` and whose immutable decision evidence matches that
+predecessor; an old planning-phase intent or relabeled intent cannot grant it.
+`retain-plan` recovery remains stricter and requires the clean Planning SHA
+before execution or the exact clean integrated HEAD after terminal work.
 
 An amendment input records provenance separately from the complete resulting plan passed with `--plan`. Its `delta` must be a nonempty object; `invalidatedEvidence` is a unique string list and may be empty:
 
@@ -143,7 +187,105 @@ Read [planning](references/planning.md) for source, checklist, validation, and
 drift rules. Read [implementation](references/implementation.md) for packet,
 worktree, result, wave, and integration rules. Read
 [state and recovery](references/state-and-recovery.md) before recovery,
-abandonment, or archival.
+abandonment, or archival. Read [verification](references/verification.md) for
+the exact final evidence and authority boundary.
+
+## Exact-HEAD verification and findings
+
+One canonical semantic-evidence composer drives both admission and the final
+`verifier-context`. It fixes item identities, kinds, digests, summaries,
+ordering, UTF-8 chunking, the 500-item ceiling, and the 256-KiB full-envelope
+ceiling. It consumes receipt-valid evidence plus explicit pending overlays and
+uses placeholders only for evidence made inevitable by accepted authority; it
+never truncates, drops, or guesses future prose. Plan acceptance and amendment,
+packet binding, implementation-result acceptance, validation-plan and result
+recording, specialist-plan and result recording, verifier-result recording,
+finding disposition, and repeated-finding authorization all run that same
+projection before writing a sidecar, receipt, transition, event, or state.
+Capacity failure is therefore retryable and leaves durable bytes unchanged.
+Each earlier layer reserves the smallest successful authority already made
+inevitable: accepted tasks include one bindable packet/result shape, bound
+packets substitute their exact ownership and validation commands while
+reserving the larger direct-rejection replacement branch, and implemented
+results retain that branch through integration-conflict recovery. Validation
+plans reserve both the maximum deterministic command-result record and the
+failed-result remediation amendment. Release-aware plans likewise reserve a
+protected-ref release record before capture. Remediation reservations use
+bounded canonical row envelopes and exact known IDs, checklist text, and
+invalidated-evidence paths, so their serialized bytes and UTF-8 chunks dominate
+the smallest truthful follow-on authority rather than a short generic label.
+
+After `finalize-integration`, `validation-plan` derives one receipt-protected
+plan from terminal packet, result, provenance, and integration identities at
+the current clean HEAD. Its command union is parsed before persistence;
+`run-validation` executes argv directly with `shell:false`, persists intent
+before execution, and stores only exit/signal summaries plus an output digest.
+A failure remains immutable and may be followed by an explicit transient
+`validation-plan --replace` round or an exact failed-result corrective
+amendment. Release or migration work always resolves its baseline and release
+authority from protected `origin/main`, independent of the development base,
+and binds that evidence to the exact validation HEAD.
+
+After validation passes, `specialist-plan` consumes each terminal packet's
+receipt-valid stored route without live rerouting. It unions reusable risk
+reviewers in canonical order; `specialist-record` accepts each required
+exact-HEAD result in that order. When no reviewer is routed, the lifecycle
+advances directly to `verifying`. The workflow then supplies the generated
+`verifier-context` and its canonical digest to the registered, read-only,
+non-delegating `development_integration_verifier`, and records only its raw
+schema-valid result with `verifier-record`.
+
+Plan, packet, worker-result, and specialist-plan admission reserve only their
+known route and result summaries; they do not invent future findings. At each
+`specialist-record` boundary, the exact pending result activates the dynamic
+remaining 100-fingerprint aggregate reservation across still-unrecorded
+reviewers, including schema-minimal identity, summary, evidence, disposition,
+and any actually applicable repeat authorization for each reserved share.
+Later rounds reuse the largest applicable prior same-role identities;
+applicability skips rounds without that reviewer and stops at an intervening
+clean same-role receipt. With two reviewers, compact 50 then 50 records exactly
+100 findings, while a clean first result leaves the schema-v1 maximum of 100 to
+the final reviewer. A 51-finding first result or an over-capacity exact result
+is rejected byte-for-byte before persistence and may be consolidated and
+retried. All reviewers still record before any disposition.
+
+While routed reviewers remain, each accepted specialist result keeps the phase
+at `specialist-review`, even when it contains findings. Recording the final
+routed result advances to `blocked` if any collected specialist finding exists,
+or to `verifying` when all are clean; finding disposition cannot begin before
+that final routed result. Any final-verifier finding moves the lifecycle to
+`blocked`. Every finding receives a stable source-role-qualified fingerprint;
+append a disposition for every exact source finding. Non-actionable
+dispositions may return the state to `integrated` for a new round only after
+the last disposition proves the complete reset next-round validation and
+routed-review projection can fit. Actionable
+findings remain unresolved until one guarded amendment, triggered by the
+fingerprint, covers every actionable sibling and adds new ordinary remediation
+criteria and task IDs while preserving terminal task definitions. Implement
+and integrate that work, then start a new exact-HEAD round. A semantic finding
+repeated in consecutive applicable rounds requires `finding-authorize` with its
+exact fingerprint, reason, and authorizer before any disposition or amendment.
+Authorization reason and authorizer are bounded to 1024 and 256 UTF-8 bytes,
+respectively, so required authorization evidence can be reserved
+conservatively after JSON escaping and exact text can be rechecked before
+persistence. Finding admission reserves a schema-minimal exact disposition.
+Result admission does not guess a later actionable/non-actionable choice,
+amendment prose, or reset round. Each exact disposition, authorization,
+amendment, and last-disposition next-round transition separately substitutes
+its newly known authority into the canonical projection before persistence and
+fails atomically if it cannot fit.
+
+Every validation, review, disposition, amendment, and finalization transition
+rechecks the clean verification HEAD. An advance or dirty checkout invalidates
+current applicability without deleting prior round history. Run
+`finalize-development` only after a clean verifier result. It captures the live
+refreshable source outside the state lock, then rechecks revision and the exact
+clean verification HEAD under lock. Progress-only drift returns terminal work
+to `integrated`; material drift enters the decision/amendment route. Capture
+errors and races leave state unchanged. Finalization independently
+requires current source and checklist evidence, no decisions, blockers,
+findings, active wave, or integration intent, and only `integrated` or
+`no-change` tasks.
 
 ## Hooks and trust
 
@@ -169,6 +311,9 @@ decision and one exact next action. For `plan-only`, archive when desired. For
 the dependency graph through binding, worktree execution, result acceptance,
 and central integration.
 
-Stop when status reaches `integrated`. Do not start issue #24 verification,
-open or update a PR, resolve review threads, push, or otherwise mutate GitHub as
-part of this capability.
+For `implement` and `full`, continue from `integrated` through the exact next
+validation, specialist, verifier, finding-remediation, and finalization actions
+until status reaches `development-ready`. Stop there. Do not push, open or
+update a PR, request or resolve review, run CI, coordinate delivery, merge, or
+otherwise mutate GitHub as part of this capability. Those actions begin in a
+separate PR preparation or review-cycle workflow using the same exact HEAD.

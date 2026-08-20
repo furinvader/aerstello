@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
 import { parseOptions, UsageError, writeJson } from '../../../../../scripts/lib/cli.mjs';
 import {
   validateTaskPacket,
@@ -15,8 +14,11 @@ import {
   checkpointReviewRequestLimit,
   checkpointTaskPacketBinding,
   checkpointTaskPacketReplan,
+  checkpointWorkerResultAcceptance,
+  checkpointWorkerResultBackfill,
   executeTargetedValidationPlan,
   initializeState,
+  inspectWorkerCommitAuthority,
   loadState,
   locateState,
   migrateState,
@@ -41,6 +43,8 @@ Commands:
   bind-task-packet    Bind accepted fixed instructions to a durable task
   replan-task-packet  Clear one proven migration-origin schema-v2 task binding
   validate-result     Check a worker result against its bound fixed instructions
+  accept-result       Persist a validated worker result before integration
+  backfill-result     Explicitly bind original result evidence to native v3 Integrated work
   validation-plan     Save and print the combined targeted checks from packet sidecars
   run-validation      Run pending checks from the saved plan and record the result
   show                Print active state JSON
@@ -74,6 +78,11 @@ Validate-result options:
   --task-packet <file>
   --worker-result <file>
 
+Accept-result and backfill-result options:
+  --task-packet <file>
+  --worker-result <file>
+  --expected-revision <number>
+
 Checkpoint options:
   --expected-revision <number>
 
@@ -106,7 +115,7 @@ function optionsFor(command, argv) {
     common.values.push('input', 'event-type', 'event-summary');
   } else if (command === 'migrate') {
     common.values.push('integration-map');
-  } else if (['bind-task-packet', 'validate-result'].includes(command)) {
+  } else if (['bind-task-packet', 'validate-result', 'accept-result', 'backfill-result'].includes(command)) {
     common.values.push('task-packet', 'worker-result');
   } else if (command === 'replan-task-packet') {
     common.values.push('task');
@@ -132,35 +141,13 @@ function positiveSafeInteger(value, option) {
   return parsed;
 }
 
-function actualWorkerChangedPaths(packet, result) {
-  if (result.status !== 'implemented') return undefined;
-  for (const [label, sha] of [['reviewed HEAD', packet.reviewedHeadSha], ['worker commit', result.commitSha]]) {
-    try {
-      execFileSync('git', ['cat-file', '-e', `${sha}^{commit}`], { cwd: process.cwd(), stdio: 'ignore' });
-    } catch {
-      throw new StateError(`${label} does not name an existing Git commit: ${sha}`, 'INVALID_WORKER_RESULT');
-    }
-  }
-  try {
-    execFileSync('git', ['merge-base', '--is-ancestor', packet.reviewedHeadSha, result.commitSha], {
-      cwd: process.cwd(), stdio: 'ignore',
-    });
-  } catch {
-    throw new StateError('Worker commit must descend from the task packet reviewedHeadSha', 'INVALID_WORKER_RESULT');
-  }
-  const output = execFileSync('git', [
-    'diff', '--name-only', '--no-renames', '-z', packet.reviewedHeadSha, result.commitSha, '--',
-  ], { cwd: process.cwd() });
-  return output.toString('utf8').split('\0').filter((path) => path !== '');
-}
-
 try {
   const [command, ...argv] = process.argv.slice(2);
   if (!command || command === '--help' || command === 'help') {
     process.stdout.write(usage());
     process.exit(0);
   }
-  if (!['init', 'path', 'validate', 'specialist-plan', 'specialist-record', 'specialist-context', 'bind-task-packet', 'replan-task-packet', 'validate-result', 'validation-plan', 'run-validation', 'show', 'checkpoint', 'set-review-limit', 'migrate', 'recover', 'archive'].includes(command)) {
+  if (!['init', 'path', 'validate', 'specialist-plan', 'specialist-record', 'specialist-context', 'bind-task-packet', 'replan-task-packet', 'validate-result', 'accept-result', 'backfill-result', 'validation-plan', 'run-validation', 'show', 'checkpoint', 'set-review-limit', 'migrate', 'recover', 'archive'].includes(command)) {
     throw new UsageError(`Unknown command ${command}`);
   }
   const options = optionsFor(command, argv);
@@ -258,9 +245,28 @@ try {
     const active = loadState(process.cwd(), options.pr);
     if (!active) throw new StateError('No active PR state for worker-result acceptance', 'STATE_NOT_FOUND');
     assertTaskPacketBound(active, packet);
-    const errors = validateWorkerResultAgainstTask(packet, result, actualWorkerChangedPaths(packet, result));
+    const authority = result.status === 'implemented'
+      ? inspectWorkerCommitAuthority({ cwd: process.cwd(), state: active, packet, result }) : null;
+    const errors = validateWorkerResultAgainstTask(packet, result, authority?.changedPaths);
     if (errors.length > 0) throw new StateError(`Worker result does not satisfy task packet:\n- ${errors.join('\n- ')}`, 'INVALID_WORKER_RESULT');
     writeJson({ valid: true, taskId: packet.taskId });
+  } else if (['accept-result', 'backfill-result'].includes(command)) {
+    if (!options['task-packet'] || !options['worker-result']) {
+      throw new UsageError(`${command} requires --task-packet and --worker-result`);
+    }
+    if (parsedExpectedRevision === undefined) throw new UsageError(`${command} requires --expected-revision`);
+    const packet = JSON.parse(readFileSync(options['task-packet'], 'utf8'));
+    const result = JSON.parse(readFileSync(options['worker-result'], 'utf8'));
+    const transition = command === 'accept-result'
+      ? checkpointWorkerResultAcceptance : checkpointWorkerResultBackfill;
+    const state = transition({
+      prNumber: options.pr, packet, result, expectedRevision: parsedExpectedRevision,
+    });
+    writeJson({
+      accepted: true, backfilled: command === 'backfill-result', taskId: packet.taskId,
+      resultDigest: state.tasks.find((task) => task.id === packet.taskId)?.workerResultDigest,
+      revision: state.revision,
+    });
   } else if (command === 'validation-plan') {
     if (options['initial-selection'] && options._.length > 0) {
       throw new UsageError('--initial-selection cannot be combined with task-packet files');

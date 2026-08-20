@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { afterEach, test } from 'node:test';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   openSync,
@@ -12,7 +14,8 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   ACTIVE_STATE_LIMIT_BYTES,
@@ -26,6 +29,7 @@ import {
   buildReviewRequestTransition,
   buildVerificationEscalationTransition,
   checkpointCompletion as rawCheckpointCompletion,
+  checkpointArchiveTaskCompletion,
   checkpointCiValidation,
   checkpointGitMetadata,
   checkpointReviewOutcome,
@@ -34,8 +38,11 @@ import {
   checkpointState,
   checkpointTaskPacketBinding,
   checkpointTaskPacketReplan,
+  checkpointWorkerResultAcceptance,
+  checkpointWorkerResultBackfill,
   checkpointTaskCompletion,
   checkpointTargetedValidation,
+  checkpointTargetedValidationReset,
   checkpointVerificationEscalation,
   completionGate,
   completeIntegratedTasks,
@@ -45,6 +52,7 @@ import {
   gitAwareGateContext,
   gitCommonDirectory,
   initializeState,
+  inspectWorkerCommitAuthority,
   loadState,
   migratePrReviewStateV1,
   migratePrReviewStateV2,
@@ -64,6 +72,8 @@ import {
   taskBindingProvenancePath,
   taskBindingProvenanceReceiptPath,
   taskPacketSidecarPath,
+  workerResultEnvelopePath,
+  workerResultReceiptPath,
   specialistContext,
   specialistPlanReceiptPath,
   specialistReviewBundlePath,
@@ -225,6 +235,106 @@ function ready(state, tasks = [task(state.currentIntegrationHeadSha)]) {
   };
 }
 
+function canonicalJsonForTest(value) {
+  if (Array.isArray(value)) return value.map(canonicalJsonForTest);
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map(
+      (key) => [key, canonicalJsonForTest(value[key])],
+    ));
+  }
+  return value;
+}
+
+function archiveImportDigest(value) {
+  return createHash('sha256')
+    .update(JSON.stringify(canonicalJsonForTest(value)))
+    .digest('hex');
+}
+
+function archiveImportStateFixture(cwd) {
+  const initial = init(cwd);
+  const head = initial.currentIntegrationHeadSha;
+  const remediation = task(head, {
+    id: 'archive-import-remediation',
+    sourceIds: ['orchestrator:archive-import-remediation'],
+    sourceType: 'github-threadless',
+    disposition: 'actionable',
+    status: 'completed',
+  });
+  const aggregate = task(head, {
+    id: 'retained-aggregate',
+    sourceIds: ['thread:PRRT_archive_a', 'discussion:202'],
+    sourceType: 'github-thread',
+    disposition: 'already-fixed',
+    status: 'not-applicable',
+    integratedCommitSha: null,
+    resolutionSummary: 'Already fixed and retained from immutable archives.',
+  });
+  const current = {
+    ...initial,
+    phase: 'implementing',
+    tasks: [remediation, aggregate],
+    threadResolutionStatus: {
+      status: 'not-run',
+      headSha: null,
+      threads: [],
+      threadlessVerification: {
+        status: 'passed', headSha: head, taskIds: [remediation.id], updatedAt: AT,
+      },
+      localVerification: emptyLocalVerification(),
+      updatedAt: null,
+    },
+    nextAction: 'Import the validated aggregate archive proof.',
+  };
+  writeFileSync(statePath(cwd, current.prNumber), `${JSON.stringify(current)}\n`);
+  const authorityFingerprint = 'a'.repeat(64);
+  const rows = [
+    ['PRRT_archive_a', 'PRRC_archive_a', 201, 'REPLY_archive_a', 'b'.repeat(64)],
+    ['PRRT_archive_b', 'PRRC_archive_b', 202, 'REPLY_archive_b', 'c'.repeat(64)],
+  ].map(([threadNodeId, rootCommentNodeId, rootCommentDatabaseId, replyId, replyBodySha256], index) => ({
+    threadNodeId,
+    rootCommentNodeId,
+    rootCommentDatabaseId,
+    taskIds: [aggregate.id],
+    disposition: 'already-fixed',
+    replyId,
+    replyUrl: `https://github.com/example/aerstello/pull/17#discussion_r${rootCommentDatabaseId}`,
+    isResolved: true,
+    resolvedAt: AT,
+    resolvedBy: 'maintainer',
+    observedHeadSha: index === 0 ? 'd'.repeat(40) : 'e'.repeat(40),
+    archiveProvenance: {
+      schemaVersion: 1,
+      historicalTaskId: `historical-partition-${index + 1}`,
+      historicalDisposition: 'already-fixed',
+      historicalIntegratedCommitSha: null,
+      replyBodySha256,
+      authorityFingerprint,
+    },
+  }));
+  const threadResolutionStatus = {
+    status: 'passed',
+    headSha: head,
+    threads: rows,
+    threadlessVerification: current.threadResolutionStatus.threadlessVerification,
+    localVerification: current.threadResolutionStatus.localVerification,
+    updatedAt: AT,
+  };
+  const envelope = {
+    schemaVersion: 1,
+    taskId: aggregate.id,
+    authorityFingerprint,
+    rows: rows.map((row) => ({
+      threadNodeId: row.threadNodeId,
+      replyId: row.replyId,
+      replyBodySha256: row.archiveProvenance.replyBodySha256,
+      provenanceFingerprint: archiveImportDigest(row.archiveProvenance),
+      rowFingerprint: archiveImportDigest(row),
+    })).sort((left, right) => left.threadNodeId.localeCompare(right.threadNodeId)),
+  };
+  return { current: loadState(cwd), aggregate, threadResolutionStatus, envelope };
+}
+
 function checkpointSyntheticTargetedValidation(cwd, state) {
   const taskIds = state.tasks.filter((item) => item.disposition === 'actionable' && item.status === 'integrated')
     .map((item) => item.id).sort();
@@ -373,17 +483,33 @@ function taskPacket(head, taskId, {
   affectedAreas = ['api'], command = 'npm run check:api',
   specialization = affectedAreas.includes('workflow') || affectedAreas.includes('documentation') ? 'ops-workflow'
     : affectedAreas.includes('shared') ? 'contracts' : affectedAreas.includes('web') ? 'web' : 'api',
-  riskTags = [],
+  riskTags = [], dependencies = [],
 } = {}) {
   return {
     schemaVersion: 3, taskId, reviewedHeadSha: head, specialization, riskTags,
     finding: `Finding for ${taskId}.`, evidence: 'Review evidence.',
-    affectedAreas, decisionIds: [], allowedPaths: ['scripts/**'], forbiddenPaths: [], dependencies: [],
+    affectedAreas, decisionIds: [], allowedPaths: ['scripts/**'], forbiddenPaths: [], dependencies,
     acceptanceCriteria: ['The targeted behavior is verified.'],
     requiredValidation: {
       unit: [{ command, reason: 'Direct targeted check.' }],
       system: [],
     },
+  };
+}
+
+function workerResult(packet, commitSha, changedPaths) {
+  return {
+    schemaVersion: 3,
+    taskId: packet.taskId,
+    specialization: packet.specialization,
+    status: 'implemented',
+    commitSha,
+    changedPaths,
+    validation: [...packet.requiredValidation.unit, ...packet.requiredValidation.system]
+      .map(({ command }) => ({ command, result: 'passed', summary: 'Focused validation passed.' })),
+    resolutionSummary: 'Implemented the fixed task and verified its declared validation.',
+    residualRisks: [],
+    unexpectedDependencies: [],
   };
 }
 
@@ -550,7 +676,9 @@ function integratedTasks(cwd, ids) {
       resolutionSummary: 'Integrated centrally; targeted validation remains.',
     };
   });
-  return checkpointState({ cwd, nextState: { ...proposed, tasks: integrated }, expectedRevision: proposed.revision });
+  const preAuthority = { ...proposed, tasks: integrated };
+  writeFileSync(statePath(cwd, preAuthority.prNumber), `${JSON.stringify(preAuthority)}\n`);
+  return loadState(cwd, preAuthority.prNumber);
 }
 
 function bindPackets(cwd, state, packets) {
@@ -567,6 +695,25 @@ function planInput(state, packet, planningSignals = { browserVisible: false, tes
 function bindPacket(cwd, state, packet, planningSignals) {
   planSpecialists({ cwd, input: planInput(state, packet, planningSignals), expectedRevision: state.revision, now: () => AT });
   return checkpointTaskPacketBinding({ cwd, packet, expectedRevision: state.revision });
+}
+
+function writePreAuthorityImplementedState(cwd, state, taskId, workerCommitSha) {
+  const implemented = {
+    ...state,
+    tasks: state.tasks.map((item) => item.id === taskId ? {
+      ...item,
+      status: 'implemented',
+      execution: { ...item.execution, workerCommitSha },
+    } : item),
+  };
+  writeFileSync(statePath(cwd, state.prNumber), `${JSON.stringify(implemented)}\n`);
+  return loadState(cwd, state.prNumber);
+}
+
+function writePreAuthorityTasks(cwd, state, tasks) {
+  const preAuthority = { ...state, tasks };
+  writeFileSync(statePath(cwd, state.prNumber), `${JSON.stringify(preAuthority)}\n`);
+  return loadState(cwd, state.prNumber);
 }
 
 function canonicalBoundIntegratedTask(cwd, taskId = 'canonical-ancestry') {
@@ -602,12 +749,19 @@ function canonicalBoundIntegratedTask(cwd, taskId = 'canonical-ancestry') {
   const integratedHead = commit(cwd, { [`scripts/${taskId}.mjs`]: 'export const integrated = true;\n' }, `integrate ${taskId}`);
   const advanced = checkpointGitMetadata({ cwd }).state;
   rmSync(validationPlanPath(cwd, advanced.prNumber), { force: true });
-  const { execution: _execution, ...boundTask } = advanced.tasks[0];
+  const implementedBeforeAcceptance = writePreAuthorityImplementedState(
+    cwd, advanced, taskId, integratedHead,
+  );
+  const accepted = checkpointWorkerResultAcceptance({
+    cwd, packet, result: workerResult(packet, integratedHead, [`scripts/${taskId}.mjs`]),
+    expectedRevision: implementedBeforeAcceptance.revision,
+  });
+  const { execution: _execution, ...boundTask } = accepted.tasks[0];
   const integrated = checkpointState({
     cwd,
-    expectedRevision: advanced.revision,
+    expectedRevision: accepted.revision,
     nextState: {
-      ...advanced,
+      ...accepted,
       tasks: [{
         ...boundTask,
         status: 'integrated',
@@ -617,6 +771,294 @@ function canonicalBoundIntegratedTask(cwd, taskId = 'canonical-ancestry') {
     },
   });
   return { packet, reviewedHead: reviewed.reviewedHeadSha, integratedHead, integrated, bound };
+}
+
+function tasklessVerifierFixture(cwd, definitions = [{
+  id: 'already-fixed-thread', disposition: 'already-fixed', status: 'not-applicable',
+}], { validate = true } = {}) {
+  const initial = init(cwd);
+  const proposedTasks = definitions.map(({ id, disposition }) => task(initial.currentIntegrationHeadSha, {
+    id, sourceIds: [`thread:${id}`], sourceType: 'github-thread', fingerprint: `fingerprint-${id}`,
+    summary: `Retained outcome for ${id}.`, disposition, status: 'proposed',
+    integratedCommitSha: null, resolutionSummary: null,
+  }));
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: proposedTasks },
+  });
+  const transitionedTasks = proposed.tasks.map((item) => {
+    const definition = definitions.find(({ id }) => id === item.id);
+    if (definition.status === 'proposed') return item;
+    if (definition.status === 'failed') {
+      return {
+        ...item, status: 'failed',
+        execution: { ...item.execution, lastError: 'Focused worker failed.' },
+      };
+    }
+    const { execution: _execution, ...withoutExecution } = item;
+    return {
+      ...withoutExecution, status: definition.status, integratedCommitSha: null,
+      resolutionSummary: `Evidence retained for ${item.id}.`,
+    };
+  });
+  const transitioned = definitions.every(({ status }) => status === 'proposed') ? proposed : checkpointState({
+    cwd, expectedRevision: proposed.revision,
+    nextState: { ...proposed, tasks: transitionedTasks },
+  });
+  return {
+    state: transitioned,
+    validated: validate ? checkpointSyntheticTargetedValidation(cwd, transitioned) : transitioned,
+  };
+}
+
+function appendVerifierOutcomeTasks(cwd, state, definitions) {
+  const proposedTasks = definitions.map(({ id, disposition }) => task(state.currentIntegrationHeadSha, {
+    id, sourceIds: [`thread:${id}`, `archive:${id}`], sourceType: 'github-thread',
+    fingerprint: `fingerprint-${id}`, summary: `Retained outcome for ${id}.`,
+    disposition, status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  }));
+  const proposed = checkpointState({
+    cwd, expectedRevision: state.revision,
+    nextState: { ...state, tasks: [...state.tasks, ...proposedTasks] },
+  });
+  const transitioned = proposed.tasks.map((item) => {
+    const definition = definitions.find(({ id }) => id === item.id);
+    if (!definition || definition.status === 'proposed') return item;
+    if (definition.status === 'failed') {
+      return {
+        ...item, status: 'failed',
+        execution: { ...item.execution, lastError: 'Focused worker failed.' },
+      };
+    }
+    const { execution: _execution, ...withoutExecution } = item;
+    return {
+      ...withoutExecution, status: definition.status, integratedCommitSha: null,
+      resolutionSummary: `Evidence retained for ${item.id}.`,
+    };
+  });
+  return definitions.every(({ status }) => status === 'proposed') ? proposed : checkpointState({
+    cwd, expectedRevision: proposed.revision,
+    nextState: { ...proposed, tasks: transitioned },
+  });
+}
+
+function completeLocalPacketTask(cwd, state, taskId) {
+  return checkpointTaskCompletion({
+    cwd, expectedRevision: state.revision, verifiedLocalTaskIds: [taskId],
+    threadResolutionStatus: {
+      status: 'passed', headSha: state.currentIntegrationHeadSha, threads: [],
+      threadlessVerification: emptyThreadless(), updatedAt: AT,
+      localVerification: {
+        status: 'passed', headSha: state.currentIntegrationHeadSha,
+        taskIds: [taskId], updatedAt: AT,
+      },
+    },
+  });
+}
+
+function completedAndIntegratedPacketFixture(cwd, {
+  retainedOutcome = true, laterReview = false,
+} = {}) {
+  const priorId = 'z-completed-packet';
+  const { packet: priorPacket, integrated: priorIntegrated } = canonicalBoundIntegratedTask(cwd, priorId);
+  const priorCompleted = completeLocalPacketTask(cwd, priorIntegrated, priorId);
+  let currentAuthority = priorCompleted;
+  if (laterReview) {
+    buildTargetedValidationPlan({ cwd, now: () => AT });
+    const priorValidated = executeTargetedValidationPlan({
+      cwd, runCommand: () => ({ status: 0 }), now: () => AT,
+    }).state;
+    const reviewReady = persistReady(cwd, priorValidated, priorValidated.tasks);
+    const requested = checkpointReviewRequest({
+      cwd, request: request(reviewReady),
+      pushedHeadSha: reviewReady.currentIntegrationHeadSha,
+      prHeadSha: reviewReady.currentIntegrationHeadSha,
+      expectedRevision: reviewReady.revision,
+    });
+    currentAuthority = checkpointReviewOutcome({
+      cwd, outcome: outcome(requested, { outcome: 'findings' }),
+      expectedRevision: requested.revision,
+    });
+  }
+  const currentId = 'a-integrated-packet';
+  const proposedTask = task(currentAuthority.reviewedHeadSha, {
+    id: currentId, sourceIds: [`local:${currentId}`], fingerprint: `fingerprint-${currentId}`,
+    status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const proposed = checkpointState({
+    cwd, expectedRevision: currentAuthority.revision,
+    nextState: { ...currentAuthority, tasks: [...currentAuthority.tasks, proposedTask] },
+  });
+  const currentPacket = taskPacket(currentAuthority.reviewedHeadSha, currentId, {
+    affectedAreas: ['api'], command: 'npm run check:api',
+  });
+  const bound = bindPacket(cwd, proposed, currentPacket);
+  const currentHead = commit(cwd, {
+    [`scripts/${currentId}.mjs`]: 'export const currentPacket = true;\n',
+  }, `integrate ${currentId}`);
+  const advanced = checkpointGitMetadata({ cwd }).state;
+  rmSync(validationPlanPath(cwd, advanced.prNumber), { force: true });
+  const accepted = checkpointWorkerResultAcceptance({
+    cwd, packet: currentPacket,
+    result: workerResult(currentPacket, currentHead, [`scripts/${currentId}.mjs`]),
+    expectedRevision: advanced.revision,
+  });
+  const integratedTasks = accepted.tasks.map((item) => {
+    if (item.id !== currentId) return item;
+    const { execution: _execution, ...withoutExecution } = item;
+    return {
+      ...withoutExecution, status: 'integrated', integratedCommitSha: currentHead,
+      resolutionSummary: 'Integrated current packet.',
+    };
+  });
+  let integrated = checkpointState({
+    cwd, expectedRevision: accepted.revision,
+    nextState: { ...accepted, tasks: integratedTasks },
+  });
+  if (retainedOutcome) {
+    integrated = appendVerifierOutcomeTasks(cwd, integrated, [{
+      id: 'm-archived-outcome', disposition: 'already-fixed', status: 'not-applicable',
+    }]);
+  }
+  return {
+    priorPacket, currentPacket, priorId, currentId, currentHead, integrated,
+  };
+}
+
+function dependentWorkerAcceptanceFixture(cwd, {
+  dependencyReference = 'integrated', workerBase = 'dependency', centralBase = 'dependency',
+} = {}) {
+  const dependencyId = 'result-dependency';
+  const { reviewedHead, integratedHead, integrated } = canonicalBoundIntegratedTask(cwd, dependencyId);
+  const pendingDependency = task(reviewedHead, {
+    id: 'pending-result-dependency', sourceIds: ['local:pending-result-dependency'],
+    fingerprint: 'pending-result-dependency', status: 'proposed', disposition: 'actionable',
+    integratedCommitSha: null, resolutionSummary: null,
+  });
+  const targetId = 'dependent-result';
+  const target = task(reviewedHead, {
+    id: targetId, sourceIds: [`local:${targetId}`], fingerprint: targetId,
+    status: 'proposed', disposition: 'actionable', integratedCommitSha: null, resolutionSummary: null,
+    execution: { dependencies: [], ownedPaths: ['scripts/**'] },
+  });
+  const dependencies = dependencyReference === 'missing' ? ['missing-result-dependency']
+    : dependencyReference === 'pending' ? [pendingDependency.id] : [dependencyId];
+  target.execution.dependencies = dependencies;
+  const proposedTasks = dependencyReference === 'pending'
+    ? [...integrated.tasks, pendingDependency, target] : [...integrated.tasks, target];
+  const proposed = checkpointState({
+    cwd, expectedRevision: integrated.revision,
+    nextState: { ...integrated, tasks: proposedTasks },
+  });
+  const packet = taskPacket(reviewedHead, targetId, {
+    affectedAreas: ['workflow'], command: 'npm run test:pr-review', dependencies,
+  });
+  const bound = bindPacket(cwd, proposed, packet);
+  const running = checkpointState({
+    cwd, expectedRevision: bound.revision,
+    nextState: {
+      ...bound,
+      tasks: bound.tasks.map((item) => item.id === targetId ? { ...item, status: 'running' } : item),
+    },
+  });
+
+  const workerParent = workerBase === 'review' ? reviewedHead : integratedHead;
+  git(cwd, ['switch', '-c', `worker-${workerBase}`, workerParent]);
+  const workerSha = commit(cwd, {
+    'scripts/dependent-result.mjs': 'export const dependentResult = true;\n',
+  }, 'implement dependent result');
+
+  const centralParent = centralBase === 'review' ? reviewedHead : integratedHead;
+  git(cwd, ['switch', '-C', `central-${centralBase}`, centralParent]);
+  const centralSha = commit(cwd, {
+    'scripts/independent-sibling.mjs': 'export const independentSibling = true;\n',
+  }, 'integrate independent sibling');
+  const advanced = checkpointGitMetadata({ cwd }).state;
+  return {
+    packet, result: workerResult(packet, workerSha, ['scripts/dependent-result.mjs']), workerSha, centralSha,
+    reviewedHead, integratedHead, advanced,
+  };
+}
+
+function durableAcceptanceSnapshot(cwd, taskId) {
+  const directory = join(stateDirectory(cwd, 17), 'worker-results');
+  return {
+    state: readFileSync(statePath(cwd, 17), 'utf8'),
+    events: readFileSync(join(stateDirectory(cwd, 17), 'events.ndjson'), 'utf8'),
+    inventory: existsSync(directory) ? readdirSync(directory).sort() : [],
+    envelope: existsSync(workerResultEnvelopePath(cwd, 17, taskId))
+      ? readFileSync(workerResultEnvelopePath(cwd, 17, taskId), 'utf8') : null,
+    receipt: existsSync(workerResultReceiptPath(cwd, 17, taskId))
+      ? readFileSync(workerResultReceiptPath(cwd, 17, taskId), 'utf8') : null,
+  };
+}
+
+function repositoryAuthoritySnapshot(cwd) {
+  const buffer = (args) => {
+    const result = spawnSync('git', args, {
+      cwd,
+      encoding: null,
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    assert.equal(
+      result.status,
+      0,
+      Buffer.from(result.stderr ?? Buffer.alloc(0)).toString('utf8'),
+    );
+    return Buffer.from(result.stdout ?? Buffer.alloc(0));
+  };
+  const indexPath = git(cwd, ['rev-parse', '--path-format=absolute', '--git-path', 'index']);
+  return {
+    head: git(cwd, ['rev-parse', 'HEAD']),
+    index: existsSync(indexPath) ? readFileSync(indexPath) : null,
+    indexDiff: buffer(['diff', '--cached', '--binary', '--no-ext-diff']),
+    objectCount: buffer(['count-objects', '-v']),
+    refs: buffer(['for-each-ref', '--format=%(refname)%00%(objectname)%00%(symref)']),
+    status: buffer(['status', '--porcelain=v1', '-z', '--untracked-files=all']),
+    temporaryDirectories: readdirSync(tmpdir())
+      .filter((name) => name.startsWith(`aerstello-worker-authority-${process.pid}-`))
+      .sort(),
+    worktreeDiff: buffer(['diff', '--binary', '--no-ext-diff']),
+  };
+}
+
+function boundWorkerResultFixture(cwd, taskId) {
+  const initial = init(cwd);
+  const proposedTask = task(initial.currentIntegrationHeadSha, {
+    id: taskId, status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [proposedTask] },
+  });
+  const packet = taskPacket(initial.currentIntegrationHeadSha, taskId, {
+    affectedAreas: ['workflow'], command: 'npm run test:pr-review',
+  });
+  const bound = bindPacket(cwd, proposed, packet);
+  git(cwd, ['switch', '-c', `${taskId}-worker`]);
+  const changedPath = `scripts/${taskId}.mjs`;
+  const workerSha = commit(cwd, { [changedPath]: 'export const workerResult = true;\n' },
+    `implement ${taskId}`);
+  git(cwd, ['switch', 'main']);
+  return { bound, packet, result: workerResult(packet, workerSha, [changedPath]) };
+}
+
+function acceptedWorkerStateProjection(state, packet, result) {
+  const validationSummaries = result.validation.map((entry) => {
+    const summary = `${entry.command}: ${entry.result} — ${entry.summary}`;
+    return summary.length <= 1000 ? summary : `${summary.slice(0, 999)}…`;
+  });
+  return {
+    ...state,
+    tasks: state.tasks.map((item) => item.id === packet.taskId ? {
+      ...item,
+      status: 'implemented',
+      workerResultDigest: 'a'.repeat(64),
+      execution: {
+        ...item.execution, workerCommitSha: result.commitSha,
+        validationSummaries, lastError: null,
+      },
+    } : item),
+  };
 }
 
 afterEach(() => {
@@ -633,6 +1075,1258 @@ test('initialization writes the v3 identity and empty durable ledgers', () => {
   assert.deepEqual(state.staleDiscoveryDispositions, []);
   assert.deepEqual(state.threadResolutionStatus.threads, []);
   assert.equal(statePath(cwd, 17), join(gitCommonDirectory(cwd), 'codex', 'pr-review', 'pr-17', 'state.json'));
+});
+
+test('worker results are receipt-bound, interruption-safe, immutable, and required for integration', () => {
+  const cwd = repo();
+  const initial = init(cwd);
+  const proposedTask = task(initial.currentIntegrationHeadSha, {
+    id: 'durable-result', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [proposedTask] },
+  });
+  const packet = taskPacket(initial.currentIntegrationHeadSha, proposedTask.id, {
+    affectedAreas: ['workflow'], command: 'npm run check:workflow',
+  });
+  const bound = bindPacket(cwd, proposed, packet);
+  git(cwd, ['switch', '-c', 'worker-result-fixture']);
+  const workerSha = commit(cwd, { 'scripts/durable-result.mjs': 'export const durable = true;\n' }, 'worker result fixture');
+  git(cwd, ['switch', 'main']);
+  const result = workerResult(packet, workerSha, ['scripts/durable-result.mjs']);
+
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: bound.revision,
+    nextState: {
+      ...bound,
+      tasks: bound.tasks.map((item) => ({
+        ...item, status: 'implemented',
+        execution: { ...item.execution, workerCommitSha: workerSha },
+      })),
+    },
+  }), { code: 'WORKER_RESULT_MISSING' });
+
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: bound.revision,
+    nextState: {
+      ...bound,
+      tasks: bound.tasks.map(({ execution: _execution, ...item }) => ({
+        ...item, status: 'integrated', integratedCommitSha: workerSha, resolutionSummary: 'Forged integration.',
+      })),
+    },
+  }), { code: 'WORKER_RESULT_MISSING' });
+
+  assert.throws(() => checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: bound.revision,
+    onStep: (step) => { if (step === 'receipt-durable') throw new Error('interrupt receipt'); },
+  }), /interrupt receipt/u);
+  assert.equal(existsSync(workerResultReceiptPath(cwd, 17, packet.taskId)), true);
+  assert.equal(existsSync(workerResultEnvelopePath(cwd, 17, packet.taskId)), false);
+  const pendingReceipt = readFileSync(workerResultReceiptPath(cwd, 17, packet.taskId), 'utf8');
+  const pending = reconcileState({ cwd });
+  assert.equal(pending.workerResults[0].status, 'pending-state');
+
+  assert.throws(() => checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: bound.revision,
+    onStep: (step) => { if (step === 'envelope-durable') throw new Error('interrupt envelope'); },
+  }), /interrupt envelope/u);
+  assert.equal(readFileSync(workerResultReceiptPath(cwd, 17, packet.taskId), 'utf8'), pendingReceipt,
+    'an exact retry reuses the immutable pending receipt byte-for-byte');
+  assert.throws(() => checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: bound.revision,
+    onStep: (step) => { if (step === 'state-checkpointed') throw new Error('interrupt state response'); },
+  }), /interrupt state response/u);
+  const accepted = loadState(cwd);
+  assert.equal(accepted.tasks[0].status, 'implemented');
+  assert.match(accepted.tasks[0].workerResultDigest, /^[0-9a-f]{64}$/u);
+  assert.equal(checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: accepted.revision,
+  }).revision, accepted.revision);
+  assert.throws(() => checkpointWorkerResultAcceptance({
+    cwd, packet, result: { ...result, resolutionSummary: 'Different evidence.' },
+    expectedRevision: accepted.revision,
+  }), { code: 'WORKER_RESULT_CONFLICT' });
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: accepted.revision,
+    nextState: { ...accepted, tasks: accepted.tasks.map(({ workerResultDigest: _digest, ...item }) => item) },
+  }), { code: 'IMMUTABLE_STATE_PROVENANCE' });
+
+  git(cwd, ['cherry-pick', workerSha]);
+  const centralSha = git(cwd, ['rev-parse', 'HEAD']);
+  const advanced = checkpointGitMetadata({ cwd }).state;
+  const { execution: _execution, ...implementedTask } = advanced.tasks[0];
+  const integrated = checkpointState({
+    cwd, expectedRevision: advanced.revision,
+    nextState: {
+      ...advanced,
+      tasks: [{
+        ...implementedTask, status: 'integrated', integratedCommitSha: centralSha,
+        resolutionSummary: 'Integrated accepted evidence.',
+      }],
+    },
+  });
+  assert.equal(reconcileState({ cwd }).workerResults[0].status, 'valid');
+  assert.equal(integrated.tasks[0].workerResultDigest, accepted.tasks[0].workerResultDigest);
+  const envelopePath = workerResultEnvelopePath(cwd, 17, packet.taskId);
+  const receiptPath = workerResultReceiptPath(cwd, 17, packet.taskId);
+  const canonicalReceipt = readFileSync(receiptPath, 'utf8');
+  writeFileSync(receiptPath, `${'0'.repeat(64)}\n`);
+  assert.throws(() => checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: integrated.revision,
+  }), { code: 'INVALID_WORKER_RESULT_EVIDENCE' });
+  assert.equal(reconcileState({ cwd }).workerResults[0].status, 'invalid',
+    'direct receipt tampering is visible to recovery reconciliation');
+  writeFileSync(receiptPath, canonicalReceipt);
+  assert.equal(reconcileState({ cwd }).workerResults[0].status, 'valid');
+  const canonicalEnvelope = readFileSync(envelopePath, 'utf8');
+  const alteredEnvelope = JSON.parse(canonicalEnvelope);
+  alteredEnvelope.result.resolutionSummary = 'Tampered evidence.';
+  writeFileSync(envelopePath, `${JSON.stringify(alteredEnvelope)}\n`);
+  assert.equal(reconcileState({ cwd }).workerResults[0].status, 'invalid');
+  writeFileSync(envelopePath, canonicalEnvelope);
+  const orphanPath = join(dirname(envelopePath), 'orphan.json');
+  writeFileSync(orphanPath, '{}\n');
+  assert.ok(reconcileState({ cwd }).workerResults.some((entry) => entry.status === 'orphan'));
+  rmSync(orphanPath);
+  const archived = archiveState({ cwd, abandonmentReason: 'Archive durable worker-result fixture.' });
+  assert.equal(readdirSync(join(archived, 'worker-results')).filter((name) => name.endsWith('.json')).length, 1);
+  assert.equal(readdirSync(join(archived, 'worker-results')).filter((name) => name.endsWith('.sha256')).length, 1);
+});
+
+test('worker result compacts max-valid validation summaries before durable acceptance', () => {
+  const cwd = repo();
+  const { bound, packet, result } = boundWorkerResultFixture(cwd, 'max-validation-summary');
+  result.validation[0].summary = 'x'.repeat(1000);
+  assert.throws(() => checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: bound.revision,
+    onStep: (step) => { if (step === 'receipt-durable') throw new Error('interrupt max summary receipt'); },
+  }), /interrupt max summary receipt/u);
+  const pendingReceipt = readFileSync(workerResultReceiptPath(cwd, bound.prNumber, packet.taskId), 'utf8');
+  assert.equal(existsSync(workerResultEnvelopePath(cwd, bound.prNumber, packet.taskId)), false);
+  const accepted = checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: bound.revision,
+  });
+  assert.equal(readFileSync(workerResultReceiptPath(cwd, bound.prNumber, packet.taskId), 'utf8'), pendingReceipt,
+    'the max-summary retry reuses its exact pending receipt');
+  const compact = accepted.tasks[0].execution.validationSummaries[0];
+  assert.equal(compact.length, 1000);
+  assert.match(compact, /…$/u);
+  const envelope = JSON.parse(readFileSync(
+    workerResultEnvelopePath(cwd, accepted.prNumber, packet.taskId), 'utf8',
+  ));
+  assert.deepEqual(envelope.result, result,
+    'only compact task state is truncated; the immutable result envelope remains exact');
+  assert.equal(envelope.result.validation[0].summary.length, 1000,
+    'the immutable result envelope retains the complete valid worker summary');
+});
+
+test('derived oversized worker state rejects before any result evidence mutation', () => {
+  const cwd = repo();
+  const { bound, packet, result } = boundWorkerResultFixture(cwd, 'derived-state-capacity');
+  result.validation[0].summary = 'y'.repeat(1000);
+  const persistedShape = (state) => ({
+    ...state, revision: bound.revision + 1, updatedAt: bound.updatedAt,
+  });
+  const bytes = (state) => Buffer.byteLength(`${JSON.stringify(state)}\n`, 'utf8');
+  let padded = { ...bound, decisions: [...bound.decisions] };
+  let index = 0;
+  while (true) {
+    const candidate = { ...padded, decisions: [...padded.decisions, {
+      id: `worker-capacity-${index}`, summary: 'd'.repeat(1000),
+    }] };
+    if (bytes(acceptedWorkerStateProjection(persistedShape(candidate), packet, result))
+        > ACTIVE_STATE_LIMIT_BYTES) break;
+    padded = candidate; index += 1;
+  }
+  let fitting = null;
+  for (let length = 1; length <= 1000; length += 1) {
+    const candidate = { ...padded, decisions: [...padded.decisions, {
+      id: `worker-capacity-${index}`, summary: 'd'.repeat(length),
+    }] };
+    const persisted = persistedShape(candidate);
+    if (bytes(persisted) <= ACTIVE_STATE_LIMIT_BYTES
+        && bytes(acceptedWorkerStateProjection(persisted, packet, result))
+          > ACTIVE_STATE_LIMIT_BYTES) fitting = candidate;
+  }
+  assert.ok(fitting, 'constructed a valid current state whose fully derived acceptance state is oversized');
+  const nearLimit = checkpointState({
+    cwd, expectedRevision: bound.revision, nextState: fitting,
+  });
+  assert.ok(bytes(nearLimit) <= ACTIVE_STATE_LIMIT_BYTES);
+  assert.ok(bytes(acceptedWorkerStateProjection(nearLimit, packet, result))
+    > ACTIVE_STATE_LIMIT_BYTES);
+  const before = durableAcceptanceSnapshot(cwd, packet.taskId);
+  assert.throws(() => checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: nearLimit.revision,
+  }), { code: 'STATE_TOO_LARGE' });
+  assert.deepEqual(durableAcceptanceSnapshot(cwd, packet.taskId), before,
+    'invalid derived state writes no envelope, receipt, state, event, or sidecar bytes');
+});
+
+test('worker result preflights revision digit growth before result evidence mutation', () => {
+  const cwd = repo();
+  const fixture = boundWorkerResultFixture(cwd, 'revision-digit-capacity');
+  fixture.result.validation[0].summary = 'z'.repeat(1000);
+  let current = fixture.bound;
+  while (current.revision < 8) {
+    current = checkpointState({ cwd, expectedRevision: current.revision, nextState: current });
+  }
+  assert.equal(current.revision, 8);
+  const bytes = (state) => Buffer.byteLength(`${JSON.stringify(state)}\n`, 'utf8');
+  const revisionNine = (state) => ({ ...state, revision: 9, updatedAt: current.updatedAt });
+  const projectedBytes = (state) => bytes(acceptedWorkerStateProjection(
+    revisionNine(state), fixture.packet, fixture.result,
+  ));
+  let padded = { ...current, nextAction: 'x', decisions: [...current.decisions] };
+  let index = 0;
+  while (true) {
+    const candidate = { ...padded, decisions: [...padded.decisions, {
+      id: `revision-capacity-${index}`, summary: 'r'.repeat(1000),
+    }] };
+    if (projectedBytes(candidate) > ACTIVE_STATE_LIMIT_BYTES) break;
+    padded = candidate; index += 1;
+  }
+  let remaining = ACTIVE_STATE_LIMIT_BYTES - projectedBytes(padded);
+  const nextActionGrowth = Math.min(999, remaining);
+  padded = { ...padded, nextAction: 'x'.repeat(1 + nextActionGrowth) };
+  remaining -= nextActionGrowth;
+  if (remaining > 0) {
+    const lastDecision = padded.decisions.at(-1);
+    assert.ok(lastDecision.id.length + remaining <= 128);
+    padded = { ...padded, decisions: padded.decisions.map((decision) =>
+      decision === lastDecision ? { ...decision, id: `${decision.id}${'x'.repeat(remaining)}` } : decision) };
+  }
+  assert.equal(projectedBytes(padded), ACTIVE_STATE_LIMIT_BYTES,
+    'constructed an exact 64-KiB acceptance state at revision 9');
+  const nearLimit = checkpointState({ cwd, expectedRevision: current.revision, nextState: padded });
+  assert.equal(nearLimit.revision, 9);
+  const revisionNineAcceptance = acceptedWorkerStateProjection(
+    nearLimit, fixture.packet, fixture.result,
+  );
+  assert.equal(bytes(revisionNineAcceptance), ACTIVE_STATE_LIMIT_BYTES);
+  assert.equal(bytes({ ...revisionNineAcceptance, revision: 10 }), ACTIVE_STATE_LIMIT_BYTES + 1);
+  const before = durableAcceptanceSnapshot(cwd, fixture.packet.taskId);
+  assert.throws(() => checkpointWorkerResultAcceptance({
+    cwd, packet: fixture.packet, result: fixture.result, expectedRevision: nearLimit.revision,
+  }), { code: 'STATE_TOO_LARGE' });
+  assert.deepEqual(durableAcceptanceSnapshot(cwd, fixture.packet.taskId), before,
+    'revision-width rejection writes no envelope, receipt, state, event, or sidecar bytes');
+});
+
+test('dependent worker result accepts its commit-local delta and integrates it exactly', () => {
+  const cwd = repo();
+  const { packet, result, workerSha, centralSha, advanced } = dependentWorkerAcceptanceFixture(cwd);
+  assert.notEqual(workerSha, centralSha);
+  assert.equal(spawnSync('git', ['merge-base', '--is-ancestor', workerSha, centralSha], { cwd }).status, 1);
+  assert.equal(spawnSync('git', ['merge-base', '--is-ancestor', centralSha, workerSha], { cwd }).status, 1);
+
+  const staleSnapshot = durableAcceptanceSnapshot(cwd, packet.taskId);
+  assert.throws(() => checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: advanced.revision - 1,
+  }), { code: 'STATE_REVISION_CONFLICT' });
+  assert.deepEqual(durableAcceptanceSnapshot(cwd, packet.taskId), staleSnapshot);
+
+  const eventPath = join(stateDirectory(cwd, 17), 'events.ndjson');
+  const priorEventCount = readFileSync(eventPath, 'utf8').trim().split('\n').length;
+  const accepted = checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: advanced.revision,
+  });
+  assert.equal(accepted.revision, advanced.revision + 1);
+  assert.equal(accepted.tasks.find((item) => item.id === packet.taskId).status, 'implemented');
+  const envelope = JSON.parse(readFileSync(workerResultEnvelopePath(cwd, 17, packet.taskId), 'utf8'));
+  const receipt = readFileSync(workerResultReceiptPath(cwd, 17, packet.taskId), 'utf8').trim();
+  assert.deepEqual(envelope.result, result);
+  assert.equal(envelope.packetDigest, taskPacketDigest(packet));
+  assert.equal(envelope.resultDigest, accepted.tasks.find((item) => item.id === packet.taskId).workerResultDigest);
+  assert.match(receipt, /^[0-9a-f]{64}$/u);
+  assert.equal(readFileSync(eventPath, 'utf8').trim().split('\n').length, priorEventCount + 1);
+  assert.equal(reconcileState({ cwd }).workerResults.find((entry) => entry.taskId === packet.taskId).status, 'valid');
+
+  const acceptedSnapshot = durableAcceptanceSnapshot(cwd, packet.taskId);
+  assert.equal(checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: accepted.revision,
+  }).revision, accepted.revision);
+  assert.deepEqual(durableAcceptanceSnapshot(cwd, packet.taskId), acceptedSnapshot);
+  assert.throws(() => checkpointWorkerResultAcceptance({
+    cwd, packet, result: { ...result, resolutionSummary: 'Altered result evidence.' },
+    expectedRevision: accepted.revision,
+  }), { code: 'WORKER_RESULT_CONFLICT' });
+  assert.deepEqual(durableAcceptanceSnapshot(cwd, packet.taskId), acceptedSnapshot);
+
+  git(cwd, ['cherry-pick', workerSha]);
+  const integratedCommitSha = git(cwd, ['rev-parse', 'HEAD']);
+  const advancedAfterPick = checkpointGitMetadata({ cwd }).state;
+  const integrated = checkpointState({
+    cwd, expectedRevision: advancedAfterPick.revision,
+    nextState: {
+      ...advancedAfterPick,
+      tasks: advancedAfterPick.tasks.map((item) => {
+        if (item.id !== packet.taskId) return item;
+        const { execution: _execution, ...withoutExecution } = item;
+        return {
+          ...withoutExecution, status: 'integrated', integratedCommitSha,
+          resolutionSummary: 'Integrated exact accepted worker patch.',
+        };
+      }),
+    },
+  });
+  assert.equal(integrated.tasks.find((item) => item.id === packet.taskId).integratedCommitSha, integratedCommitSha);
+});
+
+test('actionable integration requires an ancestral central commit with the accepted exact delta', () => {
+  const cwd = repo();
+  const fixture = dependentWorkerAcceptanceFixture(cwd);
+  const accepted = checkpointWorkerResultAcceptance({
+    cwd, packet: fixture.packet, result: fixture.result,
+    expectedRevision: fixture.advanced.revision,
+  });
+  const tree = git(cwd, ['rev-parse', `${fixture.centralSha}^{tree}`]);
+  const unrelatedSha = git(cwd, [
+    'commit-tree', tree, '-p', fixture.centralSha, '-m', 'unrelated integration candidate',
+  ]);
+  const integrationState = (integratedCommitSha) => ({
+    ...accepted,
+    tasks: accepted.tasks.map((item) => {
+      if (item.id !== fixture.packet.taskId) return item;
+      const { execution: _execution, ...withoutExecution } = item;
+      return {
+        ...withoutExecution, status: 'integrated', integratedCommitSha,
+        resolutionSummary: 'Attempted central integration.',
+      };
+    }),
+  });
+  for (const integratedCommitSha of ['f'.repeat(40), unrelatedSha]) {
+    const before = durableAcceptanceSnapshot(cwd, fixture.packet.taskId);
+    assert.throws(() => checkpointState({
+      cwd, expectedRevision: accepted.revision,
+      nextState: integrationState(integratedCommitSha),
+    }), { code: 'WORKER_RESULT_INTEGRATION_ANCESTRY_MISMATCH' });
+    assert.deepEqual(durableAcceptanceSnapshot(cwd, fixture.packet.taskId), before);
+  }
+  const beforeMismatch = durableAcceptanceSnapshot(cwd, fixture.packet.taskId);
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: accepted.revision,
+    nextState: integrationState(fixture.centralSha),
+  }), { code: 'WORKER_RESULT_EXACT_DELTA_MISMATCH' });
+  assert.deepEqual(durableAcceptanceSnapshot(cwd, fixture.packet.taskId), beforeMismatch);
+});
+
+test('an older matching apply followed by a revert cannot claim a later worker result', () => {
+  const cwd = repo();
+  const changedPath = 'scripts/replayed-delta.mjs';
+  commit(cwd, { [changedPath]: 'export const value = 0;\n' }, 'add replay base');
+  const initial = init(cwd);
+  const proposedTask = task(initial.currentIntegrationHeadSha, {
+    id: 'replayed-central-delta', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [proposedTask] },
+  });
+  const packet = taskPacket(initial.currentIntegrationHeadSha, proposedTask.id, {
+    affectedAreas: ['workflow'], command: 'npm run test:pr-review',
+  });
+  bindPacket(cwd, proposed, packet);
+  const oldApplySha = commit(cwd, { [changedPath]: 'export const value = 1;\n' }, 'old matching apply');
+  commit(cwd, { [changedPath]: 'export const value = 0;\n' }, 'revert old matching apply');
+  const workerParentSha = commit(cwd, {
+    'scripts/later-worker-parent.mjs': 'export const laterParent = true;\n',
+  }, 'advance to later worker parent');
+  git(cwd, ['switch', '-c', 'replayed-central-worker', workerParentSha]);
+  const workerSha = commit(cwd, { [changedPath]: 'export const value = 1;\n' }, 'apply later worker delta');
+  git(cwd, ['switch', 'main']);
+  const advanced = checkpointGitMetadata({ cwd }).state;
+  const result = workerResult(packet, workerSha, [changedPath]);
+  const accepted = checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: advanced.revision,
+  });
+  const { execution: _execution, ...implementedTask } = accepted.tasks[0];
+  const nextState = {
+    ...accepted,
+    tasks: [{
+      ...implementedTask, status: 'integrated', integratedCommitSha: oldApplySha,
+      resolutionSummary: 'Attempted to claim an older matching application.',
+    }],
+  };
+  assert.equal(spawnSync('git', [
+    'merge-base', '--is-ancestor', oldApplySha, workerParentSha,
+  ], { cwd }).status, 0, 'the older apply remains on the current integration history');
+  assert.equal(spawnSync('git', [
+    'merge-base', '--is-ancestor', workerParentSha, `${oldApplySha}^`,
+  ], { cwd }).status, 1, 'the older apply parent predates the worker parent');
+  const durableBefore = durableAcceptanceSnapshot(cwd, packet.taskId);
+  const repositoryBefore = repositoryAuthoritySnapshot(cwd);
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: accepted.revision, nextState,
+  }), { code: 'WORKER_RESULT_INTEGRATION_ANCESTRY_MISMATCH' });
+  assert.deepEqual(durableAcceptanceSnapshot(cwd, packet.taskId), durableBefore);
+  assert.deepEqual(repositoryAuthoritySnapshot(cwd), repositoryBefore);
+});
+
+test('exact integration accepts a same-file cherry-pick over nonoverlapping central history', () => {
+  const cwd = repo();
+  const changedPath = 'scripts/same-file-history.mjs';
+  commit(cwd, {
+    [changedPath]: [
+      'export const centralValue = 0;',
+      'export const spacerA = true;',
+      'export const spacerB = true;',
+      'export const workerValue = 0;',
+      '',
+    ].join('\n'),
+  }, 'add same-file history base');
+  const initial = init(cwd);
+  const proposedTask = task(initial.currentIntegrationHeadSha, {
+    id: 'same-file-nonoverlap', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [proposedTask] },
+  });
+  const packet = taskPacket(initial.currentIntegrationHeadSha, proposedTask.id, {
+    affectedAreas: ['workflow'], command: 'npm run test:pr-review',
+  });
+  bindPacket(cwd, proposed, packet);
+  git(cwd, ['switch', '-c', 'same-file-worker']);
+  const workerSha = commit(cwd, {
+    [changedPath]: [
+      'export const centralValue = 0;',
+      'export const spacerA = true;',
+      'export const spacerB = true;',
+      'export const workerValue = 1;',
+      '',
+    ].join('\n'),
+  }, 'change lower worker line');
+  git(cwd, ['switch', 'main']);
+  const centralParentSha = commit(cwd, {
+    [changedPath]: [
+      'export const centralValue = 1;',
+      'export const spacerA = true;',
+      'export const spacerB = true;',
+      'export const workerValue = 0;',
+      '',
+    ].join('\n'),
+  }, 'change upper central line');
+  git(cwd, ['cherry-pick', workerSha]);
+  const centralSha = git(cwd, ['rev-parse', 'HEAD']);
+  assert.notEqual(
+    git(cwd, ['rev-parse', `${packet.reviewedHeadSha}:${changedPath}`]),
+    git(cwd, ['rev-parse', `${centralParentSha}:${changedPath}`]),
+    'the central parent has a different whole-file base blob',
+  );
+  assert.notEqual(
+    git(cwd, ['rev-parse', `${workerSha}:${changedPath}`]),
+    git(cwd, ['rev-parse', `${centralSha}:${changedPath}`]),
+    'the exact cherry-pick has a different whole-file result blob',
+  );
+  const advanced = checkpointGitMetadata({ cwd }).state;
+  const inspectExact = () => inspectWorkerCommitAuthority({
+    cwd, state: advanced, packet,
+    result: workerResult(packet, workerSha, [changedPath]),
+    centralCommitSha: centralSha,
+  });
+  const baselineIdentity = inspectExact().deltaIdentity;
+  git(cwd, ['config', 'diff.context', '0']);
+  git(cwd, ['config', 'diff.interHunkContext', '99']);
+  git(cwd, ['config', 'diff.mnemonicPrefix', 'true']);
+  git(cwd, ['config', 'diff.noprefix', 'true']);
+  git(cwd, ['config', 'color.ui', 'always']);
+  assert.equal(inspectExact().deltaIdentity, baselineIdentity);
+  const accepted = checkpointWorkerResultAcceptance({
+    cwd,
+    packet,
+    result: workerResult(packet, workerSha, [changedPath]),
+    expectedRevision: advanced.revision,
+  });
+  const { execution: _execution, ...implementedTask } = accepted.tasks[0];
+  const repositoryBefore = repositoryAuthoritySnapshot(cwd);
+  const integrated = checkpointState({
+    cwd,
+    expectedRevision: accepted.revision,
+    nextState: {
+      ...accepted,
+      tasks: [{
+        ...implementedTask, status: 'integrated', integratedCommitSha: centralSha,
+        resolutionSummary: 'Integrated exact same-file nonoverlapping cherry-pick.',
+      }],
+    },
+  });
+  assert.equal(integrated.tasks[0].integratedCommitSha, centralSha);
+  assert.deepEqual(repositoryAuthoritySnapshot(cwd), repositoryBefore);
+});
+
+test('exact integration fails closed when the isolated three-way application conflicts', () => {
+  const cwd = repo();
+  const changedPath = 'scripts/three-way-conflict.mjs';
+  commit(cwd, { [changedPath]: 'export const conflictValue = 0;\n' }, 'add three-way conflict base');
+  const initial = init(cwd);
+  const proposedTask = task(initial.currentIntegrationHeadSha, {
+    id: 'three-way-conflict', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [proposedTask] },
+  });
+  const packet = taskPacket(initial.currentIntegrationHeadSha, proposedTask.id, {
+    affectedAreas: ['workflow'], command: 'npm run test:pr-review',
+  });
+  bindPacket(cwd, proposed, packet);
+  git(cwd, ['switch', '-c', 'three-way-conflict-worker']);
+  const workerSha = commit(cwd, {
+    [changedPath]: 'export const conflictValue=0;\n',
+  }, 'three-way conflict worker');
+  git(cwd, ['switch', 'main']);
+  const centralParentSha = commit(cwd, {
+    [changedPath]: 'export  const conflictValue = 0;\n',
+  }, 'overlapping central parent');
+  const centralSha = commit(cwd, {
+    [changedPath]: 'export const conflictValue=0;\n',
+  }, 'manual whitespace conflict resolution');
+  assert.equal(git(cwd, ['rev-parse', `${centralSha}^`]), centralParentSha);
+  const advanced = checkpointGitMetadata({ cwd }).state;
+  git(cwd, ['config', 'apply.ignoreWhitespace', 'change']);
+  git(cwd, ['config', 'apply.whitespace', 'fix']);
+  const result = workerResult(packet, workerSha, [changedPath]);
+  const accepted = checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: advanced.revision,
+  });
+  const { execution: _execution, ...implementedTask } = accepted.tasks[0];
+  const durableBefore = durableAcceptanceSnapshot(cwd, packet.taskId);
+  const repositoryBefore = repositoryAuthoritySnapshot(cwd);
+  assert.throws(() => checkpointState({
+    cwd,
+    expectedRevision: accepted.revision,
+    nextState: {
+      ...accepted,
+      tasks: [{
+        ...implementedTask, status: 'integrated', integratedCommitSha: centralSha,
+        resolutionSummary: 'Attempted integration after an overlapping central edit.',
+      }],
+    },
+  }), { code: 'WORKER_RESULT_EXACT_DELTA_MISMATCH' });
+  assert.deepEqual(durableAcceptanceSnapshot(cwd, packet.taskId), durableBefore);
+  assert.deepEqual(repositoryAuthoritySnapshot(cwd), repositoryBefore);
+});
+
+test('exact integration ignores repository attributes and custom merge drivers without mutation', () => {
+  const cwd = repo();
+  const changedPath = 'scripts/custom-merge-driver.txt';
+  commit(cwd, {
+    '.gitattributes': `${changedPath} merge=keepours\n`,
+    [changedPath]: 'value=base\n',
+  }, 'add custom merge driver base');
+  const initial = init(cwd);
+  const proposedTask = task(initial.currentIntegrationHeadSha, {
+    id: 'custom-merge-driver', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [proposedTask] },
+  });
+  const packet = taskPacket(initial.currentIntegrationHeadSha, proposedTask.id, {
+    affectedAreas: ['workflow'], command: 'npm run test:pr-review',
+  });
+  bindPacket(cwd, proposed, packet);
+
+  git(cwd, ['switch', '-c', 'custom-merge-driver-worker']);
+  const workerSha = commit(cwd, { [changedPath]: 'value=worker\n' }, 'custom driver worker value');
+  git(cwd, ['switch', 'main']);
+  const centralParentSha = commit(cwd, {
+    [changedPath]: 'value=central\n',
+  }, 'custom driver central value');
+  git(cwd, ['commit', '--allow-empty', '-m', 'omit custom driver worker value']);
+  const centralSha = git(cwd, ['rev-parse', 'HEAD']);
+  assert.equal(git(cwd, ['rev-parse', `${centralSha}^`]), centralParentSha);
+  const advanced = checkpointGitMetadata({ cwd }).state;
+
+  const sentinelPath = join(cwd, 'custom-merge-driver-sentinel');
+  const customDriver = `printf custom-driver-ran > ${sentinelPath}`;
+  git(cwd, ['config', 'merge.keepours.driver', customDriver]);
+  const gitDirectory = git(cwd, ['rev-parse', '--path-format=absolute', '--git-dir']);
+  const repositoryConfigPath = join(gitDirectory, 'config');
+  const inheritedConfigCount = Number(process.env.GIT_CONFIG_COUNT ?? 0);
+  assert.ok(Number.isSafeInteger(inheritedConfigCount) && inheritedConfigCount >= 0);
+  const environmentKeys = [
+    'GIT_CONFIG_COUNT',
+    `GIT_CONFIG_KEY_${inheritedConfigCount}`,
+    `GIT_CONFIG_VALUE_${inheritedConfigCount}`,
+  ];
+  const inheritedEnvironment = new Map(environmentKeys.map((key) => [key, process.env[key]]));
+  process.env.GIT_CONFIG_COUNT = String(inheritedConfigCount + 1);
+  process.env[`GIT_CONFIG_KEY_${inheritedConfigCount}`] = 'merge.text.driver';
+  process.env[`GIT_CONFIG_VALUE_${inheritedConfigCount}`] = customDriver;
+  try {
+    assert.equal(
+      git(cwd, ['check-attr', 'merge', '--', changedPath]),
+      `${changedPath}: merge: keepours`,
+    );
+    assert.equal(git(cwd, ['config', 'merge.keepours.driver']), customDriver);
+    assert.equal(existsSync(sentinelPath), false);
+
+    const result = workerResult(packet, workerSha, [changedPath]);
+    const accepted = checkpointWorkerResultAcceptance({
+      cwd, packet, result, expectedRevision: advanced.revision,
+    });
+    const { execution: _execution, ...implementedTask } = accepted.tasks[0];
+    const durableBefore = durableAcceptanceSnapshot(cwd, packet.taskId);
+    const repositoryBefore = repositoryAuthoritySnapshot(cwd);
+    const repositoryConfigBefore = readFileSync(repositoryConfigPath);
+    assert.throws(() => checkpointState({
+      cwd,
+      expectedRevision: accepted.revision,
+      nextState: {
+        ...accepted,
+        tasks: [{
+          ...implementedTask, status: 'integrated', integratedCommitSha: centralSha,
+          resolutionSummary: 'Attempted integration through a custom keep-ours merge driver.',
+        }],
+      },
+    }), { code: 'WORKER_RESULT_EXACT_DELTA_MISMATCH' });
+    assert.equal(existsSync(sentinelPath), false, 'custom merge drivers must never execute');
+    assert.deepEqual(readFileSync(repositoryConfigPath), repositoryConfigBefore);
+    assert.deepEqual(durableAcceptanceSnapshot(cwd, packet.taskId), durableBefore);
+    assert.deepEqual(repositoryAuthoritySnapshot(cwd), repositoryBefore);
+  } finally {
+    for (const [key, value] of inheritedEnvironment) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test('dependent worker result rejects missing, nonterminal, or absent dependency ancestry without mutation', () => {
+  for (const scenario of [
+    { dependencyReference: 'missing', code: 'WORKER_RESULT_DEPENDENCY_NOT_READY' },
+    { dependencyReference: 'pending', code: 'WORKER_RESULT_DEPENDENCY_NOT_READY' },
+    { centralBase: 'review', code: 'WORKER_RESULT_PARENT_ANCESTRY_MISMATCH' },
+    { workerBase: 'review', code: 'WORKER_RESULT_DEPENDENCY_ANCESTRY_MISMATCH' },
+  ]) {
+    const cwd = repo();
+    const fixture = dependentWorkerAcceptanceFixture(cwd, scenario);
+    const before = durableAcceptanceSnapshot(cwd, fixture.packet.taskId);
+    assert.throws(() => checkpointWorkerResultAcceptance({
+      cwd, packet: fixture.packet, result: fixture.result,
+      expectedRevision: fixture.advanced.revision,
+    }), { code: scenario.code });
+    assert.deepEqual(durableAcceptanceSnapshot(cwd, fixture.packet.taskId), before);
+  }
+});
+
+test('dependent worker result rejects a non-descendant central authority without mutation', () => {
+  const cwd = repo();
+  const fixture = dependentWorkerAcceptanceFixture(cwd);
+  const tree = git(cwd, ['rev-parse', `${fixture.centralSha}^{tree}`]);
+  const unrelatedHead = git(cwd, ['commit-tree', tree, '-m', 'unrelated result authority']);
+  git(cwd, ['switch', '--detach', unrelatedHead]);
+  const unrelated = checkpointGitMetadata({ cwd }).state;
+  const before = durableAcceptanceSnapshot(cwd, fixture.packet.taskId);
+  assert.throws(() => checkpointWorkerResultAcceptance({
+    cwd, packet: fixture.packet, result: fixture.result, expectedRevision: unrelated.revision,
+  }), { code: 'WORKER_RESULT_PARENT_ANCESTRY_MISMATCH' });
+  assert.deepEqual(durableAcceptanceSnapshot(cwd, fixture.packet.taskId), before);
+});
+
+test('new and unbound actionable tasks cannot pre-seed or bypass result authority', () => {
+  const cwd = repo();
+  const initial = init(cwd);
+  const unbound = task(initial.currentIntegrationHeadSha, {
+    id: 'unbound-authority', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: initial.revision,
+    nextState: { ...initial, tasks: [{ ...unbound, workerResultDigest: 'a'.repeat(64) }] },
+  }), { code: 'PROTECTED_TRANSITION_REQUIRED' });
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [unbound] },
+  });
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: proposed.revision,
+    nextState: {
+      ...proposed,
+      tasks: [{
+        ...unbound, status: 'implemented',
+        execution: { ...unbound.execution, workerCommitSha: initial.currentIntegrationHeadSha },
+      }],
+    },
+  }), { code: 'TASK_PACKET_NOT_BOUND' });
+  const { execution: _execution, ...withoutExecution } = unbound;
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: proposed.revision,
+    nextState: {
+      ...proposed,
+      tasks: [{
+        ...withoutExecution, status: 'integrated', integratedCommitSha: initial.currentIntegrationHeadSha,
+        resolutionSummary: 'Forged unbound integration.',
+      }],
+    },
+  }), { code: 'TASK_PACKET_NOT_BOUND' });
+});
+
+test('native-v3 backfill proves central patch equivalence and migrations do not synthesize results', () => {
+  const cwd = repo();
+  const initial = init(cwd);
+  const proposedTask = task(initial.currentIntegrationHeadSha, {
+    id: 'backfill-result', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [proposedTask] },
+  });
+  const packet = taskPacket(initial.currentIntegrationHeadSha, proposedTask.id, {
+    affectedAreas: ['workflow'], command: 'npm run check:workflow',
+  });
+  const bound = bindPacket(cwd, proposed, packet);
+  git(cwd, ['switch', '-c', 'backfill-worker']);
+  const workerSha = commit(cwd, { 'scripts/backfill-result.mjs': 'export const backfill = true;\n' }, 'backfill worker');
+  git(cwd, ['switch', 'main']);
+  git(cwd, ['cherry-pick', workerSha]);
+  const centralSha = git(cwd, ['rev-parse', 'HEAD']);
+  const advanced = checkpointGitMetadata({ cwd }).state;
+  const { execution: _execution, ...boundTask } = advanced.tasks[0];
+  const preBoundary = {
+    ...advanced,
+    tasks: [{
+      ...boundTask, status: 'integrated', integratedCommitSha: centralSha,
+      resolutionSummary: 'Integrated before durable result acceptance existed.',
+    }],
+  };
+  writeFileSync(statePath(cwd, preBoundary.prNumber), `${JSON.stringify(preBoundary)}\n`);
+  const result = workerResult(packet, workerSha, ['scripts/backfill-result.mjs']);
+  const backfilled = checkpointWorkerResultBackfill({
+    cwd, packet, result, expectedRevision: preBoundary.revision,
+  });
+  assert.match(backfilled.tasks[0].workerResultDigest, /^[0-9a-f]{64}$/u);
+  assert.equal(checkpointWorkerResultBackfill({
+    cwd, packet, result, expectedRevision: backfilled.revision,
+  }).revision, backfilled.revision);
+
+  git(cwd, ['switch', '-c', 'mismatched-worker', packet.reviewedHeadSha]);
+  const mismatchSha = commit(cwd, { 'scripts/backfill-result.mjs': 'export const mismatch = true;\n' }, 'mismatched worker');
+  git(cwd, ['switch', 'main']);
+  const mismatchResult = workerResult(packet, mismatchSha, ['scripts/backfill-result.mjs']);
+  const unboundEvidenceState = {
+    ...backfilled,
+    tasks: backfilled.tasks.map(({ workerResultDigest: _digest, ...item }) => item),
+  };
+  writeFileSync(statePath(cwd, unboundEvidenceState.prNumber), `${JSON.stringify(unboundEvidenceState)}\n`);
+  assert.throws(() => checkpointWorkerResultBackfill({
+    cwd, packet, result: mismatchResult, expectedRevision: unboundEvidenceState.revision,
+  }), { code: 'WORKER_RESULT_EXACT_DELTA_MISMATCH' });
+
+  const migrated = migratePrReviewStateV2(schemaV2State({
+    ...initial,
+    tasks: [task(initial.currentIntegrationHeadSha, { id: 'migrated-no-result' })],
+  }), { migratedAt: AT });
+  assert.equal(Object.hasOwn(migrated.tasks[0], 'workerResultDigest'), false);
+});
+
+test('worker authority rejects reviewed, root, merge, and absent-parent tips before durable mutation', () => {
+  const cwd = repo();
+  const initial = init(cwd);
+  const proposedTask = task(initial.currentIntegrationHeadSha, {
+    id: 'single-worker-commit', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [proposedTask] },
+  });
+  const packet = taskPacket(initial.currentIntegrationHeadSha, proposedTask.id, {
+    affectedAreas: ['workflow'], command: 'npm run test:pr-review',
+  });
+  const bound = bindPacket(cwd, proposed, packet);
+  const reviewedHead = packet.reviewedHeadSha;
+
+  const rootTree = git(cwd, ['rev-parse', `${reviewedHead}^{tree}`]);
+  const rootSha = git(cwd, ['commit-tree', rootTree, '-m', 'root worker result']);
+  git(cwd, ['switch', '-c', 'merge-worker-left', reviewedHead]);
+  const leftSha = commit(cwd, { 'scripts/merge-left.mjs': 'export const left = true;\n' }, 'merge left');
+  git(cwd, ['switch', '-c', 'merge-worker-right', reviewedHead]);
+  const rightSha = commit(cwd, { 'scripts/merge-right.mjs': 'export const right = true;\n' }, 'merge right');
+  const mergeTree = git(cwd, ['rev-parse', `${rightSha}^{tree}`]);
+  const mergeSha = git(cwd, [
+    'commit-tree', mergeTree, '-p', leftSha, '-p', rightSha, '-m', 'merge worker result',
+  ]);
+  git(cwd, ['switch', '-c', 'two-commit-worker', reviewedHead]);
+  commit(cwd, { 'scripts/worker-first.mjs': 'export const first = true;\n' }, 'worker first commit');
+  const twoCommitSha = commit(cwd, {
+    'scripts/worker-second.mjs': 'export const second = true;\n',
+  }, 'worker second commit');
+  git(cwd, ['switch', 'main']);
+
+  const scenarios = [
+    { sha: reviewedHead, paths: ['scripts/reviewed-head.mjs'], code: 'WORKER_RESULT_COMMIT_NOT_SINGLE' },
+    { sha: rootSha, paths: ['scripts/root.mjs'], code: 'WORKER_RESULT_COMMIT_NOT_SINGLE' },
+    { sha: mergeSha, paths: ['scripts/merge-right.mjs'], code: 'WORKER_RESULT_COMMIT_NOT_SINGLE' },
+    {
+      sha: twoCommitSha, paths: ['scripts/worker-second.mjs'],
+      code: 'WORKER_RESULT_PARENT_ANCESTRY_MISMATCH',
+    },
+  ];
+  for (const scenario of scenarios) {
+    const result = workerResult(packet, scenario.sha, scenario.paths);
+    const before = durableAcceptanceSnapshot(cwd, packet.taskId);
+    assert.throws(() => checkpointWorkerResultAcceptance({
+      cwd, packet, result, expectedRevision: bound.revision,
+    }), { code: scenario.code });
+    assert.deepEqual(durableAcceptanceSnapshot(cwd, packet.taskId), before);
+  }
+
+  const packetPath = join(stateDirectory(cwd, bound.prNumber), 'single-worker-packet.json');
+  const resultPath = join(stateDirectory(cwd, bound.prNumber), 'single-worker-result.json');
+  writeFileSync(packetPath, `${JSON.stringify(packet)}\n`);
+  writeFileSync(resultPath, `${JSON.stringify(workerResult(
+    packet, twoCommitSha, ['scripts/worker-second.mjs'],
+  ))}\n`);
+  const cli = spawnSync(process.execPath, [
+    STATE_CLI, 'validate-result', '--pr', '17', '--task-packet', packetPath, '--worker-result', resultPath,
+  ], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  assert.equal(cli.status, 1);
+  assert.match(cli.stderr, /WORKER_RESULT_PARENT_ANCESTRY_MISMATCH/u);
+});
+
+test('worker authority ignores replacement refs and compares actual commit objects atomically', () => {
+  const cwd = repo();
+  const changedPath = 'scripts/replacement-authority.mjs';
+  commit(cwd, { [changedPath]: 'export const actualValue = 0;\n' }, 'add replacement authority base');
+  const initial = init(cwd);
+  const proposedTask = task(initial.currentIntegrationHeadSha, {
+    id: 'replacement-object-authority', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [proposedTask] },
+  });
+  const packet = taskPacket(initial.currentIntegrationHeadSha, proposedTask.id, {
+    affectedAreas: ['workflow'], command: 'npm run test:pr-review',
+  });
+  bindPacket(cwd, proposed, packet);
+  git(cwd, ['switch', '-c', 'replacement-authority-worker']);
+  const workerSha = commit(cwd, {
+    [changedPath]: 'export const actualValue = 1;\n',
+  }, 'replacement authority worker');
+  git(cwd, ['switch', '-c', 'replacement-authority-forged-parent', packet.reviewedHeadSha]);
+  const forgedParentSha = commit(cwd, {
+    'scripts/replacement-forged-parent.mjs': 'export const forgedParent = true;\n',
+  }, 'replacement authority forged parent');
+  git(cwd, ['cherry-pick', workerSha]);
+  const forgedCentralSha = git(cwd, ['rev-parse', 'HEAD']);
+  const forgedTree = git(cwd, ['rev-parse', `${forgedCentralSha}^{tree}`]);
+  git(cwd, ['switch', 'main']);
+  const centralSha = commit(cwd, {
+    [changedPath]: 'export const actualValue = 2;\n',
+  }, 'actual mismatched central commit');
+  const advanced = checkpointGitMetadata({ cwd }).state;
+  const result = workerResult(packet, workerSha, [changedPath]);
+  const accepted = checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: advanced.revision,
+  });
+  git(cwd, ['replace', centralSha, forgedCentralSha]);
+  assert.equal(
+    git(cwd, ['rev-parse', `${centralSha}^`]),
+    forgedParentSha,
+    'ordinary Git reads the forged replacement parent',
+  );
+  assert.equal(
+    git(cwd, ['--no-replace-objects', 'rev-parse', `${centralSha}^`]),
+    packet.reviewedHeadSha,
+    'the actual central object retains its real parent',
+  );
+  assert.equal(
+    git(cwd, ['rev-parse', `${centralSha}^{tree}`]),
+    forgedTree,
+    'ordinary Git reads the forged replacement tree',
+  );
+  assert.notEqual(
+    git(cwd, ['--no-replace-objects', 'rev-parse', `${centralSha}^{tree}`]),
+    forgedTree,
+    'the actual central object retains its mismatched tree',
+  );
+  const { execution: _execution, ...implementedTask } = accepted.tasks[0];
+  const nextState = {
+    ...accepted,
+    tasks: [{
+      ...implementedTask, status: 'integrated', integratedCommitSha: centralSha,
+      resolutionSummary: 'Attempted integration through a replacement object.',
+    }],
+  };
+  const durableBefore = durableAcceptanceSnapshot(cwd, packet.taskId);
+  const repositoryBefore = repositoryAuthoritySnapshot(cwd);
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: accepted.revision, nextState,
+  }), { code: 'WORKER_RESULT_EXACT_DELTA_MISMATCH' });
+  assert.deepEqual(durableAcceptanceSnapshot(cwd, packet.taskId), durableBefore);
+  assert.deepEqual(repositoryAuthoritySnapshot(cwd), repositoryBefore);
+});
+
+test('worker authority rejects common-dir grafts in linked worktrees without durable mutation', () => {
+  const cwd = repo();
+  const integrationCwd = `${cwd}-linked-worker-authority`;
+  git(cwd, ['worktree', 'add', '--detach', integrationCwd, 'HEAD']);
+  repositories.push(integrationCwd);
+  const initial = init(integrationCwd);
+  const proposedTask = task(initial.currentIntegrationHeadSha, {
+    id: 'legacy-graft-authority', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const proposed = checkpointState({
+    cwd: integrationCwd,
+    expectedRevision: initial.revision,
+    nextState: { ...initial, tasks: [proposedTask] },
+  });
+  const packet = taskPacket(initial.currentIntegrationHeadSha, proposedTask.id, {
+    affectedAreas: ['workflow'], command: 'npm run test:pr-review',
+  });
+  const bound = bindPacket(integrationCwd, proposed, packet);
+
+  git(integrationCwd, ['switch', '-c', 'legacy-grafts-valid-worker']);
+  const validWorkerSha = commit(integrationCwd, {
+    'scripts/legacy-grafts-valid.mjs': 'export const validWorker = true;\n',
+  }, 'add valid worker commit');
+  git(integrationCwd, ['switch', '--detach', packet.reviewedHeadSha]);
+  const validResult = workerResult(packet, validWorkerSha, ['scripts/legacy-grafts-valid.mjs']);
+  const commonGitDirectory = git(integrationCwd, [
+    '--no-replace-objects', 'rev-parse', '--path-format=absolute', '--git-common-dir',
+  ]);
+  assert.equal(commonGitDirectory, join(cwd, '.git'));
+  const graftsPath = join(commonGitDirectory, 'info', 'grafts');
+  assert.equal(existsSync(graftsPath), false);
+  assert.doesNotThrow(() => inspectWorkerCommitAuthority({
+    cwd: integrationCwd, state: bound, packet, result: validResult,
+  }));
+  mkdirSync(dirname(graftsPath), { recursive: true });
+  writeFileSync(graftsPath, '');
+  assert.doesNotThrow(() => inspectWorkerCommitAuthority({
+    cwd: integrationCwd, state: bound, packet, result: validResult,
+  }));
+
+  git(integrationCwd, ['switch', '-c', 'legacy-grafts-forged-worker', packet.reviewedHeadSha]);
+  git(integrationCwd, ['commit', '--allow-empty', '-m', 'hide an extra worker commit']);
+  const hiddenParentSha = git(integrationCwd, ['rev-parse', 'HEAD']);
+  const forgedWorkerSha = commit(integrationCwd, {
+    'scripts/legacy-grafts-forged.mjs': 'export const forgedWorker = true;\n',
+  }, 'add forged worker tip');
+  git(integrationCwd, ['switch', '--detach', packet.reviewedHeadSha]);
+  assert.equal(
+    git(integrationCwd, ['--no-replace-objects', 'rev-list', '--parents', '-n', '1', forgedWorkerSha]),
+    `${forgedWorkerSha} ${hiddenParentSha}`,
+  );
+  assert.equal(spawnSync('git', [
+    '--no-replace-objects', 'merge-base', '--is-ancestor', hiddenParentSha,
+    bound.currentIntegrationHeadSha,
+  ], { cwd: integrationCwd }).status, 1);
+
+  writeFileSync(graftsPath, `${forgedWorkerSha} ${packet.reviewedHeadSha}\n`);
+  assert.equal(
+    git(integrationCwd, ['--no-replace-objects', 'rev-list', '--parents', '-n', '1', forgedWorkerSha]),
+    `${forgedWorkerSha} ${packet.reviewedHeadSha}`,
+    'Git 2.34-compatible authority reads honor the forged common-dir graft',
+  );
+  assert.equal(spawnSync('git', [
+    '--no-replace-objects', 'merge-base', '--is-ancestor', packet.reviewedHeadSha, forgedWorkerSha,
+  ], { cwd: integrationCwd }).status, 0, 'the graft forges worker ancestry despite --no-replace-objects');
+
+  const forgedResult = workerResult(packet, forgedWorkerSha, ['scripts/legacy-grafts-forged.mjs']);
+  const durableBefore = durableAcceptanceSnapshot(integrationCwd, packet.taskId);
+  const repositoryBefore = repositoryAuthoritySnapshot(integrationCwd);
+  const graftsBefore = readFileSync(graftsPath, 'utf8');
+  assert.throws(() => checkpointWorkerResultAcceptance({
+    cwd: integrationCwd, packet, result: forgedResult, expectedRevision: bound.revision,
+  }), { code: 'WORKER_RESULT_LEGACY_GRAFTS_PRESENT' });
+  assert.deepEqual(durableAcceptanceSnapshot(integrationCwd, packet.taskId), durableBefore);
+  assert.deepEqual(repositoryAuthoritySnapshot(integrationCwd), repositoryBefore);
+  assert.equal(readFileSync(graftsPath, 'utf8'), graftsBefore);
+});
+
+test('worker authority cannot omit gitlink paths or pointers through diff configuration', () => {
+  const cwd = repo();
+  const targetTree = git(cwd, ['rev-parse', 'HEAD^{tree}']);
+  const baseGitlinkSha = git(cwd, ['commit-tree', targetTree, '-m', 'base gitlink target']);
+  const workerGitlinkSha = git(cwd, [
+    'commit-tree', targetTree, '-p', baseGitlinkSha, '-m', 'worker gitlink target',
+  ]);
+  const gitlinkPath = 'scripts/worker-authority-gitlink';
+  const regularPath = 'scripts/gitlink-authority.mjs';
+  git(cwd, [
+    'update-index', '--add', '--cacheinfo', `160000,${baseGitlinkSha},${gitlinkPath}`,
+  ]);
+  git(cwd, ['commit', '-m', 'add worker authority gitlink base']);
+
+  const initial = init(cwd);
+  const proposedTask = task(initial.currentIntegrationHeadSha, {
+    id: 'gitlink-diff-authority', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [proposedTask] },
+  });
+  const packet = taskPacket(initial.currentIntegrationHeadSha, proposedTask.id, {
+    affectedAreas: ['workflow'], command: 'npm run test:pr-review',
+  });
+  bindPacket(cwd, proposed, packet);
+
+  git(cwd, ['switch', '-c', 'gitlink-diff-worker']);
+  mkdirSync(dirname(join(cwd, regularPath)), { recursive: true });
+  writeFileSync(join(cwd, regularPath), 'export const gitlinkAuthority = true;\n');
+  git(cwd, ['add', '--', regularPath]);
+  git(cwd, ['update-index', '--cacheinfo', `160000,${workerGitlinkSha},${gitlinkPath}`]);
+  git(cwd, ['commit', '-m', 'change worker file and gitlink']);
+  const workerSha = git(cwd, ['rev-parse', 'HEAD']);
+
+  git(cwd, ['switch', 'main']);
+  mkdirSync(dirname(join(cwd, regularPath)), { recursive: true });
+  writeFileSync(join(cwd, regularPath), 'export const gitlinkAuthority = true;\n');
+  git(cwd, ['add', '--', regularPath]);
+  git(cwd, ['commit', '-m', 'integrate worker file without gitlink']);
+  const centralSha = git(cwd, ['rev-parse', 'HEAD']);
+  const advanced = checkpointGitMetadata({ cwd }).state;
+
+  const inheritedConfigCount = Number(process.env.GIT_CONFIG_COUNT ?? 0);
+  assert.ok(Number.isSafeInteger(inheritedConfigCount) && inheritedConfigCount >= 0);
+  const environmentKeys = [
+    'GIT_CONFIG_COUNT',
+    `GIT_CONFIG_KEY_${inheritedConfigCount}`,
+    `GIT_CONFIG_VALUE_${inheritedConfigCount}`,
+    `GIT_CONFIG_KEY_${inheritedConfigCount + 1}`,
+    `GIT_CONFIG_VALUE_${inheritedConfigCount + 1}`,
+  ];
+  const inheritedEnvironment = new Map(environmentKeys.map((key) => [key, process.env[key]]));
+  process.env.GIT_CONFIG_COUNT = String(inheritedConfigCount + 2);
+  process.env[`GIT_CONFIG_KEY_${inheritedConfigCount}`] = 'diff.ignoreSubmodules';
+  process.env[`GIT_CONFIG_VALUE_${inheritedConfigCount}`] = 'all';
+  process.env[`GIT_CONFIG_KEY_${inheritedConfigCount + 1}`] = 'diff.submodule';
+  process.env[`GIT_CONFIG_VALUE_${inheritedConfigCount + 1}`] = 'log';
+  try {
+    const configuredPaths = git(cwd, [
+      '--no-replace-objects', 'diff', '--name-only', '--no-renames',
+      packet.reviewedHeadSha, workerSha, '--',
+    ]).split('\n').filter(Boolean);
+    assert.deepEqual(configuredPaths, [regularPath], 'inherited diff configuration hides the gitlink path');
+    const authorityPatchArgs = (submoduleFormat = []) => [
+      '--no-replace-objects', '-c', 'diff.algorithm=myers', '-c', 'diff.indentHeuristic=false',
+      'diff', '--binary', '--full-index', '--no-renames', '--no-ext-diff', '--no-textconv',
+      '--ignore-submodules=none', ...submoduleFormat, '--no-color',
+      '--src-prefix=a/', '--dst-prefix=b/', '--unified=3', '--inter-hunk-context=0',
+      packet.reviewedHeadSha, workerSha, '--',
+    ];
+    const inheritedLogPatch = git(cwd, authorityPatchArgs());
+    assert.ok(inheritedLogPatch.includes(`Submodule ${gitlinkPath} `),
+      'inherited diff.submodule=log replaces the applyable gitlink delta with a log summary');
+    const forcedShortPatch = git(cwd, authorityPatchArgs(['--submodule=short']));
+    assert.ok(forcedShortPatch.includes(`-Subproject commit ${baseGitlinkSha}`));
+    assert.ok(forcedShortPatch.includes(`+Subproject commit ${workerGitlinkSha}`));
+    assert.equal(git(cwd, ['rev-parse', `${workerSha}:${gitlinkPath}`]), workerGitlinkSha);
+    assert.equal(git(cwd, ['rev-parse', `${centralSha}:${gitlinkPath}`]), baseGitlinkSha);
+
+    const result = workerResult(packet, workerSha, [regularPath, gitlinkPath]);
+    const authority = inspectWorkerCommitAuthority({ cwd, state: advanced, packet, result });
+    assert.deepEqual([...authority.changedPaths].sort(), [gitlinkPath, regularPath].sort());
+    const accepted = checkpointWorkerResultAcceptance({
+      cwd, packet, result, expectedRevision: advanced.revision,
+    });
+    const { execution: _execution, ...implementedTask } = accepted.tasks[0];
+    const durableBefore = durableAcceptanceSnapshot(cwd, packet.taskId);
+    const repositoryBefore = repositoryAuthoritySnapshot(cwd);
+    assert.throws(() => checkpointState({
+      cwd,
+      expectedRevision: accepted.revision,
+      nextState: {
+        ...accepted,
+        tasks: [{
+          ...implementedTask, status: 'integrated', integratedCommitSha: centralSha,
+          resolutionSummary: 'Attempted integration without the accepted gitlink pointer.',
+        }],
+      },
+    }), { code: 'WORKER_RESULT_EXACT_DELTA_MISMATCH' });
+    assert.deepEqual(durableAcceptanceSnapshot(cwd, packet.taskId), durableBefore);
+    assert.deepEqual(repositoryAuthoritySnapshot(cwd), repositoryBefore);
+  } finally {
+    for (const [key, value] of inheritedEnvironment) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test('exact delta identity rejects patch-id whitespace collisions and preserves state', () => {
+  const cwd = repo();
+  commit(cwd, { 'scripts/collision.mjs': 'export const base = true;\n' }, 'add collision base');
+  const initial = init(cwd);
+  const proposedTask = task(initial.currentIntegrationHeadSha, {
+    id: 'whitespace-collision', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [proposedTask] },
+  });
+  const packet = taskPacket(initial.currentIntegrationHeadSha, proposedTask.id, {
+    affectedAreas: ['workflow'], command: 'npm run test:pr-review',
+  });
+  const bound = bindPacket(cwd, proposed, packet);
+  git(cwd, ['switch', '-c', 'whitespace-worker']);
+  const workerSha = commit(cwd, {
+    'scripts/collision.mjs': 'export const base = true;\nexport const value = 1;\n',
+  }, 'worker whitespace form');
+  git(cwd, ['switch', 'main']);
+  const centralSha = commit(cwd, {
+    'scripts/collision.mjs': 'export const base = true;\nexport const value=1;\n',
+  }, 'central whitespace form');
+  const advanced = checkpointGitMetadata({ cwd }).state;
+  const patchId = (sha) => {
+    const shown = spawnSync('git', ['show', '--format=', '--no-renames', sha], { cwd, encoding: 'utf8' });
+    assert.equal(shown.status, 0, shown.stderr);
+    const identified = spawnSync('git', ['patch-id', '--stable'], {
+      cwd, input: shown.stdout, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    assert.equal(identified.status, 0, identified.stderr);
+    return identified.stdout.trim().split(/\s+/u)[0];
+  };
+  assert.equal(patchId(workerSha), patchId(centralSha), 'fixture reproduces the stable patch-id collision');
+  const result = workerResult(packet, workerSha, ['scripts/collision.mjs']);
+  const accepted = checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: advanced.revision,
+  });
+  const { execution: _execution, ...implementedTask } = accepted.tasks[0];
+  const before = durableAcceptanceSnapshot(cwd, packet.taskId);
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: accepted.revision,
+    nextState: {
+      ...accepted,
+      tasks: [{
+        ...implementedTask, status: 'integrated', integratedCommitSha: centralSha,
+        resolutionSummary: 'Attempted whitespace-normalized integration.',
+      }],
+    },
+  }), { code: 'WORKER_RESULT_EXACT_DELTA_MISMATCH' });
+  assert.deepEqual(durableAcceptanceSnapshot(cwd, packet.taskId), before);
+});
+
+test('exact integration rejects text, whitespace, path, status, and mode mismatch matrix', () => {
+  const cwd = repo();
+  const changedPath = 'scripts/exact-matrix.mjs';
+  const baseText = 'export const exactValue = 0;\n';
+  const workerText = 'export const exactValue = 1;\n';
+  commit(cwd, { [changedPath]: baseText }, 'add exact mismatch matrix base');
+  const initial = init(cwd);
+  const proposedTask = task(initial.currentIntegrationHeadSha, {
+    id: 'exact-mismatch-matrix', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [proposedTask] },
+  });
+  const packet = taskPacket(initial.currentIntegrationHeadSha, proposedTask.id, {
+    affectedAreas: ['workflow'], command: 'npm run test:pr-review',
+  });
+  const bound = bindPacket(cwd, proposed, packet);
+  const fromBase = (branch) => git(cwd, ['switch', '-C', branch, packet.reviewedHeadSha]);
+
+  fromBase('exact-matrix-worker');
+  const workerSha = commit(cwd, { [changedPath]: workerText }, 'exact matrix worker');
+  fromBase('exact-matrix-match');
+  const exactSha = commit(cwd, { [changedPath]: workerText }, 'exact matrix match');
+  fromBase('exact-matrix-text');
+  const textMismatchSha = commit(cwd, {
+    [changedPath]: 'export const exactValue = 2;\n',
+  }, 'exact matrix text mismatch');
+  fromBase('exact-matrix-whitespace');
+  const whitespaceMismatchSha = commit(cwd, {
+    [changedPath]: 'export const exactValue=1;\n',
+  }, 'exact matrix whitespace mismatch');
+  fromBase('exact-matrix-path');
+  const pathMismatchSha = commit(cwd, {
+    'scripts/exact-matrix-other.mjs': workerText,
+  }, 'exact matrix path mismatch');
+  fromBase('exact-matrix-status');
+  rmSync(join(cwd, changedPath));
+  git(cwd, ['add', '--all', '--', changedPath]);
+  git(cwd, ['commit', '-m', 'exact matrix status mismatch']);
+  const statusMismatchSha = git(cwd, ['rev-parse', 'HEAD']);
+  fromBase('exact-matrix-mode');
+  writeFileSync(join(cwd, changedPath), workerText);
+  chmodSync(join(cwd, changedPath), 0o755);
+  git(cwd, ['add', '--', changedPath]);
+  git(cwd, ['commit', '-m', 'exact matrix mode mismatch']);
+  const modeMismatchSha = git(cwd, ['rev-parse', 'HEAD']);
+
+  const result = workerResult(packet, workerSha, [changedPath]);
+  const inspect = (centralCommitSha) => inspectWorkerCommitAuthority({
+    cwd,
+    state: { ...bound, currentIntegrationHeadSha: centralCommitSha },
+    packet,
+    result,
+    centralCommitSha,
+  });
+  const repositoryBefore = repositoryAuthoritySnapshot(cwd);
+  assert.doesNotThrow(() => inspect(exactSha));
+  for (const centralCommitSha of [
+    textMismatchSha,
+    whitespaceMismatchSha,
+    pathMismatchSha,
+    statusMismatchSha,
+    modeMismatchSha,
+  ]) {
+    assert.throws(() => inspect(centralCommitSha), { code: 'WORKER_RESULT_EXACT_DELTA_MISMATCH' });
+  }
+  assert.deepEqual(repositoryAuthoritySnapshot(cwd), repositoryBefore);
+});
+
+test('exact delta identity covers binary bytes and executable modes', () => {
+  const cwd = repo();
+  mkdirSync(join(cwd, 'scripts'), { recursive: true });
+  writeFileSync(join(cwd, 'scripts', 'payload.bin'), Buffer.from([0, 1]));
+  writeFileSync(join(cwd, 'scripts', 'tool.sh'), '#!/bin/sh\nexit 0\n');
+  git(cwd, ['add', 'scripts/payload.bin', 'scripts/tool.sh']);
+  git(cwd, ['commit', '-m', 'add delta identity base']);
+  const initial = init(cwd);
+  const proposedTask = task(initial.currentIntegrationHeadSha, {
+    id: 'binary-mode-delta', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const proposed = checkpointState({
+    cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [proposedTask] },
+  });
+  const packet = taskPacket(initial.currentIntegrationHeadSha, proposedTask.id, {
+    affectedAreas: ['workflow'], command: 'npm run test:pr-review',
+  });
+  const bound = bindPacket(cwd, proposed, packet);
+  const makeDeltaCommit = (branch, bytes, executable) => {
+    git(cwd, ['switch', '-c', branch, packet.reviewedHeadSha]);
+    writeFileSync(join(cwd, 'scripts', 'payload.bin'), Buffer.from(bytes));
+    chmodSync(join(cwd, 'scripts', 'tool.sh'), executable ? 0o755 : 0o644);
+    git(cwd, ['add', 'scripts/payload.bin', 'scripts/tool.sh']);
+    git(cwd, ['commit', '-m', branch]);
+    return git(cwd, ['rev-parse', 'HEAD']);
+  };
+  const workerSha = makeDeltaCommit('binary-mode-worker', [0, 1, 2], true);
+  const exactSha = makeDeltaCommit('binary-mode-exact', [0, 1, 2], true);
+  const binaryMismatchSha = makeDeltaCommit('binary-mode-content-mismatch', [0, 1, 3], true);
+  const modeMismatchSha = makeDeltaCommit('binary-mode-mode-mismatch', [0, 1, 2], false);
+  const result = workerResult(packet, workerSha, ['scripts/payload.bin', 'scripts/tool.sh']);
+
+  assert.doesNotThrow(() => inspectWorkerCommitAuthority({
+    cwd, state: { ...bound, currentIntegrationHeadSha: exactSha }, packet, result,
+    centralCommitSha: exactSha,
+  }));
+  for (const centralCommitSha of [binaryMismatchSha, modeMismatchSha]) {
+    assert.throws(() => inspectWorkerCommitAuthority({
+      cwd, state: { ...bound, currentIntegrationHeadSha: centralCommitSha }, packet, result,
+      centralCommitSha,
+    }), { code: 'WORKER_RESULT_EXACT_DELTA_MISMATCH' });
+  }
+});
+
+test('post-acceptance worker-parent drift blocks final integration without mutation', () => {
+  const cwd = repo();
+  const { bound, packet, result } = boundWorkerResultFixture(cwd, 'post-acceptance-drift');
+  const accepted = checkpointWorkerResultAcceptance({
+    cwd, packet, result, expectedRevision: bound.revision,
+  });
+  const tree = git(cwd, ['rev-parse', `${packet.reviewedHeadSha}^{tree}`]);
+  const unrelatedRoot = git(cwd, ['commit-tree', tree, '-m', 'unrelated post-acceptance root']);
+  git(cwd, ['switch', '--detach', unrelatedRoot]);
+  const drifted = checkpointGitMetadata({ cwd }).state;
+  const { execution: _execution, ...implementedTask } = drifted.tasks[0];
+  const before = durableAcceptanceSnapshot(cwd, packet.taskId);
+  assert.throws(() => checkpointState({
+    cwd, expectedRevision: drifted.revision,
+    nextState: {
+      ...drifted,
+      tasks: [{
+        ...implementedTask, status: 'integrated', integratedCommitSha: unrelatedRoot,
+        resolutionSummary: 'Attempted after worker-parent history drift.',
+      }],
+    },
+  }), { code: 'WORKER_RESULT_PARENT_ANCESTRY_MISMATCH' });
+  assert.deepEqual(durableAcceptanceSnapshot(cwd, packet.taskId), before);
+  assert.equal(reconcileState({ cwd }).workerResults[0].status, 'invalid');
 });
 
 test('initialization accepts only an explicit positive review request limit', () => {
@@ -2835,6 +4529,139 @@ test('proven non-actionable not-applicable findings become completed-equivalent'
   assert.equal(completed.tasks[0].integratedCommitSha, null);
 });
 
+test('dedicated archive import completion revalidates its closed envelope and retries byte-identically', () => {
+  const cwd = repo();
+  const fixture = archiveImportStateFixture(cwd);
+  const adopted = checkpointArchiveTaskCompletion({
+    cwd,
+    expectedRevision: fixture.current.revision,
+    threadResolutionStatus: fixture.threadResolutionStatus,
+    archiveImportEnvelope: fixture.envelope,
+  });
+  assert.equal(adopted.tasks.find((candidate) => candidate.id === fixture.aggregate.id).status, 'completed');
+  assert.equal(adopted.threadResolutionStatus.threads.length, 2);
+  assert.deepEqual(
+    adopted.threadResolutionStatus.threads.map((row) => row.archiveProvenance.authorityFingerprint),
+    [fixture.envelope.authorityFingerprint, fixture.envelope.authorityFingerprint],
+  );
+  const stateBytes = readFileSync(statePath(cwd, adopted.prNumber), 'utf8');
+  const eventBytes = readFileSync(join(stateDirectory(cwd, adopted.prNumber), 'events.ndjson'), 'utf8');
+  const retried = checkpointArchiveTaskCompletion({
+    cwd,
+    expectedRevision: adopted.revision,
+    threadResolutionStatus: adopted.threadResolutionStatus,
+    archiveImportEnvelope: fixture.envelope,
+  });
+  assert.equal(retried.revision, adopted.revision);
+  assert.equal(readFileSync(statePath(cwd, adopted.prNumber), 'utf8'), stateBytes);
+  assert.equal(readFileSync(join(stateDirectory(cwd, adopted.prNumber), 'events.ndjson'), 'utf8'), eventBytes);
+
+  const invalidEnvelopes = [
+    { ...fixture.envelope, extra: true },
+    { ...fixture.envelope, taskId: 'alternate-task' },
+    { ...fixture.envelope, rows: fixture.envelope.rows.slice().reverse() },
+    {
+      ...fixture.envelope,
+      rows: fixture.envelope.rows.map((row, index) => (
+        index === 0 ? { ...row, rowFingerprint: '0'.repeat(64) } : row
+      )),
+    },
+  ];
+  for (const archiveImportEnvelope of invalidEnvelopes) {
+    assert.throws(() => checkpointArchiveTaskCompletion({
+      cwd,
+      expectedRevision: adopted.revision,
+      threadResolutionStatus: adopted.threadResolutionStatus,
+      archiveImportEnvelope,
+    }), { code: 'INVALID_ARCHIVE_IMPORT' });
+    assert.equal(readFileSync(statePath(cwd, adopted.prNumber), 'utf8'), stateBytes);
+    assert.equal(readFileSync(join(stateDirectory(cwd, adopted.prNumber), 'events.ndjson'), 'utf8'), eventBytes);
+  }
+});
+
+test('generic and ordinary checkpoints cannot forge archive provenance and adopted rows stay immutable', () => {
+  const cwd = repo();
+  const fixture = archiveImportStateFixture(cwd);
+  const stateBytes = readFileSync(statePath(cwd, fixture.current.prNumber), 'utf8');
+  const eventPath = join(stateDirectory(cwd, fixture.current.prNumber), 'events.ndjson');
+  const eventBytes = readFileSync(eventPath, 'utf8');
+  assert.throws(() => checkpointArchiveTaskCompletion({
+    cwd,
+    threadResolutionStatus: fixture.threadResolutionStatus,
+    archiveImportEnvelope: fixture.envelope,
+  }), { code: 'STATE_REVISION_CONFLICT' });
+  const extraResolvedProof = structuredClone(fixture.threadResolutionStatus);
+  extraResolvedProof.threads.push({
+    ...structuredClone(extraResolvedProof.threads[0]),
+    threadNodeId: 'PRRT_archive_extra',
+    rootCommentNodeId: 'PRRC_archive_extra',
+    rootCommentDatabaseId: 203,
+    replyId: 'REPLY_archive_extra',
+    replyUrl: 'https://github.com/example/aerstello/pull/17#discussion_r203',
+  });
+  delete extraResolvedProof.threads.at(-1).archiveProvenance;
+  assert.throws(() => checkpointArchiveTaskCompletion({
+    cwd,
+    expectedRevision: fixture.current.revision,
+    threadResolutionStatus: extraResolvedProof,
+    archiveImportEnvelope: fixture.envelope,
+  }), { code: 'INVALID_ARCHIVE_IMPORT' });
+  assert.throws(() => checkpointTaskCompletion({
+    cwd,
+    expectedRevision: fixture.current.revision,
+    threadResolutionStatus: fixture.threadResolutionStatus,
+    archiveImportEnvelope: fixture.envelope,
+  }), { code: 'PROTECTED_ARCHIVE_IMPORT_REQUIRED' });
+  assert.throws(() => checkpointTaskCompletion({
+    cwd,
+    expectedRevision: fixture.current.revision,
+    threadResolutionStatus: fixture.threadResolutionStatus,
+  }), { code: 'PROTECTED_ARCHIVE_IMPORT_REQUIRED' });
+  const forgedNext = completeIntegratedTasks(fixture.current, {
+    threadResolutionStatus: fixture.threadResolutionStatus,
+  });
+  assert.throws(() => checkpointState({
+    cwd,
+    expectedRevision: fixture.current.revision,
+    nextState: forgedNext,
+  }), { code: 'PROTECTED_ARCHIVE_IMPORT_REQUIRED' });
+  assert.equal(readFileSync(statePath(cwd, fixture.current.prNumber), 'utf8'), stateBytes);
+  assert.equal(readFileSync(eventPath, 'utf8'), eventBytes);
+
+  const adopted = checkpointArchiveTaskCompletion({
+    cwd,
+    expectedRevision: fixture.current.revision,
+    threadResolutionStatus: fixture.threadResolutionStatus,
+    archiveImportEnvelope: fixture.envelope,
+  });
+  const adoptedBytes = readFileSync(statePath(cwd, adopted.prNumber), 'utf8');
+  const adoptedEvents = readFileSync(eventPath, 'utf8');
+  const removed = structuredClone(adopted);
+  delete removed.threadResolutionStatus.threads[0].archiveProvenance;
+  assert.throws(() => checkpointState({
+    cwd,
+    expectedRevision: adopted.revision,
+    nextState: removed,
+  }), { code: 'IMMUTABLE_STATE_PROVENANCE' });
+  const alteredProof = structuredClone(adopted.threadResolutionStatus);
+  alteredProof.threads[0].archiveProvenance.replyBodySha256 = 'f'.repeat(64);
+  const alteredEnvelope = structuredClone(fixture.envelope);
+  alteredEnvelope.rows[0] = {
+    ...alteredEnvelope.rows[0],
+    replyBodySha256: 'f'.repeat(64),
+    provenanceFingerprint: archiveImportDigest(alteredProof.threads[0].archiveProvenance),
+    rowFingerprint: archiveImportDigest(alteredProof.threads[0]),
+  };
+  assert.throws(() => checkpointArchiveTaskCompletion({
+    cwd,
+    expectedRevision: adopted.revision,
+    threadResolutionStatus: alteredProof,
+    archiveImportEnvelope: alteredEnvelope,
+  }), { code: 'INVALID_ARCHIVE_IMPORT' });
+  assert.equal(readFileSync(statePath(cwd, adopted.prNumber), 'utf8'), adoptedBytes);
+  assert.equal(readFileSync(eventPath, 'utf8'), adoptedEvents);
+});
+
 test('checkpoint enforces immutable identity, monotonic counters, sticky verification, and null active abandonment', () => {
   const cwd = repo();
   const state = init(cwd);
@@ -2890,9 +4717,7 @@ test('HEAD drift preserves durable task coverage while invalidating and refreshi
   const integratedTask = task(headA, {
     id: 'thread-task', status: 'integrated', sourceType: 'github-thread', sourceIds: ['thread:PRRT_drift'],
   });
-  const integrated = checkpointState({
-    cwd, nextState: { ...proposed, tasks: [integratedTask] }, expectedRevision: proposed.revision,
-  });
+  const integrated = writePreAuthorityTasks(cwd, proposed, [integratedTask]);
   assert.throws(() => checkpointState({
     cwd, expectedRevision: integrated.revision,
     nextState: { ...integrated, tasks: [{ ...integratedTask, status: 'completed' }] },
@@ -2964,9 +4789,7 @@ test('HEAD drift preserves historical local verifier proof until guarded current
     cwd, expectedRevision: initial.revision, nextState: { ...initial, tasks: [proposedTask] },
   });
   const integratedTask = task(headA, { id: 'local-drift', status: 'integrated', sourceType: 'local' });
-  const integrated = checkpointState({
-    cwd, expectedRevision: proposed.revision, nextState: { ...proposed, tasks: [integratedTask] },
-  });
+  const integrated = writePreAuthorityTasks(cwd, proposed, [integratedTask]);
   const proofA = {
     status: 'passed', headSha: headA, threads: [], threadlessVerification: emptyThreadless(), updatedAt: AT,
   };
@@ -3035,9 +4858,7 @@ test('generic checkpoint cannot forge zero-thread or threadless successful proof
   const integratedTask = task(threadlessHeadA, {
     id: 'threadless-forgery', status: 'integrated', sourceType: 'github-threadless', sourceIds: ['review:threadless'],
   });
-  const integrated = checkpointState({
-    cwd: threadlessCwd, expectedRevision: proposed.revision, nextState: { ...proposed, tasks: [integratedTask] },
-  });
+  const integrated = writePreAuthorityTasks(threadlessCwd, proposed, [integratedTask]);
   const threadlessProofA = {
     status: 'passed', headSha: threadlessHeadA, threads: [], updatedAt: AT,
     threadlessVerification: {
@@ -3232,13 +5053,20 @@ test('exact bound packet survives null-review central integration HEAD advance o
   const advanced = checkpointGitMetadata({ cwd }).state;
   assert.equal(advanced.currentIntegrationHeadSha, integratedHead);
   assert.throws(() => assertTaskPacketBound(advanced, packet), { code: 'TASK_PACKET_HEAD_MISMATCH' });
-
-  const { execution: _execution, ...boundTask } = advanced.tasks[0];
+  const implementedBeforeAcceptance = writePreAuthorityImplementedState(
+    cwd, advanced, packet.taskId, integratedHead,
+  );
+  const accepted = checkpointWorkerResultAcceptance({
+    cwd, packet,
+    result: workerResult(packet, integratedHead, ['scripts/integrated-task.mjs']),
+    expectedRevision: implementedBeforeAcceptance.revision,
+  });
+  const { execution: _execution, ...boundTask } = accepted.tasks[0];
   const integrated = checkpointState({
     cwd,
-    expectedRevision: advanced.revision,
+    expectedRevision: accepted.revision,
     nextState: {
-      ...advanced,
+      ...accepted,
       tasks: [{
         ...boundTask,
         status: 'integrated',
@@ -3288,12 +5116,20 @@ test('bound packet rejects rollback, unrelated, or missing central integration a
   const bound = bindPacket(cwd, proposed, packet);
   const integratedHead = commit(cwd, { 'scripts/ancestry-task.mjs': 'export const integrated = true;\n' }, 'integrate ancestry task');
   const advanced = checkpointGitMetadata({ cwd }).state;
-  const { execution: _execution, ...boundTask } = advanced.tasks[0];
+  const implementedBeforeAcceptance = writePreAuthorityImplementedState(
+    cwd, advanced, packet.taskId, integratedHead,
+  );
+  const accepted = checkpointWorkerResultAcceptance({
+    cwd, packet,
+    result: workerResult(packet, integratedHead, ['scripts/ancestry-task.mjs']),
+    expectedRevision: implementedBeforeAcceptance.revision,
+  });
+  const { execution: _execution, ...boundTask } = accepted.tasks[0];
   const integrated = checkpointState({
     cwd,
-    expectedRevision: advanced.revision,
+    expectedRevision: accepted.revision,
     nextState: {
-      ...advanced,
+      ...accepted,
       tasks: [{
         ...boundTask,
         status: 'integrated',
@@ -4144,6 +5980,373 @@ test('archival preserves immutable packet sidecars and specialist bundles', () =
   assert.equal(readdirSync(join(archived, 'specialist-reviews')).filter((name) => name.endsWith('.plan.sha256')).length, 2);
 });
 
+test('taskless post-integration planning yields receipt-backed final-verifier context', () => {
+  const cwd = repo();
+  const { validated } = tasklessVerifierFixture(cwd, [
+    { id: 'z-already-fixed', disposition: 'already-fixed', status: 'not-applicable' },
+    { id: 'a-invalid', disposition: 'invalid', status: 'not-applicable' },
+  ]);
+  const input = {
+    schemaVersion: 1, stage: 'post-integration', headSha: validated.currentIntegrationHeadSha, tasks: [],
+  };
+  const stateBefore = readFileSync(statePath(cwd, validated.prNumber), 'utf8');
+  const eventsPath = join(stateDirectory(cwd, validated.prNumber), 'events.ndjson');
+  const eventsBefore = readFileSync(eventsPath, 'utf8');
+  const bundle = planSpecialists({
+    cwd, input, expectedRevision: validated.revision, now: () => AT,
+  });
+  assert.deepEqual(bundle.tasks, []);
+  assert.deepEqual(bundle.records, []);
+  assert.equal(readFileSync(statePath(cwd, validated.prNumber), 'utf8'), stateBefore);
+  assert.equal(readFileSync(eventsPath, 'utf8'), eventsBefore);
+  const bundlePath = specialistReviewBundlePath(
+    cwd, validated.prNumber, validated.currentIntegrationHeadSha, validated.revision,
+  );
+  const receiptPath = specialistPlanReceiptPath(
+    cwd, validated.prNumber, validated.currentIntegrationHeadSha, validated.revision,
+  );
+  assert.equal(existsSync(bundlePath), true);
+  assert.match(readFileSync(receiptPath, 'utf8'), /^[0-9a-f]{64}\n$/u);
+  assert.deepEqual(planSpecialists({
+    cwd, input, expectedRevision: validated.revision, now: () => '2026-08-05T01:00:00Z',
+  }), bundle);
+
+  const context = specialistContext({ cwd });
+  assert.equal(context.status, 'clean');
+  assert.equal(context.readyForIntegrationVerifier, true);
+  assert.deepEqual(context.packets, []);
+  assert.deepEqual(context.routes, []);
+  assert.deepEqual(context.workerResultEvidence, []);
+  assert.deepEqual(context.workerResults, []);
+  assert.deepEqual(context.preBindPlanning, []);
+  assert.deepEqual(context.requiredReviewerIds, []);
+  assert.deepEqual(context.specialistResults, []);
+  assert.deepEqual(context.finalVerification, {
+    verifierId: 'integration_verifier', priority: 'standard',
+  });
+  assert.deepEqual(context.targetedValidation, validated.validationStatus);
+  assert.deepEqual(context.taskOutcomes, [
+    {
+      taskId: 'a-invalid', sourceIds: ['thread:a-invalid'], sourceType: 'github-thread',
+      fingerprint: 'fingerprint-a-invalid', summary: 'Retained outcome for a-invalid.', severity: 'P1',
+      disposition: 'invalid', status: 'not-applicable', integratedCommitSha: null,
+      resolutionSummary: 'Evidence retained for a-invalid.',
+    },
+    {
+      taskId: 'z-already-fixed', sourceIds: ['thread:z-already-fixed'], sourceType: 'github-thread',
+      fingerprint: 'fingerprint-z-already-fixed', summary: 'Retained outcome for z-already-fixed.', severity: 'P1',
+      disposition: 'already-fixed', status: 'not-applicable', integratedCommitSha: null,
+      resolutionSummary: 'Evidence retained for z-already-fixed.',
+    },
+  ]);
+  assert.deepEqual(loadState(cwd).tasks, validated.tasks);
+  assert.equal(readSpecialistStatus({ cwd }).status, 'clean');
+  assert.throws(() => recordSpecialistReview({
+    cwd, expectedRevision: validated.revision, now: () => AT,
+    input: {
+      schemaVersion: 1, planRevision: validated.revision, headSha: validated.currentIntegrationHeadSha,
+      reviewerId: 'security_reviewer', outcome: 'clean', summary: 'No routed review exists.', findings: [],
+    },
+  }), { code: 'SPECIALIST_REVIEWER_MISMATCH' });
+  assert.deepEqual(loadState(cwd).tasks, validated.tasks);
+});
+
+test('mixed specialist context projects uncovered archived outcomes without packet duplication', () => {
+  const cwd = repo();
+  const { packet, integrated } = canonicalBoundIntegratedTask(cwd, 'packet-backed-fix');
+  const retained = appendVerifierOutcomeTasks(cwd, integrated, [
+    { id: 'z-archived-already-fixed', disposition: 'already-fixed', status: 'not-applicable' },
+    { id: 'a-archived-invalid', disposition: 'invalid', status: 'not-applicable' },
+  ]);
+  const validated = checkpointSyntheticTargetedValidation(cwd, retained);
+  planSpecialists({
+    cwd, expectedRevision: validated.revision, now: () => AT,
+    input: {
+      schemaVersion: 1, stage: 'post-integration', headSha: validated.currentIntegrationHeadSha,
+      tasks: [{ taskPacket: packet }],
+    },
+  });
+  const context = specialistContext({ cwd });
+  assert.equal(context.status, 'clean');
+  assert.equal(context.readyForIntegrationVerifier, true);
+  assert.deepEqual(context.packets, [packet]);
+  assert.deepEqual(context.routes.map(({ taskId }) => taskId), ['packet-backed-fix']);
+  assert.deepEqual(context.workerResultEvidence.map(({ taskId, status }) => ({ taskId, status })), [
+    { taskId: 'packet-backed-fix', status: 'valid' },
+  ]);
+  assert.deepEqual(context.taskOutcomes, [
+    {
+      taskId: 'a-archived-invalid',
+      sourceIds: ['thread:a-archived-invalid', 'archive:a-archived-invalid'],
+      sourceType: 'github-thread', fingerprint: 'fingerprint-a-archived-invalid',
+      summary: 'Retained outcome for a-archived-invalid.', severity: 'P1', disposition: 'invalid',
+      status: 'not-applicable', integratedCommitSha: null,
+      resolutionSummary: 'Evidence retained for a-archived-invalid.',
+    },
+    {
+      taskId: 'z-archived-already-fixed',
+      sourceIds: ['thread:z-archived-already-fixed', 'archive:z-archived-already-fixed'],
+      sourceType: 'github-thread', fingerprint: 'fingerprint-z-archived-already-fixed',
+      summary: 'Retained outcome for z-archived-already-fixed.', severity: 'P1',
+      disposition: 'already-fixed', status: 'not-applicable', integratedCommitSha: null,
+      resolutionSummary: 'Evidence retained for z-archived-already-fixed.',
+    },
+  ]);
+  assert.equal(context.taskOutcomes.some(({ taskId }) => taskId === 'packet-backed-fix'), false);
+});
+
+test('mixed specialist planning rejects every ineligible uncovered durable task', () => {
+  const scenarios = [
+    { id: 'uncovered-actionable', disposition: 'actionable', status: 'proposed' },
+    { id: 'uncovered-nonterminal', disposition: 'already-fixed', status: 'proposed' },
+    { id: 'uncovered-failed', disposition: 'already-fixed', status: 'failed' },
+    { id: 'uncovered-human', disposition: 'needs-human-decision', status: 'not-applicable' },
+  ];
+  for (const scenario of scenarios) {
+    const cwd = repo();
+    const { packet, integrated } = canonicalBoundIntegratedTask(cwd, `packet-for-${scenario.id}`);
+    const retained = appendVerifierOutcomeTasks(cwd, integrated, [scenario]);
+    const validated = checkpointSyntheticTargetedValidation(cwd, retained);
+    const bundlePath = specialistReviewBundlePath(
+      cwd, validated.prNumber, validated.currentIntegrationHeadSha, validated.revision,
+    );
+    const receiptPath = specialistPlanReceiptPath(
+      cwd, validated.prNumber, validated.currentIntegrationHeadSha, validated.revision,
+    );
+    assert.throws(() => planSpecialists({
+      cwd, expectedRevision: validated.revision, now: () => AT,
+      input: {
+        schemaVersion: 1, stage: 'post-integration', headSha: validated.currentIntegrationHeadSha,
+        tasks: [{ taskPacket: packet }],
+      },
+    }), { code: 'SPECIALIST_PLAN_TASK_MISMATCH' });
+    assert.equal(existsSync(bundlePath), false);
+    assert.equal(existsSync(receiptPath), false);
+  }
+});
+
+test('Resolved packets remain in later validation and mixed final-verifier context', () => {
+  const cwd = repo();
+  const {
+    priorPacket, currentPacket, priorId, currentId, integrated,
+  } = completedAndIntegratedPacketFixture(cwd);
+  const plan = buildTargetedValidationPlan({ cwd, now: () => AT });
+  assert.deepEqual(plan.taskIds, [currentId, priorId]);
+  assert.deepEqual(plan.commands.map(({ command }) => command), [
+    'npm run check:api', 'npm run check:workflow',
+  ]);
+  const validated = executeTargetedValidationPlan({
+    cwd, runCommand: () => ({ status: 0 }), now: () => AT,
+  }).state;
+  const bundle = planSpecialists({
+    cwd, expectedRevision: validated.revision, now: () => AT,
+    input: {
+      schemaVersion: 1, stage: 'post-integration', headSha: validated.currentIntegrationHeadSha,
+      tasks: [{ taskPacket: priorPacket }, { taskPacket: currentPacket }],
+    },
+  });
+  assert.deepEqual(bundle.tasks.map(({ taskId }) => taskId), [currentId, priorId]);
+  const context = specialistContext({ cwd });
+  assert.equal(context.status, 'clean');
+  assert.equal(context.readyForIntegrationVerifier, true);
+  assert.deepEqual(context.packets.map(({ taskId }) => taskId), [currentId, priorId]);
+  assert.deepEqual(context.routes.map(({ taskId }) => taskId), [currentId, priorId]);
+  assert.deepEqual(context.workerResultEvidence.map(({ taskId, status }) => ({ taskId, status })), [
+    { taskId: currentId, status: 'valid' }, { taskId: priorId, status: 'valid' },
+  ]);
+  assert.deepEqual(context.workerResults.map(({ taskId }) => taskId), [currentId, priorId]);
+  assert.deepEqual(context.taskOutcomes.map(({ taskId }) => taskId), ['m-archived-outcome']);
+  assert.equal(context.taskOutcomes.some(({ taskId }) => [currentId, priorId].includes(taskId)), false);
+  assert.equal(context.workerResults.find(({ taskId }) => taskId === priorId).integratedCommitSha,
+    integrated.tasks.find(({ id }) => id === priorId).integratedCommitSha);
+
+  const allCompleted = completeLocalPacketTask(cwd, validated, currentId);
+  const reset = checkpointTargetedValidationReset({
+    cwd, expectedRevision: allCompleted.revision,
+  });
+  const completedPlan = buildTargetedValidationPlan({ cwd, replace: true, now: () => AT });
+  assert.deepEqual(completedPlan.taskIds, [currentId, priorId]);
+  writeFileSync(validationPlanPath(cwd, completedPlan.prNumber), `${JSON.stringify({
+    ...completedPlan, taskIds: [],
+  })}\n`);
+  assert.throws(() => executeTargetedValidationPlan({
+    cwd, runCommand: () => ({ status: 0 }), now: () => AT,
+  }), { code: 'VALIDATION_TASK_COVERAGE_MISMATCH' });
+  writeFileSync(validationPlanPath(cwd, completedPlan.prNumber), `${JSON.stringify(completedPlan)}\n`);
+  const completedValidated = executeTargetedValidationPlan({
+    cwd, runCommand: () => ({ status: 0 }), now: () => AT,
+  }).state;
+  assert.equal(reset.revision + 1, completedValidated.revision);
+  planSpecialists({
+    cwd, expectedRevision: completedValidated.revision, now: () => AT,
+    input: {
+      schemaVersion: 1, stage: 'post-integration', headSha: completedValidated.currentIntegrationHeadSha,
+      tasks: [{ taskPacket: currentPacket }, { taskPacket: priorPacket }],
+    },
+  });
+  const completedContext = specialistContext({ cwd });
+  assert.deepEqual(completedContext.packets.map(({ taskId }) => taskId), [currentId, priorId]);
+  assert.deepEqual(completedContext.workerResults.map(({ taskId }) => taskId), [currentId, priorId]);
+  assert.deepEqual(completedContext.taskOutcomes.map(({ taskId }) => taskId), ['m-archived-outcome']);
+});
+
+test('Resolved packet receipts and ancestry survive a later active review head', () => {
+  const cwd = repo();
+  const {
+    priorPacket, currentPacket, priorId, currentId, currentHead,
+  } = completedAndIntegratedPacketFixture(cwd, { laterReview: true });
+  assert.notEqual(priorPacket.reviewedHeadSha, currentPacket.reviewedHeadSha);
+  buildTargetedValidationPlan({ cwd, now: () => AT });
+  const validated = executeTargetedValidationPlan({
+    cwd, runCommand: () => ({ status: 0 }), now: () => AT,
+  }).state;
+  assert.equal(validated.reviewedHeadSha, currentPacket.reviewedHeadSha);
+  assert.equal(validated.currentIntegrationHeadSha, currentHead);
+  assert.notEqual(currentPacket.reviewedHeadSha, currentHead);
+  assert.deepEqual(validated.tasks.filter(({ disposition }) => disposition === 'actionable')
+    .map(({ id, status }) => ({ id, status })), [
+    { id: priorId, status: 'completed' }, { id: currentId, status: 'integrated' },
+  ]);
+  planSpecialists({
+    cwd, expectedRevision: validated.revision, now: () => AT,
+    input: {
+      schemaVersion: 1, stage: 'post-integration', headSha: validated.currentIntegrationHeadSha,
+      tasks: [{ taskPacket: priorPacket }, { taskPacket: currentPacket }],
+    },
+  });
+  assert.equal(specialistContext({ cwd }).readyForIntegrationVerifier, true);
+  const provenanceReceiptPath = taskBindingProvenanceReceiptPath(
+    cwd, validated.prNumber, priorId,
+  );
+  const provenanceReceipt = readFileSync(provenanceReceiptPath, 'utf8');
+  writeFileSync(provenanceReceiptPath, `${'f'.repeat(64)}\n`);
+  assert.throws(() => specialistContext({ cwd }), {
+    code: 'INVALID_TASK_BINDING_PROVENANCE',
+  });
+  writeFileSync(provenanceReceiptPath, provenanceReceipt);
+
+  const tree = git(cwd, ['rev-parse', `${validated.currentIntegrationHeadSha}^{tree}`]);
+  const unrelated = git(cwd, ['commit-tree', tree, '-m', 'unrelated Resolved packet ancestry']);
+  const stateSource = readFileSync(statePath(cwd, validated.prNumber), 'utf8');
+  writeFileSync(statePath(cwd, validated.prNumber), `${JSON.stringify({
+    ...validated,
+    tasks: validated.tasks.map((item) => item.id === priorId
+      ? { ...item, taskPacketDigest: 'f'.repeat(64) } : item),
+  })}\n`);
+  assert.throws(() => specialistContext({ cwd }), { code: 'TASK_PACKET_REPLAN_REQUIRED' });
+  writeFileSync(statePath(cwd, validated.prNumber), stateSource);
+
+  const altered = {
+    ...validated,
+    tasks: validated.tasks.map((item) => item.id === priorId
+      ? { ...item, integratedCommitSha: unrelated } : item),
+  };
+  writeFileSync(statePath(cwd, validated.prNumber), `${JSON.stringify(altered)}\n`);
+  assert.throws(() => specialistContext({ cwd }), { code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH' });
+  writeFileSync(statePath(cwd, validated.prNumber), stateSource);
+
+  const reset = checkpointTargetedValidationReset({ cwd, expectedRevision: validated.revision });
+  const resetSource = readFileSync(statePath(cwd, reset.prNumber), 'utf8');
+  writeFileSync(statePath(cwd, reset.prNumber), `${JSON.stringify({
+    ...reset,
+    tasks: reset.tasks.map((item) => item.id === priorId
+      ? { ...item, integratedCommitSha: unrelated } : item),
+  })}\n`);
+  assert.throws(() => buildTargetedValidationPlan({ cwd, now: () => AT }), {
+    code: 'TASK_INTEGRATION_ANCESTRY_MISMATCH',
+  });
+  writeFileSync(statePath(cwd, reset.prNumber), resetSource);
+});
+
+test('taskless specialist planning rejects ineligible states before durable evidence writes', () => {
+  const scenarios = [
+    [{ id: 'actionable-omission', disposition: 'actionable', status: 'proposed' }],
+    [{ id: 'nonterminal-outcome', disposition: 'already-fixed', status: 'proposed' }],
+    [{ id: 'failed-outcome', disposition: 'already-fixed', status: 'failed' }],
+    [{ id: 'human-outcome', disposition: 'needs-human-decision', status: 'not-applicable' }],
+  ];
+  for (const definitions of scenarios) {
+    const cwd = repo();
+    const { validated } = tasklessVerifierFixture(cwd, definitions);
+    const stateBefore = readFileSync(statePath(cwd, validated.prNumber), 'utf8');
+    const eventsPath = join(stateDirectory(cwd, validated.prNumber), 'events.ndjson');
+    const eventsBefore = readFileSync(eventsPath, 'utf8');
+    const bundlePath = specialistReviewBundlePath(
+      cwd, validated.prNumber, validated.currentIntegrationHeadSha, validated.revision,
+    );
+    const receiptPath = specialistPlanReceiptPath(
+      cwd, validated.prNumber, validated.currentIntegrationHeadSha, validated.revision,
+    );
+    assert.throws(() => planSpecialists({
+      cwd, expectedRevision: validated.revision, now: () => AT,
+      input: {
+        schemaVersion: 1, stage: 'post-integration',
+        headSha: validated.currentIntegrationHeadSha, tasks: [],
+      },
+    }), { code: 'SPECIALIST_PLAN_TASK_MISMATCH' });
+    assert.equal(readFileSync(statePath(cwd, validated.prNumber), 'utf8'), stateBefore);
+    assert.equal(readFileSync(eventsPath, 'utf8'), eventsBefore);
+    assert.equal(existsSync(bundlePath), false);
+    assert.equal(existsSync(receiptPath), false);
+  }
+});
+
+test('taskless specialist planning and context fail closed on stale or altered authority', () => {
+  const preBindCwd = repo();
+  const preBind = init(preBindCwd);
+  assert.throws(() => planSpecialists({
+    cwd: preBindCwd, expectedRevision: preBind.revision,
+    input: { schemaVersion: 1, stage: 'pre-bind', headSha: preBind.currentIntegrationHeadSha, tasks: [] },
+  }), { code: 'INVALID_SPECIALIST_PLAN' });
+
+  const missingValidationCwd = repo();
+  const { validated: missingValidation } = tasklessVerifierFixture(missingValidationCwd, undefined, { validate: false });
+  assert.throws(() => planSpecialists({
+    cwd: missingValidationCwd, expectedRevision: missingValidation.revision,
+    input: {
+      schemaVersion: 1, stage: 'post-integration',
+      headSha: missingValidation.currentIntegrationHeadSha, tasks: [],
+    },
+  }), { code: 'SPECIALIST_VALIDATION_REQUIRED' });
+
+  const cwd = repo();
+  const { validated } = tasklessVerifierFixture(cwd);
+  const input = {
+    schemaVersion: 1, stage: 'post-integration', headSha: validated.currentIntegrationHeadSha, tasks: [],
+  };
+  assert.throws(() => planSpecialists({
+    cwd, input, expectedRevision: validated.revision - 1,
+  }), { code: 'STATE_REVISION_CONFLICT' });
+  assert.throws(() => planSpecialists({
+    cwd, expectedRevision: validated.revision,
+    input: { ...input, headSha: 'f'.repeat(40) },
+  }), { code: 'SPECIALIST_PLAN_STALE' });
+  planSpecialists({ cwd, input, expectedRevision: validated.revision, now: () => AT });
+  const bundlePath = specialistReviewBundlePath(
+    cwd, validated.prNumber, validated.currentIntegrationHeadSha, validated.revision,
+  );
+  const receiptPath = specialistPlanReceiptPath(
+    cwd, validated.prNumber, validated.currentIntegrationHeadSha, validated.revision,
+  );
+  const bundle = readFileSync(bundlePath, 'utf8');
+  const receipt = readFileSync(receiptPath, 'utf8');
+  writeFileSync(bundlePath, `${JSON.stringify({ ...JSON.parse(bundle), tasks: [{}] })}\n`);
+  assert.throws(() => specialistContext({ cwd }), { code: 'INVALID_SPECIALIST_REVIEW' });
+  writeFileSync(bundlePath, bundle);
+  writeFileSync(receiptPath, `${'0'.repeat(64)}\n`);
+  assert.throws(() => specialistContext({ cwd }), { code: 'INVALID_SPECIALIST_REVIEW' });
+  writeFileSync(receiptPath, receipt);
+
+  const readme = readFileSync(join(cwd, 'README.md'), 'utf8');
+  writeFileSync(join(cwd, 'README.md'), `${readme}dirty\n`);
+  assert.throws(() => specialistContext({ cwd }), { code: 'SPECIALIST_PLAN_STALE' });
+  writeFileSync(join(cwd, 'README.md'), readme);
+  commit(cwd, { 'scripts/taskless-later.mjs': 'export const later = true;\n' }, 'advance taskless context');
+  assert.throws(() => specialistContext({ cwd }), { code: 'SPECIALIST_PLAN_STALE' });
+  checkpointGitMetadata({ cwd });
+  assert.throws(() => specialistContext({ cwd }), { code: 'SPECIALIST_EVIDENCE_MISSING' });
+});
+
 test('behavior mapping gates binding and exact-head risk evidence feeds only verifier context', () => {
   const cwd = repo();
   let state = integratedTasks(cwd, ['browser-task']);
@@ -4235,7 +6438,8 @@ test('behavior mapping gates binding and exact-head risk evidence feeds only ver
   const post = planSpecialists({ cwd, input: postInput, expectedRevision: state.revision, now: () => AT });
   assert.deepEqual(post.records, []);
   const context = specialistContext({ cwd });
-  assert.equal(context.readyForIntegrationVerifier, true);
+  assert.equal(context.readyForIntegrationVerifier, false);
+  assert.deepEqual(context.missingWorkerResultTaskIds, ['browser-task']);
   assert.deepEqual(context.packets, [browserPacket]);
   assert.deepEqual(context.routes.map(({ taskId }) => taskId), ['browser-task']);
   assert.equal(context.routes[0].route.profileGuidePath, 'profiles/web.md');
@@ -4296,7 +6500,8 @@ test('signal-only behavior mapping survives binding and compound provenance tamp
   assert.deepEqual(post.tasks[0].route.riskReviewers, []);
   assert.deepEqual(post.records, []);
   const context = specialistContext({ cwd });
-  assert.equal(context.readyForIntegrationVerifier, true);
+  assert.equal(context.readyForIntegrationVerifier, false);
+  assert.deepEqual(context.missingWorkerResultTaskIds, ['signal-only-mapping']);
   assert.deepEqual(context.requiredReviewerIds, []);
   assert.deepEqual(context.finalVerification, {
     verifierId: 'integration_verifier', priority: 'standard',
@@ -4469,7 +6674,15 @@ test('behavior mapping remains bound to the reviewed commit after dependent inte
     'scripts/later-browser-task.mjs': 'export const laterBrowserTask = true;\n',
   }, 'integrate later browser task');
   const advanced = checkpointGitMetadata({ cwd }).state;
-  const integratedTasksAtHead = advanced.tasks.map((taskItem) => {
+  const implementedBeforeAcceptance = writePreAuthorityImplementedState(
+    cwd, advanced, packet.taskId, laterIntegratedHead,
+  );
+  const accepted = checkpointWorkerResultAcceptance({
+    cwd, packet,
+    result: workerResult(packet, laterIntegratedHead, ['scripts/later-browser-task.mjs']),
+    expectedRevision: implementedBeforeAcceptance.revision,
+  });
+  const integratedTasksAtHead = accepted.tasks.map((taskItem) => {
     if (taskItem.id !== packet.taskId) return taskItem;
     const { execution: _execution, ...withoutExecution } = taskItem;
     return {
@@ -4480,8 +6693,8 @@ test('behavior mapping remains bound to the reviewed commit after dependent inte
     };
   });
   let integratedLater = checkpointState({
-    cwd, expectedRevision: advanced.revision,
-    nextState: { ...advanced, tasks: integratedTasksAtHead },
+    cwd, expectedRevision: accepted.revision,
+    nextState: { ...accepted, tasks: integratedTasksAtHead },
   });
   assert.equal(bound.tasks.find((taskItem) => taskItem.id === packet.taskId).taskPacketDigest, taskPacketDigest(packet));
   buildTargetedValidationPlan({ cwd, now: () => AT });
@@ -4510,6 +6723,16 @@ test('behavior mapping remains bound to the reviewed commit after dependent inte
   assert.ok(postRoute.route.planningHelpers.some(({ id }) => id === 'behavior_mapper'));
   assert.equal(context.headSha, laterIntegratedHead);
   assert.notEqual(context.headSha, preBind.reviewedHeadSha);
+  assert.deepEqual(context.missingWorkerResultTaskIds, []);
+  assert.deepEqual(context.invalidWorkerResultTaskIds, []);
+  const laterResult = context.workerResults.find((entry) => entry.taskId === packet.taskId);
+  assert.equal(laterResult.packetDigest, taskPacketDigest(packet));
+  assert.equal(laterResult.reviewedHeadSha, reviewedHead);
+  assert.equal(laterResult.workerCommitSha, laterIntegratedHead);
+  assert.equal(laterResult.integratedCommitSha, laterIntegratedHead);
+  assert.deepEqual(laterResult.result, workerResult(
+    packet, laterIntegratedHead, ['scripts/later-browser-task.mjs'],
+  ));
 });
 
 test('PR context selects its own final verifier and aggregates high priority across routes', () => {
@@ -4576,7 +6799,8 @@ test('PR context selects its own final verifier and aggregates high priority acr
     },
   });
   context = specialistContext({ cwd });
-  assert.equal(context.readyForIntegrationVerifier, true);
+  assert.equal(context.readyForIntegrationVerifier, false);
+  assert.deepEqual(context.missingWorkerResultTaskIds, ['billing-task', 'security-task']);
   assert.deepEqual(context.finalVerification, {
     verifierId: 'integration_verifier', priority: 'high',
   });
@@ -4628,7 +6852,7 @@ test('specialist risk evidence is exact reviewer/head/revision, deduplicated, ta
   writeFileSync(bundlePath, `${JSON.stringify(plannedBundle)}\n`);
   recordSpecialistReview({ cwd, input: record, expectedRevision: state.revision, now: () => AT });
   recordSpecialistReview({ cwd, input: record, expectedRevision: state.revision, now: () => AT });
-  assert.equal(specialistContext({ cwd }).status, 'findings');
+  assert.equal(specialistContext({ cwd }).status, 'incomplete');
   assert.equal(specialistContext({ cwd }).readyForIntegrationVerifier, false);
   assert.equal(readSpecialistStatus({ cwd }).status, 'finding');
   assert.throws(() => recordSpecialistReview({

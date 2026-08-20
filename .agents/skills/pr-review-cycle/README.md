@@ -129,6 +129,38 @@ reported explicitly; no profile, risk, or planning signal is inferred for
 legacy bound tasks. These sidecars keep the active state schema at v3 and move
 with the PR directory when it is archived.
 
+Worker validation output is not durable acceptance. The orchestrator runs the
+revision-guarded `accept-result` transition, which receipt-binds the complete
+canonical schema-v3 result under `worker-results/` before integration. Generic
+checkpoints cannot add or rewrite that digest, and the final verifier context
+includes every receipt-verified result. Native-v3 work already Integrated at
+the contract boundary may use `backfill-result` with its original result and
+exact worker-to-central commit-delta proof; migrated state never fabricates one.
+The worker result names one non-root, non-merge commit `W` with sole parent
+`P`. The Review commit may precede `P` because dependencies can already be
+Integrated, but ownership is always the no-renames `P`-to-`W` delta. Integration
+accepts a named central commit `C` only when `P` is ancestral to `C`'s parent.
+Before inspecting any commit, the inspector uses replacement-disabled Git to
+resolve the actual common Git directory, including from a linked worktree. It
+refuses a nonempty `<git-common-dir>/info/grafts`; an absent or empty file is
+inert. All remaining authority reads ignore replacement refs and read the actual
+commit objects. The inspector emits the binary full-index `P`-to-`W` patch
+without renames, external diffs, text conversion, or ignored submodules, and
+forces the applyable short gitlink format. It applies that patch with cached
+three-way semantics inside a unique temporary Git directory, index, and object
+store rooted at `C`'s parent, and requires the complete resulting tree to equal
+`C`'s actual tree. The proof clears inherited Git configuration, disables
+system and user configuration and attributes, and gives temporary
+`info/attributes` highest precedence with the built-in `merge=text` driver, so
+repository attributes and custom merge drivers cannot affect or execute during
+authority inspection. It reads repository objects only through an alternate;
+the temporary repository declares the same SHA-1 or SHA-256 object format. All
+temporary authority files and object writes are removed in `finally`. This
+permits an exact cherry-pick over nonoverlapping same-file history while
+preserving paths, statuses, modes, gitlink pointers, whitespace, added/deleted
+bytes, and binary content. Whitespace-normalizing patch identities are not
+authority.
+
 Nested specialist routes use the workflow-neutral v2 shape: `planningHelpers`,
 `riskReviewers`, `supplementalGuidance`, and `finalVerificationPriority`. They
 never contain the PR verifier. Read-only `specialist-context` adds the PR-owned
@@ -264,6 +296,182 @@ it only after the refresh, from that sole immutable reply plus the correlated
 durable reply and resolve intent lookups and proven prior-HEAD ancestry. It does
 not repeat either GitHub mutation. Extra replies or markers and any resolution,
 live-HEAD, or state-revision drift are rejected.
+
+A separate recovery-only `reply-resolve --task <id>` path may adopt a batch of
+already-resolved roots from one canonical immutable archive-proof lineage. It is available only
+for a terminal non-actionable GitHub-thread task, an otherwise pristine current
+aggregate thread proof, and current-HEAD verifier coverage for a completed
+actionable GitHub-threadless remediation. Every live canonical root must first
+map uniquely to an active task. Every same-PR, same-repository archive carrying
+the task must be independently valid and terminal, project its one completed
+task exactly to the active task, and carry the identical complete selected-root
+proof rows in stable root order. One or more lineage origins must retain the
+complete reply and resolve intent authority and correlate exactly with the
+unchanged live roots, comments, deterministic reply bodies, markers, authors,
+timestamps, and resolution state. Multiple origins are accepted only when
+their normalized proof and intent authority is identical. Later replay
+archives may carry different terminal metadata, unrelated tasks, proof rows,
+or events, but are tolerated only when their selected proof projection is
+identical and they contain zero selected-root mutation intents; partial or
+conflicting intent evidence and every divergent projection fail closed. Archive
+names, timestamps, enumeration order, and latest or earliest position never
+establish authority. On Linux, the production reader traverses pinned no-follow
+archive and candidate descriptors through `/proc/self/fd/<fd>`. Darwin does not
+use `/proc` or `/dev/fd` child lookup: the standalone main-thread CLI holds one
+process-wide archive owner and uses synchronous verified-working-directory
+scopes. Authorized root and candidate nesting never reacquires that owner, and
+no callback may return a Promise or thenable. Before each Darwin target open or
+`chdir`, the current `.` is first pinned and proved, then the saved absolute
+prior cwd is resolved and opened no-follow; its followed `.`, descriptor, and
+absolute-path identities must agree. A replaced saved path is never entered
+before target traversal: the failure is recoverable only while `.` still proves
+the initial pinned identity, otherwise cwd is poisoned. The target receives the
+same proof immediately after `chdir`. Every scope attempts restoration in
+`finally` and re-proves the saved cwd before descriptor closure. An inner
+failure remains recoverable after the outer caller cwd is proved, while an
+unprovable outer restoration or pre-target cwd poisons cwd and terminates the
+executable without continued workflow work. This is not a generic concurrent-library contract:
+Darwin worker threads and overlapping stores fail closed. Both strategies keep
+read-only/no-follow evidence opens, stable pre/post inode and exact-byte proof,
+the 128-KiB state and 16-MiB events bounds, and the 10,000-entry bound before
+candidate traversal; `.partial` entries stay ignored.
+Timestamp evidence must place root creation no later than the logical reply
+intent, that intent no later than its persisted event, and the reply event no
+later than the exact resolve intent. Resolve intent must be no earlier than the
+live reply's represented-second start, and the preserved durable proof no
+earlier than resolve intent. Intent events and proof remain bounded by archived
+state and terminal evidence. GitHub's second-granular reply timestamp represents
+an interval, not an exact mutation instant: logical intent and its event may
+occur after the represented second's start, but the event must be before its
+exclusive end. `.999` within that second is valid only when it does not follow
+resolve intent, while the next second's `.000` is not. A resolve proof recorded
+later than its intent must also follow the persisted resolve-intent event; exact
+equality with the resolve intent is the recovery form that deliberately stores
+the logical intent time, so its event envelope may be milliseconds later.
+Historical ancestry
+uses actual Git objects with replacement refs disabled and refuses a nonempty
+common-directory `info/grafts`, including from linked worktrees.
+It fingerprints the sorted complete carrier inventory and rereads the lineage,
+GitHub, Git heads, checkout cleanliness, ancestry, and state revision before one
+ordinary task-completion checkpoint. Added, removed, or altered carriers fail
+as a race, while list-only reordering is harmless. It posts no reply,
+resolves no thread, creates no intent, and appends no mutation-journal event.
+Use `verify-resolve` for the remediation task first; never copy proof rows or
+journal events manually, and never reopen a resolved thread to manufacture a
+normal resolution path. Single-root prior-HEAD recovery and ordinary unresolved
+thread handling remain the normal `reply-resolve` behavior.
+
+When no applicable ordinary exact-task carrier exists, that same command has a
+narrow aggregate variant for one `already-fixed`, null-commit terminal task
+with at least two canonical roots named by explicit `thread:` and/or
+`discussion:` sources. The fully paginated live mapping normalizes both aliases
+to thread identity and deduplicates dual aliases for one root. At least one terminal
+historical full carrier must cover exactly those exclusive live roots. Its
+completed GitHub-thread tasks must partition the roots uniquely and disjointly:
+each task owns its entire explicit source set, keeps one observed historical
+HEAD, and projects only actionable to `fixed` with an integration commit or
+already-fixed to `already-fixed` with a null commit. A relevant partial carrier
+is valid only as one or more exact whole-partition slices anchored by that full
+carrier; partial archives can never establish the full projection.
+Every carrier that names the active task ID in either an archived task object
+or any proof row is relevant even if its proof is wholly off-selection. Once
+the full carrier anchors historical task IDs, every same-repository/PR archive
+that names one of those IDs in a task object, proof-row `taskIds`, or
+`archiveProvenance.historicalTaskId` is relevant too.
+Every relevant historical or active-replay carrier is scanned across all proof
+rows and every GitHub-thread task whose canonical thread or discussion sources
+intersect the selected roots. Those tasks must be exact anchored whole
+partitions; hidden off-selection rows and unanchored overlapping tasks are
+fatal. Selected roots, historical partitions,
+relevant carriers, all carrier/root role entries, and selected intent footprints
+share one cumulative node bound before projection cloning, sorting, intent, or
+live lineage work begins; selected intents are indexed once per carrier.
+
+Aggregate roles are per root, so a later full carrier may replay an older
+partition while originating newer partitions. An origin has exactly one
+correlated reply intent and resolve intent at that root's observed HEAD; a
+replay has none. Every root needs an origin, duplicate origins must normalize
+identically, and intent-only, partial, cross-partition, wrong-HEAD, or otherwise
+conflicting evidence fails closed. An actionable historical integration commit
+must be an ancestor of its proof HEAD, each proof HEAD an ancestor of its
+carrier durable HEAD, and each carrier HEAD an ancestor of the current
+integration HEAD. Both archive inventories rerun every distinct ancestry
+relation and bind a sorted archive/content/partition-root-role fingerprint;
+enumeration-only reordering remains harmless.
+
+The one adoption checkpoint maps every imported row to the fresh active task
+and `already-fixed` disposition while retaining its own historical observed
+HEAD. It also stores closed `archiveProvenance` version 1 with the historical
+task ID, historical `fixed` or `already-fixed` disposition, corresponding
+nullable integration commit, exact UTF-8 reply-body SHA-256, and common
+aggregate authority fingerprint. Later request, retry, advance, CI, completion,
+and Done gates do not reread archives: they revalidate the live reply's exact
+ID, URL, parent, unedited actor identity, historical HEAD header, sole marker,
+historical task line, and body hash against this immutable provenance. A later
+terminal carrier for an aggregate task is reusable only as a zero-intent replay
+when every selected row retains consistent provenance and the carrier contains
+no unanchored selected-root task or off-partition historical proof. Historical
+reply headers accept exact lowercase 40- or 64-hex object IDs. Stripping an
+aggregate carrier into an active-ID legacy carrier is an error, while a genuine
+schema-valid provenance-free ordinary carrier continues through the legacy
+single-head path. Ordinary schema-v3 rows without provenance
+remain unchanged and keep their existing active-task validation.
+Historical already-fixed task content may span lines, but its exact UTF-8 body
+hash and unambiguous task/validation/marker structure remain mandatory;
+additional marker-shaped content or an ambiguous validation boundary rejects
+before adoption.
+
+This creation authority is capability-separated. Only the fully validated
+archive importer calls `checkpointArchiveTaskCompletion` with a closed compact
+envelope binding the selected task, exact newly resolved root set, per-row
+reply/body/provenance fingerprints, and common authority fingerprint. The state
+layer revalidates that envelope under its lock before authorizing
+`archive-task-completion`. Ordinary `checkpointTaskCompletion` rejects even a
+caller-supplied otherwise-valid envelope and cannot introduce provenance;
+generic `checkpointState` cannot add it either. Every resolved adopted row is
+then immutable under all transitions, and exact retry requires byte-identical
+rows and authority.
+
+When the resolved archive batch itself prevents the remediation's ordinary
+aggregate-proof gate, use a two-command state-only bootstrap. First run
+`verify-resolve --task <remediation-id>` for the sole actionable Integrated
+GitHub-threadless remediation. This exception exists only when the aggregate,
+threadless, and local proofs are pristine; one exclusive terminal
+`already-fixed`, null-commit, `not-applicable` GitHub-thread task owns at least
+two live resolved roots; and
+every other fully paginated canonical root is unresolved and maps exclusively
+either to an actionable Integrated or Resolved GitHub-thread task or to a
+terminal `already-fixed`, null-commit, `not-applicable` task that will use
+ordinary `reply-resolve` afterward. The command proves
+twice that the hypothetical singleton remediation proof enables the existing
+archive-adoption predicate, while rechecking clean equal local, pushed, live,
+and durable heads plus the exact state revision. It then completes only that
+remediation and records only singleton exact-current-HEAD threadless coverage.
+Aggregate status, head, rows, timestamp, and local proof remain byte-for-byte
+unchanged. An exact retry repeats all topology, pagination, head, checkout, and
+revision guards before returning idempotently. Completed-retry bootstrap
+handling is armed only when the terminal task's immutable `thread:` and
+`discussion:` aliases resolve through the canonical live mapping to at least
+two distinct root identities. Both aliases for the same root count once, so an
+ordinary one-root terminal task retains the guarded completed-threadless retry
+path.
+
+Then run `reply-resolve --task <terminal-id>` to select and verify the immutable
+archive through the ordinary batch-adoption path. The bootstrap never reads an
+archive, trusts archived proof early, reads or writes the mutation journal,
+mutates GitHub, or fabricates aggregate thread rows. Unique archive selection,
+exact intent/reply/timestamp evidence, ancestry, live rereads, races, and the
+single adoption checkpoint remain solely `reply-resolve` responsibilities.
+For a fresh cycle retaining multiple historical partitions, the exact operator
+sequence is: `verify-resolve --task <remediation-id>`, then
+`reply-resolve --task <retained-aggregate-id>`, then ordinary
+`reply-resolve --task <current-unresolved-root-task-id>`. The middle command is
+zero-mutation archive adoption; only the final ordinary command may post and
+resolve the current root.
+For PR #35 the durable profile is
+`verify-resolve --task pr-review-multi-historical-archive-aggregate-adoption-r2`,
+`reply-resolve --task retained-pr35-nine-roots-r1`, then ordinary
+`reply-resolve --task retained-pr35-portable-archive-reader-r1`.
 
 A schema-v2 migration may preserve a taskless pending review for the exact
 integration HEAD while deliberately clearing legacy targeted-validation proof.

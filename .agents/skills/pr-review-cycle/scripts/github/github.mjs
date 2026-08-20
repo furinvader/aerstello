@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 
 import {
   buildStaleDiscoveryDisposition,
@@ -6,6 +7,7 @@ import {
   reviewRequestUsage,
   validatePrReviewState,
 } from '../contracts/contracts.mjs';
+import { checkpointArchiveTaskCompletion } from '../state/state.mjs';
 
 const CANONICAL_LOGIN = 'chatgpt-codex-connector';
 const CANONICAL_URL = 'https://github.com/apps/chatgpt-codex-connector';
@@ -30,7 +32,7 @@ const OPERATIONS = {
   PullRequestReviews: `query PullRequestReviews($owner:String!,$repo:String!,$pr:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviews(first:50,after:$cursor){nodes{id databaseId url body state submittedAt commit{oid} author{__typename login url ... on Bot{id} ... on User{id}}} pageInfo{hasNextPage endCursor}}}}}`,
   PullRequestThreads: `query PullRequestThreads($owner:String!,$repo:String!,$pr:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:50,after:$cursor){nodes{id isResolved} pageInfo{hasNextPage endCursor}}}}}`,
   PullRequestChecks: `query PullRequestChecks($owner:String!,$repo:String!,$pr:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){pullRequest(number:$pr){id number state isDraft headRefOid commits(last:1){nodes{commit{oid statusCheckRollup{state contexts(first:50,after:$cursor){nodes{__typename ... on CheckRun{id databaseId name status conclusion completedAt detailsUrl checkSuite{workflowRun{databaseId url file{path} workflow{name}} app{slug}}} ... on StatusContext{id context state targetUrl}} pageInfo{hasNextPage endCursor}}}}}}}}}`,
-  ReviewThreadComments: `query ReviewThreadComments($threadId:ID!,$cursor:String){rateLimit{cost remaining} node(id:$threadId){... on PullRequestReviewThread{comments(first:50,after:$cursor){nodes{id databaseId url body createdAt author{__typename login url ... on Bot{id} ... on User{id}} replyTo{id} pullRequestReview{id}} pageInfo{hasNextPage endCursor}}}}}`,
+  ReviewThreadComments: `query ReviewThreadComments($threadId:ID!,$cursor:String){rateLimit{cost remaining} node(id:$threadId){... on PullRequestReviewThread{comments(first:50,after:$cursor){nodes{id databaseId url body createdAt lastEditedAt author{__typename login url ... on Bot{id} ... on User{id}} replyTo{id} pullRequestReview{id}} pageInfo{hasNextPage endCursor}}}}}`,
   RequestReactions: `query RequestReactions($commentId:ID!,$cursor:String){rateLimit{cost remaining} node(id:$commentId){... on IssueComment{reactions(first:50,after:$cursor){nodes{id content createdAt user{__typename login url id}} pageInfo{hasNextPage endCursor}}}}}`,
   AddReviewRequest: `mutation AddReviewRequest($subjectId:ID!,$body:String!,$clientMutationId:String!){addComment(input:{subjectId:$subjectId,body:$body,clientMutationId:$clientMutationId}){clientMutationId}}`,
   MarkPullRequestReadyForReview: `mutation MarkPullRequestReadyForReview($pullRequestId:ID!,$clientMutationId:String!){markPullRequestReadyForReview(input:{pullRequestId:$pullRequestId,clientMutationId:$clientMutationId}){clientMutationId}}`,
@@ -407,6 +409,57 @@ function replyTaskLine(task) {
     : `- ${task.id}: ${task.disposition} — ${task.resolutionSummary ?? 'Disposition recorded and verified.'}`;
 }
 
+const FULL_GIT_SHA_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
+const AGGREGATE_REPLY_HEADER_PATTERN = /^Aerstello review resolution at ([0-9a-f]{40}(?:[0-9a-f]{24})?)\.\n/u;
+const OPAQUE_LINE_SEPARATOR_PATTERN = /[\r\u2028\u2029]/u;
+
+function aggregateHistoricalReplyBody(body, {
+  prNumber, threadNodeId, historicalHeadSha, historicalTaskId,
+  historicalDisposition, historicalIntegratedCommitSha,
+}) {
+  if (typeof body !== 'string' || !FULL_GIT_SHA_PATTERN.test(historicalHeadSha)
+      || typeof historicalTaskId !== 'string' || historicalTaskId.length === 0
+      || /[\n\r\u2028\u2029]/u.test(historicalTaskId)
+      || OPAQUE_LINE_SEPARATOR_PATTERN.test(body)) return null;
+  const header = AGGREGATE_REPLY_HEADER_PATTERN.exec(body);
+  if (header?.[1] !== historicalHeadSha) return null;
+  const expectedMarker = replyMarker(`reply:${prNumber}:${threadNodeId}:${historicalHeadSha}`);
+  const markerAnchors = [...body.matchAll(/<!-- aerstello-review:/gu)];
+  const markers = [...body.matchAll(/<!-- aerstello-review:[0-9a-f]{24} -->/gu)]
+    .map((match) => match[0]);
+  const prefix = `${header[0]}Tasks:\n`;
+  const validationSeparator = '\nValidation: ';
+  const separatorIndex = body.indexOf(validationSeparator, prefix.length);
+  if (!body.startsWith(prefix) || separatorIndex <= prefix.length
+      || separatorIndex !== body.lastIndexOf(validationSeparator)
+      || markerAnchors.length !== 1
+      || markers.length !== 1 || markers[0] !== expectedMarker) return null;
+  const taskContent = body.slice(prefix.length, separatorIndex);
+  const stableTaskMatches = historicalDisposition === 'fixed'
+    ? FULL_GIT_SHA_PATTERN.test(historicalIntegratedCommitSha ?? '')
+      && taskContent === `- ${historicalTaskId}: ${historicalIntegratedCommitSha}`
+    : historicalDisposition === 'already-fixed'
+      && historicalIntegratedCommitSha === null
+      && taskContent.startsWith(`- ${historicalTaskId}: already-fixed — `)
+      && taskContent.length > `- ${historicalTaskId}: already-fixed — `.length;
+  const markerSuffix = `\n${expectedMarker}`;
+  const validationAndMarker = body.slice(separatorIndex + 1);
+  if (!stableTaskMatches || !validationAndMarker.endsWith(markerSuffix)) return null;
+  const validationLine = validationAndMarker.slice(0, -markerSuffix.length);
+  if (!/^Validation: [^\n\r\u2028\u2029]+\.$/u.test(validationLine)) return null;
+  return { historicalHeadSha: header[1], expectedMarker };
+}
+
+function aggregateHistoricalReplyBodyIsAdmissible(body, {
+  prNumber, threadNodeId, historicalHeadSha, historicalTaskId,
+  historicalDisposition, historicalIntegratedCommitSha,
+}) {
+  return aggregateHistoricalReplyBody(body, {
+    prNumber, threadNodeId, historicalHeadSha, historicalTaskId,
+    historicalDisposition, historicalIntegratedCommitSha,
+  }) !== null;
+}
+
 function deterministicReply(state, entry, operationId) {
   const checks = state.validationStatus.checks.slice(0, 3).join(', ');
   const tasks = entry.tasks.slice().sort((left, right) => left.id.localeCompare(right.id));
@@ -548,6 +601,29 @@ function verifyResolveResult(taskIds, active) {
   };
 }
 
+function canonicalRootsForTask(task, live) {
+  const expectedSources = task.sourceIds.filter((source) => /^(?:thread|discussion):/u.test(source));
+  if (expectedSources.length === 0) {
+    throw new GitHubWorkflowError(
+      `Task ${task.id} has no canonical root source`,
+      'ROOT_IDENTITY_MISMATCH',
+    );
+  }
+  const roots = new Map();
+  for (const source of expectedSources) {
+    const matches = live.threads.filter((thread) => thread.canonical
+      && (source === `thread:${thread.id}` || source === `discussion:${thread.root.databaseId}`));
+    if (matches.length !== 1) {
+      throw new GitHubWorkflowError(
+        `Source ${source} is missing or ambiguous`,
+        'ROOT_IDENTITY_MISMATCH',
+      );
+    }
+    roots.set(matches[0].id, matches[0]);
+  }
+  return [...roots.values()];
+}
+
 function buildCanonicalRootPlan(state, live, selectedTaskId = null) {
   if (state.validationStatus.status !== 'passed'
       || state.validationStatus.headSha !== state.currentIntegrationHeadSha
@@ -573,13 +649,7 @@ function buildCanonicalRootPlan(state, live, selectedTaskId = null) {
   const tasks = state.tasks.filter((task) => task.sourceType === 'github-thread');
   const mapped = new Map();
   for (const task of tasks) {
-    const expectedSources = task.sourceIds.filter((source) => /^(?:thread|discussion):/u.test(source));
-    if (expectedSources.length === 0) throw new GitHubWorkflowError(`Task ${task.id} has no canonical root source`, 'ROOT_IDENTITY_MISMATCH');
-    for (const source of expectedSources) {
-      const matches = live.threads.filter((thread) => thread.canonical
-        && (source === `thread:${thread.id}` || source === `discussion:${thread.root.databaseId}`));
-      if (matches.length !== 1) throw new GitHubWorkflowError(`Source ${source} is missing or ambiguous`, 'ROOT_IDENTITY_MISMATCH');
-      const thread = matches[0];
+    for (const thread of canonicalRootsForTask(task, live)) {
       const entry = mapped.get(thread.id) ?? { thread, tasks: [] };
       if (!entry.tasks.some((item) => item.id === task.id)) entry.tasks.push(task);
       mapped.set(thread.id, entry);
@@ -634,6 +704,1632 @@ function completedThreadlessRecoveryReady(state) {
   });
 }
 
+function hasExactKeys(value, expected) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    && isDeepStrictEqual(Object.keys(value).sort(), [...expected].sort());
+}
+
+function archiveBatchAdoptionReady(state, selectedTask, selectedPlan) {
+  const aggregate = state.threadResolutionStatus;
+  const verification = aggregate.threadlessVerification;
+  if (selectedTask?.sourceType !== 'github-thread'
+      || selectedTask.status !== 'not-applicable'
+      || !VERIFIED_NON_ACTIONABLE_DISPOSITIONS.has(selectedTask.disposition)
+      || selectedTask.integratedCommitSha !== null
+      || selectedPlan.length < 2
+      || selectedPlan.some((entry) => !entry.thread.isResolved
+        || entry.tasks.length !== 1 || entry.tasks[0].id !== selectedTask.id)
+      || aggregate.status !== 'not-run' || aggregate.headSha !== null
+      || aggregate.threads.length !== 0 || aggregate.updatedAt !== null
+      || verification.status !== 'passed'
+      || verification.headSha !== state.currentIntegrationHeadSha
+      || verification.taskIds.length === 0 || verification.updatedAt === null) return false;
+  const byId = new Map(state.tasks.map((task) => [task.id, task]));
+  return verification.taskIds.every((taskId) => {
+    const task = byId.get(taskId);
+    return task?.sourceType === 'github-threadless'
+      && task.disposition === 'actionable' && task.status === 'completed'
+      && typeof task.integratedCommitSha === 'string';
+  });
+}
+
+function verificationProofIsPristine(verification) {
+  return verification?.status === 'not-run'
+    && verification.headSha === null
+    && verification.taskIds.length === 0
+    && verification.updatedAt === null;
+}
+
+function archiveBootstrapScaffoldIsPristine(state) {
+  const aggregate = state.threadResolutionStatus;
+  return aggregate.status === 'not-run'
+    && aggregate.headSha === null
+    && aggregate.threads.length === 0
+    && aggregate.updatedAt === null
+    && Object.hasOwn(aggregate, 'localVerification')
+    && verificationProofIsPristine(aggregate.localVerification);
+}
+
+function immutableSourcesDeclareMultiRootArchiveBatch(task, live) {
+  return canonicalRootsForTask(task, live).length >= 2;
+}
+
+function archiveAdoptionVerifierBootstrapPlan(state, live, selectedTaskId, heads) {
+  const selectedTask = state.tasks.find((task) => task.id === selectedTaskId);
+  const terminalThreadTasks = state.tasks.filter((task) => task.sourceType === 'github-thread'
+    && task.status === 'not-applicable' && task.disposition === 'already-fixed'
+    && task.integratedCommitSha === null);
+  const verification = state.threadResolutionStatus.threadlessVerification;
+  const retry = selectedTask?.disposition === 'actionable'
+    && selectedTask.status === 'completed'
+    && typeof selectedTask.integratedCommitSha === 'string'
+    && verification.status === 'passed'
+    && verification.headSha === state.currentIntegrationHeadSha
+    && sameTaskIds([...verification.taskIds].sort(), [selectedTask.id])
+    && verification.updatedAt !== null;
+  const potentialBootstrap = selectedTask?.sourceType === 'github-threadless'
+    && archiveBootstrapScaffoldIsPristine(state)
+    && terminalThreadTasks.length > 0
+    && (selectedTask.status !== 'completed' || (retry && terminalThreadTasks.some(
+      (task) => immutableSourcesDeclareMultiRootArchiveBatch(task, live),
+    )));
+  if (!potentialBootstrap) return null;
+
+  const pending = selectedTask.disposition === 'actionable'
+    && selectedTask.status === 'integrated'
+    && typeof selectedTask.integratedCommitSha === 'string'
+    && verificationProofIsPristine(verification);
+  if (!pending && !retry) {
+    throw new GitHubWorkflowError(
+      'Archive-adoption verifier bootstrap requires one Integrated remediation or its exact retry',
+      'TASK_NOT_READY',
+    );
+  }
+
+  const eligibleRemediations = state.tasks.filter((task) => task.sourceType === 'github-threadless'
+    && task.disposition === 'actionable' && task.status === 'integrated'
+    && typeof task.integratedCommitSha === 'string');
+  if ((pending && (eligibleRemediations.length !== 1 || eligibleRemediations[0].id !== selectedTask.id))
+      || (retry && eligibleRemediations.length !== 0)) {
+    throw new GitHubWorkflowError(
+      'Archive-adoption verifier bootstrap remediation is missing or ambiguous',
+      'TASK_NOT_READY',
+    );
+  }
+  const { plan } = buildCanonicalRootPlan(state, live);
+  const canonicalRoots = live.threads.filter((thread) => thread.canonical);
+  if (plan.length !== canonicalRoots.length
+      || plan.some((entry) => entry.tasks.length !== 1)) {
+    throw new GitHubWorkflowError(
+      'Archive-adoption verifier bootstrap requires exclusive canonical-root mappings',
+      'ROOT_IDENTITY_MISMATCH',
+    );
+  }
+  const archiveCandidates = terminalThreadTasks.map((task) => ({
+    task,
+    plan: plan.filter((entry) => entry.tasks[0].id === task.id),
+  })).filter((candidate) => candidate.plan.length >= 2
+    && candidate.plan.every((entry) => entry.thread.isResolved));
+  if (archiveCandidates.length !== 1) {
+    throw new GitHubWorkflowError(
+      'Archive-adoption verifier bootstrap requires one resolved multi-root batch',
+      'TASK_NOT_READY',
+    );
+  }
+  const [{ task: archiveTask, plan: archivePlan }] = archiveCandidates;
+  const otherRootsEligible = plan.filter((entry) => entry.tasks[0].id !== archiveTask.id)
+    .every((entry) => {
+      const task = entry.tasks[0];
+      return !entry.thread.isResolved
+        && task.sourceType === 'github-thread'
+        && ((task.disposition === 'actionable'
+          && ['integrated', 'completed'].includes(task.status)
+          && typeof task.integratedCommitSha === 'string')
+          || (task.disposition === 'already-fixed'
+            && task.status === 'not-applicable'
+            && task.integratedCommitSha === null));
+    });
+  if (!otherRootsEligible) {
+    throw new GitHubWorkflowError(
+      'Archive-adoption verifier bootstrap found an ineligible root outside the resolved batch',
+      'TASK_NOT_READY',
+    );
+  }
+
+  const hypotheticalState = {
+    ...state,
+    tasks: state.tasks.map((task) => task.id === selectedTask.id
+      ? { ...task, status: 'completed' } : task),
+    threadResolutionStatus: {
+      ...state.threadResolutionStatus,
+      threadlessVerification: {
+        status: 'passed',
+        headSha: state.currentIntegrationHeadSha,
+        taskIds: [selectedTask.id],
+        updatedAt: retry ? verification.updatedAt : state.updatedAt,
+      },
+    },
+  };
+  if (!archiveBatchAdoptionReady(hypotheticalState, archiveTask, archivePlan)) {
+    throw new GitHubWorkflowError(
+      'Archive-adoption verifier bootstrap does not enable the ordinary archive-adoption predicate',
+      'TASK_NOT_READY',
+    );
+  }
+
+  return {
+    mode: pending ? 'pending' : 'retry',
+    stateRevision: state.revision,
+    selectedTaskId: selectedTask.id,
+    selectedIntegratedCommitSha: selectedTask.integratedCommitSha,
+    archiveTaskId: archiveTask.id,
+    heads: {
+      durable: state.currentIntegrationHeadSha,
+      local: heads.localHeadSha,
+      pushed: heads.pushedHeadSha,
+      live: live.metadata.headRefOid,
+    },
+    roots: plan.map((entry) => ({
+      threadNodeId: entry.thread.id,
+      rootCommentNodeId: entry.thread.root.id,
+      rootCommentDatabaseId: entry.thread.root.databaseId,
+      isResolved: entry.thread.isResolved,
+      taskId: entry.tasks[0].id,
+    })),
+  };
+}
+
+function assertArchiveEventList(events) {
+  if (!Array.isArray(events) || events.length === 0 || events.length > MAX_NODES
+      || events.some((event) => event === null || typeof event !== 'object' || Array.isArray(event))) {
+    throw new GitHubWorkflowError('Archived mutation evidence is missing or malformed', 'ARCHIVE_EVIDENCE_INVALID');
+  }
+}
+
+function assertTerminalArchive(state, events) {
+  const stateUpdatedAt = parsedTime(state.updatedAt, 'Archived state');
+  if (state.phase === 'complete' && state.abandonmentReason === null) {
+    return { stateUpdatedAt, terminalEventAt: null };
+  }
+  if (typeof state.abandonmentReason !== 'string' || state.abandonmentReason.trim().length === 0) {
+    throw new GitHubWorkflowError('Archive lacks terminal completion or abandonment evidence', 'ARCHIVE_EVIDENCE_INVALID');
+  }
+  const terminal = events.filter((event) => event.type === 'abandoned');
+  const event = terminal[0];
+  if (terminal.length !== 1 || events.at(-1) !== event
+      || !hasExactKeys(event, ['schemaVersion', 'type', 'summary', 'at'])
+      || event.schemaVersion !== 1
+      || event.summary !== `Archived without completion: ${state.abandonmentReason}`
+      || parsedTime(event.at, 'Archive terminal event') < stateUpdatedAt) {
+    throw new GitHubWorkflowError('Archive terminal evidence is missing, altered, or ambiguous', 'ARCHIVE_EVIDENCE_INVALID');
+  }
+  return { stateUpdatedAt, terminalEventAt: parsedTime(event.at, 'Archive terminal event') };
+}
+
+function projectedArchivedTask(archivedTask) {
+  return { ...archivedTask, status: 'not-applicable' };
+}
+
+function archiveBatchProofProjection(state, selectedTask, archivedState) {
+  const sourceThreadIds = selectedTask.sourceIds.map((source) => (
+    /^thread:(.+)$/u.exec(source)?.[1] ?? null
+  ));
+  if (sourceThreadIds.some((threadId) => threadId === null)
+      || new Set(sourceThreadIds).size !== sourceThreadIds.length) {
+    throw new GitHubWorkflowError(
+      'Archive batch requires one unique explicit thread source per root',
+      'ARCHIVE_PROOF_MISMATCH',
+    );
+  }
+  const archivedProofs = archivedState.threadResolutionStatus.threads.filter((proof) => (
+    proof.taskIds.includes(selectedTask.id)
+  ));
+  if (archivedProofs.length !== sourceThreadIds.length
+      || archivedProofs.some((proof) => proof.taskIds.length !== 1
+        || proof.taskIds[0] !== selectedTask.id || proof.isResolved !== true
+        || proof.disposition !== selectedTask.disposition
+        || proof.replyId === null || proof.replyUrl === null
+        || proof.resolvedAt === null || proof.resolvedBy === null)) {
+    throw new GitHubWorkflowError('Archived resolved-root proof is incomplete or ambiguous', 'ARCHIVE_PROOF_MISMATCH');
+  }
+  const proofRows = sourceThreadIds.slice().sort().map((threadId) => {
+    const proofs = archivedProofs.filter((proof) => proof.threadNodeId === threadId);
+    if (proofs.length !== 1) {
+      throw new GitHubWorkflowError('Archived source root is missing or duplicated', 'ARCHIVE_PROOF_MISMATCH');
+    }
+    return structuredClone(proofs[0]);
+  });
+  const historicalHeads = new Set(proofRows.map((proof) => proof.observedHeadSha));
+  if (historicalHeads.size !== 1) {
+    throw new GitHubWorkflowError('Archived roots do not share one historical HEAD', 'ARCHIVE_PROOF_MISMATCH');
+  }
+  const historicalHeadSha = [...historicalHeads][0];
+  if (historicalHeadSha === state.currentIntegrationHeadSha) {
+    throw new GitHubWorkflowError('Archive adoption requires a distinct historical HEAD', 'ARCHIVE_PROOF_MISMATCH');
+  }
+  return {
+    task: structuredClone(selectedTask),
+    proofRows,
+    historicalHeadSha,
+  };
+}
+
+function archiveContentFingerprint(archive) {
+  return createHash('sha256')
+    .update(JSON.stringify(canonicalJson(archive)))
+    .digest('hex');
+}
+
+function assertArchiveInventory(archives) {
+  if (!Array.isArray(archives) || archives.length > MAX_NODES) {
+    throw new GitHubWorkflowError('Immutable archive inventory is malformed or unbounded', 'ARCHIVE_EVIDENCE_INVALID');
+  }
+  const archiveIds = archives.map((archive) => archive?.archiveId);
+  if (archiveIds.some((archiveId) => typeof archiveId !== 'string' || archiveId.length === 0)
+      || new Set(archiveIds).size !== archiveIds.length) {
+    throw new GitHubWorkflowError('Immutable archive identity is missing or duplicated', 'ARCHIVE_EVIDENCE_AMBIGUOUS');
+  }
+}
+
+function selectLegacyArchiveForBatch(state, selectedTask, archives) {
+  assertArchiveInventory(archives);
+  const candidates = [];
+  for (const archive of archives) {
+    const archivedState = archive?.state;
+    if (archivedState?.repository !== state.repository || archivedState?.prNumber !== state.prNumber) continue;
+    const matchingTasks = Array.isArray(archivedState.tasks)
+      ? archivedState.tasks.filter((task) => task?.id === selectedTask.id) : [];
+    if (matchingTasks.length === 0) {
+      const proofRows = archivedState?.threadResolutionStatus?.threads;
+      const proofReferencesSelectedTask = Array.isArray(proofRows) && proofRows.some(
+        (row) => Array.isArray(row?.taskIds) && row.taskIds.includes(selectedTask.id),
+      );
+      if (!proofReferencesSelectedTask) continue;
+      const stateErrors = Array.isArray(archivedState.tasks)
+        ? validatePrReviewState(archivedState) : ['tasks must be an array'];
+      throw new GitHubWorkflowError(
+        `Archived task state is invalid: ${stateErrors.join('; ')}`,
+        'ARCHIVE_EVIDENCE_INVALID',
+      );
+    }
+    if (matchingTasks.length !== 1) {
+      throw new GitHubWorkflowError('Archived task identity is duplicated', 'ARCHIVE_EVIDENCE_AMBIGUOUS');
+    }
+    const stateErrors = validatePrReviewState(archivedState);
+    if (archivedState.schemaVersion !== 3 || stateErrors.length > 0) {
+      throw new GitHubWorkflowError(
+        `Archived task state is invalid: ${stateErrors.join('; ')}`,
+        'ARCHIVE_EVIDENCE_INVALID',
+      );
+    }
+    assertArchiveEventList(archive.events);
+    const terminalBounds = assertTerminalArchive(archivedState, archive.events);
+    const archivedTask = matchingTasks[0];
+    if (archivedTask.status !== 'completed'
+        || !isDeepStrictEqual(projectedArchivedTask(archivedTask), selectedTask)) {
+      throw new GitHubWorkflowError(
+        'Archived task does not exactly match the active terminal projection',
+        'ARCHIVE_TASK_MISMATCH',
+      );
+    }
+    const projection = archiveBatchProofProjection(state, selectedTask, archivedState);
+    candidates.push({
+      archive,
+      archivedState,
+      archivedTask,
+      terminalBounds,
+      projection,
+      contentFingerprint: archiveContentFingerprint(archive),
+    });
+  }
+  if (candidates.length === 0) {
+    throw new GitHubWorkflowError('No exact immutable archive proves this task', 'ARCHIVE_EVIDENCE_MISSING');
+  }
+  const projection = candidates[0].projection;
+  if (candidates.some((candidate) => !isDeepStrictEqual(candidate.projection, projection))) {
+    throw new GitHubWorkflowError(
+      'Matching archives carry conflicting task or resolved-root proof lineages',
+      'ARCHIVE_EVIDENCE_AMBIGUOUS',
+    );
+  }
+  candidates.sort((left, right) => left.archive.archiveId.localeCompare(right.archive.archiveId));
+  return { candidates, projection };
+}
+
+function archiveIntent(events, type, operationId) {
+  const expectedClientMutationId = intentFor(type, operationId, null).clientMutationId;
+  const candidates = events.filter((event) => event.details?.operationId === operationId
+    || event.details?.clientMutationId === expectedClientMutationId);
+  if (candidates.length !== 1) {
+    throw new GitHubWorkflowError(
+      `Archived ${type} intent is missing, duplicated, or ambiguous`,
+      'ARCHIVE_INTENT_AMBIGUOUS',
+    );
+  }
+  const event = candidates[0];
+  const intent = event.details;
+  if (!hasExactKeys(event, ['schemaVersion', 'type', 'summary', 'at', 'details'])
+      || !hasExactKeys(intent, ['type', 'operationId', 'clientMutationId', 'at'])
+      || event.schemaVersion !== 1 || event.type !== 'github-mutation-intent'
+      || event.summary !== `Intent ${type} ${operationId}`
+      || !isDeepStrictEqual(intent, intentFor(type, operationId, intent?.at))
+      || parsedTime(event.at, `Archived ${type} event`) < parsedTime(intent?.at, `Archived ${type} intent`)) {
+    throw new GitHubWorkflowError(`Archived ${type} intent lost exact correlation`, 'ARCHIVE_INTENT_INVALID');
+  }
+  return { event, intent };
+}
+
+function assertArchiveReplyBody(archivedState, archivedTask, threadId, historicalHeadSha, body) {
+  if (typeof body !== 'string') {
+    throw new GitHubWorkflowError('Archived live reply body is missing', 'ARCHIVE_REPLY_MISMATCH');
+  }
+  const operationId = `reply:${archivedTask.prNumber ?? ''}:${threadId}:${historicalHeadSha}`;
+  const expectedBody = deterministicReply(
+    { ...archivedState, currentIntegrationHeadSha: historicalHeadSha },
+    { tasks: [archivedTask] },
+    operationId,
+  );
+  if (body !== expectedBody) {
+    throw new GitHubWorkflowError('Archived live reply body or marker is altered', 'ARCHIVE_REPLY_MISMATCH');
+  }
+  return operationId;
+}
+
+function stableCommentEvidence(comment) {
+  return {
+    id: comment.id,
+    databaseId: comment.databaseId ?? null,
+    url: comment.url,
+    body: comment.body,
+    createdAt: comment.createdAt,
+    lastEditedAt: comment.lastEditedAt,
+    author: {
+      type: comment.author?.__typename ?? null,
+      login: comment.author?.login ?? null,
+      url: comment.author?.url ?? null,
+      id: comment.author?.id ?? null,
+    },
+    replyToId: comment.replyTo?.id ?? null,
+    pullRequestReviewId: comment.pullRequestReview?.id ?? null,
+  };
+}
+
+function validateArchiveBatchLive(state, live, selectedTask, selectedPlan, selectedArchive) {
+  const {
+    archivedState, archivedTask, archive, terminalBounds, projection,
+  } = selectedArchive;
+  if (!isDeepStrictEqual(projection.task, selectedTask)
+      || projection.proofRows.length !== selectedPlan.length) {
+    throw new GitHubWorkflowError(
+      'Archive batch requires one unique explicit thread source per root',
+      'ARCHIVE_PROOF_MISMATCH',
+    );
+  }
+  const historicalHeadSha = projection.historicalHeadSha;
+  const evidence = [];
+  for (const proof of projection.proofRows) {
+    const threadId = proof.threadNodeId;
+    const entries = selectedPlan.filter((entry) => entry.thread.id === threadId);
+    if (entries.length !== 1) {
+      throw new GitHubWorkflowError('Archived source root is missing or duplicated', 'ARCHIVE_PROOF_MISMATCH');
+    }
+    const entry = entries[0];
+    const { thread } = entry;
+    const root = thread.root;
+    const directReplies = thread.comments.filter((comment) => comment.replyTo?.id === root.id);
+    if (!thread.isResolved || thread.comments.length !== 2 || directReplies.length !== 1
+        || proof.rootCommentNodeId !== root.id
+        || proof.rootCommentDatabaseId !== root.databaseId
+        || root.lastEditedAt !== null || !httpsUrl(root.url) || typeof root.body !== 'string'
+        || !isCanonicalActor(root.author)) {
+      throw new GitHubWorkflowError('Live archived root or root comment does not match proof', 'ARCHIVE_LIVE_MISMATCH');
+    }
+    const reply = directReplies[0];
+    if (reply.id !== proof.replyId || reply.url !== proof.replyUrl
+        || reply.replyTo?.id !== root.id || reply.lastEditedAt !== null
+        || !httpsUrl(reply.url) || !isViewerActor(reply.author, live.metadata.viewer)
+        || proof.resolvedBy !== live.metadata.viewer.login) {
+      throw new GitHubWorkflowError('Live archived reply identity does not match proof', 'ARCHIVE_LIVE_MISMATCH');
+    }
+    const replyOperationId = assertArchiveReplyBody(
+      archivedState, { ...archivedTask, prNumber: state.prNumber },
+      thread.id, historicalHeadSha, reply.body,
+    );
+    const resolveOperationId = `resolve:${state.prNumber}:${thread.id}:${historicalHeadSha}`;
+    const replyIntent = archiveIntent(archive.events, 'reply', replyOperationId);
+    const resolveIntent = archiveIntent(archive.events, 'resolve', resolveOperationId);
+    const rootAt = parsedTime(root.createdAt, 'Archived root creation');
+    const replyAt = parsedTime(reply.createdAt, 'Archived reply creation');
+    const replyIntentAt = parsedTime(replyIntent.intent.at, 'Archived reply intent');
+    const resolveIntentAt = parsedTime(resolveIntent.intent.at, 'Archived resolve intent');
+    const replyIntentEventAt = parsedTime(replyIntent.event.at, 'Archived reply intent event');
+    const resolveIntentEventAt = parsedTime(resolveIntent.event.at, 'Archived resolve intent event');
+    const proofResolvedAt = parsedTime(proof.resolvedAt, 'Archived durable resolution proof');
+    // GitHub returns reply.createdAt at second precision. archiveIntent already
+    // proves intent.at <= event.at, so this represented second supplies only an
+    // exclusive upper bound for both values, not an exact mutation instant.
+    const replyRepresentedSecondExclusiveUpperBound = (Math.floor(replyAt / 1_000) * 1_000) + 1_000;
+    // Recovery deliberately records intent.at as resolvedAt; appendEvent timestamps
+    // its enclosing journal record moments later. A later proof is instead a
+    // post-mutation observation and must follow that persisted journal record.
+    const proofUsesResolveIntentTime = proofResolvedAt === resolveIntentAt;
+    if (replyIntentAt < rootAt
+        || replyIntentEventAt >= replyRepresentedSecondExclusiveUpperBound
+        || replyIntentEventAt > resolveIntentAt
+        || resolveIntentAt < replyAt
+        || proofResolvedAt < resolveIntentAt
+        || (!proofUsesResolveIntentTime && resolveIntentEventAt > proofResolvedAt)
+        || replyIntentEventAt > terminalBounds.stateUpdatedAt
+        || resolveIntentEventAt > terminalBounds.stateUpdatedAt
+        || proofResolvedAt > terminalBounds.stateUpdatedAt
+        || (terminalBounds.terminalEventAt !== null
+          && (replyIntentEventAt > terminalBounds.terminalEventAt
+            || resolveIntentEventAt > terminalBounds.terminalEventAt
+            || proofResolvedAt > terminalBounds.terminalEventAt))) {
+      throw new GitHubWorkflowError('Archived reply and resolution timestamps do not correlate', 'ARCHIVE_INTENT_INVALID');
+    }
+    evidence.push({
+      threadNodeId: thread.id,
+      proof: { ...proof },
+      reply: { ...reply },
+      intents: {
+        reply: structuredClone(replyIntent),
+        resolve: structuredClone(resolveIntent),
+      },
+      live: {
+        threadNodeId: thread.id,
+        isResolved: thread.isResolved,
+        root: stableCommentEvidence(root),
+        reply: stableCommentEvidence(reply),
+      },
+    });
+  }
+  return {
+    archiveId: archive.archiveId,
+    archive: structuredClone(archive),
+    historicalHeadSha,
+    evidence,
+  };
+}
+
+function selectedArchiveIntentCorrelations(state, projection) {
+  return projection.proofRows.flatMap((proof) => ['reply', 'resolve'].map((type) => {
+    const operationId = `${type}:${state.prNumber}:${proof.threadNodeId}:${projection.historicalHeadSha}`;
+    return {
+      operationId,
+      clientMutationId: intentFor(type, operationId, null).clientMutationId,
+      summary: `Intent ${type} ${operationId}`,
+    };
+  }));
+}
+
+function exactlyMatchesArchiveIntentCorrelation(event, correlation) {
+  return event.summary === correlation.summary
+    || event.details?.operationId === correlation.operationId
+    || event.details?.clientMutationId === correlation.clientMutationId;
+}
+
+function archivedOperationReference(value) {
+  if (typeof value !== 'string') return null;
+  const parts = value.split(':');
+  return {
+    operationId: value,
+    type: parts[0],
+    tokens: parts,
+    threadNodeId: parts.length >= 3 && parts[2].length > 0 ? parts[2] : null,
+    wellFormedReplyResolve: ['reply', 'resolve'].includes(parts[0])
+      && parts.length === 4
+      && /^[1-9]\d*$/u.test(parts[1])
+      && parts[2].length > 0
+      && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(parts[3]),
+  };
+}
+
+function archivedIntentSummaryReference(value) {
+  if (typeof value !== 'string') return null;
+  const match = /^Intent (\S+) ([\s\S]*)$/u.exec(value);
+  if (!match) return null;
+  const operation = archivedOperationReference(match[2]);
+  return {
+    ...operation,
+    summaryType: match[1],
+    wellFormedReplyResolve: operation.wellFormedReplyResolve
+      && operation.type === match[1],
+  };
+}
+
+function eventCarriesSelectedArchiveIntent(event, selectedThreadIds) {
+  const detailOperation = archivedOperationReference(event.details?.operationId);
+  const summaryOperation = archivedIntentSummaryReference(event.summary);
+  if ([detailOperation, summaryOperation].some((operation) => (
+    operation?.tokens.some((token) => selectedThreadIds.has(token))
+  ))) return true;
+
+  const replyResolve = (value) => ['reply', 'resolve'].includes(value);
+  const detailAdvertisesReplyResolve = event.type === 'github-mutation-intent'
+    && (replyResolve(event.details?.type) || replyResolve(detailOperation?.type));
+  const summaryAdvertisesReplyResolve = summaryOperation !== null
+    && (replyResolve(summaryOperation.summaryType) || replyResolve(summaryOperation.type));
+  if (!detailAdvertisesReplyResolve && !summaryAdvertisesReplyResolve) return false;
+  if (detailAdvertisesReplyResolve && (
+    detailOperation === null
+      || !detailOperation.wellFormedReplyResolve
+      || event.details?.type !== detailOperation.type
+      || (summaryOperation !== null && !summaryAdvertisesReplyResolve)
+  )) return true;
+  if (summaryAdvertisesReplyResolve && (
+    !summaryOperation.wellFormedReplyResolve
+      || (detailOperation !== null && !detailAdvertisesReplyResolve)
+  )) return true;
+  return detailAdvertisesReplyResolve && summaryAdvertisesReplyResolve
+    && (detailOperation.operationId !== summaryOperation.operationId
+      || detailOperation.type !== summaryOperation.type);
+}
+
+function selectedArchiveIntentFootprint(state, projection, events) {
+  const correlations = selectedArchiveIntentCorrelations(state, projection);
+  const selectedThreadIds = new Set(projection.proofRows.map((proof) => proof.threadNodeId));
+  return events.filter((event) => (
+    correlations.some((correlation) => exactlyMatchesArchiveIntentCorrelation(event, correlation))
+    || eventCarriesSelectedArchiveIntent(event, selectedThreadIds)
+  ));
+}
+
+function unambiguousSelectedArchiveIntentRoot(event, selectedRoots) {
+  const detailOperation = archivedOperationReference(event.details?.operationId);
+  const summaryOperation = archivedIntentSummaryReference(event.summary);
+  const replyResolve = (value) => ['reply', 'resolve'].includes(value);
+  const detailAdvertises = event.type === 'github-mutation-intent'
+    && (replyResolve(event.details?.type) || replyResolve(detailOperation?.type));
+  const summaryAdvertises = summaryOperation !== null
+    && (replyResolve(summaryOperation.summaryType) || replyResolve(summaryOperation.type));
+  if (!detailAdvertises && !summaryAdvertises) return null;
+  if (detailAdvertises && (detailOperation === null
+      || !detailOperation.wellFormedReplyResolve
+      || event.details?.type !== detailOperation.type
+      || (summaryOperation !== null && !summaryAdvertises))) return null;
+  if (summaryAdvertises && (!summaryOperation.wellFormedReplyResolve
+      || (detailOperation !== null && !detailAdvertises))) return null;
+  if (detailAdvertises && summaryAdvertises
+      && (detailOperation.operationId !== summaryOperation.operationId
+        || detailOperation.type !== summaryOperation.type)) return null;
+  const operations = [detailAdvertises ? detailOperation : null, summaryAdvertises ? summaryOperation : null]
+    .filter((operation) => operation !== null);
+  const roots = new Set(operations.map((operation) => operation.threadNodeId));
+  return roots.size === 1 && selectedRoots.has([...roots][0]) ? [...roots][0] : null;
+}
+
+function indexedAggregateArchiveIntentFootprints(state, candidate, projection, reserveNode) {
+  const authorityByRoot = aggregateAuthorityByRoot(projection);
+  const selectedRoots = new Set(authorityByRoot.keys());
+  const footprints = new Map();
+  const bySummary = new Map();
+  const byOperationId = new Map();
+  const byClientMutationId = new Map();
+  const addIndex = (index, key, threadId) => {
+    const roots = index.get(key) ?? new Set();
+    roots.add(threadId);
+    index.set(key, roots);
+  };
+  for (const [threadId, authority] of authorityByRoot) {
+    for (const correlation of selectedArchiveIntentCorrelations(
+      state, singleRootProjection(authority),
+    )) {
+      addIndex(bySummary, correlation.summary, threadId);
+      addIndex(byOperationId, correlation.operationId, threadId);
+      addIndex(byClientMutationId, correlation.clientMutationId, threadId);
+    }
+  }
+  for (const event of candidate.archive.events) {
+    const matchedRoots = new Set([
+      ...(bySummary.get(event.summary) ?? []),
+      ...(byOperationId.get(event.details?.operationId) ?? []),
+      ...(byClientMutationId.get(event.details?.clientMutationId) ?? []),
+    ]);
+    if (eventCarriesSelectedArchiveIntent(event, selectedRoots)) {
+      const referencedRoot = unambiguousSelectedArchiveIntentRoot(event, selectedRoots);
+      if (referencedRoot === null) {
+        for (const threadId of selectedRoots) matchedRoots.add(threadId);
+      } else {
+        matchedRoots.add(referencedRoot);
+      }
+    }
+    for (const threadId of matchedRoots) {
+      reserveNode();
+      const footprint = footprints.get(threadId);
+      if (footprint === undefined) footprints.set(threadId, [event]);
+      else footprint.push(event);
+    }
+  }
+  return footprints;
+}
+
+const EMPTY_AGGREGATE_INTENT_FOOTPRINT = Object.freeze([]);
+
+function aggregateArchiveIntentFootprint(footprints, threadId) {
+  return footprints.get(threadId) ?? EMPTY_AGGREGATE_INTENT_FOOTPRINT;
+}
+
+function assertCompleteSelectedArchiveIntentFootprint(state, projection, footprint) {
+  const correlations = selectedArchiveIntentCorrelations(state, projection);
+  const correlationsAreUnique = correlations.every((correlation) => (
+    footprint.filter((event) => exactlyMatchesArchiveIntentCorrelation(event, correlation)).length === 1
+  ));
+  const eventsAreUnique = footprint.every((event) => (
+    correlations.filter((correlation) => exactlyMatchesArchiveIntentCorrelation(event, correlation)).length === 1
+  ));
+  if (footprint.length !== correlations.length || !correlationsAreUnique || !eventsAreUnique) {
+    throw new GitHubWorkflowError(
+      'Archived selected-root intent footprint is partial, duplicated, altered, or conflicting',
+      'ARCHIVE_INTENT_AMBIGUOUS',
+    );
+  }
+}
+
+function assertReplayArchiveBounds(candidate) {
+  for (const proof of candidate.projection.proofRows) {
+    const resolvedAt = parsedTime(proof.resolvedAt, 'Archived replay resolution proof');
+    if (resolvedAt > candidate.terminalBounds.stateUpdatedAt
+        || (candidate.terminalBounds.terminalEventAt !== null
+          && resolvedAt > candidate.terminalBounds.terminalEventAt)) {
+      throw new GitHubWorkflowError(
+        'Archived replay proof falls outside its terminal envelope',
+        'ARCHIVE_EVIDENCE_INVALID',
+      );
+    }
+  }
+}
+
+function normalizedArchiveOriginAuthority(projection, adoption) {
+  return {
+    projection: structuredClone(projection),
+    roots: adoption.evidence.map((item) => ({
+      threadNodeId: item.threadNodeId,
+      replyBody: item.reply.body,
+      intents: structuredClone(item.intents),
+    })),
+  };
+}
+
+function archiveLineageFingerprint(candidates, roles) {
+  const inventory = candidates.map((candidate) => ({
+    archiveId: candidate.archive.archiveId,
+    contentFingerprint: candidate.contentFingerprint,
+    role: roles.get(candidate.archive.archiveId),
+  })).sort((left, right) => left.archiveId.localeCompare(right.archiveId));
+  return {
+    inventory,
+    fingerprint: createHash('sha256')
+      .update(JSON.stringify(canonicalJson(inventory)))
+      .digest('hex'),
+  };
+}
+
+function aggregateCanonicalRootIndex(proofRows) {
+  const bySource = new Map();
+  for (const proof of proofRows) {
+    for (const source of [
+      `thread:${proof.threadNodeId}`,
+      `discussion:${proof.rootCommentDatabaseId}`,
+    ]) {
+      const existing = bySource.get(source);
+      if (existing !== undefined && existing !== proof.threadNodeId) {
+        throw new GitHubWorkflowError(
+          'Aggregate canonical root aliases are ambiguous',
+          'ARCHIVE_PROOF_MISMATCH',
+        );
+      }
+      bySource.set(source, proof.threadNodeId);
+    }
+  }
+  return bySource;
+}
+
+function taskCanonicalRootIds(task, canonicalRootIndex, { requireComplete = false } = {}) {
+  const sources = task.sourceIds.filter((source) => /^(?:thread|discussion):/u.test(source));
+  if (requireComplete && sources.length === 0) return null;
+  const roots = new Set();
+  for (const source of sources) {
+    const root = canonicalRootIndex.get(source);
+    if (root === undefined) {
+      if (requireComplete) return null;
+      continue;
+    }
+    roots.add(root);
+  }
+  return [...roots].sort();
+}
+
+function aggregateSelectedThreadIds(selectedTask, selectedPlan) {
+  const selectedRows = selectedPlan.map((entry) => ({
+    threadNodeId: entry.thread.id,
+    rootCommentDatabaseId: entry.thread.root.databaseId,
+  }));
+  const threadIds = taskCanonicalRootIds(
+    selectedTask, aggregateCanonicalRootIndex(selectedRows), { requireComplete: true },
+  );
+  const planThreadIds = selectedRows.map((row) => row.threadNodeId).sort();
+  if (threadIds === null || threadIds.length < 2 || threadIds.length > MAX_NODES
+      || !isDeepStrictEqual(threadIds, planThreadIds)) {
+    throw new GitHubWorkflowError(
+      'Aggregate archive adoption requires at least two unique canonical root sources',
+      'ARCHIVE_PROOF_MISMATCH',
+    );
+  }
+  return threadIds;
+}
+
+function archiveReferencesSelectedRoots(archive, selectedThreadIds) {
+  const selected = new Set(selectedThreadIds);
+  const proofReference = Array.isArray(archive?.state?.threadResolutionStatus?.threads)
+    && archive.state.threadResolutionStatus.threads.some((proof) => selected.has(proof?.threadNodeId));
+  const intentReference = Array.isArray(archive?.events)
+    && archive.events.some((event) => event !== null && typeof event === 'object' && !Array.isArray(event)
+      && eventCarriesSelectedArchiveIntent(event, selected));
+  return proofReference || intentReference;
+}
+
+function validatedAggregateCarrier(state, archive, activeCarrierKind = null) {
+  const archivedState = archive.state;
+  const stateErrors = Array.isArray(archivedState?.tasks)
+    ? validatePrReviewState(archivedState) : ['tasks must be an array'];
+  if (archivedState?.schemaVersion !== 3 || stateErrors.length > 0) {
+    throw new GitHubWorkflowError(
+      `Relevant archived state is invalid: ${stateErrors.join('; ')}`,
+      'ARCHIVE_EVIDENCE_INVALID',
+    );
+  }
+  assertArchiveEventList(archive.events);
+  return {
+    archive,
+    archivedState,
+    terminalBounds: assertTerminalArchive(archivedState, archive.events),
+    contentFingerprint: archiveContentFingerprint(archive),
+    activeCarrierKind,
+  };
+}
+
+function selectedCarrierProofRows(candidate, selectedThreadIds) {
+  const selected = new Set(selectedThreadIds);
+  const rows = candidate.archivedState.threadResolutionStatus.threads
+    .filter((proof) => selected.has(proof.threadNodeId));
+  const ids = rows.map((proof) => proof.threadNodeId);
+  if (new Set(ids).size !== ids.length || rows.length > MAX_NODES) {
+    throw new GitHubWorkflowError(
+      'Relevant archive duplicates or exceeds selected-root proof bounds',
+      'ARCHIVE_PROOF_MISMATCH',
+    );
+  }
+  return rows.slice().sort((left, right) => left.threadNodeId.localeCompare(right.threadNodeId));
+}
+
+function boundedAggregateSelectedRows(candidates, selectedThreadIds) {
+  const selected = new Set(selectedThreadIds);
+  let nodeCount = selectedThreadIds.length + 2 + candidates.length;
+  if (nodeCount > MAX_NODES) {
+    throw new GitHubWorkflowError(
+      'Aggregate selected roots, minimum partitions, and relevant carriers exceed the cumulative node bound',
+      'ARCHIVE_EVIDENCE_INVALID',
+    );
+  }
+  const rowsByArchive = new Map();
+  for (const candidate of candidates) {
+    const rows = [];
+    const seen = new Set();
+    for (const proof of candidate.archivedState.threadResolutionStatus.threads) {
+      if (!selected.has(proof.threadNodeId)) continue;
+      nodeCount += 1;
+      if (nodeCount > MAX_NODES) {
+        throw new GitHubWorkflowError(
+          'Aggregate carrier-root roles exceed the cumulative node bound',
+          'ARCHIVE_EVIDENCE_INVALID',
+        );
+      }
+      if (seen.has(proof.threadNodeId)) {
+        throw new GitHubWorkflowError(
+          'Relevant archive duplicates selected-root proof',
+          'ARCHIVE_PROOF_MISMATCH',
+        );
+      }
+      seen.add(proof.threadNodeId);
+      rows.push(proof);
+    }
+    rows.sort((left, right) => left.threadNodeId.localeCompare(right.threadNodeId));
+    rowsByArchive.set(candidate.archive.archiveId, rows);
+  }
+  return { nodeCount, rowsByArchive };
+}
+
+function aggregateHistoricalProjection(
+  state, candidate, selectedThreadIds, selectedRows = null, reservePartition = null,
+) {
+  const proofRows = selectedRows ?? selectedCarrierProofRows(candidate, selectedThreadIds);
+  if (proofRows.length === 0 || proofRows.some((proof) => Object.hasOwn(proof, 'archiveProvenance')
+      || proof.taskIds.length !== 1 || proof.isResolved !== true
+      || proof.replyId === null || proof.replyUrl === null
+      || proof.resolvedAt === null || proof.resolvedBy === null
+      || proof.observedHeadSha === state.currentIntegrationHeadSha)) {
+    throw new GitHubWorkflowError(
+      'Historical aggregate carrier proof is incomplete or provenance-mixed',
+      'ARCHIVE_PROOF_MISMATCH',
+    );
+  }
+  const partitions = [];
+  for (const taskId of [...new Set(proofRows.flatMap((proof) => proof.taskIds))].sort()) {
+    const partitionRows = proofRows.filter((proof) => proof.taskIds[0] === taskId);
+    const matchingTasks = candidate.archivedState.tasks.filter((task) => task.id === taskId);
+    if (matchingTasks.length !== 1) {
+      throw new GitHubWorkflowError('Historical aggregate task is missing or duplicated', 'ARCHIVE_TASK_MISMATCH');
+    }
+    const task = matchingTasks[0];
+    const taskThreadIds = taskCanonicalRootIds(
+      task, aggregateCanonicalRootIndex(proofRows), { requireComplete: true },
+    );
+    const partitionThreadIds = partitionRows.map((proof) => proof.threadNodeId).sort();
+    const expectedDisposition = task.disposition === 'actionable' ? 'fixed'
+      : task.disposition === 'already-fixed' ? 'already-fixed' : null;
+    const heads = new Set(partitionRows.map((proof) => proof.observedHeadSha));
+    if (task.sourceType !== 'github-thread' || task.status !== 'completed'
+        || taskThreadIds === null
+        || !isDeepStrictEqual(taskThreadIds, partitionThreadIds)
+        || expectedDisposition === null
+        || partitionRows.some((proof) => proof.disposition !== expectedDisposition)
+        || (task.disposition === 'actionable' && typeof task.integratedCommitSha !== 'string')
+        || (task.disposition === 'already-fixed' && task.integratedCommitSha !== null)
+        || heads.size !== 1) {
+      throw new GitHubWorkflowError(
+        'Historical aggregate task partition is incomplete, divergent, or ineligible',
+        'ARCHIVE_TASK_MISMATCH',
+      );
+    }
+    if (partitions.length >= 2) reservePartition?.();
+    partitions.push({
+      historicalTask: task,
+      historicalDisposition: expectedDisposition,
+      historicalHeadSha: [...heads][0],
+      proofRows: partitionRows,
+    });
+  }
+  return { partitions, proofRows };
+}
+
+function aggregateFullAuthorityProjection(
+  state, historicalCandidates, selectedThreadIds, selectedRowsByArchive, reservePartition,
+) {
+  const full = historicalCandidates.filter((candidate) => (
+    selectedRowsByArchive.get(candidate.archive.archiveId).length === selectedThreadIds.length
+  ));
+  if (full.length === 0) {
+    throw new GitHubWorkflowError(
+      'Aggregate adoption requires one complete historical full carrier',
+      'ARCHIVE_EVIDENCE_MISSING',
+    );
+  }
+  const projection = aggregateHistoricalProjection(
+    state,
+    full[0],
+    selectedThreadIds,
+    selectedRowsByArchive.get(full[0].archive.archiveId),
+    reservePartition,
+  );
+  if (projection.proofRows.length !== selectedThreadIds.length
+      || full.slice(1).some((candidate) => !isDeepStrictEqual(
+        aggregateHistoricalProjection(
+          state, candidate, selectedThreadIds, selectedRowsByArchive.get(candidate.archive.archiveId),
+        ),
+        projection,
+      ))) {
+    throw new GitHubWorkflowError(
+      'Historical full carriers disagree on the aggregate partition authority',
+      'ARCHIVE_EVIDENCE_AMBIGUOUS',
+    );
+  }
+  return projection;
+}
+
+function aggregateAuthorityByRoot(projection) {
+  const byRoot = new Map();
+  for (const partition of projection.partitions) {
+    for (const proof of partition.proofRows) {
+      byRoot.set(proof.threadNodeId, {
+        historicalTask: partition.historicalTask,
+        historicalDisposition: partition.historicalDisposition,
+        historicalHeadSha: partition.historicalHeadSha,
+        proof,
+      });
+    }
+  }
+  return byRoot;
+}
+
+function assertHistoricalCarrierSlice(candidate, projection, rows) {
+  if (rows.length === 0) {
+    throw new GitHubWorkflowError('Intent-only aggregate carrier is not authoritative', 'ARCHIVE_PROOF_MISMATCH');
+  }
+  const carriedRoots = new Set(rows.map((proof) => proof.threadNodeId));
+  const authorityByRoot = aggregateAuthorityByRoot(projection);
+  const canonicalRootIndex = aggregateCanonicalRootIndex(projection.proofRows);
+  const partitionsByTask = new Map(projection.partitions.map((partition) => (
+    [partition.historicalTask.id, partition]
+  )));
+  const archivedTasksById = new Map();
+  const requiredHistoricalTaskIds = new Set();
+  for (const task of candidate.archivedState.tasks) {
+    const indexed = archivedTasksById.get(task.id);
+    if (indexed === undefined) archivedTasksById.set(task.id, { count: 1, task });
+    else indexed.count += 1;
+    if (task.sourceType === 'github-thread'
+        && taskCanonicalRootIds(task, canonicalRootIndex).length !== 0) {
+      requiredHistoricalTaskIds.add(task.id);
+    }
+  }
+  for (const row of candidate.archivedState.threadResolutionStatus.threads) {
+    const provenanceTaskId = row.archiveProvenance?.historicalTaskId;
+    if (partitionsByTask.has(provenanceTaskId)) {
+      requiredHistoricalTaskIds.add(provenanceTaskId);
+      if (!row.taskIds.includes(provenanceTaskId)) {
+        throw new GitHubWorkflowError(
+          'Aggregate carrier provenance references historical authority outside its exact partition',
+          'ARCHIVE_EVIDENCE_AMBIGUOUS',
+        );
+      }
+    }
+    for (const taskId of row.taskIds) {
+      if (partitionsByTask.has(taskId)) requiredHistoricalTaskIds.add(taskId);
+    }
+  }
+  for (const taskId of requiredHistoricalTaskIds) {
+    const partition = partitionsByTask.get(taskId);
+    const indexedTask = archivedTasksById.get(taskId);
+    const task = indexedTask?.task;
+    const taskThreadIds = task?.sourceType === 'github-thread'
+      ? taskCanonicalRootIds(task, canonicalRootIndex, { requireComplete: true }) : null;
+    const authorityRows = new Map(partition?.proofRows.map((row) => [row.threadNodeId, row]) ?? []);
+    const taskRowIds = [];
+    let taskRowsAreExact = true;
+    for (const row of candidate.archivedState.threadResolutionStatus.threads) {
+      if (!row.taskIds.includes(taskId)) continue;
+      taskRowIds.push(row.threadNodeId);
+      if (row.taskIds.length !== 1 || row.taskIds[0] !== taskId
+          || !isDeepStrictEqual(row, authorityRows.get(row.threadNodeId))) {
+        taskRowsAreExact = false;
+      }
+    }
+    taskRowIds.sort();
+    if (!partition || indexedTask?.count !== 1
+        || !isDeepStrictEqual(task, partition.historicalTask)
+        || taskThreadIds === null
+        || !isDeepStrictEqual(taskThreadIds, taskRowIds)
+        || !taskRowsAreExact) {
+      throw new GitHubWorkflowError(
+        'Aggregate carrier has an unanchored, overlapping, or incomplete historical task partition',
+        'ARCHIVE_EVIDENCE_AMBIGUOUS',
+      );
+    }
+  }
+  for (const partition of projection.partitions) {
+    const roots = partition.proofRows.map((proof) => proof.threadNodeId);
+    const count = roots.filter((root) => carriedRoots.has(root)).length;
+    if (count !== 0 && count !== roots.length) {
+      throw new GitHubWorkflowError(
+        'Partial aggregate carrier slices a historical task partition',
+        'ARCHIVE_PROOF_MISMATCH',
+      );
+    }
+  }
+  for (const row of rows) {
+    const authority = authorityByRoot.get(row.threadNodeId);
+    const indexedTask = archivedTasksById.get(authority?.historicalTask.id);
+    if (!authority || !isDeepStrictEqual(row, authority.proof)
+        || indexedTask?.count !== 1
+        || !isDeepStrictEqual(indexedTask.task, authority.historicalTask)) {
+      throw new GitHubWorkflowError(
+        'Aggregate carrier diverges from its anchored historical partition',
+        'ARCHIVE_EVIDENCE_AMBIGUOUS',
+      );
+    }
+  }
+  return rows;
+}
+
+function archiveReferencesAnchoredHistoricalTasks(archive, anchoredTaskIds) {
+  if (Array.isArray(archive?.state?.tasks)) {
+    for (const task of archive.state.tasks) {
+      if (anchoredTaskIds.has(task?.id)) return true;
+    }
+  }
+  const proofRows = archive?.state?.threadResolutionStatus?.threads;
+  if (!Array.isArray(proofRows)) return false;
+  for (const row of proofRows) {
+    if (anchoredTaskIds.has(row?.archiveProvenance?.historicalTaskId)) return true;
+    if (!Array.isArray(row?.taskIds)) continue;
+    for (const taskId of row.taskIds) {
+      if (anchoredTaskIds.has(taskId)) return true;
+    }
+  }
+  return false;
+}
+
+function singleRootProjection(authority) {
+  return {
+    task: authority.historicalTask,
+    proofRows: [authority.proof],
+    historicalHeadSha: authority.historicalHeadSha,
+  };
+}
+
+function validateAggregateRootOrigin(state, live, selectedPlanByRoot, candidate, authority) {
+  const entry = selectedPlanByRoot.get(authority.proof.threadNodeId);
+  if (!entry) throw new GitHubWorkflowError('Aggregate live root is missing', 'ARCHIVE_LIVE_MISMATCH');
+  const adoption = validateArchiveBatchLive(
+    state,
+    live,
+    authority.historicalTask,
+    [entry],
+    {
+      ...candidate,
+      archivedTask: authority.historicalTask,
+      projection: singleRootProjection(authority),
+    },
+  );
+  const evidence = adoption.evidence[0];
+  if (!aggregateHistoricalReplyBodyIsAdmissible(evidence.reply.body, {
+    prNumber: state.prNumber,
+    threadNodeId: authority.proof.threadNodeId,
+    historicalHeadSha: authority.historicalHeadSha,
+    historicalTaskId: authority.historicalTask.id,
+    historicalDisposition: authority.historicalDisposition,
+    historicalIntegratedCommitSha: authority.historicalTask.integratedCommitSha,
+  })) {
+    throw new GitHubWorkflowError(
+      'Historical aggregate reply has ambiguous stable task or marker structure',
+      'ARCHIVE_REPLY_MISMATCH',
+    );
+  }
+  return evidence;
+}
+
+function normalizedAggregateRootAuthority(authority, evidence) {
+  return {
+    threadNodeId: authority.proof.threadNodeId,
+    proof: structuredClone(authority.proof),
+    historicalTask: structuredClone(authority.historicalTask),
+    observedHeadSha: authority.historicalHeadSha,
+    replyBody: evidence.reply.body,
+    intents: structuredClone(evidence.intents),
+  };
+}
+
+function aggregateInventoryFingerprint(candidates, roleEntries, authorityFingerprint) {
+  const inventory = candidates.map((candidate) => ({
+    archiveId: candidate.archive.archiveId,
+    contentFingerprint: candidate.contentFingerprint,
+    partitionRootRoles: roleEntries.get(candidate.archive.archiveId)
+      .slice().sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+  })).sort((left, right) => left.archiveId.localeCompare(right.archiveId));
+  const bound = { authorityFingerprint, inventory };
+  return {
+    inventory,
+    fingerprint: createHash('sha256')
+      .update(JSON.stringify(canonicalJson(bound)))
+      .digest('hex'),
+  };
+}
+
+function aggregateProofCore(proof) {
+  return {
+    threadNodeId: proof.threadNodeId,
+    rootCommentNodeId: proof.rootCommentNodeId,
+    rootCommentDatabaseId: proof.rootCommentDatabaseId,
+    replyId: proof.replyId,
+    replyUrl: proof.replyUrl,
+    isResolved: proof.isResolved,
+    resolvedAt: proof.resolvedAt,
+    resolvedBy: proof.resolvedBy,
+    observedHeadSha: proof.observedHeadSha,
+  };
+}
+
+function assertAggregateReplayCarrier(
+  selectedTask, candidate, rows, selectedThreadIds, projection, authorityRootsByRoot,
+  authorityFingerprint, intentFootprints,
+) {
+  const archivedActiveTaskIds = [...new Set(rows.flatMap((row) => row.taskIds))];
+  const archivedActiveTaskId = archivedActiveTaskIds.length === 1 ? archivedActiveTaskIds[0] : null;
+  const matchingTasks = candidate.archivedState.tasks.filter((task) => task.id === selectedTask.id);
+  const authorityByRoot = aggregateAuthorityByRoot(projection);
+  const canonicalRootIndex = aggregateCanonicalRootIndex(projection.proofRows);
+  const archivedTaskThreadIds = matchingTasks.length === 1
+    ? taskCanonicalRootIds(matchingTasks[0], canonicalRootIndex, { requireComplete: true }) : null;
+  const selectedRows = new Set(rows.map((row) => row.threadNodeId));
+  const allActiveRows = candidate.archivedState.threadResolutionStatus.threads.filter(
+    (row) => row.taskIds.includes(selectedTask.id),
+  );
+  const anchoredHistoricalTaskIds = new Set(
+    projection.partitions.map((partition) => partition.historicalTask.id),
+  );
+  const replayClosureIsExact = candidate.archivedState.tasks.every((task) => {
+    if (task.sourceType !== 'github-thread') return true;
+    const intersecting = taskCanonicalRootIds(task, canonicalRootIndex);
+    return intersecting.length === 0 || task.id === selectedTask.id;
+  }) && candidate.archivedState.threadResolutionStatus.threads.every((row) => {
+    if (row.taskIds.some((taskId) => anchoredHistoricalTaskIds.has(taskId))) return false;
+    if (!anchoredHistoricalTaskIds.has(row.archiveProvenance?.historicalTaskId)) return true;
+    return row.taskIds.length === 1 && row.taskIds[0] === selectedTask.id
+      && selectedRows.has(row.threadNodeId);
+  });
+  if (rows.length !== selectedThreadIds.length || matchingTasks.length !== 1
+      || archivedActiveTaskId !== selectedTask.id
+      || allActiveRows.length !== rows.length
+      || allActiveRows.some((row) => !selectedRows.has(row.threadNodeId))
+      || !replayClosureIsExact
+      || matchingTasks[0].status !== 'completed'
+      || matchingTasks[0].sourceType !== 'github-thread'
+      || matchingTasks[0].disposition !== 'already-fixed'
+      || matchingTasks[0].integratedCommitSha !== null
+      || archivedTaskThreadIds === null
+      || !isDeepStrictEqual(archivedTaskThreadIds, selectedThreadIds)
+      || !isDeepStrictEqual(projectedArchivedTask(matchingTasks[0]), selectedTask)
+      || rows.some((row) => row.taskIds.length !== 1 || row.taskIds[0] !== archivedActiveTaskId
+        || row.disposition !== 'already-fixed' || !Object.hasOwn(row, 'archiveProvenance'))) {
+    throw new GitHubWorkflowError(
+      'Active aggregate replay carrier is incomplete or downgraded',
+      'ARCHIVE_PROOF_MISMATCH',
+    );
+  }
+  const roles = [];
+  for (const row of rows) {
+    const authority = authorityByRoot.get(row.threadNodeId);
+    const normalizedAuthority = authorityRootsByRoot.get(row.threadNodeId);
+    const provenance = row.archiveProvenance;
+    const expectedBodyHash = createHash('sha256')
+      .update(normalizedAuthority?.replyBody ?? '', 'utf8').digest('hex');
+    if (!authority || !normalizedAuthority
+        || !isDeepStrictEqual(aggregateProofCore(row), aggregateProofCore(authority.proof))
+        || provenance.schemaVersion !== 1
+        || provenance.historicalTaskId !== authority.historicalTask.id
+        || provenance.historicalDisposition !== authority.historicalDisposition
+        || provenance.historicalIntegratedCommitSha !== authority.historicalTask.integratedCommitSha
+        || provenance.replyBodySha256 !== expectedBodyHash
+        || provenance.authorityFingerprint !== authorityFingerprint) {
+      throw new GitHubWorkflowError(
+        'Active aggregate replay provenance is missing, altered, or inconsistent',
+        'ARCHIVE_EVIDENCE_AMBIGUOUS',
+      );
+    }
+    const projectionForRoot = singleRootProjection(authority);
+    const footprint = aggregateArchiveIntentFootprint(intentFootprints, row.threadNodeId);
+    if (footprint.length !== 0) {
+      throw new GitHubWorkflowError(
+        'Active aggregate carrier may replay but cannot originate historical authority',
+        'ARCHIVE_INTENT_AMBIGUOUS',
+      );
+    }
+    assertReplayArchiveBounds({ ...candidate, projection: projectionForRoot });
+    roles.push({
+      historicalTaskId: authority.historicalTask.id,
+      threadNodeId: row.threadNodeId,
+      role: 'replay',
+    });
+  }
+  return roles;
+}
+
+function aggregateAncestryRelations(state, candidates, projection, selectedRowsByArchive) {
+  const relations = new Map();
+  const add = (ancestorSha, descendantSha, label) => {
+    relations.set(`${ancestorSha}:${descendantSha}`, { ancestorSha, descendantSha, label });
+  };
+  for (const partition of projection.partitions) {
+    if (partition.historicalDisposition === 'fixed') {
+      add(
+        partition.historicalTask.integratedCommitSha,
+        partition.historicalHeadSha,
+        `historical task ${partition.historicalTask.id}`,
+      );
+    }
+  }
+  for (const candidate of candidates) {
+    for (const row of selectedRowsByArchive.get(candidate.archive.archiveId)) {
+      add(
+        row.observedHeadSha,
+        candidate.archivedState.currentIntegrationHeadSha,
+        `archive ${candidate.archive.archiveId} proof`,
+      );
+    }
+    add(
+      candidate.archivedState.currentIntegrationHeadSha,
+      state.currentIntegrationHeadSha,
+      `archive ${candidate.archive.archiveId} carrier`,
+    );
+  }
+  return [...relations.values()].sort((left, right) => (
+    `${left.ancestorSha}:${left.descendantSha}`.localeCompare(`${right.ancestorSha}:${right.descendantSha}`)
+  ));
+}
+
+function validateAggregateArchiveLineage(
+  state, live, selectedTask, selectedPlan, candidates, provenanceCandidates, archiveInventory,
+) {
+  const selectedThreadIds = aggregateSelectedThreadIds(selectedTask, selectedPlan);
+  const planThreadIds = selectedPlan.map((entry) => entry.thread.id).sort();
+  if (!isDeepStrictEqual(planThreadIds, selectedThreadIds)) {
+    throw new GitHubWorkflowError(
+      'Aggregate archive roots do not exactly match the exclusive live plan',
+      'ARCHIVE_PROOF_MISMATCH',
+    );
+  }
+  const provenanceIds = new Set(provenanceCandidates.map((candidate) => candidate.archive.archiveId));
+  const historicalCandidates = candidates.filter((candidate) => !provenanceIds.has(candidate.archive.archiveId));
+  const boundedRows = boundedAggregateSelectedRows(candidates, selectedThreadIds);
+  const selectedRowsByArchive = boundedRows.rowsByArchive;
+  let aggregateNodeCount = boundedRows.nodeCount;
+  const reserveAggregateNode = (count = 1) => {
+    aggregateNodeCount += count;
+    if (aggregateNodeCount > MAX_NODES) {
+      throw new GitHubWorkflowError(
+        'Aggregate partitions, carriers, roles, and intent footprints exceed the cumulative node bound',
+        'ARCHIVE_EVIDENCE_INVALID',
+      );
+    }
+  };
+  const projection = aggregateFullAuthorityProjection(
+    state, historicalCandidates, selectedThreadIds, selectedRowsByArchive, reserveAggregateNode,
+  );
+  if (projection.partitions.length < 2 || projection.partitions.length > MAX_NODES) {
+    throw new GitHubWorkflowError(
+      'Aggregate adoption requires multiple bounded historical task partitions',
+      'ARCHIVE_PROOF_MISMATCH',
+    );
+  }
+  const candidateIds = new Set();
+  for (const candidate of candidates) candidateIds.add(candidate.archive.archiveId);
+  const anchoredHistoricalTaskIds = new Set();
+  for (const partition of projection.partitions) {
+    anchoredHistoricalTaskIds.add(partition.historicalTask.id);
+  }
+  for (const archive of archiveInventory) {
+    if (candidateIds.has(archive.archiveId)
+        || archive?.state?.repository !== state.repository
+        || archive?.state?.prNumber !== state.prNumber) continue;
+    if (archiveReferencesAnchoredHistoricalTasks(archive, anchoredHistoricalTaskIds)) {
+      throw new GitHubWorkflowError(
+        'An off-selection archive carrier references anchored historical authority',
+        'ARCHIVE_EVIDENCE_AMBIGUOUS',
+      );
+    }
+  }
+  const historicalRowsByArchive = new Map(historicalCandidates.map((candidate) => [
+    candidate.archive.archiveId,
+    assertHistoricalCarrierSlice(
+      candidate, projection, selectedRowsByArchive.get(candidate.archive.archiveId),
+    ),
+  ]));
+  const provenanceRowsByArchive = new Map(provenanceCandidates.map((candidate) => [
+    candidate.archive.archiveId,
+    selectedRowsByArchive.get(candidate.archive.archiveId),
+  ]));
+  const intentFootprintsByArchive = new Map();
+  for (const candidate of candidates) {
+    intentFootprintsByArchive.set(
+      candidate.archive.archiveId,
+      indexedAggregateArchiveIntentFootprints(
+        state, candidate, projection, reserveAggregateNode,
+      ),
+    );
+  }
+  const authorityByRoot = aggregateAuthorityByRoot(projection);
+  const selectedPlanByRoot = new Map(selectedPlan.map((entry) => [entry.thread.id, entry]));
+  const origins = new Map(selectedThreadIds.map((threadId) => [threadId, []]));
+  const roleEntries = new Map(candidates.map((candidate) => [candidate.archive.archiveId, []]));
+  for (const candidate of historicalCandidates) {
+    const carriedRows = historicalRowsByArchive.get(candidate.archive.archiveId);
+    const carried = new Set(carriedRows.map((row) => row.threadNodeId));
+    const intentFootprints = intentFootprintsByArchive.get(candidate.archive.archiveId);
+    for (const threadId of selectedThreadIds) {
+      const authority = authorityByRoot.get(threadId);
+      const rootProjection = singleRootProjection(authority);
+      const footprint = aggregateArchiveIntentFootprint(intentFootprints, threadId);
+      if (!carried.has(threadId)) {
+        if (footprint.length !== 0) {
+          throw new GitHubWorkflowError(
+            'Archive carries selected-root intent evidence outside its proof partition',
+            'ARCHIVE_INTENT_AMBIGUOUS',
+          );
+        }
+        continue;
+      }
+      let role = 'replay';
+      if (footprint.length === 0) {
+        assertReplayArchiveBounds({ ...candidate, projection: rootProjection });
+      } else {
+        assertCompleteSelectedArchiveIntentFootprint(state, rootProjection, footprint);
+        const evidence = validateAggregateRootOrigin(
+          state, live, selectedPlanByRoot, candidate, authority,
+        );
+        origins.get(threadId).push({
+          archiveId: candidate.archive.archiveId,
+          evidence,
+          authority: normalizedAggregateRootAuthority(authority, evidence),
+        });
+        role = 'origin';
+      }
+      roleEntries.get(candidate.archive.archiveId).push({
+        historicalTaskId: authority.historicalTask.id,
+        threadNodeId: threadId,
+        role,
+      });
+    }
+  }
+  const authorityRoots = [];
+  const evidence = [];
+  for (const threadId of selectedThreadIds) {
+    const rootOrigins = origins.get(threadId);
+    if (rootOrigins.length === 0) {
+      throw new GitHubWorkflowError(
+        `Aggregate root ${threadId} lacks an original reply and resolve authority`,
+        'ARCHIVE_INTENT_AMBIGUOUS',
+      );
+    }
+    const normalized = rootOrigins[0].authority;
+    if (rootOrigins.some((origin) => !isDeepStrictEqual(origin.authority, normalized))) {
+      throw new GitHubWorkflowError(
+        `Aggregate root ${threadId} has conflicting origin authorities`,
+        'ARCHIVE_EVIDENCE_AMBIGUOUS',
+      );
+    }
+    rootOrigins.sort((left, right) => left.archiveId.localeCompare(right.archiveId));
+    authorityRoots.push(normalized);
+    const authority = authorityByRoot.get(threadId);
+    evidence.push({
+      ...rootOrigins[0].evidence,
+      historicalTask: structuredClone(authority.historicalTask),
+      historicalDisposition: authority.historicalDisposition,
+      historicalHeadSha: authority.historicalHeadSha,
+    });
+  }
+  const authorityFingerprint = createHash('sha256')
+    .update(JSON.stringify(canonicalJson({ roots: authorityRoots })))
+    .digest('hex');
+  const authorityRootsByRoot = new Map(authorityRoots.map((root) => [root.threadNodeId, root]));
+  for (const candidate of provenanceCandidates) {
+    const roles = assertAggregateReplayCarrier(
+      selectedTask, candidate, provenanceRowsByArchive.get(candidate.archive.archiveId),
+      selectedThreadIds, projection, authorityRootsByRoot, authorityFingerprint,
+      intentFootprintsByArchive.get(candidate.archive.archiveId),
+    );
+    roleEntries.set(candidate.archive.archiveId, roles);
+  }
+  const replyBodies = new Map(authorityRoots.map((root) => [root.threadNodeId, root.replyBody]));
+  const finalizedEvidence = evidence.map((item) => ({
+    ...item,
+    archiveProvenance: {
+      schemaVersion: 1,
+      historicalTaskId: item.historicalTask.id,
+      historicalDisposition: item.historicalDisposition,
+      historicalIntegratedCommitSha: item.historicalTask.integratedCommitSha,
+      replyBodySha256: createHash('sha256').update(replyBodies.get(item.threadNodeId), 'utf8').digest('hex'),
+      authorityFingerprint,
+    },
+  }));
+  const inventory = aggregateInventoryFingerprint(candidates, roleEntries, authorityFingerprint);
+  return {
+    mode: 'aggregate',
+    evidence: finalizedEvidence,
+    archiveLineage: { ...inventory, authorityFingerprint },
+    ancestryRelations: aggregateAncestryRelations(state, candidates, projection, new Map([
+      ...historicalRowsByArchive,
+      ...provenanceRowsByArchive,
+    ])),
+  };
+}
+
+function activeArchiveCarrierKind(state, selectedTask, archive) {
+  const archivedState = archive?.state;
+  if (archivedState?.repository !== state.repository
+      || archivedState?.prNumber !== state.prNumber) return null;
+  let matchingTaskCount = 0;
+  if (Array.isArray(archivedState.tasks)) {
+    for (const task of archivedState.tasks) {
+      if (task?.id !== selectedTask.id) continue;
+      matchingTaskCount += 1;
+    }
+  }
+  const proofRows = archivedState.threadResolutionStatus?.threads;
+  if (!Array.isArray(proofRows)) return matchingTaskCount === 0 ? null : 'ordinary';
+  let matchingProofCount = 0;
+  let sawProvenance = false;
+  let sawLegacy = false;
+  for (const proof of proofRows) {
+    if (!Array.isArray(proof?.taskIds) || !proof.taskIds.includes(selectedTask.id)) continue;
+    matchingProofCount += 1;
+    if (Object.hasOwn(proof, 'archiveProvenance')) sawProvenance = true;
+    else sawLegacy = true;
+    if (sawProvenance && sawLegacy) {
+      throw new GitHubWorkflowError(
+        'Active archive carrier mixes aggregate provenance with legacy proof rows',
+        'ARCHIVE_EVIDENCE_AMBIGUOUS',
+      );
+    }
+  }
+  if (matchingTaskCount === 0 && matchingProofCount === 0) return null;
+  return sawProvenance ? 'aggregate-replay' : 'ordinary';
+}
+
+async function selectArchiveForBatch(state, selectedTask, selectedPlan, archiveStore) {
+  if (!archiveStore?.list) {
+    throw new GitHubWorkflowError('Immutable archive evidence is unavailable', 'ARCHIVE_EVIDENCE_MISSING');
+  }
+  const archives = await archiveStore.list(state.prNumber);
+  assertArchiveInventory(archives);
+  const selectedThreadIds = aggregateSelectedThreadIds(selectedTask, selectedPlan);
+  const relevantArchives = [];
+  let minimumAggregateNodes = selectedThreadIds.length + 2;
+  let hasOrdinaryCarrier = false;
+  let hasAggregateReplayCarrier = false;
+  for (const archive of archives) {
+    const kind = activeArchiveCarrierKind(state, selectedTask, archive);
+    hasOrdinaryCarrier ||= kind === 'ordinary';
+    hasAggregateReplayCarrier ||= kind === 'aggregate-replay';
+    if (hasOrdinaryCarrier && hasAggregateReplayCarrier) {
+      throw new GitHubWorkflowError(
+        'Ordinary and aggregate replay carriers cannot be mixed',
+        'ARCHIVE_EVIDENCE_AMBIGUOUS',
+      );
+    }
+    const samePullRequest = archive?.state?.repository === state.repository
+      && archive?.state?.prNumber === state.prNumber;
+    if (!samePullRequest || (kind === null
+        && !archiveReferencesSelectedRoots(archive, selectedThreadIds))) continue;
+    minimumAggregateNodes += 1;
+    if (minimumAggregateNodes > MAX_NODES) {
+      throw new GitHubWorkflowError(
+        'Aggregate selected roots, minimum partitions, and relevant carriers exceed the cumulative node bound',
+        'ARCHIVE_EVIDENCE_INVALID',
+      );
+    }
+    relevantArchives.push({ archive, kind });
+  }
+  if (hasOrdinaryCarrier) {
+    return { mode: 'legacy', ...selectLegacyArchiveForBatch(state, selectedTask, archives) };
+  }
+  if (selectedTask.disposition !== 'already-fixed') {
+    throw new GitHubWorkflowError(
+      'Aggregate archive adoption is limited to an already-fixed active task',
+      'ARCHIVE_TASK_MISMATCH',
+    );
+  }
+  const relevant = relevantArchives.map(({ archive, kind }) => (
+    validatedAggregateCarrier(state, archive, kind)
+  ));
+  if (relevant.length === 0) {
+    throw new GitHubWorkflowError('No immutable archive proves this aggregate task', 'ARCHIVE_EVIDENCE_MISSING');
+  }
+  const provenanceCandidates = relevant.filter(
+    (candidate) => candidate.activeCarrierKind === 'aggregate-replay',
+  );
+  return {
+    mode: 'aggregate', candidates: relevant, provenanceCandidates, archiveInventory: archives,
+  };
+}
+
+function validateArchiveBatchLineage(state, live, selectedTask, selectedPlan, lineage) {
+  if (lineage.mode === 'aggregate') {
+    return validateAggregateArchiveLineage(
+      state, live, selectedTask, selectedPlan, lineage.candidates, lineage.provenanceCandidates,
+      lineage.archiveInventory,
+    );
+  }
+  if (!isDeepStrictEqual(lineage.projection.task, selectedTask)) {
+    throw new GitHubWorkflowError('Archive lineage task projection changed', 'ARCHIVE_TASK_MISMATCH');
+  }
+  const origins = [];
+  const roles = new Map();
+  for (const candidate of lineage.candidates) {
+    const archiveId = candidate.archive.archiveId;
+    const footprint = selectedArchiveIntentFootprint(
+      state, candidate.projection, candidate.archive.events,
+    );
+    if (footprint.length === 0) {
+      assertReplayArchiveBounds(candidate);
+      roles.set(archiveId, 'replay');
+      continue;
+    }
+    assertCompleteSelectedArchiveIntentFootprint(state, candidate.projection, footprint);
+    const adoption = validateArchiveBatchLive(
+      state, live, selectedTask, selectedPlan, candidate,
+    );
+    origins.push({
+      archiveId,
+      adoption,
+      authority: normalizedArchiveOriginAuthority(lineage.projection, adoption),
+    });
+    roles.set(archiveId, 'origin');
+  }
+  if (origins.length === 0) {
+    throw new GitHubWorkflowError(
+      'Archive lineage lacks a complete original reply and resolve intent authority',
+      'ARCHIVE_INTENT_AMBIGUOUS',
+    );
+  }
+  const authority = origins[0].authority;
+  if (origins.some((origin) => !isDeepStrictEqual(origin.authority, authority))) {
+    throw new GitHubWorkflowError(
+      'Archive lineage contains conflicting complete intent authorities',
+      'ARCHIVE_EVIDENCE_AMBIGUOUS',
+    );
+  }
+  origins.sort((left, right) => left.archiveId.localeCompare(right.archiveId));
+  const lineageInventory = archiveLineageFingerprint(lineage.candidates, roles);
+  return {
+    ...origins[0].adoption,
+    archiveLineage: {
+      ...lineageInventory,
+      authorityFingerprint: createHash('sha256')
+        .update(JSON.stringify(canonicalJson(authority)))
+        .digest('hex'),
+    },
+  };
+}
+
+async function prepareArchiveBatchAdoption({
+  state, live, selectedTask, selectedPlan, archiveStore, git,
+}) {
+  const lineage = await selectArchiveForBatch(state, selectedTask, selectedPlan, archiveStore);
+  const adoption = validateArchiveBatchLineage(state, live, selectedTask, selectedPlan, lineage);
+  const relations = adoption.mode === 'aggregate'
+    ? adoption.ancestryRelations
+    : [{
+      ancestorSha: adoption.historicalHeadSha,
+      descendantSha: state.currentIntegrationHeadSha,
+      label: 'archived historical HEAD',
+    }];
+  for (const relation of relations) {
+    if (!(await git.isAncestor(
+      relation.ancestorSha, relation.descendantSha, state.integrationWorktree,
+    ))) {
+      throw new GitHubWorkflowError(
+        `${relation.label} is not an integration ancestor`,
+        'MUTATION_NOT_READY',
+      );
+    }
+  }
+  return adoption;
+}
+
+function archiveAdoptionEvidenceMap(adoption) {
+  return new Map(adoption.evidence.map((item) => [item.threadNodeId, {
+    archiveAdoption: true,
+    reply: item.reply,
+    resolvedAt: item.proof.resolvedAt,
+    resolvedBy: item.proof.resolvedBy,
+    observedHeadSha: item.historicalHeadSha ?? adoption.historicalHeadSha,
+    ...(item.archiveProvenance ? { archiveProvenance: structuredClone(item.archiveProvenance) } : {}),
+  }]));
+}
+
+function archiveImportCompletionEnvelope(selectedTask, proof, adoption) {
+  const rows = proof.threads.filter((row) => Object.hasOwn(row, 'archiveProvenance'))
+    .map((row) => ({
+      threadNodeId: row.threadNodeId,
+      replyId: row.replyId,
+      replyBodySha256: row.archiveProvenance.replyBodySha256,
+      provenanceFingerprint: createHash('sha256')
+        .update(JSON.stringify(canonicalJson(row.archiveProvenance)))
+        .digest('hex'),
+      rowFingerprint: createHash('sha256')
+        .update(JSON.stringify(canonicalJson(row)))
+        .digest('hex'),
+    }))
+    .sort((left, right) => left.threadNodeId.localeCompare(right.threadNodeId));
+  return {
+    schemaVersion: 1,
+    taskId: selectedTask.id,
+    authorityFingerprint: adoption.archiveLineage.authorityFingerprint,
+    rows,
+  };
+}
+
 function priorHeadRecoveryCandidate(state, live, entry, selectedTask) {
   if (!completedThreadlessRecoveryReady(state) || !entry.thread.isResolved
       || selectedTask?.sourceType !== 'github-thread'
@@ -645,7 +2341,7 @@ function priorHeadRecoveryCandidate(state, live, entry, selectedTask) {
   const markedReplies = directReplies.filter((comment) => markerPattern.test(comment.body ?? ''));
   const priorCandidates = markedReplies.map((reply) => ({
     reply,
-    priorHeadSha: /^Aerstello review resolution at ([0-9a-f]{40})\.\n/u.exec(reply.body ?? '')?.[1] ?? null,
+    priorHeadSha: AGGREGATE_REPLY_HEADER_PATTERN.exec(reply.body ?? '')?.[1] ?? null,
   })).filter((candidate) => candidate.priorHeadSha !== null
     && candidate.priorHeadSha !== state.currentIntegrationHeadSha);
   if (priorCandidates.length === 0) return null;
@@ -721,21 +2417,57 @@ function assertRecordedReply(state, live, entry, proof) {
   const replies = entry.thread.comments.filter((comment) => comment.id === proof.replyId);
   if (replies.length !== 1) throw new GitHubWorkflowError('Historical reply ID is not uniquely live', 'THREAD_PROOF_STALE');
   const reply = replies[0];
-  const header = /^Aerstello review resolution at ([0-9a-f]{40})\.\n/u.exec(reply.body ?? '');
+  const header = AGGREGATE_REPLY_HEADER_PATTERN.exec(reply.body ?? '');
   const replyHeadSha = header?.[1] ?? null;
   const operationId = replyHeadSha ? `reply:${state.prNumber}:${entry.thread.id}:${replyHeadSha}` : null;
   const markers = [...String(reply.body ?? '').matchAll(/<!-- aerstello-review:[0-9a-f]{24} -->/gu)].map((match) => match[0]);
+  const provenance = proof.archiveProvenance;
   const authorMatches = proof.isResolved
-    ? reply.author?.login === proof.resolvedBy
+    ? provenance
+      ? isViewerActor(reply.author, live.metadata.viewer) && reply.author.login === proof.resolvedBy
+      : reply.author?.login === proof.resolvedBy
     : isViewerActor(reply.author, live.metadata.viewer);
-  if (proof.isResolved && authorMatches && !reply.author?.id) {
+  if (proof.isResolved && reply.author?.login === proof.resolvedBy && !reply.author?.id) {
     throw new GitHubWorkflowError('Recorded reply actor has no node ID', 'CANONICAL_ACTOR_INCOMPLETE');
   }
   if (reply.url !== proof.replyUrl || reply.replyTo?.id !== entry.thread.root.id
       || !authorMatches || !replyHeadSha || markers.length !== 1
-      || (!proof.isResolved && replyHeadSha !== state.currentIntegrationHeadSha)
+      || (!provenance && !proof.isResolved && replyHeadSha !== state.currentIntegrationHeadSha)
       || markers[0] !== replyMarker(operationId)) {
     throw new GitHubWorkflowError('Historical reply identity or immutable anchor is stale', 'THREAD_PROOF_STALE');
+  }
+  if (provenance) {
+    const fields = [
+      'schemaVersion', 'historicalTaskId', 'historicalDisposition',
+      'historicalIntegratedCommitSha', 'replyBodySha256', 'authorityFingerprint',
+    ];
+    const bodyHash = createHash('sha256').update(String(reply.body ?? ''), 'utf8').digest('hex');
+    if (!hasExactKeys(provenance, fields)
+        || provenance.schemaVersion !== 1
+        || typeof provenance.historicalTaskId !== 'string' || provenance.historicalTaskId.length === 0
+        || !['fixed', 'already-fixed'].includes(provenance.historicalDisposition)
+        || (provenance.historicalDisposition === 'fixed'
+          && !FULL_GIT_SHA_PATTERN.test(provenance.historicalIntegratedCommitSha ?? ''))
+        || (provenance.historicalDisposition === 'already-fixed'
+          && provenance.historicalIntegratedCommitSha !== null)
+        || !/^[0-9a-f]{64}$/u.test(provenance.replyBodySha256 ?? '')
+        || !/^[0-9a-f]{64}$/u.test(provenance.authorityFingerprint ?? '')
+        || reply.lastEditedAt !== null || replyHeadSha !== proof.observedHeadSha
+        || bodyHash !== provenance.replyBodySha256
+        || !aggregateHistoricalReplyBodyIsAdmissible(reply.body, {
+          prNumber: state.prNumber,
+          threadNodeId: entry.thread.id,
+          historicalHeadSha: proof.observedHeadSha,
+          historicalTaskId: provenance.historicalTaskId,
+          historicalDisposition: provenance.historicalDisposition,
+          historicalIntegratedCommitSha: provenance.historicalIntegratedCommitSha,
+        })) {
+      throw new GitHubWorkflowError(
+        'Historical aggregate reply or archive provenance is stale',
+        'THREAD_PROOF_STALE',
+      );
+    }
+    return reply;
   }
   for (const task of entry.tasks) {
     const stableLine = task.integratedCommitSha
@@ -808,6 +2540,7 @@ function buildThreadProof(state, live, resolvedEvidence, at) {
     const exact = recordedReply ? [recordedReply]
       : fresh?.priorHeadRecovery
         ? [assertPriorHeadRecoveryLive(state, live, entry, fresh.priorHeadRecovery)]
+        : fresh?.archiveAdoption ? [fresh.reply]
         : exactRepliesFor(state, live, entry).exact;
     const reply = recordedReply ?? fresh?.reply ?? exact[0] ?? null;
     if (thread.isResolved && (!fresh || exact.length !== 1)) {
@@ -827,7 +2560,10 @@ function buildThreadProof(state, live, resolvedEvidence, at) {
       isResolved: thread.isResolved,
       resolvedAt: thread.isResolved ? old?.resolvedAt ?? fresh?.resolvedAt ?? null : null,
       resolvedBy: thread.isResolved ? old?.resolvedBy ?? fresh?.resolvedBy ?? null : null,
-      observedHeadSha: old?.observedHeadSha ?? state.currentIntegrationHeadSha,
+      observedHeadSha: old?.observedHeadSha ?? fresh?.observedHeadSha ?? state.currentIntegrationHeadSha,
+      ...(fresh?.archiveProvenance ? {
+        archiveProvenance: structuredClone(fresh.archiveProvenance),
+      } : {}),
     };
     return old ? {
       ...old,
@@ -1343,7 +3079,7 @@ function staleDiscoveryNextAction(status, fallback) {
   return fallback;
 }
 
-export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, clock, journal }) {
+export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, clock, journal, archiveStore }) {
   if (!client?.graphql || !stateAdapter?.load || !git || !clock?.now) {
     throw new GitHubWorkflowError('Client, state, Git, and clock adapters are required', 'INVALID_ADAPTERS');
   }
@@ -1907,6 +3643,66 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     let live = await readLiveSnapshot(client, active);
     await assertMutationReady({ state: active, git }, live);
     const { plan, selected: selectedTask, selectedPlan } = buildCanonicalRootPlan(active, live, taskId);
+    if (archiveBatchAdoptionReady(active, selectedTask, selectedPlan)) {
+      const preflightAdoption = await prepareArchiveBatchAdoption({
+        state: active, live, selectedTask, selectedPlan, archiveStore, git,
+      });
+      const finalLineage = await selectArchiveForBatch(
+        active, selectedTask, selectedPlan, archiveStore,
+      );
+      live = await readLiveSnapshot(client, active);
+      await assertMutationReady({ state: active, git }, live);
+      const finalPlan = buildCanonicalRootPlan(active, live, taskId);
+      if (!archiveBatchAdoptionReady(active, finalPlan.selected, finalPlan.selectedPlan)) {
+        throw new GitHubWorkflowError('Archive adoption prerequisites changed after preflight', 'THREAD_PROOF_STALE');
+      }
+      const finalAdoption = validateArchiveBatchLineage(
+        active, live, finalPlan.selected, finalPlan.selectedPlan, finalLineage,
+      );
+      const finalRelations = finalAdoption.mode === 'aggregate'
+        ? finalAdoption.ancestryRelations
+        : [{
+          ancestorSha: finalAdoption.historicalHeadSha,
+          descendantSha: active.currentIntegrationHeadSha,
+          label: 'archived historical HEAD',
+        }];
+      for (const relation of finalRelations) {
+        if (!(await git.isAncestor(
+          relation.ancestorSha, relation.descendantSha, active.integrationWorktree,
+        ))) {
+          throw new GitHubWorkflowError(
+            `${relation.label} is not an integration ancestor`,
+            'MUTATION_NOT_READY',
+          );
+        }
+      }
+      if (!isDeepStrictEqual(preflightAdoption, finalAdoption)) {
+        throw new GitHubWorkflowError('Archive or live resolved-root evidence changed after preflight', 'THREAD_PROOF_STALE');
+      }
+      const proof = buildThreadProof(
+        active, live, archiveAdoptionEvidenceMap(finalAdoption), clock.now(),
+      );
+      await assertCurrent(active);
+      if (finalAdoption.mode === 'aggregate') {
+        const archiveImportEnvelope = archiveImportCompletionEnvelope(
+          finalPlan.selected, proof, finalAdoption,
+        );
+        const archiveCheckpoint = stateAdapter.checkpointArchiveTaskCompletion
+          ? (input) => stateAdapter.checkpointArchiveTaskCompletion(input)
+          : (input) => checkpointArchiveTaskCompletion({ cwd: active.integrationWorktree, ...input });
+        active = await archiveCheckpoint({
+          prNumber,
+          expectedRevision: active.revision,
+          threadResolutionStatus: proof,
+          archiveImportEnvelope,
+        });
+      } else {
+        active = await stateAdapter.checkpointTaskCompletion({
+          prNumber, expectedRevision: active.revision, threadResolutionStatus: proof,
+        });
+      }
+      return { taskId, stateRevision: active.revision, threadResolutionStatus: active.threadResolutionStatus };
+    }
     if (selectedTask?.sourceType === 'github-threadless') {
       const verification = active.threadResolutionStatus.threadlessVerification;
       if (verification.status !== 'passed' || verification.headSha !== active.currentIntegrationHeadSha
@@ -2106,16 +3902,60 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     }
 
     let live = await readLiveSnapshot(client, active);
-    await assertMutationReady({ state: active, git }, live);
-    if (completedThreadlessRefresh) assertRecordedThreadsLive(active, live);
-    else assertLiveThreadProof(active, live);
+    const preflightHeads = await assertMutationReady({ state: active, git }, live);
+    const preflightBootstrap = taskIds.length === 1
+      ? archiveAdoptionVerifierBootstrapPlan(active, live, selectedTask.id, preflightHeads)
+      : null;
+    if (preflightBootstrap === null) {
+      if (completedThreadlessRefresh) assertRecordedThreadsLive(active, live);
+      else assertLiveThreadProof(active, live);
+    }
     await assertCurrent(active);
 
     live = await readLiveSnapshot(client, active);
-    await assertMutationReady({ state: active, git }, live);
-    if (completedThreadlessRefresh) assertRecordedThreadsLive(active, live);
-    else assertLiveThreadProof(active, live);
+    const finalHeads = await assertMutationReady({ state: active, git }, live);
+    let finalBootstrap = null;
+    try {
+      finalBootstrap = taskIds.length === 1
+        ? archiveAdoptionVerifierBootstrapPlan(active, live, selectedTask.id, finalHeads)
+        : null;
+    } catch (error) {
+      if (preflightBootstrap === null) throw error;
+      throw new GitHubWorkflowError(
+        'Archive-adoption verifier bootstrap evidence changed after preflight',
+        'THREAD_PROOF_STALE',
+      );
+    }
+    if (preflightBootstrap !== null) {
+      if (finalBootstrap === null || !isDeepStrictEqual(preflightBootstrap, finalBootstrap)) {
+        throw new GitHubWorkflowError(
+          'Archive-adoption verifier bootstrap evidence changed after preflight',
+          'THREAD_PROOF_STALE',
+        );
+      }
+    } else {
+      if (completedThreadlessRefresh) assertRecordedThreadsLive(active, live);
+      else assertLiveThreadProof(active, live);
+    }
     await assertCurrent(active);
+
+    if (preflightBootstrap !== null) {
+      if (preflightBootstrap.mode === 'retry') return verifyResolveResult(taskIds, active);
+      const verifiedAt = clock.now();
+      const threadResolutionStatus = {
+        ...active.threadResolutionStatus,
+        threadlessVerification: {
+          status: 'passed',
+          headSha: active.currentIntegrationHeadSha,
+          taskIds: [selectedTask.id],
+          updatedAt: verifiedAt,
+        },
+      };
+      active = await stateAdapter.checkpointTaskCompletion({
+        prNumber, expectedRevision: active.revision, threadResolutionStatus, verifiedLocalTaskIds: [],
+      });
+      return verifyResolveResult(taskIds, active);
+    }
 
     if (selectedTask.status === 'completed' && completedThreadlessRefresh) {
       if (completedThreadlessVerification.headSha === active.currentIntegrationHeadSha) {

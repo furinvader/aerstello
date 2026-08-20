@@ -4,6 +4,7 @@ import {
   existsSync,
   fsyncSync,
   lstatSync,
+  mkdtempSync,
   mkdirSync,
   openSync,
   readdirSync,
@@ -14,6 +15,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -31,6 +33,8 @@ import {
   unionRequiredValidation,
   validateInitialValidationSelection,
   validateTaskPacket,
+  validateWorkerResultAgainstTask,
+  workerResultDigest,
   validatePrReviewState,
   validatePrReviewStateV1,
 } from '../contracts/contracts.mjs';
@@ -41,6 +45,7 @@ import {
   specialistReviewDirectory,
   taskBindingProvenanceDirectory,
   taskPacketDirectory,
+  workerResultDirectory,
 } from '../paths.mjs';
 import {
   isSpecialistEvidenceApplicable,
@@ -54,6 +59,7 @@ export { completionGate, reviewRequestGate, reviewRequestUsage } from '../contra
 export { gitCommonDirectory, repositoryRoot, reviewRoot } from '../paths.mjs';
 
 export const ACTIVE_STATE_LIMIT_BYTES = 64 * 1024;
+const MAX_NODES = 10_000;
 const DEFAULT_LOCK_TIMEOUT_MS = 5000;
 const SQLITE_BUSY = 5;
 const LOCK_RETRY_INTERVAL_MS = 25;
@@ -177,6 +183,18 @@ export function taskBindingProvenancePath(cwd, prNumber, taskId) {
 export function taskBindingProvenanceReceiptPath(cwd, prNumber, taskId) {
   const name = createHash('sha256').update(String(taskId)).digest('hex');
   return join(taskBindingProvenanceDirectory(cwd, parsePrNumber(prNumber)), `${name}.sha256`);
+}
+
+function workerResultName(taskId) {
+  return createHash('sha256').update(String(taskId)).digest('hex');
+}
+
+export function workerResultEnvelopePath(cwd, prNumber, taskId) {
+  return join(workerResultDirectory(cwd, parsePrNumber(prNumber)), `${workerResultName(taskId)}.json`);
+}
+
+export function workerResultReceiptPath(cwd, prNumber, taskId) {
+  return join(workerResultDirectory(cwd, parsePrNumber(prNumber)), `${workerResultName(taskId)}.sha256`);
 }
 
 export function specialistReviewBundlePath(cwd, prNumber, headSha, revision) {
@@ -324,6 +342,388 @@ function persistImmutableTaskPacketSidecar(cwd, state, packet, digest) {
   return path;
 }
 
+const AUTHORITY_GIT_MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
+
+function runAuthorityGit(args, options = {}) {
+  return runGit(['--no-replace-objects', ...args], options);
+}
+
+function authorityGitText(args, options = {}) {
+  return String(runAuthorityGit(args, { ...options, encoding: 'utf8' }).stdout).trim();
+}
+
+function assertLegacyGraftsAreInert(cwd) {
+  let commonGitDirectory;
+  try {
+    commonGitDirectory = authorityGitText([
+      'rev-parse', '--path-format=absolute', '--git-common-dir',
+    ], { cwd });
+  } catch (error) {
+    throw new StateError(
+      `Unable to resolve the common Git directory for worker authority: ${error.message}`,
+      'WORKER_RESULT_GIT_AUTHORITY_UNAVAILABLE',
+    );
+  }
+  if (commonGitDirectory === '') {
+    throw new StateError(
+      'Unable to resolve the common Git directory for worker authority',
+      'WORKER_RESULT_GIT_AUTHORITY_UNAVAILABLE',
+    );
+  }
+  const graftsPath = join(commonGitDirectory, 'info', 'grafts');
+  let grafts;
+  try {
+    grafts = statSync(graftsPath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return;
+    throw new StateError(
+      `Unable to inspect legacy Git graft authority at ${graftsPath}: ${error.message}`,
+      'WORKER_RESULT_GIT_AUTHORITY_UNAVAILABLE',
+    );
+  }
+  if (grafts.size > 0) {
+    throw new StateError(
+      `Worker authority refuses nonempty legacy Git grafts at ${graftsPath}`,
+      'WORKER_RESULT_LEGACY_GRAFTS_PRESENT',
+    );
+  }
+}
+
+function assertCommitExists(cwd, label, sha, code = 'INVALID_WORKER_RESULT') {
+  if (typeof sha !== 'string'
+      || runAuthorityGit(['cat-file', '-e', `${sha}^{commit}`], { cwd, allowFailure: true }).status !== 0) {
+    throw new StateError(`${label} does not name an existing Git commit: ${sha}`, code);
+  }
+}
+
+function soleCommitParent(cwd, label, sha, code) {
+  assertCommitExists(cwd, label, sha, code);
+  const fields = authorityGitText(['rev-list', '--parents', '-n', '1', sha], { cwd }).split(/\s+/u);
+  if (fields.length !== 2) {
+    const kind = fields.length === 1 ? 'root' : 'merge';
+    throw new StateError(`${label} must be one non-root, non-merge commit; ${sha} is a ${kind} commit`, code);
+  }
+  return fields[1];
+}
+
+function workerCommitPatch(cwd, parentSha, commitSha) {
+  return Buffer.from(runAuthorityGit([
+    '-c', 'diff.algorithm=myers', '-c', 'diff.indentHeuristic=false',
+    'diff', '--binary', '--full-index', '--no-renames', '--no-ext-diff', '--no-textconv',
+    '--ignore-submodules=none', '--submodule=short', '--no-color',
+    '--src-prefix=a/', '--dst-prefix=b/', '--unified=3', '--inter-hunk-context=0',
+    parentSha, commitSha, '--',
+  ], { cwd, encoding: null }).stdout ?? Buffer.alloc(0));
+}
+
+function commitChangedPaths(cwd, parentSha, commitSha) {
+  const output = Buffer.from(runAuthorityGit([
+    'diff', '--name-only', '--no-renames', '--ignore-submodules=none', '-z',
+    parentSha, commitSha, '--',
+  ], { cwd, encoding: null }).stdout ?? Buffer.alloc(0));
+  return output.toString('utf8').split('\0').filter(Boolean);
+}
+
+function isolatedAuthorityGit(args, { cwd, env, input = undefined }) {
+  return spawnSync('git', ['--no-replace-objects', ...args], {
+    cwd,
+    env,
+    input,
+    encoding: null,
+    maxBuffer: AUTHORITY_GIT_MAX_OUTPUT_BYTES,
+    windowsHide: true,
+  });
+}
+
+function assertIsolatedGitSucceeded(result, message) {
+  if (result.error || result.status !== 0) {
+    throw new StateError(message, 'WORKER_RESULT_EXACT_DELTA_MISMATCH');
+  }
+}
+
+function proveWorkerPatchProducesCentralTree({
+  cwd, workerPatch, centralParentSha, centralCommitSha,
+}) {
+  const centralTreeSha = authorityGitText([
+    'rev-parse', '--verify', '--end-of-options', `${centralCommitSha}^{tree}`,
+  ], { cwd });
+  const realObjectDirectory = authorityGitText([
+    'rev-parse', '--path-format=absolute', '--git-path', 'objects',
+  ], { cwd });
+  const objectFormat = authorityGitText(['rev-parse', '--show-object-format'], { cwd });
+  if (!['sha1', 'sha256'].includes(objectFormat)) {
+    throw new StateError(
+      `Unsupported worker-authority object format: ${objectFormat}`,
+      'WORKER_RESULT_GIT_AUTHORITY_UNAVAILABLE',
+    );
+  }
+  const temporaryRoot = mkdtempSync(join(tmpdir(), `aerstello-worker-authority-${process.pid}-`));
+  try {
+    const temporaryGitDirectory = join(temporaryRoot, 'git');
+    const temporaryObjectDirectory = join(temporaryGitDirectory, 'objects');
+    const temporaryIndex = join(temporaryGitDirectory, 'index');
+    const temporaryGlobalConfig = join(temporaryRoot, 'global-config');
+    const temporaryXdgConfig = join(temporaryRoot, 'xdg');
+    mkdirSync(join(temporaryGitDirectory, 'refs', 'heads'), { recursive: true });
+    mkdirSync(join(temporaryGitDirectory, 'info'), { recursive: true });
+    mkdirSync(join(temporaryObjectDirectory, 'info'), { recursive: true });
+    mkdirSync(temporaryXdgConfig, { recursive: true });
+    writeFileSync(join(temporaryGitDirectory, 'HEAD'), 'ref: refs/heads/authority\n');
+    const temporaryRepositoryConfig = [
+      '[core]',
+      `\trepositoryformatversion = ${objectFormat === 'sha1' ? 0 : 1}`,
+      '\tbare = true',
+    ];
+    if (objectFormat !== 'sha1') {
+      temporaryRepositoryConfig.push('[extensions]', `\tobjectformat = ${objectFormat}`);
+    }
+    temporaryRepositoryConfig.push('');
+    writeFileSync(join(temporaryGitDirectory, 'config'), temporaryRepositoryConfig.join('\n'));
+    writeFileSync(join(temporaryGitDirectory, 'info', 'attributes'), '* merge=text\n');
+    writeFileSync(join(temporaryObjectDirectory, 'info', 'alternates'), `${realObjectDirectory}\n`);
+    writeFileSync(temporaryGlobalConfig, '');
+    const isolatedEnv = Object.fromEntries(
+      Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')),
+    );
+    Object.assign(isolatedEnv, {
+      GIT_ATTR_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: temporaryGlobalConfig,
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_DIR: temporaryGitDirectory,
+      GIT_INDEX_FILE: temporaryIndex,
+      GIT_NO_REPLACE_OBJECTS: '1',
+      GIT_OBJECT_DIRECTORY: temporaryObjectDirectory,
+      GIT_OPTIONAL_LOCKS: '0',
+      XDG_CONFIG_HOME: temporaryXdgConfig,
+    });
+    const seeded = isolatedAuthorityGit(['read-tree', centralParentSha], {
+      cwd: temporaryRoot, env: isolatedEnv,
+    });
+    assertIsolatedGitSucceeded(
+      seeded,
+      'Unable to seed isolated worker-authority index from the central commit parent',
+    );
+    const applied = isolatedAuthorityGit([
+      '-c', 'apply.ignoreWhitespace=no', '-c', 'apply.whitespace=warn',
+      'apply', '--cached', '--3way', '--whitespace=warn',
+    ], { cwd: temporaryRoot, env: isolatedEnv, input: workerPatch });
+    assertIsolatedGitSucceeded(
+      applied,
+      'Worker patch does not apply cleanly to the central commit parent',
+    );
+    const written = isolatedAuthorityGit(['write-tree'], {
+      cwd: temporaryRoot, env: isolatedEnv,
+    });
+    assertIsolatedGitSucceeded(written, 'Unable to write the isolated worker-authority tree');
+    const appliedTreeSha = Buffer.from(written.stdout ?? Buffer.alloc(0)).toString('utf8').trim();
+    if (appliedTreeSha !== centralTreeSha) {
+      throw new StateError(
+        'Worker patch applied to the central parent does not produce the central commit tree',
+        'WORKER_RESULT_EXACT_DELTA_MISMATCH',
+      );
+    }
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+}
+
+export function inspectWorkerCommitAuthority({ cwd = process.cwd(), state, packet, result, centralCommitSha = null }) {
+  const integrationCwd = state.integrationWorktree ?? cwd;
+  assertLegacyGraftsAreInert(integrationCwd);
+  const isAncestor = (ancestor, descendant) => runAuthorityGit(
+    ['merge-base', '--is-ancestor', ancestor, descendant],
+    { cwd: integrationCwd, allowFailure: true },
+  ).status === 0;
+  assertCommitExists(integrationCwd, 'reviewed HEAD', packet.reviewedHeadSha);
+  assertCommitExists(integrationCwd, 'current integration HEAD', state.currentIntegrationHeadSha,
+    'WORKER_RESULT_INTEGRATION_ANCESTRY_MISMATCH');
+  if (result.commitSha === packet.reviewedHeadSha) {
+    throw new StateError(
+      'Worker result commit must not equal the task packet reviewed HEAD',
+      'WORKER_RESULT_COMMIT_NOT_SINGLE',
+    );
+  }
+  const workerParentSha = soleCommitParent(
+    integrationCwd, 'worker result commit', result.commitSha, 'WORKER_RESULT_COMMIT_NOT_SINGLE',
+  );
+  if (!isAncestor(packet.reviewedHeadSha, workerParentSha)) {
+    throw new StateError(
+      'Worker result parent does not descend from the task packet reviewed HEAD',
+      'WORKER_RESULT_PARENT_ANCESTRY_MISMATCH',
+    );
+  }
+  if (!isAncestor(workerParentSha, state.currentIntegrationHeadSha)) {
+    throw new StateError(
+      'Worker result parent is absent from the current integration history',
+      'WORKER_RESULT_PARENT_ANCESTRY_MISMATCH',
+    );
+  }
+  for (const dependencyId of packet.dependencies) {
+    const dependency = state.tasks.find((candidate) => candidate.id === dependencyId);
+    if (!dependency || !['integrated', 'completed'].includes(dependency.status)
+        || typeof dependency.integratedCommitSha !== 'string') {
+      throw new StateError(
+        `Task ${packet.taskId} dependency ${dependencyId} is not durably integrated`,
+        'WORKER_RESULT_DEPENDENCY_NOT_READY',
+      );
+    }
+    if (!isAncestor(dependency.integratedCommitSha, state.currentIntegrationHeadSha)
+        || !isAncestor(dependency.integratedCommitSha, workerParentSha)) {
+      throw new StateError(
+        `Task ${packet.taskId} dependency ${dependencyId} is absent from required Git ancestry`,
+        'WORKER_RESULT_DEPENDENCY_ANCESTRY_MISMATCH',
+      );
+    }
+  }
+  const workerPatch = workerCommitPatch(integrationCwd, workerParentSha, result.commitSha);
+  const inspection = {
+    workerCommitSha: result.commitSha,
+    workerParentSha,
+    changedPaths: commitChangedPaths(integrationCwd, workerParentSha, result.commitSha),
+    deltaIdentity: createHash('sha256').update(workerPatch).digest('hex'),
+  };
+  if (centralCommitSha === null) return inspection;
+
+  assertCommitExists(
+    integrationCwd, 'central integration commit', centralCommitSha,
+    'WORKER_RESULT_INTEGRATION_ANCESTRY_MISMATCH',
+  );
+  const centralParentSha = soleCommitParent(
+    integrationCwd, 'central integration commit', centralCommitSha,
+    'WORKER_RESULT_INTEGRATION_COMMIT_NOT_SINGLE',
+  );
+  if (!isAncestor(workerParentSha, centralParentSha)) {
+    throw new StateError(
+      `Task ${packet.taskId} central commit parent does not descend from the worker result parent`,
+      'WORKER_RESULT_INTEGRATION_ANCESTRY_MISMATCH',
+    );
+  }
+  if (!isAncestor(centralCommitSha, state.currentIntegrationHeadSha)) {
+    throw new StateError(
+      `Task ${packet.taskId} central commit is not on the integration HEAD`,
+      'WORKER_RESULT_INTEGRATION_ANCESTRY_MISMATCH',
+    );
+  }
+  proveWorkerPatchProducesCentralTree({
+    cwd: integrationCwd,
+    workerPatch,
+    centralParentSha,
+    centralCommitSha,
+  });
+  return {
+    ...inspection,
+    centralCommitSha,
+    centralParentSha,
+  };
+}
+
+function assertIntegratedWorkerCommit(cwd, state, task, packet, result) {
+  const centralCommitSha = task.status === 'implemented'
+    ? state.currentIntegrationHeadSha : task.integratedCommitSha;
+  if (typeof centralCommitSha !== 'string') {
+    throw new StateError(
+      `Task ${task.id} has no central integration commit`,
+      'WORKER_RESULT_INTEGRATION_ANCESTRY_MISMATCH',
+    );
+  }
+  return inspectWorkerCommitAuthority({ cwd, state, packet, result, centralCommitSha });
+}
+
+function buildWorkerResultEnvelope(state, packet, result) {
+  return canonicalJson({
+    schemaVersion: 1,
+    prNumber: state.prNumber,
+    taskId: packet.taskId,
+    packetDigest: taskPacketDigest(packet),
+    reviewedHeadSha: packet.reviewedHeadSha,
+    resultDigest: workerResultDigest(result),
+    result,
+  });
+}
+
+function workerResultEnvelopeDigest(envelope) {
+  return createHash('sha256').update(canonicalSerializedJson(envelope)).digest('hex');
+}
+
+function verifyWorkerResultReceipt(cwd, state, task, envelope) {
+  const path = workerResultReceiptPath(cwd, state.prNumber, task.id);
+  let receipt;
+  try {
+    if (statSync(path).size > 128) throw new Error('receipt exceeds 128 bytes');
+    receipt = readFileSync(path, 'utf8').trim();
+  } catch (error) {
+    throw new StateError(`Unable to read task ${task.id} worker-result receipt: ${error.message}`, 'INVALID_WORKER_RESULT_EVIDENCE');
+  }
+  if (receipt !== workerResultEnvelopeDigest(envelope)) {
+    throw new StateError(`Task ${task.id} worker-result receipt does not match its envelope`, 'INVALID_WORKER_RESULT_EVIDENCE');
+  }
+  return receipt;
+}
+
+function persistWorkerResultEvidence(cwd, state, task, envelope, onStep) {
+  const envelopePath = workerResultEnvelopePath(cwd, state.prNumber, task.id);
+  const receiptPath = workerResultReceiptPath(cwd, state.prNumber, task.id);
+  const serialized = canonicalSerializedJson(envelope);
+  if (Buffer.byteLength(serialized, 'utf8') > ACTIVE_STATE_LIMIT_BYTES) {
+    throw new StateError('Worker-result envelope exceeds 64 KiB', 'WORKER_RESULT_EVIDENCE_TOO_LARGE');
+  }
+  const expectedReceipt = workerResultEnvelopeDigest(envelope);
+  if (existsSync(envelopePath) && !existsSync(receiptPath)) {
+    throw new StateError('Worker-result envelope exists without its immutable receipt', 'INVALID_WORKER_RESULT_EVIDENCE');
+  }
+  if (existsSync(receiptPath)) {
+    const actual = readFileSync(receiptPath, 'utf8').trim();
+    if (actual !== expectedReceipt) throw new StateError('A different worker-result receipt already exists', 'WORKER_RESULT_CONFLICT');
+  } else {
+    atomicWriteText(receiptPath, `${expectedReceipt}\n`);
+    onStep?.('receipt-durable');
+  }
+  if (existsSync(envelopePath)) {
+    let existing;
+    try { existing = readJsonSidecar(envelopePath, 'worker-result envelope'); } catch {
+      throw new StateError('An invalid worker-result envelope already exists', 'WORKER_RESULT_CONFLICT');
+    }
+    if (canonicalSerializedJson(existing) !== serialized) {
+      throw new StateError('A different worker-result envelope already exists', 'WORKER_RESULT_CONFLICT');
+    }
+  } else {
+    atomicWriteText(envelopePath, serialized);
+    onStep?.('envelope-durable');
+  }
+  verifyWorkerResultReceipt(cwd, state, task, envelope);
+}
+
+function readAcceptedWorkerResult(cwd, state, task, packet) {
+  if (typeof task.workerResultDigest !== 'string') {
+    throw new StateError(`Task ${task.id} has no accepted worker-result digest`, 'WORKER_RESULT_MISSING');
+  }
+  const envelope = readJsonSidecar(
+    workerResultEnvelopePath(cwd, state.prNumber, task.id), 'worker-result envelope',
+  );
+  const expectedFields = ['schemaVersion', 'prNumber', 'taskId', 'packetDigest', 'reviewedHeadSha', 'resultDigest', 'result'];
+  if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)
+      || Object.keys(envelope).sort().join('\0') !== [...expectedFields].sort().join('\0')
+      || envelope.schemaVersion !== 1 || envelope.prNumber !== state.prNumber
+      || envelope.taskId !== task.id || envelope.packetDigest !== taskPacketDigest(packet)
+      || envelope.reviewedHeadSha !== packet.reviewedHeadSha
+      || envelope.resultDigest !== task.workerResultDigest
+      || workerResultDigest(envelope.result) !== envelope.resultDigest) {
+    throw new StateError(`Task ${task.id} worker-result envelope is missing, stale, or altered`, 'INVALID_WORKER_RESULT_EVIDENCE');
+  }
+  const authority = envelope.result.status === 'implemented'
+    ? inspectWorkerCommitAuthority({
+      cwd, state, packet, result: envelope.result,
+      centralCommitSha: ['integrated', 'completed'].includes(task.status) ? task.integratedCommitSha : null,
+    }) : null;
+  const actualPaths = authority?.changedPaths;
+  const errors = validateWorkerResultAgainstTask(packet, envelope.result, actualPaths);
+  if (errors.length > 0) {
+    throw new StateError(`Task ${task.id} worker-result envelope is invalid: ${errors.join('; ')}`, 'INVALID_WORKER_RESULT_EVIDENCE');
+  }
+  verifyWorkerResultReceipt(cwd, state, task, envelope);
+  return envelope;
+}
+
 function readBoundTaskPacketSidecar(cwd, state, task, {
   suppliedPacket, verifyBindingProvenance = true,
 } = {}) {
@@ -384,8 +784,10 @@ function specialistPlanningErrors(input) {
   if (input.schemaVersion !== 1) errors.push('input.schemaVersion must be 1');
   if (!['pre-bind', 'post-integration'].includes(input.stage)) errors.push('input.stage is invalid');
   if (typeof input.headSha !== 'string' || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(input.headSha)) errors.push('input.headSha is invalid');
-  if (!Array.isArray(input.tasks) || input.tasks.length === 0) errors.push('input.tasks must not be empty');
-  else for (const [index, entry] of input.tasks.entries()) {
+  if (!Array.isArray(input.tasks)
+      || (input.stage === 'pre-bind' && input.tasks.length === 0)) {
+    errors.push('input.tasks must be a non-empty array for pre-bind planning');
+  } else for (const [index, entry] of input.tasks.entries()) {
     const prefix = `input.tasks[${index}]`;
     const entryFields = input.stage === 'pre-bind' ? ['taskPacket', 'planningSignals'] : ['taskPacket'];
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) { errors.push(`${prefix} must be an object`); continue; }
@@ -518,8 +920,10 @@ function validateSpecialistBundle(bundle, state) {
     errors.push('bundle.headSha does not match the reviewed commit');
   }
   if (bundle.stateRevision !== state.revision) errors.push('bundle.stateRevision is stale');
-  if (!Array.isArray(bundle.tasks) || bundle.tasks.length === 0) errors.push('bundle.tasks must not be empty');
-  else {
+  if (!Array.isArray(bundle.tasks)
+      || (bundle.stage === 'pre-bind' && bundle.tasks.length === 0)) {
+    errors.push('bundle.tasks must be a non-empty array for pre-bind planning');
+  } else {
     if (bundle.stage === 'pre-bind' && bundle.tasks.length !== 1) {
       errors.push('pre-bind bundles must contain exactly one task');
     }
@@ -576,8 +980,13 @@ function validateSpecialistBundle(bundle, state) {
   if (!Array.isArray(bundle.records)) errors.push('bundle.records must be an array');
   else {
     const reviewers = [];
-    const required = new Set(bundle.tasks?.flatMap((task) =>
-      normalizedRequiredSpecialistIds(task.route, { stage: bundle.stage })) ?? []);
+    let required = new Set();
+    try {
+      required = new Set(bundle.tasks?.flatMap((task) =>
+        normalizedRequiredSpecialistIds(task.route, { stage: bundle.stage })) ?? []);
+    } catch (error) {
+      errors.push(`bundle task routes are invalid: ${error.message}`);
+    }
     for (const record of bundle.records) {
       if (!record || typeof record !== 'object' || Array.isArray(record)) {
         errors.push('bundle record must be an object');
@@ -921,10 +1330,49 @@ function loadBoundTaskPacketEntries(cwd, state, { statuses } = {}) {
   });
 }
 
+const TASKLESS_VERIFIER_DISPOSITIONS = new Set([
+  'duplicate', 'already-fixed', 'stale', 'invalid', 'policy-conflict', 'out-of-scope',
+]);
+
+function uncoveredVerifierOutcomes(state, entries) {
+  const representedTaskIds = new Set(entries.map(({ task }) => task.id));
+  const uncovered = state.tasks.filter((task) => !representedTaskIds.has(task.id));
+  const ineligible = uncovered.find((task) => task.disposition === 'actionable'
+    || !TASKLESS_VERIFIER_DISPOSITIONS.has(task.disposition)
+    || !['not-applicable', 'completed'].includes(task.status));
+  if (ineligible) {
+    throw new StateError(
+      `Post-integration planning does not cover task ${ineligible.id}, which is actionable, nonterminal, or human-gated`,
+      'SPECIALIST_PLAN_TASK_MISMATCH',
+    );
+  }
+  return uncovered.sort((a, b) => a.id.localeCompare(b.id)).map((task) => canonicalJson({
+    taskId: task.id,
+    sourceIds: task.sourceIds,
+    sourceType: task.sourceType,
+    fingerprint: task.fingerprint,
+    summary: task.summary,
+    severity: task.severity,
+    disposition: task.disposition,
+    status: task.status,
+    integratedCommitSha: task.integratedCommitSha,
+    resolutionSummary: task.resolutionSummary,
+  }));
+}
+
 function assertPostIntegrationBundleCoverage(cwd, state, bundle) {
   if (bundle.stage !== 'post-integration') return null;
-  const entries = loadBoundTaskPacketEntries(cwd, state, { statuses: ['integrated'] })
+  if (state.validationStatus.status !== 'passed'
+      || state.validationStatus.headSha !== state.currentIntegrationHeadSha) {
+    throw new StateError(
+      'Post-integration specialist context requires passed exact-HEAD targeted validation',
+      'SPECIALIST_VALIDATION_REQUIRED',
+    );
+  }
+  const entries = loadBoundTaskPacketEntries(cwd, state, { statuses: ['integrated', 'completed'] })
     .sort((a, b) => a.packet.taskId.localeCompare(b.packet.taskId));
+  entries.forEach(({ packet }) => assertBoundTaskPacket(state, packet, cwd));
+  const taskOutcomes = uncoveredVerifierOutcomes(state, entries);
   const expectedTasks = entries.map(({ packet, provenance }) => ({
     taskId: packet.taskId,
     packetDigest: taskPacketDigest(packet),
@@ -937,11 +1385,11 @@ function assertPostIntegrationBundleCoverage(cwd, state, bundle) {
   const actualTasks = [...bundle.tasks].sort((a, b) => a.taskId.localeCompare(b.taskId));
   if (canonicalSerializedJson(actualTasks) !== canonicalSerializedJson(expectedTasks)) {
     throw new StateError(
-      'Specialist bundle does not cover current Integrated packet sidecars',
+      'Specialist bundle does not cover current Integrated or Resolved packet sidecars',
       'SPECIALIST_PLAN_TASK_MISMATCH',
     );
   }
-  return { entries, packets: entries.map(({ packet }) => packet), expectedTasks };
+  return { entries, packets: entries.map(({ packet }) => packet), expectedTasks, taskOutcomes };
 }
 
 export function planSpecialists({ cwd = process.cwd(), prNumber, input, expectedRevision, now = utcNow } = {}) {
@@ -980,12 +1428,14 @@ export function planSpecialists({ cwd = process.cwd(), prNumber, input, expected
       if (state.validationStatus.status !== 'passed' || state.validationStatus.headSha !== state.currentIntegrationHeadSha) {
         throw new StateError('Post-integration specialist planning requires passed exact-HEAD targeted validation', 'SPECIALIST_VALIDATION_REQUIRED');
       }
-      boundEntries = loadBoundTaskPacketEntries(cwd, state, { statuses: ['integrated'] })
+      boundEntries = loadBoundTaskPacketEntries(cwd, state, { statuses: ['integrated', 'completed'] })
         .sort((a, b) => a.packet.taskId.localeCompare(b.packet.taskId));
+      boundEntries.forEach(({ packet }) => assertBoundTaskPacket(state, packet, cwd));
       packets = boundEntries.map(({ packet }) => packet);
+      uncoveredVerifierOutcomes(state, boundEntries);
       const supplied = [...input.tasks].map((entry) => entry.taskPacket).sort((a, b) => a.taskId.localeCompare(b.taskId));
       if (canonicalSerializedJson(supplied) !== canonicalSerializedJson(packets)) {
-        throw new StateError('Post-integration planning input must exactly cover durable Integrated packet sidecars', 'SPECIALIST_PLAN_TASK_MISMATCH');
+        throw new StateError('Post-integration planning input must exactly cover durable Integrated or Resolved packet sidecars', 'SPECIALIST_PLAN_TASK_MISMATCH');
       }
     }
     const timestamp = now();
@@ -1187,7 +1637,9 @@ export function specialistContext({ cwd = process.cwd(), prNumber } = {}) {
   }
   const bundle = readSpecialistBundle(cwd, state);
   if (bundle.stage !== 'post-integration') throw new StateError('Current specialist bundle is not a post-integration review plan', 'SPECIALIST_EVIDENCE_MISSING');
-  const { entries, packets, expectedTasks } = assertPostIntegrationBundleCoverage(cwd, state, bundle);
+  const {
+    entries, packets, expectedTasks, taskOutcomes,
+  } = assertPostIntegrationBundleCoverage(cwd, state, bundle);
   const required = [...new Set(bundle.tasks.flatMap((task) =>
     normalizedRequiredSpecialistIds(task.route, { stage: 'post-integration' })))].sort();
   const records = new Map(bundle.records.map((record) => [record.reviewerId, record]));
@@ -1202,6 +1654,35 @@ export function specialistContext({ cwd = process.cwd(), prNumber } = {}) {
   const finalVerificationPriority = expectedTasks.some(({ route }) =>
     route.finalVerificationPriority === 'high') ? 'high' : 'standard';
   const specialistResults = required.filter((id) => records.has(id)).map((id) => records.get(id));
+  const workerResultEvidence = entries.map(({ task, packet }) => {
+    try {
+      const envelope = readAcceptedWorkerResult(cwd, state, task, packet);
+      return {
+        taskId: task.id,
+        status: 'valid',
+        resultDigest: envelope.resultDigest,
+        envelope: canonicalJson({
+          taskId: task.id,
+          packetDigest: envelope.packetDigest,
+          resultDigest: envelope.resultDigest,
+          reviewedHeadSha: envelope.reviewedHeadSha,
+          workerCommitSha: envelope.result.commitSha,
+          integratedCommitSha: task.integratedCommitSha,
+          result: envelope.result,
+        }),
+      };
+    } catch (error) {
+      return {
+        taskId: task.id,
+        status: error.code === 'WORKER_RESULT_MISSING' ? 'missing' : 'invalid',
+        resultDigest: task.workerResultDigest ?? null,
+        error: error.code ?? 'INVALID_WORKER_RESULT_EVIDENCE',
+      };
+    }
+  });
+  const invalidWorkerResults = workerResultEvidence.filter((entry) => entry.status !== 'valid');
+  const workerResults = workerResultEvidence.filter((entry) => entry.status === 'valid')
+    .map((entry) => entry.envelope);
   const preBindPlanning = entries.map(({ provenance }) => canonicalJson({
     phase: 'pre-bind',
     taskId: provenance.taskId,
@@ -1215,11 +1696,18 @@ export function specialistContext({ cwd = process.cwd(), prNumber } = {}) {
   }));
   return {
     schemaVersion: 1,
-    status: missing.length > 0 || stale.length > 0 ? 'incomplete' : findings.length > 0 ? 'findings' : 'clean',
-    readyForIntegrationVerifier: missing.length === 0 && stale.length === 0 && findings.length === 0,
+    status: missing.length > 0 || stale.length > 0 || invalidWorkerResults.length > 0
+      ? 'incomplete' : findings.length > 0 ? 'findings' : 'clean',
+    readyForIntegrationVerifier: missing.length === 0 && stale.length === 0
+      && findings.length === 0 && invalidWorkerResults.length === 0,
     headSha: state.currentIntegrationHeadSha,
     stateRevision: state.revision,
+    taskOutcomes,
     packets: packets.map((packet) => canonicalJson(packet)),
+    workerResultEvidence,
+    workerResults,
+    missingWorkerResultTaskIds: workerResultEvidence.filter((entry) => entry.status === 'missing').map((entry) => entry.taskId),
+    invalidWorkerResultTaskIds: workerResultEvidence.filter((entry) => entry.status === 'invalid').map((entry) => entry.taskId),
     preBindPlanning,
     routes,
     finalVerification: {
@@ -1433,6 +1921,13 @@ function actionableIntegratedTaskIds(state) {
     .map((task) => task.id).sort();
 }
 
+function actionablePacketValidationTaskIds(state) {
+  return state.tasks.filter((task) => task.disposition === 'actionable'
+    && (task.status === 'integrated'
+      || (task.status === 'completed' && typeof task.taskPacketDigest === 'string')))
+    .map((task) => task.id).sort();
+}
+
 function isPristineTasklessValidationSelection(state, expectedIds) {
   return state.reviewRound === 0 && state.reviewRequest === null && state.reviewHistory.length === 0
     && state.tasks.length === 0 && expectedIds.length === 0;
@@ -1538,15 +2033,7 @@ function isV2CompletedTaskValidationRecovery(cwd, state, expectedIds) {
 }
 
 function assertTaskPacketHead(state, task, packet, digest) {
-  const evidenceHeadSha = activeReviewEvidenceHead(state);
-  if (evidenceHeadSha !== null) {
-    if (packet.reviewedHeadSha !== evidenceHeadSha) {
-      throw new StateError(`Task packet ${packet.taskId} does not match the exact reviewed HEAD`, 'TASK_PACKET_HEAD_MISMATCH');
-    }
-  }
-  const boundIntegratedTask = task.status === 'integrated'
-    && typeof task.taskPacketDigest === 'string';
-  if (boundIntegratedTask) {
+  const assertBoundIntegrationHistory = () => {
     if (task.taskPacketDigest !== digest) {
       throw new StateError(`Task packet ${packet.taskId} differs from the accepted packet`, 'TASK_PACKET_CONFLICT');
     }
@@ -1574,6 +2061,23 @@ function assertTaskPacketHead(state, task, packet, digest) {
         'TASK_INTEGRATION_ANCESTRY_MISMATCH',
       );
     }
+  };
+  const boundCompletedTask = task.status === 'completed'
+    && typeof task.taskPacketDigest === 'string';
+  if (boundCompletedTask) {
+    assertBoundIntegrationHistory();
+    return;
+  }
+  const evidenceHeadSha = activeReviewEvidenceHead(state);
+  if (evidenceHeadSha !== null) {
+    if (packet.reviewedHeadSha !== evidenceHeadSha) {
+      throw new StateError(`Task packet ${packet.taskId} does not match the exact reviewed HEAD`, 'TASK_PACKET_HEAD_MISMATCH');
+    }
+  }
+  const boundIntegratedTask = task.status === 'integrated'
+    && typeof task.taskPacketDigest === 'string';
+  if (boundIntegratedTask) {
+    assertBoundIntegrationHistory();
     return;
   }
   if (evidenceHeadSha !== null) return;
@@ -1621,8 +2125,9 @@ function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, initi
     throw new StateError('Targeted validation proof must be reset before planning', 'TARGETED_VALIDATION_RESET_REQUIRED');
   }
   assertCleanExactIntegrationHead(state);
-  const expectedIds = actionableIntegratedTaskIds(state);
   const initialMode = initialSelection !== undefined && initialSelection !== null;
+  const expectedIds = initialMode
+    ? actionableIntegratedTaskIds(state) : actionablePacketValidationTaskIds(state);
   if (initialMode && Array.isArray(taskPackets) && taskPackets.length > 0) {
     throw new StateError('Initial selection and task packets are mutually exclusive', 'INVALID_VALIDATION_PLAN');
   }
@@ -1657,20 +2162,21 @@ function buildTargetedValidationPlanUnlocked({ cwd, prNumber, taskPackets, initi
     packetIds = [];
   } else {
     const missingBinding = state.tasks.find((task) => task.disposition === 'actionable'
-      && task.status === 'integrated' && typeof task.taskPacketDigest !== 'string');
+      && ['integrated', 'completed'].includes(task.status)
+      && typeof task.taskPacketDigest !== 'string');
     if (missingBinding) {
       throw new StateError(`Task ${missingBinding.id} has not been durably bound`, 'TASK_PACKET_NOT_BOUND');
     }
-    const sortedPackets = loadBoundTaskPackets(cwd, state, { statuses: ['integrated'] })
+    const sortedPackets = loadBoundTaskPackets(cwd, state, { statuses: ['integrated', 'completed'] })
       .sort((left, right) => left.taskId.localeCompare(right.taskId));
     packetIds = sortedPackets.map((packet) => packet.taskId);
     if (new Set(packetIds).size !== packetIds.length || JSON.stringify(packetIds) !== JSON.stringify(expectedIds)) {
-      throw new StateError('Task packets must exactly cover current actionable integrated tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
+      throw new StateError('Task packets must exactly cover current actionable Integrated or Resolved tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
     }
     if (Array.isArray(taskPackets) && taskPackets.length > 0) {
       const supplied = [...taskPackets].sort((left, right) => left.taskId.localeCompare(right.taskId));
       if (JSON.stringify(supplied.map((packet) => packet.taskId)) !== JSON.stringify(expectedIds)) {
-        throw new StateError('Task packets must exactly cover current actionable integrated tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
+        throw new StateError('Task packets must exactly cover current actionable Integrated or Resolved tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
       }
       if (canonicalSerializedJson(supplied) !== canonicalSerializedJson(sortedPackets)) {
         throw new StateError('Supplied packets differ from durable task packet sidecars', 'TASK_PACKET_CONFLICT');
@@ -2486,7 +2992,7 @@ function checkpointStateUnlocked({
   if (nextState.abandonmentReason !== null) {
     throw new StateError('abandonmentReason must remain null in active state', 'INVALID_LIFECYCLE_TRANSITION');
   }
-  assertCheckpointProvenance(current, nextState, transitionAuthorization);
+  assertCheckpointProvenance(current, nextState, transitionAuthorization, cwd);
   const state = { ...nextState, revision: current.revision + 1, updatedAt: utcNow() };
   validateStateForWrite(state);
   atomicWriteJson(statePath(cwd, selectedPr), state);
@@ -2623,13 +3129,169 @@ function sameEvidence(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function protectedTransition(expectedState, kind) {
-  return { token: TRANSITION_AUTHORIZATION, expectedState, kind };
+function protectedTransition(expectedState, kind, evidence = {}) {
+  return { token: TRANSITION_AUTHORIZATION, expectedState, kind, ...evidence };
 }
 
 function assertImmutableValue(current, next, label) {
   if (!sameEvidence(current, next)) {
     throw new StateError(`${label} is append-only provenance`, 'IMMUTABLE_STATE_PROVENANCE');
+  }
+}
+
+function archiveImportFingerprint(value) {
+  return createHash('sha256').update(JSON.stringify(canonicalJson(value))).digest('hex');
+}
+
+function exactObjectFields(value, fields) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).length === fields.length
+    && fields.every((field) => Object.hasOwn(value, field));
+}
+
+function canonicalImportedTaskRoots(task, rows) {
+  const bySource = new Map();
+  for (const row of rows) {
+    for (const source of [
+      `thread:${row.threadNodeId}`,
+      `discussion:${row.rootCommentDatabaseId}`,
+    ]) {
+      if (bySource.has(source) && bySource.get(source) !== row.threadNodeId) return null;
+      bySource.set(source, row.threadNodeId);
+    }
+  }
+  const canonicalSources = task.sourceIds.filter((source) => /^(?:thread|discussion):/u.test(source));
+  if (canonicalSources.length === 0) return null;
+  const roots = new Set();
+  for (const source of canonicalSources) {
+    const root = bySource.get(source);
+    if (root === undefined) return null;
+    roots.add(root);
+  }
+  return [...roots].sort();
+}
+
+function assertArchiveImportEnvelope(current, next, envelope) {
+  const envelopeFields = ['schemaVersion', 'taskId', 'authorityFingerprint', 'rows'];
+  const rowFields = [
+    'threadNodeId', 'replyId', 'replyBodySha256', 'provenanceFingerprint', 'rowFingerprint',
+  ];
+  if (!exactObjectFields(envelope, envelopeFields)
+      || envelope.schemaVersion !== 1
+      || typeof envelope.taskId !== 'string' || envelope.taskId.length === 0
+      || !/^[0-9a-f]{64}$/u.test(envelope.authorityFingerprint ?? '')
+      || !Array.isArray(envelope.rows) || envelope.rows.length < 2
+      || envelope.rows.length > MAX_NODES) {
+    throw new StateError('Archive import completion envelope is malformed', 'INVALID_ARCHIVE_IMPORT');
+  }
+  const sortedEnvelopeRows = envelope.rows.slice().sort(
+    (left, right) => String(left?.threadNodeId).localeCompare(String(right?.threadNodeId)),
+  );
+  if (!sameEvidence(envelope.rows, sortedEnvelopeRows)
+      || new Set(envelope.rows.map((row) => row?.threadNodeId)).size !== envelope.rows.length
+      || envelope.rows.some((row) => !exactObjectFields(row, rowFields)
+        || typeof row.threadNodeId !== 'string' || row.threadNodeId.length === 0
+        || typeof row.replyId !== 'string' || row.replyId.length === 0
+        || !/^[0-9a-f]{64}$/u.test(row.replyBodySha256 ?? '')
+        || !/^[0-9a-f]{64}$/u.test(row.provenanceFingerprint ?? '')
+        || !/^[0-9a-f]{64}$/u.test(row.rowFingerprint ?? ''))) {
+    throw new StateError('Archive import completion rows are malformed or unordered', 'INVALID_ARCHIVE_IMPORT');
+  }
+
+  const currentTask = current.tasks.find((task) => task.id === envelope.taskId);
+  const nextTask = next.tasks.find((task) => task.id === envelope.taskId);
+  if (!currentTask || !nextTask || currentTask.sourceType !== 'github-thread'
+      || currentTask.disposition !== 'already-fixed' || currentTask.integratedCommitSha !== null
+      || !['not-applicable', 'completed'].includes(currentTask.status)
+      || nextTask.status !== 'completed') {
+    throw new StateError('Archive import task is not an eligible already-fixed transition', 'INVALID_ARCHIVE_IMPORT');
+  }
+  for (const task of current.tasks) {
+    const updated = next.tasks.find((candidate) => candidate.id === task.id);
+    if (task.id === envelope.taskId) {
+      assertImmutableValue({ ...task, status: 'completed' }, updated, `archive import task ${task.id}`);
+    } else {
+      assertImmutableValue(task, updated, `archive import unrelated task ${task.id}`);
+    }
+  }
+
+  const currentByRoot = new Map(current.threadResolutionStatus.threads.map(
+    (row) => [row.threadNodeId, row],
+  ));
+  const nextByRoot = new Map(next.threadResolutionStatus.threads.map(
+    (row) => [row.threadNodeId, row],
+  ));
+  const importedRows = [];
+  for (const expected of envelope.rows) {
+    const row = nextByRoot.get(expected.threadNodeId);
+    const provenance = row?.archiveProvenance;
+    if (!row || row.taskIds.length !== 1 || row.taskIds[0] !== envelope.taskId
+        || row.disposition !== 'already-fixed' || row.isResolved !== true
+        || row.replyId !== expected.replyId || row.replyUrl === null
+        || row.resolvedAt === null || row.resolvedBy === null
+        || provenance?.authorityFingerprint !== envelope.authorityFingerprint
+        || provenance?.replyBodySha256 !== expected.replyBodySha256
+        || archiveImportFingerprint(provenance) !== expected.provenanceFingerprint
+        || archiveImportFingerprint(row) !== expected.rowFingerprint) {
+      throw new StateError('Archive import row does not match its authorized evidence', 'INVALID_ARCHIVE_IMPORT');
+    }
+    importedRows.push(row);
+  }
+  const importedIds = new Set(importedRows.map((row) => row.threadNodeId));
+  const provenanceRows = next.threadResolutionStatus.threads.filter(
+    (row) => Object.hasOwn(row, 'archiveProvenance'),
+  );
+  if (provenanceRows.length !== importedRows.length
+      || provenanceRows.some((row) => !importedIds.has(row.threadNodeId))) {
+    throw new StateError('Archive import provenance exceeds its authorized root coverage', 'INVALID_ARCHIVE_IMPORT');
+  }
+  const canonicalRoots = canonicalImportedTaskRoots(currentTask, importedRows);
+  if (canonicalRoots === null || canonicalRoots.length < 2
+      || !sameEvidence(canonicalRoots, [...importedIds].sort())) {
+    throw new StateError('Archive import task sources do not exactly cover its canonical roots', 'INVALID_ARCHIVE_IMPORT');
+  }
+
+  if (currentTask.status === 'not-applicable') {
+    const newlyResolvedIds = next.threadResolutionStatus.threads.filter((row) => (
+      row.isResolved === true && currentByRoot.get(row.threadNodeId)?.isResolved !== true
+    )).map((row) => row.threadNodeId).sort();
+    if (!sameEvidence(newlyResolvedIds, [...importedIds].sort())) {
+      throw new StateError(
+        'Archive import envelope must cover every newly resolved row exactly',
+        'INVALID_ARCHIVE_IMPORT',
+      );
+    }
+    if (current.threadResolutionStatus.status !== 'not-run'
+        || current.threadResolutionStatus.headSha !== null
+        || current.threadResolutionStatus.threads.length !== 0
+        || current.threadResolutionStatus.updatedAt !== null
+        || current.threadResolutionStatus.threadlessVerification.status !== 'passed'
+        || current.threadResolutionStatus.threadlessVerification.headSha
+          !== current.currentIntegrationHeadSha
+        || current.threadResolutionStatus.threadlessVerification.taskIds.length === 0
+        || next.threadResolutionStatus.headSha !== current.currentIntegrationHeadSha) {
+      throw new StateError('Archive import requires the exact pristine aggregate transition', 'INVALID_ARCHIVE_IMPORT');
+    }
+  } else if (!sameEvidence(current, next)) {
+    throw new StateError('Archive import retry must be byte-identical', 'INVALID_ARCHIVE_IMPORT');
+  }
+  assertImmutableValue(
+    current.threadResolutionStatus.threadlessVerification,
+    next.threadResolutionStatus.threadlessVerification,
+    'archive import threadless proof',
+  );
+  assertImmutableValue(
+    current.threadResolutionStatus.localVerification ?? emptyLocalVerification(),
+    next.threadResolutionStatus.localVerification ?? emptyLocalVerification(),
+    'archive import local proof',
+  );
+
+  for (const row of provenanceRows) {
+    const previous = currentByRoot.get(row.threadNodeId);
+    if (previous && Object.hasOwn(previous, 'archiveProvenance')
+        && !sameEvidence(previous, row)) {
+      throw new StateError('Existing archive provenance is immutable', 'IMMUTABLE_STATE_PROVENANCE');
+    }
   }
 }
 
@@ -2653,12 +3315,29 @@ function assertStaleDiscoveryDispositionProvenance(current, next, guardedKind) {
   ));
 }
 
-function assertCheckpointProvenance(current, next, authorization) {
+function assertCheckpointProvenance(current, next, authorization, cwd) {
   const guardedKind = authorization?.token === TRANSITION_AUTHORIZATION ? authorization.kind : null;
+  const completionKind = ['task-completion', 'archive-task-completion'].includes(guardedKind);
   if (guardedKind !== null) {
     if (!sameEvidence(next, authorization.expectedState)) {
       throw new StateError('Guarded transition state does not match its authorization', 'INVALID_TRANSITION_AUTHORIZATION');
     }
+  }
+  const currentThreadByRoot = new Map(current.threadResolutionStatus.threads.map(
+    (thread) => [thread.threadNodeId, thread],
+  ));
+  const introducedArchiveProvenance = next.threadResolutionStatus.threads.filter((thread) => (
+    Object.hasOwn(thread, 'archiveProvenance')
+      && !Object.hasOwn(currentThreadByRoot.get(thread.threadNodeId) ?? {}, 'archiveProvenance')
+  ));
+  if (introducedArchiveProvenance.length > 0 && guardedKind !== 'archive-task-completion') {
+    throw new StateError(
+      'Archive provenance may only be introduced by guarded archive import completion',
+      'PROTECTED_ARCHIVE_IMPORT_REQUIRED',
+    );
+  }
+  if (guardedKind === 'archive-task-completion') {
+    assertArchiveImportEnvelope(current, next, authorization.archiveImportEnvelope);
   }
   if (guardedKind !== 'review-request-limit') {
     assertImmutableValue(
@@ -2768,6 +3447,9 @@ function assertCheckpointProvenance(current, next, authorization) {
     if (!currentTaskIds.has(task.id) && task.taskPacketDigest) {
       throw new StateError(`New task ${task.id} packet binding requires a guarded transition`, 'PROTECTED_TRANSITION_REQUIRED');
     }
+    if (!currentTaskIds.has(task.id) && task.workerResultDigest) {
+      throw new StateError(`New task ${task.id} worker-result binding requires a guarded transition`, 'PROTECTED_TRANSITION_REQUIRED');
+    }
   }
   for (const task of current.tasks) {
     const updated = nextTasks.get(task.id);
@@ -2784,14 +3466,45 @@ function assertCheckpointProvenance(current, next, authorization) {
     } else if (updated.taskPacketDigest && guardedKind !== 'task-packet-binding') {
       throw new StateError(`Task ${task.id} packet binding requires a guarded transition`, 'PROTECTED_TRANSITION_REQUIRED');
     }
+    if (typeof task.workerResultDigest === 'string') {
+      assertImmutableValue(task.workerResultDigest, updated.workerResultDigest, `task ${task.id} workerResultDigest`);
+    } else if (typeof updated.workerResultDigest === 'string'
+        && !['worker-result-acceptance', 'worker-result-backfill'].includes(guardedKind)) {
+      throw new StateError(`Task ${task.id} worker-result binding requires a guarded transition`, 'PROTECTED_TRANSITION_REQUIRED');
+    }
+    const entersImplementedOrIntegrated = !['implemented', 'integrated', 'completed'].includes(task.status)
+      && ['implemented', 'integrated'].includes(updated.status);
+    const entersIntegrated = !['integrated', 'completed'].includes(task.status)
+      && updated.status === 'integrated';
+    if ((entersImplementedOrIntegrated || entersIntegrated) && task.disposition === 'actionable') {
+      if (typeof task.taskPacketDigest !== 'string') {
+        throw new StateError(
+          `Task ${task.id} requires a receipt-valid packet before ${updated.status}`,
+          'TASK_PACKET_NOT_BOUND',
+        );
+      }
+      const packet = readBoundTaskPacketSidecar(cwd, current, task);
+      const resultTask = guardedKind === 'worker-result-acceptance' ? updated : task;
+      const acceptedResult = readAcceptedWorkerResult(cwd, current, resultTask, packet);
+      if (entersIntegrated) {
+        assertIntegratedWorkerCommit(cwd, current, updated, packet, acceptedResult.result);
+      }
+    }
     if (task.integratedCommitSha !== null) {
       assertImmutableValue(task.integratedCommitSha, updated.integratedCommitSha, `task ${task.id} integratedCommitSha`);
     }
     if (task.resolutionSummary !== null) {
       assertImmutableValue(task.resolutionSummary, updated.resolutionSummary, `task ${task.id} resolutionSummary`);
     }
-    if (task.status === 'completed') assertImmutableValue(task, updated, `completed task ${task.id}`);
-    if (task.status !== 'completed' && updated.status === 'completed' && guardedKind !== 'task-completion') {
+    if (task.status === 'completed') {
+      if (guardedKind === 'worker-result-backfill' && typeof task.workerResultDigest !== 'string') {
+        const { workerResultDigest: _workerResultDigest, ...updatedWithoutResult } = updated;
+        assertImmutableValue(task, updatedWithoutResult, `completed task ${task.id}`);
+      } else {
+        assertImmutableValue(task, updated, `completed task ${task.id}`);
+      }
+    }
+    if (task.status !== 'completed' && updated.status === 'completed' && !completionKind) {
       throw new StateError(`Task ${task.id} completion requires guarded proof`, 'PROTECTED_TRANSITION_REQUIRED');
     }
   }
@@ -2803,7 +3516,7 @@ function assertCheckpointProvenance(current, next, authorization) {
 
   const currentThreads = current.threadResolutionStatus.threads ?? [];
   const nextThreads = next.threadResolutionStatus.threads ?? [];
-  if (currentThreads.length > nextThreads.length || (currentThreads.length !== nextThreads.length && guardedKind !== 'task-completion')) {
+  if (currentThreads.length > nextThreads.length || (currentThreads.length !== nextThreads.length && !completionKind)) {
     throw new StateError('Canonical threads may only be added by guarded task completion', 'IMMUTABLE_STATE_PROVENANCE');
   }
   const nextByNode = new Map(nextThreads.map((thread) => [thread.threadNodeId, thread]));
@@ -2816,12 +3529,12 @@ function assertCheckpointProvenance(current, next, authorization) {
     if (thread.replyId !== null) {
       assertImmutableValue(thread.replyId, updated.replyId, `thread ${thread.threadNodeId} replyId`);
       assertImmutableValue(thread.replyUrl, updated.replyUrl, `thread ${thread.threadNodeId} replyUrl`);
-    } else if (updated.replyId !== null && guardedKind !== 'task-completion') {
+    } else if (updated.replyId !== null && !completionKind) {
       throw new StateError(`Thread ${thread.threadNodeId} reply evidence requires guarded persistence`, 'PROTECTED_TRANSITION_REQUIRED');
     }
     if (thread.isResolved) {
       assertImmutableValue(thread, updated, `resolved thread ${thread.threadNodeId}`);
-    } else if (updated.isResolved && guardedKind !== 'task-completion') {
+    } else if (updated.isResolved && !completionKind) {
       throw new StateError(`Thread ${thread.threadNodeId} resolution requires guarded persistence`, 'PROTECTED_TRANSITION_REQUIRED');
     }
   }
@@ -2836,15 +3549,15 @@ function assertCheckpointProvenance(current, next, authorization) {
       throw new StateError('Successful threadless task proof cannot regress', 'IMMUTABLE_STATE_PROVENANCE');
     }
   }
-  if (oldThreadless.status !== 'passed' && newThreadless.status === 'passed' && guardedKind !== 'task-completion') {
+  if (oldThreadless.status !== 'passed' && newThreadless.status === 'passed' && !completionKind) {
     throw new StateError('Threadless proof may only pass through guarded completion', 'PROTECTED_TRANSITION_REQUIRED');
   }
-  if (newThreadless.taskIds.some((taskId) => !oldThreadless.taskIds.includes(taskId)) && guardedKind !== 'task-completion') {
+  if (newThreadless.taskIds.some((taskId) => !oldThreadless.taskIds.includes(taskId)) && !completionKind) {
     throw new StateError('Threadless task proof may only grow through guarded completion', 'PROTECTED_TRANSITION_REQUIRED');
   }
   const oldLocal = current.threadResolutionStatus.localVerification ?? emptyLocalVerification();
   const newLocal = next.threadResolutionStatus.localVerification ?? emptyLocalVerification();
-  if (guardedKind !== 'task-completion') {
+  if (!completionKind) {
     assertImmutableValue(oldLocal, newLocal, 'local verifier proof');
   }
   if (oldLocal.status === 'passed') {
@@ -2859,11 +3572,11 @@ function assertCheckpointProvenance(current, next, authorization) {
       );
     }
   }
-  if (oldLocal.status !== 'passed' && newLocal.status === 'passed' && guardedKind !== 'task-completion') {
+  if (oldLocal.status !== 'passed' && newLocal.status === 'passed' && !completionKind) {
     throw new StateError('Local verifier proof may only pass through guarded completion', 'PROTECTED_TRANSITION_REQUIRED');
   }
   if (current.threadResolutionStatus.status !== 'passed'
-      && next.threadResolutionStatus.status === 'passed' && guardedKind !== 'task-completion') {
+      && next.threadResolutionStatus.status === 'passed' && !completionKind) {
     throw new StateError('Aggregate thread proof may only pass through guarded completion', 'PROTECTED_TRANSITION_REQUIRED');
   }
   if (guardedKind === null && current.threadResolutionStatus.status === 'passed') {
@@ -3020,8 +3733,8 @@ function buildTargetedValidationTransition(state, plan, timestamp = utcNow()) {
   if (plan.commands.some((entry) => entry.status === 'pending')) {
     throw new StateError('Targeted validation plan still has pending commands', 'VALIDATION_PLAN_INCOMPLETE');
   }
-  if (JSON.stringify([...plan.taskIds].sort()) !== JSON.stringify(actionableIntegratedTaskIds(state))) {
-    throw new StateError('Targeted validation plan no longer covers current actionable integrated tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
+  if (JSON.stringify([...plan.taskIds].sort()) !== JSON.stringify(actionablePacketValidationTaskIds(state))) {
+    throw new StateError('Targeted validation plan no longer covers current actionable Integrated or Resolved tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
   }
   const status = plan.commands.every((entry) => entry.status === 'passed') ? 'passed' : 'failed';
   const next = {
@@ -3104,8 +3817,8 @@ export function executeTargetedValidationPlan({
     if (!state) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
     assertCleanExactIntegrationHead(state);
     let plan = readValidationPlan(cwd, state);
-    if (JSON.stringify([...plan.taskIds].sort()) !== JSON.stringify(actionableIntegratedTaskIds(state))) {
-      throw new StateError('Targeted validation plan no longer covers current actionable integrated tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
+    if (JSON.stringify([...plan.taskIds].sort()) !== JSON.stringify(actionablePacketValidationTaskIds(state))) {
+      throw new StateError('Targeted validation plan no longer covers current actionable Integrated or Resolved tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
     }
     for (let index = 0; index < plan.commands.length; index += 1) {
       const entry = plan.commands[index];
@@ -3115,8 +3828,8 @@ export function executeTargetedValidationPlan({
       if (state.currentIntegrationHeadSha !== plan.headSha || state.revision !== plan.stateRevision) {
         throw new StateError('Targeted validation plan is stale', 'VALIDATION_PLAN_STALE');
       }
-      if (JSON.stringify([...plan.taskIds].sort()) !== JSON.stringify(actionableIntegratedTaskIds(state))) {
-        throw new StateError('Targeted validation plan no longer covers current actionable integrated tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
+      if (JSON.stringify([...plan.taskIds].sort()) !== JSON.stringify(actionablePacketValidationTaskIds(state))) {
+        throw new StateError('Targeted validation plan no longer covers current actionable Integrated or Resolved tasks', 'VALIDATION_TASK_COVERAGE_MISMATCH');
       }
       let result;
       try {
@@ -3494,6 +4207,140 @@ export function checkpointTaskPacketBinding({
   });
 }
 
+function checkpointWorkerResultEvidence({
+  cwd, selectedPr, current, task, packet, result, expectedRevision, backfill, event, onStep,
+}) {
+  if (expectedRevision !== current.revision) {
+    throw new StateError(`State revision changed: expected ${expectedRevision}, found ${current.revision}`, 'STATE_REVISION_CONFLICT');
+  }
+  const packetErrors = validateTaskPacket(packet);
+  if (packetErrors.length > 0) throw new StateError(`Invalid task packet:\n- ${packetErrors.join('\n- ')}`, 'INVALID_TASK_PACKET');
+  if (task.disposition !== 'actionable' || task.taskPacketDigest !== taskPacketDigest(packet)) {
+    throw new StateError('Worker result does not match the accepted packet binding', 'TASK_PACKET_CONFLICT');
+  }
+  const durablePacket = readBoundTaskPacketSidecar(cwd, current, task);
+  if (canonicalSerializedJson(durablePacket) !== canonicalSerializedJson(packet)) {
+    throw new StateError('Worker result packet differs from its durable sidecar', 'TASK_PACKET_CONFLICT');
+  }
+  const preliminaryErrors = validateWorkerResultAgainstTask(packet, result, result?.changedPaths);
+  if (preliminaryErrors.length > 0) {
+    throw new StateError(`Worker result does not satisfy task packet:\n- ${preliminaryErrors.join('\n- ')}`, 'INVALID_WORKER_RESULT');
+  }
+  if (result.status !== 'implemented') {
+    throw new StateError('Only an implemented worker result can be durably accepted', 'INVALID_WORKER_RESULT');
+  }
+  const authority = inspectWorkerCommitAuthority({ cwd, state: current, packet, result });
+  const resultErrors = validateWorkerResultAgainstTask(packet, result, authority.changedPaths);
+  if (resultErrors.length > 0) {
+    throw new StateError(`Worker result does not satisfy task packet:\n- ${resultErrors.join('\n- ')}`, 'INVALID_WORKER_RESULT');
+  }
+  const envelope = buildWorkerResultEnvelope(current, packet, result);
+  if (typeof task.workerResultDigest === 'string') {
+    if (backfill && !['integrated', 'completed'].includes(task.status)) {
+      throw new StateError('Worker-result backfill requires an Integrated native schema-v3 task', 'WORKER_RESULT_BACKFILL_NOT_ALLOWED');
+    }
+    const existing = readAcceptedWorkerResult(cwd, current, task, packet);
+    if (canonicalSerializedJson(existing) !== canonicalSerializedJson(envelope)) {
+      throw new StateError(`Task ${task.id} already has different accepted worker evidence`, 'WORKER_RESULT_CONFLICT');
+    }
+    return current;
+  }
+  if (backfill) {
+    if (!['integrated', 'completed'].includes(task.status)) {
+      throw new StateError('Worker-result backfill requires an Integrated native schema-v3 task', 'WORKER_RESULT_BACKFILL_NOT_ALLOWED');
+    }
+    for (const version of [1, 2]) {
+      const backupPath = join(stateDirectory(cwd, current.prNumber), `state.v${version}.backup.json`);
+      if (!existsSync(backupPath)) continue;
+      try {
+        const legacy = readJsonSidecar(backupPath, `schema-v${version} migration backup`);
+        if (legacy.tasks?.some((candidate) => candidate.id === task.id)) {
+          throw new StateError(
+            `Task ${task.id} originated in schema v${version}; migration cannot synthesize its result`,
+            'WORKER_RESULT_BACKFILL_NOT_ALLOWED',
+          );
+        }
+      } catch (error) {
+        if (error instanceof StateError && error.code === 'WORKER_RESULT_BACKFILL_NOT_ALLOWED') throw error;
+        throw new StateError(`Cannot prove task ${task.id} is native schema v3: ${error.message}`, 'WORKER_RESULT_BACKFILL_NOT_ALLOWED');
+      }
+    }
+    assertIntegratedWorkerCommit(cwd, current, task, packet, result);
+  } else {
+    if (!['proposed', 'queued', 'running', 'implemented'].includes(task.status)) {
+      throw new StateError(`Task ${task.id} cannot accept a worker result while ${task.status}`, 'WORKER_RESULT_ACCEPTANCE_NOT_ALLOWED');
+    }
+    if (task.status === 'implemented') {
+      assertIntegratedWorkerCommit(cwd, current, task, packet, result);
+    }
+  }
+  const nextTask = backfill ? { ...task, workerResultDigest: envelope.resultDigest } : {
+    ...task,
+    status: 'implemented',
+    workerResultDigest: envelope.resultDigest,
+    execution: {
+      ...task.execution,
+      workerCommitSha: result.commitSha,
+      validationSummaries: result.validation.map((entry) => truncate(
+        `${entry.command}: ${entry.result} — ${entry.summary}`,
+        1000,
+      )),
+      lastError: null,
+    },
+  };
+  const nextState = {
+    ...current,
+    tasks: current.tasks.map((candidate) => candidate.id === task.id ? nextTask : candidate),
+  };
+  validateStateForWrite({ ...nextState, revision: current.revision + 1 });
+  persistWorkerResultEvidence(cwd, current, task, envelope, onStep);
+  const updated = checkpointStateUnlocked({
+    cwd, selectedPr, nextState, expectedRevision: current.revision,
+    event: event ?? {
+      type: backfill ? 'worker-result-backfilled' : 'worker-result-accepted',
+      summary: `${backfill ? 'Backfilled' : 'Accepted'} worker result for task ${task.id}`,
+    },
+    eventWriter: appendEvent,
+    transitionAuthorization: protectedTransition(
+      nextState, backfill ? 'worker-result-backfill' : 'worker-result-acceptance',
+    ),
+  });
+  onStep?.('state-checkpointed');
+  return updated;
+}
+
+export function checkpointWorkerResultAcceptance({
+  cwd = process.cwd(), prNumber, packet, result, expectedRevision, event, onStep,
+} = {}) {
+  const selectedPr = prNumber ?? activePrNumber(cwd);
+  if (selectedPr === null || selectedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  return withStateLock(cwd, selectedPr, () => {
+    const current = loadState(cwd, selectedPr);
+    const task = current.tasks.find((candidate) => candidate.id === packet?.taskId);
+    if (!task) throw new StateError('Worker result does not match a durable task', 'TASK_PACKET_NOT_BOUND');
+    return checkpointWorkerResultEvidence({
+      cwd, selectedPr: current.prNumber, current, task, packet, result,
+      expectedRevision, backfill: false, event, onStep,
+    });
+  });
+}
+
+export function checkpointWorkerResultBackfill({
+  cwd = process.cwd(), prNumber, packet, result, expectedRevision, event, onStep,
+} = {}) {
+  const selectedPr = prNumber ?? activePrNumber(cwd);
+  if (selectedPr === null || selectedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  return withStateLock(cwd, selectedPr, () => {
+    const current = loadState(cwd, selectedPr);
+    const task = current.tasks.find((candidate) => candidate.id === packet?.taskId);
+    if (!task) throw new StateError('Worker result does not match a durable task', 'TASK_PACKET_NOT_BOUND');
+    return checkpointWorkerResultEvidence({
+      cwd, selectedPr: current.prNumber, current, task, packet, result,
+      expectedRevision, backfill: true, event, onStep,
+    });
+  });
+}
+
 export function checkpointReviewRequest({
   cwd = process.cwd(), prNumber, request, pushedHeadSha, prHeadSha, prState, isDraft, expectedRevision, event,
 } = {}) {
@@ -3571,10 +4418,17 @@ export function checkpointCiValidation({
   });
 }
 
-export function checkpointTaskCompletion({
-  cwd = process.cwd(), prNumber, threadResolutionStatus, verifiedLocalTaskIds = [],
-  staleDiscoveryDisposition = null, expectedRevision, event,
-} = {}) {
+export function checkpointTaskCompletion(options = {}) {
+  const {
+    cwd = process.cwd(), prNumber, threadResolutionStatus, verifiedLocalTaskIds = [],
+    staleDiscoveryDisposition = null, expectedRevision, event,
+  } = options;
+  if (Object.hasOwn(options, 'archiveImportEnvelope')) {
+    throw new StateError(
+      'Ordinary task completion cannot accept archive import authorization',
+      'PROTECTED_ARCHIVE_IMPORT_REQUIRED',
+    );
+  }
   const current = loadState(cwd, prNumber);
   if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
   const priorDispositionCount = staleDiscoveryDispositionList(current).length;
@@ -3627,6 +4481,54 @@ export function checkpointTaskCompletion({
   return checkpointState({
     cwd, prNumber: current.prNumber, nextState, expectedRevision,
     event, transitionAuthorization: protectedTransition(nextState, 'task-completion'),
+  });
+}
+
+export function checkpointArchiveTaskCompletion({
+  cwd = process.cwd(), prNumber, threadResolutionStatus, archiveImportEnvelope,
+  expectedRevision, event,
+} = {}) {
+  const selectedPr = prNumber ?? activePrNumber(cwd);
+  if (selectedPr === null || selectedPr === undefined) {
+    throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  }
+  return withStateLock(cwd, selectedPr, () => {
+    const current = loadState(cwd, selectedPr);
+    if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+    if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
+      throw new StateError(
+        'Archive import completion requires an explicit expected revision',
+        'STATE_REVISION_CONFLICT',
+      );
+    }
+    const expected = expectedRevision;
+    if (expected !== current.revision) {
+      throw new StateError(
+        `State revision changed: expected ${expected}, found ${current.revision}`,
+        'STATE_REVISION_CONFLICT',
+      );
+    }
+    const nextState = completeIntegratedTasks(current, {
+      threadResolutionStatus,
+      verifiedLocalTaskIds: [],
+      staleDiscoveryDisposition: null,
+    });
+    const authorization = protectedTransition(nextState, 'archive-task-completion', {
+      archiveImportEnvelope,
+    });
+    if (sameEvidence(current, nextState)) {
+      assertArchiveImportEnvelope(current, nextState, archiveImportEnvelope);
+      return current;
+    }
+    return checkpointStateUnlocked({
+      cwd,
+      selectedPr,
+      nextState,
+      expectedRevision: expected,
+      event,
+      eventWriter: appendEvent,
+      transitionAuthorization: authorization,
+    });
   });
 }
 
@@ -3787,12 +4689,55 @@ export function reconcileState({ cwd = process.cwd(), prNumber } = {}) {
       }
     }
   }
+  const workerResults = [];
+  const seenWorkerEvidencePaths = new Set();
+  for (const task of state.tasks.filter((candidate) => typeof candidate.taskPacketDigest === 'string')) {
+    const envelopePath = workerResultEnvelopePath(cwd, state.prNumber, task.id);
+    const receiptPath = workerResultReceiptPath(cwd, state.prNumber, task.id);
+    seenWorkerEvidencePaths.add(envelopePath);
+    seenWorkerEvidencePaths.add(receiptPath);
+    if (typeof task.workerResultDigest !== 'string') {
+      if (existsSync(envelopePath) || existsSync(receiptPath)) {
+        let status = 'pending-state';
+        try {
+          if (existsSync(envelopePath) && !existsSync(receiptPath)) throw new Error('envelope has no receipt');
+          if (existsSync(envelopePath)) {
+            const envelope = readJsonSidecar(envelopePath, 'pending worker-result envelope');
+            const packet = readBoundTaskPacketSidecar(cwd, state, task);
+            readAcceptedWorkerResult(cwd, state, { ...task, workerResultDigest: envelope.resultDigest }, packet);
+          }
+        } catch {
+          status = 'invalid';
+        }
+        workerResults.push({ taskId: task.id, status, path: existsSync(envelopePath) ? envelopePath : null, receiptPath: existsSync(receiptPath) ? receiptPath : null });
+        evidenceErrors.push(`Task ${task.id} worker-result evidence is ${status === 'invalid' ? 'invalid' : 'pending its guarded state checkpoint'}`);
+      }
+      continue;
+    }
+    try {
+      const packet = readBoundTaskPacketSidecar(cwd, state, task);
+      readAcceptedWorkerResult(cwd, state, task, packet);
+      workerResults.push({ taskId: task.id, status: 'valid', path: envelopePath, receiptPath });
+    } catch (error) {
+      workerResults.push({ taskId: task.id, status: 'invalid', path: existsSync(envelopePath) ? envelopePath : null, receiptPath: existsSync(receiptPath) ? receiptPath : null, error: error.code });
+      evidenceErrors.push(`Task ${task.id} worker-result evidence: ${error.message}`);
+    }
+  }
+  const resultDirectory = workerResultDirectory(cwd, state.prNumber);
+  if (existsSync(resultDirectory)) {
+    for (const name of readdirSync(resultDirectory).filter((entry) => /\.(?:json|sha256)$/u.test(entry)).sort()) {
+      const path = join(resultDirectory, name);
+      if (seenWorkerEvidencePaths.has(path)) continue;
+      workerResults.push({ taskId: null, status: 'orphan', path: name.endsWith('.json') ? path : null, receiptPath: name.endsWith('.sha256') ? path : null });
+      evidenceErrors.push(`Worker-result evidence ${name} is orphaned`);
+    }
+  }
   const specialist = readSpecialistStatus({ cwd, prNumber: state.prNumber });
   if (specialist.error && specialist.error !== 'SPECIALIST_PLAN_STALE') {
     evidenceErrors.push(`Specialist review bundle is invalid: ${specialist.error}`);
   }
   return {
-    state, actualGit: actual, warnings, evidenceErrors, packetSidecars, bindingProvenance, specialist,
+    state, actualGit: actual, warnings, evidenceErrors, packetSidecars, bindingProvenance, workerResults, specialist,
   };
 }
 
@@ -3930,7 +4875,7 @@ function staleDiscoveryRecoverySummary(state) {
 
 export function renderRecoverySummary({ cwd = process.cwd(), prNumber, maxCharacters = 9000 } = {}) {
   const {
-    state, warnings, evidenceErrors, packetSidecars, bindingProvenance, specialist,
+    state, warnings, evidenceErrors, packetSidecars, bindingProvenance, workerResults, specialist,
   } = reconcileState({ cwd, prNumber });
   if (!state) return '';
   const release = state.releaseBaseline ? `${state.releaseBaseline.tag} (${state.releaseBaseline.commit})` : 'pre-release';
@@ -3954,6 +4899,7 @@ export function renderRecoverySummary({ cwd = process.cwd(), prNumber, maxCharac
     `Integration HEAD: ${state.currentIntegrationHeadSha}`,
     `Task packet sidecars: ${packetSidecars.length === 0 ? 'none' : packetSidecars.map((entry) => `${entry.taskId}=${entry.status}`).join(', ')}`,
     `Task binding provenance: ${bindingProvenance.length === 0 ? 'none' : bindingProvenance.map((entry) => `${entry.taskId ?? 'unknown'}=${entry.status}`).join(', ')}`,
+    `Worker results: ${workerResults.length === 0 ? 'none' : workerResults.map((entry) => `${entry.taskId ?? 'unknown'}=${entry.status}`).join(', ')}`,
     `Specialist evidence: ${specialist.status}${specialist.requiredReviewerIds.length > 0 ? `; required ${specialist.requiredReviewerIds.join(', ')}` : ''}`,
     `Targeted validation plan: ${validationPlanRecoverySummary(cwd, state)}`,
     'Tasks:',
@@ -3974,6 +4920,14 @@ export function archiveState({ cwd = process.cwd(), prNumber, abandonmentReason,
   const selectedPr = parsePrNumber(requestedPr);
   return withStateLock(cwd, selectedPr, () => {
     const current = loadState(cwd, selectedPr);
+    const resultInventory = reconcileState({ cwd, prNumber: selectedPr }).workerResults ?? [];
+    const invalidResultEvidence = resultInventory.filter((entry) => entry.status !== 'valid');
+    if (invalidResultEvidence.length > 0) {
+      throw new StateError(
+        `Worker-result evidence must be receipt-valid before archive: ${invalidResultEvidence.map((entry) => `${entry.taskId ?? 'orphan'}=${entry.status}`).join(', ')}`,
+        'INVALID_WORKER_RESULT_EVIDENCE',
+      );
+    }
     const reason = typeof abandonmentReason === 'string' ? abandonmentReason.trim() : '';
     if (current.phase !== 'complete' && reason.length === 0) {
       throw new StateError(

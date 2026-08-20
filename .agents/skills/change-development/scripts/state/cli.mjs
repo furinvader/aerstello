@@ -7,16 +7,24 @@ import { planReadiness, validateImplementationPlan } from '../contracts/contract
 import {
   acceptPlan,
   acceptResult,
+  authorizeRepeatedFinding,
   amendPlan,
   archiveState,
   bindTask,
+  buildVerifierContext,
+  createSpecialistPlan,
+  createValidationPlan,
   initializeState,
   integrateTask,
   finalizeIntegration,
+  finalizeDevelopment,
   loadLatestSourceObservation,
   loadState,
   locateState,
   recordDecision,
+  recordFindingDisposition,
+  recordSpecialistResult,
+  recordVerifierResult,
   reconcileIntegration,
   rejectTask,
   recoverState,
@@ -28,6 +36,7 @@ import {
   validateState,
   scheduleWave,
   startTask,
+  runValidation,
   upgradeState,
 } from './state.mjs';
 
@@ -37,6 +46,8 @@ const COMMANDS = new Set([
   'upgrade-state', 'bind-task', 'schedule-wave', 'start-task', 'accept-result',
   'integrate-task', 'reconcile-integration',
   'finalize-integration',
+  'validation-plan', 'run-validation', 'specialist-plan', 'specialist-record',
+  'verifier-context', 'verifier-record', 'finding-authorize', 'finding-disposition', 'finalize-development',
   'reject-task',
 ]);
 
@@ -63,6 +74,15 @@ Commands:
   integrate-task    Persist intent, cherry-pick, and reconcile one accepted task
   reconcile-integration  Reconcile an interrupted persisted integration intent
   finalize-integration   Prove all worker worktrees removed and enter integrated
+  validation-plan       Persist an immutable exact-HEAD targeted validation plan
+  run-validation        Resume direct execution of pending validation argv
+  specialist-plan       Derive routed reviewers from immutable stored packet routes
+  specialist-record     Record one exact-HEAD routed specialist result
+  verifier-context      Print deterministic bounded final-verifier context
+  verifier-record       Record one exact-context final-verifier result
+  finding-authorize     Receipt-protect human authorization for a repeated finding
+  finding-disposition   Append a source-role-qualified finding disposition
+  finalize-development  Prove all exact-HEAD local gates and enter development-ready
   reject-task       Durably reject packet-bound work before cleanup and replan
 
 Init options:
@@ -95,11 +115,11 @@ function parseRevision(value, required = false) {
 
 function options(argv) {
   return parseOptions(argv, {
-    booleans: ['help', 'human'],
+    booleans: ['help', 'human', 'replace'],
     values: [
       'change-id', 'mode', 'base-branch', 'expected-pr-base-branch', 'planning-ref',
       'source', 'expected-revision', 'plan', 'planning-evidence', 'decision',
-      'amendment', 'abandon-reason', 'packet', 'result', 'task-id', 'worker-id', 'worker-cwd', 'reason',
+      'amendment', 'abandon-reason', 'packet', 'result', 'input', 'task-id', 'worker-id', 'worker-cwd', 'reason',
     ],
   });
 }
@@ -122,6 +142,15 @@ const COMMAND_OPTIONS = Object.freeze({
   'integrate-task': ['change-id', 'expected-revision', 'task-id'],
   'reconcile-integration': ['change-id', 'expected-revision'],
   'finalize-integration': ['change-id', 'expected-revision'],
+  'validation-plan': ['change-id', 'expected-revision', 'replace'],
+  'run-validation': ['change-id', 'expected-revision'],
+  'specialist-plan': ['change-id', 'expected-revision'],
+  'specialist-record': ['change-id', 'expected-revision', 'input'],
+  'verifier-context': ['change-id'],
+  'verifier-record': ['change-id', 'expected-revision', 'input'],
+  'finding-authorize': ['change-id', 'expected-revision', 'input'],
+  'finding-disposition': ['change-id', 'expected-revision', 'input'],
+  'finalize-development': ['change-id', 'expected-revision'],
   'reject-task': ['change-id', 'expected-revision', 'task-id', 'reason'],
 });
 
@@ -239,6 +268,24 @@ try {
     writeJson(reconcileIntegration({ ...common, expectedRevision: parseRevision(parsed['expected-revision'], true) }));
   } else if (command === 'finalize-integration') {
     writeJson(finalizeIntegration({ ...common, expectedRevision: parseRevision(parsed['expected-revision'], true) }));
+  } else if (command === 'validation-plan') {
+    writeJson(createValidationPlan({ ...common, expectedRevision: parseRevision(parsed['expected-revision'], true), replace: parsed.replace === true }));
+  } else if (command === 'run-validation') {
+    writeJson(runValidation({ ...common, expectedRevision: parseRevision(parsed['expected-revision'], true) }));
+  } else if (command === 'specialist-plan') {
+    writeJson(createSpecialistPlan({ ...common, expectedRevision: parseRevision(parsed['expected-revision'], true) }));
+  } else if (command === 'specialist-record') {
+    writeJson(recordSpecialistResult({ ...common, expectedRevision: parseRevision(parsed['expected-revision'], true), result: json(parsed.input, '--input') }));
+  } else if (command === 'verifier-context') {
+    writeJson(buildVerifierContext(common));
+  } else if (command === 'verifier-record') {
+    writeJson(recordVerifierResult({ ...common, expectedRevision: parseRevision(parsed['expected-revision'], true), result: json(parsed.input, '--input') }));
+  } else if (command === 'finding-authorize') {
+    writeJson(authorizeRepeatedFinding({ ...common, expectedRevision: parseRevision(parsed['expected-revision'], true), authorization: json(parsed.input, '--input') }));
+  } else if (command === 'finding-disposition') {
+    writeJson(recordFindingDisposition({ ...common, expectedRevision: parseRevision(parsed['expected-revision'], true), disposition: json(parsed.input, '--input') }));
+  } else if (command === 'finalize-development') {
+    writeJson(await finalizeDevelopment({ ...common, expectedRevision: parseRevision(parsed['expected-revision'], true) }));
   } else if (command === 'reject-task') {
     if (!parsed['task-id'] || !parsed.reason) throw new UsageError('reject-task requires --task-id and --reason');
     writeJson(rejectTask({ ...common, taskId: parsed['task-id'], reason: parsed.reason, expectedRevision: parseRevision(parsed['expected-revision'], true) }));

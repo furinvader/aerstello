@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 
 import { featureDirectory } from '../paths.mjs';
 import { loadRegistry, validateSpecialization } from '../../../aerstello-specialists/scripts/validate-registry.mjs';
@@ -106,6 +107,14 @@ export function staleDiscoveryDispositionId(disposition) {
   const { dispositionId: _dispositionId, ...identity } = disposition;
   return createHash('sha256')
     .update(JSON.stringify(canonicalContractJson(identity)))
+    .digest('hex');
+}
+
+export function workerResultDigest(result) {
+  const errors = validateWorkerResult(result);
+  if (errors.length > 0) throw new Error(`Invalid worker result: ${errors.join('; ')}`);
+  return createHash('sha256')
+    .update(JSON.stringify(canonicalContractJson(result)))
     .digest('hex');
 }
 
@@ -959,9 +968,9 @@ function validateTaskV2(task, index, errors) {
   const path = `$.tasks[${index}]`;
   const fields = [
     'id', 'sourceIds', 'sourceType', 'fingerprint', 'summary', 'severity', 'disposition', 'status',
-    'integratedCommitSha', 'resolutionSummary', 'taskPacketDigest', 'execution',
+    'integratedCommitSha', 'resolutionSummary', 'taskPacketDigest', 'workerResultDigest', 'execution',
   ];
-  if (!requireFields(task, fields.filter((field) => !['execution', 'taskPacketDigest'].includes(field)), path, errors)) return;
+  if (!requireFields(task, fields.filter((field) => !['execution', 'taskPacketDigest', 'workerResultDigest'].includes(field)), path, errors)) return;
   rejectUnknownFields(task, fields, path, errors);
   if (!isString(task.id, { min: 1, max: 128 })) errors.push(`${path}.id is invalid`);
   validateStringList(task.sourceIds, `${path}.sourceIds`, errors);
@@ -978,6 +987,10 @@ function validateTaskV2(task, index, errors) {
   if (!(task.taskPacketDigest === undefined || task.taskPacketDigest === null
       || /^[0-9a-f]{64}$/u.test(task.taskPacketDigest))) {
     errors.push(`${path}.taskPacketDigest is invalid`);
+  }
+  if (!(task.workerResultDigest === undefined || task.workerResultDigest === null
+      || /^[0-9a-f]{64}$/u.test(task.workerResultDigest))) {
+    errors.push(`${path}.workerResultDigest is invalid`);
   }
   if (EXECUTION_STATUSES.has(task.status)) {
     if (task.execution === undefined) errors.push(`${path}.execution is required for ${task.status}`);
@@ -1107,6 +1120,35 @@ function threadMatchesSource(thread, sourceId) {
     || sourceId === `discussion:${thread.rootCommentDatabaseId}`;
 }
 
+function validateArchiveProvenance(value, path, errors) {
+  const fields = [
+    'schemaVersion', 'historicalTaskId', 'historicalDisposition',
+    'historicalIntegratedCommitSha', 'replyBodySha256', 'authorityFingerprint',
+  ];
+  if (!requireFields(value, fields, path, errors)) return;
+  rejectUnknownFields(value, fields, path, errors);
+  if (value.schemaVersion !== 1) errors.push(`${path}.schemaVersion must be 1`);
+  if (!isString(value.historicalTaskId, { min: 1, max: 128 })) {
+    errors.push(`${path}.historicalTaskId is invalid`);
+  }
+  if (!['fixed', 'already-fixed'].includes(value.historicalDisposition)) {
+    errors.push(`${path}.historicalDisposition is invalid`);
+  }
+  if (!isSha(value.historicalIntegratedCommitSha, true)) {
+    errors.push(`${path}.historicalIntegratedCommitSha is invalid`);
+  }
+  for (const field of ['replyBodySha256', 'authorityFingerprint']) {
+    if (!/^[0-9a-f]{64}$/u.test(value[field] ?? '')) errors.push(`${path}.${field} is invalid`);
+  }
+  if (value.historicalDisposition === 'fixed' && !isSha(value.historicalIntegratedCommitSha)) {
+    errors.push(`${path} fixed provenance requires a historical integration commit`);
+  }
+  if (value.historicalDisposition === 'already-fixed'
+      && value.historicalIntegratedCommitSha !== null) {
+    errors.push(`${path} already-fixed provenance requires a null historical integration commit`);
+  }
+}
+
 export function taskHasCanonicalThreadCoverage(task, threads) {
   const sources = task.sourceIds.filter((sourceId) => /^(?:discussion|thread):/u.test(sourceId));
   const expectedDisposition = TASK_THREAD_DISPOSITIONS.get(task.disposition);
@@ -1137,9 +1179,9 @@ function validateThreadStatus(value, tasks, errors) {
     const threadPath = `${path}.threads[${index}]`;
     const threadFields = [
       'threadNodeId', 'rootCommentNodeId', 'rootCommentDatabaseId', 'taskIds', 'disposition', 'replyId', 'replyUrl',
-      'isResolved', 'resolvedAt', 'resolvedBy', 'observedHeadSha',
+      'isResolved', 'resolvedAt', 'resolvedBy', 'observedHeadSha', 'archiveProvenance',
     ];
-    if (!requireFields(thread, threadFields, threadPath, errors)) return;
+    if (!requireFields(thread, threadFields.filter((field) => field !== 'archiveProvenance'), threadPath, errors)) return;
     rejectUnknownFields(thread, threadFields, threadPath, errors);
     if (!isString(thread.threadNodeId, { min: 1, max: 256 })) errors.push(`${threadPath}.threadNodeId is invalid`);
     if (!isString(thread.rootCommentNodeId, { min: 1, max: 256 })) errors.push(`${threadPath}.rootCommentNodeId is invalid`);
@@ -1167,6 +1209,24 @@ function validateThreadStatus(value, tasks, errors) {
     }
     if ((thread.replyId === null) !== (thread.replyUrl === null)) errors.push(`${threadPath} reply ID and URL must be paired`);
     if (thread.isResolved && thread.replyId === null) errors.push(`${threadPath} resolved disposition requires reply evidence`);
+    if (Object.hasOwn(thread, 'archiveProvenance')) {
+      validateArchiveProvenance(thread.archiveProvenance, `${threadPath}.archiveProvenance`, errors);
+      const activeTask = thread.taskIds?.length === 1
+        ? (tasks ?? []).find((task) => task.id === thread.taskIds[0]) : null;
+      if (!thread.isResolved || thread.replyId === null || thread.disposition !== 'already-fixed') {
+        errors.push(`${threadPath}.archiveProvenance requires an adopted resolved already-fixed row`);
+      }
+      if (!activeTask || activeTask.sourceType !== 'github-thread'
+          || activeTask.status !== 'completed' || activeTask.disposition !== 'already-fixed'
+          || activeTask.integratedCommitSha !== null) {
+        errors.push(`${threadPath}.archiveProvenance requires one completed already-fixed GitHub-thread task`);
+      } else if (!activeTask.sourceIds.some((sourceId) => threadMatchesSource(thread, sourceId))) {
+        errors.push(`${threadPath}.archiveProvenance is outside the active task source partition`);
+      }
+      if (thread.archiveProvenance?.historicalTaskId === thread.taskIds?.[0]) {
+        errors.push(`${threadPath}.archiveProvenance historical task must differ from the active task`);
+      }
+    }
   });
   validateThreadlessProof(value.threadlessVerification, `${path}.threadlessVerification`, errors);
   if (Object.hasOwn(value, 'localVerification')) {
@@ -1193,6 +1253,40 @@ function validateThreadStatus(value, tasks, errors) {
       const identifiers = value.threads.map((thread) => thread[field]).filter((identifier) => identifier !== null);
       if (new Set(identifiers).size !== identifiers.length) {
         errors.push(`${path}.threads contains duplicate ${label}`);
+      }
+    }
+    const authorityTasks = new Map();
+    const activeAuthorities = new Map();
+    const historicalTasks = new Map();
+    for (const [index, thread] of value.threads.entries()) {
+      if (!Object.hasOwn(thread, 'archiveProvenance')) continue;
+      const provenance = thread.archiveProvenance;
+      if (!isObject(provenance) || !isString(provenance.historicalTaskId, { min: 1, max: 128 })) continue;
+      const activeTaskId = thread.taskIds?.length === 1 ? thread.taskIds[0] : null;
+      const authorityTask = authorityTasks.get(provenance.authorityFingerprint);
+      if (authorityTask !== undefined && authorityTask !== activeTaskId) {
+        errors.push(`${path}.threads[${index}].archiveProvenance authority projects to multiple active tasks`);
+      } else {
+        authorityTasks.set(provenance.authorityFingerprint, activeTaskId);
+      }
+      const activeAuthority = activeAuthorities.get(activeTaskId);
+      if (activeAuthority !== undefined && activeAuthority !== provenance.authorityFingerprint) {
+        errors.push(`${path}.threads[${index}].archiveProvenance diverges within its active adoption`);
+      } else {
+        activeAuthorities.set(activeTaskId, provenance.authorityFingerprint);
+      }
+      const metadata = {
+        historicalDisposition: provenance.historicalDisposition,
+        historicalIntegratedCommitSha: provenance.historicalIntegratedCommitSha,
+        observedHeadSha: thread.observedHeadSha,
+        authorityFingerprint: provenance.authorityFingerprint,
+      };
+      const partitionKey = JSON.stringify([activeTaskId, provenance.historicalTaskId]);
+      const prior = historicalTasks.get(partitionKey);
+      if (prior !== undefined && !isDeepStrictEqual(prior, metadata)) {
+        errors.push(`${path}.threads[${index}].archiveProvenance conflicts with its historical task partition`);
+      } else {
+        historicalTasks.set(partitionKey, metadata);
       }
     }
   }

@@ -110,18 +110,48 @@ Remove a worktree only after its commit was Integrated or intentionally rejected
 
 ## Accept and integrate worker results
 
-Before integration, confirm:
+Before integration, durably accept the exact result with `accept-result`; the
+read-only `validate-result` output is not final-verifier evidence. Then confirm:
 
 1. The result matches the fixed task ID and Review commit.
-2. An implemented result names a real descendant commit with a nonempty tree diff from the Review commit.
-3. Git-derived changed paths exactly equal the reported paths, every changed path is allowed, and no forbidden path changed.
-4. The exact required validations ran and have concise results.
-5. The commit contains no unrelated work.
-6. Unexpected dependencies were reported instead of silently included.
+2. An implemented result names exactly one non-root, non-merge commit `W` with sole parent `P`; the Review commit is ancestral to `P`, and `P` is already on the exact current integration history.
+3. Every dependency is durably Integrated or Resolved and its central commit is ancestral to both `P` and the current integration HEAD.
+4. The no-renames, no-ignored-submodules `P`-to-`W` changed paths exactly equal the reported paths, every changed path is allowed, and no forbidden path changed. Dependency changes before `P` are not worker-owned paths.
+5. The exact required validations ran and have concise results.
+6. The commit contains no unrelated work, and unexpected dependencies were reported instead of silently included.
+
+Acceptance is receipt-first, revision-guarded, and idempotent only for the same
+canonical result. A generic checkpoint cannot add, replace, or clear the bound
+result digest, and integration refuses missing or invalid result evidence. For
+an eligible native-v3 task already Integrated before this boundary, use the
+explicit `backfill-result` command with the original result; never reconstruct
+a result from compact task fields or migration data.
 
 Cherry-pick accepted commits centrally in dependency order. Resolve conflicts
 only in the integration checkout. Checkpoint each successful integration.
-Integrated means the code is central; it does not mean the finding is Resolved.
+That checkpoint reruns the shared worker inspector against actual Git objects.
+Before any commit inspection, replacement-disabled Git resolves the actual
+common Git directory, including from a linked worktree; a nonempty common-dir
+`info/grafts` fails closed while an absent or empty file is inert. Subsequent
+authority reads keep replacement refs disabled. The named central commit's
+parent must descend from `P`. The inspector emits the binary full-index
+`P`-to-`W` patch with renames, external diffs, text conversion, and submodule
+ignoring disabled and short applyable gitlink formatting forced. It applies the
+patch cached and three-way inside a unique temporary Git directory, index, and
+object database rooted at the central parent, with the repository's SHA-1 or
+SHA-256 object format, and requires the complete generated tree to equal the
+actual central tree. It clears inherited Git settings,
+disables system and user configuration and attributes, and forces the built-in
+`merge=text` driver through highest-precedence temporary `info/attributes`, so
+repository attributes and custom merge drivers cannot affect or execute during
+the proof. Its object writes go only to the temporary database, which reads the
+repository object database as an alternate; every temporary authority file is
+removed in `finally`. Conflicts and any path, status, mode,
+gitlink pointer, whitespace, added/deleted-byte, or binary-content mismatch fail
+closed, while unrelated nonoverlapping history in the same file is permitted.
+A whitespace-normalizing patch ID is not sufficient. Parent or integration-
+history drift after acceptance fails before durable state changes. Integrated
+means the code is central; it does not mean the finding is Resolved.
 
 ## Validate the integrated batch
 
@@ -230,6 +260,15 @@ finishes, and lets `run-validation` skip commands already attempted after an
 interruption. A changed commit, dirty checkout, malformed plan, or incomplete
 task list is an error. After a failed plan, fix the cause and create a fresh
 plan with `validation-plan --replace` rather than substituting a broader check.
+
+When the exact current state has no actionable tasks and every retained finding
+is a terminal, verifier-eligible non-actionable outcome, post-integration
+specialist planning may use an empty task list. This creates the same
+exact-HEAD/revision, receipt-protected final-verification context, including the
+retained task outcomes, without routing reusable reviewers. It still requires a
+clean checkout and passed current-HEAD targeted validation. Pre-bind planning
+never permits an empty task list. Do not fabricate a dummy actionable packet
+solely to obtain integration-verifier context.
 
 | Area | Normal integrated check |
 | --- | --- |

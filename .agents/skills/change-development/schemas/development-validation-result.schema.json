@@ -1,0 +1,11 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema", "$id":"https://aerstello.local/schemas/change-development/development-validation-result-v1.schema.json",
+  "title":"Append-only development validation command result v1", "type":"object", "additionalProperties":false,
+  "required":["schemaVersion","planDigest","headSha","commandId","argv","attempt","status","startedAt","completedAt","exitCode","signal","summary","outputDigest"],
+  "properties":{"schemaVersion":{"const":1},"planDigest":{"$ref":"#/$defs/digest"},"headSha":{"$ref":"#/$defs/sha"},"commandId":{"$ref":"#/$defs/id"},
+    "argv":{"type":"array","minItems":2,"maxItems":100,"items":{"type":"string","minLength":1,"maxLength":500}},"attempt":{"type":"integer","minimum":1},
+    "status":{"enum":["passed","failed"]},"startedAt":{"type":"string","format":"date-time"},"completedAt":{"type":"string","format":"date-time"},
+    "exitCode":{"oneOf":[{"type":"integer","minimum":0,"maximum":255},{"type":"null"}]},"signal":{"oneOf":[{"type":"string","minLength":1,"maxLength":64},{"type":"null"}]},
+    "summary":{"type":"string","minLength":1,"maxLength":2000,"pattern":"\\S"},"outputDigest":{"$ref":"#/$defs/digest"}},
+  "$defs":{"id":{"type":"string","pattern":"^[a-z0-9]+(?:-[a-z0-9]+)*$","maxLength":128},"sha":{"type":"string","pattern":"^[0-9a-f]{40}([0-9a-f]{24})?$"},"digest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"}}
+}

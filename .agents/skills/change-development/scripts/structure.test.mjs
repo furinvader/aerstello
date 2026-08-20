@@ -17,7 +17,14 @@ const EXPECTED_CANONICAL_FILES = [
   'references/implementation.md',
   'references/planning.md',
   'references/state-and-recovery.md',
+  'references/verification.md',
+  'schemas/development-finding-disposition.schema.json',
+  'schemas/development-specialist-result.schema.json',
   'schemas/development-state.schema.json',
+  'schemas/development-validation-plan.schema.json',
+  'schemas/development-validation-result.schema.json',
+  'schemas/development-verification-result.schema.json',
+  'schemas/development-verifier-context.schema.json',
   'schemas/implementation-plan.schema.json',
   'schemas/implementation-result.schema.json',
   'schemas/implementation-task.schema.json',
@@ -44,6 +51,8 @@ const EXPECTED_CANONICAL_FILES = [
   'scripts/state/state.mjs',
   'scripts/state/state.test.mjs',
   'scripts/structure.test.mjs',
+  'scripts/verification/contracts.mjs',
+  'scripts/verification/contracts.test.mjs',
   'scripts/worktree/cli.mjs',
   'scripts/worktree/worktree.mjs',
   'scripts/worktree/worktree.test.mjs',
@@ -55,9 +64,16 @@ const DOCUMENTATION_FILES = [
   'references/implementation.md',
   'references/planning.md',
   'references/state-and-recovery.md',
+  'references/verification.md',
 ];
 
 const EXPECTED_ADAPTERS = {
+  '.codex/agents/development-integration-verifier.toml': [
+    'README.md',
+    'references/verification.md',
+    'schemas/development-verification-result.schema.json',
+    'schemas/development-verifier-context.schema.json',
+  ],
   '.codex/agents/implementation-worker.toml': [
     'schemas/implementation-result.schema.json',
     'schemas/implementation-task.schema.json',
@@ -242,7 +258,13 @@ test('operator docs expose exact source descriptors and durable state layout', (
 test('schema identifiers and the operator guide each have one canonical copy', () => {
   const files = repositoryFiles();
   const schemaPaths = [
+    '.agents/skills/change-development/schemas/development-finding-disposition.schema.json',
+    '.agents/skills/change-development/schemas/development-specialist-result.schema.json',
     '.agents/skills/change-development/schemas/development-state.schema.json',
+    '.agents/skills/change-development/schemas/development-validation-plan.schema.json',
+    '.agents/skills/change-development/schemas/development-validation-result.schema.json',
+    '.agents/skills/change-development/schemas/development-verification-result.schema.json',
+    '.agents/skills/change-development/schemas/development-verifier-context.schema.json',
     '.agents/skills/change-development/schemas/implementation-plan.schema.json',
     '.agents/skills/change-development/schemas/implementation-result.schema.json',
     '.agents/skills/change-development/schemas/implementation-task.schema.json',
@@ -301,6 +323,31 @@ test('one thin implementation worker is the only ordinary development writer', (
   assert.match(worker, /edit central change-development state/u);
   assert.match(worker, /push/u);
   assert.match(worker, /GitHub/u);
+});
+
+test('development final verifier is exact-HEAD read-only and has no hook authority', () => {
+  const verifier = readRepositoryFile('.codex/agents/development-integration-verifier.toml');
+  assert.match(verifier, /^name = "development_integration_verifier"$/mu);
+  assert.match(verifier, /^model_reasoning_effort = "high"$/mu);
+  assert.match(verifier, /^sandbox_mode = "read-only"$/mu);
+  assert.match(verifier, /^\[agents\]\nenabled = false$/mu);
+  for (const target of [
+    '.agents/skills/change-development/README.md',
+    '.agents/skills/change-development/references/verification.md',
+    '.agents/skills/change-development/schemas/development-verifier-context.schema.json',
+    '.agents/skills/change-development/schemas/development-verification-result.schema.json',
+    '.agents/skills/aerstello-specialists/references/reviewer-contracts.md',
+  ]) assert.ok(verifier.includes(target), `development verifier misses ${target}`);
+  for (const fragment of [
+    'generated, ready development-verifier context', 'exact clean checkout HEAD',
+    'original accepted plan and effective plan', 'integration receipt order',
+    'Remain read-only', 'Never edit files or change-development state',
+    'invoke a specialist, or delegate', 'Return only one raw JSON object',
+  ]) assert.ok(verifier.includes(fragment), `development verifier misses ${fragment}`);
+
+  const config = readRepositoryFile('.codex/config.toml');
+  assert.match(config, /^\[agents\.development_integration_verifier\][\s\S]*?^config_file = "agents\/development-integration-verifier\.toml"$/mu);
+  assert.equal(readRepositoryFile('.codex/hooks.json').includes('development_integration_verifier'), false);
 });
 
 test('change hooks share matcher groups with unchanged first PR handlers', () => {
