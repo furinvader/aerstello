@@ -40,13 +40,21 @@ symlinked root, candidate, or evidence file, pins no-follow directory
 descriptors, opens files read-only and no-follow, and requires stable pre/post
 device, inode, mode, size, timestamps, and exact byte count. The 10,000-name
 limit is applied before any canonical candidate is read or parsed, while
-`.partial` entries are ignored. It rereads its one exact candidate before
-checkpointing. The archived schema-v3 task must be completed and project
-exactly to one active terminal `not-applicable` GitHub-thread task. Terminal
-archive evidence, all resolved proof rows, one shared ancestral historical
-HEAD, and exactly one correlated archived reply intent plus resolve intent per
-root are mandatory. Each live reply must equal the deterministic body rebuilt
-from archived state and task evidence. Root creation must be no later than
+`.partial` entries are ignored. Selection requires one canonical immutable
+proof lineage rather than one archive directory. Every matching carrier is
+independently schema-valid and terminal, and its one completed schema-v3 task
+must project exactly to one active terminal `not-applicable` GitHub-thread task.
+Every carrier must reproduce the same complete selected-root proof rows in
+stable root order, including root, reply, task, disposition, resolution, and
+historical-HEAD identity. At least one origin must retain exactly one correlated
+reply intent plus resolve intent per root. Multiple complete origins deduplicate
+only when their normalized proof-and-intent authority is identical. A later
+replay carrier may differ in terminal metadata and unrelated state or events,
+but it is tolerated only with the exact canonical task-and-proof projection and
+zero selected-root intents. Partial or conflicting intent footprints and every
+divergent projection are fatal. Archive name, timestamp, enumeration order, and
+latest or earliest position never establish authority. Each live reply must
+equal the deterministic body rebuilt from origin state and task evidence. Root creation must be no later than
 logical reply intent, logical intent no later than its persisted event, and
 that reply event no later than exact resolve intent. Resolve intent must be no
 earlier than the live reply's represented-second start, and preserved durable
@@ -62,8 +70,10 @@ recovery form and intentionally permits the event envelope's few milliseconds
 of persistence latency.
 Historical ancestry reads actual objects with replacement refs disabled and
 refuses nonempty common-directory `info/grafts`, including for linked
-worktrees. Fully paginated live roots and replies must match those records
-twice. The transition writes only the ordinary current thread proof and
+worktrees. A deterministic sorted fingerprint of every matching carrier binds
+the two complete archive reads, so additions, removals, or content changes fail
+as races while list-only reordering is harmless. Fully paginated live roots and
+replies must match those records twice. The transition writes only the ordinary current thread proof and
 task completion; it never changes an archive, copies evidence into a sidecar,
 appends a mutation event, or mutates GitHub. Manual state/proof copying and
 thread reopening are not recovery mechanisms.

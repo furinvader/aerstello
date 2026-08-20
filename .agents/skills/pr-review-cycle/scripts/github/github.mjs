@@ -858,6 +858,56 @@ function projectedArchivedTask(archivedTask) {
   return { ...archivedTask, status: 'not-applicable' };
 }
 
+function archiveBatchProofProjection(state, selectedTask, archivedState) {
+  const sourceThreadIds = selectedTask.sourceIds.map((source) => (
+    /^thread:(.+)$/u.exec(source)?.[1] ?? null
+  ));
+  if (sourceThreadIds.some((threadId) => threadId === null)
+      || new Set(sourceThreadIds).size !== sourceThreadIds.length) {
+    throw new GitHubWorkflowError(
+      'Archive batch requires one unique explicit thread source per root',
+      'ARCHIVE_PROOF_MISMATCH',
+    );
+  }
+  const archivedProofs = archivedState.threadResolutionStatus.threads.filter((proof) => (
+    proof.taskIds.includes(selectedTask.id)
+  ));
+  if (archivedProofs.length !== sourceThreadIds.length
+      || archivedProofs.some((proof) => proof.taskIds.length !== 1
+        || proof.taskIds[0] !== selectedTask.id || proof.isResolved !== true
+        || proof.disposition !== selectedTask.disposition
+        || proof.replyId === null || proof.replyUrl === null
+        || proof.resolvedAt === null || proof.resolvedBy === null)) {
+    throw new GitHubWorkflowError('Archived resolved-root proof is incomplete or ambiguous', 'ARCHIVE_PROOF_MISMATCH');
+  }
+  const proofRows = sourceThreadIds.slice().sort().map((threadId) => {
+    const proofs = archivedProofs.filter((proof) => proof.threadNodeId === threadId);
+    if (proofs.length !== 1) {
+      throw new GitHubWorkflowError('Archived source root is missing or duplicated', 'ARCHIVE_PROOF_MISMATCH');
+    }
+    return structuredClone(proofs[0]);
+  });
+  const historicalHeads = new Set(proofRows.map((proof) => proof.observedHeadSha));
+  if (historicalHeads.size !== 1) {
+    throw new GitHubWorkflowError('Archived roots do not share one historical HEAD', 'ARCHIVE_PROOF_MISMATCH');
+  }
+  const historicalHeadSha = [...historicalHeads][0];
+  if (historicalHeadSha === state.currentIntegrationHeadSha) {
+    throw new GitHubWorkflowError('Archive adoption requires a distinct historical HEAD', 'ARCHIVE_PROOF_MISMATCH');
+  }
+  return {
+    task: structuredClone(selectedTask),
+    proofRows,
+    historicalHeadSha,
+  };
+}
+
+function archiveContentFingerprint(archive) {
+  return createHash('sha256')
+    .update(JSON.stringify(canonicalJson(archive)))
+    .digest('hex');
+}
+
 async function selectArchiveForBatch(state, selectedTask, archiveStore) {
   if (!archiveStore?.list) {
     throw new GitHubWorkflowError('Immutable archive evidence is unavailable', 'ARCHIVE_EVIDENCE_MISSING');
@@ -898,15 +948,28 @@ async function selectArchiveForBatch(state, selectedTask, archiveStore) {
         'ARCHIVE_TASK_MISMATCH',
       );
     }
-    candidates.push({ archive, archivedState, archivedTask, terminalBounds });
+    const projection = archiveBatchProofProjection(state, selectedTask, archivedState);
+    candidates.push({
+      archive,
+      archivedState,
+      archivedTask,
+      terminalBounds,
+      projection,
+      contentFingerprint: archiveContentFingerprint(archive),
+    });
   }
   if (candidates.length === 0) {
     throw new GitHubWorkflowError('No exact immutable archive proves this task', 'ARCHIVE_EVIDENCE_MISSING');
   }
-  if (candidates.length !== 1) {
-    throw new GitHubWorkflowError('More than one immutable archive proves this task', 'ARCHIVE_EVIDENCE_AMBIGUOUS');
+  const projection = candidates[0].projection;
+  if (candidates.some((candidate) => !isDeepStrictEqual(candidate.projection, projection))) {
+    throw new GitHubWorkflowError(
+      'Matching archives carry conflicting task or resolved-root proof lineages',
+      'ARCHIVE_EVIDENCE_AMBIGUOUS',
+    );
   }
-  return candidates[0];
+  candidates.sort((left, right) => left.archive.archiveId.localeCompare(right.archive.archiveId));
+  return { candidates, projection };
 }
 
 function archiveIntent(events, type, operationId) {
@@ -969,46 +1032,23 @@ function stableCommentEvidence(comment) {
 
 function validateArchiveBatchLive(state, live, selectedTask, selectedPlan, selectedArchive) {
   const {
-    archivedState, archivedTask, archive, terminalBounds,
+    archivedState, archivedTask, archive, terminalBounds, projection,
   } = selectedArchive;
-  const sourceThreadIds = selectedTask.sourceIds.map((source) => (
-    /^thread:(.+)$/u.exec(source)?.[1] ?? null
-  ));
-  if (sourceThreadIds.some((threadId) => threadId === null)
-      || new Set(sourceThreadIds).size !== sourceThreadIds.length
-      || sourceThreadIds.length !== selectedPlan.length) {
+  if (!isDeepStrictEqual(projection.task, selectedTask)
+      || projection.proofRows.length !== selectedPlan.length) {
     throw new GitHubWorkflowError(
       'Archive batch requires one unique explicit thread source per root',
       'ARCHIVE_PROOF_MISMATCH',
     );
   }
-  const archivedProofs = archivedState.threadResolutionStatus.threads.filter((proof) => (
-    proof.taskIds.includes(selectedTask.id)
-  ));
-  if (archivedProofs.length !== sourceThreadIds.length
-      || archivedProofs.some((proof) => proof.taskIds.length !== 1
-        || proof.taskIds[0] !== selectedTask.id || proof.isResolved !== true
-        || proof.disposition !== selectedTask.disposition
-        || proof.replyId === null || proof.replyUrl === null
-        || proof.resolvedAt === null || proof.resolvedBy === null)) {
-    throw new GitHubWorkflowError('Archived resolved-root proof is incomplete or ambiguous', 'ARCHIVE_PROOF_MISMATCH');
-  }
-  const historicalHeads = new Set(archivedProofs.map((proof) => proof.observedHeadSha));
-  if (historicalHeads.size !== 1) {
-    throw new GitHubWorkflowError('Archived roots do not share one historical HEAD', 'ARCHIVE_PROOF_MISMATCH');
-  }
-  const historicalHeadSha = [...historicalHeads][0];
-  if (historicalHeadSha === state.currentIntegrationHeadSha) {
-    throw new GitHubWorkflowError('Archive adoption requires a distinct historical HEAD', 'ARCHIVE_PROOF_MISMATCH');
-  }
+  const historicalHeadSha = projection.historicalHeadSha;
   const evidence = [];
-  for (const threadId of sourceThreadIds) {
-    const proofs = archivedProofs.filter((proof) => proof.threadNodeId === threadId);
+  for (const proof of projection.proofRows) {
+    const threadId = proof.threadNodeId;
     const entries = selectedPlan.filter((entry) => entry.thread.id === threadId);
-    if (proofs.length !== 1 || entries.length !== 1) {
+    if (entries.length !== 1) {
       throw new GitHubWorkflowError('Archived source root is missing or duplicated', 'ARCHIVE_PROOF_MISMATCH');
     }
-    const proof = proofs[0];
     const entry = entries[0];
     const { thread } = entry;
     const root = thread.root;
@@ -1068,6 +1108,10 @@ function validateArchiveBatchLive(state, live, selectedTask, selectedPlan, selec
       threadNodeId: thread.id,
       proof: { ...proof },
       reply: { ...reply },
+      intents: {
+        reply: structuredClone(replyIntent),
+        resolve: structuredClone(resolveIntent),
+      },
       live: {
         threadNodeId: thread.id,
         isResolved: thread.isResolved,
@@ -1084,11 +1128,202 @@ function validateArchiveBatchLive(state, live, selectedTask, selectedPlan, selec
   };
 }
 
+function selectedArchiveIntentCorrelations(state, projection) {
+  return projection.proofRows.flatMap((proof) => ['reply', 'resolve'].map((type) => {
+    const operationId = `${type}:${state.prNumber}:${proof.threadNodeId}:${projection.historicalHeadSha}`;
+    return {
+      operationId,
+      clientMutationId: intentFor(type, operationId, null).clientMutationId,
+      summary: `Intent ${type} ${operationId}`,
+    };
+  }));
+}
+
+function exactlyMatchesArchiveIntentCorrelation(event, correlation) {
+  return event.summary === correlation.summary
+    || event.details?.operationId === correlation.operationId
+    || event.details?.clientMutationId === correlation.clientMutationId;
+}
+
+function archivedOperationReference(value) {
+  if (typeof value !== 'string') return null;
+  const parts = value.split(':');
+  return {
+    operationId: value,
+    type: parts[0],
+    tokens: parts,
+    threadNodeId: parts.length >= 3 && parts[2].length > 0 ? parts[2] : null,
+    wellFormedReplyResolve: ['reply', 'resolve'].includes(parts[0])
+      && parts.length === 4
+      && /^[1-9]\d*$/u.test(parts[1])
+      && parts[2].length > 0
+      && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(parts[3]),
+  };
+}
+
+function archivedIntentSummaryReference(value) {
+  if (typeof value !== 'string') return null;
+  const match = /^Intent (\S+) ([\s\S]*)$/u.exec(value);
+  if (!match) return null;
+  const operation = archivedOperationReference(match[2]);
+  return {
+    ...operation,
+    summaryType: match[1],
+    wellFormedReplyResolve: operation.wellFormedReplyResolve
+      && operation.type === match[1],
+  };
+}
+
+function eventCarriesSelectedArchiveIntent(event, selectedThreadIds) {
+  const detailOperation = archivedOperationReference(event.details?.operationId);
+  const summaryOperation = archivedIntentSummaryReference(event.summary);
+  if ([detailOperation, summaryOperation].some((operation) => (
+    operation?.tokens.some((token) => selectedThreadIds.has(token))
+  ))) return true;
+
+  const replyResolve = (value) => ['reply', 'resolve'].includes(value);
+  const detailAdvertisesReplyResolve = event.type === 'github-mutation-intent'
+    && (replyResolve(event.details?.type) || replyResolve(detailOperation?.type));
+  const summaryAdvertisesReplyResolve = summaryOperation !== null
+    && (replyResolve(summaryOperation.summaryType) || replyResolve(summaryOperation.type));
+  if (!detailAdvertisesReplyResolve && !summaryAdvertisesReplyResolve) return false;
+  if (detailAdvertisesReplyResolve && (
+    detailOperation === null
+      || !detailOperation.wellFormedReplyResolve
+      || event.details?.type !== detailOperation.type
+      || (summaryOperation !== null && !summaryAdvertisesReplyResolve)
+  )) return true;
+  if (summaryAdvertisesReplyResolve && (
+    !summaryOperation.wellFormedReplyResolve
+      || (detailOperation !== null && !detailAdvertisesReplyResolve)
+  )) return true;
+  return detailAdvertisesReplyResolve && summaryAdvertisesReplyResolve
+    && (detailOperation.operationId !== summaryOperation.operationId
+      || detailOperation.type !== summaryOperation.type);
+}
+
+function selectedArchiveIntentFootprint(state, projection, events) {
+  const correlations = selectedArchiveIntentCorrelations(state, projection);
+  const selectedThreadIds = new Set(projection.proofRows.map((proof) => proof.threadNodeId));
+  return events.filter((event) => (
+    correlations.some((correlation) => exactlyMatchesArchiveIntentCorrelation(event, correlation))
+    || eventCarriesSelectedArchiveIntent(event, selectedThreadIds)
+  ));
+}
+
+function assertCompleteSelectedArchiveIntentFootprint(state, projection, footprint) {
+  const correlations = selectedArchiveIntentCorrelations(state, projection);
+  const correlationsAreUnique = correlations.every((correlation) => (
+    footprint.filter((event) => exactlyMatchesArchiveIntentCorrelation(event, correlation)).length === 1
+  ));
+  const eventsAreUnique = footprint.every((event) => (
+    correlations.filter((correlation) => exactlyMatchesArchiveIntentCorrelation(event, correlation)).length === 1
+  ));
+  if (footprint.length !== correlations.length || !correlationsAreUnique || !eventsAreUnique) {
+    throw new GitHubWorkflowError(
+      'Archived selected-root intent footprint is partial, duplicated, altered, or conflicting',
+      'ARCHIVE_INTENT_AMBIGUOUS',
+    );
+  }
+}
+
+function assertReplayArchiveBounds(candidate) {
+  for (const proof of candidate.projection.proofRows) {
+    const resolvedAt = parsedTime(proof.resolvedAt, 'Archived replay resolution proof');
+    if (resolvedAt > candidate.terminalBounds.stateUpdatedAt
+        || (candidate.terminalBounds.terminalEventAt !== null
+          && resolvedAt > candidate.terminalBounds.terminalEventAt)) {
+      throw new GitHubWorkflowError(
+        'Archived replay proof falls outside its terminal envelope',
+        'ARCHIVE_EVIDENCE_INVALID',
+      );
+    }
+  }
+}
+
+function normalizedArchiveOriginAuthority(projection, adoption) {
+  return {
+    projection: structuredClone(projection),
+    roots: adoption.evidence.map((item) => ({
+      threadNodeId: item.threadNodeId,
+      replyBody: item.reply.body,
+      intents: structuredClone(item.intents),
+    })),
+  };
+}
+
+function archiveLineageFingerprint(candidates, roles) {
+  const inventory = candidates.map((candidate) => ({
+    archiveId: candidate.archive.archiveId,
+    contentFingerprint: candidate.contentFingerprint,
+    role: roles.get(candidate.archive.archiveId),
+  })).sort((left, right) => left.archiveId.localeCompare(right.archiveId));
+  return {
+    inventory,
+    fingerprint: createHash('sha256')
+      .update(JSON.stringify(canonicalJson(inventory)))
+      .digest('hex'),
+  };
+}
+
+function validateArchiveBatchLineage(state, live, selectedTask, selectedPlan, lineage) {
+  if (!isDeepStrictEqual(lineage.projection.task, selectedTask)) {
+    throw new GitHubWorkflowError('Archive lineage task projection changed', 'ARCHIVE_TASK_MISMATCH');
+  }
+  const origins = [];
+  const roles = new Map();
+  for (const candidate of lineage.candidates) {
+    const archiveId = candidate.archive.archiveId;
+    const footprint = selectedArchiveIntentFootprint(
+      state, candidate.projection, candidate.archive.events,
+    );
+    if (footprint.length === 0) {
+      assertReplayArchiveBounds(candidate);
+      roles.set(archiveId, 'replay');
+      continue;
+    }
+    assertCompleteSelectedArchiveIntentFootprint(state, candidate.projection, footprint);
+    const adoption = validateArchiveBatchLive(
+      state, live, selectedTask, selectedPlan, candidate,
+    );
+    origins.push({
+      archiveId,
+      adoption,
+      authority: normalizedArchiveOriginAuthority(lineage.projection, adoption),
+    });
+    roles.set(archiveId, 'origin');
+  }
+  if (origins.length === 0) {
+    throw new GitHubWorkflowError(
+      'Archive lineage lacks a complete original reply and resolve intent authority',
+      'ARCHIVE_INTENT_AMBIGUOUS',
+    );
+  }
+  const authority = origins[0].authority;
+  if (origins.some((origin) => !isDeepStrictEqual(origin.authority, authority))) {
+    throw new GitHubWorkflowError(
+      'Archive lineage contains conflicting complete intent authorities',
+      'ARCHIVE_EVIDENCE_AMBIGUOUS',
+    );
+  }
+  origins.sort((left, right) => left.archiveId.localeCompare(right.archiveId));
+  const lineageInventory = archiveLineageFingerprint(lineage.candidates, roles);
+  return {
+    ...origins[0].adoption,
+    archiveLineage: {
+      ...lineageInventory,
+      authorityFingerprint: createHash('sha256')
+        .update(JSON.stringify(canonicalJson(authority)))
+        .digest('hex'),
+    },
+  };
+}
+
 async function prepareArchiveBatchAdoption({
   state, live, selectedTask, selectedPlan, archiveStore, git,
 }) {
-  const selectedArchive = await selectArchiveForBatch(state, selectedTask, archiveStore);
-  const adoption = validateArchiveBatchLive(state, live, selectedTask, selectedPlan, selectedArchive);
+  const lineage = await selectArchiveForBatch(state, selectedTask, archiveStore);
+  const adoption = validateArchiveBatchLineage(state, live, selectedTask, selectedPlan, lineage);
   if (!(await git.isAncestor(
     adoption.historicalHeadSha, state.currentIntegrationHeadSha, state.integrationWorktree,
   ))) {
@@ -2385,15 +2620,15 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
       const preflightAdoption = await prepareArchiveBatchAdoption({
         state: active, live, selectedTask, selectedPlan, archiveStore, git,
       });
-      const finalArchive = await selectArchiveForBatch(active, selectedTask, archiveStore);
+      const finalLineage = await selectArchiveForBatch(active, selectedTask, archiveStore);
       live = await readLiveSnapshot(client, active);
       await assertMutationReady({ state: active, git }, live);
       const finalPlan = buildCanonicalRootPlan(active, live, taskId);
       if (!archiveBatchAdoptionReady(active, finalPlan.selected, finalPlan.selectedPlan)) {
         throw new GitHubWorkflowError('Archive adoption prerequisites changed after preflight', 'THREAD_PROOF_STALE');
       }
-      const finalAdoption = validateArchiveBatchLive(
-        active, live, finalPlan.selected, finalPlan.selectedPlan, finalArchive,
+      const finalAdoption = validateArchiveBatchLineage(
+        active, live, finalPlan.selected, finalPlan.selectedPlan, finalLineage,
       );
       if (!(await git.isAncestor(
         finalAdoption.historicalHeadSha, active.currentIntegrationHeadSha, active.integrationWorktree,

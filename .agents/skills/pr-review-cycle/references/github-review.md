@@ -179,9 +179,17 @@ One recovery-only batch variant exists for roots already resolved by an
 archived cycle. First use `verify-resolve` to complete the actionable
 GitHub-threadless remediation at the exact current HEAD. With a pristine
 aggregate thread proof, `reply-resolve --task <terminal-non-actionable-id>` may
-then select exactly one immutable archive for the same repository and PR. The
-archived completed task must project exactly to the active `not-applicable`
-task. Every archived proof row, historical HEAD, reply and resolve intent,
+then select one canonical immutable proof lineage for the same repository and
+PR. Every matching archive must be independently schema-valid and terminal,
+carry exactly one completed task that projects exactly to the active
+`not-applicable` task, and reproduce the complete selected-root proof rows in
+stable root order. At least one origin archive must retain every reply and
+resolve intent; multiple origins deduplicate only when their normalized proof
+and intent authority is identical. A later replay carrier is allowed only with
+that exact task-and-proof projection and zero selected-root intents. Partial or
+conflicting intents and missing, duplicated, or divergent proof fail closed;
+archive names, timestamps, ordering, and latest or earliest position are never
+authority. Every authoritative archived proof row, historical HEAD, reply and resolve intent,
 deterministic client ID, live canonical root, root comment, direct reply,
 exact deterministic body, marker, author, parent, URL, timestamp, and resolution
 state must agree, while all other live canonical roots still map uniquely to
@@ -199,15 +207,19 @@ follow resolve intent, and the next second's `.000` is rejected. When durable
 no later than that proof. Exact equality between `resolvedAt` and the resolve
 intent denotes recovery's logical intent timestamp and may precede the event
 envelope by its persistence latency.
-Archive files are read
+Archive-local terminal metadata plus unrelated tasks, proofs, and events do not
+enter the lineage authority, but each carrier still passes its own immutable
+envelope validation. Archive files are read
 through pinned no-follow directory and file descriptors with stable inode,
 size, and exact-byte checks, and canonical names are bounded before any parse.
 Historical ancestry ignores replacement refs and rejects a nonempty
 common-directory `info/grafts`, including in linked worktrees. The command
 performs two complete evidence and head reads and one guarded state checkpoint;
 it performs no GitHub mutation and no active or archived journal write. Missing,
-duplicate, edited, foreign, raced, non-ancestral, or mixed-archive evidence is
-fatal. Do not manually copy proof or intent data and do not reopen threads.
+edited, foreign, non-ancestral, or mixed-lineage evidence is fatal. A sorted
+fingerprint binds every matching carrier across both reads: additions,
+removals, and content changes are races, while enumeration-only reordering is
+harmless. Do not manually copy proof or intent data and do not reopen threads.
 Ordinary unresolved roots and the existing single-root prior-HEAD recovery keep
 their existing `reply-resolve` paths.
 

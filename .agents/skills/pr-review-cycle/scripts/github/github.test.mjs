@@ -822,6 +822,27 @@ function archiveAdoptionFixture({
   return { active, archive, client, journal };
 }
 
+function replayArchive(origin, {
+  archiveId = 'pr-2-2026-08-05T00-02-00-000Z',
+  stateAt = '2026-08-05T00:02:00.000Z',
+  terminalAt = '2026-08-05T00:02:00.010Z',
+  retainValidation = false,
+} = {}) {
+  const replay = structuredClone(origin);
+  replay.archiveId = archiveId;
+  replay.state.updatedAt = stateAt;
+  if (!retainValidation) {
+    replay.state.validationStatus = {
+      ...replay.state.validationStatus,
+      checks: ['npm run check:workflow'],
+      updatedAt: stateAt,
+    };
+  }
+  replay.events = replay.events.filter((event) => event.type !== 'github-mutation-intent');
+  replay.events.at(-1).at = terminalAt;
+  return replay;
+}
+
 function archiveBootstrapFixture(options = {}) {
   const fixture = archiveAdoptionFixture(options);
   const remediation = fixture.active.tasks.find((task) => task.id === ARCHIVE_REMEDIATION_ID);
@@ -4366,10 +4387,15 @@ test('archive-adoption verifier bootstrap rejects second-snapshot root, head, an
 test('archive-adoption verifier bootstrap never weakens later archive evidence gates', async () => {
   const cases = [
     ['missing archive', (fixture) => ({ records: [] })],
-    ['duplicate archive', (fixture) => ({ records: [
-      fixture.archive,
-      { ...structuredClone(fixture.archive), archiveId: 'pr-2-2026-08-05T00-02-00-000Z' },
-    ] })],
+    ['conflicting archive authority', (fixture) => {
+      const conflicting = {
+        ...structuredClone(fixture.archive), archiveId: 'pr-2-2026-08-05T00-02-00-000Z',
+      };
+      const intent = conflicting.events.find((event) => event.details?.type === 'reply');
+      intent.details.at = '2026-08-04T23:58:31.000Z';
+      intent.at = '2026-08-04T23:58:31.001Z';
+      return { records: [fixture.archive, conflicting] };
+    }],
     ['tampered archive', (fixture) => {
       const archive = structuredClone(fixture.archive);
       archive.state.threadResolutionStatus.threads[0].replyUrl = 'https://github.com/tampered';
@@ -4570,13 +4596,65 @@ test('bootstrap then reply-resolve adopts five byte-faithful Wc8 roots beside th
   }
 });
 
+test('archive batch adoption accepts one canonical lineage across replay generations and equivalent origins', async () => {
+  const cases = [
+    ['one replay', (fixture) => [
+      fixture.archive,
+      replayArchive(fixture.archive),
+    ]],
+    ['multiple replay generations', (fixture) => [
+      replayArchive(fixture.archive, {
+        archiveId: 'pr-2-2026-08-05T00-03-00-000Z',
+        stateAt: '2026-08-05T00:03:00.000Z',
+        terminalAt: '2026-08-05T00:03:00.010Z',
+      }),
+      fixture.archive,
+      replayArchive(fixture.archive),
+    ]],
+    ['equivalent complete origins', (fixture) => [
+      { ...structuredClone(fixture.archive), archiveId: 'pr-2-2026-08-05T00-02-00-000Z' },
+      fixture.archive,
+    ]],
+  ];
+
+  for (const [label, recordsFor] of cases) {
+    const fixture = archiveAdoptionFixture();
+    const records = recordsFor(fixture);
+    const originalRecords = structuredClone(records);
+    let archiveReads = 0;
+    const archiveStore = {
+      async list() {
+        archiveReads += 1;
+        const order = archiveReads % 2 === 1 ? records : [...records].reverse();
+        return structuredClone(order);
+      },
+    };
+    const setup = workflow(fixture.active, fixture.client, {
+      archiveStore, journal: fixture.journal,
+    });
+
+    const result = await setup.api.replyResolve(2, ARCHIVED_TASK_ID);
+
+    assert.equal(archiveReads, 2, label);
+    assert.equal(setup.state.calls.length, 1, label);
+    assert.equal(
+      result.threadResolutionStatus.threads.filter((thread) => thread.isResolved).length,
+      2,
+      label,
+    );
+    assert.equal(
+      fixture.client.calls.some((call) => ['AddThreadReply', 'ResolveThread'].includes(call.name)),
+      false,
+      label,
+    );
+    assert.deepEqual(fixture.client.events, [], label);
+    assert.deepEqual(records, originalRecords, `${label} archive carriers remain immutable`);
+  }
+});
+
 test('archive batch adoption rejects archive identity, task projection, and terminal-evidence ambiguity', async () => {
   const cases = [
     ['missing archive', (fixture) => []],
-    ['duplicate archive', (fixture) => [
-      fixture.archive,
-      { ...structuredClone(fixture.archive), archiveId: 'pr-2-2026-08-05T00-02-00-000Z' },
-    ]],
     ['foreign repository', (fixture) => [{
       ...fixture.archive,
       state: { ...fixture.archive.state, repository: 'other/aerstello' },
@@ -4593,6 +4671,15 @@ test('archive batch adoption rejects archive identity, task projection, and term
       state: { ...fixture.archive.state, abandonmentReason: null },
       events: fixture.archive.events.filter((event) => event.type !== 'abandoned'),
     }]],
+    ['conflicting archive authority', (fixture) => {
+      const conflicting = {
+        ...structuredClone(fixture.archive), archiveId: 'pr-2-2026-08-05T00-02-00-000Z',
+      };
+      const intent = conflicting.events.find((event) => event.details?.type === 'reply');
+      intent.details.at = '2026-08-04T23:58:31.000Z';
+      intent.at = '2026-08-04T23:58:31.001Z';
+      return [fixture.archive, conflicting];
+    }],
     ['duplicate archive identity', (fixture) => [fixture.archive, structuredClone(fixture.archive)]],
   ];
 
@@ -4607,6 +4694,260 @@ test('archive batch adoption rejects archive identity, task projection, and term
     assert.equal(fixture.client.calls.some((call) => ['AddThreadReply', 'ResolveThread'].includes(call.name)), false, label);
     assert.deepEqual(fixture.client.events, [], label);
   }
+});
+
+test('archive proof lineage rejects replay-only, divergent carriers, and partial intent authority', async () => {
+  const cases = [
+    ['replay only', (fixture) => [replayArchive(fixture.archive)]],
+    ['divergent task', (fixture) => {
+      const replay = replayArchive(fixture.archive);
+      replay.state.tasks[0].summary = 'Divergent replay task.';
+      return [fixture.archive, replay];
+    }],
+    ['missing proof row', (fixture) => {
+      const replay = replayArchive(fixture.archive);
+      replay.state.threadResolutionStatus.threads.pop();
+      return [fixture.archive, replay];
+    }],
+    ['divergent task set', (fixture) => {
+      const replay = replayArchive(fixture.archive);
+      replay.state.threadResolutionStatus.threads[0].taskIds.push('foreign-task');
+      return [fixture.archive, replay];
+    }],
+    ['divergent historical head', (fixture) => {
+      const replay = replayArchive(fixture.archive);
+      for (const proofRow of replay.state.threadResolutionStatus.threads) {
+        proofRow.observedHeadSha = ADVANCED_HEAD;
+      }
+      return [fixture.archive, replay];
+    }],
+    ['divergent reply identity', (fixture) => {
+      const replay = replayArchive(fixture.archive);
+      replay.state.threadResolutionStatus.threads[0].replyId = 'REPLY_DIVERGENT';
+      return [fixture.archive, replay];
+    }],
+    ['divergent resolution identity', (fixture) => {
+      const replay = replayArchive(fixture.archive);
+      replay.state.threadResolutionStatus.threads[0].resolvedBy = 'other-operator';
+      return [fixture.archive, replay];
+    }],
+    ['partial replay intent footprint', (fixture) => {
+      const replay = replayArchive(fixture.archive, { retainValidation: true });
+      replay.events.unshift(structuredClone(
+        fixture.archive.events.find((event) => event.details?.type === 'reply'),
+      ));
+      return [fixture.archive, replay];
+    }],
+    ['conflicting complete origins', (fixture) => {
+      const conflicting = {
+        ...structuredClone(fixture.archive), archiveId: 'pr-2-2026-08-05T00-02-00-000Z',
+      };
+      const intent = conflicting.events.find((event) => event.details?.type === 'reply');
+      intent.details.at = '2026-08-04T23:58:31.000Z';
+      intent.at = '2026-08-04T23:58:31.001Z';
+      return [fixture.archive, conflicting];
+    }],
+    ['nonterminal replay envelope', (fixture) => {
+      const replay = replayArchive(fixture.archive);
+      replay.state.abandonmentReason = null;
+      replay.events = replay.events.filter((event) => event.type !== 'abandoned');
+      return [fixture.archive, replay];
+    }],
+  ];
+
+  for (const [label, recordsFor] of cases) {
+    const fixture = archiveAdoptionFixture();
+    const records = recordsFor(fixture);
+    const originalRecords = structuredClone(records);
+    const setup = workflow(fixture.active, fixture.client, {
+      archiveStore: immutableArchiveStore(records), journal: fixture.journal,
+    });
+
+    await assert.rejects(() => setup.api.replyResolve(2, ARCHIVED_TASK_ID), GitHubWorkflowError, label);
+
+    assert.equal(setup.state.calls.length, 0, label);
+    assert.equal(
+      fixture.client.calls.some((call) => ['AddThreadReply', 'ResolveThread'].includes(call.name)),
+      false,
+      label,
+    );
+    assert.deepEqual(fixture.client.events, [], label);
+    assert.deepEqual(records, originalRecords, `${label} archive carriers remain immutable`);
+  }
+});
+
+test('archive proof lineage rejects every extra selected-root intent correlation without writes', async () => {
+  const cases = [
+    ['different-HEAD reply operation', () => archiveIntentEvent(
+      'reply', `reply:2:THREAD_ARCHIVE_A:${ADVANCED_HEAD}`, ARCHIVE_REPLY_INTENT_AT,
+    )],
+    ['different-HEAD resolve operation', () => archiveIntentEvent(
+      'resolve', `resolve:2:THREAD_ARCHIVE_A:${ADVANCED_HEAD}`, ARCHIVE_RESOLVE_INTENT_AT,
+    )],
+    ['different-HEAD summary alias', () => {
+      const event = archiveIntentEvent(
+        'reply', `reply:2:THREAD_FOREIGN:${ADVANCED_HEAD}`, ARCHIVE_REPLY_INTENT_AT,
+      );
+      event.summary = `Intent reply reply:2:THREAD_ARCHIVE_A:${ADVANCED_HEAD}`;
+      return event;
+    }],
+    ['historical client-ID alias', () => {
+      const event = archiveIntentEvent(
+        'resolve', `resolve:2:THREAD_FOREIGN:${ADVANCED_HEAD}`, ARCHIVE_RESOLVE_INTENT_AT,
+      );
+      event.details.clientMutationId = priorIntent(
+        'resolve', `resolve:2:THREAD_ARCHIVE_A:${OTHER_HEAD}`,
+      ).clientMutationId;
+      return event;
+    }],
+  ];
+
+  for (const [label, extraEvent] of cases) {
+    const fixture = archiveAdoptionFixture();
+    fixture.archive.events.splice(-1, 0, extraEvent());
+    const originalArchive = structuredClone(fixture.archive);
+    const setup = workflow(fixture.active, fixture.client, {
+      archiveStore: immutableArchiveStore([fixture.archive]), journal: fixture.journal,
+    });
+
+    await assert.rejects(
+      () => setup.api.replyResolve(2, ARCHIVED_TASK_ID),
+      { code: 'ARCHIVE_INTENT_AMBIGUOUS' },
+      label,
+    );
+    assert.equal(setup.state.calls.length, 0, label);
+    assert.equal(
+      fixture.client.calls.some((call) => ['AddThreadReply', 'ResolveThread'].includes(call.name)),
+      false,
+      label,
+    );
+    assert.deepEqual(fixture.client.events, [], label);
+    assert.deepEqual(fixture.archive, originalArchive, `${label} archive remains immutable`);
+  }
+});
+
+test('archive intent recognition is PR-neutral by selected thread and ignores only unrelated roots', async () => {
+  const rejectedCases = [
+    ['wrong-PR reply details only', () => {
+      const event = archiveIntentEvent(
+        'reply', `reply:999:THREAD_ARCHIVE_A:${ADVANCED_HEAD}`, ARCHIVE_REPLY_INTENT_AT,
+      );
+      event.summary = 'Unrelated envelope text.';
+      return event;
+    }],
+    ['wrong-PR resolve operation', () => archiveIntentEvent(
+      'resolve', `resolve:999:THREAD_ARCHIVE_A:${ADVANCED_HEAD}`, ARCHIVE_RESOLVE_INTENT_AT,
+    )],
+    ['mismatched summary and operation labels', () => {
+      const event = archiveIntentEvent(
+        'reply', `reply:999:THREAD_FOREIGN:${ADVANCED_HEAD}`, ARCHIVE_REPLY_INTENT_AT,
+      );
+      event.summary = `Intent reply resolve:999:THREAD_ARCHIVE_A:${ADVANCED_HEAD}`;
+      return event;
+    }],
+    ['extra-head selected operation', () => {
+      const event = archiveIntentEvent(
+        'reply', `reply:999:THREAD_FOREIGN:${ADVANCED_HEAD}`, ARCHIVE_REPLY_INTENT_AT,
+      );
+      event.details.operationId = `reply:999:THREAD_ARCHIVE_A:${ADVANCED_HEAD}:extra`;
+      event.summary = 'Unrelated envelope text.';
+      return event;
+    }],
+    ['wrong-namespace reply details only', () => {
+      const event = archiveIntentEvent(
+        'reply', `reply:999:THREAD_FOREIGN:${ADVANCED_HEAD}`, ARCHIVE_REPLY_INTENT_AT,
+      );
+      event.details.operationId = `close:999:THREAD_ARCHIVE_A:${ADVANCED_HEAD}`;
+      event.summary = 'Unrelated envelope text.';
+      return event;
+    }],
+    ['wrong-namespace resolve details only', () => {
+      const event = archiveIntentEvent(
+        'resolve', `resolve:999:THREAD_FOREIGN:${ADVANCED_HEAD}`, ARCHIVE_RESOLVE_INTENT_AT,
+      );
+      event.details.operationId = `close:999:THREAD_ARCHIVE_A:${ADVANCED_HEAD}`;
+      event.summary = 'Unrelated envelope text.';
+      return event;
+    }],
+    ['wrong-namespace and label summary only', () => {
+      const event = archiveIntentEvent(
+        'reply', `reply:999:THREAD_FOREIGN:${ADVANCED_HEAD}`, ARCHIVE_REPLY_INTENT_AT,
+      );
+      event.summary = `Intent close close:999:THREAD_ARCHIVE_A:${ADVANCED_HEAD}`;
+      return event;
+    }],
+    ['selected token outside the canonical slot', () => {
+      const event = archiveIntentEvent(
+        'reply', `reply:999:THREAD_FOREIGN:${ADVANCED_HEAD}`, ARCHIVE_REPLY_INTENT_AT,
+      );
+      event.details.type = 'close';
+      event.details.operationId = `close:999:THREAD_FOREIGN:${ADVANCED_HEAD}:THREAD_ARCHIVE_A`;
+      event.summary = 'Unrelated envelope text.';
+      return event;
+    }],
+    ['altered outer wrapper with selected details only', () => {
+      const event = archiveIntentEvent(
+        'resolve', `resolve:999:THREAD_ARCHIVE_A:${ADVANCED_HEAD}`, ARCHIVE_RESOLVE_INTENT_AT,
+      );
+      event.type = 'altered-mutation-envelope';
+      event.summary = 'Unrelated envelope text.';
+      return event;
+    }],
+  ];
+
+  for (const [label, extraEvent] of rejectedCases) {
+    const fixture = archiveAdoptionFixture();
+    fixture.archive.events.splice(-1, 0, extraEvent());
+    const originalArchive = structuredClone(fixture.archive);
+    const setup = workflow(fixture.active, fixture.client, {
+      archiveStore: immutableArchiveStore([fixture.archive]), journal: fixture.journal,
+    });
+
+    await assert.rejects(
+      () => setup.api.replyResolve(2, ARCHIVED_TASK_ID),
+      { code: 'ARCHIVE_INTENT_AMBIGUOUS' },
+      label,
+    );
+    assert.equal(setup.state.calls.length, 0, label);
+    assert.equal(
+      fixture.client.calls.some((call) => ['AddThreadReply', 'ResolveThread'].includes(call.name)),
+      false,
+      label,
+    );
+    assert.deepEqual(fixture.client.events, [], label);
+    assert.deepEqual(fixture.archive, originalArchive, `${label} archive remains immutable`);
+  }
+
+  const unrelated = archiveAdoptionFixture();
+  unrelated.archive.events.splice(-1, 0, archiveIntentEvent(
+    'reply', `reply:999:THREAD_UNRELATED:${ADVANCED_HEAD}`, ARCHIVE_REPLY_INTENT_AT,
+  ));
+  unrelated.archive.events.splice(-1, 0, archiveIntentEvent(
+    'close', `close:999:THREAD_UNRELATED:${ADVANCED_HEAD}`, ARCHIVE_REPLY_INTENT_AT,
+  ));
+  const unrelatedWrapper = archiveIntentEvent(
+    'resolve', `resolve:999:THREAD_UNRELATED:${ADVANCED_HEAD}`, ARCHIVE_RESOLVE_INTENT_AT,
+  );
+  unrelatedWrapper.type = 'altered-mutation-envelope';
+  unrelatedWrapper.summary = 'Unrelated envelope text.';
+  unrelated.archive.events.splice(-1, 0, unrelatedWrapper);
+  const originalArchive = structuredClone(unrelated.archive);
+  const archiveStore = immutableArchiveStore([unrelated.archive]);
+  const setup = workflow(unrelated.active, unrelated.client, {
+    archiveStore, journal: unrelated.journal,
+  });
+
+  const result = await setup.api.replyResolve(2, ARCHIVED_TASK_ID);
+
+  assert.equal(archiveStore.calls, 2);
+  assert.equal(setup.state.calls.length, 1);
+  assert.equal(result.threadResolutionStatus.threads.filter((thread) => thread.isResolved).length, 2);
+  assert.equal(
+    unrelated.client.calls.some((call) => ['AddThreadReply', 'ResolveThread'].includes(call.name)),
+    false,
+  );
+  assert.deepEqual(unrelated.client.events, []);
+  assert.deepEqual(unrelated.archive, originalArchive);
 });
 
 test('archive batch adoption honors reply represented-second and resolve-intent boundaries byte-for-byte', async () => {
@@ -4897,6 +5238,54 @@ test('archive batch adoption repeats live, archive, head, and revision guards be
   });
   await assert.rejects(() => archiveRaceSetup.api.replyResolve(2, ARCHIVED_TASK_ID), GitHubWorkflowError);
   assert.equal(archiveRaceSetup.state.calls.length, 0);
+
+  for (const [label, snapshots] of [
+    ['lineage carrier added', (fixture) => [
+      [fixture.archive],
+      [fixture.archive, replayArchive(fixture.archive)],
+    ]],
+    ['lineage carrier removed', (fixture) => [
+      [fixture.archive, replayArchive(fixture.archive)],
+      [fixture.archive],
+    ]],
+    ['lineage carrier content altered', (fixture) => {
+      const replay = replayArchive(fixture.archive);
+      const altered = structuredClone(replay);
+      altered.state.nextAction = 'Changed after the first immutable inventory read.';
+      return [
+        [fixture.archive, replay],
+        [fixture.archive, altered],
+      ];
+    }],
+  ]) {
+    const fixture = archiveAdoptionFixture();
+    const reads = snapshots(fixture);
+    let calls = 0;
+    const setup = workflow(fixture.active, fixture.client, {
+      archiveStore: {
+        async list() {
+          const snapshot = reads[Math.min(calls, reads.length - 1)];
+          calls += 1;
+          return structuredClone(snapshot);
+        },
+      },
+      journal: fixture.journal,
+    });
+
+    await assert.rejects(
+      () => setup.api.replyResolve(2, ARCHIVED_TASK_ID),
+      { code: 'THREAD_PROOF_STALE' },
+      label,
+    );
+    assert.equal(calls, 2, label);
+    assert.equal(setup.state.calls.length, 0, label);
+    assert.equal(
+      fixture.client.calls.some((call) => ['AddThreadReply', 'ResolveThread'].includes(call.name)),
+      false,
+      label,
+    );
+    assert.deepEqual(fixture.client.events, [], label);
+  }
 
   const revisionRace = archiveAdoptionFixture();
   let revisionSetup;
