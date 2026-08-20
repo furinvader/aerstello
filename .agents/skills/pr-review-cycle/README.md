@@ -335,6 +335,34 @@ journal events manually, and never reopen a resolved thread to manufacture a
 normal resolution path. Single-root prior-HEAD recovery and ordinary unresolved
 thread handling remain the normal `reply-resolve` behavior.
 
+When the resolved archive batch itself prevents the remediation's ordinary
+aggregate-proof gate, use a two-command state-only bootstrap. First run
+`verify-resolve --task <remediation-id>` for the sole actionable Integrated
+GitHub-threadless remediation. This exception exists only when the aggregate,
+threadless, and local proofs are pristine; one exclusive terminal
+`not-applicable` GitHub-thread task owns at least two live resolved roots; and
+every other fully paginated canonical root is unresolved and maps exclusively
+to an actionable Integrated or Resolved GitHub-thread task. The command proves
+twice that the hypothetical singleton remediation proof enables the existing
+archive-adoption predicate, while rechecking clean equal local, pushed, live,
+and durable heads plus the exact state revision. It then completes only that
+remediation and records only singleton exact-current-HEAD threadless coverage.
+Aggregate status, head, rows, timestamp, and local proof remain byte-for-byte
+unchanged. An exact retry repeats all topology, pagination, head, checkout, and
+revision guards before returning idempotently. Completed-retry bootstrap
+handling is armed only when the terminal task's immutable `thread:` and
+`discussion:` aliases resolve through the canonical live mapping to at least
+two distinct root identities. Both aliases for the same root count once, so an
+ordinary one-root terminal task retains the guarded completed-threadless retry
+path.
+
+Then run `reply-resolve --task <terminal-id>` to select and verify the immutable
+archive through the ordinary batch-adoption path. The bootstrap never reads an
+archive, trusts archived proof early, reads or writes the mutation journal,
+mutates GitHub, or fabricates aggregate thread rows. Unique archive selection,
+exact intent/reply/timestamp evidence, ancestry, live rereads, races, and the
+single adoption checkpoint remain solely `reply-resolve` responsibilities.
+
 A schema-v2 migration may preserve a taskless pending review for the exact
 integration HEAD while deliberately clearing legacy targeted-validation proof.
 After that preserved review is collected as clean,

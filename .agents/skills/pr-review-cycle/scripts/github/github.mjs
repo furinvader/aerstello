@@ -549,6 +549,29 @@ function verifyResolveResult(taskIds, active) {
   };
 }
 
+function canonicalRootsForTask(task, live) {
+  const expectedSources = task.sourceIds.filter((source) => /^(?:thread|discussion):/u.test(source));
+  if (expectedSources.length === 0) {
+    throw new GitHubWorkflowError(
+      `Task ${task.id} has no canonical root source`,
+      'ROOT_IDENTITY_MISMATCH',
+    );
+  }
+  const roots = new Map();
+  for (const source of expectedSources) {
+    const matches = live.threads.filter((thread) => thread.canonical
+      && (source === `thread:${thread.id}` || source === `discussion:${thread.root.databaseId}`));
+    if (matches.length !== 1) {
+      throw new GitHubWorkflowError(
+        `Source ${source} is missing or ambiguous`,
+        'ROOT_IDENTITY_MISMATCH',
+      );
+    }
+    roots.set(matches[0].id, matches[0]);
+  }
+  return [...roots.values()];
+}
+
 function buildCanonicalRootPlan(state, live, selectedTaskId = null) {
   if (state.validationStatus.status !== 'passed'
       || state.validationStatus.headSha !== state.currentIntegrationHeadSha
@@ -574,13 +597,7 @@ function buildCanonicalRootPlan(state, live, selectedTaskId = null) {
   const tasks = state.tasks.filter((task) => task.sourceType === 'github-thread');
   const mapped = new Map();
   for (const task of tasks) {
-    const expectedSources = task.sourceIds.filter((source) => /^(?:thread|discussion):/u.test(source));
-    if (expectedSources.length === 0) throw new GitHubWorkflowError(`Task ${task.id} has no canonical root source`, 'ROOT_IDENTITY_MISMATCH');
-    for (const source of expectedSources) {
-      const matches = live.threads.filter((thread) => thread.canonical
-        && (source === `thread:${thread.id}` || source === `discussion:${thread.root.databaseId}`));
-      if (matches.length !== 1) throw new GitHubWorkflowError(`Source ${source} is missing or ambiguous`, 'ROOT_IDENTITY_MISMATCH');
-      const thread = matches[0];
+    for (const thread of canonicalRootsForTask(task, live)) {
       const entry = mapped.get(thread.id) ?? { thread, tasks: [] };
       if (!entry.tasks.some((item) => item.id === task.id)) entry.tasks.push(task);
       mapped.set(thread.id, entry);
@@ -662,6 +679,152 @@ function archiveBatchAdoptionReady(state, selectedTask, selectedPlan) {
       && task.disposition === 'actionable' && task.status === 'completed'
       && typeof task.integratedCommitSha === 'string';
   });
+}
+
+function verificationProofIsPristine(verification) {
+  return verification?.status === 'not-run'
+    && verification.headSha === null
+    && verification.taskIds.length === 0
+    && verification.updatedAt === null;
+}
+
+function archiveBootstrapScaffoldIsPristine(state) {
+  const aggregate = state.threadResolutionStatus;
+  return aggregate.status === 'not-run'
+    && aggregate.headSha === null
+    && aggregate.threads.length === 0
+    && aggregate.updatedAt === null
+    && Object.hasOwn(aggregate, 'localVerification')
+    && verificationProofIsPristine(aggregate.localVerification);
+}
+
+function immutableSourcesDeclareMultiRootArchiveBatch(task, live) {
+  return canonicalRootsForTask(task, live).length >= 2;
+}
+
+function archiveAdoptionVerifierBootstrapPlan(state, live, selectedTaskId, heads) {
+  const selectedTask = state.tasks.find((task) => task.id === selectedTaskId);
+  const terminalThreadTasks = state.tasks.filter((task) => task.sourceType === 'github-thread'
+    && task.status === 'not-applicable' && task.disposition !== 'actionable');
+  const verification = state.threadResolutionStatus.threadlessVerification;
+  const retry = selectedTask?.disposition === 'actionable'
+    && selectedTask.status === 'completed'
+    && typeof selectedTask.integratedCommitSha === 'string'
+    && verification.status === 'passed'
+    && verification.headSha === state.currentIntegrationHeadSha
+    && sameTaskIds([...verification.taskIds].sort(), [selectedTask.id])
+    && verification.updatedAt !== null;
+  const potentialBootstrap = selectedTask?.sourceType === 'github-threadless'
+    && archiveBootstrapScaffoldIsPristine(state)
+    && terminalThreadTasks.length > 0
+    && (selectedTask.status !== 'completed' || (retry && terminalThreadTasks.some(
+      (task) => immutableSourcesDeclareMultiRootArchiveBatch(task, live),
+    )));
+  if (!potentialBootstrap) return null;
+
+  const pending = selectedTask.disposition === 'actionable'
+    && selectedTask.status === 'integrated'
+    && typeof selectedTask.integratedCommitSha === 'string'
+    && verificationProofIsPristine(verification);
+  if (!pending && !retry) {
+    throw new GitHubWorkflowError(
+      'Archive-adoption verifier bootstrap requires one Integrated remediation or its exact retry',
+      'TASK_NOT_READY',
+    );
+  }
+
+  const eligibleRemediations = state.tasks.filter((task) => task.sourceType === 'github-threadless'
+    && task.disposition === 'actionable' && task.status === 'integrated'
+    && typeof task.integratedCommitSha === 'string');
+  if ((pending && (eligibleRemediations.length !== 1 || eligibleRemediations[0].id !== selectedTask.id))
+      || (retry && eligibleRemediations.length !== 0)) {
+    throw new GitHubWorkflowError(
+      'Archive-adoption verifier bootstrap remediation is missing or ambiguous',
+      'TASK_NOT_READY',
+    );
+  }
+  if (terminalThreadTasks.length !== 1
+      || !VERIFIED_NON_ACTIONABLE_DISPOSITIONS.has(terminalThreadTasks[0].disposition)) {
+    throw new GitHubWorkflowError(
+      'Archive-adoption verifier bootstrap requires one terminal non-actionable thread task',
+      'TASK_NOT_READY',
+    );
+  }
+
+  const { plan } = buildCanonicalRootPlan(state, live);
+  const canonicalRoots = live.threads.filter((thread) => thread.canonical);
+  if (plan.length !== canonicalRoots.length
+      || plan.some((entry) => entry.tasks.length !== 1)) {
+    throw new GitHubWorkflowError(
+      'Archive-adoption verifier bootstrap requires exclusive canonical-root mappings',
+      'ROOT_IDENTITY_MISMATCH',
+    );
+  }
+  const archiveTask = terminalThreadTasks[0];
+  const archivePlan = plan.filter((entry) => entry.tasks[0].id === archiveTask.id);
+  if (archivePlan.length < 2 || archivePlan.some((entry) => !entry.thread.isResolved)) {
+    throw new GitHubWorkflowError(
+      'Archive-adoption verifier bootstrap requires one resolved multi-root batch',
+      'TASK_NOT_READY',
+    );
+  }
+  const otherRootsEligible = plan.filter((entry) => entry.tasks[0].id !== archiveTask.id)
+    .every((entry) => {
+      const task = entry.tasks[0];
+      return !entry.thread.isResolved
+        && task.sourceType === 'github-thread'
+        && task.disposition === 'actionable'
+        && ['integrated', 'completed'].includes(task.status)
+        && typeof task.integratedCommitSha === 'string';
+    });
+  if (!otherRootsEligible) {
+    throw new GitHubWorkflowError(
+      'Archive-adoption verifier bootstrap found an ineligible root outside the resolved batch',
+      'TASK_NOT_READY',
+    );
+  }
+
+  const hypotheticalState = {
+    ...state,
+    tasks: state.tasks.map((task) => task.id === selectedTask.id
+      ? { ...task, status: 'completed' } : task),
+    threadResolutionStatus: {
+      ...state.threadResolutionStatus,
+      threadlessVerification: {
+        status: 'passed',
+        headSha: state.currentIntegrationHeadSha,
+        taskIds: [selectedTask.id],
+        updatedAt: retry ? verification.updatedAt : state.updatedAt,
+      },
+    },
+  };
+  if (!archiveBatchAdoptionReady(hypotheticalState, archiveTask, archivePlan)) {
+    throw new GitHubWorkflowError(
+      'Archive-adoption verifier bootstrap does not enable the ordinary archive-adoption predicate',
+      'TASK_NOT_READY',
+    );
+  }
+
+  return {
+    mode: pending ? 'pending' : 'retry',
+    stateRevision: state.revision,
+    selectedTaskId: selectedTask.id,
+    selectedIntegratedCommitSha: selectedTask.integratedCommitSha,
+    archiveTaskId: archiveTask.id,
+    heads: {
+      durable: state.currentIntegrationHeadSha,
+      local: heads.localHeadSha,
+      pushed: heads.pushedHeadSha,
+      live: live.metadata.headRefOid,
+    },
+    roots: plan.map((entry) => ({
+      threadNodeId: entry.thread.id,
+      rootCommentNodeId: entry.thread.root.id,
+      rootCommentDatabaseId: entry.thread.root.databaseId,
+      isResolved: entry.thread.isResolved,
+      taskId: entry.tasks[0].id,
+    })),
+  };
 }
 
 function assertArchiveEventList(events) {
@@ -2448,16 +2611,60 @@ export function createGitHubReviewWorkflow({ client, state: stateAdapter, git, c
     }
 
     let live = await readLiveSnapshot(client, active);
-    await assertMutationReady({ state: active, git }, live);
-    if (completedThreadlessRefresh) assertRecordedThreadsLive(active, live);
-    else assertLiveThreadProof(active, live);
+    const preflightHeads = await assertMutationReady({ state: active, git }, live);
+    const preflightBootstrap = taskIds.length === 1
+      ? archiveAdoptionVerifierBootstrapPlan(active, live, selectedTask.id, preflightHeads)
+      : null;
+    if (preflightBootstrap === null) {
+      if (completedThreadlessRefresh) assertRecordedThreadsLive(active, live);
+      else assertLiveThreadProof(active, live);
+    }
     await assertCurrent(active);
 
     live = await readLiveSnapshot(client, active);
-    await assertMutationReady({ state: active, git }, live);
-    if (completedThreadlessRefresh) assertRecordedThreadsLive(active, live);
-    else assertLiveThreadProof(active, live);
+    const finalHeads = await assertMutationReady({ state: active, git }, live);
+    let finalBootstrap = null;
+    try {
+      finalBootstrap = taskIds.length === 1
+        ? archiveAdoptionVerifierBootstrapPlan(active, live, selectedTask.id, finalHeads)
+        : null;
+    } catch (error) {
+      if (preflightBootstrap === null) throw error;
+      throw new GitHubWorkflowError(
+        'Archive-adoption verifier bootstrap evidence changed after preflight',
+        'THREAD_PROOF_STALE',
+      );
+    }
+    if (preflightBootstrap !== null) {
+      if (finalBootstrap === null || !isDeepStrictEqual(preflightBootstrap, finalBootstrap)) {
+        throw new GitHubWorkflowError(
+          'Archive-adoption verifier bootstrap evidence changed after preflight',
+          'THREAD_PROOF_STALE',
+        );
+      }
+    } else {
+      if (completedThreadlessRefresh) assertRecordedThreadsLive(active, live);
+      else assertLiveThreadProof(active, live);
+    }
     await assertCurrent(active);
+
+    if (preflightBootstrap !== null) {
+      if (preflightBootstrap.mode === 'retry') return verifyResolveResult(taskIds, active);
+      const verifiedAt = clock.now();
+      const threadResolutionStatus = {
+        ...active.threadResolutionStatus,
+        threadlessVerification: {
+          status: 'passed',
+          headSha: active.currentIntegrationHeadSha,
+          taskIds: [selectedTask.id],
+          updatedAt: verifiedAt,
+        },
+      };
+      active = await stateAdapter.checkpointTaskCompletion({
+        prNumber, expectedRevision: active.revision, threadResolutionStatus, verifiedLocalTaskIds: [],
+      });
+      return verifyResolveResult(taskIds, active);
+    }
 
     if (selectedTask.status === 'completed' && completedThreadlessRefresh) {
       if (completedThreadlessVerification.headSha === active.currentIntegrationHeadSha) {

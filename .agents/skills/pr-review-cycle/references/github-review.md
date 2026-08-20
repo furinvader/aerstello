@@ -211,6 +211,31 @@ fatal. Do not manually copy proof or intent data and do not reopen threads.
 Ordinary unresolved roots and the existing single-root prior-HEAD recovery keep
 their existing `reply-resolve` paths.
 
+If the live resolved batch makes ordinary `verify-resolve` circular, the first
+command has one state-only bootstrap topology. The selection must be a singleton
+and the sole actionable Integrated GitHub-threadless remediation. Aggregate,
+threadless, and local proof must all be pristine. Exactly one exclusive terminal
+`not-applicable` GitHub-thread task must own at least two live resolved roots;
+every other fully paginated canonical root must be unresolved and owned only by
+an actionable Integrated or Resolved GitHub-thread task. Unknown, missing,
+duplicate, shared, additionally resolved, or ambiguously remediated roots fail
+closed. Two complete live snapshots must reproduce the exact candidate, root
+mapping, local/pushed/live/durable head identities, and state revision.
+
+Success completes only the selected remediation and replaces only pristine
+threadless proof with singleton exact-current-HEAD coverage. It preserves the
+aggregate status, head, rows, timestamp, and local proof byte-for-byte and is
+idempotent only after all guards run again. A completed retry enters this
+bootstrap only when the terminal task's immutable `thread:` and `discussion:`
+aliases resolve through the canonical live mapping to at least two distinct
+root identities. Dual aliases for one root count once, keeping that task on the
+ordinary fully guarded threadless retry. This command performs no GitHub
+mutation, no mutation-journal read or write, and no archive read or write; its
+two fully paginated GitHub reads are intentional. It never synthesizes
+aggregate proof. Run `reply-resolve` second; it alone selects and trusts one
+immutable archive and retains every ordinary projection, intent, reply-body,
+timestamp, ancestry, live-evidence, and race gate.
+
 ## Run Codex and CI together
 
 Once targeted local validation passes and the Review commit is pushed, Codex

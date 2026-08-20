@@ -68,6 +68,36 @@ task completion; it never changes an archive, copies evidence into a sidecar,
 appends a mutation event, or mutates GitHub. Manual state/proof copying and
 thread reopening are not recovery mechanisms.
 
+Archive adoption may require one preceding state-only `verify-resolve`
+bootstrap when its already-resolved live roots circularly block ordinary
+aggregate verification. The bootstrap is not archive evidence. It requires
+pristine aggregate, threadless, and local proof; one selected actionable
+Integrated GitHub-threadless remediation; exactly one exclusive terminal
+`not-applicable` GitHub-thread task with at least two live resolved roots; and
+only unresolved, exclusively mapped actionable Integrated or Resolved
+GitHub-thread roots outside that batch. The complete canonical-root mapping,
+clean equal local/pushed/live/durable heads, and state revision must match across
+two full snapshots. An additional or ineligible remediation, any unknown,
+missing, duplicate, shared, or extra-resolved root, or any snapshot race fails
+without a checkpoint.
+
+Its sole transition completes the selected remediation and changes only
+`threadResolutionStatus.threadlessVerification` from pristine to passed with
+the singleton task ID, exact current integration HEAD, and current assertion
+time. Aggregate `status`, `headSha`, `threads`, `updatedAt`, and
+`localVerification` remain byte-for-byte unchanged. An identical retry still
+repeats every live, checkout, head, topology, and revision guard.
+Completed-retry bootstrap handling is armed only when the terminal task's immutable
+`thread:` and `discussion:` aliases resolve through the canonical live mapping
+to at least two distinct root identities. Dual aliases for one root count once,
+so an ordinary one-root terminal task keeps the guarded threadless retry. The
+command does not enumerate or read archives, copy archived evidence, consult or
+append the mutation journal, mutate GitHub, or synthesize aggregate thread
+rows. The following `reply-resolve` remains the only authority for archive
+selection, immutable archive proof, historical ancestry,
+intent/reply/timestamp correlation, live evidence, race checks, and the
+adoption checkpoint.
+
 Pull-request `state` and `isDraft` are volatile GitHub evidence, never durable
 review-state fields. `status` reports them without writing. A review request
 against an otherwise ready draft first journals the deterministic

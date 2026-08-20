@@ -678,6 +678,11 @@ const PACKET_ARCHIVE_LIVE_TIMES = new Map([
   ['PRRT_kwDOTqOdrM6aWc8q', { rootCreatedAt: '2026-08-19T05:01:01.000Z', replyCreatedAt: '2026-08-19T15:33:27.000Z' }],
   ['PRRT_kwDOTqOdrM6aWc8t', { rootCreatedAt: '2026-08-19T05:01:01.000Z', replyCreatedAt: '2026-08-19T15:34:08.000Z' }],
 ]);
+const PACKET_UNRESOLVED_THREAD_IDS = Object.freeze([
+  'PRRT_kwDOTqOdrM6ahnN9',
+  'PRRT_kwDOTqOdrM6ahnOB',
+  'PRRT_kwDOTqOdrM6ahnOF',
+]);
 
 function archivedBatchTask(status = 'not-applicable') {
   return {
@@ -817,7 +822,18 @@ function archiveAdoptionFixture({
   return { active, archive, client, journal };
 }
 
-function packetArchiveAdoptionFixture(archive) {
+function archiveBootstrapFixture(options = {}) {
+  const fixture = archiveAdoptionFixture(options);
+  const remediation = fixture.active.tasks.find((task) => task.id === ARCHIVE_REMEDIATION_ID);
+  remediation.status = 'integrated';
+  fixture.active.threadResolutionStatus = proof('not-run');
+  return fixture;
+}
+
+function packetArchiveAdoptionFixture(archive, {
+  bootstrap = false,
+  unresolvedThreadIds = [],
+} = {}) {
   const archivedState = archive.state;
   const archivedTask = archivedState.tasks.find(
     (task) => task.id === 'archived-pr35-five-thread-fixes-r1',
@@ -830,15 +846,24 @@ function packetArchiveAdoptionFixture(archive) {
     sourceType: 'github-threadless',
     fingerprint: 'fp-packet-archive-adoption-remediation',
     summary: 'Implement exact packet archive adoption.',
-    severity: 'P1', disposition: 'actionable', status: 'completed',
+    severity: 'P1', disposition: 'actionable', status: bootstrap ? 'integrated' : 'completed',
     integratedCommitSha: HEAD, resolutionSummary: 'Implemented and verified.',
+  };
+  const unresolvedTask = {
+    id: 'pr-review-worker-commit-delta-integrity-r1',
+    sourceIds: unresolvedThreadIds.map((threadId) => `thread:${threadId}`),
+    sourceType: 'github-thread',
+    fingerprint: 'fp-pr-review-worker-commit-delta-integrity-r1',
+    summary: 'Preserve exact worker-commit delta integrity.',
+    severity: 'P1', disposition: 'actionable', status: 'integrated',
+    integratedCommitSha: HEAD, resolutionSummary: 'Integrated and verified.',
   };
   const active = readyState({
     repository: archivedState.repository,
     prNumber: archivedState.prNumber,
     phase: 'verifying',
-    tasks: [selectedTask, remediation],
-    threadResolutionStatus: {
+    tasks: [selectedTask, remediation, ...(unresolvedThreadIds.length > 0 ? [unresolvedTask] : [])],
+    threadResolutionStatus: bootstrap ? proof('not-run') : {
       status: 'not-run', headSha: null, threads: [], updatedAt: null,
       threadlessVerification: {
         status: 'passed', headSha: HEAD, taskIds: [remediation.id], updatedAt: AT,
@@ -908,11 +933,21 @@ function packetArchiveAdoptionFixture(archive) {
       }],
     });
   }
+  for (const [index, threadId] of unresolvedThreadIds.entries()) {
+    addThread(client, {
+      id: threadId,
+      resolved: false,
+      root: rootComment(threadId, {
+        databaseId: 3_900_000_000 + index,
+        url: `https://github.com/${archivedState.repository}/pull/${archivedState.prNumber}#discussion_r${3_900_000_000 + index}`,
+      }),
+    });
+  }
   const journal = {
     async lookupIntent() { throw new Error('packet archive adoption must not read the active journal'); },
     async ensureIntent() { throw new Error('packet archive adoption must not write the active journal'); },
   };
-  return { active, archivedTask, client, journal, proofs };
+  return { active, archivedTask, client, journal, proofs, remediation };
 }
 
 test('status uses split fully paginated reads and filters canonical roots', async () => {
@@ -3582,9 +3617,6 @@ test('verify-resolve proves eligible non-actionable threadless tasks and rejects
 });
 
 test('verify-resolve re-attests completed threadless proof after HEAD drift without aggregate fabrication', async () => {
-  const state = completedThreadlessDriftState();
-  const client = new FakeClient();
-  client.metadata.headRefOid = OTHER_HEAD;
   const journal = {
     async lookupIntent() { throw new Error('verify-resolve must not read the mutation journal'); },
     async ensureIntent() { throw new Error('verify-resolve must not write the mutation journal'); },
@@ -3594,24 +3626,54 @@ test('verify-resolve re-attests completed threadless proof after HEAD drift with
     pushedHead: async () => OTHER_HEAD,
   });
   const later = '2026-08-05T00:01:00Z';
-  const setup = workflow(state, client, { git, journal, clock: { now: () => later } });
-  const result = await setup.api.verifyResolve(2, ['threadless-completed']);
-  assert.equal(result.stateRevision, state.revision + 1);
-  assert.deepEqual(result.threadResolutionStatus, {
-    status: 'not-run', headSha: null, threads: [], updatedAt: null,
-    threadlessVerification: {
-      status: 'passed', headSha: OTHER_HEAD, taskIds: ['threadless-completed'], updatedAt: later,
-    },
-  });
-  assert.deepEqual(setup.state.calls.at(-1).input.verifiedLocalTaskIds, []);
-  assert.equal(client.calls.filter((call) => call.name === 'PullRequestThreads').length, 2);
-  assert.equal(client.events.length, 0);
+  for (const [label, withTerminalThreadTask] of [
+    ['ordinary stale proof', false],
+    ['one-root already-fixed terminal thread task', true],
+  ]) {
+    const state = completedThreadlessDriftState();
+    const client = new FakeClient();
+    client.metadata.headRefOid = OTHER_HEAD;
+    if (withTerminalThreadTask) {
+      state.tasks.push({
+        ...archivedBatchTask(), sourceIds: ['thread:THREAD_ARCHIVE_A'],
+      });
+      state.threadResolutionStatus.localVerification = proof('not-run').localVerification;
+      addThread(client, {
+        id: 'THREAD_ARCHIVE_A', resolved: true,
+        root: rootComment('THREAD_ARCHIVE_A', { databaseId: 510 }),
+      });
+    }
+    const originalAggregate = structuredClone(state.threadResolutionStatus);
+    const setup = workflow(state, client, { git, journal, clock: { now: () => later } });
+    const result = await setup.api.verifyResolve(2, ['threadless-completed']);
+    assert.equal(result.stateRevision, state.revision + 1, label);
+    assert.deepEqual(result.threadResolutionStatus, {
+      ...originalAggregate,
+      threadlessVerification: {
+        status: 'passed', headSha: OTHER_HEAD, taskIds: ['threadless-completed'], updatedAt: later,
+      },
+    }, label);
+    assert.deepEqual(setup.state.calls.at(-1).input.verifiedLocalTaskIds, [], label);
+    assert.equal(
+      client.calls.filter((call) => call.name === 'PullRequestThreads').length,
+      2,
+      label,
+    );
+    assert.equal(client.events.length, 0, label);
 
-  const revision = setup.state.current.revision;
-  const checkpointCount = setup.state.calls.length;
-  await setup.api.verifyResolve(2, ['threadless-completed']);
-  assert.equal(setup.state.current.revision, revision);
-  assert.equal(setup.state.calls.length, checkpointCount);
+    const revision = setup.state.current.revision;
+    const checkpointCount = setup.state.calls.length;
+    const guardedReads = client.calls.filter((call) => call.name === 'PullRequestThreads').length;
+    const retry = await setup.api.verifyResolve(2, ['threadless-completed']);
+    assert.equal(retry.stateRevision, revision, label);
+    assert.equal(setup.state.current.revision, revision, label);
+    assert.equal(setup.state.calls.length, checkpointCount, label);
+    assert.equal(
+      client.calls.filter((call) => call.name === 'PullRequestThreads').length,
+      guardedReads + 2,
+      `${label} retry repeats both complete live snapshots`,
+    );
+  }
 
   const aggregateNotInvalidated = completedThreadlessDriftState();
   aggregateNotInvalidated.threadResolutionStatus = {
@@ -3939,6 +4001,418 @@ test('completed threadless refresh permits mapped new roots and enables journal-
   assert.deepEqual(journalEvents, []);
 });
 
+test('verify-resolve bootstraps only the exact archive-adoption topology before state-only batch adoption', async () => {
+  const fixture = archiveBootstrapFixture();
+  const archiveStore = immutableArchiveStore([fixture.archive]);
+  const setup = workflow(fixture.active, fixture.client, {
+    archiveStore, journal: fixture.journal,
+  });
+  const pristine = structuredClone(fixture.active.threadResolutionStatus);
+
+  const verified = await setup.api.verifyResolve(2, [ARCHIVE_REMEDIATION_ID]);
+
+  assert.equal(archiveStore.calls, 0, 'bootstrap does not read archive evidence');
+  assert.equal(setup.state.calls.length, 1);
+  assert.deepEqual(setup.state.current.tasks.map((task) => [task.id, task.status]), [
+    [ARCHIVED_TASK_ID, 'not-applicable'],
+    [ARCHIVE_REMEDIATION_ID, 'completed'],
+    ['current-thread-fix', 'integrated'],
+  ]);
+  assert.deepEqual(verified.threadResolutionStatus, {
+    ...pristine,
+    threadlessVerification: {
+      status: 'passed', headSha: HEAD, taskIds: [ARCHIVE_REMEDIATION_ID], updatedAt: AT,
+    },
+  });
+  for (const key of ['status', 'headSha', 'threads', 'updatedAt', 'localVerification']) {
+    assert.deepEqual(verified.threadResolutionStatus[key], pristine[key], key);
+  }
+  assert.deepEqual(setup.state.calls[0].input.verifiedLocalTaskIds, []);
+  assert.ok(fixture.client.calls.filter((call) => call.name === 'PullRequestThreads').length >= 6);
+  assert.equal(
+    fixture.client.calls.some((call) => ['AddThreadReply', 'ResolveThread'].includes(call.name)),
+    false,
+  );
+  assert.deepEqual(fixture.client.events, []);
+
+  const revision = setup.state.current.revision;
+  const checkpoints = setup.state.calls.length;
+  const guardedReads = fixture.client.calls.filter((call) => call.name === 'PullRequestThreads').length;
+  const retried = await setup.api.verifyResolve(2, [ARCHIVE_REMEDIATION_ID]);
+  assert.equal(retried.stateRevision, revision);
+  assert.equal(setup.state.calls.length, checkpoints);
+  assert.equal(archiveStore.calls, 0);
+  assert.ok(
+    fixture.client.calls.filter((call) => call.name === 'PullRequestThreads').length >= guardedReads + 6,
+  );
+
+  const adopted = await setup.api.replyResolve(2, ARCHIVED_TASK_ID);
+  assert.equal(archiveStore.calls, 2);
+  assert.equal(setup.state.calls.length, 2);
+  assert.equal(adopted.threadResolutionStatus.status, 'failed');
+  assert.deepEqual(adopted.threadResolutionStatus.threadlessVerification,
+    verified.threadResolutionStatus.threadlessVerification);
+  assert.deepEqual(
+    adopted.threadResolutionStatus.threads.filter((thread) => thread.isResolved)
+      .map((thread) => thread.threadNodeId),
+    ['THREAD_ARCHIVE_A', 'THREAD_ARCHIVE_B'],
+  );
+  assert.deepEqual(
+    adopted.threadResolutionStatus.threads.filter((thread) => !thread.isResolved)
+      .map((thread) => thread.threadNodeId),
+    ['THREAD_CURRENT'],
+  );
+  assert.equal(
+    fixture.client.calls.some((call) => ['AddThreadReply', 'ResolveThread'].includes(call.name)),
+    false,
+  );
+  assert.deepEqual(fixture.client.events, []);
+});
+
+test('archive-adoption verifier bootstrap retries a discussion-only multi-root declaration', async () => {
+  const fixture = archiveBootstrapFixture();
+  fixture.active.tasks.find((task) => task.id === ARCHIVED_TASK_ID).sourceIds = [
+    'discussion:510', 'discussion:511',
+  ];
+  const archiveStore = immutableArchiveStore([fixture.archive]);
+  const setup = workflow(fixture.active, fixture.client, {
+    archiveStore, journal: fixture.journal,
+  });
+
+  await setup.api.verifyResolve(2, [ARCHIVE_REMEDIATION_ID]);
+  const revision = setup.state.current.revision;
+  const checkpointCount = setup.state.calls.length;
+  const proof = structuredClone(setup.state.current.threadResolutionStatus);
+  const guardedReads = fixture.client.calls.filter(
+    (call) => call.name === 'PullRequestThreads',
+  ).length;
+
+  const retry = await setup.api.verifyResolve(2, [ARCHIVE_REMEDIATION_ID]);
+
+  assert.equal(retry.stateRevision, revision);
+  assert.equal(setup.state.calls.length, checkpointCount);
+  assert.deepEqual(retry.threadResolutionStatus, proof);
+  assert.ok(fixture.client.calls.filter(
+    (call) => call.name === 'PullRequestThreads',
+  ).length >= guardedReads + 6);
+  assert.equal(archiveStore.calls, 0);
+  assert.deepEqual(fixture.client.events, []);
+});
+
+test('archive-adoption verifier bootstrap retries mixed canonical root aliases', async () => {
+  const fixture = archiveBootstrapFixture();
+  fixture.active.tasks.find((task) => task.id === ARCHIVED_TASK_ID).sourceIds = [
+    'thread:THREAD_ARCHIVE_A', 'discussion:511',
+  ];
+  const archiveStore = immutableArchiveStore([fixture.archive]);
+  const setup = workflow(fixture.active, fixture.client, {
+    archiveStore, journal: fixture.journal,
+  });
+
+  await setup.api.verifyResolve(2, [ARCHIVE_REMEDIATION_ID]);
+  const revision = setup.state.current.revision;
+  const checkpointCount = setup.state.calls.length;
+  const proof = structuredClone(setup.state.current.threadResolutionStatus);
+
+  const retry = await setup.api.verifyResolve(2, [ARCHIVE_REMEDIATION_ID]);
+
+  assert.equal(retry.stateRevision, revision);
+  assert.equal(setup.state.calls.length, checkpointCount);
+  assert.deepEqual(retry.threadResolutionStatus, proof);
+  assert.equal(archiveStore.calls, 0);
+  assert.deepEqual(fixture.client.events, []);
+});
+
+test('completed retry counts thread and discussion aliases for one root only once', async () => {
+  const state = completedThreadlessDriftState();
+  state.threadResolutionStatus.threadlessVerification.headSha = OTHER_HEAD;
+  state.threadResolutionStatus.localVerification = proof('not-run').localVerification;
+  state.tasks.push({
+    ...archivedBatchTask(),
+    sourceIds: ['thread:THREAD_ARCHIVE_A', 'discussion:510'],
+  });
+  const client = new FakeClient();
+  client.metadata.headRefOid = OTHER_HEAD;
+  addThread(client, {
+    id: 'THREAD_ARCHIVE_A', resolved: true,
+    root: rootComment('THREAD_ARCHIVE_A', { databaseId: 510 }),
+  });
+  const journal = {
+    async lookupIntent() { throw new Error('ordinary retry must not read the mutation journal'); },
+    async ensureIntent() { throw new Error('ordinary retry must not write the mutation journal'); },
+  };
+  const setup = workflow(state, client, {
+    journal,
+    git: fakeGit({
+      snapshot: async () => ({ headSha: OTHER_HEAD, dirty: false }),
+      pushedHead: async () => OTHER_HEAD,
+    }),
+  });
+
+  const retry = await setup.api.verifyResolve(2, ['threadless-completed']);
+
+  assert.equal(retry.stateRevision, state.revision);
+  assert.equal(setup.state.calls.length, 0);
+  assert.equal(client.calls.filter((call) => call.name === 'PullRequestThreads').length, 2);
+  assert.deepEqual(client.events, []);
+});
+
+test('canonical multi-root retry rejects discussion-only and mixed-alias current-proof drift', async () => {
+  const cases = [
+    {
+      label: 'discussion-only preflight drift',
+      sourceIds: ['discussion:510', 'discussion:511'],
+      code: 'TASK_NOT_READY',
+      drift(fixture) {
+        fixture.client.threads.find((thread) => thread.id === 'THREAD_ARCHIVE_B').isResolved = false;
+      },
+    },
+    {
+      label: 'mixed-alias second-snapshot drift',
+      sourceIds: ['thread:THREAD_ARCHIVE_A', 'discussion:511'],
+      code: 'THREAD_PROOF_STALE',
+      drift(fixture) {
+        const graphql = fixture.client.graphql.bind(fixture.client);
+        let metadataReads = 0;
+        fixture.client.graphql = async (input) => {
+          if (input.name === 'PullRequestMetadata' && ++metadataReads === 2) {
+            fixture.client.threads.find(
+              (thread) => thread.id === 'THREAD_ARCHIVE_B',
+            ).isResolved = false;
+          }
+          return graphql(input);
+        };
+      },
+    },
+  ];
+
+  for (const { label, sourceIds, code, drift } of cases) {
+    const fixture = archiveBootstrapFixture();
+    fixture.active.tasks.find((task) => task.id === ARCHIVED_TASK_ID).sourceIds = sourceIds;
+    const archiveStore = immutableArchiveStore([fixture.archive]);
+    const setup = workflow(fixture.active, fixture.client, {
+      archiveStore, journal: fixture.journal,
+    });
+    await setup.api.verifyResolve(2, [ARCHIVE_REMEDIATION_ID]);
+    drift(fixture);
+
+    await assert.rejects(
+      () => setup.api.verifyResolve(2, [ARCHIVE_REMEDIATION_ID]),
+      { code },
+      label,
+    );
+    assert.equal(setup.state.calls.length, 1, label);
+    assert.equal(archiveStore.calls, 0, label);
+    assert.deepEqual(fixture.client.events, [], label);
+  }
+});
+
+test('archive-adoption verifier bootstrap rejects inexact candidate and root topologies without writes', async () => {
+  const cases = [
+    ['unmapped root', (fixture) => {
+      addThread(fixture.client, {
+        id: 'THREAD_UNMAPPED', root: rootComment('THREAD_UNMAPPED', { databaseId: 777 }),
+      });
+    }],
+    ['shared root', (fixture) => {
+      const current = fixture.active.tasks.find((task) => task.id === 'current-thread-fix');
+      fixture.active.tasks.push({
+        ...structuredClone(current), id: 'shared-current-fix', fingerprint: 'fp-shared-current-fix',
+      });
+    }],
+    ['singleton archive source', (fixture) => {
+      fixture.active.tasks.find((task) => task.id === ARCHIVED_TASK_ID).sourceIds = ['thread:THREAD_ARCHIVE_A'];
+      fixture.client.threads = fixture.client.threads.filter((thread) => thread.id !== 'THREAD_ARCHIVE_B');
+      fixture.client.threadComments.delete('THREAD_ARCHIVE_B');
+    }],
+    ['additional remediation candidate', (fixture) => {
+      const remediation = fixture.active.tasks.find((task) => task.id === ARCHIVE_REMEDIATION_ID);
+      fixture.active.tasks.push({
+        ...structuredClone(remediation), id: 'archive-adoption-remediation-extra',
+        sourceIds: ['orchestrator:archive-adoption-extra'],
+        fingerprint: 'fp-archive-adoption-remediation-extra',
+      });
+    }],
+    ['extra resolved root', (fixture) => {
+      fixture.client.threads.find((thread) => thread.id === 'THREAD_CURRENT').isResolved = true;
+    }],
+    ['wrong selected disposition', (fixture) => {
+      const remediation = fixture.active.tasks.find((task) => task.id === ARCHIVE_REMEDIATION_ID);
+      remediation.disposition = 'already-fixed';
+      remediation.status = 'not-applicable';
+      remediation.integratedCommitSha = null;
+    }],
+  ];
+
+  for (const [label, mutate] of cases) {
+    const fixture = archiveBootstrapFixture();
+    mutate(fixture);
+    const archiveStore = immutableArchiveStore([fixture.archive]);
+    const setup = workflow(fixture.active, fixture.client, {
+      archiveStore, journal: fixture.journal,
+    });
+    await assert.rejects(
+      () => setup.api.verifyResolve(2, [ARCHIVE_REMEDIATION_ID]),
+      GitHubWorkflowError,
+      label,
+    );
+    assert.equal(setup.state.calls.length, 0, label);
+    assert.equal(archiveStore.calls, 0, label);
+    assert.equal(
+      fixture.client.calls.some((call) => ['AddThreadReply', 'ResolveThread'].includes(call.name)),
+      false,
+      label,
+    );
+    assert.deepEqual(fixture.client.events, [], label);
+  }
+});
+
+test('archive-adoption verifier bootstrap rejects non-pristine aggregate, threadless, or local proof', async () => {
+  const cases = [
+    ['aggregate proof', (fixture) => {
+      fixture.active.threadResolutionStatus = proof();
+    }],
+    ['threadless proof', (fixture) => {
+      const prior = {
+        ...fixture.active.tasks.find((task) => task.id === ARCHIVE_REMEDIATION_ID),
+        id: 'prior-threadless', sourceIds: ['review:prior-threadless'],
+        fingerprint: 'fp-prior-threadless', status: 'completed',
+      };
+      fixture.active.tasks.push(prior);
+      fixture.active.threadResolutionStatus.threadlessVerification = {
+        status: 'passed', headSha: HEAD, taskIds: [prior.id], updatedAt: AT,
+      };
+    }],
+    ['local proof', (fixture) => {
+      const local = {
+        ...integratedNonThreadState('local', 'prior-local').tasks[0], status: 'completed',
+      };
+      fixture.active.tasks.push(local);
+      fixture.active.threadResolutionStatus.localVerification = {
+        status: 'passed', headSha: HEAD, taskIds: [local.id], updatedAt: AT,
+      };
+    }],
+  ];
+
+  for (const [label, mutate] of cases) {
+    const fixture = archiveBootstrapFixture();
+    mutate(fixture);
+    const archiveStore = immutableArchiveStore([fixture.archive]);
+    const setup = workflow(fixture.active, fixture.client, {
+      archiveStore, journal: fixture.journal,
+    });
+    await assert.rejects(
+      () => setup.api.verifyResolve(2, [ARCHIVE_REMEDIATION_ID]),
+      GitHubWorkflowError,
+      label,
+    );
+    assert.equal(setup.state.calls.length, 0, label);
+    assert.equal(archiveStore.calls, 0, label);
+    assert.deepEqual(fixture.client.events, [], label);
+  }
+});
+
+test('archive-adoption verifier bootstrap rejects second-snapshot root, head, and revision drift', async () => {
+  for (const [label, race, code] of [
+    ['root drift', (fixture) => {
+      const graphql = fixture.client.graphql.bind(fixture.client);
+      let metadataReads = 0;
+      fixture.client.graphql = async (input) => {
+        if (input.name === 'PullRequestMetadata' && ++metadataReads === 2) {
+          fixture.client.threads.find((thread) => thread.id === 'THREAD_CURRENT').isResolved = true;
+        }
+        return graphql(input);
+      };
+    }, 'THREAD_PROOF_STALE'],
+    ['head drift', (fixture) => {
+      const graphql = fixture.client.graphql.bind(fixture.client);
+      let metadataReads = 0;
+      fixture.client.graphql = async (input) => {
+        if (input.name === 'PullRequestMetadata' && ++metadataReads === 2) {
+          fixture.client.metadata.headRefOid = OTHER_HEAD;
+        }
+        return graphql(input);
+      };
+    }, 'MUTATION_NOT_READY'],
+    ['revision drift', (fixture, setupRef) => {
+      const graphql = fixture.client.graphql.bind(fixture.client);
+      let metadataReads = 0;
+      fixture.client.graphql = async (input) => {
+        if (input.name === 'PullRequestMetadata' && ++metadataReads === 2) {
+          setupRef.current.state.advanceRevisionForTest();
+        }
+        return graphql(input);
+      };
+    }, 'STATE_REVISION_CHANGED'],
+  ]) {
+    const fixture = archiveBootstrapFixture();
+    const setupRef = { current: null };
+    race(fixture, setupRef);
+    const archiveStore = immutableArchiveStore([fixture.archive]);
+    setupRef.current = workflow(fixture.active, fixture.client, {
+      archiveStore, journal: fixture.journal,
+    });
+    await assert.rejects(
+      () => setupRef.current.api.verifyResolve(2, [ARCHIVE_REMEDIATION_ID]),
+      { code },
+      label,
+    );
+    assert.equal(setupRef.current.state.calls.length, 0, label);
+    assert.equal(archiveStore.calls, 0, label);
+    assert.deepEqual(fixture.client.events, [], label);
+  }
+});
+
+test('archive-adoption verifier bootstrap never weakens later archive evidence gates', async () => {
+  const cases = [
+    ['missing archive', (fixture) => ({ records: [] })],
+    ['duplicate archive', (fixture) => ({ records: [
+      fixture.archive,
+      { ...structuredClone(fixture.archive), archiveId: 'pr-2-2026-08-05T00-02-00-000Z' },
+    ] })],
+    ['tampered archive', (fixture) => {
+      const archive = structuredClone(fixture.archive);
+      archive.state.threadResolutionStatus.threads[0].replyUrl = 'https://github.com/tampered';
+      return { records: [archive] };
+    }],
+    ['non-ancestral archive', (fixture) => ({
+      records: [fixture.archive],
+      git: fakeGit({ isAncestor: async (ancestor) => ancestor !== OTHER_HEAD }),
+    })],
+    ['raced archive', (fixture) => ({
+      records: [fixture.archive],
+      onList(calls) {
+        if (calls === 2) fixture.archive.events[0].at = AT;
+      },
+    })],
+  ];
+
+  for (const [label, configure] of cases) {
+    const fixture = archiveBootstrapFixture();
+    const configured = configure(fixture);
+    const archiveStore = immutableArchiveStore(configured.records, configured.onList);
+    const setup = workflow(fixture.active, fixture.client, {
+      archiveStore, journal: fixture.journal, git: configured.git,
+    });
+    await setup.api.verifyResolve(2, [ARCHIVE_REMEDIATION_ID]);
+    assert.equal(setup.state.calls.length, 1, label);
+    assert.equal(archiveStore.calls, 0, label);
+
+    await assert.rejects(
+      () => setup.api.replyResolve(2, ARCHIVED_TASK_ID),
+      GitHubWorkflowError,
+      label,
+    );
+    assert.equal(setup.state.calls.length, 1, label);
+    assert.equal(
+      fixture.client.calls.some((call) => ['AddThreadReply', 'ResolveThread'].includes(call.name)),
+      false,
+      label,
+    );
+    assert.deepEqual(fixture.client.events, [], label);
+  }
+});
+
 test('reply-resolve adopts one exact archived resolved-root batch with zero GitHub or journal writes', async () => {
   const fixture = archiveAdoptionFixture();
   const archiveStore = immutableArchiveStore([fixture.archive]);
@@ -3983,7 +4457,7 @@ test('reply-resolve adopts one exact archived resolved-root batch with zero GitH
   assert.deepEqual(fixture.client.events, []);
 });
 
-test('reply-resolve adopts the byte-faithful packet-named archive with distinct durable resolution times', async () => {
+test('bootstrap then reply-resolve adopts five byte-faithful Wc8 roots beside three unresolved ahn roots', async () => {
   const cwd = createRepository();
   try {
     const stateBytes = Buffer.from(PACKET_ARCHIVE_STATE_BASE64, 'base64');
@@ -3999,7 +4473,10 @@ test('reply-resolve adopts the byte-faithful packet-named archive with distinct 
     const loaded = await defaultStore.list(35);
     assert.equal(loaded.length, 1);
     assert.equal(loaded[0].archiveId, PACKET_ARCHIVE_NAME);
-    const fixture = packetArchiveAdoptionFixture(loaded[0]);
+    const fixture = packetArchiveAdoptionFixture(loaded[0], {
+      bootstrap: true,
+      unresolvedThreadIds: PACKET_UNRESOLVED_THREAD_IDS,
+    });
     const exactDistinctTimes = fixture.proofs.slice(1).map((proofRow) => {
       const resolveIntent = loaded[0].events.find((event) => (
         event.details?.operationId === `resolve:35:${proofRow.threadNodeId}:${proofRow.observedHeadSha}`
@@ -4033,16 +4510,53 @@ test('reply-resolve adopts the byte-faithful packet-named archive with distinct 
       archiveStore, journal: fixture.journal,
       clock: { now: () => '2026-08-19T16:40:00.000Z' },
     });
+    const pristineAggregate = structuredClone(fixture.active.threadResolutionStatus);
+
+    const verified = await setup.api.verifyResolve(35, [fixture.remediation.id]);
+
+    const singletonThreadlessProof = {
+      status: 'passed', headSha: HEAD, taskIds: [fixture.remediation.id],
+      updatedAt: '2026-08-19T16:40:00.000Z',
+    };
+    assert.equal(archiveReads, 0, 'bootstrap does not read the byte-faithful archive');
+    assert.equal(setup.state.calls.length, 1);
+    assert.deepEqual(verified.threadResolutionStatus, {
+      ...pristineAggregate,
+      threadlessVerification: singletonThreadlessProof,
+    }, 'bootstrap preserves the pristine aggregate and changes only singleton threadless proof');
 
     const result = await setup.api.replyResolve(35, fixture.archivedTask.id);
 
     assert.equal(archiveReads, 2);
-    assert.equal(setup.state.calls.length, 1);
-    assert.equal(result.threadResolutionStatus.status, 'passed');
+    assert.equal(setup.state.calls.length, 2, 'bootstrap and adoption make exactly two checkpoints');
+    assert.equal(result.threadResolutionStatus.status, 'failed');
+    assert.equal(result.threadResolutionStatus.headSha, HEAD);
     assert.deepEqual(
-      result.threadResolutionStatus.threads.map((proofRow) => proofRow.resolvedAt),
-      fixture.proofs.map((proofRow) => proofRow.resolvedAt),
-      'adoption preserves each exact durable proof timestamp',
+      result.threadResolutionStatus.threadlessVerification,
+      singletonThreadlessProof,
+      'adoption preserves singleton threadless proof',
+    );
+    assert.deepEqual(
+      result.threadResolutionStatus.threads.filter((proofRow) => proofRow.isResolved)
+        .map((proofRow) => [proofRow.threadNodeId, proofRow.resolvedAt]),
+      fixture.proofs.map((proofRow) => [proofRow.threadNodeId, proofRow.resolvedAt]),
+      'adoption resolves exactly the five Wc8 roots with their durable timestamps',
+    );
+    assert.deepEqual(
+      result.threadResolutionStatus.threads.filter((proofRow) => !proofRow.isResolved)
+        .map((proofRow) => [
+          proofRow.threadNodeId, proofRow.observedHeadSha, proofRow.replyId, proofRow.resolvedAt,
+        ]),
+      PACKET_UNRESOLVED_THREAD_IDS.map((threadId) => [threadId, HEAD, null, null]),
+      'adoption retains exactly the three ahn roots as unresolved current-HEAD work',
+    );
+    assert.deepEqual(
+      setup.state.current.tasks.map((task) => [task.id, task.status]),
+      [
+        [fixture.archivedTask.id, 'completed'],
+        [fixture.remediation.id, 'completed'],
+        ['pr-review-worker-commit-delta-integrity-r1', 'integrated'],
+      ],
     );
     assert.equal(
       fixture.client.calls.some((call) => ['AddThreadReply', 'ResolveThread'].includes(call.name)),
