@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { afterEach, test } from 'node:test';
 import {
   chmodSync,
@@ -28,6 +29,7 @@ import {
   buildReviewRequestTransition,
   buildVerificationEscalationTransition,
   checkpointCompletion as rawCheckpointCompletion,
+  checkpointArchiveTaskCompletion,
   checkpointCiValidation,
   checkpointGitMetadata,
   checkpointReviewOutcome,
@@ -231,6 +233,106 @@ function ready(state, tasks = [task(state.currentIntegrationHeadSha)]) {
     blockedReasons: [],
     nextAction: 'Request canonical review.',
   };
+}
+
+function canonicalJsonForTest(value) {
+  if (Array.isArray(value)) return value.map(canonicalJsonForTest);
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map(
+      (key) => [key, canonicalJsonForTest(value[key])],
+    ));
+  }
+  return value;
+}
+
+function archiveImportDigest(value) {
+  return createHash('sha256')
+    .update(JSON.stringify(canonicalJsonForTest(value)))
+    .digest('hex');
+}
+
+function archiveImportStateFixture(cwd) {
+  const initial = init(cwd);
+  const head = initial.currentIntegrationHeadSha;
+  const remediation = task(head, {
+    id: 'archive-import-remediation',
+    sourceIds: ['orchestrator:archive-import-remediation'],
+    sourceType: 'github-threadless',
+    disposition: 'actionable',
+    status: 'completed',
+  });
+  const aggregate = task(head, {
+    id: 'retained-aggregate',
+    sourceIds: ['thread:PRRT_archive_a', 'discussion:202'],
+    sourceType: 'github-thread',
+    disposition: 'already-fixed',
+    status: 'not-applicable',
+    integratedCommitSha: null,
+    resolutionSummary: 'Already fixed and retained from immutable archives.',
+  });
+  const current = {
+    ...initial,
+    phase: 'implementing',
+    tasks: [remediation, aggregate],
+    threadResolutionStatus: {
+      status: 'not-run',
+      headSha: null,
+      threads: [],
+      threadlessVerification: {
+        status: 'passed', headSha: head, taskIds: [remediation.id], updatedAt: AT,
+      },
+      localVerification: emptyLocalVerification(),
+      updatedAt: null,
+    },
+    nextAction: 'Import the validated aggregate archive proof.',
+  };
+  writeFileSync(statePath(cwd, current.prNumber), `${JSON.stringify(current)}\n`);
+  const authorityFingerprint = 'a'.repeat(64);
+  const rows = [
+    ['PRRT_archive_a', 'PRRC_archive_a', 201, 'REPLY_archive_a', 'b'.repeat(64)],
+    ['PRRT_archive_b', 'PRRC_archive_b', 202, 'REPLY_archive_b', 'c'.repeat(64)],
+  ].map(([threadNodeId, rootCommentNodeId, rootCommentDatabaseId, replyId, replyBodySha256], index) => ({
+    threadNodeId,
+    rootCommentNodeId,
+    rootCommentDatabaseId,
+    taskIds: [aggregate.id],
+    disposition: 'already-fixed',
+    replyId,
+    replyUrl: `https://github.com/example/aerstello/pull/17#discussion_r${rootCommentDatabaseId}`,
+    isResolved: true,
+    resolvedAt: AT,
+    resolvedBy: 'maintainer',
+    observedHeadSha: index === 0 ? 'd'.repeat(40) : 'e'.repeat(40),
+    archiveProvenance: {
+      schemaVersion: 1,
+      historicalTaskId: `historical-partition-${index + 1}`,
+      historicalDisposition: 'already-fixed',
+      historicalIntegratedCommitSha: null,
+      replyBodySha256,
+      authorityFingerprint,
+    },
+  }));
+  const threadResolutionStatus = {
+    status: 'passed',
+    headSha: head,
+    threads: rows,
+    threadlessVerification: current.threadResolutionStatus.threadlessVerification,
+    localVerification: current.threadResolutionStatus.localVerification,
+    updatedAt: AT,
+  };
+  const envelope = {
+    schemaVersion: 1,
+    taskId: aggregate.id,
+    authorityFingerprint,
+    rows: rows.map((row) => ({
+      threadNodeId: row.threadNodeId,
+      replyId: row.replyId,
+      replyBodySha256: row.archiveProvenance.replyBodySha256,
+      provenanceFingerprint: archiveImportDigest(row.archiveProvenance),
+      rowFingerprint: archiveImportDigest(row),
+    })).sort((left, right) => left.threadNodeId.localeCompare(right.threadNodeId)),
+  };
+  return { current: loadState(cwd), aggregate, threadResolutionStatus, envelope };
 }
 
 function checkpointSyntheticTargetedValidation(cwd, state) {
@@ -4425,6 +4527,139 @@ test('proven non-actionable not-applicable findings become completed-equivalent'
   const completed = completeIntegratedTasks({ ...state, tasks: [disposed] }, { threadResolutionStatus: proof });
   assert.equal(completed.tasks[0].status, 'completed');
   assert.equal(completed.tasks[0].integratedCommitSha, null);
+});
+
+test('dedicated archive import completion revalidates its closed envelope and retries byte-identically', () => {
+  const cwd = repo();
+  const fixture = archiveImportStateFixture(cwd);
+  const adopted = checkpointArchiveTaskCompletion({
+    cwd,
+    expectedRevision: fixture.current.revision,
+    threadResolutionStatus: fixture.threadResolutionStatus,
+    archiveImportEnvelope: fixture.envelope,
+  });
+  assert.equal(adopted.tasks.find((candidate) => candidate.id === fixture.aggregate.id).status, 'completed');
+  assert.equal(adopted.threadResolutionStatus.threads.length, 2);
+  assert.deepEqual(
+    adopted.threadResolutionStatus.threads.map((row) => row.archiveProvenance.authorityFingerprint),
+    [fixture.envelope.authorityFingerprint, fixture.envelope.authorityFingerprint],
+  );
+  const stateBytes = readFileSync(statePath(cwd, adopted.prNumber), 'utf8');
+  const eventBytes = readFileSync(join(stateDirectory(cwd, adopted.prNumber), 'events.ndjson'), 'utf8');
+  const retried = checkpointArchiveTaskCompletion({
+    cwd,
+    expectedRevision: adopted.revision,
+    threadResolutionStatus: adopted.threadResolutionStatus,
+    archiveImportEnvelope: fixture.envelope,
+  });
+  assert.equal(retried.revision, adopted.revision);
+  assert.equal(readFileSync(statePath(cwd, adopted.prNumber), 'utf8'), stateBytes);
+  assert.equal(readFileSync(join(stateDirectory(cwd, adopted.prNumber), 'events.ndjson'), 'utf8'), eventBytes);
+
+  const invalidEnvelopes = [
+    { ...fixture.envelope, extra: true },
+    { ...fixture.envelope, taskId: 'alternate-task' },
+    { ...fixture.envelope, rows: fixture.envelope.rows.slice().reverse() },
+    {
+      ...fixture.envelope,
+      rows: fixture.envelope.rows.map((row, index) => (
+        index === 0 ? { ...row, rowFingerprint: '0'.repeat(64) } : row
+      )),
+    },
+  ];
+  for (const archiveImportEnvelope of invalidEnvelopes) {
+    assert.throws(() => checkpointArchiveTaskCompletion({
+      cwd,
+      expectedRevision: adopted.revision,
+      threadResolutionStatus: adopted.threadResolutionStatus,
+      archiveImportEnvelope,
+    }), { code: 'INVALID_ARCHIVE_IMPORT' });
+    assert.equal(readFileSync(statePath(cwd, adopted.prNumber), 'utf8'), stateBytes);
+    assert.equal(readFileSync(join(stateDirectory(cwd, adopted.prNumber), 'events.ndjson'), 'utf8'), eventBytes);
+  }
+});
+
+test('generic and ordinary checkpoints cannot forge archive provenance and adopted rows stay immutable', () => {
+  const cwd = repo();
+  const fixture = archiveImportStateFixture(cwd);
+  const stateBytes = readFileSync(statePath(cwd, fixture.current.prNumber), 'utf8');
+  const eventPath = join(stateDirectory(cwd, fixture.current.prNumber), 'events.ndjson');
+  const eventBytes = readFileSync(eventPath, 'utf8');
+  assert.throws(() => checkpointArchiveTaskCompletion({
+    cwd,
+    threadResolutionStatus: fixture.threadResolutionStatus,
+    archiveImportEnvelope: fixture.envelope,
+  }), { code: 'STATE_REVISION_CONFLICT' });
+  const extraResolvedProof = structuredClone(fixture.threadResolutionStatus);
+  extraResolvedProof.threads.push({
+    ...structuredClone(extraResolvedProof.threads[0]),
+    threadNodeId: 'PRRT_archive_extra',
+    rootCommentNodeId: 'PRRC_archive_extra',
+    rootCommentDatabaseId: 203,
+    replyId: 'REPLY_archive_extra',
+    replyUrl: 'https://github.com/example/aerstello/pull/17#discussion_r203',
+  });
+  delete extraResolvedProof.threads.at(-1).archiveProvenance;
+  assert.throws(() => checkpointArchiveTaskCompletion({
+    cwd,
+    expectedRevision: fixture.current.revision,
+    threadResolutionStatus: extraResolvedProof,
+    archiveImportEnvelope: fixture.envelope,
+  }), { code: 'INVALID_ARCHIVE_IMPORT' });
+  assert.throws(() => checkpointTaskCompletion({
+    cwd,
+    expectedRevision: fixture.current.revision,
+    threadResolutionStatus: fixture.threadResolutionStatus,
+    archiveImportEnvelope: fixture.envelope,
+  }), { code: 'PROTECTED_ARCHIVE_IMPORT_REQUIRED' });
+  assert.throws(() => checkpointTaskCompletion({
+    cwd,
+    expectedRevision: fixture.current.revision,
+    threadResolutionStatus: fixture.threadResolutionStatus,
+  }), { code: 'PROTECTED_ARCHIVE_IMPORT_REQUIRED' });
+  const forgedNext = completeIntegratedTasks(fixture.current, {
+    threadResolutionStatus: fixture.threadResolutionStatus,
+  });
+  assert.throws(() => checkpointState({
+    cwd,
+    expectedRevision: fixture.current.revision,
+    nextState: forgedNext,
+  }), { code: 'PROTECTED_ARCHIVE_IMPORT_REQUIRED' });
+  assert.equal(readFileSync(statePath(cwd, fixture.current.prNumber), 'utf8'), stateBytes);
+  assert.equal(readFileSync(eventPath, 'utf8'), eventBytes);
+
+  const adopted = checkpointArchiveTaskCompletion({
+    cwd,
+    expectedRevision: fixture.current.revision,
+    threadResolutionStatus: fixture.threadResolutionStatus,
+    archiveImportEnvelope: fixture.envelope,
+  });
+  const adoptedBytes = readFileSync(statePath(cwd, adopted.prNumber), 'utf8');
+  const adoptedEvents = readFileSync(eventPath, 'utf8');
+  const removed = structuredClone(adopted);
+  delete removed.threadResolutionStatus.threads[0].archiveProvenance;
+  assert.throws(() => checkpointState({
+    cwd,
+    expectedRevision: adopted.revision,
+    nextState: removed,
+  }), { code: 'IMMUTABLE_STATE_PROVENANCE' });
+  const alteredProof = structuredClone(adopted.threadResolutionStatus);
+  alteredProof.threads[0].archiveProvenance.replyBodySha256 = 'f'.repeat(64);
+  const alteredEnvelope = structuredClone(fixture.envelope);
+  alteredEnvelope.rows[0] = {
+    ...alteredEnvelope.rows[0],
+    replyBodySha256: 'f'.repeat(64),
+    provenanceFingerprint: archiveImportDigest(alteredProof.threads[0].archiveProvenance),
+    rowFingerprint: archiveImportDigest(alteredProof.threads[0]),
+  };
+  assert.throws(() => checkpointArchiveTaskCompletion({
+    cwd,
+    expectedRevision: adopted.revision,
+    threadResolutionStatus: alteredProof,
+    archiveImportEnvelope: alteredEnvelope,
+  }), { code: 'INVALID_ARCHIVE_IMPORT' });
+  assert.equal(readFileSync(statePath(cwd, adopted.prNumber), 'utf8'), adoptedBytes);
+  assert.equal(readFileSync(eventPath, 'utf8'), adoptedEvents);
 });
 
 test('checkpoint enforces immutable identity, monotonic counters, sticky verification, and null active abandonment', () => {

@@ -59,6 +59,7 @@ export { completionGate, reviewRequestGate, reviewRequestUsage } from '../contra
 export { gitCommonDirectory, repositoryRoot, reviewRoot } from '../paths.mjs';
 
 export const ACTIVE_STATE_LIMIT_BYTES = 64 * 1024;
+const MAX_NODES = 10_000;
 const DEFAULT_LOCK_TIMEOUT_MS = 5000;
 const SQLITE_BUSY = 5;
 const LOCK_RETRY_INTERVAL_MS = 25;
@@ -3128,13 +3129,169 @@ function sameEvidence(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function protectedTransition(expectedState, kind) {
-  return { token: TRANSITION_AUTHORIZATION, expectedState, kind };
+function protectedTransition(expectedState, kind, evidence = {}) {
+  return { token: TRANSITION_AUTHORIZATION, expectedState, kind, ...evidence };
 }
 
 function assertImmutableValue(current, next, label) {
   if (!sameEvidence(current, next)) {
     throw new StateError(`${label} is append-only provenance`, 'IMMUTABLE_STATE_PROVENANCE');
+  }
+}
+
+function archiveImportFingerprint(value) {
+  return createHash('sha256').update(JSON.stringify(canonicalJson(value))).digest('hex');
+}
+
+function exactObjectFields(value, fields) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).length === fields.length
+    && fields.every((field) => Object.hasOwn(value, field));
+}
+
+function canonicalImportedTaskRoots(task, rows) {
+  const bySource = new Map();
+  for (const row of rows) {
+    for (const source of [
+      `thread:${row.threadNodeId}`,
+      `discussion:${row.rootCommentDatabaseId}`,
+    ]) {
+      if (bySource.has(source) && bySource.get(source) !== row.threadNodeId) return null;
+      bySource.set(source, row.threadNodeId);
+    }
+  }
+  const canonicalSources = task.sourceIds.filter((source) => /^(?:thread|discussion):/u.test(source));
+  if (canonicalSources.length === 0) return null;
+  const roots = new Set();
+  for (const source of canonicalSources) {
+    const root = bySource.get(source);
+    if (root === undefined) return null;
+    roots.add(root);
+  }
+  return [...roots].sort();
+}
+
+function assertArchiveImportEnvelope(current, next, envelope) {
+  const envelopeFields = ['schemaVersion', 'taskId', 'authorityFingerprint', 'rows'];
+  const rowFields = [
+    'threadNodeId', 'replyId', 'replyBodySha256', 'provenanceFingerprint', 'rowFingerprint',
+  ];
+  if (!exactObjectFields(envelope, envelopeFields)
+      || envelope.schemaVersion !== 1
+      || typeof envelope.taskId !== 'string' || envelope.taskId.length === 0
+      || !/^[0-9a-f]{64}$/u.test(envelope.authorityFingerprint ?? '')
+      || !Array.isArray(envelope.rows) || envelope.rows.length < 2
+      || envelope.rows.length > MAX_NODES) {
+    throw new StateError('Archive import completion envelope is malformed', 'INVALID_ARCHIVE_IMPORT');
+  }
+  const sortedEnvelopeRows = envelope.rows.slice().sort(
+    (left, right) => String(left?.threadNodeId).localeCompare(String(right?.threadNodeId)),
+  );
+  if (!sameEvidence(envelope.rows, sortedEnvelopeRows)
+      || new Set(envelope.rows.map((row) => row?.threadNodeId)).size !== envelope.rows.length
+      || envelope.rows.some((row) => !exactObjectFields(row, rowFields)
+        || typeof row.threadNodeId !== 'string' || row.threadNodeId.length === 0
+        || typeof row.replyId !== 'string' || row.replyId.length === 0
+        || !/^[0-9a-f]{64}$/u.test(row.replyBodySha256 ?? '')
+        || !/^[0-9a-f]{64}$/u.test(row.provenanceFingerprint ?? '')
+        || !/^[0-9a-f]{64}$/u.test(row.rowFingerprint ?? ''))) {
+    throw new StateError('Archive import completion rows are malformed or unordered', 'INVALID_ARCHIVE_IMPORT');
+  }
+
+  const currentTask = current.tasks.find((task) => task.id === envelope.taskId);
+  const nextTask = next.tasks.find((task) => task.id === envelope.taskId);
+  if (!currentTask || !nextTask || currentTask.sourceType !== 'github-thread'
+      || currentTask.disposition !== 'already-fixed' || currentTask.integratedCommitSha !== null
+      || !['not-applicable', 'completed'].includes(currentTask.status)
+      || nextTask.status !== 'completed') {
+    throw new StateError('Archive import task is not an eligible already-fixed transition', 'INVALID_ARCHIVE_IMPORT');
+  }
+  for (const task of current.tasks) {
+    const updated = next.tasks.find((candidate) => candidate.id === task.id);
+    if (task.id === envelope.taskId) {
+      assertImmutableValue({ ...task, status: 'completed' }, updated, `archive import task ${task.id}`);
+    } else {
+      assertImmutableValue(task, updated, `archive import unrelated task ${task.id}`);
+    }
+  }
+
+  const currentByRoot = new Map(current.threadResolutionStatus.threads.map(
+    (row) => [row.threadNodeId, row],
+  ));
+  const nextByRoot = new Map(next.threadResolutionStatus.threads.map(
+    (row) => [row.threadNodeId, row],
+  ));
+  const importedRows = [];
+  for (const expected of envelope.rows) {
+    const row = nextByRoot.get(expected.threadNodeId);
+    const provenance = row?.archiveProvenance;
+    if (!row || row.taskIds.length !== 1 || row.taskIds[0] !== envelope.taskId
+        || row.disposition !== 'already-fixed' || row.isResolved !== true
+        || row.replyId !== expected.replyId || row.replyUrl === null
+        || row.resolvedAt === null || row.resolvedBy === null
+        || provenance?.authorityFingerprint !== envelope.authorityFingerprint
+        || provenance?.replyBodySha256 !== expected.replyBodySha256
+        || archiveImportFingerprint(provenance) !== expected.provenanceFingerprint
+        || archiveImportFingerprint(row) !== expected.rowFingerprint) {
+      throw new StateError('Archive import row does not match its authorized evidence', 'INVALID_ARCHIVE_IMPORT');
+    }
+    importedRows.push(row);
+  }
+  const importedIds = new Set(importedRows.map((row) => row.threadNodeId));
+  const provenanceRows = next.threadResolutionStatus.threads.filter(
+    (row) => Object.hasOwn(row, 'archiveProvenance'),
+  );
+  if (provenanceRows.length !== importedRows.length
+      || provenanceRows.some((row) => !importedIds.has(row.threadNodeId))) {
+    throw new StateError('Archive import provenance exceeds its authorized root coverage', 'INVALID_ARCHIVE_IMPORT');
+  }
+  const canonicalRoots = canonicalImportedTaskRoots(currentTask, importedRows);
+  if (canonicalRoots === null || canonicalRoots.length < 2
+      || !sameEvidence(canonicalRoots, [...importedIds].sort())) {
+    throw new StateError('Archive import task sources do not exactly cover its canonical roots', 'INVALID_ARCHIVE_IMPORT');
+  }
+
+  if (currentTask.status === 'not-applicable') {
+    const newlyResolvedIds = next.threadResolutionStatus.threads.filter((row) => (
+      row.isResolved === true && currentByRoot.get(row.threadNodeId)?.isResolved !== true
+    )).map((row) => row.threadNodeId).sort();
+    if (!sameEvidence(newlyResolvedIds, [...importedIds].sort())) {
+      throw new StateError(
+        'Archive import envelope must cover every newly resolved row exactly',
+        'INVALID_ARCHIVE_IMPORT',
+      );
+    }
+    if (current.threadResolutionStatus.status !== 'not-run'
+        || current.threadResolutionStatus.headSha !== null
+        || current.threadResolutionStatus.threads.length !== 0
+        || current.threadResolutionStatus.updatedAt !== null
+        || current.threadResolutionStatus.threadlessVerification.status !== 'passed'
+        || current.threadResolutionStatus.threadlessVerification.headSha
+          !== current.currentIntegrationHeadSha
+        || current.threadResolutionStatus.threadlessVerification.taskIds.length === 0
+        || next.threadResolutionStatus.headSha !== current.currentIntegrationHeadSha) {
+      throw new StateError('Archive import requires the exact pristine aggregate transition', 'INVALID_ARCHIVE_IMPORT');
+    }
+  } else if (!sameEvidence(current, next)) {
+    throw new StateError('Archive import retry must be byte-identical', 'INVALID_ARCHIVE_IMPORT');
+  }
+  assertImmutableValue(
+    current.threadResolutionStatus.threadlessVerification,
+    next.threadResolutionStatus.threadlessVerification,
+    'archive import threadless proof',
+  );
+  assertImmutableValue(
+    current.threadResolutionStatus.localVerification ?? emptyLocalVerification(),
+    next.threadResolutionStatus.localVerification ?? emptyLocalVerification(),
+    'archive import local proof',
+  );
+
+  for (const row of provenanceRows) {
+    const previous = currentByRoot.get(row.threadNodeId);
+    if (previous && Object.hasOwn(previous, 'archiveProvenance')
+        && !sameEvidence(previous, row)) {
+      throw new StateError('Existing archive provenance is immutable', 'IMMUTABLE_STATE_PROVENANCE');
+    }
   }
 }
 
@@ -3160,10 +3317,27 @@ function assertStaleDiscoveryDispositionProvenance(current, next, guardedKind) {
 
 function assertCheckpointProvenance(current, next, authorization, cwd) {
   const guardedKind = authorization?.token === TRANSITION_AUTHORIZATION ? authorization.kind : null;
+  const completionKind = ['task-completion', 'archive-task-completion'].includes(guardedKind);
   if (guardedKind !== null) {
     if (!sameEvidence(next, authorization.expectedState)) {
       throw new StateError('Guarded transition state does not match its authorization', 'INVALID_TRANSITION_AUTHORIZATION');
     }
+  }
+  const currentThreadByRoot = new Map(current.threadResolutionStatus.threads.map(
+    (thread) => [thread.threadNodeId, thread],
+  ));
+  const introducedArchiveProvenance = next.threadResolutionStatus.threads.filter((thread) => (
+    Object.hasOwn(thread, 'archiveProvenance')
+      && !Object.hasOwn(currentThreadByRoot.get(thread.threadNodeId) ?? {}, 'archiveProvenance')
+  ));
+  if (introducedArchiveProvenance.length > 0 && guardedKind !== 'archive-task-completion') {
+    throw new StateError(
+      'Archive provenance may only be introduced by guarded archive import completion',
+      'PROTECTED_ARCHIVE_IMPORT_REQUIRED',
+    );
+  }
+  if (guardedKind === 'archive-task-completion') {
+    assertArchiveImportEnvelope(current, next, authorization.archiveImportEnvelope);
   }
   if (guardedKind !== 'review-request-limit') {
     assertImmutableValue(
@@ -3330,7 +3504,7 @@ function assertCheckpointProvenance(current, next, authorization, cwd) {
         assertImmutableValue(task, updated, `completed task ${task.id}`);
       }
     }
-    if (task.status !== 'completed' && updated.status === 'completed' && guardedKind !== 'task-completion') {
+    if (task.status !== 'completed' && updated.status === 'completed' && !completionKind) {
       throw new StateError(`Task ${task.id} completion requires guarded proof`, 'PROTECTED_TRANSITION_REQUIRED');
     }
   }
@@ -3342,7 +3516,7 @@ function assertCheckpointProvenance(current, next, authorization, cwd) {
 
   const currentThreads = current.threadResolutionStatus.threads ?? [];
   const nextThreads = next.threadResolutionStatus.threads ?? [];
-  if (currentThreads.length > nextThreads.length || (currentThreads.length !== nextThreads.length && guardedKind !== 'task-completion')) {
+  if (currentThreads.length > nextThreads.length || (currentThreads.length !== nextThreads.length && !completionKind)) {
     throw new StateError('Canonical threads may only be added by guarded task completion', 'IMMUTABLE_STATE_PROVENANCE');
   }
   const nextByNode = new Map(nextThreads.map((thread) => [thread.threadNodeId, thread]));
@@ -3355,12 +3529,12 @@ function assertCheckpointProvenance(current, next, authorization, cwd) {
     if (thread.replyId !== null) {
       assertImmutableValue(thread.replyId, updated.replyId, `thread ${thread.threadNodeId} replyId`);
       assertImmutableValue(thread.replyUrl, updated.replyUrl, `thread ${thread.threadNodeId} replyUrl`);
-    } else if (updated.replyId !== null && guardedKind !== 'task-completion') {
+    } else if (updated.replyId !== null && !completionKind) {
       throw new StateError(`Thread ${thread.threadNodeId} reply evidence requires guarded persistence`, 'PROTECTED_TRANSITION_REQUIRED');
     }
     if (thread.isResolved) {
       assertImmutableValue(thread, updated, `resolved thread ${thread.threadNodeId}`);
-    } else if (updated.isResolved && guardedKind !== 'task-completion') {
+    } else if (updated.isResolved && !completionKind) {
       throw new StateError(`Thread ${thread.threadNodeId} resolution requires guarded persistence`, 'PROTECTED_TRANSITION_REQUIRED');
     }
   }
@@ -3375,15 +3549,15 @@ function assertCheckpointProvenance(current, next, authorization, cwd) {
       throw new StateError('Successful threadless task proof cannot regress', 'IMMUTABLE_STATE_PROVENANCE');
     }
   }
-  if (oldThreadless.status !== 'passed' && newThreadless.status === 'passed' && guardedKind !== 'task-completion') {
+  if (oldThreadless.status !== 'passed' && newThreadless.status === 'passed' && !completionKind) {
     throw new StateError('Threadless proof may only pass through guarded completion', 'PROTECTED_TRANSITION_REQUIRED');
   }
-  if (newThreadless.taskIds.some((taskId) => !oldThreadless.taskIds.includes(taskId)) && guardedKind !== 'task-completion') {
+  if (newThreadless.taskIds.some((taskId) => !oldThreadless.taskIds.includes(taskId)) && !completionKind) {
     throw new StateError('Threadless task proof may only grow through guarded completion', 'PROTECTED_TRANSITION_REQUIRED');
   }
   const oldLocal = current.threadResolutionStatus.localVerification ?? emptyLocalVerification();
   const newLocal = next.threadResolutionStatus.localVerification ?? emptyLocalVerification();
-  if (guardedKind !== 'task-completion') {
+  if (!completionKind) {
     assertImmutableValue(oldLocal, newLocal, 'local verifier proof');
   }
   if (oldLocal.status === 'passed') {
@@ -3398,11 +3572,11 @@ function assertCheckpointProvenance(current, next, authorization, cwd) {
       );
     }
   }
-  if (oldLocal.status !== 'passed' && newLocal.status === 'passed' && guardedKind !== 'task-completion') {
+  if (oldLocal.status !== 'passed' && newLocal.status === 'passed' && !completionKind) {
     throw new StateError('Local verifier proof may only pass through guarded completion', 'PROTECTED_TRANSITION_REQUIRED');
   }
   if (current.threadResolutionStatus.status !== 'passed'
-      && next.threadResolutionStatus.status === 'passed' && guardedKind !== 'task-completion') {
+      && next.threadResolutionStatus.status === 'passed' && !completionKind) {
     throw new StateError('Aggregate thread proof may only pass through guarded completion', 'PROTECTED_TRANSITION_REQUIRED');
   }
   if (guardedKind === null && current.threadResolutionStatus.status === 'passed') {
@@ -4244,10 +4418,17 @@ export function checkpointCiValidation({
   });
 }
 
-export function checkpointTaskCompletion({
-  cwd = process.cwd(), prNumber, threadResolutionStatus, verifiedLocalTaskIds = [],
-  staleDiscoveryDisposition = null, expectedRevision, event,
-} = {}) {
+export function checkpointTaskCompletion(options = {}) {
+  const {
+    cwd = process.cwd(), prNumber, threadResolutionStatus, verifiedLocalTaskIds = [],
+    staleDiscoveryDisposition = null, expectedRevision, event,
+  } = options;
+  if (Object.hasOwn(options, 'archiveImportEnvelope')) {
+    throw new StateError(
+      'Ordinary task completion cannot accept archive import authorization',
+      'PROTECTED_ARCHIVE_IMPORT_REQUIRED',
+    );
+  }
   const current = loadState(cwd, prNumber);
   if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
   const priorDispositionCount = staleDiscoveryDispositionList(current).length;
@@ -4300,6 +4481,54 @@ export function checkpointTaskCompletion({
   return checkpointState({
     cwd, prNumber: current.prNumber, nextState, expectedRevision,
     event, transitionAuthorization: protectedTransition(nextState, 'task-completion'),
+  });
+}
+
+export function checkpointArchiveTaskCompletion({
+  cwd = process.cwd(), prNumber, threadResolutionStatus, archiveImportEnvelope,
+  expectedRevision, event,
+} = {}) {
+  const selectedPr = prNumber ?? activePrNumber(cwd);
+  if (selectedPr === null || selectedPr === undefined) {
+    throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  }
+  return withStateLock(cwd, selectedPr, () => {
+    const current = loadState(cwd, selectedPr);
+    if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+    if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
+      throw new StateError(
+        'Archive import completion requires an explicit expected revision',
+        'STATE_REVISION_CONFLICT',
+      );
+    }
+    const expected = expectedRevision;
+    if (expected !== current.revision) {
+      throw new StateError(
+        `State revision changed: expected ${expected}, found ${current.revision}`,
+        'STATE_REVISION_CONFLICT',
+      );
+    }
+    const nextState = completeIntegratedTasks(current, {
+      threadResolutionStatus,
+      verifiedLocalTaskIds: [],
+      staleDiscoveryDisposition: null,
+    });
+    const authorization = protectedTransition(nextState, 'archive-task-completion', {
+      archiveImportEnvelope,
+    });
+    if (sameEvidence(current, nextState)) {
+      assertArchiveImportEnvelope(current, nextState, archiveImportEnvelope);
+      return current;
+    }
+    return checkpointStateUnlocked({
+      cwd,
+      selectedPr,
+      nextState,
+      expectedRevision: expected,
+      event,
+      eventWriter: appendEvent,
+      transitionAuthorization: authorization,
+    });
   });
 }
 

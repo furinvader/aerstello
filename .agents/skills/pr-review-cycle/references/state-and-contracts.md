@@ -93,14 +93,88 @@ task completion; it never changes an archive, copies evidence into a sidecar,
 appends a mutation event, or mutates GitHub. Manual state/proof copying and
 thread reopening are not recovery mechanisms.
 
+The ordinary exact-task/single-head archive contract remains authoritative
+when any active-task carrier exists. Only when none applies may one terminal
+`already-fixed` active task with a null commit and at least two unique explicit
+canonical roots named by `thread:` and/or `discussion:` sources use composite
+aggregate adoption. Fully paginated live identity normalizes both aliases and
+deduplicates dual aliases for one root. A terminal historical full
+carrier must cover that exact exclusive live-root set. Its completed
+GitHub-thread tasks form one unique disjoint cover of whole source partitions;
+each partition has one observed historical HEAD and projects only actionable
+to `fixed` with a commit or already-fixed to `already-fixed` with null. Every
+relevant partial carrier must equal an exact union of whole partitions from the
+full anchor. Missing, overlapping, sliced, duplicated, divergent, alternate,
+intent-only, or provenance-stripped covers fail closed.
+
+Aggregate carrier roles are stored only in transient selection evidence and
+classified per partition root. An origin has one complete correlated reply and
+resolve intent pair at that row's observed HEAD; a replay has zero. A full
+carrier may therefore replay an older partition while originating newer ones.
+Every root requires at least one origin, and multiple origins must have the
+same normalized proof, historical task, head, reply body, and intents. The
+bounded sorted inventory fingerprint includes archive ID, content digest,
+partition/root role, and aggregate authority. Both inventory reads rerun all
+distinct historical commit-to-proof, proof-to-carrier, and carrier-to-current
+ancestry checks with replacement refs disabled and common-directory grafts
+rejected.
+Every carrier that names the active task ID in either a task object or proof
+row is relevant even when its provenance is wholly off-selection or the task
+object is absent. After the full carrier anchors historical task IDs, every
+same-repository/PR archive naming one of those IDs in a task object, proof-row
+`taskIds`, or `archiveProvenance.historicalTaskId` is relevant too. Every
+relevant historical or active-replay carrier is
+checked across all proof rows that name an anchored historical task and every
+GitHub-thread task whose canonical thread/discussion sources intersect selected
+roots. The selected-root count, minimum and actual partitions, relevant
+carriers, carrier/root roles, and selected intent footprints share one
+cumulative node bound before projection cloning, sorting, intent indexing, and
+live lineage checks.
+
+`threadRecord.archiveProvenance` is optional so ordinary schema-v3 rows remain
+byte-for-byte compatible. When present it is a closed version-1 object with
+exactly `historicalTaskId`, `historicalDisposition` (`fixed` or
+`already-fixed`), `historicalIntegratedCommitSha`, `replyBodySha256`, and
+`authorityFingerprint`. It is permitted only on an adopted, resolved
+`already-fixed` row mapped to one completed null-commit GitHub-thread active
+task. Fixed historical provenance requires a commit; already-fixed provenance
+requires null. Rows in one historical partition keep identical disposition,
+commit, and observed HEAD, while every row in the active aggregate adoption
+shares one authority fingerprint. Only the dedicated
+`checkpointArchiveTaskCompletion` API may add imported rows and provenance. Its
+closed compact envelope binds the selected task, exact newly resolved root set,
+per-row reply/body/provenance fingerprints, and common authority fingerprint;
+state independently revalidates it under the state lock before authorizing
+`archive-task-completion`. Ordinary `checkpointTaskCompletion` rejects even an
+otherwise-valid caller-supplied archive envelope and cannot introduce
+provenance. Generic `checkpointState` cannot create it either, and later guarded
+or generic transitions cannot alter or remove a resolved provenance-bearing
+row. Exact retry requires byte-identical rows and authority.
+
+Later request, retry, advance, CI, completion, and Done proof gates use this
+durable provenance rather than archives. They require the live reply's header
+HEAD to equal `observedHeadSha` as exact lowercase 40 or 64 hex, its body digest
+to match, and its sole marker anchor,
+actor, parent, URL, no-edit state, and historical task line to remain exact. A
+later archived active-task carrier may replay the aggregate only when every
+selected row has consistent provenance and no selected-root mutation intent.
+Already-fixed task content may contain newlines, but its body hash, historical
+task prefix, unique validation boundary, and sole marker remain exact; marker
+collisions or structurally ambiguous multiline content fail before import.
+The operational recovery order is verifier bootstrap first, retained aggregate
+`reply-resolve` second, and ordinary current-root `reply-resolve` last; only the
+last command mutates GitHub.
+
 Archive adoption may require one preceding state-only `verify-resolve`
 bootstrap when its already-resolved live roots circularly block ordinary
 aggregate verification. The bootstrap is not archive evidence. It requires
 pristine aggregate, threadless, and local proof; one selected actionable
 Integrated GitHub-threadless remediation; exactly one exclusive terminal
-`not-applicable` GitHub-thread task with at least two live resolved roots; and
-only unresolved, exclusively mapped actionable Integrated or Resolved
-GitHub-thread roots outside that batch. The complete canonical-root mapping,
+`already-fixed`, null-commit, `not-applicable` GitHub-thread task with at least
+two live resolved roots; and only unresolved, exclusively mapped actionable
+Integrated or Resolved GitHub-thread roots outside that batch, or eligible
+terminal `already-fixed`, null-commit roots that will use ordinary
+`reply-resolve` afterward. The complete canonical-root mapping,
 clean equal local/pushed/live/durable heads, and state revision must match across
 two full snapshots. An additional or ineligible remediation, any unknown,
 missing, duplicate, shared, or extra-resolved root, or any snapshot race fails
@@ -122,6 +196,10 @@ rows. The following `reply-resolve` remains the only authority for archive
 selection, immutable archive proof, historical ancestry,
 intent/reply/timestamp correlation, live evidence, race checks, and the
 adoption checkpoint.
+For PR #35, use
+`verify-resolve --task pr-review-multi-historical-archive-aggregate-adoption-r2`,
+then `reply-resolve --task retained-pr35-nine-roots-r1`, then ordinary
+`reply-resolve --task retained-pr35-portable-archive-reader-r1`.
 
 Pull-request `state` and `isDraft` are volatile GitHub evidence, never durable
 review-state fields. `status` reports them without writing. A review request

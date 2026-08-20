@@ -740,6 +740,101 @@ test('unresolved canonical thread may retain paired reply evidence for recovery'
   assert.deepEqual(validatePrReviewState(state), []);
 });
 
+test('archive provenance is optional for legacy rows and strictly binds a multi-history aggregate', () => {
+  const schema = JSON.parse(readFileSync(prReviewStateSchemaPath, 'utf8'));
+  assert.equal(schema.$defs.threadRecord.required.includes('archiveProvenance'), false);
+  assert.equal(schema.$defs.archiveProvenance.additionalProperties, false);
+  assert.equal(schema.$defs.archiveProvenance.properties.schemaVersion.const, 1);
+  assert.equal(schema.$defs.archiveProvenance.properties.replyBodySha256.pattern, '^[0-9a-f]{64}$');
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajv);
+  const validateSchema = ajv.compile(schema);
+  const activeTask = {
+    id: 'aggregate-task',
+    sourceIds: ['thread:PRRT_one', 'thread:PRRT_two'],
+    sourceType: 'github-thread', fingerprint: 'aggregate-task-fingerprint',
+    summary: 'Retain two historical roots.', severity: 'P1', disposition: 'already-fixed',
+    status: 'completed', integratedCommitSha: null,
+    resolutionSummary: 'Composite archive authority retained.',
+  };
+  const authorityFingerprint = 'c'.repeat(64);
+  const provenanceRows = [
+    threadFixture({
+      threadNodeId: 'PRRT_one', rootCommentNodeId: 'PRRC_one', rootCommentDatabaseId: 11,
+      taskIds: [activeTask.id], disposition: 'already-fixed', replyId: 'PRRC_reply_one',
+      replyUrl: 'https://github.com/example/aerstello/pull/17#discussion_r11',
+      archiveProvenance: {
+        schemaVersion: 1,
+        historicalTaskId: 'historical-fixed',
+        historicalDisposition: 'fixed',
+        historicalIntegratedCommitSha: 'b'.repeat(40),
+        replyBodySha256: '1'.repeat(64),
+        authorityFingerprint,
+      },
+    }),
+    threadFixture({
+      threadNodeId: 'PRRT_two', rootCommentNodeId: 'PRRC_two', rootCommentDatabaseId: 12,
+      taskIds: [activeTask.id], disposition: 'already-fixed', replyId: 'PRRC_reply_two',
+      replyUrl: 'https://github.com/example/aerstello/pull/17#discussion_r12',
+      observedHeadSha: 'd'.repeat(40),
+      archiveProvenance: {
+        schemaVersion: 1,
+        historicalTaskId: 'historical-already-fixed',
+        historicalDisposition: 'already-fixed',
+        historicalIntegratedCommitSha: null,
+        replyBodySha256: '2'.repeat(64),
+        authorityFingerprint,
+      },
+    }),
+  ];
+  const valid = stateFixture({
+    tasks: [activeTask],
+    threadResolutionStatus: {
+      status: 'passed', headSha: 'a'.repeat(40), threads: provenanceRows,
+      threadlessVerification: { status: 'not-run', headSha: null, taskIds: [], updatedAt: null },
+      updatedAt: AT,
+    },
+  });
+  assert.equal(validateSchema(valid), true, JSON.stringify(validateSchema.errors));
+  assert.deepEqual(validatePrReviewState(valid), []);
+  const legacy = structuredClone(valid);
+  for (const row of legacy.threadResolutionStatus.threads) delete row.archiveProvenance;
+  assert.equal(validateSchema(legacy), true, JSON.stringify(validateSchema.errors));
+  assert.deepEqual(validatePrReviewState(legacy), []);
+
+  for (const [label, mutate] of [
+    ['missing field', (state) => { delete state.threadResolutionStatus.threads[0].archiveProvenance.replyBodySha256; }],
+    ['unknown field', (state) => { state.threadResolutionStatus.threads[0].archiveProvenance.extra = true; }],
+    ['wrong version', (state) => { state.threadResolutionStatus.threads[0].archiveProvenance.schemaVersion = 2; }],
+    ['bad body hash', (state) => { state.threadResolutionStatus.threads[0].archiveProvenance.replyBodySha256 = 'A'.repeat(64); }],
+    ['fixed without commit', (state) => { state.threadResolutionStatus.threads[0].archiveProvenance.historicalIntegratedCommitSha = null; }],
+    ['already-fixed with commit', (state) => { state.threadResolutionStatus.threads[1].archiveProvenance.historicalIntegratedCommitSha = 'e'.repeat(40); }],
+  ]) {
+    const invalid = structuredClone(valid);
+    mutate(invalid);
+    assert.equal(validateSchema(invalid), false, label);
+    assert.notDeepEqual(validatePrReviewState(invalid), [], label);
+  }
+
+  const unresolved = structuredClone(valid);
+  Object.assign(unresolved.threadResolutionStatus.threads[0], {
+    isResolved: false, resolvedAt: null, resolvedBy: null,
+  });
+  assert.equal(validateSchema(unresolved), false, 'unresolved rows must schema-forbid archive provenance');
+  assert.ok(validatePrReviewState(unresolved).some((error) => error.includes('adopted resolved')));
+  const divergentAuthority = structuredClone(valid);
+  divergentAuthority.threadResolutionStatus.threads[1].archiveProvenance.authorityFingerprint = 'f'.repeat(64);
+  assert.ok(validatePrReviewState(divergentAuthority).some((error) => error.includes('diverges within')));
+  const inconsistentPartition = structuredClone(valid);
+  inconsistentPartition.threadResolutionStatus.threads[1].archiveProvenance = {
+    ...inconsistentPartition.threadResolutionStatus.threads[0].archiveProvenance,
+    replyBodySha256: '2'.repeat(64),
+  };
+  assert.ok(validatePrReviewState(inconsistentPartition).some(
+    (error) => error.includes('historical task partition'),
+  ));
+});
+
 test('manual state validation rejects every ambiguous canonical thread identifier', () => {
   const cases = [
     ['threadNodeId', 'PRRT_node'],
