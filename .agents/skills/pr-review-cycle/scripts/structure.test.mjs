@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { dirname, join, relative, sep } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+
+import ts from 'typescript';
 
 import { gitText } from '../../../../scripts/lib/git.mjs';
 import {
@@ -33,10 +35,29 @@ const EXPECTED_CANONICAL_FILES = [
   'schemas/pr-review-state.schema.json',
   'schemas/review-fix-result.schema.json',
   'schemas/review-fix-task.schema.json',
+  'scripts/contracts/contract-identities.mjs',
   'scripts/contracts/contracts.mjs',
   'scripts/contracts/contracts.test.mjs',
-  'scripts/contracts/state-contracts.test.mjs',
-  'scripts/contracts/task-worker-contracts.test.mjs',
+  'scripts/contracts/gates.mjs',
+  'scripts/contracts/gates.test.mjs',
+  'scripts/contracts/primitives.mjs',
+  'scripts/contracts/primitives.test.mjs',
+  'scripts/contracts/review-evidence.mjs',
+  'scripts/contracts/review-evidence.test.mjs',
+  'scripts/contracts/state-v1.mjs',
+  'scripts/contracts/state-v1.test.mjs',
+  'scripts/contracts/state-v3.mjs',
+  'scripts/contracts/state-v3.test.mjs',
+  'scripts/contracts/targeted-validation.mjs',
+  'scripts/contracts/targeted-validation.test.mjs',
+  'scripts/contracts/task-packet-union.mjs',
+  'scripts/contracts/task-packet-union.test.mjs',
+  'scripts/contracts/task-packet.mjs',
+  'scripts/contracts/task-packet.test.mjs',
+  'scripts/contracts/thread-proof.mjs',
+  'scripts/contracts/thread-proof.test.mjs',
+  'scripts/contracts/worker-result.mjs',
+  'scripts/contracts/worker-result.test.mjs',
   'scripts/github/archive/adoption.test.mjs',
   'scripts/github/archive/archive-fixture-loader.mjs',
   'scripts/github/archive/fixture-integrity.test.mjs',
@@ -155,6 +176,8 @@ const EXPECTED_SEPARATE_CAPABILITIES = {
 };
 
 const EXPECTED_OBSOLETE_PATHS = [
+  '.agents/skills/pr-review-cycle/scripts/contracts/state-contracts.test.mjs',
+  '.agents/skills/pr-review-cycle/scripts/contracts/task-worker-contracts.test.mjs',
   '.agents/skills/pr-review-cycle/scripts/github/github.test.mjs',
   '.agents/skills/pr-review-cycle/scripts/state/state.test.mjs',
   '.codex/hooks/pre-compact.mjs',
@@ -217,6 +240,280 @@ function readRepositoryFile(path) {
 
 function loadOwnership() {
   return JSON.parse(readFileSync(join(skillDirectory, 'ownership.json'), 'utf8'));
+}
+
+const contractsDirectory = join(scriptsDirectory, 'contracts');
+const specialistRegistryModule = join(
+  repositoryDirectory,
+  '.agents/skills/aerstello-specialists/scripts/validate-registry.mjs',
+);
+
+function contractModule(fileName) {
+  return join(contractsDirectory, fileName);
+}
+
+const PRODUCTION_CONTRACT_IMPORTS = new Map([
+  ['primitives.mjs', new Map()],
+  ['contract-identities.mjs', new Map([
+    ['node:crypto', ['createHash']],
+    [contractModule('primitives.mjs'), ['isObject']],
+  ])],
+  ['targeted-validation.mjs', new Map([
+    ['node:fs', ['readdirSync', 'readFileSync']],
+    ['node:path', ['join']],
+    [join(scriptsDirectory, 'paths.mjs'), ['featureDirectory']],
+    [contractModule('primitives.mjs'), [
+      'isSha', 'isString', 'parseRepositoryPath', 'rejectUnknownFields', 'requireFields',
+      'validateStringList',
+    ]],
+  ])],
+  ['task-packet.mjs', new Map([
+    [specialistRegistryModule, ['validateSpecialization']],
+    [contractModule('contract-identities.mjs'), ['sha256CanonicalContractJson']],
+    [contractModule('primitives.mjs'), [
+      'findRawFields', 'isSha', 'isString', 'parseRepositoryPath', 'rejectUnknownFields',
+      'requireFields', 'validateStringList',
+    ]],
+    [contractModule('targeted-validation.mjs'), ['validateAffectedAreas', 'validateRequiredValidation']],
+  ])],
+  ['task-packet-union.mjs', new Map([
+    [contractModule('targeted-validation.mjs'), ['unionValidationSelections']],
+    [contractModule('task-packet.mjs'), ['validateTaskPacket']],
+  ])],
+  ['worker-result.mjs', new Map([
+    [specialistRegistryModule, ['loadRegistry']],
+    [contractModule('contract-identities.mjs'), ['validatedWorkerResultDigest']],
+    [contractModule('primitives.mjs'), [
+      'findRawFields', 'isSha', 'isString', 'parseRepositoryPath', 'pathMatchesOwnership',
+      'rejectUnknownFields', 'requireFields', 'validateValidationEntry',
+    ]],
+    [contractModule('task-packet.mjs'), ['validateTaskPacket']],
+  ])],
+  ['review-evidence.mjs', new Map([
+    [contractModule('contract-identities.mjs'), ['staleDiscoveryDispositionId']],
+    [contractModule('primitives.mjs'), [
+      'isDateTime', 'isHttpsUrl', 'isObject', 'isSha', 'isString', 'rejectUnknownFields',
+      'requireFields', 'validateStringList',
+    ]],
+  ])],
+  ['thread-proof.mjs', new Map([
+    ['node:util', ['isDeepStrictEqual']],
+    [contractModule('primitives.mjs'), [
+      'isDateTime', 'isHttpsUrl', 'isObject', 'isSha', 'isString', 'rejectUnknownFields',
+      'requireFields', 'validateStringList',
+    ]],
+  ])],
+  ['gates.mjs', new Map([
+    [contractModule('primitives.mjs'), ['isObject']],
+  ])],
+  ['state-v1.mjs', new Map([
+    [contractModule('primitives.mjs'), [
+      'findRawFields', 'isDateTime', 'isObject', 'isSha', 'isString', 'rejectUnknownFields',
+      'requireFields',
+    ]],
+  ])],
+  ['state-v3.mjs', new Map([
+    [contractModule('gates.mjs'), ['completionStateGate', 'reviewReadyStateGate', 'reviewRequestUsage']],
+    [contractModule('primitives.mjs'), [
+      'findRawFields', 'isDateTime', 'isObject', 'isSha', 'isString', 'rejectUnknownFields',
+      'requireFields', 'validateStringList',
+    ]],
+    [contractModule('review-evidence.mjs'), [
+      'validateReviewHistory', 'validateReviewOutcome', 'validateReviewRequest',
+      'validateStaleDiscoveryDispositions', 'validateVerificationEscalation',
+    ]],
+    [contractModule('thread-proof.mjs'), ['validateCiProof', 'validateProof', 'validateThreadStatus']],
+  ])],
+  ['contracts.mjs', new Map([
+    [contractModule('contract-identities.mjs'), ['staleDiscoveryDispositionId']],
+    [contractModule('gates.mjs'), ['completionGate', 'reviewRequestGate', 'reviewRequestUsage']],
+    [contractModule('review-evidence.mjs'), ['buildStaleDiscoveryDisposition']],
+    [contractModule('state-v1.mjs'), ['validatePrReviewStateV1']],
+    [contractModule('state-v3.mjs'), [
+      'FINDING_DISPOSITIONS', 'STATE_PHASES', 'TASK_STATUSES', 'validatePrReviewState',
+    ]],
+    [contractModule('targeted-validation.mjs'), [
+      'parseTargetedValidationCommand', 'unionInitialValidationSelection',
+      'validateInitialValidationSelection',
+    ]],
+    [contractModule('task-packet-union.mjs'), ['unionRequiredValidation']],
+    [contractModule('task-packet.mjs'), ['validateTaskPacket']],
+    [contractModule('thread-proof.mjs'), ['taskHasCanonicalThreadCoverage']],
+    [contractModule('worker-result.mjs'), [
+      'validateWorkerResult', 'validateWorkerResultAgainstTask', 'workerResultDigest',
+    ]],
+  ])],
+]);
+
+const CONTRACT_FACADE_EXPORTS = [
+  'buildStaleDiscoveryDisposition',
+  'completionGate',
+  'FINDING_DISPOSITIONS',
+  'parseTargetedValidationCommand',
+  'reviewRequestGate',
+  'reviewRequestUsage',
+  'staleDiscoveryDispositionId',
+  'STATE_PHASES',
+  'TASK_STATUSES',
+  'taskHasCanonicalThreadCoverage',
+  'unionInitialValidationSelection',
+  'unionRequiredValidation',
+  'validateInitialValidationSelection',
+  'validatePrReviewState',
+  'validatePrReviewStateV1',
+  'validateTaskPacket',
+  'validateWorkerResult',
+  'validateWorkerResultAgainstTask',
+  'workerResultDigest',
+];
+
+function normalizedModuleTarget(importer, specifier) {
+  return specifier.startsWith('.') ? resolve(dirname(importer), specifier) : specifier;
+}
+
+function namedBindings(importClause) {
+  if (!importClause?.namedBindings || !ts.isNamedImports(importClause.namedBindings)) return null;
+  return importClause.namedBindings.elements.map((element) => ({
+    imported: element.propertyName?.text ?? element.name.text,
+    local: element.name.text,
+  }));
+}
+
+function parseModule(importer, source) {
+  return ts.createSourceFile(importer, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+}
+
+function inspectProductionContractSource(importer, source) {
+  const errors = [];
+  const fileName = posixRelative(contractsDirectory, importer);
+  const allowlist = PRODUCTION_CONTRACT_IMPORTS.get(fileName);
+  if (!allowlist) return [`unknown production contract module ${fileName}`];
+  const parsed = parseModule(importer, source);
+  for (const diagnostic of parsed.parseDiagnostics) {
+    errors.push(`syntax error: ${diagnostic.messageText}`);
+  }
+
+  const exportDeclarations = [];
+  function visit(node) {
+    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      errors.push('dynamic import is forbidden');
+    }
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'require') {
+      errors.push('CommonJS require is forbidden');
+    }
+    if (ts.isIdentifier(node) && node.text === 'createRequire') {
+      errors.push('createRequire is forbidden');
+    }
+    if (ts.isImportEqualsDeclaration(node)) errors.push('CommonJS import assignment is forbidden');
+    if (ts.isExportAssignment(node)) errors.push('default export assignment is forbidden');
+    ts.forEachChild(node, visit);
+  }
+  visit(parsed);
+
+  for (const statement of parsed.statements) {
+    if (ts.isImportDeclaration(statement)) {
+      const specifier = ts.isStringLiteral(statement.moduleSpecifier)
+        ? statement.moduleSpecifier.text : null;
+      if (specifier === null) {
+        errors.push('import specifier must be a string literal');
+        continue;
+      }
+      const target = normalizedModuleTarget(importer, specifier);
+      const expectedNames = allowlist.get(target);
+      if (!expectedNames) errors.push(`unapproved dependency ${specifier} resolves to ${target}`);
+      if (!statement.importClause) {
+        errors.push(`side-effect import is forbidden: ${specifier}`);
+        continue;
+      }
+      if (statement.importClause.name) errors.push(`default import is forbidden: ${specifier}`);
+      if (statement.importClause.namedBindings
+          && ts.isNamespaceImport(statement.importClause.namedBindings)) {
+        errors.push(`namespace import is forbidden: ${specifier}`);
+      }
+      const bindings = namedBindings(statement.importClause);
+      if (bindings === null) continue;
+      for (const binding of bindings) {
+        if (binding.imported !== binding.local) errors.push(`aliased import is forbidden: ${binding.imported}`);
+      }
+      if (expectedNames && JSON.stringify(sorted(bindings.map(({ imported }) => imported)))
+          !== JSON.stringify(sorted(expectedNames))) {
+        errors.push(`named imports from ${specifier} must be exactly ${sorted(expectedNames).join(', ')}`);
+      }
+    }
+    if (ts.isExportDeclaration(statement)) exportDeclarations.push(statement);
+  }
+
+  for (const declaration of exportDeclarations) {
+    if (!declaration.exportClause || !ts.isNamedExports(declaration.exportClause)) {
+      errors.push('export-star is forbidden');
+      continue;
+    }
+    const names = declaration.exportClause.elements.map((element) => element.name.text);
+    if (declaration.exportClause.elements.some((element) => (
+      element.propertyName && element.propertyName.text !== element.name.text
+    ))) errors.push('aliased export is forbidden');
+    if (fileName === 'contracts.mjs') {
+      if (declaration.moduleSpecifier) errors.push('contracts facade exports must be local');
+      if (JSON.stringify(sorted(names)) !== JSON.stringify(sorted(CONTRACT_FACADE_EXPORTS))) {
+        errors.push('contracts facade export list is not exact');
+      }
+    } else if (fileName === 'review-evidence.mjs') {
+      const specifier = ts.isStringLiteral(declaration.moduleSpecifier)
+        ? declaration.moduleSpecifier.text : null;
+      const target = specifier === null ? null : normalizedModuleTarget(importer, specifier);
+      if (target !== contractModule('contract-identities.mjs')
+          || JSON.stringify(names) !== JSON.stringify(['staleDiscoveryDispositionId'])) {
+        errors.push('review-evidence re-export is not exact');
+      }
+    } else {
+      errors.push(`named export declarations are forbidden in ${fileName}`);
+    }
+  }
+  if (fileName === 'contracts.mjs' && exportDeclarations.length !== 1) {
+    errors.push('contracts facade must have exactly one explicit export list');
+  }
+  if (fileName === 'review-evidence.mjs' && exportDeclarations.length !== 1) {
+    errors.push('review-evidence must have exactly one explicit identity re-export');
+  }
+  return errors;
+}
+
+function validateProductionContractSource(importer, source) {
+  const errors = inspectProductionContractSource(importer, source);
+  const expectedTargets = PRODUCTION_CONTRACT_IMPORTS.get(posixRelative(contractsDirectory, importer));
+  if (!expectedTargets) return errors;
+  const parsed = parseModule(importer, source);
+  const actualTargets = parsed.statements.filter(ts.isImportDeclaration).flatMap((statement) => (
+    ts.isStringLiteral(statement.moduleSpecifier)
+      ? [normalizedModuleTarget(importer, statement.moduleSpecifier.text)] : []
+  ));
+  if (JSON.stringify(sorted(actualTargets)) !== JSON.stringify(sorted(expectedTargets.keys()))) {
+    errors.push('production import targets must exactly match the module allowlist');
+  }
+  return errors;
+}
+
+function forbiddenWorkflowTarget(target) {
+  if (!target.startsWith(`${scriptsDirectory}${sep}`)) return false;
+  const localPath = posixRelative(scriptsDirectory, target);
+  return /^(?:state|github|hooks|worktree)\//u.test(localPath)
+    || /(?:^|\/)cli\.mjs$/u.test(localPath);
+}
+
+function testImportTargets(importer, source) {
+  const parsed = parseModule(importer, source);
+  const errors = parsed.parseDiagnostics.map((diagnostic) => `syntax error: ${diagnostic.messageText}`);
+  const targets = [];
+  for (const statement of parsed.statements.filter(ts.isImportDeclaration)) {
+    if (!ts.isStringLiteral(statement.moduleSpecifier)) {
+      errors.push('test import specifier must be a string literal');
+      continue;
+    }
+    const target = normalizedModuleTarget(importer, statement.moduleSpecifier.text);
+    targets.push(target);
+    if (forbiddenWorkflowTarget(target)) errors.push(`test import reaches forbidden workflow layer: ${target}`);
+  }
+  return { errors, targets };
 }
 
 test('path discovery anchors checked-in resources to the skill and Git top level', () => {
@@ -311,6 +608,77 @@ test('ownership manifest names the complete canonical skill and no obsolete path
       || /^\.codex\/hooks\/.*\.mjs$/u.test(path))
   ));
   assert.deepEqual(unexpectedOwnedPaths, []);
+});
+
+test('production contract modules obey the exact AST dependency and façade boundaries', () => {
+  const productionFiles = sorted(readdirSync(contractsDirectory)
+    .filter((name) => name.endsWith('.mjs') && !name.endsWith('.test.mjs')));
+  assert.deepEqual(productionFiles, sorted(PRODUCTION_CONTRACT_IMPORTS.keys()));
+
+  for (const fileName of productionFiles) {
+    const path = contractModule(fileName);
+    assert.deepEqual(
+      validateProductionContractSource(path, readFileSync(path, 'utf8')),
+      [],
+      fileName,
+    );
+  }
+});
+
+test('focused contract tests directly own their production module without higher-layer imports', () => {
+  const focusedTestFiles = sorted(readdirSync(contractsDirectory)
+    .filter((name) => name.endsWith('.test.mjs')));
+  const expectedFocusedTests = sorted([...PRODUCTION_CONTRACT_IMPORTS.keys()]
+    .filter((name) => name !== 'contract-identities.mjs')
+    .map((name) => name.replace(/\.mjs$/u, '.test.mjs')));
+  assert.deepEqual(focusedTestFiles, expectedFocusedTests);
+
+  for (const testFileName of focusedTestFiles) {
+    const importer = contractModule(testFileName);
+    const { errors, targets } = testImportTargets(importer, readFileSync(importer, 'utf8'));
+    const owner = contractModule(testFileName.replace(/\.test\.mjs$/u, '.mjs'));
+    assert.deepEqual(errors, [], testFileName);
+    assert.ok(targets.includes(owner), `${testFileName} must directly import its production owner`);
+  }
+});
+
+test('contract AST guards reject normalized boundary and module-system escape hatches', () => {
+  const gatesPath = contractModule('gates.mjs');
+  const rejectedSources = [
+    ["import { validatePrReviewState } from './nested/../../state/state.mjs';", /unapproved dependency/u],
+    ["import { githubStatus } from '../github/github.mjs';", /unapproved dependency/u],
+    ["import { runHook } from '../hooks/session-start.mjs';", /unapproved dependency/u],
+    ["import { createWorktree } from '../worktree/worktree.mjs';", /unapproved dependency/u],
+    ["import { main } from '../state/cli.mjs';", /unapproved dependency/u],
+    ["import { reviewRequestGate } from './contracts.mjs';", /unapproved dependency/u],
+    ["export * from './primitives.mjs';", /export-star is forbidden/u],
+    ["const contracts = await import('./primitives.mjs');", /dynamic import is forbidden/u],
+    ["const contracts = require('./primitives.mjs');", /CommonJS require is forbidden/u],
+    ["import { createRequire } from 'node:module';", /createRequire is forbidden/u],
+    ["import primitives from './primitives.mjs';", /default import is forbidden/u],
+    ["import * as primitives from './primitives.mjs';", /namespace import is forbidden/u],
+    ["import './primitives.mjs';", /side-effect import is forbidden/u],
+  ];
+  for (const [source, expected] of rejectedSources) {
+    assert.match(inspectProductionContractSource(gatesPath, source).join('\n'), expected, source);
+  }
+
+  for (const [importer, source] of [
+    [gatesPath, "import { isObject } from './primitives.mjs';"],
+    [contractModule('contract-identities.mjs'), "import { createHash } from 'node:crypto';"],
+    [contractModule('targeted-validation.mjs'), "import { featureDirectory } from '../paths.mjs';"],
+    [contractModule('task-packet.mjs'), "import { validateSpecialization } from '../../../aerstello-specialists/scripts/validate-registry.mjs';"],
+  ]) assert.deepEqual(inspectProductionContractSource(importer, source), []);
+
+  const legitimateTest = testImportTargets(
+    contractModule('state-v3.test.mjs'),
+    "import assert from 'node:assert/strict';\nimport Ajv2020 from 'ajv/dist/2020.js';\nimport { prReviewStateSchemaPath } from '../paths.mjs';\nimport { validatePrReviewState } from './state-v3.mjs';",
+  );
+  assert.deepEqual(legitimateTest.errors, []);
+  assert.match(testImportTargets(
+    contractModule('state-v3.test.mjs'),
+    "import { validateState } from './nested/../../state/state.mjs';",
+  ).errors.join('\n'), /forbidden workflow layer/u);
 });
 
 test('hooks and npm façades target only canonical skill entrypoints', () => {
