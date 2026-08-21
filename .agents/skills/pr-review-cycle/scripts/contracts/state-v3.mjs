@@ -279,4 +279,3 @@ export function validatePrReviewState(value) {
   findRawFields(value, '$', errors);
   return errors;
 }
-
