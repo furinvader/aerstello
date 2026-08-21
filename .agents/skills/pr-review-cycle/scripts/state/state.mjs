@@ -38,6 +38,7 @@ import {
   validatePrReviewState,
   validatePrReviewStateV1,
 } from '../contracts/contracts.mjs';
+import { taskPacketDigest as internalTaskPacketDigest } from '../contracts/task-packet.mjs';
 import {
   gitCommonDirectory,
   repositoryRoot,
@@ -293,7 +294,7 @@ export function taskPacketDigest(packet) {
       || typeof packet.taskId !== 'string' || packet.taskId.length === 0) {
     throw new StateError('Invalid historical schema-v2 task packet', 'INVALID_TASK_PACKET');
   }
-  return createHash('sha256').update(JSON.stringify(canonicalJson(packet))).digest('hex');
+  return internalTaskPacketDigest(packet);
 }
 
 function readJsonSidecar(path, label, limit = ACTIVE_STATE_LIMIT_BYTES) {
