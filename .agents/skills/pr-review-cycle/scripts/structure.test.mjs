@@ -35,18 +35,50 @@ const EXPECTED_CANONICAL_FILES = [
   'schemas/review-fix-task.schema.json',
   'scripts/contracts/contracts.mjs',
   'scripts/contracts/contracts.test.mjs',
+  'scripts/contracts/state-contracts.test.mjs',
+  'scripts/contracts/task-worker-contracts.test.mjs',
+  'scripts/github/archive/adoption.test.mjs',
+  'scripts/github/archive/archive-fixture-loader.mjs',
+  'scripts/github/archive/fixture-integrity.test.mjs',
+  'scripts/github/archive/fixtures/pr-35-2026-08-19T16-31-55-612Z/events.ndjson',
+  'scripts/github/archive/fixtures/pr-35-2026-08-19T16-31-55-612Z/state.json',
+  'scripts/github/archive/fixtures/pr-35-2026-08-20T09-39-32-610Z/events.ndjson',
+  'scripts/github/archive/fixtures/pr-35-2026-08-20T09-39-32-610Z/state.json',
+  'scripts/github/archive/store.test.mjs',
+  'scripts/github/ci.test.mjs',
   'scripts/github/cli.mjs',
+  'scripts/github/cli.test.mjs',
+  'scripts/github/facade.test.mjs',
   'scripts/github/github.mjs',
-  'scripts/github/github.test.mjs',
+  'scripts/github/live-evidence.test.mjs',
+  'scripts/github/recovery.test.mjs',
+  'scripts/github/request.test.mjs',
+  'scripts/github/review-response.test.mjs',
+  'scripts/github/test-support/workflow-harness.mjs',
+  'scripts/github/threads.test.mjs',
+  'scripts/github/workflow.test.mjs',
   'scripts/hooks/hooks.test.mjs',
   'scripts/hooks/pre-compact.mjs',
   'scripts/hooks/session-start.mjs',
   'scripts/hooks/subagent-stop.mjs',
   'scripts/paths.mjs',
+  'scripts/state/archive.test.mjs',
   'scripts/state/cli.mjs',
+  'scripts/state/cli.test.mjs',
+  'scripts/state/facade.test.mjs',
   'scripts/state/fixtures/hold-state-lock.mjs',
+  'scripts/state/locks-and-barriers.test.mjs',
+  'scripts/state/review-transitions.test.mjs',
+  'scripts/state/schema-migration-and-recovery.test.mjs',
+  'scripts/state/specialist-evidence.test.mjs',
+  'scripts/state/state-loading-and-persistence.test.mjs',
   'scripts/state/state.mjs',
-  'scripts/state/state.test.mjs',
+  'scripts/state/task-completion.test.mjs',
+  'scripts/state/task-packets.test.mjs',
+  'scripts/state/test-support/state-harness.mjs',
+  'scripts/state/validation-plans.test.mjs',
+  'scripts/state/worker-evidence.test.mjs',
+  'scripts/state/worker-git-authority.test.mjs',
   'scripts/structure.test.mjs',
   'scripts/worktree/cli.mjs',
   'scripts/worktree/worktree.mjs',
@@ -123,6 +155,8 @@ const EXPECTED_SEPARATE_CAPABILITIES = {
 };
 
 const EXPECTED_OBSOLETE_PATHS = [
+  '.agents/skills/pr-review-cycle/scripts/github/github.test.mjs',
+  '.agents/skills/pr-review-cycle/scripts/state/state.test.mjs',
   '.codex/hooks/pre-compact.mjs',
   '.codex/hooks/session-start.mjs',
   '.codex/hooks/subagent-stop.mjs',
@@ -487,6 +521,31 @@ test('external adapters link to the canonical guide without obsolete references'
       '.codex/hooks/subagent-stop.mjs',
     ]) {
       assert.equal(source.includes(obsolete), false, `obsolete reference ${obsolete} in ${path}`);
+    }
+  }
+});
+
+test('skill frontmatter has only name and description and no TODOs', () => {
+  const skill = readFileSync(join(repositoryDirectory, '.agents/skills/pr-review-cycle/SKILL.md'), 'utf8');
+  const frontmatter = skill.match(/^---\n([\s\S]*?)\n---/u)?.[1] ?? '';
+  const keys = frontmatter.split('\n').map((line) => line.split(':', 1)[0]);
+  assert.deepEqual(keys, ['name', 'description']);
+  assert.doesNotMatch(skill, /TODO/u);
+  assert.ok(skill.split('\n').length < 500);
+});
+
+test('custom agent required fields are declared at the TOML root', () => {
+  const agentsDirectory = join(repositoryDirectory, '.codex', 'agents');
+  for (const fileName of readdirSync(agentsDirectory).filter((name) => name.endsWith('.toml'))) {
+    const source = readFileSync(join(agentsDirectory, fileName), 'utf8');
+    const firstTable = source.search(/^\s*\[/mu);
+    const rootSource = firstTable === -1 ? source : source.slice(0, firstTable);
+    for (const field of ['name', 'description', 'developer_instructions']) {
+      assert.match(
+        rootSource,
+        new RegExp(`^${field}\\s*=`, 'mu'),
+        `${fileName} must declare ${field} before its first TOML table`,
+      );
     }
   }
 });
