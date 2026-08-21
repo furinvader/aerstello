@@ -309,28 +309,3 @@ export function validateThreadStatus(value, tasks, errors) {
     }
   }
 }
-
-export function completedLocalTaskIds(state) {
-  return (state?.tasks ?? []).filter((task) => task.sourceType === 'local' && task.status === 'completed')
-    .map((task) => task.id).sort();
-}
-
-export function localVerificationStateGate(state) {
-  const expectedTaskIds = completedLocalTaskIds(state);
-  if (expectedTaskIds.length === 0) return [];
-  const proof = state?.threadResolutionStatus?.localVerification;
-  const reasons = [];
-  if (!isObject(proof)) {
-    return ['completed local tasks require persisted local verifier proof'];
-  }
-  if (proof.status !== 'passed') reasons.push('local verifier proof must have passed');
-  if (proof.headSha !== state?.currentIntegrationHeadSha) {
-    reasons.push('local verifier proof HEAD must equal currentIntegrationHeadSha');
-  }
-  const actualTaskIds = Array.isArray(proof.taskIds) ? [...proof.taskIds].sort() : [];
-  if (actualTaskIds.length !== expectedTaskIds.length
-      || actualTaskIds.some((taskId, index) => taskId !== expectedTaskIds[index])) {
-    reasons.push('local verifier proof must cover exactly every completed local task');
-  }
-  return reasons;
-}

@@ -3,7 +3,6 @@ import { test } from 'node:test';
 
 import {
   localTaskIsEligibleForVerification,
-  localVerificationStateGate,
   taskHasCanonicalThreadCoverage,
   validateArchiveProvenance,
   validateCiProof,
@@ -111,16 +110,6 @@ test('direct local proof preserves eligibility and exact completed-task coverage
   assert.deepEqual(errorsFrom(validateLocalVerification, { ...proof, taskIds: [] }, [actionable], '$.local'), [
     '$.local passed proof must cover at least one local task',
   ]);
-  const state = {
-    currentIntegrationHeadSha: HEAD,
-    tasks: [nonActionable, actionable],
-    threadResolutionStatus: { localVerification: proof },
-  };
-  assert.deepEqual(localVerificationStateGate(state), []);
-  assert.deepEqual(localVerificationStateGate({
-    ...state,
-    threadResolutionStatus: { localVerification: { ...proof, taskIds: [actionable.id] } },
-  }), ['local verifier proof must cover exactly every completed local task']);
 });
 
 test('canonical thread coverage is source- and disposition-bound', () => {
