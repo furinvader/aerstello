@@ -1,19 +1,18 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import {
   parseTargetedValidationCommand, unionInitialValidationSelection, unionRequiredValidation,
   validateInitialValidationSelection, reviewRequestUsage,
 } from '../../contracts/contracts.mjs';
 import {
-  atomicWriteJson, canonicalJson, canonicalSerializedJson, readJsonSidecar, serializeJson,
+  atomicWriteJson, canonicalSerializedJson, readJsonSidecar, serializeJson,
 } from '../atomic-io.mjs';
 import { StateError } from '../errors.mjs';
 import { gitSnapshot } from '../git-authority.mjs';
 import { appendEvent } from '../journal.mjs';
 import { stateDirectory, validationPlanPath } from '../locations.mjs';
-import { withStateLock } from '../locks.mjs';
 import { migratePrReviewStateV2 } from '../migrations.mjs';
-import { activePrNumber, loadState, readStateDocument } from '../state-store.mjs';
+import { loadState, readStateDocument } from '../state-store.mjs';
 import { loadBoundTaskPackets, readBoundTaskBindingProvenance } from './task-binding.mjs';
 import { assertBoundTaskPacket, readTaskPacketSidecar, taskPacketDigest } from './task-packets.mjs';
 
@@ -214,14 +213,14 @@ export function isNativeTasklessPendingReviewHeadDriftValidationRecovery(state, 
         && disposition.evidence?.requestId === request.id));
 }
 
-export function isV2CompletedTaskValidationRecovery(cwd, state, expectedIds, buildReviewOutcome) {
+export function readV2CompletedTaskValidationRecoveryEvidence(cwd, state, expectedIds) {
   if (!['recovering', 'validating'].includes(state.phase) || state.validationStatus.status !== 'not-run'
       || expectedIds.length !== 0 || state.tasks.length === 0
       || state.tasks.some((task) => task.status !== 'completed'
         || task.disposition === 'needs-human-decision')
-      || state.blockedReasons.length !== 0 || state.verificationEscalation !== null) return false;
+      || state.blockedReasons.length !== 0 || state.verificationEscalation !== null) return null;
   const backupPath = join(stateDirectory(cwd, state.prNumber), 'state.v2.backup.json');
-  if (!existsSync(backupPath)) return false;
+  if (!existsSync(backupPath)) return null;
   try {
     const legacy = readStateDocument(backupPath);
     if (legacy.schemaVersion !== 2 || !['awaiting-review', 'ready-for-review', 'complete'].includes(legacy.phase)
@@ -231,29 +230,18 @@ export function isV2CompletedTaskValidationRecovery(cwd, state, expectedIds, bui
         || typeof legacy.validationStatus.updatedAt !== 'string'
         || !Number.isFinite(Date.parse(legacy.validationStatus.updatedAt))
         || !Array.isArray(legacy.tasks) || legacy.tasks.length === 0
-        || legacy.tasks.some((task) => task.status !== 'completed')) return false;
+        || legacy.tasks.some((task) => task.status !== 'completed')) return null;
     const migrated = migratePrReviewStateV2(legacy, { migratedAt: state.updatedAt });
-    let expected = migrated;
-    if (legacy.phase === 'awaiting-review') {
-      if (typeof buildReviewOutcome !== 'function') return false;
-      if (migrated.phase !== 'awaiting-review' || state.phase !== 'validating'
-          || state.reviewOutcome?.outcome !== 'clean'
-          || state.revision !== migrated.revision + 1) return false;
-      expected = {
-        ...buildReviewOutcome(migrated, state.reviewOutcome),
-        revision: state.revision,
-        updatedAt: state.updatedAt,
-      };
-    }
-    return JSON.stringify(canonicalJson(expected)) === JSON.stringify(canonicalJson(state));
+    return { legacyPhase: legacy.phase, migrated };
   } catch {
-    return false;
+    return null;
   }
 }
 
 
 export function buildTargetedValidationPlanUnlocked({
-  cwd, prNumber, taskPackets, initialSelection, replace, now, buildReviewOutcome,
+  cwd, prNumber, taskPackets, initialSelection, replace, now = utcNow,
+  completedTaskRecoveryAuthorized = false,
 }) {
   const state = loadState(cwd, prNumber);
   if (!state) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
@@ -283,11 +271,8 @@ export function buildTargetedValidationPlanUnlocked({
     const pendingHeadDriftRecovery = isNativeTasklessPendingReviewHeadDriftValidationRecovery(
       state, expectedIds,
     );
-    const completedTaskRecovery = isV2CompletedTaskValidationRecovery(
-      cwd, state, expectedIds, buildReviewOutcome,
-    );
     if (!pristineSelection && !cleanReviewRecovery && !headDriftRecovery
-        && !pendingHeadDriftRecovery && !completedTaskRecovery) {
+        && !pendingHeadDriftRecovery && completedTaskRecoveryAuthorized !== true) {
       throw new StateError(
         'Taskless validation selection requires a pristine cycle, guarded stale-review recovery, or proven v2 completed-task recovery',
         'INITIAL_VALIDATION_NOT_ALLOWED',
@@ -400,43 +385,6 @@ export function buildTargetedValidationPlanUnlocked({
   appendEvent(cwd, state.prNumber, { type: 'targeted-validation-planned', summary: `Saved ${commands.length} targeted checks for ${state.currentIntegrationHeadSha}` });
   return plan;
 }
-
-export function buildTargetedValidationPlanEvidence({
-  cwd = process.cwd(), prNumber, taskPackets, initialSelection, replace = false, now = utcNow,
-  resetTargetedValidation, buildReviewOutcome,
-} = {}) {
-  const selectedPr = prNumber ?? activePrNumber(cwd);
-  if (selectedPr === null || selectedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
-  const current = loadState(cwd, selectedPr);
-  if (!VALIDATION_PLANNING_PHASES.has(current.phase)) {
-    throw new StateError(`Cannot plan targeted validation while phase is ${current.phase}`, 'VALIDATION_PLAN_PHASE_BLOCKED');
-  }
-  if (initialSelection !== undefined && initialSelection !== null
-      && current.validationStatus.status === 'passed'
-      && (isCleanTasklessReviewValidationRecovery(current, actionableIntegratedTaskIds(current))
-        || isNativeTasklessReviewHeadDriftValidationRecovery(current, actionableIntegratedTaskIds(current))
-        || isNativeTasklessPendingReviewHeadDriftValidationRecovery(
-          current, actionableIntegratedTaskIds(current),
-        ))) {
-    throw new StateError(
-      'Taskless review recovery cannot replace existing targeted-validation proof',
-      'INITIAL_VALIDATION_NOT_ALLOWED',
-    );
-  }
-  if (current.validationStatus.status !== 'not-run' && !replace) {
-    throw new StateError('Targeted validation proof already exists; use --replace to start a fresh plan', 'VALIDATION_PLAN_REPLACE_REQUIRED');
-  }
-  if (current.validationStatus.status !== 'not-run') {
-    if (typeof resetTargetedValidation !== 'function') {
-      throw new StateError('Replacing validation proof requires the guarded façade reset', 'VALIDATION_RESET_REQUIRED');
-    }
-    resetTargetedValidation({ cwd, prNumber: selectedPr, expectedRevision: current.revision });
-  }
-  return withStateLock(cwd, selectedPr, () => buildTargetedValidationPlanUnlocked({
-    cwd, prNumber: selectedPr, taskPackets, initialSelection, replace, now, buildReviewOutcome,
-  }));
-}
-
 
 export function executeTargetedValidationFacts({
   cwd, state, plan, runCommand, now = () => new Date().toISOString(), beforeCommand,

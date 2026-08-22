@@ -74,12 +74,13 @@ import {
   actionableIntegratedTaskIds,
   actionablePacketValidationTaskIds,
   assertCleanExactIntegrationHead,
-  buildTargetedValidationPlanEvidence,
+  buildTargetedValidationPlanUnlocked,
   executeTargetedValidationFacts,
   hasRemainingReviewAllowance,
   isCleanTasklessReviewValidationRecovery,
   isNativeTasklessPendingReviewHeadDriftValidationRecovery,
   isNativeTasklessReviewHeadDriftValidationRecovery,
+  readV2CompletedTaskValidationRecoveryEvidence,
   readValidationPlan,
   validateValidationPlan,
 } from './evidence/validation-plans.mjs';
@@ -121,6 +122,9 @@ export {
 export { ACTIVE_STATE_LIMIT_BYTES } from './state-store.mjs';
 const MAX_NODES = 10_000;
 const TRANSITION_AUTHORIZATION = Symbol('guarded PR review transition');
+const VALIDATION_PLANNING_PHASES = new Set([
+  'recovering', 'ready-for-review', 'integrating', 'verifying', 'validating',
+]);
 
 export function assertReviewRequestAllowed(state, external) {
   const gate = reviewRequestGate(state, external);
@@ -202,13 +206,73 @@ function activeReviewEvidenceHead(state) {
     ?? null;
 }
 
+function isV2CompletedTaskValidationRecoveryAuthorized(cwd, state, expectedIds) {
+  const evidence = readV2CompletedTaskValidationRecoveryEvidence(cwd, state, expectedIds);
+  if (evidence === null) return false;
+  let expected = evidence.migrated;
+  if (evidence.legacyPhase === 'awaiting-review') {
+    if (evidence.migrated.phase !== 'awaiting-review' || state.phase !== 'validating'
+        || state.reviewOutcome?.outcome !== 'clean'
+        || state.revision !== evidence.migrated.revision + 1) return false;
+    try {
+      expected = {
+        ...buildReviewOutcomeTransition(evidence.migrated, state.reviewOutcome),
+        revision: state.revision,
+        updatedAt: state.updatedAt,
+      };
+    } catch {
+      return false;
+    }
+  }
+  return JSON.stringify(canonicalJson(expected)) === JSON.stringify(canonicalJson(state));
+}
+
 export function buildTargetedValidationPlan({
   cwd = process.cwd(), prNumber, taskPackets, initialSelection, replace = false, now = utcNow,
 } = {}) {
-  return buildTargetedValidationPlanEvidence({
-    cwd, prNumber, taskPackets, initialSelection, replace, now,
-    resetTargetedValidation: checkpointTargetedValidationReset,
-    buildReviewOutcome: buildReviewOutcomeTransition,
+  const selectedPr = prNumber ?? activePrNumber(cwd);
+  if (selectedPr === null || selectedPr === undefined) {
+    throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  }
+  const current = loadState(cwd, selectedPr);
+  if (!current) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  if (!VALIDATION_PLANNING_PHASES.has(current.phase)) {
+    throw new StateError(`Cannot plan targeted validation while phase is ${current.phase}`, 'VALIDATION_PLAN_PHASE_BLOCKED');
+  }
+  if (initialSelection !== undefined && initialSelection !== null
+      && current.validationStatus.status === 'passed'
+      && (isCleanTasklessReviewValidationRecovery(current, actionableIntegratedTaskIds(current))
+        || isNativeTasklessReviewHeadDriftValidationRecovery(current, actionableIntegratedTaskIds(current))
+        || isNativeTasklessPendingReviewHeadDriftValidationRecovery(
+          current, actionableIntegratedTaskIds(current),
+        ))) {
+    throw new StateError(
+      'Taskless review recovery cannot replace existing targeted-validation proof',
+      'INITIAL_VALIDATION_NOT_ALLOWED',
+    );
+  }
+  if (current.validationStatus.status !== 'not-run' && !replace) {
+    throw new StateError(
+      'Targeted validation proof already exists; use --replace to start a fresh plan',
+      'VALIDATION_PLAN_REPLACE_REQUIRED',
+    );
+  }
+  if (current.validationStatus.status !== 'not-run') {
+    checkpointTargetedValidationReset({
+      cwd, prNumber: selectedPr, expectedRevision: current.revision,
+    });
+  }
+  return withStateLock(cwd, selectedPr, () => {
+    const locked = loadState(cwd, selectedPr);
+    if (!locked) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+    const initialMode = initialSelection !== undefined && initialSelection !== null;
+    const expectedIds = initialMode ? actionableIntegratedTaskIds(locked) : [];
+    const completedTaskRecoveryAuthorized = initialMode
+      && isV2CompletedTaskValidationRecoveryAuthorized(cwd, locked, expectedIds);
+    return buildTargetedValidationPlanUnlocked({
+      cwd, prNumber: selectedPr, taskPackets, initialSelection, replace, now,
+      completedTaskRecoveryAuthorized,
+    });
   });
 }
 
