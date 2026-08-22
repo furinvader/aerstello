@@ -149,16 +149,33 @@ const EXPECTED_CANONICAL_FILES = [
   'scripts/hooks/session-start.mjs',
   'scripts/hooks/subagent-stop.mjs',
   'scripts/paths.mjs',
+  'scripts/state/archive.mjs',
   'scripts/state/archive.test.mjs',
+  'scripts/state/atomic-io.mjs',
   'scripts/state/cli.mjs',
   'scripts/state/cli.test.mjs',
+  'scripts/state/errors.mjs',
+  'scripts/state/evidence/specialist-bundle-store.mjs',
+  'scripts/state/evidence/specialist-bundles.mjs',
+  'scripts/state/evidence/task-binding.mjs',
+  'scripts/state/evidence/task-packets.mjs',
+  'scripts/state/evidence/validation-plans.mjs',
+  'scripts/state/evidence/worker-results.mjs',
   'scripts/state/facade.test.mjs',
   'scripts/state/fixtures/hold-state-lock.mjs',
+  'scripts/state/git-authority.mjs',
+  'scripts/state/journal.mjs',
+  'scripts/state/locations.mjs',
   'scripts/state/locks-and-barriers.test.mjs',
+  'scripts/state/locks.mjs',
+  'scripts/state/migrations.mjs',
+  'scripts/state/reconciliation.mjs',
+  'scripts/state/recovery.mjs',
   'scripts/state/review-transitions.test.mjs',
   'scripts/state/schema-migration-and-recovery.test.mjs',
   'scripts/state/specialist-evidence.test.mjs',
   'scripts/state/state-loading-and-persistence.test.mjs',
+  'scripts/state/state-store.mjs',
   'scripts/state/state.mjs',
   'scripts/state/task-completion.test.mjs',
   'scripts/state/task-packets.test.mjs',
@@ -440,6 +457,275 @@ function githubModule(path) {
 }
 
 const importedAs = (imported, local = imported) => ({ imported, local });
+
+const stateModuleDirectory = join(scriptsDirectory, 'state');
+const stateModule = (path) => join(stateModuleDirectory, path);
+
+const PRODUCTION_STATE_IMPORTS = new Map([
+  ['errors.mjs', new Map()],
+  ['atomic-io.mjs', new Map([
+    ['node:fs', ['closeSync', 'existsSync', 'fsyncSync', 'mkdirSync', 'openSync', 'readFileSync', 'renameSync', 'rmSync', 'writeFileSync']],
+    ['node:crypto', ['randomUUID']],
+    ['node:path', ['basename', 'dirname', 'join']],
+    [stateModule('errors.mjs'), ['StateError']],
+  ])],
+  ['locations.mjs', new Map([
+    ['node:crypto', ['createHash']],
+    ['node:path', ['join']],
+    [join(scriptsDirectory, 'paths.mjs'), ['reviewRoot', 'specialistReviewDirectory', 'taskBindingProvenanceDirectory', 'taskPacketDirectory', 'workerResultDirectory']],
+    [stateModule('errors.mjs'), ['StateError']],
+  ])],
+  ['locks.mjs', new Map([
+    ['node:fs', ['lstatSync', 'mkdirSync']],
+    ['node:path', ['dirname']],
+    ['node:sqlite', ['DatabaseSync']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('locations.mjs'), ['legacyLockPath', 'legacyRequestOwnerLockPath', 'lockPath', 'requestOwnerLockPath']],
+  ])],
+  ['journal.mjs', new Map([
+    ['node:fs', ['existsSync', 'mkdirSync', 'readFileSync']],
+    ['node:path', ['join']],
+    [stateModule('atomic-io.mjs'), ['atomicWriteText']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('locations.mjs'), ['stateDirectory', 'statePath']],
+    [stateModule('locks.mjs'), ['withStateLock']],
+  ])],
+  ['git-authority.mjs', new Map([
+    ['node:crypto', ['createHash']],
+    ['node:fs', ['existsSync', 'mkdtempSync', 'mkdirSync', 'readFileSync', 'rmSync', 'statSync', 'writeFileSync']],
+    ['node:os', ['tmpdir']],
+    ['node:path', ['dirname', 'join', 'resolve']],
+    ['node:child_process', ['spawnSync']],
+    [join(repositoryDirectory, 'scripts', 'lib', 'git.mjs'), ['gitText', 'resolveCommit', 'runGit']],
+    [stateModule('errors.mjs'), ['StateError']],
+  ])],
+  ['migrations.mjs', new Map([
+    ['node:fs', ['existsSync', 'readFileSync']],
+    ['node:path', ['join']],
+    [join(repositoryDirectory, 'scripts', 'lib', 'git.mjs'), ['runGit']],
+    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['validatePrReviewState', 'validatePrReviewStateV1']],
+    [stateModule('atomic-io.mjs'), ['atomicWriteJson', 'atomicWriteText', 'serializeJson']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('journal.mjs'), ['appendEvent']],
+    [stateModule('locations.mjs'), ['activePointerPath', 'parsePrNumber', 'stateDirectory', 'statePath']],
+    [stateModule('locks.mjs'), ['withStateLock']],
+  ])],
+  ['state-store.mjs', new Map([
+    ['node:fs', ['existsSync', 'readFileSync']],
+    [join(repositoryDirectory, 'scripts', 'lib', 'git.mjs'), ['gitText', 'resolveCommit', 'runGit']],
+    [join(repositoryDirectory, 'scripts', 'lib', 'release-state.mjs'), ['inspectReleaseState']],
+    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['validatePrReviewState', 'validatePrReviewStateV1']],
+    [join(scriptsDirectory, 'paths.mjs'), ['repositoryRoot']],
+    [stateModule('atomic-io.mjs'), ['atomicWriteJson', 'serializeJson']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('git-authority.mjs'), ['gitSnapshot']],
+    [stateModule('journal.mjs'), ['appendEvent']],
+    [stateModule('locations.mjs'), ['activePointerPath', 'parsePrNumber', 'statePath']],
+    [stateModule('locks.mjs'), ['withStateLock']],
+    [stateModule('migrations.mjs'), ['migratePrReviewStateV2']],
+  ])],
+  ['evidence/task-packets.mjs', new Map([
+    ['node:fs', ['existsSync']],
+    ['node:path', ['join', 'resolve']],
+    [join(repositoryDirectory, 'scripts', 'lib', 'git.mjs'), ['runGit']],
+    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['validateTaskPacket']],
+    [join(scriptsDirectory, 'contracts', 'task-packet.mjs'), [importedAs('taskPacketDigest', 'internalTaskPacketDigest')]],
+    [stateModule('atomic-io.mjs'), ['atomicWriteText', 'canonicalSerializedJson', 'readJsonSidecar']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('locations.mjs'), ['stateDirectory', 'taskPacketSidecarPath']],
+    [stateModule('migrations.mjs'), ['migratePrReviewStateV2']],
+  ])],
+  ['evidence/specialist-bundle-store.mjs', new Map([
+    ['node:crypto', ['createHash']],
+    ['node:fs', ['existsSync', 'readFileSync', 'statSync']],
+    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['validateTaskPacket']],
+    [join(skillDirectory, '..', 'aerstello-specialists', 'scripts', 'validate-registry.mjs'), ['isSpecialistEvidenceApplicable', 'loadRegistry', 'requiredSpecialistIds', 'routeSpecialists', 'validateSpecialistEvidence']],
+    [stateModule('atomic-io.mjs'), ['atomicWriteText', 'canonicalSerializedJson', 'readJsonSidecar']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('locations.mjs'), ['specialistPlanReceiptPath', 'specialistReviewBundlePath']],
+    [stateModule('evidence/task-packets.mjs'), ['taskPacketDigest']],
+  ])],
+  ['evidence/task-binding.mjs', new Map([
+    ['node:crypto', ['createHash']],
+    ['node:fs', ['existsSync', 'readFileSync', 'readdirSync', 'statSync']],
+    [join(scriptsDirectory, 'paths.mjs'), ['specialistReviewDirectory']],
+    [join(skillDirectory, '..', 'aerstello-specialists', 'scripts', 'validate-registry.mjs'), ['isSpecialistEvidenceApplicable']],
+    [stateModule('atomic-io.mjs'), ['atomicWriteText', 'canonicalJson', 'canonicalSerializedJson', 'readJsonSidecar']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('locations.mjs'), ['specialistReviewBundlePath', 'taskBindingProvenancePath', 'taskBindingProvenanceReceiptPath']],
+    [stateModule('evidence/specialist-bundle-store.mjs'), ['conciseSpecialistPayloadErrors', 'normalizedRequiredSpecialistIds', 'readSpecialistBundle', 'specialistPlanDigest', 'specialistRouteFor']],
+    [stateModule('evidence/task-packets.mjs'), ['assertBoundTaskPacket', 'readTaskPacketSidecar', 'taskPacketDigest']],
+  ])],
+  ['evidence/worker-results.mjs', new Map([
+    ['node:crypto', ['createHash']],
+    ['node:fs', ['existsSync', 'readFileSync', 'statSync']],
+    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['validateWorkerResultAgainstTask', 'workerResultDigest']],
+    [stateModule('atomic-io.mjs'), ['atomicWriteText', 'canonicalJson', 'canonicalSerializedJson', 'readJsonSidecar']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('git-authority.mjs'), ['inspectWorkerCommitAuthority']],
+    [stateModule('locations.mjs'), ['workerResultEnvelopePath', 'workerResultReceiptPath']],
+    [stateModule('evidence/task-packets.mjs'), ['taskPacketDigest']],
+  ])],
+  ['evidence/specialist-bundles.mjs', new Map([
+    ['node:fs', ['existsSync', 'readdirSync']],
+    ['node:path', ['join']],
+    [join(skillDirectory, '..', 'aerstello-specialists', 'scripts', 'validate-registry.mjs'), ['isSpecialistEvidenceApplicable', 'validateSpecialistEvidence']],
+    [join(scriptsDirectory, 'paths.mjs'), ['specialistReviewDirectory']],
+    [stateModule('atomic-io.mjs'), ['atomicWriteText', 'canonicalJson', 'canonicalSerializedJson']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('git-authority.mjs'), ['gitSnapshot']],
+    [stateModule('locations.mjs'), ['specialistPlanReceiptPath', 'specialistReviewBundlePath', 'taskBindingProvenancePath', 'taskBindingProvenanceReceiptPath', 'taskPacketSidecarPath']],
+    [stateModule('locks.mjs'), ['withStateLock']],
+    [stateModule('state-store.mjs'), ['activePrNumber', 'loadState']],
+    [stateModule('evidence/task-binding.mjs'), ['loadBoundTaskPacketEntries', 'readBoundTaskBindingProvenance', 'recoverHistoricalTaskBindingPlanning', 'taskBindingProvenanceDigest']],
+    [stateModule('evidence/specialist-bundle-store.mjs'), ['conciseSpecialistPayloadErrors', 'normalizedRequiredSpecialistIds', 'readSpecialistBundle', 'specialistPhaseForStage', 'specialistPlanningErrors', 'specialistRouteFor', 'validateSpecialistBundle', 'writeNewSpecialistBundle']],
+    [stateModule('evidence/task-packets.mjs'), ['assertBoundTaskPacket', 'assertTaskPacketHead', 'hasCompletedHistoricalV2TaskProof', 'readTaskPacketSidecar', 'taskPacketDigest']],
+    [stateModule('evidence/worker-results.mjs'), ['readAcceptedWorkerResult']],
+  ])],
+  ['evidence/validation-plans.mjs', new Map([
+    ['node:fs', ['existsSync', 'readFileSync']],
+    ['node:path', ['join', 'resolve']],
+    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['parseTargetedValidationCommand', 'unionInitialValidationSelection', 'unionRequiredValidation', 'validateInitialValidationSelection', 'reviewRequestUsage']],
+    [stateModule('atomic-io.mjs'), ['atomicWriteJson', 'canonicalJson', 'canonicalSerializedJson', 'readJsonSidecar', 'serializeJson']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('git-authority.mjs'), ['gitSnapshot']],
+    [stateModule('journal.mjs'), ['appendEvent']],
+    [stateModule('locations.mjs'), ['stateDirectory', 'validationPlanPath']],
+    [stateModule('locks.mjs'), ['withStateLock']],
+    [stateModule('migrations.mjs'), ['migratePrReviewStateV2']],
+    [stateModule('state-store.mjs'), ['activePrNumber', 'loadState', 'readStateDocument']],
+    [stateModule('evidence/task-binding.mjs'), ['loadBoundTaskPackets', 'readBoundTaskBindingProvenance']],
+    [stateModule('evidence/task-packets.mjs'), ['assertBoundTaskPacket', 'readTaskPacketSidecar', 'taskPacketDigest']],
+  ])],
+  ['reconciliation.mjs', new Map([
+    ['node:fs', ['existsSync', 'readdirSync']],
+    ['node:path', ['join']],
+    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['validateTaskPacket']],
+    [join(scriptsDirectory, 'paths.mjs'), ['taskBindingProvenanceDirectory', 'taskPacketDirectory', 'workerResultDirectory']],
+    [stateModule('atomic-io.mjs'), ['readJsonSidecar']],
+    [stateModule('git-authority.mjs'), ['gitSnapshot']],
+    [stateModule('locations.mjs'), ['taskBindingProvenancePath', 'taskBindingProvenanceReceiptPath', 'taskPacketSidecarPath', 'workerResultEnvelopePath', 'workerResultReceiptPath']],
+    [stateModule('state-store.mjs'), ['loadState']],
+    [stateModule('evidence/task-binding.mjs'), ['assertTaskBindingProvenanceSource', 'buildTaskBindingProvenance', 'readBoundTaskBindingProvenance', 'recoverHistoricalTaskBindingPlanning', 'validateTaskBindingProvenance', 'verifyTaskBindingProvenanceReceipt']],
+    [stateModule('evidence/specialist-bundles.mjs'), ['readSpecialistStatus']],
+    [stateModule('evidence/task-packets.mjs'), ['hasCompletedHistoricalV2TaskProof', 'readTaskPacketSidecar']],
+    [stateModule('evidence/worker-results.mjs'), ['readAcceptedWorkerResult']],
+  ])],
+  ['recovery.mjs', new Map([
+    ['node:fs', ['existsSync', 'readFileSync']],
+    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['reviewRequestUsage']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('locations.mjs'), ['validationPlanPath']],
+    [stateModule('reconciliation.mjs'), ['reconcileState']],
+    [stateModule('state-store.mjs'), ['loadState']],
+    [stateModule('evidence/specialist-bundles.mjs'), ['readSpecialistStatus']],
+    [stateModule('evidence/validation-plans.mjs'), ['actionablePacketValidationTaskIds', 'readValidationPlan', 'validateValidationPlan']],
+  ])],
+  ['archive.mjs', new Map([
+    ['node:crypto', ['randomUUID']],
+    ['node:fs', ['closeSync', 'cpSync', 'existsSync', 'fsyncSync', 'mkdirSync', 'openSync', 'renameSync', 'rmSync', 'unlinkSync', 'writeFileSync']],
+    ['node:path', ['dirname', 'join']],
+    [join(scriptsDirectory, 'paths.mjs'), ['reviewRoot']],
+    [stateModule('atomic-io.mjs'), ['atomicWriteJson']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('journal.mjs'), ['prepareEvent']],
+    [stateModule('locations.mjs'), ['activePointerPath', 'parsePrNumber', 'stateDirectory']],
+    [stateModule('locks.mjs'), ['withStateLock']],
+    [stateModule('reconciliation.mjs'), ['reconcileState']],
+    [stateModule('state-store.mjs'), ['activePrNumber', 'loadState', 'validateStateForWrite']],
+  ])],
+  ['state.mjs', new Map([
+    ['node:fs', ['existsSync', 'readFileSync']],
+    ['node:path', ['join', 'resolve']],
+    ['node:crypto', ['createHash']],
+    ['node:child_process', ['spawnSync']],
+    [join(repositoryDirectory, 'scripts', 'lib', 'git.mjs'), ['runGit']],
+    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['completionGate', 'reviewRequestGate', 'reviewRequestUsage', 'staleDiscoveryDispositionId', 'taskHasCanonicalThreadCoverage', 'validateTaskPacket', 'workerResultDigest', 'validatePrReviewState']],
+    [join(scriptsDirectory, 'paths.mjs'), ['repositoryRoot']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('locations.mjs'), ['stateDirectory', 'statePath', 'taskBindingProvenancePath', 'taskBindingProvenanceReceiptPath', 'taskPacketSidecarPath']],
+    [stateModule('atomic-io.mjs'), ['atomicWriteJson', 'canonicalJson', 'canonicalSerializedJson', 'readJsonSidecar']],
+    [stateModule('locks.mjs'), ['withStateLock']],
+    [stateModule('recovery.mjs'), [importedAs('truncate', 'truncateSummary')]],
+    [stateModule('git-authority.mjs'), ['assertIntegratedWorkerCommit', 'gitSnapshot']],
+    [stateModule('journal.mjs'), ['appendEvent', 'claimGitHubMutationDispatch', 'ensureGitHubMutationIntent', 'prepareEvent']],
+    [stateModule('migrations.mjs'), ['migratePrReviewStateV2']],
+    [stateModule('state-store.mjs'), ['activePrNumber', 'loadState', 'readStateDocument', 'validateStateForWrite']],
+    [stateModule('evidence/task-binding.mjs'), ['assertBehaviorMapperPlanningComplete', 'buildTaskBindingProvenance', 'persistImmutableTaskBindingProvenance', 'readBoundTaskBindingProvenance', 'recoverHistoricalTaskBindingPlanning']],
+    [stateModule('evidence/task-packets.mjs'), ['assertTaskPacketHead', 'persistImmutableTaskPacketSidecar', importedAs('readTaskPacketSidecar', 'readBoundTaskPacketSidecar'), 'taskPacketDigest']],
+    [stateModule('evidence/worker-results.mjs'), ['persistWorkerResultEvidence', 'proveWorkerResultEvidence', 'readAcceptedWorkerResult']],
+    [stateModule('evidence/validation-plans.mjs'), ['actionableIntegratedTaskIds', 'actionablePacketValidationTaskIds', 'assertCleanExactIntegrationHead', 'buildTargetedValidationPlanEvidence', 'executeTargetedValidationFacts', 'hasRemainingReviewAllowance', 'isCleanTasklessReviewValidationRecovery', 'isNativeTasklessPendingReviewHeadDriftValidationRecovery', 'isNativeTasklessReviewHeadDriftValidationRecovery', 'readValidationPlan', 'validateValidationPlan']],
+  ])],
+]);
+
+const PRODUCTION_STATE_EXPORTS = new Map([
+  ['errors.mjs', ['StateError']],
+  ['atomic-io.mjs', ['serializeJson', 'canonicalJson', 'canonicalSerializedJson', 'atomicWriteText', 'atomicWriteJson', 'readJsonSidecar']],
+  ['locations.mjs', ['parsePrNumber', 'stateDirectory', 'statePath', 'validationPlanPath', 'taskPacketSidecarPath', 'taskBindingProvenancePath', 'taskBindingProvenanceReceiptPath', 'workerResultEnvelopePath', 'workerResultReceiptPath', 'specialistReviewBundlePath', 'specialistPlanReceiptPath', 'activePointerPath', 'lockPath', 'requestOwnerLockPath', 'legacyLockPath', 'legacyRequestOwnerLockPath']],
+  ['locks.mjs', ['withStateLock', 'withGitHubRequestOwnerLock']],
+  ['journal.mjs', ['prepareEvent', 'appendEvent', 'ensureGitHubMutationIntent', 'claimGitHubMutationDispatch']],
+  ['git-authority.mjs', ['inspectWorkerCommitAuthority', 'assertIntegratedWorkerCommit', 'gitSnapshot']],
+  ['migrations.mjs', ['validateIntegrationMap', 'migrateTaskV1', 'migrateValidationProof', 'migratePrReviewStateV2', 'migratePrReviewStateV1', 'migrateState']],
+  ['state-store.mjs', ['ACTIVE_STATE_LIMIT_BYTES', 'validateStateForWrite', 'readStateDocument', 'parseState', 'activePrNumber', 'locateState', 'loadState', 'originRepository', 'initializeState']],
+  ['evidence/task-packets.mjs', ['taskPacketDigest', 'persistImmutableTaskPacketSidecar', 'readTaskPacketSidecar', 'hasCompletedHistoricalV2TaskProof', 'assertTaskPacketHead', 'assertBoundTaskPacket', 'assertTaskPacketBound']],
+  ['evidence/specialist-bundle-store.mjs', ['specialistPlanningErrors', 'specialistRouteFor', 'specialistPhaseForStage', 'normalizedRequiredSpecialistIds', 'canonicalBundleTaskRoute', 'specialistPlanDigest', 'verifySpecialistPlanReceipt', 'persistSpecialistPlanReceipt', 'conciseSpecialistPayloadErrors', 'validateSpecialistBundle', 'readSpecialistBundle', 'writeNewSpecialistBundle']],
+  ['evidence/task-binding.mjs', ['loadBoundTaskPackets', 'assertTaskPacketBound', 'assertBehaviorMapperBundleComplete', 'assertBehaviorMapperPlanningComplete', 'recoverHistoricalTaskBindingPlanning', 'taskBindingProvenanceDigest', 'verifyTaskBindingProvenanceReceipt', 'persistTaskBindingProvenanceReceipt', 'validateTaskBindingProvenance', 'buildTaskBindingProvenance', 'assertTaskBindingProvenanceSource', 'persistImmutableTaskBindingProvenance', 'readBoundTaskBindingProvenance', 'loadBoundTaskPacketEntries']],
+  ['evidence/worker-results.mjs', ['buildWorkerResultEnvelope', 'workerResultEnvelopeDigest', 'verifyWorkerResultReceipt', 'persistWorkerResultEvidence', 'readAcceptedWorkerResult', 'proveWorkerResultEvidence']],
+  ['evidence/specialist-bundles.mjs', ['planSpecialists', 'recordSpecialistReview', 'specialistContext', 'readSpecialistStatus']],
+  ['evidence/validation-plans.mjs', ['relatedE2EMetadata', 'validateValidationPlan', 'readValidationPlan', 'assertCleanExactIntegrationHead', 'actionableIntegratedTaskIds', 'actionablePacketValidationTaskIds', 'isPristineTasklessValidationSelection', 'isCleanTasklessReviewValidationRecovery', 'hasRemainingReviewAllowance', 'isNativeTasklessReviewHeadDriftValidationRecovery', 'isNativeTasklessPendingReviewHeadDriftValidationRecovery', 'isV2CompletedTaskValidationRecovery', 'buildTargetedValidationPlanUnlocked', 'buildTargetedValidationPlanEvidence', 'executeTargetedValidationFacts']],
+  ['reconciliation.mjs', ['reconcileState']],
+  ['recovery.mjs', ['truncate', 'validationPlanRecoverySummary', 'staleDiscoveryRecoverySummary', 'renderRecoverySummary']],
+  ['archive.mjs', ['archiveState']],
+  ['state.mjs', [
+    'completionGate', 'reviewRequestGate', 'reviewRequestUsage', 'gitCommonDirectory',
+    'repositoryRoot', 'reviewRoot', 'StateError', 'activePointerPath',
+    'specialistPlanReceiptPath', 'specialistReviewBundlePath', 'stateDirectory', 'statePath',
+    'taskBindingProvenancePath', 'taskBindingProvenanceReceiptPath', 'taskPacketSidecarPath',
+    'validationPlanPath', 'workerResultEnvelopePath', 'workerResultReceiptPath', 'atomicWriteJson',
+    'inspectWorkerCommitAuthority', 'appendEvent', 'claimGitHubMutationDispatch',
+    'ensureGitHubMutationIntent', 'migratePrReviewStateV1', 'migratePrReviewStateV2', 'migrateState',
+    'activePrNumber', 'initializeState', 'loadState', 'locateState', 'archiveState',
+    'assertTaskPacketBound', 'loadBoundTaskPackets', 'planSpecialists', 'readSpecialistStatus',
+    'recordSpecialistReview', 'specialistContext', 'taskPacketDigest', 'reconcileState',
+    'renderRecoverySummary', 'withGitHubRequestOwnerLock', 'withStateLock', 'ACTIVE_STATE_LIMIT_BYTES',
+    'assertReviewRequestAllowed', 'assertCompletionAllowed', 'gitAwareGateContext',
+    'buildTargetedValidationPlan', 'checkpointState', 'checkpointReviewRequestLimit',
+    'buildReviewRequestTransition', 'buildReviewOutcomeTransition',
+    'buildVerificationEscalationTransition', 'buildCompletionTransition', 'buildCiValidationTransition',
+    'checkpointTargetedValidationReset', 'checkpointTargetedValidation',
+    'executeTargetedValidationPlan', 'completeIntegratedTasks', 'checkpointTaskPacketReplan',
+    'checkpointTaskPacketBinding', 'checkpointWorkerResultAcceptance', 'checkpointWorkerResultBackfill',
+    'checkpointReviewRequest', 'checkpointReviewOutcome', 'checkpointVerificationEscalation',
+    'checkpointCompletion', 'checkpointCiValidation', 'checkpointTaskCompletion',
+    'checkpointArchiveTaskCompletion', 'checkpointGitMetadata',
+  ]],
+]);
+
+const STATE_FACADE_SOURCE_EXPORTS = new Map([
+  [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['completionGate', 'reviewRequestGate', 'reviewRequestUsage']],
+  [join(scriptsDirectory, 'paths.mjs'), ['gitCommonDirectory', 'repositoryRoot', 'reviewRoot']],
+  [stateModule('errors.mjs'), ['StateError']],
+  [stateModule('locations.mjs'), ['activePointerPath', 'specialistPlanReceiptPath', 'specialistReviewBundlePath', 'stateDirectory', 'statePath', 'taskBindingProvenancePath', 'taskBindingProvenanceReceiptPath', 'taskPacketSidecarPath', 'validationPlanPath', 'workerResultEnvelopePath', 'workerResultReceiptPath']],
+  [stateModule('atomic-io.mjs'), ['atomicWriteJson']],
+  [stateModule('git-authority.mjs'), ['inspectWorkerCommitAuthority']],
+  [stateModule('journal.mjs'), ['appendEvent', 'claimGitHubMutationDispatch', 'ensureGitHubMutationIntent']],
+  [stateModule('migrations.mjs'), ['migratePrReviewStateV1', 'migratePrReviewStateV2', 'migrateState']],
+  [stateModule('state-store.mjs'), ['activePrNumber', 'initializeState', 'loadState', 'locateState', 'ACTIVE_STATE_LIMIT_BYTES']],
+  [stateModule('archive.mjs'), ['archiveState']],
+  [stateModule('evidence/task-binding.mjs'), ['assertTaskPacketBound', 'loadBoundTaskPackets']],
+  [stateModule('evidence/specialist-bundles.mjs'), ['planSpecialists', 'readSpecialistStatus', 'recordSpecialistReview', 'specialistContext']],
+  [stateModule('evidence/task-packets.mjs'), ['taskPacketDigest']],
+  [stateModule('reconciliation.mjs'), ['reconcileState']],
+  [stateModule('recovery.mjs'), ['renderRecoverySummary']],
+  [stateModule('locks.mjs'), ['withGitHubRequestOwnerLock', 'withStateLock']],
+]);
+
+const PRODUCTION_STATE_SOURCE_EXPORTS = new Map([
+  ['state.mjs', STATE_FACADE_SOURCE_EXPORTS],
+]);
+
+const PROTECTED_STATE_AUTHORITY_PATTERN = /^(?:checkpoint|build.*Transition$|completeIntegratedTasks$)/u;
+
 const STATE_ADAPTER_OPERATIONS = [
   'checkpointCiValidation',
   'checkpointCompletion',
@@ -1327,6 +1613,196 @@ function productionGitHubCycle(imports = PRODUCTION_GITHUB_IMPORTS) {
   return null;
 }
 
+function inspectProductionStateSource(importer, source) {
+  const errors = [];
+  const fileName = posixRelative(stateModuleDirectory, importer);
+  const allowlist = PRODUCTION_STATE_IMPORTS.get(fileName);
+  const expectedExports = PRODUCTION_STATE_EXPORTS.get(fileName);
+  if (!allowlist || !expectedExports) return [`unknown production state module ${fileName}`];
+  const parsed = parseModule(importer, source);
+  for (const diagnostic of parsed.parseDiagnostics) errors.push(`syntax error: ${diagnostic.messageText}`);
+  const evidenceModule = fileName.startsWith('evidence/');
+
+  function visit(node) {
+    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      errors.push('dynamic import is forbidden');
+    }
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
+        && node.expression.text === 'require') errors.push('CommonJS require is forbidden');
+    if (ts.isIdentifier(node) && node.text === 'createRequire') errors.push('createRequire is forbidden');
+    if (ts.isImportEqualsDeclaration(node)) errors.push('CommonJS import assignment is forbidden');
+    if (ts.isExportAssignment(node)) errors.push('default export assignment is forbidden');
+    if (evidenceModule && ts.isCallExpression(node)) {
+      const authorityName = ts.isIdentifier(node.expression) ? node.expression.text
+        : ts.isPropertyAccessExpression(node.expression) ? node.expression.name.text
+          : ts.isElementAccessExpression(node.expression)
+              && ts.isStringLiteral(node.expression.argumentExpression)
+            ? node.expression.argumentExpression.text : null;
+      if (authorityName && PROTECTED_STATE_AUTHORITY_PATTERN.test(authorityName)) {
+        errors.push(`evidence module may not invoke protected state authority ${authorityName}`);
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(parsed);
+
+  const exports = [];
+  const sourceExports = new Map();
+  for (const statement of parsed.statements) {
+    if (ts.isImportDeclaration(statement)) {
+      const specifier = ts.isStringLiteral(statement.moduleSpecifier)
+        ? statement.moduleSpecifier.text : null;
+      if (specifier === null) {
+        errors.push('import specifier must be a string literal');
+        continue;
+      }
+      const target = normalizedModuleTarget(importer, specifier);
+      const expected = allowlist.get(target);
+      if (fileName !== 'state.mjs' && target === stateModule('state.mjs')) {
+        errors.push('internal state module may not import the public state.mjs facade');
+      }
+      if (!expected) errors.push(`unapproved state dependency ${specifier} resolves to ${target}`);
+      if (!statement.importClause) {
+        errors.push(`side-effect import is forbidden: ${specifier}`);
+        continue;
+      }
+      if (statement.importClause.name) errors.push(`default import is forbidden: ${specifier}`);
+      if (statement.importClause.namedBindings
+          && ts.isNamespaceImport(statement.importClause.namedBindings)) {
+        errors.push(`namespace import is forbidden: ${specifier}`);
+      }
+      const bindings = namedBindings(statement.importClause);
+      if (bindings === null) continue;
+      if (evidenceModule) {
+        for (const { imported } of bindings) {
+          if (PROTECTED_STATE_AUTHORITY_PATTERN.test(imported)) {
+            errors.push(`evidence module may not import protected state authority ${imported}`);
+          }
+        }
+      }
+      if (expected && JSON.stringify(sorted(bindings.map(bindingKey)))
+          !== JSON.stringify(sorted(expectedBindingPairs(expected).map(bindingKey)))) {
+        errors.push(`named imports from ${specifier} do not match the exact state module allowlist`);
+      }
+    }
+
+    if (ts.isExportDeclaration(statement)) {
+      if (!statement.exportClause || !ts.isNamedExports(statement.exportClause)) {
+        errors.push(statement.exportClause ? 'namespace export is forbidden' : 'export-star is forbidden');
+        continue;
+      }
+      const names = statement.exportClause.elements.map((element) => element.name.text);
+      for (const element of statement.exportClause.elements) {
+        if (element.propertyName && element.propertyName.text !== element.name.text) {
+          errors.push('aliased export is forbidden');
+        }
+      }
+      exports.push(...names);
+      if (fileName !== 'state.mjs') {
+        errors.push(`explicit export declarations are forbidden in ${fileName}`);
+        continue;
+      }
+      if (!statement.moduleSpecifier || !ts.isStringLiteral(statement.moduleSpecifier)) {
+        errors.push('state facade exports must name a source module');
+        continue;
+      }
+      const target = normalizedModuleTarget(importer, statement.moduleSpecifier.text);
+      const accumulated = sourceExports.get(target) ?? [];
+      accumulated.push(...names);
+      sourceExports.set(target, accumulated);
+    } else exports.push(...inlineExportNames(statement, errors));
+  }
+
+  const expectedExportSet = new Set(expectedExports);
+  for (const name of exports) {
+    if (!expectedExportSet.has(name)) errors.push(`unexpected state module export ${name}`);
+  }
+  if (fileName === 'state.mjs') {
+    if (JSON.stringify(sorted(sourceExports.keys()))
+        !== JSON.stringify(sorted(STATE_FACADE_SOURCE_EXPORTS.keys()))) {
+      errors.push('state facade source export targets do not match the exact allowlist');
+    }
+    for (const [target, expectedNames] of STATE_FACADE_SOURCE_EXPORTS) {
+      if (JSON.stringify(sorted(sourceExports.get(target) ?? []))
+          !== JSON.stringify(sorted(expectedNames))) {
+        errors.push(`state facade source exports from ${target} do not match the exact allowlist`);
+      }
+    }
+  }
+  return errors;
+}
+
+function validateProductionStateSource(importer, source) {
+  const errors = inspectProductionStateSource(importer, source);
+  const fileName = posixRelative(stateModuleDirectory, importer);
+  const expectedTargets = PRODUCTION_STATE_IMPORTS.get(fileName);
+  const expectedExports = PRODUCTION_STATE_EXPORTS.get(fileName);
+  if (!expectedTargets || !expectedExports) return errors;
+  const parsed = parseModule(importer, source);
+  const actualTargets = parsed.statements.filter(ts.isImportDeclaration).flatMap((statement) => (
+    ts.isStringLiteral(statement.moduleSpecifier)
+      ? [normalizedModuleTarget(importer, statement.moduleSpecifier.text)] : []
+  ));
+  if (JSON.stringify(sorted(actualTargets)) !== JSON.stringify(sorted(expectedTargets.keys()))) {
+    errors.push('state production import targets must exactly match the module allowlist');
+  }
+  const exportErrors = [];
+  const actualExports = [];
+  for (const statement of parsed.statements) {
+    if (ts.isExportDeclaration(statement) && statement.exportClause
+        && ts.isNamedExports(statement.exportClause)) {
+      actualExports.push(...statement.exportClause.elements.map((element) => element.name.text));
+    } else actualExports.push(...inlineExportNames(statement, exportErrors));
+  }
+  if (JSON.stringify(sorted(actualExports)) !== JSON.stringify(sorted(expectedExports))) {
+    errors.push('state production exports must exactly match the module export allowlist');
+  }
+  return [...errors, ...exportErrors];
+}
+
+function productionStateFiles() {
+  return filesBelow(stateModuleDirectory).filter((path) => path.endsWith('.mjs')
+    && !path.endsWith('.test.mjs')
+    && !path.startsWith('test-support/')
+    && !path.startsWith('fixtures/')
+    && path !== 'cli.mjs');
+}
+
+function productionStateCycle(
+  imports = PRODUCTION_STATE_IMPORTS,
+  sourceExports = PRODUCTION_STATE_SOURCE_EXPORTS,
+) {
+  const visited = new Set();
+  const active = new Set();
+  const stack = [];
+  function visit(fileName) {
+    if (active.has(fileName)) return [...stack.slice(stack.indexOf(fileName)), fileName];
+    if (visited.has(fileName)) return null;
+    active.add(fileName);
+    stack.push(fileName);
+    const targets = new Set([
+      ...(imports.get(fileName)?.keys() ?? []),
+      ...(sourceExports.get(fileName)?.keys() ?? []),
+    ]);
+    for (const target of targets) {
+      if (typeof target !== 'string' || !target.startsWith(`${stateModuleDirectory}${sep}`)) continue;
+      const dependency = posixRelative(stateModuleDirectory, target);
+      if (!imports.has(dependency)) continue;
+      const cycle = visit(dependency);
+      if (cycle) return cycle;
+    }
+    stack.pop();
+    active.delete(fileName);
+    visited.add(fileName);
+    return null;
+  }
+  for (const fileName of imports.keys()) {
+    const cycle = visit(fileName);
+    if (cycle) return cycle;
+  }
+  return null;
+}
+
 function inspectFocusedGitHubTestSource(importer, source) {
   const errors = [];
   const fileName = posixRelative(githubDirectory, importer);
@@ -1524,6 +2000,73 @@ test('focused contract tests directly own their production module without higher
     assert.deepEqual(errors, [], testFileName);
     assert.ok(targets.includes(owner), `${testFileName} must directly import its production owner`);
   }
+});
+
+test('extracted state production modules obey exact AST dependency and export boundaries', () => {
+  const productionFiles = productionStateFiles();
+  assert.deepEqual(sorted(PRODUCTION_STATE_IMPORTS.keys()), sorted(PRODUCTION_STATE_EXPORTS.keys()));
+  assert.deepEqual(sorted(PRODUCTION_STATE_IMPORTS.keys()), productionFiles);
+  assert.deepEqual(sorted(PRODUCTION_STATE_EXPORTS.keys()), productionFiles);
+  assert.equal(productionStateCycle(), null, 'state production dependency graph must be acyclic');
+  for (const fileName of sorted(PRODUCTION_STATE_IMPORTS.keys())) {
+    const path = stateModule(fileName);
+    assert.equal(statSync(path).isFile(), true, `missing state production module ${fileName}`);
+    assert.deepEqual(
+      validateProductionStateSource(path, readFileSync(path, 'utf8')),
+      [],
+      fileName,
+    );
+  }
+});
+
+test('state AST guards reject normalized facade and module-system escape hatches', () => {
+  const atomicIoPath = stateModule('atomic-io.mjs');
+  const rejectedSources = [
+    ["const dependency = await import('./errors.mjs');", /dynamic import is forbidden/u],
+    ["const dependency = require('./errors.mjs');", /CommonJS require is forbidden/u],
+    ["import { createRequire } from 'node:module';", /createRequire is forbidden/u],
+    ["import dependency = require('./errors.mjs');", /CommonJS import assignment is forbidden/u],
+    ["import dependency from './errors.mjs';", /default import is forbidden/u],
+    ["export default function leaked() {}", /default export is forbidden/u],
+    ["import * as dependency from './errors.mjs';", /namespace import is forbidden/u],
+    ["export * as dependency from './errors.mjs';", /namespace export is forbidden/u],
+    ["import './errors.mjs';", /side-effect import is forbidden/u],
+    ["export * from './errors.mjs';", /export-star is forbidden/u],
+    ["import { StateError as WorkflowError } from './errors.mjs';", /do not match the exact/u],
+    ["import { loadState } from './nested/../state.mjs';", /may not import the public state\.mjs facade/u],
+  ];
+  for (const [source, expected] of rejectedSources) {
+    assert.match(inspectProductionStateSource(atomicIoPath, source).join('\n'), expected, source);
+  }
+});
+
+test('state evidence AST guards reject protected transition and checkpoint authority', () => {
+  const evidencePath = stateModule('evidence/task-packets.mjs');
+  const rejectedSources = [
+    ["import { checkpointState } from '../state.mjs';", /may not import protected state authority checkpointState/u],
+    ['checkpointCompletion();', /may not invoke protected state authority checkpointCompletion/u],
+    ['lifecycle.buildCompletionTransition();', /may not invoke protected state authority buildCompletionTransition/u],
+    ["lifecycle['checkpointState']();", /may not invoke protected state authority checkpointState/u],
+    ['authority.completeIntegratedTasks();', /may not invoke protected state authority completeIntegratedTasks/u],
+  ];
+  for (const [source, expected] of rejectedSources) {
+    assert.match(inspectProductionStateSource(evidencePath, source).join('\n'), expected, source);
+  }
+});
+
+test('state dependency cycle detection includes façade source re-export edges', () => {
+  const imports = new Map([
+    ['facade.mjs', new Map()],
+    ['owner.mjs', new Map([[stateModule('facade.mjs'), []]])],
+  ]);
+  const sourceExports = new Map([
+    ['facade.mjs', new Map([[stateModule('owner.mjs'), ['owner']]])],
+  ]);
+  assert.equal(productionStateCycle(imports, new Map()), null);
+  assert.deepEqual(
+    productionStateCycle(imports, sourceExports),
+    ['facade.mjs', 'owner.mjs', 'facade.mjs'],
+  );
 });
 
 test('contract AST guards reject normalized boundary and module-system escape hatches', () => {
