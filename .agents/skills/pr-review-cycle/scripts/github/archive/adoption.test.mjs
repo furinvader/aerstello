@@ -1,4 +1,10 @@
 import * as harness from '../test-support/workflow-harness.mjs';
+import { readLiveSnapshot } from '../snapshot.mjs';
+import { buildCanonicalRootPlan } from '../threads/canonical-roots.mjs';
+import {
+  adoptArchiveBatch,
+  archiveBatchAdoptionReady,
+} from './adoption.mjs';
 
 const {
   assert,
@@ -114,6 +120,56 @@ const {
   nonActionableNonThreadState,
   completedThreadlessDriftState,
 } = harness;
+
+test('adoption owner repeats immutable and live proof before one ordinary checkpoint', async () => {
+  const fixture = archiveAdoptionFixture();
+  const live = await readLiveSnapshot(fixture.client, fixture.active);
+  const { selected, selectedPlan } = buildCanonicalRootPlan(
+    fixture.active, live, ARCHIVED_TASK_ID,
+  );
+  const archiveStore = immutableArchiveStore([fixture.archive]);
+  let liveReads = 0;
+  let currentChecks = 0;
+  let ordinaryCheckpoints = 0;
+  let archiveCheckpoints = 0;
+
+  assert.equal(archiveBatchAdoptionReady(fixture.active, selected, selectedPlan), true);
+  const result = await adoptArchiveBatch({
+    state: fixture.active,
+    live,
+    taskId: ARCHIVED_TASK_ID,
+    selectedTask: selected,
+    selectedPlan,
+    archiveStore,
+    git: fakeGit(),
+    clock: { now: () => AT },
+    readLiveSnapshot: async (state) => {
+      liveReads += 1;
+      return readLiveSnapshot(fixture.client, state);
+    },
+    assertMutationReady: async () => {},
+    assertCurrent: async () => { currentChecks += 1; },
+    checkpointArchiveTaskCompletion: async () => {
+      archiveCheckpoints += 1;
+      throw new Error('ordinary archive must not use the dedicated aggregate checkpoint');
+    },
+    checkpointTaskCompletion: async ({ threadResolutionStatus }) => {
+      ordinaryCheckpoints += 1;
+      return {
+        ...fixture.active,
+        revision: fixture.active.revision + 1,
+        threadResolutionStatus,
+      };
+    },
+  });
+
+  assert.equal(archiveStore.calls, 2);
+  assert.equal(liveReads, 1);
+  assert.equal(currentChecks, 1);
+  assert.equal(ordinaryCheckpoints, 1);
+  assert.equal(archiveCheckpoints, 0);
+  assert.equal(result.stateRevision, fixture.active.revision + 1);
+});
 
 test('completed threadless refresh permits mapped new roots and enables journal-backed resolution recovery', async () => {
   const state = completedThreadlessDriftState();
