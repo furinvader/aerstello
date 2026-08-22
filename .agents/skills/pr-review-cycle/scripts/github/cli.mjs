@@ -1,9 +1,7 @@
 #!/usr/bin/env node
-import { execFileSync } from 'node:child_process';
 import {
   closeSync,
   constants as fsConstants,
-  existsSync,
   fstatSync,
   lstatSync,
   openSync,
@@ -16,22 +14,21 @@ import { pathToFileURL } from 'node:url';
 import { isMainThread } from 'node:worker_threads';
 
 import { parseOptions, UsageError, writeJson } from '../../../../../scripts/lib/cli.mjs';
-import { createGitHubReviewWorkflow, GitHubWorkflowError } from './github.mjs';
-import {
-  checkpointCiValidation,
-  checkpointCompletion,
-  checkpointReviewOutcome,
-  checkpointReviewRequest,
-  checkpointTaskCompletion,
-  checkpointVerificationEscalation,
-  ensureGitHubMutationIntent,
-  claimGitHubMutationDispatch,
-  withGitHubRequestOwnerLock,
-  loadState,
-  readSpecialistStatus,
-  reviewRoot,
-  stateDirectory,
-} from '../state/state.mjs';
+import { reviewRoot } from '../state/state.mjs';
+import { buildGhGraphqlArgs, createDefaultGitHubClient } from './adapters/gh-cli.mjs';
+import { createDefaultGitAdapter } from './adapters/git.mjs';
+import { createDefaultStateAdapter } from './adapters/state.mjs';
+import { GitHubWorkflowError } from './errors.mjs';
+import { createGitHubReviewWorkflow } from './github.mjs';
+import { createDefaultMutationJournal } from './mutation-journal.mjs';
+import { renderHumanStatus } from './status-renderer.mjs';
+
+export {
+  buildGhGraphqlArgs,
+  createDefaultGitAdapter,
+  createDefaultGitHubClient,
+  renderHumanStatus,
+};
 
 const MAX_ARCHIVED_STATE_BYTES = 128 * 1024;
 const MAX_ARCHIVED_EVENTS_BYTES = 16 * 1024 * 1024;
@@ -58,173 +55,6 @@ function baseUsage() {
 
 export function usage() {
   return `${baseUsage().trimEnd()}\n\nadvance safely records available review and CI progress without requesting review or archiving. Request may return waiting while a durable GitHub dispatch is reconciled; retry it rather than posting another comment.\n\nLocal task verification persists exact-current-HEAD proof; rerun it to re-attest a completed local task after HEAD drift.\n`;
-}
-
-function titleCase(value) {
-  return String(value ?? 'unknown').split('-').map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
-}
-
-export function renderHumanStatus(status) {
-  const headMatches = status.stateHeadSha === status.liveHeadSha;
-  const headRelation = headMatches ? 'matches PR head' : `DOES NOT MATCH PR head ${status.liveHeadSha}`;
-  const review = !headMatches && status.codexReview === 'clean' ? 'Stale clean evidence (commit mismatch)'
-    : status.codexReview === 'clean' ? 'Clean'
-    : status.codexReview === 'findings' ? 'Findings need resolution'
-      : status.codexReview === 'awaiting' ? 'Awaiting Codex'
-        : status.codexReview === 'stale' ? 'Stale review evidence (commit mismatch)' : 'Not requested';
-  const tasks = status.statePhase === 'complete' && headMatches ? 'Done'
-    : `${status.taskStatus.resolved} Resolved, ${status.taskStatus.pending} pending`;
-  const taskRows = status.taskStatus.items.map((task) => {
-    const taskStatus = !headMatches && task.status === 'Done' ? 'Resolved (stale head)' : task.status;
-    return `  - ${task.id}: ${taskStatus} — ${task.summary}`;
-  });
-  const targeted = status.targetedValidation?.status === 'passed'
-    ? `Passed (${status.targetedValidation.checks.join(', ')})${headMatches ? '' : ' for the recorded commit; PR head differs'}`
-    : titleCase(status.targetedValidation?.status);
-  const ci = status.liveCiValidation?.status === 'passed'
-    ? `Passed (${status.liveCiValidation.checks.join(', ')}) — ${status.liveCiValidation.workflowRunUrl}${headMatches ? '' : ' (live PR head differs from the recorded commit)'}`
-    : status.liveCiValidation?.status === 'failed'
-      ? `Failed — ${status.liveCiValidation.workflowRunUrl}`
-      : titleCase(status.liveCiValidation?.status);
-  const specialistStatus = status.specialistReviews?.status ?? 'missing';
-  const specialistReviewers = status.specialistReviews?.requiredReviewerIds ?? [];
-  const specialists = `${titleCase(specialistStatus)}${specialistReviewers.length > 0
-    ? ` (required: ${specialistReviewers.join(', ')})` : ''}`;
-  return [
-    `PR: #${status.prNumber}`,
-    `PR readiness: ${status.pullRequest?.state ?? 'unknown'}${status.pullRequest?.isDraft ? ' draft' : ''}`,
-    `Live review observation: ${titleCase(status.reviewObservation?.status)}`,
-    `Current commit: ${status.stateHeadSha} (${headRelation})`,
-    `Phase: ${status.statePhase === 'complete' && headMatches ? 'Done'
-      : status.statePhase === 'complete' ? 'Stale (recorded Done; PR head changed)'
-        : titleCase(status.statePhase)}`,
-    `Codex review: ${review}`,
-    `Review requests: ${status.reviewRequests.used}; limit: ${status.reviewRequests.limit ?? 'unlimited'}`,
-    `Tasks: ${tasks}`,
-    ...taskRows,
-    `Targeted local tests: ${targeted}`,
-    `Specialist reviews: ${specialists}`,
-    `Full CI: ${ci}`,
-    `Open Codex threads: ${status.openCodexThreads}`,
-    `Next action: ${headMatches ? status.nextAction
-      : `Reconcile recorded commit with live PR head ${status.liveHeadSha}. Recorded next action: ${status.nextAction}`}`,
-  ].join('\n');
-}
-
-function gitText(cwd, args) {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-}
-
-export function buildGhGraphqlArgs(query, variables) {
-  if (typeof query !== 'string') {
-    throw new GitHubWorkflowError('GraphQL query must be a string', 'INVALID_GRAPHQL_VARIABLE');
-  }
-  const args = ['api', 'graphql', '-f', `query=${query}`];
-  for (const [key, value] of Object.entries(variables)) {
-    if (value === null || value === undefined) continue;
-    if (typeof value === 'string') {
-      args.push('-f', `${key}=${value}`);
-    } else if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) {
-      args.push('-F', `${key}=${value}`);
-    } else {
-      throw new GitHubWorkflowError(`GraphQL variable ${key} has an unsupported value`, 'INVALID_GRAPHQL_VARIABLE');
-    }
-  }
-  return args;
-}
-
-export function createDefaultGitHubClient(exec = execFileSync) {
-  return {
-    async graphql({ query, variables }) {
-      const args = buildGhGraphqlArgs(query, variables);
-      return JSON.parse(exec('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
-    },
-  };
-}
-
-function defaultState(cwd) {
-  return {
-    load: (prNumber) => loadState(cwd, prNumber),
-    checkpointCiValidation: (input) => checkpointCiValidation({ cwd, ...input }),
-    checkpointReviewRequest: (input) => checkpointReviewRequest({ cwd, ...input }),
-    checkpointReviewOutcome: (input) => checkpointReviewOutcome({ cwd, ...input }),
-    checkpointVerificationEscalation: (input) => checkpointVerificationEscalation({ cwd, ...input }),
-    checkpointTaskCompletion: (input) => checkpointTaskCompletion({ cwd, ...input }),
-    checkpointCompletion: (input) => checkpointCompletion({ cwd, ...input }),
-    specialistStatus: (prNumber) => readSpecialistStatus({ cwd, prNumber }),
-  };
-}
-
-function actualObjectGitText(cwd, args) {
-  return execFileSync('git', ['--no-replace-objects', ...args], {
-    cwd,
-    encoding: 'utf8',
-    env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim();
-}
-
-function assertLegacyGraftsAreInert(cwd) {
-  const commonGitDirectory = actualObjectGitText(
-    cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir'],
-  );
-  if (commonGitDirectory.length === 0) throw new Error('Git common directory is unavailable');
-  const graftsPath = join(commonGitDirectory, 'info', 'grafts');
-  let stat;
-  try {
-    stat = lstatSync(graftsPath);
-  } catch (error) {
-    if (error?.code === 'ENOENT') return;
-    throw error;
-  }
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== 0) {
-    throw new Error(`Actual-object ancestry refuses legacy grafts at ${graftsPath}`);
-  }
-}
-
-export function createDefaultGitAdapter() {
-  return {
-    snapshot: (cwd) => ({
-      headSha: gitText(cwd, ['rev-parse', 'HEAD']),
-      dirty: gitText(cwd, ['status', '--porcelain']).length > 0,
-    }),
-    pushedHead: (cwd) => gitText(cwd, ['rev-parse', '@{upstream}']),
-    isAncestor: (ancestor, descendant, cwd) => {
-      try {
-        assertLegacyGraftsAreInert(cwd);
-        execFileSync('git', ['--no-replace-objects', 'merge-base', '--is-ancestor', ancestor, descendant], {
-          cwd,
-          env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' },
-          stdio: ['ignore', 'ignore', 'ignore'],
-        });
-        return true;
-      } catch {
-        return false;
-      }
-    },
-    resolveCommitPrefix: (prefix, cwd) => gitText(cwd, ['rev-list', '--all'])
-      .split('\n').filter((sha) => sha.startsWith(prefix)),
-  };
-}
-
-function defaultJournal(cwd, prNumber) {
-  const path = join(stateDirectory(cwd, prNumber), 'events.ndjson');
-  function lookupIntent(operationId) {
-    const events = existsSync(path)
-      ? readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))
-      : [];
-    const existing = events.find((event) => event.type === 'github-mutation-intent'
-      && event.details?.operationId === operationId);
-    return existing ? { ...existing.details, isNew: false } : null;
-  }
-  return {
-    lookupIntent,
-    ensureIntent(intent) {
-      return ensureGitHubMutationIntent(cwd, prNumber, intent);
-    },
-    claimDispatch(intent, expectedRevision) { return claimGitHubMutationDispatch(cwd, prNumber, intent, expectedRevision); },
-    withRequestOwner(callback) { return withGitHubRequestOwnerLock(cwd, prNumber, callback); },
-  };
 }
 
 function sameStableArchiveStat(left, right) {
@@ -734,11 +564,11 @@ export async function runCli(argv, {
   if (command !== 'request' && options.kind !== undefined) throw new UsageError('--kind is only valid for request');
   const workflow = createGitHubReviewWorkflow({
     client,
-    state: state ?? defaultState(cwd),
+    state: state ?? createDefaultStateAdapter(cwd),
     git,
     clock,
     journal: journal ?? (['status', 'advance', 'refresh-threads', 'verify-resolve'].includes(command)
-      ? null : defaultJournal(cwd, prNumber)),
+      ? null : createDefaultMutationJournal(cwd, prNumber)),
     archiveStore: archiveStore ?? (command === 'reply-resolve' ? createDefaultArchiveStore(cwd) : null),
   });
   if (command === 'status') {

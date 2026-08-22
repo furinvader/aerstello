@@ -8,291 +8,56 @@ import {
   validatePrReviewState,
 } from '../contracts/contracts.mjs';
 import { checkpointArchiveTaskCompletion } from '../state/state.mjs';
+import { GitHubWorkflowError } from './errors.mjs';
+import {
+  CANONICAL_LOGIN,
+  CANONICAL_URL,
+  actorObservation,
+  isCanonicalActor,
+  isViewerActor,
+} from './evidence/actors.mjs';
+import {
+  FULL_VALIDATION_CHECK,
+  FULL_VALIDATION_WORKFLOW,
+  FULL_VALIDATION_WORKFLOW_PATH,
+  GITHUB_ACTIONS_APP,
+  ciEvidenceFromRollup,
+} from './evidence/ci.mjs';
+import { httpsUrl } from './evidence/primitives.mjs';
+import {
+  canonicalJson,
+  classifyPendingReviewResponse,
+  classifyReviewSubmission,
+  classifyStructuralIssueComments,
+} from './evidence/review-response.mjs';
+import { MAX_NODES, executeMutation } from './graphql/client.mjs';
+import { PAGE_SIZE } from './graphql/operations.mjs';
+import {
+  readLiveSnapshot as readPullRequestLiveSnapshot,
+  readPullRequestChecks,
+  readPullRequestMetadata,
+  readRequestReactions,
+  readReviewThreads,
+  readReviews,
+  readThreadComments,
+  readTopLevelComments,
+} from './graphql/pull-request-reader.mjs';
 
-const CANONICAL_LOGIN = 'chatgpt-codex-connector';
-const CANONICAL_URL = 'https://github.com/apps/chatgpt-codex-connector';
+export {
+  GitHubWorkflowError,
+  readPullRequestChecks,
+  readPullRequestMetadata,
+  readRequestReactions,
+  readReviewThreads,
+  readReviews,
+  readThreadComments,
+  readTopLevelComments,
+};
+
 const REQUEST_BODY = '@codex review';
-const REVIEWED_COMMIT_MARKER_LINE_PATTERN = /^\*\*Reviewed commit:\*\*.*$/gimu;
-const REVIEWED_COMMIT_ANCHOR_PATTERN = /^\*\*Reviewed commit:\*\* `([0-9a-f]{7,40})`$/gmu;
-const PAGE_SIZE = 50;
-const MAX_PAGES = 100;
-const MAX_NODES = 10_000;
-const MIN_GRAPHQL_REMAINING = 10;
-const FULL_VALIDATION_CHECK = 'Full validation';
-const GITHUB_ACTIONS_APP = 'github-actions';
-const FULL_VALIDATION_WORKFLOW = 'CI';
-const FULL_VALIDATION_WORKFLOW_PATH = '.github/workflows/ci.yml';
 const VERIFIED_NON_ACTIONABLE_DISPOSITIONS = new Set([
   'duplicate', 'already-fixed', 'stale', 'invalid', 'policy-conflict', 'out-of-scope',
 ]);
-
-const OPERATIONS = {
-  PullRequestMetadata: `query PullRequestMetadata($owner:String!,$repo:String!,$pr:Int!){rateLimit{cost remaining} viewer{login id} repository(owner:$owner,name:$repo){pullRequest(number:$pr){id number url headRefOid state isDraft}}}`,
-  PullRequestComments: `query PullRequestComments($owner:String!,$repo:String!,$pr:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){pullRequest(number:$pr){comments(first:50,after:$cursor){nodes{id databaseId url body createdAt lastEditedAt author{__typename login url ... on Bot{id} ... on User{id}}} pageInfo{hasNextPage endCursor}}}}}`,
-  PullRequestReviews: `query PullRequestReviews($owner:String!,$repo:String!,$pr:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviews(first:50,after:$cursor){nodes{id databaseId url body state submittedAt commit{oid} author{__typename login url ... on Bot{id} ... on User{id}}} pageInfo{hasNextPage endCursor}}}}}`,
-  PullRequestThreads: `query PullRequestThreads($owner:String!,$repo:String!,$pr:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:50,after:$cursor){nodes{id isResolved} pageInfo{hasNextPage endCursor}}}}}`,
-  PullRequestChecks: `query PullRequestChecks($owner:String!,$repo:String!,$pr:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){pullRequest(number:$pr){id number state isDraft headRefOid commits(last:1){nodes{commit{oid statusCheckRollup{state contexts(first:50,after:$cursor){nodes{__typename ... on CheckRun{id databaseId name status conclusion completedAt detailsUrl checkSuite{workflowRun{databaseId url file{path} workflow{name}} app{slug}}} ... on StatusContext{id context state targetUrl}} pageInfo{hasNextPage endCursor}}}}}}}}}`,
-  ReviewThreadComments: `query ReviewThreadComments($threadId:ID!,$cursor:String){rateLimit{cost remaining} node(id:$threadId){... on PullRequestReviewThread{comments(first:50,after:$cursor){nodes{id databaseId url body createdAt lastEditedAt author{__typename login url ... on Bot{id} ... on User{id}} replyTo{id} pullRequestReview{id}} pageInfo{hasNextPage endCursor}}}}}`,
-  RequestReactions: `query RequestReactions($commentId:ID!,$cursor:String){rateLimit{cost remaining} node(id:$commentId){... on IssueComment{reactions(first:50,after:$cursor){nodes{id content createdAt user{__typename login url id}} pageInfo{hasNextPage endCursor}}}}}`,
-  AddReviewRequest: `mutation AddReviewRequest($subjectId:ID!,$body:String!,$clientMutationId:String!){addComment(input:{subjectId:$subjectId,body:$body,clientMutationId:$clientMutationId}){clientMutationId}}`,
-  MarkPullRequestReadyForReview: `mutation MarkPullRequestReadyForReview($pullRequestId:ID!,$clientMutationId:String!){markPullRequestReadyForReview(input:{pullRequestId:$pullRequestId,clientMutationId:$clientMutationId}){clientMutationId}}`,
-  AddThreadReply: `mutation AddThreadReply($threadId:ID!,$body:String!,$clientMutationId:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body,clientMutationId:$clientMutationId}){clientMutationId}}`,
-  ResolveThread: `mutation ResolveThread($threadId:ID!,$clientMutationId:String!){resolveReviewThread(input:{threadId:$threadId,clientMutationId:$clientMutationId}){clientMutationId}}`,
-};
-
-export class GitHubWorkflowError extends Error {
-  constructor(message, code = 'GITHUB_WORKFLOW_ERROR') {
-    super(message);
-    this.name = 'GitHubWorkflowError';
-    this.code = code;
-  }
-}
-
-function splitRepository(repository) {
-  const [owner, repo, extra] = String(repository ?? '').split('/');
-  if (!owner || !repo || extra) throw new GitHubWorkflowError('State repository must be owner/name', 'INVALID_REPOSITORY');
-  return { owner, repo };
-}
-
-function isCanonicalActor(actor) {
-  const matches = actor?.__typename === 'Bot'
-    && actor?.login === CANONICAL_LOGIN && actor?.url === CANONICAL_URL;
-  if (matches && !actor.id) {
-    throw new GitHubWorkflowError('Canonical Bot actor has no node ID', 'CANONICAL_ACTOR_INCOMPLETE');
-  }
-  return matches;
-}
-
-function isViewerActor(actor, viewer) {
-  const matches = actor?.login === viewer.login;
-  if (matches && !actor.id) {
-    throw new GitHubWorkflowError('Viewer actor has no node ID', 'CANONICAL_ACTOR_INCOMPLETE');
-  }
-  return matches && actor.id === viewer.id;
-}
-
-function assertGraphqlResult(result, operation) {
-  if (!result || typeof result !== 'object' || (result.errors?.length ?? 0) > 0 || !result.data) {
-    throw new GitHubWorkflowError(`${operation} returned GraphQL errors or no data`, 'GRAPHQL_READ_FAILED');
-  }
-  return result.data;
-}
-
-async function execute(client, name, variables) {
-  const result = await client.graphql({ name, query: OPERATIONS[name], variables });
-  const data = assertGraphqlResult(result, name);
-  if (!name.startsWith('Add') && !['ResolveThread', 'MarkPullRequestReadyForReview'].includes(name)) {
-    if (!Number.isFinite(data.rateLimit?.cost) || !Number.isFinite(data.rateLimit?.remaining)
-        || data.rateLimit.remaining < MIN_GRAPHQL_REMAINING) {
-      throw new GitHubWorkflowError(`${name} did not prove safe live rate-limit cost`, 'GRAPHQL_COST_UNSAFE');
-    }
-  }
-  return data;
-}
-
-async function executeMutation(client, name, variables, payloadField) {
-  const data = await execute(client, name, variables);
-  if (data[payloadField]?.clientMutationId !== variables.clientMutationId) {
-    throw new GitHubWorkflowError(`${name} lost clientMutationId correlation`, 'MUTATION_CORRELATION_FAILED');
-  }
-  return data[payloadField];
-}
-
-async function paginate(client, name, variables, selectConnection) {
-  const nodes = [];
-  let cursor = null;
-  for (let page = 0; page < MAX_PAGES; page += 1) {
-    const data = await execute(client, name, { ...variables, cursor });
-    const connection = selectConnection(data);
-    if (!connection || !Array.isArray(connection.nodes)
-        || typeof connection.pageInfo?.hasNextPage !== 'boolean') {
-      throw new GitHubWorkflowError(`${name} returned a truncated connection`, 'GRAPHQL_TRUNCATED');
-    }
-    nodes.push(...connection.nodes);
-    if (nodes.length > MAX_NODES) throw new GitHubWorkflowError(`${name} exceeded the node limit`, 'GRAPHQL_TRUNCATED');
-    if (!connection.pageInfo.hasNextPage) return nodes;
-    if (!connection.pageInfo.endCursor || connection.pageInfo.endCursor === cursor) {
-      throw new GitHubWorkflowError(`${name} pagination cursor is missing or repeated`, 'GRAPHQL_TRUNCATED');
-    }
-    cursor = connection.pageInfo.endCursor;
-  }
-  throw new GitHubWorkflowError(`${name} exceeded the page limit`, 'GRAPHQL_TRUNCATED');
-}
-
-function prConnection(data, name) {
-  const pr = data.repository?.pullRequest;
-  if (!pr) throw new GitHubWorkflowError('Pull request was not found', 'PR_NOT_FOUND');
-  return pr[name];
-}
-
-export async function readPullRequestMetadata(client, repository, prNumber) {
-  const variables = { ...splitRepository(repository), pr: prNumber };
-  const data = await execute(client, 'PullRequestMetadata', variables);
-  const pr = data.repository?.pullRequest;
-  if (!pr || pr.number !== prNumber || !pr.id || !pr.headRefOid || !['OPEN', 'CLOSED', 'MERGED'].includes(pr.state)
-      || typeof pr.isDraft !== 'boolean' || !data.viewer?.login || !data.viewer?.id) {
-    throw new GitHubWorkflowError('Pull request metadata is incomplete', 'GRAPHQL_TRUNCATED');
-  }
-  return { ...pr, viewer: data.viewer };
-}
-
-export function readTopLevelComments(client, repository, prNumber) {
-  const variables = { ...splitRepository(repository), pr: prNumber };
-  return paginate(client, 'PullRequestComments', variables, (data) => prConnection(data, 'comments'));
-}
-
-export function readReviews(client, repository, prNumber) {
-  const variables = { ...splitRepository(repository), pr: prNumber };
-  return paginate(client, 'PullRequestReviews', variables, (data) => prConnection(data, 'reviews'));
-}
-
-export function readReviewThreads(client, repository, prNumber) {
-  const variables = { ...splitRepository(repository), pr: prNumber };
-  return paginate(client, 'PullRequestThreads', variables, (data) => prConnection(data, 'reviewThreads'));
-}
-
-export function readThreadComments(client, threadId) {
-  return paginate(client, 'ReviewThreadComments', { threadId }, (data) => data.node?.comments);
-}
-
-export function readRequestReactions(client, commentId) {
-  return paginate(client, 'RequestReactions', { commentId }, (data) => data.node?.reactions);
-}
-
-export async function readPullRequestChecks(client, repository, prNumber, expectedHeadSha, { requireReady = true } = {}) {
-  const variables = { ...splitRepository(repository), pr: prNumber };
-  const contexts = [];
-  let cursor = null;
-  let rollupState = null;
-  for (let page = 0; page < MAX_PAGES; page += 1) {
-    const data = await execute(client, 'PullRequestChecks', { ...variables, cursor });
-    const pr = data.repository?.pullRequest;
-    const commits = pr?.commits?.nodes;
-    if (pr?.number !== prNumber || !pr.id || typeof pr.state !== 'string' || typeof pr.isDraft !== 'boolean') {
-      throw new GitHubWorkflowError('Check rollup pull request metadata was truncated', 'GRAPHQL_TRUNCATED');
-    }
-    if (pr.state !== 'OPEN') {
-      throw new GitHubWorkflowError('Pull request is closed or merged', 'PR_NOT_OPEN');
-    }
-    if (requireReady && pr.isDraft) {
-      throw new GitHubWorkflowError('Pull request is still a draft', 'PR_DRAFT');
-    }
-    if (pr.headRefOid !== expectedHeadSha
-        || !Array.isArray(commits) || commits.length !== 1
-        || commits[0]?.commit?.oid !== expectedHeadSha) {
-      throw new GitHubWorkflowError('Check rollup does not apply to the expected PR HEAD', 'CI_HEAD_MISMATCH');
-    }
-    const commit = commits[0].commit;
-    if (!Object.hasOwn(commit, 'statusCheckRollup')) {
-      throw new GitHubWorkflowError('Commit status check rollup was truncated', 'GRAPHQL_TRUNCATED');
-    }
-    const rollup = commit.statusCheckRollup;
-    if (rollup === null) return { headSha: expectedHeadSha, rollupState: null, contexts: [] };
-    const connection = rollup?.contexts;
-    if (!rollup || typeof rollup.state !== 'string' || !connection || !Array.isArray(connection.nodes)
-        || typeof connection.pageInfo?.hasNextPage !== 'boolean') {
-      throw new GitHubWorkflowError('Commit status check rollup is missing or truncated', 'GRAPHQL_TRUNCATED');
-    }
-    if (rollupState !== null && rollupState !== rollup.state) {
-      throw new GitHubWorkflowError('Commit status check rollup changed during pagination', 'CI_EVIDENCE_AMBIGUOUS');
-    }
-    if (connection.nodes.some((node) => !node || !['CheckRun', 'StatusContext'].includes(node.__typename)
-        || (node.__typename === 'CheckRun' && (typeof node.name !== 'string' || typeof node.status !== 'string'))
-        || (node.__typename === 'StatusContext' && (typeof node.context !== 'string' || typeof node.state !== 'string')))) {
-      throw new GitHubWorkflowError('Commit status context was truncated', 'GRAPHQL_TRUNCATED');
-    }
-    rollupState = rollup.state;
-    contexts.push(...connection.nodes);
-    if (contexts.length > MAX_NODES) {
-      throw new GitHubWorkflowError('PullRequestChecks exceeded the node limit', 'GRAPHQL_TRUNCATED');
-    }
-    if (!connection.pageInfo.hasNextPage) {
-      return { headSha: expectedHeadSha, rollupState, contexts };
-    }
-    if (!connection.pageInfo.endCursor || connection.pageInfo.endCursor === cursor) {
-      throw new GitHubWorkflowError('PullRequestChecks pagination cursor is missing or repeated', 'GRAPHQL_TRUNCATED');
-    }
-    cursor = connection.pageInfo.endCursor;
-  }
-  throw new GitHubWorkflowError('PullRequestChecks exceeded the page limit', 'GRAPHQL_TRUNCATED');
-}
-
-function httpsUrl(value) {
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === 'https:' && parsed.username === '' && parsed.password === '';
-  } catch {
-    return false;
-  }
-}
-
-function ciEvidenceFromRollup(snapshot) {
-  const checkRuns = snapshot.contexts.filter((context) => context?.__typename === 'CheckRun');
-  const candidates = checkRuns.filter((check) => check.name === FULL_VALIDATION_CHECK
-    && check.checkSuite?.app?.slug === GITHUB_ACTIONS_APP);
-  if (candidates.length === 0) {
-    throw new GitHubWorkflowError('The authoritative Full validation GitHub Actions check is missing', 'CI_CHECK_MISSING');
-  }
-  const namedChecks = [...new Set(candidates.map((check) => check.name))].sort();
-  const checkRunIds = new Set();
-  const runs = new Map();
-  for (const check of candidates) {
-    const workflowRun = check.checkSuite?.workflowRun;
-    if (typeof workflowRun?.workflow?.name !== 'string' || typeof workflowRun?.file?.path !== 'string') {
-      throw new GitHubWorkflowError('Full validation lacks authoritative workflow identity', 'CI_EVIDENCE_INCOMPLETE');
-    }
-    if (workflowRun.workflow.name !== FULL_VALIDATION_WORKFLOW
-        || workflowRun.file.path !== FULL_VALIDATION_WORKFLOW_PATH) {
-      throw new GitHubWorkflowError('Full validation came from an unexpected workflow', 'CI_WORKFLOW_MISMATCH');
-    }
-    if (typeof check.id !== 'string' || check.id.length === 0
-        || !Number.isInteger(workflowRun.databaseId) || workflowRun.databaseId < 1
-        || !httpsUrl(workflowRun.url) || typeof check.status !== 'string' || check.status.length === 0) {
-      throw new GitHubWorkflowError('Full validation lacks authoritative run identity', 'CI_EVIDENCE_INCOMPLETE');
-    }
-    if (checkRunIds.has(check.id)) {
-      throw new GitHubWorkflowError('Full validation check-run identity is duplicated', 'CI_EVIDENCE_AMBIGUOUS');
-    }
-    checkRunIds.add(check.id);
-    if (check.status === 'COMPLETED'
-        && (!check.completedAt || !Number.isFinite(Date.parse(check.completedAt))
-          || typeof check.conclusion !== 'string' || check.conclusion.length === 0)) {
-      throw new GitHubWorkflowError('Completed Full validation lacks completion metadata', 'CI_EVIDENCE_INCOMPLETE');
-    }
-    const group = runs.get(workflowRun.databaseId) ?? { urls: new Set(), attempts: [] };
-    group.urls.add(workflowRun.url);
-    group.attempts.push(check);
-    runs.set(workflowRun.databaseId, group);
-  }
-  if ([...runs.values()].some((run) => run.urls.size !== 1)) {
-    throw new GitHubWorkflowError('Full validation workflow-run identity is ambiguous', 'CI_EVIDENCE_AMBIGUOUS');
-  }
-  if (candidates.some((check) => check.status !== 'COMPLETED')) {
-    throw new GitHubWorkflowError('Full validation is still pending', 'CI_VALIDATION_PENDING');
-  }
-  const effective = [];
-  for (const [runId, run] of runs) {
-    const latestTime = Math.max(...run.attempts.map((check) => Date.parse(check.completedAt)));
-    const latest = run.attempts.filter((check) => Date.parse(check.completedAt) === latestTime);
-    if (latest.length !== 1) {
-      throw new GitHubWorkflowError('Latest Full validation attempt is ambiguous', 'CI_EVIDENCE_AMBIGUOUS');
-    }
-    effective.push({ check: latest[0], runId });
-  }
-  const failed = effective.filter(({ check }) => check.conclusion !== 'SUCCESS');
-  const representatives = failed.length > 0 ? failed : effective;
-  representatives.sort((left, right) => Date.parse(right.check.completedAt) - Date.parse(left.check.completedAt)
-    || right.runId - left.runId);
-  const selected = representatives[0].check;
-  const workflowRun = selected.checkSuite?.workflowRun;
-  const passed = failed.length === 0;
-  return {
-    source: 'github-actions', scope: 'full', status: passed ? 'passed' : 'failed',
-    headSha: snapshot.headSha, checks: namedChecks,
-    checkRunId: selected.id, workflowRunId: workflowRun.databaseId, workflowRunUrl: workflowRun.url,
-    updatedAt: selected.completedAt,
-  };
-}
 
 function codexReviewStatus(state, liveHeadSha) {
   const request = state.reviewRequest;
@@ -333,27 +98,7 @@ function validateState(state, prNumber) {
 }
 
 async function readLiveSnapshot(client, state, { reactionsFor = null } = {}) {
-  const metadata = await readPullRequestMetadata(client, state.repository, state.prNumber);
-  const [comments, reviews, rawThreads, reactions] = await Promise.all([
-    readTopLevelComments(client, state.repository, state.prNumber),
-    readReviews(client, state.repository, state.prNumber),
-    readReviewThreads(client, state.repository, state.prNumber),
-    reactionsFor ? readRequestReactions(client, reactionsFor) : Promise.resolve([]),
-  ]);
-  if (rawThreads.some((thread) => typeof thread?.id !== 'string' || thread.id.length === 0)
-      || new Set(rawThreads.map((thread) => thread.id)).size !== rawThreads.length) {
-    throw new GitHubWorkflowError('Review thread identity is missing or duplicated', 'ROOT_IDENTITY_AMBIGUOUS');
-  }
-  const threads = [];
-  for (const thread of rawThreads) {
-    const threadComments = await readThreadComments(client, thread.id);
-    const roots = threadComments.filter((comment) => comment.replyTo === null);
-    if (roots.length !== 1) {
-      throw new GitHubWorkflowError(`Thread ${thread.id} does not have one explicit root`, 'ROOT_IDENTITY_AMBIGUOUS');
-    }
-    threads.push({ ...thread, comments: threadComments, root: roots[0], canonical: isCanonicalActor(roots[0].author) });
-  }
-  return { metadata, comments, reviews, threads, reactions };
+  return readPullRequestLiveSnapshot(client, state, { reactionsFor, isCanonicalActor });
 }
 
 async function assertMutationReady({ state, git }, live, { requireReady = true } = {}) {
@@ -2586,58 +2331,6 @@ function buildThreadProof(state, live, resolvedEvidence, at) {
   };
 }
 
-function canonicalEvidenceId(item, prefix) {
-  return `${prefix}:${item.id}`;
-}
-
-function classifyReviewSubmission(review, threads) {
-  if (typeof review.body !== 'string') return 'unsupported';
-  const hasAttachedCanonicalRoot = threads.some((thread) => thread.canonical
-    && thread.root.pullRequestReview?.id === review.id);
-  return review.body.trim().length > 0 || hasAttachedCanonicalRoot ? 'findings' : 'clean';
-}
-
-async function classifyStructuralIssueComments({ comments, request, threads, git, cwd, expectedHeads }) {
-  const exact = [];
-  const unsupported = [];
-  for (const comment of comments) {
-    if (typeof comment.body !== 'string') continue;
-    const markerLines = [...comment.body.matchAll(REVIEWED_COMMIT_MARKER_LINE_PATTERN)];
-    if (markerLines.length === 0) continue;
-    if (!evidenceAtOrAfter(comment.createdAt, request.at)) continue;
-    if (!isCanonicalActor(comment.author)) continue;
-    if (comment.lastEditedAt !== null) {
-      unsupported.push(comment);
-      continue;
-    }
-    const anchors = [...comment.body.matchAll(REVIEWED_COMMIT_ANCHOR_PATTERN)];
-    if (markerLines.length !== 1 || anchors.length !== 1) {
-      unsupported.push(comment);
-      continue;
-    }
-    let candidates;
-    try {
-      candidates = await git.resolveCommitPrefix(anchors[0][1], cwd);
-    } catch {
-      candidates = [];
-    }
-    if (!Array.isArray(candidates) || candidates.length !== 1
-        || !/^[0-9a-f]{40}$/u.test(candidates[0])
-        || expectedHeads.some((head) => candidates[0] !== head)) {
-      unsupported.push(comment);
-      continue;
-    }
-    const hasPostRequestCanonicalRoot = threads.some((thread) => thread.canonical
-      && evidenceAtOrAfter(thread.root.createdAt, request.at));
-    if (hasPostRequestCanonicalRoot) {
-      unsupported.push(comment);
-      continue;
-    }
-    exact.push({ comment, headSha: candidates[0] });
-  }
-  return { exact, unsupported };
-}
-
 function assertRecordedRequestComment(state, live) {
   const request = state.reviewRequest;
   if (!request) throw new GitHubWorkflowError('Review request is missing', 'REVIEW_NOT_PENDING');
@@ -2734,209 +2427,6 @@ function tasklessPendingReviewHeadDriftRefreshAllowed(state) {
     && (disposition === null
       || (disposition.requestHeadSha === priorHeadSha
         && disposition.liveHeadSha === state.currentIntegrationHeadSha));
-}
-
-function outcomeFromCanonicalResponse(request, selected, threads) {
-  if (selected.type === 'reaction') {
-    const reaction = selected.value;
-    return {
-      id: reaction.id, databaseId: null, url: request.url,
-      headSha: request.headSha, at: reaction.createdAt, requestId: request.id, kind: request.kind,
-      outcome: 'clean', evidenceType: 'request-reaction',
-      reviewerLogin: reaction.user.login, reviewerNodeId: reaction.user.id,
-      reviewerType: reaction.user.__typename, reviewerUrl: reaction.user.url,
-      reactionContent: 'THUMBS_UP', reactionCommentId: request.id,
-    };
-  }
-  if (selected.type === 'issue-comment') {
-    const { comment, headSha } = selected.value;
-    return {
-      id: comment.id, databaseId: comment.databaseId ?? null, url: comment.url,
-      headSha, at: comment.createdAt, requestId: request.id, kind: request.kind,
-      outcome: 'clean', evidenceType: 'issue-comment',
-      reviewerLogin: comment.author.login, reviewerNodeId: comment.author.id,
-      reviewerType: comment.author.__typename, reviewerUrl: comment.author.url,
-      reactionContent: null, reactionCommentId: null,
-    };
-  }
-  const review = selected.value;
-  return {
-    id: review.id, databaseId: review.databaseId ?? null, url: review.url,
-    headSha: review.commit.oid, at: review.submittedAt, requestId: request.id, kind: request.kind,
-    outcome: classifyReviewSubmission(review, threads), evidenceType: 'review-submission',
-    reviewerLogin: review.author.login, reviewerNodeId: review.author.id,
-    reviewerType: review.author.__typename, reviewerUrl: review.author.url,
-    reactionContent: null, reactionCommentId: null,
-  };
-}
-
-function canonicalJson(value) {
-  if (Array.isArray(value)) return value.map(canonicalJson);
-  if (value !== null && typeof value === 'object') {
-    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalJson(value[key])]));
-  }
-  return value;
-}
-
-function actorObservation(actor) {
-  return {
-    type: actor?.__typename ?? null,
-    login: actor?.login ?? null,
-    id: actor?.id ?? null,
-    url: actor?.url ?? null,
-  };
-}
-
-function canonicalRootEvidence(live, reviewId = undefined) {
-  return live.threads.filter((thread) => thread.canonical
-    && (reviewId === undefined || thread.root.pullRequestReview?.id === reviewId)).map((thread) => ({
-    threadId: thread.id,
-    rootId: thread.root.id,
-    rootDatabaseId: thread.root.databaseId ?? null,
-    rootUrl: thread.root.url ?? null,
-    rootBody: thread.root.body ?? null,
-    rootCreatedAt: thread.root.createdAt ?? null,
-    rootAuthor: actorObservation(thread.root.author),
-    reviewId: thread.root.pullRequestReview?.id ?? null,
-  })).sort((left, right) => left.threadId.localeCompare(right.threadId));
-}
-
-function canonicalRootState(live) {
-  const evidenceByThread = new Map(canonicalRootEvidence(live)
-    .map((evidence) => [evidence.threadId, evidence]));
-  return live.threads.filter((thread) => thread.canonical).map((thread) => ({
-    ...evidenceByThread.get(thread.id),
-    isResolved: thread.isResolved,
-    comments: thread.comments.map((comment) => ({
-      id: comment.id,
-      databaseId: comment.databaseId ?? null,
-      url: comment.url ?? null,
-      body: comment.body ?? null,
-      createdAt: comment.createdAt ?? null,
-      authorType: comment.author?.__typename ?? null,
-      authorLogin: comment.author?.login ?? null,
-      authorId: comment.author?.id ?? null,
-      authorUrl: comment.author?.url ?? null,
-      replyToId: comment.replyTo?.id ?? null,
-      reviewId: comment.pullRequestReview?.id ?? null,
-    })).sort((left, right) => left.id.localeCompare(right.id)),
-  })).sort((left, right) => left.threadId.localeCompare(right.threadId));
-}
-
-function responseObservation(candidate) {
-  if (candidate.type === 'review') {
-    const review = candidate.value;
-    return {
-      type: candidate.type,
-      id: review.id,
-      databaseId: review.databaseId ?? null,
-      url: review.url,
-      body: review.body,
-      state: review.state,
-      submittedAt: review.submittedAt,
-      commitOid: review.commit?.oid ?? null,
-      actor: actorObservation(review.author),
-    };
-  }
-  if (candidate.type === 'reaction') {
-    const reaction = candidate.value;
-    return {
-      type: candidate.type,
-      id: reaction.id,
-      content: reaction.content,
-      createdAt: reaction.createdAt,
-      actor: actorObservation(reaction.user),
-    };
-  }
-  const { comment, headSha } = candidate.value;
-  return {
-    type: candidate.type,
-    id: comment.id,
-    databaseId: comment.databaseId ?? null,
-    url: comment.url,
-    body: comment.body,
-    createdAt: comment.createdAt,
-    lastEditedAt: comment.lastEditedAt,
-    headSha,
-    actor: actorObservation(comment.author),
-  };
-}
-
-function responseFingerprint(candidate, live) {
-  const observation = {
-    response: responseObservation(candidate),
-    roots: candidate.type === 'review'
-      ? canonicalRootEvidence(live, candidate.value.id) : [],
-  };
-  return createHash('sha256').update(JSON.stringify(canonicalJson(observation))).digest('hex');
-}
-
-async function classifyPendingReviewResponse(state, live, git, { includeUnmatchedRoots = false } = {}) {
-  const request = state.reviewRequest;
-  const reviews = live.reviews.filter((review) => isCanonicalActor(review.author)
-    && evidenceAtOrAfter(review.submittedAt, request.at));
-  const exactReviews = reviews.filter((review) => review.state === 'COMMENTED'
-    && typeof review.body === 'string' && review.commit?.oid === request.headSha);
-  const staleReviews = reviews.filter((review) => review.state === 'COMMENTED'
-    && typeof review.body === 'string' && review.commit?.oid !== request.headSha);
-  const roots = live.threads.filter((thread) => thread.canonical
-    && evidenceAtOrAfter(thread.root.createdAt, request.at));
-  const exactReviewIds = new Set(exactReviews.map((review) => review.id));
-  const unmatchedRoots = roots.filter((thread) => !exactReviewIds.has(thread.root.pullRequestReview?.id));
-  const unsupportedReviews = reviews.filter((review) => !exactReviews.includes(review));
-  const canonicalReactions = live.reactions.filter((reaction) => reaction.content === 'THUMBS_UP'
-    && isCanonicalActor(reaction.user));
-  const reactions = canonicalReactions.filter((reaction) =>
-    evidenceAtOrAfter(reaction.createdAt, request.at));
-  const unsupportedReactions = canonicalReactions.filter((reaction) =>
-    !evidenceAtOrAfter(reaction.createdAt, request.at));
-  const structural = await classifyStructuralIssueComments({
-    comments: live.comments,
-    request,
-    threads: live.threads,
-    git,
-    cwd: state.integrationWorktree,
-    expectedHeads: [request.headSha],
-  });
-  const candidates = [
-    ...exactReviews.map((value) => ({ type: 'review', value })),
-    ...reactions.map((value) => ({ type: 'reaction', value })),
-    ...structural.exact.map((value) => ({ type: 'issue-comment', value })),
-  ];
-  const unsupportedIds = [
-    ...unsupportedReviews.map((item) => canonicalEvidenceId(item, 'review')),
-    ...unsupportedReactions.map((item) => canonicalEvidenceId(item, 'reaction')),
-    ...unmatchedRoots.map((item) => canonicalEvidenceId(item.root, 'review-root')),
-    ...structural.unsupported.map((item) => canonicalEvidenceId(item, 'issue-comment')),
-  ];
-  const candidateIds = candidates.map((candidate) => canonicalEvidenceId(
-    candidate.type === 'issue-comment' ? candidate.value.comment : candidate.value,
-    candidate.type,
-  ));
-  const rootState = canonicalRootState(live);
-  if (candidates.length === 0 && unsupportedIds.length === 0) {
-    return {
-      status: 'none', evidence: null, responseFingerprint: null, evidenceIds: [], rootState,
-    };
-  }
-  if (!includeUnmatchedRoots && candidates.length === 0 && staleReviews.length > 0 && unsupportedIds.length === staleReviews.length) {
-    return { status: 'stale', evidence: null, responseFingerprint: null, evidenceIds: unsupportedIds, rootState };
-  }
-  if (candidates.length !== 1 || unsupportedIds.length > 0) {
-    return {
-      status: 'ambiguous', evidence: null,
-      responseFingerprint: null,
-      evidenceIds: [...new Set([...candidateIds, ...unsupportedIds])],
-      rootState,
-    };
-  }
-  const evidence = outcomeFromCanonicalResponse(request, candidates[0], live.threads);
-  return {
-    status: 'supported', evidence,
-    responseFingerprint: responseFingerprint(candidates[0], live),
-    evidenceIds: [...candidateIds, ...canonicalRootEvidence(live, candidates[0].type === 'review'
-      ? candidates[0].value.id : undefined).map((root) => `review-root:${root.rootId}`)], rootState,
-  };
 }
 
 function dispositionForPendingResponse(state, response, disposedAt) {

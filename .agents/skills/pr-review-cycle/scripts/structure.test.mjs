@@ -58,6 +58,12 @@ const EXPECTED_CANONICAL_FILES = [
   'scripts/contracts/thread-proof.test.mjs',
   'scripts/contracts/worker-result.mjs',
   'scripts/contracts/worker-result.test.mjs',
+  'scripts/github/adapters/gh-cli.mjs',
+  'scripts/github/adapters/gh-cli.test.mjs',
+  'scripts/github/adapters/git.mjs',
+  'scripts/github/adapters/git.test.mjs',
+  'scripts/github/adapters/state.mjs',
+  'scripts/github/adapters/state.test.mjs',
   'scripts/github/archive/adoption.test.mjs',
   'scripts/github/archive/archive-fixture-loader.mjs',
   'scripts/github/archive/fixture-integrity.test.mjs',
@@ -69,12 +75,30 @@ const EXPECTED_CANONICAL_FILES = [
   'scripts/github/ci.test.mjs',
   'scripts/github/cli.mjs',
   'scripts/github/cli.test.mjs',
+  'scripts/github/errors.mjs',
+  'scripts/github/evidence/actors.mjs',
+  'scripts/github/evidence/actors.test.mjs',
+  'scripts/github/evidence/ci.mjs',
+  'scripts/github/evidence/ci.test.mjs',
+  'scripts/github/evidence/primitives.mjs',
+  'scripts/github/evidence/review-response.mjs',
+  'scripts/github/evidence/review-response.test.mjs',
   'scripts/github/facade.test.mjs',
   'scripts/github/github.mjs',
+  'scripts/github/graphql/client.mjs',
+  'scripts/github/graphql/client.test.mjs',
+  'scripts/github/graphql/operations.mjs',
+  'scripts/github/graphql/operations.test.mjs',
+  'scripts/github/graphql/pull-request-reader.mjs',
+  'scripts/github/graphql/pull-request-reader.test.mjs',
   'scripts/github/live-evidence.test.mjs',
+  'scripts/github/mutation-journal.mjs',
+  'scripts/github/mutation-journal.test.mjs',
   'scripts/github/recovery.test.mjs',
   'scripts/github/request.test.mjs',
   'scripts/github/review-response.test.mjs',
+  'scripts/github/status-renderer.mjs',
+  'scripts/github/status-renderer.test.mjs',
   'scripts/github/test-support/workflow-harness.mjs',
   'scripts/github/threads.test.mjs',
   'scripts/github/workflow.test.mjs',
@@ -367,6 +391,213 @@ const CONTRACT_FACADE_EXPORTS = [
   'workerResultDigest',
 ];
 
+const githubDirectory = join(scriptsDirectory, 'github');
+
+function githubModule(path) {
+  return join(githubDirectory, path);
+}
+
+const importedAs = (imported, local = imported) => ({ imported, local });
+const STATE_ADAPTER_OPERATIONS = [
+  'checkpointCiValidation',
+  'checkpointCompletion',
+  'checkpointReviewOutcome',
+  'checkpointReviewRequest',
+  'checkpointTaskCompletion',
+  'checkpointVerificationEscalation',
+  'loadState',
+  'readSpecialistStatus',
+];
+
+const PRODUCTION_GITHUB_IMPORTS = new Map([
+  ['errors.mjs', new Map()],
+  ['graphql/operations.mjs', new Map()],
+  ['graphql/client.mjs', new Map([
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+    [githubModule('graphql/operations.mjs'), ['OPERATIONS']],
+  ])],
+  ['graphql/pull-request-reader.mjs', new Map([
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+    [githubModule('graphql/client.mjs'), ['MAX_NODES', 'MAX_PAGES', 'execute', 'paginate']],
+  ])],
+  ['evidence/primitives.mjs', new Map()],
+  ['evidence/actors.mjs', new Map([
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+  ])],
+  ['evidence/ci.mjs', new Map([
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+    [githubModule('evidence/primitives.mjs'), ['httpsUrl']],
+  ])],
+  ['evidence/review-response.mjs', new Map([
+    ['node:crypto', ['createHash']],
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+    [githubModule('evidence/actors.mjs'), ['actorObservation', 'isCanonicalActor']],
+  ])],
+  ['status-renderer.mjs', new Map()],
+  ['mutation-journal.mjs', new Map([
+    ['node:fs', ['existsSync', 'readFileSync']],
+    ['node:path', ['join']],
+    [join(scriptsDirectory, 'state', 'state.mjs'), [
+      'claimGitHubMutationDispatch', 'ensureGitHubMutationIntent', 'stateDirectory',
+      'withGitHubRequestOwnerLock',
+    ]],
+  ])],
+  ['adapters/gh-cli.mjs', new Map([
+    ['node:child_process', ['execFileSync']],
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+  ])],
+  ['adapters/git.mjs', new Map([
+    ['node:child_process', ['execFileSync']],
+    ['node:fs', ['lstatSync']],
+    ['node:path', ['join']],
+  ])],
+  ['adapters/state.mjs', new Map([
+    [join(scriptsDirectory, 'state', 'state.mjs'), STATE_ADAPTER_OPERATIONS],
+  ])],
+  ['github.mjs', new Map([
+    ['node:crypto', ['createHash']],
+    ['node:util', ['isDeepStrictEqual']],
+    [contractModule('contracts.mjs'), [
+      'buildStaleDiscoveryDisposition', 'reviewRequestGate', 'reviewRequestUsage',
+      'validatePrReviewState',
+    ]],
+    [join(scriptsDirectory, 'state', 'state.mjs'), ['checkpointArchiveTaskCompletion']],
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+    [githubModule('evidence/actors.mjs'), [
+      'CANONICAL_LOGIN', 'CANONICAL_URL', 'actorObservation', 'isCanonicalActor', 'isViewerActor',
+    ]],
+    [githubModule('evidence/ci.mjs'), [
+      'FULL_VALIDATION_CHECK', 'FULL_VALIDATION_WORKFLOW', 'FULL_VALIDATION_WORKFLOW_PATH',
+      'GITHUB_ACTIONS_APP', 'ciEvidenceFromRollup',
+    ]],
+    [githubModule('evidence/primitives.mjs'), ['httpsUrl']],
+    [githubModule('evidence/review-response.mjs'), [
+      'canonicalJson', 'classifyPendingReviewResponse', 'classifyReviewSubmission',
+      'classifyStructuralIssueComments',
+    ]],
+    [githubModule('graphql/client.mjs'), ['MAX_NODES', 'executeMutation']],
+    [githubModule('graphql/operations.mjs'), ['PAGE_SIZE']],
+    [githubModule('graphql/pull-request-reader.mjs'), [
+      importedAs('readLiveSnapshot', 'readPullRequestLiveSnapshot'),
+      'readPullRequestChecks', 'readPullRequestMetadata', 'readRequestReactions',
+      'readReviewThreads', 'readReviews', 'readThreadComments', 'readTopLevelComments',
+    ]],
+  ])],
+  ['cli.mjs', new Map([
+    ['node:fs', [
+      importedAs('constants', 'fsConstants'), 'closeSync', 'fstatSync', 'lstatSync', 'openSync',
+      'readdirSync', 'readFileSync', 'statSync',
+    ]],
+    ['node:path', ['join']],
+    ['node:url', ['pathToFileURL']],
+    ['node:worker_threads', ['isMainThread']],
+    [join(repositoryDirectory, 'scripts', 'lib', 'cli.mjs'), ['UsageError', 'parseOptions', 'writeJson']],
+    [join(scriptsDirectory, 'state', 'state.mjs'), ['reviewRoot']],
+    [githubModule('adapters/gh-cli.mjs'), ['buildGhGraphqlArgs', 'createDefaultGitHubClient']],
+    [githubModule('adapters/git.mjs'), ['createDefaultGitAdapter']],
+    [githubModule('adapters/state.mjs'), ['createDefaultStateAdapter']],
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+    [githubModule('github.mjs'), ['createGitHubReviewWorkflow']],
+    [githubModule('mutation-journal.mjs'), ['createDefaultMutationJournal']],
+    [githubModule('status-renderer.mjs'), ['renderHumanStatus']],
+  ])],
+]);
+
+const PRODUCTION_GITHUB_EXPORTS = new Map([
+  ['errors.mjs', ['GitHubWorkflowError']],
+  ['graphql/operations.mjs', ['OPERATIONS', 'PAGE_SIZE']],
+  ['graphql/client.mjs', [
+    'MAX_NODES', 'MAX_PAGES', 'MIN_GRAPHQL_REMAINING', 'assertGraphqlResult', 'execute',
+    'executeMutation', 'paginate',
+  ]],
+  ['graphql/pull-request-reader.mjs', [
+    'readLiveSnapshot', 'readPullRequestChecks', 'readPullRequestMetadata', 'readRequestReactions',
+    'readReviewThreads', 'readReviews', 'readThreadComments', 'readTopLevelComments',
+  ]],
+  ['evidence/primitives.mjs', ['httpsUrl']],
+  ['evidence/actors.mjs', [
+    'CANONICAL_LOGIN', 'CANONICAL_URL', 'actorObservation', 'isCanonicalActor', 'isViewerActor',
+  ]],
+  ['evidence/ci.mjs', [
+    'FULL_VALIDATION_CHECK', 'FULL_VALIDATION_WORKFLOW', 'FULL_VALIDATION_WORKFLOW_PATH',
+    'GITHUB_ACTIONS_APP', 'ciEvidenceFromRollup',
+  ]],
+  ['evidence/review-response.mjs', [
+    'canonicalJson', 'canonicalRootEvidence', 'canonicalRootState', 'classifyPendingReviewResponse',
+    'classifyReviewSubmission', 'classifyStructuralIssueComments', 'outcomeFromCanonicalResponse',
+    'responseFingerprint', 'responseObservation',
+  ]],
+  ['status-renderer.mjs', ['renderHumanStatus']],
+  ['mutation-journal.mjs', ['createDefaultMutationJournal']],
+  ['adapters/gh-cli.mjs', ['buildGhGraphqlArgs', 'createDefaultGitHubClient']],
+  ['adapters/git.mjs', ['createDefaultGitAdapter']],
+  ['adapters/state.mjs', ['createDefaultStateAdapter']],
+  ['github.mjs', [
+    'GitHubWorkflowError', 'createGitHubReviewWorkflow', 'githubReviewConstants',
+    'readPullRequestChecks', 'readPullRequestMetadata', 'readRequestReactions', 'readReviewThreads',
+    'readReviews', 'readThreadComments', 'readTopLevelComments',
+  ]],
+  ['cli.mjs', [
+    'buildGhGraphqlArgs', 'createDefaultArchiveStore', 'createDefaultGitAdapter',
+    'createDefaultGitHubClient', 'renderHumanStatus', 'runCli', 'terminateOnFatalArchiveCwd', 'usage',
+  ]],
+]);
+
+const FOCUSED_GITHUB_TEST_IMPORTS = new Map([
+  ['graphql/operations.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('graphql/operations.mjs'),
+  ]],
+  ['graphql/client.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('errors.mjs'),
+    githubModule('graphql/client.mjs'), githubModule('graphql/operations.mjs'),
+  ]],
+  ['graphql/pull-request-reader.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('errors.mjs'),
+    githubModule('graphql/client.mjs'), githubModule('graphql/pull-request-reader.mjs'),
+  ]],
+  ['evidence/actors.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('evidence/actors.mjs'),
+  ]],
+  ['evidence/ci.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('evidence/ci.mjs'),
+  ]],
+  ['evidence/review-response.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('errors.mjs'),
+    githubModule('evidence/review-response.mjs'),
+  ]],
+  ['status-renderer.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('status-renderer.mjs'),
+  ]],
+  ['mutation-journal.test.mjs', [
+    'node:assert/strict', 'node:fs', 'node:os', 'node:path', 'node:test',
+    githubModule('mutation-journal.mjs'),
+  ]],
+  ['adapters/gh-cli.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('errors.mjs'),
+    githubModule('adapters/gh-cli.mjs'),
+  ]],
+  ['adapters/git.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('adapters/git.mjs'),
+  ]],
+  ['adapters/state.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('adapters/state.mjs'),
+  ]],
+]);
+
+const FOCUSED_GITHUB_TEST_OWNERS = new Map([
+  ['graphql/operations.test.mjs', 'graphql/operations.mjs'],
+  ['graphql/client.test.mjs', 'graphql/client.mjs'],
+  ['graphql/pull-request-reader.test.mjs', 'graphql/pull-request-reader.mjs'],
+  ['evidence/actors.test.mjs', 'evidence/actors.mjs'],
+  ['evidence/ci.test.mjs', 'evidence/ci.mjs'],
+  ['evidence/review-response.test.mjs', 'evidence/review-response.mjs'],
+  ['status-renderer.test.mjs', 'status-renderer.mjs'],
+  ['mutation-journal.test.mjs', 'mutation-journal.mjs'],
+  ['adapters/gh-cli.test.mjs', 'adapters/gh-cli.mjs'],
+  ['adapters/git.test.mjs', 'adapters/git.mjs'],
+  ['adapters/state.test.mjs', 'adapters/state.mjs'],
+]);
+
 function normalizedModuleTarget(importer, specifier) {
   return specifier.startsWith('.') ? resolve(dirname(importer), specifier) : specifier;
 }
@@ -491,6 +722,201 @@ function validateProductionContractSource(importer, source) {
     errors.push('production import targets must exactly match the module allowlist');
   }
   return errors;
+}
+
+function expectedBindingPairs(values) {
+  return values.map((value) => (
+    typeof value === 'string' ? importedAs(value) : value
+  ));
+}
+
+function bindingKey({ imported, local }) {
+  return `${imported}\0${local}`;
+}
+
+function hasModifier(node, kind) {
+  return node.modifiers?.some((modifier) => modifier.kind === kind) ?? false;
+}
+
+function inlineExportNames(statement, errors) {
+  if (!hasModifier(statement, ts.SyntaxKind.ExportKeyword)) return [];
+  if (hasModifier(statement, ts.SyntaxKind.DefaultKeyword)) {
+    errors.push('default export is forbidden');
+  }
+  if (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) {
+    if (!statement.name) {
+      errors.push('exported declaration must have a stable name');
+      return [];
+    }
+    return [statement.name.text];
+  }
+  if (ts.isVariableStatement(statement)) {
+    const names = [];
+    for (const declaration of statement.declarationList.declarations) {
+      if (!ts.isIdentifier(declaration.name)) {
+        errors.push('exported variable must have a stable identifier');
+      } else names.push(declaration.name.text);
+    }
+    return names;
+  }
+  errors.push('unsupported exported declaration');
+  return [];
+}
+
+function inspectProductionGitHubSource(importer, source) {
+  const errors = [];
+  const fileName = posixRelative(githubDirectory, importer);
+  const allowlist = PRODUCTION_GITHUB_IMPORTS.get(fileName);
+  const expectedExports = PRODUCTION_GITHUB_EXPORTS.get(fileName);
+  if (!allowlist || !expectedExports) return [`unknown production GitHub module ${fileName}`];
+  const parsed = parseModule(importer, source);
+  for (const diagnostic of parsed.parseDiagnostics) errors.push(`syntax error: ${diagnostic.messageText}`);
+
+  function visit(node) {
+    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      errors.push('dynamic import is forbidden');
+    }
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
+        && node.expression.text === 'require') errors.push('CommonJS require is forbidden');
+    if (ts.isIdentifier(node) && node.text === 'createRequire') errors.push('createRequire is forbidden');
+    if (ts.isImportEqualsDeclaration(node)) errors.push('CommonJS import assignment is forbidden');
+    if (ts.isExportAssignment(node)) errors.push('default export assignment is forbidden');
+    ts.forEachChild(node, visit);
+  }
+  visit(parsed);
+
+  const exportDeclarations = [];
+  const exports = [];
+  for (const statement of parsed.statements) {
+    if (ts.isImportDeclaration(statement)) {
+      const specifier = ts.isStringLiteral(statement.moduleSpecifier)
+        ? statement.moduleSpecifier.text : null;
+      if (specifier === null) {
+        errors.push('import specifier must be a string literal');
+        continue;
+      }
+      const target = normalizedModuleTarget(importer, specifier);
+      const expected = allowlist.get(target);
+      if (!expected) errors.push(`unapproved GitHub dependency ${specifier} resolves to ${target}`);
+      if (!statement.importClause) {
+        errors.push(`side-effect import is forbidden: ${specifier}`);
+        continue;
+      }
+      if (statement.importClause.name) errors.push(`default import is forbidden: ${specifier}`);
+      if (statement.importClause.namedBindings
+          && ts.isNamespaceImport(statement.importClause.namedBindings)) {
+        errors.push(`namespace import is forbidden: ${specifier}`);
+      }
+      const bindings = namedBindings(statement.importClause);
+      if (bindings === null) continue;
+      if (expected && JSON.stringify(sorted(bindings.map(bindingKey)))
+          !== JSON.stringify(sorted(expectedBindingPairs(expected).map(bindingKey)))) {
+        errors.push(`named imports from ${specifier} do not match the exact GitHub module allowlist`);
+      }
+    }
+    if (ts.isExportDeclaration(statement)) {
+      exportDeclarations.push(statement);
+      if (statement.moduleSpecifier) errors.push('source re-export is forbidden');
+      if (!statement.exportClause || !ts.isNamedExports(statement.exportClause)) {
+        errors.push('export-star is forbidden');
+      } else {
+        for (const element of statement.exportClause.elements) {
+          if (element.propertyName && element.propertyName.text !== element.name.text) {
+            errors.push('aliased export is forbidden');
+          }
+          exports.push(element.name.text);
+        }
+      }
+    } else exports.push(...inlineExportNames(statement, errors));
+  }
+
+  const expectedExportSet = new Set(expectedExports);
+  for (const name of exports) {
+    if (!expectedExportSet.has(name)) errors.push(`unexpected GitHub module export ${name}`);
+  }
+  const expectedExportDeclarations = ['github.mjs', 'cli.mjs'].includes(fileName) ? 1 : 0;
+  if (exportDeclarations.length !== expectedExportDeclarations) {
+    errors.push(`${fileName} must have exactly ${expectedExportDeclarations} explicit local export lists`);
+  }
+  return errors;
+}
+
+function validateProductionGitHubSource(importer, source) {
+  const errors = inspectProductionGitHubSource(importer, source);
+  const fileName = posixRelative(githubDirectory, importer);
+  const expectedTargets = PRODUCTION_GITHUB_IMPORTS.get(fileName);
+  const expectedExports = PRODUCTION_GITHUB_EXPORTS.get(fileName);
+  if (!expectedTargets || !expectedExports) return errors;
+  const parsed = parseModule(importer, source);
+  const actualTargets = parsed.statements.filter(ts.isImportDeclaration).flatMap((statement) => (
+    ts.isStringLiteral(statement.moduleSpecifier)
+      ? [normalizedModuleTarget(importer, statement.moduleSpecifier.text)] : []
+  ));
+  if (JSON.stringify(sorted(actualTargets)) !== JSON.stringify(sorted(expectedTargets.keys()))) {
+    errors.push('GitHub production import targets must exactly match the module allowlist');
+  }
+  const exportErrors = [];
+  const actualExports = [];
+  for (const statement of parsed.statements) {
+    if (ts.isExportDeclaration(statement) && statement.exportClause
+        && ts.isNamedExports(statement.exportClause)) {
+      actualExports.push(...statement.exportClause.elements.map((element) => element.name.text));
+    } else actualExports.push(...inlineExportNames(statement, exportErrors));
+  }
+  if (JSON.stringify(sorted(actualExports)) !== JSON.stringify(sorted(expectedExports))) {
+    errors.push('GitHub production exports must exactly match the module export allowlist');
+  }
+  return [...errors, ...exportErrors];
+}
+
+function inspectFocusedGitHubTestSource(importer, source) {
+  const errors = [];
+  const fileName = posixRelative(githubDirectory, importer);
+  const allowedTargets = FOCUSED_GITHUB_TEST_IMPORTS.get(fileName);
+  if (!allowedTargets) return { errors: [`unknown focused GitHub test ${fileName}`], targets: [] };
+  const allowed = new Set(allowedTargets);
+  const parsed = parseModule(importer, source);
+  for (const diagnostic of parsed.parseDiagnostics) errors.push(`syntax error: ${diagnostic.messageText}`);
+  function visit(node) {
+    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      errors.push('focused GitHub tests may not use dynamic import');
+    }
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
+        && node.expression.text === 'require') errors.push('focused GitHub tests may not use require');
+    if (ts.isIdentifier(node) && node.text === 'createRequire') {
+      errors.push('focused GitHub tests may not use createRequire');
+    }
+    if (ts.isImportEqualsDeclaration(node)) errors.push('focused GitHub tests may not use import assignment');
+    if (ts.isExportAssignment(node) || ts.isExportDeclaration(node)
+        || hasModifier(node, ts.SyntaxKind.ExportKeyword)) {
+      errors.push('focused GitHub tests may not export declarations');
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(parsed);
+  const targets = [];
+  for (const statement of parsed.statements.filter(ts.isImportDeclaration)) {
+    if (!ts.isStringLiteral(statement.moduleSpecifier)) {
+      errors.push('test import specifier must be a string literal');
+      continue;
+    }
+    const target = normalizedModuleTarget(importer, statement.moduleSpecifier.text);
+    targets.push(target);
+    if (!allowed.has(target)) errors.push(`focused GitHub test has unapproved dependency ${target}`);
+    if (!statement.importClause) errors.push(`focused GitHub test side-effect import is forbidden: ${target}`);
+  }
+  return { errors, targets };
+}
+
+function validateFocusedGitHubTestSource(importer, source) {
+  const result = inspectFocusedGitHubTestSource(importer, source);
+  const fileName = posixRelative(githubDirectory, importer);
+  const expectedTargets = FOCUSED_GITHUB_TEST_IMPORTS.get(fileName);
+  if (expectedTargets
+      && JSON.stringify(sorted(result.targets)) !== JSON.stringify(sorted(expectedTargets))) {
+    result.errors.push('focused GitHub test imports must exactly match its module allowlist');
+  }
+  return result;
 }
 
 function forbiddenWorkflowTarget(target) {
@@ -679,6 +1105,114 @@ test('contract AST guards reject normalized boundary and module-system escape ha
     contractModule('state-v3.test.mjs'),
     "import { validateState } from './nested/../../state/state.mjs';",
   ).errors.join('\n'), /forbidden workflow layer/u);
+});
+
+test('extracted GitHub production modules obey exact AST dependency and export boundaries', () => {
+  assert.deepEqual(
+    sorted(PRODUCTION_GITHUB_IMPORTS.keys()),
+    sorted(PRODUCTION_GITHUB_EXPORTS.keys()),
+  );
+  for (const fileName of sorted(PRODUCTION_GITHUB_IMPORTS.keys())) {
+    const path = githubModule(fileName);
+    assert.equal(statSync(path).isFile(), true, `missing GitHub production module ${fileName}`);
+    assert.deepEqual(
+      validateProductionGitHubSource(path, readFileSync(path, 'utf8')),
+      [],
+      fileName,
+    );
+  }
+});
+
+test('focused GitHub tests directly own exact lower-layer modules', () => {
+  assert.deepEqual(
+    sorted(FOCUSED_GITHUB_TEST_IMPORTS.keys()),
+    sorted(FOCUSED_GITHUB_TEST_OWNERS.keys()),
+  );
+  for (const fileName of sorted(FOCUSED_GITHUB_TEST_IMPORTS.keys())) {
+    const path = githubModule(fileName);
+    assert.equal(statSync(path).isFile(), true, `missing focused GitHub test ${fileName}`);
+    const { errors, targets } = validateFocusedGitHubTestSource(path, readFileSync(path, 'utf8'));
+    assert.deepEqual(errors, [], fileName);
+    assert.ok(
+      targets.includes(githubModule(FOCUSED_GITHUB_TEST_OWNERS.get(fileName))),
+      `${fileName} must directly import its production owner`,
+    );
+  }
+});
+
+test('GitHub AST guards reject dependency, export, and module-system escape hatches', () => {
+  const ciPath = githubModule('evidence/ci.mjs');
+  const rejectedProductionSources = [
+    ["import { validateState } from './nested/../../../state/state.mjs';", /unapproved GitHub dependency/u],
+    ["import { createGitHubReviewWorkflow } from '../github.mjs';", /unapproved GitHub dependency/u],
+    ["import { runCli } from '../cli.mjs';", /unapproved GitHub dependency/u],
+    ["import { loadArchiveFixture } from '../archive/archive-fixture-loader.mjs';", /unapproved GitHub dependency/u],
+    ["import { runHook } from '../../hooks/session-start.mjs';", /unapproved GitHub dependency/u],
+    ["import { createWorktree } from '../../worktree/worktree.mjs';", /unapproved GitHub dependency/u],
+    ["export * from './primitives.mjs';", /export-star is forbidden/u],
+    ["export { httpsUrl } from './primitives.mjs';", /source re-export is forbidden/u],
+    ["const dependency = await import('./primitives.mjs');", /dynamic import is forbidden/u],
+    ["const dependency = require('./primitives.mjs');", /CommonJS require is forbidden/u],
+    ["import { createRequire } from 'node:module';", /createRequire is forbidden/u],
+    ["import dependency from './primitives.mjs';", /default import is forbidden/u],
+    ["import * as dependency from './primitives.mjs';", /namespace import is forbidden/u],
+    ["import './primitives.mjs';", /side-effect import is forbidden/u],
+    ["import { httpsUrl as url } from './primitives.mjs';", /do not match the exact/u],
+    ["export default function leaked() {}", /default export is forbidden/u],
+    ["export const leaked = true;", /unexpected GitHub module export leaked/u],
+  ];
+  for (const [source, expected] of rejectedProductionSources) {
+    assert.match(inspectProductionGitHubSource(ciPath, source).join('\n'), expected, source);
+  }
+
+  const duplicatedActorDependency = [
+    "import { GitHubWorkflowError } from '../errors.mjs';",
+    "import { GitHubWorkflowError } from '../errors.mjs';",
+    'export const CANONICAL_LOGIN = "login";',
+    'export const CANONICAL_URL = "url";',
+    'export function actorObservation() {}',
+    'export function isCanonicalActor() {}',
+    'export function isViewerActor() {}',
+  ].join('\n');
+  assert.match(
+    validateProductionGitHubSource(
+      githubModule('evidence/actors.mjs'), duplicatedActorDependency,
+    ).join('\n'),
+    /import targets must exactly match/u,
+  );
+
+  for (const [importer, source] of [
+    [githubModule('graphql/client.mjs'), [
+      "import { GitHubWorkflowError } from '../errors.mjs';",
+      "import { OPERATIONS } from './operations.mjs';",
+    ].join('\n')],
+    [githubModule('evidence/review-response.mjs'), [
+      "import { createHash } from 'node:crypto';",
+      "import { GitHubWorkflowError } from '../errors.mjs';",
+      "import { actorObservation, isCanonicalActor } from './actors.mjs';",
+    ].join('\n')],
+    [githubModule('adapters/gh-cli.mjs'), [
+      "import { execFileSync } from 'node:child_process';",
+      "import { GitHubWorkflowError } from '../errors.mjs';",
+    ].join('\n')],
+    [githubModule('adapters/state.mjs'), [
+      `import { ${STATE_ADAPTER_OPERATIONS.join(', ')} } from '../../state/state.mjs';`,
+    ].join('\n')],
+  ]) assert.deepEqual(inspectProductionGitHubSource(importer, source), []);
+
+  const focusedPath = githubModule('evidence/ci.test.mjs');
+  assert.match(inspectFocusedGitHubTestSource(
+    focusedPath,
+    "import { createGitHubReviewWorkflow } from '../github.mjs';",
+  ).errors.join('\n'), /unapproved dependency/u);
+  assert.match(inspectFocusedGitHubTestSource(
+    focusedPath,
+    "import { validateState } from './nested/../../../state/state.mjs';",
+  ).errors.join('\n'), /unapproved dependency/u);
+  assert.match(inspectFocusedGitHubTestSource(
+    focusedPath,
+    "const dependency = await import('./ci.mjs');",
+  ).errors.join('\n'), /may not use dynamic import/u);
 });
 
 test('hooks and npm façades target only canonical skill entrypoints', () => {
