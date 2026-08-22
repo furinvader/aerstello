@@ -64,17 +64,25 @@ const EXPECTED_CANONICAL_FILES = [
   'scripts/github/adapters/git.test.mjs',
   'scripts/github/adapters/state.mjs',
   'scripts/github/adapters/state.test.mjs',
+  'scripts/github/archive/adoption.mjs',
   'scripts/github/archive/adoption.test.mjs',
   'scripts/github/archive/archive-fixture-loader.mjs',
+  'scripts/github/archive/evidence.mjs',
+  'scripts/github/archive/evidence.test.mjs',
   'scripts/github/archive/fixture-integrity.test.mjs',
   'scripts/github/archive/fixtures/pr-35-2026-08-19T16-31-55-612Z/events.ndjson',
   'scripts/github/archive/fixtures/pr-35-2026-08-19T16-31-55-612Z/state.json',
   'scripts/github/archive/fixtures/pr-35-2026-08-20T09-39-32-610Z/events.ndjson',
   'scripts/github/archive/fixtures/pr-35-2026-08-20T09-39-32-610Z/state.json',
+  'scripts/github/archive/lineage.mjs',
+  'scripts/github/archive/lineage.test.mjs',
+  'scripts/github/archive/store.mjs',
   'scripts/github/archive/store.test.mjs',
   'scripts/github/ci.test.mjs',
   'scripts/github/cli.mjs',
   'scripts/github/cli.test.mjs',
+  'scripts/github/create-workflow.mjs',
+  'scripts/github/create-workflow.test.mjs',
   'scripts/github/errors.mjs',
   'scripts/github/evidence/actors.mjs',
   'scripts/github/evidence/actors.test.mjs',
@@ -94,14 +102,48 @@ const EXPECTED_CANONICAL_FILES = [
   'scripts/github/live-evidence.test.mjs',
   'scripts/github/mutation-journal.mjs',
   'scripts/github/mutation-journal.test.mjs',
+  'scripts/github/mutation-readiness.mjs',
+  'scripts/github/mutation-readiness.test.mjs',
+  'scripts/github/mutations/draft-review-request.mjs',
+  'scripts/github/mutations/draft-review-request.test.mjs',
+  'scripts/github/mutations/thread-reply-resolve.mjs',
+  'scripts/github/mutations/thread-reply-resolve.test.mjs',
   'scripts/github/recovery.test.mjs',
   'scripts/github/request.test.mjs',
   'scripts/github/review-response.test.mjs',
+  'scripts/github/snapshot.mjs',
+  'scripts/github/snapshot.test.mjs',
   'scripts/github/status-renderer.mjs',
   'scripts/github/status-renderer.test.mjs',
   'scripts/github/test-support/workflow-harness.mjs',
   'scripts/github/threads.test.mjs',
+  'scripts/github/threads/canonical-roots.mjs',
+  'scripts/github/threads/canonical-roots.test.mjs',
+  'scripts/github/threads/proof.mjs',
+  'scripts/github/threads/proof.test.mjs',
+  'scripts/github/threads/recovery.mjs',
+  'scripts/github/threads/recovery.test.mjs',
+  'scripts/github/threads/replies.mjs',
+  'scripts/github/threads/replies.test.mjs',
   'scripts/github/workflow.test.mjs',
+  'scripts/github/workflow/advance.mjs',
+  'scripts/github/workflow/advance.test.mjs',
+  'scripts/github/workflow/collect-ci.mjs',
+  'scripts/github/workflow/collect-ci.test.mjs',
+  'scripts/github/workflow/collect.mjs',
+  'scripts/github/workflow/collect.test.mjs',
+  'scripts/github/workflow/complete.mjs',
+  'scripts/github/workflow/complete.test.mjs',
+  'scripts/github/workflow/context.mjs',
+  'scripts/github/workflow/context.test.mjs',
+  'scripts/github/workflow/refresh-threads.mjs',
+  'scripts/github/workflow/refresh-threads.test.mjs',
+  'scripts/github/workflow/request.mjs',
+  'scripts/github/workflow/request.test.mjs',
+  'scripts/github/workflow/resolve.mjs',
+  'scripts/github/workflow/resolve.test.mjs',
+  'scripts/github/workflow/status.mjs',
+  'scripts/github/workflow/status.test.mjs',
   'scripts/hooks/hooks.test.mjs',
   'scripts/hooks/pre-compact.mjs',
   'scripts/hooks/session-start.mjs',
@@ -454,50 +496,236 @@ const PRODUCTION_GITHUB_IMPORTS = new Map([
   ['adapters/state.mjs', new Map([
     [join(scriptsDirectory, 'state', 'state.mjs'), STATE_ADAPTER_OPERATIONS],
   ])],
-  ['github.mjs', new Map([
-    ['node:crypto', ['createHash']],
-    ['node:util', ['isDeepStrictEqual']],
-    [contractModule('contracts.mjs'), [
-      'buildStaleDiscoveryDisposition', 'reviewRequestGate', 'reviewRequestUsage',
-      'validatePrReviewState',
-    ]],
-    [join(scriptsDirectory, 'state', 'state.mjs'), ['checkpointArchiveTaskCompletion']],
-    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
-    [githubModule('evidence/actors.mjs'), [
-      'CANONICAL_LOGIN', 'CANONICAL_URL', 'actorObservation', 'isCanonicalActor', 'isViewerActor',
-    ]],
-    [githubModule('evidence/ci.mjs'), [
-      'FULL_VALIDATION_CHECK', 'FULL_VALIDATION_WORKFLOW', 'FULL_VALIDATION_WORKFLOW_PATH',
-      'GITHUB_ACTIONS_APP', 'ciEvidenceFromRollup',
-    ]],
-    [githubModule('evidence/primitives.mjs'), ['httpsUrl']],
-    [githubModule('evidence/review-response.mjs'), [
-      'canonicalJson', 'classifyPendingReviewResponse', 'classifyReviewSubmission',
-      'classifyStructuralIssueComments',
-    ]],
-    [githubModule('graphql/client.mjs'), ['MAX_NODES', 'executeMutation']],
-    [githubModule('graphql/operations.mjs'), ['PAGE_SIZE']],
+  ['snapshot.mjs', new Map([
+    [githubModule('evidence/actors.mjs'), ['isCanonicalActor']],
     [githubModule('graphql/pull-request-reader.mjs'), [
       importedAs('readLiveSnapshot', 'readPullRequestLiveSnapshot'),
-      'readPullRequestChecks', 'readPullRequestMetadata', 'readRequestReactions',
-      'readReviewThreads', 'readReviews', 'readThreadComments', 'readTopLevelComments',
     ]],
   ])],
-  ['cli.mjs', new Map([
+  ['mutation-readiness.mjs', new Map([
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+  ])],
+  ['threads/canonical-roots.mjs', new Map([
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+  ])],
+  ['threads/replies.mjs', new Map([
+    ['node:crypto', ['createHash']],
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+    [githubModule('evidence/actors.mjs'), ['isViewerActor']],
+  ])],
+  ['mutations/thread-reply-resolve.mjs', new Map([
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+    [githubModule('graphql/client.mjs'), ['executeMutation']],
+    [githubModule('mutation-readiness.mjs'), ['assertMutationReady']],
+    [githubModule('snapshot.mjs'), ['readLiveSnapshot']],
+    [githubModule('threads/replies.mjs'), ['deterministicReply', 'exactRepliesFor', 'intentFor']],
+  ])],
+  ['threads/recovery.mjs', new Map([
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+    [githubModule('evidence/actors.mjs'), ['isViewerActor']],
+    [githubModule('mutations/thread-reply-resolve.mjs'), ['lookupThreadMutationIntent']],
+    [githubModule('threads/replies.mjs'), [
+      'AGGREGATE_REPLY_HEADER_PATTERN', 'replyMarker', 'replyTaskLine',
+    ]],
+  ])],
+  ['threads/proof.mjs', new Map([
+    ['node:crypto', ['createHash']],
+    ['node:util', ['isDeepStrictEqual']],
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+    [githubModule('evidence/actors.mjs'), ['isViewerActor']],
+    [githubModule('threads/canonical-roots.mjs'), ['buildCanonicalRootPlan', 'dispositionForTask']],
+    [githubModule('threads/recovery.mjs'), ['assertPriorHeadRecoveryLive']],
+    [githubModule('threads/replies.mjs'), [
+      'AGGREGATE_REPLY_HEADER_PATTERN', 'FULL_GIT_SHA_PATTERN',
+      'aggregateHistoricalReplyBodyIsAdmissible', 'exactRepliesFor', 'replyMarker',
+    ]],
+  ])],
+  ['archive/store.mjs', new Map([
     ['node:fs', [
       importedAs('constants', 'fsConstants'), 'closeSync', 'fstatSync', 'lstatSync', 'openSync',
       'readdirSync', 'readFileSync', 'statSync',
     ]],
     ['node:path', ['join']],
-    ['node:url', ['pathToFileURL']],
     ['node:worker_threads', ['isMainThread']],
-    [join(repositoryDirectory, 'scripts', 'lib', 'cli.mjs'), ['UsageError', 'parseOptions', 'writeJson']],
     [join(scriptsDirectory, 'state', 'state.mjs'), ['reviewRoot']],
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+  ])],
+  ['archive/evidence.mjs', new Map([
+    ['node:crypto', ['createHash']],
+    ['node:util', ['isDeepStrictEqual']],
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+    [githubModule('evidence/actors.mjs'), ['isCanonicalActor', 'isViewerActor']],
+    [githubModule('evidence/primitives.mjs'), ['httpsUrl']],
+    [githubModule('evidence/review-response.mjs'), ['canonicalJson']],
+    [githubModule('graphql/client.mjs'), ['MAX_NODES']],
+    [githubModule('threads/replies.mjs'), ['deterministicReply', 'intentFor']],
+  ])],
+  ['archive/lineage.mjs', new Map([
+    ['node:crypto', ['createHash']],
+    ['node:util', ['isDeepStrictEqual']],
+    [contractModule('contracts.mjs'), ['validatePrReviewState']],
+    [githubModule('archive/evidence.mjs'), [
+      'archiveBatchProofProjection', 'archiveContentFingerprint', 'assertArchiveEventList',
+      'assertArchiveInventory', 'assertArchiveReplyBody', 'assertTerminalArchive', 'parsedTime',
+      'projectedArchivedTask', 'stableCommentEvidence', 'validateArchiveBatchLive',
+    ]],
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+    [githubModule('evidence/review-response.mjs'), ['canonicalJson']],
+    [githubModule('graphql/client.mjs'), ['MAX_NODES']],
+    [githubModule('threads/replies.mjs'), ['aggregateHistoricalReplyBodyIsAdmissible', 'intentFor']],
+  ])],
+  ['archive/adoption.mjs', new Map([
+    ['node:crypto', ['createHash']],
+    ['node:util', ['isDeepStrictEqual']],
+    [githubModule('archive/lineage.mjs'), ['selectArchiveForBatch', 'validateArchiveBatchLineage']],
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+    [githubModule('evidence/review-response.mjs'), ['canonicalJson']],
+    [githubModule('threads/canonical-roots.mjs'), ['buildCanonicalRootPlan', 'canonicalRootsForTask']],
+    [githubModule('threads/proof.mjs'), ['buildThreadProof']],
+  ])],
+  ['mutations/draft-review-request.mjs', new Map([
+    [contractModule('contracts.mjs'), ['reviewRequestGate']],
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+    [githubModule('evidence/actors.mjs'), ['actorObservation', 'isViewerActor']],
+    [githubModule('graphql/client.mjs'), ['MAX_NODES', 'executeMutation']],
+    [githubModule('mutation-readiness.mjs'), ['assertMutationReady', 'assertPullRequestReady']],
+    [githubModule('snapshot.mjs'), ['readLiveSnapshot']],
+    [githubModule('threads/proof.mjs'), ['assertLiveThreadProof']],
+    [githubModule('threads/replies.mjs'), ['intentFor']],
+  ])],
+  ['workflow/context.mjs', new Map([
+    [contractModule('contracts.mjs'), ['validatePrReviewState']],
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+    [githubModule('mutation-readiness.mjs'), ['assertMutationReady']],
+  ])],
+  ['workflow/refresh-threads.mjs', new Map([
+    [contractModule('contracts.mjs'), ['buildStaleDiscoveryDisposition', 'reviewRequestUsage']],
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+    [githubModule('evidence/review-response.mjs'), ['classifyPendingReviewResponse']],
+    [githubModule('mutation-readiness.mjs'), ['assertMutationReady']],
+    [githubModule('mutations/draft-review-request.mjs'), ['assertRecordedRequestComment']],
+    [githubModule('snapshot.mjs'), ['readLiveSnapshot']],
+    [githubModule('threads/canonical-roots.mjs'), ['buildCanonicalRootPlan']],
+  ])],
+  ['workflow/status.mjs', new Map([
+    [contractModule('contracts.mjs'), ['reviewRequestUsage']],
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+    [githubModule('evidence/ci.mjs'), ['ciEvidenceFromRollup']],
+    [githubModule('evidence/review-response.mjs'), ['classifyPendingReviewResponse']],
+    [githubModule('graphql/pull-request-reader.mjs'), ['readPullRequestChecks']],
+    [githubModule('mutation-readiness.mjs'), ['assertMutationReady']],
+    [githubModule('mutations/draft-review-request.mjs'), ['assertRecordedRequestComment']],
+    [githubModule('snapshot.mjs'), ['readLiveSnapshot']],
+    [githubModule('workflow/refresh-threads.mjs'), ['tasklessPendingReviewHeadDriftRefreshAllowed']],
+  ])],
+  ['workflow/request.mjs', new Map([
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+    [githubModule('mutation-readiness.mjs'), ['assertMutationReady']],
+    [githubModule('mutations/draft-review-request.mjs'), ['lookupOptionalMutationJournalIntent']],
+    [githubModule('snapshot.mjs'), ['readLiveSnapshot']],
+  ])],
+  ['workflow/collect.mjs', new Map([
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+    [githubModule('evidence/review-response.mjs'), ['classifyPendingReviewResponse']],
+    [githubModule('mutation-readiness.mjs'), ['assertMutationReady']],
+    [githubModule('mutations/draft-review-request.mjs'), [
+      'assertRecordedRequestComment', 'requestAnchorObservation',
+    ]],
+    [githubModule('snapshot.mjs'), ['readLiveSnapshot']],
+    [githubModule('workflow/refresh-threads.mjs'), ['samePendingResponseObservation']],
+  ])],
+  ['workflow/resolve.mjs', new Map([
+    ['node:util', ['isDeepStrictEqual']],
+    [join(scriptsDirectory, 'state', 'state.mjs'), ['checkpointArchiveTaskCompletion']],
+    [githubModule('archive/adoption.mjs'), [
+      'adoptArchiveBatch', 'archiveAdoptionVerifierBootstrapPlan', 'archiveBatchAdoptionReady',
+    ]],
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+    [githubModule('graphql/client.mjs'), ['executeMutation']],
+    [githubModule('mutation-readiness.mjs'), ['assertMutationReady']],
+    [githubModule('mutations/thread-reply-resolve.mjs'), [
+      'lookupThreadMutationIntent', 'postThreadReply', 'resolveThread',
+    ]],
+    [githubModule('snapshot.mjs'), ['readLiveSnapshot']],
+    [githubModule('threads/canonical-roots.mjs'), ['buildCanonicalRootPlan']],
+    [githubModule('threads/proof.mjs'), [
+      'assertExistingThreadProof', 'assertLiveThreadProof', 'assertRecordedThreadsLive',
+      'buildThreadProof',
+    ]],
+    [githubModule('threads/recovery.mjs'), [
+      'assertPriorHeadRecoveryLive', 'journaledPriorHeadRecovery',
+    ]],
+    [githubModule('threads/replies.mjs'), ['exactRepliesFor']],
+  ])],
+  ['workflow/collect-ci.mjs', new Map([
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+    [githubModule('evidence/ci.mjs'), ['ciEvidenceFromRollup']],
+    [githubModule('graphql/pull-request-reader.mjs'), ['readPullRequestChecks', 'readPullRequestMetadata']],
+    [githubModule('mutation-readiness.mjs'), ['assertPullRequestReady']],
+  ])],
+  ['workflow/complete.mjs', new Map([
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+    [githubModule('evidence/actors.mjs'), ['isCanonicalActor']],
+    [githubModule('evidence/ci.mjs'), ['ciEvidenceFromRollup']],
+    [githubModule('evidence/review-response.mjs'), [
+      'classifyPendingReviewResponse', 'classifyReviewSubmission', 'classifyStructuralIssueComments',
+    ]],
+    [githubModule('graphql/pull-request-reader.mjs'), ['readPullRequestChecks']],
+    [githubModule('mutation-readiness.mjs'), ['assertMutationReady']],
+    [githubModule('mutations/draft-review-request.mjs'), ['assertRecordedRequestComment', 'sameTimestamp']],
+    [githubModule('snapshot.mjs'), ['readLiveSnapshot']],
+    [githubModule('threads/proof.mjs'), ['assertLiveThreadProof']],
+    [githubModule('workflow/collect-ci.mjs'), ['sameCiEvidence']],
+    [githubModule('workflow/refresh-threads.mjs'), ['samePendingResponseObservation']],
+  ])],
+  ['workflow/advance.mjs', new Map([
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+    [githubModule('evidence/ci.mjs'), ['ciEvidenceFromRollup']],
+    [githubModule('evidence/review-response.mjs'), ['classifyPendingReviewResponse']],
+    [githubModule('graphql/pull-request-reader.mjs'), ['readPullRequestChecks']],
+    [githubModule('mutation-readiness.mjs'), ['assertMutationReady', 'assertPullRequestReady']],
+    [githubModule('mutations/draft-review-request.mjs'), ['assertRecordedRequestComment']],
+    [githubModule('snapshot.mjs'), ['readLiveSnapshot']],
+    [githubModule('threads/proof.mjs'), ['assertLiveThreadProof']],
+    [githubModule('workflow/complete.mjs'), ['isTransientCiError']],
+    [githubModule('workflow/refresh-threads.mjs'), ['samePendingResponseObservation']],
+  ])],
+  ['create-workflow.mjs', new Map([
+    [githubModule('mutations/draft-review-request.mjs'), ['createRequestReviewUnlocked']],
+    [githubModule('workflow/advance.mjs'), ['createAdvanceUseCase']],
+    [githubModule('workflow/collect-ci.mjs'), ['createCollectCiUseCase']],
+    [githubModule('workflow/collect.mjs'), ['createCollectUseCase']],
+    [githubModule('workflow/complete.mjs'), ['createCompletionUseCases']],
+    [githubModule('workflow/context.mjs'), ['createWorkflowContext']],
+    [githubModule('workflow/refresh-threads.mjs'), ['createRefreshThreadsUseCase']],
+    [githubModule('workflow/request.mjs'), ['createRequestUseCase']],
+    [githubModule('workflow/resolve.mjs'), ['createResolveUseCases']],
+    [githubModule('workflow/status.mjs'), ['createStatusUseCase']],
+  ])],
+  ['github.mjs', new Map([
+    [githubModule('create-workflow.mjs'), ['createGitHubReviewWorkflow']],
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+    [githubModule('evidence/actors.mjs'), ['CANONICAL_LOGIN', 'CANONICAL_URL']],
+    [githubModule('evidence/ci.mjs'), [
+      'FULL_VALIDATION_CHECK', 'FULL_VALIDATION_WORKFLOW', 'FULL_VALIDATION_WORKFLOW_PATH',
+      'GITHUB_ACTIONS_APP',
+    ]],
+    [githubModule('graphql/operations.mjs'), ['PAGE_SIZE']],
+    [githubModule('graphql/pull-request-reader.mjs'), [
+      'readPullRequestChecks', 'readPullRequestMetadata', 'readRequestReactions',
+      'readReviewThreads', 'readReviews', 'readThreadComments', 'readTopLevelComments',
+    ]],
+    [githubModule('mutations/draft-review-request.mjs'), ['REQUEST_BODY']],
+  ])],
+  ['cli.mjs', new Map([
+    ['node:url', ['pathToFileURL']],
+    [join(repositoryDirectory, 'scripts', 'lib', 'cli.mjs'), ['UsageError', 'parseOptions', 'writeJson']],
     [githubModule('adapters/gh-cli.mjs'), ['buildGhGraphqlArgs', 'createDefaultGitHubClient']],
     [githubModule('adapters/git.mjs'), ['createDefaultGitAdapter']],
     [githubModule('adapters/state.mjs'), ['createDefaultStateAdapter']],
+    [githubModule('archive/store.mjs'), ['createDefaultArchiveStore', 'terminateOnFatalArchiveCwd']],
+    [githubModule('create-workflow.mjs'), ['createGitHubReviewWorkflow']],
     [githubModule('errors.mjs'), ['GitHubWorkflowError']],
-    [githubModule('github.mjs'), ['createGitHubReviewWorkflow']],
     [githubModule('mutation-journal.mjs'), ['createDefaultMutationJournal']],
     [githubModule('status-renderer.mjs'), ['renderHumanStatus']],
   ])],
@@ -532,6 +760,88 @@ const PRODUCTION_GITHUB_EXPORTS = new Map([
   ['adapters/gh-cli.mjs', ['buildGhGraphqlArgs', 'createDefaultGitHubClient']],
   ['adapters/git.mjs', ['createDefaultGitAdapter']],
   ['adapters/state.mjs', ['createDefaultStateAdapter']],
+  ['snapshot.mjs', ['readLiveSnapshot']],
+  ['mutation-readiness.mjs', ['assertMutationReady', 'assertPullRequestReady']],
+  ['threads/canonical-roots.mjs', [
+    'buildCanonicalRootPlan', 'canonicalRootsForTask', 'dispositionForTask',
+  ]],
+  ['threads/replies.mjs', [
+    'AGGREGATE_REPLY_HEADER_PATTERN', 'FULL_GIT_SHA_PATTERN', 'aggregateHistoricalReplyBody',
+    'aggregateHistoricalReplyBodyIsAdmissible', 'deterministicReply', 'exactRepliesFor',
+    'intentFor', 'operationToken', 'replyMarker', 'replyTaskLine',
+  ]],
+  ['mutations/thread-reply-resolve.mjs', [
+    'journalThreadMutationIntent', 'lookupThreadMutationIntent', 'postThreadReply',
+    'resolveThread', 'threadOperationId',
+  ]],
+  ['threads/recovery.mjs', [
+    'assertPriorHeadRecoveryLive', 'completedThreadlessRecoveryReady',
+    'journaledPriorHeadRecovery', 'priorHeadRecoveryCandidate',
+  ]],
+  ['threads/proof.mjs', [
+    'assertExistingThreadProof', 'assertLiveThreadProof', 'assertRecordedReply',
+    'assertRecordedThreadsLive', 'buildThreadProof',
+  ]],
+  ['archive/store.mjs', ['createDefaultArchiveStore', 'terminateOnFatalArchiveCwd']],
+  ['archive/evidence.mjs', [
+    'archiveBatchProofProjection', 'archiveContentFingerprint', 'archiveIntent',
+    'assertArchiveEventList', 'assertArchiveInventory', 'assertArchiveReplyBody',
+    'assertTerminalArchive', 'hasExactKeys', 'parsedTime', 'projectedArchivedTask',
+    'stableCommentEvidence', 'validateArchiveBatchLive',
+  ]],
+  ['archive/lineage.mjs', [
+    'activeArchiveCarrierKind', 'aggregateAncestryRelations', 'aggregateArchiveIntentFootprint',
+    'aggregateAuthorityByRoot', 'aggregateCanonicalRootIndex', 'aggregateFullAuthorityProjection',
+    'aggregateHistoricalProjection', 'aggregateInventoryFingerprint', 'aggregateProofCore',
+    'aggregateSelectedThreadIds', 'archiveLineageFingerprint',
+    'archiveReferencesAnchoredHistoricalTasks', 'archiveReferencesSelectedRoots',
+    'archivedIntentSummaryReference', 'archivedOperationReference', 'assertAggregateReplayCarrier',
+    'assertCompleteSelectedArchiveIntentFootprint', 'assertHistoricalCarrierSlice',
+    'assertReplayArchiveBounds', 'boundedAggregateSelectedRows', 'eventCarriesSelectedArchiveIntent',
+    'exactlyMatchesArchiveIntentCorrelation', 'indexedAggregateArchiveIntentFootprints',
+    'normalizedAggregateRootAuthority', 'normalizedArchiveOriginAuthority',
+    'selectArchiveForBatch', 'selectLegacyArchiveForBatch', 'selectedArchiveIntentCorrelations',
+    'selectedArchiveIntentFootprint', 'selectedCarrierProofRows', 'singleRootProjection',
+    'taskCanonicalRootIds', 'unambiguousSelectedArchiveIntentRoot',
+    'validateAggregateArchiveLineage', 'validateAggregateRootOrigin',
+    'validateArchiveBatchLineage', 'validatedAggregateCarrier',
+  ]],
+  ['archive/adoption.mjs', [
+    'adoptArchiveBatch', 'archiveAdoptionEvidenceMap', 'archiveAdoptionVerifierBootstrapPlan',
+    'archiveBatchAdoptionReady', 'archiveBootstrapScaffoldIsPristine',
+    'archiveImportCompletionEnvelope', 'immutableSourcesDeclareMultiRootArchiveBatch',
+    'prepareArchiveBatchAdoption', 'verificationProofIsPristine',
+  ]],
+  ['mutations/draft-review-request.mjs', [
+    'REQUEST_BODY', 'assertRecordedRequestComment', 'createRequestReviewUnlocked',
+    'exactViewerRequestCandidates', 'journalRequestIntent', 'lookupOptionalMutationJournalIntent',
+    'lookupRequestJournalIntent', 'parsedTime', 'requestAnchorObservation',
+    'requestRecoveryAtOrAfter', 'sameTimestamp',
+  ]],
+  ['workflow/context.mjs', [
+    'createWorkflowContext', 'escalationFor', 'sameEscalationIntent', 'validateWorkflowState',
+  ]],
+  ['workflow/refresh-threads.mjs', [
+    'createRefreshThreadsUseCase', 'dispositionForPendingResponse',
+    'samePendingResponseObservation', 'tasklessPendingReviewHeadDriftRefreshAllowed',
+    'tasklessReviewHeadDriftRefreshAllowed',
+  ]],
+  ['workflow/status.mjs', [
+    'codexReviewStatus', 'createStatusUseCase', 'reviewObservation',
+    'staleDiscoveryNextAction', 'staleDiscoveryStatus',
+  ]],
+  ['workflow/request.mjs', ['createRequestUseCase']],
+  ['workflow/collect.mjs', ['createCollectUseCase', 'sameRequestBoundOutcome']],
+  ['workflow/resolve.mjs', [
+    'archiveTaskCheckpoint', 'createResolveUseCases', 'normalizeVerifyResolveTaskIds',
+    'taskIsEligibleForVerifyResolve',
+  ]],
+  ['workflow/collect-ci.mjs', ['createCollectCiUseCase', 'sameCiEvidence']],
+  ['workflow/complete.mjs', [
+    'createCompleteUseCase', 'createCompletionUseCases', 'isTransientCiError',
+  ]],
+  ['workflow/advance.mjs', ['createAdvanceUseCase']],
+  ['create-workflow.mjs', ['createGitHubReviewWorkflow']],
   ['github.mjs', [
     'GitHubWorkflowError', 'createGitHubReviewWorkflow', 'githubReviewConstants',
     'readPullRequestChecks', 'readPullRequestMetadata', 'readRequestReactions', 'readReviewThreads',
@@ -582,6 +892,94 @@ const FOCUSED_GITHUB_TEST_IMPORTS = new Map([
   ['adapters/state.test.mjs', [
     'node:assert/strict', 'node:test', githubModule('adapters/state.mjs'),
   ]],
+  ['snapshot.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('errors.mjs'), githubModule('snapshot.mjs'),
+  ]],
+  ['mutation-readiness.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('errors.mjs'),
+    githubModule('mutation-readiness.mjs'),
+  ]],
+  ['threads/canonical-roots.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('threads/canonical-roots.mjs'),
+  ]],
+  ['threads/replies.test.mjs', [
+    'node:assert/strict', 'node:crypto', 'node:test', githubModule('threads/replies.mjs'),
+  ]],
+  ['mutations/thread-reply-resolve.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('threads/replies.mjs'),
+    githubModule('mutations/thread-reply-resolve.mjs'),
+  ]],
+  ['threads/proof.test.mjs', [
+    'node:assert/strict', 'node:crypto', 'node:test', githubModule('threads/proof.mjs'),
+    githubModule('threads/replies.mjs'),
+  ]],
+  ['threads/recovery.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('threads/recovery.mjs'),
+    githubModule('threads/replies.mjs'),
+  ]],
+  ['archive/store.test.mjs', [
+    githubModule('archive/store.mjs'), githubModule('test-support/workflow-harness.mjs'),
+  ]],
+  ['archive/evidence.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('archive/evidence.mjs'),
+    githubModule('errors.mjs'), githubModule('test-support/workflow-harness.mjs'),
+  ]],
+  ['archive/lineage.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('archive/lineage.mjs'),
+    githubModule('snapshot.mjs'), githubModule('test-support/workflow-harness.mjs'),
+    githubModule('threads/canonical-roots.mjs'),
+  ]],
+  ['archive/adoption.test.mjs', [
+    githubModule('archive/adoption.mjs'), githubModule('snapshot.mjs'),
+    githubModule('test-support/workflow-harness.mjs'), githubModule('threads/canonical-roots.mjs'),
+  ]],
+  ['mutations/draft-review-request.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('mutations/draft-review-request.mjs'),
+    githubModule('test-support/workflow-harness.mjs'), githubModule('workflow/context.mjs'),
+  ]],
+  ['workflow/context.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('errors.mjs'),
+    githubModule('test-support/workflow-harness.mjs'), githubModule('workflow/context.mjs'),
+  ]],
+  ['workflow/status.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('test-support/workflow-harness.mjs'),
+    githubModule('workflow/context.mjs'), githubModule('workflow/status.mjs'),
+  ]],
+  ['workflow/refresh-threads.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('test-support/workflow-harness.mjs'),
+    githubModule('workflow/context.mjs'), githubModule('workflow/refresh-threads.mjs'),
+  ]],
+  ['workflow/request.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('mutations/draft-review-request.mjs'),
+    githubModule('test-support/workflow-harness.mjs'), githubModule('workflow/context.mjs'),
+    githubModule('workflow/request.mjs'),
+  ]],
+  ['workflow/collect.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('test-support/workflow-harness.mjs'),
+    githubModule('workflow/collect.mjs'), githubModule('workflow/context.mjs'),
+  ]],
+  ['workflow/resolve.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('test-support/workflow-harness.mjs'),
+    githubModule('workflow/context.mjs'), githubModule('workflow/resolve.mjs'),
+  ]],
+  ['workflow/collect-ci.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('test-support/workflow-harness.mjs'),
+    githubModule('workflow/collect-ci.mjs'), githubModule('workflow/context.mjs'),
+  ]],
+  ['workflow/complete.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('test-support/workflow-harness.mjs'),
+    githubModule('workflow/complete.mjs'), githubModule('workflow/context.mjs'),
+  ]],
+  ['workflow/advance.test.mjs', [
+    'node:assert/strict', 'node:test', githubModule('test-support/workflow-harness.mjs'),
+    githubModule('workflow/advance.mjs'), githubModule('workflow/collect-ci.mjs'),
+    githubModule('workflow/collect.mjs'), githubModule('workflow/complete.mjs'),
+    githubModule('workflow/context.mjs'),
+  ]],
+  ['create-workflow.test.mjs', [
+    'node:assert/strict', 'node:fs', 'node:test', githubModule('create-workflow.mjs'),
+    githubModule('errors.mjs'),
+  ]],
 ]);
 
 const FOCUSED_GITHUB_TEST_OWNERS = new Map([
@@ -596,6 +994,28 @@ const FOCUSED_GITHUB_TEST_OWNERS = new Map([
   ['adapters/gh-cli.test.mjs', 'adapters/gh-cli.mjs'],
   ['adapters/git.test.mjs', 'adapters/git.mjs'],
   ['adapters/state.test.mjs', 'adapters/state.mjs'],
+  ['snapshot.test.mjs', 'snapshot.mjs'],
+  ['mutation-readiness.test.mjs', 'mutation-readiness.mjs'],
+  ['threads/canonical-roots.test.mjs', 'threads/canonical-roots.mjs'],
+  ['threads/replies.test.mjs', 'threads/replies.mjs'],
+  ['mutations/thread-reply-resolve.test.mjs', 'mutations/thread-reply-resolve.mjs'],
+  ['threads/proof.test.mjs', 'threads/proof.mjs'],
+  ['threads/recovery.test.mjs', 'threads/recovery.mjs'],
+  ['archive/store.test.mjs', 'archive/store.mjs'],
+  ['archive/evidence.test.mjs', 'archive/evidence.mjs'],
+  ['archive/lineage.test.mjs', 'archive/lineage.mjs'],
+  ['archive/adoption.test.mjs', 'archive/adoption.mjs'],
+  ['mutations/draft-review-request.test.mjs', 'mutations/draft-review-request.mjs'],
+  ['workflow/context.test.mjs', 'workflow/context.mjs'],
+  ['workflow/status.test.mjs', 'workflow/status.mjs'],
+  ['workflow/refresh-threads.test.mjs', 'workflow/refresh-threads.mjs'],
+  ['workflow/request.test.mjs', 'workflow/request.mjs'],
+  ['workflow/collect.test.mjs', 'workflow/collect.mjs'],
+  ['workflow/resolve.test.mjs', 'workflow/resolve.mjs'],
+  ['workflow/collect-ci.test.mjs', 'workflow/collect-ci.mjs'],
+  ['workflow/complete.test.mjs', 'workflow/complete.mjs'],
+  ['workflow/advance.test.mjs', 'workflow/advance.mjs'],
+  ['create-workflow.test.mjs', 'create-workflow.mjs'],
 ]);
 
 function normalizedModuleTarget(importer, specifier) {
@@ -869,6 +1289,44 @@ function validateProductionGitHubSource(importer, source) {
   return [...errors, ...exportErrors];
 }
 
+function productionGitHubFiles() {
+  return filesBelow(githubDirectory).filter((path) => path.endsWith('.mjs')
+    && !path.endsWith('.test.mjs')
+    && !path.startsWith('test-support/')
+    && path !== 'archive/archive-fixture-loader.mjs');
+}
+
+function productionGitHubCycle(imports = PRODUCTION_GITHUB_IMPORTS) {
+  const visited = new Set();
+  const active = new Set();
+  const stack = [];
+  function visit(fileName) {
+    if (active.has(fileName)) {
+      const start = stack.indexOf(fileName);
+      return [...stack.slice(start), fileName];
+    }
+    if (visited.has(fileName)) return null;
+    active.add(fileName);
+    stack.push(fileName);
+    for (const target of imports.get(fileName)?.keys() ?? []) {
+      if (typeof target !== 'string' || !target.startsWith(`${githubDirectory}${sep}`)) continue;
+      const dependency = posixRelative(githubDirectory, target);
+      if (!imports.has(dependency)) continue;
+      const cycle = visit(dependency);
+      if (cycle) return cycle;
+    }
+    stack.pop();
+    active.delete(fileName);
+    visited.add(fileName);
+    return null;
+  }
+  for (const fileName of imports.keys()) {
+    const cycle = visit(fileName);
+    if (cycle) return cycle;
+  }
+  return null;
+}
+
 function inspectFocusedGitHubTestSource(importer, source) {
   const errors = [];
   const fileName = posixRelative(githubDirectory, importer);
@@ -1108,10 +1566,14 @@ test('contract AST guards reject normalized boundary and module-system escape ha
 });
 
 test('extracted GitHub production modules obey exact AST dependency and export boundaries', () => {
+  const productionFiles = productionGitHubFiles();
   assert.deepEqual(
     sorted(PRODUCTION_GITHUB_IMPORTS.keys()),
     sorted(PRODUCTION_GITHUB_EXPORTS.keys()),
   );
+  assert.deepEqual(sorted(PRODUCTION_GITHUB_IMPORTS.keys()), productionFiles);
+  assert.deepEqual(sorted(PRODUCTION_GITHUB_EXPORTS.keys()), productionFiles);
+  assert.equal(productionGitHubCycle(), null, 'GitHub production dependency graph must be acyclic');
   for (const fileName of sorted(PRODUCTION_GITHUB_IMPORTS.keys())) {
     const path = githubModule(fileName);
     assert.equal(statSync(path).isFile(), true, `missing GitHub production module ${fileName}`);
@@ -1149,10 +1611,15 @@ test('GitHub AST guards reject dependency, export, and module-system escape hatc
     ["import { loadArchiveFixture } from '../archive/archive-fixture-loader.mjs';", /unapproved GitHub dependency/u],
     ["import { runHook } from '../../hooks/session-start.mjs';", /unapproved GitHub dependency/u],
     ["import { createWorktree } from '../../worktree/worktree.mjs';", /unapproved GitHub dependency/u],
+    ["import { adoptArchiveBatch } from '../archive/adoption.mjs';", /unapproved GitHub dependency/u],
+    ["import { postThreadReply } from '../mutations/thread-reply-resolve.mjs';", /unapproved GitHub dependency/u],
+    ["import { createStatusUseCase } from '../workflow/status.mjs';", /unapproved GitHub dependency/u],
+    ["import { workflow } from '../test-support/workflow-harness.mjs';", /unapproved GitHub dependency/u],
     ["export * from './primitives.mjs';", /export-star is forbidden/u],
     ["export { httpsUrl } from './primitives.mjs';", /source re-export is forbidden/u],
     ["const dependency = await import('./primitives.mjs');", /dynamic import is forbidden/u],
     ["const dependency = require('./primitives.mjs');", /CommonJS require is forbidden/u],
+    ["import dependency = require('./primitives.mjs');", /CommonJS import assignment is forbidden/u],
     ["import { createRequire } from 'node:module';", /createRequire is forbidden/u],
     ["import dependency from './primitives.mjs';", /default import is forbidden/u],
     ["import * as dependency from './primitives.mjs';", /namespace import is forbidden/u],
@@ -1180,6 +1647,12 @@ test('GitHub AST guards reject dependency, export, and module-system escape hatc
     ).join('\n'),
     /import targets must exactly match/u,
   );
+
+  const cyclicImports = new Map([
+    ['one.mjs', new Map([[githubModule('two.mjs'), ['two']]])],
+    ['two.mjs', new Map([[githubModule('one.mjs'), ['one']]])],
+  ]);
+  assert.deepEqual(productionGitHubCycle(cyclicImports), ['one.mjs', 'two.mjs', 'one.mjs']);
 
   for (const [importer, source] of [
     [githubModule('graphql/client.mjs'), [
@@ -1213,6 +1686,22 @@ test('GitHub AST guards reject dependency, export, and module-system escape hatc
     focusedPath,
     "const dependency = await import('./ci.mjs');",
   ).errors.join('\n'), /may not use dynamic import/u);
+  assert.match(inspectFocusedGitHubTestSource(
+    focusedPath,
+    "const dependency = require('./ci.mjs');",
+  ).errors.join('\n'), /may not use require/u);
+  assert.match(inspectFocusedGitHubTestSource(
+    focusedPath,
+    "import { createRequire } from 'node:module';",
+  ).errors.join('\n'), /may not use createRequire/u);
+  assert.match(inspectFocusedGitHubTestSource(
+    focusedPath,
+    "import dependency = require('./ci.mjs');",
+  ).errors.join('\n'), /may not use import assignment/u);
+  assert.match(inspectFocusedGitHubTestSource(
+    focusedPath,
+    "export { ciEvidenceFromRollup } from './ci.mjs';",
+  ).errors.join('\n'), /may not export/u);
 });
 
 test('hooks and npm façades target only canonical skill entrypoints', () => {
