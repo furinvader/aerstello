@@ -33,23 +33,40 @@ import { createRepository, git, writeFiles } from '../../../../../../tests/suppo
 
 import {
   createGitHubReviewWorkflow,
-  GitHubWorkflowError,
-  githubReviewConstants,
-  readTopLevelComments,
-} from '../github.mjs';
+} from '../create-workflow.mjs';
 
-import { withGitHubRequestOwnerLock } from '../../state/state.mjs';
+import { GitHubWorkflowError } from '../errors.mjs';
+
+import { CANONICAL_LOGIN, CANONICAL_URL } from '../evidence/actors.mjs';
+
+import {
+  FULL_VALIDATION_CHECK,
+  FULL_VALIDATION_WORKFLOW,
+  FULL_VALIDATION_WORKFLOW_PATH,
+  GITHUB_ACTIONS_APP,
+} from '../evidence/ci.mjs';
+
+import { PAGE_SIZE } from '../graphql/operations.mjs';
+
+import { readTopLevelComments } from '../graphql/pull-request-reader.mjs';
+
+import { REQUEST_BODY } from '../mutations/draft-review-request.mjs';
 
 import {
   buildGhGraphqlArgs,
-  createDefaultArchiveStore,
-  createDefaultGitAdapter,
   createDefaultGitHubClient,
-  renderHumanStatus,
-  runCli,
+} from '../adapters/gh-cli.mjs';
+
+import { createDefaultGitAdapter } from '../adapters/git.mjs';
+
+import {
+  createDefaultArchiveStore,
   terminateOnFatalArchiveCwd,
-  usage,
-} from '../cli.mjs';
+} from '../archive/store.mjs';
+
+import { renderHumanStatus } from '../status-renderer.mjs';
+
+import { withGitHubRequestOwnerLock } from '../../state/state.mjs';
 
 const HEAD = 'a'.repeat(40);
 
@@ -64,6 +81,11 @@ const SELECTED_TASK_HEAD = '7ea9bbccc60725dcfd0cfefcb0caff742145b8ec';
 const AT = '2026-08-05T00:00:00Z';
 
 const GITHUB_CLI_MODULE_URL = new URL('../cli.mjs', import.meta.url).href;
+
+const githubReviewConstants = {
+  CANONICAL_LOGIN, CANONICAL_URL, REQUEST_BODY, PAGE_SIZE, FULL_VALIDATION_CHECK, GITHUB_ACTIONS_APP,
+  FULL_VALIDATION_WORKFLOW, FULL_VALIDATION_WORKFLOW_PATH,
+};
 
 const BOT = {
   __typename: 'Bot', login: 'chatgpt-codex-connector',
@@ -1287,9 +1309,7 @@ export {
   createDefaultGitAdapter,
   createDefaultGitHubClient,
   renderHumanStatus,
-  runCli,
   terminateOnFatalArchiveCwd,
-  usage,
   HEAD,
   OTHER_HEAD,
   ADVANCED_HEAD,

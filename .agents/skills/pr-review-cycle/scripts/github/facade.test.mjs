@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { GitHubWorkflowError } from './errors.mjs';
+import { createGitHubReviewWorkflow } from './create-workflow.mjs';
 import * as github from './github.mjs';
 import {
   readPullRequestChecks,
@@ -32,6 +33,7 @@ test('GitHub workflow façade retains the production importer-backed exports', (
     assert.equal(typeof github[name], type, `${name} must remain available as a ${type}`);
   }
   assert.equal(github.GitHubWorkflowError, GitHubWorkflowError);
+  assert.equal(github.createGitHubReviewWorkflow, createGitHubReviewWorkflow);
   assert.equal(github.readPullRequestChecks, readPullRequestChecks);
   assert.equal(github.readPullRequestMetadata, readPullRequestMetadata);
   assert.equal(github.readRequestReactions, readRequestReactions);
