@@ -1,6 +1,7 @@
 import * as harness from './test-support/workflow-harness.mjs';
 import * as ghCliAdapter from './adapters/gh-cli.mjs';
 import * as gitAdapter from './adapters/git.mjs';
+import * as archiveStoreOwner from './archive/store.mjs';
 import * as cli from './cli.mjs';
 import * as statusRenderer from './status-renderer.mjs';
 
@@ -29,14 +30,6 @@ const {
   githubReviewConstants,
   readTopLevelComments,
   withGitHubRequestOwnerLock,
-  buildGhGraphqlArgs,
-  createDefaultArchiveStore,
-  createDefaultGitAdapter,
-  createDefaultGitHubClient,
-  renderHumanStatus,
-  runCli,
-  terminateOnFatalArchiveCwd,
-  usage,
   HEAD,
   OTHER_HEAD,
   ADVANCED_HEAD,
@@ -119,6 +112,28 @@ const {
   completedThreadlessDriftState,
 } = harness;
 
+const { buildGhGraphqlArgs, createDefaultGitHubClient } = ghCliAdapter;
+const { createDefaultGitAdapter } = gitAdapter;
+const { createDefaultArchiveStore, terminateOnFatalArchiveCwd } = archiveStoreOwner;
+const { renderHumanStatus } = statusRenderer;
+const { runCli, usage } = cli;
+
+function addRecordedRequest(client, request) {
+  client.comments.push({
+    id: request.id,
+    databaseId: request.databaseId,
+    url: request.url,
+    body: request.body,
+    createdAt: request.at,
+    lastEditedAt: null,
+    author: {
+      ...VIEWER,
+      login: request.authorLogin,
+      id: request.authorNodeId,
+    },
+  });
+}
+
 test('CLI retains its exact public façade with importer-backed adapter and renderer identities', () => {
   assert.deepEqual(Object.keys(cli).sort(), [
     'buildGhGraphqlArgs',
@@ -133,7 +148,11 @@ test('CLI retains its exact public façade with importer-backed adapter and rend
   assert.equal(cli.buildGhGraphqlArgs, ghCliAdapter.buildGhGraphqlArgs);
   assert.equal(cli.createDefaultGitHubClient, ghCliAdapter.createDefaultGitHubClient);
   assert.equal(cli.createDefaultGitAdapter, gitAdapter.createDefaultGitAdapter);
+  assert.equal(cli.createDefaultArchiveStore, archiveStoreOwner.createDefaultArchiveStore);
+  assert.equal(cli.terminateOnFatalArchiveCwd, archiveStoreOwner.terminateOnFatalArchiveCwd);
   assert.equal(cli.renderHumanStatus, statusRenderer.renderHumanStatus);
+  assert.equal(cli.runCli, runCli);
+  assert.equal(cli.usage, usage);
 });
 
 test('CLI returns stable uncertainty for an already-dispatched request without replay', async () => {
@@ -436,4 +455,42 @@ test('CLI exposes exactly the documented explicit-PR command surface and JSON-re
   assert.match(stale, /Targeted local tests: Passed .* for the recorded commit; PR head differs/u);
   assert.match(stale, /Full CI: Passed .*live PR head differs from the recorded commit/u);
   assert.match(stale, new RegExp(`Next action: Reconcile recorded commit with live PR head ${OTHER_HEAD}`, 'u'));
+});
+
+test('CLI successfully dispatches collect, collect-ci, and complete through direct composition', async () => {
+  const collectInitial = pendingState('discovery');
+  const collectClient = new FakeClient();
+  addRecordedRequest(collectClient, collectInitial.reviewRequest);
+  collectClient.reviews.push(canonicalReview());
+  const collected = await runCli(['collect', '--pr', '2'], {
+    client: collectClient,
+    state: fakeState(collectInitial),
+    git: fakeGit(),
+    clock: { now: () => AT },
+    journal: fakeJournal(),
+  });
+  assert.equal(collected.outcome.outcome, 'clean');
+
+  const ci = await runCli(['collect-ci', '--pr', '2'], {
+    client: new FakeClient(),
+    state: fakeState(stateFixture()),
+    git: fakeGit(),
+    clock: { now: () => AT },
+    journal: fakeJournal(),
+  });
+  assert.deepEqual(Object.keys(ci).sort(), ['evidence', 'performed', 'phase', 'revision']);
+  assert.equal(ci.evidence.status, 'passed');
+
+  const completeInitial = completedState();
+  const completeClient = new FakeClient();
+  addRecordedRequest(completeClient, completeInitial.reviewRequest);
+  completeClient.reviews.push(canonicalReview());
+  const completed = await runCli(['complete', '--pr', '2'], {
+    client: completeClient,
+    state: fakeState(completeInitial),
+    git: fakeGit(),
+    clock: { now: () => AT },
+    journal: fakeJournal(),
+  });
+  assert.equal(completed.phase, 'complete');
 });
