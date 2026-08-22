@@ -1,4 +1,12 @@
 import * as harness from './test-support/state-harness.mjs';
+import { reconcileState } from './reconciliation.mjs';
+import { renderRecoverySummary } from './recovery.mjs';
+import {
+  planSpecialists,
+  readSpecialistStatus,
+  recordSpecialistReview,
+  specialistContext,
+} from './evidence/specialist-bundles.mjs';
 
 const {
   assert,
@@ -60,11 +68,6 @@ const {
   migratePrReviewStateV1,
   migratePrReviewStateV2,
   migrateState,
-  planSpecialists,
-  readSpecialistStatus,
-  reconcileState,
-  recordSpecialistReview,
-  renderRecoverySummary,
   reviewRequestGate,
   reviewRequestUsage,
   reviewRoot,
@@ -77,7 +80,6 @@ const {
   taskPacketSidecarPath,
   workerResultEnvelopePath,
   workerResultReceiptPath,
-  specialistContext,
   specialistPlanReceiptPath,
   specialistReviewBundlePath,
   validationPlanPath,

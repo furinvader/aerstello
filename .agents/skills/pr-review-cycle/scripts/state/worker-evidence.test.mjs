@@ -1,4 +1,11 @@
 import * as harness from './test-support/state-harness.mjs';
+import { reconcileState } from './reconciliation.mjs';
+import {
+  buildWorkerResultEnvelope,
+  persistWorkerResultEvidence,
+  readAcceptedWorkerResult,
+  workerResultEnvelopeDigest,
+} from './evidence/worker-results.mjs';
 
 const {
   assert,
@@ -62,7 +69,6 @@ const {
   migrateState,
   planSpecialists,
   readSpecialistStatus,
-  reconcileState,
   recordSpecialistReview,
   renderRecoverySummary,
   reviewRequestGate,
@@ -165,6 +171,16 @@ test('worker results are receipt-bound, interruption-safe, immutable, and requir
   const workerSha = commit(cwd, { 'scripts/durable-result.mjs': 'export const durable = true;\n' }, 'worker result fixture');
   git(cwd, ['switch', 'main']);
   const result = workerResult(packet, workerSha, ['scripts/durable-result.mjs']);
+  const directEnvelope = buildWorkerResultEnvelope(bound, packet, result);
+  const writeOrder = [];
+  persistWorkerResultEvidence(cwd, bound, bound.tasks[0], directEnvelope, (step) => writeOrder.push(step));
+  assert.deepEqual(writeOrder, ['receipt-durable', 'envelope-durable']);
+  assert.equal(
+    readFileSync(workerResultReceiptPath(cwd, 17, packet.taskId), 'utf8'),
+    `${workerResultEnvelopeDigest(directEnvelope)}\n`,
+  );
+  rmSync(workerResultEnvelopePath(cwd, 17, packet.taskId));
+  rmSync(workerResultReceiptPath(cwd, 17, packet.taskId));
 
   assert.throws(() => checkpointState({
     cwd, expectedRevision: bound.revision,
@@ -210,6 +226,11 @@ test('worker results are receipt-bound, interruption-safe, immutable, and requir
   const accepted = loadState(cwd);
   assert.equal(accepted.tasks[0].status, 'implemented');
   assert.match(accepted.tasks[0].workerResultDigest, /^[0-9a-f]{64}$/u);
+  assert.deepEqual(
+    readAcceptedWorkerResult(cwd, accepted, accepted.tasks[0], packet).result,
+    result,
+    'the extracted worker evidence owner recovers the immutable accepted result',
+  );
   assert.equal(checkpointWorkerResultAcceptance({
     cwd, packet, result, expectedRevision: accepted.revision,
   }).revision, accepted.revision);

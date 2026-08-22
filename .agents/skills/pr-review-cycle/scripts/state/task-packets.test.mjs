@@ -1,4 +1,11 @@
 import * as harness from './test-support/state-harness.mjs';
+import { reconcileState } from './reconciliation.mjs';
+import { renderRecoverySummary } from './recovery.mjs';
+import { readBoundTaskBindingProvenance } from './evidence/task-binding.mjs';
+import {
+  assertBoundTaskPacket as assertBoundTaskPacketOwner,
+  taskPacketDigest,
+} from './evidence/task-packets.mjs';
 
 const {
   assert,
@@ -62,16 +69,13 @@ const {
   migrateState,
   planSpecialists,
   readSpecialistStatus,
-  reconcileState,
   recordSpecialistReview,
-  renderRecoverySummary,
   reviewRequestGate,
   reviewRequestUsage,
   reviewRoot,
   stateDirectory,
   statePath,
   StateError,
-  taskPacketDigest,
   taskBindingProvenancePath,
   taskBindingProvenanceReceiptPath,
   taskPacketSidecarPath,
@@ -179,6 +183,7 @@ test('accepted task packet identity is canonical, guarded, persistent, and requi
     code: 'TASK_PACKET_HEAD_MISMATCH',
   });
   state = bindPacket(cwd, state, packet);
+  assert.equal(assertBoundTaskPacketOwner(state, packet, cwd).id, packet.taskId);
   const boundRevision = state.revision;
   assert.equal(state.tasks[0].taskPacketDigest, taskPacketDigest(packet));
   assert.equal(checkpointTaskPacketBinding({
@@ -507,6 +512,11 @@ test('schema-v3 packet sidecars are canonical, immutable, digest-verified, and r
   state = checkpointTaskPacketBinding({ cwd, packet, expectedRevision: state.revision });
   assert.equal(state.tasks[0].taskPacketDigest, taskPacketDigest(packet));
   const provenance = JSON.parse(readFileSync(provenancePath, 'utf8'));
+  assert.deepEqual(
+    readBoundTaskBindingProvenance(cwd, state, state.tasks[0], packet),
+    provenance,
+    'the extracted binding owner reads the immutable, receipt-verified provenance',
+  );
   assert.equal(provenance.phase, 'pre-bind');
   assert.equal(provenance.packetDigest, taskPacketDigest(packet));
   assert.equal(provenance.reviewedHeadSha, packet.reviewedHeadSha);

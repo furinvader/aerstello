@@ -1,4 +1,9 @@
 import * as harness from './test-support/state-harness.mjs';
+import { renderRecoverySummary } from './recovery.mjs';
+import {
+  relatedE2EMetadata,
+  validateValidationPlan,
+} from './evidence/validation-plans.mjs';
 
 const {
   assert,
@@ -64,7 +69,6 @@ const {
   readSpecialistStatus,
   reconcileState,
   recordSpecialistReview,
-  renderRecoverySummary,
   reviewRequestGate,
   reviewRequestUsage,
   reviewRoot,
@@ -147,6 +151,27 @@ const {
   boundWorkerResultFixture,
   acceptedWorkerStateProjection,
 } = harness;
+
+test('extracted validation evidence owner validates plans and related E2E metadata directly', () => {
+  assert.deepEqual(
+    relatedE2EMetadata(['npm', 'run', 'test:e2e:related', '--', '--id', 'sample', '--project', 'desktop-firefox']),
+    { selectors: ['id-sample'], projects: ['desktop-firefox'] },
+  );
+  assert.equal(relatedE2EMetadata(['npm', 'run', 'check:workflow']), null);
+
+  const cwd = repo();
+  const state = init(cwd);
+  const plan = buildTargetedValidationPlan({
+    cwd,
+    initialSelection: initialSelection(state.currentIntegrationHeadSha),
+    now: () => AT,
+  });
+  assert.deepEqual(validateValidationPlan(plan, state), []);
+  assert.match(
+    validateValidationPlan({ ...plan, headSha: 'f'.repeat(40) }, state).join('\n'),
+    /plan\.headSha is stale/u,
+  );
+});
 
 test('pristine taskless cycles run an explicit initial targeted validation selection', () => {
   const cwd = repo();
