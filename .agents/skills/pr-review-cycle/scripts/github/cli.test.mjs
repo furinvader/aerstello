@@ -1,4 +1,8 @@
 import * as harness from './test-support/workflow-harness.mjs';
+import * as ghCliAdapter from './adapters/gh-cli.mjs';
+import * as gitAdapter from './adapters/git.mjs';
+import * as cli from './cli.mjs';
+import * as statusRenderer from './status-renderer.mjs';
 
 const {
   assert,
@@ -114,6 +118,23 @@ const {
   nonActionableNonThreadState,
   completedThreadlessDriftState,
 } = harness;
+
+test('CLI retains its exact public façade with importer-backed adapter and renderer identities', () => {
+  assert.deepEqual(Object.keys(cli).sort(), [
+    'buildGhGraphqlArgs',
+    'createDefaultArchiveStore',
+    'createDefaultGitAdapter',
+    'createDefaultGitHubClient',
+    'renderHumanStatus',
+    'runCli',
+    'terminateOnFatalArchiveCwd',
+    'usage',
+  ]);
+  assert.equal(cli.buildGhGraphqlArgs, ghCliAdapter.buildGhGraphqlArgs);
+  assert.equal(cli.createDefaultGitHubClient, ghCliAdapter.createDefaultGitHubClient);
+  assert.equal(cli.createDefaultGitAdapter, gitAdapter.createDefaultGitAdapter);
+  assert.equal(cli.renderHumanStatus, statusRenderer.renderHumanStatus);
+});
 
 test('CLI returns stable uncertainty for an already-dispatched request without replay', async () => {
   const client = new FakeClient();
