@@ -5,6 +5,7 @@ import { atomicWriteText, canonicalJson, canonicalSerializedJson, readJsonSideca
 import { StateError } from '../errors.mjs';
 import { inspectWorkerCommitAuthority } from '../git-authority.mjs';
 import { workerResultEnvelopePath, workerResultReceiptPath } from '../locations.mjs';
+import { readBoundTaskBindingProvenance } from './task-binding.mjs';
 import { taskPacketDigest } from './task-packets.mjs';
 
 const ACTIVE_STATE_LIMIT_BYTES = 64 * 1024;
@@ -74,6 +75,7 @@ export function persistWorkerResultEvidence(cwd, state, task, envelope, onStep) 
 }
 
 export function readAcceptedWorkerResult(cwd, state, task, packet) {
+  readBoundTaskBindingProvenance(cwd, state, task, packet);
   if (typeof task.workerResultDigest !== 'string') {
     throw new StateError(`Task ${task.id} has no accepted worker-result digest`, 'WORKER_RESULT_MISSING');
   }
@@ -106,6 +108,7 @@ export function readAcceptedWorkerResult(cwd, state, task, packet) {
 
 
 export function proveWorkerResultEvidence({ cwd, state, task, packet, result }) {
+  readBoundTaskBindingProvenance(cwd, state, task, packet);
   const preliminaryErrors = validateWorkerResultAgainstTask(packet, result, result?.changedPaths);
   if (preliminaryErrors.length > 0) {
     throw new StateError(`Worker result does not satisfy task packet:\n- ${preliminaryErrors.join('\n- ')}`, 'INVALID_WORKER_RESULT');

@@ -564,6 +564,7 @@ const PRODUCTION_STATE_IMPORTS = new Map([
     [stateModule('errors.mjs'), ['StateError']],
     [stateModule('git-authority.mjs'), ['inspectWorkerCommitAuthority']],
     [stateModule('locations.mjs'), ['workerResultEnvelopePath', 'workerResultReceiptPath']],
+    [stateModule('evidence/task-binding.mjs'), ['readBoundTaskBindingProvenance']],
     [stateModule('evidence/task-packets.mjs'), ['taskPacketDigest']],
   ])],
   ['evidence/specialist-bundles.mjs', new Map([
@@ -584,16 +585,15 @@ const PRODUCTION_STATE_IMPORTS = new Map([
   ])],
   ['evidence/validation-plans.mjs', new Map([
     ['node:fs', ['existsSync', 'readFileSync']],
-    ['node:path', ['join', 'resolve']],
+    ['node:path', ['join']],
     [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['parseTargetedValidationCommand', 'unionInitialValidationSelection', 'unionRequiredValidation', 'validateInitialValidationSelection', 'reviewRequestUsage']],
-    [stateModule('atomic-io.mjs'), ['atomicWriteJson', 'canonicalJson', 'canonicalSerializedJson', 'readJsonSidecar', 'serializeJson']],
+    [stateModule('atomic-io.mjs'), ['atomicWriteJson', 'canonicalSerializedJson', 'readJsonSidecar', 'serializeJson']],
     [stateModule('errors.mjs'), ['StateError']],
     [stateModule('git-authority.mjs'), ['gitSnapshot']],
     [stateModule('journal.mjs'), ['appendEvent']],
     [stateModule('locations.mjs'), ['stateDirectory', 'validationPlanPath']],
-    [stateModule('locks.mjs'), ['withStateLock']],
     [stateModule('migrations.mjs'), ['migratePrReviewStateV2']],
-    [stateModule('state-store.mjs'), ['activePrNumber', 'loadState', 'readStateDocument']],
+    [stateModule('state-store.mjs'), ['loadState', 'readStateDocument']],
     [stateModule('evidence/task-binding.mjs'), ['loadBoundTaskPackets', 'readBoundTaskBindingProvenance']],
     [stateModule('evidence/task-packets.mjs'), ['assertBoundTaskPacket', 'readTaskPacketSidecar', 'taskPacketDigest']],
   ])],
@@ -654,7 +654,7 @@ const PRODUCTION_STATE_IMPORTS = new Map([
     [stateModule('evidence/task-binding.mjs'), ['assertBehaviorMapperPlanningComplete', 'buildTaskBindingProvenance', 'persistImmutableTaskBindingProvenance', 'readBoundTaskBindingProvenance', 'recoverHistoricalTaskBindingPlanning']],
     [stateModule('evidence/task-packets.mjs'), ['assertTaskPacketHead', 'persistImmutableTaskPacketSidecar', importedAs('readTaskPacketSidecar', 'readBoundTaskPacketSidecar'), 'taskPacketDigest']],
     [stateModule('evidence/worker-results.mjs'), ['persistWorkerResultEvidence', 'proveWorkerResultEvidence', 'readAcceptedWorkerResult']],
-    [stateModule('evidence/validation-plans.mjs'), ['actionableIntegratedTaskIds', 'actionablePacketValidationTaskIds', 'assertCleanExactIntegrationHead', 'buildTargetedValidationPlanEvidence', 'executeTargetedValidationFacts', 'hasRemainingReviewAllowance', 'isCleanTasklessReviewValidationRecovery', 'isNativeTasklessPendingReviewHeadDriftValidationRecovery', 'isNativeTasklessReviewHeadDriftValidationRecovery', 'readValidationPlan', 'validateValidationPlan']],
+    [stateModule('evidence/validation-plans.mjs'), ['actionableIntegratedTaskIds', 'actionablePacketValidationTaskIds', 'assertCleanExactIntegrationHead', 'buildTargetedValidationPlanUnlocked', 'executeTargetedValidationFacts', 'hasRemainingReviewAllowance', 'isCleanTasklessReviewValidationRecovery', 'isNativeTasklessPendingReviewHeadDriftValidationRecovery', 'isNativeTasklessReviewHeadDriftValidationRecovery', 'readV2CompletedTaskValidationRecoveryEvidence', 'readValidationPlan', 'validateValidationPlan']],
   ])],
 ]);
 
@@ -672,7 +672,7 @@ const PRODUCTION_STATE_EXPORTS = new Map([
   ['evidence/task-binding.mjs', ['loadBoundTaskPackets', 'assertTaskPacketBound', 'assertBehaviorMapperBundleComplete', 'assertBehaviorMapperPlanningComplete', 'recoverHistoricalTaskBindingPlanning', 'taskBindingProvenanceDigest', 'verifyTaskBindingProvenanceReceipt', 'persistTaskBindingProvenanceReceipt', 'validateTaskBindingProvenance', 'buildTaskBindingProvenance', 'assertTaskBindingProvenanceSource', 'persistImmutableTaskBindingProvenance', 'readBoundTaskBindingProvenance', 'loadBoundTaskPacketEntries']],
   ['evidence/worker-results.mjs', ['buildWorkerResultEnvelope', 'workerResultEnvelopeDigest', 'verifyWorkerResultReceipt', 'persistWorkerResultEvidence', 'readAcceptedWorkerResult', 'proveWorkerResultEvidence']],
   ['evidence/specialist-bundles.mjs', ['planSpecialists', 'recordSpecialistReview', 'specialistContext', 'readSpecialistStatus']],
-  ['evidence/validation-plans.mjs', ['relatedE2EMetadata', 'validateValidationPlan', 'readValidationPlan', 'assertCleanExactIntegrationHead', 'actionableIntegratedTaskIds', 'actionablePacketValidationTaskIds', 'isPristineTasklessValidationSelection', 'isCleanTasklessReviewValidationRecovery', 'hasRemainingReviewAllowance', 'isNativeTasklessReviewHeadDriftValidationRecovery', 'isNativeTasklessPendingReviewHeadDriftValidationRecovery', 'isV2CompletedTaskValidationRecovery', 'buildTargetedValidationPlanUnlocked', 'buildTargetedValidationPlanEvidence', 'executeTargetedValidationFacts']],
+  ['evidence/validation-plans.mjs', ['relatedE2EMetadata', 'validateValidationPlan', 'readValidationPlan', 'assertCleanExactIntegrationHead', 'actionableIntegratedTaskIds', 'actionablePacketValidationTaskIds', 'isPristineTasklessValidationSelection', 'isCleanTasklessReviewValidationRecovery', 'hasRemainingReviewAllowance', 'isNativeTasklessReviewHeadDriftValidationRecovery', 'isNativeTasklessPendingReviewHeadDriftValidationRecovery', 'readV2CompletedTaskValidationRecoveryEvidence', 'buildTargetedValidationPlanUnlocked', 'executeTargetedValidationFacts']],
   ['reconciliation.mjs', ['reconcileState']],
   ['recovery.mjs', ['truncate', 'validationPlanRecoverySummary', 'staleDiscoveryRecoverySummary', 'renderRecoverySummary']],
   ['archive.mjs', ['archiveState']],
@@ -725,6 +725,14 @@ const PRODUCTION_STATE_SOURCE_EXPORTS = new Map([
 ]);
 
 const PROTECTED_STATE_AUTHORITY_PATTERN = /^(?:checkpoint|build.*Transition$|completeIntegratedTasks$)/u;
+
+const EVIDENCE_PARAMETER_INVOCATION_ALLOWLIST = new Map([
+  ['evidence/validation-plans.mjs', new Set([
+    'now', 'runCommand', 'beforeCommand', 'onCommandRecorded',
+  ])],
+  ['evidence/worker-results.mjs', new Set(['onStep'])],
+  ['evidence/specialist-bundles.mjs', new Set(['now'])],
+]);
 
 const STATE_ADAPTER_OPERATIONS = [
   'checkpointCiValidation',
@@ -1623,7 +1631,30 @@ function inspectProductionStateSource(importer, source) {
   for (const diagnostic of parsed.parseDiagnostics) errors.push(`syntax error: ${diagnostic.messageText}`);
   const evidenceModule = fileName.startsWith('evidence/');
 
-  function visit(node) {
+  function parameterBindings(name, authorityName = null) {
+    if (ts.isIdentifier(name)) return [[name.text, authorityName ?? name.text]];
+    if (ts.isObjectBindingPattern(name)) {
+      return name.elements.flatMap((element) => {
+        const propertyName = element.propertyName && (ts.isIdentifier(element.propertyName)
+          || ts.isStringLiteral(element.propertyName)) ? element.propertyName.text
+          : ts.isIdentifier(element.name) ? element.name.text : null;
+        return parameterBindings(element.name, propertyName);
+      });
+    }
+    if (ts.isArrayBindingPattern(name)) {
+      return name.elements.flatMap((element) => ts.isBindingElement(element)
+        ? parameterBindings(element.name, authorityName) : []);
+    }
+    return [];
+  }
+
+  function visit(node, parameterScopes = []) {
+    let scopes = parameterScopes;
+    if (ts.isFunctionLike(node)) {
+      scopes = [new Map(node.parameters.flatMap((parameter) => (
+        parameterBindings(parameter.name)
+      ))), ...parameterScopes];
+    }
     if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
       errors.push('dynamic import is forbidden');
     }
@@ -1641,8 +1672,18 @@ function inspectProductionStateSource(importer, source) {
       if (authorityName && PROTECTED_STATE_AUTHORITY_PATTERN.test(authorityName)) {
         errors.push(`evidence module may not invoke protected state authority ${authorityName}`);
       }
+      if (ts.isIdentifier(node.expression)) {
+        const binding = scopes.find((scope) => scope.has(node.expression.text));
+        if (binding) {
+          const parameterName = binding.get(node.expression.text);
+          const allowed = EVIDENCE_PARAMETER_INVOCATION_ALLOWLIST.get(fileName);
+          if (!allowed?.has(parameterName)) {
+            errors.push(`evidence module may not invoke function parameter ${parameterName}`);
+          }
+        }
+      }
     }
-    ts.forEachChild(node, visit);
+    ts.forEachChild(node, (child) => visit(child, scopes));
   }
   visit(parsed);
 
@@ -2051,6 +2092,28 @@ test('state evidence AST guards reject protected transition and checkpoint autho
   ];
   for (const [source, expected] of rejectedSources) {
     assert.match(inspectProductionStateSource(evidencePath, source).join('\n'), expected, source);
+  }
+});
+
+test('state evidence AST guards default-deny direct function-parameter invocation', () => {
+  const workerResultsPath = stateModule('evidence/worker-results.mjs');
+  assert.deepEqual(
+    inspectProductionStateSource(
+      workerResultsPath,
+      'function persist({ onStep: recordStep }) { recordStep(); }',
+    ),
+    [],
+    'an exact allowlisted destructured callback remains permitted through its local alias',
+  );
+  for (const source of [
+    'function persist(onProgress) { onProgress(); }',
+    'function persist({ callback: onStep }) { onStep(); }',
+  ]) {
+    assert.match(
+      inspectProductionStateSource(workerResultsPath, source).join('\n'),
+      /may not invoke function parameter (?:onProgress|callback)/u,
+      source,
+    );
   }
 });
 

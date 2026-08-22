@@ -285,6 +285,62 @@ test('worker results are receipt-bound, interruption-safe, immutable, and requir
   assert.equal(readdirSync(join(archived, 'worker-results')).filter((name) => name.endsWith('.sha256')).length, 1);
 });
 
+test('worker result acceptance rejects missing or tampered task-binding provenance without mutation', () => {
+  for (const scenario of ['missing-sidecar', 'tampered-receipt']) {
+    const cwd = repo();
+    const fixture = boundWorkerResultFixture(cwd, `binding-${scenario}`);
+    const provenancePath = taskBindingProvenancePath(
+      cwd, fixture.bound.prNumber, fixture.packet.taskId,
+    );
+    const provenanceReceiptPath = taskBindingProvenanceReceiptPath(
+      cwd, fixture.bound.prNumber, fixture.packet.taskId,
+    );
+    if (scenario === 'missing-sidecar') unlinkSync(provenancePath);
+    else writeFileSync(provenanceReceiptPath, `${'0'.repeat(64)}\n`);
+    const before = durableAcceptanceSnapshot(cwd, fixture.packet.taskId);
+
+    assert.throws(() => checkpointWorkerResultAcceptance({
+      cwd, packet: fixture.packet, result: fixture.result,
+      expectedRevision: fixture.bound.revision,
+    }), { code: 'INVALID_TASK_BINDING_PROVENANCE' });
+    assert.deepEqual(durableAcceptanceSnapshot(cwd, fixture.packet.taskId), before,
+      `${scenario} leaves revision, events, and worker evidence unchanged`);
+    assert.equal(existsSync(workerResultEnvelopePath(
+      cwd, fixture.bound.prNumber, fixture.packet.taskId,
+    )), false);
+    assert.equal(existsSync(workerResultReceiptPath(
+      cwd, fixture.bound.prNumber, fixture.packet.taskId,
+    )), false);
+  }
+});
+
+test('accepted worker result replay rejects missing or tampered task-binding provenance', () => {
+  for (const scenario of ['missing-sidecar', 'tampered-receipt']) {
+    const cwd = repo();
+    const fixture = boundWorkerResultFixture(cwd, `replay-${scenario}`);
+    const accepted = checkpointWorkerResultAcceptance({
+      cwd, packet: fixture.packet, result: fixture.result,
+      expectedRevision: fixture.bound.revision,
+    });
+    const task = accepted.tasks.find((candidate) => candidate.id === fixture.packet.taskId);
+    const provenancePath = taskBindingProvenancePath(
+      cwd, accepted.prNumber, fixture.packet.taskId,
+    );
+    const provenanceReceiptPath = taskBindingProvenanceReceiptPath(
+      cwd, accepted.prNumber, fixture.packet.taskId,
+    );
+    if (scenario === 'missing-sidecar') unlinkSync(provenancePath);
+    else writeFileSync(provenanceReceiptPath, `${'0'.repeat(64)}\n`);
+    const before = durableAcceptanceSnapshot(cwd, fixture.packet.taskId);
+
+    assert.throws(() => readAcceptedWorkerResult(
+      cwd, accepted, task, fixture.packet,
+    ), { code: 'INVALID_TASK_BINDING_PROVENANCE' });
+    assert.deepEqual(durableAcceptanceSnapshot(cwd, fixture.packet.taskId), before,
+      `${scenario} replay does not mutate accepted evidence`);
+  }
+});
+
 test('worker result compacts max-valid validation summaries before durable acceptance', () => {
   const cwd = repo();
   const { bound, packet, result } = boundWorkerResultFixture(cwd, 'max-validation-summary');
