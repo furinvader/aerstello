@@ -1,5 +1,7 @@
 import * as harness from '../test-support/workflow-harness.mjs';
 
+import { createDefaultArchiveStore, terminateOnFatalArchiveCwd } from './store.mjs';
+
 const {
   assert,
   spawnSync,
@@ -26,12 +28,10 @@ const {
   readTopLevelComments,
   withGitHubRequestOwnerLock,
   buildGhGraphqlArgs,
-  createDefaultArchiveStore,
   createDefaultGitAdapter,
   createDefaultGitHubClient,
   renderHumanStatus,
   runCli,
-  terminateOnFatalArchiveCwd,
   usage,
   HEAD,
   OTHER_HEAD,
@@ -39,7 +39,6 @@ const {
   PRIOR_INTEGRATION_HEAD,
   SELECTED_TASK_HEAD,
   AT,
-  GITHUB_CLI_MODULE_URL,
   BOT,
   VIEWER,
   darwinArchiveRuntime,
@@ -114,6 +113,8 @@ const {
   nonActionableNonThreadState,
   completedThreadlessDriftState,
 } = harness;
+
+const ARCHIVE_STORE_MODULE_URL = new URL('./store.mjs', import.meta.url).href;
 
 test('default archive store reads only bounded canonical archives from the Git common directory', async () => {
   const cwd = createRepository();
@@ -733,7 +734,7 @@ test('fatal Darwin outer restoration proof exits the executable boundary after c
     mkdirSync(archiveRoot, { recursive: true });
     writeFiles(cwd, { 'different-directory/placeholder': 'different inode\n' });
     const child = spawnSync(process.execPath, [
-      '--input-type=module', '--eval', script, GITHUB_CLI_MODULE_URL, cwd, differentPath,
+      '--input-type=module', '--eval', script, ARCHIVE_STORE_MODULE_URL, cwd, differentPath,
     ], { cwd: process.cwd(), encoding: 'utf8' });
     assert.equal(child.status, 1);
     assert.equal(child.signal, null);
