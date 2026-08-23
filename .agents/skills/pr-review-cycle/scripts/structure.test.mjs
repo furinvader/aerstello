@@ -2675,6 +2675,13 @@ function inspectEvidenceCallbackCapabilities(fileName, parsed) {
   return errors;
 }
 
+function isNonOptionalDirectEvalCall(node) {
+  if (!ts.isCallExpression(node) || node.questionDotToken) return false;
+  let expression = node.expression;
+  while (ts.isParenthesizedExpression(expression)) expression = expression.expression;
+  return ts.isIdentifier(expression) && expression.text === 'eval';
+}
+
 function inspectProductionStateSource(importer, source) {
   const errors = [];
   const fileName = posixRelative(stateModuleDirectory, importer);
@@ -2695,6 +2702,9 @@ function inspectProductionStateSource(importer, source) {
     if (ts.isImportEqualsDeclaration(node)) errors.push('CommonJS import assignment is forbidden');
     if (ts.isExportAssignment(node)) errors.push('default export assignment is forbidden');
     if (evidenceModule && ts.isCallExpression(node)) {
+      if (isNonOptionalDirectEvalCall(node)) {
+        errors.push('evidence module may not use non-optional direct eval');
+      }
       const authorityName = ts.isIdentifier(node.expression) ? node.expression.text
         : ts.isPropertyAccessExpression(node.expression) ? node.expression.name.text
           : ts.isElementAccessExpression(node.expression)
@@ -3115,6 +3125,54 @@ test('state evidence AST guards reject protected transition and checkpoint autho
   for (const [source, expected] of rejectedSources) {
     assert.match(inspectProductionStateSource(evidencePath, source).join('\n'), expected, source);
   }
+});
+
+test('state evidence AST guards reject lexical direct eval without broadening dynamic-code policy', () => {
+  const workerResultsPath = stateModule('evidence/worker-results.mjs');
+  const exactWorker = (body = '') => `
+    export function persistWorkerResultEvidence(cwd, state, task, envelope, onStep) {
+      onStep?.('receipt-durable'); onStep?.('envelope-durable'); ${body}
+    }
+  `;
+  const rejectedSources = new Map([
+    ['authorized callback owner', exactWorker("eval(\"onStep?.('hidden')\");")],
+    ['parenthesized callee', exactWorker("(((eval)))(\"onStep?.('hidden')\");")],
+    ['nested closure', exactWorker("(() => { eval(\"onStep?.('hidden')\"); })();")],
+    ['arbitrary function parameter', `${exactWorker()}
+      function arbitrary(progress) { eval('progress()'); }
+    `],
+  ]);
+  for (const [name, source] of rejectedSources) {
+    assert.match(
+      inspectProductionStateSource(workerResultsPath, source).join('\n'),
+      /evidence module may not use non-optional direct eval/u,
+      name,
+    );
+  }
+
+  for (const fileName of PRODUCTION_STATE_IMPORTS.keys()) {
+    if (!fileName.startsWith('evidence/')) continue;
+    assert.match(
+      inspectProductionStateSource(
+        stateModule(fileName), "eval('lexically captured callback()');",
+      ).join('\n'),
+      /evidence module may not use non-optional direct eval/u,
+      fileName,
+    );
+  }
+
+  const safeSource = `${exactWorker()}
+    function evaluate() { return true; }
+    function permittedDynamicCode(evaluator, source) {
+      evaluator.eval(source); evaluate(source); eval?.(source); (0, eval)(source);
+      globalThis.eval(source); Function(source); return "eval('inert callback()')";
+    }
+  `;
+  assert.deepEqual(
+    inspectProductionStateSource(workerResultsPath, safeSource),
+    [],
+    'indirect/global eval, Function constructors, property calls, and inert strings stay outside the guard',
+  );
 });
 
 test('state evidence callback capabilities bind exact owners, parameters, and call shapes', () => {
