@@ -39,7 +39,6 @@ import {
 } from './git-authority.mjs';
 import {
   appendEvent,
-  claimGitHubMutationDispatch,
   ensureGitHubMutationIntent,
   prepareEvent,
 } from './journal.mjs';
@@ -48,6 +47,7 @@ import {
 } from './migrations.mjs';
 import {
   activePrNumber,
+  claimGitHubMutationDispatch,
   loadState,
   readStateDocument,
   validateStateForWrite,
@@ -103,9 +103,15 @@ export {
 } from './locations.mjs';
 export { atomicWriteJson } from './atomic-io.mjs';
 export { inspectWorkerCommitAuthority } from './git-authority.mjs';
-export { appendEvent, claimGitHubMutationDispatch, ensureGitHubMutationIntent } from './journal.mjs';
+export { appendEvent, ensureGitHubMutationIntent } from './journal.mjs';
 export { migratePrReviewStateV1, migratePrReviewStateV2, migrateState } from './migrations.mjs';
-export { activePrNumber, initializeState, loadState, locateState } from './state-store.mjs';
+export {
+  activePrNumber,
+  claimGitHubMutationDispatch,
+  initializeState,
+  loadState,
+  locateState,
+} from './state-store.mjs';
 export { archiveState } from './archive.mjs';
 export { assertTaskPacketBound, loadBoundTaskPackets } from './evidence/task-binding.mjs';
 export {

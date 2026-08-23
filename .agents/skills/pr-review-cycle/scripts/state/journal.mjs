@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWriteText } from './atomic-io.mjs';
 import { StateError } from './errors.mjs';
-import { stateDirectory, statePath } from './locations.mjs';
+import { stateDirectory } from './locations.mjs';
 import { withStateLock } from './locks.mjs';
 
 function utcNow() { return new Date().toISOString(); }
@@ -62,45 +62,5 @@ export function ensureGitHubMutationIntent(cwd, prNumber, intent) {
     }
     appendEvent(cwd, prNumber, { type: 'github-mutation-intent', summary: `Intent ${intent.type} ${intent.operationId}`.slice(0, 1000), details: intent });
     return { ...intent, isNew: true };
-  });
-}
-
-export function claimGitHubMutationDispatch(cwd, prNumber, intent, expectedRevision) {
-  return withStateLock(cwd, prNumber, () => {
-    if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
-      throw new StateError('Dispatch claim requires an expected state revision', 'STATE_REVISION_CONFLICT');
-    }
-    let currentState;
-    try { currentState = JSON.parse(readFileSync(statePath(cwd, prNumber), 'utf8')); } catch {
-      throw new StateError('State could not be read before dispatch', 'STATE_READ_FAILED');
-    }
-    if (currentState.revision !== expectedRevision) {
-      throw new StateError('State revision changed before dispatch', 'STATE_REVISION_CONFLICT');
-    }
-    const path = join(stateDirectory(cwd, prNumber), 'events.ndjson');
-    let events = [];
-    try {
-      events = existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').filter(Boolean)
-        .map((line) => JSON.parse(line)) : [];
-    } catch {
-      throw new StateError('GitHub mutation dispatch journal is malformed', 'INTENT_RECOVERY_INVALID');
-    }
-    const correlatedIntent = events.find((event) => event.type === 'github-mutation-intent'
-      && event.details?.operationId === intent.operationId);
-    if (!correlatedIntent || correlatedIntent.details?.type !== intent.type
-        || correlatedIntent.details?.clientMutationId !== intent.clientMutationId) {
-      throw new StateError('GitHub mutation dispatch has no correlated intent', 'INTENT_RECOVERY_INVALID');
-    }
-    const existing = events.find((event) => event.type === 'github-mutation-dispatch'
-      && event.details?.operationId === intent.operationId);
-    if (existing) {
-      if (existing.details.clientMutationId !== intent.clientMutationId) {
-        throw new StateError('GitHub mutation dispatch conflicts', 'INTENT_CONFLICT');
-      }
-      return { ...existing.details, isNew: false };
-    }
-    const details = { operationId: intent.operationId, clientMutationId: intent.clientMutationId };
-    appendEvent(cwd, prNumber, { type: 'github-mutation-dispatch', summary: `Dispatch ${intent.operationId}`, details });
-    return { ...details, isNew: true };
   });
 }

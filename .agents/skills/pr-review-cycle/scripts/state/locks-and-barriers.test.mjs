@@ -188,6 +188,78 @@ test('GitHub request owner lock awaits async work and dispatch claims are revisi
   assert.throws(() => claimGitHubMutationDispatch(missingCwd, 17, intent, missing.revision), { code: 'INTENT_RECOVERY_INVALID' });
 });
 
+test('dispatch claims load canonical state before appending a dispatch event', () => {
+  const cases = [
+    {
+      name: 'oversized',
+      expectedCode: 'STATE_TOO_LARGE',
+      writeState: (path) => writeFileSync(path, 'x'.repeat(ACTIVE_STATE_LIMIT_BYTES + 1)),
+    },
+    {
+      name: 'legacy-v1',
+      expectedCode: 'STATE_MIGRATION_REQUIRED',
+      writeState: (path, state) => writeFileSync(path, JSON.stringify(legacyState(state))),
+    },
+    {
+      name: 'legacy-v2',
+      expectedCode: 'STATE_MIGRATION_REQUIRED',
+      writeState: (path, state) => writeFileSync(path, JSON.stringify(schemaV2State(state))),
+    },
+    {
+      name: 'invalid',
+      expectedCode: 'INVALID_STATE',
+      writeState: (path, state) => writeFileSync(path, JSON.stringify({ ...state, phase: 'invalid' })),
+    },
+    {
+      name: 'malformed',
+      expectedCode: 'STATE_READ_FAILED',
+      writeState: (path) => writeFileSync(path, '{bad json}\n'),
+    },
+    {
+      name: 'missing',
+      expectedCode: 'STATE_NOT_FOUND',
+      writeState: (path) => unlinkSync(path),
+    },
+  ];
+
+  for (const stateCase of cases) {
+    const cwd = repo();
+    const initial = init(cwd);
+    const intent = {
+      type: 'request',
+      operationId: `request:17:${stateCase.name}:${initial.currentIntegrationHeadSha}`,
+      clientMutationId: `dispatch-${stateCase.name}`,
+      at: AT,
+      excludedCommentIds: [],
+    };
+    ensureGitHubMutationIntent(cwd, 17, intent);
+    stateCase.writeState(statePath(cwd, 17), initial);
+
+    assert.throws(
+      () => claimGitHubMutationDispatch(cwd, 17, intent, initial.revision),
+      { code: stateCase.expectedCode },
+      stateCase.name,
+    );
+    const events = readFileSync(join(stateDirectory(cwd, 17), 'events.ndjson'), 'utf8');
+    assert.equal(events.includes('github-mutation-dispatch'), false, stateCase.name);
+  }
+
+  const cwd = repo();
+  const initial = init(cwd);
+  const intent = {
+    type: 'request', operationId: `request:17:invalid-revision:${initial.currentIntegrationHeadSha}`,
+    clientMutationId: 'dispatch-invalid-revision', at: AT, excludedCommentIds: [],
+  };
+  ensureGitHubMutationIntent(cwd, 17, intent);
+  unlinkSync(statePath(cwd, 17));
+  assert.throws(
+    () => claimGitHubMutationDispatch(cwd, 17, intent, -1),
+    { code: 'STATE_REVISION_CONFLICT' },
+  );
+  const events = readFileSync(join(stateDirectory(cwd, 17), 'events.ndjson'), 'utf8');
+  assert.equal(events.includes('github-mutation-dispatch'), false);
+});
+
 test('state lock recovers from SIGKILL and keeps the replacement owner exclusive', async () => {
   const cwd = repo();
   init(cwd);
