@@ -1514,7 +1514,7 @@ export function checkpointTaskPacketBinding({
 }
 
 function preflightWorkerResultAcceptance({
-  cwd = process.cwd(), state, packet, result, backfill = false, diagnostic = false,
+  cwd = process.cwd(), state, packet, result, backfill = false,
 } = {}) {
   const task = state?.tasks?.find((candidate) => candidate.id === packet?.taskId);
   if (!task) throw new StateError('Worker result does not match a durable task', 'TASK_PACKET_NOT_BOUND');
@@ -1539,9 +1539,6 @@ function preflightWorkerResultAcceptance({
     if (canonicalSerializedJson(existing) !== canonicalSerializedJson(envelope)) {
       throw new StateError(`Task ${task.id} already has different accepted worker evidence`, 'WORKER_RESULT_CONFLICT');
     }
-    return { authority, envelope, task, nextState: state, idempotent: true };
-  }
-  if (diagnostic && ['integrated', 'completed'].includes(task.status)) {
     return { authority, envelope, task, nextState: state, idempotent: true };
   }
   if (backfill) {
@@ -1628,9 +1625,7 @@ export function checkpointWorkerResultAcceptance({
   if (preflightOnly) {
     const current = loadState(cwd, selectedPr);
     if (!current) throw new StateError('No active PR state for worker-result acceptance', 'STATE_NOT_FOUND');
-    return preflightWorkerResultAcceptance({
-      cwd, state: current, packet, result, backfill: false, diagnostic: true,
-    });
+    return preflightWorkerResultAcceptance({ cwd, state: current, packet, result, backfill: false });
   }
   return withStateLock(cwd, selectedPr, () => {
     const current = loadState(cwd, selectedPr);

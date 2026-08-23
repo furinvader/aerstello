@@ -435,7 +435,7 @@ test('canonical bound packet rejects rollback, unrelated, or missing integration
   assert.equal(loadState(cwd).validationStatus.status, 'not-run');
 });
 
-test('worker-result acceptance requires the exact durably bound task packet', () => {
+test('worker-result diagnostics require exact packet and ordinary acceptance status', () => {
   const cwd = repo();
   let state = integratedTasks(cwd, ['task-a']);
   const packet = taskPacket(state.currentIntegrationHeadSha, 'task-a');
@@ -475,9 +475,13 @@ test('worker-result acceptance requires the exact durably bound task packet', ()
   assert.match(conflicting.stderr, /TASK_PACKET_CONFLICT/u);
   writeFileSync(packetPath, `${JSON.stringify(packet)}\n`);
   writeFileSync(resultPath, `${JSON.stringify(result)}\n`);
-  const accepted = runValidation();
-  assert.equal(accepted.status, 0, accepted.stderr);
-  assert.deepEqual(JSON.parse(accepted.stdout), { valid: true, taskId: 'task-a' });
+  const beforeIntegrated = durableAcceptanceSnapshot(cwd, packet.taskId);
+  const integrated = runValidation();
+  assert.equal(integrated.status, 1);
+  assert.match(integrated.stderr, /WORKER_RESULT_ACCEPTANCE_NOT_ALLOWED/u);
+  assert.equal(integrated.stdout, '');
+  assert.deepEqual(durableAcceptanceSnapshot(cwd, packet.taskId), beforeIntegrated,
+    'a diagnostic status rejection writes no state, event, envelope, or receipt evidence');
 });
 
 test('schema-v3 packet sidecars are canonical, immutable, digest-verified, and recovery-critical', () => {
