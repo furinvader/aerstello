@@ -1,4 +1,5 @@
-import { reviewRequestUsage } from '../../contracts/contracts.mjs';
+import { reviewRequestUsage, validatePrReviewState } from '../../contracts/contracts.mjs';
+import { StateError } from '../errors.mjs';
 
 function sameEvidence(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
@@ -16,6 +17,17 @@ function emptyCiValidation() {
     source: 'github-actions', scope: 'full', status: 'not-run', headSha: null,
     checks: [], checkRunId: null, workflowRunId: null, workflowRunUrl: null, updatedAt: null,
   };
+}
+
+function validateTransition(next) {
+  const errors = validatePrReviewState(next);
+  if (errors.length > 0) {
+    throw new StateError(
+      `Invalid Git metadata transition:\n- ${errors.join('\n- ')}`,
+      'INVALID_GIT_METADATA',
+    );
+  }
+  return next;
 }
 
 function reviewLimitNextAction(state) {
@@ -74,5 +86,5 @@ export function buildGitMetadataTransition(state, git) {
     git,
     ...checkpointUpdate,
   };
-  return sameEvidence(state, next) ? state : next;
+  return sameEvidence(state, next) ? state : validateTransition(next);
 }

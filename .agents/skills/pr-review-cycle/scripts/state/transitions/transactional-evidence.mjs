@@ -1,5 +1,11 @@
-import { reviewRequestUsage } from '../../contracts/contracts.mjs';
+import { reviewRequestUsage, validatePrReviewState } from '../../contracts/contracts.mjs';
 import { StateError } from '../errors.mjs';
+
+function validateTransition(next, message, code) {
+  const errors = validatePrReviewState(next);
+  if (errors.length > 0) throw new StateError(`${message}:\n- ${errors.join('\n- ')}`, code);
+  return next;
+}
 
 function emptyTargetedValidation() {
   return {
@@ -90,13 +96,13 @@ export function buildTaskPacketReplanTransition(state, taskId) {
       workerCommitSha: null, validationSummaries: [], lastError: null,
     },
   };
-  return {
+  return validateTransition({
     ...state,
     phase: 'recovering',
     tasks: state.tasks.map((candidate) => candidate.id === taskId ? nextTask : candidate),
     validationStatus: emptyTargetedValidation(),
     nextAction: `Create an explicit schema-v3 specialist plan and bind a new packet for task ${taskId}.`,
-  };
+  }, 'Invalid task packet replan transition', 'TASK_PACKET_REPLAN_NOT_ALLOWED');
 }
 
 export function buildTaskPacketBindingTransition(state, taskId, digest) {
@@ -105,11 +111,11 @@ export function buildTaskPacketBindingTransition(state, taskId, digest) {
     throw new StateError('Task packet must match an actionable durable task', 'TASK_PACKET_NOT_BOUND');
   }
   if (task.taskPacketDigest === digest) return state;
-  return {
+  return validateTransition({
     ...state,
     tasks: state.tasks.map((candidate) => candidate.id === taskId
       ? { ...candidate, taskPacketDigest: digest } : candidate),
-  };
+  }, 'Invalid task packet binding transition', 'TASK_PACKET_NOT_BOUND');
 }
 
 export function buildWorkerResultTransition(state, {
@@ -128,10 +134,10 @@ export function buildWorkerResultTransition(state, {
       lastError: null,
     },
   };
-  return {
+  return validateTransition({
     ...state,
     tasks: state.tasks.map((candidate) => candidate.id === taskId ? nextTask : candidate),
-  };
+  }, 'Invalid worker result transition', 'INVALID_WORKER_RESULT');
 }
 
 export function buildTargetedValidationResetTransition(state) {
@@ -147,12 +153,12 @@ export function buildTargetedValidationResetTransition(state) {
       'INITIAL_VALIDATION_NOT_ALLOWED',
     );
   }
-  return {
+  return validateTransition({
     ...state,
     validationStatus: emptyTargetedValidation(),
     ...(state.phase === 'ready-for-review' ? {
       phase: 'recovering',
       nextAction: 'Run the saved targeted validation plan before requesting review.',
     } : {}),
-  };
+  }, 'Invalid targeted validation reset transition', 'INVALID_TARGETED_VALIDATION_RESET');
 }
