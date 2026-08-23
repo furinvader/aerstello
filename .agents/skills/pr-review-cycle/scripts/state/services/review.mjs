@@ -67,6 +67,7 @@ export function checkpointReviewRequestLimit({
     cwd,
     prNumber: selectedPr(cwd, prNumber),
     expectedRevision,
+    requireExpectedRevision: true,
     transitionKind: 'review-request-limit',
     transaction: (current) => {
       const nextState = buildReviewRequestLimitTransition(current, {
@@ -122,6 +123,7 @@ export function checkpointReviewOutcome({
 } = {}) {
   return checkpointProtectedStateTransaction({
     cwd, prNumber: selectedPr(cwd, prNumber), expectedRevision,
+    requireExpectedRevision: true,
     transitionKind: 'review-outcome',
     transaction: (current) => {
       const nextState = buildReviewOutcomeTransition(current, outcome);
@@ -136,16 +138,16 @@ export function checkpointVerificationEscalation({
   cwd = process.cwd(), prNumber, escalation, expectedRevision, event,
 } = {}) {
   const pr = selectedPr(cwd, prNumber);
-  const observed = loadState(cwd, pr);
-  if (!observed) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
-  const proposal = buildVerificationEscalationTransition(observed, escalation);
-  if (proposal === observed) return observed;
   return checkpointProtectedStateTransaction({
     cwd, prNumber: pr, expectedRevision,
+    requireExpectedRevision: true,
+    authorizeNoWrite: false,
     transitionKind: 'verification-escalation',
-    transaction: (current) => ({
-      nextState: buildVerificationEscalationTransition(current, escalation),
-      event,
-    }),
+    transaction: (current) => {
+      const nextState = buildVerificationEscalationTransition(current, escalation);
+      return nextState === current
+        ? { nextState: current, result: current, noWrite: true }
+        : { nextState, event };
+    },
   });
 }

@@ -27,8 +27,8 @@ function selectPr(cwd, prNumber, nextState) {
   return selectedPr;
 }
 
-function assertRevision(current, expectedRevision, nextState) {
-  const expected = expectedRevision ?? nextState?.revision;
+function assertRevision(current, expectedRevision, nextState, { required = false } = {}) {
+  const expected = required ? expectedRevision : (expectedRevision ?? nextState?.revision);
   if (expected !== current.revision) {
     throw new StateError(
       `State revision changed: expected ${expected}, found ${current.revision}`,
@@ -253,6 +253,8 @@ function checkpointTransaction({
   cwd = process.cwd(),
   prNumber,
   expectedRevision,
+  requireExpectedRevision = false,
+  authorizeNoWrite = true,
   transaction,
   eventWriter = appendEvent,
   transitionKind,
@@ -267,9 +269,15 @@ function checkpointTransaction({
   const selectedPr = selectPr(cwd, prNumber);
   return withStateLock(cwd, selectedPr, () => {
     const current = loadState(cwd, selectedPr);
-    assertRevision(current, expectedRevision, current);
+    assertRevision(current, expectedRevision, current, { required: requireExpectedRevision });
     const result = transactionResult(transaction(structuredClone(current)));
-    const kind = transitionKind;
+    if (result.noWrite === true && !authorizeNoWrite && result.beforeCommit !== undefined) {
+      throw new StateError(
+        'Checkpoint transaction authorization bypass cannot stage effects',
+        'INVALID_CHECKPOINT_TRANSACTION',
+      );
+    }
+    const kind = result.noWrite === true && !authorizeNoWrite ? undefined : transitionKind;
     const authorization = kind === undefined
       ? undefined
       : transitionPolicy.authorizeProtectedTransition(
@@ -316,6 +324,8 @@ export function checkpointStateTransaction(options = {}) {
   const {
     transitionKind: _transitionKind,
     transitionEvidence: _transitionEvidence,
+    requireExpectedRevision: _requireExpectedRevision,
+    authorizeNoWrite: _authorizeNoWrite,
     ...genericOptions
   } = options;
   return checkpointTransaction(genericOptions);

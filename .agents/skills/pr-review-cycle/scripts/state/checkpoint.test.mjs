@@ -200,6 +200,41 @@ test('protected transaction reloads state and rejects Promise callbacks before p
   });
 });
 
+test('transactions require revisions only when their service contract opts in', () => {
+  withRepository((cwd, initial) => {
+    const path = statePath(cwd, 17);
+    const stableBytes = readFileSync(path, 'utf8');
+    let guardedCallbacks = 0;
+    const guardedTransaction = () => {
+      guardedCallbacks += 1;
+      return { nextState: initial, result: initial, noWrite: true };
+    };
+
+    for (const expectedRevision of [undefined, initial.revision + 1]) {
+      throwsCode(() => checkpointProtectedStateTransaction({
+        cwd,
+        expectedRevision,
+        requireExpectedRevision: true,
+        transitionKind: 'review-request-limit',
+        transaction: guardedTransaction,
+      }), 'STATE_REVISION_CONFLICT');
+    }
+    assert.equal(guardedCallbacks, 0);
+    assert.equal(readFileSync(path, 'utf8'), stableBytes);
+
+    const optional = checkpointStateTransaction({
+      cwd,
+      requireExpectedRevision: true,
+      authorizeNoWrite: false,
+      transaction: (current) => ({
+        nextState: { ...current, nextAction: 'Keep generic revision omission supported.' },
+      }),
+    });
+    assert.equal(optional.revision, initial.revision + 1);
+    assert.equal(optional.nextAction, 'Keep generic revision omission supported.');
+  });
+});
+
 test('transactions can return explicit synchronous service results', () => {
   withRepository((cwd, initial) => {
     const serviceResult = { kind: 'checkpoint-result', selectedPr: initial.prNumber };
@@ -269,6 +304,17 @@ test('explicit no-write results authorize under the lock without persistence', (
         nextState: current,
         event: { type: 'invalid-no-write-event', summary: 'Must be rejected' },
         noWrite: true,
+      }),
+    }), 'INVALID_CHECKPOINT_TRANSACTION');
+    throwsCode(() => checkpointProtectedStateTransaction({
+      cwd,
+      expectedRevision: initial.revision,
+      transitionKind: 'review-request-limit',
+      authorizeNoWrite: false,
+      transaction: (current) => ({
+        nextState: current,
+        noWrite: true,
+        beforeCommit: () => undefined,
       }),
     }), 'INVALID_CHECKPOINT_TRANSACTION');
     assert.equal(readFileSync(path, 'utf8'), stableBytes);

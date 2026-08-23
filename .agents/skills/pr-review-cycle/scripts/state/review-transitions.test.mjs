@@ -280,6 +280,131 @@ test('generic checkpoint cannot bypass guarded request, outcome, or completion p
   assert.equal(completed.phase, 'complete');
 });
 
+test('revision-guarded review services reject omitted and stale revisions without persistence', () => {
+  const cwd = repo();
+  const snapshot = () => ({
+    state: readFileSync(statePath(cwd, 17), 'utf8'),
+    events: readFileSync(join(stateDirectory(cwd, 17), 'events.ndjson'), 'utf8'),
+  });
+  const rejectsWithoutPersistence = (invoke, revision) => {
+    const before = snapshot();
+    for (const expectedRevision of [undefined, revision + 1]) {
+      assert.throws(() => invoke(expectedRevision), { code: 'STATE_REVISION_CONFLICT' });
+      assert.deepEqual(snapshot(), before);
+    }
+  };
+
+  const initial = init(cwd);
+  rejectsWithoutPersistence((expectedRevision) => checkpointReviewRequestLimit({
+    cwd, reviewRequestLimit: 4, expectedRevision,
+  }), initial.revision);
+  const limited = checkpointReviewRequestLimit({
+    cwd, reviewRequestLimit: 4, expectedRevision: initial.revision,
+  });
+  assert.deepEqual(checkpointReviewRequestLimit({
+    cwd, reviewRequestLimit: 4, expectedRevision: limited.revision,
+  }), limited);
+  rejectsWithoutPersistence((expectedRevision) => checkpointReviewRequestLimit({
+    cwd, reviewRequestLimit: 4, expectedRevision,
+  }), limited.revision);
+
+  const prepared = ready(initial, []);
+  writeFileSync(statePath(cwd, 17), `${JSON.stringify(prepared)}\n`);
+  const requested = checkpointReviewRequest({
+    cwd,
+    request: request(prepared),
+    pushedHeadSha: prepared.currentIntegrationHeadSha,
+    prHeadSha: prepared.currentIntegrationHeadSha,
+    expectedRevision: prepared.revision,
+  });
+  const reviewEvidence = outcome(requested);
+  rejectsWithoutPersistence((expectedRevision) => checkpointReviewOutcome({
+    cwd, outcome: reviewEvidence, expectedRevision,
+  }), requested.revision);
+  const reviewed = checkpointReviewOutcome({
+    cwd, outcome: reviewEvidence, expectedRevision: requested.revision,
+  });
+  assert.deepEqual(checkpointReviewOutcome({
+    cwd, outcome: reviewEvidence, expectedRevision: reviewed.revision,
+  }), reviewed);
+
+  const ci = ciEvidence(reviewed);
+  rejectsWithoutPersistence((expectedRevision) => checkpointCiValidation({
+    cwd, evidence: ci, expectedRevision,
+  }), reviewed.revision);
+  const validated = checkpointCiValidation({
+    cwd, evidence: ci, expectedRevision: reviewed.revision,
+  });
+  assert.deepEqual(checkpointCiValidation({
+    cwd, evidence: ci, expectedRevision: validated.revision,
+  }), validated);
+
+  rejectsWithoutPersistence((expectedRevision) => checkpointCompletion({
+    cwd,
+    pushedHeadSha: validated.currentIntegrationHeadSha,
+    prHeadSha: validated.currentIntegrationHeadSha,
+    expectedRevision,
+  }), validated.revision);
+  const completed = checkpointCompletion({
+    cwd,
+    pushedHeadSha: validated.currentIntegrationHeadSha,
+    prHeadSha: validated.currentIntegrationHeadSha,
+    expectedRevision: validated.revision,
+  });
+  assert.deepEqual(checkpointCompletion({
+    cwd,
+    pushedHeadSha: completed.currentIntegrationHeadSha,
+    prHeadSha: completed.currentIntegrationHeadSha,
+    expectedRevision: completed.revision,
+  }), completed);
+  rejectsWithoutPersistence((expectedRevision) => checkpointCompletion({
+    cwd,
+    pushedHeadSha: completed.currentIntegrationHeadSha,
+    prHeadSha: completed.currentIntegrationHeadSha,
+    expectedRevision,
+  }), completed.revision);
+});
+
+test('historically optional task-completion revisions remain optional', () => {
+  const cwd = repo();
+  const initial = init(cwd);
+  const completed = checkpointTaskCompletion({
+    cwd, threadResolutionStatus: ready(initial, []).threadResolutionStatus,
+  });
+  assert.equal(completed.revision, initial.revision + 1);
+  assert.equal(completed.threadResolutionStatus.status, 'passed');
+});
+
+test('verification-escalation retries enforce revisions before idempotence', () => {
+  const cwd = repo();
+  const requested = nativeTasklessPendingVerification(cwd).requested;
+  const escalation = {
+    requestId: requested.reviewRequest.id,
+    requestHeadSha: requested.reviewRequest.headSha,
+    observedPrHeadSha: requested.reviewRequest.headSha,
+    headRelation: 'same',
+    evidenceIds: ['review:PRR_ambiguous', 'reaction:R_ambiguous'],
+    reason: 'ambiguous-canonical-evidence',
+    at: AT,
+  };
+  const escalated = checkpointVerificationEscalation({
+    cwd, escalation, expectedRevision: requested.revision,
+  });
+  const stateBytes = readFileSync(statePath(cwd, 17), 'utf8');
+  const eventBytes = readFileSync(join(stateDirectory(cwd, 17), 'events.ndjson'), 'utf8');
+
+  for (const expectedRevision of [undefined, escalated.revision - 1]) {
+    assert.throws(() => checkpointVerificationEscalation({
+      cwd, escalation, expectedRevision,
+    }), { code: 'STATE_REVISION_CONFLICT' });
+    assert.equal(readFileSync(statePath(cwd, 17), 'utf8'), stateBytes);
+    assert.equal(readFileSync(join(stateDirectory(cwd, 17), 'events.ndjson'), 'utf8'), eventBytes);
+  }
+  assert.deepEqual(checkpointVerificationEscalation({
+    cwd, escalation, expectedRevision: escalated.revision,
+  }), escalated);
+});
+
 test('full CI evidence is guarded, restorable, append-only, exact-head, and invalidated by HEAD drift', () => {
   const cwd = repo();
   const initial = init(cwd);

@@ -277,6 +277,7 @@ function checkpointWorkerResultEvidence({
 }) {
   return runProtectedTransaction({
     cwd, prNumber: selectedPr(cwd, prNumber), expectedRevision,
+    requireExpectedRevision: true,
     transitionKind: backfill ? 'worker-result-backfill' : 'worker-result-acceptance',
     transaction: (current) => {
       const preflight = preflightWorkerResultAcceptance({ cwd, state: current, packet, result, backfill });

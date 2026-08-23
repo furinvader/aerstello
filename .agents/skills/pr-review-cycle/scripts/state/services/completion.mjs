@@ -52,6 +52,7 @@ export function checkpointCompletion({
     cwd,
     prNumber: selectedPr(cwd, prNumber),
     expectedRevision,
+    requireExpectedRevision: true,
     transitionKind: 'cycle-completion',
     transaction: (current) => {
       if (current.phase === 'complete') {

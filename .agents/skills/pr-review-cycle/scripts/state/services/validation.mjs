@@ -227,6 +227,7 @@ export function checkpointCiValidation({
 } = {}) {
   return runProtectedTransaction({
     cwd, prNumber: selectedPr(cwd, prNumber), expectedRevision,
+    requireExpectedRevision: true,
     transitionKind: 'ci-validation',
     transaction: (current) => {
       const nextState = buildCiValidationTransition(current, evidence);
