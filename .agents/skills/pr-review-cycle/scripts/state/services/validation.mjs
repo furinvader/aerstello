@@ -30,20 +30,6 @@ const VALIDATION_PLANNING_PHASES = new Set([
   'recovering', 'ready-for-review', 'integrating', 'verifying', 'validating',
 ]);
 
-class IdempotentTransaction extends Error {
-  constructor(state) {
-    super('idempotent checkpoint transaction');
-    this.state = state;
-  }
-}
-
-class PlanTransaction extends Error {
-  constructor(plan) {
-    super('validation plan persisted under checkpoint lock');
-    this.plan = plan;
-  }
-}
-
 function utcNow() { return new Date().toISOString(); }
 function selectedPr(cwd, prNumber) {
   const selected = prNumber ?? activePrNumber(cwd);
@@ -53,10 +39,7 @@ function selectedPr(cwd, prNumber) {
   return selected;
 }
 function runProtectedTransaction(options) {
-  try { return checkpointProtectedStateTransaction(options); } catch (error) {
-    if (error instanceof IdempotentTransaction) return error.state;
-    throw error;
-  }
+  return checkpointProtectedStateTransaction(options);
 }
 
 function isV2CompletedTaskValidationRecoveryAuthorized(cwd, state, expectedIds) {
@@ -118,28 +101,22 @@ export function buildTargetedValidationPlan({
       cwd, prNumber: pr, expectedRevision: current.revision,
     });
   }
-  try {
-    checkpointStateTransaction({
-      cwd,
-      prNumber: pr,
-      expectedRevision: current.revision,
-      transaction: (locked) => {
-        const initialMode = initialSelection !== undefined && initialSelection !== null;
-        const expectedIds = initialMode ? actionableIntegratedTaskIds(locked) : [];
-        const completedTaskRecoveryAuthorized = initialMode
-          && isV2CompletedTaskValidationRecoveryAuthorized(cwd, locked, expectedIds);
-        const plan = buildTargetedValidationPlanUnlocked({
-          cwd, prNumber: pr, taskPackets, initialSelection, replace, now,
-          completedTaskRecoveryAuthorized,
-        });
-        throw new PlanTransaction(plan);
-      },
-    });
-  } catch (error) {
-    if (error instanceof PlanTransaction) return error.plan;
-    throw error;
-  }
-  throw new StateError('Validation plan transaction did not return a plan', 'INVALID_VALIDATION_PLAN');
+  return checkpointStateTransaction({
+    cwd,
+    prNumber: pr,
+    expectedRevision: current.revision,
+    transaction: (locked) => {
+      const initialMode = initialSelection !== undefined && initialSelection !== null;
+      const expectedIds = initialMode ? actionableIntegratedTaskIds(locked) : [];
+      const completedTaskRecoveryAuthorized = initialMode
+        && isV2CompletedTaskValidationRecoveryAuthorized(cwd, locked, expectedIds);
+      const plan = buildTargetedValidationPlanUnlocked({
+        cwd, prNumber: pr, taskPackets, initialSelection, replace, now,
+        completedTaskRecoveryAuthorized,
+      });
+      return { nextState: locked, result: plan, noWrite: true };
+    },
+  });
 }
 
 export function checkpointTargetedValidationReset({
@@ -150,7 +127,9 @@ export function checkpointTargetedValidationReset({
     transitionKind: 'targeted-validation',
     transaction: (current) => {
       const nextState = buildTargetedValidationResetTransition(current);
-      if (nextState === current) throw new IdempotentTransaction(current);
+      if (nextState === current) {
+        return { nextState: current, result: current, noWrite: true };
+      }
       return {
         nextState,
         event: {
@@ -251,7 +230,9 @@ export function checkpointCiValidation({
     transitionKind: 'ci-validation',
     transaction: (current) => {
       const nextState = buildCiValidationTransition(current, evidence);
-      if (nextState === current) throw new IdempotentTransaction(current);
+      if (nextState === current) {
+        return { nextState: current, result: current, noWrite: true };
+      }
       return { nextState, event };
     },
   });

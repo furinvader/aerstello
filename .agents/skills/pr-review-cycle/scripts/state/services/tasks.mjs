@@ -39,13 +39,6 @@ const STABLE_TASK_IDENTITY_FIELDS = [
   'id', 'sourceIds', 'sourceType', 'fingerprint', 'summary', 'severity', 'disposition',
 ];
 
-class IdempotentTransaction extends Error {
-  constructor(state) {
-    super('idempotent checkpoint transaction');
-    this.state = state;
-  }
-}
-
 function sameEvidence(left, right) { return JSON.stringify(left) === JSON.stringify(right); }
 function selectedPr(cwd, prNumber) {
   const selected = prNumber ?? activePrNumber(cwd);
@@ -55,14 +48,11 @@ function selectedPr(cwd, prNumber) {
   return selected;
 }
 function runProtectedTransaction(options, { onCheckpoint } = {}) {
-  try {
-    const state = checkpointProtectedStateTransaction(options);
+  const state = checkpointProtectedStateTransaction(options);
+  if (state.revision !== options.expectedRevision) {
     onCheckpoint?.(state);
-    return state;
-  } catch (error) {
-    if (error instanceof IdempotentTransaction) return error.state;
-    throw error;
   }
+  return state;
 }
 
 function assertMigrationOriginV2Binding(cwd, state, task) {
@@ -185,7 +175,7 @@ export function checkpointTaskPacketBinding({
           const provenance = buildTaskBindingProvenance(current, durablePacket, planning);
           persistImmutableTaskBindingProvenance(cwd, current, task, durablePacket, provenance);
         }
-        throw new IdempotentTransaction(current);
+        return { nextState: current, result: current, noWrite: true };
       }
       assertTaskPacketHead(current, task, packet, digest);
       if (packet.schemaVersion !== 3) {
@@ -279,7 +269,9 @@ function checkpointWorkerResultEvidence({
     transitionKind: backfill ? 'worker-result-backfill' : 'worker-result-acceptance',
     transaction: (current) => {
       const preflight = preflightWorkerResultAcceptance({ cwd, state: current, packet, result, backfill });
-      if (preflight.idempotent) throw new IdempotentTransaction(current);
+      if (preflight.idempotent) {
+        return { nextState: current, result: current, noWrite: true };
+      }
       persistWorkerResultEvidence(cwd, current, preflight.task, preflight.envelope, onStep);
       return {
         nextState: preflight.nextState,
@@ -363,7 +355,7 @@ export function checkpointTaskCompletion(options = {}) {
         nextState = { ...nextState, phase: 'ready-for-review', nextAction: reviewLimitNextAction(nextState) };
       }
       if (staleDiscoveryDisposition !== null && sameEvidence(current, nextState)) {
-        throw new IdempotentTransaction(current);
+        return { nextState: current, result: current, noWrite: true };
       }
       return { nextState, event };
     },

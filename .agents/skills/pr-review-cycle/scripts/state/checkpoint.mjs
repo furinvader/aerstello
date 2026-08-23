@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { isDeepStrictEqual } from 'node:util';
 
 import { atomicWriteJson, atomicWriteText } from './atomic-io.mjs';
 import { StateError } from './errors.mjs';
@@ -198,6 +199,21 @@ function transactionResult(value) {
       'INVALID_CHECKPOINT_TRANSACTION',
     );
   }
+  if (Object.hasOwn(value, 'result')
+      && value.result !== null
+      && (typeof value.result === 'object' || typeof value.result === 'function')
+      && typeof value.result.then === 'function') {
+    throw new StateError(
+      'Checkpoint transaction results must be synchronous',
+      'ASYNC_CHECKPOINT_TRANSACTION',
+    );
+  }
+  if (Object.hasOwn(value, 'noWrite') && typeof value.noWrite !== 'boolean') {
+    throw new StateError(
+      'Checkpoint transaction noWrite must be a boolean',
+      'INVALID_CHECKPOINT_TRANSACTION',
+    );
+  }
   return value;
 }
 
@@ -230,7 +246,23 @@ function checkpointTransaction({
         kind,
         result.transitionEvidence ?? transitionEvidence,
       );
-    return writeCheckpoint({
+    if (result.noWrite === true) {
+      transitionPolicy.assertTransitionAllowed(current, result.nextState, authorization, cwd);
+      if (!isDeepStrictEqual(result.nextState, current)) {
+        throw new StateError(
+          'Checkpoint transaction noWrite requires the exact current state',
+          'INVALID_CHECKPOINT_TRANSACTION',
+        );
+      }
+      if (Object.hasOwn(result, 'event')) {
+        throw new StateError(
+          'Checkpoint transaction noWrite cannot include an event',
+          'INVALID_CHECKPOINT_TRANSACTION',
+        );
+      }
+      return Object.hasOwn(result, 'result') ? result.result : current;
+    }
+    const state = writeCheckpoint({
       cwd,
       selectedPr,
       current,
@@ -240,6 +272,7 @@ function checkpointTransaction({
       transitionAuthorization: authorization,
       now: utcNow,
     });
+    return Object.hasOwn(result, 'result') ? result.result : state;
   });
 }
 

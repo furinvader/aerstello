@@ -163,3 +163,78 @@ test('protected transaction reloads state and rejects Promise callbacks before p
     assert.equal(readFileSync(statePath(cwd, 17), 'utf8'), stableBytes);
   });
 });
+
+test('transactions can return explicit synchronous service results', () => {
+  withRepository((cwd, initial) => {
+    const serviceResult = { kind: 'checkpoint-result', selectedPr: initial.prNumber };
+    const returned = checkpointStateTransaction({
+      cwd,
+      expectedRevision: initial.revision,
+      transaction: (current) => ({
+        nextState: { ...current, nextAction: 'Return the structured service result.' },
+        result: serviceResult,
+      }),
+    });
+
+    assert.equal(returned, serviceResult);
+    assert.equal(loadState(cwd).revision, initial.revision + 1);
+    assert.equal(loadState(cwd).nextAction, 'Return the structured service result.');
+
+    const stableBytes = readFileSync(statePath(cwd, 17), 'utf8');
+    throwsCode(() => checkpointStateTransaction({
+      cwd,
+      expectedRevision: initial.revision + 1,
+      transaction: (current) => ({
+        nextState: current,
+        result: Promise.resolve(current),
+      }),
+    }), 'ASYNC_CHECKPOINT_TRANSACTION');
+    assert.equal(readFileSync(statePath(cwd, 17), 'utf8'), stableBytes);
+  });
+});
+
+test('explicit no-write results authorize under the lock without persistence', () => {
+  withRepository((cwd, initial) => {
+    const path = statePath(cwd, 17);
+    const stableBytes = readFileSync(path, 'utf8');
+    let eventWrites = 0;
+    const serviceResult = { kind: 'idempotent', revision: initial.revision };
+    const returned = checkpointProtectedStateTransaction({
+      cwd,
+      expectedRevision: initial.revision,
+      transitionKind: 'review-request-limit',
+      eventWriter: () => { eventWrites += 1; },
+      transaction: (current) => ({
+        nextState: current,
+        result: serviceResult,
+        noWrite: true,
+      }),
+    });
+
+    assert.equal(returned, serviceResult);
+    assert.equal(eventWrites, 0);
+    assert.equal(readFileSync(path, 'utf8'), stableBytes);
+    assert.deepEqual(loadState(cwd), initial);
+
+    throwsCode(() => checkpointProtectedStateTransaction({
+      cwd,
+      expectedRevision: initial.revision,
+      transitionKind: 'review-request-limit',
+      transaction: (current) => ({
+        nextState: { ...current, reviewRequestLimit: 4 },
+        noWrite: true,
+      }),
+    }), 'INVALID_CHECKPOINT_TRANSACTION');
+    throwsCode(() => checkpointProtectedStateTransaction({
+      cwd,
+      expectedRevision: initial.revision,
+      transitionKind: 'review-request-limit',
+      transaction: (current) => ({
+        nextState: current,
+        event: { type: 'invalid-no-write-event', summary: 'Must be rejected' },
+        noWrite: true,
+      }),
+    }), 'INVALID_CHECKPOINT_TRANSACTION');
+    assert.equal(readFileSync(path, 'utf8'), stableBytes);
+  });
+});
