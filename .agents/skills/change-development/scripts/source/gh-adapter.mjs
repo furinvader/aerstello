@@ -2,7 +2,7 @@ import { execFile as nodeExecFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(nodeExecFile);
-const ISSUE_QUERY = `query ChangeDevelopmentIssue($owner:String!,$repo:String!,$issue:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){issue(number:$issue){id number url title body state createdAt updatedAt author{__typename login id url} comments(first:100,after:$cursor){nodes{id databaseId url body createdAt updatedAt lastEditedAt author{__typename login id url}} pageInfo{hasNextPage endCursor}}}}}`;
+const ISSUE_QUERY = `query ChangeDevelopmentIssue($owner:String!,$repo:String!,$issue:Int!,$cursor:String){rateLimit{cost remaining} repository(owner:$owner,name:$repo){issue(number:$issue){id number url title body state createdAt updatedAt author{__typename login ... on Node{id} url} comments(first:100,after:$cursor){nodes{id databaseId url body createdAt updatedAt lastEditedAt author{__typename login ... on Node{id} url}} pageInfo{hasNextPage endCursor}}}}}`;
 
 function splitRepository(repository) {
   const parts = String(repository ?? '').split('/');
