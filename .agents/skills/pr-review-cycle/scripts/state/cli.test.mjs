@@ -349,6 +349,87 @@ test('validate-result CLI rejects off-history advanced results without writes', 
     'a rejected diagnostic writes no state, event, envelope, or receipt evidence');
 });
 
+test('validate-result CLI rejects terminal tasks without accepted worker evidence', () => {
+  for (const status of ['integrated', 'completed']) {
+    const cwd = repo();
+    const fixture = boundWorkerResultFixture(cwd, `terminal-${status}`);
+    git(cwd, ['cherry-pick', fixture.result.commitSha]);
+    const centralSha = git(cwd, ['rev-parse', 'HEAD']);
+    const advanced = checkpointGitMetadata({ cwd }).state;
+    const terminalTask = advanced.tasks.map((item) => {
+      if (item.id !== fixture.packet.taskId) return item;
+      const { execution: _execution, ...withoutExecution } = item;
+      return {
+        ...withoutExecution,
+        status,
+        integratedCommitSha: centralSha,
+        resolutionSummary: `Terminal ${status} fixture without accepted evidence.`,
+      };
+    });
+    writeFileSync(statePath(cwd, advanced.prNumber), `${JSON.stringify({
+      ...advanced, tasks: terminalTask,
+    })}\n`);
+    const packetPath = join(cwd, `${status}-packet.json`);
+    const resultPath = join(cwd, `${status}-result.json`);
+    writeFileSync(packetPath, JSON.stringify(fixture.packet));
+    writeFileSync(resultPath, JSON.stringify(fixture.result));
+    const before = durableAcceptanceSnapshot(cwd, fixture.packet.taskId);
+
+    const rejected = spawnSync(process.execPath, [
+      STATE_CLI, 'validate-result', '--task-packet', packetPath, '--worker-result', resultPath,
+    ], { cwd, encoding: 'utf8' });
+
+    assert.equal(rejected.status, 1);
+    assert.match(rejected.stderr, new RegExp(
+      `^WORKER_RESULT_ACCEPTANCE_NOT_ALLOWED: Task ${fixture.packet.taskId} cannot accept a worker result while ${status}`,
+      'u',
+    ));
+    assert.deepEqual(durableAcceptanceSnapshot(cwd, fixture.packet.taskId), before,
+      `a rejected ${status} diagnostic writes no state, event, envelope, or receipt evidence`);
+  }
+});
+
+test('validate-result CLI is idempotent for exact accepted terminal evidence', () => {
+  const cwd = repo();
+  const fixture = boundWorkerResultFixture(cwd, 'accepted-diagnostic');
+  checkpointWorkerResultAcceptance({
+    cwd, packet: fixture.packet, result: fixture.result,
+    expectedRevision: fixture.bound.revision,
+  });
+  git(cwd, ['cherry-pick', fixture.result.commitSha]);
+  const centralSha = git(cwd, ['rev-parse', 'HEAD']);
+  const advanced = checkpointGitMetadata({ cwd }).state;
+  const { execution: _execution, ...acceptedTask } = advanced.tasks[0];
+  const integrated = checkpointState({
+    cwd,
+    expectedRevision: advanced.revision,
+    nextState: {
+      ...advanced,
+      tasks: [{
+        ...acceptedTask,
+        status: 'integrated',
+        integratedCommitSha: centralSha,
+        resolutionSummary: 'Integrated exact accepted worker evidence.',
+      }],
+    },
+  });
+  const packetPath = join(cwd, 'accepted-packet.json');
+  const resultPath = join(cwd, 'accepted-result.json');
+  writeFileSync(packetPath, JSON.stringify(fixture.packet));
+  writeFileSync(resultPath, JSON.stringify(fixture.result));
+  const before = durableAcceptanceSnapshot(cwd, fixture.packet.taskId);
+
+  const validated = spawnSync(process.execPath, [
+    STATE_CLI, 'validate-result', '--task-packet', packetPath, '--worker-result', resultPath,
+  ], { cwd, encoding: 'utf8' });
+
+  assert.equal(integrated.tasks[0].status, 'integrated');
+  assert.equal(validated.status, 0, validated.stderr);
+  assert.equal(validated.stdout, '{\n  "valid": true,\n  "taskId": "accepted-diagnostic"\n}\n');
+  assert.deepEqual(durableAcceptanceSnapshot(cwd, fixture.packet.taskId), before,
+    'an idempotent accepted-evidence diagnostic writes no state, event, envelope, or receipt evidence');
+});
+
 test('state CLI configures and removes a finite review request limit strictly', () => {
   const cwd = repo();
   const initialized = spawnSync(process.execPath, [
