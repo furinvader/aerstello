@@ -170,12 +170,21 @@ export function checkpointTaskPacketBinding({
         const provenancePath = taskBindingProvenancePath(cwd, current.prNumber, task.id);
         if (existsSync(provenancePath)) {
           readBoundTaskBindingProvenance(cwd, current, task, durablePacket);
+          return { nextState: current, result: current, noWrite: true };
         } else {
           const planning = recoverHistoricalTaskBindingPlanning(cwd, current, durablePacket);
           const provenance = buildTaskBindingProvenance(current, durablePacket, planning);
-          persistImmutableTaskBindingProvenance(cwd, current, task, durablePacket, provenance);
+          return {
+            nextState: current,
+            result: current,
+            noWrite: true,
+            beforeCommit: () => {
+              persistImmutableTaskBindingProvenance(
+                cwd, current, task, durablePacket, provenance,
+              );
+            },
+          };
         }
-        return { nextState: current, result: current, noWrite: true };
       }
       assertTaskPacketHead(current, task, packet, digest);
       if (packet.schemaVersion !== 3) {
@@ -183,11 +192,13 @@ export function checkpointTaskPacketBinding({
       }
       const planning = assertBehaviorMapperPlanningComplete(cwd, current, packet);
       const provenance = buildTaskBindingProvenance(current, packet, planning);
-      persistImmutableTaskPacketSidecar(cwd, current, packet, digest);
-      persistImmutableTaskBindingProvenance(cwd, current, task, packet, provenance);
       return {
         nextState: buildTaskPacketBindingTransition(current, packet.taskId, digest),
         event: event ?? { type: 'task-packet-bound', summary: `Bound accepted packet for task ${packet.taskId}` },
+        beforeCommit: () => {
+          persistImmutableTaskPacketSidecar(cwd, current, packet, digest);
+          persistImmutableTaskBindingProvenance(cwd, current, task, packet, provenance);
+        },
       };
     },
   });
@@ -272,12 +283,16 @@ function checkpointWorkerResultEvidence({
       if (preflight.idempotent) {
         return { nextState: current, result: current, noWrite: true };
       }
-      persistWorkerResultEvidence(cwd, current, preflight.task, preflight.envelope, onStep);
       return {
         nextState: preflight.nextState,
         event: event ?? {
           type: backfill ? 'worker-result-backfilled' : 'worker-result-accepted',
           summary: `${backfill ? 'Backfilled' : 'Accepted'} worker result for task ${preflight.task.id}`,
+        },
+        beforeCommit: () => {
+          persistWorkerResultEvidence(
+            cwd, current, preflight.task, preflight.envelope, onStep,
+          );
         },
       };
     },

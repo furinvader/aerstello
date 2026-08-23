@@ -71,19 +71,21 @@ function writeCheckpoint({
   nextState,
   event,
   eventWriter,
+  beforeCommit,
   transitionAuthorization,
   now,
 }) {
-  if (event) prepareEvent(event);
   assertImmutableIdentity(current, nextState);
+  const state = { ...nextState, revision: current.revision + 1, updatedAt: now() };
+  validateStateForWrite(state);
+  invokeBeforeCommit(beforeCommit);
   transitionPolicy.assertTransitionAllowed(
     current,
     nextState,
     transitionAuthorization,
     cwd,
   );
-  const state = { ...nextState, revision: current.revision + 1, updatedAt: now() };
-  validateStateForWrite(state);
+  if (event) prepareEvent(event);
 
   const path = statePath(cwd, selectedPr);
   const originalBytes = readFileSync(path, 'utf8');
@@ -114,7 +116,6 @@ function checkpointLocked({
   transitionEvidence,
   now,
 }) {
-  if (event) prepareEvent(event);
   const current = loadState(cwd, selectedPr);
   assertRevision(current, expectedRevision, nextState);
   const authorization = transitionKind === undefined
@@ -214,7 +215,25 @@ function transactionResult(value) {
       'INVALID_CHECKPOINT_TRANSACTION',
     );
   }
+  if (Object.hasOwn(value, 'beforeCommit') && typeof value.beforeCommit !== 'function') {
+    throw new StateError(
+      'Checkpoint transaction beforeCommit must be a function',
+      'INVALID_CHECKPOINT_TRANSACTION',
+    );
+  }
   return value;
+}
+
+function invokeBeforeCommit(beforeCommit) {
+  if (beforeCommit === undefined) return;
+  const value = beforeCommit();
+  if (value !== null && (typeof value === 'object' || typeof value === 'function')
+      && typeof value.then === 'function') {
+    throw new StateError(
+      'Checkpoint transaction beforeCommit hooks must be synchronous',
+      'ASYNC_CHECKPOINT_TRANSACTION',
+    );
+  }
 }
 
 function checkpointTransaction({
@@ -247,7 +266,6 @@ function checkpointTransaction({
         result.transitionEvidence ?? transitionEvidence,
       );
     if (result.noWrite === true) {
-      transitionPolicy.assertTransitionAllowed(current, result.nextState, authorization, cwd);
       if (!isDeepStrictEqual(result.nextState, current)) {
         throw new StateError(
           'Checkpoint transaction noWrite requires the exact current state',
@@ -260,6 +278,10 @@ function checkpointTransaction({
           'INVALID_CHECKPOINT_TRANSACTION',
         );
       }
+      assertImmutableIdentity(current, result.nextState);
+      validateStateForWrite(result.nextState);
+      transitionPolicy.assertTransitionAllowed(current, result.nextState, authorization, cwd);
+      invokeBeforeCommit(result.beforeCommit);
       return Object.hasOwn(result, 'result') ? result.result : current;
     }
     const state = writeCheckpoint({
@@ -269,6 +291,7 @@ function checkpointTransaction({
       nextState: result.nextState,
       event: result.event,
       eventWriter,
+      beforeCommit: result.beforeCommit,
       transitionAuthorization: authorization,
       now: utcNow,
     });

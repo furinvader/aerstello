@@ -238,3 +238,141 @@ test('explicit no-write results authorize under the lock without persistence', (
     assert.equal(readFileSync(path, 'utf8'), stableBytes);
   });
 });
+
+test('transactions preflight the exact persisted candidate before staged effects', () => {
+  withRepository((cwd, initial) => {
+    const path = statePath(cwd, 17);
+    const stableBytes = readFileSync(path, 'utf8');
+    let stagedEffects = 0;
+
+    throwsCode(() => checkpointStateTransaction({
+      cwd,
+      expectedRevision: initial.revision,
+      transaction: (current) => ({
+        nextState: {
+          ...current,
+          tasks: Array.from({ length: 70 }, (_entry, index) => proposedTask(index)),
+        },
+        beforeCommit: () => { stagedEffects += 1; },
+      }),
+    }), 'STATE_TOO_LARGE');
+    assert.equal(stagedEffects, 0);
+    assert.equal(readFileSync(path, 'utf8'), stableBytes);
+  });
+});
+
+test('staged effects precede receipt-dependent policy and event validation', () => {
+  withRepository((cwd, initial) => {
+    const path = statePath(cwd, 17);
+    const stableBytes = readFileSync(path, 'utf8');
+    let stagedEffects = 0;
+
+    throwsCode(() => checkpointProtectedStateTransaction({
+      cwd,
+      expectedRevision: initial.revision,
+      transitionKind: 'review-request-limit',
+      transaction: (current) => ({
+        nextState: {
+          ...current,
+          reviewRequestLimit: 4,
+          tasks: [proposedTask(0)],
+        },
+        beforeCommit: () => { stagedEffects += 1; },
+      }),
+    }), 'IMMUTABLE_STATE_PROVENANCE');
+    assert.equal(stagedEffects, 1);
+
+    throwsCode(() => checkpointStateTransaction({
+      cwd,
+      expectedRevision: initial.revision,
+      transaction: (current) => ({
+        nextState: { ...current, nextAction: 'Reject the event after staging.' },
+        event: { type: 'invalid-event', summary: 'x'.repeat(1001) },
+        beforeCommit: () => { stagedEffects += 1; },
+      }),
+    }), 'INVALID_EVENT');
+
+    assert.equal(stagedEffects, 2);
+    assert.equal(readFileSync(path, 'utf8'), stableBytes);
+  });
+});
+
+test('transaction staged effects must be functions with synchronous results', () => {
+  withRepository((cwd, initial) => {
+    const path = statePath(cwd, 17);
+    const stableBytes = readFileSync(path, 'utf8');
+
+    throwsCode(() => checkpointStateTransaction({
+      cwd,
+      expectedRevision: initial.revision,
+      transaction: (current) => ({ nextState: current, beforeCommit: null }),
+    }), 'INVALID_CHECKPOINT_TRANSACTION');
+    throwsCode(() => checkpointStateTransaction({
+      cwd,
+      expectedRevision: initial.revision,
+      transaction: (current) => ({
+        nextState: current,
+        beforeCommit: async () => undefined,
+      }),
+    }), 'ASYNC_CHECKPOINT_TRANSACTION');
+    assert.throws(() => checkpointStateTransaction({
+      cwd,
+      expectedRevision: initial.revision,
+      transaction: (current) => ({
+        nextState: current,
+        beforeCommit: () => { throw new Error('synthetic staged-effect failure'); },
+      }),
+    }), /synthetic staged-effect failure/u);
+
+    assert.equal(readFileSync(path, 'utf8'), stableBytes);
+  });
+});
+
+test('no-write transactions validate before running their staged repair', () => {
+  withRepository((cwd, initial) => {
+    const path = statePath(cwd, 17);
+    const stableBytes = readFileSync(path, 'utf8');
+    let observedRevision = null;
+    const returned = checkpointStateTransaction({
+      cwd,
+      expectedRevision: initial.revision,
+      transaction: (current) => ({
+        nextState: current,
+        result: { repaired: true },
+        noWrite: true,
+        beforeCommit: () => { observedRevision = loadState(cwd).revision; },
+      }),
+    });
+
+    assert.deepEqual(returned, { repaired: true });
+    assert.equal(observedRevision, initial.revision);
+    assert.equal(readFileSync(path, 'utf8'), stableBytes);
+  });
+});
+
+test('event failure rolls state back while retaining the completed staged effect', () => {
+  withRepository((cwd, initial) => {
+    const path = statePath(cwd, 17);
+    const stableBytes = readFileSync(path, 'utf8');
+    let evidenceDurable = false;
+    let revisionSeenByEffect = null;
+
+    throwsCode(() => checkpointStateTransaction({
+      cwd,
+      expectedRevision: initial.revision,
+      eventWriter: () => { throw new Error('synthetic journal failure'); },
+      transaction: (current) => ({
+        nextState: { ...current, nextAction: 'Retry after journal recovery.' },
+        event: { type: 'staged-effect-test', summary: 'Retain staged evidence on rollback' },
+        beforeCommit: () => {
+          revisionSeenByEffect = loadState(cwd).revision;
+          evidenceDurable = true;
+        },
+      }),
+    }), 'CHECKPOINT_EVENT_FAILED');
+
+    assert.equal(revisionSeenByEffect, initial.revision);
+    assert.equal(evidenceDurable, true);
+    assert.equal(readFileSync(path, 'utf8'), stableBytes);
+  });
+});
