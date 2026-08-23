@@ -711,10 +711,11 @@ PRODUCTION_STATE_IMPORTS.set('transitions/tasks.mjs', new Map([
   [stateModule('errors.mjs'), ['StateError']],
 ]));
 PRODUCTION_STATE_IMPORTS.set('transitions/git-metadata.mjs', new Map([
-  [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['reviewRequestUsage']],
+  [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['reviewRequestUsage', 'validatePrReviewState']],
+  [stateModule('errors.mjs'), ['StateError']],
 ]));
 PRODUCTION_STATE_IMPORTS.set('transitions/transactional-evidence.mjs', new Map([
-  [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['reviewRequestUsage']],
+  [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['reviewRequestUsage', 'validatePrReviewState']],
   [stateModule('errors.mjs'), ['StateError']],
 ]));
 PRODUCTION_STATE_IMPORTS.set('services/review.mjs', new Map([
