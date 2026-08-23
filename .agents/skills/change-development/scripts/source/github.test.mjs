@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { createGhGraphqlAdapter } from './gh-adapter.mjs';
+import { createGhGraphqlAdapter, ISSUE_QUERY } from './gh-adapter.mjs';
 import { GithubSourceError, readGithubIssue } from './github.mjs';
 
 const AT = '2026-08-17T00:00:00.000Z';
@@ -136,4 +136,10 @@ test('gh adapter issues only a GraphQL read and passes pagination cursor', async
   assert.deepEqual(call[1].slice(0, 2), ['api', 'graphql']);
   assert.ok(call[1].includes('cursor=cursor-2'));
   assert.equal(call[1].some((argument) => /mutation/iu.test(argument)), false);
+});
+
+test('gh adapter selects issue and comment author IDs through Node', () => {
+  const nodeAuthorSelection = 'author{__typename login ... on Node{id} url}';
+  assert.equal(ISSUE_QUERY.split(nodeAuthorSelection).length - 1, 2);
+  assert.equal(ISSUE_QUERY.replaceAll('... on Node{id}', '').includes('author{__typename login id url}'), false);
 });
