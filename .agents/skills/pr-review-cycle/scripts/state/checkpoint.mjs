@@ -75,17 +75,30 @@ function writeCheckpoint({
   transitionAuthorization,
   now,
 }) {
-  assertImmutableIdentity(current, nextState);
+  if (beforeCommit === undefined) {
+    if (event) prepareEvent(event);
+    assertImmutableIdentity(current, nextState);
+    transitionPolicy.assertTransitionAllowed(
+      current,
+      nextState,
+      transitionAuthorization,
+      cwd,
+    );
+  } else {
+    assertImmutableIdentity(current, nextState);
+  }
   const state = { ...nextState, revision: current.revision + 1, updatedAt: now() };
   validateStateForWrite(state);
   invokeBeforeCommit(beforeCommit);
-  transitionPolicy.assertTransitionAllowed(
-    current,
-    nextState,
-    transitionAuthorization,
-    cwd,
-  );
-  if (event) prepareEvent(event);
+  if (beforeCommit !== undefined) {
+    transitionPolicy.assertTransitionAllowed(
+      current,
+      nextState,
+      transitionAuthorization,
+      cwd,
+    );
+    if (event) prepareEvent(event);
+  }
 
   const path = statePath(cwd, selectedPr);
   const originalBytes = readFileSync(path, 'utf8');

@@ -89,6 +89,42 @@ test('checkpoint reloads under the lock and owns revision, identity, validation,
   });
 });
 
+test('generic checkpoints retain event, identity, policy, and schema error precedence', () => {
+  withRepository((cwd, initial) => {
+    const path = statePath(cwd, 17);
+    const stableBytes = readFileSync(path, 'utf8');
+
+    throwsCode(() => checkpointState({
+      cwd,
+      expectedRevision: initial.revision,
+      nextState: { ...initial, repository: 'other/repository' },
+      event: { type: 'invalid-event', summary: 'x'.repeat(1001) },
+    }), 'INVALID_EVENT');
+
+    throwsCode(() => checkpointState({
+      cwd,
+      expectedRevision: initial.revision,
+      nextState: {
+        ...initial,
+        repository: 'other/repository',
+        reviewRequestLimit: 5,
+      },
+    }), 'IMMUTABLE_STATE_IDENTITY');
+
+    throwsCode(() => checkpointState({
+      cwd,
+      expectedRevision: initial.revision,
+      nextState: {
+        ...initial,
+        reviewRequestLimit: 5,
+        tasks: Array.from({ length: 70 }, (_entry, index) => proposedTask(index)),
+      },
+    }), 'IMMUTABLE_STATE_PROVENANCE');
+
+    assert.equal(readFileSync(path, 'utf8'), stableBytes);
+  });
+});
+
 test('checkpoint is the only accepted protected-authorization minting boundary', () => {
   withRepository((cwd, initial) => {
     const nextState = { ...initial, reviewRequestLimit: 5 };
