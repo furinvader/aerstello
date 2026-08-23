@@ -1513,38 +1513,43 @@ export function checkpointTaskPacketBinding({
   });
 }
 
-function checkpointWorkerResultEvidence({
-  cwd, selectedPr, current, task, packet, result, expectedRevision, backfill, event, onStep,
-}) {
-  if (expectedRevision !== current.revision) {
-    throw new StateError(`State revision changed: expected ${expectedRevision}, found ${current.revision}`, 'STATE_REVISION_CONFLICT');
-  }
+function preflightWorkerResultAcceptance({
+  cwd = process.cwd(), state, packet, result, backfill = false, diagnostic = false,
+} = {}) {
+  const task = state?.tasks?.find((candidate) => candidate.id === packet?.taskId);
+  if (!task) throw new StateError('Worker result does not match a durable task', 'TASK_PACKET_NOT_BOUND');
   const packetErrors = validateTaskPacket(packet);
   if (packetErrors.length > 0) throw new StateError(`Invalid task packet:\n- ${packetErrors.join('\n- ')}`, 'INVALID_TASK_PACKET');
+  if (typeof task.taskPacketDigest !== 'string') {
+    throw new StateError('Worker result does not match a durably bound task packet', 'TASK_PACKET_NOT_BOUND');
+  }
   if (task.disposition !== 'actionable' || task.taskPacketDigest !== taskPacketDigest(packet)) {
     throw new StateError('Worker result does not match the accepted packet binding', 'TASK_PACKET_CONFLICT');
   }
-  const durablePacket = readBoundTaskPacketSidecar(cwd, current, task);
+  const durablePacket = readBoundTaskPacketSidecar(cwd, state, task);
   if (canonicalSerializedJson(durablePacket) !== canonicalSerializedJson(packet)) {
     throw new StateError('Worker result packet differs from its durable sidecar', 'TASK_PACKET_CONFLICT');
   }
-  const { envelope } = proveWorkerResultEvidence({ cwd, state: current, task, packet, result });
+  const { authority, envelope } = proveWorkerResultEvidence({ cwd, state, task, packet, result });
   if (typeof task.workerResultDigest === 'string') {
     if (backfill && !['integrated', 'completed'].includes(task.status)) {
       throw new StateError('Worker-result backfill requires an Integrated native schema-v3 task', 'WORKER_RESULT_BACKFILL_NOT_ALLOWED');
     }
-    const existing = readAcceptedWorkerResult(cwd, current, task, packet);
+    const existing = readAcceptedWorkerResult(cwd, state, task, packet);
     if (canonicalSerializedJson(existing) !== canonicalSerializedJson(envelope)) {
       throw new StateError(`Task ${task.id} already has different accepted worker evidence`, 'WORKER_RESULT_CONFLICT');
     }
-    return current;
+    return { authority, envelope, task, nextState: state, idempotent: true };
+  }
+  if (diagnostic && ['integrated', 'completed'].includes(task.status)) {
+    return { authority, envelope, task, nextState: state, idempotent: true };
   }
   if (backfill) {
     if (!['integrated', 'completed'].includes(task.status)) {
       throw new StateError('Worker-result backfill requires an Integrated native schema-v3 task', 'WORKER_RESULT_BACKFILL_NOT_ALLOWED');
     }
     for (const version of [1, 2]) {
-      const backupPath = join(stateDirectory(cwd, current.prNumber), `state.v${version}.backup.json`);
+      const backupPath = join(stateDirectory(cwd, state.prNumber), `state.v${version}.backup.json`);
       if (!existsSync(backupPath)) continue;
       try {
         const legacy = readJsonSidecar(backupPath, `schema-v${version} migration backup`);
@@ -1559,13 +1564,13 @@ function checkpointWorkerResultEvidence({
         throw new StateError(`Cannot prove task ${task.id} is native schema v3: ${error.message}`, 'WORKER_RESULT_BACKFILL_NOT_ALLOWED');
       }
     }
-    assertIntegratedWorkerCommit(cwd, current, task, packet, result);
+    assertIntegratedWorkerCommit(cwd, state, task, packet, result);
   } else {
     if (!['proposed', 'queued', 'running', 'implemented'].includes(task.status)) {
       throw new StateError(`Task ${task.id} cannot accept a worker result while ${task.status}`, 'WORKER_RESULT_ACCEPTANCE_NOT_ALLOWED');
     }
     if (task.status === 'implemented') {
-      assertIntegratedWorkerCommit(cwd, current, task, packet, result);
+      assertIntegratedWorkerCommit(cwd, state, task, packet, result);
     }
   }
   const nextTask = backfill ? { ...task, workerResultDigest: envelope.resultDigest } : {
@@ -1583,20 +1588,31 @@ function checkpointWorkerResultEvidence({
     },
   };
   const nextState = {
-    ...current,
-    tasks: current.tasks.map((candidate) => candidate.id === task.id ? nextTask : candidate),
+    ...state,
+    tasks: state.tasks.map((candidate) => candidate.id === task.id ? nextTask : candidate),
   };
-  validateStateForWrite({ ...nextState, revision: current.revision + 1 });
-  persistWorkerResultEvidence(cwd, current, task, envelope, onStep);
+  validateStateForWrite({ ...nextState, revision: state.revision + 1 });
+  return { authority, envelope, task, nextState, idempotent: false };
+}
+
+function checkpointWorkerResultEvidence({
+  cwd, selectedPr, current, packet, result, expectedRevision, backfill, event, onStep,
+}) {
+  if (expectedRevision !== current.revision) {
+    throw new StateError(`State revision changed: expected ${expectedRevision}, found ${current.revision}`, 'STATE_REVISION_CONFLICT');
+  }
+  const preflight = preflightWorkerResultAcceptance({ cwd, state: current, packet, result, backfill });
+  if (preflight.idempotent) return current;
+  persistWorkerResultEvidence(cwd, current, preflight.task, preflight.envelope, onStep);
   const updated = checkpointStateUnlocked({
-    cwd, selectedPr, nextState, expectedRevision: current.revision,
+    cwd, selectedPr, nextState: preflight.nextState, expectedRevision: current.revision,
     event: event ?? {
       type: backfill ? 'worker-result-backfilled' : 'worker-result-accepted',
-      summary: `${backfill ? 'Backfilled' : 'Accepted'} worker result for task ${task.id}`,
+      summary: `${backfill ? 'Backfilled' : 'Accepted'} worker result for task ${preflight.task.id}`,
     },
     eventWriter: appendEvent,
     transitionAuthorization: protectedTransition(
-      nextState, backfill ? 'worker-result-backfill' : 'worker-result-acceptance',
+      preflight.nextState, backfill ? 'worker-result-backfill' : 'worker-result-acceptance',
     ),
   });
   onStep?.('state-checkpointed');
@@ -1605,15 +1621,21 @@ function checkpointWorkerResultEvidence({
 
 export function checkpointWorkerResultAcceptance({
   cwd = process.cwd(), prNumber, packet, result, expectedRevision, event, onStep,
+  preflightOnly = false,
 } = {}) {
   const selectedPr = prNumber ?? activePrNumber(cwd);
   if (selectedPr === null || selectedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+  if (preflightOnly) {
+    const current = loadState(cwd, selectedPr);
+    if (!current) throw new StateError('No active PR state for worker-result acceptance', 'STATE_NOT_FOUND');
+    return preflightWorkerResultAcceptance({
+      cwd, state: current, packet, result, backfill: false, diagnostic: true,
+    });
+  }
   return withStateLock(cwd, selectedPr, () => {
     const current = loadState(cwd, selectedPr);
-    const task = current.tasks.find((candidate) => candidate.id === packet?.taskId);
-    if (!task) throw new StateError('Worker result does not match a durable task', 'TASK_PACKET_NOT_BOUND');
     return checkpointWorkerResultEvidence({
-      cwd, selectedPr: current.prNumber, current, task, packet, result,
+      cwd, selectedPr: current.prNumber, current, packet, result,
       expectedRevision, backfill: false, event, onStep,
     });
   });
@@ -1626,10 +1648,8 @@ export function checkpointWorkerResultBackfill({
   if (selectedPr === null || selectedPr === undefined) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
   return withStateLock(cwd, selectedPr, () => {
     const current = loadState(cwd, selectedPr);
-    const task = current.tasks.find((candidate) => candidate.id === packet?.taskId);
-    if (!task) throw new StateError('Worker result does not match a durable task', 'TASK_PACKET_NOT_BOUND');
     return checkpointWorkerResultEvidence({
-      cwd, selectedPr: current.prNumber, current, task, packet, result,
+      cwd, selectedPr: current.prNumber, current, packet, result,
       expectedRevision, backfill: true, event, onStep,
     });
   });

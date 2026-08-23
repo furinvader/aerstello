@@ -2,13 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { parseOptions, UsageError, writeJson } from '../../../../../scripts/lib/cli.mjs';
 import {
-  validateTaskPacket,
-  validateWorkerResult,
-  validateWorkerResultAgainstTask,
-} from '../contracts/contracts.mjs';
-import {
   archiveState,
-  assertTaskPacketBound,
   buildTargetedValidationPlan,
   checkpointState,
   checkpointReviewRequestLimit,
@@ -18,7 +12,6 @@ import {
   checkpointWorkerResultBackfill,
   executeTargetedValidationPlan,
   initializeState,
-  inspectWorkerCommitAuthority,
   loadState,
   locateState,
   migrateState,
@@ -235,20 +228,9 @@ try {
     }
     const packet = JSON.parse(readFileSync(options['task-packet'], 'utf8'));
     const result = JSON.parse(readFileSync(options['worker-result'], 'utf8'));
-    const structuralErrors = [
-      ...validateTaskPacket(packet).map((error) => `task packet: ${error}`),
-      ...validateWorkerResult(result).map((error) => `worker result: ${error}`),
-    ];
-    if (structuralErrors.length > 0) {
-      throw new StateError(`Worker result does not satisfy task packet:\n- ${structuralErrors.join('\n- ')}`, 'INVALID_WORKER_RESULT');
-    }
-    const active = loadState(process.cwd(), options.pr);
-    if (!active) throw new StateError('No active PR state for worker-result acceptance', 'STATE_NOT_FOUND');
-    assertTaskPacketBound(active, packet);
-    const authority = result.status === 'implemented'
-      ? inspectWorkerCommitAuthority({ cwd: process.cwd(), state: active, packet, result }) : null;
-    const errors = validateWorkerResultAgainstTask(packet, result, authority?.changedPaths);
-    if (errors.length > 0) throw new StateError(`Worker result does not satisfy task packet:\n- ${errors.join('\n- ')}`, 'INVALID_WORKER_RESULT');
+    checkpointWorkerResultAcceptance({
+      cwd: process.cwd(), prNumber: options.pr, packet, result, preflightOnly: true,
+    });
     writeJson({ valid: true, taskId: packet.taskId });
   } else if (['accept-result', 'backfill-result'].includes(command)) {
     if (!options['task-packet'] || !options['worker-result']) {
