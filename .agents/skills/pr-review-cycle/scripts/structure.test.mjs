@@ -149,16 +149,33 @@ const EXPECTED_CANONICAL_FILES = [
   'scripts/hooks/session-start.mjs',
   'scripts/hooks/subagent-stop.mjs',
   'scripts/paths.mjs',
+  'scripts/state/archive.mjs',
   'scripts/state/archive.test.mjs',
+  'scripts/state/atomic-io.mjs',
   'scripts/state/cli.mjs',
   'scripts/state/cli.test.mjs',
+  'scripts/state/errors.mjs',
+  'scripts/state/evidence/specialist-bundle-store.mjs',
+  'scripts/state/evidence/specialist-bundles.mjs',
+  'scripts/state/evidence/task-binding.mjs',
+  'scripts/state/evidence/task-packets.mjs',
+  'scripts/state/evidence/validation-plans.mjs',
+  'scripts/state/evidence/worker-results.mjs',
   'scripts/state/facade.test.mjs',
   'scripts/state/fixtures/hold-state-lock.mjs',
+  'scripts/state/git-authority.mjs',
+  'scripts/state/journal.mjs',
+  'scripts/state/locations.mjs',
   'scripts/state/locks-and-barriers.test.mjs',
+  'scripts/state/locks.mjs',
+  'scripts/state/migrations.mjs',
+  'scripts/state/reconciliation.mjs',
+  'scripts/state/recovery.mjs',
   'scripts/state/review-transitions.test.mjs',
   'scripts/state/schema-migration-and-recovery.test.mjs',
   'scripts/state/specialist-evidence.test.mjs',
   'scripts/state/state-loading-and-persistence.test.mjs',
+  'scripts/state/state-store.mjs',
   'scripts/state/state.mjs',
   'scripts/state/task-completion.test.mjs',
   'scripts/state/task-packets.test.mjs',
@@ -440,6 +457,293 @@ function githubModule(path) {
 }
 
 const importedAs = (imported, local = imported) => ({ imported, local });
+
+const stateModuleDirectory = join(scriptsDirectory, 'state');
+const stateModule = (path) => join(stateModuleDirectory, path);
+
+const PRODUCTION_STATE_IMPORTS = new Map([
+  ['errors.mjs', new Map()],
+  ['atomic-io.mjs', new Map([
+    ['node:fs', ['closeSync', 'existsSync', 'fsyncSync', 'mkdirSync', 'openSync', 'readFileSync', 'renameSync', 'rmSync', 'writeFileSync']],
+    ['node:crypto', ['randomUUID']],
+    ['node:path', ['basename', 'dirname', 'join']],
+    [stateModule('errors.mjs'), ['StateError']],
+  ])],
+  ['locations.mjs', new Map([
+    ['node:crypto', ['createHash']],
+    ['node:path', ['join']],
+    [join(scriptsDirectory, 'paths.mjs'), ['reviewRoot', 'specialistReviewDirectory', 'taskBindingProvenanceDirectory', 'taskPacketDirectory', 'workerResultDirectory']],
+    [stateModule('errors.mjs'), ['StateError']],
+  ])],
+  ['locks.mjs', new Map([
+    ['node:fs', ['lstatSync', 'mkdirSync']],
+    ['node:path', ['dirname']],
+    ['node:sqlite', ['DatabaseSync']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('locations.mjs'), ['legacyLockPath', 'legacyRequestOwnerLockPath', 'lockPath', 'requestOwnerLockPath']],
+  ])],
+  ['journal.mjs', new Map([
+    ['node:fs', ['existsSync', 'mkdirSync', 'readFileSync']],
+    ['node:path', ['join']],
+    [stateModule('atomic-io.mjs'), ['atomicWriteText']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('locations.mjs'), ['stateDirectory']],
+    [stateModule('locks.mjs'), ['withStateLock']],
+  ])],
+  ['git-authority.mjs', new Map([
+    ['node:crypto', ['createHash']],
+    ['node:fs', ['existsSync', 'mkdtempSync', 'mkdirSync', 'readFileSync', 'rmSync', 'statSync', 'writeFileSync']],
+    ['node:os', ['tmpdir']],
+    ['node:path', ['dirname', 'join', 'resolve']],
+    ['node:child_process', ['spawnSync']],
+    [join(repositoryDirectory, 'scripts', 'lib', 'git.mjs'), ['gitText', 'resolveCommit', 'runGit']],
+    [stateModule('errors.mjs'), ['StateError']],
+  ])],
+  ['migrations.mjs', new Map([
+    ['node:fs', ['existsSync', 'readFileSync']],
+    ['node:path', ['join']],
+    [join(repositoryDirectory, 'scripts', 'lib', 'git.mjs'), ['runGit']],
+    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['validatePrReviewState', 'validatePrReviewStateV1']],
+    [stateModule('atomic-io.mjs'), ['atomicWriteJson', 'atomicWriteText', 'serializeJson']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('journal.mjs'), ['appendEvent']],
+    [stateModule('locations.mjs'), ['activePointerPath', 'parsePrNumber', 'stateDirectory', 'statePath']],
+    [stateModule('locks.mjs'), ['withStateLock']],
+  ])],
+  ['state-store.mjs', new Map([
+    ['node:fs', ['existsSync', 'readFileSync']],
+    ['node:path', ['join']],
+    [join(repositoryDirectory, 'scripts', 'lib', 'git.mjs'), ['gitText', 'resolveCommit', 'runGit']],
+    [join(repositoryDirectory, 'scripts', 'lib', 'release-state.mjs'), ['inspectReleaseState']],
+    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['validatePrReviewState', 'validatePrReviewStateV1']],
+    [join(scriptsDirectory, 'paths.mjs'), ['repositoryRoot']],
+    [stateModule('atomic-io.mjs'), ['atomicWriteJson', 'serializeJson']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('git-authority.mjs'), ['gitSnapshot']],
+    [stateModule('journal.mjs'), ['appendEvent']],
+    [stateModule('locations.mjs'), ['activePointerPath', 'parsePrNumber', 'stateDirectory', 'statePath']],
+    [stateModule('locks.mjs'), ['withStateLock']],
+    [stateModule('migrations.mjs'), ['migratePrReviewStateV2']],
+  ])],
+  ['evidence/task-packets.mjs', new Map([
+    ['node:fs', ['existsSync']],
+    ['node:path', ['join', 'resolve']],
+    [join(repositoryDirectory, 'scripts', 'lib', 'git.mjs'), ['runGit']],
+    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['validateTaskPacket']],
+    [join(scriptsDirectory, 'contracts', 'task-packet.mjs'), [importedAs('taskPacketDigest', 'internalTaskPacketDigest')]],
+    [stateModule('atomic-io.mjs'), ['atomicWriteText', 'canonicalSerializedJson', 'readJsonSidecar']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('locations.mjs'), ['stateDirectory', 'taskPacketSidecarPath']],
+    [stateModule('migrations.mjs'), ['migratePrReviewStateV2']],
+  ])],
+  ['evidence/specialist-bundle-store.mjs', new Map([
+    ['node:crypto', ['createHash']],
+    ['node:fs', ['existsSync', 'readFileSync', 'statSync']],
+    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['validateTaskPacket']],
+    [join(skillDirectory, '..', 'aerstello-specialists', 'scripts', 'validate-registry.mjs'), ['isSpecialistEvidenceApplicable', 'loadRegistry', 'requiredSpecialistIds', 'routeSpecialists', 'validateSpecialistEvidence']],
+    [stateModule('atomic-io.mjs'), ['atomicWriteText', 'canonicalSerializedJson', 'readJsonSidecar']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('locations.mjs'), ['specialistPlanReceiptPath', 'specialistReviewBundlePath']],
+    [stateModule('evidence/task-packets.mjs'), ['taskPacketDigest']],
+  ])],
+  ['evidence/task-binding.mjs', new Map([
+    ['node:crypto', ['createHash']],
+    ['node:fs', ['existsSync', 'readFileSync', 'readdirSync', 'statSync']],
+    [join(scriptsDirectory, 'paths.mjs'), ['specialistReviewDirectory']],
+    [join(skillDirectory, '..', 'aerstello-specialists', 'scripts', 'validate-registry.mjs'), ['isSpecialistEvidenceApplicable']],
+    [stateModule('atomic-io.mjs'), ['atomicWriteText', 'canonicalJson', 'canonicalSerializedJson', 'readJsonSidecar']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('locations.mjs'), ['specialistReviewBundlePath', 'taskBindingProvenancePath', 'taskBindingProvenanceReceiptPath']],
+    [stateModule('evidence/specialist-bundle-store.mjs'), ['conciseSpecialistPayloadErrors', 'normalizedRequiredSpecialistIds', 'readSpecialistBundle', 'specialistPlanDigest', 'specialistRouteFor']],
+    [stateModule('evidence/task-packets.mjs'), ['assertBoundTaskPacket', 'readTaskPacketSidecar', 'taskPacketDigest']],
+  ])],
+  ['evidence/worker-results.mjs', new Map([
+    ['node:crypto', ['createHash']],
+    ['node:fs', ['existsSync', 'readFileSync', 'statSync']],
+    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['validateWorkerResultAgainstTask', 'workerResultDigest']],
+    [stateModule('atomic-io.mjs'), ['atomicWriteText', 'canonicalJson', 'canonicalSerializedJson', 'readJsonSidecar']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('git-authority.mjs'), ['inspectWorkerCommitAuthority']],
+    [stateModule('locations.mjs'), ['workerResultEnvelopePath', 'workerResultReceiptPath']],
+    [stateModule('evidence/task-binding.mjs'), ['readBoundTaskBindingProvenance']],
+    [stateModule('evidence/task-packets.mjs'), ['taskPacketDigest']],
+  ])],
+  ['evidence/specialist-bundles.mjs', new Map([
+    ['node:fs', ['existsSync', 'readdirSync']],
+    ['node:path', ['join']],
+    [join(skillDirectory, '..', 'aerstello-specialists', 'scripts', 'validate-registry.mjs'), ['isSpecialistEvidenceApplicable', 'validateSpecialistEvidence']],
+    [join(scriptsDirectory, 'paths.mjs'), ['specialistReviewDirectory']],
+    [stateModule('atomic-io.mjs'), ['atomicWriteText', 'canonicalJson', 'canonicalSerializedJson']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('git-authority.mjs'), ['gitSnapshot']],
+    [stateModule('locations.mjs'), ['specialistPlanReceiptPath', 'specialistReviewBundlePath', 'taskBindingProvenancePath', 'taskBindingProvenanceReceiptPath', 'taskPacketSidecarPath']],
+    [stateModule('locks.mjs'), ['withStateLock']],
+    [stateModule('state-store.mjs'), ['activePrNumber', 'loadState']],
+    [stateModule('evidence/task-binding.mjs'), ['loadBoundTaskPacketEntries', 'readBoundTaskBindingProvenance', 'recoverHistoricalTaskBindingPlanning', 'taskBindingProvenanceDigest']],
+    [stateModule('evidence/specialist-bundle-store.mjs'), ['conciseSpecialistPayloadErrors', 'normalizedRequiredSpecialistIds', 'readSpecialistBundle', 'specialistPhaseForStage', 'specialistPlanningErrors', 'specialistRouteFor', 'validateSpecialistBundle', 'writeNewSpecialistBundle']],
+    [stateModule('evidence/task-packets.mjs'), ['assertBoundTaskPacket', 'assertTaskPacketHead', 'hasCompletedHistoricalV2TaskProof', 'readTaskPacketSidecar', 'taskPacketDigest']],
+    [stateModule('evidence/worker-results.mjs'), ['readAcceptedWorkerResult']],
+  ])],
+  ['evidence/validation-plans.mjs', new Map([
+    ['node:fs', ['existsSync', 'readFileSync']],
+    ['node:path', ['join']],
+    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['parseTargetedValidationCommand', 'unionInitialValidationSelection', 'unionRequiredValidation', 'validateInitialValidationSelection', 'reviewRequestUsage']],
+    [stateModule('atomic-io.mjs'), ['atomicWriteJson', 'canonicalSerializedJson', 'readJsonSidecar', 'serializeJson']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('git-authority.mjs'), ['gitSnapshot']],
+    [stateModule('journal.mjs'), ['appendEvent']],
+    [stateModule('locations.mjs'), ['stateDirectory', 'validationPlanPath']],
+    [stateModule('migrations.mjs'), ['migratePrReviewStateV2']],
+    [stateModule('state-store.mjs'), ['loadState', 'readStateDocument']],
+    [stateModule('evidence/task-binding.mjs'), ['loadBoundTaskPackets', 'readBoundTaskBindingProvenance']],
+    [stateModule('evidence/task-packets.mjs'), ['assertBoundTaskPacket', 'readTaskPacketSidecar', 'taskPacketDigest']],
+  ])],
+  ['reconciliation.mjs', new Map([
+    ['node:fs', ['existsSync', 'readdirSync']],
+    ['node:path', ['join']],
+    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['validateTaskPacket']],
+    [join(scriptsDirectory, 'paths.mjs'), ['taskBindingProvenanceDirectory', 'taskPacketDirectory', 'workerResultDirectory']],
+    [stateModule('atomic-io.mjs'), ['readJsonSidecar']],
+    [stateModule('git-authority.mjs'), ['gitSnapshot']],
+    [stateModule('locations.mjs'), ['taskBindingProvenancePath', 'taskBindingProvenanceReceiptPath', 'taskPacketSidecarPath', 'workerResultEnvelopePath', 'workerResultReceiptPath']],
+    [stateModule('state-store.mjs'), ['loadState']],
+    [stateModule('evidence/task-binding.mjs'), ['assertTaskBindingProvenanceSource', 'buildTaskBindingProvenance', 'readBoundTaskBindingProvenance', 'recoverHistoricalTaskBindingPlanning', 'validateTaskBindingProvenance', 'verifyTaskBindingProvenanceReceipt']],
+    [stateModule('evidence/specialist-bundles.mjs'), ['readSpecialistStatus']],
+    [stateModule('evidence/task-packets.mjs'), ['hasCompletedHistoricalV2TaskProof', 'readTaskPacketSidecar']],
+    [stateModule('evidence/worker-results.mjs'), ['readAcceptedWorkerResult']],
+  ])],
+  ['recovery.mjs', new Map([
+    ['node:fs', ['existsSync', 'readFileSync']],
+    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['reviewRequestUsage']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('locations.mjs'), ['validationPlanPath']],
+    [stateModule('reconciliation.mjs'), ['reconcileState']],
+    [stateModule('state-store.mjs'), ['loadState']],
+    [stateModule('evidence/specialist-bundles.mjs'), ['readSpecialistStatus']],
+    [stateModule('evidence/validation-plans.mjs'), ['actionablePacketValidationTaskIds', 'readValidationPlan', 'validateValidationPlan']],
+  ])],
+  ['archive.mjs', new Map([
+    ['node:crypto', ['randomUUID']],
+    ['node:fs', ['closeSync', 'cpSync', 'existsSync', 'fsyncSync', 'mkdirSync', 'openSync', 'renameSync', 'rmSync', 'unlinkSync', 'writeFileSync']],
+    ['node:path', ['dirname', 'join']],
+    [join(scriptsDirectory, 'paths.mjs'), ['reviewRoot']],
+    [stateModule('atomic-io.mjs'), ['atomicWriteJson']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('journal.mjs'), ['prepareEvent']],
+    [stateModule('locations.mjs'), ['activePointerPath', 'parsePrNumber', 'stateDirectory']],
+    [stateModule('locks.mjs'), ['withStateLock']],
+    [stateModule('reconciliation.mjs'), ['reconcileState']],
+    [stateModule('state-store.mjs'), ['activePrNumber', 'loadState', 'validateStateForWrite']],
+  ])],
+  ['state.mjs', new Map([
+    ['node:fs', ['existsSync', 'readFileSync']],
+    ['node:path', ['join', 'resolve']],
+    ['node:crypto', ['createHash']],
+    ['node:child_process', ['spawnSync']],
+    [join(repositoryDirectory, 'scripts', 'lib', 'git.mjs'), ['runGit']],
+    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['completionGate', 'reviewRequestGate', 'reviewRequestUsage', 'staleDiscoveryDispositionId', 'taskHasCanonicalThreadCoverage', 'validateTaskPacket', 'workerResultDigest', 'validatePrReviewState']],
+    [join(scriptsDirectory, 'paths.mjs'), ['repositoryRoot']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('locations.mjs'), ['stateDirectory', 'statePath', 'taskBindingProvenancePath', 'taskBindingProvenanceReceiptPath', 'taskPacketSidecarPath']],
+    [stateModule('atomic-io.mjs'), ['atomicWriteJson', 'canonicalJson', 'canonicalSerializedJson', 'readJsonSidecar']],
+    [stateModule('locks.mjs'), ['withStateLock']],
+    [stateModule('recovery.mjs'), [importedAs('truncate', 'truncateSummary')]],
+    [stateModule('git-authority.mjs'), ['assertIntegratedWorkerCommit', 'gitSnapshot']],
+    [stateModule('journal.mjs'), ['appendEvent', 'ensureGitHubMutationIntent', 'prepareEvent']],
+    [stateModule('migrations.mjs'), ['migratePrReviewStateV2']],
+    [stateModule('state-store.mjs'), ['activePrNumber', 'claimGitHubMutationDispatch', 'loadState', 'readStateDocument', 'validateStateForWrite']],
+    [stateModule('evidence/task-binding.mjs'), ['assertBehaviorMapperPlanningComplete', 'buildTaskBindingProvenance', 'persistImmutableTaskBindingProvenance', 'readBoundTaskBindingProvenance', 'recoverHistoricalTaskBindingPlanning']],
+    [stateModule('evidence/task-packets.mjs'), ['assertTaskPacketHead', 'persistImmutableTaskPacketSidecar', importedAs('readTaskPacketSidecar', 'readBoundTaskPacketSidecar'), 'taskPacketDigest']],
+    [stateModule('evidence/worker-results.mjs'), ['persistWorkerResultEvidence', 'proveWorkerResultEvidence', 'readAcceptedWorkerResult']],
+    [stateModule('evidence/validation-plans.mjs'), ['actionableIntegratedTaskIds', 'actionablePacketValidationTaskIds', 'assertCleanExactIntegrationHead', 'buildTargetedValidationPlanUnlocked', 'executeTargetedValidationFacts', 'hasRemainingReviewAllowance', 'isCleanTasklessReviewValidationRecovery', 'isNativeTasklessPendingReviewHeadDriftValidationRecovery', 'isNativeTasklessReviewHeadDriftValidationRecovery', 'readV2CompletedTaskValidationRecoveryEvidence', 'readValidationPlan', 'validateValidationPlan']],
+  ])],
+]);
+
+const PRODUCTION_STATE_EXPORTS = new Map([
+  ['errors.mjs', ['StateError']],
+  ['atomic-io.mjs', ['serializeJson', 'canonicalJson', 'canonicalSerializedJson', 'atomicWriteText', 'atomicWriteJson', 'readJsonSidecar']],
+  ['locations.mjs', ['parsePrNumber', 'stateDirectory', 'statePath', 'validationPlanPath', 'taskPacketSidecarPath', 'taskBindingProvenancePath', 'taskBindingProvenanceReceiptPath', 'workerResultEnvelopePath', 'workerResultReceiptPath', 'specialistReviewBundlePath', 'specialistPlanReceiptPath', 'activePointerPath', 'lockPath', 'requestOwnerLockPath', 'legacyLockPath', 'legacyRequestOwnerLockPath']],
+  ['locks.mjs', ['withStateLock', 'withGitHubRequestOwnerLock']],
+  ['journal.mjs', ['prepareEvent', 'appendEvent', 'ensureGitHubMutationIntent']],
+  ['git-authority.mjs', ['inspectWorkerCommitAuthority', 'assertIntegratedWorkerCommit', 'gitSnapshot']],
+  ['migrations.mjs', ['validateIntegrationMap', 'migrateTaskV1', 'migrateValidationProof', 'migratePrReviewStateV2', 'migratePrReviewStateV1', 'migrateState']],
+  ['state-store.mjs', ['ACTIVE_STATE_LIMIT_BYTES', 'validateStateForWrite', 'readStateDocument', 'parseState', 'activePrNumber', 'locateState', 'loadState', 'claimGitHubMutationDispatch', 'originRepository', 'initializeState']],
+  ['evidence/task-packets.mjs', ['taskPacketDigest', 'persistImmutableTaskPacketSidecar', 'readTaskPacketSidecar', 'hasCompletedHistoricalV2TaskProof', 'assertTaskPacketHead', 'assertBoundTaskPacket', 'assertTaskPacketBound']],
+  ['evidence/specialist-bundle-store.mjs', ['specialistPlanningErrors', 'specialistRouteFor', 'specialistPhaseForStage', 'normalizedRequiredSpecialistIds', 'canonicalBundleTaskRoute', 'specialistPlanDigest', 'verifySpecialistPlanReceipt', 'persistSpecialistPlanReceipt', 'conciseSpecialistPayloadErrors', 'validateSpecialistBundle', 'readSpecialistBundle', 'writeNewSpecialistBundle']],
+  ['evidence/task-binding.mjs', ['loadBoundTaskPackets', 'assertTaskPacketBound', 'assertBehaviorMapperBundleComplete', 'assertBehaviorMapperPlanningComplete', 'recoverHistoricalTaskBindingPlanning', 'taskBindingProvenanceDigest', 'verifyTaskBindingProvenanceReceipt', 'persistTaskBindingProvenanceReceipt', 'validateTaskBindingProvenance', 'buildTaskBindingProvenance', 'assertTaskBindingProvenanceSource', 'persistImmutableTaskBindingProvenance', 'readBoundTaskBindingProvenance', 'loadBoundTaskPacketEntries']],
+  ['evidence/worker-results.mjs', ['buildWorkerResultEnvelope', 'workerResultEnvelopeDigest', 'verifyWorkerResultReceipt', 'persistWorkerResultEvidence', 'readAcceptedWorkerResult', 'proveWorkerResultEvidence']],
+  ['evidence/specialist-bundles.mjs', ['planSpecialists', 'recordSpecialistReview', 'specialistContext', 'readSpecialistStatus']],
+  ['evidence/validation-plans.mjs', ['relatedE2EMetadata', 'validateValidationPlan', 'readValidationPlan', 'assertCleanExactIntegrationHead', 'actionableIntegratedTaskIds', 'actionablePacketValidationTaskIds', 'isPristineTasklessValidationSelection', 'isCleanTasklessReviewValidationRecovery', 'hasRemainingReviewAllowance', 'isNativeTasklessReviewHeadDriftValidationRecovery', 'isNativeTasklessPendingReviewHeadDriftValidationRecovery', 'readV2CompletedTaskValidationRecoveryEvidence', 'buildTargetedValidationPlanUnlocked', 'executeTargetedValidationFacts']],
+  ['reconciliation.mjs', ['reconcileState']],
+  ['recovery.mjs', ['truncate', 'validationPlanRecoverySummary', 'staleDiscoveryRecoverySummary', 'renderRecoverySummary']],
+  ['archive.mjs', ['archiveState']],
+  ['state.mjs', [
+    'completionGate', 'reviewRequestGate', 'reviewRequestUsage', 'gitCommonDirectory',
+    'repositoryRoot', 'reviewRoot', 'StateError', 'activePointerPath',
+    'specialistPlanReceiptPath', 'specialistReviewBundlePath', 'stateDirectory', 'statePath',
+    'taskBindingProvenancePath', 'taskBindingProvenanceReceiptPath', 'taskPacketSidecarPath',
+    'validationPlanPath', 'workerResultEnvelopePath', 'workerResultReceiptPath', 'atomicWriteJson',
+    'inspectWorkerCommitAuthority', 'appendEvent', 'claimGitHubMutationDispatch',
+    'ensureGitHubMutationIntent', 'migratePrReviewStateV1', 'migratePrReviewStateV2', 'migrateState',
+    'activePrNumber', 'initializeState', 'loadState', 'locateState', 'archiveState',
+    'assertTaskPacketBound', 'loadBoundTaskPackets', 'planSpecialists', 'readSpecialistStatus',
+    'recordSpecialistReview', 'specialistContext', 'taskPacketDigest', 'reconcileState',
+    'renderRecoverySummary', 'withGitHubRequestOwnerLock', 'withStateLock', 'ACTIVE_STATE_LIMIT_BYTES',
+    'assertReviewRequestAllowed', 'assertCompletionAllowed', 'gitAwareGateContext',
+    'buildTargetedValidationPlan', 'checkpointState', 'checkpointReviewRequestLimit',
+    'buildReviewRequestTransition', 'buildReviewOutcomeTransition',
+    'buildVerificationEscalationTransition', 'buildCompletionTransition', 'buildCiValidationTransition',
+    'checkpointTargetedValidationReset', 'checkpointTargetedValidation',
+    'executeTargetedValidationPlan', 'completeIntegratedTasks', 'checkpointTaskPacketReplan',
+    'checkpointTaskPacketBinding', 'checkpointWorkerResultAcceptance', 'checkpointWorkerResultBackfill',
+    'checkpointReviewRequest', 'checkpointReviewOutcome', 'checkpointVerificationEscalation',
+    'checkpointCompletion', 'checkpointCiValidation', 'checkpointTaskCompletion',
+    'checkpointArchiveTaskCompletion', 'checkpointGitMetadata',
+  ]],
+]);
+
+const STATE_FACADE_SOURCE_EXPORTS = new Map([
+  [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['completionGate', 'reviewRequestGate', 'reviewRequestUsage']],
+  [join(scriptsDirectory, 'paths.mjs'), ['gitCommonDirectory', 'repositoryRoot', 'reviewRoot']],
+  [stateModule('errors.mjs'), ['StateError']],
+  [stateModule('locations.mjs'), ['activePointerPath', 'specialistPlanReceiptPath', 'specialistReviewBundlePath', 'stateDirectory', 'statePath', 'taskBindingProvenancePath', 'taskBindingProvenanceReceiptPath', 'taskPacketSidecarPath', 'validationPlanPath', 'workerResultEnvelopePath', 'workerResultReceiptPath']],
+  [stateModule('atomic-io.mjs'), ['atomicWriteJson']],
+  [stateModule('git-authority.mjs'), ['inspectWorkerCommitAuthority']],
+  [stateModule('journal.mjs'), ['appendEvent', 'ensureGitHubMutationIntent']],
+  [stateModule('migrations.mjs'), ['migratePrReviewStateV1', 'migratePrReviewStateV2', 'migrateState']],
+  [stateModule('state-store.mjs'), ['activePrNumber', 'claimGitHubMutationDispatch', 'initializeState', 'loadState', 'locateState', 'ACTIVE_STATE_LIMIT_BYTES']],
+  [stateModule('archive.mjs'), ['archiveState']],
+  [stateModule('evidence/task-binding.mjs'), ['assertTaskPacketBound', 'loadBoundTaskPackets']],
+  [stateModule('evidence/specialist-bundles.mjs'), ['planSpecialists', 'readSpecialistStatus', 'recordSpecialistReview', 'specialistContext']],
+  [stateModule('evidence/task-packets.mjs'), ['taskPacketDigest']],
+  [stateModule('reconciliation.mjs'), ['reconcileState']],
+  [stateModule('recovery.mjs'), ['renderRecoverySummary']],
+  [stateModule('locks.mjs'), ['withGitHubRequestOwnerLock', 'withStateLock']],
+]);
+
+const PRODUCTION_STATE_SOURCE_EXPORTS = new Map([
+  ['state.mjs', STATE_FACADE_SOURCE_EXPORTS],
+]);
+
+const PROTECTED_STATE_AUTHORITY_PATTERN = /^(?:checkpoint|build.*Transition$|completeIntegratedTasks$)/u;
+
+const EVIDENCE_CALLBACK_CAPABILITIES = new Map([
+  ['evidence/specialist-bundles.mjs', [
+    { owner: 'planSpecialists', parameterIndex: 0, property: 'now', local: 'now', callShape: 'direct', calls: 1, closure: 'withStateLock' },
+    { owner: 'recordSpecialistReview', parameterIndex: 0, property: 'now', local: 'now', callShape: 'direct', calls: 1, closure: 'withStateLock' },
+  ]],
+  ['evidence/validation-plans.mjs', [
+    { owner: 'buildTargetedValidationPlanUnlocked', parameterIndex: 0, property: 'now', local: 'now', callShape: 'direct', calls: 1 },
+    { owner: 'executeTargetedValidationFacts', parameterIndex: 0, property: 'beforeCommand', local: 'beforeCommand', callShape: 'optional-direct', calls: 1 },
+    { owner: 'executeTargetedValidationFacts', parameterIndex: 0, property: 'runCommand', local: 'runCommand', callShape: 'direct', calls: 1 },
+    { owner: 'executeTargetedValidationFacts', parameterIndex: 0, property: 'now', local: 'now', callShape: 'direct', calls: 1 },
+    { owner: 'executeTargetedValidationFacts', parameterIndex: 0, property: 'onCommandRecorded', local: 'onCommandRecorded', callShape: 'optional-direct', calls: 1 },
+  ]],
+  ['evidence/worker-results.mjs', [
+    { owner: 'persistWorkerResultEvidence', parameterIndex: 4, property: null, local: 'onStep', callShape: 'optional-direct', calls: 2 },
+  ]],
+]);
+
 const STATE_ADAPTER_OPERATIONS = [
   'checkpointCiValidation',
   'checkpointCompletion',
@@ -1327,6 +1631,1251 @@ function productionGitHubCycle(imports = PRODUCTION_GITHUB_IMPORTS) {
   return null;
 }
 
+function inspectEvidenceCallbackCapabilities(fileName, parsed) {
+  const capabilities = EVIDENCE_CALLBACK_CAPABILITIES.get(fileName) ?? [];
+  const errors = [];
+  const nodeScopes = new WeakMap();
+  const bindings = [];
+  const parameterBindings = [];
+
+  function createScope(parent, functionNode = parent?.functionNode ?? null) {
+    return { parent, functionNode, bindings: new Map() };
+  }
+
+  const sourceScope = createScope(null);
+
+  function registerBinding(scope, identifier, details = {}) {
+    const binding = { scope, identifier, sourceNodes: [], memberSourceNodes: new Map(), ...details };
+    scope.bindings.set(identifier.text, binding);
+    bindings.push(binding);
+    return binding;
+  }
+
+  function registerBindingName(scope, name, details = {}, property = null) {
+    if (ts.isIdentifier(name)) {
+      return [registerBinding(scope, name, { ...details, property })];
+    }
+    if (ts.isObjectBindingPattern(name)) {
+      return name.elements.flatMap((element) => {
+        const elementProperty = element.propertyName
+          && (ts.isIdentifier(element.propertyName) || ts.isStringLiteral(element.propertyName))
+          ? element.propertyName.text
+          : ts.isIdentifier(element.name) ? element.name.text : null;
+        const registered = registerBindingName(scope, element.name, details, elementProperty);
+        if (element.initializer) {
+          for (const binding of registered) binding.sourceNodes.push(element.initializer);
+        }
+        return registered;
+      });
+    }
+    if (ts.isArrayBindingPattern(name)) {
+      return name.elements.flatMap((element, index) => ts.isBindingElement(element)
+        ? registerBindingName(scope, element.name, details, String(index)) : []);
+    }
+    return [];
+  }
+
+  function functionOwner(node) {
+    return ts.isFunctionDeclaration(node) && node.parent === parsed && node.name
+      ? node.name.text : null;
+  }
+
+  function visit(node, scope) {
+    nodeScopes.set(node, scope);
+    if (ts.isFunctionLike(node)) {
+      if (ts.isFunctionDeclaration(node) && node.name) {
+        registerBinding(scope, node.name, { kind: 'function', functionNode: node });
+      }
+      const functionScope = createScope(scope, node);
+      nodeScopes.set(node, functionScope);
+      if (!ts.isFunctionDeclaration(node) && node.name && ts.isIdentifier(node.name)) {
+        registerBinding(functionScope, node.name, { kind: 'function' });
+      }
+      const owner = functionOwner(node);
+      for (const [parameterIndex, parameter] of node.parameters.entries()) {
+        nodeScopes.set(parameter, functionScope);
+        const registered = registerBindingName(functionScope, parameter.name, {
+          kind: 'parameter', functionNode: node, owner, parameter, parameterIndex,
+        });
+        parameterBindings.push(...registered);
+        if (parameter.initializer) visit(parameter.initializer, functionScope);
+      }
+      if (node.body) visit(node.body, functionScope);
+      return;
+    }
+    if (ts.isBlock(node) || ts.isCatchClause(node)) {
+      const blockScope = createScope(scope);
+      nodeScopes.set(node, blockScope);
+      if (ts.isCatchClause(node) && node.variableDeclaration) {
+        registerBindingName(blockScope, node.variableDeclaration.name, { kind: 'catch' });
+      }
+      ts.forEachChild(node, (child) => visit(child, blockScope));
+      return;
+    }
+    if (ts.isVariableDeclaration(node)) {
+      const registered = registerBindingName(scope, node.name, { kind: 'variable' });
+      if (node.initializer) {
+        for (const binding of registered) {
+          binding.sourceNodes.push(node.initializer);
+          if (ts.isIdentifier(node.name) && ts.isObjectLiteralExpression(node.initializer)) {
+            for (const property of node.initializer.properties) {
+              const key = property.name && (ts.isIdentifier(property.name)
+                || ts.isStringLiteral(property.name) || ts.isNumericLiteral(property.name))
+                ? property.name.text : '*';
+              const sourceNode = ts.isShorthandPropertyAssignment(property) ? property.name
+                : ts.isPropertyAssignment(property) ? property.initializer
+                  : ts.isSpreadAssignment(property) ? property.expression : null;
+              if (sourceNode) {
+                const sources = binding.memberSourceNodes.get(key) ?? [];
+                sources.push(sourceNode);
+                binding.memberSourceNodes.set(key, sources);
+              }
+            }
+          } else if (ts.isIdentifier(node.name) && ts.isArrayLiteralExpression(node.initializer)) {
+            for (const [index, element] of node.initializer.elements.entries()) {
+              const sources = binding.memberSourceNodes.get(String(index)) ?? [];
+              sources.push(ts.isSpreadElement(element) ? element.expression : element);
+              binding.memberSourceNodes.set(String(index), sources);
+            }
+          }
+        }
+      }
+    } else if ((ts.isClassDeclaration(node) || ts.isEnumDeclaration(node)) && node.name) {
+      registerBinding(scope, node.name, { kind: 'declaration', declarationNode: node });
+    } else if (ts.isImportClause(node) && node.name) {
+      registerBinding(scope, node.name, { kind: 'import' });
+    } else if (ts.isImportSpecifier(node)) {
+      registerBinding(scope, node.name, { kind: 'import' });
+    } else if (ts.isNamespaceImport(node)) {
+      registerBinding(scope, node.name, { kind: 'import' });
+    }
+    ts.forEachChild(node, (child) => visit(child, scope));
+  }
+  visit(parsed, sourceScope);
+
+  function resolveIdentifier(identifier) {
+    let scope = nodeScopes.get(identifier);
+    while (scope) {
+      const binding = scope.bindings.get(identifier.text);
+      if (binding) return binding;
+      scope = scope.parent;
+    }
+    return null;
+  }
+
+  function assignmentTargets(node) {
+    if (ts.isIdentifier(node)) return [resolveIdentifier(node)].filter(Boolean);
+    if (ts.isParenthesizedExpression(node)) return assignmentTargets(node.expression);
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      const targets = assignmentTargets(node.left);
+      for (const target of targets) target.sourceNodes.push(node.right);
+      return targets;
+    }
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      let root = node.expression;
+      while (ts.isPropertyAccessExpression(root) || ts.isElementAccessExpression(root)) {
+        root = root.expression;
+      }
+      return ts.isIdentifier(root) ? [resolveIdentifier(root)].filter(Boolean) : [];
+    }
+    if (ts.isArrayLiteralExpression(node)) {
+      return node.elements.flatMap((element) => ts.isSpreadElement(element)
+        ? assignmentTargets(element.expression) : assignmentTargets(element));
+    }
+    if (ts.isObjectLiteralExpression(node)) {
+      return node.properties.flatMap((property) => {
+        if (ts.isShorthandPropertyAssignment(property)) return assignmentTargets(property.name);
+        if (ts.isPropertyAssignment(property)) return assignmentTargets(property.initializer);
+        if (ts.isSpreadAssignment(property)) return assignmentTargets(property.expression);
+        return [];
+      });
+    }
+    return [];
+  }
+
+  const unmodelledAssignments = [];
+  function memberAssignmentTarget(node) {
+    if (!ts.isPropertyAccessExpression(node) && !ts.isElementAccessExpression(node)) return null;
+    const path = [];
+    let root = node;
+    while (ts.isPropertyAccessExpression(root) || ts.isElementAccessExpression(root)) {
+      path.unshift(ts.isPropertyAccessExpression(root) ? root.name.text
+        : ts.isStringLiteral(root.argumentExpression) || ts.isNumericLiteral(root.argumentExpression)
+          ? root.argumentExpression.text : '*');
+      root = root.expression;
+    }
+    if (!ts.isIdentifier(root)) return null;
+    const binding = resolveIdentifier(root);
+    if (!binding) return null;
+    return { binding, key: path.join('.') };
+  }
+
+  function visitAssignments(node) {
+    if (ts.isBinaryExpression(node)
+        && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+        && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+      const targets = assignmentTargets(node.left);
+      if (targets.length === 0) unmodelledAssignments.push(node);
+      for (const target of targets) target.sourceNodes.push(node.right);
+      const memberTarget = memberAssignmentTarget(node.left);
+      if (memberTarget) {
+        const sources = memberTarget.binding.memberSourceNodes.get(memberTarget.key) ?? [];
+        sources.push(node.right);
+        memberTarget.binding.memberSourceNodes.set(memberTarget.key, sources);
+      }
+    }
+    ts.forEachChild(node, visitAssignments);
+  }
+  visitAssignments(parsed);
+
+  function isReferenceIdentifier(node) {
+    const parent = node.parent;
+    if (!parent) return false;
+    const binding = resolveIdentifier(node);
+    if (binding?.identifier === node) return false;
+    if (ts.isPropertyAccessExpression(parent) && parent.name === node) return false;
+    if (ts.isPropertyAssignment(parent) && parent.name === node && !parent.name.getText().startsWith('[')) return false;
+    if (ts.isBindingElement(parent) && parent.propertyName === node) return false;
+    if ((ts.isMethodDeclaration(parent) || ts.isPropertyDeclaration(parent)) && parent.name === node) return false;
+    if (ts.isLabeledStatement(parent) || ts.isBreakOrContinueStatement(parent)) return false;
+    return true;
+  }
+
+  const originsByBinding = new Map(bindings.map((binding) => [
+    binding, binding.kind === 'parameter' ? new Set([binding]) : new Set(),
+  ]));
+  let callbackParameters = new Set();
+
+  function staticPropertyKey(name) {
+    if (!name) return '*';
+    if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) {
+      return name.text;
+    }
+    if (ts.isComputedPropertyName(name)
+        && (ts.isStringLiteral(name.expression) || ts.isNumericLiteral(name.expression))) {
+      return name.expression.text;
+    }
+    return '*';
+  }
+
+  function ownedReturnExpressions(functionNode) {
+    if (ts.isArrowFunction(functionNode) && !ts.isBlock(functionNode.body)) {
+      return [functionNode.body];
+    }
+    if (!functionNode.body) return [];
+    const returned = [];
+    function visitReturn(node) {
+      if (node !== functionNode.body && ts.isFunctionLike(node)) return;
+      if (ts.isReturnStatement(node)) {
+        if (node.expression) returned.push(node.expression);
+        return;
+      }
+      ts.forEachChild(node, visitReturn);
+    }
+    visitReturn(functionNode.body);
+    return returned;
+  }
+
+  function classValues(node, seen = new Set()) {
+    if (!node || seen.has(node)) return [];
+    seen.add(node);
+    if (ts.isParenthesizedExpression(node)) return classValues(node.expression, seen);
+    if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) return [node];
+    if (ts.isIdentifier(node)) {
+      const binding = resolveIdentifier(node);
+      if (!binding || seen.has(binding)) return [];
+      seen.add(binding);
+      const declarations = binding.declarationNode
+        && (ts.isClassDeclaration(binding.declarationNode)
+          || ts.isClassExpression(binding.declarationNode)) ? [binding.declarationNode] : [];
+      for (const sourceNode of binding.sourceNodes) {
+        declarations.push(...classValues(sourceNode, seen));
+      }
+      return declarations;
+    }
+    if (ts.isConditionalExpression(node)) {
+      return [node.whenTrue, node.whenFalse].flatMap((branch) => classValues(branch, seen));
+    }
+    if (ts.isBinaryExpression(node)) {
+      return [node.left, node.right].flatMap((operand) => classValues(operand, seen));
+    }
+    if (ts.isCallExpression(node)) {
+      return callableReturnExpressions(node.expression, seen).flatMap((returned) => (
+        classValues(returned, seen)
+      ));
+    }
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      const { root, path } = memberExpressionParts(node);
+      return classSlotDeclarations(root, path, seen);
+    }
+    return [];
+  }
+
+  function classSlotDeclarationsFromBinding(binding, path, seen = new Set()) {
+    if (!binding || seen.has(binding)) return [];
+    const nextSeen = new Set(seen);
+    nextSeen.add(binding);
+    if (path.length === 0) {
+      const declarations = binding.declarationNode
+        && (ts.isClassDeclaration(binding.declarationNode)
+          || ts.isClassExpression(binding.declarationNode)) ? [binding.declarationNode] : [];
+      for (const sourceNode of binding.sourceNodes) {
+        declarations.push(...classValues(sourceNode, nextSeen));
+      }
+      return declarations;
+    }
+    const [key, ...rest] = path;
+    const declarations = [];
+    if (binding.declarationNode && ts.isClassDeclaration(binding.declarationNode)) {
+      declarations.push(...classMemberSlotDeclarations(
+        binding.declarationNode, path, true, nextSeen,
+      ));
+    }
+    for (const sourceNode of binding.memberSourceNodes.get(path.join('.')) ?? []) {
+      declarations.push(...classValues(sourceNode, nextSeen));
+    }
+    const memberKeys = key === '*' ? [...binding.memberSourceNodes.keys()]
+      .filter((memberKey) => !memberKey.includes('.')) : [key, '*'];
+    for (const memberKey of memberKeys) {
+      for (const sourceNode of binding.memberSourceNodes.get(memberKey) ?? []) {
+        declarations.push(...classSlotDeclarations(sourceNode, rest, nextSeen));
+      }
+    }
+    for (const sourceNode of binding.sourceNodes) {
+      declarations.push(...classSlotDeclarations(sourceNode, path, nextSeen));
+    }
+    return declarations;
+  }
+
+  function classMemberSlotDeclarations(classNode, path, requireStatic, seen) {
+    if (path.length === 0) return [];
+    const [key, ...rest] = path;
+    const declarations = [];
+    for (const member of classNode.members) {
+      if (isStaticClassMember(member) !== requireStatic) continue;
+      const memberKey = staticPropertyKey(member.name);
+      if (key !== '*' && memberKey !== key && memberKey !== '*') continue;
+      if (ts.isGetAccessorDeclaration(member)) {
+        for (const returned of ownedReturnExpressions(member)) {
+          declarations.push(...classSlotDeclarations(returned, rest, seen));
+        }
+        continue;
+      }
+      if (ts.isPropertyDeclaration(member) && member.initializer) {
+        declarations.push(...classSlotDeclarations(member.initializer, rest, seen));
+      }
+    }
+    return declarations;
+  }
+
+  function classSlotDeclarations(node, path, seen = new Set()) {
+    if (!node) return [];
+    if (path.length === 0) return classValues(node, seen);
+    if (seen.has(node)) return [];
+    const nextSeen = new Set(seen);
+    nextSeen.add(node);
+    if (ts.isParenthesizedExpression(node)) {
+      return classSlotDeclarations(node.expression, path, nextSeen);
+    }
+    if (ts.isIdentifier(node)) {
+      return classSlotDeclarationsFromBinding(resolveIdentifier(node), path, nextSeen);
+    }
+    if (ts.isCallExpression(node)) {
+      return callableReturnExpressions(node.expression, nextSeen).flatMap((returned) => (
+        classSlotDeclarations(returned, path, nextSeen)
+      ));
+    }
+    if (ts.isNewExpression(node)) {
+      return classValues(node.expression, nextSeen).flatMap((classNode) => (
+        classMemberSlotDeclarations(classNode, path, false, nextSeen)
+      ));
+    }
+    if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
+      return classMemberSlotDeclarations(node, path, true, nextSeen);
+    }
+    if (ts.isConditionalExpression(node)) {
+      return [node.whenTrue, node.whenFalse].flatMap((branch) => (
+        classSlotDeclarations(branch, path, nextSeen)
+      ));
+    }
+    if (ts.isBinaryExpression(node)) {
+      return [node.left, node.right].flatMap((operand) => (
+        classSlotDeclarations(operand, path, nextSeen)
+      ));
+    }
+    const [key, ...rest] = path;
+    if (ts.isObjectLiteralExpression(node)) {
+      const declarations = [];
+      for (const property of node.properties) {
+        if (ts.isSpreadAssignment(property)) {
+          declarations.push(...classSlotDeclarations(property.expression, path, nextSeen));
+          continue;
+        }
+        const memberKey = staticPropertyKey(property.name);
+        if (key !== '*' && memberKey !== key && memberKey !== '*') continue;
+        if (ts.isGetAccessorDeclaration(property)) {
+          for (const returned of ownedReturnExpressions(property)) {
+            declarations.push(...classSlotDeclarations(returned, rest, nextSeen));
+          }
+          continue;
+        }
+        const value = ts.isShorthandPropertyAssignment(property) ? property.name
+          : ts.isPropertyAssignment(property) ? property.initializer : null;
+        if (value) declarations.push(...classSlotDeclarations(value, rest, nextSeen));
+      }
+      return declarations;
+    }
+    if (ts.isArrayLiteralExpression(node)) {
+      return node.elements.flatMap((element, index) => {
+        if (key !== '*' && key !== String(index)) return [];
+        const value = ts.isSpreadElement(element) ? element.expression : element;
+        return classSlotDeclarations(value, rest, nextSeen);
+      });
+    }
+    return [];
+  }
+
+  function isStaticClassMember(member) {
+    return member.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword)
+      ?? false;
+  }
+
+  function functionClassSlotValues(classNode, path, requireStatic, seen) {
+    if (path.length === 0) return [];
+    const [key, ...rest] = path;
+    const values = [];
+    for (const member of classNode.members) {
+      if (isStaticClassMember(member) !== requireStatic) continue;
+      const memberKey = staticPropertyKey(member.name);
+      if (key !== '*' && memberKey !== key && memberKey !== '*') continue;
+      if (rest.length === 0 && ts.isMethodDeclaration(member)) {
+        values.push(member);
+        continue;
+      }
+      if (ts.isGetAccessorDeclaration(member)) {
+        for (const returned of ownedReturnExpressions(member)) {
+          values.push(...functionSlotValues(returned, rest, seen));
+        }
+        continue;
+      }
+      if (ts.isPropertyDeclaration(member) && member.initializer) {
+        values.push(...functionSlotValues(member.initializer, rest, seen));
+      }
+    }
+    return values;
+  }
+
+  function functionValues(node, seen = new Set()) {
+    if (!node || seen.has(node)) return [];
+    const nextSeen = new Set(seen);
+    nextSeen.add(node);
+    if (ts.isParenthesizedExpression(node)) {
+      return functionValues(node.expression, nextSeen);
+    }
+    if (ts.isFunctionLike(node)) return [node];
+    if (ts.isIdentifier(node)) {
+      const binding = resolveIdentifier(node);
+      if (!binding || nextSeen.has(binding)) return [];
+      nextSeen.add(binding);
+      const values = binding.functionNode ? [binding.functionNode] : [];
+      for (const sourceNode of binding.sourceNodes) {
+        values.push(...functionValues(sourceNode, nextSeen));
+      }
+      return values;
+    }
+    if (ts.isConditionalExpression(node)) {
+      return [node.whenTrue, node.whenFalse].flatMap((branch) => (
+        functionValues(branch, nextSeen)
+      ));
+    }
+    if (ts.isBinaryExpression(node)) {
+      return [node.left, node.right].flatMap((operand) => (
+        functionValues(operand, nextSeen)
+      ));
+    }
+    if (ts.isCallExpression(node)) {
+      return callableReturnExpressions(node.expression, nextSeen).flatMap((returned) => (
+        functionValues(returned, nextSeen)
+      ));
+    }
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      const { root, path } = memberExpressionParts(node);
+      return functionSlotValues(root, path, nextSeen);
+    }
+    return [];
+  }
+
+  function functionSlotValuesFromBinding(binding, path, seen = new Set()) {
+    if (!binding || seen.has(binding)) return [];
+    const nextSeen = new Set(seen);
+    nextSeen.add(binding);
+    if (path.length === 0) {
+      const values = binding.functionNode ? [binding.functionNode] : [];
+      for (const sourceNode of binding.sourceNodes) {
+        values.push(...functionValues(sourceNode, nextSeen));
+      }
+      return values;
+    }
+    const [key, ...rest] = path;
+    const values = [];
+    if (binding.declarationNode && ts.isClassDeclaration(binding.declarationNode)) {
+      values.push(...functionClassSlotValues(
+        binding.declarationNode, path, true, nextSeen,
+      ));
+    }
+    for (const sourceNode of binding.memberSourceNodes.get(path.join('.')) ?? []) {
+      values.push(...functionValues(sourceNode, nextSeen));
+    }
+    const memberKeys = key === '*' ? [...binding.memberSourceNodes.keys()]
+      .filter((memberKey) => !memberKey.includes('.')) : [key, '*'];
+    for (const memberKey of memberKeys) {
+      for (const sourceNode of binding.memberSourceNodes.get(memberKey) ?? []) {
+        values.push(...functionSlotValues(sourceNode, rest, nextSeen));
+      }
+    }
+    for (const sourceNode of binding.sourceNodes) {
+      values.push(...functionSlotValues(sourceNode, path, nextSeen));
+    }
+    return values;
+  }
+
+  function functionSlotValues(node, path, seen = new Set()) {
+    if (!node) return [];
+    if (path.length === 0) return functionValues(node, seen);
+    if (seen.has(node)) return [];
+    const nextSeen = new Set(seen);
+    nextSeen.add(node);
+    if (ts.isParenthesizedExpression(node)) {
+      return functionSlotValues(node.expression, path, nextSeen);
+    }
+    if (ts.isIdentifier(node)) {
+      return functionSlotValuesFromBinding(resolveIdentifier(node), path, nextSeen);
+    }
+    if (ts.isCallExpression(node)) {
+      return callableReturnExpressions(node.expression, nextSeen).flatMap((returned) => (
+        functionSlotValues(returned, path, nextSeen)
+      ));
+    }
+    if (ts.isNewExpression(node)) {
+      return classValues(node.expression).flatMap((classNode) => (
+        functionClassSlotValues(classNode, path, false, nextSeen)
+      ));
+    }
+    if (ts.isClassExpression(node) || ts.isClassDeclaration(node)) {
+      return functionClassSlotValues(node, path, true, nextSeen);
+    }
+    if (ts.isConditionalExpression(node)) {
+      return [node.whenTrue, node.whenFalse].flatMap((branch) => (
+        functionSlotValues(branch, path, nextSeen)
+      ));
+    }
+    if (ts.isBinaryExpression(node)) {
+      return [node.left, node.right].flatMap((operand) => (
+        functionSlotValues(operand, path, nextSeen)
+      ));
+    }
+    const [key, ...rest] = path;
+    if (ts.isObjectLiteralExpression(node)) {
+      const values = [];
+      for (const property of node.properties) {
+        if (ts.isSpreadAssignment(property)) {
+          values.push(...functionSlotValues(property.expression, path, nextSeen));
+          continue;
+        }
+        const memberKey = staticPropertyKey(property.name);
+        if (key !== '*' && memberKey !== key && memberKey !== '*') continue;
+        if (rest.length === 0 && ts.isMethodDeclaration(property)) {
+          values.push(property);
+          continue;
+        }
+        if (ts.isGetAccessorDeclaration(property)) {
+          for (const returned of ownedReturnExpressions(property)) {
+            values.push(...functionSlotValues(returned, rest, nextSeen));
+          }
+          continue;
+        }
+        const value = ts.isShorthandPropertyAssignment(property) ? property.name
+          : ts.isPropertyAssignment(property) ? property.initializer : null;
+        if (value) values.push(...functionSlotValues(value, rest, nextSeen));
+      }
+      return values;
+    }
+    if (ts.isArrayLiteralExpression(node)) {
+      return node.elements.flatMap((element, index) => {
+        if (key !== '*' && key !== String(index)) return [];
+        const value = ts.isSpreadElement(element) ? element.expression : element;
+        return functionSlotValues(value, rest, nextSeen);
+      });
+    }
+    return [];
+  }
+
+  function callableReturnExpressions(node, seen = new Set()) {
+    return functionValues(node, seen).flatMap(ownedReturnExpressions);
+  }
+
+  const activeCallableReturnNodes = new Set();
+  function callableReturnOrigins(node) {
+    if (activeCallableReturnNodes.has(node)) return new Set();
+    activeCallableReturnNodes.add(node);
+    const origins = new Set();
+    try {
+      for (const returned of callableReturnExpressions(node)) {
+        for (const origin of returnedValueOrigins(returned)) origins.add(origin);
+      }
+    } finally {
+      activeCallableReturnNodes.delete(node);
+    }
+    return origins;
+  }
+
+  function returnedValueOrigins(node) {
+    if (ts.isParenthesizedExpression(node)) return returnedValueOrigins(node.expression);
+    if (ts.isIdentifier(node)) return expressionOrigins(node);
+    if (ts.isConditionalExpression(node)) {
+      return new Set([
+        ...returnedValueOrigins(node.whenTrue), ...returnedValueOrigins(node.whenFalse),
+      ]);
+    }
+    if (ts.isBinaryExpression(node)) {
+      if (node.operatorToken.kind === ts.SyntaxKind.CommaToken) {
+        return returnedValueOrigins(node.right);
+      }
+      if ([ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.BarBarToken,
+        ts.SyntaxKind.QuestionQuestionToken].includes(node.operatorToken.kind)) {
+        return new Set([
+          ...returnedValueOrigins(node.left), ...returnedValueOrigins(node.right),
+        ]);
+      }
+    }
+    if (ts.isCallExpression(node)) return expressionOrigins(node);
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      return executableExpressionOrigins(node);
+    }
+    return new Set([...expressionOrigins(node)]
+      .filter((origin) => callbackParameters.has(origin)));
+  }
+
+  function expressionOrigins(node) {
+    const origins = new Set();
+    if (ts.isIdentifier(node) && isReferenceIdentifier(node)) {
+      return new Set(originsByBinding.get(resolveIdentifier(node)) ?? []);
+    }
+    if (ts.isFunctionLike(node) || ts.isClassExpression(node)) return origins;
+    if (ts.isConditionalExpression(node)) {
+      for (const branch of [node.whenTrue, node.whenFalse]) {
+        for (const origin of expressionOrigins(branch)) origins.add(origin);
+      }
+      return origins;
+    }
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression;
+      if (ts.isPropertyAccessExpression(callee)
+          && ['call', 'apply', 'bind'].includes(callee.name.text)) {
+        return expressionOrigins(callee.expression);
+      }
+      if (ts.isElementAccessExpression(callee) && ts.isStringLiteral(callee.argumentExpression)
+          && ['call', 'apply', 'bind'].includes(callee.argumentExpression.text)) {
+        return expressionOrigins(callee.expression);
+      }
+      for (const argument of node.arguments) {
+        for (const origin of expressionOrigins(argument)) origins.add(origin);
+      }
+      for (const origin of callableReturnOrigins(callee)) origins.add(origin);
+      return origins;
+    }
+    ts.forEachChild(node, (child) => {
+      for (const origin of expressionOrigins(child)) origins.add(origin);
+    });
+    return origins;
+  }
+
+  function recomputeOrigins() {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const binding of bindings) {
+        const origins = originsByBinding.get(binding);
+        for (const sourceNode of binding.sourceNodes) {
+          for (const origin of expressionOrigins(sourceNode)) {
+            if (!origins.has(origin)) {
+              origins.add(origin);
+              changed = true;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  function originParameters(binding) {
+    return new Set(originsByBinding.get(binding) ?? []);
+  }
+
+  function classSlotOrigins(classNode, path, requireStatic, seen) {
+    if (path.length === 0) return new Set();
+    const [key, ...rest] = path;
+    const origins = new Set();
+    for (const member of classNode.members) {
+      if (isStaticClassMember(member) !== requireStatic) continue;
+      const memberKey = staticPropertyKey(member.name);
+      if (key !== '*' && memberKey !== key && memberKey !== '*') continue;
+      if (ts.isGetAccessorDeclaration(member)) {
+        for (const returned of ownedReturnExpressions(member)) {
+          for (const origin of slotOriginsFromExpression(returned, rest, seen)) origins.add(origin);
+        }
+        continue;
+      }
+      if (rest.length === 0 && ts.isMethodDeclaration(member)) {
+        for (const origin of callableReturnOrigins(member)) origins.add(origin);
+        continue;
+      }
+      if (ts.isPropertyDeclaration(member) && member.initializer) {
+        if (rest.length === 0 && ts.isFunctionLike(member.initializer)) {
+          for (const origin of callableReturnOrigins(member.initializer)) origins.add(origin);
+        }
+        for (const origin of slotOriginsFromExpression(member.initializer, rest, seen)) {
+          origins.add(origin);
+        }
+      }
+    }
+    return origins;
+  }
+
+  function slotOriginsFromBinding(binding, path, seen = new Map()) {
+    if (!binding) return new Set();
+    const pathKey = path.join('\0');
+    const seenPaths = seen.get(binding) ?? new Set();
+    if (seenPaths.has(pathKey)) return new Set();
+    seenPaths.add(pathKey);
+    seen.set(binding, seenPaths);
+    if (path.length === 0) return originParameters(binding);
+    const origins = new Set();
+    const [key, ...rest] = path;
+    if (binding.declarationNode && ts.isClassDeclaration(binding.declarationNode)) {
+      for (const origin of classSlotOrigins(binding.declarationNode, path, true, seen)) {
+        origins.add(origin);
+      }
+    }
+    const exactPath = path.join('.');
+    for (const sourceNode of binding.memberSourceNodes.get(exactPath) ?? []) {
+      for (const origin of expressionOrigins(sourceNode)) origins.add(origin);
+    }
+    const memberKeys = key === '*' ? [...binding.memberSourceNodes.keys()
+      ].filter((memberKey) => !memberKey.includes('.')) : [key, '*'];
+    for (const memberKey of memberKeys) {
+      for (const sourceNode of binding.memberSourceNodes.get(memberKey) ?? []) {
+        for (const origin of slotOriginsFromExpression(sourceNode, rest, seen)) origins.add(origin);
+      }
+    }
+    for (const sourceNode of binding.sourceNodes) {
+      for (const origin of slotOriginsFromExpression(sourceNode, path, seen)) {
+        origins.add(origin);
+      }
+    }
+    return origins;
+  }
+
+  function slotOriginsFromExpression(node, path, seen = new Map()) {
+    if (path.length === 0) return expressionOrigins(node);
+    if (ts.isParenthesizedExpression(node)) {
+      return slotOriginsFromExpression(node.expression, path, seen);
+    }
+    if (ts.isIdentifier(node)) {
+      return slotOriginsFromBinding(resolveIdentifier(node), path, seen);
+    }
+    if (ts.isCallExpression(node)) {
+      const origins = new Set();
+      for (const returned of callableReturnExpressions(node.expression)) {
+        for (const origin of slotOriginsFromExpression(returned, path, seen)) origins.add(origin);
+      }
+      return origins;
+    }
+    if (ts.isNewExpression(node)) {
+      const origins = new Set();
+      for (const classNode of classValues(node.expression)) {
+        for (const origin of classSlotOrigins(classNode, path, false, seen)) origins.add(origin);
+      }
+      return origins;
+    }
+    if (ts.isClassExpression(node) || ts.isClassDeclaration(node)) {
+      return classSlotOrigins(node, path, true, seen);
+    }
+    if (ts.isConditionalExpression(node)) {
+      const origins = new Set();
+      for (const branch of [node.whenTrue, node.whenFalse]) {
+        for (const origin of slotOriginsFromExpression(branch, path, seen)) origins.add(origin);
+      }
+      return origins;
+    }
+    if (ts.isBinaryExpression(node)) {
+      const origins = new Set();
+      for (const operand of [node.left, node.right]) {
+        for (const origin of slotOriginsFromExpression(operand, path, seen)) origins.add(origin);
+      }
+      return origins;
+    }
+    const [key, ...rest] = path;
+    if (ts.isObjectLiteralExpression(node)) {
+      const origins = new Set();
+      for (const property of node.properties) {
+        if (ts.isSpreadAssignment(property)) {
+          for (const origin of slotOriginsFromExpression(property.expression, path, seen)) {
+            origins.add(origin);
+          }
+          continue;
+        }
+        const memberKey = staticPropertyKey(property.name);
+        if (key !== '*' && memberKey !== key && memberKey !== '*') continue;
+        if (ts.isGetAccessorDeclaration(property)) {
+          for (const returned of ownedReturnExpressions(property)) {
+            for (const origin of slotOriginsFromExpression(returned, rest, seen)) {
+              origins.add(origin);
+            }
+          }
+          continue;
+        }
+        if (rest.length === 0 && ts.isMethodDeclaration(property)) {
+          for (const origin of callableReturnOrigins(property)) origins.add(origin);
+          continue;
+        }
+        const value = ts.isShorthandPropertyAssignment(property) ? property.name
+          : ts.isPropertyAssignment(property) ? property.initializer : null;
+        if (value) {
+          if (rest.length === 0 && ts.isFunctionLike(value)) {
+            for (const origin of callableReturnOrigins(value)) origins.add(origin);
+          }
+          for (const origin of slotOriginsFromExpression(value, rest, seen)) origins.add(origin);
+        }
+      }
+      return origins;
+    }
+    if (ts.isArrayLiteralExpression(node)) {
+      const origins = new Set();
+      for (const [index, element] of node.elements.entries()) {
+        if (key !== '*' && key !== String(index)) continue;
+        const value = ts.isSpreadElement(element) ? element.expression : element;
+        for (const origin of slotOriginsFromExpression(value, rest, seen)) origins.add(origin);
+      }
+      return origins;
+    }
+    return new Set([...expressionOrigins(node)]
+      .filter((origin) => callbackParameters.has(origin)));
+  }
+
+  function memberExpressionParts(node) {
+    const path = [];
+    let root = node;
+    while (ts.isPropertyAccessExpression(root) || ts.isElementAccessExpression(root)) {
+      path.unshift(ts.isPropertyAccessExpression(root) ? root.name.text
+        : ts.isStringLiteral(root.argumentExpression) || ts.isNumericLiteral(root.argumentExpression)
+          ? root.argumentExpression.text : '*');
+      root = root.expression;
+    }
+    return { root, path };
+  }
+
+  function executableExpressionOrigins(node) {
+    if (ts.isParenthesizedExpression(node)) return executableExpressionOrigins(node.expression);
+    if (ts.isIdentifier(node)) return originParameters(resolveIdentifier(node));
+    if (ts.isCallExpression(node)) {
+      const origins = expressionOrigins(node);
+      for (const returned of callableReturnExpressions(node.expression)) {
+        for (const origin of executableExpressionOrigins(returned)) origins.add(origin);
+        for (const origin of callableReturnOrigins(returned)) origins.add(origin);
+      }
+      return origins;
+    }
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      const { root, path } = memberExpressionParts(node);
+      const member = slotOriginsFromExpression(root, path);
+      if (member.size > 0) return member;
+      return new Set([...expressionOrigins(root)].filter((origin) => callbackParameters.has(origin)));
+    }
+    return expressionOrigins(node);
+  }
+
+  function capabilityForParameter(binding) {
+    return capabilities.find((capability) => capability.owner === binding.owner
+      && capability.parameterIndex === binding.parameterIndex
+      && capability.property === binding.property
+      && capability.local === binding.identifier.text) ?? null;
+  }
+
+  const capabilityBindings = new Map();
+  for (const capability of capabilities) {
+    const matches = parameterBindings.filter((binding) => (
+      capabilityForParameter(binding) === capability
+    ));
+    if (matches.length !== 1) {
+      errors.push(`evidence callback capability ${capability.owner}.${capability.local} must have one exact parameter binding`);
+    } else capabilityBindings.set(matches[0], { capability, calls: 0 });
+  }
+
+  callbackParameters = new Set(capabilityBindings.keys());
+
+  function invocationOrigins(node) {
+    const callee = node.expression;
+    const returnedOrigins = ts.isPropertyAccessExpression(callee)
+      || ts.isElementAccessExpression(callee) ? callableReturnOrigins(callee) : new Set();
+    function withReturned(origins) {
+      return new Set([...origins, ...returnedOrigins]);
+    }
+    if (ts.isIdentifier(callee)) return withReturned(originParameters(resolveIdentifier(callee)));
+    if (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) {
+      const property = ts.isPropertyAccessExpression(callee) ? callee.name.text
+        : ts.isStringLiteral(callee.argumentExpression) || ts.isNumericLiteral(callee.argumentExpression)
+          ? callee.argumentExpression.text : null;
+      if (ts.isIdentifier(callee.expression) && callee.expression.text === 'Reflect'
+          && ['apply', 'construct'].includes(property) && node.arguments[0]) {
+        return withReturned(expressionOrigins(node.arguments[0]));
+      }
+      if (['call', 'apply', 'bind'].includes(property)) {
+        const receiverOrigins = expressionOrigins(callee.expression);
+        if (receiverOrigins.size > 0) return withReturned(receiverOrigins);
+        let receiverRoot = callee.expression;
+        while (ts.isPropertyAccessExpression(receiverRoot)
+            || ts.isElementAccessExpression(receiverRoot)) {
+          receiverRoot = receiverRoot.expression;
+        }
+        if (ts.isIdentifier(receiverRoot) && receiverRoot.text === 'Function'
+            && node.arguments[0]) return withReturned(expressionOrigins(node.arguments[0]));
+      }
+      return withReturned(executableExpressionOrigins(callee));
+    }
+    return withReturned(executableExpressionOrigins(callee));
+  }
+
+  function classifyInvokedParameters(node) {
+    let changed = false;
+    if (ts.isCallExpression(node)) {
+      for (const origin of invocationOrigins(node)) {
+        if (!callbackParameters.has(origin)) {
+          callbackParameters.add(origin);
+          changed = true;
+        }
+      }
+    } else if (ts.isNewExpression(node)) {
+      for (const origin of executableExpressionOrigins(node.expression)) {
+        if (!callbackParameters.has(origin)) {
+          callbackParameters.add(origin);
+          changed = true;
+        }
+      }
+    } else if (ts.isTaggedTemplateExpression(node)) {
+      for (const origin of executableExpressionOrigins(node.tag)) {
+        if (!callbackParameters.has(origin)) {
+          callbackParameters.add(origin);
+          changed = true;
+        }
+      }
+    }
+    ts.forEachChild(node, (child) => {
+      if (classifyInvokedParameters(child)) changed = true;
+    });
+    return changed;
+  }
+  let callbackFlowChanged = true;
+  while (callbackFlowChanged) {
+    recomputeOrigins();
+    callbackFlowChanged = classifyInvokedParameters(parsed);
+  }
+  recomputeOrigins();
+
+  function isBelow(node, ancestor) {
+    for (let current = node.parent; current; current = current.parent) {
+      if (current === ancestor) return true;
+    }
+    return false;
+  }
+  for (const [authorizedBinding, { capability }] of capabilityBindings) {
+    if (bindings.some((binding) => binding !== authorizedBinding
+        && binding.identifier.text === capability.local
+        && isBelow(binding.identifier, authorizedBinding.functionNode))) {
+      errors.push(`evidence callback capability ${capability.owner}.${capability.local} may not be shadowed`);
+    }
+  }
+
+  function nestedFunctionsBetween(node, owner) {
+    const nested = [];
+    for (let current = node.parent; current && current !== owner; current = current.parent) {
+      if (ts.isFunctionLike(current)) nested.push(current);
+    }
+    return nested;
+  }
+
+  function permittedClosure(node, owner, capability) {
+    const nested = nestedFunctionsBetween(node, owner);
+    if (!capability.closure) return nested.length === 0;
+    if (nested.length !== 1) return false;
+    const closure = nested[0];
+    const call = closure.parent;
+    const calleeBinding = ts.isCallExpression(call) && ts.isIdentifier(call.expression)
+      ? resolveIdentifier(call.expression) : null;
+    return ts.isCallExpression(call) && call.arguments.includes(closure)
+      && calleeBinding?.kind === 'import'
+      && calleeBinding.identifier.text === capability.closure;
+  }
+
+  function visitUses(node) {
+    if (ts.isIdentifier(node) && isReferenceIdentifier(node)) {
+      const binding = resolveIdentifier(node);
+      const authorized = capabilityBindings.get(binding);
+      if (authorized) {
+        const parent = node.parent;
+        const directCall = ts.isCallExpression(parent) && parent.expression === node;
+        const actualShape = directCall && parent.questionDotToken
+          ? 'optional-direct' : directCall ? 'direct' : null;
+        if (actualShape === authorized.capability.callShape
+            && permittedClosure(parent, binding.functionNode, authorized.capability)) {
+          authorized.calls += 1;
+        } else {
+          errors.push(`evidence callback capability ${authorized.capability.owner}.${authorized.capability.local} has an unauthorized use`);
+        }
+      } else if (binding?.kind === 'parameter' && callbackParameters.has(binding)) {
+        errors.push(`evidence module may not use callback parameter ${binding.property ?? binding.identifier.text}`);
+      }
+    }
+    if (ts.isCallExpression(node)) {
+      const directBinding = ts.isIdentifier(node.expression)
+        ? resolveIdentifier(node.expression) : null;
+      for (const origin of invocationOrigins(node)) {
+        if (!capabilityBindings.has(origin)) {
+          errors.push(`evidence module may not invoke function parameter ${origin.property ?? origin.identifier.text} via ${node.expression.getText()}`);
+        } else if (directBinding !== origin) {
+          errors.push(`evidence callback derived from ${origin.property ?? origin.identifier.text} may not be invoked through an alias`);
+        }
+      }
+    } else if (ts.isNewExpression(node) || ts.isTaggedTemplateExpression(node)) {
+      const executable = ts.isNewExpression(node) ? node.expression : node.tag;
+      for (const origin of executableExpressionOrigins(executable)) {
+        if (!capabilityBindings.has(origin)) {
+          errors.push(`evidence module may not execute function parameter ${origin.property ?? origin.identifier.text}`);
+        } else {
+          errors.push(`evidence callback derived from ${origin.property ?? origin.identifier.text} has an unauthorized executable use`);
+        }
+      }
+    }
+    ts.forEachChild(node, visitUses);
+  }
+  visitUses(parsed);
+
+  for (const assignment of unmodelledAssignments) {
+    const origins = expressionOrigins(assignment.right);
+    if ([...origins].some((origin) => callbackParameters.has(origin))) {
+      errors.push('evidence callback has an unmodelled assignment target');
+    }
+  }
+
+  for (const { capability, calls } of capabilityBindings.values()) {
+    if (calls !== capability.calls) {
+      errors.push(`evidence callback capability ${capability.owner}.${capability.local} must have exactly ${capability.calls} authorized call(s)`);
+    }
+  }
+  return errors;
+}
+
+function isNonOptionalDirectEvalCall(node) {
+  if (!ts.isCallExpression(node) || node.questionDotToken) return false;
+  let expression = node.expression;
+  while (ts.isParenthesizedExpression(expression)) expression = expression.expression;
+  return ts.isIdentifier(expression) && expression.text === 'eval';
+}
+
+function inspectProductionStateSource(importer, source) {
+  const errors = [];
+  const fileName = posixRelative(stateModuleDirectory, importer);
+  const allowlist = PRODUCTION_STATE_IMPORTS.get(fileName);
+  const expectedExports = PRODUCTION_STATE_EXPORTS.get(fileName);
+  if (!allowlist || !expectedExports) return [`unknown production state module ${fileName}`];
+  const parsed = parseModule(importer, source);
+  for (const diagnostic of parsed.parseDiagnostics) errors.push(`syntax error: ${diagnostic.messageText}`);
+  const evidenceModule = fileName.startsWith('evidence/');
+
+  function visit(node) {
+    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      errors.push('dynamic import is forbidden');
+    }
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
+        && node.expression.text === 'require') errors.push('CommonJS require is forbidden');
+    if (ts.isIdentifier(node) && node.text === 'createRequire') errors.push('createRequire is forbidden');
+    if (ts.isImportEqualsDeclaration(node)) errors.push('CommonJS import assignment is forbidden');
+    if (ts.isExportAssignment(node)) errors.push('default export assignment is forbidden');
+    if (evidenceModule && ts.isCallExpression(node)) {
+      if (isNonOptionalDirectEvalCall(node)) {
+        errors.push('evidence module may not use non-optional direct eval');
+      }
+      const authorityName = ts.isIdentifier(node.expression) ? node.expression.text
+        : ts.isPropertyAccessExpression(node.expression) ? node.expression.name.text
+          : ts.isElementAccessExpression(node.expression)
+              && ts.isStringLiteral(node.expression.argumentExpression)
+            ? node.expression.argumentExpression.text : null;
+      if (authorityName && PROTECTED_STATE_AUTHORITY_PATTERN.test(authorityName)) {
+        errors.push(`evidence module may not invoke protected state authority ${authorityName}`);
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(parsed);
+  if (evidenceModule) errors.push(...inspectEvidenceCallbackCapabilities(fileName, parsed));
+
+  const exports = [];
+  const sourceExports = new Map();
+  for (const statement of parsed.statements) {
+    if (ts.isImportDeclaration(statement)) {
+      const specifier = ts.isStringLiteral(statement.moduleSpecifier)
+        ? statement.moduleSpecifier.text : null;
+      if (specifier === null) {
+        errors.push('import specifier must be a string literal');
+        continue;
+      }
+      const target = normalizedModuleTarget(importer, specifier);
+      const expected = allowlist.get(target);
+      if (fileName !== 'state.mjs' && target === stateModule('state.mjs')) {
+        errors.push('internal state module may not import the public state.mjs facade');
+      }
+      if (!expected) errors.push(`unapproved state dependency ${specifier} resolves to ${target}`);
+      if (!statement.importClause) {
+        errors.push(`side-effect import is forbidden: ${specifier}`);
+        continue;
+      }
+      if (statement.importClause.name) errors.push(`default import is forbidden: ${specifier}`);
+      if (statement.importClause.namedBindings
+          && ts.isNamespaceImport(statement.importClause.namedBindings)) {
+        errors.push(`namespace import is forbidden: ${specifier}`);
+      }
+      const bindings = namedBindings(statement.importClause);
+      if (bindings === null) continue;
+      if (evidenceModule) {
+        for (const { imported } of bindings) {
+          if (PROTECTED_STATE_AUTHORITY_PATTERN.test(imported)) {
+            errors.push(`evidence module may not import protected state authority ${imported}`);
+          }
+        }
+      }
+      if (expected && JSON.stringify(sorted(bindings.map(bindingKey)))
+          !== JSON.stringify(sorted(expectedBindingPairs(expected).map(bindingKey)))) {
+        errors.push(`named imports from ${specifier} do not match the exact state module allowlist`);
+      }
+    }
+
+    if (ts.isExportDeclaration(statement)) {
+      if (!statement.exportClause || !ts.isNamedExports(statement.exportClause)) {
+        errors.push(statement.exportClause ? 'namespace export is forbidden' : 'export-star is forbidden');
+        continue;
+      }
+      const names = statement.exportClause.elements.map((element) => element.name.text);
+      for (const element of statement.exportClause.elements) {
+        if (element.propertyName && element.propertyName.text !== element.name.text) {
+          errors.push('aliased export is forbidden');
+        }
+      }
+      exports.push(...names);
+      if (fileName !== 'state.mjs') {
+        errors.push(`explicit export declarations are forbidden in ${fileName}`);
+        continue;
+      }
+      if (!statement.moduleSpecifier || !ts.isStringLiteral(statement.moduleSpecifier)) {
+        errors.push('state facade exports must name a source module');
+        continue;
+      }
+      const target = normalizedModuleTarget(importer, statement.moduleSpecifier.text);
+      const accumulated = sourceExports.get(target) ?? [];
+      accumulated.push(...names);
+      sourceExports.set(target, accumulated);
+    } else exports.push(...inlineExportNames(statement, errors));
+  }
+
+  const expectedExportSet = new Set(expectedExports);
+  for (const name of exports) {
+    if (!expectedExportSet.has(name)) errors.push(`unexpected state module export ${name}`);
+  }
+  if (fileName === 'state.mjs') {
+    if (JSON.stringify(sorted(sourceExports.keys()))
+        !== JSON.stringify(sorted(STATE_FACADE_SOURCE_EXPORTS.keys()))) {
+      errors.push('state facade source export targets do not match the exact allowlist');
+    }
+    for (const [target, expectedNames] of STATE_FACADE_SOURCE_EXPORTS) {
+      if (JSON.stringify(sorted(sourceExports.get(target) ?? []))
+          !== JSON.stringify(sorted(expectedNames))) {
+        errors.push(`state facade source exports from ${target} do not match the exact allowlist`);
+      }
+    }
+  }
+  return errors;
+}
+
+function validateProductionStateSource(importer, source) {
+  const errors = inspectProductionStateSource(importer, source);
+  const fileName = posixRelative(stateModuleDirectory, importer);
+  const expectedTargets = PRODUCTION_STATE_IMPORTS.get(fileName);
+  const expectedExports = PRODUCTION_STATE_EXPORTS.get(fileName);
+  if (!expectedTargets || !expectedExports) return errors;
+  const parsed = parseModule(importer, source);
+  const actualTargets = parsed.statements.filter(ts.isImportDeclaration).flatMap((statement) => (
+    ts.isStringLiteral(statement.moduleSpecifier)
+      ? [normalizedModuleTarget(importer, statement.moduleSpecifier.text)] : []
+  ));
+  if (JSON.stringify(sorted(actualTargets)) !== JSON.stringify(sorted(expectedTargets.keys()))) {
+    errors.push('state production import targets must exactly match the module allowlist');
+  }
+  const exportErrors = [];
+  const actualExports = [];
+  for (const statement of parsed.statements) {
+    if (ts.isExportDeclaration(statement) && statement.exportClause
+        && ts.isNamedExports(statement.exportClause)) {
+      actualExports.push(...statement.exportClause.elements.map((element) => element.name.text));
+    } else actualExports.push(...inlineExportNames(statement, exportErrors));
+  }
+  if (JSON.stringify(sorted(actualExports)) !== JSON.stringify(sorted(expectedExports))) {
+    errors.push('state production exports must exactly match the module export allowlist');
+  }
+  return [...errors, ...exportErrors];
+}
+
+function productionStateFiles() {
+  return filesBelow(stateModuleDirectory).filter((path) => path.endsWith('.mjs')
+    && !path.endsWith('.test.mjs')
+    && !path.startsWith('test-support/')
+    && !path.startsWith('fixtures/')
+    && path !== 'cli.mjs');
+}
+
+function productionStateCycle(
+  imports = PRODUCTION_STATE_IMPORTS,
+  sourceExports = PRODUCTION_STATE_SOURCE_EXPORTS,
+) {
+  const visited = new Set();
+  const active = new Set();
+  const stack = [];
+  function visit(fileName) {
+    if (active.has(fileName)) return [...stack.slice(stack.indexOf(fileName)), fileName];
+    if (visited.has(fileName)) return null;
+    active.add(fileName);
+    stack.push(fileName);
+    const targets = new Set([
+      ...(imports.get(fileName)?.keys() ?? []),
+      ...(sourceExports.get(fileName)?.keys() ?? []),
+    ]);
+    for (const target of targets) {
+      if (typeof target !== 'string' || !target.startsWith(`${stateModuleDirectory}${sep}`)) continue;
+      const dependency = posixRelative(stateModuleDirectory, target);
+      if (!imports.has(dependency)) continue;
+      const cycle = visit(dependency);
+      if (cycle) return cycle;
+    }
+    stack.pop();
+    active.delete(fileName);
+    visited.add(fileName);
+    return null;
+  }
+  for (const fileName of imports.keys()) {
+    const cycle = visit(fileName);
+    if (cycle) return cycle;
+  }
+  return null;
+}
+
 function inspectFocusedGitHubTestSource(importer, source) {
   const errors = [];
   const fileName = posixRelative(githubDirectory, importer);
@@ -1524,6 +3073,815 @@ test('focused contract tests directly own their production module without higher
     assert.deepEqual(errors, [], testFileName);
     assert.ok(targets.includes(owner), `${testFileName} must directly import its production owner`);
   }
+});
+
+test('extracted state production modules obey exact AST dependency and export boundaries', () => {
+  const productionFiles = productionStateFiles();
+  assert.deepEqual(sorted(PRODUCTION_STATE_IMPORTS.keys()), sorted(PRODUCTION_STATE_EXPORTS.keys()));
+  assert.deepEqual(sorted(PRODUCTION_STATE_IMPORTS.keys()), productionFiles);
+  assert.deepEqual(sorted(PRODUCTION_STATE_EXPORTS.keys()), productionFiles);
+  assert.equal(productionStateCycle(), null, 'state production dependency graph must be acyclic');
+  for (const fileName of sorted(PRODUCTION_STATE_IMPORTS.keys())) {
+    const path = stateModule(fileName);
+    assert.equal(statSync(path).isFile(), true, `missing state production module ${fileName}`);
+    assert.deepEqual(
+      validateProductionStateSource(path, readFileSync(path, 'utf8')),
+      [],
+      fileName,
+    );
+  }
+});
+
+test('state AST guards reject normalized facade and module-system escape hatches', () => {
+  const atomicIoPath = stateModule('atomic-io.mjs');
+  const rejectedSources = [
+    ["const dependency = await import('./errors.mjs');", /dynamic import is forbidden/u],
+    ["const dependency = require('./errors.mjs');", /CommonJS require is forbidden/u],
+    ["import { createRequire } from 'node:module';", /createRequire is forbidden/u],
+    ["import dependency = require('./errors.mjs');", /CommonJS import assignment is forbidden/u],
+    ["import dependency from './errors.mjs';", /default import is forbidden/u],
+    ["export default function leaked() {}", /default export is forbidden/u],
+    ["import * as dependency from './errors.mjs';", /namespace import is forbidden/u],
+    ["export * as dependency from './errors.mjs';", /namespace export is forbidden/u],
+    ["import './errors.mjs';", /side-effect import is forbidden/u],
+    ["export * from './errors.mjs';", /export-star is forbidden/u],
+    ["import { StateError as WorkflowError } from './errors.mjs';", /do not match the exact/u],
+    ["import { loadState } from './nested/../state.mjs';", /may not import the public state\.mjs facade/u],
+  ];
+  for (const [source, expected] of rejectedSources) {
+    assert.match(inspectProductionStateSource(atomicIoPath, source).join('\n'), expected, source);
+  }
+});
+
+test('state evidence AST guards reject protected transition and checkpoint authority', () => {
+  const evidencePath = stateModule('evidence/task-packets.mjs');
+  const rejectedSources = [
+    ["import { checkpointState } from '../state.mjs';", /may not import protected state authority checkpointState/u],
+    ['checkpointCompletion();', /may not invoke protected state authority checkpointCompletion/u],
+    ['lifecycle.buildCompletionTransition();', /may not invoke protected state authority buildCompletionTransition/u],
+    ["lifecycle['checkpointState']();", /may not invoke protected state authority checkpointState/u],
+    ['authority.completeIntegratedTasks();', /may not invoke protected state authority completeIntegratedTasks/u],
+  ];
+  for (const [source, expected] of rejectedSources) {
+    assert.match(inspectProductionStateSource(evidencePath, source).join('\n'), expected, source);
+  }
+});
+
+test('state evidence AST guards reject lexical direct eval without broadening dynamic-code policy', () => {
+  const workerResultsPath = stateModule('evidence/worker-results.mjs');
+  const exactWorker = (body = '') => `
+    export function persistWorkerResultEvidence(cwd, state, task, envelope, onStep) {
+      onStep?.('receipt-durable'); onStep?.('envelope-durable'); ${body}
+    }
+  `;
+  const rejectedSources = new Map([
+    ['authorized callback owner', exactWorker("eval(\"onStep?.('hidden')\");")],
+    ['parenthesized callee', exactWorker("(((eval)))(\"onStep?.('hidden')\");")],
+    ['nested closure', exactWorker("(() => { eval(\"onStep?.('hidden')\"); })();")],
+    ['arbitrary function parameter', `${exactWorker()}
+      function arbitrary(progress) { eval('progress()'); }
+    `],
+  ]);
+  for (const [name, source] of rejectedSources) {
+    assert.match(
+      inspectProductionStateSource(workerResultsPath, source).join('\n'),
+      /evidence module may not use non-optional direct eval/u,
+      name,
+    );
+  }
+
+  for (const fileName of PRODUCTION_STATE_IMPORTS.keys()) {
+    if (!fileName.startsWith('evidence/')) continue;
+    assert.match(
+      inspectProductionStateSource(
+        stateModule(fileName), "eval('lexically captured callback()');",
+      ).join('\n'),
+      /evidence module may not use non-optional direct eval/u,
+      fileName,
+    );
+  }
+
+  const safeSource = `${exactWorker()}
+    function evaluate() { return true; }
+    function permittedDynamicCode(evaluator, source) {
+      evaluator.eval(source); evaluate(source); eval?.(source); (0, eval)(source);
+      globalThis.eval(source); Function(source); return "eval('inert callback()')";
+    }
+  `;
+  assert.deepEqual(
+    inspectProductionStateSource(workerResultsPath, safeSource),
+    [],
+    'indirect/global eval, Function constructors, property calls, and inert strings stay outside the guard',
+  );
+});
+
+test('state evidence callback capabilities bind exact owners, parameters, and call shapes', () => {
+  const positiveSources = new Map([
+    [stateModule('evidence/specialist-bundles.mjs'), `
+      import { withStateLock } from '../locks.mjs';
+      export function planSpecialists({ now = utcNow } = {}) {
+        return withStateLock(null, null, () => { const timestamp = now(); return timestamp; });
+      }
+      export function recordSpecialistReview({ now = utcNow } = {}) {
+        return withStateLock(null, null, () => ({ recordedAt: now() }));
+      }
+    `],
+    [stateModule('evidence/validation-plans.mjs'), `
+      export function buildTargetedValidationPlanUnlocked({ now = utcNow }) { return now(); }
+      export function executeTargetedValidationFacts({
+        runCommand, now = utcNow, beforeCommand, onCommandRecorded,
+      }) {
+        beforeCommand?.(); runCommand(); const completedAt = now(); onCommandRecorded?.();
+        return completedAt;
+      }
+    `],
+    [stateModule('evidence/worker-results.mjs'), `
+      export function persistWorkerResultEvidence(cwd, state, task, envelope, onStep) {
+        onStep?.('receipt-durable'); onStep?.('envelope-durable');
+      }
+    `],
+  ]);
+  for (const [path, source] of positiveSources) {
+    assert.deepEqual(inspectProductionStateSource(path, source), [], path);
+  }
+  const unrelatedDataSource = `${positiveSources.get(stateModule('evidence/worker-results.mjs'))}
+    function moveUnrelatedData(now, handlerValue, input) {
+      const stored = { now, handlerValue };
+      const selected = input ? now : handlerValue;
+      return { selected, stored };
+    }
+    function useSafeLocalClosures(value, condition) {
+      const predicate = () => condition;
+      const localFactory = () => () => true;
+      const box = {
+        get callback() { return () => true; },
+        method() { return () => true; },
+        arrow: () => () => true,
+        fn: function localFunction() { return () => true; },
+      };
+      predicate(); localFactory()(); box.callback(); box.method()(); box.arrow()(); box.fn()();
+      class LocalBox {
+        get callback() { return () => true; }
+        method() { return () => true; }
+        ['arrow'] = () => () => true;
+        set stored(fn) { this.local = () => true; }
+      }
+      const localBox = new LocalBox();
+      localBox.callback(); localBox.method()(); localBox['arrow']()();
+      localBox.stored = () => true;
+      const makeLocalBox = () => class {
+        get callback() { return () => true; }
+        method() { return () => true; }
+        field = () => true;
+      };
+      const makeLocalBoxFactory = () => makeLocalBox;
+      const returnedBox = new (makeLocalBox())();
+      returnedBox.callback(); returnedBox.method()(); returnedBox.field();
+      new (makeLocalBoxFactory()())().field();
+      const safeHolder = { Box: class { callback = () => true; } };
+      const safeFactory = () => ({ Box: class { method() { return () => true; } } });
+      const safeArray = [class { get callback() { return () => true; } }];
+      const safeKey = condition ? 'Box' : 'Box';
+      new safeHolder.Box().callback(); new (safeFactory().Box)().method()();
+      new safeHolder[safeKey]().callback(); new safeArray[0]().callback();
+      const safeGetterHolder = { get Box() { return class { callback = () => true; }; } };
+      class SafeClassHolder {
+        static get Box() { return class { method() { return () => true; } }; }
+        static Field = class { callback = () => true; };
+        get Box() { return class { callback = () => true; }; }
+        Field = class { callback = () => true; };
+      }
+      new safeGetterHolder.Box().callback(); new SafeClassHolder.Box().method()();
+      new SafeClassHolder.Field().callback();
+      const safeClassHolder = new SafeClassHolder();
+      new safeClassHolder.Box().callback(); new safeClassHolder.Field().callback();
+      const safeFactoryGetterHolder = {
+        get Box() { return () => class { callback = () => true; }; },
+      };
+      class SafeFactoryClassHolder {
+        static get Box() { return () => class { callback = () => true; }; }
+        get Box() { return () => class { callback = () => true; }; }
+      }
+      new (safeFactoryGetterHolder.Box())().callback();
+      new (SafeFactoryClassHolder.Box())().callback();
+      new (new SafeFactoryClassHolder().Box())().callback();
+      return value;
+    }
+  `;
+  assert.deepEqual(
+    inspectProductionStateSource(
+      stateModule('evidence/worker-results.mjs'), unrelatedDataSource,
+    ),
+    [],
+    'ordinary parameter data flow must not be classified by callback-like spelling',
+  );
+});
+
+test('state evidence callback capabilities fail closed on indirection and escape', () => {
+  const workerResultsPath = stateModule('evidence/worker-results.mjs');
+  const workerSource = (body, prefix = '') => `${prefix}
+    export function persistWorkerResultEvidence(cwd, state, task, envelope, onStep) {
+      ${body}
+    }
+  `;
+  const rejectedSources = new Map([
+    ['arbitrary owner', 'function arbitrary(cwd, state, task, envelope, onStep) { onStep?.(); }'],
+    ['wrong parameter slot', 'export function persistWorkerResultEvidence(cwd, state, task, onStep) { onStep?.(); }'],
+    ['wrong direct shape', workerSource("onStep('receipt'); onStep?.('envelope');")],
+    ['declaration alias', workerSource("const escaped = onStep; escaped(); onStep?.('a'); onStep?.('b');")],
+    ['assignment alias', workerSource("let escaped; escaped = onStep; escaped(); onStep?.('a'); onStep?.('b');")],
+    ['object storage', workerSource("const stored = { onStep }; onStep?.('a'); onStep?.('b'); return stored;")],
+    ['array storage', workerSource("const stored = [onStep]; onStep?.('a'); onStep?.('b'); return stored;")],
+    ['destructuring storage', workerSource("const { callback } = { callback: onStep }; onStep?.('a'); onStep?.('b'); return callback;")],
+    ['call indirection', workerSource("onStep.call(null); onStep?.('a'); onStep?.('b');")],
+    ['apply indirection', workerSource("onStep.apply(null, []); onStep?.('a'); onStep?.('b');")],
+    ['bind indirection', workerSource("onStep.bind(null)(); onStep?.('a'); onStep?.('b');")],
+    ['computed call indirection', workerSource("onStep['call'](null); onStep?.('a'); onStep?.('b');")],
+    ['computed apply indirection', workerSource("onStep['apply'](null, []); onStep?.('a'); onStep?.('b');")],
+    ['computed bind indirection', workerSource("onStep['bind'](null)(); onStep?.('a'); onStep?.('b');")],
+    ['Reflect indirection', workerSource("Reflect.apply(onStep, null, []); onStep?.('a'); onStep?.('b');")],
+    ['Function prototype indirection', workerSource("Function.prototype.call.call(onStep, null); onStep?.('a'); onStep?.('b');")],
+    ['local callback forwarding', workerSource("consume(onStep); onStep?.('a'); onStep?.('b');")],
+    ['imported callback forwarding', workerSource("consume(onStep); onStep?.('a'); onStep?.('b');", "import { consume } from './consumer.mjs';")],
+    ['property callback forwarding', workerSource("consumer.consume(onStep); onStep?.('a'); onStep?.('b');")],
+    ['callback return', workerSource("onStep?.('a'); onStep?.('b'); return onStep;")],
+    ['callback yield', `
+      export function* persistWorkerResultEvidence(cwd, state, task, envelope, onStep) {
+        onStep?.('a'); onStep?.('b'); yield onStep;
+      }
+    `],
+    ['nested closure escape', workerSource("onStep?.('a'); onStep?.('b'); return () => onStep?.('later');")],
+    ['shadowed callback name', workerSource("onStep?.('a'); onStep?.('b'); { const onStep = () => {}; onStep(); }")],
+  ]);
+  for (const [name, source] of rejectedSources) {
+    assert.match(
+      inspectProductionStateSource(workerResultsPath, source).join('\n'),
+      /evidence callback|may not invoke function parameter/u,
+      name,
+    );
+  }
+  const exactWorker = workerSource("onStep?.('a'); onStep?.('b');");
+  for (const source of [
+    `${exactWorker} function arbitrary(onProgress) { const escaped = onProgress; escaped(); }`,
+    `${exactWorker} function arbitrary(onProgress, condition) {
+      const escaped = condition ? onProgress : () => {}; escaped();
+    }`,
+  ]) {
+    assert.match(
+      inspectProductionStateSource(workerResultsPath, source).join('\n'),
+      /may not invoke function parameter onProgress/u,
+      source,
+    );
+  }
+
+  const arbitrarySource = (body, prefix = '') => `${exactWorker} ${prefix}
+    function arbitrary(progress, consume, condition) {
+      ${body}
+    }
+  `;
+  const arbitraryCallbackEscapes = new Map([
+    ['direct call', 'progress.call(null);'],
+    ['direct apply', 'progress.apply(null, []);'],
+    ['direct bind', 'progress.bind(null);'],
+    ['computed call', "progress['call'](null);"],
+    ['computed apply', "progress['apply'](null, []);"],
+    ['computed bind', "progress['bind'](null);"],
+    ['Reflect apply', 'Reflect.apply(progress, null, []);'],
+    ['Function prototype call', 'Function.prototype.call.call(progress, null);'],
+    ['Function prototype apply', 'Function.prototype.apply.call(progress, null, []);'],
+    ['nested closure', 'return () => progress();'],
+    ['declaration alias', 'const escaped = progress; escaped();'],
+    ['assignment alias', 'let escaped; escaped = progress; escaped();'],
+    ['new expression', 'new progress();'],
+    ['tagged template', 'progress`value`;'],
+    ['member new expression', 'const box = { callback: progress }; new box.callback();'],
+    ['member tagged template', 'const box = { callback: progress }; box.callback`value`;'],
+    ['computed member new expression', "const box = { callback: progress }; new box['callback']();"],
+    ['computed member tagged template', "const box = { callback: progress }; box['callback']`value`;"],
+    ['dynamic member new expression', 'const box = { callback: progress }; new box[key]();'],
+    ['conditional new expression', 'new (condition ? progress : class {})();'],
+    ['conditional tagged template', '(condition ? progress : String.raw)`value`;'],
+  ]);
+  for (const [name, body] of arbitraryCallbackEscapes) {
+    const output = inspectProductionStateSource(
+      workerResultsPath, arbitrarySource(body),
+    ).join('\n');
+    assert.match(output, /may not use callback parameter progress/u, name);
+  }
+
+  const factoryReturnedClassSource = (member, sink) => `
+    ${exactWorker} function arbitrary(progress) {
+      const makeBox = () => class { ${member} }; ${sink}
+    }
+  `;
+  const flowSources = new Map([
+    ['branch and safe overwrite', `
+      ${exactWorker} function arbitrary(value, condition) {
+        let escaped; if (condition) escaped = value; else escaped = () => {};
+        escaped = () => {}; escaped();
+      }
+    `],
+    ['conditional and logical RHS', `
+      ${exactWorker} function arbitrary(value, condition) {
+        let escaped; escaped ||= condition ? value : () => {}; escaped();
+      }
+    `],
+    ['destructuring assignment', `
+      ${exactWorker} function arbitrary(value) {
+        let escaped; [escaped] = [value]; escaped();
+      }
+    `],
+    ['member assignment', `
+      ${exactWorker} function arbitrary(value) {
+        const stored = {}; stored.callback = value; stored.callback();
+      }
+    `],
+    ['computed member assignment', `
+      ${exactWorker} function arbitrary(value, key) {
+        const stored = {}; stored[key] = value; stored[key]();
+      }
+    `],
+    ['object container alias', `
+      ${exactWorker} function arbitrary(value) {
+        const stored = { callback: value }; const alias = stored; alias.callback();
+      }
+    `],
+    ['array container alias', `
+      ${exactWorker} function arbitrary(value) {
+        const stored = [value]; const alias = stored; alias[0]();
+      }
+    `],
+    ['conditional callee expression', `
+      ${exactWorker} function arbitrary(value, condition) {
+        (condition ? value : () => {})();
+      }
+    `],
+    ['inline object member call', `
+      ${exactWorker} function arbitrary(value) {
+        ({ callback: value }).callback();
+      }
+    `],
+    ['conditional container alias call', `
+      ${exactWorker} function arbitrary(value, condition) {
+        const box = { callback: value }; const alias = condition ? box : {};
+        alias.callback();
+      }
+    `],
+    ['nested container member call', `
+      ${exactWorker} function arbitrary(value) {
+        const box = { inner: { callback: value } }; box.inner.callback();
+      }
+    `],
+    ['inline object member new', `
+      ${exactWorker} function arbitrary(value) {
+        new ({ callback: value }).callback();
+      }
+    `],
+    ['inline object member tag', `
+      ${exactWorker} function arbitrary(value) {
+        ({ callback: value }).callback\`value\`;
+      }
+    `],
+    ['inline computed member call', `
+      ${exactWorker} function arbitrary(value) {
+        ({ callback: value })['callback']();
+      }
+    `],
+    ['inline computed member new', `
+      ${exactWorker} function arbitrary(value) {
+        new ({ callback: value })['callback']();
+      }
+    `],
+    ['inline computed member tag', `
+      ${exactWorker} function arbitrary(value) {
+        ({ callback: value })['callback']\`value\`;
+      }
+    `],
+    ['inline getter member call', `
+      ${exactWorker} function arbitrary(progress) {
+        ({ get callback() { return progress; } }).callback();
+      }
+    `],
+    ['inline computed getter member call', `
+      ${exactWorker} function arbitrary(progress) {
+        ({ get ['callback']() { return progress; } })['callback']();
+      }
+    `],
+    ['inline getter returned arrow call chain', `
+      ${exactWorker} function arbitrary(progress) {
+        ({ get callback() { return () => progress; } }).callback()();
+      }
+    `],
+    ['inline method return call', `
+      ${exactWorker} function arbitrary(progress) {
+        ({ callback() { return progress; } }).callback()();
+      }
+    `],
+    ['inline method direct return escape', `
+      ${exactWorker} function arbitrary(progress) {
+        ({ callback() { return progress; } }).callback();
+      }
+    `],
+    ['inline computed method return call', `
+      ${exactWorker} function arbitrary(progress) {
+        ({ ['callback']() { return progress; } })['callback']()();
+      }
+    `],
+    ['inline arrow property return call', `
+      ${exactWorker} function arbitrary(progress) {
+        ({ callback: () => progress }).callback()();
+      }
+    `],
+    ['inline arrow property direct return escape', `
+      ${exactWorker} function arbitrary(progress) {
+        ({ callback: () => progress }).callback();
+      }
+    `],
+    ['inline computed arrow property return call', `
+      ${exactWorker} function arbitrary(progress) {
+        ({ ['callback']: () => progress })['callback']()();
+      }
+    `],
+    ['inline function property return call', `
+      ${exactWorker} function arbitrary(progress) {
+        ({ callback: function factory() { return progress; } }).callback()();
+      }
+    `],
+    ['IIFE return call', `
+      ${exactWorker} function arbitrary(progress) {
+        (() => progress)()();
+      }
+    `],
+    ['IIFE returned arrow call chain', `
+      ${exactWorker} function arbitrary(progress) {
+        (() => () => progress)()()();
+      }
+    `],
+    ['named block factory return call', `
+      ${exactWorker} function arbitrary(progress) {
+        function factory() { if (true) { return progress; } return () => {}; }
+        factory()();
+      }
+    `],
+    ['conditional factory return call', `
+      ${exactWorker} function arbitrary(progress, condition) {
+        const factory = () => condition ? progress : () => {}; factory()();
+      }
+    `],
+    ['factory returned object member call', `
+      ${exactWorker} function arbitrary(progress) {
+        const factory = () => ({ callback: progress, data: 'safe' });
+        factory().callback();
+      }
+    `],
+    ['class instance getter member call', `
+      ${exactWorker} function arbitrary(progress) {
+        class Box { get callback() { return progress; } }
+        new Box().callback();
+      }
+    `],
+    ['class getter returned arrow call chain', `
+      ${exactWorker} function arbitrary(progress) {
+        class Box { get callback() { return () => progress; } }
+        new Box().callback()();
+      }
+    `],
+    ['class instance method return call', `
+      ${exactWorker} function arbitrary(progress) {
+        class Box { callback() { return progress; } }
+        new Box().callback()();
+      }
+    `],
+    ['class computed method return call', `
+      ${exactWorker} function arbitrary(progress) {
+        class Box { ['callback']() { return progress; } }
+        new Box()['callback']()();
+      }
+    `],
+    ['class arrow field return call', `
+      ${exactWorker} function arbitrary(progress) {
+        class Box { callback = () => progress; }
+        new Box().callback()();
+      }
+    `],
+    ['class static method return call', `
+      ${exactWorker} function arbitrary(progress) {
+        class Box { static callback() { return progress; } }
+        Box.callback()();
+      }
+    `],
+    ['class expression getter member call', `
+      ${exactWorker} function arbitrary(progress) {
+        const Box = class { get ['callback']() { return progress; } };
+        new Box()['callback']();
+      }
+    `],
+    ['factory class getter call', factoryReturnedClassSource(
+      'get callback() { return progress; }', 'new (makeBox())().callback();',
+    )],
+    ['factory class getter new', factoryReturnedClassSource(
+      'get callback() { return progress; }', 'new (new (makeBox())().callback)();',
+    )],
+    ['factory class getter tag', factoryReturnedClassSource(
+      'get callback() { return progress; }', 'new (makeBox())().callback`value`;',
+    )],
+    ['factory class method call', factoryReturnedClassSource(
+      'callback() { return progress; }', 'new (makeBox())().callback()();',
+    )],
+    ['factory class method new', factoryReturnedClassSource(
+      'callback() { return progress; }', 'new (new (makeBox())().callback())();',
+    )],
+    ['factory class method tag', factoryReturnedClassSource(
+      'callback() { return progress; }', 'new (makeBox())().callback()`value`;',
+    )],
+    ['factory class field call', factoryReturnedClassSource(
+      'callback = progress;', 'new (makeBox())().callback();',
+    )],
+    ['factory class field new', factoryReturnedClassSource(
+      'callback = progress;', 'new (new (makeBox())().callback)();',
+    )],
+    ['factory class field tag', factoryReturnedClassSource(
+      'callback = progress;', 'new (makeBox())().callback`value`;',
+    )],
+    ['conditional factory class getter call', `
+      ${exactWorker} function arbitrary(progress, condition) {
+        const makeBox = condition ? () => class {
+          get callback() { return progress; }
+        } : () => class {};
+        new (makeBox())().callback();
+      }
+    `],
+    ['chained factory class field call', `
+      ${exactWorker} function arbitrary(progress) {
+        const makeFactory = () => () => class { callback = progress; };
+        new (makeFactory()())().callback();
+      }
+    `],
+    ['holder class getter call', `
+      ${exactWorker} function arbitrary(progress) {
+        const holder = { Box: class { get callback() { return progress; } } };
+        new holder.Box().callback();
+      }
+    `],
+    ['holder computed class getter call', `
+      ${exactWorker} function arbitrary(progress) {
+        const holder = { Box: class { get callback() { return progress; } } };
+        new holder['Box']().callback();
+      }
+    `],
+    ['holder wildcard class getter call', `
+      ${exactWorker} function arbitrary(progress, key) {
+        const holder = { Box: class { get callback() { return progress; } } };
+        new holder[key]().callback();
+      }
+    `],
+    ['holder class method call', `
+      ${exactWorker} function arbitrary(progress) {
+        const holder = { Box: class { callback() { return progress; } } };
+        new holder.Box().callback()();
+      }
+    `],
+    ['holder class method new', `
+      ${exactWorker} function arbitrary(progress) {
+        const holder = { Box: class { callback() { return progress; } } };
+        new (new holder.Box().callback())();
+      }
+    `],
+    ['holder class method tag', `
+      ${exactWorker} function arbitrary(progress) {
+        const holder = { Box: class { callback() { return progress; } } };
+        new holder.Box().callback()\`value\`;
+      }
+    `],
+    ['holder class field call', `
+      ${exactWorker} function arbitrary(progress) {
+        const holder = { Box: class { callback = progress; } };
+        new holder.Box().callback();
+      }
+    `],
+    ['holder class field new', `
+      ${exactWorker} function arbitrary(progress) {
+        const holder = { Box: class { callback = progress; } };
+        new (new holder.Box().callback)();
+      }
+    `],
+    ['holder class field tag', `
+      ${exactWorker} function arbitrary(progress) {
+        const holder = { Box: class { callback = progress; } };
+        new holder.Box().callback\`value\`;
+      }
+    `],
+    ['factory returned constructor slot call', `
+      ${exactWorker} function arbitrary(progress) {
+        const make = () => ({ Box: class { callback = progress; } });
+        new (make().Box)().callback();
+      }
+    `],
+    ['factory returned computed constructor slot call', `
+      ${exactWorker} function arbitrary(progress) {
+        const make = () => ({ Box: class { callback = progress; } });
+        new (make()['Box'])().callback();
+      }
+    `],
+    ['factory returned wildcard constructor slot call', `
+      ${exactWorker} function arbitrary(progress, key) {
+        const make = () => ({ Box: class { callback = progress; } });
+        new (make()[key])().callback();
+      }
+    `],
+    ['array constructor slot call', `
+      ${exactWorker} function arbitrary(progress) {
+        const holder = [class { get callback() { return progress; } }];
+        new holder[0]().callback();
+      }
+    `],
+    ['conditional constructor container call', `
+      ${exactWorker} function arbitrary(progress, condition) {
+        const holder = condition
+          ? { Box: class { callback = progress; } } : { Box: class {} };
+        new holder.Box().callback();
+      }
+    `],
+    ['assigned constructor slot call', `
+      ${exactWorker} function arbitrary(progress) {
+        const holder = {}; holder.Box = class { callback = progress; };
+        new holder.Box().callback();
+      }
+    `],
+    ['object getter class getter call', `
+      ${exactWorker} function arbitrary(progress) {
+        const holder = { get Box() {
+          return class { get callback() { return progress; } };
+        } };
+        new holder.Box().callback();
+      }
+    `],
+    ['computed object getter class method new', `
+      ${exactWorker} function arbitrary(progress) {
+        const holder = { get ['Box']() {
+          return class { callback() { return progress; } };
+        } };
+        new (new holder['Box']().callback())();
+      }
+    `],
+    ['wildcard object getter class field tag', `
+      ${exactWorker} function arbitrary(progress, key) {
+        const holder = { get Box() { return class { callback = progress; }; } };
+        new holder[key]().callback\`value\`;
+      }
+    `],
+    ['factory object getter class field call', `
+      ${exactWorker} function arbitrary(progress) {
+        const make = () => ({ get Box() { return class { callback = progress; }; } });
+        new (make().Box)().callback();
+      }
+    `],
+    ['factory computed getter class method tag', `
+      ${exactWorker} function arbitrary(progress) {
+        const make = () => ({ get ['Box']() {
+          return class { callback() { return progress; } };
+        } });
+        new (make()['Box'])().callback()\`value\`;
+      }
+    `],
+    ['object method class field new', `
+      ${exactWorker} function arbitrary(progress) {
+        const holder = { Box() { return class { callback = progress; }; } };
+        new (new (holder.Box())().callback)();
+      }
+    `],
+    ['static getter class getter call', `
+      ${exactWorker} function arbitrary(progress) {
+        class Holder { static get Box() {
+          return class { get callback() { return progress; } };
+        } }
+        new Holder.Box().callback();
+      }
+    `],
+    ['computed static getter class method new', `
+      ${exactWorker} function arbitrary(progress) {
+        class Holder { static get ['Box']() {
+          return class { callback() { return progress; } };
+        } }
+        new (new Holder['Box']().callback())();
+      }
+    `],
+    ['static field class field tag', `
+      ${exactWorker} function arbitrary(progress) {
+        class Holder { static Box = class { callback = progress; }; }
+        new Holder.Box().callback\`value\`;
+      }
+    `],
+    ['static method class field call', `
+      ${exactWorker} function arbitrary(progress) {
+        class Holder { static Box() { return class { callback = progress; }; } }
+        new (Holder.Box())().callback();
+      }
+    `],
+    ['instance getter class field call', `
+      ${exactWorker} function arbitrary(progress) {
+        class Holder { get Box() { return class { callback = progress; }; } }
+        new (new Holder().Box)().callback();
+      }
+    `],
+    ['instance field class getter tag', `
+      ${exactWorker} function arbitrary(progress) {
+        class Holder { Box = class { get callback() { return progress; } }; }
+        new (new Holder().Box)().callback\`value\`;
+      }
+    `],
+    ['object getter returned factory class call', `
+      ${exactWorker} function arbitrary(progress) {
+        const holder = { get Box() {
+          return () => class { callback = progress; };
+        } };
+        new (holder.Box())().callback();
+      }
+    `],
+    ['computed object getter returned factory class new', `
+      ${exactWorker} function arbitrary(progress) {
+        const holder = { get ['Box']() {
+          return () => class { callback() { return progress; } };
+        } };
+        new (new (holder['Box']())().callback())();
+      }
+    `],
+    ['factory object wildcard getter returned factory class call', `
+      ${exactWorker} function arbitrary(progress, key) {
+        const make = () => ({ get Box() {
+          return () => class { callback = progress; };
+        } });
+        new (make()[key]())().callback();
+      }
+    `],
+    ['factory object getter returned factory class tag', `
+      ${exactWorker} function arbitrary(progress) {
+        const make = () => ({ get Box() {
+          return () => class { callback = progress; };
+        } });
+        new (make().Box())().callback\`value\`;
+      }
+    `],
+    ['static getter returned factory class call', `
+      ${exactWorker} function arbitrary(progress) {
+        class Holder { static get Box() {
+          return () => class { callback = progress; };
+        } }
+        new (Holder.Box())().callback();
+      }
+    `],
+    ['computed static getter returned factory class new', `
+      ${exactWorker} function arbitrary(progress) {
+        class Holder { static get ['Box']() {
+          return () => class { callback() { return progress; } };
+        } }
+        new (new (Holder['Box']())().callback())();
+      }
+    `],
+    ['instance getter returned factory class tag', `
+      ${exactWorker} function arbitrary(progress) {
+        class Holder { get Box() {
+          return () => class { callback = progress; };
+        } }
+        new (new Holder().Box())().callback\`value\`;
+      }
+    `],
+    ['getter returned multi-call factory class call', `
+      ${exactWorker} function arbitrary(progress) {
+        const holder = { get Box() {
+          return () => () => class { callback = progress; };
+        } };
+        new (holder.Box()())().callback();
+      }
+    `],
+    ['call-result alias', `
+      ${exactWorker} function arbitrary(progress, identity) {
+        const escaped = identity(progress); escaped();
+      }
+    `],
+  ]);
+  for (const [name, source] of flowSources) {
+    assert.match(
+      inspectProductionStateSource(workerResultsPath, source).join('\n'),
+      /may not (?:use callback|invoke function) parameter (?:value|progress)/u,
+      name,
+    );
+  }
+});
+
+test('state dependency cycle detection includes façade source re-export edges', () => {
+  const imports = new Map([
+    ['facade.mjs', new Map()],
+    ['owner.mjs', new Map([[stateModule('facade.mjs'), []]])],
+  ]);
+  const sourceExports = new Map([
+    ['facade.mjs', new Map([[stateModule('owner.mjs'), ['owner']]])],
+  ]);
+  assert.equal(productionStateCycle(imports, new Map()), null);
+  assert.deepEqual(
+    productionStateCycle(imports, sourceExports),
+    ['facade.mjs', 'owner.mjs', 'facade.mjs'],
+  );
 });
 
 test('contract AST guards reject normalized boundary and module-system escape hatches', () => {

@@ -1,4 +1,11 @@
 import * as harness from './test-support/state-harness.mjs';
+import { reconcileState } from './reconciliation.mjs';
+import {
+  buildWorkerResultEnvelope,
+  persistWorkerResultEvidence,
+  readAcceptedWorkerResult,
+  workerResultEnvelopeDigest,
+} from './evidence/worker-results.mjs';
 
 const {
   assert,
@@ -62,7 +69,6 @@ const {
   migrateState,
   planSpecialists,
   readSpecialistStatus,
-  reconcileState,
   recordSpecialistReview,
   renderRecoverySummary,
   reviewRequestGate,
@@ -165,6 +171,16 @@ test('worker results are receipt-bound, interruption-safe, immutable, and requir
   const workerSha = commit(cwd, { 'scripts/durable-result.mjs': 'export const durable = true;\n' }, 'worker result fixture');
   git(cwd, ['switch', 'main']);
   const result = workerResult(packet, workerSha, ['scripts/durable-result.mjs']);
+  const directEnvelope = buildWorkerResultEnvelope(bound, packet, result);
+  const writeOrder = [];
+  persistWorkerResultEvidence(cwd, bound, bound.tasks[0], directEnvelope, (step) => writeOrder.push(step));
+  assert.deepEqual(writeOrder, ['receipt-durable', 'envelope-durable']);
+  assert.equal(
+    readFileSync(workerResultReceiptPath(cwd, 17, packet.taskId), 'utf8'),
+    `${workerResultEnvelopeDigest(directEnvelope)}\n`,
+  );
+  rmSync(workerResultEnvelopePath(cwd, 17, packet.taskId));
+  rmSync(workerResultReceiptPath(cwd, 17, packet.taskId));
 
   assert.throws(() => checkpointState({
     cwd, expectedRevision: bound.revision,
@@ -210,6 +226,11 @@ test('worker results are receipt-bound, interruption-safe, immutable, and requir
   const accepted = loadState(cwd);
   assert.equal(accepted.tasks[0].status, 'implemented');
   assert.match(accepted.tasks[0].workerResultDigest, /^[0-9a-f]{64}$/u);
+  assert.deepEqual(
+    readAcceptedWorkerResult(cwd, accepted, accepted.tasks[0], packet).result,
+    result,
+    'the extracted worker evidence owner recovers the immutable accepted result',
+  );
   assert.equal(checkpointWorkerResultAcceptance({
     cwd, packet, result, expectedRevision: accepted.revision,
   }).revision, accepted.revision);
@@ -262,6 +283,62 @@ test('worker results are receipt-bound, interruption-safe, immutable, and requir
   const archived = archiveState({ cwd, abandonmentReason: 'Archive durable worker-result fixture.' });
   assert.equal(readdirSync(join(archived, 'worker-results')).filter((name) => name.endsWith('.json')).length, 1);
   assert.equal(readdirSync(join(archived, 'worker-results')).filter((name) => name.endsWith('.sha256')).length, 1);
+});
+
+test('worker result acceptance rejects missing or tampered task-binding provenance without mutation', () => {
+  for (const scenario of ['missing-sidecar', 'tampered-receipt']) {
+    const cwd = repo();
+    const fixture = boundWorkerResultFixture(cwd, `binding-${scenario}`);
+    const provenancePath = taskBindingProvenancePath(
+      cwd, fixture.bound.prNumber, fixture.packet.taskId,
+    );
+    const provenanceReceiptPath = taskBindingProvenanceReceiptPath(
+      cwd, fixture.bound.prNumber, fixture.packet.taskId,
+    );
+    if (scenario === 'missing-sidecar') unlinkSync(provenancePath);
+    else writeFileSync(provenanceReceiptPath, `${'0'.repeat(64)}\n`);
+    const before = durableAcceptanceSnapshot(cwd, fixture.packet.taskId);
+
+    assert.throws(() => checkpointWorkerResultAcceptance({
+      cwd, packet: fixture.packet, result: fixture.result,
+      expectedRevision: fixture.bound.revision,
+    }), { code: 'INVALID_TASK_BINDING_PROVENANCE' });
+    assert.deepEqual(durableAcceptanceSnapshot(cwd, fixture.packet.taskId), before,
+      `${scenario} leaves revision, events, and worker evidence unchanged`);
+    assert.equal(existsSync(workerResultEnvelopePath(
+      cwd, fixture.bound.prNumber, fixture.packet.taskId,
+    )), false);
+    assert.equal(existsSync(workerResultReceiptPath(
+      cwd, fixture.bound.prNumber, fixture.packet.taskId,
+    )), false);
+  }
+});
+
+test('accepted worker result replay rejects missing or tampered task-binding provenance', () => {
+  for (const scenario of ['missing-sidecar', 'tampered-receipt']) {
+    const cwd = repo();
+    const fixture = boundWorkerResultFixture(cwd, `replay-${scenario}`);
+    const accepted = checkpointWorkerResultAcceptance({
+      cwd, packet: fixture.packet, result: fixture.result,
+      expectedRevision: fixture.bound.revision,
+    });
+    const task = accepted.tasks.find((candidate) => candidate.id === fixture.packet.taskId);
+    const provenancePath = taskBindingProvenancePath(
+      cwd, accepted.prNumber, fixture.packet.taskId,
+    );
+    const provenanceReceiptPath = taskBindingProvenanceReceiptPath(
+      cwd, accepted.prNumber, fixture.packet.taskId,
+    );
+    if (scenario === 'missing-sidecar') unlinkSync(provenancePath);
+    else writeFileSync(provenanceReceiptPath, `${'0'.repeat(64)}\n`);
+    const before = durableAcceptanceSnapshot(cwd, fixture.packet.taskId);
+
+    assert.throws(() => readAcceptedWorkerResult(
+      cwd, accepted, task, fixture.packet,
+    ), { code: 'INVALID_TASK_BINDING_PROVENANCE' });
+    assert.deepEqual(durableAcceptanceSnapshot(cwd, fixture.packet.taskId), before,
+      `${scenario} replay does not mutate accepted evidence`);
+  }
 });
 
 test('worker result compacts max-valid validation summaries before durable acceptance', () => {

@@ -1,4 +1,11 @@
 import * as harness from './test-support/state-harness.mjs';
+import { reconcileState } from './reconciliation.mjs';
+import {
+  renderRecoverySummary,
+  staleDiscoveryRecoverySummary,
+  truncate,
+  validationPlanRecoverySummary,
+} from './recovery.mjs';
 
 const {
   assert,
@@ -62,9 +69,7 @@ const {
   migrateState,
   planSpecialists,
   readSpecialistStatus,
-  reconcileState,
   recordSpecialistReview,
-  renderRecoverySummary,
   reviewRequestGate,
   reviewRequestUsage,
   reviewRoot,
@@ -147,6 +152,20 @@ const {
   boundWorkerResultFixture,
   acceptedWorkerStateProjection,
 } = harness;
+
+test('extracted recovery owners classify read-only evidence and bound rendered output', () => {
+  const cwd = repo();
+  const state = init(cwd);
+  const before = readFileSync(statePath(cwd, state.prNumber), 'utf8');
+
+  assert.equal(validationPlanRecoverySummary(cwd, state), 'missing');
+  assert.equal(staleDiscoveryRecoverySummary(state), 'none');
+  assert.equal(truncate('abcdef', 4), 'abc…');
+  assert.match(renderRecoverySummary({ cwd, maxCharacters: 180 }), /PR review recovery:/u);
+  assert.equal(readFileSync(statePath(cwd, state.prNumber), 'utf8'), before,
+    'recovery classification and rendering remain read-only');
+  assert.deepEqual(reconcileState({ cwd }).warnings, []);
+});
 
 test('v2 loading requires explicit migration and writes an exact versioned backup', () => {
   const cwd = repo();
