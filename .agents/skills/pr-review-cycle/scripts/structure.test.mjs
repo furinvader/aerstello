@@ -152,8 +152,11 @@ const EXPECTED_CANONICAL_FILES = [
   'scripts/state/archive.mjs',
   'scripts/state/archive.test.mjs',
   'scripts/state/atomic-io.mjs',
+  'scripts/state/checkpoint.mjs',
+  'scripts/state/checkpoint.test.mjs',
   'scripts/state/cli.mjs',
   'scripts/state/cli.test.mjs',
+  'scripts/state/composed-services.test.mjs',
   'scripts/state/errors.mjs',
   'scripts/state/evidence/specialist-bundle-store.mjs',
   'scripts/state/evidence/specialist-bundles.mjs',
@@ -173,6 +176,18 @@ const EXPECTED_CANONICAL_FILES = [
   'scripts/state/recovery.mjs',
   'scripts/state/review-transitions.test.mjs',
   'scripts/state/schema-migration-and-recovery.test.mjs',
+  'scripts/state/services/archive-import.mjs',
+  'scripts/state/services/archive-import.test.mjs',
+  'scripts/state/services/completion.mjs',
+  'scripts/state/services/completion.test.mjs',
+  'scripts/state/services/git-metadata.mjs',
+  'scripts/state/services/git-metadata.test.mjs',
+  'scripts/state/services/review.mjs',
+  'scripts/state/services/review.test.mjs',
+  'scripts/state/services/tasks.mjs',
+  'scripts/state/services/tasks.test.mjs',
+  'scripts/state/services/validation.mjs',
+  'scripts/state/services/validation.test.mjs',
   'scripts/state/specialist-evidence.test.mjs',
   'scripts/state/state-loading-and-persistence.test.mjs',
   'scripts/state/state-store.mjs',
@@ -180,6 +195,22 @@ const EXPECTED_CANONICAL_FILES = [
   'scripts/state/task-completion.test.mjs',
   'scripts/state/task-packets.test.mjs',
   'scripts/state/test-support/state-harness.mjs',
+  'scripts/state/transition-policy.mjs',
+  'scripts/state/transition-policy.test.mjs',
+  'scripts/state/transitions/completion.mjs',
+  'scripts/state/transitions/completion.test.mjs',
+  'scripts/state/transitions/git-metadata.mjs',
+  'scripts/state/transitions/git-metadata.test.mjs',
+  'scripts/state/transitions/review-policy.mjs',
+  'scripts/state/transitions/review-policy.test.mjs',
+  'scripts/state/transitions/review.mjs',
+  'scripts/state/transitions/review.test.mjs',
+  'scripts/state/transitions/tasks.mjs',
+  'scripts/state/transitions/tasks.test.mjs',
+  'scripts/state/transitions/transactional-evidence.mjs',
+  'scripts/state/transitions/transactional-evidence.test.mjs',
+  'scripts/state/transitions/validation.mjs',
+  'scripts/state/transitions/validation.test.mjs',
   'scripts/state/validation-plans.test.mjs',
   'scripts/state/worker-evidence.test.mjs',
   'scripts/state/worker-git-authority.test.mjs',
@@ -635,29 +666,126 @@ const PRODUCTION_STATE_IMPORTS = new Map([
     [stateModule('reconciliation.mjs'), ['reconcileState']],
     [stateModule('state-store.mjs'), ['activePrNumber', 'loadState', 'validateStateForWrite']],
   ])],
-  ['state.mjs', new Map([
-    ['node:fs', ['existsSync', 'readFileSync']],
-    ['node:path', ['join', 'resolve']],
-    ['node:crypto', ['createHash']],
-    ['node:child_process', ['spawnSync']],
-    [join(repositoryDirectory, 'scripts', 'lib', 'git.mjs'), ['runGit']],
-    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['completionGate', 'reviewRequestGate', 'reviewRequestUsage', 'staleDiscoveryDispositionId', 'taskHasCanonicalThreadCoverage', 'validateTaskPacket', 'workerResultDigest', 'validatePrReviewState']],
-    [join(scriptsDirectory, 'paths.mjs'), ['repositoryRoot']],
-    [stateModule('errors.mjs'), ['StateError']],
-    [stateModule('locations.mjs'), ['stateDirectory', 'statePath', 'taskBindingProvenancePath', 'taskBindingProvenanceReceiptPath', 'taskPacketSidecarPath']],
-    [stateModule('atomic-io.mjs'), ['atomicWriteJson', 'canonicalJson', 'canonicalSerializedJson', 'readJsonSidecar']],
-    [stateModule('locks.mjs'), ['withStateLock']],
-    [stateModule('recovery.mjs'), [importedAs('truncate', 'truncateSummary')]],
-    [stateModule('git-authority.mjs'), ['assertIntegratedWorkerCommit', 'gitSnapshot']],
-    [stateModule('journal.mjs'), ['appendEvent', 'ensureGitHubMutationIntent', 'prepareEvent']],
-    [stateModule('migrations.mjs'), ['migratePrReviewStateV2']],
-    [stateModule('state-store.mjs'), ['activePrNumber', 'claimGitHubMutationDispatch', 'loadState', 'readStateDocument', 'validateStateForWrite']],
-    [stateModule('evidence/task-binding.mjs'), ['assertBehaviorMapperPlanningComplete', 'buildTaskBindingProvenance', 'persistImmutableTaskBindingProvenance', 'readBoundTaskBindingProvenance', 'recoverHistoricalTaskBindingPlanning']],
-    [stateModule('evidence/task-packets.mjs'), ['assertTaskPacketHead', 'persistImmutableTaskPacketSidecar', importedAs('readTaskPacketSidecar', 'readBoundTaskPacketSidecar'), 'taskPacketDigest']],
-    [stateModule('evidence/worker-results.mjs'), ['persistWorkerResultEvidence', 'proveWorkerResultEvidence', 'readAcceptedWorkerResult']],
-    [stateModule('evidence/validation-plans.mjs'), ['actionableIntegratedTaskIds', 'actionablePacketValidationTaskIds', 'assertCleanExactIntegrationHead', 'buildTargetedValidationPlanUnlocked', 'executeTargetedValidationFacts', 'hasRemainingReviewAllowance', 'isCleanTasklessReviewValidationRecovery', 'isNativeTasklessPendingReviewHeadDriftValidationRecovery', 'isNativeTasklessReviewHeadDriftValidationRecovery', 'readV2CompletedTaskValidationRecoveryEvidence', 'readValidationPlan', 'validateValidationPlan']],
-  ])],
+  ['state.mjs', new Map()],
 ]);
+
+// The facade is a pure explicit re-export surface. Extracted transition, checkpoint, and service
+// modules use exact dependency allowlists so additions cannot acquire persistence authority by drift.
+PRODUCTION_STATE_IMPORTS.set('transition-policy.mjs', new Map([
+  ['node:crypto', ['createHash']],
+  [stateModule('atomic-io.mjs'), ['canonicalJson']],
+  [stateModule('errors.mjs'), ['StateError']],
+  [stateModule('git-authority.mjs'), ['assertIntegratedWorkerCommit']],
+  [stateModule('evidence/task-packets.mjs'), [importedAs('readTaskPacketSidecar', 'readBoundTaskPacketSidecar')]],
+  [stateModule('evidence/worker-results.mjs'), ['readAcceptedWorkerResult']],
+]));
+PRODUCTION_STATE_IMPORTS.set('checkpoint.mjs', new Map([
+  ['node:fs', ['readFileSync']],
+  ['node:util', ['isDeepStrictEqual']],
+  [stateModule('atomic-io.mjs'), ['atomicWriteJson', 'atomicWriteText']],
+  [stateModule('errors.mjs'), ['StateError']],
+  [stateModule('journal.mjs'), ['appendEvent', 'prepareEvent']],
+  [stateModule('locations.mjs'), ['statePath']],
+  [stateModule('locks.mjs'), ['withStateLock']],
+  [stateModule('state-store.mjs'), ['activePrNumber', 'loadState', 'validateStateForWrite']],
+  [stateModule('transition-policy.mjs'), ['createTransitionPolicy']],
+]));
+PRODUCTION_STATE_IMPORTS.set('transitions/review.mjs', new Map([
+  [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['reviewRequestGate', 'reviewRequestUsage', 'validatePrReviewState']],
+  [stateModule('errors.mjs'), ['StateError']],
+]));
+PRODUCTION_STATE_IMPORTS.set('transitions/review-policy.mjs', new Map([
+  [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['reviewRequestUsage', 'validatePrReviewState']],
+  [stateModule('errors.mjs'), ['StateError']],
+]));
+PRODUCTION_STATE_IMPORTS.set('transitions/completion.mjs', new Map([
+  [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['completionGate', 'validatePrReviewState']],
+  [stateModule('errors.mjs'), ['StateError']],
+]));
+PRODUCTION_STATE_IMPORTS.set('transitions/validation.mjs', new Map([
+  [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['parseTargetedValidationCommand', 'validatePrReviewState']],
+  [stateModule('errors.mjs'), ['StateError']],
+]));
+PRODUCTION_STATE_IMPORTS.set('transitions/tasks.mjs', new Map([
+  [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['staleDiscoveryDispositionId', 'taskHasCanonicalThreadCoverage', 'validatePrReviewState']],
+  [stateModule('errors.mjs'), ['StateError']],
+]));
+PRODUCTION_STATE_IMPORTS.set('transitions/git-metadata.mjs', new Map([
+  [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['reviewRequestUsage', 'validatePrReviewState']],
+  [stateModule('errors.mjs'), ['StateError']],
+]));
+PRODUCTION_STATE_IMPORTS.set('transitions/transactional-evidence.mjs', new Map([
+  [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['reviewRequestUsage', 'validatePrReviewState']],
+  [stateModule('errors.mjs'), ['StateError']],
+]));
+PRODUCTION_STATE_IMPORTS.set('services/review.mjs', new Map([
+  ['node:fs', ['existsSync', 'readFileSync']],
+  ['node:path', ['join']],
+  [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['reviewRequestGate', 'reviewRequestUsage']],
+  [stateModule('checkpoint.mjs'), ['checkpointProtectedStateTransaction']],
+  [stateModule('errors.mjs'), ['StateError']],
+  [stateModule('locations.mjs'), ['stateDirectory']],
+  [stateModule('state-store.mjs'), ['activePrNumber', 'loadState']],
+  [stateModule('services/completion.mjs'), ['gitAwareGateContext']],
+  [stateModule('transitions/review.mjs'), ['buildReviewOutcomeTransition', 'buildReviewRequestTransition', 'buildVerificationEscalationTransition']],
+  [stateModule('transitions/review-policy.mjs'), ['buildReviewRequestLimitTransition']],
+]));
+PRODUCTION_STATE_IMPORTS.set('services/completion.mjs', new Map([
+  [join(repositoryDirectory, 'scripts', 'lib', 'git.mjs'), ['runGit']],
+  [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['completionGate']],
+  [stateModule('checkpoint.mjs'), ['checkpointProtectedStateTransaction']],
+  [stateModule('errors.mjs'), ['StateError']],
+  [stateModule('git-authority.mjs'), ['gitSnapshot']],
+  [stateModule('state-store.mjs'), ['activePrNumber']],
+  [stateModule('transitions/completion.mjs'), ['buildCompletionTransition']],
+]));
+PRODUCTION_STATE_IMPORTS.set('services/git-metadata.mjs', new Map([
+  ['node:path', ['join', 'resolve']],
+  [join(scriptsDirectory, 'paths.mjs'), ['repositoryRoot']],
+  [stateModule('atomic-io.mjs'), ['atomicWriteJson']],
+  [stateModule('checkpoint.mjs'), ['checkpointProtectedStateTransaction']],
+  [stateModule('git-authority.mjs'), ['gitSnapshot']],
+  [stateModule('locations.mjs'), ['stateDirectory']],
+  [stateModule('state-store.mjs'), ['activePrNumber']],
+  [stateModule('transitions/git-metadata.mjs'), ['buildGitMetadataTransition']],
+]));
+PRODUCTION_STATE_IMPORTS.set('services/archive-import.mjs', new Map([
+  [stateModule('checkpoint.mjs'), ['checkpointProtectedStateTransaction']],
+  [stateModule('errors.mjs'), ['StateError']],
+  [stateModule('state-store.mjs'), ['activePrNumber']],
+  [stateModule('transitions/tasks.mjs'), ['completeIntegratedTasks']],
+]));
+PRODUCTION_STATE_IMPORTS.set('services/validation.mjs', new Map([
+  ['node:child_process', ['spawnSync']],
+  [stateModule('atomic-io.mjs'), ['canonicalJson']],
+  [stateModule('checkpoint.mjs'), ['checkpointProtectedStateTransaction', 'checkpointStateTransaction']],
+  [stateModule('errors.mjs'), ['StateError']],
+  [stateModule('evidence/validation-plans.mjs'), ['actionableIntegratedTaskIds', 'actionablePacketValidationTaskIds', 'assertCleanExactIntegrationHead', 'buildTargetedValidationPlanUnlocked', 'executeTargetedValidationFacts', 'isCleanTasklessReviewValidationRecovery', 'isNativeTasklessPendingReviewHeadDriftValidationRecovery', 'isNativeTasklessReviewHeadDriftValidationRecovery', 'readV2CompletedTaskValidationRecoveryEvidence', 'readValidationPlan']],
+  [stateModule('state-store.mjs'), ['activePrNumber', 'loadState']],
+  [stateModule('transitions/review.mjs'), ['buildReviewOutcomeTransition']],
+  [stateModule('transitions/validation.mjs'), ['buildCiValidationTransition', 'buildTargetedValidationTransition']],
+  [stateModule('transitions/transactional-evidence.mjs'), ['buildTargetedValidationResetTransition']],
+]));
+PRODUCTION_STATE_IMPORTS.set('services/tasks.mjs', new Map([
+  ['node:fs', ['existsSync']],
+  ['node:path', ['join', 'resolve']],
+  [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['validateTaskPacket']],
+  [stateModule('atomic-io.mjs'), ['canonicalSerializedJson', 'readJsonSidecar']],
+  [stateModule('checkpoint.mjs'), ['checkpointProtectedStateTransaction']],
+  [stateModule('errors.mjs'), ['StateError']],
+  [stateModule('git-authority.mjs'), ['assertIntegratedWorkerCommit']],
+  [stateModule('locations.mjs'), ['stateDirectory', 'taskBindingProvenancePath', 'taskBindingProvenanceReceiptPath', 'taskPacketSidecarPath']],
+  [stateModule('migrations.mjs'), ['migratePrReviewStateV2']],
+  [stateModule('recovery.mjs'), [importedAs('truncate', 'truncateSummary')]],
+  [stateModule('state-store.mjs'), ['activePrNumber', 'loadState', 'readStateDocument']],
+  [stateModule('evidence/task-binding.mjs'), ['assertBehaviorMapperPlanningComplete', 'buildTaskBindingProvenance', 'persistImmutableTaskBindingProvenance', 'readBoundTaskBindingProvenance', 'recoverHistoricalTaskBindingPlanning']],
+  [stateModule('evidence/task-packets.mjs'), ['assertTaskPacketHead', 'persistImmutableTaskPacketSidecar', importedAs('readTaskPacketSidecar', 'readBoundTaskPacketSidecar'), 'taskPacketDigest']],
+  [stateModule('evidence/worker-results.mjs'), ['persistWorkerResultEvidence', 'proveWorkerResultEvidence', 'readAcceptedWorkerResult']],
+  [stateModule('evidence/validation-plans.mjs'), ['isNativeTasklessPendingReviewHeadDriftValidationRecovery']],
+  [stateModule('transitions/review-policy.mjs'), ['reviewLimitNextAction']],
+  [stateModule('transitions/tasks.mjs'), ['completeIntegratedTasks']],
+  [stateModule('transitions/transactional-evidence.mjs'), ['buildTaskPacketBindingTransition', 'buildTaskPacketReplanTransition', 'buildWorkerResultTransition']],
+]));
 
 const PRODUCTION_STATE_EXPORTS = new Map([
   ['errors.mjs', ['StateError']],
@@ -702,6 +830,47 @@ const PRODUCTION_STATE_EXPORTS = new Map([
   ]],
 ]);
 
+PRODUCTION_STATE_EXPORTS.set('transition-policy.mjs', ['createTransitionPolicy']);
+PRODUCTION_STATE_EXPORTS.set('checkpoint.mjs', [
+  'checkpointState', 'checkpointProtectedState', 'checkpointStateTransaction',
+  'checkpointProtectedStateTransaction',
+]);
+PRODUCTION_STATE_EXPORTS.set('transitions/review.mjs', [
+  'buildReviewRequestTransition', 'buildReviewOutcomeTransition',
+  'buildVerificationEscalationTransition',
+]);
+PRODUCTION_STATE_EXPORTS.set('transitions/review-policy.mjs', [
+  'reviewLimitNextAction', 'triageNextAction', 'buildReviewRequestLimitTransition',
+]);
+PRODUCTION_STATE_EXPORTS.set('transitions/completion.mjs', ['buildCompletionTransition']);
+PRODUCTION_STATE_EXPORTS.set('transitions/validation.mjs', [
+  'buildTargetedValidationTransition', 'buildCiValidationTransition',
+]);
+PRODUCTION_STATE_EXPORTS.set('transitions/tasks.mjs', ['completeIntegratedTasks']);
+PRODUCTION_STATE_EXPORTS.set('transitions/git-metadata.mjs', ['buildGitMetadataTransition']);
+PRODUCTION_STATE_EXPORTS.set('transitions/transactional-evidence.mjs', [
+  'buildTaskPacketReplanTransition', 'buildTaskPacketBindingTransition',
+  'buildWorkerResultTransition', 'buildTargetedValidationResetTransition',
+]);
+PRODUCTION_STATE_EXPORTS.set('services/review.mjs', [
+  'assertReviewRequestAllowed', 'checkpointReviewRequestLimit', 'checkpointReviewRequest',
+  'checkpointReviewOutcome', 'checkpointVerificationEscalation',
+]);
+PRODUCTION_STATE_EXPORTS.set('services/completion.mjs', [
+  'assertCompletionAllowed', 'gitAwareGateContext', 'checkpointCompletion',
+]);
+PRODUCTION_STATE_EXPORTS.set('services/git-metadata.mjs', ['checkpointGitMetadata']);
+PRODUCTION_STATE_EXPORTS.set('services/archive-import.mjs', ['checkpointArchiveTaskCompletion']);
+PRODUCTION_STATE_EXPORTS.set('services/validation.mjs', [
+  'buildTargetedValidationPlan', 'checkpointTargetedValidationReset',
+  'checkpointTargetedValidation', 'executeTargetedValidationPlan', 'checkpointCiValidation',
+]);
+PRODUCTION_STATE_EXPORTS.set('services/tasks.mjs', [
+  'checkpointTaskPacketReplan', 'checkpointTaskPacketBinding',
+  'checkpointWorkerResultAcceptance', 'checkpointWorkerResultBackfill',
+  'checkpointTaskCompletion',
+]);
+
 const STATE_FACADE_SOURCE_EXPORTS = new Map([
   [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['completionGate', 'reviewRequestGate', 'reviewRequestUsage']],
   [join(scriptsDirectory, 'paths.mjs'), ['gitCommonDirectory', 'repositoryRoot', 'reviewRoot']],
@@ -719,6 +888,17 @@ const STATE_FACADE_SOURCE_EXPORTS = new Map([
   [stateModule('reconciliation.mjs'), ['reconcileState']],
   [stateModule('recovery.mjs'), ['renderRecoverySummary']],
   [stateModule('locks.mjs'), ['withGitHubRequestOwnerLock', 'withStateLock']],
+  [stateModule('checkpoint.mjs'), ['checkpointState']],
+  [stateModule('transitions/review.mjs'), ['buildReviewOutcomeTransition', 'buildReviewRequestTransition', 'buildVerificationEscalationTransition']],
+  [stateModule('transitions/completion.mjs'), ['buildCompletionTransition']],
+  [stateModule('transitions/validation.mjs'), ['buildCiValidationTransition']],
+  [stateModule('transitions/tasks.mjs'), ['completeIntegratedTasks']],
+  [stateModule('services/review.mjs'), ['assertReviewRequestAllowed', 'checkpointReviewOutcome', 'checkpointReviewRequest', 'checkpointReviewRequestLimit', 'checkpointVerificationEscalation']],
+  [stateModule('services/completion.mjs'), ['assertCompletionAllowed', 'checkpointCompletion', 'gitAwareGateContext']],
+  [stateModule('services/git-metadata.mjs'), ['checkpointGitMetadata']],
+  [stateModule('services/archive-import.mjs'), ['checkpointArchiveTaskCompletion']],
+  [stateModule('services/validation.mjs'), ['buildTargetedValidationPlan', 'checkpointCiValidation', 'checkpointTargetedValidation', 'checkpointTargetedValidationReset', 'executeTargetedValidationPlan']],
+  [stateModule('services/tasks.mjs'), ['checkpointTaskCompletion', 'checkpointTaskPacketBinding', 'checkpointTaskPacketReplan', 'checkpointWorkerResultAcceptance', 'checkpointWorkerResultBackfill']],
 ]);
 
 const PRODUCTION_STATE_SOURCE_EXPORTS = new Map([
@@ -2805,6 +2985,55 @@ function inspectProductionStateSource(importer, source) {
   return errors;
 }
 
+function inspectStateFacadeConsumerSource(importer, source, allowedFacadeNames) {
+  const errors = [];
+  const parsed = parseModule(importer, source);
+  function visit(node) {
+    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      errors.push('state consumer dynamic import is forbidden');
+    }
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
+        && node.expression.text === 'require') errors.push('state consumer CommonJS require is forbidden');
+    if (ts.isIdentifier(node) && node.text === 'createRequire') {
+      errors.push('state consumer createRequire is forbidden');
+    }
+    if (ts.isImportEqualsDeclaration(node)) {
+      errors.push('state consumer CommonJS import assignment is forbidden');
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(parsed);
+  for (const statement of parsed.statements.filter(ts.isImportDeclaration)) {
+    if (!ts.isStringLiteral(statement.moduleSpecifier)) continue;
+    const specifier = statement.moduleSpecifier.text;
+    const target = normalizedModuleTarget(importer, specifier);
+    if (!target.startsWith(`${stateModuleDirectory}${sep}`)) continue;
+    if (target !== stateModule('state.mjs')) {
+      errors.push(`state consumer must use the public facade: ${specifier}`);
+      continue;
+    }
+    if (!statement.importClause) {
+      errors.push('state consumer side-effect import is forbidden');
+      continue;
+    }
+    if (statement.importClause.name) errors.push('state consumer default import is forbidden');
+    if (statement.importClause.namedBindings
+        && ts.isNamespaceImport(statement.importClause.namedBindings)) {
+      errors.push('state consumer namespace import is forbidden');
+    }
+    const bindings = namedBindings(statement.importClause);
+    if (bindings === null) continue;
+    if (bindings.some(({ imported, local }) => imported !== local)) {
+      errors.push('state consumer aliased import is forbidden');
+    }
+    if (JSON.stringify(sorted(bindings.map(({ imported }) => imported)))
+        !== JSON.stringify(sorted(allowedFacadeNames))) {
+      errors.push('state consumer facade imports do not match the exact allowlist');
+    }
+  }
+  return errors;
+}
+
 function validateProductionStateSource(importer, source) {
   const errors = inspectProductionStateSource(importer, source);
   const fileName = posixRelative(stateModuleDirectory, importer);
@@ -3111,6 +3340,74 @@ test('state AST guards reject normalized facade and module-system escape hatches
   for (const [source, expected] of rejectedSources) {
     assert.match(inspectProductionStateSource(atomicIoPath, source).join('\n'), expected, source);
   }
+});
+
+test('checkpoint, services, transitions, CLI, and hooks cannot bypass state authority', () => {
+  const policyTarget = stateModule('transition-policy.mjs');
+  assert.deepEqual(
+    [...PRODUCTION_STATE_IMPORTS].filter(([, imports]) => imports.has(policyTarget))
+      .map(([fileName]) => fileName),
+    ['checkpoint.mjs'],
+  );
+  for (const fileName of PRODUCTION_STATE_IMPORTS.keys()) {
+    if (!fileName.startsWith('services/')) continue;
+    const targets = PRODUCTION_STATE_IMPORTS.get(fileName);
+    for (const forbidden of ['transition-policy.mjs', 'locks.mjs', 'journal.mjs']) {
+      assert.equal(targets.has(stateModule(forbidden)), false, `${fileName} must not own ${forbidden}`);
+    }
+  }
+  for (const fileName of PRODUCTION_STATE_IMPORTS.keys()) {
+    if (!fileName.startsWith('transitions/')) continue;
+    for (const target of PRODUCTION_STATE_IMPORTS.get(fileName).keys()) {
+      assert.equal(target.startsWith('node:fs'), false, `${fileName} must stay I/O-free`);
+      assert.equal(target.startsWith('node:child_process'), false, `${fileName} must stay I/O-free`);
+      assert.notEqual(target, stateModule('atomic-io.mjs'), `${fileName} must stay I/O-free`);
+      assert.notEqual(target, stateModule('checkpoint.mjs'), `${fileName} must stay I/O-free`);
+      assert.notEqual(target, stateModule('journal.mjs'), `${fileName} must stay I/O-free`);
+      assert.notEqual(target, stateModule('locks.mjs'), `${fileName} must stay I/O-free`);
+      assert.notEqual(target, stateModule('state-store.mjs'), `${fileName} must stay I/O-free`);
+    }
+  }
+
+  const servicePath = stateModule('services/review.mjs');
+  for (const [source, expected] of [
+    ["import { createTransitionPolicy } from '../nested/../transition-policy.mjs';", /unapproved state dependency/u],
+    ["import { withStateLock } from '../locks.mjs';", /unapproved state dependency/u],
+    ["import { appendEvent } from '../journal.mjs';", /unapproved state dependency/u],
+    ["import { atomicWriteJson as write } from '../atomic-io.mjs';", /unapproved state dependency|aliased/u],
+    ["const owner = await import('../transition-policy.mjs');", /dynamic import is forbidden/u],
+    ["const owner = require('../checkpoint.mjs');", /CommonJS require is forbidden/u],
+  ]) assert.match(inspectProductionStateSource(servicePath, source).join('\n'), expected, source);
+
+  const cliPath = stateModule('cli.mjs');
+  const cliFacadeNames = [
+    'StateError', 'archiveState', 'buildTargetedValidationPlan', 'checkpointReviewRequestLimit',
+    'checkpointState', 'checkpointTaskPacketBinding', 'checkpointTaskPacketReplan',
+    'checkpointWorkerResultAcceptance', 'checkpointWorkerResultBackfill',
+    'executeTargetedValidationPlan', 'initializeState', 'loadState', 'locateState', 'migrateState',
+    'planSpecialists', 'reconcileState', 'recordSpecialistReview', 'renderRecoverySummary',
+    'specialistContext',
+  ];
+  assert.deepEqual(
+    inspectStateFacadeConsumerSource(cliPath, readFileSync(cliPath, 'utf8'), cliFacadeNames),
+    [],
+  );
+  const hookAllowlist = new Map([
+    ['pre-compact.mjs', ['StateError', 'checkpointGitMetadata']],
+    ['session-start.mjs', ['StateError', 'renderRecoverySummary']],
+    ['subagent-stop.mjs', []],
+  ]);
+  for (const [fileName, names] of hookAllowlist) {
+    const path = join(scriptsDirectory, 'hooks', fileName);
+    assert.deepEqual(inspectStateFacadeConsumerSource(path, readFileSync(path, 'utf8'), names), [], fileName);
+  }
+  for (const [source, expected] of [
+    ["import { checkpointState } from './nested/../checkpoint.mjs';", /must use the public facade/u],
+    ["import { checkpointState as save } from './state.mjs';", /aliased import is forbidden/u],
+    ["const owner = await import('./state.mjs');", /dynamic import is forbidden/u],
+    ["const owner = require('./state.mjs');", /CommonJS require is forbidden/u],
+    ["import { createRequire } from 'node:module';", /createRequire is forbidden/u],
+  ]) assert.match(inspectStateFacadeConsumerSource(cliPath, source, []).join('\n'), expected, source);
 });
 
 test('state evidence AST guards reject protected transition and checkpoint authority', () => {

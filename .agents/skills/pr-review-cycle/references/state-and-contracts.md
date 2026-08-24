@@ -33,6 +33,24 @@ Only the main orchestrator is the logical writer. Writes are locked,
 revision-checked, schema-validated, limited to 64 KiB, and committed by atomic
 rename. Keep raw logs, full diffs, stack traces, and transcripts out of state.
 
+The checked-in state implementation has one dependency direction. Pure builders
+live under `scripts/state/transitions/`; they receive state and evidence and do
+no I/O. Public workflow operations live under `scripts/state/services/` and
+compose those builders with evidence owners. `checkpoint.mjs` alone creates the
+private transition-policy capability and owns the active-state lock, reload,
+revision check, policy authorization, write, event, and exact-byte rollback
+transaction. Evidence modules never invoke transition or checkpoint authority.
+
+`scripts/state/state.mjs` is the stable public façade. It contains explicit
+named re-exports from canonical owners and no implementation. CLI, hooks, and
+GitHub adapters use that façade instead of importing state internals. Protected
+checkpoint transaction functions and `createTransitionPolicy` are deliberately
+private. `gitAwareGateContext` belongs to the completion service;
+`checkpointGitMetadata` alone belongs to the Git-metadata service. When adding
+or moving state behavior, update the exact production import/export allowlists,
+canonical inventory, focused owner test, and composed persisted-flow proof in
+the same change.
+
 Archived state remains read-only recovery evidence. The narrow resolved-root
 batch adoption in `reply-resolve` enumerates only bounded canonical archive
 directories under `<git-common-dir>/codex/pr-review/archive/`. It rejects a

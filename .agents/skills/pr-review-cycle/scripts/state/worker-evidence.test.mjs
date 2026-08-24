@@ -182,6 +182,19 @@ test('worker results are receipt-bound, interruption-safe, immutable, and requir
   rmSync(workerResultEnvelopePath(cwd, 17, packet.taskId));
   rmSync(workerResultReceiptPath(cwd, 17, packet.taskId));
 
+  const guardedSnapshot = durableAcceptanceSnapshot(cwd, packet.taskId);
+  for (const checkpointWorkerResult of [
+    checkpointWorkerResultAcceptance, checkpointWorkerResultBackfill,
+  ]) {
+    for (const expectedRevision of [undefined, bound.revision + 1]) {
+      assert.throws(() => checkpointWorkerResult({
+        cwd, packet, result, expectedRevision,
+      }), { code: 'STATE_REVISION_CONFLICT' });
+    }
+    assert.deepEqual(durableAcceptanceSnapshot(cwd, packet.taskId), guardedSnapshot,
+      'revision failures must precede worker-result receipt, envelope, journal, and state writes');
+  }
+
   assert.throws(() => checkpointState({
     cwd, expectedRevision: bound.revision,
     nextState: {
