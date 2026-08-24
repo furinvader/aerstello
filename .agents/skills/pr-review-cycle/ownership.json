@@ -13,6 +13,8 @@
     "schemas/pr-review-state.schema.json",
     "schemas/review-fix-result.schema.json",
     "schemas/review-fix-task.schema.json",
+    "scripts/architecture/fixtures/create-require-alias/github/loader.mjs",
+    "scripts/architecture/fixtures/create-require-text/github/loader.mjs",
     "scripts/architecture/fixtures/cycle/github/one.mjs",
     "scripts/architecture/fixtures/cycle/github/two.mjs",
     "scripts/architecture/fixtures/dynamic/github/loader.mjs",
@@ -213,6 +215,59 @@
     "scripts/worktree/worktree.mjs",
     "scripts/worktree/worktree.test.mjs"
   ],
+  "architecturePolicies": {
+    "privilegedStateFacadeExports": {
+      "atomicWriteJson": [
+        "worktree/worktree.mjs"
+      ],
+      "statePath": []
+    },
+    "exactConsumers": [
+      {
+        "path": "scripts/hooks/pre-compact.mjs",
+        "imports": [
+          { "specifier": "../state/state.mjs", "names": ["StateError", "checkpointGitMetadata"] }
+        ]
+      },
+      {
+        "path": "scripts/hooks/session-start.mjs",
+        "imports": [
+          { "specifier": "../state/state.mjs", "names": ["StateError", "renderRecoverySummary"] }
+        ]
+      },
+      {
+        "path": "scripts/hooks/subagent-stop.mjs",
+        "imports": [
+          { "specifier": "../contracts/contracts.mjs", "names": ["validateWorkerResult"] }
+        ]
+      },
+      {
+        "path": "scripts/state/cli.mjs",
+        "imports": [
+          { "specifier": "node:fs", "names": ["readFileSync"] },
+          { "specifier": "../../../../../scripts/lib/cli.mjs", "names": ["UsageError", "parseOptions", "writeJson"] },
+          { "specifier": "./state.mjs", "names": ["StateError", "archiveState", "buildTargetedValidationPlan", "checkpointReviewRequestLimit", "checkpointState", "checkpointTaskPacketBinding", "checkpointTaskPacketReplan", "checkpointWorkerResultAcceptance", "checkpointWorkerResultBackfill", "executeTargetedValidationPlan", "initializeState", "loadState", "locateState", "migrateState", "planSpecialists", "reconcileState", "recordSpecialistReview", "renderRecoverySummary", "specialistContext"] }
+        ]
+      },
+      {
+        "path": "scripts/worktree/cli.mjs",
+        "imports": [
+          { "specifier": "../../../../../scripts/lib/cli.mjs", "names": ["UsageError", "parseOptions", "writeJson"] },
+          { "specifier": "./worktree.mjs", "names": ["createTaskWorktree", "inspectTaskWorktree", "removeTaskWorktree"] },
+          { "specifier": "../state/state.mjs", "names": ["StateError"] }
+        ]
+      },
+      {
+        "path": "scripts/worktree/worktree.mjs",
+        "imports": [
+          { "specifier": "node:fs", "names": ["existsSync", "mkdirSync", "readFileSync"] },
+          { "specifier": "node:path", "names": ["dirname", "join", "resolve"] },
+          { "specifier": "../../../../../scripts/lib/git.mjs", "names": ["gitText", "resolveCommit", "runGit"] },
+          { "specifier": "../state/state.mjs", "names": ["StateError", "atomicWriteJson", "gitCommonDirectory", "reviewRoot"] }
+        ]
+      }
+    ]
+  },
   "permittedExternalAdapters": [
     {
       "path": ".codex/agents/integration-verifier.toml",

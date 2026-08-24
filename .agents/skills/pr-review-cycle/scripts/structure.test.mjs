@@ -145,6 +145,7 @@ function filesBelow(directory) {
       const path = join(current, entry.name);
       if (entry.isDirectory()) pending.push(path);
       else if (entry.isFile()) files.push(posixRelative(directory, path));
+      else throw new Error(`non-regular canonical entry: ${posixRelative(directory, path)}`);
     }
   }
   return sorted(files);
@@ -2794,51 +2795,49 @@ function inspectProductionStateSource(importer, source) {
   return errors;
 }
 
-function inspectStateFacadeConsumerSource(importer, source, allowedFacadeNames) {
+function inspectExactConsumerSource(importer, source, expectedImports) {
   const errors = [];
   const parsed = parseModule(importer, source);
+  for (const diagnostic of parsed.parseDiagnostics) errors.push(`syntax error: ${diagnostic.messageText}`);
   function visit(node) {
     if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
-      errors.push('state consumer dynamic import is forbidden');
+      errors.push('exact consumer dynamic import is forbidden');
     }
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
-        && node.expression.text === 'require') errors.push('state consumer CommonJS require is forbidden');
-    if (ts.isIdentifier(node) && node.text === 'createRequire') {
-      errors.push('state consumer createRequire is forbidden');
-    }
-    if (ts.isImportEqualsDeclaration(node)) {
-      errors.push('state consumer CommonJS import assignment is forbidden');
-    }
+        && node.expression.text === 'require') errors.push('exact consumer CommonJS require is forbidden');
+    if (ts.isImportEqualsDeclaration(node)) errors.push('exact consumer import assignment is forbidden');
     ts.forEachChild(node, visit);
   }
   visit(parsed);
+  const actualImports = [];
   for (const statement of parsed.statements.filter(ts.isImportDeclaration)) {
-    if (!ts.isStringLiteral(statement.moduleSpecifier)) continue;
+    if (!ts.isStringLiteral(statement.moduleSpecifier)) {
+      errors.push('exact consumer import specifier must be a string literal');
+      continue;
+    }
     const specifier = statement.moduleSpecifier.text;
-    const target = normalizedModuleTarget(importer, specifier);
-    if (!target.startsWith(`${stateModuleDirectory}${sep}`)) continue;
-    if (target !== stateModule('state.mjs')) {
-      errors.push(`state consumer must use the public facade: ${specifier}`);
-      continue;
-    }
     if (!statement.importClause) {
-      errors.push('state consumer side-effect import is forbidden');
+      errors.push(`exact consumer side-effect import is forbidden: ${specifier}`);
       continue;
     }
-    if (statement.importClause.name) errors.push('state consumer default import is forbidden');
+    if (statement.importClause.name) errors.push(`exact consumer default import is forbidden: ${specifier}`);
     if (statement.importClause.namedBindings
         && ts.isNamespaceImport(statement.importClause.namedBindings)) {
-      errors.push('state consumer namespace import is forbidden');
+      errors.push(`exact consumer namespace import is forbidden: ${specifier}`);
     }
     const bindings = namedBindings(statement.importClause);
     if (bindings === null) continue;
     if (bindings.some(({ imported, local }) => imported !== local)) {
-      errors.push('state consumer aliased import is forbidden');
+      errors.push(`exact consumer aliased import is forbidden: ${specifier}`);
     }
-    if (JSON.stringify(sorted(bindings.map(({ imported }) => imported)))
-        !== JSON.stringify(sorted(allowedFacadeNames))) {
-      errors.push('state consumer facade imports do not match the exact allowlist');
-    }
+    actualImports.push({ specifier, names: sorted(bindings.map(({ imported }) => imported)) });
+  }
+  const normalizedExpected = expectedImports.map(({ specifier, names }) => ({
+    specifier, names: sorted(names),
+  })).sort((left, right) => left.specifier.localeCompare(right.specifier));
+  actualImports.sort((left, right) => left.specifier.localeCompare(right.specifier));
+  if (JSON.stringify(actualImports) !== JSON.stringify(normalizedExpected)) {
+    errors.push('exact consumer imports do not match the ownership manifest');
   }
   return errors;
 }
@@ -3007,6 +3006,39 @@ test('ownership manifest names the complete canonical skill and no obsolete path
   assert.equal(ownership.schemaVersion, 1);
   assert.equal(ownership.skillRoot, '.agents/skills/pr-review-cycle');
   assert.deepEqual(
+    Object.keys(ownership.architecturePolicies),
+    ['privilegedStateFacadeExports', 'exactConsumers'],
+  );
+  assert.deepEqual(
+    Object.keys(ownership.architecturePolicies.privilegedStateFacadeExports),
+    ['atomicWriteJson', 'statePath'],
+  );
+  for (const [name, consumers] of Object.entries(
+    ownership.architecturePolicies.privilegedStateFacadeExports,
+  )) {
+    assert.ok(PRODUCTION_STATE_EXPORTS.get('state.mjs').includes(name));
+    assert.deepEqual(consumers, sorted(consumers));
+    assert.equal(new Set(consumers).size, consumers.length);
+    for (const consumer of consumers) {
+      assert.ok(ownership.canonicalFiles.includes(`scripts/${consumer}`), `unknown privileged consumer ${consumer}`);
+    }
+  }
+  assert.deepEqual(
+    ownership.architecturePolicies.exactConsumers.map(({ path }) => path),
+    sorted(ownership.architecturePolicies.exactConsumers.map(({ path }) => path)),
+    'exact consumer inventory must be sorted for deterministic review',
+  );
+  assert.equal(
+    new Set(ownership.architecturePolicies.exactConsumers.map(({ path }) => path)).size,
+    ownership.architecturePolicies.exactConsumers.length,
+  );
+  for (const consumer of ownership.architecturePolicies.exactConsumers) {
+    assert.deepEqual(Object.keys(consumer), ['path', 'imports']);
+    for (const dependency of consumer.imports) {
+      assert.deepEqual(Object.keys(dependency), ['specifier', 'names']);
+    }
+  }
+  assert.deepEqual(
     ownership.canonicalFiles,
     sorted(ownership.canonicalFiles),
     'canonical inventory must be sorted for deterministic review',
@@ -3087,10 +3119,13 @@ test('ownership manifest names the complete canonical skill and no obsolete path
 });
 
 test('repository-wide architecture guards cover imports, authority, adjacency, and documentation', () => {
-  const diagnostics = scanImportBoundaries({ rootDirectory: scriptsDirectory });
+  const ownership = loadOwnership();
+  const diagnostics = scanImportBoundaries({
+    rootDirectory: scriptsDirectory,
+    privilegedFacadeExports: ownership.architecturePolicies.privilegedStateFacadeExports,
+  });
   assert.deepEqual(diagnostics.map(formatBoundaryDiagnostic), []);
 
-  const ownership = loadOwnership();
   for (const path of ownership.canonicalFiles.filter((value) => !value.includes('/fixtures/'))) {
     assert.doesNotMatch(
       path.split('/').at(-1),
@@ -3120,6 +3155,43 @@ test('repository-wide architecture guards cover imports, authority, adjacency, a
       assert.equal(existsSync(resolved), true, `unresolved documentation link ${path} -> ${target}`);
     }
   }
+});
+
+test('ownership manifest closes CLI, worktree, and hook dependency surfaces', () => {
+  const ownership = loadOwnership();
+  for (const consumer of ownership.architecturePolicies.exactConsumers) {
+    assert.ok(ownership.canonicalFiles.includes(consumer.path), `unknown exact consumer ${consumer.path}`);
+    assert.equal(new Set(consumer.imports.map(({ specifier }) => specifier)).size, consumer.imports.length);
+    for (const dependency of consumer.imports) {
+      assert.deepEqual(dependency.names, sorted(dependency.names));
+      assert.equal(new Set(dependency.names).size, dependency.names.length);
+    }
+    const path = join(skillDirectory, consumer.path);
+    assert.deepEqual(
+      inspectExactConsumerSource(path, readFileSync(path, 'utf8'), consumer.imports),
+      [],
+      consumer.path,
+    );
+  }
+
+  const stateCli = ownership.architecturePolicies.exactConsumers
+    .find(({ path }) => path === 'scripts/state/cli.mjs');
+  assert.match(
+    inspectExactConsumerSource(
+      stateModule('cli.mjs'),
+      "import { checkpointState } from './checkpoint.mjs';",
+      stateCli.imports,
+    ).join('\n'),
+    /do not match the ownership manifest/u,
+  );
+  assert.match(
+    inspectExactConsumerSource(
+      stateModule('cli.mjs'),
+      "const hidden = await import('./state.mjs');",
+      stateCli.imports,
+    ).join('\n'),
+    /dynamic import is forbidden/u,
+  );
 });
 
 test('production contract modules obey the exact AST dependency and façade boundaries', () => {
@@ -3229,35 +3301,6 @@ test('checkpoint, services, transitions, CLI, and hooks cannot bypass state auth
     ["const owner = require('../checkpoint.mjs');", /CommonJS require is forbidden/u],
   ]) assert.match(inspectProductionStateSource(servicePath, source).join('\n'), expected, source);
 
-  const cliPath = stateModule('cli.mjs');
-  const cliFacadeNames = [
-    'StateError', 'archiveState', 'buildTargetedValidationPlan', 'checkpointReviewRequestLimit',
-    'checkpointState', 'checkpointTaskPacketBinding', 'checkpointTaskPacketReplan',
-    'checkpointWorkerResultAcceptance', 'checkpointWorkerResultBackfill',
-    'executeTargetedValidationPlan', 'initializeState', 'loadState', 'locateState', 'migrateState',
-    'planSpecialists', 'reconcileState', 'recordSpecialistReview', 'renderRecoverySummary',
-    'specialistContext',
-  ];
-  assert.deepEqual(
-    inspectStateFacadeConsumerSource(cliPath, readFileSync(cliPath, 'utf8'), cliFacadeNames),
-    [],
-  );
-  const hookAllowlist = new Map([
-    ['pre-compact.mjs', ['StateError', 'checkpointGitMetadata']],
-    ['session-start.mjs', ['StateError', 'renderRecoverySummary']],
-    ['subagent-stop.mjs', []],
-  ]);
-  for (const [fileName, names] of hookAllowlist) {
-    const path = join(scriptsDirectory, 'hooks', fileName);
-    assert.deepEqual(inspectStateFacadeConsumerSource(path, readFileSync(path, 'utf8'), names), [], fileName);
-  }
-  for (const [source, expected] of [
-    ["import { checkpointState } from './nested/../checkpoint.mjs';", /must use the public facade/u],
-    ["import { checkpointState as save } from './state.mjs';", /aliased import is forbidden/u],
-    ["const owner = await import('./state.mjs');", /dynamic import is forbidden/u],
-    ["const owner = require('./state.mjs');", /CommonJS require is forbidden/u],
-    ["import { createRequire } from 'node:module';", /createRequire is forbidden/u],
-  ]) assert.match(inspectStateFacadeConsumerSource(cliPath, source, []).join('\n'), expected, source);
 });
 
 test('state evidence AST guards reject protected transition and checkpoint authority', () => {

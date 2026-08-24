@@ -40,8 +40,9 @@ function diagnostic(sourceFile, node, rule, importer, target, message) {
   return { rule, importer, target, ...location(sourceFile, node), message };
 }
 
-function productionFiles(rootDirectory) {
+function productionEntries(rootDirectory) {
   const files = [];
+  const diagnostics = [];
   const pending = [rootDirectory];
   while (pending.length > 0) {
     const directory = pending.pop();
@@ -51,10 +52,16 @@ function productionFiles(rootDirectory) {
         if (!['fixtures', 'test-support'].includes(entry.name)) pending.push(path);
       } else if (entry.isFile() && extname(entry.name) === '.mjs' && !entry.name.endsWith('.test.mjs')) {
         files.push(posix(relative(rootDirectory, path)));
+      } else if (!entry.isFile()) {
+        const target = posix(relative(rootDirectory, path));
+        diagnostics.push({
+          rule: 'non-regular-canonical-entry', importer: target, target, line: 1, column: 1,
+          message: 'production architecture entries must be regular files or directories',
+        });
       }
     }
   }
-  return files.sort();
+  return { files: files.sort(), diagnostics };
 }
 
 function resolveInternalTarget(rootDirectory, importer, specifier) {
@@ -103,10 +110,41 @@ export function formatBoundaryDiagnostic(value) {
   return `[${value.rule}] ${value.importer}:${value.line}:${value.column} -> ${value.target}: ${value.message}`;
 }
 
-export function scanImportBoundaries({ rootDirectory, files = productionFiles(rootDirectory) }) {
+function createRequireImport(statement) {
+  if (!ts.isImportDeclaration(statement)
+      || !ts.isStringLiteral(statement.moduleSpecifier)
+      || statement.moduleSpecifier.text !== 'node:module'
+      || !statement.importClause) return false;
+  if (statement.importClause.name) return true;
+  const bindings = statement.importClause.namedBindings;
+  if (!bindings) return false;
+  if (ts.isNamespaceImport(bindings)) return true;
+  return bindings.elements.some((element) => (
+    (element.propertyName ?? element.name).text === 'createRequire'
+  ));
+}
+
+function importedNames(statement) {
+  if (ts.isExportDeclaration(statement)) {
+    if (!statement.exportClause || !ts.isNamedExports(statement.exportClause)) return [];
+    return statement.exportClause.elements.map((element) => (element.propertyName ?? element.name).text);
+  }
+  const bindings = statement.importClause?.namedBindings;
+  if (!bindings || !ts.isNamedImports(bindings)) return [];
+  return bindings.elements.map((element) => (element.propertyName ?? element.name).text);
+}
+
+export function scanImportBoundaries({
+  rootDirectory,
+  files,
+  privilegedFacadeExports = {},
+} = {}) {
+  const discovered = files === undefined
+    ? productionEntries(rootDirectory) : { files, diagnostics: [] };
+  files = discovered.files;
   const knownFiles = new Set(files);
   const graph = new Map(files.map((file) => [file, new Set()]));
-  const diagnostics = [];
+  const diagnostics = [...discovered.diagnostics];
 
   for (const importer of files) {
     const source = readFileSync(join(rootDirectory, importer), 'utf8');
@@ -146,7 +184,7 @@ export function scanImportBoundaries({ rootDirectory, files = productionFiles(ro
         continue;
       }
       const specifier = moduleSpecifier.text;
-      if (specifier === 'node:module' && source.includes('createRequire')) {
+      if (createRequireImport(statement)) {
         diagnostics.push(diagnostic(sourceFile, statement, 'hidden-module-loading', importer, specifier, 'createRequire is forbidden'));
       }
       const target = resolveInternalTarget(rootDirectory, importer, specifier);
@@ -177,6 +215,17 @@ export function scanImportBoundaries({ rootDirectory, files = productionFiles(ro
       const privilegedConsumers = PRIVILEGED_STATE_IMPORTS.get(target);
       if (privilegedConsumers && !privilegedConsumers.has(importer)) {
         diagnostics.push(diagnostic(sourceFile, statement, 'privileged-state-consumer', importer, target, 'module is not authorized to consume this protected state authority'));
+      }
+      if (target === 'state/state.mjs') {
+        for (const imported of importedNames(statement)) {
+          const consumers = privilegedFacadeExports[imported];
+          if (consumers && !consumers.includes(importer)) {
+            diagnostics.push(diagnostic(
+              sourceFile, statement, 'privileged-state-facade-consumer', importer, target,
+              `${imported} is not authorized for this state facade consumer`,
+            ));
+          }
+        }
       }
     }
   }
