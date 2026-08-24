@@ -95,7 +95,7 @@ utilities belong under root `scripts/lib/`.
 
 ## State mutation path
 
-All active-state writes follow one guarded path:
+Ordinary active-state mutations follow one guarded path:
 
 ```text
 CLI or GitHub workflow use case
@@ -105,6 +105,22 @@ CLI or GitHub workflow use case
   -> revision and private transition-policy authorization
   -> atomic state write, event append, and rollback protection
 ```
+
+Three narrow lifecycle operations write outside `checkpoint.mjs`, each under
+the active-state lock and for its named purpose only:
+
+- `scripts/state/state-store.mjs` performs guarded initialization when no active
+  state exists, creating the validated initial state, active pointer, and
+  initialization event.
+- `scripts/state/migrations.mjs` performs an explicit schema migration, keeping
+  the legacy-state backup before replacing the validated state and active
+  pointer and recording the migration event.
+- `scripts/state/archive.mjs` performs terminal archive cleanup after validating
+  the cycle and worker-result evidence, making the archive durable before it
+  clears the active pointer and removes the active state directory.
+
+These are not general mutation paths. Every ordinary lifecycle transition must
+still use the checkpoint path above; no other writer may bypass it.
 
 `scripts/state/checkpoint.mjs` alone creates the private transition-policy
 capability. Protected checkpoint transactions and
