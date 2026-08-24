@@ -30,6 +30,11 @@ Read the phase reference before acting in that phase:
 - [GitHub review](references/github-review.md): request or collect a review,
   resolve threads, record CI, apply loop breakers, and finish.
 
+Maintainers changing capability boundaries, façades, composition roots, or
+evidence ownership must also read the
+[internal architecture map](references/internal-architecture.md). Keep the
+[operator guide](README.md) focused on commands, status, setup, and recovery.
+
 ## Phase 1: Restore and confirm
 
 Read root `AGENTS.md` and the [operator guide](README.md), then run
