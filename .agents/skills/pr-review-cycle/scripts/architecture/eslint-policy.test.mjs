@@ -59,10 +59,43 @@ test('dynamic code and hidden loader identifiers fail closed in dead or shadowed
     "globalThis.eval('hidden');\n",
     'function Function() {}\n',
     'const getBuiltinModule = null;\n',
+    'const createRequire = null;\n',
   ];
   for (const source of cases) {
     assert.equal((await lint(source))[0]?.ruleId, 'no-restricted-syntax');
   }
+});
+
+test('computed access cannot reconstruct dynamic code or hidden module loaders', async () => {
+  const cases = [
+    "globalThis.process['getBuiltin' + 'Module']('node:module')['create' + 'Require'](import.meta.url);\n",
+    "process['get' + 'BuiltinModule']('node:module');\n",
+    "process?.[`get${'Builtin'}Module`]('node:module');\n",
+    "globalThis.process?.['create' + `Require`](import.meta.url);\n",
+    "module['re' + 'quire']('./hidden.mjs');\n",
+    "value['e' + 'val']('hidden');\n",
+    "value[`Func${'tion'}`]('hidden');\n",
+    'process.argv[propertyName];\n',
+    'globalThis?.[propertyName];\n',
+    'module?.exports[propertyName];\n',
+  ];
+  for (const source of cases) {
+    assert.equal(
+      (await lint(source))[0]?.ruleId,
+      'pr-review/computed-loader-access',
+      source,
+    );
+  }
+});
+
+test('computed-key controls remain available outside privileged loader access', async () => {
+  assert.deepEqual(await lint([
+    "const expected = options['expected-revision'];",
+    'const selected = value[field];',
+    'const previous = historyIndexes[index - 1];',
+    'const executable = process.argv[1];',
+    'export { expected, selected, previous, executable };',
+  ].join('\n')), []);
 });
 
 test('every static getBuiltinModule name is rejected without overmatching templates', async () => {
