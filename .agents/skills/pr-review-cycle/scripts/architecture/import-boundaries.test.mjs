@@ -74,6 +74,47 @@ test('scanner rejects absolute filesystem paths and file URLs in static module d
   });
 });
 
+test('scanner rejects executable data URLs in static module declarations', () => {
+  withSources({
+    'github/import.mjs': "import 'data:text/javascript,export%20default%201';\n",
+    'github/named-export.mjs': "export { default as value } from 'DaTa:application/javascript,export%20default%202';\n",
+    'github/namespace-export.mjs': "export * as inline from 'DATA:text/ecmascript;base64,ZXhwb3J0IGRlZmF1bHQgMzs=';\n",
+    'github/wildcard-export.mjs': "export * from 'data:application/javascript;charset=utf-8;base64,ZXhwb3J0IGNvbnN0IHZhbHVlID0gNDs=';\n",
+  }, (rootDirectory) => {
+    const diagnostics = scanImportBoundaries({
+      rootDirectory,
+      files: [
+        'github/import.mjs',
+        'github/named-export.mjs',
+        'github/namespace-export.mjs',
+        'github/wildcard-export.mjs',
+      ],
+    });
+    assert.deepEqual(diagnostics.map(({ rule, importer, target }) => ({ rule, importer, target })), [
+      {
+        rule: 'inline-data-import',
+        importer: 'github/import.mjs',
+        target: 'data:text/javascript,export%20default%201',
+      },
+      {
+        rule: 'inline-data-import',
+        importer: 'github/named-export.mjs',
+        target: 'DaTa:application/javascript,export%20default%202',
+      },
+      {
+        rule: 'inline-data-import',
+        importer: 'github/namespace-export.mjs',
+        target: 'DATA:text/ecmascript;base64,ZXhwb3J0IGRlZmF1bHQgMzs=',
+      },
+      {
+        rule: 'inline-data-import',
+        importer: 'github/wildcard-export.mjs',
+        target: 'data:application/javascript;charset=utf-8;base64,ZXhwb3J0IGNvbnN0IHZhbHVlID0gNDs=',
+      },
+    ]);
+  });
+});
+
 test('scanner keeps package and built-in module specifiers external', () => {
   withSources({
     'github/packages.mjs': [
@@ -81,6 +122,7 @@ test('scanner keeps package and built-in module specifiers external', () => {
       "export { version } from 'typescript';",
       "export * from '@scope/package/subpath';",
       "export * as state from '#state';",
+      "export * from 'custom:package';",
     ].join('\n'),
   }, (rootDirectory) => {
     assert.deepEqual(scanImportBoundaries({

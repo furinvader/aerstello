@@ -88,6 +88,10 @@ function isAbsoluteFilesystemSpecifier(specifier) {
     || /^file:/iu.test(specifier);
 }
 
+function isInlineDataSpecifier(specifier) {
+  return /^data:/iu.test(specifier);
+}
+
 function forbiddenLayer(importer, target) {
   const importerLayer = importer.split('/', 1)[0];
   const importedLayer = target.split('/', 1)[0];
@@ -215,6 +219,13 @@ export function scanImportBoundaries({
         continue;
       }
       const specifier = moduleSpecifier.text;
+      if (isInlineDataSpecifier(specifier)) {
+        diagnostics.push(diagnostic(
+          sourceFile, statement, 'inline-data-import', importer, specifier,
+          'static module specifier must not use an inline data URL',
+        ));
+        continue;
+      }
       if (isAbsoluteFilesystemSpecifier(specifier)) {
         diagnostics.push(diagnostic(
           sourceFile, statement, 'absolute-filesystem-import', importer, specifier,
