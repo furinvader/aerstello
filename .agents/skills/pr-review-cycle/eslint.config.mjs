@@ -110,6 +110,8 @@ export default [
           { name: 'node:module', message: 'Node module loading APIs are forbidden in production review workflow modules.' },
           { name: 'process', message: 'Process module loading APIs are forbidden in production review workflow modules.' },
           { name: 'node:process', message: 'Process module loading APIs are forbidden in production review workflow modules.' },
+          { name: 'vm', message: 'Node VM code-execution APIs are forbidden in production review workflow modules.' },
+          { name: 'node:vm', message: 'Node VM code-execution APIs are forbidden in production review workflow modules.' },
         ],
       }],
       'no-restricted-syntax': ['error',

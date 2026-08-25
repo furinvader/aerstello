@@ -5,6 +5,9 @@ import { fileURLToPath } from 'node:url';
 
 import { ESLint } from 'eslint';
 
+import canonicalPolicy from '../../eslint.config.mjs';
+import rootPolicy from '../../../../../eslint.config.mjs';
+
 const repositoryDirectory = fileURLToPath(new URL('../../../../..', import.meta.url));
 const canonicalConfig = join(
   repositoryDirectory,
@@ -25,6 +28,10 @@ async function lint(source, filePath = productionProbe) {
   const [result] = await eslint.lintText(source, { filePath });
   return result?.messages ?? [];
 }
+
+test('the root ESLint adapter re-exports the exact canonical policy', () => {
+  assert.strictEqual(rootPolicy, canonicalPolicy);
+});
 
 test('production PR-review modules satisfy the canonical source policy', async () => {
   const results = await eslint.lintFiles([
@@ -50,6 +57,32 @@ test('static imports and re-exports cannot expose module or process APIs', async
   for (const source of sources) {
     assert.equal((await lint(source))[0]?.ruleId, 'no-restricted-imports');
   }
+});
+
+test('static imports and re-exports cannot expose Node VM APIs', async () => {
+  for (const modulePath of ['vm', 'node:vm']) {
+    const sources = [
+      `import '${modulePath}';\n`,
+      `import vmApi from '${modulePath}';\nexport { vmApi };\n`,
+      `import * as vmApi from '${modulePath}';\nexport { vmApi };\n`,
+      `import { Script } from '${modulePath}';\nexport { Script };\n`,
+      `export * from '${modulePath}';\n`,
+      `export { Script } from '${modulePath}';\n`,
+    ];
+    for (const source of sources) {
+      assert.equal((await lint(source))[0]?.ruleId, 'no-restricted-imports');
+    }
+  }
+});
+
+test('VM-like safe module specifiers remain available', async () => {
+  assert.deepEqual(await lint([
+    "import fs from 'node:fs';",
+    "import localVm from './vm.mjs';",
+    "import browserVm from 'vm-browserify';",
+    "import scopedVm from '@scope/vm';",
+    'export { fs, localVm, browserVm, scopedVm };',
+  ].join('\n')), []);
 });
 
 test('dynamic code and hidden loader identifiers fail closed in dead or shadowed code', async () => {
