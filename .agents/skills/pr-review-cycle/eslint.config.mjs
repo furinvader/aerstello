@@ -1,7 +1,7 @@
 const capabilityRoot = '.agents/skills/pr-review-cycle';
 const productionModules = `${capabilityRoot}/scripts/**/*.mjs`;
 
-const forbiddenIdentifierSelector = "Identifier[name=/^(?:require|eval|Function|getBuiltinModule|createRequire)$/]";
+const forbiddenIdentifierSelector = "Identifier[name=/^(?:require|eval|Function|Reflect|getBuiltinModule|createRequire)$/]";
 const forbiddenNameLiteralSelector = "Literal[value='getBuiltinModule']";
 const forbiddenNameTemplateSelector = "TemplateLiteral[expressions.length=0] > TemplateElement[value.cooked='getBuiltinModule']";
 const forbiddenRawNameTemplateSelector = "TemplateLiteral[expressions.length=0] > TemplateElement[value.raw='getBuiltinModule']";
@@ -11,6 +11,7 @@ const forbiddenComputedNames = new Set([
   'require',
   'eval',
   'Function',
+  'Reflect',
 ]);
 const guardedComputedRoots = new Set(['process', 'globalThis', 'module']);
 
@@ -76,6 +77,14 @@ const computedLoaderAccessRule = {
   },
 };
 
+const restrictedSyntaxDescriptors = [
+  { selector: 'ImportExpression', message: 'Dynamic import is forbidden in production review workflow modules.' },
+  { selector: forbiddenIdentifierSelector, message: 'Dynamic code and hidden module-loading identifiers are forbidden in production review workflow modules.' },
+  { selector: forbiddenNameLiteralSelector, message: 'Static getBuiltinModule names are forbidden in production review workflow modules.' },
+  { selector: forbiddenNameTemplateSelector, message: 'Static getBuiltinModule names are forbidden in production review workflow modules.' },
+  { selector: forbiddenRawNameTemplateSelector, message: 'Static getBuiltinModule names are forbidden in production review workflow modules.' },
+];
+
 export default [
   {
     ignores: [
@@ -114,12 +123,21 @@ export default [
           { name: 'node:vm', message: 'Node VM code-execution APIs are forbidden in production review workflow modules.' },
         ],
       }],
+      'no-restricted-syntax': ['error', ...restrictedSyntaxDescriptors],
+    },
+  },
+  {
+    files: [
+      `${capabilityRoot}/scripts/hooks/*.mjs`,
+      `${capabilityRoot}/scripts/state/cli.mjs`,
+      `${capabilityRoot}/scripts/worktree/cli.mjs`,
+    ],
+    rules: {
       'no-restricted-syntax': ['error',
-        { selector: 'ImportExpression', message: 'Dynamic import is forbidden in production review workflow modules.' },
-        { selector: forbiddenIdentifierSelector, message: 'Dynamic code and hidden module-loading identifiers are forbidden in production review workflow modules.' },
-        { selector: forbiddenNameLiteralSelector, message: 'Static getBuiltinModule names are forbidden in production review workflow modules.' },
-        { selector: forbiddenNameTemplateSelector, message: 'Static getBuiltinModule names are forbidden in production review workflow modules.' },
-        { selector: forbiddenRawNameTemplateSelector, message: 'Static getBuiltinModule names are forbidden in production review workflow modules.' },
+        ...restrictedSyntaxDescriptors,
+        { selector: 'ExportNamedDeclaration', message: 'Executable composition roots must not export module authority.' },
+        { selector: 'ExportDefaultDeclaration', message: 'Executable composition roots must not export module authority.' },
+        { selector: 'ExportAllDeclaration', message: 'Executable composition roots must not export module authority.' },
       ],
     },
   },

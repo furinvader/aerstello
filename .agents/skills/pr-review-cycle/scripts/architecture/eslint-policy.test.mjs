@@ -17,6 +17,11 @@ const productionProbe = join(
   repositoryDirectory,
   '.agents/skills/pr-review-cycle/scripts/github/policy-probe.mjs',
 );
+const compositionRootProbes = [
+  join(repositoryDirectory, '.agents/skills/pr-review-cycle/scripts/hooks/policy-probe.mjs'),
+  join(repositoryDirectory, '.agents/skills/pr-review-cycle/scripts/state/cli.mjs'),
+  join(repositoryDirectory, '.agents/skills/pr-review-cycle/scripts/worktree/cli.mjs'),
+];
 
 const eslint = new ESLint({
   cwd: repositoryDirectory,
@@ -99,6 +104,30 @@ test('dynamic code and hidden loader identifiers fail closed in dead or shadowed
   }
 });
 
+test('Reflect cannot reacquire dynamic-code or hidden-loader capabilities', async () => {
+  const cases = [
+    ["Reflect.get(globalThis, 'eval')('hidden');\n", 'no-restricted-syntax'],
+    ["Reflect?.get(process, 'getBuiltinModule')('node:module');\n", 'no-restricted-syntax'],
+    ["if (false) Reflect.get(globalThis, 'Function');\n", 'no-restricted-syntax'],
+    ['function Reflect() {}\n', 'no-restricted-syntax'],
+    ["globalThis.Reflect.get(globalThis, 'eval')('hidden');\n", 'no-restricted-syntax'],
+    ["globalThis['Ref' + 'lect'].get(module, 'require')('./hidden.mjs');\n", 'pr-review/computed-loader-access'],
+    ["globalThis[`Ref${'lect'}`].get(process, 'getBuiltinModule')('node:module');\n", 'pr-review/computed-loader-access'],
+  ];
+  for (const [source, ruleId] of cases) {
+    assert.equal((await lint(source))[0]?.ruleId, ruleId, source);
+  }
+});
+
+test('ordinary reflection names, object introspection, and Reflect string data remain available', async () => {
+  assert.deepEqual(await lint([
+    "const reflector = Object.getOwnPropertyDescriptor(options, 'selected');",
+    "const capabilityName = 'Reflect';",
+    'const reflected = reflector?.value;',
+    'export { capabilityName, reflected };',
+  ].join('\n')), []);
+});
+
 test('computed access cannot reconstruct dynamic code or hidden module loaders', async () => {
   const cases = [
     "globalThis.process['getBuiltin' + 'Module']('node:module')['create' + 'Require'](import.meta.url);\n",
@@ -163,6 +192,43 @@ test('production modules named eslint.config.mjs remain inside production scope'
     (await lint('const require = null;\n', nestedConfig))[0]?.ruleId,
     'no-restricted-syntax',
   );
+});
+
+test('executable composition roots cannot expose ESM exports', async () => {
+  const exportForms = [
+    'export const exposed = true;\n',
+    'export default function exposed() {}\n',
+    "export * from './private-authority.mjs';\n",
+  ];
+  for (const filePath of compositionRootProbes) {
+    for (const source of exportForms) {
+      assert.equal((await lint(source, filePath))[0]?.ruleId, 'no-restricted-syntax', `${filePath}: ${source}`);
+    }
+  }
+});
+
+test('composition-root overrides retain the complete production source policy', async () => {
+  for (const filePath of compositionRootProbes) {
+    assert.equal(
+      (await lint('const require = null;\n', filePath))[0]?.ruleId,
+      'no-restricted-syntax',
+      filePath,
+    );
+  }
+});
+
+test('facades and ordinary production modules may still expose ESM exports', async () => {
+  const permittedPaths = [
+    join(repositoryDirectory, '.agents/skills/pr-review-cycle/scripts/worktree/worktree.mjs'),
+    productionProbe,
+  ];
+  for (const filePath of permittedPaths) {
+    assert.deepEqual(await lint([
+      'export const available = true;',
+      'export default function availableByDefault() {}',
+      "export * from './public-module.mjs';",
+    ].join('\n'), filePath), []);
+  }
 });
 
 test('tests, fixtures, test-support, and canonical configuration remain outside production scope', async () => {
