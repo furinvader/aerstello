@@ -115,13 +115,37 @@ test('scanner rejects executable data URLs in static module declarations', () =>
   });
 });
 
-test('scanner keeps package and built-in module specifiers external', () => {
+test('scanner rejects package import aliases across static module declarations', () => {
+  withSources({
+    'github/import.mjs': "import '#state';\n",
+    'github/named-export.mjs': "export { state } from '#state/named';\n",
+    'github/namespace-export.mjs': "export * as state from '#state/namespace';\n",
+    'github/wildcard-export.mjs': "export * from '#state/wildcard';\n",
+  }, (rootDirectory) => {
+    const diagnostics = scanImportBoundaries({
+      rootDirectory,
+      files: [
+        'github/import.mjs',
+        'github/named-export.mjs',
+        'github/namespace-export.mjs',
+        'github/wildcard-export.mjs',
+      ],
+    });
+    assert.deepEqual(diagnostics.map(({ rule, importer, target }) => ({ rule, importer, target })), [
+      { rule: 'package-import-alias', importer: 'github/import.mjs', target: '#state' },
+      { rule: 'package-import-alias', importer: 'github/named-export.mjs', target: '#state/named' },
+      { rule: 'package-import-alias', importer: 'github/namespace-export.mjs', target: '#state/namespace' },
+      { rule: 'package-import-alias', importer: 'github/wildcard-export.mjs', target: '#state/wildcard' },
+    ]);
+  });
+});
+
+test('scanner keeps packages, built-ins, and unrelated schemes external', () => {
   withSources({
     'github/packages.mjs': [
       "import 'node:fs';",
       "export { version } from 'typescript';",
       "export * from '@scope/package/subpath';",
-      "export * as state from '#state';",
       "export * from 'custom:package';",
     ].join('\n'),
   }, (rootDirectory) => {
@@ -129,6 +153,54 @@ test('scanner keeps package and built-in module specifiers external', () => {
       rootDirectory,
       files: ['github/packages.mjs'],
     }), []);
+  });
+});
+
+test('scanner reports alternate production source extensions while retaining exclusions', () => {
+  withSources({
+    'fixtures/fixture.js': 'export const ignoredFixture = true;\n',
+    'github/owner.cjs': 'module.exports = {};\n',
+    'github/owner.cts': 'export const owner = true;\n',
+    'github/owner.js': 'export const owner = true;\n',
+    'github/owner.mjs': 'export const owner = true;\n',
+    'github/owner.mts': 'export const owner = true;\n',
+    'github/owner.test.cjs': 'module.exports = {};\n',
+    'github/owner.test.cts': 'export const owner = true;\n',
+    'github/owner.test.js': 'export const owner = true;\n',
+    'github/owner.test.mjs': 'export const owner = true;\n',
+    'github/owner.test.mts': 'export const owner = true;\n',
+    'github/owner.test.ts': 'export const owner = true;\n',
+    'github/owner.ts': 'export const owner = true;\n',
+    'test-support/support.ts': 'export const ignoredSupport = true;\n',
+  }, (rootDirectory) => {
+    const diagnostics = scanImportBoundaries({ rootDirectory });
+    assert.deepEqual(diagnostics.map(({ rule, importer, target }) => ({ rule, importer, target })), [
+      {
+        rule: 'unsupported-production-source-extension',
+        importer: 'github/owner.cjs',
+        target: 'github/owner.cjs',
+      },
+      {
+        rule: 'unsupported-production-source-extension',
+        importer: 'github/owner.cts',
+        target: 'github/owner.cts',
+      },
+      {
+        rule: 'unsupported-production-source-extension',
+        importer: 'github/owner.js',
+        target: 'github/owner.js',
+      },
+      {
+        rule: 'unsupported-production-source-extension',
+        importer: 'github/owner.mts',
+        target: 'github/owner.mts',
+      },
+      {
+        rule: 'unsupported-production-source-extension',
+        importer: 'github/owner.ts',
+        target: 'github/owner.ts',
+      },
+    ]);
   });
 });
 

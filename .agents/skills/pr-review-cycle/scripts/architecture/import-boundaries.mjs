@@ -9,6 +9,10 @@ const GENERIC_OWNER_NAMES = new Set([
   'common.mjs', 'helper.mjs', 'helpers.mjs', 'misc.mjs', 'util.mjs', 'utils.mjs',
 ]);
 
+const UNSUPPORTED_PRODUCTION_SOURCE_EXTENSIONS = new Set([
+  '.cjs', '.cts', '.js', '.mts', '.ts',
+]);
+
 const FACADE_PATHS = new Map([
   ['contracts', 'contracts/contracts.mjs'],
   ['github', 'github/github.mjs'],
@@ -57,8 +61,22 @@ function productionEntries(rootDirectory) {
       const path = join(directory, entry.name);
       if (entry.isDirectory()) {
         if (!['fixtures', 'test-support'].includes(entry.name)) pending.push(path);
-      } else if (entry.isFile() && extname(entry.name) === '.mjs' && !entry.name.endsWith('.test.mjs')) {
-        files.push(posix(relative(rootDirectory, path)));
+      } else if (entry.isFile()) {
+        const extension = extname(entry.name);
+        const testSource = entry.name.endsWith(`.test${extension}`);
+        if (extension === '.mjs' && !testSource) {
+          files.push(posix(relative(rootDirectory, path)));
+        } else if (UNSUPPORTED_PRODUCTION_SOURCE_EXTENSIONS.has(extension) && !testSource) {
+          const target = posix(relative(rootDirectory, path));
+          diagnostics.push({
+            rule: 'unsupported-production-source-extension',
+            importer: target,
+            target,
+            line: 1,
+            column: 1,
+            message: 'canonical production workflow modules must use the .mjs extension',
+          });
+        }
       } else if (!entry.isFile()) {
         const target = posix(relative(rootDirectory, path));
         diagnostics.push({
@@ -219,6 +237,13 @@ export function scanImportBoundaries({
         continue;
       }
       const specifier = moduleSpecifier.text;
+      if (specifier.startsWith('#')) {
+        diagnostics.push(diagnostic(
+          sourceFile, statement, 'package-import-alias', importer, specifier,
+          'static package import aliases are not permitted in the canonical production graph',
+        ));
+        continue;
+      }
       if (isInlineDataSpecifier(specifier)) {
         diagnostics.push(diagnostic(
           sourceFile, statement, 'inline-data-import', importer, specifier,
