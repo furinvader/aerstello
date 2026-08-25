@@ -12,7 +12,7 @@ export default [
       '**/*.test.mjs',
       '**/fixtures/**',
       '**/test-support/**',
-      '**/eslint.config.mjs',
+      '.agents/skills/pr-review-cycle/eslint.config.mjs',
     ],
   },
   {

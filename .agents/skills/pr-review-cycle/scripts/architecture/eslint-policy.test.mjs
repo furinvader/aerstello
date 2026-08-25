@@ -91,7 +91,15 @@ test('inline configuration cannot suppress the production policy', async () => {
   assert.equal(messages.some(({ ruleId }) => ruleId === 'no-restricted-syntax'), true);
 });
 
-test('tests, fixtures, test-support, and configuration remain outside production scope', async () => {
+test('production modules named eslint.config.mjs remain inside production scope', async () => {
+  const nestedConfig = join(dirname(productionProbe), 'eslint.config.mjs');
+  assert.equal(
+    (await lint('const require = null;\n', nestedConfig))[0]?.ruleId,
+    'no-restricted-syntax',
+  );
+});
+
+test('tests, fixtures, test-support, and canonical configuration remain outside production scope', async () => {
   const excluded = [
     join(dirname(productionProbe), 'policy-probe.test.mjs'),
     join(dirname(productionProbe), 'fixtures/policy-probe.mjs'),
