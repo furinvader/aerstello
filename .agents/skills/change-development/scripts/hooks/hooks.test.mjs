@@ -7,9 +7,9 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { changeDirectory, initializeState, loadState } from '../state/state.mjs';
-import { initializeState as initializePrState, loadState as loadPrState } from '../../../pr-review-cycle/scripts/state/state.mjs';
 
 const directory = new URL('.', import.meta.url);
+const prStateCli = fileURLToPath(new URL('../../../pr-review-cycle/scripts/state/cli.mjs', import.meta.url));
 
 function hook(name, cwd, input = { cwd }) {
   return spawnSync(process.execPath, [fileURLToPath(new URL(name, directory))], {
@@ -38,6 +38,12 @@ function validImplementationResult() {
 }
 
 function git(cwd, ...args) { return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim(); }
+
+function runPrState(cwd, ...args) {
+  const result = spawnSync(process.execPath, [prStateCli, ...args], { cwd, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
+}
 
 function repository() {
   const cwd = mkdtempSync(join(tmpdir(), 'active change hooks '));
@@ -106,8 +112,8 @@ test('PR and change hook pairs run concurrently against separate durable roots',
   const { cwd, sha } = repository();
   await initializeState({ cwd, changeId: 'concurrent-hooks', mode: 'plan-only', baseBranch: 'main', planningRef: sha,
     source: { type: 'direct-request', path: 'request.md', relationshipIntent: 'reference-only' } });
-  initializePrState({ cwd, prNumber: 23, repository: 'example/aerstello', base: 'main', head: 'HEAD', releaseRef: 'main' });
-  const changeBefore = loadState(cwd); const prBefore = loadPrState(cwd);
+  runPrState(cwd, 'init', '--pr', '23', '--repository', 'example/aerstello', '--base', 'main', '--head', 'HEAD', '--release-ref', 'main');
+  const changeBefore = loadState(cwd); const prBefore = runPrState(cwd, 'show', '--pr', '23');
   const changeHooks = ['session-start.mjs', 'pre-compact.mjs'].map((name) => fileURLToPath(new URL(name, import.meta.url)));
   const prHooks = ['session-start.mjs', 'pre-compact.mjs'].map((name) => fileURLToPath(new URL(`../../../pr-review-cycle/scripts/hooks/${name}`, import.meta.url)));
   const results = await Promise.all([...changeHooks, ...prHooks].map((path) => runConcurrent(path, cwd, { cwd })));
@@ -116,7 +122,7 @@ test('PR and change hook pairs run concurrently against separate durable roots',
     assert.equal(JSON.parse(result.stdout).continue, true);
   }
   assert.deepEqual(loadState(cwd), changeBefore);
-  assert.deepEqual(loadPrState(cwd), prBefore);
+  assert.deepEqual(runPrState(cwd, 'show', '--pr', '23'), prBefore);
 });
 
 test('PreCompact fails open without advancing state when durable evidence is corrupt', async () => {

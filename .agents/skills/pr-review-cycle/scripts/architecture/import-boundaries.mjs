@@ -132,8 +132,7 @@ export function scanInboundCapabilityImports({
   for (const importer of files) {
     const extension = posixPath.extname(importer);
     if (isPathAtOrBelow(importer, protectedRoot)
-        || !REPOSITORY_SOURCE_EXTENSIONS.has(extension)
-        || importer.endsWith(`.test${extension}`)) continue;
+        || !REPOSITORY_SOURCE_EXTENSIONS.has(extension)) continue;
     const source = readFileSync(join(repositoryDirectory, importer), 'utf8');
     const sourceFile = ts.createSourceFile(
       importer,

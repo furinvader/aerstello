@@ -288,14 +288,18 @@ test('scanner rejects generic owner names and unauthorized protected-state consu
 test('inbound scanner rejects undeclared repository imports into the protected capability', () => {
   withSources({
     '.agents/skills/other/scripts/sibling.mts': "export * from '../../pr-review-cycle/scripts/state/checkpoint.mjs';\n",
+    '.agents/skills/other/scripts/sibling.test.ts': "export * from '../../pr-review-cycle/scripts/state/checkpoint.mjs';\n",
     '.agents/skills/pr-review-cycle/scripts/internal.mjs': "import './state/checkpoint.mjs';\n",
+    'scripts/nested/consumer.test.mjs': "import '../../.agents/skills/pr-review-cycle/scripts/state/checkpoint.mjs';\n",
     'scripts/nested/consumer.tsx': "import '../../.agents/skills/pr-review-cycle/scripts/state/checkpoint.mjs';\n",
   }, (repositoryDirectory) => {
     const diagnostics = scanInboundCapabilityImports({
       repositoryDirectory,
       files: [
         '.agents/skills/other/scripts/sibling.mts',
+        '.agents/skills/other/scripts/sibling.test.ts',
         '.agents/skills/pr-review-cycle/scripts/internal.mjs',
+        'scripts/nested/consumer.test.mjs',
         'scripts/nested/consumer.tsx',
       ],
       capabilityRoot: '.agents/skills/pr-review-cycle',
@@ -305,6 +309,16 @@ test('inbound scanner rejects undeclared repository imports into the protected c
       {
         rule: 'undeclared-capability-import',
         importer: '.agents/skills/other/scripts/sibling.mts',
+        target: '.agents/skills/pr-review-cycle/scripts/state/checkpoint.mjs',
+      },
+      {
+        rule: 'undeclared-capability-import',
+        importer: '.agents/skills/other/scripts/sibling.test.ts',
+        target: '.agents/skills/pr-review-cycle/scripts/state/checkpoint.mjs',
+      },
+      {
+        rule: 'undeclared-capability-import',
+        importer: 'scripts/nested/consumer.test.mjs',
         target: '.agents/skills/pr-review-cycle/scripts/state/checkpoint.mjs',
       },
       {
@@ -324,7 +338,6 @@ test('inbound scanner permits exact adapters and ignores unrelated static edges'
       "export * from '@scope/package';",
       "export * from './local.cjs';",
     ].join('\n'),
-    'scripts/consumer.test.mjs': "import '../.agents/skills/pr-review-cycle/scripts/state/checkpoint.mjs';\n",
     'scripts/ignored.json': 'not JavaScript',
     'scripts/local.cjs': 'module.exports = {};\n',
   }, (repositoryDirectory) => {
@@ -333,7 +346,6 @@ test('inbound scanner permits exact adapters and ignores unrelated static edges'
       files: [
         'eslint.config.mjs',
         'scripts/consumer.cjs',
-        'scripts/consumer.test.mjs',
         'scripts/ignored.json',
         'scripts/local.cjs',
       ],
