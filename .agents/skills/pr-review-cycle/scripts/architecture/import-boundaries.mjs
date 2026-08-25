@@ -13,6 +13,10 @@ const UNSUPPORTED_PRODUCTION_SOURCE_EXTENSIONS = new Set([
   '.cjs', '.cts', '.js', '.mts', '.ts',
 ]);
 
+const REPOSITORY_SOURCE_EXTENSIONS = new Set([
+  '.cjs', '.cts', '.js', '.jsx', '.mjs', '.mts', '.ts', '.tsx',
+]);
+
 const FACADE_PATHS = new Map([
   ['contracts', 'contracts/contracts.mjs'],
   ['github', 'github/github.mjs'],
@@ -98,6 +102,80 @@ function resolveInternalTarget(rootDirectory, importer, specifier) {
     resolvedTarget,
     target,
   };
+}
+
+function isPathAtOrBelow(path, root) {
+  return path === root || path.startsWith(`${root}/`);
+}
+
+function repositoryScriptKind(path) {
+  if (path.endsWith('.jsx')) return ts.ScriptKind.JSX;
+  if (path.endsWith('.tsx')) return ts.ScriptKind.TSX;
+  if (/\.(?:cts|mts|ts)$/u.test(path)) return ts.ScriptKind.TS;
+  return ts.ScriptKind.JS;
+}
+
+export function scanInboundCapabilityImports({
+  repositoryDirectory,
+  files,
+  capabilityRoot,
+  permittedExternalAdapters,
+} = {}) {
+  const protectedRoot = posixPath.normalize(capabilityRoot);
+  const permittedEdges = new Set(permittedExternalAdapters.flatMap((adapter) => (
+    adapter.targets.map((target) => (
+      `${adapter.path}\0${posixPath.join(protectedRoot, target)}`
+    ))
+  )));
+  const diagnostics = [];
+
+  for (const importer of files) {
+    const extension = posixPath.extname(importer);
+    if (isPathAtOrBelow(importer, protectedRoot)
+        || !REPOSITORY_SOURCE_EXTENSIONS.has(extension)
+        || importer.endsWith(`.test${extension}`)) continue;
+    const source = readFileSync(join(repositoryDirectory, importer), 'utf8');
+    const sourceFile = ts.createSourceFile(
+      importer,
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+      repositoryScriptKind(importer),
+    );
+    for (const statement of sourceFile.statements) {
+      const moduleSpecifier = (ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement))
+        ? statement.moduleSpecifier : null;
+      if (!moduleSpecifier || !ts.isStringLiteral(moduleSpecifier)) continue;
+      const specifier = moduleSpecifier.text;
+      if (specifier.startsWith('#')) {
+        diagnostics.push(diagnostic(
+          sourceFile,
+          statement,
+          'opaque-package-import-alias',
+          importer,
+          specifier,
+          'outside package import aliases are opaque to the capability boundary scan',
+        ));
+        continue;
+      }
+      if (!specifier.startsWith('.')) continue;
+      const target = posixPath.normalize(posixPath.join(posixPath.dirname(importer), specifier));
+      if (!isPathAtOrBelow(target, protectedRoot)) continue;
+      if (permittedEdges.has(`${importer}\0${target}`)) continue;
+      diagnostics.push(diagnostic(
+        sourceFile,
+        statement,
+        'undeclared-capability-import',
+        importer,
+        target,
+        'outside source must use an exact declared external adapter edge',
+      ));
+    }
+  }
+
+  return diagnostics.sort((left, right) => (
+    formatBoundaryDiagnostic(left).localeCompare(formatBoundaryDiagnostic(right))
+  ));
 }
 
 function isAbsoluteFilesystemSpecifier(specifier) {

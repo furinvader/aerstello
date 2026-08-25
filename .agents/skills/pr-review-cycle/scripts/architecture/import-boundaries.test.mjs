@@ -5,7 +5,11 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { formatBoundaryDiagnostic, scanImportBoundaries } from './import-boundaries.mjs';
+import {
+  formatBoundaryDiagnostic,
+  scanImportBoundaries,
+  scanInboundCapabilityImports,
+} from './import-boundaries.mjs';
 
 const fixtureRoot = fileURLToPath(new URL('./fixtures/', import.meta.url));
 const scan = (name, files) => scanImportBoundaries({ rootDirectory: join(fixtureRoot, name), files });
@@ -279,4 +283,88 @@ test('scanner rejects generic owner names and unauthorized protected-state consu
       .find(({ rule }) => rule === 'privileged-state-consumer')?.rule,
     'privileged-state-consumer',
   );
+});
+
+test('inbound scanner rejects undeclared repository imports into the protected capability', () => {
+  withSources({
+    '.agents/skills/other/scripts/sibling.mts': "export * from '../../pr-review-cycle/scripts/state/checkpoint.mjs';\n",
+    '.agents/skills/pr-review-cycle/scripts/internal.mjs': "import './state/checkpoint.mjs';\n",
+    'scripts/nested/consumer.tsx': "import '../../.agents/skills/pr-review-cycle/scripts/state/checkpoint.mjs';\n",
+  }, (repositoryDirectory) => {
+    const diagnostics = scanInboundCapabilityImports({
+      repositoryDirectory,
+      files: [
+        '.agents/skills/other/scripts/sibling.mts',
+        '.agents/skills/pr-review-cycle/scripts/internal.mjs',
+        'scripts/nested/consumer.tsx',
+      ],
+      capabilityRoot: '.agents/skills/pr-review-cycle',
+      permittedExternalAdapters: [],
+    });
+    assert.deepEqual(diagnostics.map(({ rule, importer, target }) => ({ rule, importer, target })), [
+      {
+        rule: 'undeclared-capability-import',
+        importer: '.agents/skills/other/scripts/sibling.mts',
+        target: '.agents/skills/pr-review-cycle/scripts/state/checkpoint.mjs',
+      },
+      {
+        rule: 'undeclared-capability-import',
+        importer: 'scripts/nested/consumer.tsx',
+        target: '.agents/skills/pr-review-cycle/scripts/state/checkpoint.mjs',
+      },
+    ]);
+  });
+});
+
+test('inbound scanner permits exact adapters and ignores unrelated static edges', () => {
+  withSources({
+    'eslint.config.mjs': "export { default } from './.agents/skills/pr-review-cycle/eslint.config.mjs';\n",
+    'scripts/consumer.cjs': [
+      "import 'node:fs';",
+      "export * from '@scope/package';",
+      "export * from './local.cjs';",
+    ].join('\n'),
+    'scripts/consumer.test.mjs': "import '../.agents/skills/pr-review-cycle/scripts/state/checkpoint.mjs';\n",
+    'scripts/ignored.json': 'not JavaScript',
+    'scripts/local.cjs': 'module.exports = {};\n',
+  }, (repositoryDirectory) => {
+    assert.deepEqual(scanInboundCapabilityImports({
+      repositoryDirectory,
+      files: [
+        'eslint.config.mjs',
+        'scripts/consumer.cjs',
+        'scripts/consumer.test.mjs',
+        'scripts/ignored.json',
+        'scripts/local.cjs',
+      ],
+      capabilityRoot: '.agents/skills/pr-review-cycle',
+      permittedExternalAdapters: [{ path: 'eslint.config.mjs', targets: ['eslint.config.mjs'] }],
+    }), []);
+  });
+});
+
+test('inbound scanner fails closed on opaque outside package import aliases', () => {
+  withSources({
+    'scripts/import.cts': "import '#private/import';\n",
+    'scripts/re-export.js': "export * from '#private/export';\n",
+  }, (repositoryDirectory) => {
+    const diagnostics = scanInboundCapabilityImports({
+      repositoryDirectory,
+      files: ['scripts/import.cts', 'scripts/re-export.js'],
+      capabilityRoot: '.agents/skills/pr-review-cycle',
+      permittedExternalAdapters: [],
+    });
+    assert.deepEqual(diagnostics.map(({ rule, importer, target }) => ({ rule, importer, target })), [
+      {
+        rule: 'opaque-package-import-alias',
+        importer: 'scripts/import.cts',
+        target: '#private/import',
+      },
+      {
+        rule: 'opaque-package-import-alias',
+        importer: 'scripts/re-export.js',
+        target: '#private/export',
+      },
+    ]);
+  });
 });

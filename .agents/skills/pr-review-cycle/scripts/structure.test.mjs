@@ -11,6 +11,7 @@ import { gitText } from '../../../../scripts/lib/git.mjs';
 import {
   formatBoundaryDiagnostic,
   scanImportBoundaries,
+  scanInboundCapabilityImports,
 } from './architecture/import-boundaries.mjs';
 import {
   featureDirectory,
@@ -3124,6 +3125,14 @@ test('ownership manifest names the complete canonical skill and no obsolete path
 
 test('repository-wide architecture guards cover imports, authority, adjacency, and documentation', () => {
   const ownership = loadOwnership();
+  const inboundDiagnostics = scanInboundCapabilityImports({
+    repositoryDirectory,
+    files: repositoryFiles(),
+    capabilityRoot: ownership.skillRoot,
+    permittedExternalAdapters: ownership.permittedExternalAdapters,
+  });
+  assert.deepEqual(inboundDiagnostics.map(formatBoundaryDiagnostic), []);
+
   const diagnostics = scanImportBoundaries({
     rootDirectory: scriptsDirectory,
     permittedNeutralDependencies: ownership.neutralSharedDependencies.map((path) => (
