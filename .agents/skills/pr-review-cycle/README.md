@@ -51,6 +51,12 @@ rules remain in the phase references:
 Machine state uses task status `completed` for Resolved and cycle phase
 `complete` for Done. These are storage names, not extra lifecycle stages.
 
+Maintainers can run `npm run lint:pr-review` to enforce the capability's strict
+production-source policy. The separate architecture scanner continues to own
+repository dependency-graph policy; see the
+[internal architecture map](references/internal-architecture.md) for the exact
+boundary.
+
 Use the human status view for a compact operational summary:
 
 ```bash

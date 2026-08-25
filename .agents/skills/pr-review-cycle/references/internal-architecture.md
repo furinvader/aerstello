@@ -66,6 +66,26 @@ Executable composition belongs only at these roots:
 Root `package.json` scripts and `.codex/hooks.json` point at these composition
 roots. They do not contain a second implementation or schema.
 
+## Production source and dependency policy
+
+Two deliberately separate checks protect the capability's production modules:
+
+- the canonical flat configuration in `eslint.config.mjs` owns fail-closed
+  source-shape policy for hidden module loading, dynamic code, static
+  `getBuiltinModule` names, and inline ESLint directives;
+- `scripts/architecture/import-boundaries.mjs` owns production discovery,
+  syntax and resolution, repository containment, allowed neutral dependencies,
+  layer and façade direction, privileged consumers and exports, cycles, and
+  authority-specific filenames.
+
+The graph scanner does not model bindings, aliases, reachability, or JavaScript
+value flow. Forbidden source shapes are rejected wherever they appear in a
+production module. Tests, fixtures, test-support modules, and ESLint
+configuration are outside the production lint target because they must contain
+policy examples. The root `eslint.config.mjs` only re-exports this canonical
+configuration, and `npm run lint:pr-review` treats warnings as failures so an
+inline directive cannot silently weaken the policy.
+
 ## Dependency layers
 
 Dependencies flow downward through these layers:
@@ -178,6 +198,8 @@ Tests live next to their owners:
   remain beside those modules;
 - `scripts/structure.test.mjs` enforces ownership, import direction, façade
   exports, composition roots, and forbidden legacy paths;
+- `scripts/architecture/eslint-policy.test.mjs` proves the production-only
+  source policy and its exclusions;
 - `scripts/**/test-support/` and owner-local `fixtures/` contain focused test
   support rather than production helpers.
 

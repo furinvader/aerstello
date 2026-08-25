@@ -18,7 +18,7 @@ import {
   validateInitialValidationSelection,
 } from './targeted-validation.mjs';
 import { unionRequiredValidation } from './task-packet-union.mjs';
-import { validateTaskPacket } from './task-packet.mjs';
+import { taskPacketDigest, validateTaskPacket } from './task-packet.mjs';
 import { taskHasCanonicalThreadCoverage } from './thread-proof.mjs';
 import {
   validateWorkerResult,
@@ -33,6 +33,7 @@ const SUPPORTED_FUNCTIONS = {
   reviewRequestGate,
   reviewRequestUsage,
   staleDiscoveryDispositionId,
+  taskPacketDigest,
   taskHasCanonicalThreadCoverage,
   unionInitialValidationSelection,
   unionRequiredValidation,

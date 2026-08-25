@@ -27,6 +27,11 @@ const PRIVILEGED_STATE_IMPORTS = new Map([
   ])],
 ]);
 
+const EXTERNAL_PUBLIC_SURFACES = [
+  '.agents/skills/aerstello-specialists/scripts/validate-registry.mjs',
+  'scripts/lib/release-state.mjs',
+];
+
 function posix(path) {
   return path.split(sep).join('/');
 }
@@ -66,8 +71,13 @@ function productionEntries(rootDirectory) {
 
 function resolveInternalTarget(rootDirectory, importer, specifier) {
   if (!specifier.startsWith('.')) return null;
-  const target = posix(relative(rootDirectory, resolve(rootDirectory, dirname(importer), specifier)));
-  return target === '..' || target.startsWith('../') ? null : target;
+  const resolvedTarget = resolve(rootDirectory, dirname(importer), specifier);
+  const target = posix(relative(rootDirectory, resolvedTarget));
+  return {
+    escaped: target === '..' || target.startsWith('../'),
+    resolvedTarget,
+    target,
+  };
 }
 
 function forbiddenLayer(importer, target) {
@@ -79,6 +89,33 @@ function forbiddenLayer(importer, target) {
   if (importerLayer === 'state' && importedLayer === 'github') return true;
   if (importerLayer === 'worktree' && ['github', 'hooks'].includes(importedLayer)) return true;
   return false;
+}
+
+function crossesOwnerLayer(importer, target) {
+  const importerLayer = importer.split('/', 1)[0];
+  const importedLayer = target.split('/', 1)[0];
+  return importerLayer !== importedLayer;
+}
+
+function publicCrossLayerTarget(target) {
+  return target === 'paths.mjs' || [...FACADE_PATHS.values()].includes(target);
+}
+
+function declaredExternalDependencies(rootDirectory) {
+  try {
+    const skillDirectory = dirname(rootDirectory);
+    const ownership = JSON.parse(readFileSync(join(skillDirectory, 'ownership.json'), 'utf8'));
+    const repositoryDirectory = resolve(
+      skillDirectory,
+      ...ownership.skillRoot.split('/').map(() => '..'),
+    );
+    return [
+      ...ownership.neutralSharedDependencies,
+      ...EXTERNAL_PUBLIC_SURFACES,
+    ].map((path) => resolve(repositoryDirectory, path));
+  } catch {
+    return [];
+  }
 }
 
 function cycleFrom(graph) {
@@ -110,39 +147,40 @@ export function formatBoundaryDiagnostic(value) {
   return `[${value.rule}] ${value.importer}:${value.line}:${value.column} -> ${value.target}: ${value.message}`;
 }
 
-function createRequireImport(statement) {
-  if (!ts.isImportDeclaration(statement)
-      || !ts.isStringLiteral(statement.moduleSpecifier)
-      || statement.moduleSpecifier.text !== 'node:module'
-      || !statement.importClause) return false;
-  if (statement.importClause.name) return true;
-  const bindings = statement.importClause.namedBindings;
-  if (!bindings) return false;
-  if (ts.isNamespaceImport(bindings)) return true;
-  return bindings.elements.some((element) => (
-    (element.propertyName ?? element.name).text === 'createRequire'
-  ));
-}
-
-function importedNames(statement) {
+function importedFacadeAccess(statement) {
   if (ts.isExportDeclaration(statement)) {
-    if (!statement.exportClause || !ts.isNamedExports(statement.exportClause)) return [];
-    return statement.exportClause.elements.map((element) => (element.propertyName ?? element.name).text);
+    if (!statement.exportClause || ts.isNamespaceExport(statement.exportClause)) {
+      return { names: [], opaque: true };
+    }
+    return {
+      names: statement.exportClause.elements.map((element) => (element.propertyName ?? element.name).text),
+      opaque: false,
+    };
   }
   const bindings = statement.importClause?.namedBindings;
-  if (!bindings || !ts.isNamedImports(bindings)) return [];
-  return bindings.elements.map((element) => (element.propertyName ?? element.name).text);
+  if (!bindings) return { names: [], opaque: false };
+  if (ts.isNamespaceImport(bindings)) return { names: [], opaque: true };
+  return {
+    names: bindings.elements.map((element) => (element.propertyName ?? element.name).text),
+    opaque: false,
+  };
 }
 
 export function scanImportBoundaries({
   rootDirectory,
   files,
+  permittedNeutralDependencies,
   privilegedFacadeExports = {},
 } = {}) {
+  const discoversCanonicalProduction = files === undefined;
   const discovered = files === undefined
     ? productionEntries(rootDirectory) : { files, diagnostics: [] };
   files = discovered.files;
   const knownFiles = new Set(files);
+  const permittedNeutralTargets = new Set((
+    permittedNeutralDependencies
+    ?? (discoversCanonicalProduction ? declaredExternalDependencies(rootDirectory) : [])
+  ).map((path) => resolve(path)));
   const graph = new Map(files.map((file) => [file, new Set()]));
   const diagnostics = [...discovered.diagnostics];
 
@@ -160,21 +198,6 @@ export function scanImportBoundaries({
       diagnostics.push(diagnostic(sourceFile, sourceFile, 'generic-owner-name', importer, importer, 'use a narrow authority-specific module name'));
     }
 
-    function inspect(node) {
-      if (ts.isCallExpression(node)) {
-        if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
-          diagnostics.push(diagnostic(sourceFile, node, 'hidden-module-loading', importer, '<dynamic>', 'dynamic import is forbidden'));
-        } else if (ts.isIdentifier(node.expression) && node.expression.text === 'require') {
-          diagnostics.push(diagnostic(sourceFile, node, 'hidden-module-loading', importer, '<require>', 'CommonJS require is forbidden'));
-        }
-      }
-      if (ts.isImportEqualsDeclaration(node)) {
-        diagnostics.push(diagnostic(sourceFile, node, 'hidden-module-loading', importer, '<import-equals>', 'CommonJS import assignment is forbidden'));
-      }
-      ts.forEachChild(node, inspect);
-    }
-    inspect(sourceFile);
-
     for (const statement of sourceFile.statements) {
       const moduleSpecifier = (ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement))
         ? statement.moduleSpecifier : null;
@@ -184,11 +207,25 @@ export function scanImportBoundaries({
         continue;
       }
       const specifier = moduleSpecifier.text;
-      if (createRequireImport(statement)) {
-        diagnostics.push(diagnostic(sourceFile, statement, 'hidden-module-loading', importer, specifier, 'createRequire is forbidden'));
+      const resolution = resolveInternalTarget(rootDirectory, importer, specifier);
+      if (resolution === null) continue;
+      const { escaped, resolvedTarget, target } = resolution;
+      if (escaped) {
+        let regularPermittedFile = false;
+        try {
+          regularPermittedFile = permittedNeutralTargets.has(resolvedTarget)
+            && lstatSync(resolvedTarget).isFile();
+        } catch {
+          regularPermittedFile = false;
+        }
+        if (!regularPermittedFile) {
+          diagnostics.push(diagnostic(
+            sourceFile, statement, 'escaped-capability-import', importer, target,
+            'relative import escapes the capability scripts root without an explicitly permitted neutral dependency',
+          ));
+        }
+        continue;
       }
-      const target = resolveInternalTarget(rootDirectory, importer, specifier);
-      if (target === null) continue;
       const targetPath = join(rootDirectory, target);
       let regularFile = false;
       try {
@@ -203,6 +240,11 @@ export function scanImportBoundaries({
       graph.get(importer).add(target);
       if (forbiddenLayer(importer, target)) {
         diagnostics.push(diagnostic(sourceFile, statement, 'layer-direction', importer, target, 'dependency crosses a forbidden architecture layer'));
+      } else if (crossesOwnerLayer(importer, target) && !publicCrossLayerTarget(target)) {
+        diagnostics.push(diagnostic(
+          sourceFile, statement, 'private-layer-import', importer, target,
+          'cross-layer dependencies must use the imported layer public facade or an explicit neutral utility',
+        ));
       }
       for (const [layer, facade] of FACADE_PATHS) {
         if (target === facade
@@ -217,7 +259,9 @@ export function scanImportBoundaries({
         diagnostics.push(diagnostic(sourceFile, statement, 'privileged-state-consumer', importer, target, 'module is not authorized to consume this protected state authority'));
       }
       if (target === 'state/state.mjs') {
-        for (const imported of importedNames(statement)) {
+        const access = importedFacadeAccess(statement);
+        const names = access.opaque ? Object.keys(privilegedFacadeExports) : access.names;
+        for (const imported of names) {
           const consumers = privilegedFacadeExports[imported];
           if (consumers && !consumers.includes(importer)) {
             diagnostics.push(diagnostic(

@@ -1,8 +1,10 @@
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { runGit } from '../../../../../../scripts/lib/git.mjs';
-import { validateTaskPacket } from '../../contracts/contracts.mjs';
-import { taskPacketDigest as internalTaskPacketDigest } from '../../contracts/task-packet.mjs';
+import {
+  taskPacketDigest as contractTaskPacketDigest,
+  validateTaskPacket,
+} from '../../contracts/contracts.mjs';
 import { atomicWriteText, canonicalSerializedJson, readJsonSidecar } from '../atomic-io.mjs';
 import { StateError } from '../errors.mjs';
 import { stateDirectory, taskPacketSidecarPath } from '../locations.mjs';
@@ -22,7 +24,7 @@ export function taskPacketDigest(packet) {
       || typeof packet.taskId !== 'string' || packet.taskId.length === 0) {
     throw new StateError('Invalid historical schema-v2 task packet', 'INVALID_TASK_PACKET');
   }
-  return internalTaskPacketDigest(packet);
+  return contractTaskPacketDigest(packet);
 }
 
 export function persistImmutableTaskPacketSidecar(cwd, state, packet, digest) {

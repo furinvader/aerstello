@@ -5,6 +5,7 @@
     "README.md",
     "SKILL.md",
     "agents/openai.yaml",
+    "eslint.config.mjs",
     "ownership.json",
     "references/github-review.md",
     "references/internal-architecture.md",
@@ -13,6 +14,7 @@
     "schemas/pr-review-state.schema.json",
     "schemas/review-fix-result.schema.json",
     "schemas/review-fix-task.schema.json",
+    "scripts/architecture/eslint-policy.test.mjs",
     "scripts/architecture/fixtures/create-require-alias/github/loader.mjs",
     "scripts/architecture/fixtures/create-require-text/github/loader.mjs",
     "scripts/architecture/fixtures/cycle/github/one.mjs",
@@ -306,6 +308,12 @@
       "path": "CONTRIBUTING.md",
       "targets": [
         "README.md"
+      ]
+    },
+    {
+      "path": "eslint.config.mjs",
+      "targets": [
+        "eslint.config.mjs"
       ]
     },
     {

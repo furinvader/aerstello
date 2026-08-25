@@ -37,6 +37,7 @@ const EXPECTED_ADAPTERS = [
   'AGENTS.md',
   'CONTRIBUTING.md',
   'README.md',
+  'eslint.config.mjs',
   'package.json',
 ];
 
@@ -59,6 +60,7 @@ const EXPECTED_ADAPTER_TARGETS = {
   'AGENTS.md': ['README.md'],
   'CONTRIBUTING.md': ['README.md'],
   'README.md': ['README.md'],
+  'eslint.config.mjs': ['eslint.config.mjs'],
   'package.json': [
     'scripts/github/cli.mjs',
     'scripts/state/cli.mjs',
@@ -261,7 +263,7 @@ const PRODUCTION_CONTRACT_IMPORTS = new Map([
       'validateInitialValidationSelection',
     ]],
     [contractModule('task-packet-union.mjs'), ['unionRequiredValidation']],
-    [contractModule('task-packet.mjs'), ['validateTaskPacket']],
+    [contractModule('task-packet.mjs'), ['taskPacketDigest', 'validateTaskPacket']],
     [contractModule('thread-proof.mjs'), ['taskHasCanonicalThreadCoverage']],
     [contractModule('worker-result.mjs'), [
       'validateWorkerResult', 'validateWorkerResultAgainstTask', 'workerResultDigest',
@@ -279,6 +281,7 @@ const CONTRACT_FACADE_EXPORTS = [
   'staleDiscoveryDispositionId',
   'STATE_PHASES',
   'TASK_STATUSES',
+  'taskPacketDigest',
   'taskHasCanonicalThreadCoverage',
   'unionInitialValidationSelection',
   'unionRequiredValidation',
@@ -370,8 +373,9 @@ const PRODUCTION_STATE_IMPORTS = new Map([
     ['node:fs', ['existsSync']],
     ['node:path', ['join', 'resolve']],
     [join(repositoryDirectory, 'scripts', 'lib', 'git.mjs'), ['runGit']],
-    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['validateTaskPacket']],
-    [join(scriptsDirectory, 'contracts', 'task-packet.mjs'), [importedAs('taskPacketDigest', 'internalTaskPacketDigest')]],
+    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), [
+      importedAs('taskPacketDigest', 'contractTaskPacketDigest'), 'validateTaskPacket',
+    ]],
     [stateModule('atomic-io.mjs'), ['atomicWriteText', 'canonicalSerializedJson', 'readJsonSidecar']],
     [stateModule('errors.mjs'), ['StateError']],
     [stateModule('locations.mjs'), ['stateDirectory', 'taskPacketSidecarPath']],
@@ -3122,6 +3126,12 @@ test('repository-wide architecture guards cover imports, authority, adjacency, a
   const ownership = loadOwnership();
   const diagnostics = scanImportBoundaries({
     rootDirectory: scriptsDirectory,
+    permittedNeutralDependencies: ownership.neutralSharedDependencies.map((path) => (
+      join(repositoryDirectory, path)
+    )).concat([
+      join(repositoryDirectory, '.agents/skills/aerstello-specialists/scripts/validate-registry.mjs'),
+      join(repositoryDirectory, 'scripts/lib/release-state.mjs'),
+    ]),
     privilegedFacadeExports: ownership.architecturePolicies.privilegedStateFacadeExports,
   });
   assert.deepEqual(diagnostics.map(formatBoundaryDiagnostic), []);
@@ -4295,9 +4305,16 @@ test('hooks and npm façades target only canonical skill entrypoints', () => {
     scripts['test:tooling'],
     'npm run test:change-development && npm run test:pr-review && npm run test:specialists && node --test "scripts/**/*.test.mjs" && npm run test:e2e:structure',
   );
-  assert.equal(scripts['check:workflow'], 'npm run test:tooling');
+  assert.equal(
+    scripts['lint:pr-review'],
+    'eslint ".agents/skills/pr-review-cycle/**/*.mjs" --max-warnings 0',
+  );
+  assert.equal(scripts['check:workflow'], 'npm run lint:pr-review && npm run test:tooling');
   assert.equal(scripts.test, 'npm run test:tooling && npm run test --workspaces --if-present');
-  assert.equal(scripts['check:full'], 'npm run typecheck && npm run test && npm run build');
+  assert.equal(
+    scripts['check:full'],
+    'npm run typecheck && npm run lint:pr-review && npm run test && npm run build',
+  );
   assert.equal(scripts['test:e2e:related'], 'node scripts/run-related-e2e.mjs');
   assert.equal(scripts['test:e2e:full'], 'bddgen && playwright test');
   assert.equal(scripts['release:state'], 'node scripts/release-state.mjs --json');
@@ -4350,6 +4367,10 @@ test('root npm façades remain available from a nested workspace directory', () 
       script: 'review:worktree',
       usage: 'Usage: node .agents/skills/pr-review-cycle/scripts/worktree/cli.mjs <create|inspect|remove> [options]',
     },
+    {
+      script: 'review:status',
+      usage: 'Usage: node .agents/skills/pr-review-cycle/scripts/github/cli.mjs <command> [--pr <number>] [options]',
+    },
   ];
 
   for (const { script, usage } of facades) {
@@ -4365,15 +4386,15 @@ test('root npm façades remain available from a nested workspace directory', () 
     if (script === 'review:github') assert.match(result.stdout, /advance --pr <number>/u);
   }
 
-  const status = spawnSync(
-    'npm',
-    ['--prefix', repositoryDirectory, 'run', 'review:status'],
-    { cwd: workspaceDirectory, encoding: 'utf8' },
+  assert.equal(
+    FOCUSED_GITHUB_TEST_OWNERS.get('workflow/status.test.mjs'),
+    'workflow/status.mjs',
   );
-  assert.equal(status.error, undefined, 'review:status failed to start');
-  assert.equal(status.signal, null, `review:status terminated by ${status.signal}`);
-  assert.ok([0, 1].includes(status.status), `review:status failed unexpectedly:\n${status.stderr}`);
-  if (status.status === 1) assert.match(status.stderr, /STATE_NOT_FOUND/u);
+  assert.ok(
+    FOCUSED_GITHUB_TEST_IMPORTS.get('workflow/status.test.mjs')
+      .includes(githubModule('test-support/workflow-harness.mjs')),
+    'review:status must retain isolated workflow-adapter coverage',
+  );
 });
 
 test('schemas and operator documentation have one canonical copy', () => {
