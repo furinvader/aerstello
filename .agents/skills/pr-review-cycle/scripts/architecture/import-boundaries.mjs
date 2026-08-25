@@ -1,5 +1,7 @@
 import { lstatSync, readFileSync, readdirSync } from 'node:fs';
-import { dirname, extname, join, relative, resolve, sep } from 'node:path';
+import {
+  dirname, extname, join, posix as posixPath, relative, resolve, sep, win32 as win32Path,
+} from 'node:path';
 
 import ts from 'typescript';
 
@@ -78,6 +80,12 @@ function resolveInternalTarget(rootDirectory, importer, specifier) {
     resolvedTarget,
     target,
   };
+}
+
+function isAbsoluteFilesystemSpecifier(specifier) {
+  return posixPath.isAbsolute(specifier)
+    || win32Path.isAbsolute(specifier)
+    || /^file:/iu.test(specifier);
 }
 
 function forbiddenLayer(importer, target) {
@@ -207,6 +215,13 @@ export function scanImportBoundaries({
         continue;
       }
       const specifier = moduleSpecifier.text;
+      if (isAbsoluteFilesystemSpecifier(specifier)) {
+        diagnostics.push(diagnostic(
+          sourceFile, statement, 'absolute-filesystem-import', importer, specifier,
+          'static module specifier must not use an absolute filesystem path or file URL',
+        ));
+        continue;
+      }
       const resolution = resolveInternalTarget(rootDirectory, importer, specifier);
       if (resolution === null) continue;
       const { escaped, resolvedTarget, target } = resolution;

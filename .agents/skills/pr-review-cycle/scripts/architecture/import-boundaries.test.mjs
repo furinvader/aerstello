@@ -46,6 +46,50 @@ test('scanner rejects escaped relative imports unless the resolved dependency is
   });
 });
 
+test('scanner rejects absolute filesystem paths and file URLs in static module declarations', () => {
+  withSources({
+    'github/file-url.mjs': "export * as state from 'FiLe:///private/state.mjs';\n",
+    'github/posix.mjs': "import '/proc/self/cwd/private/state.mjs';\n",
+    'github/unc.mjs': String.raw`export * from '\\\\server\\share\\state.mjs';`,
+    'github/windows-drive.mjs': String.raw`export { state } from 'C:\\private\\state.mjs';`,
+    'github/windows-rooted.mjs': String.raw`export { state as default } from '\\private\\state.mjs';`,
+  }, (rootDirectory) => {
+    const diagnostics = scanImportBoundaries({
+      rootDirectory,
+      files: [
+        'github/file-url.mjs',
+        'github/posix.mjs',
+        'github/unc.mjs',
+        'github/windows-drive.mjs',
+        'github/windows-rooted.mjs',
+      ],
+    });
+    assert.deepEqual(diagnostics.map(({ rule, importer, target }) => ({ rule, importer, target })), [
+      { rule: 'absolute-filesystem-import', importer: 'github/file-url.mjs', target: 'FiLe:///private/state.mjs' },
+      { rule: 'absolute-filesystem-import', importer: 'github/posix.mjs', target: '/proc/self/cwd/private/state.mjs' },
+      { rule: 'absolute-filesystem-import', importer: 'github/unc.mjs', target: String.raw`\\server\share\state.mjs` },
+      { rule: 'absolute-filesystem-import', importer: 'github/windows-drive.mjs', target: String.raw`C:\private\state.mjs` },
+      { rule: 'absolute-filesystem-import', importer: 'github/windows-rooted.mjs', target: String.raw`\private\state.mjs` },
+    ]);
+  });
+});
+
+test('scanner keeps package and built-in module specifiers external', () => {
+  withSources({
+    'github/packages.mjs': [
+      "import 'node:fs';",
+      "export { version } from 'typescript';",
+      "export * from '@scope/package/subpath';",
+      "export * as state from '#state';",
+    ].join('\n'),
+  }, (rootDirectory) => {
+    assert.deepEqual(scanImportBoundaries({
+      rootDirectory,
+      files: ['github/packages.mjs'],
+    }), []);
+  });
+});
+
 test('scanner reports malformed and unresolved imports with actionable locations', () => {
   const malformed = scan('malformed', ['state/broken.mjs']);
   assert.equal(malformed[0].rule, 'syntax');
