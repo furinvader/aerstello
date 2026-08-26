@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +8,11 @@ import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 
 import { gitText } from '../../../../scripts/lib/git.mjs';
+import {
+  formatBoundaryDiagnostic,
+  scanImportBoundaries,
+  scanInboundCapabilityImports,
+} from './architecture/import-boundaries.mjs';
 import {
   featureDirectory,
   gitCommonDirectory,
@@ -24,201 +29,6 @@ import {
 
 const repositoryDirectory = resolveRepositoryDirectory();
 
-const EXPECTED_CANONICAL_FILES = [
-  'README.md',
-  'SKILL.md',
-  'agents/openai.yaml',
-  'ownership.json',
-  'references/github-review.md',
-  'references/orchestration.md',
-  'references/state-and-contracts.md',
-  'schemas/pr-review-state.schema.json',
-  'schemas/review-fix-result.schema.json',
-  'schemas/review-fix-task.schema.json',
-  'scripts/contracts/contract-identities.mjs',
-  'scripts/contracts/contracts.mjs',
-  'scripts/contracts/contracts.test.mjs',
-  'scripts/contracts/gates.mjs',
-  'scripts/contracts/gates.test.mjs',
-  'scripts/contracts/primitives.mjs',
-  'scripts/contracts/primitives.test.mjs',
-  'scripts/contracts/review-evidence.mjs',
-  'scripts/contracts/review-evidence.test.mjs',
-  'scripts/contracts/state-v1.mjs',
-  'scripts/contracts/state-v1.test.mjs',
-  'scripts/contracts/state-v3.mjs',
-  'scripts/contracts/state-v3.test.mjs',
-  'scripts/contracts/targeted-validation.mjs',
-  'scripts/contracts/targeted-validation.test.mjs',
-  'scripts/contracts/task-packet-union.mjs',
-  'scripts/contracts/task-packet-union.test.mjs',
-  'scripts/contracts/task-packet.mjs',
-  'scripts/contracts/task-packet.test.mjs',
-  'scripts/contracts/thread-proof.mjs',
-  'scripts/contracts/thread-proof.test.mjs',
-  'scripts/contracts/worker-result.mjs',
-  'scripts/contracts/worker-result.test.mjs',
-  'scripts/github/adapters/gh-cli.mjs',
-  'scripts/github/adapters/gh-cli.test.mjs',
-  'scripts/github/adapters/git.mjs',
-  'scripts/github/adapters/git.test.mjs',
-  'scripts/github/adapters/state.mjs',
-  'scripts/github/adapters/state.test.mjs',
-  'scripts/github/archive/adoption.mjs',
-  'scripts/github/archive/adoption.test.mjs',
-  'scripts/github/archive/archive-fixture-loader.mjs',
-  'scripts/github/archive/evidence.mjs',
-  'scripts/github/archive/evidence.test.mjs',
-  'scripts/github/archive/fixture-integrity.test.mjs',
-  'scripts/github/archive/fixtures/pr-35-2026-08-19T16-31-55-612Z/events.ndjson',
-  'scripts/github/archive/fixtures/pr-35-2026-08-19T16-31-55-612Z/state.json',
-  'scripts/github/archive/fixtures/pr-35-2026-08-20T09-39-32-610Z/events.ndjson',
-  'scripts/github/archive/fixtures/pr-35-2026-08-20T09-39-32-610Z/state.json',
-  'scripts/github/archive/lineage.mjs',
-  'scripts/github/archive/lineage.test.mjs',
-  'scripts/github/archive/store.mjs',
-  'scripts/github/archive/store.test.mjs',
-  'scripts/github/ci.test.mjs',
-  'scripts/github/cli.mjs',
-  'scripts/github/cli.test.mjs',
-  'scripts/github/create-workflow.mjs',
-  'scripts/github/create-workflow.test.mjs',
-  'scripts/github/errors.mjs',
-  'scripts/github/evidence/actors.mjs',
-  'scripts/github/evidence/actors.test.mjs',
-  'scripts/github/evidence/ci.mjs',
-  'scripts/github/evidence/ci.test.mjs',
-  'scripts/github/evidence/primitives.mjs',
-  'scripts/github/evidence/review-response.mjs',
-  'scripts/github/evidence/review-response.test.mjs',
-  'scripts/github/facade.test.mjs',
-  'scripts/github/github.mjs',
-  'scripts/github/graphql/client.mjs',
-  'scripts/github/graphql/client.test.mjs',
-  'scripts/github/graphql/operations.mjs',
-  'scripts/github/graphql/operations.test.mjs',
-  'scripts/github/graphql/pull-request-reader.mjs',
-  'scripts/github/graphql/pull-request-reader.test.mjs',
-  'scripts/github/live-evidence.test.mjs',
-  'scripts/github/mutation-journal.mjs',
-  'scripts/github/mutation-journal.test.mjs',
-  'scripts/github/mutation-readiness.mjs',
-  'scripts/github/mutation-readiness.test.mjs',
-  'scripts/github/mutations/draft-review-request.mjs',
-  'scripts/github/mutations/draft-review-request.test.mjs',
-  'scripts/github/mutations/thread-reply-resolve.mjs',
-  'scripts/github/mutations/thread-reply-resolve.test.mjs',
-  'scripts/github/recovery.test.mjs',
-  'scripts/github/request.test.mjs',
-  'scripts/github/review-response.test.mjs',
-  'scripts/github/snapshot.mjs',
-  'scripts/github/snapshot.test.mjs',
-  'scripts/github/status-renderer.mjs',
-  'scripts/github/status-renderer.test.mjs',
-  'scripts/github/test-support/workflow-harness.mjs',
-  'scripts/github/threads.test.mjs',
-  'scripts/github/threads/canonical-roots.mjs',
-  'scripts/github/threads/canonical-roots.test.mjs',
-  'scripts/github/threads/proof.mjs',
-  'scripts/github/threads/proof.test.mjs',
-  'scripts/github/threads/recovery.mjs',
-  'scripts/github/threads/recovery.test.mjs',
-  'scripts/github/threads/replies.mjs',
-  'scripts/github/threads/replies.test.mjs',
-  'scripts/github/workflow.test.mjs',
-  'scripts/github/workflow/advance.mjs',
-  'scripts/github/workflow/advance.test.mjs',
-  'scripts/github/workflow/collect-ci.mjs',
-  'scripts/github/workflow/collect-ci.test.mjs',
-  'scripts/github/workflow/collect.mjs',
-  'scripts/github/workflow/collect.test.mjs',
-  'scripts/github/workflow/complete.mjs',
-  'scripts/github/workflow/complete.test.mjs',
-  'scripts/github/workflow/context.mjs',
-  'scripts/github/workflow/context.test.mjs',
-  'scripts/github/workflow/refresh-threads.mjs',
-  'scripts/github/workflow/refresh-threads.test.mjs',
-  'scripts/github/workflow/request.mjs',
-  'scripts/github/workflow/request.test.mjs',
-  'scripts/github/workflow/resolve.mjs',
-  'scripts/github/workflow/resolve.test.mjs',
-  'scripts/github/workflow/status.mjs',
-  'scripts/github/workflow/status.test.mjs',
-  'scripts/hooks/hooks.test.mjs',
-  'scripts/hooks/pre-compact.mjs',
-  'scripts/hooks/session-start.mjs',
-  'scripts/hooks/subagent-stop.mjs',
-  'scripts/paths.mjs',
-  'scripts/state/archive.mjs',
-  'scripts/state/archive.test.mjs',
-  'scripts/state/atomic-io.mjs',
-  'scripts/state/checkpoint.mjs',
-  'scripts/state/checkpoint.test.mjs',
-  'scripts/state/cli.mjs',
-  'scripts/state/cli.test.mjs',
-  'scripts/state/composed-services.test.mjs',
-  'scripts/state/errors.mjs',
-  'scripts/state/evidence/specialist-bundle-store.mjs',
-  'scripts/state/evidence/specialist-bundles.mjs',
-  'scripts/state/evidence/task-binding.mjs',
-  'scripts/state/evidence/task-packets.mjs',
-  'scripts/state/evidence/validation-plans.mjs',
-  'scripts/state/evidence/worker-results.mjs',
-  'scripts/state/facade.test.mjs',
-  'scripts/state/fixtures/hold-state-lock.mjs',
-  'scripts/state/git-authority.mjs',
-  'scripts/state/journal.mjs',
-  'scripts/state/locations.mjs',
-  'scripts/state/locks-and-barriers.test.mjs',
-  'scripts/state/locks.mjs',
-  'scripts/state/migrations.mjs',
-  'scripts/state/reconciliation.mjs',
-  'scripts/state/recovery.mjs',
-  'scripts/state/review-transitions.test.mjs',
-  'scripts/state/schema-migration-and-recovery.test.mjs',
-  'scripts/state/services/archive-import.mjs',
-  'scripts/state/services/archive-import.test.mjs',
-  'scripts/state/services/completion.mjs',
-  'scripts/state/services/completion.test.mjs',
-  'scripts/state/services/git-metadata.mjs',
-  'scripts/state/services/git-metadata.test.mjs',
-  'scripts/state/services/review.mjs',
-  'scripts/state/services/review.test.mjs',
-  'scripts/state/services/tasks.mjs',
-  'scripts/state/services/tasks.test.mjs',
-  'scripts/state/services/validation.mjs',
-  'scripts/state/services/validation.test.mjs',
-  'scripts/state/specialist-evidence.test.mjs',
-  'scripts/state/state-loading-and-persistence.test.mjs',
-  'scripts/state/state-store.mjs',
-  'scripts/state/state.mjs',
-  'scripts/state/task-completion.test.mjs',
-  'scripts/state/task-packets.test.mjs',
-  'scripts/state/test-support/state-harness.mjs',
-  'scripts/state/transition-policy.mjs',
-  'scripts/state/transition-policy.test.mjs',
-  'scripts/state/transitions/completion.mjs',
-  'scripts/state/transitions/completion.test.mjs',
-  'scripts/state/transitions/git-metadata.mjs',
-  'scripts/state/transitions/git-metadata.test.mjs',
-  'scripts/state/transitions/review-policy.mjs',
-  'scripts/state/transitions/review-policy.test.mjs',
-  'scripts/state/transitions/review.mjs',
-  'scripts/state/transitions/review.test.mjs',
-  'scripts/state/transitions/tasks.mjs',
-  'scripts/state/transitions/tasks.test.mjs',
-  'scripts/state/transitions/transactional-evidence.mjs',
-  'scripts/state/transitions/transactional-evidence.test.mjs',
-  'scripts/state/transitions/validation.mjs',
-  'scripts/state/transitions/validation.test.mjs',
-  'scripts/state/validation-plans.test.mjs',
-  'scripts/state/worker-evidence.test.mjs',
-  'scripts/state/worker-git-authority.test.mjs',
-  'scripts/structure.test.mjs',
-  'scripts/worktree/cli.mjs',
-  'scripts/worktree/worktree.mjs',
-  'scripts/worktree/worktree.test.mjs',
-];
 
 const EXPECTED_ADAPTERS = [
   '.codex/agents/integration-verifier.toml',
@@ -228,6 +38,7 @@ const EXPECTED_ADAPTERS = [
   'AGENTS.md',
   'CONTRIBUTING.md',
   'README.md',
+  'eslint.config.mjs',
   'package.json',
 ];
 
@@ -250,6 +61,7 @@ const EXPECTED_ADAPTER_TARGETS = {
   'AGENTS.md': ['README.md'],
   'CONTRIBUTING.md': ['README.md'],
   'README.md': ['README.md'],
+  'eslint.config.mjs': ['eslint.config.mjs'],
   'package.json': [
     'scripts/github/cli.mjs',
     'scripts/state/cli.mjs',
@@ -336,6 +148,7 @@ function filesBelow(directory) {
       const path = join(current, entry.name);
       if (entry.isDirectory()) pending.push(path);
       else if (entry.isFile()) files.push(posixRelative(directory, path));
+      else throw new Error(`non-regular canonical entry: ${posixRelative(directory, path)}`);
     }
   }
   return sorted(files);
@@ -451,7 +264,7 @@ const PRODUCTION_CONTRACT_IMPORTS = new Map([
       'validateInitialValidationSelection',
     ]],
     [contractModule('task-packet-union.mjs'), ['unionRequiredValidation']],
-    [contractModule('task-packet.mjs'), ['validateTaskPacket']],
+    [contractModule('task-packet.mjs'), ['taskPacketDigest', 'validateTaskPacket']],
     [contractModule('thread-proof.mjs'), ['taskHasCanonicalThreadCoverage']],
     [contractModule('worker-result.mjs'), [
       'validateWorkerResult', 'validateWorkerResultAgainstTask', 'workerResultDigest',
@@ -469,6 +282,7 @@ const CONTRACT_FACADE_EXPORTS = [
   'staleDiscoveryDispositionId',
   'STATE_PHASES',
   'TASK_STATUSES',
+  'taskPacketDigest',
   'taskHasCanonicalThreadCoverage',
   'unionInitialValidationSelection',
   'unionRequiredValidation',
@@ -560,8 +374,9 @@ const PRODUCTION_STATE_IMPORTS = new Map([
     ['node:fs', ['existsSync']],
     ['node:path', ['join', 'resolve']],
     [join(repositoryDirectory, 'scripts', 'lib', 'git.mjs'), ['runGit']],
-    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['validateTaskPacket']],
-    [join(scriptsDirectory, 'contracts', 'task-packet.mjs'), [importedAs('taskPacketDigest', 'internalTaskPacketDigest')]],
+    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), [
+      importedAs('taskPacketDigest', 'contractTaskPacketDigest'), 'validateTaskPacket',
+    ]],
     [stateModule('atomic-io.mjs'), ['atomicWriteText', 'canonicalSerializedJson', 'readJsonSidecar']],
     [stateModule('errors.mjs'), ['StateError']],
     [stateModule('locations.mjs'), ['stateDirectory', 'taskPacketSidecarPath']],
@@ -2985,51 +2800,49 @@ function inspectProductionStateSource(importer, source) {
   return errors;
 }
 
-function inspectStateFacadeConsumerSource(importer, source, allowedFacadeNames) {
+function inspectExactConsumerSource(importer, source, expectedImports) {
   const errors = [];
   const parsed = parseModule(importer, source);
+  for (const diagnostic of parsed.parseDiagnostics) errors.push(`syntax error: ${diagnostic.messageText}`);
   function visit(node) {
     if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
-      errors.push('state consumer dynamic import is forbidden');
+      errors.push('exact consumer dynamic import is forbidden');
     }
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
-        && node.expression.text === 'require') errors.push('state consumer CommonJS require is forbidden');
-    if (ts.isIdentifier(node) && node.text === 'createRequire') {
-      errors.push('state consumer createRequire is forbidden');
-    }
-    if (ts.isImportEqualsDeclaration(node)) {
-      errors.push('state consumer CommonJS import assignment is forbidden');
-    }
+        && node.expression.text === 'require') errors.push('exact consumer CommonJS require is forbidden');
+    if (ts.isImportEqualsDeclaration(node)) errors.push('exact consumer import assignment is forbidden');
     ts.forEachChild(node, visit);
   }
   visit(parsed);
+  const actualImports = [];
   for (const statement of parsed.statements.filter(ts.isImportDeclaration)) {
-    if (!ts.isStringLiteral(statement.moduleSpecifier)) continue;
+    if (!ts.isStringLiteral(statement.moduleSpecifier)) {
+      errors.push('exact consumer import specifier must be a string literal');
+      continue;
+    }
     const specifier = statement.moduleSpecifier.text;
-    const target = normalizedModuleTarget(importer, specifier);
-    if (!target.startsWith(`${stateModuleDirectory}${sep}`)) continue;
-    if (target !== stateModule('state.mjs')) {
-      errors.push(`state consumer must use the public facade: ${specifier}`);
-      continue;
-    }
     if (!statement.importClause) {
-      errors.push('state consumer side-effect import is forbidden');
+      errors.push(`exact consumer side-effect import is forbidden: ${specifier}`);
       continue;
     }
-    if (statement.importClause.name) errors.push('state consumer default import is forbidden');
+    if (statement.importClause.name) errors.push(`exact consumer default import is forbidden: ${specifier}`);
     if (statement.importClause.namedBindings
         && ts.isNamespaceImport(statement.importClause.namedBindings)) {
-      errors.push('state consumer namespace import is forbidden');
+      errors.push(`exact consumer namespace import is forbidden: ${specifier}`);
     }
     const bindings = namedBindings(statement.importClause);
     if (bindings === null) continue;
     if (bindings.some(({ imported, local }) => imported !== local)) {
-      errors.push('state consumer aliased import is forbidden');
+      errors.push(`exact consumer aliased import is forbidden: ${specifier}`);
     }
-    if (JSON.stringify(sorted(bindings.map(({ imported }) => imported)))
-        !== JSON.stringify(sorted(allowedFacadeNames))) {
-      errors.push('state consumer facade imports do not match the exact allowlist');
-    }
+    actualImports.push({ specifier, names: sorted(bindings.map(({ imported }) => imported)) });
+  }
+  const normalizedExpected = expectedImports.map(({ specifier, names }) => ({
+    specifier, names: sorted(names),
+  })).sort((left, right) => left.specifier.localeCompare(right.specifier));
+  actualImports.sort((left, right) => left.specifier.localeCompare(right.specifier));
+  if (JSON.stringify(actualImports) !== JSON.stringify(normalizedExpected)) {
+    errors.push('exact consumer imports do not match the ownership manifest');
   }
   return errors;
 }
@@ -3197,8 +3010,46 @@ test('ownership manifest names the complete canonical skill and no obsolete path
   const ownership = loadOwnership();
   assert.equal(ownership.schemaVersion, 1);
   assert.equal(ownership.skillRoot, '.agents/skills/pr-review-cycle');
-  assert.deepEqual(sorted(ownership.canonicalFiles), EXPECTED_CANONICAL_FILES);
-  assert.deepEqual(filesBelow(skillDirectory), EXPECTED_CANONICAL_FILES);
+  assert.deepEqual(
+    Object.keys(ownership.architecturePolicies),
+    ['privilegedStateFacadeExports', 'exactConsumers'],
+  );
+  assert.deepEqual(
+    Object.keys(ownership.architecturePolicies.privilegedStateFacadeExports),
+    ['atomicWriteJson', 'statePath'],
+  );
+  for (const [name, consumers] of Object.entries(
+    ownership.architecturePolicies.privilegedStateFacadeExports,
+  )) {
+    assert.ok(PRODUCTION_STATE_EXPORTS.get('state.mjs').includes(name));
+    assert.deepEqual(consumers, sorted(consumers));
+    assert.equal(new Set(consumers).size, consumers.length);
+    for (const consumer of consumers) {
+      assert.ok(ownership.canonicalFiles.includes(`scripts/${consumer}`), `unknown privileged consumer ${consumer}`);
+    }
+  }
+  assert.deepEqual(
+    ownership.architecturePolicies.exactConsumers.map(({ path }) => path),
+    sorted(ownership.architecturePolicies.exactConsumers.map(({ path }) => path)),
+    'exact consumer inventory must be sorted for deterministic review',
+  );
+  assert.equal(
+    new Set(ownership.architecturePolicies.exactConsumers.map(({ path }) => path)).size,
+    ownership.architecturePolicies.exactConsumers.length,
+  );
+  for (const consumer of ownership.architecturePolicies.exactConsumers) {
+    assert.deepEqual(Object.keys(consumer), ['path', 'imports']);
+    for (const dependency of consumer.imports) {
+      assert.deepEqual(Object.keys(dependency), ['specifier', 'names']);
+    }
+  }
+  assert.deepEqual(
+    ownership.canonicalFiles,
+    sorted(ownership.canonicalFiles),
+    'canonical inventory must be sorted for deterministic review',
+  );
+  assert.equal(new Set(ownership.canonicalFiles).size, ownership.canonicalFiles.length);
+  assert.deepEqual(filesBelow(skillDirectory), ownership.canonicalFiles);
   assert.deepEqual(
     sorted(ownership.permittedExternalAdapters.map((adapter) => adapter.path)),
     EXPECTED_ADAPTERS,
@@ -3243,7 +3094,7 @@ test('ownership manifest names the complete canonical skill and no obsolete path
   ]);
 
   for (const path of ownership.canonicalFiles) {
-    assert.equal(statSync(join(skillDirectory, path)).isFile(), true, `missing canonical file ${path}`);
+    assert.equal(lstatSync(join(skillDirectory, path)).isFile(), true, `missing canonical regular file ${path}`);
   }
   for (const adapter of ownership.permittedExternalAdapters) {
     assert.equal(statSync(join(repositoryDirectory, adapter.path)).isFile(), true, `missing adapter ${adapter.path}`);
@@ -3270,6 +3121,96 @@ test('ownership manifest names the complete canonical skill and no obsolete path
       || /^\.codex\/hooks\/.*\.mjs$/u.test(path))
   ));
   assert.deepEqual(unexpectedOwnedPaths, []);
+});
+
+test('repository-wide architecture guards cover imports, authority, adjacency, and documentation', () => {
+  const ownership = loadOwnership();
+  const inboundDiagnostics = scanInboundCapabilityImports({
+    repositoryDirectory,
+    files: repositoryFiles(),
+    capabilityRoot: ownership.skillRoot,
+    permittedExternalAdapters: ownership.permittedExternalAdapters,
+  });
+  assert.deepEqual(inboundDiagnostics.map(formatBoundaryDiagnostic), []);
+
+  const diagnostics = scanImportBoundaries({
+    rootDirectory: scriptsDirectory,
+    permittedNeutralDependencies: ownership.neutralSharedDependencies.map((path) => (
+      join(repositoryDirectory, path)
+    )).concat([
+      join(repositoryDirectory, '.agents/skills/aerstello-specialists/scripts/validate-registry.mjs'),
+      join(repositoryDirectory, 'scripts/lib/release-state.mjs'),
+    ]),
+    privilegedFacadeExports: ownership.architecturePolicies.privilegedStateFacadeExports,
+  });
+  assert.deepEqual(diagnostics.map(formatBoundaryDiagnostic), []);
+
+  for (const path of ownership.canonicalFiles.filter((value) => !value.includes('/fixtures/'))) {
+    assert.doesNotMatch(
+      path.split('/').at(-1),
+      /^(?:common|helper|helpers|misc|util|utils)\.mjs$/u,
+      `generic helper dumping ground is forbidden: ${path}`,
+    );
+  }
+
+  const fixtureOwners = new Map([
+    ['scripts/architecture/fixtures/', 'scripts/architecture/import-boundaries.test.mjs'],
+    ['scripts/github/archive/fixtures/', 'scripts/github/archive/fixture-integrity.test.mjs'],
+    ['scripts/state/fixtures/', 'scripts/state/locks-and-barriers.test.mjs'],
+  ]);
+  for (const path of ownership.canonicalFiles.filter((value) => value.includes('/fixtures/'))) {
+    const owner = [...fixtureOwners].find(([prefix]) => path.startsWith(prefix))?.[1];
+    assert.ok(owner, `detached immutable fixture has no declared owner: ${path}`);
+    assert.ok(ownership.canonicalFiles.includes(owner), `fixture owner is not canonical: ${owner}`);
+  }
+
+  for (const path of ownership.canonicalFiles.filter((value) => value.endsWith('.md'))) {
+    const sourcePath = join(skillDirectory, path);
+    const source = readFileSync(sourcePath, 'utf8');
+    for (const match of source.matchAll(/\[[^\]]+\]\(([^)]+)\)/gu)) {
+      const target = match[1].split('#', 1)[0];
+      if (target === '' || /^[a-z][a-z0-9+.-]*:/iu.test(target)) continue;
+      const resolved = resolve(dirname(sourcePath), decodeURIComponent(target));
+      assert.equal(existsSync(resolved), true, `unresolved documentation link ${path} -> ${target}`);
+    }
+  }
+});
+
+test('ownership manifest closes CLI, worktree, and hook dependency surfaces', () => {
+  const ownership = loadOwnership();
+  for (const consumer of ownership.architecturePolicies.exactConsumers) {
+    assert.ok(ownership.canonicalFiles.includes(consumer.path), `unknown exact consumer ${consumer.path}`);
+    assert.equal(new Set(consumer.imports.map(({ specifier }) => specifier)).size, consumer.imports.length);
+    for (const dependency of consumer.imports) {
+      assert.deepEqual(dependency.names, sorted(dependency.names));
+      assert.equal(new Set(dependency.names).size, dependency.names.length);
+    }
+    const path = join(skillDirectory, consumer.path);
+    assert.deepEqual(
+      inspectExactConsumerSource(path, readFileSync(path, 'utf8'), consumer.imports),
+      [],
+      consumer.path,
+    );
+  }
+
+  const stateCli = ownership.architecturePolicies.exactConsumers
+    .find(({ path }) => path === 'scripts/state/cli.mjs');
+  assert.match(
+    inspectExactConsumerSource(
+      stateModule('cli.mjs'),
+      "import { checkpointState } from './checkpoint.mjs';",
+      stateCli.imports,
+    ).join('\n'),
+    /do not match the ownership manifest/u,
+  );
+  assert.match(
+    inspectExactConsumerSource(
+      stateModule('cli.mjs'),
+      "const hidden = await import('./state.mjs');",
+      stateCli.imports,
+    ).join('\n'),
+    /dynamic import is forbidden/u,
+  );
 });
 
 test('production contract modules obey the exact AST dependency and façade boundaries', () => {
@@ -3379,35 +3320,6 @@ test('checkpoint, services, transitions, CLI, and hooks cannot bypass state auth
     ["const owner = require('../checkpoint.mjs');", /CommonJS require is forbidden/u],
   ]) assert.match(inspectProductionStateSource(servicePath, source).join('\n'), expected, source);
 
-  const cliPath = stateModule('cli.mjs');
-  const cliFacadeNames = [
-    'StateError', 'archiveState', 'buildTargetedValidationPlan', 'checkpointReviewRequestLimit',
-    'checkpointState', 'checkpointTaskPacketBinding', 'checkpointTaskPacketReplan',
-    'checkpointWorkerResultAcceptance', 'checkpointWorkerResultBackfill',
-    'executeTargetedValidationPlan', 'initializeState', 'loadState', 'locateState', 'migrateState',
-    'planSpecialists', 'reconcileState', 'recordSpecialistReview', 'renderRecoverySummary',
-    'specialistContext',
-  ];
-  assert.deepEqual(
-    inspectStateFacadeConsumerSource(cliPath, readFileSync(cliPath, 'utf8'), cliFacadeNames),
-    [],
-  );
-  const hookAllowlist = new Map([
-    ['pre-compact.mjs', ['StateError', 'checkpointGitMetadata']],
-    ['session-start.mjs', ['StateError', 'renderRecoverySummary']],
-    ['subagent-stop.mjs', []],
-  ]);
-  for (const [fileName, names] of hookAllowlist) {
-    const path = join(scriptsDirectory, 'hooks', fileName);
-    assert.deepEqual(inspectStateFacadeConsumerSource(path, readFileSync(path, 'utf8'), names), [], fileName);
-  }
-  for (const [source, expected] of [
-    ["import { checkpointState } from './nested/../checkpoint.mjs';", /must use the public facade/u],
-    ["import { checkpointState as save } from './state.mjs';", /aliased import is forbidden/u],
-    ["const owner = await import('./state.mjs');", /dynamic import is forbidden/u],
-    ["const owner = require('./state.mjs');", /CommonJS require is forbidden/u],
-    ["import { createRequire } from 'node:module';", /createRequire is forbidden/u],
-  ]) assert.match(inspectStateFacadeConsumerSource(cliPath, source, []).join('\n'), expected, source);
 });
 
 test('state evidence AST guards reject protected transition and checkpoint authority', () => {
@@ -4402,9 +4314,16 @@ test('hooks and npm façades target only canonical skill entrypoints', () => {
     scripts['test:tooling'],
     'npm run test:change-development && npm run test:pr-review && npm run test:specialists && node --test "scripts/**/*.test.mjs" && npm run test:e2e:structure',
   );
-  assert.equal(scripts['check:workflow'], 'npm run test:tooling');
+  assert.equal(
+    scripts['lint:pr-review'],
+    'eslint ".agents/skills/pr-review-cycle/**/*.mjs" --max-warnings 0',
+  );
+  assert.equal(scripts['check:workflow'], 'npm run lint:pr-review && npm run test:tooling');
   assert.equal(scripts.test, 'npm run test:tooling && npm run test --workspaces --if-present');
-  assert.equal(scripts['check:full'], 'npm run typecheck && npm run test && npm run build');
+  assert.equal(
+    scripts['check:full'],
+    'npm run typecheck && npm run lint:pr-review && npm run test && npm run build',
+  );
   assert.equal(scripts['test:e2e:related'], 'node scripts/run-related-e2e.mjs');
   assert.equal(scripts['test:e2e:full'], 'bddgen && playwright test');
   assert.equal(scripts['release:state'], 'node scripts/release-state.mjs --json');
@@ -4457,6 +4376,10 @@ test('root npm façades remain available from a nested workspace directory', () 
       script: 'review:worktree',
       usage: 'Usage: node .agents/skills/pr-review-cycle/scripts/worktree/cli.mjs <create|inspect|remove> [options]',
     },
+    {
+      script: 'review:status',
+      usage: 'Usage: node .agents/skills/pr-review-cycle/scripts/github/cli.mjs <command> [--pr <number>] [options]',
+    },
   ];
 
   for (const { script, usage } of facades) {
@@ -4471,6 +4394,16 @@ test('root npm façades remain available from a nested workspace directory', () 
     assert.ok(result.stdout.includes(`${usage}\n`), `${script} did not print canonical usage`);
     if (script === 'review:github') assert.match(result.stdout, /advance --pr <number>/u);
   }
+
+  assert.equal(
+    FOCUSED_GITHUB_TEST_OWNERS.get('workflow/status.test.mjs'),
+    'workflow/status.mjs',
+  );
+  assert.ok(
+    FOCUSED_GITHUB_TEST_IMPORTS.get('workflow/status.test.mjs')
+      .includes(githubModule('test-support/workflow-harness.mjs')),
+    'review:status must retain isolated workflow-adapter coverage',
+  );
 });
 
 test('schemas and operator documentation have one canonical copy', () => {
@@ -4492,7 +4425,7 @@ test('schemas and operator documentation have one canonical copy', () => {
     assert.deepEqual(matches, [`.agents/skills/pr-review-cycle/${expectedSkillPath}`]);
   }
 
-  const guideHeading = '# How the PR review cycle works';
+  const guideHeading = '# PR review-cycle operator guide';
   const guideCopies = files.filter((path) => path.endsWith('.md')
     && readRepositoryFile(path).split(/\r?\n/u).includes(guideHeading));
   assert.deepEqual(guideCopies, ['.agents/skills/pr-review-cycle/README.md']);
@@ -4540,7 +4473,7 @@ test('schemas and operator documentation have one canonical copy', () => {
   assert.match(stateGuide, /volatile GitHub evidence/u);
   assert.match(stateGuide, /not a state schema addition/u);
   assert.match(stateGuide, /ready:<pr>:<pr-node>:<head>/u);
-  assert.match(readme, /issue\s+25/iu);
+  assert.match(readme, /issue\s+#?25/iu);
 });
 
 test('external adapters link to the canonical guide without obsolete references', () => {

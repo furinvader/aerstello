@@ -5,13 +5,34 @@
     "README.md",
     "SKILL.md",
     "agents/openai.yaml",
+    "eslint.config.mjs",
     "ownership.json",
     "references/github-review.md",
+    "references/internal-architecture.md",
     "references/orchestration.md",
     "references/state-and-contracts.md",
     "schemas/pr-review-state.schema.json",
     "schemas/review-fix-result.schema.json",
     "schemas/review-fix-task.schema.json",
+    "scripts/architecture/eslint-policy.test.mjs",
+    "scripts/architecture/fixtures/create-require-alias/github/loader.mjs",
+    "scripts/architecture/fixtures/create-require-text/github/loader.mjs",
+    "scripts/architecture/fixtures/cycle/github/one.mjs",
+    "scripts/architecture/fixtures/cycle/github/two.mjs",
+    "scripts/architecture/fixtures/dynamic/github/loader.mjs",
+    "scripts/architecture/fixtures/facade/state/owner.mjs",
+    "scripts/architecture/fixtures/facade/state/state.mjs",
+    "scripts/architecture/fixtures/generic/state/helpers.mjs",
+    "scripts/architecture/fixtures/layer/contracts/shape.mjs",
+    "scripts/architecture/fixtures/layer/state/service.mjs",
+    "scripts/architecture/fixtures/malformed/state/broken.mjs",
+    "scripts/architecture/fixtures/privileged/github/consumer.mjs",
+    "scripts/architecture/fixtures/privileged/state/checkpoint.mjs",
+    "scripts/architecture/fixtures/unresolved/state/service.mjs",
+    "scripts/architecture/fixtures/valid/contracts/shape.mjs",
+    "scripts/architecture/fixtures/valid/state/service.mjs",
+    "scripts/architecture/import-boundaries.mjs",
+    "scripts/architecture/import-boundaries.test.mjs",
     "scripts/contracts/contract-identities.mjs",
     "scripts/contracts/contracts.mjs",
     "scripts/contracts/contracts.test.mjs",
@@ -196,6 +217,59 @@
     "scripts/worktree/worktree.mjs",
     "scripts/worktree/worktree.test.mjs"
   ],
+  "architecturePolicies": {
+    "privilegedStateFacadeExports": {
+      "atomicWriteJson": [
+        "worktree/worktree.mjs"
+      ],
+      "statePath": []
+    },
+    "exactConsumers": [
+      {
+        "path": "scripts/hooks/pre-compact.mjs",
+        "imports": [
+          { "specifier": "../state/state.mjs", "names": ["StateError", "checkpointGitMetadata"] }
+        ]
+      },
+      {
+        "path": "scripts/hooks/session-start.mjs",
+        "imports": [
+          { "specifier": "../state/state.mjs", "names": ["StateError", "renderRecoverySummary"] }
+        ]
+      },
+      {
+        "path": "scripts/hooks/subagent-stop.mjs",
+        "imports": [
+          { "specifier": "../contracts/contracts.mjs", "names": ["validateWorkerResult"] }
+        ]
+      },
+      {
+        "path": "scripts/state/cli.mjs",
+        "imports": [
+          { "specifier": "node:fs", "names": ["readFileSync"] },
+          { "specifier": "../../../../../scripts/lib/cli.mjs", "names": ["UsageError", "parseOptions", "writeJson"] },
+          { "specifier": "./state.mjs", "names": ["StateError", "archiveState", "buildTargetedValidationPlan", "checkpointReviewRequestLimit", "checkpointState", "checkpointTaskPacketBinding", "checkpointTaskPacketReplan", "checkpointWorkerResultAcceptance", "checkpointWorkerResultBackfill", "executeTargetedValidationPlan", "initializeState", "loadState", "locateState", "migrateState", "planSpecialists", "reconcileState", "recordSpecialistReview", "renderRecoverySummary", "specialistContext"] }
+        ]
+      },
+      {
+        "path": "scripts/worktree/cli.mjs",
+        "imports": [
+          { "specifier": "../../../../../scripts/lib/cli.mjs", "names": ["UsageError", "parseOptions", "writeJson"] },
+          { "specifier": "./worktree.mjs", "names": ["createTaskWorktree", "inspectTaskWorktree", "removeTaskWorktree"] },
+          { "specifier": "../state/state.mjs", "names": ["StateError"] }
+        ]
+      },
+      {
+        "path": "scripts/worktree/worktree.mjs",
+        "imports": [
+          { "specifier": "node:fs", "names": ["existsSync", "mkdirSync", "readFileSync"] },
+          { "specifier": "node:path", "names": ["dirname", "join", "resolve"] },
+          { "specifier": "../../../../../scripts/lib/git.mjs", "names": ["gitText", "resolveCommit", "runGit"] },
+          { "specifier": "../state/state.mjs", "names": ["StateError", "atomicWriteJson", "gitCommonDirectory", "reviewRoot"] }
+        ]
+      }
+    ]
+  },
   "permittedExternalAdapters": [
     {
       "path": ".codex/agents/integration-verifier.toml",
@@ -234,6 +308,12 @@
       "path": "CONTRIBUTING.md",
       "targets": [
         "README.md"
+      ]
+    },
+    {
+      "path": "eslint.config.mjs",
+      "targets": [
+        "eslint.config.mjs"
       ]
     },
     {

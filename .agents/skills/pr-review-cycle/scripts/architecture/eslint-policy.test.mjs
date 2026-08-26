@@ -1,0 +1,289 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { ESLint } from 'eslint';
+
+import canonicalPolicy from '../../eslint.config.mjs';
+import rootPolicy from '../../../../../eslint.config.mjs';
+
+const repositoryDirectory = fileURLToPath(new URL('../../../../..', import.meta.url));
+const canonicalConfig = join(
+  repositoryDirectory,
+  '.agents/skills/pr-review-cycle/eslint.config.mjs',
+);
+const rootConfig = join(repositoryDirectory, 'eslint.config.mjs');
+const productionProbe = join(
+  repositoryDirectory,
+  '.agents/skills/pr-review-cycle/scripts/github/policy-probe.mjs',
+);
+const compositionRootProbes = [
+  join(repositoryDirectory, '.agents/skills/pr-review-cycle/scripts/hooks/policy-probe.mjs'),
+  join(repositoryDirectory, '.agents/skills/pr-review-cycle/scripts/state/cli.mjs'),
+  join(repositoryDirectory, '.agents/skills/pr-review-cycle/scripts/worktree/cli.mjs'),
+];
+
+const eslint = new ESLint({
+  cwd: repositoryDirectory,
+  overrideConfigFile: canonicalConfig,
+  warnIgnored: false,
+});
+const rootEslint = new ESLint({
+  cwd: repositoryDirectory,
+  overrideConfigFile: rootConfig,
+  warnIgnored: false,
+});
+const discoveredEslint = new ESLint({
+  cwd: repositoryDirectory,
+  warnIgnored: false,
+});
+
+async function lint(source, filePath = productionProbe) {
+  const [result] = await eslint.lintText(source, { filePath });
+  return result?.messages ?? [];
+}
+
+async function lintWith(engine, source, filePath = productionProbe) {
+  const [result] = await engine.lintText(source, { filePath });
+  return result?.messages ?? [];
+}
+
+test('the root ESLint adapter re-exports the exact canonical policy', () => {
+  assert.strictEqual(rootPolicy, canonicalPolicy);
+});
+
+test('auto-discovery applies the canonical production policy from the nested config', async () => {
+  const [result] = await discoveredEslint.lintText('const require = null;\n', {
+    filePath: productionProbe,
+  });
+  assert.equal(result?.messages[0]?.ruleId, 'no-restricted-syntax');
+});
+
+test('canonical and root-adapter loading apply the production policy only within the capability', async () => {
+  const unrelatedProbes = [
+    join(repositoryDirectory, 'scripts/release-state.mjs'),
+    join(repositoryDirectory, '.agents/skills/change-development/scripts/policy-probe.mjs'),
+  ];
+  for (const engine of [eslint, rootEslint]) {
+    assert.equal(
+      (await lintWith(engine, 'const require = null;\n'))[0]?.ruleId,
+      'no-restricted-syntax',
+    );
+    for (const filePath of unrelatedProbes) {
+      assert.deepEqual(await lintWith(engine, 'const require = null;\n', filePath), []);
+    }
+  }
+});
+
+test('production PR-review modules satisfy the canonical source policy', async () => {
+  const results = await eslint.lintFiles([
+    '.agents/skills/pr-review-cycle/**/*.mjs',
+  ]);
+  assert.deepEqual(
+    results.flatMap((result) => result.messages.map((message) => ({
+      filePath: result.filePath,
+      ruleId: message.ruleId,
+      severity: message.severity,
+    }))),
+    [],
+  );
+});
+
+test('static imports and re-exports cannot expose module or process APIs', async () => {
+  const sources = [
+    "import moduleApi from 'module';\nexport { moduleApi };\n",
+    "export * from 'node:module';\n",
+    "import processApi from 'process';\nexport { processApi };\n",
+    "export { default as processApi } from 'node:process';\n",
+  ];
+  for (const source of sources) {
+    assert.equal((await lint(source))[0]?.ruleId, 'no-restricted-imports');
+  }
+});
+
+test('static imports and re-exports cannot expose Node VM APIs', async () => {
+  for (const modulePath of ['vm', 'node:vm']) {
+    const sources = [
+      `import '${modulePath}';\n`,
+      `import vmApi from '${modulePath}';\nexport { vmApi };\n`,
+      `import * as vmApi from '${modulePath}';\nexport { vmApi };\n`,
+      `import { Script } from '${modulePath}';\nexport { Script };\n`,
+      `export * from '${modulePath}';\n`,
+      `export { Script } from '${modulePath}';\n`,
+    ];
+    for (const source of sources) {
+      assert.equal((await lint(source))[0]?.ruleId, 'no-restricted-imports');
+    }
+  }
+});
+
+test('VM-like safe module specifiers remain available', async () => {
+  assert.deepEqual(await lint([
+    "import fs from 'node:fs';",
+    "import localVm from './vm.mjs';",
+    "import browserVm from 'vm-browserify';",
+    "import scopedVm from '@scope/vm';",
+    'export { fs, localVm, browserVm, scopedVm };',
+  ].join('\n')), []);
+});
+
+test('dynamic code and hidden loader identifiers fail closed in dead or shadowed code', async () => {
+  const cases = [
+    "if (false) import('./hidden.mjs');\n",
+    'function local(require) { return require; }\n',
+    "globalThis.eval('hidden');\n",
+    'function Function() {}\n',
+    'const getBuiltinModule = null;\n',
+    'const createRequire = null;\n',
+  ];
+  for (const source of cases) {
+    assert.equal((await lint(source))[0]?.ruleId, 'no-restricted-syntax');
+  }
+});
+
+test('Reflect cannot reacquire dynamic-code or hidden-loader capabilities', async () => {
+  const cases = [
+    ["Reflect.get(globalThis, 'eval')('hidden');\n", 'no-restricted-syntax'],
+    ["Reflect?.get(process, 'getBuiltinModule')('node:module');\n", 'no-restricted-syntax'],
+    ["if (false) Reflect.get(globalThis, 'Function');\n", 'no-restricted-syntax'],
+    ['function Reflect() {}\n', 'no-restricted-syntax'],
+    ["globalThis.Reflect.get(globalThis, 'eval')('hidden');\n", 'no-restricted-syntax'],
+    ["globalThis['Ref' + 'lect'].get(module, 'require')('./hidden.mjs');\n", 'pr-review/computed-loader-access'],
+    ["globalThis[`Ref${'lect'}`].get(process, 'getBuiltinModule')('node:module');\n", 'pr-review/computed-loader-access'],
+  ];
+  for (const [source, ruleId] of cases) {
+    assert.equal((await lint(source))[0]?.ruleId, ruleId, source);
+  }
+});
+
+test('ordinary reflection names, object introspection, and Reflect string data remain available', async () => {
+  assert.deepEqual(await lint([
+    "const reflector = Object.getOwnPropertyDescriptor(options, 'selected');",
+    "const capabilityName = 'Reflect';",
+    'const reflected = reflector?.value;',
+    'export { capabilityName, reflected };',
+  ].join('\n')), []);
+});
+
+test('computed access cannot reconstruct dynamic code or hidden module loaders', async () => {
+  const cases = [
+    "globalThis.process['getBuiltin' + 'Module']('node:module')['create' + 'Require'](import.meta.url);\n",
+    "process['get' + 'BuiltinModule']('node:module');\n",
+    "process?.[`get${'Builtin'}Module`]('node:module');\n",
+    "globalThis.process?.['create' + `Require`](import.meta.url);\n",
+    "module['re' + 'quire']('./hidden.mjs');\n",
+    "value['e' + 'val']('hidden');\n",
+    "value[`Func${'tion'}`]('hidden');\n",
+    'process.argv[propertyName];\n',
+    'globalThis?.[propertyName];\n',
+    'module?.exports[propertyName];\n',
+  ];
+  for (const source of cases) {
+    assert.equal(
+      (await lint(source))[0]?.ruleId,
+      'pr-review/computed-loader-access',
+      source,
+    );
+  }
+});
+
+test('computed-key controls remain available outside privileged loader access', async () => {
+  assert.deepEqual(await lint([
+    "const expected = options['expected-revision'];",
+    'const selected = value[field];',
+    'const previous = historyIndexes[index - 1];',
+    'const executable = process.argv[1];',
+    'export { expected, selected, previous, executable };',
+  ].join('\n')), []);
+});
+
+test('every static getBuiltinModule name is rejected without overmatching templates', async () => {
+  for (const source of [
+    "const value = 'getBuiltinModule';\n",
+    'const value = `getBuiltinModule`;\n',
+    "const value = { 'getBuiltinModule': true };\n",
+  ]) {
+    assert.equal((await lint(source))[0]?.ruleId, 'no-restricted-syntax');
+  }
+
+  assert.deepEqual(await lint([
+    "const name = 'BuiltinModule';",
+    'const interpolated = `get${name}`;',
+    'const unrelated = `getBuiltinModules`;',
+    'export { interpolated, unrelated };',
+  ].join('\n')), []);
+});
+
+test('inline configuration cannot suppress the production policy', async () => {
+  const messages = await lint([
+    '/* eslint-disable no-restricted-syntax */',
+    'const require = null;',
+  ].join('\n'));
+  assert.equal(messages.some(({ severity }) => severity === 1), true);
+  assert.equal(messages.some(({ ruleId }) => ruleId === 'no-restricted-syntax'), true);
+});
+
+test('production modules named eslint.config.mjs remain inside production scope', async () => {
+  const nestedConfig = join(dirname(productionProbe), 'eslint.config.mjs');
+  assert.equal(
+    (await lint('const require = null;\n', nestedConfig))[0]?.ruleId,
+    'no-restricted-syntax',
+  );
+});
+
+test('executable composition roots cannot expose ESM exports', async () => {
+  const exportForms = [
+    'export const exposed = true;\n',
+    'export default function exposed() {}\n',
+    "export * from './private-authority.mjs';\n",
+  ];
+  for (const engine of [eslint, rootEslint]) {
+    for (const filePath of compositionRootProbes) {
+      for (const source of exportForms) {
+        assert.equal(
+          (await lintWith(engine, source, filePath))[0]?.ruleId,
+          'no-restricted-syntax',
+          `${filePath}: ${source}`,
+        );
+      }
+    }
+  }
+});
+
+test('composition-root overrides retain the complete production source policy', async () => {
+  for (const filePath of compositionRootProbes) {
+    assert.equal(
+      (await lint('const require = null;\n', filePath))[0]?.ruleId,
+      'no-restricted-syntax',
+      filePath,
+    );
+  }
+});
+
+test('facades and ordinary production modules may still expose ESM exports', async () => {
+  const permittedPaths = [
+    join(repositoryDirectory, '.agents/skills/pr-review-cycle/scripts/worktree/worktree.mjs'),
+    productionProbe,
+  ];
+  for (const filePath of permittedPaths) {
+    assert.deepEqual(await lint([
+      'export const available = true;',
+      'export default function availableByDefault() {}',
+      "export * from './public-module.mjs';",
+    ].join('\n'), filePath), []);
+  }
+});
+
+test('tests, fixtures, test-support, and canonical configuration remain outside production scope', async () => {
+  const excluded = [
+    join(dirname(productionProbe), 'policy-probe.test.mjs'),
+    join(dirname(productionProbe), 'fixtures/policy-probe.mjs'),
+    join(dirname(productionProbe), 'test-support/policy-probe.mjs'),
+    canonicalConfig,
+    join(repositoryDirectory, 'eslint.config.mjs'),
+  ];
+  for (const filePath of excluded) {
+    assert.deepEqual(await lint('const require = null;\n', filePath), []);
+  }
+});
