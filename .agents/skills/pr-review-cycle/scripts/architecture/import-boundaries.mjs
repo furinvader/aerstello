@@ -146,12 +146,15 @@ function executableModuleLoad(node) {
   if (ts.isCallExpression(node)
       && (node.expression.kind === ts.SyntaxKind.ImportKeyword
         || directCommonJsLoader(node.expression))) {
-    return { specifier: node.arguments.length > 0 ? literalModuleSpecifier(node.arguments[0]) : null };
+    return {
+      esmUrl: node.expression.kind === ts.SyntaxKind.ImportKeyword,
+      specifier: node.arguments.length > 0 ? literalModuleSpecifier(node.arguments[0]) : null,
+    };
   }
   if (ts.isImportEqualsDeclaration(node)
       && ts.isExternalModuleReference(node.moduleReference)
       && node.moduleReference.expression !== undefined) {
-    return { specifier: literalModuleSpecifier(node.moduleReference.expression) };
+    return { esmUrl: false, specifier: literalModuleSpecifier(node.moduleReference.expression) };
   }
   return null;
 }
@@ -241,7 +244,7 @@ export function scanInboundCapabilityImports({
   )));
   const diagnostics = [];
 
-  function inspectSpecifier(sourceFile, node, importer, specifier) {
+  function inspectSpecifier(sourceFile, node, importer, specifier, { esmUrl = false } = {}) {
     if (specifier.startsWith('#')) {
       diagnostics.push(diagnostic(
         sourceFile,
@@ -254,7 +257,34 @@ export function scanInboundCapabilityImports({
       return;
     }
     if (!specifier.startsWith('.')) return;
-    const target = posixPath.normalize(posixPath.join(posixPath.dirname(importer), specifier));
+    let classifiedSpecifier = specifier;
+    if (esmUrl) {
+      if (/%(?:2f|5c)/iu.test(specifier)) {
+        diagnostics.push(diagnostic(
+          sourceFile,
+          node,
+          'invalid-esm-module-specifier-encoding',
+          importer,
+          specifier,
+          'relative ESM module specifier must not encode a path separator',
+        ));
+        return;
+      }
+      try {
+        classifiedSpecifier = decodeURIComponent(specifier);
+      } catch {
+        diagnostics.push(diagnostic(
+          sourceFile,
+          node,
+          'invalid-esm-module-specifier-encoding',
+          importer,
+          specifier,
+          'relative ESM module specifier must use valid percent and UTF-8 encoding',
+        ));
+        return;
+      }
+    }
+    const target = posixPath.normalize(posixPath.join(posixPath.dirname(importer), classifiedSpecifier));
     if (!isPathAtOrBelow(target, protectedRoot)) return;
     if (permittedEdges.has(`${importer}\0${target}`)) return;
     diagnostics.push(diagnostic(
@@ -278,7 +308,7 @@ export function scanInboundCapabilityImports({
     ));
   }
 
-  function inspectExecutableSpecifier(sourceFile, node, importer, specifier) {
+  function inspectExecutableSpecifier(sourceFile, node, importer, specifier, { esmUrl }) {
     if (specifier === null) {
       diagnostics.push(diagnostic(
         sourceFile,
@@ -311,7 +341,7 @@ export function scanInboundCapabilityImports({
       ));
       return;
     }
-    inspectSpecifier(sourceFile, node, importer, specifier);
+    inspectSpecifier(sourceFile, node, importer, specifier, { esmUrl });
   }
 
   for (const importer of files) {
@@ -351,7 +381,7 @@ export function scanInboundCapabilityImports({
       const moduleSpecifierText = moduleSpecifier && ts.isStringLiteral(moduleSpecifier)
         ? moduleSpecifier.text : null;
       if (moduleSpecifierText !== null) {
-        inspectSpecifier(sourceFile, statement, importer, moduleSpecifierText);
+        inspectSpecifier(sourceFile, statement, importer, moduleSpecifierText, { esmUrl: true });
       }
       if (ts.isImportDeclaration(statement)
           && statement.importClause
@@ -413,7 +443,7 @@ export function scanInboundCapabilityImports({
     }
     function visit(node) {
       const load = executableModuleLoad(node);
-      if (load !== null) inspectExecutableSpecifier(sourceFile, node, importer, load.specifier);
+      if (load !== null) inspectExecutableSpecifier(sourceFile, node, importer, load.specifier, load);
       if (ts.isBindingElement(node)
           && (MODULE_LOADER_NAMES.has((node.propertyName ?? node.name).getText(sourceFile))
             || MODULE_LOADER_NAMES.has(node.name.getText(sourceFile)))) {
