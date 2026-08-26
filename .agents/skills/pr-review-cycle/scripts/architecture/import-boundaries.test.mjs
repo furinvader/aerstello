@@ -335,7 +335,9 @@ test('inbound scanner permits exact adapters and ignores unrelated static edges'
     'eslint.config.mjs': "export { default } from './.agents/skills/pr-review-cycle/eslint.config.mjs';\n",
     'scripts/consumer.cjs': [
       "import 'node:fs';",
+      "export { version } from 'typescript';",
       "export * from '@scope/package';",
+      "export * from 'custom:package';",
       "export * from './local.cjs';",
     ].join('\n'),
     'scripts/ignored.json': 'not JavaScript',
@@ -352,6 +354,35 @@ test('inbound scanner permits exact adapters and ignores unrelated static edges'
       capabilityRoot: '.agents/skills/pr-review-cycle',
       permittedExternalAdapters: [{ path: 'eslint.config.mjs', targets: ['eslint.config.mjs'] }],
     }), []);
+  });
+});
+
+test('inbound scanner rejects absolute filesystem specifiers in static declarations', () => {
+  withSources({
+    'scripts/absolute-static.mjs': [
+      "import '/proc/self/cwd/.agents/skills/pr-review-cycle/scripts/state/checkpoint.mjs';",
+      String.raw`export * from 'C:\\private\\checkpoint.mjs';`,
+      String.raw`export * as privateModule from '\\\\server\\share\\checkpoint.mjs';`,
+      String.raw`export { state } from '\\private\\state.mjs';`,
+      "export { default } from 'FiLe:///private/checkpoint.mjs';",
+    ].join('\n'),
+  }, (repositoryDirectory) => {
+    const diagnostics = scanInboundCapabilityImports({
+      repositoryDirectory,
+      files: ['scripts/absolute-static.mjs'],
+      capabilityRoot: '.agents/skills/pr-review-cycle',
+      permittedExternalAdapters: [],
+    });
+    assert.deepEqual(diagnostics.map(({ rule, target }) => ({ rule, target })), [
+      {
+        rule: 'absolute-filesystem-import',
+        target: '/proc/self/cwd/.agents/skills/pr-review-cycle/scripts/state/checkpoint.mjs',
+      },
+      { rule: 'absolute-filesystem-import', target: String.raw`C:\private\checkpoint.mjs` },
+      { rule: 'absolute-filesystem-import', target: String.raw`\\server\share\checkpoint.mjs` },
+      { rule: 'absolute-filesystem-import', target: String.raw`\private\state.mjs` },
+      { rule: 'absolute-filesystem-import', target: 'FiLe:///private/checkpoint.mjs' },
+    ]);
   });
 });
 
@@ -731,6 +762,7 @@ test('inbound scanner rejects opaque and unsafe direct executable specifiers', (
     'scripts/unsafe.cts': [
       "import('/private/checkpoint.mjs');",
       "require('FiLe:///private/checkpoint.mjs');",
+      "module.require('/private/checkpoint.mjs');",
       "module.require('DATA:text/javascript,export%20default%201');",
       String.raw`import state = require('C:\\private\\checkpoint.mjs');`,
     ].join('\n'),
@@ -746,7 +778,7 @@ test('inbound scanner rejects opaque and unsafe direct executable specifiers', (
       'inline-data-import',
       'opaque-executable-module-specifier',
     ]);
-    assert.equal(diagnostics.filter(({ rule }) => rule === 'absolute-filesystem-import').length, 3);
+    assert.equal(diagnostics.filter(({ rule }) => rule === 'absolute-filesystem-import').length, 4);
     assert.equal(diagnostics.filter(({ rule }) => rule === 'inline-data-import').length, 1);
     assert.equal(diagnostics.filter(({ rule }) => rule === 'opaque-executable-module-specifier').length, 5);
   });

@@ -256,6 +256,17 @@ export function scanInboundCapabilityImports({
       ));
       return;
     }
+    if (isAbsoluteFilesystemSpecifier(specifier)) {
+      diagnostics.push(diagnostic(
+        sourceFile,
+        node,
+        'absolute-filesystem-import',
+        importer,
+        specifier,
+        'static module specifier must not use an absolute filesystem path or file URL',
+      ));
+      return;
+    }
     if (!specifier.startsWith('.')) return;
     let classifiedSpecifier = specifier;
     if (esmUrl) {
