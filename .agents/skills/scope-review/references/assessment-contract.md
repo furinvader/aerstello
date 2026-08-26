@@ -9,7 +9,7 @@ The caller prepares one normalized packet and remains responsible for source cap
 Include:
 
 - the phase and exact source type, identity, and digest;
-- the accepted plan digest, ordered amendment digests, and task-packet digest when those artifacts exist; `planDigest` and `taskPacketDigest` are null before their respective artifacts exist and must never contain placeholders, amendment digests must remain empty until an accepted-plan digest exists, and `source-draft` requires both downstream digests to be null and the amendment list to be empty;
+- the accepted plan digest, ordered amendment digests, and task-packet digest when those artifacts exist; `planDigest` and `taskPacketDigest` are null before their respective artifacts exist and must never contain placeholders, task-packet identity can exist only after accepted-plan identity, amendment digests must remain empty until an accepted-plan digest exists, and `source-draft` requires both downstream digests to be null and the amendment list to be empty;
 - the subject digest and, for `task`, `integrated-head`, and `review-finding`, its exact Git SHA; phase never implies that a plan or task-packet artifact exists, so their digests remain null-capable and missing artifacts require `insufficient-evidence`;
 - the semantic `acceptedScope` candidate during `plan`, even before an accepted-plan digest exists; only `source-draft` uses null because no accepted-scope candidate exists yet;
 - source-required criteria, source non-goals, accepted criteria and invariants, and optional implementation guidance in separate stable-ID lists;

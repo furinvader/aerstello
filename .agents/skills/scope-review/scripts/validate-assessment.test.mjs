@@ -1074,19 +1074,39 @@ test('source and plan drafts use null identities instead of invented artifact di
   );
 });
 
+test('task-packet identity requires an accepted-plan identity in every assessment phase', () => {
+  for (const phase of ['plan', 'task', 'integrated-head', 'review-finding']) {
+    const staleBinding = binding({
+      phase,
+      subject: phase === 'plan'
+        ? { digest: `sha256:${B}`, sha: null }
+        : binding().subject,
+      planDigest: null,
+      amendmentDigests: [],
+      taskPacketDigest: `sha256:${A}`,
+    });
+    const stalePacket = packet({ binding: staleBinding });
+    const staleResult = result('within-scope', { binding: staleBinding });
+
+    assert.notDeepEqual(validateAssessmentPacket(stalePacket), [], `${phase}: packet`);
+    assert.notDeepEqual(validateScopeAssessmentResult(staleResult), [], `${phase}: result`);
+    assert.notDeepEqual(
+      validateScopeAssessmentApplicability(stalePacket, staleResult),
+      [],
+      `${phase}: applicability`,
+    );
+  }
+});
+
 test('code phases require insufficient evidence when plan or task artifacts are absent', () => {
   const artifactCases = [
     {
       label: 'plan',
-      overrides: { planDigest: null, amendmentDigests: [] },
+      overrides: { planDigest: null, amendmentDigests: [], taskPacketDigest: null },
     },
     {
       label: 'task packet',
       overrides: { taskPacketDigest: null },
-    },
-    {
-      label: 'plan and task packet',
-      overrides: { planDigest: null, amendmentDigests: [], taskPacketDigest: null },
     },
   ];
 
@@ -1124,12 +1144,11 @@ test('code phases require insufficient evidence when plan or task artifacts are 
 
 test('missing code artifacts preserve insufficient-evidence material representability', () => {
   const artifactCases = [
-    { label: 'plan', overrides: { planDigest: null, amendmentDigests: [] } },
-    { label: 'task packet', overrides: { taskPacketDigest: null } },
     {
-      label: 'plan and task packet',
+      label: 'plan',
       overrides: { planDigest: null, amendmentDigests: [], taskPacketDigest: null },
     },
+    { label: 'task packet', overrides: { taskPacketDigest: null } },
   ];
   const unsupportedSurface = 'unmapped-material-subsystem';
   const unsupportedMapping = {

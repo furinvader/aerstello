@@ -160,7 +160,13 @@
         },
         {
           "if": { "type": "object", "properties": { "planDigest": { "type": "null" } }, "required": ["planDigest"] },
-          "then": { "type": "object", "properties": { "amendmentDigests": { "type": "array", "maxItems": 0 } } }
+          "then": {
+            "type": "object",
+            "properties": {
+              "amendmentDigests": { "type": "array", "maxItems": 0 },
+              "taskPacketDigest": { "type": "null" }
+            }
+          }
         }
       ]
     },

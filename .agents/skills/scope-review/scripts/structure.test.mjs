@@ -166,6 +166,7 @@ test('documentation links resolve and defines invocation and authority boundarie
   assert.match(contract, /minimal sufficient closure/u);
   assert.match(contract, /authorized, unauthorized, and deferred implementation shape/u);
   assert.match(contract, /only `source-draft` uses null/u);
+  assert.match(contract, /task-packet identity can exist only after accepted-plan identity/u);
   assert.match(contract, /paths, dependencies, public surfaces, persistent surfaces, subsystems/u);
   assert.match(contract, /independent workstream, new criterion, non-goal reversal, sensitive policy/u);
   assert.match(contract, /without authorizing either/u);
@@ -196,6 +197,15 @@ test('documentation links resolve and defines invocation and authority boundarie
   assert.match(contract, /adjacent helper/u);
   assert.match(contract, /new subsystem/u);
   assert.match(contract, /insufficient-evidence/u);
+});
+
+test('binding schema preserves accepted-plan before task-packet artifact order', () => {
+  const schema = JSON.parse(readFileSync(join(skillDirectory, 'schemas/scope-assessment.schema.json'), 'utf8'));
+  const missingPlanRule = schema.$defs.binding.allOf.find(
+    ({ if: condition }) => condition?.properties?.planDigest?.type === 'null',
+  );
+  assert.equal(missingPlanRule.then.properties.amendmentDigests.maxItems, 0);
+  assert.equal(missingPlanRule.then.properties.taskPacketDigest.type, 'null');
 });
 
 test('minor verdict schema permits only exact speculative-removal correspondence', () => {
