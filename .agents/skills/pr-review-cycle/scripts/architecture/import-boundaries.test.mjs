@@ -380,3 +380,104 @@ test('inbound scanner fails closed on opaque outside package import aliases', ()
     ]);
   });
 });
+
+test('inbound scanner rejects literal dynamic imports at any AST depth', () => {
+  withSources({
+    'scripts/consumer.mjs': [
+      "await import('../.agents/skills/pr-review-cycle/scripts/state/checkpoint.mjs');",
+      'async function nested() {',
+      '  return import(`../.agents/skills/pr-review-cycle/scripts/github/github.mjs`);',
+      '}',
+    ].join('\n'),
+  }, (repositoryDirectory) => {
+    const diagnostics = scanInboundCapabilityImports({
+      repositoryDirectory,
+      files: ['scripts/consumer.mjs'],
+      capabilityRoot: '.agents/skills/pr-review-cycle',
+      permittedExternalAdapters: [],
+    });
+    assert.deepEqual(diagnostics.map(({ rule, target }) => ({ rule, target })), [
+      {
+        rule: 'undeclared-capability-import',
+        target: '.agents/skills/pr-review-cycle/scripts/state/checkpoint.mjs',
+      },
+      {
+        rule: 'undeclared-capability-import',
+        target: '.agents/skills/pr-review-cycle/scripts/github/github.mjs',
+      },
+    ]);
+  });
+});
+
+test('inbound scanner rejects direct CommonJS loader spellings and import-equals', () => {
+  withSources({
+    'scripts/commonjs.cts': [
+      "require('../.agents/skills/pr-review-cycle/scripts/state/checkpoint.mjs');",
+      "require?.(`../.agents/skills/pr-review-cycle/scripts/state/state.mjs`);",
+      "module.require('../.agents/skills/pr-review-cycle/scripts/github/github.mjs');",
+      "module?.require?.('../.agents/skills/pr-review-cycle/scripts/contracts/contracts.mjs');",
+      "module['require']('../.agents/skills/pr-review-cycle/scripts/worktree/worktree.mjs');",
+      "module?.['require']?.(`../.agents/skills/pr-review-cycle/scripts/paths.mjs`);",
+      "import state = require('../.agents/skills/pr-review-cycle/scripts/state/state.mjs');",
+      'import github = require(`../.agents/skills/pr-review-cycle/scripts/github/github.mjs`);',
+    ].join('\n'),
+  }, (repositoryDirectory) => {
+    const diagnostics = scanInboundCapabilityImports({
+      repositoryDirectory,
+      files: ['scripts/commonjs.cts'],
+      capabilityRoot: '.agents/skills/pr-review-cycle',
+      permittedExternalAdapters: [],
+    });
+    assert.equal(diagnostics.length, 8);
+    assert.ok(diagnostics.every(({ rule }) => rule === 'undeclared-capability-import'));
+  });
+});
+
+test('inbound scanner applies aliases and exact adapters to executable literal edges', () => {
+  withSources({
+    'scripts/adapter.mjs': "await import('../.agents/skills/pr-review-cycle/eslint.config.mjs');\n",
+    'scripts/aliases.ts': [
+      "import('#dynamic');",
+      "require(`#require`);",
+      "module.require('#module');",
+      "import state = require('#equals');",
+    ].join('\n'),
+  }, (repositoryDirectory) => {
+    const diagnostics = scanInboundCapabilityImports({
+      repositoryDirectory,
+      files: ['scripts/adapter.mjs', 'scripts/aliases.ts'],
+      capabilityRoot: '.agents/skills/pr-review-cycle',
+      permittedExternalAdapters: [{ path: 'scripts/adapter.mjs', targets: ['eslint.config.mjs'] }],
+    });
+    assert.deepEqual(diagnostics.map(({ rule, target }) => ({ rule, target })), [
+      { rule: 'opaque-package-import-alias', target: '#dynamic' },
+      { rule: 'opaque-package-import-alias', target: '#require' },
+      { rule: 'opaque-package-import-alias', target: '#module' },
+      { rule: 'opaque-package-import-alias', target: '#equals' },
+    ]);
+  });
+});
+
+test('inbound scanner ignores unrelated and non-direct executable load forms', () => {
+  withSources({
+    'scripts/controls.cjs': [
+      "import('node:fs');",
+      "require('@scope/package');",
+      "module.require('./local.cjs');",
+      "require.resolve('../.agents/skills/pr-review-cycle/scripts/state/checkpoint.mjs');",
+      "module.require.call(null, '../.agents/skills/pr-review-cycle/scripts/state/checkpoint.mjs');",
+      "loader('../.agents/skills/pr-review-cycle/scripts/state/checkpoint.mjs');",
+      "createRequire(import.meta.url)('../.agents/skills/pr-review-cycle/scripts/state/checkpoint.mjs');",
+      "getBuiltinModule('module').createRequire(import.meta.url)('../.agents/skills/pr-review-cycle/scripts/state/checkpoint.mjs');",
+      'import(`../.agents/skills/pr-review-cycle/${name}.mjs`);',
+    ].join('\n'),
+    'scripts/local.cjs': 'module.exports = {};\n',
+  }, (repositoryDirectory) => {
+    assert.deepEqual(scanInboundCapabilityImports({
+      repositoryDirectory,
+      files: ['scripts/controls.cjs', 'scripts/local.cjs'],
+      capabilityRoot: '.agents/skills/pr-review-cycle',
+      permittedExternalAdapters: [],
+    }), []);
+  });
+});

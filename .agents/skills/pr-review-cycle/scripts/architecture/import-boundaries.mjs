@@ -115,6 +115,41 @@ function repositoryScriptKind(path) {
   return ts.ScriptKind.JS;
 }
 
+function literalModuleSpecifier(node) {
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
+  return null;
+}
+
+function directCommonJsLoader(expression) {
+  if (ts.isIdentifier(expression)) return expression.text === 'require';
+  if (ts.isPropertyAccessExpression(expression)) {
+    return ts.isIdentifier(expression.expression)
+      && expression.expression.text === 'module'
+      && expression.name.text === 'require';
+  }
+  if (ts.isElementAccessExpression(expression)) {
+    return ts.isIdentifier(expression.expression)
+      && expression.expression.text === 'module'
+      && expression.argumentExpression !== undefined
+      && literalModuleSpecifier(expression.argumentExpression) === 'require';
+  }
+  return false;
+}
+
+function executableModuleSpecifier(node) {
+  if (ts.isCallExpression(node)
+      && (node.expression.kind === ts.SyntaxKind.ImportKeyword
+        || directCommonJsLoader(node.expression))) {
+    return node.arguments.length > 0 ? literalModuleSpecifier(node.arguments[0]) : null;
+  }
+  if (ts.isImportEqualsDeclaration(node)
+      && ts.isExternalModuleReference(node.moduleReference)
+      && node.moduleReference.expression !== undefined) {
+    return literalModuleSpecifier(node.moduleReference.expression);
+  }
+  return null;
+}
+
 export function scanInboundCapabilityImports({
   repositoryDirectory,
   files,
@@ -128,6 +163,32 @@ export function scanInboundCapabilityImports({
     ))
   )));
   const diagnostics = [];
+
+  function inspectSpecifier(sourceFile, node, importer, specifier) {
+    if (specifier.startsWith('#')) {
+      diagnostics.push(diagnostic(
+        sourceFile,
+        node,
+        'opaque-package-import-alias',
+        importer,
+        specifier,
+        'outside package import aliases are opaque to the capability boundary scan',
+      ));
+      return;
+    }
+    if (!specifier.startsWith('.')) return;
+    const target = posixPath.normalize(posixPath.join(posixPath.dirname(importer), specifier));
+    if (!isPathAtOrBelow(target, protectedRoot)) return;
+    if (permittedEdges.has(`${importer}\0${target}`)) return;
+    diagnostics.push(diagnostic(
+      sourceFile,
+      node,
+      'undeclared-capability-import',
+      importer,
+      target,
+      'outside source must use an exact declared external adapter edge',
+    ));
+  }
 
   for (const importer of files) {
     const extension = posixPath.extname(importer);
@@ -145,31 +206,14 @@ export function scanInboundCapabilityImports({
       const moduleSpecifier = (ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement))
         ? statement.moduleSpecifier : null;
       if (!moduleSpecifier || !ts.isStringLiteral(moduleSpecifier)) continue;
-      const specifier = moduleSpecifier.text;
-      if (specifier.startsWith('#')) {
-        diagnostics.push(diagnostic(
-          sourceFile,
-          statement,
-          'opaque-package-import-alias',
-          importer,
-          specifier,
-          'outside package import aliases are opaque to the capability boundary scan',
-        ));
-        continue;
-      }
-      if (!specifier.startsWith('.')) continue;
-      const target = posixPath.normalize(posixPath.join(posixPath.dirname(importer), specifier));
-      if (!isPathAtOrBelow(target, protectedRoot)) continue;
-      if (permittedEdges.has(`${importer}\0${target}`)) continue;
-      diagnostics.push(diagnostic(
-        sourceFile,
-        statement,
-        'undeclared-capability-import',
-        importer,
-        target,
-        'outside source must use an exact declared external adapter edge',
-      ));
+      inspectSpecifier(sourceFile, statement, importer, moduleSpecifier.text);
     }
+    function visit(node) {
+      const specifier = executableModuleSpecifier(node);
+      if (specifier !== null) inspectSpecifier(sourceFile, node, importer, specifier);
+      ts.forEachChild(node, visit);
+    }
+    ts.forEachChild(sourceFile, visit);
   }
 
   return diagnostics.sort((left, right) => (
