@@ -358,7 +358,12 @@ export function scanInboundCapabilityImports({
           && moduleSpecifierText !== null) {
         const bindings = statement.importClause.namedBindings;
         const defaultOrNamespace = statement.importClause.name !== undefined
-          || (bindings !== undefined && ts.isNamespaceImport(bindings));
+          || (bindings !== undefined && ts.isNamespaceImport(bindings))
+          || (bindings !== undefined
+            && ts.isNamedImports(bindings)
+            && bindings.elements.some((element) => (
+              (element.propertyName ?? element.name).text === 'default'
+            )));
         if (['module', 'node:module'].includes(moduleSpecifierText) && defaultOrNamespace) {
           loaderShapeDiagnostic(
             sourceFile, statement, importer,
@@ -393,7 +398,11 @@ export function scanInboundCapabilityImports({
         ));
         const opaqueModuleExport = moduleSpecifierText !== null
           && ['module', 'node:module'].includes(moduleSpecifierText)
-          && (!statement.exportClause || ts.isNamespaceExport(statement.exportClause));
+          && (!statement.exportClause
+            || ts.isNamespaceExport(statement.exportClause)
+            || elements.some((element) => (
+              (element.propertyName ?? element.name).text === 'default'
+            )));
         if (exposesLoaderCapability || opaqueModuleExport) {
           loaderShapeDiagnostic(
             sourceFile, statement, importer,

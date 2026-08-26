@@ -535,6 +535,34 @@ test('inbound scanner accepts the five canonical change-development createRequir
   });
 });
 
+test('inbound scanner rejects source-side named-default Node module access', () => {
+  withSources({
+    'scripts/module-shapes.mjs': [
+      "import { default as NodeModuleApi } from 'node:module';",
+      "import { default as ModuleApi } from 'module';",
+      "export { default as NodeModuleBridge } from 'node:module';",
+      "export { default as ModuleBridge } from 'module';",
+      "import ModuleDefault from 'module';",
+      "import * as ModuleNamespace from 'node:module';",
+      "import { createRequire } from 'node:module';",
+      'const require = createRequire(import.meta.url);',
+      "import { isBuiltin as defaultModuleApi } from 'module';",
+      "export { isBuiltin as defaultModuleBridge } from 'node:module';",
+      "import { default as SafeDefault } from 'safe-module';",
+      "export { default as SafeBridge } from 'safe-module';",
+    ].join('\n'),
+  }, (repositoryDirectory) => {
+    const diagnostics = scanInboundCapabilityImports({
+      repositoryDirectory,
+      files: ['scripts/module-shapes.mjs'],
+      capabilityRoot: '.agents/skills/pr-review-cycle',
+      permittedExternalAdapters: [],
+    });
+    assert.equal(diagnostics.length, 6);
+    assert.ok(diagnostics.every(({ rule }) => rule === 'unsupported-module-loader-shape'));
+  });
+});
+
 test('inbound scanner rejects escaped loader acquisition and helper source shapes', () => {
   withSources({
     'scripts/loaders.mjs': [
