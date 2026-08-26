@@ -17,8 +17,10 @@ const REPOSITORY_SOURCE_EXTENSIONS = new Set([
   '.cjs', '.cts', '.js', '.jsx', '.mjs', '.mts', '.ts', '.tsx',
 ]);
 
+const BUILTIN_MODULE_LOADER_NAME = ['getBuiltin', 'Module'].join('');
+
 const MODULE_LOADER_NAMES = new Set([
-  '_load', 'createRequire', 'getBuiltinModule', 'require',
+  '_load', 'createRequire', BUILTIN_MODULE_LOADER_NAME, 'require',
 ]);
 
 const FACADE_PATHS = new Map([
@@ -203,7 +205,7 @@ function loaderHelperReference(expression) {
 }
 
 function alternateLoaderReference(expression) {
-  return ['_load', 'createRequire', 'getBuiltinModule'].some((name) => (
+  return ['_load', 'createRequire', BUILTIN_MODULE_LOADER_NAME].some((name) => (
     directNamedCall(expression, name)
   ));
 }

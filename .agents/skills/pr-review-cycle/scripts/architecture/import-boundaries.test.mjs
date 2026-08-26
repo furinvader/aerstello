@@ -706,3 +706,25 @@ test('inbound scanner reserves loader capabilities in import, export, and bindin
     assert.ok(diagnostics.every(({ rule }) => rule === 'unsupported-module-loader-shape'));
   });
 });
+
+test('inbound scanner retains the inert built-in loader name across bounded source shapes', () => {
+  withSources({
+    'scripts/bridge.mjs': 'export const value = true;\n',
+    'scripts/builtin-loader.mjs': [
+      "import { getBuiltinModule } from 'node:module';",
+      "export { getBuiltinModule } from './bridge.mjs';",
+      'const { getBuiltinModule: load } = process;',
+      'forward(process.getBuiltinModule);',
+      "process.getBuiltinModule('module');",
+    ].join('\n'),
+  }, (repositoryDirectory) => {
+    const diagnostics = scanInboundCapabilityImports({
+      repositoryDirectory,
+      files: ['scripts/bridge.mjs', 'scripts/builtin-loader.mjs'],
+      capabilityRoot: '.agents/skills/pr-review-cycle',
+      permittedExternalAdapters: [],
+    });
+    assert.equal(diagnostics.length, 5);
+    assert.ok(diagnostics.every(({ rule }) => rule === 'unsupported-module-loader-shape'));
+  });
+});

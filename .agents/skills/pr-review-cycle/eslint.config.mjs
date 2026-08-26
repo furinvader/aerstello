@@ -1,5 +1,8 @@
 const capabilityRoot = '.agents/skills/pr-review-cycle';
-const productionModules = `${capabilityRoot}/scripts/**/*.mjs`;
+const productionModules = [
+  `${capabilityRoot}/scripts/**/*.mjs`,
+  'scripts/**/*.mjs',
+];
 
 const forbiddenIdentifierSelector = "Identifier[name=/^(?:require|eval|Function|Reflect|getBuiltinModule|createRequire)$/]";
 const forbiddenNameLiteralSelector = "Literal[value='getBuiltinModule']";
@@ -95,7 +98,7 @@ export default [
     ],
   },
   {
-    files: [productionModules],
+    files: productionModules,
     plugins: {
       'pr-review': {
         rules: {
@@ -131,6 +134,9 @@ export default [
       `${capabilityRoot}/scripts/hooks/*.mjs`,
       `${capabilityRoot}/scripts/state/cli.mjs`,
       `${capabilityRoot}/scripts/worktree/cli.mjs`,
+      'scripts/hooks/*.mjs',
+      'scripts/state/cli.mjs',
+      'scripts/worktree/cli.mjs',
     ],
     rules: {
       'no-restricted-syntax': ['error',

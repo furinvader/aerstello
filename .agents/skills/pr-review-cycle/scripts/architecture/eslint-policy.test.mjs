@@ -28,6 +28,10 @@ const eslint = new ESLint({
   overrideConfigFile: canonicalConfig,
   warnIgnored: false,
 });
+const discoveredEslint = new ESLint({
+  cwd: repositoryDirectory,
+  warnIgnored: false,
+});
 
 async function lint(source, filePath = productionProbe) {
   const [result] = await eslint.lintText(source, { filePath });
@@ -36,6 +40,13 @@ async function lint(source, filePath = productionProbe) {
 
 test('the root ESLint adapter re-exports the exact canonical policy', () => {
   assert.strictEqual(rootPolicy, canonicalPolicy);
+});
+
+test('auto-discovery applies the canonical production policy from the nested config', async () => {
+  const [result] = await discoveredEslint.lintText('const require = null;\n', {
+    filePath: productionProbe,
+  });
+  assert.equal(result?.messages[0]?.ruleId, 'no-restricted-syntax');
 });
 
 test('production PR-review modules satisfy the canonical source policy', async () => {
