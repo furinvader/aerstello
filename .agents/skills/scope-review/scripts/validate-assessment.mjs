@@ -224,6 +224,11 @@ function acceptedShapeCorrespondence(packet, result) {
   return errors;
 }
 
+function requiresMissingArtifactVerdict(packet) {
+  return CODE_PHASES.has(packet.binding.phase)
+    && (packet.binding.planDigest === null || packet.binding.taskPacketDigest === null);
+}
+
 function unknownReferences(
   entries,
   sourceCriteria,
@@ -320,11 +325,8 @@ export function validateScopeAssessmentApplicability(packet, result) {
     errors.push('$ result binding does not exactly match assessment packet binding');
   }
 
-  if (
-    CODE_PHASES.has(packet.binding.phase)
-    && (packet.binding.planDigest === null || packet.binding.taskPacketDigest === null)
-    && result.verdict !== 'insufficient-evidence'
-  ) {
+  const missingCodeArtifact = requiresMissingArtifactVerdict(packet);
+  if (missingCodeArtifact && result.verdict !== 'insufficient-evidence') {
     errors.push('$ code-phase assessment with an absent plan or task-packet identity requires insufficient-evidence');
   }
 
@@ -360,6 +362,8 @@ export function validateScopeAssessmentApplicability(packet, result) {
     errors.push('$ result coverage does not exactly match packet inventory mechanisms');
   }
   errors.push(...acceptedShapeCorrespondence(packet, result));
-  errors.push(...materialInventoryCorrespondence(packet, result));
+  if (!(missingCodeArtifact && result.verdict === 'insufficient-evidence')) {
+    errors.push(...materialInventoryCorrespondence(packet, result));
+  }
   return normalize(errors);
 }

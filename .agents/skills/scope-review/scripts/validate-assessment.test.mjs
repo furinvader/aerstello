@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import {
@@ -14,6 +15,10 @@ const B = 'b'.repeat(64);
 const C = 'c'.repeat(64);
 const D = 'd'.repeat(64);
 const SHA = '1'.repeat(40);
+const assessmentSchema = JSON.parse(readFileSync(
+  new URL('../schemas/scope-assessment.schema.json', import.meta.url),
+  'utf8',
+));
 
 function binding(overrides = {}) {
   return {
@@ -796,6 +801,146 @@ test('code phases require insufficient evidence when plan or task artifacts are 
       );
     }
   }
+});
+
+test('missing code artifacts preserve insufficient-evidence material representability', () => {
+  const artifactCases = [
+    { label: 'plan', overrides: { planDigest: null, amendmentDigests: [] } },
+    { label: 'task packet', overrides: { taskPacketDigest: null } },
+    {
+      label: 'plan and task packet',
+      overrides: { planDigest: null, amendmentDigests: [], taskPacketDigest: null },
+    },
+  ];
+  const unsupportedSurface = 'unmapped-material-subsystem';
+
+  for (const phase of ['task', 'integrated-head', 'review-finding']) {
+    for (const { label, overrides } of artifactCases) {
+      const exactBinding = binding({ phase, ...overrides });
+      const input = packet({
+        binding: exactBinding,
+        changeInventory: {
+          ...packet().changeInventory,
+          subsystems: [...packet().changeInventory.subsystems, unsupportedSurface],
+        },
+      });
+      const insufficient = result('insufficient-evidence', {
+        binding: exactBinding,
+        coverage: [{
+          ...result('within-scope').coverage[0],
+          classification: 'insufficient-evidence',
+          rationale: `The exact ${label} identity is absent.`,
+        }],
+        missingEvidence: [`Exact ${label} identity`],
+      });
+      assert.deepEqual(
+        validateScopeAssessmentApplicability(input, insufficient),
+        [],
+        `${phase}: missing ${label} insufficient-evidence material verdict`,
+      );
+
+      const affirmative = result('within-scope', { binding: exactBinding });
+      const affirmativeErrors = validateScopeAssessmentApplicability(input, affirmative);
+      assert.ok(
+        affirmativeErrors.includes(
+          '$ code-phase assessment with an absent plan or task-packet identity requires insufficient-evidence',
+        ),
+        `${phase}: missing ${label} affirmative identity rejection`,
+      );
+      assert.ok(
+        affirmativeErrors.some((error) => error.includes(unsupportedSurface)),
+        `${phase}: missing ${label} affirmative material rejection`,
+      );
+    }
+  }
+});
+
+test('complete code artifacts retain material inventory enforcement', () => {
+  const unsupportedSurface = 'unmapped-material-subsystem';
+  const input = packet({
+    changeInventory: {
+      ...packet().changeInventory,
+      subsystems: [...packet().changeInventory.subsystems, unsupportedSurface],
+    },
+  });
+  const insufficient = result('insufficient-evidence', {
+    coverage: [{
+      ...result('within-scope').coverage[0],
+      classification: 'insufficient-evidence',
+      rationale: 'Other exact evidence is absent.',
+    }],
+    missingEvidence: ['Other exact evidence'],
+  });
+  assert.deepEqual(
+    validateScopeAssessmentApplicability(input, insufficient),
+    [
+      `$ changeInventory.subsystems material surface ${JSON.stringify(unsupportedSurface)} lacks explicit authoritative-source support and accepted-scope authorization and requires human-decision-required material-scope-change coverage with category new-subsystem`,
+    ],
+  );
+});
+
+test('trim-required represents 129 exact speculative mechanisms within its byte envelope', () => {
+  assert.equal(assessmentSchema.properties.unnecessaryWork.maxItems, 256);
+  assert.equal(assessmentSchema.properties.coverage.maxItems, 256);
+  assert.equal(assessmentSchema.$defs.changeInventory.properties.mappings.maxItems, 256);
+
+  const mechanisms = Array.from({ length: 129 }, (_, index) => `m${index}`);
+  const mappings = mechanisms.map((mechanism) => ({
+    mechanism,
+    sourceCriterionIds: ['x'],
+    acceptedCriterionIds: [],
+    invariantIds: [],
+    nonGoalIds: [],
+    guidanceIds: [],
+    rationale: 'x',
+  }));
+  const input = packet({
+    sourceScope: {
+      objective: 'x',
+      requiredCriteria: [{ id: 'x', text: 'x' }],
+      nonGoals: [],
+      implementationGuidance: [],
+    },
+    acceptedScope: {
+      criteria: [{ id: 'x', text: 'x' }],
+      invariants: [],
+      minimalClosure: 'x',
+      authorizedShape: [],
+      unauthorizedShape: [],
+      deferredShape: [],
+    },
+    changeInventory: {
+      summary: 'x',
+      paths: [],
+      dependencies: [],
+      publicSurfaces: [],
+      persistentSurfaces: [],
+      subsystems: [],
+      mappings,
+    },
+  });
+  const coverage = mechanisms.map((mechanism) => ({
+    mechanism,
+    sourceCriterionIds: [],
+    acceptedCriterionIds: [],
+    invariantIds: [],
+    nonGoalIds: [],
+    guidanceIds: [],
+    classification: 'speculative',
+    rationale: 'x',
+  }));
+  const assessment = result('trim-required', {
+    coverage,
+    unnecessaryWork: [...mechanisms].reverse(),
+    smallerSufficientAlternative: 'x',
+  });
+
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(assessment)) < SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES,
+  );
+  assert.deepEqual(validateAssessmentPacket(input), []);
+  assert.deepEqual(validateScopeAssessmentResult(assessment), []);
+  assert.deepEqual(validateScopeAssessmentApplicability(input, assessment), []);
 });
 
 test('all named materiality triggers are valid evidence categories', () => {

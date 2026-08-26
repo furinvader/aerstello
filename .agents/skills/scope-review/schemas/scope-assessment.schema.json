@@ -15,7 +15,7 @@
     "verdict": { "$ref": "#/$defs/verdict" },
     "summary": { "$ref": "#/$defs/text" },
     "coverage": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/coverage" } },
-    "unnecessaryWork": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/text" } },
+    "unnecessaryWork": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/text" } },
     "smallerSufficientAlternative": { "$ref": "#/$defs/nullableText" },
     "scopeDelta": { "oneOf": [{ "$ref": "#/$defs/scopeDelta" }, { "type": "null" }] },
     "materialityTriggers": { "type": "array", "maxItems": 13, "uniqueItems": true, "items": { "$ref": "#/$defs/materialityTrigger" } },
