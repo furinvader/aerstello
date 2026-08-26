@@ -21,8 +21,8 @@ read-only verdict; they do not authorize an amendment or implementation.
 4. Do not accept infrastructure for hypothetical future consumers. A current,
    authoritative need must justify every such mechanism.
 5. Treat optional implementation guidance and indicative directory trees as
-   non-mandatory unless the accepted scope shows that they are required for
-   sufficient closure.
+   non-mandatory unless the authoritative source explicitly makes them a
+   closure criterion.
 6. Do not assume broad source language makes an expansion safe. Surface any
    material expansion for a human decision before execution.
 7. Findings in newly introduced machinery do not by themselves justify

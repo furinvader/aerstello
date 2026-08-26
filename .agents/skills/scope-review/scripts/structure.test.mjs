@@ -150,7 +150,7 @@ test('documentation links resolve and defines invocation and authority boundarie
     /Apply the removal counterfactual/u,
     /Prefer the smallest local, direct fix/u,
     /Do not accept infrastructure for hypothetical future consumers/u,
-    /optional implementation guidance and indicative directory trees as\s+non-mandatory/u,
+    /optional implementation guidance and indicative directory trees as\s+non-mandatory unless the authoritative source explicitly makes them a\s+closure criterion/u,
     /Do not assume broad source language makes an expansion safe/u,
     /Findings in newly introduced machinery do not by themselves justify\s+hardening/u,
     /quantitative size measurements\s+only as tripwires/u,
@@ -220,7 +220,7 @@ test('materiality takes precedence over trimming at the executable result bounda
       dependencies: [],
       publicSurfaces: [authorizedMechanism],
       persistentSurfaces: [],
-      subsystems: ['scope-review'],
+      subsystems: [],
       mappings: [{
         mechanism: authorizedMechanism,
         sourceCriterionIds: [authorizedCriterion],
