@@ -271,7 +271,7 @@ export function scanInboundCapabilityImports({
         return;
       }
       try {
-        classifiedSpecifier = decodeURIComponent(specifier);
+        classifiedSpecifier = decodeURIComponent(specifier).replaceAll('\\', '/');
       } catch {
         diagnostics.push(diagnostic(
           sourceFile,

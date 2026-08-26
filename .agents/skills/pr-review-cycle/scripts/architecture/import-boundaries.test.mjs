@@ -441,6 +441,38 @@ test('inbound scanner decodes relative ESM URL paths before capability classific
   });
 });
 
+test('inbound scanner normalizes raw ESM URL backslashes before capability classification', () => {
+  withSources({
+    'scripts/esm-backslashes.mjs': [
+      String.raw`import '..\\.agents\\skills\\pr-review-cycle\\scripts\\state\\checkpoint.mjs';`,
+      String.raw`export * from '../.agents\\skills/pr-review-cycle\\scripts/github/github.mjs';`,
+      String.raw`await import('..\\.agents/skills\\pr-review-cycle/scripts\\contracts/contracts.mjs');`,
+      String.raw`import '.\\local.mjs';`,
+    ].join('\n'),
+  }, (repositoryDirectory) => {
+    const diagnostics = scanInboundCapabilityImports({
+      repositoryDirectory,
+      files: ['scripts/esm-backslashes.mjs'],
+      capabilityRoot: '.agents/skills/pr-review-cycle',
+      permittedExternalAdapters: [],
+    });
+    assert.deepEqual(diagnostics.map(({ rule, target }) => ({ rule, target })), [
+      {
+        rule: 'undeclared-capability-import',
+        target: '.agents/skills/pr-review-cycle/scripts/state/checkpoint.mjs',
+      },
+      {
+        rule: 'undeclared-capability-import',
+        target: '.agents/skills/pr-review-cycle/scripts/github/github.mjs',
+      },
+      {
+        rule: 'undeclared-capability-import',
+        target: '.agents/skills/pr-review-cycle/scripts/contracts/contracts.mjs',
+      },
+    ]);
+  });
+});
+
 test('inbound scanner fails closed on invalid relative ESM URL encoding', () => {
   withSources({
     'scripts/invalid-encoding.mjs': [
@@ -483,6 +515,9 @@ test('inbound scanner retains CommonJS semantics for encoded relative paths', ()
       "require('../.%61gents/skills/pr-review-cycle/scripts/state/checkpoint.mjs');",
       "module.require('../.agents%2fskills/pr-review-cycle/scripts/github/github.mjs');",
       "import state = require('../.%ZZagents/skills/pr-review-cycle/scripts/state/state.mjs');",
+      String.raw`require('..\\.agents\\skills\\pr-review-cycle\\scripts\\state\\checkpoint.mjs');`,
+      String.raw`module.require('..\\.agents\\skills\\pr-review-cycle\\scripts\\github\\github.mjs');`,
+      String.raw`import stateWithBackslashes = require('..\\.agents\\skills\\pr-review-cycle\\scripts\\state\\state.mjs');`,
     ].join('\n'),
   }, (repositoryDirectory) => {
     assert.deepEqual(scanInboundCapabilityImports({
