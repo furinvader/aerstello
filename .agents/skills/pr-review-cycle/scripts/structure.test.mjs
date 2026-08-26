@@ -4399,8 +4399,12 @@ test('hooks and npm façades target only canonical skill entrypoints', () => {
     'node --test ".agents/skills/aerstello-specialists/scripts/**/*.test.mjs"',
   );
   assert.equal(
+    scripts['test:scope-review'],
+    'node --test .agents/skills/scope-review/scripts/validate-assessment.test.mjs .agents/skills/scope-review/scripts/structure.test.mjs',
+  );
+  assert.equal(
     scripts['test:tooling'],
-    'npm run test:change-development && npm run test:pr-review && npm run test:specialists && node --test "scripts/**/*.test.mjs" && npm run test:e2e:structure',
+    'npm run test:change-development && npm run test:pr-review && npm run test:specialists && npm run test:scope-review && node --test "scripts/**/*.test.mjs" && npm run test:e2e:structure',
   );
   assert.equal(scripts['check:workflow'], 'npm run test:tooling');
   assert.equal(scripts.test, 'npm run test:tooling && npm run test --workspaces --if-present');
