@@ -60,8 +60,8 @@
       "properties": {
         "verdict": { "const": "minor-amendment-required" },
         "coverage": { "type": "array", "items": { "$ref": "#/$defs/minorCoverage" }, "contains": { "type": "object", "properties": { "classification": { "const": "necessary-minor-expansion" } }, "required": ["classification"] } },
-        "unnecessaryWork": { "type": "array", "maxItems": 0 },
-        "smallerSufficientAlternative": { "type": "null" },
+        "unnecessaryWork": { "type": "array", "maxItems": 256 },
+        "smallerSufficientAlternative": { "$ref": "#/$defs/nullableText" },
         "scopeDelta": { "$ref": "#/$defs/minorScopeDelta" },
         "materialityTriggers": { "type": "array", "maxItems": 0 },
         "smallestExpansion": { "type": "null" },
@@ -272,7 +272,7 @@
     "minorCoverage": {
       "allOf": [
         { "$ref": "#/$defs/coverage" },
-        { "type": "object", "properties": { "classification": { "enum": ["required", "implementation-choice", "necessary-minor-expansion"] } } }
+        { "type": "object", "properties": { "classification": { "enum": ["required", "implementation-choice", "speculative", "necessary-minor-expansion"] } } }
       ]
     },
     "materialCoverage": {

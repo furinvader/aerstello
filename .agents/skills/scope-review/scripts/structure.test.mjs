@@ -180,10 +180,30 @@ test('documentation links resolve and defines invocation and authority boundarie
   assert.match(contract, /`unnecessaryWork` must name the\s+complete set of `speculative` coverage mechanisms exactly once/u);
   assert.match(contract, /`scopeDelta\.materialSurfaces` and the categories\s+in `materialityTriggers` must be the same order-insensitive set/u);
   assert.match(contract, /dependency, public surface, persistent surface, or\s+subsystem in the material inventory/u);
+  assert.match(contract, /must not relabel that surface\s+`material-scope-change` while claiming its inventory field's native materiality\s+category/u);
+  assert.match(contract, /Necessary-minor precedence does not hide independent removable work/u);
+  assert.match(contract, /`unnecessaryWork` is the order-insensitive exact set of speculative mechanisms/u);
+  assert.match(contract, /pure minor result has\s+neither speculative work nor a smaller alternative/u);
   assert.match(contract, /generic repository checker/u);
   assert.match(contract, /adjacent helper/u);
   assert.match(contract, /new subsystem/u);
   assert.match(contract, /insufficient-evidence/u);
+});
+
+test('minor verdict schema permits only exact speculative-removal correspondence', () => {
+  const schema = JSON.parse(readFileSync(join(skillDirectory, 'schemas/scope-assessment.schema.json'), 'utf8'));
+  const minorCoverage = schema.$defs.minorCoverage.allOf[1].properties.classification.enum;
+  assert.deepEqual(minorCoverage, [
+    'required',
+    'implementation-choice',
+    'speculative',
+    'necessary-minor-expansion',
+  ]);
+  const minorVerdict = schema.oneOf.find(
+    ({ properties }) => properties.verdict.const === 'minor-amendment-required',
+  ).properties;
+  assert.equal(minorVerdict.unnecessaryWork.maxItems, 256);
+  assert.equal(minorVerdict.smallerSufficientAlternative.$ref, '#/$defs/nullableText');
 });
 
 test('materiality takes precedence over trimming at the executable result boundary', () => {

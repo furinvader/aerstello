@@ -163,6 +163,92 @@ function compactPacket(mechanisms, bindingOverrides = {}) {
   });
 }
 
+function mixedMinorPacket(speculativeCount, identityBytes = 1) {
+  const necessary = 'necessary-minor-work';
+  const speculative = Array.from(
+    { length: speculativeCount },
+    (_, index) => `speculative-${String(index).padStart(3, '0')}`,
+  );
+  return packet({
+    binding: binding({
+      source: { ...binding().source, identity: 'i'.repeat(identityBytes) },
+      amendmentDigests: [],
+    }),
+    sourceScope: {
+      objective: 'x',
+      requiredCriteria: [{ id: 'x', text: 'x' }],
+      nonGoals: [],
+      implementationGuidance: [],
+    },
+    acceptedScope: {
+      criteria: [{ id: 'x', text: 'x' }],
+      invariants: [],
+      minimalClosure: 'x',
+      authorizedShape: [],
+      unauthorizedShape: [necessary],
+      deferredShape: [],
+    },
+    changeInventory: {
+      summary: 'x',
+      paths: [],
+      dependencies: [],
+      publicSurfaces: [],
+      persistentSurfaces: [],
+      subsystems: [],
+      mappings: [
+        {
+          mechanism: necessary,
+          sourceCriterionIds: ['x'],
+          acceptedCriterionIds: [],
+          invariantIds: [],
+          nonGoalIds: [],
+          guidanceIds: [],
+          rationale: 'x',
+        },
+        ...speculative.map((mechanism) => ({
+          mechanism,
+          sourceCriterionIds: [],
+          acceptedCriterionIds: [],
+          invariantIds: [],
+          nonGoalIds: [],
+          guidanceIds: [],
+          rationale: 'x',
+        })),
+      ],
+    },
+  });
+}
+
+function mixedMinorResult(input) {
+  const [necessary, ...speculative] = input.changeInventory.mappings;
+  return result('minor-amendment-required', {
+    binding: input.binding,
+    summary: 'x',
+    coverage: [
+      {
+        ...necessary,
+        sourceCriterionIds: ['x'],
+        classification: 'necessary-minor-expansion',
+        rationale: 'x',
+      },
+      ...speculative.map((mapping) => ({
+        ...mapping,
+        classification: 'speculative',
+        rationale: 'x',
+      })),
+    ],
+    unnecessaryWork: speculative.map(({ mechanism }) => mechanism),
+    smallerSufficientAlternative: speculative.length > 0 ? 'x' : null,
+    scopeDelta: {
+      description: 'x',
+      sourceCriterionIds: ['x'],
+      acceptedCriterionIds: [],
+      invariantIds: [],
+      materialSurfaces: [],
+    },
+  });
+}
+
 test('direct local fix is a valid within-scope assessment', () => {
   const input = packet();
   const assessment = result('within-scope');
@@ -375,6 +461,75 @@ test('exact source and accepted-scope authority allow a material surface', () =>
     ],
   });
   assert.deepEqual(validateScopeAssessmentApplicability(input, assessment), []);
+});
+
+test('dual-authorized material inventory cannot be relabeled with its native category', () => {
+  const cases = [
+    ['dependencies', 'new-dependency'],
+    ['publicSurfaces', 'public-surface'],
+    ['persistentSurfaces', 'persistent-surface'],
+    ['subsystems', 'new-subsystem'],
+  ];
+  for (const [field, category] of cases) {
+    const surface = `authorized-${field}`;
+    const mapping = {
+      mechanism: surface,
+      sourceCriterionIds: ['direct-fix'],
+      acceptedCriterionIds: ['direct-fix'],
+      invariantIds: [],
+      nonGoalIds: [],
+      guidanceIds: [],
+      rationale: 'Both exact authorities support the inventory surface.',
+    };
+    const input = packet({
+      acceptedScope: {
+        ...packet().acceptedScope,
+        authorizedShape: [surface],
+      },
+      changeInventory: {
+        ...packet().changeInventory,
+        dependencies: [],
+        publicSurfaces: [],
+        persistentSurfaces: [],
+        subsystems: [],
+        [field]: [surface],
+        mappings: [mapping],
+      },
+    });
+    const nativeRelabel = result('human-decision-required', {
+      coverage: [{ ...mapping, classification: 'material-scope-change' }],
+      scopeDelta: {
+        description: 'Relabel the authorized surface and add a policy.',
+        sourceCriterionIds: [],
+        acceptedCriterionIds: [],
+        invariantIds: [],
+        materialSurfaces: [category, 'policy-change'],
+      },
+      materialityTriggers: [
+        { category, evidence: 'The native inventory category is claimed.' },
+        { category: 'policy-change', evidence: 'A distinct policy expansion is also claimed.' },
+      ],
+      smallestExpansion: 'Add only the proposed policy.',
+      narrowAlternative: 'Keep the authorized inventory surface without policy expansion.',
+      deferralConsequences: 'The authorized surface remains ordinary scoped work.',
+      humanDecision: true,
+    });
+    assert.deepEqual(validateScopeAssessmentApplicability(input, result('within-scope', {
+      coverage: [{ ...mapping, classification: 'implementation-choice' }],
+    })), [], field);
+    assert.match(
+      validateScopeAssessmentApplicability(input, nativeRelabel).join('\n'),
+      new RegExp(`cannot be relabeled material-scope-change with native category ${category}`, 'u'),
+      field,
+    );
+
+    const distinctExpansion = {
+      ...nativeRelabel,
+      scopeDelta: { ...nativeRelabel.scopeDelta, materialSurfaces: ['policy-change'] },
+      materialityTriggers: [nativeRelabel.materialityTriggers[1]],
+    };
+    assert.deepEqual(validateScopeAssessmentApplicability(input, distinctExpansion), [], field);
+  }
 });
 
 test('non-overlapping accepted shapes preserve material inventory authority', () => {
@@ -721,6 +876,53 @@ test('necessary adjacent helper and focused test require a minor amendment', () 
     },
   });
   assert.deepEqual(validateScopeAssessmentApplicability(input, assessment), []);
+});
+
+test('mixed minor assessment retains necessary work and removes independent speculation', () => {
+  const input = mixedMinorPacket(2);
+  const assessment = mixedMinorResult(input);
+
+  assert.deepEqual(validateAssessmentPacket(input), []);
+  assert.deepEqual(validateScopeAssessmentResult(assessment), []);
+  assert.deepEqual(validateScopeAssessmentApplicability(input, {
+    ...assessment,
+    unnecessaryWork: [...assessment.unnecessaryWork].reverse(),
+  }), []);
+
+  const correspondenceFailures = [
+    { ...assessment, unnecessaryWork: assessment.unnecessaryWork.slice(1) },
+    { ...assessment, unnecessaryWork: [...assessment.unnecessaryWork, 'extra-work'] },
+    { ...assessment, smallerSufficientAlternative: null },
+  ];
+  for (const candidate of correspondenceFailures) {
+    assert.notDeepEqual(validateScopeAssessmentResult(candidate), []);
+  }
+
+  const pureMinor = mixedMinorResult(mixedMinorPacket(0));
+  assert.deepEqual(validateScopeAssessmentResult(pureMinor), []);
+  assert.notDeepEqual(
+    validateScopeAssessmentResult({ ...pureMinor, smallerSufficientAlternative: 'Remove nothing.' }),
+    [],
+  );
+
+  const deferredInput = mixedMinorPacket(1);
+  deferredInput.acceptedScope.deferredShape = deferredInput.acceptedScope.unauthorizedShape;
+  deferredInput.acceptedScope.unauthorizedShape = [];
+  assert.deepEqual(
+    validateScopeAssessmentApplicability(deferredInput, mixedMinorResult(deferredInput)),
+    [],
+  );
+});
+
+test('mixed minor cannot trim a deficient material inventory surface', () => {
+  const input = mixedMinorPacket(1);
+  const speculative = input.changeInventory.mappings[1].mechanism;
+  input.changeInventory.publicSurfaces = [speculative];
+  const assessment = mixedMinorResult(input);
+  assert.match(
+    validateScopeAssessmentApplicability(input, assessment).join('\n'),
+    /requires human-decision-required material-scope-change coverage with category public-surface/u,
+  );
 });
 
 test('supported authorized material inventory remains a feasible minor anchor', () => {
@@ -1731,6 +1933,31 @@ test('representability accepts exactly 32768 bytes and rejects the next byte', (
   assert.ok(boundary, 'a one-byte binding boundary must be discoverable');
   assert.deepEqual(validateAssessmentPacket(boundary.at), []);
   assert.match(boundary.overErrors.join('\n'), /requires 32769 bytes/u);
+});
+
+test('mixed minor representability accounts for exact removal details at 32768 bytes', () => {
+  let boundary = null;
+  for (let count = 80; count <= 200 && boundary === null; count += 1) {
+    const base = mixedMinorPacket(count, 1);
+    const baseBytes = Buffer.byteLength(JSON.stringify(mixedMinorResult(base)));
+    const identityBytes = 1 + SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES - baseBytes;
+    if (identityBytes < 1 || identityBytes >= 512) continue;
+    boundary = {
+      at: mixedMinorPacket(count, identityBytes),
+      over: mixedMinorPacket(count, identityBytes + 1),
+    };
+  }
+
+  assert.ok(boundary, 'a mixed-minor one-byte boundary must be constructible');
+  assert.equal(
+    Buffer.byteLength(JSON.stringify(mixedMinorResult(boundary.at))),
+    SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES,
+  );
+  assert.deepEqual(validateAssessmentPacket(boundary.at), []);
+  assert.match(
+    validateAssessmentPacket(boundary.over).join('\n'),
+    /schema-minimal minor-amendment-required result.*requires 32769 bytes/u,
+  );
 });
 
 test('escaped mechanism identities and maximal binding metadata use serialized bytes', () => {

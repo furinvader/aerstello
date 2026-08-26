@@ -216,6 +216,10 @@ function buildMinorResult(packet, coverage, necessary) {
     invariantIds: [...deltaFields.get('invariantIds')],
     materialSurfaces: [],
   };
+  result.unnecessaryWork = groundedCoverage
+    .filter(({ classification }) => classification === 'speculative')
+    .map(({ mechanism }) => mechanism);
+  if (result.unnecessaryWork.length > 0) result.smallerSufficientAlternative = 'x';
   return result;
 }
 
@@ -735,7 +739,9 @@ function minimalResult(packet, verdict) {
       const affirmative = affirmativeCoverage(mapping, rejectedShape);
       if (affirmative) return affirmative;
       if (materialMechanisms.has(mapping.mechanism)) return null;
-      if (minorAuthorityOptions(mapping).length === 0) return null;
+      if (minorAuthorityOptions(mapping).length === 0) {
+        return minimalCoverage(mapping.mechanism, 'speculative');
+      }
       forcedNecessaryIndexes.push(index);
       return minimalCoverage(mapping.mechanism, 'necessary-minor-expansion');
     });
@@ -916,6 +922,18 @@ function materialInventoryCorrespondence(packet, result) {
             `$ changeInventory.${field} material surface ${JSON.stringify(surface)} lacks ${missingAuthorities.join(' and ')} and requires human-decision-required material-scope-change coverage with category ${category}`,
           );
         }
+      } else {
+        const category = MATERIAL_INVENTORY_CATEGORIES.get(field);
+        const surfaceCoverage = coverage.get(surface);
+        if (
+          surfaceCoverage?.classification === 'material-scope-change'
+          && materialSurfaces.has(category)
+          && materialityTriggers.has(category)
+        ) {
+          errors.push(
+            `$ changeInventory.${field} material surface ${JSON.stringify(surface)} has exact authoritative-source support and accepted-scope authorization and cannot be relabeled material-scope-change with native category ${category}`,
+          );
+        }
       }
     }
   }
@@ -957,6 +975,19 @@ function resultCorrespondence(result) {
       .map((entry) => entry.mechanism);
     if (!exactSemanticSet(result.unnecessaryWork, speculativeMechanisms)) {
       errors.push('$ trim-required unnecessaryWork must exactly match speculative coverage mechanisms');
+    }
+  }
+  if (result?.verdict === 'minor-amendment-required') {
+    const speculativeMechanisms = (Array.isArray(result.coverage) ? result.coverage : [])
+      .filter((entry) => entry?.classification === 'speculative')
+      .map((entry) => entry.mechanism);
+    if (!exactSemanticSet(result.unnecessaryWork, speculativeMechanisms)) {
+      errors.push('$ minor-amendment-required unnecessaryWork must exactly match speculative coverage mechanisms');
+    }
+    const hasAlternative = typeof result.smallerSufficientAlternative === 'string'
+      && result.smallerSufficientAlternative.trim().length > 0;
+    if (hasAlternative !== (speculativeMechanisms.length > 0)) {
+      errors.push('$ minor-amendment-required smallerSufficientAlternative must be nonempty if and only if speculative coverage exists');
     }
   }
   if (result?.verdict === 'human-decision-required') {

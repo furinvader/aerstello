@@ -45,6 +45,16 @@ used by at least one `necessary-minor-expansion` row. This bidirectional
 grounding permits multiple mechanisms to share one authority and permits strict
 subsets, but IDs in different namespaces do not correspond.
 
+Necessary-minor precedence does not hide independent removable work. A
+`minor-amendment-required` result may retain positively grounded rejected or
+deferred work as `necessary-minor-expansion` while classifying independent
+unsupported nonmaterial work as `speculative`. In that mixed result,
+`unnecessaryWork` is the order-insensitive exact set of speculative mechanisms
+and `smallerSufficientAlternative` gives their removal. A pure minor result has
+neither speculative work nor a smaller alternative. Material scope changes and
+insufficient-evidence claims remain ineligible for this verdict, and a deficient
+material inventory surface can never be trimmed this way.
+
 Materiality triggers are closed and complete: a new subsystem, new dependency, public surface, persistent surface, cross-capability work, policy change, repository-wide enforcement, independent workstream, new criterion, non-goal reversal, sensitive policy, replacement of the accepted approach, or repeated expansion. A tripwire can request closer inspection but cannot select or exclude any verdict.
 
 Apply authority before materiality and materiality before trimming. First
@@ -52,7 +62,11 @@ determine whether the named material surface is explicitly required by the
 authoritative source and explicitly authorized by accepted scope. When both the
 authoritative source and accepted scope provide that exact authority, the
 mechanism is not a new material scope change: assess its necessity normally and
-allow `within-scope` when every other condition holds. If either authority is
+allow `within-scope`, `minor-amendment-required`, or another grounded ordinary
+verdict when every other condition holds. A result must not relabel that surface
+`material-scope-change` while claiming its inventory field's native materiality
+category. A distinct material expansion remains representable under its own
+non-native category. If either authority is
 absent, classify the material commitment as `material-scope-change` and return
 `human-decision-required`, even when the mechanism appears removable. Never
 downgrade that mechanism to `speculative` or the assessment to
@@ -82,7 +96,7 @@ Return exactly one verdict:
 
 - `within-scope`: every mechanism is supported and no work, delta, evidence, or human decision remains.
 - `trim-required`: name each unnecessary mechanism and a smaller sufficient alternative.
-- `minor-amendment-required`: describe a necessary minor delta, map it to existing criteria, and show that it creates no material surface.
+- `minor-amendment-required`: describe a necessary minor delta, map it to existing criteria, show that it creates no material surface, and remove any independent speculative nonmaterial work.
 - `human-decision-required`: name at least one material trigger and present the smallest expansion, a narrow alternative, and consequences of deferral without authorizing either.
 - `insufficient-evidence`: name the missing exact evidence and make no affirmative scope conclusion.
 
