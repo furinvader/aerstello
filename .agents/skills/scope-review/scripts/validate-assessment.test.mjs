@@ -199,7 +199,12 @@ test('unmapped material inventory fails closed for every compact inventory field
       assert.deepEqual(
         validateScopeAssessmentApplicability(input, assessment),
         [
-          `$ changeInventory.${field} material surface ${JSON.stringify(surface)} lacks explicit authoritative-source support and accepted-scope authorization`,
+          `$ changeInventory.${field} material surface ${JSON.stringify(surface)} lacks explicit authoritative-source support and accepted-scope authorization and requires human-decision-required material-scope-change coverage with category ${new Map([
+            ['dependencies', 'new-dependency'],
+            ['publicSurfaces', 'public-surface'],
+            ['persistentSurfaces', 'persistent-surface'],
+            ['subsystems', 'new-subsystem'],
+          ]).get(field)}`,
         ],
         `${field}: ${assessment.verdict}`,
       );
@@ -239,7 +244,7 @@ test('source-only material authority cannot produce a non-human verdict', () => 
     assert.deepEqual(
       validateScopeAssessmentApplicability(input, assessment),
       [
-        `$ changeInventory.publicSurfaces material surface ${JSON.stringify(surface)} lacks accepted-scope authorization`,
+        `$ changeInventory.publicSurfaces material surface ${JSON.stringify(surface)} lacks accepted-scope authorization and requires human-decision-required material-scope-change coverage with category public-surface`,
       ],
       assessment.verdict,
     );
@@ -282,7 +287,7 @@ test('accepted-only material authority lacks authoritative-source support', () =
     assert.deepEqual(
       validateScopeAssessmentApplicability(input, candidate),
       [
-        `$ changeInventory.publicSurfaces material surface ${JSON.stringify(surface)} lacks explicit authoritative-source support`,
+        `$ changeInventory.publicSurfaces material surface ${JSON.stringify(surface)} lacks explicit authoritative-source support and requires human-decision-required material-scope-change coverage with category public-surface`,
       ],
       candidate.verdict,
     );
@@ -331,6 +336,223 @@ test('non-overlapping accepted shapes preserve material inventory authority', ()
   });
   assert.deepEqual(validateAssessmentPacket(input), []);
   assert.deepEqual(validateScopeAssessmentApplicability(input, result('within-scope')), []);
+});
+
+test('affirmative coverage requires positive authority rather than non-goals or guidance', () => {
+  const authorityCases = [
+    { sourceCriterionIds: ['direct-fix'], acceptedCriterionIds: [], invariantIds: [] },
+    { sourceCriterionIds: [], acceptedCriterionIds: ['direct-fix'], invariantIds: [] },
+    { sourceCriterionIds: [], acceptedCriterionIds: [], invariantIds: ['exact-subject'] },
+  ];
+  for (const classification of ['required', 'implementation-choice']) {
+    for (const authority of authorityCases) {
+      const assessment = result('within-scope', {
+        coverage: [{
+          ...result('within-scope').coverage[0],
+          ...authority,
+          classification,
+        }],
+      });
+      assert.deepEqual(validateScopeAssessmentResult(assessment), []);
+    }
+
+    for (const unsupported of [
+      { nonGoalIds: ['no-generic-runtime'], guidanceIds: [] },
+      { nonGoalIds: [], guidanceIds: ['optional-helper'] },
+    ]) {
+      const assessment = result('within-scope', {
+        coverage: [{
+          ...result('within-scope').coverage[0],
+          sourceCriterionIds: [],
+          acceptedCriterionIds: [],
+          invariantIds: [],
+          ...unsupported,
+          classification,
+        }],
+      });
+      assert.deepEqual(
+        validateScopeAssessmentResult(assessment),
+        [`$ coverage[0] ${classification} classification lacks positive source, accepted-criterion, or invariant authority`],
+      );
+    }
+  }
+});
+
+test('accepted unauthorized and deferred shapes reject affirmative coverage only', () => {
+  for (const [shapeField, classification] of [
+    ['unauthorizedShape', 'required'],
+    ['deferredShape', 'implementation-choice'],
+  ]) {
+    const mechanism = `${shapeField}-mechanism`;
+    const mapping = {
+      ...packet().changeInventory.mappings[0],
+      mechanism,
+    };
+    const input = packet({
+      acceptedScope: {
+        ...packet().acceptedScope,
+        [shapeField]: [mechanism],
+      },
+      changeInventory: {
+        ...packet().changeInventory,
+        subsystems: [],
+        mappings: [mapping],
+      },
+    });
+    const affirmative = result('within-scope', {
+      coverage: [{ ...result('within-scope').coverage[0], mechanism, classification }],
+    });
+    assert.deepEqual(
+      validateScopeAssessmentApplicability(input, affirmative),
+      [`$ coverage mechanism ${JSON.stringify(mechanism)} is ${classification} despite acceptedScope.${shapeField}`],
+    );
+
+    const trimmed = result('trim-required', {
+      coverage: [{
+        ...result('within-scope').coverage[0],
+        mechanism,
+        classification: 'speculative',
+      }],
+      unnecessaryWork: [mechanism],
+      smallerSufficientAlternative: 'Omit the explicitly unaccepted mechanism.',
+    });
+    assert.deepEqual(validateScopeAssessmentApplicability(input, trimmed), []);
+
+    const minor = result('minor-amendment-required', {
+      coverage: [{
+        ...result('within-scope').coverage[0],
+        mechanism,
+        classification: 'necessary-minor-expansion',
+      }],
+      scopeDelta: {
+        description: 'Admit the mechanism through a bounded minor amendment.',
+        sourceCriterionIds: ['direct-fix'],
+        acceptedCriterionIds: ['direct-fix'],
+        invariantIds: [],
+        materialSurfaces: [],
+      },
+    });
+    assert.deepEqual(validateScopeAssessmentApplicability(input, minor), []);
+  }
+});
+
+test('trim unnecessary work exactly matches speculative mechanisms without order significance', () => {
+  const speculativeCoverage = ['speculative-a', 'speculative-b'].map((mechanism) => ({
+    ...result('within-scope').coverage[0],
+    mechanism,
+    classification: 'speculative',
+  }));
+  const valid = result('trim-required', {
+    coverage: [result('within-scope').coverage[0], ...speculativeCoverage],
+    unnecessaryWork: ['speculative-b', 'speculative-a'],
+    smallerSufficientAlternative: 'Retain only the direct local fix.',
+  });
+  assert.deepEqual(validateScopeAssessmentResult(valid), []);
+
+  for (const unnecessaryWork of [
+    ['speculative-a'],
+    ['speculative-a', 'speculative-b', 'unrelated'],
+    ['speculative-a', 'speculative-a'],
+  ]) {
+    assert.match(
+      validateScopeAssessmentResult({ ...valid, unnecessaryWork }).join('\n'),
+      /unnecessaryWork must exactly match speculative coverage mechanisms/u,
+    );
+  }
+});
+
+test('human material surfaces and trigger categories correspond exactly and uniquely', () => {
+  const materialSurfaces = ['new-subsystem', 'public-surface'];
+  const valid = result('human-decision-required', {
+    coverage: [{ ...result('within-scope').coverage[0], classification: 'material-scope-change' }],
+    scopeDelta: {
+      description: 'Add one subsystem and public surface.',
+      sourceCriterionIds: ['direct-fix'],
+      acceptedCriterionIds: ['direct-fix'],
+      invariantIds: [],
+      materialSurfaces,
+    },
+    materialityTriggers: [...materialSurfaces].reverse().map((category) => ({
+      category,
+      evidence: `Exact evidence for ${category}.`,
+    })),
+    smallestExpansion: 'Add only the named surfaces.',
+    narrowAlternative: 'Retain the local implementation.',
+    deferralConsequences: 'The material surfaces remain absent.',
+    humanDecision: true,
+  });
+  assert.deepEqual(validateScopeAssessmentResult(valid), []);
+
+  for (const materialityTriggers of [
+    valid.materialityTriggers.slice(0, 1),
+    [...valid.materialityTriggers, { category: 'new-dependency', evidence: 'Unrelated dependency.' }],
+    [
+      { category: 'new-subsystem', evidence: 'First subsystem trigger.' },
+      { category: 'new-subsystem', evidence: 'Duplicate subsystem trigger.' },
+    ],
+  ]) {
+    assert.match(
+      validateScopeAssessmentResult({ ...valid, materialityTriggers }).join('\n'),
+      /materialityTriggers categories must exactly match scopeDelta\.materialSurfaces/u,
+    );
+  }
+});
+
+test('unauthorized material inventory uses field-specific human-decision categories', () => {
+  const inventoryCategories = new Map([
+    ['dependencies', 'new-dependency'],
+    ['publicSurfaces', 'public-surface'],
+    ['persistentSurfaces', 'persistent-surface'],
+    ['subsystems', 'new-subsystem'],
+  ]);
+  for (const [field, category] of inventoryCategories) {
+    const surface = `material-${field}`;
+    const mapping = {
+      mechanism: surface,
+      sourceCriterionIds: ['direct-fix'],
+      acceptedCriterionIds: ['direct-fix'],
+      invariantIds: [],
+      nonGoalIds: [],
+      guidanceIds: [],
+      rationale: 'The source supports the mechanism but accepted shape does not authorize it.',
+    };
+    const input = packet({
+      changeInventory: {
+        ...packet().changeInventory,
+        [field]: [surface],
+        mappings: [...packet().changeInventory.mappings, mapping],
+      },
+    });
+    const assessment = result('human-decision-required', {
+      coverage: [
+        result('within-scope').coverage[0],
+        { ...mapping, classification: 'material-scope-change' },
+      ],
+      scopeDelta: {
+        description: `Add the unauthorized ${field} surface.`,
+        sourceCriterionIds: ['direct-fix'],
+        acceptedCriterionIds: ['direct-fix'],
+        invariantIds: [],
+        materialSurfaces: [category],
+      },
+      materialityTriggers: [{ category, evidence: `The inventory adds ${surface}.` }],
+      smallestExpansion: `Add only ${surface}.`,
+      narrowAlternative: 'Retain the direct local fix.',
+      deferralConsequences: 'The unauthorized material surface remains absent.',
+      humanDecision: true,
+    });
+    assert.deepEqual(validateScopeAssessmentApplicability(input, assessment), [], field);
+
+    const missingCategory = {
+      ...assessment,
+      scopeDelta: { ...assessment.scopeDelta, materialSurfaces: ['policy-change'] },
+      materialityTriggers: [{ category: 'policy-change', evidence: 'A different category.' }],
+    };
+    assert.deepEqual(
+      validateScopeAssessmentApplicability(input, missingCategory),
+      [`$ changeInventory.${field} material surface ${JSON.stringify(surface)} lacks accepted-scope authorization and requires human-decision-required material-scope-change coverage with category ${category}`],
+    );
+  }
 });
 
 test('unnecessary generic checker requires trimming to the direct fix', () => {
@@ -724,11 +946,70 @@ test('pure validators return errors instead of throwing for malformed nested JSO
     changeInventory: { ...packet().changeInventory, mappings: [null] },
   });
   const malformedResult = result('within-scope', { coverage: [null] });
+  const malformedTrimResult = result('trim-required', {
+    coverage: [null],
+    unnecessaryWork: ['unknown-work'],
+    smallerSufficientAlternative: 'Use valid evidence instead.',
+  });
+  const malformedHumanResult = result('human-decision-required', {
+    coverage: [null],
+    scopeDelta: null,
+    materialityTriggers: [null],
+    smallestExpansion: 'Use valid evidence instead.',
+    narrowAlternative: 'Retain the direct fix.',
+    deferralConsequences: 'No material expansion is accepted.',
+    humanDecision: true,
+  });
   assert.doesNotThrow(() => validateAssessmentPacket(malformedPacket));
   assert.doesNotThrow(() => validateScopeAssessmentResult(malformedResult));
+  assert.doesNotThrow(() => validateScopeAssessmentResult(malformedTrimResult));
+  assert.doesNotThrow(() => validateScopeAssessmentResult(malformedHumanResult));
   assert.doesNotThrow(() => validateScopeAssessmentApplicability(malformedPacket, malformedResult));
   assert.notDeepEqual(validateAssessmentPacket(malformedPacket), []);
   assert.notDeepEqual(validateScopeAssessmentResult(malformedResult), []);
+});
+
+test('result correspondence is total for missing, null, and wrong containers', () => {
+  const trimBase = result('trim-required', {
+    coverage: [{
+      ...result('within-scope').coverage[0],
+      classification: 'speculative',
+    }],
+    unnecessaryWork: ['direct-local-fix'],
+    smallerSufficientAlternative: 'Retain only supported work.',
+  });
+  const humanBase = result('human-decision-required', {
+    coverage: [{ ...result('within-scope').coverage[0], classification: 'material-scope-change' }],
+    scopeDelta: {
+      description: 'Add one material surface.',
+      sourceCriterionIds: ['direct-fix'],
+      acceptedCriterionIds: ['direct-fix'],
+      invariantIds: [],
+      materialSurfaces: ['new-subsystem'],
+    },
+    materialityTriggers: [{ category: 'new-subsystem', evidence: 'A subsystem is proposed.' }],
+    smallestExpansion: 'Add only the named subsystem.',
+    narrowAlternative: 'Retain the direct fix.',
+    deferralConsequences: 'The subsystem remains absent.',
+    humanDecision: true,
+  });
+  const malformed = [];
+  for (const value of [null, undefined, 'not-an-array', { wrong: 'container' }]) {
+    for (const field of ['coverage', 'unnecessaryWork']) {
+      const candidate = { ...trimBase, [field]: value };
+      if (value === undefined) delete candidate[field];
+      malformed.push(candidate);
+    }
+    for (const field of ['coverage', 'materialityTriggers', 'scopeDelta']) {
+      const candidate = { ...humanBase, [field]: value };
+      if (value === undefined) delete candidate[field];
+      malformed.push(candidate);
+    }
+  }
+  for (const candidate of malformed) {
+    assert.doesNotThrow(() => validateScopeAssessmentResult(candidate));
+    assert.notDeepEqual(validateScopeAssessmentResult(candidate), []);
+  }
 });
 
 test('every echoed identity mismatch makes a valid assessment stale without mutation', () => {

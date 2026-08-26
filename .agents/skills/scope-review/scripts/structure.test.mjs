@@ -170,6 +170,11 @@ test('documentation links resolve and defines invocation and authority boundarie
   assert.match(contract, /independent workstream, new criterion, non-goal reversal, sensitive policy/u);
   assert.match(contract, /without authorizing either/u);
   assert.match(contract, /both the\s+authoritative source and accepted scope provide that exact authority/u);
+  assert.match(contract, /must cite positive\s+authority through a source-required criterion, accepted criterion, or invariant/u);
+  assert.match(contract, /cannot be classified `required` or\s+`implementation-choice`/u);
+  assert.match(contract, /`unnecessaryWork` must name the\s+complete set of `speculative` coverage mechanisms exactly once/u);
+  assert.match(contract, /`scopeDelta\.materialSurfaces` and the categories\s+in `materialityTriggers` must be the same order-insensitive set/u);
+  assert.match(contract, /dependency, public surface, persistent surface, or\s+subsystem in the material inventory/u);
   assert.match(contract, /generic repository checker/u);
   assert.match(contract, /adjacent helper/u);
   assert.match(contract, /new subsystem/u);

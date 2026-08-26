@@ -22,6 +22,14 @@ The 64 KiB packet and 32 KiB result limits bound context. They are never scope o
 
 Classify each mechanism as `required`, `implementation-choice`, `speculative`, `necessary-minor-expansion`, `material-scope-change`, or `insufficient-evidence`. Judge necessity from the source objective and requirements together with the accepted criteria, invariants, minimal closure, and authorized/unauthorized/deferred shape, not from line, file, diff, byte, or token counts.
 
+Every `required` or `implementation-choice` coverage row must cite positive
+authority through a source-required criterion, accepted criterion, or invariant.
+Non-goals and optional implementation guidance may explain a classification,
+but cannot provide that affirmative authority by themselves. A mechanism named
+in unauthorized or deferred accepted shape cannot be classified `required` or
+`implementation-choice`; that disposition alone does not prevent a valid
+`speculative` or `necessary-minor-expansion` classification.
+
 Materiality triggers are closed and complete: a new subsystem, new dependency, public surface, persistent surface, cross-capability work, policy change, repository-wide enforcement, independent workstream, new criterion, non-goal reversal, sensitive policy, replacement of the accepted approach, or repeated expansion. A tripwire can request closer inspection but cannot select or exclude any verdict.
 
 Apply authority before materiality and materiality before trimming. First
@@ -35,7 +43,18 @@ absent, classify the material commitment as `material-scope-change` and return
 downgrade that mechanism to `speculative` or the assessment to
 `trim-required`. Use `trim-required` only when every removable mechanism is
 nonmaterial and removing it preserves sufficient closure of the authoritative
-outcome and accepted scope.
+outcome and accepted scope. For that verdict, `unnecessaryWork` must name the
+complete set of `speculative` coverage mechanisms exactly once; ordering has no
+meaning.
+
+For `human-decision-required`, `scopeDelta.materialSurfaces` and the categories
+in `materialityTriggers` must be the same order-insensitive set, with exactly
+one trigger per category. A dependency, public surface, persistent surface, or
+subsystem in the material inventory that lacks either explicit source-required
+authority or accepted-shape authorization must use `material-scope-change`
+coverage and include, respectively, `new-dependency`, `public-surface`,
+`persistent-surface`, or `new-subsystem` in both sets. An inventory entry with
+both authorities remains eligible for ordinary necessity assessment.
 
 Return exactly one verdict:
 

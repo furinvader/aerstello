@@ -7,17 +7,19 @@ export const ASSESSMENT_PACKET_LIMIT_BYTES = 64 * 1024;
 export const SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES = 32 * 1024;
 
 const CODE_PHASES = new Set(['task', 'integrated-head', 'review-finding']);
-const NON_HUMAN_SCOPE_VERDICTS = new Set([
-  'within-scope',
-  'trim-required',
-  'minor-amendment-required',
-]);
 const MATERIAL_INVENTORY_FIELDS = [
   'dependencies',
   'publicSurfaces',
   'persistentSurfaces',
   'subsystems',
 ];
+const MATERIAL_INVENTORY_CATEGORIES = new Map([
+  ['dependencies', 'new-dependency'],
+  ['publicSurfaces', 'public-surface'],
+  ['persistentSurfaces', 'persistent-surface'],
+  ['subsystems', 'new-subsystem'],
+]);
+const AFFIRMATIVE_CLASSIFICATIONS = new Set(['required', 'implementation-choice']);
 
 const schema = JSON.parse(readFileSync(
   new URL('../schemas/scope-assessment.schema.json', import.meta.url),
@@ -107,13 +109,16 @@ function overlappingAcceptedShapes(acceptedScope) {
   return errors;
 }
 
-function unauthorizedMaterialInventory(packet, verdict) {
-  if (!NON_HUMAN_SCOPE_VERDICTS.has(verdict)) return [];
-
+function materialInventoryCorrespondence(packet, result) {
   const mappings = new Map(
     packet.changeInventory.mappings.map((entry) => [entry.mechanism, entry]),
   );
+  const coverage = new Map(result.coverage.map((entry) => [entry.mechanism, entry]));
   const authorizedShape = new Set(packet.acceptedScope?.authorizedShape ?? []);
+  const materialSurfaces = new Set(result.scopeDelta?.materialSurfaces ?? []);
+  const materialityTriggers = new Set(
+    result.materialityTriggers.map(({ category }) => category),
+  );
   const errors = [];
   for (const field of MATERIAL_INVENTORY_FIELDS) {
     for (const surface of packet.changeInventory[field]) {
@@ -126,10 +131,94 @@ function unauthorizedMaterialInventory(packet, verdict) {
         missingAuthorities.push('accepted-scope authorization');
       }
       if (missingAuthorities.length > 0) {
-        errors.push(
-          `$ changeInventory.${field} material surface ${JSON.stringify(surface)} lacks ${missingAuthorities.join(' and ')}`,
+        const category = MATERIAL_INVENTORY_CATEGORIES.get(field);
+        const surfaceCoverage = coverage.get(surface);
+        const hasRequiredDisposition = (
+          result.verdict === 'human-decision-required'
+          && surfaceCoverage?.classification === 'material-scope-change'
+          && materialSurfaces.has(category)
+          && materialityTriggers.has(category)
         );
+        if (!hasRequiredDisposition) {
+          errors.push(
+            `$ changeInventory.${field} material surface ${JSON.stringify(surface)} lacks ${missingAuthorities.join(' and ')} and requires human-decision-required material-scope-change coverage with category ${category}`,
+          );
+        }
       }
+    }
+  }
+  return errors;
+}
+
+function positiveCoverageAuthority(coverage) {
+  if (!Array.isArray(coverage)) return [];
+  const errors = [];
+  for (const [index, entry] of coverage.entries()) {
+    if (!entry || !AFFIRMATIVE_CLASSIFICATIONS.has(entry.classification)) continue;
+    const hasPositiveAuthority = [
+      entry.sourceCriterionIds,
+      entry.acceptedCriterionIds,
+      entry.invariantIds,
+    ].some((ids) => Array.isArray(ids) && ids.length > 0);
+    if (!hasPositiveAuthority) {
+      errors.push(
+        `$ coverage[${index}] ${entry.classification} classification lacks positive source, accepted-criterion, or invariant authority`,
+      );
+    }
+  }
+  return errors;
+}
+
+function exactSemanticSet(actual, expected) {
+  if (!Array.isArray(actual) || !Array.isArray(expected)) return false;
+  return actual.length === expected.length
+    && new Set(actual).size === actual.length
+    && new Set(expected).size === expected.length
+    && actual.every((entry) => expected.includes(entry));
+}
+
+function resultCorrespondence(result) {
+  const errors = [...positiveCoverageAuthority(result?.coverage)];
+  if (result?.verdict === 'trim-required') {
+    const speculativeMechanisms = (Array.isArray(result.coverage) ? result.coverage : [])
+      .filter((entry) => entry?.classification === 'speculative')
+      .map((entry) => entry.mechanism);
+    if (!exactSemanticSet(result.unnecessaryWork, speculativeMechanisms)) {
+      errors.push('$ trim-required unnecessaryWork must exactly match speculative coverage mechanisms');
+    }
+  }
+  if (result?.verdict === 'human-decision-required') {
+    const triggerCategories = (Array.isArray(result.materialityTriggers)
+      ? result.materialityTriggers
+      : [])
+      .map((entry) => entry?.category)
+      .filter((category) => typeof category === 'string');
+    const materialSurfaces = Array.isArray(result.scopeDelta?.materialSurfaces)
+      ? result.scopeDelta.materialSurfaces
+      : [];
+    if (!exactSemanticSet(triggerCategories, materialSurfaces)) {
+      errors.push('$ human-decision-required materialityTriggers categories must exactly match scopeDelta.materialSurfaces');
+    }
+  }
+  return errors;
+}
+
+function acceptedShapeCorrespondence(packet, result) {
+  if (!packet.acceptedScope) return [];
+  const unauthorized = new Set(packet.acceptedScope.unauthorizedShape);
+  const deferred = new Set(packet.acceptedScope.deferredShape);
+  const errors = [];
+  for (const entry of result.coverage) {
+    if (!AFFIRMATIVE_CLASSIFICATIONS.has(entry.classification)) continue;
+    if (unauthorized.has(entry.mechanism)) {
+      errors.push(
+        `$ coverage mechanism ${JSON.stringify(entry.mechanism)} is ${entry.classification} despite acceptedScope.unauthorizedShape`,
+      );
+    }
+    if (deferred.has(entry.mechanism)) {
+      errors.push(
+        `$ coverage mechanism ${JSON.stringify(entry.mechanism)} is ${entry.classification} despite acceptedScope.deferredShape`,
+      );
     }
   }
   return errors;
@@ -217,6 +306,7 @@ export function validateScopeAssessmentResult(result) {
 
   if (!validateResultSchema(result)) errors.push(...schemaErrors(validateResultSchema));
   errors.push(...repeatedMechanisms(result?.coverage, 'coverage'));
+  errors.push(...resultCorrespondence(result));
   return normalize(errors);
 }
 
@@ -269,6 +359,7 @@ export function validateScopeAssessmentApplicability(packet, result) {
   if (JSON.stringify(inventoryMechanisms) !== JSON.stringify(coverageMechanisms)) {
     errors.push('$ result coverage does not exactly match packet inventory mechanisms');
   }
-  errors.push(...unauthorizedMaterialInventory(packet, result.verdict));
+  errors.push(...acceptedShapeCorrespondence(packet, result));
+  errors.push(...materialInventoryCorrespondence(packet, result));
   return normalize(errors);
 }
