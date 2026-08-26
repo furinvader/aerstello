@@ -1479,6 +1479,49 @@ test('minor scope deltas are grounded bidirectionally by necessary mechanisms', 
   );
 });
 
+test('minor amendments accept exact invariant-only authority and reject empty grounding', () => {
+  const mechanism = 'invariant-bound-helper';
+  const input = packet({
+    acceptedScope: {
+      ...packet().acceptedScope,
+      authorizedShape: [],
+      unauthorizedShape: [mechanism],
+    },
+    changeInventory: {
+      ...packet().changeInventory,
+      subsystems: [],
+      mappings: [{
+        ...packet().changeInventory.mappings[0],
+        mechanism,
+        sourceCriterionIds: [],
+        acceptedCriterionIds: [],
+        invariantIds: ['exact-subject'],
+      }],
+    },
+  });
+  const assessment = result('minor-amendment-required', {
+    coverage: [{
+      ...input.changeInventory.mappings[0],
+      classification: 'necessary-minor-expansion',
+    }],
+    scopeDelta: {
+      description: 'Add only the invariant-bound helper.',
+      sourceCriterionIds: [],
+      acceptedCriterionIds: [],
+      invariantIds: ['exact-subject'],
+      materialSurfaces: [],
+    },
+  });
+  assert.deepEqual(validateScopeAssessmentApplicability(input, assessment), []);
+
+  const emptyDelta = {
+    ...assessment,
+    scopeDelta: { ...assessment.scopeDelta, invariantIds: [] },
+  };
+  assert.notDeepEqual(validateScopeAssessmentResult(emptyDelta), []);
+  assert.notDeepEqual(validateScopeAssessmentApplicability(input, emptyDelta), []);
+});
+
 test('human decisions retain independent speculative nonmaterial coverage', () => {
   const material = 'new-material-subsystem';
   const helper = 'removable-local-helper';
@@ -1538,6 +1581,151 @@ test('human decisions retain independent speculative nonmaterial coverage', () =
   const errors = validateScopeAssessmentApplicability(input, materialAsSpeculative).join('\n');
   assert.match(errors, /speculative mechanism .* must be independent removable nonmaterial work/u);
   assert.match(errors, /requires human-decision-required material-scope-change coverage/u);
+});
+
+test('human decisions preserve grounded minor work beside material and speculative work', () => {
+  const material = 'new-material-subsystem';
+  const minor = 'invariant-bound-follow-up';
+  const speculative = 'unsupported-local-helper';
+  const input = packet({
+    acceptedScope: {
+      ...packet().acceptedScope,
+      authorizedShape: [],
+      unauthorizedShape: [minor],
+    },
+    changeInventory: {
+      ...packet().changeInventory,
+      subsystems: [material],
+      mappings: [
+        {
+          ...packet().changeInventory.mappings[0],
+          mechanism: material,
+          sourceCriterionIds: [],
+          acceptedCriterionIds: [],
+          invariantIds: [],
+        },
+        {
+          ...packet().changeInventory.mappings[0],
+          mechanism: minor,
+          sourceCriterionIds: [],
+          acceptedCriterionIds: [],
+          invariantIds: ['exact-subject'],
+        },
+        {
+          ...packet().changeInventory.mappings[0],
+          mechanism: speculative,
+          sourceCriterionIds: [],
+          acceptedCriterionIds: [],
+          invariantIds: [],
+        },
+      ],
+    },
+  });
+  const assessment = result('human-decision-required', {
+    coverage: [
+      { ...input.changeInventory.mappings[0], classification: 'material-scope-change' },
+      { ...input.changeInventory.mappings[1], classification: 'necessary-minor-expansion' },
+      { ...input.changeInventory.mappings[2], classification: 'speculative' },
+    ],
+    scopeDelta: {
+      description: 'Decide the subsystem and retain the invariant-bound minor follow-up.',
+      sourceCriterionIds: [],
+      acceptedCriterionIds: [],
+      invariantIds: ['exact-subject'],
+      materialSurfaces: ['new-subsystem'],
+    },
+    materialityTriggers: [{ category: 'new-subsystem', evidence: 'A new subsystem is proposed.' }],
+    smallestExpansion: 'Add only the subsystem and grounded follow-up.',
+    narrowAlternative: 'Retain the existing bounded implementation.',
+    deferralConsequences: 'The material subsystem remains absent.',
+    humanDecision: true,
+  });
+  assert.deepEqual(validateScopeAssessmentApplicability(input, assessment), []);
+  assert.deepEqual(validateAssessmentPacket(input), []);
+
+  const deltaOnly = {
+    ...assessment,
+    coverage: [
+      assessment.coverage[0],
+      { ...assessment.coverage[1], invariantIds: [] },
+      assessment.coverage[2],
+    ],
+  };
+  assert.match(
+    validateScopeAssessmentApplicability(input, deltaOnly).join('\n'),
+    /share same-field positive authority/u,
+  );
+
+  const relabeledMinor = {
+    ...assessment,
+    coverage: [
+      assessment.coverage[0],
+      { ...assessment.coverage[1], classification: 'speculative' },
+      assessment.coverage[2],
+    ],
+  };
+  assert.match(
+    validateScopeAssessmentApplicability(input, relabeledMinor).join('\n'),
+    /must be classified necessary-minor-expansion/u,
+  );
+
+  const materialRelabel = {
+    ...assessment,
+    coverage: [
+      assessment.coverage[0],
+      { ...assessment.coverage[1], classification: 'material-scope-change' },
+      assessment.coverage[2],
+    ],
+  };
+  assert.match(
+    validateScopeAssessmentApplicability(input, materialRelabel).join('\n'),
+    /must be classified necessary-minor-expansion/u,
+  );
+
+  const distinctNonNativeExpansion = {
+    ...materialRelabel,
+    scopeDelta: {
+      ...materialRelabel.scopeDelta,
+      materialSurfaces: ['new-subsystem', 'policy-change'],
+    },
+    materialityTriggers: [
+      ...materialRelabel.materialityTriggers,
+      { category: 'policy-change', evidence: 'The grounded row is separately proposed as policy.' },
+    ],
+  };
+  assert.deepEqual(
+    validateScopeAssessmentApplicability(input, distinctNonNativeExpansion),
+    [],
+  );
+
+  const unsupportedMaterialRelabel = {
+    ...assessment,
+    coverage: [
+      assessment.coverage[0],
+      assessment.coverage[1],
+      { ...assessment.coverage[2], classification: 'material-scope-change' },
+    ],
+  };
+  assert.match(
+    validateScopeAssessmentApplicability(input, unsupportedMaterialRelabel).join('\n'),
+    /independent unsupported work must remain speculative/u,
+  );
+
+  const distinctUnsupportedExpansion = {
+    ...unsupportedMaterialRelabel,
+    scopeDelta: {
+      ...unsupportedMaterialRelabel.scopeDelta,
+      materialSurfaces: ['new-subsystem', 'policy-change'],
+    },
+    materialityTriggers: [
+      ...unsupportedMaterialRelabel.materialityTriggers,
+      { category: 'policy-change', evidence: 'The unsupported row is separately proposed as policy.' },
+    ],
+  };
+  assert.deepEqual(
+    validateScopeAssessmentApplicability(input, distinctUnsupportedExpansion),
+    [],
+  );
 });
 
 test('human representability uses only forced categories and a one-trigger fallback', () => {
@@ -1616,6 +1804,152 @@ test('human representability uses only forced categories and a one-trigger fallb
     humanDecision: true,
   });
   assert.deepEqual(validateScopeAssessmentApplicability(forced, forcedAssessment), []);
+});
+
+test('generic-trigger human representability accounts for every grounded rejected row', () => {
+  const mechanisms = Array.from(
+    { length: 164 },
+    (_, index) => `m${String(index).padStart(3, '0')}`,
+  );
+  const input = compactPacket(mechanisms, {
+    source: { ...binding().source, identity: 'i'.repeat(512) },
+    amendmentDigests: Array.from({ length: 128 }, () => `sha256:${D}`),
+  });
+  input.acceptedScope.unauthorizedShape = mechanisms;
+
+  assert.ok(Buffer.byteLength(JSON.stringify(input)) <= ASSESSMENT_PACKET_LIMIT_BYTES);
+  assert.match(
+    validateAssessmentPacket(input).join('\n'),
+    /schema-minimal human-decision-required result.*requires \d+ bytes/u,
+  );
+
+  const smallInput = compactPacket(['material-anchor', 'grounded-minor']);
+  smallInput.acceptedScope.unauthorizedShape = ['material-anchor', 'grounded-minor'];
+  const applicableProjection = result('human-decision-required', {
+    binding: smallInput.binding,
+    coverage: [
+      {
+        ...smallInput.changeInventory.mappings[0],
+        sourceCriterionIds: [],
+        classification: 'material-scope-change',
+      },
+      {
+        ...smallInput.changeInventory.mappings[1],
+        classification: 'necessary-minor-expansion',
+      },
+    ],
+    scopeDelta: {
+      description: 'Represent one distinct material anchor and one grounded minor row.',
+      sourceCriterionIds: ['x'],
+      acceptedCriterionIds: [],
+      invariantIds: [],
+      materialSurfaces: ['new-criterion'],
+    },
+    materialityTriggers: [{ category: 'new-criterion', evidence: 'A distinct criterion is proposed.' }],
+    smallestExpansion: 'Add only the distinct criterion and grounded minor row.',
+    narrowAlternative: 'Keep the current accepted scope.',
+    deferralConsequences: 'The distinct criterion remains absent.',
+    humanDecision: true,
+  });
+  assert.deepEqual(
+    validateScopeAssessmentApplicability(smallInput, applicableProjection),
+    [],
+  );
+});
+
+test('generic human representability globally minimizes asymmetric anchor scenarios', () => {
+  const mechanisms = Array.from(
+    { length: 128 },
+    (_, index) => `m${index}`,
+  );
+  const longAuthority = 'a'.repeat(128);
+  const mappings = mechanisms.map((mechanism, index) => ({
+    mechanism,
+    sourceCriterionIds: index === 0 ? ['x'] : index === 1 ? [longAuthority] : [],
+    acceptedCriterionIds: [],
+    invariantIds: [],
+    nonGoalIds: [],
+    guidanceIds: [],
+    rationale: 'x',
+  }));
+  const input = packet({
+    binding: binding({
+      source: { ...binding().source, identity: 'i'.repeat(500) },
+      amendmentDigests: Array.from({ length: 128 }, () => `sha256:${D}`),
+    }),
+    sourceScope: {
+      objective: 'x',
+      requiredCriteria: [
+        { id: 'x', text: 'x' },
+        { id: longAuthority, text: 'x' },
+      ],
+      nonGoals: [],
+      implementationGuidance: [],
+    },
+    acceptedScope: {
+      criteria: [{ id: 'x', text: 'x' }],
+      invariants: [],
+      minimalClosure: 'x',
+      authorizedShape: [],
+      unauthorizedShape: mechanisms.slice(0, 2),
+      deferredShape: [],
+    },
+    changeInventory: {
+      summary: 'x',
+      paths: [],
+      dependencies: [],
+      publicSurfaces: [],
+      persistentSurfaces: [],
+      subsystems: [],
+      mappings,
+    },
+  });
+  const witness = result('human-decision-required', {
+    binding: input.binding,
+    summary: 'x',
+    coverage: mappings.map((mapping, index) => ({
+      ...mapping,
+      sourceCriterionIds: index === 0 ? ['x'] : [],
+      classification: index === 1
+        ? 'material-scope-change'
+        : index === 0
+          ? 'necessary-minor-expansion'
+          : 'speculative',
+      rationale: 'x',
+    })),
+    scopeDelta: {
+      description: 'x',
+      sourceCriterionIds: ['x'],
+      acceptedCriterionIds: [],
+      invariantIds: [],
+      materialSurfaces: ['new-criterion'],
+    },
+    materialityTriggers: [{ category: 'new-criterion', evidence: 'x' }],
+    smallestExpansion: 'x',
+    narrowAlternative: 'x',
+    deferralConsequences: 'x',
+    humanDecision: true,
+  });
+
+  assert.ok(Buffer.byteLength(JSON.stringify(witness)) <= SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES);
+  assert.deepEqual(validateScopeAssessmentResult(witness), []);
+  const correspondenceInput = {
+    ...input,
+    binding: binding({
+      source: { ...binding().source, identity: 'i' },
+      amendmentDigests: [],
+    }),
+  };
+  const correspondenceWitness = { ...witness, binding: correspondenceInput.binding };
+  assert.deepEqual(
+    validateScopeAssessmentApplicability(correspondenceInput, correspondenceWitness),
+    [],
+  );
+  const startedAt = Date.now();
+  const packetErrors = validateAssessmentPacket(input);
+  const elapsedMilliseconds = Date.now() - startedAt;
+  assert.doesNotMatch(packetErrors.join('\n'), /human-decision-required/u);
+  assert.ok(elapsedMilliseconds < 5000, `anchor scenarios took ${elapsedMilliseconds}ms`);
 });
 
 test('minor representability jointly minimizes shared mapping authority', () => {
@@ -2105,6 +2439,53 @@ test('closed contracts and phase-specific identities reject invalid input', () =
     }),
   });
   assert.notDeepEqual(validateAssessmentPacket(amendmentWithoutPlan), []);
+});
+
+test('source-draft bindings reject every downstream artifact identity independently', () => {
+  const draftBinding = binding({
+    phase: 'source-draft',
+    subject: { digest: `sha256:${B}`, sha: null },
+    planDigest: null,
+    amendmentDigests: [],
+    taskPacketDigest: null,
+  });
+  const draftPacket = packet({
+    binding: draftBinding,
+    acceptedScope: null,
+    changeInventory: {
+      ...packet().changeInventory,
+      subsystems: [],
+      mappings: [{
+        ...packet().changeInventory.mappings[0],
+        acceptedCriterionIds: [],
+        invariantIds: [],
+      }],
+    },
+  });
+  const draftResult = result('within-scope', {
+    binding: draftBinding,
+    coverage: [{
+      ...result('within-scope').coverage[0],
+      acceptedCriterionIds: [],
+      invariantIds: [],
+    }],
+  });
+  assert.deepEqual(validateAssessmentPacket(draftPacket), []);
+  assert.deepEqual(validateScopeAssessmentResult(draftResult), []);
+  assert.deepEqual(validateScopeAssessmentApplicability(draftPacket, draftResult), []);
+
+  const staleBindings = [
+    { ...draftBinding, planDigest: `sha256:${C}` },
+    { ...draftBinding, amendmentDigests: [`sha256:${D}`] },
+    { ...draftBinding, taskPacketDigest: `sha256:${A}` },
+  ];
+  for (const staleBinding of staleBindings) {
+    const stalePacket = { ...draftPacket, binding: staleBinding };
+    const staleResult = { ...draftResult, binding: staleBinding };
+    assert.notDeepEqual(validateAssessmentPacket(stalePacket), []);
+    assert.notDeepEqual(validateScopeAssessmentResult(staleResult), []);
+    assert.notDeepEqual(validateScopeAssessmentApplicability(stalePacket, staleResult), []);
+  }
 });
 
 test('pure validators return errors instead of throwing for malformed nested JSON', () => {

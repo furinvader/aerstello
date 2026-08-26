@@ -139,6 +139,17 @@
       },
       "allOf": [
         {
+          "if": { "type": "object", "properties": { "phase": { "const": "source-draft" } }, "required": ["phase"] },
+          "then": {
+            "type": "object",
+            "properties": {
+              "planDigest": { "type": "null" },
+              "amendmentDigests": { "type": "array", "maxItems": 0 },
+              "taskPacketDigest": { "type": "null" }
+            }
+          }
+        },
+        {
           "if": { "type": "object", "properties": { "phase": { "enum": ["task", "integrated-head", "review-finding"] } }, "required": ["phase"] },
           "then": {
             "type": "object",
@@ -278,7 +289,7 @@
     "materialCoverage": {
       "allOf": [
         { "$ref": "#/$defs/coverage" },
-        { "type": "object", "properties": { "classification": { "enum": ["required", "implementation-choice", "speculative", "material-scope-change"] } } }
+        { "type": "object", "properties": { "classification": { "enum": ["required", "implementation-choice", "speculative", "necessary-minor-expansion", "material-scope-change"] } } }
       ]
     },
     "insufficientCoverage": {
@@ -318,7 +329,8 @@
           "properties": { "materialSurfaces": { "type": "array", "maxItems": 0 } },
           "anyOf": [
             { "type": "object", "properties": { "sourceCriterionIds": { "type": "array", "minItems": 1 } } },
-            { "type": "object", "properties": { "acceptedCriterionIds": { "type": "array", "minItems": 1 } } }
+            { "type": "object", "properties": { "acceptedCriterionIds": { "type": "array", "minItems": 1 } } },
+            { "type": "object", "properties": { "invariantIds": { "type": "array", "minItems": 1 } } }
           ]
         }
       ]

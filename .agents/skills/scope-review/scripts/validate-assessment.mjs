@@ -199,7 +199,7 @@ function baseMinimalResult(packet, verdict, coverage) {
   };
 }
 
-function buildMinorResult(packet, coverage, necessary) {
+function buildGroundedResult(packet, verdict, coverage, necessary, materialCategories = []) {
   const groundedCoverage = coverage.map((entry, index) => {
     const authority = necessary.get(index);
     return authority
@@ -208,35 +208,58 @@ function buildMinorResult(packet, coverage, necessary) {
   });
   const deltaFields = new Map(POSITIVE_AUTHORITY_FIELDS.map((field) => [field, new Set()]));
   for (const authority of necessary.values()) deltaFields.get(authority.field).add(authority.id);
-  const result = baseMinimalResult(packet, 'minor-amendment-required', groundedCoverage);
+  const result = baseMinimalResult(packet, verdict, groundedCoverage);
   result.scopeDelta = {
     description: 'x',
     sourceCriterionIds: [...deltaFields.get('sourceCriterionIds')],
     acceptedCriterionIds: [...deltaFields.get('acceptedCriterionIds')],
     invariantIds: [...deltaFields.get('invariantIds')],
-    materialSurfaces: [],
+    materialSurfaces: materialCategories,
   };
-  result.unnecessaryWork = groundedCoverage
-    .filter(({ classification }) => classification === 'speculative')
-    .map(({ mechanism }) => mechanism);
-  if (result.unnecessaryWork.length > 0) result.smallerSufficientAlternative = 'x';
+  if (verdict === 'minor-amendment-required') {
+    result.unnecessaryWork = groundedCoverage
+      .filter(({ classification }) => classification === 'speculative')
+      .map(({ mechanism }) => mechanism);
+    if (result.unnecessaryWork.length > 0) result.smallerSufficientAlternative = 'x';
+  } else {
+    result.materialityTriggers = materialCategories.map((category) => ({
+      category,
+      evidence: 'x',
+    }));
+    result.smallestExpansion = 'x';
+    result.narrowAlternative = 'x';
+    result.deferralConsequences = 'x';
+    result.humanDecision = true;
+  }
   return result;
+}
+
+function minorAuthorityOptions(mapping) {
+  return POSITIVE_AUTHORITY_FIELDS.flatMap((field) => mapping[field].map((id) => ({
+    field,
+    id,
+    key: `${field}\u0000${id}`,
+    serializedIdBytes: Buffer.byteLength(JSON.stringify(id), 'utf8'),
+  })));
 }
 
 function isSourceOrAccepted({ field }) {
   return field === 'sourceCriterionIds' || field === 'acceptedCriterionIds';
 }
 
-function minorAuthorityOptions(mapping, sourceOrAcceptedOnly = false) {
-  const fields = sourceOrAcceptedOnly
-    ? ['sourceCriterionIds', 'acceptedCriterionIds']
-    : POSITIVE_AUTHORITY_FIELDS;
-  return fields.flatMap((field) => mapping[field].map((id) => ({
-    field,
-    id,
-    key: `${field}\u0000${id}`,
-    serializedIdBytes: Buffer.byteLength(JSON.stringify(id), 'utf8'),
-  })));
+function ensureMinorSourceAuthority(rows, assignments) {
+  if ([...assignments.values()].some(isSourceOrAccepted)) return assignments;
+  let best = null;
+  for (const row of rows) {
+    for (const option of row.options.filter(isSourceOrAccepted)) {
+      const candidate = new Map(assignments).set(row.index, option);
+      const cost = minorVariableCost(candidate);
+      if (!best || cost < best.cost || (cost === best.cost && option.key < best.option.key)) {
+        best = { assignments: candidate, cost, option };
+      }
+    }
+  }
+  return best?.assignments ?? null;
 }
 
 function reduceDominatedMinorOptions(rows) {
@@ -308,25 +331,7 @@ function incidenceCommonDenominator(rowCount) {
   return denominator;
 }
 
-function ensureMinorSourceAuthority(rows, assignments) {
-  if (![...assignments.values()].some(isSourceOrAccepted)) {
-    let best = null;
-    for (const row of rows) {
-      for (const option of row.options.filter(isSourceOrAccepted)) {
-        const candidate = new Map(assignments).set(row.index, option);
-        const cost = minorVariableCost(candidate);
-        if (!best || cost < best.cost || (cost === best.cost && option.key < best.option.key)) {
-          best = { assignments: candidate, cost, option };
-        }
-      }
-    }
-    if (!best) return null;
-    return best.assignments;
-  }
-  return assignments;
-}
-
-function initialMinorAssignments(rows) {
+function initialMinorAssignments(rows, requireSourceOrAccepted) {
   const assignments = new Map();
   for (const row of rows) {
     const options = [...row.options].sort((left, right) => (
@@ -336,10 +341,10 @@ function initialMinorAssignments(rows) {
     ));
     assignments.set(row.index, options[0]);
   }
-  return ensureMinorSourceAuthority(rows, assignments);
+  return requireSourceOrAccepted ? ensureMinorSourceAuthority(rows, assignments) : assignments;
 }
 
-function greedyCoverMinorAssignments(rows) {
+function greedyCoverMinorAssignments(rows, requireSourceOrAccepted) {
   const candidates = new Map();
   for (const row of rows) {
     for (const option of row.options) {
@@ -368,10 +373,10 @@ function greedyCoverMinorAssignments(rows) {
       uncovered.delete(index);
     }
   }
-  return ensureMinorSourceAuthority(rows, assignments);
+  return requireSourceOrAccepted ? ensureMinorSourceAuthority(rows, assignments) : assignments;
 }
 
-function improveSharedMinorAssignments(rows, initialAssignments) {
+function improveSharedMinorAssignments(rows, initialAssignments, requireSourceOrAccepted) {
   let assignments = initialAssignments;
   let cost = minorVariableCost(assignments);
   const candidates = new Map();
@@ -389,7 +394,9 @@ function improveSharedMinorAssignments(rows, initialAssignments) {
       if (indexes.length < 2) continue;
       const candidateAssignments = new Map(assignments);
       for (const index of indexes) candidateAssignments.set(index, option);
-      if (![...candidateAssignments.values()].some(isSourceOrAccepted)) continue;
+      if (requireSourceOrAccepted && ![...candidateAssignments.values()].some(isSourceOrAccepted)) {
+        continue;
+      }
       const candidateCost = minorVariableCost(candidateAssignments);
       if (candidateCost < cost) {
         assignments = candidateAssignments;
@@ -401,14 +408,20 @@ function improveSharedMinorAssignments(rows, initialAssignments) {
   return assignments;
 }
 
-function solveMinorAuthorityScenario(packet, coverage, necessaryIndexes, sourceAnchorIndex) {
+function solveMinorAuthorityScenario(
+  packet,
+  coverage,
+  necessaryIndexes,
+  buildResult,
+  authorityMode,
+) {
+  const requireSourceOrAccepted = authorityMode === 'source-or-accepted';
   let rows = necessaryIndexes.map((index) => ({
     index,
     mechanism: packet.changeInventory.mappings[index].mechanism,
-    options: minorAuthorityOptions(
-      packet.changeInventory.mappings[index],
-      index === sourceAnchorIndex,
-    ),
+    options: minorAuthorityOptions(packet.changeInventory.mappings[index]).filter((option) => (
+      authorityMode !== 'invariant-only' || option.field === 'invariantIds'
+    )),
   }));
   if (rows.some(({ options }) => options.length === 0)) return null;
   rows = reduceDominatedMinorOptions(rows);
@@ -419,10 +432,67 @@ function solveMinorAuthorityScenario(packet, coverage, necessaryIndexes, sourceA
     || left.index - right.index
   ));
 
-  let assignments = initialMinorAssignments(rows);
+  const optionIncidence = new Map();
+  for (const row of rows) {
+    for (const option of row.options) {
+      optionIncidence.set(option.key, (optionIncidence.get(option.key) ?? 0) + 1);
+    }
+  }
+  if ([...optionIncidence.values()].every((count) => count === 1)) {
+    let states = new Map([['0:0', {
+      usedFields: 0,
+      hasSourceOrAccepted: false,
+      cost: 0,
+      assignments: new Map(),
+    }]]);
+    for (const row of rows) {
+      const nextStates = new Map();
+      for (const state of states.values()) {
+        for (const option of row.options) {
+          const usedFields = state.usedFields;
+          const fieldIndex = POSITIVE_AUTHORITY_FIELDS.indexOf(option.field);
+          const fieldBit = 1 << fieldIndex;
+          const nextMask = usedFields | fieldBit;
+          const hasSourceOrAccepted = state.hasSourceOrAccepted || isSourceOrAccepted(option);
+          const cost = state.cost + (2 * option.serializedIdBytes)
+            + ((usedFields & fieldBit) === 0 ? 0 : 1);
+          const stateKey = `${nextMask}:${hasSourceOrAccepted ? 1 : 0}`;
+          const current = nextStates.get(stateKey);
+          if (!current || cost < current.cost) {
+            nextStates.set(stateKey, {
+              usedFields: nextMask,
+              hasSourceOrAccepted,
+              cost,
+              assignments: new Map(state.assignments).set(row.index, option),
+            });
+          }
+        }
+      }
+      states = nextStates;
+    }
+    const exact = [...states.values()]
+      .filter((state) => !requireSourceOrAccepted || state.hasSourceOrAccepted)
+      .sort((left, right) => left.cost - right.cost)[0];
+    if (!exact) return null;
+    const exactResult = buildResult(coverage, exact.assignments);
+    const exactBytes = serializedBytes(exactResult, 'scope assessment result').bytes;
+    if (exactBytes > SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES) {
+      Object.defineProperty(exactResult, RESULT_REPRESENTABILITY, {
+        configurable: true,
+        value: {
+          exact: true,
+          lowerBoundBytes: exactBytes,
+          witnessBytes: exactBytes,
+        },
+      });
+    }
+    return exactResult;
+  }
+
+  let assignments = initialMinorAssignments(rows, requireSourceOrAccepted);
   if (!assignments) return null;
-  assignments = improveSharedMinorAssignments(rows, assignments);
-  const greedyAssignments = greedyCoverMinorAssignments(rows);
+  assignments = improveSharedMinorAssignments(rows, assignments, requireSourceOrAccepted);
+  const greedyAssignments = greedyCoverMinorAssignments(rows, requireSourceOrAccepted);
   if (
     greedyAssignments
     && minorVariableCost(greedyAssignments) < minorVariableCost(assignments)
@@ -431,7 +501,7 @@ function solveMinorAuthorityScenario(packet, coverage, necessaryIndexes, sourceA
   }
   let bestAssignments = assignments;
   let bestVariableCost = minorVariableCost(assignments);
-  let bestResult = buildMinorResult(packet, coverage, assignments);
+  let bestResult = buildResult(coverage, assignments);
   let bestBytes = serializedBytes(bestResult, 'scope assessment result').bytes;
   if (bestBytes <= SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES) return bestResult;
 
@@ -564,13 +634,14 @@ function solveMinorAuthorityScenario(packet, coverage, necessaryIndexes, sourceA
   const memo = new Map();
   function search(position, openedMask, fieldCounts, hasSourceOrAccepted, runningCost) {
     if (position === rows.length) {
-      if (!hasSourceOrAccepted || runningCost >= bestVariableCost) return;
+      if (requireSourceOrAccepted && !hasSourceOrAccepted) return;
+      if (runningCost >= bestVariableCost) return;
       bestVariableCost = runningCost;
       bestAssignments = new Map(workingAssignments);
-      bestResult = buildMinorResult(packet, coverage, bestAssignments);
+      bestResult = buildResult(coverage, bestAssignments);
       return;
     }
-    if (!hasSourceOrAccepted) {
+    if (requireSourceOrAccepted && !hasSourceOrAccepted) {
       const canStillGroundDelta = rows.slice(position).some(({ options }) => (
         options.some(isSourceOrAccepted)
       ));
@@ -625,10 +696,10 @@ function solveMinorAuthorityScenario(packet, coverage, necessaryIndexes, sourceA
   return bestResult;
 }
 
-function exactMinorResult(packet, coverage, forcedNecessaryIndexes) {
+function exactGroundedResult(packet, coverage, forcedNecessaryIndexes, buildResult) {
   const ordinaryAnchorIndexes = packet.changeInventory.mappings.flatMap((mapping, index) => {
     if (forcedNecessaryIndexes.includes(index)) return [];
-    return minorAuthorityOptions(mapping, true).length > 0 ? [index] : [];
+    return minorAuthorityOptions(mapping).length > 0 ? [index] : [];
   });
   ordinaryAnchorIndexes.sort((left, right) => (
     packet.changeInventory.mappings[left].mechanism.localeCompare(
@@ -636,11 +707,8 @@ function exactMinorResult(packet, coverage, forcedNecessaryIndexes) {
     ) || left - right
   ));
   const scenarios = forcedNecessaryIndexes.length > 0
-    ? [{ necessary: forcedNecessaryIndexes, anchor: null }, ...ordinaryAnchorIndexes.map((anchor) => ({
-      necessary: [...forcedNecessaryIndexes, anchor],
-      anchor,
-    }))]
-    : ordinaryAnchorIndexes.map((anchor) => ({ necessary: [anchor], anchor }));
+    ? [{ necessary: forcedNecessaryIndexes }]
+    : ordinaryAnchorIndexes.map((anchor) => ({ necessary: [anchor] }));
   let bestResult = null;
   let bestBytes = Number.POSITIVE_INFINITY;
   let globalLowerBoundBytes = Number.POSITIVE_INFINITY;
@@ -650,26 +718,29 @@ function exactMinorResult(packet, coverage, forcedNecessaryIndexes) {
         ? minimalCoverage(entry.mechanism, 'necessary-minor-expansion')
         : entry
     ));
-    const result = solveMinorAuthorityScenario(
-      packet,
-      scenarioCoverage,
-      scenario.necessary,
-      scenario.anchor,
-    );
-    if (!result) continue;
-    const bytes = serializedBytes(result, 'scope assessment result').bytes;
-    const evidence = result[RESULT_REPRESENTABILITY] ?? {
-      lowerBoundBytes: bytes,
-      witnessBytes: bytes,
-    };
-    if (bytes <= SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES) return result;
-    globalLowerBoundBytes = Math.min(globalLowerBoundBytes, evidence.lowerBoundBytes);
-    if (bytes < bestBytes) {
-      bestResult = result;
-      bestBytes = bytes;
+    for (const authorityMode of ['source-or-accepted', 'invariant-only']) {
+      const result = solveMinorAuthorityScenario(
+        packet,
+        scenarioCoverage,
+        scenario.necessary,
+        buildResult,
+        authorityMode,
+      );
+      if (!result) continue;
+      const bytes = serializedBytes(result, 'scope assessment result').bytes;
+      const evidence = result[RESULT_REPRESENTABILITY] ?? {
+        lowerBoundBytes: bytes,
+        witnessBytes: bytes,
+      };
+      if (bytes <= SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES) return result;
+      globalLowerBoundBytes = Math.min(globalLowerBoundBytes, evidence.lowerBoundBytes);
+      if (bytes < bestBytes) {
+        bestResult = result;
+        bestBytes = bytes;
+      }
     }
   }
-  if (bestResult) {
+  if (bestResult && bestBytes > SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES) {
     Object.defineProperty(bestResult, RESULT_REPRESENTABILITY, {
       configurable: true,
       value: {
@@ -746,53 +817,139 @@ function minimalResult(packet, verdict) {
       return minimalCoverage(mapping.mechanism, 'necessary-minor-expansion');
     });
     if (coverage.some((entry) => entry === null)) return null;
-    return exactMinorResult(packet, coverage, forcedNecessaryIndexes);
+    return exactGroundedResult(
+      packet,
+      coverage,
+      forcedNecessaryIndexes,
+      (groundedCoverage, assignments) => buildGroundedResult(
+        packet,
+        'minor-amendment-required',
+        groundedCoverage,
+        assignments,
+      ),
+    );
   } else if (verdict === 'human-decision-required') {
-    const materialIndexes = new Set();
+    const categories = forcedCategories.size > 0
+      ? [...forcedCategories]
+      : [[...MATERIALITY_CATEGORIES].sort((left, right) => {
+        const byteDifference = Buffer.byteLength(JSON.stringify(left), 'utf8')
+          - Buffer.byteLength(JSON.stringify(right), 'utf8');
+        return byteDifference || left.localeCompare(right);
+      })[0]];
+    const resultForMaterialIndexes = (materialIndexes) => {
+      const necessaryIndexes = [];
+      const scenarioCoverage = mappings.map((mapping, index) => {
+        if (materialIndexes.has(index)) {
+          return minimalCoverage(mapping.mechanism, 'material-scope-change');
+        }
+        if (materialMechanisms.has(mapping.mechanism)) {
+          return affirmativeCoverage(mapping, rejectedShape);
+        }
+        if (
+          rejectedShape.has(mapping.mechanism)
+          && minorAuthorityOptions(mapping).length > 0
+        ) {
+          necessaryIndexes.push(index);
+          return minimalCoverage(mapping.mechanism, 'necessary-minor-expansion');
+        }
+        const speculative = minimalCoverage(mapping.mechanism, 'speculative');
+        const affirmative = affirmativeCoverage(mapping, rejectedShape);
+        if (!affirmative) return speculative;
+        return serializedBytes(affirmative, 'coverage').bytes <= serializedBytes(speculative, 'coverage').bytes
+          ? affirmative
+          : speculative;
+      });
+      if (scenarioCoverage.some((entry) => entry === null)) return null;
+      const buildHumanResult = (groundedCoverage, assignments) => buildGroundedResult(
+        packet,
+        'human-decision-required',
+        groundedCoverage,
+        assignments,
+        categories,
+      );
+      return necessaryIndexes.length > 0
+        ? exactGroundedResult(
+          packet,
+          scenarioCoverage,
+          necessaryIndexes,
+          buildHumanResult,
+        )
+        : buildHumanResult(scenarioCoverage, new Map());
+    };
+
     if (forcedMechanisms.size > 0) {
+      const materialIndexes = new Set();
       mappings.forEach(({ mechanism }, index) => {
         if (forcedMechanisms.has(mechanism)) materialIndexes.add(index);
       });
-    } else {
-      const candidates = mappings.map((mapping, index) => {
-        const material = minimalCoverage(mapping.mechanism, 'material-scope-change');
-        let ordinary;
-        if (materialMechanisms.has(mapping.mechanism)) {
-          ordinary = affirmativeCoverage(mapping, rejectedShape);
-        } else {
-          const speculative = minimalCoverage(mapping.mechanism, 'speculative');
-          const affirmative = affirmativeCoverage(mapping, rejectedShape);
-          ordinary = !affirmative
-            || serializedBytes(speculative, 'coverage').bytes < serializedBytes(affirmative, 'coverage').bytes
-            ? speculative
-            : affirmative;
-        }
-        return {
-          index,
-          incrementalBytes: ordinary
-            ? serializedBytes(material, 'coverage').bytes - serializedBytes(ordinary, 'coverage').bytes
-            : Number.POSITIVE_INFINITY,
-        };
-      });
-      candidates.sort((left, right) => (
-        left.incrementalBytes - right.incrementalBytes || left.index - right.index
-      ));
-      if (!Number.isFinite(candidates[0].incrementalBytes)) return null;
-      materialIndexes.add(candidates[0].index);
+      return resultForMaterialIndexes(materialIndexes);
     }
-    coverage = mappings.map((mapping, index) => {
-      if (materialIndexes.has(index)) {
-        return minimalCoverage(mapping.mechanism, 'material-scope-change');
+
+    let bestResult = null;
+    let bestBytes = Number.POSITIVE_INFINITY;
+    let globalLowerBoundBytes = Number.POSITIVE_INFINITY;
+    const authoritySensitiveAnchors = [];
+    const stableAnchors = [];
+    for (const [index, mapping] of mappings.entries()) {
+      if (
+        !materialMechanisms.has(mapping.mechanism)
+        && rejectedShape.has(mapping.mechanism)
+        && minorAuthorityOptions(mapping).length > 0
+      ) {
+        authoritySensitiveAnchors.push(index);
+        continue;
       }
-      if (materialMechanisms.has(mapping.mechanism)) return affirmativeCoverage(mapping, rejectedShape);
-      const speculative = minimalCoverage(mapping.mechanism, 'speculative');
-      const affirmative = affirmativeCoverage(mapping, rejectedShape);
-      if (!affirmative) return speculative;
-      return serializedBytes(affirmative, 'coverage').bytes <= serializedBytes(speculative, 'coverage').bytes
-        ? affirmative
-        : speculative;
-    });
-    if (coverage.some((entry) => entry === null)) return null;
+      const material = minimalCoverage(mapping.mechanism, 'material-scope-change');
+      let ordinary;
+      if (materialMechanisms.has(mapping.mechanism)) {
+        ordinary = affirmativeCoverage(mapping, rejectedShape);
+      } else {
+        const speculative = minimalCoverage(mapping.mechanism, 'speculative');
+        const affirmative = affirmativeCoverage(mapping, rejectedShape);
+        ordinary = !affirmative
+          || serializedBytes(speculative, 'coverage').bytes < serializedBytes(affirmative, 'coverage').bytes
+          ? speculative
+          : affirmative;
+      }
+      if (!ordinary) continue;
+      stableAnchors.push({
+        index,
+        incrementalBytes: serializedBytes(material, 'coverage').bytes
+          - serializedBytes(ordinary, 'coverage').bytes,
+      });
+    }
+    stableAnchors.sort((left, right) => (
+      left.incrementalBytes - right.incrementalBytes || left.index - right.index
+    ));
+    const anchorIndexes = [
+      ...authoritySensitiveAnchors,
+      ...stableAnchors.slice(0, 1).map(({ index }) => index),
+    ];
+    for (const index of anchorIndexes) {
+      const scenarioResult = resultForMaterialIndexes(new Set([index]));
+      if (!scenarioResult) continue;
+      const bytes = serializedBytes(scenarioResult, 'scope assessment result').bytes;
+      const evidence = scenarioResult[RESULT_REPRESENTABILITY] ?? {
+        lowerBoundBytes: bytes,
+      };
+      globalLowerBoundBytes = Math.min(globalLowerBoundBytes, evidence.lowerBoundBytes);
+      if (bytes < bestBytes) {
+        bestResult = scenarioResult;
+        bestBytes = bytes;
+      }
+    }
+    if (!bestResult) return null;
+    if (bestBytes > SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES) {
+      Object.defineProperty(bestResult, RESULT_REPRESENTABILITY, {
+        configurable: true,
+        value: {
+          exact: globalLowerBoundBytes === bestBytes,
+          lowerBoundBytes: globalLowerBoundBytes,
+          witnessBytes: bestBytes,
+        },
+      });
+    }
+    return bestResult;
   } else {
     coverage = mechanisms.map((mechanism) => minimalCoverage(mechanism, 'insufficient-evidence'));
   }
@@ -1050,7 +1207,7 @@ function mappingAuthorityCorrespondence(packet, result) {
 }
 
 function minorDeltaCorrespondence(packet, result) {
-  if (result.verdict !== 'minor-amendment-required') return [];
+  if (!['minor-amendment-required', 'human-decision-required'].includes(result.verdict)) return [];
   const mappings = new Map(
     packet.changeInventory.mappings.map((entry) => [entry.mechanism, entry]),
   );
@@ -1071,6 +1228,7 @@ function minorDeltaCorrespondence(packet, result) {
       );
     }
   }
+  if (result.verdict !== 'minor-amendment-required') return errors;
   for (const field of POSITIVE_AUTHORITY_FIELDS) {
     for (const id of result.scopeDelta[field]) {
       const supported = necessaryRows.some((entry) => {
@@ -1089,14 +1247,48 @@ function minorDeltaCorrespondence(packet, result) {
 
 function humanCoverageCorrespondence(packet, result) {
   if (result.verdict !== 'human-decision-required') return [];
-  const materialMechanisms = new Set(
-    MATERIAL_INVENTORY_FIELDS.flatMap((field) => packet.changeInventory[field]),
+  const { materialMechanisms, forcedCategories } = materialInventoryState(packet);
+  const materialSurfaces = new Set(result.scopeDelta?.materialSurfaces ?? []);
+  const hasDistinctNonNativeCategory = [...materialSurfaces].some(
+    (category) => !forcedCategories.has(category),
   );
-  return result.coverage.flatMap((entry) => (
-    entry.classification === 'speculative' && materialMechanisms.has(entry.mechanism)
-      ? [`$ human-decision-required speculative mechanism ${JSON.stringify(entry.mechanism)} must be independent removable nonmaterial work`]
-      : []
-  ));
+  const mappings = new Map(
+    packet.changeInventory.mappings.map((entry) => [entry.mechanism, entry]),
+  );
+  const rejectedShape = new Set([
+    ...(packet.acceptedScope?.unauthorizedShape ?? []),
+    ...(packet.acceptedScope?.deferredShape ?? []),
+  ]);
+  return result.coverage.flatMap((entry) => {
+    const isMaterialMechanism = materialMechanisms.has(entry.mechanism);
+    if (entry.classification === 'speculative' && isMaterialMechanism) {
+      return [`$ human-decision-required speculative mechanism ${JSON.stringify(entry.mechanism)} must be independent removable nonmaterial work`];
+    }
+    const mapping = mappings.get(entry.mechanism);
+    const hasPositiveAuthority = POSITIVE_AUTHORITY_FIELDS.some(
+      (field) => (mapping?.[field] ?? []).length > 0,
+    );
+    if (
+      !isMaterialMechanism
+      && rejectedShape.has(entry.mechanism)
+      && hasPositiveAuthority
+      && entry.classification !== 'necessary-minor-expansion'
+      && !(
+        entry.classification === 'material-scope-change'
+        && hasDistinctNonNativeCategory
+      )
+    ) {
+      return [`$ human-decision-required grounded rejected or deferred mechanism ${JSON.stringify(entry.mechanism)} must be classified necessary-minor-expansion`];
+    }
+    if (
+      !isMaterialMechanism
+      && entry.classification === 'material-scope-change'
+      && !hasDistinctNonNativeCategory
+    ) {
+      return [`$ human-decision-required non-inventory material-scope-change mechanism ${JSON.stringify(entry.mechanism)} requires a distinct non-native material category; independent unsupported work must remain speculative`];
+    }
+    return [];
+  });
 }
 
 function requiresMissingArtifactVerdict(packet) {

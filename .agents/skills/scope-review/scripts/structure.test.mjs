@@ -173,9 +173,14 @@ test('documentation links resolve and defines invocation and authority boundarie
   assert.match(contract, /must cite positive\s+authority through a source-required criterion, accepted criterion, or invariant/u);
   assert.match(contract, /same\s+authority field of that mechanism's `changeInventory\.mappings` row/u);
   assert.match(contract, /each `necessary-minor-expansion` row must share\s+at least one positive authority ID/u);
+  assert.match(contract, /including invariant-only grounding/u);
   assert.match(contract, /every positive ID in `scopeDelta` must be\s+used by at least one `necessary-minor-expansion` row/u);
   assert.match(contract, /independent removable\s+nonmaterial mechanism as `speculative`/u);
   assert.match(contract, /mixed coverage does not change authority-before-materiality or\s+materiality-before-trimming precedence/u);
+  assert.match(contract, /distinct non-native material category may\s+instead identify a genuine additional `material-scope-change`/u);
+  assert.match(contract, /neither row may be relabeled `material-scope-change` using only\s+those forced native categories/u);
+  assert.match(contract, /evaluates every authority-sensitive\s+material-anchor scenario and the byte-minimal stable anchor/u);
+  assert.match(contract, /`source-draft` requires both downstream digests to be null/u);
   assert.match(contract, /cannot be classified `required` or\s+`implementation-choice`/u);
   assert.match(contract, /`unnecessaryWork` must name the\s+complete set of `speculative` coverage mechanisms exactly once/u);
   assert.match(contract, /`scopeDelta\.materialSurfaces` and the categories\s+in `materialityTriggers` must be the same order-insensitive set/u);
@@ -204,6 +209,13 @@ test('minor verdict schema permits only exact speculative-removal correspondence
   ).properties;
   assert.equal(minorVerdict.unnecessaryWork.maxItems, 256);
   assert.equal(minorVerdict.smallerSufficientAlternative.$ref, '#/$defs/nullableText');
+  assert.equal(schema.$defs.minorScopeDelta.allOf[1].anyOf.length, 3);
+  assert.equal(
+    schema.$defs.minorScopeDelta.allOf[1].anyOf[2].properties.invariantIds.minItems,
+    1,
+  );
+  const materialCoverage = schema.$defs.materialCoverage.allOf[1].properties.classification.enum;
+  assert.equal(materialCoverage.includes('necessary-minor-expansion'), true);
 });
 
 test('materiality takes precedence over trimming at the executable result boundary', () => {
