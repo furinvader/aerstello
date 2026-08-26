@@ -1583,6 +1583,139 @@ test('human decisions retain independent speculative nonmaterial coverage', () =
   assert.match(errors, /requires human-decision-required material-scope-change coverage/u);
 });
 
+test('human decisions allow grounded rejected work to remain counterfactually speculative', () => {
+  const variants = [
+    { disposition: 'unauthorizedShape', field: 'sourceCriterionIds', id: 'direct-fix' },
+    { disposition: 'deferredShape', field: 'sourceCriterionIds', id: 'direct-fix' },
+    { disposition: 'unauthorizedShape', field: 'acceptedCriterionIds', id: 'direct-fix' },
+    { disposition: 'deferredShape', field: 'acceptedCriterionIds', id: 'direct-fix' },
+    { disposition: 'unauthorizedShape', field: 'invariantIds', id: 'exact-subject' },
+    { disposition: 'deferredShape', field: 'invariantIds', id: 'exact-subject' },
+  ];
+
+  for (const { disposition, field, id } of variants) {
+    const material = `material-${disposition}-${field}`;
+    const removable = `removable-${disposition}-${field}`;
+    const acceptedScope = {
+      ...packet().acceptedScope,
+      authorizedShape: [],
+      unauthorizedShape: [],
+      deferredShape: [],
+      [disposition]: [removable],
+    };
+    const removableMapping = {
+      ...packet().changeInventory.mappings[0],
+      mechanism: removable,
+      sourceCriterionIds: [],
+      acceptedCriterionIds: [],
+      invariantIds: [],
+      [field]: [id],
+      rationale: 'The authority records relevance; removal preserves minimal closure.',
+    };
+    const input = packet({
+      acceptedScope,
+      changeInventory: {
+        ...packet().changeInventory,
+        subsystems: [material],
+        mappings: [
+          {
+            ...packet().changeInventory.mappings[0],
+            mechanism: material,
+            sourceCriterionIds: [],
+            acceptedCriterionIds: [],
+            invariantIds: [],
+          },
+          removableMapping,
+        ],
+      },
+    });
+    const speculative = result('human-decision-required', {
+      coverage: [
+        { ...input.changeInventory.mappings[0], classification: 'material-scope-change' },
+        {
+          ...removableMapping,
+          sourceCriterionIds: [],
+          acceptedCriterionIds: [],
+          invariantIds: [],
+          classification: 'speculative',
+          rationale: 'Removing this mechanism preserves the outcome, scope, and closure.',
+        },
+      ],
+      scopeDelta: {
+        description: 'Decide only the material subsystem.',
+        sourceCriterionIds: [],
+        acceptedCriterionIds: [],
+        invariantIds: [],
+        materialSurfaces: ['new-subsystem'],
+      },
+      materialityTriggers: [{ category: 'new-subsystem', evidence: 'A subsystem is proposed.' }],
+      smallestExpansion: 'Add only the subsystem.',
+      narrowAlternative: 'Keep the bounded implementation.',
+      deferralConsequences: 'The subsystem remains absent.',
+      humanDecision: true,
+    });
+    assert.deepEqual(
+      validateScopeAssessmentApplicability(input, speculative),
+      [],
+      `${disposition} ${field} speculative`,
+    );
+
+    const necessary = {
+      ...speculative,
+      coverage: [
+        speculative.coverage[0],
+        {
+          ...speculative.coverage[1],
+          [field]: [id],
+          classification: 'necessary-minor-expansion',
+          rationale: 'The removal counterfactual establishes this minor mechanism is necessary.',
+        },
+      ],
+      scopeDelta: {
+        ...speculative.scopeDelta,
+        [field]: [id],
+      },
+    };
+    assert.deepEqual(
+      validateScopeAssessmentApplicability(input, necessary),
+      [],
+      `${disposition} ${field} necessary minor`,
+    );
+
+    const borrowedField = field === 'sourceCriterionIds'
+      ? 'acceptedCriterionIds'
+      : 'sourceCriterionIds';
+    const borrowed = {
+      ...necessary,
+      scopeDelta: {
+        ...necessary.scopeDelta,
+        [field]: [],
+        [borrowedField]: ['direct-fix'],
+      },
+    };
+    assert.match(
+      validateScopeAssessmentApplicability(input, borrowed).join('\n'),
+      /share same-field positive authority/u,
+      `${disposition} ${field} borrowed authority`,
+    );
+
+    for (const classification of ['required', 'implementation-choice']) {
+      const affirmative = {
+        ...speculative,
+        coverage: [
+          speculative.coverage[0],
+          { ...necessary.coverage[1], classification },
+        ],
+      };
+      assert.match(
+        validateScopeAssessmentApplicability(input, affirmative).join('\n'),
+        new RegExp(`despite acceptedScope\\.${disposition}`, 'u'),
+        `${disposition} ${field} ${classification}`,
+      );
+    }
+  }
+});
+
 test('human decisions preserve grounded minor work beside material and speculative work', () => {
   const material = 'new-material-subsystem';
   const minor = 'invariant-bound-follow-up';
@@ -1664,10 +1797,7 @@ test('human decisions preserve grounded minor work beside material and speculati
       assessment.coverage[2],
     ],
   };
-  assert.match(
-    validateScopeAssessmentApplicability(input, relabeledMinor).join('\n'),
-    /must be classified necessary-minor-expansion/u,
-  );
+  assert.deepEqual(validateScopeAssessmentApplicability(input, relabeledMinor), []);
 
   const materialRelabel = {
     ...assessment,
@@ -1679,7 +1809,7 @@ test('human decisions preserve grounded minor work beside material and speculati
   };
   assert.match(
     validateScopeAssessmentApplicability(input, materialRelabel).join('\n'),
-    /must be classified necessary-minor-expansion/u,
+    /requires a distinct non-native material category/u,
   );
 
   const distinctNonNativeExpansion = {
@@ -1806,9 +1936,9 @@ test('human representability uses only forced categories and a one-trigger fallb
   assert.deepEqual(validateScopeAssessmentApplicability(forced, forcedAssessment), []);
 });
 
-test('generic-trigger human representability accounts for every grounded rejected row', () => {
+test('generic-trigger human representability projects grounded rejected rows as speculative', () => {
   const mechanisms = Array.from(
-    { length: 164 },
+    { length: 128 },
     (_, index) => `m${String(index).padStart(3, '0')}`,
   );
   const input = compactPacket(mechanisms, {
@@ -1818,9 +1948,9 @@ test('generic-trigger human representability accounts for every grounded rejecte
   input.acceptedScope.unauthorizedShape = mechanisms;
 
   assert.ok(Buffer.byteLength(JSON.stringify(input)) <= ASSESSMENT_PACKET_LIMIT_BYTES);
-  assert.match(
+  assert.doesNotMatch(
     validateAssessmentPacket(input).join('\n'),
-    /schema-minimal human-decision-required result.*requires \d+ bytes/u,
+    /schema-minimal human-decision-required result/u,
   );
 
   const smallInput = compactPacket(['material-anchor', 'grounded-minor']);
@@ -1854,6 +1984,80 @@ test('generic-trigger human representability accounts for every grounded rejecte
   assert.deepEqual(
     validateScopeAssessmentApplicability(smallInput, applicableProjection),
     [],
+  );
+});
+
+test('grounded speculative human projection accepts 32768 bytes and rejects 32769', () => {
+  const makeInput = (count, identityBytes) => {
+    const material = 'forced-material';
+    const removable = Array.from(
+      { length: count },
+      (_, index) => `grounded-${String(index).padStart(3, '0')}`,
+    );
+    const input = compactPacket([material, ...removable], {
+      source: { ...binding().source, identity: 'i'.repeat(identityBytes) },
+      amendmentDigests: [],
+    });
+    input.acceptedScope.deferredShape = removable;
+    input.changeInventory.subsystems = [material];
+    input.changeInventory.mappings[0] = {
+      ...input.changeInventory.mappings[0],
+      sourceCriterionIds: [],
+    };
+    return input;
+  };
+  const projectedResult = (input) => result('human-decision-required', {
+    binding: input.binding,
+    summary: 'x',
+    coverage: input.changeInventory.mappings.map((mapping, index) => ({
+      mechanism: mapping.mechanism,
+      sourceCriterionIds: [],
+      acceptedCriterionIds: [],
+      invariantIds: [],
+      nonGoalIds: [],
+      guidanceIds: [],
+      classification: index === 0 ? 'material-scope-change' : 'speculative',
+      rationale: 'x',
+    })),
+    scopeDelta: {
+      description: 'x',
+      sourceCriterionIds: [],
+      acceptedCriterionIds: [],
+      invariantIds: [],
+      materialSurfaces: ['new-subsystem'],
+    },
+    materialityTriggers: [{ category: 'new-subsystem', evidence: 'x' }],
+    smallestExpansion: 'x',
+    narrowAlternative: 'x',
+    deferralConsequences: 'x',
+    humanDecision: true,
+  });
+
+  let boundary = null;
+  for (let count = 100; count <= 254 && boundary === null; count += 1) {
+    const shortest = makeInput(count, 1);
+    const identityBytes = 1 + SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES
+      - Buffer.byteLength(JSON.stringify(projectedResult(shortest)));
+    if (identityBytes < 1 || identityBytes >= 512) continue;
+    boundary = {
+      at: makeInput(count, identityBytes),
+      over: makeInput(count, identityBytes + 1),
+    };
+  }
+
+  assert.ok(boundary, 'a grounded-speculative human boundary must be constructible');
+  assert.equal(
+    Buffer.byteLength(JSON.stringify(projectedResult(boundary.at))),
+    SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES,
+  );
+  assert.ok(Buffer.byteLength(JSON.stringify(boundary.at)) <= ASSESSMENT_PACKET_LIMIT_BYTES);
+  assert.doesNotMatch(
+    validateAssessmentPacket(boundary.at).join('\n'),
+    /schema-minimal human-decision-required result/u,
+  );
+  assert.match(
+    validateAssessmentPacket(boundary.over).join('\n'),
+    /schema-minimal human-decision-required result.*requires 32769 bytes/u,
   );
 });
 

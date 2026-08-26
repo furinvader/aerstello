@@ -38,6 +38,14 @@ mapping with no authority remains eligible only for a citation-empty
 nonaffirmative classification such as `speculative` or
 `insufficient-evidence`.
 
+Positive authority in an inventory mapping establishes relevance and
+traceability, not counterfactual necessity. A rejected or deferred nonmaterial
+mechanism may therefore remain `speculative` when its coverage rationale records
+that removing it preserves the authoritative outcome, accepted scope, and
+minimal closure. Classify it `necessary-minor-expansion` only when the removal
+counterfactual instead establishes that the mechanism is necessary, and ground
+that claim through the correspondence rules below.
+
 For `minor-amendment-required` and `human-decision-required`, each `necessary-minor-expansion` row must share
 at least one positive authority ID, in the same field, with both its inventory
 mapping and `scopeDelta`; source criteria, accepted criteria, and invariants are
@@ -83,20 +91,22 @@ nonmaterial mechanism as `speculative` when at least one other coverage row is
 the material scope change that requires the decision. The material inventory
 surface requiring that decision remains `material-scope-change` with its exact
 category. When the result exposes only the native categories forced by deficient
-material inventory, grounded rejected or deferred work outside that inventory
-remains `necessary-minor-expansion` with its same-field authority echoed in
-`scopeDelta`, while independent unsupported nonmaterial work remains
-`speculative`; neither row may be relabeled `material-scope-change` using only
-those forced native categories. A distinct non-native material category may
-instead identify a genuine additional `material-scope-change`. In this
+material inventory, rejected or deferred work outside that inventory remains
+`speculative` when the removal counterfactual proves it removable, even if its
+mapping exposes positive authority. Work actually found necessary remains
+`necessary-minor-expansion` with its same-field authority echoed in
+`scopeDelta`, while independent unsupported nonmaterial work also remains
+`speculative`; none of those rows may be relabeled `material-scope-change`
+using only those forced native categories. A distinct non-native material
+category may instead identify a genuine additional `material-scope-change`. In this
 material-plus-minor result,
 mixed coverage does not change authority-before-materiality or
 materiality-before-trimming precedence, and `unnecessaryWork` remains empty.
-Packet-side generic human representability evaluates every authority-sensitive
-material-anchor scenario and the byte-minimal stable anchor whose selection
-leaves the grounded-minor set unchanged. It aggregates the smallest valid
-witness and the sound minimum exact or certified lower bound across those
-scenarios.
+Packet-side human representability uses the byte-minimal speculative projection
+for removable rejected or deferred nonmaterial rows, regardless of mapping
+authority. It selects the byte-minimal stable material anchor because that
+selection leaves the projected grounded-minor set unchanged, while an explicit
+result may still claim a properly grounded necessary minor sibling.
 
 For `human-decision-required`, `scopeDelta.materialSurfaces` and the categories
 in `materialityTriggers` must be the same order-insensitive set, with exactly

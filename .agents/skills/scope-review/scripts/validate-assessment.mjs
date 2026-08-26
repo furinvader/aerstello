@@ -837,20 +837,12 @@ function minimalResult(packet, verdict) {
         return byteDifference || left.localeCompare(right);
       })[0]];
     const resultForMaterialIndexes = (materialIndexes) => {
-      const necessaryIndexes = [];
       const scenarioCoverage = mappings.map((mapping, index) => {
         if (materialIndexes.has(index)) {
           return minimalCoverage(mapping.mechanism, 'material-scope-change');
         }
         if (materialMechanisms.has(mapping.mechanism)) {
           return affirmativeCoverage(mapping, rejectedShape);
-        }
-        if (
-          rejectedShape.has(mapping.mechanism)
-          && minorAuthorityOptions(mapping).length > 0
-        ) {
-          necessaryIndexes.push(index);
-          return minimalCoverage(mapping.mechanism, 'necessary-minor-expansion');
         }
         const speculative = minimalCoverage(mapping.mechanism, 'speculative');
         const affirmative = affirmativeCoverage(mapping, rejectedShape);
@@ -867,14 +859,7 @@ function minimalResult(packet, verdict) {
         assignments,
         categories,
       );
-      return necessaryIndexes.length > 0
-        ? exactGroundedResult(
-          packet,
-          scenarioCoverage,
-          necessaryIndexes,
-          buildHumanResult,
-        )
-        : buildHumanResult(scenarioCoverage, new Map());
+      return buildHumanResult(scenarioCoverage, new Map());
     };
 
     if (forcedMechanisms.size > 0) {
@@ -888,17 +873,8 @@ function minimalResult(packet, verdict) {
     let bestResult = null;
     let bestBytes = Number.POSITIVE_INFINITY;
     let globalLowerBoundBytes = Number.POSITIVE_INFINITY;
-    const authoritySensitiveAnchors = [];
     const stableAnchors = [];
     for (const [index, mapping] of mappings.entries()) {
-      if (
-        !materialMechanisms.has(mapping.mechanism)
-        && rejectedShape.has(mapping.mechanism)
-        && minorAuthorityOptions(mapping).length > 0
-      ) {
-        authoritySensitiveAnchors.push(index);
-        continue;
-      }
       const material = minimalCoverage(mapping.mechanism, 'material-scope-change');
       let ordinary;
       if (materialMechanisms.has(mapping.mechanism)) {
@@ -921,10 +897,7 @@ function minimalResult(packet, verdict) {
     stableAnchors.sort((left, right) => (
       left.incrementalBytes - right.incrementalBytes || left.index - right.index
     ));
-    const anchorIndexes = [
-      ...authoritySensitiveAnchors,
-      ...stableAnchors.slice(0, 1).map(({ index }) => index),
-    ];
+    const anchorIndexes = stableAnchors.slice(0, 1).map(({ index }) => index);
     for (const index of anchorIndexes) {
       const scenarioResult = resultForMaterialIndexes(new Set([index]));
       if (!scenarioResult) continue;
@@ -1252,33 +1225,10 @@ function humanCoverageCorrespondence(packet, result) {
   const hasDistinctNonNativeCategory = [...materialSurfaces].some(
     (category) => !forcedCategories.has(category),
   );
-  const mappings = new Map(
-    packet.changeInventory.mappings.map((entry) => [entry.mechanism, entry]),
-  );
-  const rejectedShape = new Set([
-    ...(packet.acceptedScope?.unauthorizedShape ?? []),
-    ...(packet.acceptedScope?.deferredShape ?? []),
-  ]);
   return result.coverage.flatMap((entry) => {
     const isMaterialMechanism = materialMechanisms.has(entry.mechanism);
     if (entry.classification === 'speculative' && isMaterialMechanism) {
       return [`$ human-decision-required speculative mechanism ${JSON.stringify(entry.mechanism)} must be independent removable nonmaterial work`];
-    }
-    const mapping = mappings.get(entry.mechanism);
-    const hasPositiveAuthority = POSITIVE_AUTHORITY_FIELDS.some(
-      (field) => (mapping?.[field] ?? []).length > 0,
-    );
-    if (
-      !isMaterialMechanism
-      && rejectedShape.has(entry.mechanism)
-      && hasPositiveAuthority
-      && entry.classification !== 'necessary-minor-expansion'
-      && !(
-        entry.classification === 'material-scope-change'
-        && hasDistinctNonNativeCategory
-      )
-    ) {
-      return [`$ human-decision-required grounded rejected or deferred mechanism ${JSON.stringify(entry.mechanism)} must be classified necessary-minor-expansion`];
     }
     if (
       !isMaterialMechanism
