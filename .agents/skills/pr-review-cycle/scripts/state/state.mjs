@@ -3,7 +3,9 @@ export { gitCommonDirectory, repositoryRoot, reviewRoot } from '../paths.mjs';
 export { StateError } from './errors.mjs';
 export {
   activePointerPath, specialistPlanReceiptPath, specialistReviewBundlePath, stateDirectory,
-  statePath, taskBindingProvenancePath, taskBindingProvenanceReceiptPath, taskPacketSidecarPath,
+  statePath, scopeAuthorityPath, scopeAuthorityReceiptPath, scopeControlJournalPath,
+  scopeControlJournalReceiptPath, scopeReturnPath, scopeReturnReceiptPath,
+  taskBindingProvenancePath, taskBindingProvenanceReceiptPath, taskPacketSidecarPath,
   validationPlanPath, workerResultEnvelopePath, workerResultReceiptPath,
 } from './locations.mjs';
 export { atomicWriteJson } from './atomic-io.mjs';
@@ -48,3 +50,7 @@ export {
   checkpointTaskCompletion, checkpointTaskPacketBinding, checkpointTaskPacketReplan,
   checkpointWorkerResultAcceptance, checkpointWorkerResultBackfill,
 } from './services/tasks.mjs';
+export {
+  assertScopeTaskAllowed, checkpointScopeAuthority, checkpointScopeClassification,
+  checkpointScopeDecision, checkpointScopeResume, checkpointScopeReturn, scopeStatus,
+} from './services/scope.mjs';

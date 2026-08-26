@@ -6,6 +6,8 @@ import { readJsonSidecar } from './atomic-io.mjs';
 import { gitSnapshot } from './git-authority.mjs';
 import {
   taskBindingProvenancePath, taskBindingProvenanceReceiptPath, taskPacketSidecarPath,
+  scopeAuthorityPath, scopeAuthorityReceiptPath, scopeControlJournalPath,
+  scopeControlJournalReceiptPath, scopeReturnPath, scopeReturnReceiptPath,
   workerResultEnvelopePath, workerResultReceiptPath,
 } from './locations.mjs';
 import { loadState } from './state-store.mjs';
@@ -16,6 +18,7 @@ import {
 import { readSpecialistStatus } from './evidence/specialist-bundles.mjs';
 import { hasCompletedHistoricalV2TaskProof, readTaskPacketSidecar } from './evidence/task-packets.mjs';
 import { readAcceptedWorkerResult } from './evidence/worker-results.mjs';
+import { readScopeAuthority, readScopeJournal, readScopeReturn } from './evidence/scope-control.mjs';
 
 function readBoundPacketWithProvenance(cwd, state, task, options = {}) {
   const packet = readTaskPacketSidecar(cwd, state, task, options);
@@ -41,6 +44,31 @@ export function reconcileState({ cwd = process.cwd(), prNumber } = {}) {
   const packetSidecars = [];
   const bindingProvenance = [];
   const evidenceErrors = [];
+  let scope = { status: 'not-configured' };
+  const scopePaths = [
+    scopeAuthorityPath(cwd, state.prNumber), scopeAuthorityReceiptPath(cwd, state.prNumber),
+    scopeControlJournalPath(cwd, state.prNumber), scopeControlJournalReceiptPath(cwd, state.prNumber),
+    scopeReturnPath(cwd, state.prNumber), scopeReturnReceiptPath(cwd, state.prNumber),
+  ];
+  if (state.scopeControl) {
+    try {
+      const authority = readScopeAuthority(cwd, state);
+      const journal = readScopeJournal(cwd, state);
+      const returned = state.scopeControl.returnDigest === null ? null : readScopeReturn(cwd, state);
+      if (authority.digest !== state.scopeControl.authorityDigest
+          || journal.digest !== state.scopeControl.journalDigest
+          || (returned?.digest ?? null) !== state.scopeControl.returnDigest) {
+        throw new Error('compact state reference does not match durable scope evidence');
+      }
+      scope = { status: 'valid', gate: state.scopeControl.gate };
+    } catch (error) {
+      scope = { status: 'invalid', error: error.code ?? 'INVALID_SCOPE_EVIDENCE' };
+      evidenceErrors.push(`Scope-control evidence: ${error.message}`);
+    }
+  } else if (scopePaths.some((path) => existsSync(path))) {
+    scope = { status: 'orphan' };
+    evidenceErrors.push('Scope-control evidence exists without a compact active-state reference');
+  }
   const seenPacketPaths = new Set();
   const seenProvenancePaths = new Set();
   const seenProvenanceReceiptPaths = new Set();
@@ -228,6 +256,6 @@ export function reconcileState({ cwd = process.cwd(), prNumber } = {}) {
     evidenceErrors.push(`Specialist review bundle is invalid: ${specialist.error}`);
   }
   return {
-    state, actualGit: actual, warnings, evidenceErrors, packetSidecars, bindingProvenance, workerResults, specialist,
+    state, actualGit: actual, warnings, evidenceErrors, packetSidecars, bindingProvenance, workerResults, specialist, scope,
   };
 }

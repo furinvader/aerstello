@@ -29,14 +29,15 @@ function proposedTaskFixture(cwd, taskId = 'service-task') {
   const packet = harness.taskPacket(initial.currentIntegrationHeadSha, taskId, {
     affectedAreas: ['workflow'], command: 'npm run check:workflow',
   });
+  const scoped = harness.scopeReadyForPacket(cwd, proposed, packet);
   harness.planSpecialists({
     cwd,
-    input: harness.planInput(proposed, packet),
-    expectedRevision: proposed.revision,
+    input: harness.planInput(scoped, packet),
+    expectedRevision: scoped.revision,
     now: () => harness.AT,
   });
   const bound = checkpointTaskPacketBinding({
-    cwd, packet, expectedRevision: proposed.revision,
+    cwd, packet, expectedRevision: scoped.revision,
   });
   return { initial, packet, bound };
 }
@@ -88,16 +89,17 @@ test('task packet service retains staged evidence when the event is invalid', ()
   const packet = harness.taskPacket(initial.currentIntegrationHeadSha, 'invalid-event-packet', {
     affectedAreas: ['workflow'], command: 'npm run check:workflow',
   });
+  const scoped = harness.scopeReadyForPacket(cwd, proposed, packet);
   harness.planSpecialists({
     cwd,
-    input: harness.planInput(proposed, packet),
-    expectedRevision: proposed.revision,
+    input: harness.planInput(scoped, packet),
+    expectedRevision: scoped.revision,
     now: () => harness.AT,
   });
   assert.throws(() => checkpointTaskPacketBinding({
     cwd,
     packet,
-    expectedRevision: proposed.revision,
+    expectedRevision: scoped.revision,
     event: { type: 'invalid-packet-event', summary: 'x'.repeat(1001) },
   }), { code: 'INVALID_EVENT' });
   assert.equal(existsSync(harness.taskPacketSidecarPath(cwd, 17, packet.taskId)), true);
@@ -128,10 +130,11 @@ test('task packet service preflights near-capacity state before sidecar persiste
   const packet = harness.taskPacket(initial.currentIntegrationHeadSha, 'packet-capacity', {
     affectedAreas: ['workflow'], command: 'npm run check:workflow',
   });
+  const scoped = harness.scopeReadyForPacket(cwd, proposed, packet);
   const digest = harness.taskPacketDigest(packet);
   const bytes = (state) => Buffer.byteLength(`${JSON.stringify(state)}\n`, 'utf8');
   const persistedShape = (state) => ({
-    ...state, revision: proposed.revision + 1, updatedAt: proposed.updatedAt,
+    ...state, revision: scoped.revision + 1, updatedAt: scoped.updatedAt,
   });
   const boundShape = (state) => ({
     ...state,
@@ -139,7 +142,7 @@ test('task packet service preflights near-capacity state before sidecar persiste
     tasks: state.tasks.map((task) => task.id === packet.taskId
       ? { ...task, taskPacketDigest: digest } : task),
   });
-  let padded = { ...proposed, decisions: [...proposed.decisions] };
+  let padded = { ...scoped, decisions: [...scoped.decisions] };
   let index = 0;
   while (true) {
     const candidate = { ...padded, decisions: [...padded.decisions, {
@@ -160,7 +163,7 @@ test('task packet service preflights near-capacity state before sidecar persiste
   }
   assert.ok(fitting, 'constructed a valid current state whose bound projection is oversized');
   const nearLimit = harness.checkpointState({
-    cwd, expectedRevision: proposed.revision, nextState: fitting,
+    cwd, expectedRevision: scoped.revision, nextState: fitting,
   });
   harness.planSpecialists({
     cwd,

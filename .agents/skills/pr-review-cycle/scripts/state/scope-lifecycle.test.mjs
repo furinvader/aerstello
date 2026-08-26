@@ -1,0 +1,404 @@
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import test from 'node:test';
+
+import * as harness from './test-support/state-harness.mjs';
+import {
+  checkpointScopeAuthority,
+  checkpointScopeClassification,
+  checkpointScopeDecision,
+  checkpointScopeResume,
+  checkpointScopeReturn,
+  checkpointTaskPacketBinding,
+  initializeState,
+  scopeStatus,
+} from './state.mjs';
+import {
+  scopeAuthorityPath,
+  scopeAuthorityReceiptPath,
+  scopeControlJournalPath,
+  scopeControlJournalReceiptPath,
+} from './locations.mjs';
+import { validateScopeAssessmentApplicability } from '../../../scope-review/scripts/validate-assessment.mjs';
+
+const DIGEST = `sha256:${'a'.repeat(64)}`;
+const PLAN_DIGEST = `sha256:${'b'.repeat(64)}`;
+
+function authority(headSha, authorityKind = 'standalone') {
+  return {
+    schemaVersion: 1,
+    authorityKind,
+    source: { type: 'github-issue', identity: 'example/aerstello#17', digest: DIGEST },
+    planDigest: PLAN_DIGEST,
+    amendmentDigests: [],
+    minimalClosure: { statement: 'The exact accepted remediation is sufficient.', digest: DIGEST },
+    handoffHeadSha: headSha,
+    integratedHeadAssessment: null,
+    approvedDecisions: [],
+    deferredFollowUps: [],
+    capturedAt: harness.AT,
+  };
+}
+
+function pairDigest(packet, result) {
+  return `sha256:${createHash('sha256').update(JSON.stringify(
+    harness.canonicalJsonForTest({ packet, result }),
+  )).digest('hex')}`;
+}
+
+function assessmentPair(headSha, packet, verdict = 'within-scope') {
+  const base = harness.scopePair(headSha, packet);
+  const assessmentPacket = structuredClone(base.packet);
+  const result = structuredClone(base.result);
+  if (verdict === 'trim-required') {
+    const mapping = {
+      mechanism: 'extra-checker', sourceCriterionIds: [], acceptedCriterionIds: [],
+      invariantIds: [], nonGoalIds: [], guidanceIds: [], rationale: 'No authority requires the checker.',
+    };
+    assessmentPacket.changeInventory.paths.push('scripts/extra-checker.mjs');
+    assessmentPacket.changeInventory.mappings.push(mapping);
+    result.verdict = verdict;
+    result.coverage.push({ ...mapping, classification: 'speculative' });
+    result.unnecessaryWork = ['extra-checker'];
+    result.smallerSufficientAlternative = 'Keep only the exact task packet.';
+  } else if (verdict === 'minor-amendment-required') {
+    const mapping = {
+      mechanism: 'adjacent-helper', sourceCriterionIds: ['bounded-remediation'],
+      acceptedCriterionIds: ['bounded-remediation'], invariantIds: [], nonGoalIds: [], guidanceIds: [],
+      rationale: 'The helper is adjacent and grounded but absent from accepted shape.',
+    };
+    assessmentPacket.changeInventory.paths.push('scripts/adjacent-helper.mjs');
+    assessmentPacket.changeInventory.mappings.push(mapping);
+    result.verdict = verdict;
+    result.coverage.push({ ...mapping, classification: 'necessary-minor-expansion' });
+    result.scopeDelta = {
+      description: 'Add the grounded adjacent helper.',
+      sourceCriterionIds: ['bounded-remediation'], acceptedCriterionIds: ['bounded-remediation'],
+      invariantIds: [], materialSurfaces: [],
+    };
+  } else if (verdict === 'human-decision-required') {
+    const mapping = {
+      mechanism: 'new-package', sourceCriterionIds: ['bounded-remediation'],
+      acceptedCriterionIds: ['bounded-remediation'], invariantIds: [], nonGoalIds: [], guidanceIds: [],
+      rationale: 'The dependency is relevant but not authorized by accepted shape.',
+    };
+    assessmentPacket.changeInventory.dependencies.push('new-package');
+    assessmentPacket.changeInventory.mappings.push(mapping);
+    result.verdict = verdict;
+    result.coverage.push({ ...mapping, classification: 'material-scope-change' });
+    result.scopeDelta = {
+      description: 'Add one new dependency.',
+      sourceCriterionIds: ['bounded-remediation'], acceptedCriterionIds: ['bounded-remediation'],
+      invariantIds: [], materialSurfaces: ['new-dependency'],
+    };
+    result.materialityTriggers = [{ category: 'new-dependency', evidence: 'The inventory adds new-package.' }];
+    result.smallestExpansion = 'Add only new-package.';
+    result.narrowAlternative = 'Keep the direct bounded remediation.';
+    result.deferralConsequences = 'The dependency-backed mechanism remains unavailable.';
+    result.humanDecision = true;
+  } else if (verdict === 'insufficient-evidence') {
+    result.verdict = verdict;
+    result.coverage = result.coverage.map((row) => ({ ...row, classification: 'insufficient-evidence' }));
+    result.missingEvidence = ['The accepted remediation authority is incomplete.'];
+  }
+  assert.deepEqual(validateScopeAssessmentApplicability(assessmentPacket, result), [], verdict);
+  return { packet: assessmentPacket, result, digest: pairDigest(assessmentPacket, result) };
+}
+
+function proposedFixture(cwd, taskId = 'scope-task') {
+  const initial = harness.init(cwd);
+  const proposed = harness.checkpointState({
+    cwd, expectedRevision: initial.revision,
+    nextState: {
+      ...initial,
+      tasks: [harness.task(initial.currentIntegrationHeadSha, {
+        id: taskId, status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+      })],
+    },
+  });
+  const packet = harness.taskPacket(initial.currentIntegrationHeadSha, taskId, {
+    affectedAreas: ['workflow'], command: 'npm run check:workflow',
+  });
+  const adopted = checkpointScopeAuthority({
+    cwd, authority: authority(initial.currentIntegrationHeadSha), expectedRevision: proposed.revision,
+  });
+  return { initial, proposed, packet, adopted, task: adopted.tasks[0] };
+}
+
+function classificationInput(fixture, verdict, overrides = {}) {
+  const pair = assessmentPair(fixture.packet.reviewedHeadSha, fixture.packet, verdict);
+  const mapping = new Map([
+    ['within-scope', ['within-scope-defect', false]],
+    ['trim-required', ['unnecessary-mechanism-defect', false]],
+    ['minor-amendment-required', ['within-scope-defect', true]],
+    ['human-decision-required', ['material-scope-change', false]],
+    ['insufficient-evidence', ['insufficient-scope-authority', false]],
+  ]).get(verdict);
+  return {
+    entryId: `classification-${verdict.replaceAll(/[^a-z]+/gu, '-')}`,
+    at: harness.AT,
+    reviewHeadSha: fixture.packet.reviewedHeadSha,
+    rootCauseId: 'scope-root',
+    findingIds: fixture.task.sourceIds,
+    findingFingerprints: fixture.task.sourceIds.map(() => fixture.task.fingerprint),
+    classification: mapping[0], assessment: pair,
+    authorityAmendmentRequired: mapping[1], unrelatedReference: null,
+    remediationShapeDigest: `sha256:${harness.taskPacketDigest(fixture.packet)}`,
+    tripwires: [],
+    ...overrides,
+  };
+}
+
+test('initialization atomically captures explicit authority and its empty journal', () => {
+  const cwd = harness.repo();
+  const headSha = harness.git(cwd, ['rev-parse', 'HEAD']).trim();
+  const state = initializeState({
+    cwd, prNumber: 17, repository: 'example/aerstello', base: 'HEAD', head: 'HEAD',
+    releaseRef: 'HEAD', scopeAuthority: authority(headSha),
+  });
+
+  assert.equal(state.revision, 0);
+  assert.equal(state.scopeControl.gate, 'ready');
+  assert.equal(state.scopeControl.assessmentHeadSha, null);
+  for (const path of [
+    scopeAuthorityPath(cwd, 17), scopeAuthorityReceiptPath(cwd, 17),
+    scopeControlJournalPath(cwd, 17), scopeControlJournalReceiptPath(cwd, 17),
+  ]) assert.equal(existsSync(path), true, path);
+  assert.match(readFileSync(scopeAuthorityReceiptPath(cwd, 17), 'utf8'), /^sha256:[0-9a-f]{64}\n$/u);
+  assert.deepEqual(scopeStatus({ cwd, prNumber: 17 }).journal.value.entries, []);
+});
+
+test('legacy schema-v3 stays readable but cannot bind before guarded adoption and classification', () => {
+  const cwd = harness.repo();
+  const initial = harness.init(cwd);
+  const proposed = harness.checkpointState({
+    cwd, expectedRevision: initial.revision,
+    nextState: {
+      ...initial,
+      tasks: [harness.task(initial.currentIntegrationHeadSha, {
+        id: 'scope-gated-task', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+      })],
+    },
+  });
+  const packet = harness.taskPacket(initial.currentIntegrationHeadSha, 'scope-gated-task', {
+    affectedAreas: ['workflow'], command: 'npm run check:workflow',
+  });
+  harness.planSpecialists({
+    cwd, input: harness.planInput(proposed, packet), expectedRevision: proposed.revision,
+    now: () => harness.AT,
+  });
+
+  assert.equal(harness.loadState(cwd).scopeControl, undefined);
+  assert.throws(() => checkpointTaskPacketBinding({
+    cwd, packet, expectedRevision: proposed.revision,
+  }), { code: 'SCOPE_AUTHORITY_REQUIRED' });
+
+  const bound = harness.bindPacket(cwd, proposed, packet);
+  assert.equal(bound.scopeControl.gate, 'ready');
+  assert.equal(bound.tasks[0].taskPacketDigest, harness.taskPacketDigest(packet));
+  const status = scopeStatus({ cwd });
+  assert.equal(status.journal.value.entries.filter((entry) => entry.kind === 'classification').length, 1);
+});
+
+test('guarded legacy adoption refuses active worker state and preserves historical tasks', () => {
+  const cwd = harness.repo();
+  const initial = harness.init(cwd);
+  const runningTask = harness.task(initial.currentIntegrationHeadSha, {
+    id: 'active-worker', status: 'running', integratedCommitSha: null, resolutionSummary: null,
+  });
+  const legacy = harness.writePreAuthorityTasks(cwd, initial, [runningTask]);
+
+  assert.throws(() => checkpointScopeAuthority({
+    cwd, authority: authority(initial.currentIntegrationHeadSha, 'legacy-adoption'),
+    expectedRevision: legacy.revision,
+  }), { code: 'SCOPE_ADOPTION_ACTIVE_WORKER' });
+  assert.deepEqual(harness.loadState(cwd).tasks, [runningTask]);
+  assert.equal(existsSync(scopeAuthorityPath(cwd, 17)), false);
+});
+
+test('integration-head drift invalidates only compact exact-head applicability', () => {
+  const cwd = harness.repo();
+  const initial = harness.init(cwd);
+  const proposed = harness.checkpointState({
+    cwd, expectedRevision: initial.revision,
+    nextState: {
+      ...initial,
+      tasks: [harness.task(initial.currentIntegrationHeadSha, {
+        id: 'head-sensitive-task', status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+      })],
+    },
+  });
+  const packet = harness.taskPacket(initial.currentIntegrationHeadSha, 'head-sensitive-task');
+  const scoped = harness.scopeReadyForPacket(cwd, proposed, packet);
+  const journalDigest = scoped.scopeControl.journalDigest;
+  assert.equal(scoped.scopeControl.assessmentHeadSha, packet.reviewedHeadSha);
+
+  harness.commit(cwd, { 'scripts/unrelated.mjs': 'export const unrelated = true;\n' }, 'advance integration head');
+  const advanced = harness.checkpointGitMetadata({ cwd }).state;
+  assert.equal(advanced.scopeControl.gate, 'ready');
+  assert.equal(advanced.scopeControl.assessmentHeadSha, null);
+  assert.equal(advanced.scopeControl.journalDigest, journalDigest);
+  assert.equal(scopeStatus({ cwd }).journal.digest, journalDigest);
+});
+
+test('all canonical verdict mappings drive the closed state gates', () => {
+  const expectations = new Map([
+    ['within-scope', 'ready'],
+    ['trim-required', 'ready'],
+    ['minor-amendment-required', 'decision-required'],
+    ['human-decision-required', 'decision-required'],
+    ['insufficient-evidence', 'insufficient-authority'],
+  ]);
+  for (const [verdict, expectedGate] of expectations) {
+    const cwd = harness.repo();
+    const fixture = proposedFixture(cwd, `mapping-${verdict.replaceAll(/[^a-z]+/gu, '-')}`);
+    const classified = checkpointScopeClassification({
+      cwd,
+      classification: classificationInput(fixture, verdict),
+      expectedRevision: fixture.adopted.revision,
+    });
+    assert.equal(classified.scopeControl.gate, expectedGate, verdict);
+    if (verdict === 'minor-amendment-required') {
+      harness.planSpecialists({
+        cwd, input: harness.planInput(classified, fixture.packet), expectedRevision: classified.revision,
+        now: () => harness.AT,
+      });
+      assert.throws(() => checkpointTaskPacketBinding({
+        cwd, packet: fixture.packet, expectedRevision: classified.revision,
+      }), { code: 'SCOPE_TASK_BLOCKED' });
+    }
+  }
+});
+
+test('exact packet classification is reusable for duplicate roots and rejects changed shape', () => {
+  const cwd = harness.repo();
+  const fixture = proposedFixture(cwd, 'duplicate-root-task');
+  const classification = classificationInput(fixture, 'within-scope');
+  const classified = checkpointScopeClassification({
+    cwd, classification, expectedRevision: fixture.adopted.revision,
+  });
+  const retried = checkpointScopeClassification({
+    cwd, classification, expectedRevision: classified.revision,
+  });
+  assert.equal(retried.revision, classified.revision);
+  assert.equal(scopeStatus({ cwd }).journal.value.entries.filter(
+    (entry) => entry.kind === 'classification' && entry.rootCauseId === classification.rootCauseId,
+  ).length, 1);
+
+  harness.planSpecialists({
+    cwd, input: harness.planInput(classified, fixture.packet), expectedRevision: classified.revision,
+    now: () => harness.AT,
+  });
+  const changedPacket = { ...fixture.packet, evidence: 'A changed remediation shape.' };
+  assert.throws(() => checkpointTaskPacketBinding({
+    cwd, packet: changedPacket, expectedRevision: classified.revision,
+  }), { code: 'SPECIALIST_PLAN_TASK_MISMATCH' });
+  const bound = checkpointTaskPacketBinding({
+    cwd, packet: fixture.packet, expectedRevision: classified.revision,
+  });
+  assert.equal(bound.tasks[0].taskPacketDigest, harness.taskPacketDigest(fixture.packet));
+});
+
+test('material return and resume preserve review history and stop a second expansion', () => {
+  const cwd = harness.repo();
+  const fixture = proposedFixture(cwd, 'material-return-task');
+  const material = classificationInput(fixture, 'human-decision-required');
+  const classified = checkpointScopeClassification({
+    cwd, classification: material, expectedRevision: fixture.adopted.revision,
+  });
+  const taskSnapshot = structuredClone(classified.tasks);
+  const decision = {
+    entryId: 'decision-approve-one', at: harness.AT, rootCauseId: material.rootCauseId,
+    blockerId: 'scope-blocker-one', decisionId: 'scope-decision-one',
+    decision: 'approve-expansion-and-replan', blockerDigest: DIGEST,
+    approvedDeltaDigest: PLAN_DIGEST, rationale: 'Approve only the named dependency.',
+    priorDecisionIds: [],
+  };
+  const decided = checkpointScopeDecision({
+    cwd, decision, expectedRevision: classified.revision,
+  });
+  assert.equal(decided.scopeControl.gate, 'return-pending');
+  const returned = checkpointScopeReturn({
+    cwd, livePrHeadSha: fixture.packet.reviewedHeadSha, expectedRevision: decided.revision,
+  });
+  assert.equal(returned.scopeControl.gate, 'returned');
+  assert.deepEqual(returned.tasks, taskSnapshot);
+  const returnDigest = returned.scopeControl.returnDigest;
+  const resumed = checkpointScopeResume({
+    cwd,
+    expectedRevision: returned.revision,
+    resume: {
+      entryId: 'resume-scope-one', at: harness.AT, rootCauseId: material.rootCauseId,
+      decisionId: decision.decisionId, scopeReturnDigest: returnDigest,
+      resumedAuthorityDigest: returned.scopeControl.authorityDigest,
+      resumedHeadSha: returned.currentIntegrationHeadSha,
+    },
+  });
+  assert.equal(resumed.scopeControl.gate, 'ready');
+  assert.deepEqual(resumed.tasks, taskSnapshot);
+
+  const secondMaterial = classificationInput(fixture, 'human-decision-required', {
+    entryId: 'classification-human-decision-second',
+    remediationShapeDigest: DIGEST,
+  });
+  const secondClassified = checkpointScopeClassification({
+    cwd, classification: secondMaterial, expectedRevision: resumed.revision,
+  });
+  const churned = checkpointScopeDecision({
+    cwd,
+    expectedRevision: secondClassified.revision,
+    decision: {
+      ...decision,
+      entryId: 'decision-approve-two', blockerId: 'scope-blocker-two',
+      decisionId: 'scope-decision-two', priorDecisionIds: [decision.decisionId],
+    },
+  });
+  assert.equal(churned.phase, 'blocked');
+  assert.match(churned.blockedReasons.join('\n'), /repeated expansion churn/u);
+});
+
+test('journal checkpoint interruption resumes exact evidence and tampering fails closed', () => {
+  const cwd = harness.repo();
+  const fixture = proposedFixture(cwd, 'journal-recovery-task');
+  const classification = classificationInput(fixture, 'within-scope');
+  assert.throws(() => checkpointScopeClassification({
+    cwd, classification, expectedRevision: fixture.adopted.revision,
+    event: { type: 'invalid-scope-event', summary: 'x'.repeat(1001) },
+  }), { code: 'INVALID_EVENT' });
+  assert.equal(harness.loadState(cwd).scopeControl.journalDigest, fixture.adopted.scopeControl.journalDigest);
+
+  const recovered = checkpointScopeClassification({
+    cwd, classification, expectedRevision: fixture.adopted.revision,
+  });
+  assert.equal(recovered.scopeControl.gate, 'ready');
+  assert.equal(scopeStatus({ cwd }).journal.value.entries.at(-1).entryId, classification.entryId);
+
+  writeFileSync(scopeControlJournalReceiptPath(cwd, 17), `${DIGEST}\n`);
+  assert.throws(() => scopeStatus({ cwd }), { code: 'INVALID_SCOPE_EVIDENCE' });
+});
+
+test('integrated-head classifications append one canonical manifest and reuse it exactly', () => {
+  const cwd = harness.repo();
+  const fixture = proposedFixture(cwd, 'manifest-task');
+  const classification = classificationInput(fixture, 'within-scope');
+  classification.assessment.packet.binding.phase = 'integrated-head';
+  classification.assessment.result.binding.phase = 'integrated-head';
+  classification.assessment.digest = pairDigest(
+    classification.assessment.packet, classification.assessment.result,
+  );
+  assert.deepEqual(validateScopeAssessmentApplicability(
+    classification.assessment.packet, classification.assessment.result,
+  ), []);
+  const classified = checkpointScopeClassification({
+    cwd, classification, expectedRevision: fixture.adopted.revision,
+  });
+  const entries = scopeStatus({ cwd }).journal.value.entries;
+  assert.deepEqual(entries.map((entry) => entry.kind), ['classification', 'exact-head-manifest']);
+  assert.equal(entries[1].assessmentDigest, classification.assessment.digest);
+  const retry = checkpointScopeClassification({
+    cwd, classification, expectedRevision: classified.revision,
+  });
+  assert.equal(retry.revision, classified.revision);
+  assert.deepEqual(scopeStatus({ cwd }).journal.value.entries, entries);
+});

@@ -42,6 +42,8 @@ import {
   checkpointGitMetadata,
   checkpointReviewOutcome,
   checkpointReviewRequestLimit,
+  checkpointScopeAuthority,
+  checkpointScopeClassification,
   checkpointReviewRequest as rawCheckpointReviewRequest,
   checkpointState,
   checkpointTaskPacketBinding,
@@ -711,8 +713,108 @@ function planInput(state, packet, planningSignals = { browserVisible: false, tes
 }
 
 function bindPacket(cwd, state, packet, planningSignals) {
-  planSpecialists({ cwd, input: planInput(state, packet, planningSignals), expectedRevision: state.revision, now: () => AT });
-  return checkpointTaskPacketBinding({ cwd, packet, expectedRevision: state.revision });
+  const scoped = scopeReadyForPacket(cwd, state, packet);
+  planSpecialists({ cwd, input: planInput(scoped, packet, planningSignals), expectedRevision: scoped.revision, now: () => AT });
+  return checkpointTaskPacketBinding({ cwd, packet, expectedRevision: scoped.revision });
+}
+
+const SCOPE_DIGEST = `sha256:${'a'.repeat(64)}`;
+const SCOPE_PLAN_DIGEST = `sha256:${'b'.repeat(64)}`;
+
+function scopePair(headSha, packet) {
+  const shapeDigest = `sha256:${taskPacketDigest(packet)}`;
+  const binding = {
+    phase: 'review-finding',
+    source: { type: 'github-issue', identity: 'example/aerstello#17', digest: SCOPE_DIGEST },
+    subject: { digest: shapeDigest, sha: headSha },
+    planDigest: SCOPE_PLAN_DIGEST,
+    amendmentDigests: [],
+    taskPacketDigest: shapeDigest,
+  };
+  const assessmentPacket = {
+    schemaVersion: 1,
+    binding,
+    sourceScope: {
+      objective: 'Resolve the bounded review finding.',
+      requiredCriteria: [{ id: 'bounded-remediation', text: 'Keep remediation in accepted scope.' }],
+      nonGoals: [],
+      implementationGuidance: [],
+    },
+    acceptedScope: {
+      criteria: [{ id: 'bounded-remediation', text: 'Keep remediation in accepted scope.' }],
+      invariants: [],
+      minimalClosure: 'The exact task packet is sufficient.',
+      authorizedShape: ['exact-task-packet'],
+      unauthorizedShape: [],
+      deferredShape: [],
+    },
+    changeInventory: {
+      summary: 'Implement the exact task packet.',
+      paths: packet.allowedPaths,
+      dependencies: [], publicSurfaces: [], persistentSurfaces: [], subsystems: [],
+      mappings: [{
+        mechanism: 'exact-task-packet', sourceCriterionIds: ['bounded-remediation'],
+        acceptedCriterionIds: ['bounded-remediation'], invariantIds: [], nonGoalIds: [], guidanceIds: [],
+        rationale: 'The exact packet implements the accepted remediation criterion.',
+      }],
+    },
+    tripwires: [],
+  };
+  const result = {
+    schemaVersion: 1,
+    binding,
+    verdict: 'within-scope',
+    summary: 'The exact packet remains within accepted scope.',
+    coverage: [{
+      mechanism: 'exact-task-packet', sourceCriterionIds: ['bounded-remediation'],
+      acceptedCriterionIds: ['bounded-remediation'], invariantIds: [], nonGoalIds: [], guidanceIds: [],
+      classification: 'required', rationale: 'The exact packet is the bounded remediation.',
+    }],
+    unnecessaryWork: [], smallerSufficientAlternative: null, scopeDelta: null,
+    materialityTriggers: [], smallestExpansion: null, narrowAlternative: null,
+    deferralConsequences: null, missingEvidence: [], humanDecision: false,
+  };
+  return {
+    packet: assessmentPacket,
+    result,
+    digest: `sha256:${createHash('sha256').update(JSON.stringify(canonicalJsonForTest({ packet: assessmentPacket, result }))).digest('hex')}`,
+  };
+}
+
+function scopeReadyForPacket(cwd, state, packet) {
+  let current = state;
+  if (!current.scopeControl) {
+    current = checkpointScopeAuthority({
+      cwd,
+      authority: {
+        schemaVersion: 1, authorityKind: 'standalone',
+        source: { type: 'github-issue', identity: 'example/aerstello#17', digest: SCOPE_DIGEST },
+        planDigest: SCOPE_PLAN_DIGEST, amendmentDigests: [],
+        minimalClosure: { statement: 'The exact accepted review remediation is sufficient.', digest: SCOPE_DIGEST },
+        handoffHeadSha: current.currentIntegrationHeadSha, integratedHeadAssessment: null,
+        approvedDecisions: [], deferredFollowUps: [], capturedAt: AT,
+      },
+      expectedRevision: current.revision,
+    });
+  }
+  const durableTask = current.tasks.find((item) => item.id === packet.taskId);
+  const pair = scopePair(packet.reviewedHeadSha, packet);
+  const rootCauseId = `scope-root-${createHash('sha256').update(packet.taskId).digest('hex').slice(0, 16)}`;
+  return checkpointScopeClassification({
+    cwd,
+    classification: {
+      entryId: `classification-${createHash('sha256').update(packet.taskId).digest('hex').slice(0, 16)}`,
+      at: AT,
+      reviewHeadSha: packet.reviewedHeadSha,
+      rootCauseId,
+      findingIds: durableTask.sourceIds,
+      findingFingerprints: durableTask.sourceIds.map(() => durableTask.fingerprint),
+      classification: 'within-scope-defect', assessment: pair,
+      authorityAmendmentRequired: false, unrelatedReference: null,
+      remediationShapeDigest: `sha256:${taskPacketDigest(packet)}`, tripwires: [],
+    },
+    expectedRevision: current.revision,
+  });
 }
 
 function writePreAuthorityImplementedState(cwd, state, taskId, workerCommitSha) {
@@ -1121,6 +1223,8 @@ export {
   checkpointReviewOutcome,
   checkpointReviewRequestLimit,
   rawCheckpointReviewRequest,
+  checkpointScopeAuthority,
+  checkpointScopeClassification,
   checkpointState,
   checkpointTaskPacketBinding,
   checkpointTaskPacketReplan,
@@ -1217,6 +1321,8 @@ export {
   bindPackets,
   planInput,
   bindPacket,
+  scopePair,
+  scopeReadyForPacket,
   writePreAuthorityImplementedState,
   writePreAuthorityTasks,
   canonicalBoundIntegratedTask,

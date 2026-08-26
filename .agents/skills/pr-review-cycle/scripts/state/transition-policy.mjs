@@ -3,8 +3,12 @@ import { createHash } from 'node:crypto';
 import { canonicalJson } from './atomic-io.mjs';
 import { StateError } from './errors.mjs';
 import { assertIntegratedWorkerCommit } from './git-authority.mjs';
-import { readTaskPacketSidecar as readBoundTaskPacketSidecar } from './evidence/task-packets.mjs';
+import {
+  readTaskPacketSidecar as readBoundTaskPacketSidecar,
+  taskPacketDigest,
+} from './evidence/task-packets.mjs';
 import { readAcceptedWorkerResult } from './evidence/worker-results.mjs';
+import { readScopeJournal } from './evidence/scope-control.mjs';
 
 const MAX_NODES = 10_000;
 const PROTECTED_TRANSITION_KINDS = new Set([
@@ -15,6 +19,11 @@ const PROTECTED_TRANSITION_KINDS = new Set([
   'review-outcome',
   'review-request',
   'review-request-limit',
+  'scope-authority',
+  'scope-classification',
+  'scope-decision',
+  'scope-resume',
+  'scope-return',
   'targeted-validation',
   'task-completion',
   'task-packet-binding',
@@ -249,6 +258,67 @@ function assertStaleDiscoveryDispositionProvenance(current, next, guardedKind) {
   ));
 }
 
+const SCOPE_TRANSITION_KINDS = new Set([
+  'scope-authority', 'scope-classification', 'scope-decision', 'scope-resume', 'scope-return',
+]);
+
+function assertScopeControlProvenance(current, next, guardedKind, cwd) {
+  const currentScope = current.scopeControl;
+  const nextScope = next.scopeControl;
+  if (guardedKind === 'scope-authority') {
+    if (currentScope !== undefined || nextScope === undefined) {
+      throw new StateError('Scope authority capture must initialize scope control exactly once', 'INVALID_SCOPE_TRANSITION');
+    }
+    return;
+  }
+  if (SCOPE_TRANSITION_KINDS.has(guardedKind)) {
+    if (currentScope === undefined || nextScope === undefined
+        || currentScope.authorityDigest !== nextScope.authorityDigest) {
+      throw new StateError('Guarded scope transition must preserve captured authority', 'IMMUTABLE_STATE_PROVENANCE');
+    }
+    return;
+  }
+  if (guardedKind === 'git-metadata') {
+    if (currentScope === undefined && nextScope === undefined) return;
+    if (currentScope === undefined || nextScope === undefined
+        || currentScope.authorityDigest !== nextScope.authorityDigest
+        || currentScope.journalDigest !== nextScope.journalDigest
+        || currentScope.returnDigest !== nextScope.returnDigest) {
+      throw new StateError('Git reconciliation may only invalidate the compact scope applicability projection', 'IMMUTABLE_STATE_PROVENANCE');
+    }
+    return;
+  }
+  assertImmutableValue(currentScope, nextScope, 'scopeControl');
+}
+
+function scopeClassificationForTask(cwd, state, task, packet) {
+  if (!state.scopeControl) return null;
+  const journal = readScopeJournal(cwd, state).value;
+  const expectedShape = `sha256:${taskPacketDigest(packet)}`;
+  return journal.entries.findLast((entry) => entry.kind === 'classification'
+    && (entry.rootCauseId === task.id
+      || task.sourceIds.every((sourceId) => entry.findingIds.includes(sourceId)))
+    && entry.reviewHeadSha === packet.reviewedHeadSha
+    && entry.remediationShapeDigest === expectedShape
+    && ['within-scope-defect', 'unnecessary-mechanism-defect'].includes(entry.classification));
+}
+
+function assertScopeTaskProgress(cwd, state, task) {
+  if (!state.scopeControl) {
+    throw new StateError(`Scope authority is insufficient for task ${task.id}`, 'SCOPE_AUTHORITY_REQUIRED');
+  }
+  if (state.scopeControl.gate !== 'ready') {
+    throw new StateError(`Scope gate ${state.scopeControl.gate} blocks task ${task.id}`, 'SCOPE_TASK_BLOCKED');
+  }
+  if (typeof task.taskPacketDigest !== 'string') {
+    throw new StateError(`Task ${task.id} has no packet for scope classification`, 'SCOPE_CLASSIFICATION_REQUIRED');
+  }
+  const packet = readBoundTaskPacketSidecar(cwd, state, task);
+  if (!scopeClassificationForTask(cwd, state, task, packet)) {
+    throw new StateError(`Task ${task.id} lacks current exact-shape scope evidence`, 'SCOPE_CLASSIFICATION_REQUIRED');
+  }
+}
+
 function assertCheckpointProvenance(current, next, guardedKind, evidence, cwd) {
   const completionKind = ['task-completion', 'archive-task-completion'].includes(guardedKind);
   const currentThreadByRoot = new Map(current.threadResolutionStatus.threads.map(
@@ -275,6 +345,7 @@ function assertCheckpointProvenance(current, next, guardedKind, evidence, cwd) {
     );
   }
   assertStaleDiscoveryDispositionProvenance(current, next, guardedKind);
+  assertScopeControlProvenance(current, next, guardedKind, cwd);
   if (guardedKind === null) {
     for (const field of [
       'requestedHeadSha', 'reviewedHeadSha', 'reviewRound', 'verificationReviewUsed',
@@ -402,6 +473,8 @@ function assertCheckpointProvenance(current, next, guardedKind, evidence, cwd) {
       && ['implemented', 'integrated'].includes(updated.status);
     const entersIntegrated = !['integrated', 'completed'].includes(task.status)
       && updated.status === 'integrated';
+    const entersActiveExecution = !['queued', 'running', 'implemented', 'integrated', 'completed'].includes(task.status)
+      && ['queued', 'running', 'implemented', 'integrated'].includes(updated.status);
     if ((entersImplementedOrIntegrated || entersIntegrated) && task.disposition === 'actionable') {
       if (typeof task.taskPacketDigest !== 'string') {
         throw new StateError(
@@ -415,6 +488,9 @@ function assertCheckpointProvenance(current, next, guardedKind, evidence, cwd) {
       if (entersIntegrated) {
         assertIntegratedWorkerCommit(cwd, current, updated, packet, acceptedResult.result);
       }
+    }
+    if (entersActiveExecution && updated.disposition === 'actionable') {
+      assertScopeTaskProgress(cwd, next, updated);
     }
     if (task.integratedCommitSha !== null) {
       assertImmutableValue(task.integratedCommitSha, updated.integratedCommitSha, `task ${task.id} integratedCommitSha`);

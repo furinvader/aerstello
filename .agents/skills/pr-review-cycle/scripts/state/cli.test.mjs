@@ -240,6 +240,7 @@ test('validate-result CLI enforces the exact task validation commands', () => {
       }],
     },
   });
+  state = harness.scopeReadyForPacket(cwd, state, packet);
   planSpecialists({
     cwd,
     expectedRevision: state.revision,
@@ -464,10 +465,11 @@ test('targeted validation CLI saves and executes the exact durable plan', () => 
   commit(cwd, {
     'tests/focused.test.mjs': "import test from 'node:test';\ntest('focused command', () => {});\n",
   }, 'add focused validation fixture');
-  const state = integratedTasks(cwd, ['task-a']);
+  let state = integratedTasks(cwd, ['task-a']);
   const packet = taskPacket(state.currentIntegrationHeadSha, 'task-a', {
     affectedAreas: ['documentation'], command: 'node --test tests/focused.test.mjs',
   });
+  state = harness.scopeReadyForPacket(cwd, state, packet);
   const packetPath = join(stateDirectory(cwd, state.prNumber), 'task-a.json');
   const specialistPlanInputPath = join(stateDirectory(cwd, state.prNumber), 'specialist-plan-input.json');
   writeFileSync(packetPath, `${JSON.stringify(packet)}\n`);
