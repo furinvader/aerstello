@@ -65,6 +65,17 @@ neither speculative work nor a smaller alternative. Material scope changes and
 insufficient-evidence claims remain ineligible for this verdict, and a deficient
 material inventory surface can never be trimmed this way.
 
+Packet-side minor representability selects the byte-minimal mixed projection
+jointly: every rejected or deferred grounded nonmaterial row may be speculative
+or necessary, ordinary affirmative rows remain affirmative or may anchor the
+minor delta, and unsupported nonmaterial rows remain speculative. The
+projection contains at least one same-field grounded necessary anchor and
+counts the exact serialized coverage, authority openings, repeated mechanism
+identities, `unnecessaryWork` commas, and smaller-alternative toggle. Unique
+authority incidence is minimized exactly. Shared-authority search is bounded;
+an incomplete search may reject an oversized witness only when a globally
+admissible relaxed lower bound also exceeds the result envelope.
+
 Materiality triggers are closed and complete: a new subsystem, new dependency, public surface, persistent surface, cross-capability work, policy change, repository-wide enforcement, independent workstream, new criterion, non-goal reversal, sensitive policy, replacement of the accepted approach, or repeated expansion. A tripwire can request closer inspection but cannot select or exclude any verdict.
 
 Apply authority before materiality and materiality before trimming. First

@@ -193,6 +193,10 @@ test('documentation links resolve and defines invocation and authority boundarie
   assert.match(contract, /Necessary-minor precedence does not hide independent removable work/u);
   assert.match(contract, /`unnecessaryWork` is the order-insensitive exact set of speculative mechanisms/u);
   assert.match(contract, /pure minor result has\s+neither speculative work nor a smaller alternative/u);
+  assert.match(contract, /Packet-side minor representability selects the byte-minimal mixed projection/u);
+  assert.match(contract, /rejected or deferred grounded nonmaterial row may be speculative\s+or necessary/u);
+  assert.match(contract, /Unique\s+authority incidence is minimized exactly/u);
+  assert.match(contract, /globally\s+admissible relaxed lower bound/u);
   assert.match(contract, /generic repository checker/u);
   assert.match(contract, /adjacent helper/u);
   assert.match(contract, /new subsystem/u);

@@ -262,41 +262,6 @@ function ensureMinorSourceAuthority(rows, assignments) {
   return best?.assignments ?? null;
 }
 
-function reduceDominatedMinorOptions(rows) {
-  const incidence = new Map();
-  for (const [rowIndex, row] of rows.entries()) {
-    for (const option of row.options) {
-      const indexes = incidence.get(option.key) ?? new Set();
-      indexes.add(rowIndex);
-      incidence.set(option.key, indexes);
-    }
-  }
-  const tokens = [...new Map(
-    rows.flatMap(({ options }) => options.map((option) => [option.key, option])),
-  ).values()];
-  const dominated = new Set();
-  for (const candidate of tokens) {
-    const candidateRows = incidence.get(candidate.key);
-    for (const replacement of tokens) {
-      if (candidate.key === replacement.key || candidate.field !== replacement.field) continue;
-      if (replacement.serializedIdBytes > candidate.serializedIdBytes) continue;
-      const replacementRows = incidence.get(replacement.key);
-      const coversCandidate = [...candidateRows].every((index) => replacementRows.has(index));
-      if (!coversCandidate) continue;
-      const symmetric = replacementRows.size === candidateRows.size
-        && replacement.serializedIdBytes === candidate.serializedIdBytes;
-      if (!symmetric || replacement.key.localeCompare(candidate.key) < 0) {
-        dominated.add(candidate.key);
-        break;
-      }
-    }
-  }
-  return rows.map((row) => ({
-    ...row,
-    options: row.options.filter(({ key }) => !dominated.has(key)),
-  }));
-}
-
 function minorVariableCost(assignments) {
   let cost = 0;
   const openedByField = new Map(POSITIVE_AUTHORITY_FIELDS.map((field) => [field, new Map()]));
@@ -312,25 +277,6 @@ function minorVariableCost(assignments) {
   return cost;
 }
 
-function greatestCommonDivisor(left, right) {
-  let a = left;
-  let b = right;
-  while (b !== 0n) {
-    const remainder = a % b;
-    a = b;
-    b = remainder;
-  }
-  return a;
-}
-
-function incidenceCommonDenominator(rowCount) {
-  let denominator = 1n;
-  for (let value = 2n; value <= BigInt(rowCount); value += 1n) {
-    denominator = (denominator / greatestCommonDivisor(denominator, value)) * value;
-  }
-  return denominator;
-}
-
 function initialMinorAssignments(rows, requireSourceOrAccepted) {
   const assignments = new Map();
   for (const row of rows) {
@@ -344,413 +290,375 @@ function initialMinorAssignments(rows, requireSourceOrAccepted) {
   return requireSourceOrAccepted ? ensureMinorSourceAuthority(rows, assignments) : assignments;
 }
 
-function greedyCoverMinorAssignments(rows, requireSourceOrAccepted) {
-  const candidates = new Map();
-  for (const row of rows) {
-    for (const option of row.options) {
-      const candidate = candidates.get(option.key) ?? { option, rowIndexes: [] };
-      candidate.rowIndexes.push(row.index);
-      candidates.set(option.key, candidate);
-    }
+function minorProjectionChoices(packet, mapping, materialMechanisms, rejectedShape, authorityMode) {
+  const choices = [];
+  const affirmative = affirmativeCoverage(mapping, rejectedShape);
+  if (affirmative) choices.push({ kind: 'affirmative', coverage: affirmative });
+  if (
+    !materialMechanisms.has(mapping.mechanism)
+    && (!affirmative || rejectedShape.has(mapping.mechanism))
+  ) {
+    choices.push({
+      kind: 'speculative',
+      coverage: minimalCoverage(mapping.mechanism, 'speculative'),
+    });
   }
-  const uncovered = new Set(rows.map(({ index }) => index));
+  for (const authority of minorAuthorityOptions(mapping)) {
+    if (authorityMode === 'invariant-only' && authority.field !== 'invariantIds') continue;
+    choices.push({
+      kind: 'necessary',
+      authority,
+      coverage: minimalCoverage(mapping.mechanism, 'necessary-minor-expansion', authority),
+    });
+  }
+  return choices;
+}
+
+function buildMinorProjection(packet, choices) {
   const assignments = new Map();
-  while (uncovered.size > 0) {
-    const ranked = [...candidates.values()].map((candidate) => ({
-      ...candidate,
-      uncoveredIndexes: candidate.rowIndexes.filter((index) => uncovered.has(index)),
-    })).filter(({ uncoveredIndexes }) => uncoveredIndexes.length > 0);
-    ranked.sort((left, right) => (
-      (right.uncoveredIndexes.length * left.option.serializedIdBytes)
-        - (left.uncoveredIndexes.length * right.option.serializedIdBytes)
-      || right.uncoveredIndexes.length - left.uncoveredIndexes.length
-      || left.option.serializedIdBytes - right.option.serializedIdBytes
-      || left.option.key.localeCompare(right.option.key)
-    ));
-    const selected = ranked[0];
-    for (const index of selected.uncoveredIndexes) {
-      assignments.set(index, selected.option);
-      uncovered.delete(index);
-    }
-  }
-  return requireSourceOrAccepted ? ensureMinorSourceAuthority(rows, assignments) : assignments;
+  const coverage = choices.map((choice, index) => {
+    if (choice.kind === 'necessary') assignments.set(index, choice.authority);
+    return choice.coverage;
+  });
+  return buildGroundedResult(packet, 'minor-amendment-required', coverage, assignments);
 }
 
-function improveSharedMinorAssignments(rows, initialAssignments, requireSourceOrAccepted) {
-  let assignments = initialAssignments;
-  let cost = minorVariableCost(assignments);
-  const candidates = new Map();
-  for (const row of rows) {
-    for (const option of row.options) {
-      const candidate = candidates.get(option.key) ?? { option, indexes: [] };
-      candidate.indexes.push(row.index);
-      candidates.set(option.key, candidate);
-    }
-  }
-  let improved = true;
-  while (improved) {
-    improved = false;
-    for (const { option, indexes } of candidates.values()) {
-      if (indexes.length < 2) continue;
-      const candidateAssignments = new Map(assignments);
-      for (const index of indexes) candidateAssignments.set(index, option);
-      if (requireSourceOrAccepted && ![...candidateAssignments.values()].some(isSourceOrAccepted)) {
-        continue;
-      }
-      const candidateCost = minorVariableCost(candidateAssignments);
-      if (candidateCost < cost) {
-        assignments = candidateAssignments;
-        cost = candidateCost;
-        improved = true;
-      }
-    }
-  }
-  return assignments;
+function betterMinorProjection(best, candidate) {
+  if (!candidate) return best;
+  const bytes = serializedBytes(candidate, 'scope assessment result').bytes;
+  if (!best || bytes < best.bytes) return { result: candidate, bytes };
+  return best;
 }
 
-function solveMinorAuthorityScenario(
+function exactUniqueIncidenceMinorProjection(
   packet,
-  coverage,
-  necessaryIndexes,
-  buildResult,
+  materialMechanisms,
+  rejectedShape,
   authorityMode,
 ) {
-  const requireSourceOrAccepted = authorityMode === 'source-or-accepted';
-  let rows = necessaryIndexes.map((index) => ({
-    index,
-    mechanism: packet.changeInventory.mappings[index].mechanism,
-    options: minorAuthorityOptions(packet.changeInventory.mappings[index]).filter((option) => (
-      authorityMode !== 'invariant-only' || option.field === 'invariantIds'
+  const rows = packet.changeInventory.mappings.map((mapping) => ({
+    mapping,
+    choices: minorProjectionChoices(
+      packet,
+      mapping,
+      materialMechanisms,
+      rejectedShape,
+      authorityMode,
+    ).filter((choice, index, choices) => (
+      choice.kind !== 'necessary'
+      || choices.findIndex((candidate) => (
+        candidate.kind === 'necessary'
+        && candidate.authority.field === choice.authority.field
+        && (
+          candidate.authority.serializedIdBytes < choice.authority.serializedIdBytes
+          || (
+            candidate.authority.serializedIdBytes === choice.authority.serializedIdBytes
+            && candidate.authority.key.localeCompare(choice.authority.key) <= 0
+          )
+        )
+      )) === index
     )),
   }));
-  if (rows.some(({ options }) => options.length === 0)) return null;
-  rows = reduceDominatedMinorOptions(rows);
-  if (rows.some(({ options }) => options.length === 0)) return null;
-  rows.sort((left, right) => (
-    left.options.length - right.options.length
-    || left.mechanism.localeCompare(right.mechanism)
-    || left.index - right.index
-  ));
-
-  const optionIncidence = new Map();
+  if (rows.some(({ choices }) => choices.length === 0)) return null;
+  const coverageCommas = Math.max(rows.length - 1, 0);
+  let states = new Map([['0:0:0:0', {
+    usedFields: 0,
+    hasSourceOrAccepted: false,
+    hasNecessary: false,
+    hasSpeculative: false,
+    variableBytes: 0,
+    choices: [],
+  }]]);
   for (const row of rows) {
-    for (const option of row.options) {
-      optionIncidence.set(option.key, (optionIncidence.get(option.key) ?? 0) + 1);
-    }
-  }
-  if ([...optionIncidence.values()].every((count) => count === 1)) {
-    let states = new Map([['0:0', {
-      usedFields: 0,
-      hasSourceOrAccepted: false,
-      cost: 0,
-      assignments: new Map(),
-    }]]);
-    for (const row of rows) {
-      const nextStates = new Map();
-      for (const state of states.values()) {
-        for (const option of row.options) {
-          const usedFields = state.usedFields;
-          const fieldIndex = POSITIVE_AUTHORITY_FIELDS.indexOf(option.field);
+    const nextStates = new Map();
+    for (const state of states.values()) {
+      for (const choice of row.choices) {
+        let usedFields = state.usedFields;
+        let hasSourceOrAccepted = state.hasSourceOrAccepted;
+        let hasNecessary = state.hasNecessary;
+        let hasSpeculative = state.hasSpeculative;
+        let increment = serializedBytes(choice.coverage, 'coverage').bytes;
+        if (choice.kind === 'speculative') {
+          increment += Buffer.byteLength(JSON.stringify(row.mapping.mechanism), 'utf8');
+          if (hasSpeculative) increment += 1;
+          hasSpeculative = true;
+        } else if (choice.kind === 'necessary') {
+          const fieldIndex = POSITIVE_AUTHORITY_FIELDS.indexOf(choice.authority.field);
           const fieldBit = 1 << fieldIndex;
-          const nextMask = usedFields | fieldBit;
-          const hasSourceOrAccepted = state.hasSourceOrAccepted || isSourceOrAccepted(option);
-          const cost = state.cost + (2 * option.serializedIdBytes)
-            + ((usedFields & fieldBit) === 0 ? 0 : 1);
-          const stateKey = `${nextMask}:${hasSourceOrAccepted ? 1 : 0}`;
-          const current = nextStates.get(stateKey);
-          if (!current || cost < current.cost) {
-            nextStates.set(stateKey, {
-              usedFields: nextMask,
-              hasSourceOrAccepted,
-              cost,
-              assignments: new Map(state.assignments).set(row.index, option),
-            });
-          }
+          increment += choice.authority.serializedIdBytes;
+          if ((usedFields & fieldBit) !== 0) increment += 1;
+          usedFields |= fieldBit;
+          hasNecessary = true;
+          hasSourceOrAccepted ||= isSourceOrAccepted(choice.authority);
+        }
+        const key = `${usedFields}:${hasSourceOrAccepted ? 1 : 0}:${hasNecessary ? 1 : 0}:${hasSpeculative ? 1 : 0}`;
+        const candidate = {
+          usedFields,
+          hasSourceOrAccepted,
+          hasNecessary,
+          hasSpeculative,
+          variableBytes: state.variableBytes + increment,
+        };
+        const current = nextStates.get(key);
+        if (!current || candidate.variableBytes < current.variableBytes) {
+          nextStates.set(key, {
+            ...candidate,
+            choices: [...state.choices, choice],
+          });
         }
       }
-      states = nextStates;
     }
-    const exact = [...states.values()]
-      .filter((state) => !requireSourceOrAccepted || state.hasSourceOrAccepted)
-      .sort((left, right) => left.cost - right.cost)[0];
-    if (!exact) return null;
-    const exactResult = buildResult(coverage, exact.assignments);
-    const exactBytes = serializedBytes(exactResult, 'scope assessment result').bytes;
-    if (exactBytes > SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES) {
-      Object.defineProperty(exactResult, RESULT_REPRESENTABILITY, {
-        configurable: true,
-        value: {
-          exact: true,
-          lowerBoundBytes: exactBytes,
-          witnessBytes: exactBytes,
-        },
-      });
-    }
-    return exactResult;
+    states = nextStates;
   }
-
-  let assignments = initialMinorAssignments(rows, requireSourceOrAccepted);
-  if (!assignments) return null;
-  assignments = improveSharedMinorAssignments(rows, assignments, requireSourceOrAccepted);
-  const greedyAssignments = greedyCoverMinorAssignments(rows, requireSourceOrAccepted);
-  if (
-    greedyAssignments
-    && minorVariableCost(greedyAssignments) < minorVariableCost(assignments)
-  ) {
-    assignments = greedyAssignments;
-  }
-  let bestAssignments = assignments;
-  let bestVariableCost = minorVariableCost(assignments);
-  let bestResult = buildResult(coverage, assignments);
-  let bestBytes = serializedBytes(bestResult, 'scope assessment result').bytes;
-  if (bestBytes <= SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES) return bestResult;
-
-  const tokenMap = new Map();
-  for (const row of rows) {
-    for (const option of row.options) tokenMap.set(option.key, option);
-  }
-  const tokens = [...tokenMap.values()].sort((left, right) => left.key.localeCompare(right.key));
-  tokens.forEach((token, index) => {
-    token.tokenIndex = index;
-    token.bit = 1n << BigInt(index);
-    token.fieldIndex = POSITIVE_AUTHORITY_FIELDS.indexOf(token.field);
-  });
-  for (const row of rows) {
-    row.options = row.options.map((option) => tokenMap.get(option.key));
-  }
-  const remainingIncidence = Array.from(
-    { length: rows.length + 1 },
-    () => new Uint16Array(tokens.length),
-  );
-  for (let position = rows.length - 1; position >= 0; position -= 1) {
-    remainingIncidence[position].set(remainingIncidence[position + 1]);
-    for (const option of rows[position].options) {
-      remainingIncidence[position][option.tokenIndex] += 1;
-    }
-  }
-  const commonDenominator = incidenceCommonDenominator(rows.length);
-
-  function searchLowerBound(position, openedMask, fieldCounts) {
-    let coverageLowerBound = 0;
-    let openingLowerBoundNumerator = 0n;
-    const uncoveredRows = [];
-    const unopenedCoverage = new Map();
-    const unopenedFields = new Set();
-    let shortestUnopenedAuthorityBytes = Number.POSITIVE_INFINITY;
-    for (let remaining = position; remaining < rows.length; remaining += 1) {
-      let rowCoverageLowerBound = Number.POSITIVE_INFINITY;
-      let rowOpeningLowerBoundNumerator = null;
-      let hasOpenedOption = false;
-      for (const option of rows[remaining].options) {
-        const isOpened = (openedMask & option.bit) !== 0n;
-        hasOpenedOption ||= isOpened;
-        const openingCost = isOpened ? 0 : option.serializedIdBytes;
-        const incidenceCount = BigInt(remainingIncidence[position][option.tokenIndex]);
-        const openingNumerator = BigInt(openingCost) * (commonDenominator / incidenceCount);
-        rowCoverageLowerBound = Math.min(rowCoverageLowerBound, option.serializedIdBytes);
-        if (
-          rowOpeningLowerBoundNumerator === null
-          || openingNumerator < rowOpeningLowerBoundNumerator
-        ) {
-          rowOpeningLowerBoundNumerator = openingNumerator;
-        }
-        if (!isOpened) {
-          unopenedFields.add(option.fieldIndex);
-          shortestUnopenedAuthorityBytes = Math.min(
-            shortestUnopenedAuthorityBytes,
-            option.serializedIdBytes,
-          );
-          const coveredRows = unopenedCoverage.get(option.tokenIndex) ?? new Set();
-          coveredRows.add(remaining);
-          unopenedCoverage.set(option.tokenIndex, coveredRows);
-        }
-      }
-      coverageLowerBound += rowCoverageLowerBound;
-      openingLowerBoundNumerator += rowOpeningLowerBoundNumerator;
-      if (!hasOpenedOption) uncoveredRows.push(remaining);
-    }
-    const packedKeys = new Set();
-    const packedFields = new Set();
-    let packedOpenings = 0;
-    for (let remaining = position; remaining < rows.length; remaining += 1) {
-      const unopenedOptions = rows[remaining].options.filter(
-        (option) => (openedMask & option.bit) === 0n,
-      );
-      if (unopenedOptions.length !== rows[remaining].options.length) continue;
-      if (unopenedOptions.some(({ key }) => packedKeys.has(key))) continue;
-      packedOpenings += 1;
-      for (const option of unopenedOptions) {
-        packedKeys.add(option.key);
-        packedFields.add(option.fieldIndex);
-      }
-    }
-    const availableCommaFreeFields = [...packedFields].filter(
-      (fieldIndex) => fieldCounts[fieldIndex] === 0,
-    ).length;
-    const commaLowerBound = Math.max(packedOpenings - availableCommaFreeFields, 0);
-    const exactFractionalOpeningCeiling = (
-      openingLowerBoundNumerator + commonDenominator - 1n
-    ) / commonDenominator;
-    let additionalOpeningCount = 0;
-    if (uncoveredRows.length > 0) {
-      const maxUncoveredCoverage = Math.max(
-        ...[...unopenedCoverage.values()].map((coveredRows) => coveredRows.size),
-      );
-      additionalOpeningCount = Math.ceil(uncoveredRows.length / maxUncoveredCoverage);
-    }
-    const cardinalityOpeningBytes = additionalOpeningCount === 0
-      ? 0
-      : additionalOpeningCount * shortestUnopenedAuthorityBytes;
-    const exactOpeningLowerBound = Math.max(
-      Number(exactFractionalOpeningCeiling),
-      cardinalityOpeningBytes,
+  const exact = [...states.values()].filter((state) => (
+    state.hasNecessary
+    && (authorityMode !== 'source-or-accepted' || state.hasSourceOrAccepted)
+  )).sort((left, right) => {
+    const leftBytes = left.variableBytes + Buffer.byteLength(
+      JSON.stringify(left.hasSpeculative ? 'x' : null),
+      'utf8',
     );
-    const cardinalityCommaLowerBound = Math.max(
-      additionalOpeningCount - [...unopenedFields].filter(
-        (fieldIndex) => fieldCounts[fieldIndex] === 0,
-      ).length,
-      0,
+    const rightBytes = right.variableBytes + Buffer.byteLength(
+      JSON.stringify(right.hasSpeculative ? 'x' : null),
+      'utf8',
     );
-    return coverageLowerBound
-      + exactOpeningLowerBound
-      + Math.max(commaLowerBound, cardinalityCommaLowerBound);
+    return leftBytes - rightBytes;
+  })[0];
+  if (!exact) return null;
+  const result = buildMinorProjection(packet, exact.choices);
+  const projectedVariableBytes = coverageCommas + exact.variableBytes
+    + Buffer.byteLength(JSON.stringify(exact.hasSpeculative ? 'x' : null), 'utf8');
+  const actualVariableBytes = result.coverage.reduce(
+    (sum, entry) => sum + serializedBytes(entry, 'coverage').bytes,
+    Math.max(result.coverage.length - 1, 0),
+  ) + result.unnecessaryWork.reduce(
+    (sum, mechanism) => sum + Buffer.byteLength(JSON.stringify(mechanism), 'utf8'),
+    Math.max(result.unnecessaryWork.length - 1, 0),
+  ) + POSITIVE_AUTHORITY_FIELDS.reduce((sum, field) => (
+    sum + result.scopeDelta[field].reduce(
+      (fieldSum, id) => fieldSum + Buffer.byteLength(JSON.stringify(id), 'utf8'),
+      Math.max(result.scopeDelta[field].length - 1, 0),
+    )
+  ), 0) + Buffer.byteLength(JSON.stringify(result.smallerSufficientAlternative), 'utf8');
+  if (projectedVariableBytes !== actualVariableBytes) {
+    throw new Error('internal minor projection byte ordering mismatch');
   }
-
-  const fixedResultBytes = bestBytes - bestVariableCost;
-  const rootLowerBoundBytes = fixedResultBytes + searchLowerBound(0, 0n, [0, 0, 0]);
-  if (rootLowerBoundBytes > SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES) {
-    Object.defineProperty(bestResult, RESULT_REPRESENTABILITY, {
-      configurable: true,
-      value: {
-        exact: rootLowerBoundBytes === bestBytes,
-        lowerBoundBytes: rootLowerBoundBytes,
-        witnessBytes: bestBytes,
-      },
-    });
-    return bestResult;
-  }
-
-  const workingAssignments = new Map();
-  const memo = new Map();
-  function search(position, openedMask, fieldCounts, hasSourceOrAccepted, runningCost) {
-    if (position === rows.length) {
-      if (requireSourceOrAccepted && !hasSourceOrAccepted) return;
-      if (runningCost >= bestVariableCost) return;
-      bestVariableCost = runningCost;
-      bestAssignments = new Map(workingAssignments);
-      bestResult = buildResult(coverage, bestAssignments);
-      return;
-    }
-    if (requireSourceOrAccepted && !hasSourceOrAccepted) {
-      const canStillGroundDelta = rows.slice(position).some(({ options }) => (
-        options.some(isSourceOrAccepted)
-      ));
-      if (!canStillGroundDelta) return;
-    }
-
-    const integerLowerBound = searchLowerBound(position, openedMask, fieldCounts);
-    if (runningCost + integerLowerBound >= bestVariableCost) return;
-
-    const memoKey = `${position}:${openedMask.toString(16)}:${hasSourceOrAccepted ? 1 : 0}`;
-    const priorCost = memo.get(memoKey);
-    if (priorCost !== undefined && priorCost <= runningCost) return;
-    memo.set(memoKey, runningCost);
-
-    const row = rows[position];
-    const options = [...row.options].sort((left, right) => {
-      const leftOpened = (openedMask & left.bit) !== 0n;
-      const rightOpened = (openedMask & right.bit) !== 0n;
-      const leftIncrement = left.serializedIdBytes + (leftOpened
-        ? 0
-        : left.serializedIdBytes + (fieldCounts[left.fieldIndex] > 0 ? 1 : 0));
-      const rightIncrement = right.serializedIdBytes + (rightOpened
-        ? 0
-        : right.serializedIdBytes + (fieldCounts[right.fieldIndex] > 0 ? 1 : 0));
-      return leftIncrement - rightIncrement
-        || remainingIncidence[position][right.tokenIndex]
-          - remainingIncidence[position][left.tokenIndex]
-        || left.key.localeCompare(right.key);
-    });
-    for (const option of options) {
-      const isOpened = (openedMask & option.bit) !== 0n;
-      const nextFieldCounts = [...fieldCounts];
-      let increment = option.serializedIdBytes;
-      let nextMask = openedMask;
-      if (!isOpened) {
-        increment += option.serializedIdBytes + (nextFieldCounts[option.fieldIndex] > 0 ? 1 : 0);
-        nextFieldCounts[option.fieldIndex] += 1;
-        nextMask |= option.bit;
-      }
-      workingAssignments.set(row.index, option);
-      search(
-        position + 1,
-        nextMask,
-        nextFieldCounts,
-        hasSourceOrAccepted || isSourceOrAccepted(option),
-        runningCost + increment,
-      );
-      workingAssignments.delete(row.index);
-    }
-  }
-  search(0, 0n, [0, 0, 0], false, 0);
-  return bestResult;
+  const exactBytes = serializedBytes(result, 'scope assessment result').bytes;
+  return { result, bytes: exactBytes };
 }
 
-function exactGroundedResult(packet, coverage, forcedNecessaryIndexes, buildResult) {
-  const ordinaryAnchorIndexes = packet.changeInventory.mappings.flatMap((mapping, index) => {
-    if (forcedNecessaryIndexes.includes(index)) return [];
-    return minorAuthorityOptions(mapping).length > 0 ? [index] : [];
-  });
-  ordinaryAnchorIndexes.sort((left, right) => (
-    packet.changeInventory.mappings[left].mechanism.localeCompare(
-      packet.changeInventory.mappings[right].mechanism,
-    ) || left - right
+function relaxedMinorProjectionLowerBound(
+  packet,
+  materialMechanisms,
+  rejectedShape,
+  authorityMode,
+) {
+  const rows = packet.changeInventory.mappings.map((mapping) => minorProjectionChoices(
+    packet,
+    mapping,
+    materialMechanisms,
+    rejectedShape,
+    authorityMode,
   ));
-  const scenarios = forcedNecessaryIndexes.length > 0
-    ? [{ necessary: forcedNecessaryIndexes }]
-    : ordinaryAnchorIndexes.map((anchor) => ({ necessary: [anchor] }));
-  let bestResult = null;
-  let bestBytes = Number.POSITIVE_INFINITY;
-  let globalLowerBoundBytes = Number.POSITIVE_INFINITY;
-  for (const scenario of scenarios) {
-    const scenarioCoverage = coverage.map((entry, index) => (
-      scenario.necessary.includes(index)
-        ? minimalCoverage(entry.mechanism, 'necessary-minor-expansion')
-        : entry
-    ));
-    for (const authorityMode of ['source-or-accepted', 'invariant-only']) {
-      const result = solveMinorAuthorityScenario(
-        packet,
-        scenarioCoverage,
-        scenario.necessary,
-        buildResult,
-        authorityMode,
+  if (rows.some((choices) => choices.length === 0)) return Number.POSITIVE_INFINITY;
+  const hasEligibleAnchor = rows.some((choices) => choices.some((choice) => (
+    choice.kind === 'necessary'
+    && (authorityMode !== 'source-or-accepted' || isSourceOrAccepted(choice.authority))
+  )));
+  if (!hasEligibleAnchor) return Number.POSITIVE_INFINITY;
+  const empty = buildGroundedResult(packet, 'minor-amendment-required', [], new Map());
+  const fixedWithoutAlternative = serializedBytes(empty, 'scope assessment result').bytes
+    - Buffer.byteLength(JSON.stringify(null), 'utf8');
+  const rowBytes = rows.reduce((sum, choices, index) => sum + Math.min(...choices.map((choice) => {
+    let bytes = serializedBytes(choice.coverage, 'coverage').bytes;
+    if (choice.kind === 'speculative') {
+      bytes += Buffer.byteLength(
+        JSON.stringify(packet.changeInventory.mappings[index].mechanism),
+        'utf8',
       );
-      if (!result) continue;
-      const bytes = serializedBytes(result, 'scope assessment result').bytes;
-      const evidence = result[RESULT_REPRESENTABILITY] ?? {
-        lowerBoundBytes: bytes,
-        witnessBytes: bytes,
-      };
-      if (bytes <= SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES) return result;
-      globalLowerBoundBytes = Math.min(globalLowerBoundBytes, evidence.lowerBoundBytes);
-      if (bytes < bestBytes) {
-        bestResult = result;
-        bestBytes = bytes;
-      }
+    }
+    return bytes;
+  })), 0);
+  return fixedWithoutAlternative
+    + Math.max(rows.length - 1, 0)
+    + rowBytes
+    + Buffer.byteLength(JSON.stringify('x'), 'utf8');
+}
+
+function sharedAuthorityMinorProjection(
+  packet,
+  materialMechanisms,
+  rejectedShape,
+  authorityMode,
+) {
+  const rows = packet.changeInventory.mappings.map((mapping) => ({
+    mapping,
+    choices: minorProjectionChoices(
+      packet,
+      mapping,
+      materialMechanisms,
+      rejectedShape,
+      authorityMode,
+    ),
+  }));
+  if (rows.some(({ choices }) => choices.length === 0)) return null;
+  let best = null;
+  const anchorCandidates = [];
+  for (const [anchorIndex, row] of rows.entries()) {
+    const anchors = row.choices.filter((choice) => (
+      choice.kind === 'necessary'
+      && (authorityMode !== 'source-or-accepted' || isSourceOrAccepted(choice.authority))
+    )).sort((left, right) => (
+      left.authority.serializedIdBytes - right.authority.serializedIdBytes
+      || left.authority.key.localeCompare(right.authority.key)
+    )).slice(0, 1);
+    for (const anchor of anchors) {
+      const ordinary = row.choices.filter(({ kind }) => kind !== 'necessary');
+      const ordinaryBytes = ordinary.length === 0 ? 0 : Math.min(...ordinary.map((choice) => (
+        serializedBytes(choice.coverage, 'coverage').bytes
+        + (choice.kind === 'speculative'
+          ? Buffer.byteLength(JSON.stringify(row.mapping.mechanism), 'utf8') + 1
+          : 0)
+      )));
+      anchorCandidates.push({
+        anchor,
+        anchorIndex,
+        incrementalBytes: serializedBytes(anchor.coverage, 'coverage').bytes
+          + anchor.authority.serializedIdBytes
+          - ordinaryBytes,
+      });
     }
   }
-  if (bestResult && bestBytes > SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES) {
-    Object.defineProperty(bestResult, RESULT_REPRESENTABILITY, {
+  anchorCandidates.sort((left, right) => (
+    left.incrementalBytes - right.incrementalBytes
+    || left.anchorIndex - right.anchorIndex
+    || left.anchor.authority.key.localeCompare(right.anchor.authority.key)
+  ));
+  let thresholdEvaluations = 0;
+  for (const { anchor, anchorIndex } of anchorCandidates.slice(0, 64)) {
+    let choices = rows.map(({ mapping, choices: rowChoices }, index) => {
+      if (index === anchorIndex) return anchor;
+      const ordinary = rowChoices.filter(({ kind }) => kind !== 'necessary');
+      const pool = ordinary.length > 0 ? ordinary : rowChoices;
+      return [...pool].sort((left, right) => {
+        const cost = (choice) => serializedBytes(choice.coverage, 'coverage').bytes
+          + (choice.kind === 'speculative'
+            ? Buffer.byteLength(JSON.stringify(mapping.mechanism), 'utf8') + 1
+            : 0);
+        return cost(left) - cost(right)
+          || left.kind.localeCompare(right.kind)
+          || (left.authority?.key ?? '').localeCompare(right.authority?.key ?? '');
+      })[0];
+    });
+    let candidate = betterMinorProjection(null, buildMinorProjection(packet, choices));
+    for (let pass = 0; pass < 2 && thresholdEvaluations < 4096; pass += 1) {
+      let improved = false;
+      for (const [index, row] of rows.entries()) {
+        if (choices[index].kind === 'necessary') continue;
+        const alternatives = row.choices.filter(({ kind }) => kind === 'necessary')
+          .sort((left, right) => (
+            left.authority.serializedIdBytes - right.authority.serializedIdBytes
+            || left.authority.key.localeCompare(right.authority.key)
+          )).slice(0, 3);
+        for (const alternative of alternatives) {
+          thresholdEvaluations += 1;
+          const alternativeChoices = [...choices];
+          alternativeChoices[index] = alternative;
+          const alternativeResult = betterMinorProjection(
+            null,
+            buildMinorProjection(packet, alternativeChoices),
+          );
+          if (alternativeResult.bytes < candidate.bytes) {
+            candidate = alternativeResult;
+            choices = alternativeChoices;
+            improved = true;
+          }
+          if (thresholdEvaluations >= 4096) break;
+        }
+        if (thresholdEvaluations >= 4096) break;
+      }
+      if (!improved) break;
+    }
+    best = betterMinorProjection(best, candidate.result);
+    if (best.bytes <= SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES) return best;
+    if (thresholdEvaluations >= 4096) break;
+  }
+  const necessaryRows = rows.map(({ mapping, choices }, index) => ({
+    index,
+    mechanism: mapping.mechanism,
+    options: choices.filter(({ kind }) => kind === 'necessary').map(({ authority }) => authority),
+  }));
+  if (necessaryRows.every(({ options }) => options.length > 0)) {
+    const assignments = initialMinorAssignments(
+      necessaryRows,
+      authorityMode === 'source-or-accepted',
+    );
+    if (assignments) {
+      const choices = necessaryRows.map(({ index }) => ({
+        kind: 'necessary',
+        authority: assignments.get(index),
+        coverage: minimalCoverage(
+          packet.changeInventory.mappings[index].mechanism,
+          'necessary-minor-expansion',
+          assignments.get(index),
+        ),
+      }));
+      best = betterMinorProjection(best, buildMinorProjection(packet, choices));
+    }
+  }
+  return best;
+}
+
+function minimalMinorProjection(packet, materialMechanisms, rejectedShape) {
+  const authorityIncidence = new Map();
+  for (const mapping of packet.changeInventory.mappings) {
+    for (const authority of minorAuthorityOptions(mapping)) {
+      authorityIncidence.set(authority.key, (authorityIncidence.get(authority.key) ?? 0) + 1);
+    }
+  }
+  const uniqueIncidence = [...authorityIncidence.values()].every((count) => count === 1);
+  let best = null;
+  let lowerBoundBytes = Number.POSITIVE_INFINITY;
+  for (const authorityMode of ['source-or-accepted', 'invariant-only']) {
+    if (uniqueIncidence) {
+      const exact = exactUniqueIncidenceMinorProjection(
+        packet,
+        materialMechanisms,
+        rejectedShape,
+        authorityMode,
+      );
+      if (exact) best = betterMinorProjection(best, exact.result);
+      lowerBoundBytes = Math.min(lowerBoundBytes, exact?.bytes ?? Number.POSITIVE_INFINITY);
+    } else {
+      const candidate = sharedAuthorityMinorProjection(
+        packet,
+        materialMechanisms,
+        rejectedShape,
+        authorityMode,
+      );
+      if (candidate) best = betterMinorProjection(best, candidate.result);
+      lowerBoundBytes = Math.min(
+        lowerBoundBytes,
+        relaxedMinorProjectionLowerBound(
+          packet,
+          materialMechanisms,
+          rejectedShape,
+          authorityMode,
+        ),
+      );
+    }
+  }
+  if (best && best.bytes > SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES) {
+    Object.defineProperty(best.result, RESULT_REPRESENTABILITY, {
       configurable: true,
       value: {
-        exact: globalLowerBoundBytes === bestBytes,
-        lowerBoundBytes: globalLowerBoundBytes,
-        witnessBytes: bestBytes,
+        exact: uniqueIncidence && lowerBoundBytes === best.bytes,
+        lowerBoundBytes,
+        witnessBytes: best.bytes,
       },
     });
   }
-  return bestResult;
+  return best?.result ?? null;
 }
 
 function minimalResult(packet, verdict) {
@@ -805,29 +713,7 @@ function minimalResult(packet, verdict) {
     ));
   } else if (verdict === 'minor-amendment-required') {
     if (forcedMechanisms.size > 0) return null;
-    const forcedNecessaryIndexes = [];
-    coverage = mappings.map((mapping, index) => {
-      const affirmative = affirmativeCoverage(mapping, rejectedShape);
-      if (affirmative) return affirmative;
-      if (materialMechanisms.has(mapping.mechanism)) return null;
-      if (minorAuthorityOptions(mapping).length === 0) {
-        return minimalCoverage(mapping.mechanism, 'speculative');
-      }
-      forcedNecessaryIndexes.push(index);
-      return minimalCoverage(mapping.mechanism, 'necessary-minor-expansion');
-    });
-    if (coverage.some((entry) => entry === null)) return null;
-    return exactGroundedResult(
-      packet,
-      coverage,
-      forcedNecessaryIndexes,
-      (groundedCoverage, assignments) => buildGroundedResult(
-        packet,
-        'minor-amendment-required',
-        groundedCoverage,
-        assignments,
-      ),
-    );
+    return minimalMinorProjection(packet, materialMechanisms, rejectedShape);
   } else if (verdict === 'human-decision-required') {
     const categories = forcedCategories.size > 0
       ? [...forcedCategories]

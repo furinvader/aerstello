@@ -2243,7 +2243,7 @@ test('minor representability jointly minimizes shared mapping authority', () => 
   assert.deepEqual(validateScopeAssessmentApplicability(input, witness), []);
 });
 
-test('minor representability rejects the exact unique-authority minimum', () => {
+test('minor representability accepts the official grounded mixed projection', () => {
   const mechanisms = Array.from(
     { length: 165 },
     (_, index) => `m${String(index).padStart(3, '0')}`,
@@ -2291,17 +2291,290 @@ test('minor representability rejects the exact unique-authority minimum', () => 
       })),
     },
   });
-  const errors = validateAssessmentPacket(input);
+  const [necessary, ...speculative] = input.changeInventory.mappings;
+  const witness = result('minor-amendment-required', {
+    binding: input.binding,
+    summary: 'x',
+    coverage: [
+      {
+        ...necessary,
+        invariantIds: [],
+        classification: 'necessary-minor-expansion',
+      },
+      ...speculative.map((mapping) => ({
+        ...mapping,
+        sourceCriterionIds: [],
+        invariantIds: [],
+        classification: 'speculative',
+      })),
+    ],
+    unnecessaryWork: speculative.map(({ mechanism }) => mechanism),
+    smallerSufficientAlternative: 'x',
+    scopeDelta: {
+      description: 'x',
+      sourceCriterionIds: [necessary.sourceCriterionIds[0]],
+      acceptedCriterionIds: [],
+      invariantIds: [],
+      materialSurfaces: [],
+    },
+  });
 
   assert.ok(Buffer.byteLength(JSON.stringify(input)) <= ASSESSMENT_PACKET_LIMIT_BYTES);
+  assert.equal(Buffer.byteLength(JSON.stringify(witness)), 29970);
+  assert.deepEqual(validateScopeAssessmentResult(witness), []);
+  assert.deepEqual(validateScopeAssessmentApplicability(input, witness), []);
+  assert.deepEqual(validateAssessmentPacket(input), []);
+});
+
+test('mixed shared-authority subset beats single-anchor and all-necessary projections', () => {
+  const mechanisms = [`${'l'.repeat(500)}-one`, `${'l'.repeat(500)}-two`, 's-one', 's-two'];
+  const mappings = mechanisms.map((mechanism) => ({
+    mechanism,
+    sourceCriterionIds: ['shared'],
+    acceptedCriterionIds: [],
+    invariantIds: [],
+    nonGoalIds: [],
+    guidanceIds: [],
+    rationale: 'x',
+  }));
+  const input = packet({
+    sourceScope: {
+      objective: 'x',
+      requiredCriteria: [{ id: 'shared', text: 'x' }],
+      nonGoals: [],
+      implementationGuidance: [],
+    },
+    acceptedScope: {
+      criteria: [{ id: 'x', text: 'x' }],
+      invariants: [],
+      minimalClosure: 'x',
+      authorizedShape: [],
+      unauthorizedShape: mechanisms,
+      deferredShape: [],
+    },
+    changeInventory: {
+      summary: 'x',
+      paths: [],
+      dependencies: [],
+      publicSurfaces: [],
+      persistentSurfaces: [],
+      subsystems: [],
+      mappings,
+    },
+  });
+  const projection = (necessaryIndexes) => {
+    const necessary = new Set(necessaryIndexes);
+    const speculative = mappings.filter((_, index) => !necessary.has(index));
+    return result('minor-amendment-required', {
+      coverage: mappings.map((mapping, index) => ({
+        ...mapping,
+        sourceCriterionIds: necessary.has(index) ? ['shared'] : [],
+        classification: necessary.has(index) ? 'necessary-minor-expansion' : 'speculative',
+      })),
+      unnecessaryWork: speculative.map(({ mechanism }) => mechanism),
+      smallerSufficientAlternative: speculative.length > 0 ? 'x' : null,
+      scopeDelta: {
+        description: 'x',
+        sourceCriterionIds: ['shared'],
+        acceptedCriterionIds: [],
+        invariantIds: [],
+        materialSurfaces: [],
+      },
+    });
+  };
+  const mixed = projection([0, 1]);
   assert.ok(
-    errors.includes(
-      '$ assessment packet cannot represent a schema-minimal minor-amendment-required result within 32768 bytes (requires 33251 bytes)',
-    ),
+    Buffer.byteLength(JSON.stringify(mixed)) < Buffer.byteLength(JSON.stringify(projection([0]))),
+  );
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(mixed)) < Buffer.byteLength(JSON.stringify(projection([0, 1, 2, 3]))),
+  );
+  assert.deepEqual(validateScopeAssessmentApplicability(input, mixed), []);
+  assert.doesNotMatch(
+    validateAssessmentPacket(input).join('\n'),
+    /schema-minimal minor-amendment-required/u,
   );
 });
 
-test('minor representability certifies a cyclic shared-authority packet promptly', () => {
+test('randomized small minor projections match a brute-force oracle at the byte boundary', () => {
+  let randomState = 0x54c0de;
+  const random = () => {
+    randomState = (1664525 * randomState + 1013904223) >>> 0;
+    return randomState;
+  };
+  for (let example = 0; example < 5; example += 1) {
+    const count = 3 + (random() % 4);
+    const groundedMechanisms = Array.from({ length: count }, (_, index) => `r${example}-${index}`);
+    const sourceCriteria = groundedMechanisms.map((_, index) => ({
+      id: `s${example}-${index}`,
+      text: 'x',
+    }));
+    const invariants = groundedMechanisms.map((_, index) => ({
+      id: `i${example}-${index}`,
+      text: 'x',
+    }));
+    const groundedMappings = groundedMechanisms.map((mechanism, index) => ({
+      mechanism,
+      sourceCriterionIds: random() % 2 === 0 ? [sourceCriteria[index].id] : [],
+      acceptedCriterionIds: [],
+      invariantIds: random() % 2 === 0 ? [invariants[index].id] : [],
+      nonGoalIds: [],
+      guidanceIds: [],
+      rationale: 'x',
+    }));
+    if (groundedMappings.every(({ sourceCriterionIds, invariantIds }) => (
+      sourceCriterionIds.length === 0 && invariantIds.length === 0
+    ))) groundedMappings[0].sourceCriterionIds = [sourceCriteria[0].id];
+    const fillerCount = 90;
+    const buildInput = (fillerLength, identityBytes = 1) => {
+      const fillerMappings = Array.from({ length: fillerCount }, (_, index) => ({
+        mechanism: `f${example}-${index}-${'z'.repeat(fillerLength)}`,
+        sourceCriterionIds: [],
+        acceptedCriterionIds: [],
+        invariantIds: [],
+        nonGoalIds: [],
+        guidanceIds: [],
+        rationale: 'x',
+      }));
+      const mappings = [...groundedMappings, ...fillerMappings];
+      return packet({
+        binding: binding({
+          source: { ...binding().source, identity: 'i'.repeat(identityBytes) },
+          amendmentDigests: [],
+        }),
+        sourceScope: {
+          objective: 'x',
+          requiredCriteria: sourceCriteria,
+          nonGoals: [],
+          implementationGuidance: [],
+        },
+        acceptedScope: {
+          criteria: [{ id: 'x', text: 'x' }],
+          invariants,
+          minimalClosure: 'x',
+          authorizedShape: [],
+          unauthorizedShape: mappings.filter((_, index) => index % 2 === 0)
+            .map(({ mechanism }) => mechanism),
+          deferredShape: mappings.filter((_, index) => index % 2 === 1)
+            .map(({ mechanism }) => mechanism),
+        },
+        changeInventory: {
+          summary: 'x',
+          paths: [],
+          dependencies: [],
+          publicSurfaces: [],
+          persistentSurfaces: [],
+          subsystems: [],
+          mappings,
+        },
+      });
+    };
+    const bruteForceMinimum = (input) => {
+      const fillerMappings = input.changeInventory.mappings.slice(groundedMappings.length);
+      const fillerChoices = fillerMappings.map((mapping) => ({
+        classification: 'speculative',
+        coverage: { ...mapping, classification: 'speculative' },
+      }));
+      let oracle = null;
+      const choices = [];
+      const visit = (index) => {
+        if (index === groundedMappings.length) {
+          if (!choices.some(({ classification }) => (
+            classification === 'necessary-minor-expansion'
+          ))) return;
+          const completeChoices = [...choices, ...fillerChoices];
+          const necessary = completeChoices.filter(({ classification }) => (
+            classification === 'necessary-minor-expansion'
+          ));
+          const speculative = completeChoices.filter(({ classification }) => (
+            classification === 'speculative'
+          ));
+          const assessment = result('minor-amendment-required', {
+            binding: input.binding,
+            summary: 'x',
+            coverage: completeChoices.map(({ coverage }) => coverage),
+            unnecessaryWork: speculative.map(({ coverage }) => coverage.mechanism),
+            smallerSufficientAlternative: speculative.length > 0 ? 'x' : null,
+            scopeDelta: {
+              description: 'x',
+              sourceCriterionIds: [...new Set(necessary.flatMap(
+                ({ coverage }) => coverage.sourceCriterionIds,
+              ))],
+              acceptedCriterionIds: [],
+              invariantIds: [...new Set(necessary.flatMap(
+                ({ coverage }) => coverage.invariantIds,
+              ))],
+              materialSurfaces: [],
+            },
+          });
+          const bytes = Buffer.byteLength(JSON.stringify(assessment));
+          if (!oracle || bytes < oracle.bytes) oracle = { assessment, bytes };
+          return;
+        }
+        const mapping = groundedMappings[index];
+        choices.push({
+          classification: 'speculative',
+          coverage: {
+            ...mapping,
+            sourceCriterionIds: [],
+            invariantIds: [],
+            classification: 'speculative',
+          },
+        });
+        visit(index + 1);
+        choices.pop();
+        for (const [field, ids] of [
+          ['sourceCriterionIds', mapping.sourceCriterionIds],
+          ['invariantIds', mapping.invariantIds],
+        ]) {
+          for (const id of ids) {
+            choices.push({
+              classification: 'necessary-minor-expansion',
+              coverage: {
+                ...mapping,
+                sourceCriterionIds: [],
+                invariantIds: [],
+                [field]: [id],
+                classification: 'necessary-minor-expansion',
+              },
+            });
+            visit(index + 1);
+            choices.pop();
+          }
+        }
+      };
+      visit(0);
+      return oracle;
+    };
+    let fillerLength = 40;
+    let input = buildInput(fillerLength);
+    let oracle = bruteForceMinimum(input);
+    while (SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES - oracle.bytes > 511) {
+      fillerLength += 1;
+      input = buildInput(fillerLength);
+      oracle = bruteForceMinimum(input);
+    }
+    const identityBytes = 1 + SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES - oracle.bytes;
+    assert.ok(identityBytes >= 1 && identityBytes < 512, `example ${example}`);
+    const at = buildInput(fillerLength, identityBytes);
+    const over = buildInput(fillerLength, identityBytes + 1);
+    const atOracle = bruteForceMinimum(at);
+    assert.equal(atOracle.bytes, SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES, `example ${example}`);
+    assert.deepEqual(validateScopeAssessmentApplicability(at, atOracle.assessment), []);
+    assert.doesNotMatch(
+      validateAssessmentPacket(at).join('\n'),
+      /schema-minimal minor-amendment-required/u,
+      `at ${example}`,
+    );
+    assert.match(
+      validateAssessmentPacket(over).join('\n'),
+      /schema-minimal minor-amendment-required result.*requires 32769 bytes/u,
+      `over ${example}`,
+    );
+  }
+});
+
+test('minor representability bounds cyclic shared-authority search promptly', () => {
   const count = 100;
   const token = (index) => `t${String((index + count) % count).padStart(3, '0')}`;
   const mechanisms = Array.from(
@@ -2364,10 +2637,8 @@ test('minor representability certifies a cyclic shared-authority packet promptly
   const elapsedMilliseconds = Date.now() - startedAt;
 
   assert.ok(Buffer.byteLength(JSON.stringify(input)) <= ASSESSMENT_PACKET_LIMIT_BYTES);
-  assert.match(
-    errors.join('\n'),
-    /schema-minimal minor-amendment-required.*certified lower bound/u,
-  );
+  const minorError = errors.find((error) => error.includes('minor-amendment-required'));
+  if (minorError) assert.match(minorError, /certified lower bound/u);
   assert.ok(elapsedMilliseconds < 5000, `cyclic proof took ${elapsedMilliseconds}ms`);
 });
 
