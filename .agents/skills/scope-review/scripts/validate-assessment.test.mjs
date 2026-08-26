@@ -293,12 +293,12 @@ test('source-only material authority cannot produce a non-human verdict', () => 
   );
 
   for (const assessment of cases) {
-    assert.deepEqual(
-      validateScopeAssessmentApplicability(input, assessment),
-      [
+    const errors = validateScopeAssessmentApplicability(input, assessment);
+    assert.ok(
+      errors.includes(
         `$ changeInventory.publicSurfaces material surface ${JSON.stringify(surface)} lacks accepted-scope authorization and requires human-decision-required material-scope-change coverage with category public-surface`,
-      ],
-      assessment.verdict,
+      ),
+      `${assessment.verdict}: missing material-surface rejection`,
     );
   }
 });
@@ -336,12 +336,12 @@ test('accepted-only material authority lacks authoritative-source support', () =
     ],
   });
   for (const candidate of nonHumanAssessments(assessment.coverage, surface)) {
-    assert.deepEqual(
-      validateScopeAssessmentApplicability(input, candidate),
-      [
+    const errors = validateScopeAssessmentApplicability(input, candidate);
+    assert.ok(
+      errors.includes(
         `$ changeInventory.publicSurfaces material surface ${JSON.stringify(surface)} lacks explicit authoritative-source support and requires human-decision-required material-scope-change coverage with category public-surface`,
-      ],
-      candidate.verdict,
+      ),
+      `${candidate.verdict}: missing material-surface rejection`,
     );
   }
 });
@@ -723,6 +723,47 @@ test('necessary adjacent helper and focused test require a minor amendment', () 
   assert.deepEqual(validateScopeAssessmentApplicability(input, assessment), []);
 });
 
+test('supported authorized material inventory remains a feasible minor anchor', () => {
+  const mechanism = 'supported-subsystem';
+  const mapping = {
+    mechanism,
+    sourceCriterionIds: ['supported-scope'],
+    acceptedCriterionIds: [],
+    invariantIds: [],
+    nonGoalIds: [],
+    guidanceIds: [],
+    rationale: 'The source supports the accepted material inventory mechanism.',
+  };
+  const input = packet({
+    sourceScope: {
+      ...packet().sourceScope,
+      requiredCriteria: [{ id: 'supported-scope', text: 'Support the named subsystem.' }],
+    },
+    acceptedScope: {
+      ...packet().acceptedScope,
+      authorizedShape: [mechanism],
+    },
+    changeInventory: {
+      ...packet().changeInventory,
+      subsystems: [mechanism],
+      mappings: [mapping],
+    },
+  });
+  const assessment = result('minor-amendment-required', {
+    coverage: [{ ...mapping, classification: 'necessary-minor-expansion' }],
+    scopeDelta: {
+      description: 'Record the already supported subsystem as a bounded minor amendment.',
+      sourceCriterionIds: ['supported-scope'],
+      acceptedCriterionIds: [],
+      invariantIds: [],
+      materialSurfaces: [],
+    },
+  });
+
+  assert.deepEqual(validateAssessmentPacket(input), []);
+  assert.deepEqual(validateScopeAssessmentApplicability(input, assessment), []);
+});
+
 test('material subsystem expansion requires an unauthorizing human decision', () => {
   const input = packet({
     changeInventory: {
@@ -990,12 +1031,585 @@ test('arbitrary missing evidence takes precedence over affirmative material enfo
       },
     ],
   });
-  assert.deepEqual(
-    validateScopeAssessmentApplicability(input, affirmative),
-    [
+  const affirmativeErrors = validateScopeAssessmentApplicability(input, affirmative);
+  assert.ok(
+    affirmativeErrors.includes(
       `$ changeInventory.subsystems material surface ${JSON.stringify(unsupportedSurface)} lacks explicit authoritative-source support and accepted-scope authorization and requires human-decision-required material-scope-change coverage with category new-subsystem`,
-    ],
+    ),
   );
+  assert.match(affirmativeErrors.join('\n'), /is not mapped to mechanism/u);
+});
+
+test('coverage authority is a same-mechanism same-field subset for every verdict', () => {
+  const fields = [
+    ['sourceCriterionIds', 'other-source'],
+    ['acceptedCriterionIds', 'other-accepted'],
+    ['invariantIds', 'other-invariant'],
+    ['nonGoalIds', 'other-non-goal'],
+    ['guidanceIds', 'other-guidance'],
+  ];
+  const secondMapping = {
+    mechanism: 'second-mechanism',
+    sourceCriterionIds: ['other-source'],
+    acceptedCriterionIds: ['other-accepted'],
+    invariantIds: ['other-invariant'],
+    nonGoalIds: ['other-non-goal'],
+    guidanceIds: ['other-guidance'],
+    rationale: 'The second mechanism owns separate authority in every namespace.',
+  };
+  const input = packet({
+    sourceScope: {
+      ...packet().sourceScope,
+      requiredCriteria: [
+        ...packet().sourceScope.requiredCriteria,
+        { id: 'other-source', text: 'Authorize only the second mechanism.' },
+      ],
+      nonGoals: [
+        ...packet().sourceScope.nonGoals,
+        { id: 'other-non-goal', text: 'Constrain only the second mechanism.' },
+      ],
+      implementationGuidance: [{ id: 'other-guidance', text: 'Guide only the second mechanism.' }],
+    },
+    acceptedScope: {
+      ...packet().acceptedScope,
+      criteria: [
+        ...packet().acceptedScope.criteria,
+        { id: 'other-accepted', text: 'Accept only the second mechanism.' },
+      ],
+      invariants: [
+        ...packet().acceptedScope.invariants,
+        { id: 'other-invariant', text: 'Constrain only the second mechanism.' },
+      ],
+    },
+    changeInventory: {
+      ...packet().changeInventory,
+      mappings: [...packet().changeInventory.mappings, secondMapping],
+    },
+  });
+  const verdictShapes = [
+    ['within-scope', {}],
+    ['trim-required', {
+      unnecessaryWork: ['direct-local-fix'],
+      smallerSufficientAlternative: 'x',
+    }],
+    ['minor-amendment-required', {
+      scopeDelta: {
+        description: 'x',
+        sourceCriterionIds: ['other-source'],
+        acceptedCriterionIds: [],
+        invariantIds: [],
+        materialSurfaces: [],
+      },
+    }],
+    ['human-decision-required', {
+      scopeDelta: {
+        description: 'x',
+        sourceCriterionIds: [],
+        acceptedCriterionIds: [],
+        invariantIds: [],
+        materialSurfaces: ['policy-change'],
+      },
+      materialityTriggers: [{ category: 'policy-change', evidence: 'x' }],
+      smallestExpansion: 'x',
+      narrowAlternative: 'x',
+      deferralConsequences: 'x',
+      humanDecision: true,
+    }],
+    ['insufficient-evidence', { missingEvidence: ['x'] }],
+  ];
+
+  for (const [field, borrowedId] of fields) {
+    for (const [verdict, shape] of verdictShapes) {
+      let firstClassification = 'required';
+      let secondClassification = 'required';
+      if (verdict === 'trim-required') firstClassification = 'speculative';
+      if (verdict === 'minor-amendment-required') {
+        firstClassification = 'necessary-minor-expansion';
+        secondClassification = 'necessary-minor-expansion';
+      }
+      if (verdict === 'human-decision-required') firstClassification = 'material-scope-change';
+      if (verdict === 'insufficient-evidence') {
+        firstClassification = 'insufficient-evidence';
+        secondClassification = 'insufficient-evidence';
+      }
+      const first = {
+        ...result('within-scope').coverage[0],
+        [field]: [borrowedId],
+        classification: firstClassification,
+      };
+      const second = { ...secondMapping, classification: secondClassification };
+      const assessment = result(verdict, { ...shape, coverage: [first, second] });
+      assert.match(
+        validateScopeAssessmentApplicability(input, assessment).join('\n'),
+        new RegExp(`coverage\\[0\\]\\.${field} authority .* is not mapped`, 'u'),
+        `${verdict}:${field}`,
+      );
+    }
+  }
+
+  const supportedSubset = result('within-scope', {
+    coverage: [
+      result('within-scope').coverage[0],
+      {
+        ...secondMapping,
+        acceptedCriterionIds: [],
+        invariantIds: [],
+        nonGoalIds: [],
+        guidanceIds: [],
+        classification: 'required',
+      },
+    ],
+  });
+  assert.deepEqual(validateScopeAssessmentApplicability(input, supportedSubset), []);
+});
+
+test('minor scope deltas are grounded bidirectionally by necessary mechanisms', () => {
+  const sharedCriterion = { id: 'shared-minor', text: 'Ground both minor mechanisms.' };
+  const mappings = ['minor-one', 'minor-two'].map((mechanism, index) => ({
+    mechanism,
+    sourceCriterionIds: [`source-${index + 1}`],
+    acceptedCriterionIds: ['shared-minor'],
+    invariantIds: [`invariant-${index + 1}`],
+    nonGoalIds: [],
+    guidanceIds: [],
+    rationale: 'The minor mechanism has packet-local authority.',
+  }));
+  const input = packet({
+    sourceScope: {
+      ...packet().sourceScope,
+      requiredCriteria: [
+        { id: 'source-1', text: 'Ground the first mechanism.' },
+        { id: 'source-2', text: 'Ground the second mechanism.' },
+      ],
+    },
+    acceptedScope: {
+      ...packet().acceptedScope,
+      criteria: [sharedCriterion],
+      invariants: [
+        { id: 'invariant-1', text: 'Constrain the first mechanism.' },
+        { id: 'invariant-2', text: 'Constrain the second mechanism.' },
+      ],
+      authorizedShape: [],
+    },
+    changeInventory: {
+      ...packet().changeInventory,
+      subsystems: [],
+      mappings,
+    },
+  });
+  const coverage = mappings.map((mapping) => ({
+    ...mapping,
+    sourceCriterionIds: [],
+    invariantIds: [],
+    classification: 'necessary-minor-expansion',
+  }));
+  const valid = result('minor-amendment-required', {
+    coverage,
+    scopeDelta: {
+      description: 'Admit both bounded mechanisms.',
+      sourceCriterionIds: [],
+      acceptedCriterionIds: ['shared-minor'],
+      invariantIds: [],
+      materialSurfaces: [],
+    },
+  });
+  assert.deepEqual(validateScopeAssessmentApplicability(input, valid), []);
+
+  const ungroundedRow = {
+    ...valid,
+    coverage: [
+      coverage[0],
+      { ...coverage[1], acceptedCriterionIds: [], invariantIds: ['invariant-2'] },
+    ],
+  };
+  assert.match(
+    validateScopeAssessmentApplicability(input, ungroundedRow).join('\n'),
+    /minor-two.*share same-field positive authority/u,
+  );
+
+  const mappingOnlyDelta = {
+    ...valid,
+    scopeDelta: { ...valid.scopeDelta, sourceCriterionIds: ['source-1'] },
+  };
+  assert.match(
+    validateScopeAssessmentApplicability(input, mappingOnlyDelta).join('\n'),
+    /scopeDelta\.sourceCriterionIds authority .* is not supported/u,
+  );
+
+  const namespacePacket = packet({
+    sourceScope: {
+      ...packet().sourceScope,
+      requiredCriteria: [{ id: 'same-id', text: 'Source namespace.' }],
+    },
+    acceptedScope: {
+      ...packet().acceptedScope,
+      criteria: [{ id: 'same-id', text: 'Accepted namespace.' }],
+      authorizedShape: [],
+    },
+    changeInventory: {
+      ...packet().changeInventory,
+      subsystems: [],
+      mappings: [{
+        ...packet().changeInventory.mappings[0],
+        sourceCriterionIds: ['same-id'],
+        acceptedCriterionIds: ['same-id'],
+      }],
+    },
+  });
+  const namespaceCrossing = result('minor-amendment-required', {
+    coverage: [{
+      ...result('within-scope').coverage[0],
+      sourceCriterionIds: ['same-id'],
+      acceptedCriterionIds: [],
+      classification: 'necessary-minor-expansion',
+    }],
+    scopeDelta: {
+      description: 'x',
+      sourceCriterionIds: [],
+      acceptedCriterionIds: ['same-id'],
+      invariantIds: [],
+      materialSurfaces: [],
+    },
+  });
+  assert.match(
+    validateScopeAssessmentApplicability(namespacePacket, namespaceCrossing).join('\n'),
+    /share same-field positive authority/u,
+  );
+});
+
+test('human decisions retain independent speculative nonmaterial coverage', () => {
+  const material = 'new-material-subsystem';
+  const helper = 'removable-local-helper';
+  const input = packet({
+    changeInventory: {
+      ...packet().changeInventory,
+      subsystems: [material],
+      mappings: [
+        {
+          ...packet().changeInventory.mappings[0],
+          mechanism: material,
+          sourceCriterionIds: [],
+          acceptedCriterionIds: [],
+        },
+        {
+          ...packet().changeInventory.mappings[0],
+          mechanism: helper,
+          sourceCriterionIds: [],
+          acceptedCriterionIds: [],
+        },
+      ],
+    },
+  });
+  const assessment = result('human-decision-required', {
+    coverage: [
+      {
+        ...input.changeInventory.mappings[0],
+        classification: 'material-scope-change',
+      },
+      {
+        ...input.changeInventory.mappings[1],
+        classification: 'speculative',
+      },
+    ],
+    scopeDelta: {
+      description: 'Decide the subsystem while retaining the smaller local alternative.',
+      sourceCriterionIds: [],
+      acceptedCriterionIds: [],
+      invariantIds: [],
+      materialSurfaces: ['new-subsystem'],
+    },
+    materialityTriggers: [{ category: 'new-subsystem', evidence: 'The inventory adds a subsystem.' }],
+    smallestExpansion: 'Add only the proposed subsystem.',
+    narrowAlternative: 'Remove both the subsystem and independent helper.',
+    deferralConsequences: 'Neither optional mechanism is added.',
+    humanDecision: true,
+  });
+  assert.deepEqual(validateScopeAssessmentApplicability(input, assessment), []);
+
+  const materialAsSpeculative = {
+    ...assessment,
+    coverage: [
+      { ...assessment.coverage[0], classification: 'speculative' },
+      { ...assessment.coverage[1], classification: 'material-scope-change' },
+    ],
+  };
+  const errors = validateScopeAssessmentApplicability(input, materialAsSpeculative).join('\n');
+  assert.match(errors, /speculative mechanism .* must be independent removable nonmaterial work/u);
+  assert.match(errors, /requires human-decision-required material-scope-change coverage/u);
+});
+
+test('human representability uses only forced categories and a one-trigger fallback', () => {
+  const mechanisms = Array.from({ length: 118 }, (_, index) => `m${index}`);
+  const input = compactPacket(mechanisms, {
+    source: { ...binding().source, identity: 'i'.repeat(512) },
+    amendmentDigests: Array.from({ length: 128 }, () => `sha256:${D}`),
+  });
+  const coverage = mechanisms.map((mechanism, index) => ({
+    mechanism,
+    sourceCriterionIds: [],
+    acceptedCriterionIds: [],
+    invariantIds: [],
+    nonGoalIds: [],
+    guidanceIds: [],
+    classification: index === 0 ? 'material-scope-change' : 'speculative',
+    rationale: 'x',
+  }));
+  const assessment = result('human-decision-required', {
+    binding: input.binding,
+    summary: 'x',
+    coverage,
+    scopeDelta: {
+      description: 'x',
+      sourceCriterionIds: [],
+      acceptedCriterionIds: [],
+      invariantIds: [],
+      materialSurfaces: ['new-criterion'],
+    },
+    materialityTriggers: [{ category: 'new-criterion', evidence: 'x' }],
+    smallestExpansion: 'x',
+    narrowAlternative: 'x',
+    deferralConsequences: 'x',
+    humanDecision: true,
+  });
+
+  assert.ok(Buffer.byteLength(JSON.stringify(input)) <= ASSESSMENT_PACKET_LIMIT_BYTES);
+  assert.ok(Buffer.byteLength(JSON.stringify(assessment)) < SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES);
+  assert.deepEqual(validateAssessmentPacket(input), []);
+  assert.deepEqual(validateScopeAssessmentApplicability(input, assessment), []);
+
+  const forced = packet({
+    changeInventory: {
+      ...packet().changeInventory,
+      dependencies: ['forced-surface'],
+      publicSurfaces: ['forced-surface'],
+      subsystems: ['forced-surface'],
+      mappings: [{
+        ...packet().changeInventory.mappings[0],
+        mechanism: 'forced-surface',
+        sourceCriterionIds: [],
+        acceptedCriterionIds: [],
+      }],
+    },
+  });
+  const forcedAssessment = result('human-decision-required', {
+    coverage: [{
+      ...forced.changeInventory.mappings[0],
+      classification: 'material-scope-change',
+    }],
+    scopeDelta: {
+      description: 'x',
+      sourceCriterionIds: [],
+      acceptedCriterionIds: [],
+      invariantIds: [],
+      materialSurfaces: ['new-dependency', 'public-surface', 'new-subsystem'],
+    },
+    materialityTriggers: [
+      { category: 'new-subsystem', evidence: 'x' },
+      { category: 'new-dependency', evidence: 'x' },
+      { category: 'public-surface', evidence: 'x' },
+    ],
+    smallestExpansion: 'x',
+    narrowAlternative: 'x',
+    deferralConsequences: 'x',
+    humanDecision: true,
+  });
+  assert.deepEqual(validateScopeAssessmentApplicability(forced, forcedAssessment), []);
+});
+
+test('minor representability jointly minimizes shared mapping authority', () => {
+  const mechanisms = Array.from({ length: 114 }, (_, index) => `m${index}`);
+  const sourceCriteria = [
+    { id: 'shared', text: 'x' },
+    ...mechanisms.map((_, index) => ({ id: `a${index}`, text: 'x' })),
+  ];
+  const mappings = mechanisms.map((mechanism, index) => ({
+    mechanism,
+    sourceCriterionIds: [`a${index}`, 'shared'],
+    acceptedCriterionIds: [],
+    invariantIds: [],
+    nonGoalIds: [],
+    guidanceIds: [],
+    rationale: 'x',
+  }));
+  const input = packet({
+    binding: binding({
+      source: { ...binding().source, identity: 'i'.repeat(512) },
+      amendmentDigests: Array.from({ length: 128 }, () => `sha256:${D}`),
+    }),
+    sourceScope: {
+      objective: 'x',
+      requiredCriteria: sourceCriteria,
+      nonGoals: [],
+      implementationGuidance: [],
+    },
+    acceptedScope: {
+      criteria: [{ id: 'x', text: 'x' }],
+      invariants: [],
+      minimalClosure: 'x',
+      authorizedShape: [],
+      unauthorizedShape: mechanisms,
+      deferredShape: [],
+    },
+    changeInventory: {
+      summary: 'x',
+      paths: [],
+      dependencies: [],
+      publicSurfaces: [],
+      persistentSurfaces: [],
+      subsystems: [],
+      mappings,
+    },
+  });
+  const witness = result('minor-amendment-required', {
+    binding: input.binding,
+    summary: 'x',
+    coverage: mappings.map((mapping) => ({
+      ...mapping,
+      sourceCriterionIds: ['shared'],
+      classification: 'necessary-minor-expansion',
+    })),
+    scopeDelta: {
+      description: 'x',
+      sourceCriterionIds: ['shared'],
+      acceptedCriterionIds: [],
+      invariantIds: [],
+      materialSurfaces: [],
+    },
+  });
+
+  assert.ok(Buffer.byteLength(JSON.stringify(input)) <= ASSESSMENT_PACKET_LIMIT_BYTES);
+  assert.ok(Buffer.byteLength(JSON.stringify(witness)) < SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES);
+  assert.deepEqual(validateScopeAssessmentResult(witness), []);
+  assert.deepEqual(validateAssessmentPacket(input), []);
+  assert.deepEqual(validateScopeAssessmentApplicability(input, witness), []);
+});
+
+test('minor representability rejects the exact unique-authority minimum', () => {
+  const mechanisms = Array.from(
+    { length: 165 },
+    (_, index) => `m${String(index).padStart(3, '0')}`,
+  );
+  const input = packet({
+    binding: binding({
+      source: { ...binding().source, identity: 'i' },
+      amendmentDigests: [],
+    }),
+    sourceScope: {
+      objective: 'x',
+      requiredCriteria: mechanisms.map((_, index) => ({
+        id: `s${String(index).padStart(3, '0')}`,
+        text: 'x',
+      })),
+      nonGoals: [],
+      implementationGuidance: [],
+    },
+    acceptedScope: {
+      criteria: [{ id: 'x', text: 'x' }],
+      invariants: mechanisms.map((_, index) => ({
+        id: `i${String(index).padStart(3, '0')}`,
+        text: 'x',
+      })),
+      minimalClosure: 'x',
+      authorizedShape: [],
+      unauthorizedShape: mechanisms,
+      deferredShape: [],
+    },
+    changeInventory: {
+      summary: 'x',
+      paths: [],
+      dependencies: [],
+      publicSurfaces: [],
+      persistentSurfaces: [],
+      subsystems: [],
+      mappings: mechanisms.map((mechanism, index) => ({
+        mechanism,
+        sourceCriterionIds: [`s${String(index).padStart(3, '0')}`],
+        acceptedCriterionIds: [],
+        invariantIds: [`i${String(index).padStart(3, '0')}`],
+        nonGoalIds: [],
+        guidanceIds: [],
+        rationale: 'x',
+      })),
+    },
+  });
+  const errors = validateAssessmentPacket(input);
+
+  assert.ok(Buffer.byteLength(JSON.stringify(input)) <= ASSESSMENT_PACKET_LIMIT_BYTES);
+  assert.ok(
+    errors.includes(
+      '$ assessment packet cannot represent a schema-minimal minor-amendment-required result within 32768 bytes (requires 33251 bytes)',
+    ),
+  );
+});
+
+test('minor representability certifies a cyclic shared-authority packet promptly', () => {
+  const count = 100;
+  const token = (index) => `t${String((index + count) % count).padStart(3, '0')}`;
+  const mechanisms = Array.from(
+    { length: count },
+    (_, index) => `m${String(index).padStart(3, '0')}${'x'.repeat(140)}`,
+  );
+  const input = packet({
+    binding: binding({
+      source: { ...binding().source, identity: 'i'.repeat(512) },
+      amendmentDigests: Array.from({ length: 128 }, () => `sha256:${D}`),
+    }),
+    sourceScope: {
+      objective: 'x',
+      requiredCriteria: Array.from({ length: count }, (_, index) => ({
+        id: token(index),
+        text: 'x',
+      })),
+      nonGoals: [],
+      implementationGuidance: [],
+    },
+    acceptedScope: {
+      criteria: [{ id: 'x', text: 'x' }],
+      invariants: [],
+      minimalClosure: 'x',
+      authorizedShape: [],
+      unauthorizedShape: mechanisms,
+      deferredShape: [],
+    },
+    changeInventory: {
+      summary: 'x',
+      paths: [],
+      dependencies: [],
+      publicSurfaces: [],
+      persistentSurfaces: [],
+      subsystems: [],
+      mappings: [
+        ...mechanisms.map((mechanism, index) => ({
+          mechanism,
+          sourceCriterionIds: [token(index), token(index + 1), token(index + 7)],
+          acceptedCriterionIds: [],
+          invariantIds: [],
+          nonGoalIds: [],
+          guidanceIds: [],
+          rationale: 'x',
+        })),
+        {
+          mechanism: 'ordinary-anchor',
+          sourceCriterionIds: [token(0)],
+          acceptedCriterionIds: [],
+          invariantIds: [],
+          nonGoalIds: [],
+          guidanceIds: [],
+          rationale: 'x',
+        },
+      ],
+    },
+  });
+  const startedAt = Date.now();
+  const errors = validateAssessmentPacket(input);
+  const elapsedMilliseconds = Date.now() - startedAt;
+
+  assert.ok(Buffer.byteLength(JSON.stringify(input)) <= ASSESSMENT_PACKET_LIMIT_BYTES);
+  assert.match(
+    errors.join('\n'),
+    /schema-minimal minor-amendment-required.*certified lower bound/u,
+  );
+  assert.ok(elapsedMilliseconds < 5000, `cyclic proof took ${elapsedMilliseconds}ms`);
 });
 
 test('trim-required represents 129 exact speculative mechanisms within its byte envelope', () => {

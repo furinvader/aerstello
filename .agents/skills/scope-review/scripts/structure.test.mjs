@@ -171,6 +171,11 @@ test('documentation links resolve and defines invocation and authority boundarie
   assert.match(contract, /without authorizing either/u);
   assert.match(contract, /both the\s+authoritative source and accepted scope provide that exact authority/u);
   assert.match(contract, /must cite positive\s+authority through a source-required criterion, accepted criterion, or invariant/u);
+  assert.match(contract, /same\s+authority field of that mechanism's `changeInventory\.mappings` row/u);
+  assert.match(contract, /each `necessary-minor-expansion` row must share\s+at least one positive authority ID/u);
+  assert.match(contract, /every positive ID in `scopeDelta` must be\s+used by at least one `necessary-minor-expansion` row/u);
+  assert.match(contract, /independent removable\s+nonmaterial mechanism as `speculative`/u);
+  assert.match(contract, /mixed coverage does not change authority-before-materiality or\s+materiality-before-trimming precedence/u);
   assert.match(contract, /cannot be classified `required` or\s+`implementation-choice`/u);
   assert.match(contract, /`unnecessaryWork` must name the\s+complete set of `speculative` coverage mechanisms exactly once/u);
   assert.match(contract, /`scopeDelta\.materialSurfaces` and the categories\s+in `materialityTriggers` must be the same order-insensitive set/u);

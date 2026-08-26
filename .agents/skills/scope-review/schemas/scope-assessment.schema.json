@@ -278,7 +278,7 @@
     "materialCoverage": {
       "allOf": [
         { "$ref": "#/$defs/coverage" },
-        { "type": "object", "properties": { "classification": { "enum": ["required", "implementation-choice", "material-scope-change"] } } }
+        { "type": "object", "properties": { "classification": { "enum": ["required", "implementation-choice", "speculative", "material-scope-change"] } } }
       ]
     },
     "insufficientCoverage": {

@@ -30,6 +30,21 @@ in unauthorized or deferred accepted shape cannot be classified `required` or
 `implementation-choice`; that disposition alone does not prevent a valid
 `speculative` or `necessary-minor-expansion` classification.
 
+Every authority ID cited by a coverage row must also appear in the same
+authority field of that mechanism's `changeInventory.mappings` row. Authority
+from another mechanism or another ID namespace never satisfies this rule; a
+mapping may expose additional authority that its coverage row does not use. A
+mapping with no authority remains eligible only for a citation-empty
+nonaffirmative classification such as `speculative` or
+`insufficient-evidence`.
+
+For `minor-amendment-required`, each `necessary-minor-expansion` row must share
+at least one positive authority ID, in the same field, with both its inventory
+mapping and `scopeDelta`. Conversely, every positive ID in `scopeDelta` must be
+used by at least one `necessary-minor-expansion` row. This bidirectional
+grounding permits multiple mechanisms to share one authority and permits strict
+subsets, but IDs in different namespaces do not correspond.
+
 Materiality triggers are closed and complete: a new subsystem, new dependency, public surface, persistent surface, cross-capability work, policy change, repository-wide enforcement, independent workstream, new criterion, non-goal reversal, sensitive policy, replacement of the accepted approach, or repeated expansion. A tripwire can request closer inspection but cannot select or exclude any verdict.
 
 Apply authority before materiality and materiality before trimming. First
@@ -46,6 +61,13 @@ nonmaterial and removing it preserves sufficient closure of the authoritative
 outcome and accepted scope. For that verdict, `unnecessaryWork` must name the
 complete set of `speculative` coverage mechanisms exactly once; ordering has no
 meaning.
+
+A `human-decision-required` result may also classify an independent removable
+nonmaterial mechanism as `speculative` when at least one other coverage row is
+the material scope change that requires the decision. The material inventory
+surface requiring that decision remains `material-scope-change` with its exact
+category; mixed coverage does not change authority-before-materiality or
+materiality-before-trimming precedence, and `unnecessaryWork` remains empty.
 
 For `human-decision-required`, `scopeDelta.materialSurfaces` and the categories
 in `materialityTriggers` must be the same order-insensitive set, with exactly
