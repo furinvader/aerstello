@@ -273,14 +273,12 @@ test('source and plan drafts use null identities instead of invented artifact di
     acceptedScope: null,
     changeInventory: { ...packet().changeInventory, mappings: [sourceMapping] },
   });
-  const sourceAssessment = result('insufficient-evidence', {
+  const sourceAssessment = result('within-scope', {
     binding: sourceBinding,
     coverage: [{
       ...result('within-scope').coverage[0],
       acceptedCriterionIds: [],
-      classification: 'insufficient-evidence',
     }],
-    missingEvidence: ['An accepted-scope candidate does not exist yet.'],
   });
   assert.deepEqual(validateScopeAssessmentApplicability(sourceInput, sourceAssessment), []);
 
@@ -297,23 +295,52 @@ test('source and plan drafts use null identities instead of invented artifact di
   );
 });
 
-test('code phases require SHA but never invent absent plan or task artifacts', () => {
-  const exactCodeWithoutArtifacts = binding({
-    phase: 'review-finding',
-    planDigest: null,
-    amendmentDigests: [],
-    taskPacketDigest: null,
-  });
-  const input = packet({ binding: exactCodeWithoutArtifacts });
-  const assessment = result('insufficient-evidence', {
-    binding: exactCodeWithoutArtifacts,
-    coverage: [{
-      ...result('within-scope').coverage[0],
-      classification: 'insufficient-evidence',
-    }],
-    missingEvidence: ['Accepted plan and task packet artifacts do not exist.'],
-  });
-  assert.deepEqual(validateScopeAssessmentApplicability(input, assessment), []);
+test('code phases require insufficient evidence when plan or task artifacts are absent', () => {
+  const artifactCases = [
+    {
+      label: 'plan',
+      overrides: { planDigest: null, amendmentDigests: [] },
+    },
+    {
+      label: 'task packet',
+      overrides: { taskPacketDigest: null },
+    },
+    {
+      label: 'plan and task packet',
+      overrides: { planDigest: null, amendmentDigests: [], taskPacketDigest: null },
+    },
+  ];
+
+  for (const phase of ['task', 'integrated-head', 'review-finding']) {
+    for (const { label, overrides } of artifactCases) {
+      const exactBinding = binding({ phase, ...overrides });
+      const input = packet({ binding: exactBinding });
+      const affirmative = result('within-scope', { binding: exactBinding });
+
+      assert.deepEqual(validateAssessmentPacket(input), [], `${phase}: missing ${label} packet`);
+      assert.deepEqual(validateScopeAssessmentResult(affirmative), [], `${phase}: missing ${label} result`);
+      assert.deepEqual(
+        validateScopeAssessmentApplicability(input, affirmative),
+        ['$ code-phase assessment with an absent plan or task-packet identity requires insufficient-evidence'],
+        `${phase}: missing ${label} affirmative verdict`,
+      );
+
+      const insufficient = result('insufficient-evidence', {
+        binding: exactBinding,
+        coverage: [{
+          ...result('within-scope').coverage[0],
+          classification: 'insufficient-evidence',
+          rationale: `The exact ${label} identity is absent.`,
+        }],
+        missingEvidence: [`Exact ${label} identity`],
+      });
+      assert.deepEqual(
+        validateScopeAssessmentApplicability(input, insufficient),
+        [],
+        `${phase}: missing ${label} insufficient-evidence verdict`,
+      );
+    }
+  }
 });
 
 test('all named materiality triggers are valid evidence categories', () => {

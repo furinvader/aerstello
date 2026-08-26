@@ -6,6 +6,8 @@ import Ajv2020 from 'ajv/dist/2020.js';
 export const ASSESSMENT_PACKET_LIMIT_BYTES = 64 * 1024;
 export const SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES = 32 * 1024;
 
+const CODE_PHASES = new Set(['task', 'integrated-head', 'review-finding']);
+
 const schema = JSON.parse(readFileSync(
   new URL('../schemas/scope-assessment.schema.json', import.meta.url),
   'utf8',
@@ -160,6 +162,14 @@ export function validateScopeAssessmentApplicability(packet, result) {
 
   if (!isDeepStrictEqual(packet.binding, result.binding)) {
     errors.push('$ result binding does not exactly match assessment packet binding');
+  }
+
+  if (
+    CODE_PHASES.has(packet.binding.phase)
+    && (packet.binding.planDigest === null || packet.binding.taskPacketDigest === null)
+    && result.verdict !== 'insufficient-evidence'
+  ) {
+    errors.push('$ code-phase assessment with an absent plan or task-packet identity requires insufficient-evidence');
   }
 
   const sourceCriteria = new Set(packet.sourceScope.requiredCriteria.map(({ id }) => id));
