@@ -4,7 +4,10 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { validateScopeAssessmentResult } from './validate-assessment.mjs';
+import {
+  validateScopeAssessmentApplicability,
+  validateScopeAssessmentResult,
+} from './validate-assessment.mjs';
 
 const scriptsDirectory = dirname(fileURLToPath(import.meta.url));
 const skillDirectory = dirname(scriptsDirectory);
@@ -166,6 +169,7 @@ test('documentation links resolve and defines invocation and authority boundarie
   assert.match(contract, /paths, dependencies, public surfaces, persistent surfaces, subsystems/u);
   assert.match(contract, /independent workstream, new criterion, non-goal reversal, sensitive policy/u);
   assert.match(contract, /without authorizing either/u);
+  assert.match(contract, /both the\s+authoritative source and accepted scope provide that exact authority/u);
   assert.match(contract, /generic repository checker/u);
   assert.match(contract, /adjacent helper/u);
   assert.match(contract, /new subsystem/u);
@@ -173,6 +177,67 @@ test('documentation links resolve and defines invocation and authority boundarie
 });
 
 test('materiality takes precedence over trimming at the executable result boundary', () => {
+  const authorizedMechanism = 'public-scope-assessment-api';
+  const authorizedCriterion = 'public-scope-api';
+  const authorizedResult = assessmentResult('within-scope', {
+    coverage: [{
+      mechanism: authorizedMechanism,
+      sourceCriterionIds: [authorizedCriterion],
+      acceptedCriterionIds: [authorizedCriterion],
+      invariantIds: [],
+      nonGoalIds: [],
+      guidanceIds: [],
+      classification: 'required',
+      rationale: 'Both authorities explicitly require and authorize the public surface.',
+    }],
+  });
+  const authorizedPacket = {
+    schemaVersion: 1,
+    binding: authorizedResult.binding,
+    sourceScope: {
+      objective: 'Provide the public scope-assessment API required by the issue.',
+      requiredCriteria: [{
+        id: authorizedCriterion,
+        text: 'Expose a public scope-assessment API and schema.',
+      }],
+      nonGoals: [],
+      implementationGuidance: [],
+    },
+    acceptedScope: {
+      criteria: [{
+        id: authorizedCriterion,
+        text: 'Implement the explicitly required public scope-assessment API.',
+      }],
+      invariants: [],
+      minimalClosure: 'The named public API and its schema satisfy the required surface.',
+      authorizedShape: [authorizedMechanism],
+      unauthorizedShape: [],
+      deferredShape: [],
+    },
+    changeInventory: {
+      summary: 'Add the explicitly authorized public scope-assessment API.',
+      paths: ['schemas/public-scope-assessment.json'],
+      dependencies: [],
+      publicSurfaces: [authorizedMechanism],
+      persistentSurfaces: [],
+      subsystems: ['scope-review'],
+      mappings: [{
+        mechanism: authorizedMechanism,
+        sourceCriterionIds: [authorizedCriterion],
+        acceptedCriterionIds: [authorizedCriterion],
+        invariantIds: [],
+        nonGoalIds: [],
+        guidanceIds: [],
+        rationale: 'The exact public surface maps to both explicit authorities.',
+      }],
+    },
+    tripwires: [],
+  };
+  assert.deepEqual(
+    validateScopeAssessmentApplicability(authorizedPacket, authorizedResult),
+    [],
+  );
+
   const localTrim = assessmentResult('trim-required', {
     coverage: [{
       mechanism: 'local-unenforced-checker',

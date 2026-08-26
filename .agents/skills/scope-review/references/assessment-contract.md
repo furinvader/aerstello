@@ -24,8 +24,13 @@ Classify each mechanism as `required`, `implementation-choice`, `speculative`, `
 
 Materiality triggers are closed and complete: a new subsystem, new dependency, public surface, persistent surface, cross-capability work, policy change, repository-wide enforcement, independent workstream, new criterion, non-goal reversal, sensitive policy, replacement of the accepted approach, or repeated expansion. A tripwire can request closer inspection but cannot select or exclude any verdict.
 
-Apply materiality before trimming. When a concrete mechanism creates any named
-materiality trigger, classify it as `material-scope-change` and return
+Apply authority before materiality and materiality before trimming. First
+determine whether the named material surface is explicitly required by the
+authoritative source and explicitly authorized by accepted scope. When both the
+authoritative source and accepted scope provide that exact authority, the
+mechanism is not a new material scope change: assess its necessity normally and
+allow `within-scope` when every other condition holds. If either authority is
+absent, classify the material commitment as `material-scope-change` and return
 `human-decision-required`, even when the mechanism appears removable. Never
 downgrade that mechanism to `speculative` or the assessment to
 `trim-required`. Use `trim-required` only when every removable mechanism is
