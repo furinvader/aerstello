@@ -18,10 +18,12 @@ test('forwards the exact cwd and arguments to the stable state operations', asyn
     checkpointTaskCompletion: operation('checkpointTaskCompletion'),
     checkpointVerificationEscalation: operation('checkpointVerificationEscalation'),
     readSpecialistStatus: operation('readSpecialistStatus'),
+    scopeStatus: operation('scopeStatus'),
   };
   const adapter = createDefaultStateAdapter('/repo', operations);
   assert.deepEqual(Object.keys(adapter), [
     'load',
+    'scopeStatus',
     'checkpointCiValidation',
     'checkpointReviewRequest',
     'checkpointReviewOutcome',
@@ -31,6 +33,7 @@ test('forwards the exact cwd and arguments to the stable state operations', asyn
     'specialistStatus',
   ]);
   assert.equal(adapter.load(17), 'loadState-result');
+  assert.equal(adapter.scopeStatus(17), 'scopeStatus-result');
   const input = { prNumber: 17, expectedRevision: 4 };
   for (const name of [
     'checkpointCiValidation',
@@ -43,6 +46,7 @@ test('forwards the exact cwd and arguments to the stable state operations', asyn
   assert.equal(adapter.specialistStatus(17), 'readSpecialistStatus-result');
   assert.deepEqual(calls, [
     { name: 'loadState', args: ['/repo', 17] },
+    { name: 'scopeStatus', args: [{ cwd: '/repo', prNumber: 17 }] },
     ...[
       'checkpointCiValidation',
       'checkpointReviewRequest',
@@ -66,6 +70,7 @@ test('preserves caller cwd authority over an input cwd field', () => {
     checkpointTaskCompletion() {},
     checkpointVerificationEscalation() {},
     readSpecialistStatus() {},
+    scopeStatus() {},
   };
   createDefaultStateAdapter('/adapter-root', operations)
     .checkpointCiValidation({ cwd: '/input-root', prNumber: 17 });

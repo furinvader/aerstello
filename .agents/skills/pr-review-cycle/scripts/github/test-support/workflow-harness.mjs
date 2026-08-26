@@ -184,12 +184,20 @@ function proof(status = 'passed', headSha = HEAD) {
 }
 
 function stateFixture(overrides = {}) {
-  return {
+  const state = {
     schemaVersion: 3, revision: 1, repository: 'example/aerstello', prNumber: 2, phase: 'recovering',
     baseSha: HEAD, requestedHeadSha: null, reviewedHeadSha: null, currentIntegrationHeadSha: HEAD,
     reviewRound: 0, verificationReviewUsed: false, legacyReviewProvenance: null, releaseBaseline: null,
     decisions: [], tasks: [], reviewRequest: null, reviewOutcome: null, reviewHistory: [],
     staleDiscoveryDispositions: [],
+    scopeControl: {
+      authorityDigest: `sha256:${'a'.repeat(64)}`,
+      journalDigest: `sha256:${'b'.repeat(64)}`,
+      returnDigest: null,
+      gate: 'ready',
+      assessmentHeadSha: null,
+      updatedAt: AT,
+    },
     verificationEscalation: null, threadResolutionStatus: proof('not-run'), blockedReasons: [],
     validationStatus: { source: 'orchestrator', scope: 'targeted', status: 'not-run', headSha: null, checks: [], updatedAt: null },
     ciValidationStatus: { source: 'github-actions', scope: 'full', status: 'not-run', headSha: null,
@@ -199,6 +207,7 @@ function stateFixture(overrides = {}) {
     abandonmentReason: null, git: { branch: 'main', headSha: HEAD, dirty: false }, updatedAt: AT,
     ...overrides,
   };
+  return state;
 }
 
 function readyState(overrides = {}) {
@@ -593,6 +602,7 @@ function racingRequestJournal(intent, events = []) {
 function fakeState(initial) {
   let current = structuredClone(initial);
   const calls = [];
+  let scopeStatusOverride = null;
   let beforeCheckpoint = null;
   async function runCheckpointHook(name, input) {
     if (beforeCheckpoint === null || (beforeCheckpoint.name !== null && beforeCheckpoint.name !== name)) return;
@@ -604,8 +614,44 @@ function fakeState(initial) {
     calls,
     get current() { return current; },
     advanceRevisionForTest() { current = { ...current, revision: current.revision + 1 }; },
+    setScopeStatusForTest(value) { scopeStatusOverride = structuredClone(value); },
     setBeforeCheckpointForTest(hook, name = null) { beforeCheckpoint = { hook, name }; },
     async load() { return structuredClone(current); },
+    async scopeStatus() {
+      if (scopeStatusOverride !== null) return structuredClone(scopeStatusOverride);
+      const entries = current.tasks.map((task, index) => ({
+        kind: 'classification',
+        sequence: index + 1,
+        rootCauseId: task.id,
+        findingIds: task.sourceIds ?? [task.id],
+        classification: task.disposition === 'out-of-scope'
+          ? 'unrelated-follow-up' : 'within-scope-defect',
+        reviewHeadSha: current.currentIntegrationHeadSha,
+        assessment: {
+          packet: { minimalClosure: { statement: 'Keep the fixture within its accepted boundary.' } },
+          result: { narrowAlternative: 'Keep only the selected root.' },
+        },
+      }));
+      return {
+        configured: true,
+        gate: current.scopeControl.gate,
+        reference: structuredClone(current.scopeControl),
+        authority: {
+          digest: current.scopeControl.authorityDigest,
+          value: {
+            authorityKind: 'standalone',
+            source: { identity: 'example/aerstello#fixture' },
+            minimalClosure: { statement: 'Keep the fixture within its accepted boundary.' },
+            handoffHeadSha: current.currentIntegrationHeadSha,
+          },
+        },
+        journal: {
+          digest: current.scopeControl.journalDigest,
+          value: { entries },
+        },
+        return: null,
+      };
+    },
     async checkpointReviewRequest(input) {
       calls.push({ name: 'checkpointReviewRequest', input });
       const request = input.request;

@@ -79,13 +79,20 @@ export function archiveTaskCheckpoint(stateAdapter, active, fallback = checkpoin
 export function createResolveUseCases(context) {
   const {
     client, stateAdapter, git, clock, journal, archiveStore, load, assertCurrent,
+    assertScopeRootCurrent,
   } = context;
+
+  async function assertSelectedRootReady(active, live, task) {
+    const heads = await assertMutationReady({ state: active, git }, live);
+    await assertScopeRootCurrent(active, live.metadata.headRefOid, task);
+    return heads;
+  }
 
   async function replyResolve(prNumber, taskId) {
     let active = await load(prNumber);
     let live = await readLiveSnapshot(client, active);
-    await assertMutationReady({ state: active, git }, live);
     const { plan, selected: selectedTask, selectedPlan } = buildCanonicalRootPlan(active, live, taskId);
+    await assertSelectedRootReady(active, live, selectedTask);
     if (archiveBatchAdoptionReady(active, selectedTask, selectedPlan)) {
       return adoptArchiveBatch({
         state: active,
@@ -97,7 +104,7 @@ export function createResolveUseCases(context) {
         git,
         clock,
         readLiveSnapshot: (state) => readLiveSnapshot(client, state),
-        assertMutationReady,
+        assertMutationReady: ({ state }, snapshot) => assertSelectedRootReady(state, snapshot, selectedTask),
         assertCurrent,
         checkpointArchiveTaskCompletion: archiveTaskCheckpoint(stateAdapter, active),
         checkpointTaskCompletion: (input) => stateAdapter.checkpointTaskCompletion(input),
@@ -155,7 +162,7 @@ export function createResolveUseCases(context) {
     for (const entry of selectedPlan) {
       const { thread } = entry;
       live = await readLiveSnapshot(client, active);
-      await assertMutationReady({ state: active, git }, live);
+      await assertSelectedRootReady(active, live, selectedTask);
       if (priorHeadRecoveries.size === 1) await assertCurrent(active);
       let current = live.threads.find((item) => item.id === thread.id);
       const old = previousProof.get(thread.id);
@@ -175,6 +182,7 @@ export function createResolveUseCases(context) {
         }
         const posted = await postThreadReply({
           client, journal, clock, state: active, git, entry: { ...entry, thread: current }, assertCurrent,
+          assertReady: ({ state }, snapshot) => assertSelectedRootReady(state, snapshot, selectedTask),
         });
         live = posted.live;
         current = posted.thread;
@@ -193,6 +201,7 @@ export function createResolveUseCases(context) {
       let resolveExecuted = false;
       const resolved = await resolveThread({
         client, journal, clock, state: active, git, entry: { ...entry, thread: current }, reply, assertCurrent,
+        assertReady: ({ state }, snapshot) => assertSelectedRootReady(state, snapshot, selectedTask),
         execute: async (...args) => {
           resolveExecuted = true;
           return executeMutation(...args);
@@ -207,7 +216,7 @@ export function createResolveUseCases(context) {
       });
     }
     live = await readLiveSnapshot(client, active);
-    await assertMutationReady({ state: active, git }, live);
+    await assertSelectedRootReady(active, live, selectedTask);
     if (priorHeadRecoveries.size === 1) {
       for (const [threadId, recovery] of priorHeadRecoveries) {
         const entry = plan.find((candidate) => candidate.thread.id === threadId);
@@ -274,6 +283,7 @@ export function createResolveUseCases(context) {
 
     let live = await readLiveSnapshot(client, active);
     const preflightHeads = await assertMutationReady({ state: active, git }, live);
+    for (const task of selectedTasks) await assertScopeRootCurrent(active, live.metadata.headRefOid, task);
     const preflightBootstrap = taskIds.length === 1
       ? archiveAdoptionVerifierBootstrapPlan(active, live, selectedTask.id, preflightHeads)
       : null;
@@ -285,6 +295,7 @@ export function createResolveUseCases(context) {
 
     live = await readLiveSnapshot(client, active);
     const finalHeads = await assertMutationReady({ state: active, git }, live);
+    for (const task of selectedTasks) await assertScopeRootCurrent(active, live.metadata.headRefOid, task);
     let finalBootstrap = null;
     try {
       finalBootstrap = taskIds.length === 1

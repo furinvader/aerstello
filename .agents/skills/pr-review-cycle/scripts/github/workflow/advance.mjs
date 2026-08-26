@@ -10,7 +10,7 @@ import { isTransientCiError } from './complete.mjs';
 import { samePendingResponseObservation } from './refresh-threads.mjs';
 
 export function createAdvanceUseCase(context, operations) {
-  const { client, git, load } = context;
+  const { client, git, load, assertScopeCurrent } = context;
   const {
     collect,
     collectCi,
@@ -28,7 +28,18 @@ export function createAdvanceUseCase(context, operations) {
     if (active.verificationEscalation) {
       return result('escalation', false, active.nextAction, { escalation: active.verificationEscalation });
     }
+    const scopeStop = async (liveHeadSha = active.currentIntegrationHeadSha) => {
+      try {
+        await assertScopeCurrent(active, liveHeadSha);
+        return null;
+      } catch (error) {
+        if (!String(error?.code ?? '').startsWith('SCOPE_')) throw error;
+        return result('scope-blocked', false, error.message);
+      }
+    };
     if (active.phase === 'complete') {
+      const blocked = await scopeStop();
+      if (blocked) return blocked;
       try {
         await revalidateCompletedState(active);
       } catch (error) {
@@ -99,10 +110,14 @@ export function createAdvanceUseCase(context, operations) {
           'REVIEW_COLLECTION_STALE',
         );
       }
+      const findingsScopeBlock = await scopeStop(finalFindingsLive.metadata.headRefOid);
+      if (findingsScopeBlock) return findingsScopeBlock;
       return result('triage', false, active.nextAction);
     }
     const live = await readLiveSnapshot(client, active, { reactionsFor: active.reviewRequest?.id ?? null });
     await assertMutationReady({ state: active, git }, live);
+    const validationScopeBlock = await scopeStop(live.metadata.headRefOid);
+    if (validationScopeBlock) return validationScopeBlock;
     assertRecordedRequestComment(active, live);
     if (live.threads.some((thread) => thread.canonical && !thread.isResolved)) {
       throw new GitHubWorkflowError('Canonical threads are still unresolved', 'COMPLETION_NOT_READY');

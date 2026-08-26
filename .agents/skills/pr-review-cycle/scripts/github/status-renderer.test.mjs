@@ -35,6 +35,21 @@ function statusFixture(overrides = {}) {
       workflowRunUrl: 'https://github.com/example/aerstello/actions/runs/1',
     },
     openCodexThreads: 1,
+    scope: {
+      configured: true,
+      authority: {
+        kind: 'standalone', source: 'example/aerstello#56',
+        minimalClosure: 'Keep the exact accepted remediation.',
+      },
+      exactHeadSha: HEAD,
+      headMatches: true,
+      roots: [{
+        rootCauseId: 'root-a', findingIds: ['finding-a'], classification: 'within-scope-defect',
+        smallestAlternative: 'Keep the narrow fix.', approvedBoundary: 'The accepted packet.',
+      }],
+      blocker: null,
+      nextAction: 'Continue within the approved exact-head scope boundary.',
+    },
     nextAction: 'Resolve the remaining thread.',
     ...overrides,
   };
@@ -56,6 +71,11 @@ test('renders the exact current-head human status bytes without a trailing newli
     'Specialist reviews: Pending (required: security_reviewer)',
     'Full CI: Passed (Full validation) — https://github.com/example/aerstello/actions/runs/1',
     'Open Codex threads: 1',
+    'Scope authority: standalone example/aerstello#56 — Keep the exact accepted remediation.',
+    `Scope exact HEAD: ${HEAD} (current)`,
+    'Scope roots:',
+    '  - root-a [finding-a]: within-scope-defect; smallest: Keep the narrow fix.; boundary: The accepted packet.',
+    'Scope blocker: none',
     'Next action: Resolve the remaining thread.',
   ].join('\n'));
 });
@@ -95,6 +115,11 @@ test('renders stale Done evidence and failed or missing details byte-for-byte', 
     'Specialist reviews: Missing',
     'Full CI: Failed — https://github.com/example/aerstello/actions/runs/2',
     'Open Codex threads: 0',
+    'Scope authority: standalone example/aerstello#56 — Keep the exact accepted remediation.',
+    `Scope exact HEAD: ${HEAD} (current)`,
+    'Scope roots:',
+    '  - root-a [finding-a]: within-scope-defect; smallest: Keep the narrow fix.; boundary: The accepted packet.',
+    'Scope blocker: none',
     `Next action: Reconcile recorded commit with live PR head ${OTHER_HEAD}. Recorded next action: Archive the completed cycle.`,
   ].join('\n'));
 });

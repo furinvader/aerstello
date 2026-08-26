@@ -113,7 +113,14 @@ export function requestAnchorObservation(live, requestId) {
 }
 
 export function createRequestReviewUnlocked(context) {
-  const { client, stateAdapter, git, clock, journal, load, assertCurrent } = context;
+  const {
+    client, stateAdapter, git, clock, journal, load, assertCurrent, assertScopeCurrent,
+  } = context;
+  async function assertRequestReady(active, live, options) {
+    const heads = await assertMutationReady({ state: active, git }, live, options);
+    await assertScopeCurrent(active, live.metadata.headRefOid);
+    return heads;
+  }
   async function requestReviewUnlocked(prNumber, kind) {
     let active = await load(prNumber);
     if (kind !== undefined && !['discovery', 'verification'].includes(kind)) {
@@ -132,7 +139,7 @@ export function createRequestReviewUnlocked(context) {
       }
       const livePending = await readLiveSnapshot(client, active, { reactionsFor: active.reviewRequest.id });
       assertRecordedRequestComment(active, livePending);
-      await assertMutationReady({ state: active, git }, livePending);
+      await assertRequestReady(active, livePending);
       if (livePending.metadata.headRefOid !== active.reviewRequest.headSha
           || active.reviewRequest.headSha !== active.currentIntegrationHeadSha) {
         throw new GitHubWorkflowError('Durable pending request no longer has exact live proof', 'REQUEST_NOT_READY');
@@ -147,7 +154,7 @@ export function createRequestReviewUnlocked(context) {
       };
     }
     let live = await readLiveSnapshot(client, active);
-    const heads = await assertMutationReady({ state: active, git }, live, { requireReady: false });
+    const heads = await assertRequestReady(active, live, { requireReady: false });
     if (live.metadata.state !== 'OPEN') {
       throw new GitHubWorkflowError('Pull request is closed or merged', 'PR_NOT_OPEN');
     }
@@ -179,7 +186,7 @@ export function createRequestReviewUnlocked(context) {
         throw new GitHubWorkflowError('Draft promotion identity changed after journaling', 'REQUEST_NOT_READY');
       }
       if (live.metadata.isDraft) {
-        const promotionHeads = await assertMutationReady({ state: active, git }, live, { requireReady: false });
+        const promotionHeads = await assertRequestReady(active, live, { requireReady: false });
         const promotionGate = reviewRequestGate(active, {
           ...promotionHeads, prHeadSha: live.metadata.headRefOid, prState: live.metadata.state, isDraft: live.metadata.isDraft,
         }, { promotionPreflight: true });
@@ -199,7 +206,7 @@ export function createRequestReviewUnlocked(context) {
           try {
             if (recoveredLive.metadata.id !== readyPullRequestId
                 || recoveredLive.metadata.number !== prNumber) throw error;
-            const recoveredHeads = await assertMutationReady({ state: active, git }, recoveredLive);
+            const recoveredHeads = await assertRequestReady(active, recoveredLive);
             const recoveredGate = reviewRequestGate(active, {
               ...recoveredHeads, prHeadSha: recoveredLive.metadata.headRefOid,
               prState: recoveredLive.metadata.state, isDraft: recoveredLive.metadata.isDraft,
@@ -218,7 +225,7 @@ export function createRequestReviewUnlocked(context) {
         throw new GitHubWorkflowError('Pull request identity changed during draft promotion', 'REQUEST_NOT_READY');
       }
       assertPullRequestReady(live);
-      const refreshedHeads = await assertMutationReady({ state: active, git }, live);
+      const refreshedHeads = await assertRequestReady(active, live);
       const refreshedGate = reviewRequestGate(active, {
         ...refreshedHeads, prHeadSha: live.metadata.headRefOid, prState: live.metadata.state, isDraft: live.metadata.isDraft,
       });
@@ -252,7 +259,7 @@ export function createRequestReviewUnlocked(context) {
     if (live.metadata.id !== readyPullRequestId) {
       throw new GitHubWorkflowError('Pull request identity changed before request journaling', 'REQUEST_NOT_READY');
     }
-    const preJournalHeads = await assertMutationReady({ state: active, git }, live);
+    const preJournalHeads = await assertRequestReady(active, live);
     const preJournalGate = reviewRequestGate(active, {
       ...preJournalHeads, prHeadSha: live.metadata.headRefOid,
       prState: live.metadata.state, isDraft: live.metadata.isDraft,
@@ -268,7 +275,7 @@ export function createRequestReviewUnlocked(context) {
     if (live.metadata.id !== readyPullRequestId) {
       throw new GitHubWorkflowError('Pull request identity changed after request journaling', 'REQUEST_NOT_READY');
     }
-    const journalHeads = await assertMutationReady({ state: active, git }, live);
+    const journalHeads = await assertRequestReady(active, live);
     const journalGate = reviewRequestGate(active, {
       ...journalHeads, prHeadSha: live.metadata.headRefOid,
       prState: live.metadata.state, isDraft: live.metadata.isDraft,
@@ -323,7 +330,7 @@ export function createRequestReviewUnlocked(context) {
     if (live.metadata.id !== readyPullRequestId) {
       throw new GitHubWorkflowError('Pull request identity changed before request checkpointing', 'REQUEST_NOT_READY');
     }
-    const finalHeads = await assertMutationReady({ state: active, git }, live);
+    const finalHeads = await assertRequestReady(active, live);
     const finalGate = reviewRequestGate(active, {
       ...finalHeads, prHeadSha: live.metadata.headRefOid,
       prState: live.metadata.state, isDraft: live.metadata.isDraft,

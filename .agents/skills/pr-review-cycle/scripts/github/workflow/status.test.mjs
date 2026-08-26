@@ -46,7 +46,7 @@ test('status owner executes the complete read-only shape without checkpoints or 
     'reviewObservation', 'canonicalThreads', 'reviewCount', 'reviewRequests',
     'requestReactionCount', 'staleDiscoveryEvidence', 'codexReview', 'taskStatus',
     'targetedValidation', 'specialistReviews', 'recordedCiValidation',
-    'liveCiValidation', 'openCodexThreads', 'nextAction',
+    'liveCiValidation', 'openCodexThreads', 'scope', 'nextAction',
   ]);
   assert.deepEqual(result.pullRequest, { state: 'OPEN', isDraft: true });
   assert.equal(result.reviewObservation.status, 'waiting');

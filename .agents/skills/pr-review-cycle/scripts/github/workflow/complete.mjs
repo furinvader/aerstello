@@ -33,7 +33,13 @@ export function isTransientCiError(error) {
 }
 
 export function createCompletionUseCases(context) {
-  const { client, stateAdapter, git, load, assertCurrent } = context;
+  const { client, stateAdapter, git, load, assertCurrent, assertScopeCurrent } = context;
+
+  async function assertCompletionReady(state, live) {
+    const heads = await assertMutationReady({ state, git }, live);
+    await assertScopeCurrent(state, live.metadata.headRefOid);
+    return heads;
+  }
 
   async function assertCompletionLiveEvidence(state, live, heads) {
     assertRecordedRequestComment(state, live);
@@ -100,7 +106,7 @@ export function createCompletionUseCases(context) {
         'REVIEW_COLLECTION_STALE',
       );
     }
-    await assertMutationReady({ state, git }, live);
+    await assertCompletionReady(state, live);
     assertRecordedRequestComment(state, live);
     const response = await classifyPendingReviewResponse(
       { ...state, reviewOutcome: null }, live, git,
@@ -124,7 +130,7 @@ export function createCompletionUseCases(context) {
     let priorCiEvidence = null;
     for (let snapshotIndex = 0; snapshotIndex < 2; snapshotIndex += 1) {
       const live = await readLiveSnapshot(client, active, { reactionsFor: active.reviewRequest?.id ?? null });
-      const heads = await assertMutationReady({ state: active, git }, live);
+      const heads = await assertCompletionReady(active, live);
       const response = await assertCompletionLiveEvidence(active, live, heads);
       const ciEvidence = ciEvidenceFromRollup(await readPullRequestChecks(
         client, active.repository, active.prNumber, live.metadata.headRefOid,
@@ -161,7 +167,7 @@ export function createCompletionUseCases(context) {
     const expectedHeadSha = active.currentIntegrationHeadSha;
 
     let live = await readLiveSnapshot(client, active, { reactionsFor: active.reviewRequest?.id ?? null });
-    let completionHeads = await assertMutationReady({ state: active, git }, live);
+    let completionHeads = await assertCompletionReady(active, live);
     const initialResponse = await assertCompletionLiveEvidence(active, live, completionHeads);
     const snapshot = await readPullRequestChecks(
       client, active.repository, active.prNumber, live.metadata.headRefOid,
@@ -180,7 +186,7 @@ export function createCompletionUseCases(context) {
     }
     const expectedCiEvidence = checkpointCi ? evidence : structuredClone(active.ciValidationStatus);
     live = await readLiveSnapshot(client, active, { reactionsFor: active.reviewRequest?.id ?? null });
-    const refreshedHeads = await assertMutationReady({ state: active, git }, live);
+    const refreshedHeads = await assertCompletionReady(active, live);
     completionHeads = refreshedHeads;
     const finalResponse = await assertCompletionLiveEvidence(active, live, completionHeads);
     if (!samePendingResponseObservation(initialResponse, finalResponse)) {
