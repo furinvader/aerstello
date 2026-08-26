@@ -128,6 +128,58 @@ test('direct local fix is a valid within-scope assessment', () => {
   assert.deepEqual(validateScopeAssessmentApplicability(input, assessment), []);
 });
 
+test('authorized and unauthorized accepted shapes must be disjoint', () => {
+  const input = packet({
+    acceptedScope: {
+      ...packet().acceptedScope,
+      unauthorizedShape: ['direct-local-fix'],
+    },
+  });
+  assert.deepEqual(
+    validateAssessmentPacket(input),
+    ['$ acceptedScope.authorizedShape overlaps acceptedScope.unauthorizedShape at "direct-local-fix"'],
+  );
+});
+
+test('authorized and deferred accepted shapes must be disjoint', () => {
+  const input = packet({
+    acceptedScope: {
+      ...packet().acceptedScope,
+      deferredShape: ['direct-local-fix'],
+    },
+  });
+  assert.deepEqual(
+    validateAssessmentPacket(input),
+    ['$ acceptedScope.authorizedShape overlaps acceptedScope.deferredShape at "direct-local-fix"'],
+  );
+});
+
+test('unauthorized and deferred accepted shapes must be disjoint', () => {
+  const input = packet({
+    acceptedScope: {
+      ...packet().acceptedScope,
+      deferredShape: ['generic-repository-checker'],
+    },
+  });
+  assert.deepEqual(
+    validateAssessmentPacket(input),
+    ['$ acceptedScope.unauthorizedShape overlaps acceptedScope.deferredShape at "generic-repository-checker"'],
+  );
+});
+
+test('applicability fails closed for contradictory accepted-shape authority', () => {
+  const input = packet({
+    acceptedScope: {
+      ...packet().acceptedScope,
+      unauthorizedShape: ['direct-local-fix'],
+    },
+  });
+  assert.deepEqual(
+    validateScopeAssessmentApplicability(input, result('within-scope')),
+    ['packet: $ acceptedScope.authorizedShape overlaps acceptedScope.unauthorizedShape at "direct-local-fix"'],
+  );
+});
+
 test('unmapped material inventory fails closed for every compact inventory field', () => {
   const materialInventoryFields = [
     'dependencies',
@@ -266,6 +318,19 @@ test('exact source and accepted-scope authority allow a material surface', () =>
     ],
   });
   assert.deepEqual(validateScopeAssessmentApplicability(input, assessment), []);
+});
+
+test('non-overlapping accepted shapes preserve material inventory authority', () => {
+  const input = packet({
+    acceptedScope: {
+      ...packet().acceptedScope,
+      authorizedShape: ['direct-local-fix'],
+      unauthorizedShape: ['generic-repository-checker'],
+      deferredShape: ['future-repository-policy'],
+    },
+  });
+  assert.deepEqual(validateAssessmentPacket(input), []);
+  assert.deepEqual(validateScopeAssessmentApplicability(input, result('within-scope')), []);
 });
 
 test('unnecessary generic checker requires trimming to the direct fix', () => {

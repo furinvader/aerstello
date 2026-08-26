@@ -81,6 +81,32 @@ function idsFrom(entries) {
     .filter((id) => id !== null);
 }
 
+function overlappingAcceptedShapes(acceptedScope) {
+  const shapeSet = (field) => new Set(
+    Array.isArray(acceptedScope?.[field]) ? acceptedScope[field] : [],
+  );
+  const shapes = [
+    ['authorizedShape', shapeSet('authorizedShape')],
+    ['unauthorizedShape', shapeSet('unauthorizedShape')],
+    ['deferredShape', shapeSet('deferredShape')],
+  ];
+  const errors = [];
+  for (let left = 0; left < shapes.length; left += 1) {
+    const [leftField, leftShapes] = shapes[left];
+    for (let right = left + 1; right < shapes.length; right += 1) {
+      const [rightField, rightShapes] = shapes[right];
+      for (const shape of leftShapes) {
+        if (rightShapes.has(shape)) {
+          errors.push(
+            `$ acceptedScope.${leftField} overlaps acceptedScope.${rightField} at ${JSON.stringify(shape)}`,
+          );
+        }
+      }
+    }
+  }
+  return errors;
+}
+
 function unauthorizedMaterialInventory(packet, verdict) {
   if (!NON_HUMAN_SCOPE_VERDICTS.has(verdict)) return [];
 
@@ -162,6 +188,7 @@ export function validateAssessmentPacket(packet) {
   errors.push(...repeatedIds(packet?.acceptedScope?.invariants, 'acceptedScope.invariants'));
   errors.push(...repeatedIds(packet?.tripwires, 'tripwires'));
   errors.push(...repeatedMechanisms(packet?.changeInventory?.mappings, 'changeInventory.mappings'));
+  errors.push(...overlappingAcceptedShapes(packet?.acceptedScope));
 
   const sourceCriteria = new Set(idsFrom(packet?.sourceScope?.requiredCriteria));
   const acceptedCriteria = new Set(idsFrom(packet?.acceptedScope?.criteria));
