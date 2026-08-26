@@ -19,6 +19,21 @@ const MATERIAL_INVENTORY_CATEGORIES = new Map([
   ['persistentSurfaces', 'persistent-surface'],
   ['subsystems', 'new-subsystem'],
 ]);
+const MATERIALITY_CATEGORIES = [
+  'new-subsystem',
+  'new-dependency',
+  'public-surface',
+  'persistent-surface',
+  'cross-capability-work',
+  'policy-change',
+  'repository-wide-enforcement',
+  'independent-workstream',
+  'new-criterion',
+  'non-goal-reversal',
+  'sensitive-policy',
+  'replaces-accepted-approach',
+  'repeated-expansion',
+];
 const AFFIRMATIVE_CLASSIFICATIONS = new Set(['required', 'implementation-choice']);
 
 const schema = JSON.parse(readFileSync(
@@ -74,6 +89,131 @@ function repeatedMechanisms(entries, label) {
     }
   }
   return [...duplicates].map((mechanism) => `$ ${label} contains duplicate mechanism ${mechanism}`);
+}
+
+function unmappedMaterialInventory(packet) {
+  const mappedMechanisms = new Set(packet.changeInventory.mappings.map(({ mechanism }) => mechanism));
+  const errors = [];
+  for (const field of MATERIAL_INVENTORY_FIELDS) {
+    for (const entry of packet.changeInventory[field]) {
+      if (!mappedMechanisms.has(entry)) {
+        errors.push(
+          `$ changeInventory.${field} entry ${JSON.stringify(entry)} requires exactly one changeInventory.mappings row`,
+        );
+      }
+    }
+  }
+  return errors;
+}
+
+function shortestPositiveAuthority(packet, allowedFields = null) {
+  const candidates = [
+    ...packet.sourceScope.requiredCriteria.map(({ id }) => ({ field: 'sourceCriterionIds', id })),
+    ...(packet.acceptedScope?.criteria ?? []).map(({ id }) => ({ field: 'acceptedCriterionIds', id })),
+    ...(packet.acceptedScope?.invariants ?? []).map(({ id }) => ({ field: 'invariantIds', id })),
+  ].filter(({ field }) => !allowedFields || allowedFields.has(field));
+  candidates.sort((left, right) => {
+    const byteDifference = Buffer.byteLength(JSON.stringify(left.id), 'utf8')
+      - Buffer.byteLength(JSON.stringify(right.id), 'utf8');
+    return byteDifference || left.field.localeCompare(right.field) || left.id.localeCompare(right.id);
+  });
+  return candidates[0];
+}
+
+function minimalCoverage(mechanism, classification, authority = null) {
+  const coverage = {
+    mechanism,
+    sourceCriterionIds: [],
+    acceptedCriterionIds: [],
+    invariantIds: [],
+    nonGoalIds: [],
+    guidanceIds: [],
+    classification,
+    rationale: 'x',
+  };
+  if (authority) coverage[authority.field] = [authority.id];
+  return coverage;
+}
+
+function minimalResult(packet, verdict) {
+  const mechanisms = packet.changeInventory.mappings.map(({ mechanism }) => mechanism);
+  const authority = shortestPositiveAuthority(packet);
+  const classifications = {
+    'within-scope': ['required', authority],
+    'trim-required': ['speculative', null],
+    'minor-amendment-required': ['necessary-minor-expansion', null],
+    'human-decision-required': ['material-scope-change', null],
+    'insufficient-evidence': ['insufficient-evidence', null],
+  };
+  const [classification, coverageAuthority] = classifications[verdict];
+  const result = {
+    schemaVersion: 1,
+    binding: packet.binding,
+    verdict,
+    summary: 'x',
+    coverage: mechanisms.map((mechanism) => (
+      minimalCoverage(mechanism, classification, coverageAuthority)
+    )),
+    unnecessaryWork: [],
+    smallerSufficientAlternative: null,
+    scopeDelta: null,
+    materialityTriggers: [],
+    smallestExpansion: null,
+    narrowAlternative: null,
+    deferralConsequences: null,
+    missingEvidence: [],
+    humanDecision: false,
+  };
+
+  if (verdict === 'trim-required') {
+    result.unnecessaryWork = [...mechanisms];
+    result.smallerSufficientAlternative = 'x';
+  } else if (verdict === 'minor-amendment-required') {
+    const deltaAuthority = shortestPositiveAuthority(
+      packet,
+      new Set(['sourceCriterionIds', 'acceptedCriterionIds']),
+    );
+    result.scopeDelta = {
+      description: 'x',
+      sourceCriterionIds: deltaAuthority.field === 'sourceCriterionIds' ? [deltaAuthority.id] : [],
+      acceptedCriterionIds: deltaAuthority.field === 'acceptedCriterionIds' ? [deltaAuthority.id] : [],
+      invariantIds: [],
+      materialSurfaces: [],
+    };
+  } else if (verdict === 'human-decision-required') {
+    result.scopeDelta = {
+      description: 'x',
+      sourceCriterionIds: [],
+      acceptedCriterionIds: [],
+      invariantIds: [],
+      materialSurfaces: MATERIALITY_CATEGORIES,
+    };
+    result.materialityTriggers = MATERIALITY_CATEGORIES.map((category) => ({
+      category,
+      evidence: 'x',
+    }));
+    result.smallestExpansion = 'x';
+    result.narrowAlternative = 'x';
+    result.deferralConsequences = 'x';
+    result.humanDecision = true;
+  } else if (verdict === 'insufficient-evidence') {
+    result.missingEvidence = ['x'];
+  }
+  return result;
+}
+
+function resultRepresentability(packet) {
+  const verdicts = [
+    'within-scope',
+    'trim-required',
+    'minor-amendment-required',
+    'human-decision-required',
+    'insufficient-evidence',
+  ];
+  return verdicts.map((verdict) => ({
+    verdict,
+    bytes: serializedBytes(minimalResult(packet, verdict), 'scope assessment result').bytes,
+  }));
 }
 
 function idsFrom(entries) {
@@ -273,7 +413,8 @@ export function validateAssessmentPacket(packet) {
     errors.push(`$ assessment packet exceeds ${ASSESSMENT_PACKET_LIMIT_BYTES} bytes`);
   }
 
-  if (!validatePacketSchema(packet)) errors.push(...schemaErrors(validatePacketSchema));
+  const packetSchemaValid = validatePacketSchema(packet);
+  if (!packetSchemaValid) errors.push(...schemaErrors(validatePacketSchema));
 
   errors.push(...repeatedIds(packet?.sourceScope?.requiredCriteria, 'sourceScope.requiredCriteria'));
   errors.push(...repeatedIds(packet?.sourceScope?.nonGoals, 'sourceScope.nonGoals'));
@@ -283,6 +424,17 @@ export function validateAssessmentPacket(packet) {
   errors.push(...repeatedIds(packet?.tripwires, 'tripwires'));
   errors.push(...repeatedMechanisms(packet?.changeInventory?.mappings, 'changeInventory.mappings'));
   errors.push(...overlappingAcceptedShapes(packet?.acceptedScope));
+
+  if (packetSchemaValid) {
+    errors.push(...unmappedMaterialInventory(packet));
+    for (const { verdict, bytes } of resultRepresentability(packet)) {
+      if (bytes > SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES) {
+        errors.push(
+          `$ assessment packet cannot represent a schema-minimal ${verdict} result within ${SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES} bytes (requires ${bytes} bytes)`,
+        );
+      }
+    }
+  }
 
   const sourceCriteria = new Set(idsFrom(packet?.sourceScope?.requiredCriteria));
   const acceptedCriteria = new Set(idsFrom(packet?.acceptedScope?.criteria));
@@ -362,7 +514,7 @@ export function validateScopeAssessmentApplicability(packet, result) {
     errors.push('$ result coverage does not exactly match packet inventory mechanisms');
   }
   errors.push(...acceptedShapeCorrespondence(packet, result));
-  if (!(missingCodeArtifact && result.verdict === 'insufficient-evidence')) {
+  if (result.verdict !== 'insufficient-evidence') {
     errors.push(...materialInventoryCorrespondence(packet, result));
   }
   return normalize(errors);

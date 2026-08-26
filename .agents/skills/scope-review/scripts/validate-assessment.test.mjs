@@ -125,6 +125,44 @@ function nonHumanAssessments(coverage, challengedMechanism) {
   ];
 }
 
+function compactPacket(mechanisms, bindingOverrides = {}) {
+  const mappings = mechanisms.map((mechanism) => ({
+    mechanism,
+    sourceCriterionIds: ['x'],
+    acceptedCriterionIds: [],
+    invariantIds: [],
+    nonGoalIds: [],
+    guidanceIds: [],
+    rationale: 'x',
+  }));
+  return packet({
+    binding: binding(bindingOverrides),
+    sourceScope: {
+      objective: 'x',
+      requiredCriteria: [{ id: 'x', text: 'x' }],
+      nonGoals: [],
+      implementationGuidance: [],
+    },
+    acceptedScope: {
+      criteria: [{ id: 'x', text: 'x' }],
+      invariants: [],
+      minimalClosure: 'x',
+      authorizedShape: [],
+      unauthorizedShape: [],
+      deferredShape: [],
+    },
+    changeInventory: {
+      summary: 'x',
+      paths: [],
+      dependencies: [],
+      publicSurfaces: [],
+      persistentSurfaces: [],
+      subsystems: [],
+      mappings,
+    },
+  });
+}
+
 test('direct local fix is a valid within-scope assessment', () => {
   const input = packet();
   const assessment = result('within-scope');
@@ -200,21 +238,30 @@ test('unmapped material inventory fails closed for every compact inventory field
         [field]: [...packet().changeInventory[field], surface],
       },
     });
-    for (const assessment of nonHumanAssessments(result('within-scope').coverage, 'direct-local-fix')) {
-      assert.deepEqual(
-        validateScopeAssessmentApplicability(input, assessment),
-        [
-          `$ changeInventory.${field} material surface ${JSON.stringify(surface)} lacks explicit authoritative-source support and accepted-scope authorization and requires human-decision-required material-scope-change coverage with category ${new Map([
-            ['dependencies', 'new-dependency'],
-            ['publicSurfaces', 'public-surface'],
-            ['persistentSurfaces', 'persistent-surface'],
-            ['subsystems', 'new-subsystem'],
-          ]).get(field)}`,
-        ],
-        `${field}: ${assessment.verdict}`,
-      );
-    }
+    const expected = `$ changeInventory.${field} entry ${JSON.stringify(surface)} requires exactly one changeInventory.mappings row`;
+    assert.deepEqual(validateAssessmentPacket(input), [expected], field);
+    assert.deepEqual(
+      validateScopeAssessmentApplicability(input, result('within-scope')),
+      [`packet: ${expected}`],
+      field,
+    );
   }
+});
+
+test('material inventory requires exactly one mapping row', () => {
+  const duplicate = packet({
+    changeInventory: {
+      ...packet().changeInventory,
+      mappings: [
+        ...packet().changeInventory.mappings,
+        { ...packet().changeInventory.mappings[0] },
+      ],
+    },
+  });
+  assert.deepEqual(
+    validateAssessmentPacket(duplicate),
+    ['$ changeInventory.mappings contains duplicate mechanism direct-local-fix'],
+  );
 });
 
 test('source-only material authority cannot produce a non-human verdict', () => {
@@ -599,6 +646,35 @@ test('unnecessary generic checker requires trimming to the direct fix', () => {
   assert.deepEqual(validateScopeAssessmentApplicability(input, assessment), []);
 });
 
+test('unsupported mapping rows remain representable as exact speculative trimming', () => {
+  const unsupported = {
+    mechanism: 'unsupported-local-helper',
+    sourceCriterionIds: [],
+    acceptedCriterionIds: [],
+    invariantIds: [],
+    nonGoalIds: [],
+    guidanceIds: [],
+    rationale: 'No supplied authority supports this local helper.',
+  };
+  const input = packet({
+    changeInventory: {
+      ...packet().changeInventory,
+      mappings: [...packet().changeInventory.mappings, unsupported],
+    },
+  });
+  const assessment = result('trim-required', {
+    coverage: [
+      result('within-scope').coverage[0],
+      { ...unsupported, classification: 'speculative' },
+    ],
+    unnecessaryWork: [unsupported.mechanism],
+    smallerSufficientAlternative: 'Keep only the mapped direct local fix.',
+  });
+
+  assert.deepEqual(validateAssessmentPacket(input), []);
+  assert.deepEqual(validateScopeAssessmentApplicability(input, assessment), []);
+});
+
 test('necessary adjacent helper and focused test require a minor amendment', () => {
   const input = packet({
     sourceScope: {
@@ -813,6 +889,15 @@ test('missing code artifacts preserve insufficient-evidence material representab
     },
   ];
   const unsupportedSurface = 'unmapped-material-subsystem';
+  const unsupportedMapping = {
+    mechanism: unsupportedSurface,
+    sourceCriterionIds: [],
+    acceptedCriterionIds: [],
+    invariantIds: [],
+    nonGoalIds: [],
+    guidanceIds: [],
+    rationale: 'The exact authority for this material subsystem is unavailable.',
+  };
 
   for (const phase of ['task', 'integrated-head', 'review-finding']) {
     for (const { label, overrides } of artifactCases) {
@@ -822,15 +907,16 @@ test('missing code artifacts preserve insufficient-evidence material representab
         changeInventory: {
           ...packet().changeInventory,
           subsystems: [...packet().changeInventory.subsystems, unsupportedSurface],
+          mappings: [...packet().changeInventory.mappings, unsupportedMapping],
         },
       });
       const insufficient = result('insufficient-evidence', {
         binding: exactBinding,
-        coverage: [{
-          ...result('within-scope').coverage[0],
+        coverage: [result('within-scope').coverage[0], unsupportedMapping].map((entry) => ({
+          ...entry,
           classification: 'insufficient-evidence',
           rationale: `The exact ${label} identity is absent.`,
-        }],
+        })),
         missingEvidence: [`Exact ${label} identity`],
       });
       assert.deepEqual(
@@ -839,7 +925,17 @@ test('missing code artifacts preserve insufficient-evidence material representab
         `${phase}: missing ${label} insufficient-evidence material verdict`,
       );
 
-      const affirmative = result('within-scope', { binding: exactBinding });
+      const affirmative = result('within-scope', {
+        binding: exactBinding,
+        coverage: [
+          result('within-scope').coverage[0],
+          {
+            ...unsupportedMapping,
+            sourceCriterionIds: ['direct-fix'],
+            classification: 'required',
+          },
+        ],
+      });
       const affirmativeErrors = validateScopeAssessmentApplicability(input, affirmative);
       assert.ok(
         affirmativeErrors.includes(
@@ -855,24 +951,47 @@ test('missing code artifacts preserve insufficient-evidence material representab
   }
 });
 
-test('complete code artifacts retain material inventory enforcement', () => {
-  const unsupportedSurface = 'unmapped-material-subsystem';
+test('arbitrary missing evidence takes precedence over affirmative material enforcement', () => {
+  const unsupportedSurface = 'unsupported-material-subsystem';
+  const unsupportedMapping = {
+    mechanism: unsupportedSurface,
+    sourceCriterionIds: [],
+    acceptedCriterionIds: [],
+    invariantIds: [],
+    nonGoalIds: [],
+    guidanceIds: [],
+    rationale: 'No supplied authority supports this material subsystem.',
+  };
   const input = packet({
     changeInventory: {
       ...packet().changeInventory,
       subsystems: [...packet().changeInventory.subsystems, unsupportedSurface],
+      mappings: [...packet().changeInventory.mappings, unsupportedMapping],
     },
   });
   const insufficient = result('insufficient-evidence', {
-    coverage: [{
-      ...result('within-scope').coverage[0],
+    coverage: [result('within-scope').coverage[0], unsupportedMapping].map((entry) => ({
+      ...entry,
       classification: 'insufficient-evidence',
       rationale: 'Other exact evidence is absent.',
-    }],
+    })),
     missingEvidence: ['Other exact evidence'],
   });
+  assert.deepEqual(validateAssessmentPacket(input), []);
+  assert.deepEqual(validateScopeAssessmentApplicability(input, insufficient), []);
+
+  const affirmative = result('within-scope', {
+    coverage: [
+      result('within-scope').coverage[0],
+      {
+        ...unsupportedMapping,
+        sourceCriterionIds: ['direct-fix'],
+        classification: 'required',
+      },
+    ],
+  });
   assert.deepEqual(
-    validateScopeAssessmentApplicability(input, insufficient),
+    validateScopeAssessmentApplicability(input, affirmative),
     [
       `$ changeInventory.subsystems material surface ${JSON.stringify(unsupportedSurface)} lacks explicit authoritative-source support and accepted-scope authorization and requires human-decision-required material-scope-change coverage with category new-subsystem`,
     ],
@@ -941,6 +1060,78 @@ test('trim-required represents 129 exact speculative mechanisms within its byte 
   assert.deepEqual(validateAssessmentPacket(input), []);
   assert.deepEqual(validateScopeAssessmentResult(assessment), []);
   assert.deepEqual(validateScopeAssessmentApplicability(input, assessment), []);
+});
+
+test('packet validation rejects the official 200-mechanism result counterexample', () => {
+  const input = compactPacket(Array.from({ length: 200 }, (_, index) => `m${index}`));
+  const errors = validateAssessmentPacket(input);
+
+  assert.ok(Buffer.byteLength(JSON.stringify(input)) <= ASSESSMENT_PACKET_LIMIT_BYTES);
+  assert.match(errors.join('\n'), /cannot represent a schema-minimal .* result within 32768 bytes/u);
+});
+
+test('representability covers schema-minimal forms of every verdict', () => {
+  const mechanisms = Array.from({ length: 256 }, (_, index) => `mechanism-${index}`);
+  const errors = validateAssessmentPacket(compactPacket(mechanisms)).join('\n');
+
+  for (const verdict of [
+    'within-scope',
+    'trim-required',
+    'minor-amendment-required',
+    'human-decision-required',
+    'insufficient-evidence',
+  ]) {
+    assert.match(errors, new RegExp(`schema-minimal ${verdict} result`, 'u'), verdict);
+  }
+});
+
+test('representability accepts exactly 32768 bytes and rejects the next byte', () => {
+  let boundary = null;
+  for (let count = 129; count <= 200 && boundary === null; count += 1) {
+    const mechanisms = Array.from({ length: count }, (_, index) => `m${index}`);
+    const shortest = compactPacket(mechanisms, {
+      source: { ...binding().source, identity: 'i' },
+    });
+    const longest = compactPacket(mechanisms, {
+      source: { ...binding().source, identity: 'i'.repeat(512) },
+    });
+    if (validateAssessmentPacket(shortest).length > 0) continue;
+    if (!validateAssessmentPacket(longest).some((error) => error.includes('cannot represent'))) continue;
+
+    for (let identityBytes = 2; identityBytes <= 512; identityBytes += 1) {
+      const over = compactPacket(mechanisms, {
+        source: { ...binding().source, identity: 'i'.repeat(identityBytes) },
+      });
+      const overErrors = validateAssessmentPacket(over);
+      if (!overErrors.some((error) => error.includes('cannot represent'))) continue;
+      boundary = {
+        at: compactPacket(mechanisms, {
+          source: { ...binding().source, identity: 'i'.repeat(identityBytes - 1) },
+        }),
+        overErrors,
+      };
+      break;
+    }
+  }
+
+  assert.ok(boundary, 'a one-byte binding boundary must be discoverable');
+  assert.deepEqual(validateAssessmentPacket(boundary.at), []);
+  assert.match(boundary.overErrors.join('\n'), /requires 32769 bytes/u);
+});
+
+test('escaped mechanism identities and maximal binding metadata use serialized bytes', () => {
+  const mechanisms = Array.from(
+    { length: 129 },
+    (_, index) => `m${index}-${'"\\'.repeat(12)}`,
+  );
+  const input = compactPacket(mechanisms, {
+    source: { ...binding().source, identity: 'i'.repeat(512) },
+    amendmentDigests: Array.from({ length: 128 }, () => `sha256:${D}`),
+  });
+  const errors = validateAssessmentPacket(input);
+
+  assert.ok(Buffer.byteLength(JSON.stringify(input)) <= ASSESSMENT_PACKET_LIMIT_BYTES);
+  assert.match(errors.join('\n'), /cannot represent a schema-minimal .* result within 32768 bytes/u);
 });
 
 test('all named materiality triggers are valid evidence categories', () => {

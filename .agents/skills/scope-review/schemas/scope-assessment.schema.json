@@ -168,14 +168,7 @@
         "nonGoalIds": { "$ref": "#/$defs/idList" },
         "guidanceIds": { "$ref": "#/$defs/idList" },
         "rationale": { "$ref": "#/$defs/text" }
-      },
-      "anyOf": [
-        { "type": "object", "properties": { "sourceCriterionIds": { "type": "array", "minItems": 1 } } },
-        { "type": "object", "properties": { "acceptedCriterionIds": { "type": "array", "minItems": 1 } } },
-        { "type": "object", "properties": { "invariantIds": { "type": "array", "minItems": 1 } } },
-        { "type": "object", "properties": { "nonGoalIds": { "type": "array", "minItems": 1 } } },
-        { "type": "object", "properties": { "guidanceIds": { "type": "array", "minItems": 1 } } }
-      ]
+      }
     },
     "tripwire": {
       "type": "object", "additionalProperties": false, "required": ["id", "category", "evidence"],
