@@ -7,6 +7,17 @@ export const ASSESSMENT_PACKET_LIMIT_BYTES = 64 * 1024;
 export const SCOPE_ASSESSMENT_RESULT_LIMIT_BYTES = 32 * 1024;
 
 const CODE_PHASES = new Set(['task', 'integrated-head', 'review-finding']);
+const NON_HUMAN_SCOPE_VERDICTS = new Set([
+  'within-scope',
+  'trim-required',
+  'minor-amendment-required',
+]);
+const MATERIAL_INVENTORY_FIELDS = [
+  'dependencies',
+  'publicSurfaces',
+  'persistentSurfaces',
+  'subsystems',
+];
 
 const schema = JSON.parse(readFileSync(
   new URL('../schemas/scope-assessment.schema.json', import.meta.url),
@@ -68,6 +79,34 @@ function idsFrom(entries) {
   return entries
     .map((entry) => (entry && typeof entry.id === 'string' ? entry.id : null))
     .filter((id) => id !== null);
+}
+
+function unauthorizedMaterialInventory(packet, verdict) {
+  if (!NON_HUMAN_SCOPE_VERDICTS.has(verdict)) return [];
+
+  const mappings = new Map(
+    packet.changeInventory.mappings.map((entry) => [entry.mechanism, entry]),
+  );
+  const authorizedShape = new Set(packet.acceptedScope?.authorizedShape ?? []);
+  const errors = [];
+  for (const field of MATERIAL_INVENTORY_FIELDS) {
+    for (const surface of packet.changeInventory[field]) {
+      const mapping = mappings.get(surface);
+      const missingAuthorities = [];
+      if (!mapping || mapping.sourceCriterionIds.length === 0) {
+        missingAuthorities.push('explicit authoritative-source support');
+      }
+      if (!authorizedShape.has(surface)) {
+        missingAuthorities.push('accepted-scope authorization');
+      }
+      if (missingAuthorities.length > 0) {
+        errors.push(
+          `$ changeInventory.${field} material surface ${JSON.stringify(surface)} lacks ${missingAuthorities.join(' and ')}`,
+        );
+      }
+    }
+  }
+  return errors;
 }
 
 function unknownReferences(
@@ -203,5 +242,6 @@ export function validateScopeAssessmentApplicability(packet, result) {
   if (JSON.stringify(inventoryMechanisms) !== JSON.stringify(coverageMechanisms)) {
     errors.push('$ result coverage does not exactly match packet inventory mechanisms');
   }
+  errors.push(...unauthorizedMaterialInventory(packet, result.verdict));
   return normalize(errors);
 }

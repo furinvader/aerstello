@@ -51,7 +51,7 @@ function packet(overrides = {}) {
       dependencies: [],
       publicSurfaces: [],
       persistentSurfaces: [],
-      subsystems: ['existing-local-capability'],
+      subsystems: ['direct-local-fix'],
       mappings: [{
         mechanism: 'direct-local-fix',
         sourceCriterionIds: ['direct-fix'],
@@ -96,11 +96,175 @@ function result(verdict, overrides = {}) {
   };
 }
 
+function nonHumanAssessments(coverage, challengedMechanism) {
+  const classify = (classification) => coverage.map((entry) => (
+    entry.mechanism === challengedMechanism ? { ...entry, classification } : entry
+  ));
+  return [
+    result('within-scope', { coverage }),
+    result('trim-required', {
+      coverage: classify('speculative'),
+      unnecessaryWork: [challengedMechanism],
+      smallerSufficientAlternative: 'Keep only the authorized material shape.',
+    }),
+    result('minor-amendment-required', {
+      coverage: classify('necessary-minor-expansion'),
+      scopeDelta: {
+        description: `Add ${challengedMechanism} as a minor expansion.`,
+        sourceCriterionIds: ['direct-fix'],
+        acceptedCriterionIds: ['direct-fix'],
+        invariantIds: [],
+        materialSurfaces: [],
+      },
+    }),
+  ];
+}
+
 test('direct local fix is a valid within-scope assessment', () => {
   const input = packet();
   const assessment = result('within-scope');
   assert.deepEqual(validateAssessmentPacket(input), []);
   assert.deepEqual(validateScopeAssessmentResult(assessment), []);
+  assert.deepEqual(validateScopeAssessmentApplicability(input, assessment), []);
+});
+
+test('unmapped material inventory fails closed for every compact inventory field', () => {
+  const materialInventoryFields = [
+    'dependencies',
+    'publicSurfaces',
+    'persistentSurfaces',
+    'subsystems',
+  ];
+  for (const field of materialInventoryFields) {
+    const surface = `unmapped-${field}`;
+    const input = packet({
+      changeInventory: {
+        ...packet().changeInventory,
+        [field]: [...packet().changeInventory[field], surface],
+      },
+    });
+    for (const assessment of nonHumanAssessments(result('within-scope').coverage, 'direct-local-fix')) {
+      assert.deepEqual(
+        validateScopeAssessmentApplicability(input, assessment),
+        [
+          `$ changeInventory.${field} material surface ${JSON.stringify(surface)} lacks explicit authoritative-source support and accepted-scope authorization`,
+        ],
+        `${field}: ${assessment.verdict}`,
+      );
+    }
+  }
+});
+
+test('source-only material authority cannot produce a non-human verdict', () => {
+  const surface = 'source-only-public-api';
+  const surfaceMapping = {
+    mechanism: surface,
+    sourceCriterionIds: ['direct-fix'],
+    acceptedCriterionIds: [],
+    invariantIds: [],
+    nonGoalIds: [],
+    guidanceIds: [],
+    rationale: 'The source names the surface but accepted scope does not authorize it.',
+  };
+  const input = packet({
+    changeInventory: {
+      ...packet().changeInventory,
+      publicSurfaces: [surface],
+      mappings: [...packet().changeInventory.mappings, surfaceMapping],
+    },
+  });
+  const surfaceCoverage = {
+    ...surfaceMapping,
+    classification: 'required',
+    rationale: 'The surface is source-required but is not accepted-scope-authorized.',
+  };
+  const cases = nonHumanAssessments(
+    [...result('within-scope').coverage, surfaceCoverage],
+    surface,
+  );
+
+  for (const assessment of cases) {
+    assert.deepEqual(
+      validateScopeAssessmentApplicability(input, assessment),
+      [
+        `$ changeInventory.publicSurfaces material surface ${JSON.stringify(surface)} lacks accepted-scope authorization`,
+      ],
+      assessment.verdict,
+    );
+  }
+});
+
+test('accepted-only material authority lacks authoritative-source support', () => {
+  const surface = 'accepted-only-public-api';
+  const surfaceMapping = {
+    mechanism: surface,
+    sourceCriterionIds: [],
+    acceptedCriterionIds: ['direct-fix'],
+    invariantIds: [],
+    nonGoalIds: [],
+    guidanceIds: [],
+    rationale: 'Accepted scope names the surface but the authoritative source does not.',
+  };
+  const input = packet({
+    acceptedScope: {
+      ...packet().acceptedScope,
+      authorizedShape: [...packet().acceptedScope.authorizedShape, surface],
+    },
+    changeInventory: {
+      ...packet().changeInventory,
+      publicSurfaces: [surface],
+      mappings: [...packet().changeInventory.mappings, surfaceMapping],
+    },
+  });
+  const assessment = result('within-scope', {
+    coverage: [
+      ...result('within-scope').coverage,
+      {
+        ...surfaceMapping,
+        classification: 'implementation-choice',
+        rationale: 'Accepted scope authorizes the surface without source authority.',
+      },
+    ],
+  });
+  for (const candidate of nonHumanAssessments(assessment.coverage, surface)) {
+    assert.deepEqual(
+      validateScopeAssessmentApplicability(input, candidate),
+      [
+        `$ changeInventory.publicSurfaces material surface ${JSON.stringify(surface)} lacks explicit authoritative-source support`,
+      ],
+      candidate.verdict,
+    );
+  }
+});
+
+test('exact source and accepted-scope authority allow a material surface', () => {
+  const surface = 'authorized-public-api';
+  const surfaceMapping = {
+    mechanism: surface,
+    sourceCriterionIds: ['direct-fix'],
+    acceptedCriterionIds: ['direct-fix'],
+    invariantIds: [],
+    nonGoalIds: [],
+    guidanceIds: [],
+    rationale: 'Both authorities explicitly support the exact public surface.',
+  };
+  const input = packet({
+    acceptedScope: {
+      ...packet().acceptedScope,
+      authorizedShape: [...packet().acceptedScope.authorizedShape, surface],
+    },
+    changeInventory: {
+      ...packet().changeInventory,
+      publicSurfaces: [surface],
+      mappings: [...packet().changeInventory.mappings, surfaceMapping],
+    },
+  });
+  const assessment = result('within-scope', {
+    coverage: [
+      ...result('within-scope').coverage,
+      { ...surfaceMapping, classification: 'required' },
+    ],
+  });
   assert.deepEqual(validateScopeAssessmentApplicability(input, assessment), []);
 });
 
@@ -196,7 +360,7 @@ test('material subsystem expansion requires an unauthorizing human decision', ()
     changeInventory: {
       ...packet().changeInventory,
       paths: ['src/direct-fix.ts', '.agents/skills/policy/**'],
-      subsystems: ['existing-local-capability', 'new-policy-subsystem'],
+      subsystems: ['direct-local-fix', 'new-policy-subsystem'],
       mappings: [
         packet().changeInventory.mappings[0],
         {
@@ -271,7 +435,11 @@ test('source and plan drafts use null identities instead of invented artifact di
   const sourceInput = packet({
     binding: sourceBinding,
     acceptedScope: null,
-    changeInventory: { ...packet().changeInventory, mappings: [sourceMapping] },
+    changeInventory: {
+      ...packet().changeInventory,
+      subsystems: [],
+      mappings: [sourceMapping],
+    },
   });
   const sourceAssessment = result('within-scope', {
     binding: sourceBinding,
