@@ -17,6 +17,10 @@ const REPOSITORY_SOURCE_EXTENSIONS = new Set([
   '.cjs', '.cts', '.js', '.jsx', '.mjs', '.mts', '.ts', '.tsx',
 ]);
 
+const MODULE_LOADER_NAMES = new Set([
+  '_load', 'createRequire', 'getBuiltinModule', 'require',
+]);
+
 const FACADE_PATHS = new Map([
   ['contracts', 'contracts/contracts.mjs'],
   ['github', 'github/github.mjs'],
@@ -136,18 +140,89 @@ function directCommonJsLoader(expression) {
   return false;
 }
 
-function executableModuleSpecifier(node) {
+function executableModuleLoad(node) {
   if (ts.isCallExpression(node)
       && (node.expression.kind === ts.SyntaxKind.ImportKeyword
         || directCommonJsLoader(node.expression))) {
-    return node.arguments.length > 0 ? literalModuleSpecifier(node.arguments[0]) : null;
+    return { specifier: node.arguments.length > 0 ? literalModuleSpecifier(node.arguments[0]) : null };
   }
   if (ts.isImportEqualsDeclaration(node)
       && ts.isExternalModuleReference(node.moduleReference)
       && node.moduleReference.expression !== undefined) {
-    return literalModuleSpecifier(node.moduleReference.expression);
+    return { specifier: literalModuleSpecifier(node.moduleReference.expression) };
   }
   return null;
+}
+
+function propertyName(expression, name) {
+  if (ts.isPropertyAccessExpression(expression)) return expression.name.text === name;
+  return ts.isElementAccessExpression(expression)
+    && expression.argumentExpression !== undefined
+    && literalModuleSpecifier(expression.argumentExpression) === name;
+}
+
+function directNamedCall(expression, name) {
+  return (ts.isIdentifier(expression) && expression.text === name)
+    || propertyName(expression, name);
+}
+
+function importMetaUrl(expression) {
+  return ts.isPropertyAccessExpression(expression)
+    && expression.name.text === 'url'
+    && ts.isMetaProperty(expression.expression)
+    && expression.expression.keywordToken === ts.SyntaxKind.ImportKeyword
+    && expression.expression.name.text === 'meta';
+}
+
+function canonicalCreateRequireDeclaration(node, hasCanonicalImport) {
+  if (!hasCanonicalImport
+      || !ts.isVariableDeclaration(node)
+      || !ts.isIdentifier(node.name)
+      || node.name.text !== 'require'
+      || !node.initializer
+      || !ts.isCallExpression(node.initializer)
+      || !ts.isIdentifier(node.initializer.expression)
+      || node.initializer.expression.text !== 'createRequire'
+      || node.initializer.questionDotToken
+      || node.initializer.arguments.length !== 1
+      || !importMetaUrl(node.initializer.arguments[0])) return false;
+  return ts.isVariableDeclarationList(node.parent)
+    && (node.parent.flags & ts.NodeFlags.Const) !== 0;
+}
+
+function directLoaderReference(expression) {
+  return (ts.isIdentifier(expression) && expression.text === 'require')
+    || ((ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression))
+      && directCommonJsLoader(expression));
+}
+
+function loaderHelperReference(expression) {
+  return (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression))
+    && ['apply', 'bind', 'call', 'resolve'].some((name) => propertyName(expression, name))
+    && directLoaderReference(expression.expression);
+}
+
+function alternateLoaderReference(expression) {
+  return ['_load', 'createRequire', 'getBuiltinModule'].some((name) => (
+    directNamedCall(expression, name)
+  ));
+}
+
+function declarationName(node) {
+  const { parent } = node;
+  return parent?.name === node
+    && (ts.isVariableDeclaration(parent)
+      || ts.isParameter(parent)
+      || ts.isFunctionDeclaration(parent)
+      || ts.isFunctionExpression(parent)
+      || ts.isClassDeclaration(parent)
+      || ts.isClassExpression(parent));
+}
+
+function propertyNameIdentifier(node) {
+  const { parent } = node;
+  return (ts.isPropertyAccessExpression(parent) && parent.name === node)
+    || ((ts.isPropertyAssignment(parent) || ts.isMethodDeclaration(parent)) && parent.name === node);
 }
 
 export function scanInboundCapabilityImports({
@@ -190,11 +265,76 @@ export function scanInboundCapabilityImports({
     ));
   }
 
+  function loaderShapeDiagnostic(sourceFile, node, importer, message) {
+    diagnostics.push(diagnostic(
+      sourceFile,
+      node,
+      'unsupported-module-loader-shape',
+      importer,
+      '<module-loader>',
+      message,
+    ));
+  }
+
+  function inspectExecutableSpecifier(sourceFile, node, importer, specifier) {
+    if (specifier === null) {
+      diagnostics.push(diagnostic(
+        sourceFile,
+        node,
+        'opaque-executable-module-specifier',
+        importer,
+        '<non-literal>',
+        'direct executable module loads require a string literal or no-substitution template',
+      ));
+      return;
+    }
+    if (['module', 'node:module'].includes(specifier)) {
+      loaderShapeDiagnostic(
+        sourceFile, node, importer,
+        'Node module loader APIs must be consumed only through the canonical static createRequire import',
+      );
+      return;
+    }
+    if (isInlineDataSpecifier(specifier)) {
+      diagnostics.push(diagnostic(
+        sourceFile, node, 'inline-data-import', importer, specifier,
+        'executable module specifier must not use an inline data URL',
+      ));
+      return;
+    }
+    if (isAbsoluteFilesystemSpecifier(specifier)) {
+      diagnostics.push(diagnostic(
+        sourceFile, node, 'absolute-filesystem-import', importer, specifier,
+        'executable module specifier must not use an absolute filesystem path or file URL',
+      ));
+      return;
+    }
+    inspectSpecifier(sourceFile, node, importer, specifier);
+  }
+
   for (const importer of files) {
+    const repositoryPath = join(repositoryDirectory, importer);
+    let regularFile = false;
+    try {
+      regularFile = lstatSync(repositoryPath).isFile();
+    } catch {
+      regularFile = false;
+    }
+    if (!regularFile) {
+      diagnostics.push({
+        rule: 'non-regular-repository-entry',
+        importer,
+        target: importer,
+        line: 1,
+        column: 1,
+        message: 'repository source inventory entries must be regular files',
+      });
+      continue;
+    }
     const extension = posixPath.extname(importer);
     if (isPathAtOrBelow(importer, protectedRoot)
         || !REPOSITORY_SOURCE_EXTENSIONS.has(extension)) continue;
-    const source = readFileSync(join(repositoryDirectory, importer), 'utf8');
+    const source = readFileSync(repositoryPath, 'utf8');
     const sourceFile = ts.createSourceFile(
       importer,
       source,
@@ -202,15 +342,106 @@ export function scanInboundCapabilityImports({
       true,
       repositoryScriptKind(importer),
     );
+    let hasCanonicalCreateRequireImport = false;
     for (const statement of sourceFile.statements) {
       const moduleSpecifier = (ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement))
         ? statement.moduleSpecifier : null;
-      if (!moduleSpecifier || !ts.isStringLiteral(moduleSpecifier)) continue;
-      inspectSpecifier(sourceFile, statement, importer, moduleSpecifier.text);
+      const moduleSpecifierText = moduleSpecifier && ts.isStringLiteral(moduleSpecifier)
+        ? moduleSpecifier.text : null;
+      if (moduleSpecifierText !== null) {
+        inspectSpecifier(sourceFile, statement, importer, moduleSpecifierText);
+      }
+      if (ts.isImportDeclaration(statement)
+          && statement.importClause
+          && moduleSpecifierText !== null) {
+        const bindings = statement.importClause.namedBindings;
+        const defaultOrNamespace = statement.importClause.name !== undefined
+          || (bindings !== undefined && ts.isNamespaceImport(bindings));
+        if (['module', 'node:module'].includes(moduleSpecifierText) && defaultOrNamespace) {
+          loaderShapeDiagnostic(
+            sourceFile, statement, importer,
+            'module loader access must use an unaliased named createRequire import from node:module',
+          );
+        }
+        if (bindings && ts.isNamedImports(bindings)) {
+          for (const element of bindings.elements) {
+            const importedName = (element.propertyName ?? element.name).text;
+            if (!MODULE_LOADER_NAMES.has(importedName)
+                && !MODULE_LOADER_NAMES.has(element.name.text)) continue;
+            if (moduleSpecifierText === 'node:module'
+                && importedName === 'createRequire'
+                && element.propertyName === undefined
+                && element.name.text === 'createRequire') {
+              hasCanonicalCreateRequireImport = true;
+            } else {
+              loaderShapeDiagnostic(
+                sourceFile, element, importer,
+                'createRequire must be imported without an alias from node:module',
+              );
+            }
+          }
+        }
+      }
+      if (ts.isExportDeclaration(statement)) {
+        const elements = statement.exportClause && ts.isNamedExports(statement.exportClause)
+          ? statement.exportClause.elements : [];
+        const exposesLoaderCapability = elements.some((element) => (
+          MODULE_LOADER_NAMES.has((element.propertyName ?? element.name).text)
+          || MODULE_LOADER_NAMES.has(element.name.text)
+        ));
+        const opaqueModuleExport = moduleSpecifierText !== null
+          && ['module', 'node:module'].includes(moduleSpecifierText)
+          && (!statement.exportClause || ts.isNamespaceExport(statement.exportClause));
+        if (exposesLoaderCapability || opaqueModuleExport) {
+          loaderShapeDiagnostic(
+            sourceFile, statement, importer,
+            'module loader capabilities must not be exported from outside source',
+          );
+        }
+      }
     }
     function visit(node) {
-      const specifier = executableModuleSpecifier(node);
-      if (specifier !== null) inspectSpecifier(sourceFile, node, importer, specifier);
+      const load = executableModuleLoad(node);
+      if (load !== null) inspectExecutableSpecifier(sourceFile, node, importer, load.specifier);
+      if (ts.isBindingElement(node)
+          && (MODULE_LOADER_NAMES.has((node.propertyName ?? node.name).getText(sourceFile))
+            || MODULE_LOADER_NAMES.has(node.name.getText(sourceFile)))) {
+        loaderShapeDiagnostic(sourceFile, node, importer, 'module loader capabilities cannot be acquired through binding elements');
+      }
+      const canonicalCreateRequireCall = (ts.isIdentifier(node)
+          || ts.isPropertyAccessExpression(node)
+          || ts.isElementAccessExpression(node))
+        && node.parent !== undefined
+        && ts.isCallExpression(node.parent)
+        && node.parent.expression === node
+        && directNamedCall(node, 'createRequire')
+        && canonicalCreateRequireDeclaration(node.parent.parent, hasCanonicalCreateRequireImport);
+      const directLoaderCall = directLoaderReference(node)
+        && ts.isCallExpression(node.parent)
+        && node.parent.expression === node;
+      const subsumedLoaderReference = directLoaderReference(node)
+        && (ts.isPropertyAccessExpression(node.parent) || ts.isElementAccessExpression(node.parent))
+        && node.parent.expression === node
+        && loaderHelperReference(node.parent);
+      const declarationOrPropertyName = ts.isIdentifier(node)
+        && (declarationName(node)
+          || propertyNameIdentifier(node)
+          || ts.isBindingElement(node.parent)
+          || ts.isImportSpecifier(node.parent)
+          || ts.isExportSpecifier(node.parent));
+      const exposedLoaderReference = directLoaderReference(node)
+        || loaderHelperReference(node)
+        || alternateLoaderReference(node);
+      if (exposedLoaderReference
+          && !canonicalCreateRequireCall
+          && !directLoaderCall
+          && !subsumedLoaderReference
+          && !declarationOrPropertyName) {
+        loaderShapeDiagnostic(
+          sourceFile, node, importer,
+          'module loader capabilities may appear only in canonical direct call source shapes',
+        );
+      }
       ts.forEachChild(node, visit);
     }
     ts.forEachChild(sourceFile, visit);
