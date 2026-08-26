@@ -24,6 +24,14 @@ Classify each mechanism as `required`, `implementation-choice`, `speculative`, `
 
 Materiality triggers are closed and complete: a new subsystem, new dependency, public surface, persistent surface, cross-capability work, policy change, repository-wide enforcement, independent workstream, new criterion, non-goal reversal, sensitive policy, replacement of the accepted approach, or repeated expansion. A tripwire can request closer inspection but cannot select or exclude any verdict.
 
+Apply materiality before trimming. When a concrete mechanism creates any named
+materiality trigger, classify it as `material-scope-change` and return
+`human-decision-required`, even when the mechanism appears removable. Never
+downgrade that mechanism to `speculative` or the assessment to
+`trim-required`. Use `trim-required` only when every removable mechanism is
+nonmaterial and removing it preserves sufficient closure of the authoritative
+outcome and accepted scope.
+
 Return exactly one verdict:
 
 - `within-scope`: every mechanism is supported and no work, delta, evidence, or human decision remains.
@@ -39,7 +47,12 @@ Validate the packet before assessment and the result before use. Then compare th
 ## Examples
 
 - A direct local fix mapped to the accepted defect criterion is `within-scope`.
-- Adding an unrequested generic repository checker around that fix is `trim-required`; remove the checker and retain the direct fix.
+- Adding an unrequested generic repository checker only as a local, bounded,
+  unenforced helper with no new subsystem, policy, or repository-wide
+  commitment is `trim-required`; remove the checker and retain the direct fix.
 - A small adjacent helper and focused test needed to express an existing criterion is `minor-amendment-required` when it adds no material surface.
-- Expanding the work into a new subsystem or repository-wide enforcement is `human-decision-required`, with both the smallest expansion and the narrow implementation documented.
+- Turning that checker into a new subsystem, policy, or repository-wide
+  enforcement is `human-decision-required`, with both the smallest expansion
+  and the narrow implementation documented; removability does not lower the
+  verdict.
 - If the exact plan digest, task packet, or applicable Git SHA is unavailable, return `insufficient-evidence`.

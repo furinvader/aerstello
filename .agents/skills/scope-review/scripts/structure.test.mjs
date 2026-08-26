@@ -4,6 +4,8 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { validateScopeAssessmentResult } from './validate-assessment.mjs';
+
 const scriptsDirectory = dirname(fileURLToPath(import.meta.url));
 const skillDirectory = dirname(scriptsDirectory);
 const repositoryDirectory = resolve(skillDirectory, '../../..');
@@ -57,6 +59,37 @@ function readRepositoryFile(path) {
   return readFileSync(join(repositoryDirectory, path), 'utf8');
 }
 
+const DIGEST_A = `sha256:${'a'.repeat(64)}`;
+const DIGEST_B = `sha256:${'b'.repeat(64)}`;
+const DIGEST_C = `sha256:${'c'.repeat(64)}`;
+
+function assessmentResult(verdict, overrides = {}) {
+  return {
+    schemaVersion: 1,
+    binding: {
+      phase: 'task',
+      source: { type: 'github-issue', identity: 'furinvader/aerstello#54', digest: DIGEST_A },
+      subject: { digest: DIGEST_B, sha: '1'.repeat(40) },
+      planDigest: DIGEST_C,
+      amendmentDigests: [],
+      taskPacketDigest: DIGEST_A,
+    },
+    verdict,
+    summary: 'Assess the exact mechanism against the accepted scope.',
+    coverage: [],
+    unnecessaryWork: [],
+    smallerSufficientAlternative: null,
+    scopeDelta: null,
+    materialityTriggers: [],
+    smallestExpansion: null,
+    narrowAlternative: null,
+    deferralConsequences: null,
+    missingEvidence: [],
+    humanDecision: false,
+    ...overrides,
+  };
+}
+
 test('ownership names the complete capability and every real consumer', () => {
   const ownership = JSON.parse(readFileSync(join(skillDirectory, 'ownership.json'), 'utf8'));
   assert.equal(ownership.schemaVersion, 1);
@@ -88,6 +121,7 @@ test('skill metadata is concise, automatic, and routes detail to the reference',
   const skill = readFileSync(join(skillDirectory, 'SKILL.md'), 'utf8');
   assert.match(skill, /^---\nname: scope-review\ndescription: .+\n---\n/u);
   assert.match(skill, /references\/assessment-contract\.md/u);
+  assert.match(skill, /\[operative minimality rules\]\(README\.md#operative-minimality-rules\)/u);
   assert.match(skill, /read-only/u);
   assert.doesNotMatch(skill, /spawn|delegate to|GitHub mutation/u);
 
@@ -108,6 +142,18 @@ test('documentation links resolve and defines invocation and authority boundarie
     assert.equal(statSync(join(skillDirectory, target)).isFile(), true, `broken documentation link ${target}`);
   }
   assert.match(readme, /subsystem, dependency, public or persistent surface/u);
+  for (const rule of [
+    /Map every implementation mechanism to exact source authority/u,
+    /Apply the removal counterfactual/u,
+    /Prefer the smallest local, direct fix/u,
+    /Do not accept infrastructure for hypothetical future consumers/u,
+    /optional implementation guidance and indicative directory trees as\s+non-mandatory/u,
+    /Do not assume broad source language makes an expansion safe/u,
+    /Findings in newly introduced machinery do not by themselves justify\s+hardening/u,
+    /quantitative size measurements\s+only as tripwires/u,
+  ]) {
+    assert.match(readme, rule);
+  }
   assert.match(contract, /authoritative source/u);
   assert.match(contract, /accepted plan/u);
   assert.match(contract, /append-only amendments/u);
@@ -124,6 +170,61 @@ test('documentation links resolve and defines invocation and authority boundarie
   assert.match(contract, /adjacent helper/u);
   assert.match(contract, /new subsystem/u);
   assert.match(contract, /insufficient-evidence/u);
+});
+
+test('materiality takes precedence over trimming at the executable result boundary', () => {
+  const localTrim = assessmentResult('trim-required', {
+    coverage: [{
+      mechanism: 'local-unenforced-checker',
+      sourceCriterionIds: [],
+      acceptedCriterionIds: [],
+      invariantIds: [],
+      nonGoalIds: ['no-generic-checker'],
+      guidanceIds: [],
+      classification: 'speculative',
+      rationale: 'The local helper is removable and creates no material commitment.',
+    }],
+    unnecessaryWork: ['local-unenforced-checker'],
+    smallerSufficientAlternative: 'Remove the checker and retain the sufficient direct fix.',
+  });
+  assert.deepEqual(validateScopeAssessmentResult(localTrim), []);
+
+  const materialExpansion = assessmentResult('human-decision-required', {
+    coverage: [{
+      mechanism: 'repository-wide-enforcement',
+      sourceCriterionIds: ['direct-fix'],
+      acceptedCriterionIds: ['direct-fix'],
+      invariantIds: [],
+      nonGoalIds: [],
+      guidanceIds: [],
+      classification: 'material-scope-change',
+      rationale: 'The mechanism commits the repository to new enforcement policy.',
+    }],
+    scopeDelta: {
+      description: 'Add repository-wide policy enforcement.',
+      sourceCriterionIds: ['direct-fix'],
+      acceptedCriterionIds: ['direct-fix'],
+      invariantIds: [],
+      materialSurfaces: ['repository-wide-enforcement'],
+    },
+    materialityTriggers: [{
+      category: 'repository-wide-enforcement',
+      evidence: 'The checker would enforce policy across the repository.',
+    }],
+    smallestExpansion: 'Add only the specifically approved enforcement surface.',
+    narrowAlternative: 'Retain the direct local fix without repository enforcement.',
+    deferralConsequences: 'The local defect is fixed while repository enforcement remains absent.',
+    humanDecision: true,
+  });
+  assert.deepEqual(validateScopeAssessmentResult(materialExpansion), []);
+
+  const materialTrim = assessmentResult('trim-required', {
+    coverage: materialExpansion.coverage,
+    unnecessaryWork: ['repository-wide-enforcement'],
+    smallerSufficientAlternative: 'Remove repository-wide enforcement.',
+    materialityTriggers: materialExpansion.materialityTriggers,
+  });
+  assert.notDeepEqual(validateScopeAssessmentResult(materialTrim), []);
 });
 
 test('root guidance and npm wiring make focused scope review discoverable', () => {
