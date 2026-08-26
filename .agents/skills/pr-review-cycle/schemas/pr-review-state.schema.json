@@ -92,6 +92,7 @@
       "$comment": "Optional for backward readability of states written before stale-discovery recovery. The manual validator binds every append-only disposition to one native null-outcome discovery history row and verifies its deterministic identity and distinct prior/live HEADs.",
       "items": { "$ref": "#/$defs/staleDiscoveryDisposition" }
     },
+    "scopeControl": { "$ref": "#/$defs/scopeControl" },
     "verificationEscalation": { "$ref": "#/$defs/nullableVerificationEscalation" },
     "threadResolutionStatus": { "$ref": "#/$defs/threadResolutionStatus" },
     "blockedReasons": { "$ref": "#/$defs/stringList" },
@@ -299,6 +300,27 @@
     "nullableString": {
       "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1, "maxLength": 1000 }]
     },
+    "scopeControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authorityDigest", "journalDigest", "returnDigest", "gate", "assessmentHeadSha", "updatedAt"],
+      "properties": {
+        "authorityDigest": { "$ref": "#/$defs/digest" },
+        "journalDigest": { "$ref": "#/$defs/digest" },
+        "returnDigest": { "$ref": "#/$defs/nullableDigest" },
+        "gate": { "enum": ["insufficient-authority", "ready", "decision-required", "return-pending", "returned", "resume-required"] },
+        "assessmentHeadSha": { "$ref": "#/$defs/nullableSha" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "gate": { "enum": ["return-pending", "returned", "resume-required"] } }, "required": ["gate"] },
+          "then": { "properties": { "returnDigest": { "$ref": "#/$defs/digest" } } }
+        }
+      ]
+    },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "nullableDigest": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
     "stringList": {
       "type": "array", "uniqueItems": true,
       "items": { "type": "string", "minLength": 1, "maxLength": 1000 }

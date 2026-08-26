@@ -1,0 +1,200 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aerstello.local/schemas/pr-review-scope-control-v1.schema.json",
+  "title": "Aerstello PR-review scope-control persistence contracts",
+  "oneOf": [
+    { "$ref": "#/$defs/authority" },
+    { "$ref": "#/$defs/journal" },
+    { "$ref": "#/$defs/scopeReturn" }
+  ],
+  "$defs": {
+    "text": { "type": "string", "minLength": 1, "maxLength": 4000, "pattern": "\\S" },
+    "id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 128 },
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "nullableDigest": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+    "idList": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+    "stringList": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } },
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "identity", "digest"],
+      "properties": {
+        "type": { "enum": ["github-issue", "direct-request", "repository-plan", "partial-implementation"] },
+        "identity": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "\\S" },
+        "digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "assessmentPair": {
+      "type": "object", "additionalProperties": false,
+      "required": ["packet", "result", "digest"],
+      "properties": {
+        "packet": { "type": "object" },
+        "result": { "type": "object" },
+        "digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "authority": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "schemaVersion", "authorityKind", "source", "planDigest", "amendmentDigests",
+        "minimalClosure", "handoffHeadSha", "integratedHeadAssessment", "approvedDecisions",
+        "deferredFollowUps", "capturedAt"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "authorityKind": { "enum": ["standalone", "imported", "legacy-adoption"] },
+        "source": { "$ref": "#/$defs/source" },
+        "planDigest": { "$ref": "#/$defs/nullableDigest" },
+        "amendmentDigests": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/digest" } },
+        "minimalClosure": {
+          "type": "object", "additionalProperties": false,
+          "required": ["statement", "digest"],
+          "properties": { "statement": { "$ref": "#/$defs/text" }, "digest": { "$ref": "#/$defs/digest" } }
+        },
+        "handoffHeadSha": { "$ref": "#/$defs/sha" },
+        "integratedHeadAssessment": { "oneOf": [{ "$ref": "#/$defs/assessmentPair" }, { "type": "null" }] },
+        "approvedDecisions": {
+          "type": "array", "maxItems": 128,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["id", "digest"],
+            "properties": { "id": { "$ref": "#/$defs/id" }, "digest": { "$ref": "#/$defs/digest" } }
+          }
+        },
+        "deferredFollowUps": {
+          "type": "array", "maxItems": 128,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["id", "reference"],
+            "properties": { "id": { "$ref": "#/$defs/id" }, "reference": { "type": "string", "minLength": 1, "maxLength": 1000 } }
+          }
+        },
+        "capturedAt": { "type": "string", "format": "date-time" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "authorityKind": { "const": "imported" } }, "required": ["authorityKind"] },
+          "then": {
+            "properties": {
+              "planDigest": { "$ref": "#/$defs/digest" },
+              "integratedHeadAssessment": { "$ref": "#/$defs/assessmentPair" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "planDigest": { "type": "null" } }, "required": ["planDigest"] },
+          "then": { "properties": { "amendmentDigests": { "type": "array", "maxItems": 0 } } }
+        }
+      ]
+    },
+    "journalBase": {
+      "type": "object",
+      "required": ["schemaVersion", "sequence", "entryId", "kind", "at", "reviewHeadSha", "authorityDigest", "rootCauseId"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "sequence": { "type": "integer", "minimum": 1 },
+        "entryId": { "$ref": "#/$defs/id" }, "kind": { "enum": ["classification", "decision", "amendment", "exact-head-manifest", "resume"] },
+        "at": { "type": "string", "format": "date-time" }, "reviewHeadSha": { "$ref": "#/$defs/sha" },
+        "authorityDigest": { "$ref": "#/$defs/digest" }, "rootCauseId": { "$ref": "#/$defs/id" }
+      }
+    },
+    "classificationEntry": {
+      "allOf": [
+        { "$ref": "#/$defs/journalBase" },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["schemaVersion", "sequence", "entryId", "kind", "at", "reviewHeadSha", "authorityDigest", "rootCauseId", "findingIds", "findingFingerprints", "classification", "assessment", "authorityAmendmentRequired", "unrelatedReference", "remediationShapeDigest", "tripwires"],
+          "properties": {
+            "schemaVersion": {}, "sequence": {}, "entryId": {}, "kind": { "const": "classification" }, "at": {}, "reviewHeadSha": {}, "authorityDigest": {}, "rootCauseId": {},
+            "findingIds": { "allOf": [{ "$ref": "#/$defs/stringList" }, { "type": "array", "minItems": 1 }] },
+            "findingFingerprints": { "allOf": [{ "$ref": "#/$defs/stringList" }, { "type": "array", "minItems": 1 }] },
+            "classification": { "enum": ["within-scope-defect", "unnecessary-mechanism-defect", "material-scope-change", "unrelated-follow-up", "insufficient-scope-authority"] },
+            "assessment": { "$ref": "#/$defs/assessmentPair" }, "authorityAmendmentRequired": { "type": "boolean" },
+            "unrelatedReference": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 1000 }, { "type": "null" }] },
+            "remediationShapeDigest": { "$ref": "#/$defs/digest" },
+            "tripwires": { "$ref": "#/$defs/stringList" }
+          }
+        }
+      ]
+    },
+    "decisionEntry": {
+      "allOf": [
+        { "$ref": "#/$defs/journalBase" },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["schemaVersion", "sequence", "entryId", "kind", "at", "reviewHeadSha", "authorityDigest", "rootCauseId", "blockerId", "decisionId", "decision", "assessmentDigest", "blockerDigest", "approvedDeltaDigest", "rationale", "priorDecisionIds"],
+          "properties": {
+            "schemaVersion": {}, "sequence": {}, "entryId": {}, "kind": { "const": "decision" }, "at": {}, "reviewHeadSha": {}, "authorityDigest": {}, "rootCauseId": {},
+            "blockerId": { "$ref": "#/$defs/id" }, "decisionId": { "$ref": "#/$defs/id" },
+            "decision": { "enum": ["approve-expansion-and-replan", "remove-or-simplify", "split-or-defer", "reject-expansion", "abandon-or-rework"] },
+            "assessmentDigest": { "$ref": "#/$defs/digest" }, "blockerDigest": { "$ref": "#/$defs/digest" },
+            "approvedDeltaDigest": { "$ref": "#/$defs/nullableDigest" }, "rationale": { "$ref": "#/$defs/text" },
+            "priorDecisionIds": { "$ref": "#/$defs/idList" }
+          },
+          "allOf": [{
+            "if": { "properties": { "decision": { "const": "approve-expansion-and-replan" } }, "required": ["decision"] },
+            "then": { "properties": { "approvedDeltaDigest": { "$ref": "#/$defs/digest" } } }
+          }]
+        }
+      ]
+    },
+    "amendmentEntry": {
+      "allOf": [{ "$ref": "#/$defs/journalBase" }, {
+        "type": "object", "additionalProperties": false,
+        "required": ["schemaVersion", "sequence", "entryId", "kind", "at", "reviewHeadSha", "authorityDigest", "rootCauseId", "decisionId", "amendmentDigest", "priorAuthorityDigest", "revisedAuthorityDigest"],
+        "properties": {
+          "schemaVersion": {}, "sequence": {}, "entryId": {}, "kind": { "const": "amendment" }, "at": {}, "reviewHeadSha": {}, "authorityDigest": {}, "rootCauseId": {},
+          "decisionId": { "$ref": "#/$defs/id" }, "amendmentDigest": { "$ref": "#/$defs/digest" }, "priorAuthorityDigest": { "$ref": "#/$defs/digest" }, "revisedAuthorityDigest": { "$ref": "#/$defs/digest" }
+        }
+      }]
+    },
+    "manifestEntry": {
+      "allOf": [{ "$ref": "#/$defs/journalBase" }, {
+        "type": "object", "additionalProperties": false,
+        "required": ["schemaVersion", "sequence", "entryId", "kind", "at", "reviewHeadSha", "authorityDigest", "rootCauseId", "manifestDigest", "assessmentDigest", "triggerKinds"],
+        "properties": {
+          "schemaVersion": {}, "sequence": {}, "entryId": {}, "kind": { "const": "exact-head-manifest" }, "at": {}, "reviewHeadSha": {}, "authorityDigest": {}, "rootCauseId": {},
+          "manifestDigest": { "$ref": "#/$defs/digest" }, "assessmentDigest": { "$ref": "#/$defs/digest" }, "triggerKinds": { "$ref": "#/$defs/stringList" }
+        }
+      }]
+    },
+    "resumeEntry": {
+      "allOf": [{ "$ref": "#/$defs/journalBase" }, {
+        "type": "object", "additionalProperties": false,
+        "required": ["schemaVersion", "sequence", "entryId", "kind", "at", "reviewHeadSha", "authorityDigest", "rootCauseId", "decisionId", "scopeReturnDigest", "resumedAuthorityDigest", "resumedHeadSha"],
+        "properties": {
+          "schemaVersion": {}, "sequence": {}, "entryId": {}, "kind": { "const": "resume" }, "at": {}, "reviewHeadSha": {}, "authorityDigest": {}, "rootCauseId": {},
+          "decisionId": { "$ref": "#/$defs/id" }, "scopeReturnDigest": { "$ref": "#/$defs/digest" }, "resumedAuthorityDigest": { "$ref": "#/$defs/digest" }, "resumedHeadSha": { "$ref": "#/$defs/sha" }
+        }
+      }]
+    },
+    "journalEntry": { "oneOf": [{ "$ref": "#/$defs/classificationEntry" }, { "$ref": "#/$defs/decisionEntry" }, { "$ref": "#/$defs/amendmentEntry" }, { "$ref": "#/$defs/manifestEntry" }, { "$ref": "#/$defs/resumeEntry" }] },
+    "journal": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "prNumber", "authorityDigest", "entries"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "prNumber": { "type": "integer", "minimum": 1 },
+        "authorityDigest": { "$ref": "#/$defs/digest" }, "entries": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/journalEntry" } }
+      }
+    },
+    "inventory": {
+      "type": "object", "additionalProperties": false,
+      "required": ["paths", "dependencies", "publicSurfaces", "persistentSurfaces", "validation"],
+      "properties": {
+        "paths": { "$ref": "#/$defs/stringList" }, "dependencies": { "$ref": "#/$defs/stringList" },
+        "publicSurfaces": { "$ref": "#/$defs/stringList" }, "persistentSurfaces": { "$ref": "#/$defs/stringList" },
+        "validation": { "$ref": "#/$defs/stringList" }
+      }
+    },
+    "scopeReturn": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "repository", "prNumber", "authorityDigest", "journalDigest", "blockerId", "decisionId", "reviewHeadSha", "livePrHeadSha", "rootCauseId", "findingIds", "findingFingerprints", "assessmentDigest", "smallestExpansion", "narrowAlternative", "trimAlternative", "inventory", "priorDecisionIds", "createdAt"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "repository": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$", "maxLength": 256 }, "prNumber": { "type": "integer", "minimum": 1 },
+        "authorityDigest": { "$ref": "#/$defs/digest" }, "journalDigest": { "$ref": "#/$defs/digest" }, "blockerId": { "$ref": "#/$defs/id" }, "decisionId": { "$ref": "#/$defs/id" },
+        "reviewHeadSha": { "$ref": "#/$defs/sha" }, "livePrHeadSha": { "$ref": "#/$defs/sha" }, "rootCauseId": { "$ref": "#/$defs/id" },
+        "findingIds": { "allOf": [{ "$ref": "#/$defs/stringList" }, { "type": "array", "minItems": 1 }] }, "findingFingerprints": { "allOf": [{ "$ref": "#/$defs/stringList" }, { "type": "array", "minItems": 1 }] },
+        "assessmentDigest": { "$ref": "#/$defs/digest" }, "smallestExpansion": { "$ref": "#/$defs/text" }, "narrowAlternative": { "$ref": "#/$defs/text" },
+        "trimAlternative": { "oneOf": [{ "$ref": "#/$defs/text" }, { "type": "null" }] }, "inventory": { "$ref": "#/$defs/inventory" },
+        "priorDecisionIds": { "$ref": "#/$defs/idList" }, "createdAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}
