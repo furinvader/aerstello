@@ -13,6 +13,7 @@ const canonicalConfig = join(
   repositoryDirectory,
   '.agents/skills/pr-review-cycle/eslint.config.mjs',
 );
+const rootConfig = join(repositoryDirectory, 'eslint.config.mjs');
 const productionProbe = join(
   repositoryDirectory,
   '.agents/skills/pr-review-cycle/scripts/github/policy-probe.mjs',
@@ -28,6 +29,11 @@ const eslint = new ESLint({
   overrideConfigFile: canonicalConfig,
   warnIgnored: false,
 });
+const rootEslint = new ESLint({
+  cwd: repositoryDirectory,
+  overrideConfigFile: rootConfig,
+  warnIgnored: false,
+});
 const discoveredEslint = new ESLint({
   cwd: repositoryDirectory,
   warnIgnored: false,
@@ -35,6 +41,11 @@ const discoveredEslint = new ESLint({
 
 async function lint(source, filePath = productionProbe) {
   const [result] = await eslint.lintText(source, { filePath });
+  return result?.messages ?? [];
+}
+
+async function lintWith(engine, source, filePath = productionProbe) {
+  const [result] = await engine.lintText(source, { filePath });
   return result?.messages ?? [];
 }
 
@@ -47,6 +58,22 @@ test('auto-discovery applies the canonical production policy from the nested con
     filePath: productionProbe,
   });
   assert.equal(result?.messages[0]?.ruleId, 'no-restricted-syntax');
+});
+
+test('canonical and root-adapter loading apply the production policy only within the capability', async () => {
+  const unrelatedProbes = [
+    join(repositoryDirectory, 'scripts/release-state.mjs'),
+    join(repositoryDirectory, '.agents/skills/change-development/scripts/policy-probe.mjs'),
+  ];
+  for (const engine of [eslint, rootEslint]) {
+    assert.equal(
+      (await lintWith(engine, 'const require = null;\n'))[0]?.ruleId,
+      'no-restricted-syntax',
+    );
+    for (const filePath of unrelatedProbes) {
+      assert.deepEqual(await lintWith(engine, 'const require = null;\n', filePath), []);
+    }
+  }
 });
 
 test('production PR-review modules satisfy the canonical source policy', async () => {
@@ -211,9 +238,15 @@ test('executable composition roots cannot expose ESM exports', async () => {
     'export default function exposed() {}\n',
     "export * from './private-authority.mjs';\n",
   ];
-  for (const filePath of compositionRootProbes) {
-    for (const source of exportForms) {
-      assert.equal((await lint(source, filePath))[0]?.ruleId, 'no-restricted-syntax', `${filePath}: ${source}`);
+  for (const engine of [eslint, rootEslint]) {
+    for (const filePath of compositionRootProbes) {
+      for (const source of exportForms) {
+        assert.equal(
+          (await lintWith(engine, source, filePath))[0]?.ruleId,
+          'no-restricted-syntax',
+          `${filePath}: ${source}`,
+        );
+      }
     }
   }
 });

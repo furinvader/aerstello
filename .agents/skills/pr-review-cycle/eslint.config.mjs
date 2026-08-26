@@ -1,8 +1,7 @@
-const capabilityRoot = '.agents/skills/pr-review-cycle';
-const productionModules = [
-  `${capabilityRoot}/scripts/**/*.mjs`,
-  'scripts/**/*.mjs',
-];
+import { fileURLToPath } from 'node:url';
+
+const capabilityDirectory = fileURLToPath(new URL('.', import.meta.url));
+const productionModules = ['scripts/**/*.mjs'];
 
 const forbiddenIdentifierSelector = "Identifier[name=/^(?:require|eval|Function|Reflect|getBuiltinModule|createRequire)$/]";
 const forbiddenNameLiteralSelector = "Literal[value='getBuiltinModule']";
@@ -90,14 +89,16 @@ const restrictedSyntaxDescriptors = [
 
 export default [
   {
+    basePath: capabilityDirectory,
     ignores: [
       '**/*.test.mjs',
       '**/fixtures/**',
       '**/test-support/**',
-      '.agents/skills/pr-review-cycle/eslint.config.mjs',
+      'eslint.config.mjs',
     ],
   },
   {
+    basePath: capabilityDirectory,
     files: productionModules,
     plugins: {
       'pr-review': {
@@ -130,10 +131,8 @@ export default [
     },
   },
   {
+    basePath: capabilityDirectory,
     files: [
-      `${capabilityRoot}/scripts/hooks/*.mjs`,
-      `${capabilityRoot}/scripts/state/cli.mjs`,
-      `${capabilityRoot}/scripts/worktree/cli.mjs`,
       'scripts/hooks/*.mjs',
       'scripts/state/cli.mjs',
       'scripts/worktree/cli.mjs',
