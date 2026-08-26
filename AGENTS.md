@@ -72,6 +72,10 @@ remain separately owned capabilities consumed by the review skill.
   and `development-ready`. Stop there: push, PR work, official review, CI,
   GitHub writes, delivery, and merge belong to separate workflows.
 
+## Scope assessment
+
+- When creating or materially editing an implementation issue or plan, use the [scope-review capability](./.agents/skills/scope-review/README.md) at a draft commitment boundary that commits to a subsystem, dependency, public or persistent surface, cross-capability work, policy change, or repository-wide enforcement.
+
 ## Code Review Rules
 
 ### Release and migration compatibility

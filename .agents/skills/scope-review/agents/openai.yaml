@@ -1,0 +1,4 @@
+interface:
+  display_name: "Scope Review"
+  short_description: "Check exact work for the smallest sufficient scope"
+  default_prompt: "Use $scope-review to assess whether this exact Aerstello subject is the smallest sufficient implementation of its accepted scope."

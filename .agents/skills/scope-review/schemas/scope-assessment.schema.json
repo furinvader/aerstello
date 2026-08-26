@@ -1,0 +1,335 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aerstello.local/schemas/scope-review/scope-assessment-v1.schema.json",
+  "title": "Aerstello scope assessment result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "binding", "verdict", "summary", "coverage", "unnecessaryWork",
+    "smallerSufficientAlternative", "scopeDelta", "materialityTriggers", "smallestExpansion",
+    "narrowAlternative", "deferralConsequences", "missingEvidence", "humanDecision"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "binding": { "$ref": "#/$defs/binding" },
+    "verdict": { "$ref": "#/$defs/verdict" },
+    "summary": { "$ref": "#/$defs/text" },
+    "coverage": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/coverage" } },
+    "unnecessaryWork": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/text" } },
+    "smallerSufficientAlternative": { "$ref": "#/$defs/nullableText" },
+    "scopeDelta": { "oneOf": [{ "$ref": "#/$defs/scopeDelta" }, { "type": "null" }] },
+    "materialityTriggers": { "type": "array", "maxItems": 13, "uniqueItems": true, "items": { "$ref": "#/$defs/materialityTrigger" } },
+    "smallestExpansion": { "$ref": "#/$defs/nullableText" },
+    "narrowAlternative": { "$ref": "#/$defs/nullableText" },
+    "deferralConsequences": { "$ref": "#/$defs/nullableText" },
+    "missingEvidence": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/text" } },
+    "humanDecision": { "type": "boolean" }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "verdict": { "const": "within-scope" },
+        "coverage": { "type": "array", "items": { "$ref": "#/$defs/affirmativeCoverage" } },
+        "unnecessaryWork": { "type": "array", "maxItems": 0 },
+        "smallerSufficientAlternative": { "type": "null" },
+        "scopeDelta": { "type": "null" },
+        "materialityTriggers": { "type": "array", "maxItems": 0 },
+        "smallestExpansion": { "type": "null" },
+        "narrowAlternative": { "type": "null" },
+        "deferralConsequences": { "type": "null" },
+        "missingEvidence": { "type": "array", "maxItems": 0 },
+        "humanDecision": { "const": false }
+      }
+    },
+    {
+      "properties": {
+        "verdict": { "const": "trim-required" },
+        "coverage": { "type": "array", "items": { "$ref": "#/$defs/trimCoverage" }, "contains": { "type": "object", "properties": { "classification": { "const": "speculative" } }, "required": ["classification"] } },
+        "unnecessaryWork": { "type": "array", "minItems": 1 },
+        "smallerSufficientAlternative": { "$ref": "#/$defs/text" },
+        "scopeDelta": { "type": "null" },
+        "materialityTriggers": { "type": "array", "maxItems": 0 },
+        "smallestExpansion": { "type": "null" },
+        "narrowAlternative": { "type": "null" },
+        "deferralConsequences": { "type": "null" },
+        "missingEvidence": { "type": "array", "maxItems": 0 },
+        "humanDecision": { "const": false }
+      }
+    },
+    {
+      "properties": {
+        "verdict": { "const": "minor-amendment-required" },
+        "coverage": { "type": "array", "items": { "$ref": "#/$defs/minorCoverage" }, "contains": { "type": "object", "properties": { "classification": { "const": "necessary-minor-expansion" } }, "required": ["classification"] } },
+        "unnecessaryWork": { "type": "array", "maxItems": 0 },
+        "smallerSufficientAlternative": { "type": "null" },
+        "scopeDelta": { "$ref": "#/$defs/minorScopeDelta" },
+        "materialityTriggers": { "type": "array", "maxItems": 0 },
+        "smallestExpansion": { "type": "null" },
+        "narrowAlternative": { "type": "null" },
+        "deferralConsequences": { "type": "null" },
+        "missingEvidence": { "type": "array", "maxItems": 0 },
+        "humanDecision": { "const": false }
+      }
+    },
+    {
+      "properties": {
+        "verdict": { "const": "human-decision-required" },
+        "coverage": { "type": "array", "items": { "$ref": "#/$defs/materialCoverage" }, "contains": { "type": "object", "properties": { "classification": { "const": "material-scope-change" } }, "required": ["classification"] } },
+        "unnecessaryWork": { "type": "array", "maxItems": 0 },
+        "smallerSufficientAlternative": { "type": "null" },
+        "scopeDelta": { "$ref": "#/$defs/scopeDelta" },
+        "materialityTriggers": { "type": "array", "minItems": 1 },
+        "smallestExpansion": { "$ref": "#/$defs/text" },
+        "narrowAlternative": { "$ref": "#/$defs/text" },
+        "deferralConsequences": { "$ref": "#/$defs/text" },
+        "missingEvidence": { "type": "array", "maxItems": 0 },
+        "humanDecision": { "const": true }
+      }
+    },
+    {
+      "properties": {
+        "verdict": { "const": "insufficient-evidence" },
+        "coverage": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/insufficientCoverage" } },
+        "unnecessaryWork": { "type": "array", "maxItems": 0 },
+        "smallerSufficientAlternative": { "type": "null" },
+        "scopeDelta": { "type": "null" },
+        "materialityTriggers": { "type": "array", "maxItems": 0 },
+        "smallestExpansion": { "type": "null" },
+        "narrowAlternative": { "type": "null" },
+        "deferralConsequences": { "type": "null" },
+        "missingEvidence": { "type": "array", "minItems": 1 },
+        "humanDecision": { "const": false }
+      }
+    }
+  ],
+  "$defs": {
+    "text": { "type": "string", "minLength": 1, "maxLength": 4000, "pattern": "\\S" },
+    "nullableText": { "oneOf": [{ "$ref": "#/$defs/text" }, { "type": "null" }] },
+    "id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 128 },
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "nullableDigest": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+    "identity": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "\\S" },
+    "idList": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+    "identityList": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/identity" } },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "source", "subject", "planDigest", "amendmentDigests", "taskPacketDigest"],
+      "properties": {
+        "phase": { "enum": ["source-draft", "plan", "task", "integrated-head", "review-finding"] },
+        "source": {
+          "type": "object", "additionalProperties": false, "required": ["type", "identity", "digest"],
+          "properties": {
+            "type": { "enum": ["github-issue", "direct-request", "repository-plan", "partial-implementation"] },
+            "identity": { "$ref": "#/$defs/identity" },
+            "digest": { "$ref": "#/$defs/digest" }
+          }
+        },
+        "subject": {
+          "type": "object", "additionalProperties": false, "required": ["digest", "sha"],
+          "properties": {
+            "digest": { "$ref": "#/$defs/digest" },
+            "sha": { "oneOf": [{ "$ref": "#/$defs/sha" }, { "type": "null" }] }
+          }
+        },
+        "planDigest": { "$ref": "#/$defs/nullableDigest" },
+        "amendmentDigests": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/digest" } },
+        "taskPacketDigest": { "$ref": "#/$defs/nullableDigest" }
+      },
+      "allOf": [
+        {
+          "if": { "type": "object", "properties": { "phase": { "enum": ["task", "integrated-head", "review-finding"] } }, "required": ["phase"] },
+          "then": {
+            "type": "object",
+            "properties": {
+              "subject": { "type": "object", "properties": { "sha": { "$ref": "#/$defs/sha" } } }
+            }
+          }
+        },
+        {
+          "if": { "type": "object", "properties": { "planDigest": { "type": "null" } }, "required": ["planDigest"] },
+          "then": { "type": "object", "properties": { "amendmentDigests": { "type": "array", "maxItems": 0 } } }
+        }
+      ]
+    },
+    "criterion": {
+      "type": "object", "additionalProperties": false, "required": ["id", "text"],
+      "properties": { "id": { "$ref": "#/$defs/id" }, "text": { "$ref": "#/$defs/text" } }
+    },
+    "inventoryMapping": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mechanism", "sourceCriterionIds", "acceptedCriterionIds", "invariantIds", "nonGoalIds", "guidanceIds", "rationale"],
+      "properties": {
+        "mechanism": { "$ref": "#/$defs/identity" },
+        "sourceCriterionIds": { "$ref": "#/$defs/idList" },
+        "acceptedCriterionIds": { "$ref": "#/$defs/idList" },
+        "invariantIds": { "$ref": "#/$defs/idList" },
+        "nonGoalIds": { "$ref": "#/$defs/idList" },
+        "guidanceIds": { "$ref": "#/$defs/idList" },
+        "rationale": { "$ref": "#/$defs/text" }
+      },
+      "anyOf": [
+        { "type": "object", "properties": { "sourceCriterionIds": { "type": "array", "minItems": 1 } } },
+        { "type": "object", "properties": { "acceptedCriterionIds": { "type": "array", "minItems": 1 } } },
+        { "type": "object", "properties": { "invariantIds": { "type": "array", "minItems": 1 } } },
+        { "type": "object", "properties": { "nonGoalIds": { "type": "array", "minItems": 1 } } },
+        { "type": "object", "properties": { "guidanceIds": { "type": "array", "minItems": 1 } } }
+      ]
+    },
+    "tripwire": {
+      "type": "object", "additionalProperties": false, "required": ["id", "category", "evidence"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "category": { "enum": ["line-count", "file-count", "diff-bytes", "token-count", "other-quantity"] },
+        "evidence": { "$ref": "#/$defs/text" }
+      }
+    },
+    "assessmentPacket": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "binding", "sourceScope", "acceptedScope", "changeInventory", "tripwires"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "binding": { "$ref": "#/$defs/binding" },
+        "sourceScope": { "$ref": "#/$defs/sourceScope" },
+        "acceptedScope": { "oneOf": [{ "$ref": "#/$defs/acceptedScope" }, { "type": "null" }] },
+        "changeInventory": { "$ref": "#/$defs/changeInventory" },
+        "tripwires": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/tripwire" } }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "acceptedScope": { "type": "null" },
+            "binding": { "type": "object", "properties": { "phase": { "const": "source-draft" } } }
+          }
+        },
+        {
+          "properties": {
+            "acceptedScope": { "$ref": "#/$defs/acceptedScope" },
+            "binding": { "type": "object", "properties": { "phase": { "enum": ["plan", "task", "integrated-head", "review-finding"] } } }
+          }
+        }
+      ]
+    },
+    "sourceScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["objective", "requiredCriteria", "nonGoals", "implementationGuidance"],
+      "properties": {
+        "objective": { "$ref": "#/$defs/text" },
+        "requiredCriteria": { "type": "array", "minItems": 1, "maxItems": 256, "items": { "$ref": "#/$defs/criterion" } },
+        "nonGoals": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/criterion" } },
+        "implementationGuidance": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/criterion" } }
+      }
+    },
+    "acceptedScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["criteria", "invariants", "minimalClosure", "authorizedShape", "unauthorizedShape", "deferredShape"],
+      "properties": {
+        "criteria": { "type": "array", "minItems": 1, "maxItems": 256, "items": { "$ref": "#/$defs/criterion" } },
+        "invariants": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/criterion" } },
+        "minimalClosure": { "$ref": "#/$defs/text" },
+        "authorizedShape": { "$ref": "#/$defs/identityList" },
+        "unauthorizedShape": { "$ref": "#/$defs/identityList" },
+        "deferredShape": { "$ref": "#/$defs/identityList" }
+      }
+    },
+    "changeInventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "paths", "dependencies", "publicSurfaces", "persistentSurfaces", "subsystems", "mappings"],
+      "properties": {
+        "summary": { "$ref": "#/$defs/text" },
+        "paths": { "$ref": "#/$defs/identityList" },
+        "dependencies": { "$ref": "#/$defs/identityList" },
+        "publicSurfaces": { "$ref": "#/$defs/identityList" },
+        "persistentSurfaces": { "$ref": "#/$defs/identityList" },
+        "subsystems": { "$ref": "#/$defs/identityList" },
+        "mappings": { "type": "array", "minItems": 1, "maxItems": 256, "items": { "$ref": "#/$defs/inventoryMapping" } }
+      }
+    },
+    "classification": { "enum": ["required", "implementation-choice", "speculative", "necessary-minor-expansion", "material-scope-change", "insufficient-evidence"] },
+    "coverage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mechanism", "sourceCriterionIds", "acceptedCriterionIds", "invariantIds", "nonGoalIds", "guidanceIds", "classification", "rationale"],
+      "properties": {
+        "mechanism": { "$ref": "#/$defs/identity" },
+        "sourceCriterionIds": { "$ref": "#/$defs/idList" },
+        "acceptedCriterionIds": { "$ref": "#/$defs/idList" },
+        "invariantIds": { "$ref": "#/$defs/idList" },
+        "nonGoalIds": { "$ref": "#/$defs/idList" },
+        "guidanceIds": { "$ref": "#/$defs/idList" },
+        "classification": { "$ref": "#/$defs/classification" },
+        "rationale": { "$ref": "#/$defs/text" }
+      }
+    },
+    "affirmativeCoverage": {
+      "allOf": [
+        { "$ref": "#/$defs/coverage" },
+        { "type": "object", "properties": { "classification": { "enum": ["required", "implementation-choice"] } } }
+      ]
+    },
+    "trimCoverage": {
+      "allOf": [
+        { "$ref": "#/$defs/coverage" },
+        { "type": "object", "properties": { "classification": { "enum": ["required", "implementation-choice", "speculative"] } } }
+      ]
+    },
+    "minorCoverage": {
+      "allOf": [
+        { "$ref": "#/$defs/coverage" },
+        { "type": "object", "properties": { "classification": { "enum": ["required", "implementation-choice", "necessary-minor-expansion"] } } }
+      ]
+    },
+    "materialCoverage": {
+      "allOf": [
+        { "$ref": "#/$defs/coverage" },
+        { "type": "object", "properties": { "classification": { "enum": ["required", "implementation-choice", "material-scope-change"] } } }
+      ]
+    },
+    "insufficientCoverage": {
+      "allOf": [
+        { "$ref": "#/$defs/coverage" },
+        { "type": "object", "properties": { "classification": { "const": "insufficient-evidence" } } }
+      ]
+    },
+    "materialityCategory": {
+      "enum": [
+        "new-subsystem", "new-dependency", "public-surface", "persistent-surface",
+        "cross-capability-work", "policy-change", "repository-wide-enforcement",
+        "independent-workstream", "new-criterion", "non-goal-reversal", "sensitive-policy",
+        "replaces-accepted-approach", "repeated-expansion"
+      ]
+    },
+    "materialityTrigger": {
+      "type": "object", "additionalProperties": false, "required": ["category", "evidence"],
+      "properties": { "category": { "$ref": "#/$defs/materialityCategory" }, "evidence": { "$ref": "#/$defs/text" } }
+    },
+    "scopeDelta": {
+      "type": "object", "additionalProperties": false,
+      "required": ["description", "sourceCriterionIds", "acceptedCriterionIds", "invariantIds", "materialSurfaces"],
+      "properties": {
+        "description": { "$ref": "#/$defs/text" },
+        "sourceCriterionIds": { "$ref": "#/$defs/idList" },
+        "acceptedCriterionIds": { "$ref": "#/$defs/idList" },
+        "invariantIds": { "$ref": "#/$defs/idList" },
+        "materialSurfaces": { "type": "array", "maxItems": 13, "uniqueItems": true, "items": { "$ref": "#/$defs/materialityCategory" } }
+      }
+    },
+    "minorScopeDelta": {
+      "allOf": [
+        { "$ref": "#/$defs/scopeDelta" },
+        {
+          "type": "object",
+          "properties": { "materialSurfaces": { "type": "array", "maxItems": 0 } },
+          "anyOf": [
+            { "type": "object", "properties": { "sourceCriterionIds": { "type": "array", "minItems": 1 } } },
+            { "type": "object", "properties": { "acceptedCriterionIds": { "type": "array", "minItems": 1 } } }
+          ]
+        }
+      ]
+    },
+    "verdict": { "enum": ["within-scope", "trim-required", "minor-amendment-required", "human-decision-required", "insufficient-evidence"] }
+  }
+}
