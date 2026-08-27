@@ -399,6 +399,14 @@ test('minor amendment stays blocked until an atomic authority chain and fresh as
     rootCauseId: minor.rootCauseId, decisionId: decisionInput.decisionId,
     amendmentDigest, priorAuthorityDigest, revisedAuthorityDigest,
   };
+  assert.throws(() => checkpointScopeDecision({
+    cwd,
+    decision: { ...decisionInput, amendment },
+    expectedRevision: classified.revision,
+    event: { type: 'invalid-scope-event', summary: 'x'.repeat(1001) },
+  }), { code: 'INVALID_EVENT' });
+  assert.equal(harness.loadState(cwd).scopeControl.journalDigest, classified.scopeControl.journalDigest);
+
   const amended = checkpointScopeDecision({
     cwd,
     decision: { ...decisionInput, amendment },
@@ -461,21 +469,28 @@ test('returned scope atomically imports amendment and resume evidence', () => {
     cwd, livePrHeadSha: fixture.packet.reviewedHeadSha, expectedRevision: decided.revision,
   });
   const revisedAuthorityDigest = `sha256:${'e'.repeat(64)}`;
-  const resumed = checkpointScopeResume({
+  const resume = {
+    entryId: 'resume-return-amendment', at: harness.AT, rootCauseId: material.rootCauseId,
+    decisionId: decision.decisionId, scopeReturnDigest: returned.scopeControl.returnDigest,
+    resumedAuthorityDigest: revisedAuthorityDigest,
+    resumedHeadSha: returned.currentIntegrationHeadSha,
+    amendment: {
+      entryId: 'amendment-return-one', at: harness.AT, rootCauseId: material.rootCauseId,
+      decisionId: decision.decisionId, amendmentDigest: PLAN_DIGEST,
+      priorAuthorityDigest: returned.scopeControl.authorityDigest,
+      revisedAuthorityDigest,
+    },
+  };
+  assert.throws(() => checkpointScopeResume({
     cwd,
     expectedRevision: returned.revision,
-    resume: {
-      entryId: 'resume-return-amendment', at: harness.AT, rootCauseId: material.rootCauseId,
-      decisionId: decision.decisionId, scopeReturnDigest: returned.scopeControl.returnDigest,
-      resumedAuthorityDigest: revisedAuthorityDigest,
-      resumedHeadSha: returned.currentIntegrationHeadSha,
-      amendment: {
-        entryId: 'amendment-return-one', at: harness.AT, rootCauseId: material.rootCauseId,
-        decisionId: decision.decisionId, amendmentDigest: PLAN_DIGEST,
-        priorAuthorityDigest: returned.scopeControl.authorityDigest,
-        revisedAuthorityDigest,
-      },
-    },
+    resume,
+    event: { type: 'invalid-scope-event', summary: 'x'.repeat(1001) },
+  }), { code: 'INVALID_EVENT' });
+  assert.equal(harness.loadState(cwd).scopeControl.journalDigest, returned.scopeControl.journalDigest);
+
+  const resumed = checkpointScopeResume({
+    cwd, expectedRevision: returned.revision, resume,
   });
   assert.equal(resumed.scopeControl.gate, 'decision-required');
   assert.equal(resumed.scopeControl.authorityDigest, revisedAuthorityDigest);

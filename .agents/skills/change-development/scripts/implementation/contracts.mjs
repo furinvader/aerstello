@@ -29,6 +29,7 @@ const DIRECT_COMMANDS = new Set([
   'npm run check:api', 'npm run check:web', 'npm run check:shared', 'npm run check:workflow',
   'npm run check:release-state', 'npm run check:released-migrations',
 ]);
+const FIXED_DIFF_CHECK_COMMAND = 'git diff --check';
 const WORKSPACES = new Set(['@aerstello/api', '@aerstello/web', '@aerstello/shared']);
 const WRAPPERS = new Set(['env', 'bash', 'sh', 'zsh', 'fish', 'command', 'exec', 'xargs']);
 const SHELL_SYNTAX = /[;&|<>`$()'"\\*?\[\]{}!#~\t\v\f\r\n]/u;
@@ -143,7 +144,7 @@ export function parseImplementationValidationCommand(command) {
       || command.trim() !== command || /\s{2,}/u.test(command) || SHELL_SYNTAX.test(command)) return null;
   const tokens = command.split(' ');
   if (tokens.some((token) => !safeToken(token)) || WRAPPERS.has(tokens[0])) return null;
-  if (DIRECT_COMMANDS.has(command) || parseRelatedE2E(command)) return tokens;
+  if (DIRECT_COMMANDS.has(command) || command === FIXED_DIFF_CHECK_COMMAND || parseRelatedE2E(command)) return tokens;
   if (tokens[0] === 'npm') return targetedNpmTest(tokens) ? tokens : null;
   if (tokens[0] === 'node' && tokens[1] === '--test' && tokens.length > 2
       && tokens.slice(2).every((path) => !path.startsWith('-')

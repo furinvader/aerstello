@@ -143,7 +143,10 @@ function amendmentEntry(amendment, journal, classification, decision, transition
 
 function journalPrefixLength(journal, expectedDigest) {
   for (let length = journal.entries.length; length >= 0; length -= 1) {
-    const candidate = { ...journal, entries: journal.entries.slice(0, length) };
+    const entries = journal.entries.slice(0, length);
+    const authorityDigest = entries.findLast((entry) => entry.kind === 'amendment')?.revisedAuthorityDigest
+      ?? initialJournalAuthorityDigest(journal);
+    const candidate = { ...journal, authorityDigest, entries };
     if (scopeControlJournalDigest(candidate) === expectedDigest) return length;
   }
   return null;
