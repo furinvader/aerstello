@@ -136,6 +136,7 @@ const {
   bindPackets,
   planInput,
   bindPacket,
+  scopeReadyForPacket,
   writePreAuthorityImplementedState,
   writePreAuthorityTasks,
   canonicalBoundIntegratedTask,
@@ -216,6 +217,7 @@ test('an already-bound pre-fix v3 packet repairs only from one exact historical 
     reason: 'Exact browser-visible scenario selected before binding.',
     selectors: ['id-a-host-switches-the-interface-to-italian'], projects: ['tablet-chromium'],
   });
+  state = scopeReadyForPacket(cwd, state, packet);
   planSpecialists({
     cwd, input: planInput(state, packet, { browserVisible: true, testSelectionUncertain: false }),
     expectedRevision: state.revision, now: () => AT,
@@ -662,6 +664,7 @@ test('behavior mapping gates binding and exact-head risk evidence feeds only ver
     selectors: ['id-a-host-switches-the-interface-to-italian'],
     projects: ['tablet-chromium'],
   });
+  state = scopeReadyForPacket(cwd, state, browserPacket);
   planSpecialists({
     cwd, input: planInput(state, browserPacket, { browserVisible: true, testSelectionUncertain: false }),
     expectedRevision: state.revision, now: () => AT,
@@ -768,6 +771,7 @@ test('signal-only behavior mapping survives binding and compound provenance tamp
     reason: 'Explicit browser-visible planning signal selected this scenario.',
     selectors: ['id-a-host-switches-the-interface-to-italian'], projects: ['tablet-chromium'],
   });
+  state = scopeReadyForPacket(cwd, state, packet);
   planSpecialists({
     cwd, input: planInput(state, packet, { browserVisible: false, testSelectionUncertain: true }),
     expectedRevision: state.revision, now: () => AT,
@@ -938,7 +942,7 @@ test('behavior mapping remains bound to the reviewed commit after dependent inte
     id: 'later-browser-task', sourceIds: ['local:later-browser-task'], fingerprint: 'later-browser-task',
     status: 'proposed', disposition: 'actionable', integratedCommitSha: null, resolutionSummary: null,
   });
-  const state = checkpointState({
+  let state = checkpointState({
     cwd, expectedRevision: integrated.revision,
     nextState: { ...integrated, tasks: [...integrated.tasks, laterTask] },
   });
@@ -950,6 +954,7 @@ test('behavior mapping remains bound to the reviewed commit after dependent inte
     reason: 'Exact localization scenario selected against the reviewed commit.',
     selectors: ['id-a-host-switches-the-interface-to-italian'], projects: ['tablet-chromium'],
   });
+  state = scopeReadyForPacket(cwd, state, packet);
   assert.notEqual(reviewedHead, integratedHead);
   assert.throws(() => planSpecialists({
     cwd, expectedRevision: state.revision, now: () => AT,
