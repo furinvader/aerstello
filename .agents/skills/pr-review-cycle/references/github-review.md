@@ -14,6 +14,14 @@ The main orchestrator alone requests reviews, posts evidence, closes threads,
 and writes durable state. Workers and the integration verifier never write to
 GitHub.
 
+Scope control adds no GitHub command and changes none of the native review,
+thread, CI, or Done evidence. Every existing mutation/transition gate now also
+requires receipt-valid scope authority, a `ready` compact gate, exact active
+and live PR HEAD applicability, and—when acting on a task—the matching root
+classification. Missing legacy projection, invalid receipts, material or minor
+decision gates, returned state, or stale HEAD fails closed before a GitHub
+mutation or state checkpoint.
+
 ## Review-ready gate
 
 A commit is review-ready only when:
@@ -27,6 +35,19 @@ A commit is review-ready only when:
 - the branch is pushed and local HEAD equals the GitHub PR head;
 - the state checkpoint records that Review commit; and
 - a fresh GitHub query shows no open Codex review threads from prior rounds.
+
+It must also have current receipt-valid scope proof for the exact live PR HEAD.
+This does not replace any item above. `status` remains read-only and renders a
+concise scope authority/source/minimal-closure line, exact-HEAD current/stale
+line, root classification plus smallest alternative and approved boundary,
+blocker, and next action. `advance` returns `scope-blocked` without mutation
+when that proof is not ready.
+
+Done repeats the same current scope gate immediately before completion: scope
+proof must still be receipt-valid, `ready`, and bound to the current local,
+pushed, integration, and live PR HEAD. Clean review, green CI/full E2E, closed
+threads, and every other native completion condition remain independently
+required.
 
 Full local checks and full local E2E are not review-ready requirements.
 
@@ -125,6 +146,13 @@ successful verification.
 
 A successful close mutation alone is not confirmation. Integrated is not
 Resolved, and neither means Done.
+
+For each selected root, prefer the `unnecessary-mechanism-defect` removal or
+trim path when it is sufficient. A `material-scope-change` cannot be resolved
+by an earlier PR implementation: it requires an explicit decision, and an
+approved replan must return with a new exact-head classification before these
+GitHub gates reopen. This enforces correctness of the current PR rather than
+preserving obsolete review-round machinery.
 
 For an actionable Integrated `local` or `github-threadless` fix, or a selected
 `not-applicable` task with disposition `duplicate`, `already-fixed`, `stale`,

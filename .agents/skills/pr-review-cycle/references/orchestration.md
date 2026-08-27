@@ -3,6 +3,43 @@
 Read this reference before assigning workers, managing worktrees, integrating
 fixes, or choosing local tests.
 
+## Establish the scope boundary
+
+Before binding a remediation packet, load verified authority and classify its
+root against a canonical scope-review assessment for the exact Review commit
+and exact packet shape. The five lifecycle classifications and their canonical
+verdict mapping are defined in
+[State and contracts](state-and-contracts.md#scope-authority-and-receipts).
+`minor-amendment-required` is not an execution shortcut: it remains decision
+gated until the authority amendment is recorded.
+
+Use removal-first analysis for newly introduced machinery. If removing or
+simplifying it still closes the accepted authority, classify it
+`unnecessary-mechanism-defect` and use the smaller sufficient alternative.
+Current-PR correctness is authoritative; an earlier implementation or review
+round does not justify preserving unnecessary infrastructure. Unrelated work
+is recorded as a referenced follow-up rather than folded into remediation.
+
+Only a receipt-valid `ready` gate and matching root classification may bind,
+start, accept, integrate, resolve, request review, refresh threads, or finish.
+The classification's root/finding identity, exact HEAD, and
+remediation-shape digest must match. Duplicate evidence may reuse the same exact
+classification; changed HEAD, findings, authority, decision, or shape requires
+a new assessment and exact-head manifest.
+
+A material expansion needs one evidence-bound decision. Narrow rejection,
+split/defer, or removal/simplification can continue only inside the resulting
+ready boundary. Approved expansion/replan or abandon/rework produces a guarded
+scope-return envelope for change development while retaining plan, task, and
+review history. The review orchestrator never edits change-development state,
+and resume requires the matching return, authority, and current HEAD. A second
+approved expansion for the same root activates the churn breaker.
+
+Issue 25/55 may later provide an imported authority/handoff coordinator, but
+this cycle consumes only the normalized authority contract and guarded return
+boundary. It does not implement, synthesize, or declare that future production
+handoff complete.
+
 ## Plan fixed tasks
 
 Group comments that share one root cause under one stable finding key. Each task

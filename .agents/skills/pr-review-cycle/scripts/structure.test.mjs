@@ -35,6 +35,7 @@ const EXPECTED_CANONICAL_FILES = [
   'schemas/pr-review-state.schema.json',
   'schemas/review-fix-result.schema.json',
   'schemas/review-fix-task.schema.json',
+  'schemas/scope-control.schema.json',
   'scripts/contracts/contract-identities.mjs',
   'scripts/contracts/contracts.mjs',
   'scripts/contracts/contracts.test.mjs',
@@ -44,6 +45,8 @@ const EXPECTED_CANONICAL_FILES = [
   'scripts/contracts/primitives.test.mjs',
   'scripts/contracts/review-evidence.mjs',
   'scripts/contracts/review-evidence.test.mjs',
+  'scripts/contracts/scope-control.mjs',
+  'scripts/contracts/scope-control.test.mjs',
   'scripts/contracts/state-v1.mjs',
   'scripts/contracts/state-v1.test.mjs',
   'scripts/contracts/state-v3.mjs',
@@ -111,6 +114,9 @@ const EXPECTED_CANONICAL_FILES = [
   'scripts/github/recovery.test.mjs',
   'scripts/github/request.test.mjs',
   'scripts/github/review-response.test.mjs',
+  'scripts/github/scope-gates.test.mjs',
+  'scripts/github/scope-readiness.mjs',
+  'scripts/github/scope-readiness.test.mjs',
   'scripts/github/snapshot.mjs',
   'scripts/github/snapshot.test.mjs',
   'scripts/github/status-renderer.mjs',
@@ -158,6 +164,7 @@ const EXPECTED_CANONICAL_FILES = [
   'scripts/state/cli.test.mjs',
   'scripts/state/composed-services.test.mjs',
   'scripts/state/errors.mjs',
+  'scripts/state/evidence/scope-control.mjs',
   'scripts/state/evidence/specialist-bundle-store.mjs',
   'scripts/state/evidence/specialist-bundles.mjs',
   'scripts/state/evidence/task-binding.mjs',
@@ -176,6 +183,7 @@ const EXPECTED_CANONICAL_FILES = [
   'scripts/state/recovery.mjs',
   'scripts/state/review-transitions.test.mjs',
   'scripts/state/schema-migration-and-recovery.test.mjs',
+  'scripts/state/scope-lifecycle.test.mjs',
   'scripts/state/services/archive-import.mjs',
   'scripts/state/services/archive-import.test.mjs',
   'scripts/state/services/completion.mjs',
@@ -184,6 +192,7 @@ const EXPECTED_CANONICAL_FILES = [
   'scripts/state/services/git-metadata.test.mjs',
   'scripts/state/services/review.mjs',
   'scripts/state/services/review.test.mjs',
+  'scripts/state/services/scope.mjs',
   'scripts/state/services/tasks.mjs',
   'scripts/state/services/tasks.test.mjs',
   'scripts/state/services/validation.mjs',
@@ -205,6 +214,7 @@ const EXPECTED_CANONICAL_FILES = [
   'scripts/state/transitions/review-policy.test.mjs',
   'scripts/state/transitions/review.mjs',
   'scripts/state/transitions/review.test.mjs',
+  'scripts/state/transitions/scope.mjs',
   'scripts/state/transitions/tasks.mjs',
   'scripts/state/transitions/tasks.test.mjs',
   'scripts/state/transitions/transactional-evidence.mjs',
@@ -273,6 +283,9 @@ const EXPECTED_SEPARATE_CAPABILITIES = {
     '.codex/agents/behavior-mapper.toml',
     '.codex/agents/offline-realtime-reviewer.toml',
     '.codex/agents/security-reviewer.toml',
+  ],
+  scopeReview: [
+    '.agents/skills/scope-review/**',
   ],
   release: [
     '.release/**',
@@ -361,6 +374,10 @@ const specialistRegistryModule = join(
   repositoryDirectory,
   '.agents/skills/aerstello-specialists/scripts/validate-registry.mjs',
 );
+const scopeReviewValidationModule = join(
+  repositoryDirectory,
+  '.agents/skills/scope-review/scripts/validate-assessment.mjs',
+);
 
 function contractModule(fileName) {
   return join(contractsDirectory, fileName);
@@ -410,6 +427,17 @@ const PRODUCTION_CONTRACT_IMPORTS = new Map([
       'requireFields', 'validateStringList',
     ]],
   ])],
+  ['scope-control.mjs', new Map([
+    [scopeReviewValidationModule, [
+      'validateAssessmentPacket', 'validateScopeAssessmentApplicability',
+      'validateScopeAssessmentResult',
+    ]],
+    [contractModule('contract-identities.mjs'), ['sha256CanonicalContractJson']],
+    [contractModule('primitives.mjs'), [
+      'isDateTime', 'isObject', 'isSha', 'isString', 'rejectUnknownFields',
+      'requireFields', 'validateStringList',
+    ]],
+  ])],
   ['thread-proof.mjs', new Map([
     ['node:util', ['isDeepStrictEqual']],
     [contractModule('primitives.mjs'), [
@@ -436,6 +464,7 @@ const PRODUCTION_CONTRACT_IMPORTS = new Map([
       'validateReviewHistory', 'validateReviewOutcome', 'validateReviewRequest',
       'validateStaleDiscoveryDispositions', 'validateVerificationEscalation',
     ]],
+    [contractModule('scope-control.mjs'), ['validateScopeControlReference']],
     [contractModule('thread-proof.mjs'), ['validateCiProof', 'validateProof', 'validateThreadStatus']],
   ])],
   ['contracts.mjs', new Map([
@@ -445,6 +474,13 @@ const PRODUCTION_CONTRACT_IMPORTS = new Map([
     [contractModule('state-v1.mjs'), ['validatePrReviewStateV1']],
     [contractModule('state-v3.mjs'), [
       'FINDING_DISPOSITIONS', 'STATE_PHASES', 'TASK_STATUSES', 'validatePrReviewState',
+    ]],
+    [contractModule('scope-control.mjs'), [
+      'SCOPE_CLASSIFICATIONS', 'SCOPE_CONTROL_GATES', 'SCOPE_DECISIONS',
+      'SCOPE_JOURNAL_ENTRY_KINDS', 'scopeAuthorityDigest', 'scopeControlJournalDigest',
+      'scopeExactHeadManifestDigest', 'scopeGateForClassificationEntry',
+      'validateScopeAuthoritySnapshot', 'validateScopeControlJournal',
+      'validateScopeControlReference', 'validateScopeReturnEnvelope',
     ]],
     [contractModule('targeted-validation.mjs'), [
       'parseTargetedValidationCommand', 'unionInitialValidationSelection',
@@ -466,6 +502,14 @@ const CONTRACT_FACADE_EXPORTS = [
   'parseTargetedValidationCommand',
   'reviewRequestGate',
   'reviewRequestUsage',
+  'SCOPE_CLASSIFICATIONS',
+  'SCOPE_CONTROL_GATES',
+  'SCOPE_DECISIONS',
+  'SCOPE_JOURNAL_ENTRY_KINDS',
+  'scopeAuthorityDigest',
+  'scopeControlJournalDigest',
+  'scopeExactHeadManifestDigest',
+  'scopeGateForClassificationEntry',
   'staleDiscoveryDispositionId',
   'STATE_PHASES',
   'TASK_STATUSES',
@@ -473,6 +517,10 @@ const CONTRACT_FACADE_EXPORTS = [
   'unionInitialValidationSelection',
   'unionRequiredValidation',
   'validateInitialValidationSelection',
+  'validateScopeAuthoritySnapshot',
+  'validateScopeControlJournal',
+  'validateScopeControlReference',
+  'validateScopeReturnEnvelope',
   'validatePrReviewState',
   'validatePrReviewStateV1',
   'validateTaskPacket',
@@ -546,7 +594,10 @@ const PRODUCTION_STATE_IMPORTS = new Map([
     ['node:path', ['join']],
     [join(repositoryDirectory, 'scripts', 'lib', 'git.mjs'), ['gitText', 'resolveCommit', 'runGit']],
     [join(repositoryDirectory, 'scripts', 'lib', 'release-state.mjs'), ['inspectReleaseState']],
-    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['validatePrReviewState', 'validatePrReviewStateV1']],
+    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), [
+      'scopeAuthorityDigest', 'scopeControlJournalDigest', 'validatePrReviewState',
+      'validatePrReviewStateV1', 'validateScopeAuthoritySnapshot',
+    ]],
     [join(scriptsDirectory, 'paths.mjs'), ['repositoryRoot']],
     [stateModule('atomic-io.mjs'), ['atomicWriteJson', 'serializeJson']],
     [stateModule('errors.mjs'), ['StateError']],
@@ -555,6 +606,21 @@ const PRODUCTION_STATE_IMPORTS = new Map([
     [stateModule('locations.mjs'), ['activePointerPath', 'parsePrNumber', 'stateDirectory', 'statePath']],
     [stateModule('locks.mjs'), ['withStateLock']],
     [stateModule('migrations.mjs'), ['migratePrReviewStateV2']],
+    [stateModule('evidence/scope-control.mjs'), ['persistScopeAuthority', 'persistScopeJournal']],
+  ])],
+  ['evidence/scope-control.mjs', new Map([
+    ['node:crypto', ['createHash']],
+    ['node:fs', ['existsSync', 'readFileSync', 'statSync']],
+    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), [
+      'scopeAuthorityDigest', 'scopeControlJournalDigest', 'validateScopeAuthoritySnapshot',
+      'validateScopeControlJournal', 'validateScopeReturnEnvelope',
+    ]],
+    [stateModule('atomic-io.mjs'), ['atomicWriteText', 'canonicalSerializedJson', 'readJsonSidecar']],
+    [stateModule('errors.mjs'), ['StateError']],
+    [stateModule('locations.mjs'), [
+      'scopeAuthorityPath', 'scopeAuthorityReceiptPath', 'scopeControlJournalPath',
+      'scopeControlJournalReceiptPath', 'scopeReturnPath', 'scopeReturnReceiptPath',
+    ]],
   ])],
   ['evidence/task-packets.mjs', new Map([
     ['node:fs', ['existsSync']],
@@ -636,12 +702,18 @@ const PRODUCTION_STATE_IMPORTS = new Map([
     [join(scriptsDirectory, 'paths.mjs'), ['taskBindingProvenanceDirectory', 'taskPacketDirectory', 'workerResultDirectory']],
     [stateModule('atomic-io.mjs'), ['readJsonSidecar']],
     [stateModule('git-authority.mjs'), ['gitSnapshot']],
-    [stateModule('locations.mjs'), ['taskBindingProvenancePath', 'taskBindingProvenanceReceiptPath', 'taskPacketSidecarPath', 'workerResultEnvelopePath', 'workerResultReceiptPath']],
+    [stateModule('locations.mjs'), [
+      'scopeAuthorityPath', 'scopeAuthorityReceiptPath', 'scopeControlJournalPath',
+      'scopeControlJournalReceiptPath', 'scopeReturnPath', 'scopeReturnReceiptPath',
+      'taskBindingProvenancePath', 'taskBindingProvenanceReceiptPath', 'taskPacketSidecarPath',
+      'workerResultEnvelopePath', 'workerResultReceiptPath',
+    ]],
     [stateModule('state-store.mjs'), ['loadState']],
     [stateModule('evidence/task-binding.mjs'), ['assertTaskBindingProvenanceSource', 'buildTaskBindingProvenance', 'readBoundTaskBindingProvenance', 'recoverHistoricalTaskBindingPlanning', 'validateTaskBindingProvenance', 'verifyTaskBindingProvenanceReceipt']],
     [stateModule('evidence/specialist-bundles.mjs'), ['readSpecialistStatus']],
     [stateModule('evidence/task-packets.mjs'), ['hasCompletedHistoricalV2TaskProof', 'readTaskPacketSidecar']],
     [stateModule('evidence/worker-results.mjs'), ['readAcceptedWorkerResult']],
+    [stateModule('evidence/scope-control.mjs'), ['readScopeAuthority', 'readScopeJournal', 'readScopeReturn']],
   ])],
   ['recovery.mjs', new Map([
     ['node:fs', ['existsSync', 'readFileSync']],
@@ -676,8 +748,11 @@ PRODUCTION_STATE_IMPORTS.set('transition-policy.mjs', new Map([
   [stateModule('atomic-io.mjs'), ['canonicalJson']],
   [stateModule('errors.mjs'), ['StateError']],
   [stateModule('git-authority.mjs'), ['assertIntegratedWorkerCommit']],
-  [stateModule('evidence/task-packets.mjs'), [importedAs('readTaskPacketSidecar', 'readBoundTaskPacketSidecar')]],
+  [stateModule('evidence/task-packets.mjs'), [
+    importedAs('readTaskPacketSidecar', 'readBoundTaskPacketSidecar'), 'taskPacketDigest',
+  ]],
   [stateModule('evidence/worker-results.mjs'), ['readAcceptedWorkerResult']],
+  [stateModule('evidence/scope-control.mjs'), ['readScopeJournal']],
 ]));
 PRODUCTION_STATE_IMPORTS.set('checkpoint.mjs', new Map([
   ['node:fs', ['readFileSync']],
@@ -785,17 +860,47 @@ PRODUCTION_STATE_IMPORTS.set('services/tasks.mjs', new Map([
   [stateModule('transitions/review-policy.mjs'), ['reviewLimitNextAction']],
   [stateModule('transitions/tasks.mjs'), ['completeIntegratedTasks']],
   [stateModule('transitions/transactional-evidence.mjs'), ['buildTaskPacketBindingTransition', 'buildTaskPacketReplanTransition', 'buildWorkerResultTransition']],
+  [stateModule('services/scope.mjs'), ['assertScopeTaskAllowed']],
+]));
+PRODUCTION_STATE_IMPORTS.set('transitions/scope.mjs', new Map([
+  [join(scriptsDirectory, 'contracts', 'contracts.mjs'), [
+    'scopeControlJournalDigest', 'scopeGateForClassificationEntry',
+  ]],
+  [stateModule('errors.mjs'), ['StateError']],
+]));
+PRODUCTION_STATE_IMPORTS.set('services/scope.mjs', new Map([
+  ['node:fs', ['existsSync']],
+  [join(scriptsDirectory, 'contracts', 'contracts.mjs'), [
+    'scopeAuthorityDigest', 'scopeControlJournalDigest', 'scopeExactHeadManifestDigest',
+    'validateScopeAuthoritySnapshot', 'validateScopeControlJournal', 'validateScopeReturnEnvelope',
+  ]],
+  [stateModule('atomic-io.mjs'), ['canonicalSerializedJson']],
+  [stateModule('checkpoint.mjs'), ['checkpointProtectedStateTransaction']],
+  [stateModule('errors.mjs'), ['StateError']],
+  [stateModule('evidence/scope-control.mjs'), [
+    'persistScopeAuthority', 'persistScopeJournal', 'persistScopeReturn', 'readScopeAuthority',
+    'readScopeJournal', 'readScopeReturn', 'scopeReturnDigest',
+  ]],
+  [stateModule('state-store.mjs'), ['activePrNumber', 'loadState']],
+  [stateModule('evidence/task-packets.mjs'), ['taskPacketDigest']],
+  [stateModule('locations.mjs'), ['scopeReturnPath']],
+  [stateModule('transitions/scope.mjs'), [
+    'buildScopeAuthorityTransition', 'buildScopeClassificationTransition',
+    'buildScopeDecisionTransition', 'buildScopeResumeTransition',
+    'buildScopeReturnTransition', 'latestScopeClassification',
+  ]],
 ]));
 
 const PRODUCTION_STATE_EXPORTS = new Map([
   ['errors.mjs', ['StateError']],
   ['atomic-io.mjs', ['serializeJson', 'canonicalJson', 'canonicalSerializedJson', 'atomicWriteText', 'atomicWriteJson', 'readJsonSidecar']],
-  ['locations.mjs', ['parsePrNumber', 'stateDirectory', 'statePath', 'validationPlanPath', 'taskPacketSidecarPath', 'taskBindingProvenancePath', 'taskBindingProvenanceReceiptPath', 'workerResultEnvelopePath', 'workerResultReceiptPath', 'specialistReviewBundlePath', 'specialistPlanReceiptPath', 'activePointerPath', 'lockPath', 'requestOwnerLockPath', 'legacyLockPath', 'legacyRequestOwnerLockPath']],
+  ['locations.mjs', ['parsePrNumber', 'stateDirectory', 'statePath', 'validationPlanPath', 'scopeAuthorityPath', 'scopeAuthorityReceiptPath', 'scopeControlJournalPath', 'scopeControlJournalReceiptPath', 'scopeReturnPath', 'scopeReturnReceiptPath', 'taskPacketSidecarPath', 'taskBindingProvenancePath', 'taskBindingProvenanceReceiptPath', 'workerResultEnvelopePath', 'workerResultReceiptPath', 'specialistReviewBundlePath', 'specialistPlanReceiptPath', 'activePointerPath', 'lockPath', 'requestOwnerLockPath', 'legacyLockPath', 'legacyRequestOwnerLockPath']],
   ['locks.mjs', ['withStateLock', 'withGitHubRequestOwnerLock']],
   ['journal.mjs', ['prepareEvent', 'appendEvent', 'ensureGitHubMutationIntent']],
   ['git-authority.mjs', ['inspectWorkerCommitAuthority', 'assertIntegratedWorkerCommit', 'gitSnapshot']],
   ['migrations.mjs', ['validateIntegrationMap', 'migrateTaskV1', 'migrateValidationProof', 'migratePrReviewStateV2', 'migratePrReviewStateV1', 'migrateState']],
   ['state-store.mjs', ['ACTIVE_STATE_LIMIT_BYTES', 'validateStateForWrite', 'readStateDocument', 'parseState', 'activePrNumber', 'locateState', 'loadState', 'claimGitHubMutationDispatch', 'originRepository', 'initializeState']],
+  ['evidence/scope-control.mjs', ['scopeReturnDigest', 'persistScopeAuthority', 'readScopeAuthority', 'persistScopeJournal', 'readScopeJournal', 'persistScopeReturn', 'readScopeReturn']],
   ['evidence/task-packets.mjs', ['taskPacketDigest', 'persistImmutableTaskPacketSidecar', 'readTaskPacketSidecar', 'hasCompletedHistoricalV2TaskProof', 'assertTaskPacketHead', 'assertBoundTaskPacket', 'assertTaskPacketBound']],
   ['evidence/specialist-bundle-store.mjs', ['specialistPlanningErrors', 'specialistRouteFor', 'specialistPhaseForStage', 'normalizedRequiredSpecialistIds', 'canonicalBundleTaskRoute', 'specialistPlanDigest', 'verifySpecialistPlanReceipt', 'persistSpecialistPlanReceipt', 'conciseSpecialistPayloadErrors', 'validateSpecialistBundle', 'readSpecialistBundle', 'writeNewSpecialistBundle']],
   ['evidence/task-binding.mjs', ['loadBoundTaskPackets', 'assertTaskPacketBound', 'assertBehaviorMapperBundleComplete', 'assertBehaviorMapperPlanningComplete', 'recoverHistoricalTaskBindingPlanning', 'taskBindingProvenanceDigest', 'verifyTaskBindingProvenanceReceipt', 'persistTaskBindingProvenanceReceipt', 'validateTaskBindingProvenance', 'buildTaskBindingProvenance', 'assertTaskBindingProvenanceSource', 'persistImmutableTaskBindingProvenance', 'readBoundTaskBindingProvenance', 'loadBoundTaskPacketEntries']],
@@ -809,6 +914,8 @@ const PRODUCTION_STATE_EXPORTS = new Map([
     'completionGate', 'reviewRequestGate', 'reviewRequestUsage', 'gitCommonDirectory',
     'repositoryRoot', 'reviewRoot', 'StateError', 'activePointerPath',
     'specialistPlanReceiptPath', 'specialistReviewBundlePath', 'stateDirectory', 'statePath',
+    'scopeAuthorityPath', 'scopeAuthorityReceiptPath', 'scopeControlJournalPath',
+    'scopeControlJournalReceiptPath', 'scopeReturnPath', 'scopeReturnReceiptPath',
     'taskBindingProvenancePath', 'taskBindingProvenanceReceiptPath', 'taskPacketSidecarPath',
     'validationPlanPath', 'workerResultEnvelopePath', 'workerResultReceiptPath', 'atomicWriteJson',
     'inspectWorkerCommitAuthority', 'appendEvent', 'claimGitHubMutationDispatch',
@@ -827,6 +934,8 @@ const PRODUCTION_STATE_EXPORTS = new Map([
     'checkpointReviewRequest', 'checkpointReviewOutcome', 'checkpointVerificationEscalation',
     'checkpointCompletion', 'checkpointCiValidation', 'checkpointTaskCompletion',
     'checkpointArchiveTaskCompletion', 'checkpointGitMetadata',
+    'assertScopeTaskAllowed', 'checkpointScopeAuthority', 'checkpointScopeClassification',
+    'checkpointScopeDecision', 'checkpointScopeResume', 'checkpointScopeReturn', 'scopeStatus',
   ]],
 ]);
 
@@ -848,6 +957,11 @@ PRODUCTION_STATE_EXPORTS.set('transitions/validation.mjs', [
 ]);
 PRODUCTION_STATE_EXPORTS.set('transitions/tasks.mjs', ['completeIntegratedTasks']);
 PRODUCTION_STATE_EXPORTS.set('transitions/git-metadata.mjs', ['buildGitMetadataTransition']);
+PRODUCTION_STATE_EXPORTS.set('transitions/scope.mjs', [
+  'scopeReference', 'latestScopeClassification', 'scopeGateForJournal',
+  'buildScopeAuthorityTransition', 'buildScopeClassificationTransition',
+  'buildScopeDecisionTransition', 'buildScopeReturnTransition', 'buildScopeResumeTransition',
+]);
 PRODUCTION_STATE_EXPORTS.set('transitions/transactional-evidence.mjs', [
   'buildTaskPacketReplanTransition', 'buildTaskPacketBindingTransition',
   'buildWorkerResultTransition', 'buildTargetedValidationResetTransition',
@@ -870,12 +984,16 @@ PRODUCTION_STATE_EXPORTS.set('services/tasks.mjs', [
   'checkpointWorkerResultAcceptance', 'checkpointWorkerResultBackfill',
   'checkpointTaskCompletion',
 ]);
+PRODUCTION_STATE_EXPORTS.set('services/scope.mjs', [
+  'checkpointScopeAuthority', 'checkpointScopeClassification', 'checkpointScopeDecision',
+  'checkpointScopeReturn', 'checkpointScopeResume', 'assertScopeTaskAllowed', 'scopeStatus',
+]);
 
 const STATE_FACADE_SOURCE_EXPORTS = new Map([
   [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['completionGate', 'reviewRequestGate', 'reviewRequestUsage']],
   [join(scriptsDirectory, 'paths.mjs'), ['gitCommonDirectory', 'repositoryRoot', 'reviewRoot']],
   [stateModule('errors.mjs'), ['StateError']],
-  [stateModule('locations.mjs'), ['activePointerPath', 'specialistPlanReceiptPath', 'specialistReviewBundlePath', 'stateDirectory', 'statePath', 'taskBindingProvenancePath', 'taskBindingProvenanceReceiptPath', 'taskPacketSidecarPath', 'validationPlanPath', 'workerResultEnvelopePath', 'workerResultReceiptPath']],
+  [stateModule('locations.mjs'), ['activePointerPath', 'specialistPlanReceiptPath', 'specialistReviewBundlePath', 'stateDirectory', 'statePath', 'scopeAuthorityPath', 'scopeAuthorityReceiptPath', 'scopeControlJournalPath', 'scopeControlJournalReceiptPath', 'scopeReturnPath', 'scopeReturnReceiptPath', 'taskBindingProvenancePath', 'taskBindingProvenanceReceiptPath', 'taskPacketSidecarPath', 'validationPlanPath', 'workerResultEnvelopePath', 'workerResultReceiptPath']],
   [stateModule('atomic-io.mjs'), ['atomicWriteJson']],
   [stateModule('git-authority.mjs'), ['inspectWorkerCommitAuthority']],
   [stateModule('journal.mjs'), ['appendEvent', 'ensureGitHubMutationIntent']],
@@ -899,6 +1017,7 @@ const STATE_FACADE_SOURCE_EXPORTS = new Map([
   [stateModule('services/archive-import.mjs'), ['checkpointArchiveTaskCompletion']],
   [stateModule('services/validation.mjs'), ['buildTargetedValidationPlan', 'checkpointCiValidation', 'checkpointTargetedValidation', 'checkpointTargetedValidationReset', 'executeTargetedValidationPlan']],
   [stateModule('services/tasks.mjs'), ['checkpointTaskCompletion', 'checkpointTaskPacketBinding', 'checkpointTaskPacketReplan', 'checkpointWorkerResultAcceptance', 'checkpointWorkerResultBackfill']],
+  [stateModule('services/scope.mjs'), ['assertScopeTaskAllowed', 'checkpointScopeAuthority', 'checkpointScopeClassification', 'checkpointScopeDecision', 'checkpointScopeResume', 'checkpointScopeReturn', 'scopeStatus']],
 ]);
 
 const PRODUCTION_STATE_SOURCE_EXPORTS = new Map([
@@ -922,6 +1041,11 @@ const EVIDENCE_CALLBACK_CAPABILITIES = new Map([
   ['evidence/worker-results.mjs', [
     { owner: 'persistWorkerResultEvidence', parameterIndex: 4, property: null, local: 'onStep', callShape: 'optional-direct', calls: 2 },
   ]],
+  ['evidence/scope-control.mjs', [
+    { owner: 'assertValid', parameterIndex: 1, property: null, local: 'validate', callShape: 'direct', calls: 1 },
+    { owner: 'readEvidence', parameterIndex: 0, property: 'validate', local: 'validate', callShape: 'delegate', delegate: 'assertValid', calls: 1 },
+    { owner: 'readEvidence', parameterIndex: 0, property: 'expectedDigest', local: 'expectedDigest', callShape: 'direct', calls: 1 },
+  ]],
 ]);
 
 const STATE_ADAPTER_OPERATIONS = [
@@ -933,6 +1057,7 @@ const STATE_ADAPTER_OPERATIONS = [
   'checkpointVerificationEscalation',
   'loadState',
   'readSpecialistStatus',
+  'scopeStatus',
 ];
 
 const PRODUCTION_GITHUB_IMPORTS = new Map([
@@ -960,6 +1085,9 @@ const PRODUCTION_GITHUB_IMPORTS = new Map([
     [githubModule('evidence/actors.mjs'), ['actorObservation', 'isCanonicalActor']],
   ])],
   ['status-renderer.mjs', new Map()],
+  ['scope-readiness.mjs', new Map([
+    [githubModule('errors.mjs'), ['GitHubWorkflowError']],
+  ])],
   ['mutation-journal.mjs', new Map([
     ['node:fs', ['existsSync', 'readFileSync']],
     ['node:path', ['join']],
@@ -1081,6 +1209,7 @@ const PRODUCTION_GITHUB_IMPORTS = new Map([
     [contractModule('contracts.mjs'), ['validatePrReviewState']],
     [githubModule('errors.mjs'), ['GitHubWorkflowError']],
     [githubModule('mutation-readiness.mjs'), ['assertMutationReady']],
+    [githubModule('scope-readiness.mjs'), ['assertScopeReady', 'assertScopeRootReady', 'readScopeReadiness']],
   ])],
   ['workflow/refresh-threads.mjs', new Map([
     [contractModule('contracts.mjs'), ['buildStaleDiscoveryDisposition', 'reviewRequestUsage']],
@@ -1101,6 +1230,7 @@ const PRODUCTION_GITHUB_IMPORTS = new Map([
     [githubModule('mutations/draft-review-request.mjs'), ['assertRecordedRequestComment']],
     [githubModule('snapshot.mjs'), ['readLiveSnapshot']],
     [githubModule('workflow/refresh-threads.mjs'), ['tasklessPendingReviewHeadDriftRefreshAllowed']],
+    [githubModule('scope-readiness.mjs'), ['scopeStatusSummary']],
   ])],
   ['workflow/request.mjs', new Map([
     [githubModule('errors.mjs'), ['GitHubWorkflowError']],
@@ -1240,6 +1370,7 @@ const PRODUCTION_GITHUB_EXPORTS = new Map([
     'responseFingerprint', 'responseObservation',
   ]],
   ['status-renderer.mjs', ['renderHumanStatus']],
+  ['scope-readiness.mjs', ['readScopeReadiness', 'assertScopeReady', 'assertScopeRootReady', 'scopeStatusSummary']],
   ['mutation-journal.mjs', ['createDefaultMutationJournal']],
   ['adapters/gh-cli.mjs', ['buildGhGraphqlArgs', 'createDefaultGitHubClient']],
   ['adapters/git.mjs', ['createDefaultGitAdapter']],
@@ -2804,8 +2935,12 @@ function inspectEvidenceCallbackCapabilities(fileName, parsed) {
       if (authorized) {
         const parent = node.parent;
         const directCall = ts.isCallExpression(parent) && parent.expression === node;
+        const delegatedCall = ts.isCallExpression(parent)
+          && parent.arguments.includes(node)
+          && ts.isIdentifier(parent.expression)
+          && parent.expression.text === authorized.capability.delegate;
         const actualShape = directCall && parent.questionDotToken
-          ? 'optional-direct' : directCall ? 'direct' : null;
+          ? 'optional-direct' : directCall ? 'direct' : delegatedCall ? 'delegate' : null;
         if (actualShape === authorized.capability.callShape
             && permittedClosure(parent, binding.functionNode, authorized.capability)) {
           authorized.calls += 1;
@@ -2822,7 +2957,8 @@ function inspectEvidenceCallbackCapabilities(fileName, parsed) {
       for (const origin of invocationOrigins(node)) {
         if (!capabilityBindings.has(origin)) {
           errors.push(`evidence module may not invoke function parameter ${origin.property ?? origin.identifier.text} via ${node.expression.getText()}`);
-        } else if (directBinding !== origin) {
+        } else if (directBinding !== origin
+            && capabilityBindings.get(origin).capability.delegate !== directBinding?.owner) {
           errors.push(`evidence callback derived from ${origin.property ?? origin.identifier.text} may not be invoked through an alias`);
         }
       }
@@ -3175,6 +3311,19 @@ function testImportTargets(importer, source) {
     targets.push(target);
     if (forbiddenWorkflowTarget(target)) errors.push(`test import reaches forbidden workflow layer: ${target}`);
   }
+  function visit(node) {
+    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      if (node.arguments.length !== 1 || !ts.isStringLiteral(node.arguments[0])) {
+        errors.push('test dynamic import specifier must be one string literal');
+      } else {
+        const target = normalizedModuleTarget(importer, node.arguments[0].text);
+        targets.push(target);
+        if (forbiddenWorkflowTarget(target)) errors.push(`test import reaches forbidden workflow layer: ${target}`);
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(parsed);
   return { errors, targets };
 }
 
@@ -3386,7 +3535,8 @@ test('checkpoint, services, transitions, CLI, and hooks cannot bypass state auth
     'checkpointWorkerResultAcceptance', 'checkpointWorkerResultBackfill',
     'executeTargetedValidationPlan', 'initializeState', 'loadState', 'locateState', 'migrateState',
     'planSpecialists', 'reconcileState', 'recordSpecialistReview', 'renderRecoverySummary',
-    'specialistContext',
+    'specialistContext', 'checkpointScopeAuthority', 'checkpointScopeClassification',
+    'checkpointScopeDecision', 'checkpointScopeResume', 'checkpointScopeReturn',
   ];
   assert.deepEqual(
     inspectStateFacadeConsumerSource(cliPath, readFileSync(cliPath, 'utf8'), cliFacadeNames),
@@ -4483,6 +4633,7 @@ test('schemas and operator documentation have one canonical copy', () => {
     ['https://aerstello.local/schemas/pr-review-state.schema.json', 'schemas/pr-review-state.schema.json'],
     ['https://aerstello.local/schemas/review-fix-task.schema.json', 'schemas/review-fix-task.schema.json'],
     ['https://aerstello.local/schemas/review-fix-result.schema.json', 'schemas/review-fix-result.schema.json'],
+    ['https://aerstello.local/schemas/pr-review-scope-control-v1.schema.json', 'schemas/scope-control.schema.json'],
   ]);
   for (const [id, expectedSkillPath] of schemaIds) {
     const matches = files.filter((path) => {
@@ -4528,6 +4679,7 @@ test('schemas and operator documentation have one canonical copy', () => {
   const skill = readRepositoryFile('.agents/skills/pr-review-cycle/SKILL.md');
   const githubGuide = readRepositoryFile('.agents/skills/pr-review-cycle/references/github-review.md');
   const stateGuide = readRepositoryFile('.agents/skills/pr-review-cycle/references/state-and-contracts.md');
+  const orchestrationGuide = readRepositoryFile('.agents/skills/pr-review-cycle/references/orchestration.md');
   for (const source of [readme, skill, githubGuide]) {
     assert.match(source, /npm run review:github -- advance --pr/u);
   }
@@ -4545,6 +4697,33 @@ test('schemas and operator documentation have one canonical copy', () => {
   assert.match(stateGuide, /not a state schema addition/u);
   assert.match(stateGuide, /ready:<pr>:<pr-node>:<head>/u);
   assert.match(readme, /issue\s+25/iu);
+
+  for (const surface of [
+    'init --scope-authority',
+    'scope-authority --pr 123 --input',
+    'scope-classify --pr 123 --input',
+    'scope-decision --pr 123 --input',
+    'scope-return --pr 123 --expected-revision',
+    'scope-resume --pr 123 --input',
+  ]) assert.match(readme, new RegExp(surface, 'u'));
+  for (const surface of [
+    /immutable\s+authority snapshot/u,
+    /append-only typed journal/u,
+    /guarded return envelope/u,
+  ]) assert.match(readme, surface);
+  for (const classification of [
+    'within-scope-defect', 'unnecessary-mechanism-defect', 'material-scope-change',
+    'unrelated-follow-up', 'insufficient-scope-authority',
+  ]) assert.match(stateGuide, new RegExp(classification, 'u'));
+  assert.match(stateGuide, /minor-amendment-required[\s\S]*authorityAmendmentRequired: true[\s\S]*decision-required/u);
+  assert.match(orchestrationGuide, /review orchestrator never edits change-development state/u);
+  assert.match(githubGuide, /Done repeats the same current scope gate/u);
+  assert.match(githubGuide, /native completion condition[s]? remain independently\s+required/u);
+  assert.match(stateGuide, /Do not create a fourth\s+scope sidecar or copy the separately owned/u);
+  assert.deepEqual(loadOwnership().separateCapabilities.scopeReview, [
+    '.agents/skills/scope-review/**',
+  ]);
+  assert.equal(PRODUCTION_CONTRACT_IMPORTS.get('scope-control.mjs').has(scopeReviewValidationModule), true);
 });
 
 test('external adapters link to the canonical guide without obsolete references', () => {

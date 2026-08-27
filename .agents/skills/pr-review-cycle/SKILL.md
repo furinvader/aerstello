@@ -39,12 +39,28 @@ the repository, explicit PR, base, local head, GitHub head, saved state, and
 inconsistent release metadata as pre-release. Explicitly migrate old state and
 preserve its backup.
 
+Load receipt-valid scope authority and its exact-head evidence before expanded
+execution. New state uses `init --scope-authority`; the only later scope
+commands are `scope-authority --input`, `scope-classify --input`,
+`scope-decision --input`, `scope-return`, and `scope-resume --input`. Missing,
+partial, stale, or mismatched standalone, imported, or legacy-adoption
+authority fails closed. Legacy adoption preserves review history and is
+unavailable while a worker is active.
+
 ## Phase 2: Plan fixes for the Review commit
 
 Triage applicable Codex findings by root cause. Give each worker fixed
 instructions with exact owned paths, acceptance criteria, related commands, E2E
 selectors, browser projects, and reasons. Missing related-test selection is a
 planning error, never permission to run a full local suite.
+
+Bind each root to one of the five canonical classifications documented in the
+[state reference](references/state-and-contracts.md). A minor-amendment verdict
+still requires a decision and authority amendment. Remove or simplify an
+unnecessary mechanism first; judge correctness against the accepted scope and
+the current PR, not an obsolete intermediate implementation. Task binding and
+worker progress require a receipt-valid exact-HEAD classification for the exact
+remediation shape.
 
 Use the [Aerstello specialist registry](../aerstello-specialists/SKILL.md) to
 select one primary profile and compatible risk tags for each task. Record the
@@ -130,6 +146,9 @@ Diagnostic status reports `not-applicable`, `waiting`, `collectable`,
 
 If work stops earlier, checkpoint the exact next action. Recover from saved
 state, Git, structured GitHub data, and CI artifacts—never from a transcript.
+For material expansion, record the decision and use the guarded return/resume
+boundary; neither side mutates the other workflow's state. A second material
+expansion beyond the last approved boundary for the same root stops as churn.
 If the same finding returns twice, investigate its root cause. Continue the
 exact-commit review cycle until clean by default; stop requesting only when an
 explicit durable operator limit is exhausted or evidence requires human review.
