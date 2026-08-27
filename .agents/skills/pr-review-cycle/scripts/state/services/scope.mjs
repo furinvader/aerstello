@@ -13,6 +13,7 @@ import {
 import { canonicalSerializedJson } from '../atomic-io.mjs';
 import { checkpointProtectedStateTransaction } from '../checkpoint.mjs';
 import { StateError } from '../errors.mjs';
+import { gitSnapshot } from '../git-authority.mjs';
 import {
   persistScopeAuthority,
   persistScopeJournal,
@@ -483,7 +484,14 @@ export function checkpointScopeReturn({
           || !decision || decision.assessmentDigest !== envelope.assessmentDigest) {
         throw new StateError('Scope return lacks classified decision evidence', 'INVALID_SCOPE_RETURN');
       }
-      if (livePrHeadSha !== current.currentIntegrationHeadSha
+      const integrationCheckout = gitSnapshot(current.integrationWorktree);
+      if (integrationCheckout.dirty) {
+        throw new StateError('Scope return requires a clean integration checkout', 'SCOPE_RETURN_STALE');
+      }
+      if (integrationCheckout.headSha !== current.currentIntegrationHeadSha
+          || integrationCheckout.headSha !== livePrHeadSha
+          || integrationCheckout.headSha !== classification.reviewHeadSha
+          || livePrHeadSha !== current.currentIntegrationHeadSha
           || livePrHeadSha !== classification.reviewHeadSha) {
         throw new StateError('Scope return requires the exact live PR HEAD', 'SCOPE_RETURN_STALE');
       }

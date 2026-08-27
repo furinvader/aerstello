@@ -887,6 +887,7 @@ PRODUCTION_STATE_IMPORTS.set('services/scope.mjs', new Map([
   [stateModule('atomic-io.mjs'), ['canonicalSerializedJson']],
   [stateModule('checkpoint.mjs'), ['checkpointProtectedStateTransaction']],
   [stateModule('errors.mjs'), ['StateError']],
+  [stateModule('git-authority.mjs'), ['gitSnapshot']],
   [stateModule('evidence/scope-control.mjs'), [
     'persistScopeAuthority', 'persistScopeJournal', 'persistScopeReturn', 'readScopeAuthority',
     'readScopeJournal', 'readScopeJournalForUpdate', 'readScopeReturn', 'scopeReturnDigest',

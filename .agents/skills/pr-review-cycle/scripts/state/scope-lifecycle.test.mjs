@@ -157,6 +157,23 @@ function classificationInput(fixture, verdict, overrides = {}) {
   };
 }
 
+function scopePersistenceSnapshot(cwd, prNumber) {
+  return [
+    harness.statePath(cwd, prNumber),
+    scopeControlJournalPath(cwd, prNumber),
+    scopeControlJournalReceiptPath(cwd, prNumber),
+    scopeReturnPath(cwd, prNumber),
+    scopeReturnReceiptPath(cwd, prNumber),
+  ].map((path) => [path, existsSync(path) ? readFileSync(path, 'utf8') : null]);
+}
+
+function assertScopePersistenceUnchanged(cwd, snapshot) {
+  for (const [path, contents] of snapshot) {
+    assert.equal(existsSync(path), contents !== null, path);
+    if (contents !== null) assert.equal(readFileSync(path, 'utf8'), contents, path);
+  }
+}
+
 test('initialization atomically captures explicit authority and its empty journal', () => {
   const cwd = harness.repo();
   const headSha = harness.git(cwd, ['rev-parse', 'HEAD']).trim();
@@ -479,6 +496,66 @@ test('scope return reconstructs the exact envelope root despite a later unrelate
   assert.equal(returnedEnvelope.value.smallestExpansion, returning.assessment.result.smallestExpansion);
   assert.equal(returnedEnvelope.value.narrowAlternative, returning.assessment.result.narrowAlternative);
   assert.equal(returnedEnvelope.value.trimAlternative, returning.assessment.result.smallerSufficientAlternative);
+});
+
+test('scope return rejects a dirty integration checkout without durable writes', () => {
+  const cwd = harness.repo();
+  const fixture = proposedFixture(cwd, 'dirty-checkout-return-task');
+  const material = classificationInput(fixture, 'human-decision-required');
+  const classified = checkpointScopeClassification({
+    cwd, classification: material, expectedRevision: fixture.adopted.revision,
+  });
+  const decided = checkpointScopeDecision({
+    cwd,
+    expectedRevision: classified.revision,
+    decision: {
+      entryId: 'decision-dirty-checkout-return', at: harness.AT,
+      rootCauseId: material.rootCauseId, blockerId: 'scope-blocker-dirty-checkout-return',
+      decisionId: 'scope-decision-dirty-checkout-return',
+      decision: 'approve-expansion-and-replan', blockerDigest: DIGEST,
+      approvedDeltaDigest: PLAN_DIGEST, rationale: 'Return the bounded scope expansion.',
+      priorDecisionIds: [],
+    },
+  });
+  writeFileSync(`${cwd}/dirty-integration-checkout.txt`, 'dirty\n');
+  const before = scopePersistenceSnapshot(cwd, decided.prNumber);
+
+  assert.throws(() => checkpointScopeReturn({
+    cwd, livePrHeadSha: fixture.packet.reviewedHeadSha, expectedRevision: decided.revision,
+  }), { code: 'SCOPE_RETURN_STALE' });
+  assertScopePersistenceUnchanged(cwd, before);
+  assert.equal(harness.loadState(cwd).scopeControl.gate, 'return-pending');
+});
+
+test('scope return rejects an uncheckpointed integration commit without durable writes', () => {
+  const cwd = harness.repo();
+  const fixture = proposedFixture(cwd, 'uncheckpointed-head-return-task');
+  const material = classificationInput(fixture, 'human-decision-required');
+  const classified = checkpointScopeClassification({
+    cwd, classification: material, expectedRevision: fixture.adopted.revision,
+  });
+  const decided = checkpointScopeDecision({
+    cwd,
+    expectedRevision: classified.revision,
+    decision: {
+      entryId: 'decision-uncheckpointed-head-return', at: harness.AT,
+      rootCauseId: material.rootCauseId, blockerId: 'scope-blocker-uncheckpointed-head-return',
+      decisionId: 'scope-decision-uncheckpointed-head-return',
+      decision: 'approve-expansion-and-replan', blockerDigest: DIGEST,
+      approvedDeltaDigest: PLAN_DIGEST, rationale: 'Return the bounded scope expansion.',
+      priorDecisionIds: [],
+    },
+  });
+  harness.commit(cwd, {
+    'scripts/uncheckpointed-scope-return.mjs': 'export const uncheckpointed = true;\n',
+  }, 'advance integration checkout without checkpoint');
+  const before = scopePersistenceSnapshot(cwd, decided.prNumber);
+
+  assert.throws(() => checkpointScopeReturn({
+    cwd, livePrHeadSha: fixture.packet.reviewedHeadSha, expectedRevision: decided.revision,
+  }), { code: 'SCOPE_RETURN_STALE' });
+  assertScopePersistenceUnchanged(cwd, before);
+  assert.equal(harness.loadState(cwd).scopeControl.gate, 'return-pending');
 });
 
 test('material return and resume preserve review history and stop a second expansion', () => {
