@@ -483,6 +483,7 @@ const PRODUCTION_CONTRACT_IMPORTS = new Map([
       'SCOPE_CLASSIFICATIONS', 'SCOPE_CONTROL_GATES', 'SCOPE_DECISIONS',
       'SCOPE_JOURNAL_ENTRY_KINDS', 'scopeAuthorityDigest', 'scopeControlJournalDigest',
       'scopeExactHeadManifestDigest', 'scopeClassificationMatchesTask', 'scopeGateForClassificationEntry',
+      'scopeGateForJournal',
       'validateScopeAuthoritySnapshot', 'validateScopeControlJournal',
       'validateScopeControlReference', 'validateScopeReturnEnvelope',
     ]],
@@ -515,6 +516,7 @@ const CONTRACT_FACADE_EXPORTS = [
   'scopeExactHeadManifestDigest',
   'scopeClassificationMatchesTask',
   'scopeGateForClassificationEntry',
+  'scopeGateForJournal',
   'staleDiscoveryDispositionId',
   'STATE_PHASES',
   'TASK_STATUSES',
@@ -871,7 +873,7 @@ PRODUCTION_STATE_IMPORTS.set('services/tasks.mjs', new Map([
 ]));
 PRODUCTION_STATE_IMPORTS.set('transitions/scope.mjs', new Map([
   [join(scriptsDirectory, 'contracts', 'contracts.mjs'), [
-    'scopeControlJournalDigest', 'scopeGateForClassificationEntry',
+    'scopeControlJournalDigest', 'scopeGateForJournal',
   ]],
   [stateModule('errors.mjs'), ['StateError']],
 ]));
@@ -968,7 +970,7 @@ PRODUCTION_STATE_EXPORTS.set('transitions/validation.mjs', [
 PRODUCTION_STATE_EXPORTS.set('transitions/tasks.mjs', ['completeIntegratedTasks']);
 PRODUCTION_STATE_EXPORTS.set('transitions/git-metadata.mjs', ['buildGitMetadataTransition']);
 PRODUCTION_STATE_EXPORTS.set('transitions/scope.mjs', [
-  'scopeReference', 'latestScopeClassification', 'scopeGateForJournal',
+  'scopeReference', 'latestScopeClassification',
   'buildScopeAuthorityTransition', 'buildScopeClassificationTransition',
   'buildScopeDecisionTransition', 'buildScopeReturnTransition', 'buildScopeResumeTransition',
 ]);
@@ -1099,7 +1101,9 @@ const PRODUCTION_GITHUB_IMPORTS = new Map([
   ])],
   ['status-renderer.mjs', new Map()],
   ['scope-readiness.mjs', new Map([
-    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['scopeClassificationMatchesTask']],
+    [join(scriptsDirectory, 'contracts', 'contracts.mjs'), [
+      'scopeClassificationMatchesTask', 'scopeGateForJournal',
+    ]],
     [githubModule('errors.mjs'), ['GitHubWorkflowError']],
   ])],
   ['mutation-journal.mjs', new Map([

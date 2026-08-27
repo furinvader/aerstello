@@ -41,21 +41,21 @@ function manifest(headSha = HEAD, authorityDigest = DIGEST_A, rootCauseId = 'sco
 
 function amendedFixture() {
   const entries = [
-    classification({
+    { ...classification({
       phase: 'review-finding', authorityDigest: DIGEST_A,
       rootCauseId: 'stale-root', findingIds: ['stale-finding'],
-    }),
+    }), sequence: 1 },
     {
       schemaVersion: 1, kind: 'decision', authorityDigest: DIGEST_A,
-      rootCauseId: 'scope-root', reviewHeadSha: HEAD,
+      rootCauseId: 'scope-root', reviewHeadSha: HEAD, sequence: 2,
     },
     {
       schemaVersion: 1, kind: 'amendment', authorityDigest: DIGEST_A,
       rootCauseId: 'scope-root', reviewHeadSha: HEAD,
-      priorAuthorityDigest: DIGEST_A, revisedAuthorityDigest: DIGEST_D,
+      priorAuthorityDigest: DIGEST_A, revisedAuthorityDigest: DIGEST_D, sequence: 3,
     },
-    classification({ authorityDigest: DIGEST_D }),
-    manifest(HEAD, DIGEST_D),
+    { ...classification({ authorityDigest: DIGEST_D }), sequence: 4 },
+    { ...manifest(HEAD, DIGEST_D), sequence: 5 },
   ];
   return fixture({
     reference: { authorityDigest: DIGEST_D, assessmentHeadSha: HEAD },
@@ -155,7 +155,7 @@ test('preserves pristine standalone and imported readiness without accepting emp
   const { state, status } = fixture();
   status.authority.value.authorityKind = 'legacy-adoption';
   await assert.rejects(() => assertScopeReady({ async scopeStatus() { return status; } }, state, HEAD), {
-    code: 'SCOPE_EVIDENCE_INVALID',
+    code: 'SCOPE_NOT_READY',
   });
 });
 
@@ -297,6 +297,32 @@ test('reports durable decision, return, and resume blockers without trusting com
     await assert.rejects(() => assertScopeReady(adapter, state, HEAD), { code: 'SCOPE_NOT_READY' });
     assert.match(scopeStatusSummary(readiness).blocker, new RegExp(gate, 'u'));
   }
+});
+
+test('rejects a forged ready projection when the durable journal requires a decision', async () => {
+  const entry = { ...classification({ scopeClassification: 'material-scope-change' }), sequence: 1 };
+  const { state, status } = fixture({
+    reference: { assessmentHeadSha: HEAD },
+    status: {
+      journal: {
+        digest: DIGEST_B,
+        value: { authorityDigest: DIGEST_A, entries: [entry] },
+      },
+    },
+  });
+  const adapter = { async scopeStatus() { return status; } };
+  const readiness = await readScopeReadiness(adapter, state, HEAD);
+  assert.equal(status.gate, 'ready');
+  assert.equal(readiness.journalGate, 'decision-required');
+  assert.equal(readiness.gate, 'decision-required');
+  assert.equal(readiness.ready, false);
+  await assert.rejects(() => assertScopeReady(adapter, state, HEAD), { code: 'SCOPE_NOT_READY' });
+  await assert.rejects(() => assertScopeRootReady(adapter, state, HEAD, {
+    id: entry.rootCauseId,
+    sourceIds: entry.findingIds,
+    fingerprint: 'scope-fingerprint',
+    disposition: 'actionable',
+  }), { code: 'SCOPE_NOT_READY' });
 });
 
 test('fails closed when the receipt-valid facade operation is unavailable or interrupted', async () => {

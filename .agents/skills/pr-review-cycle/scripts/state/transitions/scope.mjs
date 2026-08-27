@@ -1,6 +1,6 @@
 import {
   scopeControlJournalDigest,
-  scopeGateForClassificationEntry,
+  scopeGateForJournal,
 } from '../../contracts/contracts.mjs';
 import { StateError } from '../errors.mjs';
 
@@ -20,38 +20,6 @@ export function scopeReference({ authorityDigest, journal, gate, returnDigest = 
 export function latestScopeClassification(journal, rootCauseId = null) {
   return journal.entries.findLast((entry) => entry.kind === 'classification'
     && (rootCauseId === null || entry.rootCauseId === rootCauseId)) ?? null;
-}
-
-export function scopeGateForJournal(journal) {
-  const latestAmendment = journal.entries.findLast((entry) => entry.kind === 'amendment');
-  if (latestAmendment) {
-    const revisedAssessment = journal.entries.findLast((entry) => entry.kind === 'classification'
-      && entry.sequence > latestAmendment.sequence
-      && entry.authorityDigest === journal.authorityDigest
-      && !entry.authorityAmendmentRequired);
-    if (!revisedAssessment) return 'decision-required';
-  }
-  const latestByRoot = new Map();
-  for (const entry of journal.entries) {
-    if (entry.kind === 'classification') latestByRoot.set(entry.rootCauseId, entry);
-  }
-  if (latestByRoot.size === 0) return 'insufficient-authority';
-  let decisionRequired = false;
-  for (const entry of latestByRoot.values()) {
-    const entryGate = scopeGateForClassificationEntry(entry);
-    if (entryGate === 'insufficient-authority') return entryGate;
-    if (entryGate !== 'decision-required') continue;
-    if (entry.authorityAmendmentRequired) {
-      decisionRequired = true;
-      continue;
-    }
-    const resolved = journal.entries.some((candidate) => candidate.kind === 'decision'
-      && candidate.rootCauseId === entry.rootCauseId
-      && candidate.assessmentDigest === entry.assessment.digest
-      && candidate.sequence > entry.sequence);
-    if (!resolved) decisionRequired = true;
-  }
-  return decisionRequired ? 'decision-required' : 'ready';
 }
 
 export function buildScopeAuthorityTransition(state, authorityDigest, journal, at) {

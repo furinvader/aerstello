@@ -1,4 +1,7 @@
-import { scopeClassificationMatchesTask } from '../contracts/contracts.mjs';
+import {
+  scopeClassificationMatchesTask,
+  scopeGateForJournal,
+} from '../contracts/contracts.mjs';
 import { GitHubWorkflowError } from './errors.mjs';
 
 function latestClassifications(journal) {
@@ -61,8 +64,11 @@ export async function readScopeReadiness(stateAdapter, state, liveHeadSha = null
   const entries = status?.journal?.value?.entries ?? [];
   // scopeStatus validates durable journal variants before they reach this adapter. Keeping
   // the schema discriminator here also leaves old lightweight adapter fixtures equivalent
-  // to their original empty-journal authority setup.
+  // to their original projection-only setup. Only canonical sequenced entries independently
+  // derive the journal gate; receipt-valid production journals always carry that sequence.
   const durableEntries = entries.filter((entry) => entry?.schemaVersion === 1);
+  const sequencedEntries = durableEntries.filter((entry) => Number.isInteger(entry.sequence));
+  const lightweightProjection = entries.length > 0 && sequencedEntries.length === 0;
   const classifications = latestClassifications(status?.journal?.value);
   const currentHead = state.currentIntegrationHeadSha;
   const referenceMatchesState = status?.configured === true
@@ -84,6 +90,14 @@ export async function readScopeReadiness(stateAdapter, state, liveHeadSha = null
     && durableEntries.length === 0
     && ['standalone', 'imported'].includes(status?.authority?.value?.authorityKind)
     && authorityHead === currentHead;
+  const journalGate = lightweightProjection
+    ? status?.gate ?? 'insufficient-authority'
+    : sequencedEntries.length === 0
+      ? initialAuthorityReady ? 'ready' : 'insufficient-authority'
+    : scopeGateForJournal(status.journal.value);
+  const gate = status?.gate === 'ready'
+    ? journalGate
+    : status?.gate ?? 'insufficient-authority';
   const manifestMatches = !hasClassificationHistory
     ? initialAuthorityReady
     : exactHeadManifest?.manifest.authorityDigest === effectiveAuthorityDigest;
@@ -92,12 +106,13 @@ export async function readScopeReadiness(stateAdapter, state, liveHeadSha = null
   const headMatches = exactHead === currentHead
     && (liveHeadSha === null || liveHeadSha === currentHead)
     && status?.reference?.assessmentHeadSha === (hasClassificationHistory ? currentHead : null);
-  const ready = referenceMatchesState && receiptsMatch && status.gate === 'ready'
+  const ready = referenceMatchesState && receiptsMatch && gate === 'ready'
     && manifestMatches && headMatches;
   return {
     ready,
     configured: status?.configured === true,
-    gate: status?.gate ?? 'insufficient-authority',
+    gate,
+    journalGate,
     currentHeadSha: currentHead,
     liveHeadSha,
     exactHeadSha: exactHead,
