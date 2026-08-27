@@ -87,6 +87,17 @@ function assessmentPair() {
   };
 }
 
+function bindAssessmentAuthority(pair, authorityValue, amendmentDigests = authorityValue.amendmentDigests) {
+  for (const side of ['packet', 'result']) {
+    pair[side].binding.source = structuredClone(authorityValue.source);
+    pair[side].binding.planDigest = authorityValue.planDigest;
+    pair[side].binding.amendmentDigests = [...amendmentDigests];
+    if (authorityValue.planDigest === null) pair[side].binding.taskPacketDigest = null;
+  }
+  pair.digest = `sha256:${sha256CanonicalContractJson({ packet: pair.packet, result: pair.result })}`;
+  return pair;
+}
+
 function authority(overrides = {}) {
   return {
     schemaVersion: 1,
@@ -182,6 +193,37 @@ test('imported authority requires complete real scope identities and a current w
   stale.result.binding.subject.sha = OTHER_HEAD;
   stale.digest = `sha256:${sha256CanonicalContractJson({ packet: stale.packet, result: stale.result })}`;
   assert.match(validateScopeAuthoritySnapshot(authority({ integratedHeadAssessment: stale })).join('\n'), /exact expected HEAD/u);
+
+  const capturedAmendments = [DIGEST, OTHER_DIGEST];
+  const correlated = authority({ amendmentDigests: capturedAmendments });
+  correlated.integratedHeadAssessment = bindAssessmentAuthority(
+    correlated.integratedHeadAssessment,
+    correlated,
+  );
+  assert.deepEqual(validateScopeAuthoritySnapshot(correlated), []);
+  for (const mutate of [
+    (bindingValue) => { bindingValue.source.digest = THIRD_DIGEST; },
+    (bindingValue) => { bindingValue.planDigest = DIGEST; },
+    (bindingValue) => { bindingValue.amendmentDigests = [OTHER_DIGEST, DIGEST]; },
+    (bindingValue) => { bindingValue.amendmentDigests = [DIGEST]; },
+    (bindingValue) => { bindingValue.amendmentDigests = [...capturedAmendments, THIRD_DIGEST]; },
+  ]) {
+    const mismatched = structuredClone(correlated);
+    mutate(mismatched.integratedHeadAssessment.packet.binding);
+    mismatched.integratedHeadAssessment.result.binding = structuredClone(
+      mismatched.integratedHeadAssessment.packet.binding,
+    );
+    mismatched.integratedHeadAssessment.digest = `sha256:${sha256CanonicalContractJson({
+      packet: mismatched.integratedHeadAssessment.packet,
+      result: mismatched.integratedHeadAssessment.result,
+    })}`;
+    assert.notDeepEqual(validateScopeAuthoritySnapshot(mismatched), []);
+  }
+
+  assert.match(validateScopeAuthoritySnapshot(authority({
+    authorityKind: 'standalone', planDigest: null, amendmentDigests: [DIGEST],
+    integratedHeadAssessment: null,
+  })).join('\n'), /amendmentDigests requires a plan digest/u);
 });
 
 test('journal is append-only shaped and embeds exact canonical assessment evidence', () => {
@@ -202,6 +244,68 @@ test('journal is append-only shaped and embeds exact canonical assessment eviden
   assert.match(validateScopeControlJournal(journal(authorityDigest, {
     entries: [classificationEntry(authorityDigest, { assessment: changedPair })],
   })).join('\n'), /canonical packet\/result pair/u);
+});
+
+test('classification assessments bind captured and journal authority in exact append order', () => {
+  const { scopeAuthorityDigest, validateScopeControlJournal } = contract;
+  const authorityValue = authority({ amendmentDigests: [DIGEST] });
+  authorityValue.integratedHeadAssessment = bindAssessmentAuthority(
+    authorityValue.integratedHeadAssessment,
+    authorityValue,
+  );
+  const capturedAuthorityDigest = scopeAuthorityDigest(authorityValue);
+  const first = classificationEntry(capturedAuthorityDigest);
+  first.assessment = bindAssessmentAuthority(first.assessment, authorityValue);
+  const decision = {
+    schemaVersion: 1, sequence: 2, entryId: 'decision-authority', kind: 'decision', at: AT,
+    reviewHeadSha: HEAD, authorityDigest: capturedAuthorityDigest, rootCauseId: 'scope-root',
+    blockerId: 'blocker-authority', decisionId: 'decision-authority',
+    decision: 'approve-expansion-and-replan', assessmentDigest: first.assessment.digest,
+    blockerDigest: OTHER_DIGEST, approvedDeltaDigest: THIRD_DIGEST,
+    rationale: 'Approve the bounded authority amendment.', priorDecisionIds: [],
+  };
+  const amendment = {
+    schemaVersion: 1, sequence: 3, entryId: 'amendment-authority', kind: 'amendment', at: AT,
+    reviewHeadSha: HEAD, authorityDigest: capturedAuthorityDigest, rootCauseId: 'scope-root',
+    decisionId: 'decision-authority', amendmentDigest: THIRD_DIGEST,
+    priorAuthorityDigest: capturedAuthorityDigest, revisedAuthorityDigest: OTHER_DIGEST,
+  };
+  const second = classificationEntry(OTHER_DIGEST, {
+    sequence: 4, entryId: 'classification-authority-revised',
+  });
+  second.assessment = bindAssessmentAuthority(second.assessment, authorityValue, [DIGEST, THIRD_DIGEST]);
+  const entries = [first, decision, amendment, second];
+  const exactJournal = journal(OTHER_DIGEST, { entries });
+  assert.deepEqual(validateScopeControlJournal(exactJournal, authorityValue), []);
+
+  for (const amendments of [
+    [THIRD_DIGEST],
+    [THIRD_DIGEST, DIGEST],
+    [DIGEST],
+    [DIGEST, OTHER_DIGEST, THIRD_DIGEST],
+  ]) {
+    const mismatched = structuredClone(exactJournal);
+    mismatched.entries[3].assessment = bindAssessmentAuthority(
+      mismatched.entries[3].assessment,
+      authorityValue,
+      amendments,
+    );
+    assert.match(
+      validateScopeControlJournal(mismatched, authorityValue).join('\n'),
+      /ordered effective authority amendments/u,
+    );
+  }
+
+  const foreignSource = structuredClone(exactJournal);
+  foreignSource.entries[3].assessment.packet.binding.source.digest = OTHER_DIGEST;
+  foreignSource.entries[3].assessment.result.binding = structuredClone(
+    foreignSource.entries[3].assessment.packet.binding,
+  );
+  foreignSource.entries[3].assessment.digest = `sha256:${sha256CanonicalContractJson({
+    packet: foreignSource.entries[3].assessment.packet,
+    result: foreignSource.entries[3].assessment.result,
+  })}`;
+  assert.match(validateScopeControlJournal(foreignSource, authorityValue).join('\n'), /captured authority source/u);
 });
 
 test('all non-assessment journal variants are closed and exact-evidence-bound', () => {

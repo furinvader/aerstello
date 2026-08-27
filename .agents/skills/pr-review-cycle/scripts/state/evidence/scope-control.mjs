@@ -101,7 +101,8 @@ export function readScopeAuthority(cwd, state) {
 }
 
 export function persistScopeJournal(cwd, state, journal) {
-  assertValid(journal, validateScopeControlJournal, 'scope control journal');
+  const authority = readScopeAuthority(cwd, state).value;
+  assertValid(journal, (value) => validateScopeControlJournal(value, authority), 'scope control journal');
   persistEvidence({
     documentPath: scopeControlJournalPath(cwd, state.prNumber),
     receiptPath: scopeControlJournalReceiptPath(cwd, state.prNumber),
@@ -113,10 +114,11 @@ export function persistScopeJournal(cwd, state, journal) {
 }
 
 export function readScopeJournal(cwd, state) {
+  const authority = readScopeAuthority(cwd, state).value;
   return readEvidence({
     documentPath: scopeControlJournalPath(cwd, state.prNumber),
     receiptPath: scopeControlJournalReceiptPath(cwd, state.prNumber),
-    validate: validateScopeControlJournal,
+    validate: (value) => validateScopeControlJournal(value, authority),
     expectedDigest: scopeControlJournalDigest,
     label: 'scope control journal',
   });

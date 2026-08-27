@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from 'node:util';
+
 import {
   validateAssessmentPacket,
   validateScopeAssessmentApplicability,
@@ -109,6 +111,21 @@ function validateAssessmentPair(value, path, errors, { requiredVerdict = null, e
   if (value.digest !== expectedDigest) errors.push(`${path}.digest must bind the canonical packet/result pair`);
 }
 
+function validateAssessmentAuthority(value, authority, amendmentDigests, path, errors) {
+  for (const side of ['packet', 'result']) {
+    const binding = value?.[side]?.binding;
+    if (!isDeepStrictEqual(binding?.source, authority?.source)) {
+      errors.push(`${path}.${side}.binding.source must equal the captured authority source`);
+    }
+    if (binding?.planDigest !== authority?.planDigest) {
+      errors.push(`${path}.${side}.binding.planDigest must equal the captured authority plan digest`);
+    }
+    if (!isDeepStrictEqual(binding?.amendmentDigests, amendmentDigests)) {
+      errors.push(`${path}.${side}.binding.amendmentDigests must equal the ordered effective authority amendments`);
+    }
+  }
+}
+
 function validateApprovedDecisions(value, path, errors) {
   if (!Array.isArray(value) || value.length > 128) {
     errors.push(`${path} is invalid`);
@@ -169,6 +186,13 @@ export function validateScopeAuthoritySnapshot(value) {
     validateAssessmentPair(value.integratedHeadAssessment, '$.integratedHeadAssessment', errors, {
       requiredVerdict: 'within-scope', expectedHeadSha: value.handoffHeadSha,
     });
+    validateAssessmentAuthority(
+      value.integratedHeadAssessment,
+      value,
+      value.amendmentDigests,
+      '$.integratedHeadAssessment',
+      errors,
+    );
     if (value.integratedHeadAssessment.packet?.binding?.phase !== 'integrated-head'
         || value.integratedHeadAssessment.result?.binding?.phase !== 'integrated-head') {
       errors.push('$.integratedHeadAssessment must be a canonical integrated-head assessment');
@@ -313,7 +337,7 @@ function validateEntry(entry, index, errors) {
   }
 }
 
-export function validateScopeControlJournal(value) {
+export function validateScopeControlJournal(value, authority = null) {
   const errors = [];
   const fields = ['schemaVersion', 'prNumber', 'authorityDigest', 'entries'];
   if (!requireFields(value, fields, '$', errors)) return errors;
@@ -331,7 +355,17 @@ export function validateScopeControlJournal(value) {
     let effectiveAuthority = firstAmendment?.priorAuthorityDigest ?? value.authorityDigest;
     const decisions = new Map();
     const classifications = new Map();
-    const amendmentDigests = [];
+    const amendmentDigests = Array.isArray(authority?.amendmentDigests)
+      ? [...authority.amendmentDigests]
+      : [];
+    if (authority !== null) {
+      const authorityErrors = validateScopeAuthoritySnapshot(authority);
+      for (const error of authorityErrors) errors.push(`$ authority: ${error}`);
+      const capturedDigest = authorityErrors.length === 0 ? scopeAuthorityDigest(authority) : null;
+      if (capturedDigest !== null && effectiveAuthority !== capturedDigest) {
+        errors.push('$.authorityDigest chain must begin with the captured authority digest');
+      }
+    }
     for (const [index, entry] of value.entries.entries()) {
       const path = `$.entries[${index}]`;
       if (entry?.authorityDigest !== effectiveAuthority) {
@@ -339,7 +373,9 @@ export function validateScopeControlJournal(value) {
       }
       if (entry?.kind === 'classification') {
         classifications.set(entry.rootCauseId, entry);
-        if (amendmentDigests.some(
+        if (authority !== null) {
+          validateAssessmentAuthority(entry.assessment, authority, amendmentDigests, `${path}.assessment`, errors);
+        } else if (amendmentDigests.some(
           (digest) => !entry.assessment?.packet?.binding?.amendmentDigests?.includes(digest),
         )) {
           errors.push(`${path}.assessment must bind every preceding journal amendment`);
