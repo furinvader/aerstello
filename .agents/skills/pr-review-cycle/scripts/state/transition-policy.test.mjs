@@ -247,9 +247,11 @@ test('transition policy rejects active execution behind a forged ready minor-ame
     expectedRevision: bound.revision,
     classification: {
       entryId: 'classification-minor-policy', at: harness.AT,
-      reviewHeadSha: packet.reviewedHeadSha, rootCauseId: 'minor-policy-task',
+      reviewHeadSha: packet.reviewedHeadSha, rootCauseId: 'minor-policy-root',
       findingIds: bound.tasks[0].sourceIds,
-      findingFingerprints: bound.tasks[0].sourceIds.map(() => bound.tasks[0].fingerprint),
+      findingFingerprints: bound.tasks[0].sourceIds.map(
+        (_sourceId, index) => `${bound.tasks[0].fingerprint}-f${index + 1}`,
+      ),
       classification: 'within-scope-defect', assessment: pair,
       authorityAmendmentRequired: true, unrelatedReference: null,
       remediationShapeDigest: `sha256:${harness.taskPacketDigest(packet)}`, tripwires: [],
@@ -266,6 +268,77 @@ test('transition policy rejects active execution behind a forged ready minor-ame
   };
   assertCode(
     () => createTransitionPolicy().assertTransitionAllowed(forged, next, undefined, cwd),
+    'SCOPE_CLASSIFICATION_REQUIRED',
+  );
+});
+
+test('transition policy selects the latest exact task evidence independently of scope root identity', () => {
+  const cwd = harness.repo();
+  const initial = harness.init(cwd);
+  const proposed = harness.checkpointState({
+    cwd,
+    expectedRevision: initial.revision,
+    nextState: {
+      ...initial,
+      tasks: [harness.task(initial.currentIntegrationHeadSha, {
+        id: 'opaque, task "identity"',
+        sourceIds: ['thread:root-one', 'thread:root-two'],
+        fingerprint: 'fingerprint-policy-map',
+        status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+      })],
+    },
+  });
+  const packet = harness.taskPacket(initial.currentIntegrationHeadSha, proposed.tasks[0].id, {
+    affectedAreas: ['workflow'], command: 'npm run check:workflow',
+  });
+  const scoped = harness.scopeReadyForPacket(cwd, proposed, packet);
+  harness.planSpecialists({
+    cwd, input: harness.planInput(scoped, packet), expectedRevision: scoped.revision,
+    now: () => harness.AT,
+  });
+  const bound = checkpointTaskPacketBinding({ cwd, packet, expectedRevision: scoped.revision });
+  const pair = harness.scopePair(packet.reviewedHeadSha, packet);
+  const exactClassification = {
+    entryId: 'classification-independent-policy-root', at: harness.AT,
+    reviewHeadSha: packet.reviewedHeadSha, rootCauseId: 'independent-policy-root',
+    findingIds: [...bound.tasks[0].sourceIds].reverse(),
+    findingFingerprints: bound.tasks[0].sourceIds.map(
+      (_sourceId, index) => `${bound.tasks[0].fingerprint}-f${index + 1}`,
+    ).reverse(),
+    classification: 'within-scope-defect', assessment: pair,
+    authorityAmendmentRequired: false, unrelatedReference: null,
+    remediationShapeDigest: `sha256:${harness.taskPacketDigest(packet)}`, tripwires: [],
+  };
+  const classified = checkpointScopeClassification({
+    cwd, classification: exactClassification, expectedRevision: bound.revision,
+  });
+  const queued = {
+    ...classified,
+    tasks: classified.tasks.map((task) => task.id === packet.taskId ? { ...task, status: 'queued' } : task),
+  };
+  assert.doesNotThrow(() => createTransitionPolicy().assertTransitionAllowed(
+    classified, queued, undefined, cwd,
+  ));
+
+  const changedPacket = { ...packet, evidence: 'A different remediation shape.' };
+  const changedPair = harness.scopePair(changedPacket.reviewedHeadSha, changedPacket);
+  const stale = checkpointScopeClassification({
+    cwd,
+    expectedRevision: classified.revision,
+    classification: {
+      ...exactClassification,
+      entryId: 'classification-independent-policy-root-stale-shape',
+      rootCauseId: 'independent-policy-root-stale-shape',
+      assessment: changedPair,
+      remediationShapeDigest: `sha256:${harness.taskPacketDigest(changedPacket)}`,
+    },
+  });
+  const staleQueued = {
+    ...stale,
+    tasks: stale.tasks.map((task) => task.id === packet.taskId ? { ...task, status: 'queued' } : task),
+  };
+  assertCode(
+    () => createTransitionPolicy().assertTransitionAllowed(stale, staleQueued, undefined, cwd),
     'SCOPE_CLASSIFICATION_REQUIRED',
   );
 });

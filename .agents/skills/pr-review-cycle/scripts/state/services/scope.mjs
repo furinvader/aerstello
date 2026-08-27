@@ -184,8 +184,7 @@ function retainedScopeReturnDigest(cwd, state) {
 }
 
 function classificationMatchesTask(classification, task) {
-  if (classification.rootCauseId !== task.id
-      || classification.findingIds.length !== task.sourceIds.length
+  if (classification.findingIds.length !== task.sourceIds.length
       || classification.findingFingerprints.length !== task.sourceIds.length) return false;
   const actual = new Map(classification.findingIds.map(
     (findingId, index) => [findingId, classification.findingFingerprints[index]],
@@ -559,7 +558,7 @@ export function assertScopeTaskAllowed(cwd, state, task, packet) {
   const journal = readScopeJournal(cwd, state).value;
   const expectedShape = `sha256:${taskPacketDigest(packet)}`;
   const classification = journal.entries.findLast((entry) => entry.kind === 'classification'
-    && entry.rootCauseId === task.id);
+    && classificationMatchesTask(entry, task));
   if (!classification
       || !classificationMatchesTask(classification, task)
       || classification.authorityAmendmentRequired

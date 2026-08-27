@@ -781,6 +781,10 @@ function scopePair(headSha, packet) {
   };
 }
 
+function scopeRootForTask(task) {
+  return `scope-root-${createHash('sha256').update(task.id).digest('hex').slice(0, 24)}`;
+}
+
 function scopeReadyForPacket(cwd, state, packet) {
   let current = state;
   if (!current.scopeControl) {
@@ -805,7 +809,7 @@ function scopeReadyForPacket(cwd, state, packet) {
       entryId: `classification-${createHash('sha256').update(packet.taskId).digest('hex').slice(0, 16)}`,
       at: AT,
       reviewHeadSha: packet.reviewedHeadSha,
-      rootCauseId: durableTask.id,
+      rootCauseId: scopeRootForTask(durableTask),
       findingIds: durableTask.sourceIds,
       findingFingerprints: durableTask.sourceIds.map(
         (_sourceId, index) => `${durableTask.fingerprint}-f${index + 1}`,
@@ -1323,6 +1327,7 @@ export {
   planInput,
   bindPacket,
   scopePair,
+  scopeRootForTask,
   scopeReadyForPacket,
   writePreAuthorityImplementedState,
   writePreAuthorityTasks,

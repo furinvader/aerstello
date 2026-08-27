@@ -140,7 +140,7 @@ function classificationInput(fixture, verdict, overrides = {}) {
     entryId: `classification-${verdict.replaceAll(/[^a-z]+/gu, '-')}`,
     at: harness.AT,
     reviewHeadSha: fixture.packet.reviewedHeadSha,
-    rootCauseId: fixture.task.id,
+    rootCauseId: harness.scopeRootForTask(fixture.task),
     findingIds: fixture.task.sourceIds,
     findingFingerprints: fixture.task.sourceIds.map(
       (_sourceId, index) => `${fixture.task.fingerprint}-f${index + 1}`,
@@ -342,16 +342,55 @@ test('task binding requires the exact order-independent finding identity map', (
       }),
       allowed: false,
     },
+    {
+      name: 'mixed',
+      mutate: (classification) => ({
+        ...classification,
+        findingIds: [classification.findingIds[0], 'thread:root-foreign'],
+      }),
+      allowed: false,
+    },
+    {
+      name: 'root-only',
+      mutate: (classification) => ({
+        ...classification,
+        rootCauseId: `identity-root-only`,
+        findingIds: ['thread:root-foreign-one', 'thread:root-foreign-two'],
+        findingFingerprints: ['fingerprint-foreign-f1', 'fingerprint-foreign-f2'],
+      }),
+      allowed: false,
+    },
+    {
+      name: 'duplicated-sources',
+      mutate: (classification) => ({
+        ...classification,
+        findingIds: [classification.findingIds[0], classification.findingIds[0]],
+      }),
+      evidenceRejected: true,
+    },
+    {
+      name: 'copied-fingerprint',
+      mutate: (classification) => ({
+        ...classification,
+        findingFingerprints: [classification.findingFingerprints[0], classification.findingFingerprints[0]],
+      }),
+      evidenceRejected: true,
+    },
   ];
 
   for (const item of cases) {
     const cwd = harness.repo();
     const fixture = proposedFixture(cwd, `identity-${item.name}`, { sourceIds, fingerprint });
-    const classified = checkpointScopeClassification({
+    const classify = () => checkpointScopeClassification({
       cwd,
       classification: item.mutate(classificationInput(fixture, 'within-scope')),
       expectedRevision: fixture.adopted.revision,
     });
+    if (item.evidenceRejected) {
+      assert.throws(classify, { code: 'INVALID_SCOPE_EVIDENCE' }, item.name);
+      continue;
+    }
+    const classified = classify();
     harness.planSpecialists({
       cwd, input: harness.planInput(classified, fixture.packet), expectedRevision: classified.revision,
       now: () => harness.AT,
@@ -563,6 +602,7 @@ test('minor amendment stays blocked until an atomic authority chain and fresh as
   const bareCwd = harness.repo();
   const bareFixture = proposedFixture(bareCwd, 'bare-minor-task');
   const bareClassification = classificationInput(bareFixture, 'minor-amendment-required');
+  decisionInput.rootCauseId = bareClassification.rootCauseId;
   const bareClassified = checkpointScopeClassification({
     cwd: bareCwd, classification: bareClassification, expectedRevision: bareFixture.adopted.revision,
   });

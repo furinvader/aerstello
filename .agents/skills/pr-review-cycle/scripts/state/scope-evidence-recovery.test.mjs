@@ -103,7 +103,7 @@ function classificationInput(fixture, verdict = 'within-scope') {
     entryId: `classification-${verdict}`,
     at: harness.AT,
     reviewHeadSha: fixture.packet.reviewedHeadSha,
-    rootCauseId: fixture.task.id,
+    rootCauseId: harness.scopeRootForTask(fixture.task),
     findingIds: fixture.task.sourceIds,
     findingFingerprints: fixture.task.sourceIds.map(
       (_sourceId, index) => `${fixture.task.fingerprint}-f${index + 1}`,
