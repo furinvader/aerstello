@@ -46,6 +46,15 @@ envelope's matching root and decision identities, return, authority, and current
 HEAD. A second
 approved expansion for the same root activates the churn breaker.
 
+If a receipt-first scope write is interrupted, rerun only the exact original
+scope command with the same candidate and expected revision. While holding the
+existing PR lock, that retry may finish one receipt-new/document-old pair only
+when the document still matches compact state and the receipt binds the exact
+candidate; an initial receipt-only create additionally requires no prior
+compact identity. Do not use status, manual sidecar edits, or a broader retry
+to repair evidence. Ordinary reads remain non-mutating and every ambiguous or
+foreign combination fails closed.
+
 Issue 25/55 may later provide an imported authority/handoff coordinator, but
 this cycle consumes only the normalized authority contract and guarded return
 boundary. It does not implement, synthesize, or declare that future production

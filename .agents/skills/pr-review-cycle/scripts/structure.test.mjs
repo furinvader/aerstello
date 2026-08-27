@@ -884,11 +884,11 @@ PRODUCTION_STATE_IMPORTS.set('services/scope.mjs', new Map([
   [stateModule('errors.mjs'), ['StateError']],
   [stateModule('evidence/scope-control.mjs'), [
     'persistScopeAuthority', 'persistScopeJournal', 'persistScopeReturn', 'readScopeAuthority',
-    'readScopeJournal', 'readScopeReturn', 'scopeReturnDigest',
+    'readScopeJournal', 'readScopeJournalForUpdate', 'readScopeReturn', 'scopeReturnDigest',
   ]],
   [stateModule('state-store.mjs'), ['activePrNumber', 'loadState']],
   [stateModule('evidence/task-packets.mjs'), ['taskPacketDigest']],
-  [stateModule('locations.mjs'), ['scopeReturnPath']],
+  [stateModule('locations.mjs'), ['scopeReturnPath', 'scopeReturnReceiptPath']],
   [stateModule('scope-classification-head.mjs'), ['resolveScopeClassificationHead']],
   [stateModule('transitions/scope.mjs'), [
     'buildScopeAuthorityTransition', 'buildScopeClassificationTransition',
@@ -907,7 +907,7 @@ const PRODUCTION_STATE_EXPORTS = new Map([
   ['git-authority.mjs', ['inspectWorkerCommitAuthority', 'assertIntegratedWorkerCommit', 'gitSnapshot']],
   ['migrations.mjs', ['validateIntegrationMap', 'migrateTaskV1', 'migrateValidationProof', 'migratePrReviewStateV2', 'migratePrReviewStateV1', 'migrateState']],
   ['state-store.mjs', ['ACTIVE_STATE_LIMIT_BYTES', 'validateStateForWrite', 'readStateDocument', 'parseState', 'activePrNumber', 'locateState', 'loadState', 'claimGitHubMutationDispatch', 'originRepository', 'initializeState']],
-  ['evidence/scope-control.mjs', ['scopeReturnDigest', 'persistScopeAuthority', 'readScopeAuthority', 'persistScopeJournal', 'readScopeJournal', 'persistScopeReturn', 'readScopeReturn']],
+  ['evidence/scope-control.mjs', ['scopeReturnDigest', 'persistScopeAuthority', 'readScopeAuthority', 'persistScopeJournal', 'readScopeJournal', 'readScopeJournalForUpdate', 'persistScopeReturn', 'readScopeReturn']],
   ['evidence/task-packets.mjs', ['taskPacketDigest', 'persistImmutableTaskPacketSidecar', 'readTaskPacketSidecar', 'hasCompletedHistoricalV2TaskProof', 'assertTaskPacketHead', 'assertBoundTaskPacket', 'assertTaskPacketBound']],
   ['evidence/specialist-bundle-store.mjs', ['specialistPlanningErrors', 'specialistRouteFor', 'specialistPhaseForStage', 'normalizedRequiredSpecialistIds', 'canonicalBundleTaskRoute', 'specialistPlanDigest', 'verifySpecialistPlanReceipt', 'persistSpecialistPlanReceipt', 'conciseSpecialistPayloadErrors', 'validateSpecialistBundle', 'readSpecialistBundle', 'writeNewSpecialistBundle']],
   ['evidence/task-binding.mjs', ['loadBoundTaskPackets', 'assertTaskPacketBound', 'assertBehaviorMapperBundleComplete', 'assertBehaviorMapperPlanningComplete', 'recoverHistoricalTaskBindingPlanning', 'taskBindingProvenanceDigest', 'verifyTaskBindingProvenanceReceipt', 'persistTaskBindingProvenanceReceipt', 'validateTaskBindingProvenance', 'buildTaskBindingProvenance', 'assertTaskBindingProvenanceSource', 'persistImmutableTaskBindingProvenance', 'readBoundTaskBindingProvenance', 'loadBoundTaskPacketEntries']],
@@ -1050,8 +1050,11 @@ const EVIDENCE_CALLBACK_CAPABILITIES = new Map([
   ]],
   ['evidence/scope-control.mjs', [
     { owner: 'assertValid', parameterIndex: 1, property: null, local: 'validate', callShape: 'direct', calls: 1 },
+    { owner: 'persistEvidence', parameterIndex: 0, property: 'valueDigest', local: 'valueDigest', callShape: 'direct', calls: 1 },
     { owner: 'readEvidence', parameterIndex: 0, property: 'validate', local: 'validate', callShape: 'delegate', delegate: 'assertValid', calls: 1 },
     { owner: 'readEvidence', parameterIndex: 0, property: 'expectedDigest', local: 'expectedDigest', callShape: 'direct', calls: 1 },
+    { owner: 'readEvidenceForUpdate', parameterIndex: 0, property: 'validate', local: 'validate', callShape: 'delegate', delegate: 'assertValid', calls: 1 },
+    { owner: 'readEvidenceForUpdate', parameterIndex: 0, property: 'expectedDigest', local: 'expectedDigest', callShape: 'direct', calls: 1 },
   ]],
 ]);
 

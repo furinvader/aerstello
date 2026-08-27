@@ -110,9 +110,17 @@ instead it blocks on repeated-expansion churn for explicit human disposition.
 
 Recovery trusts receipt-valid documents, their canonical digests, and the
 compact projection. It may finish a single interrupted append-only suffix or
-return checkpoint only when the pending evidence is the unique expected
-extension. Missing documents, receipt mismatch, divergent suffixes, stale
-return identity, orphan sidecars, or HEAD drift fail closed.
+return checkpoint only during the exact revision-guarded retry under the PR
+lock. For receipt-new/document-old evidence, the old document must match the
+compact state's prior digest and the pending receipt must match the complete
+retried candidate. Receipt-only recovery is limited to an exact create whose
+compact projection proves no prior document. Pair-complete/state-old suffix
+recovery remains unchanged. Status and other ordinary reads are strictly
+read-only. Missing or oversized documents, malformed or foreign receipts,
+divergent suffixes, stale return identity, orphan sidecars, ambiguous
+candidates, or HEAD drift fail closed. Scope documents remain bounded at 256
+KiB—including valid evidence larger than the 64 KiB active-state limit—and
+receipts remain bounded at 128 bytes.
 
 The checked-in state implementation has one dependency direction. Pure builders
 live under `scripts/state/transitions/`; they receive state and evidence and do

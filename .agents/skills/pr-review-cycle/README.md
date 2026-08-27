@@ -130,6 +130,13 @@ material expansion for the same root triggers the churn breaker and requires
 human disposition. Recovery verifies receipts, pending append-only journal
 suffixes, compact projection, return envelope, and current HEAD before it can
 continue.
+Scope writes remain receipt-first. Under the existing PR lock, an exact retry
+may finish only one uniquely proven receipt-new/document-old update whose old
+document matches the compact projection and whose receipt matches the exact
+retried candidate. A receipt-only create is recoverable only when the compact
+projection proves no prior document. Ordinary reads never repair evidence;
+foreign, malformed, orphaned, stale, or ambiguous pairs fail closed. Scope
+documents retain the 256 KiB limit and receipts the 128-byte limit.
 
 New cycles have no configured review-request count cap. To start with a finite
 total limit, pass `--review-limit <positive-safe-integer>` to `review:state init`.

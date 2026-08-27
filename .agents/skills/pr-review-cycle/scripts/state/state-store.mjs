@@ -256,8 +256,8 @@ export function initializeState({
     };
     validateStateForWrite(state);
     if (scopeJournal) {
-      persistScopeAuthority(cwd, state, scopeAuthority);
-      persistScopeJournal(cwd, state, scopeJournal);
+      persistScopeAuthority(cwd, state, scopeAuthority, { previousDigest: null });
+      persistScopeJournal(cwd, state, scopeJournal, { previousDigest: null });
     }
     atomicWriteJson(path, state);
     atomicWriteJson(activePointerPath(cwd), { schemaVersion: 3, prNumber: selectedPr });

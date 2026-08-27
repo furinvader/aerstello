@@ -17,12 +17,13 @@ import {
   persistScopeReturn,
   readScopeAuthority,
   readScopeJournal,
+  readScopeJournalForUpdate,
   readScopeReturn,
   scopeReturnDigest,
 } from '../evidence/scope-control.mjs';
 import { activePrNumber, loadState } from '../state-store.mjs';
 import { taskPacketDigest } from '../evidence/task-packets.mjs';
-import { scopeReturnPath } from '../locations.mjs';
+import { scopeReturnPath, scopeReturnReceiptPath } from '../locations.mjs';
 import { resolveScopeClassificationHead } from '../scope-classification-head.mjs';
 import {
   buildScopeAuthorityTransition,
@@ -175,7 +176,7 @@ export function checkpointScopeClassification({
         );
       }
       const authority = readScopeAuthority(cwd, current);
-      const existing = readScopeJournal(cwd, current);
+      const existing = readScopeJournalForUpdate(cwd, current);
       if (authority.digest !== initialJournalAuthorityDigest(existing.value)) {
         throw new StateError('Scope state projection is stale or altered', 'INVALID_SCOPE_EVIDENCE');
       }
@@ -255,7 +256,7 @@ export function checkpointScopeDecision({
     cwd, prNumber, expectedRevision, kind: 'scope-decision',
     transaction: (current) => {
       if (!current.scopeControl) throw new StateError('Scope authority is required', 'SCOPE_AUTHORITY_REQUIRED');
-      const existing = readScopeJournal(cwd, current);
+      const existing = readScopeJournalForUpdate(cwd, current);
       if (current.scopeControl.gate !== 'decision-required') {
         throw new StateError('No scope decision is currently required', 'SCOPE_DECISION_NOT_REQUIRED');
       }
@@ -289,13 +290,24 @@ export function checkpointScopeDecision({
             || (expectedAmendment && !sameEntryPayload(pending[1], expectedAmendment))) {
           throw new StateError('Different scope decision evidence is pending checkpoint', 'SCOPE_EVIDENCE_CONFLICT');
         }
-        const pendingReturn = existsSync(scopeReturnPath(cwd, current.prNumber))
-          ? readScopeReturn(cwd, current) : null;
+        const returning = !classification.authorityAmendmentRequired
+          && ['approve-expansion-and-replan', 'abandon-or-rework'].includes(pending[0].decision);
+        const returnEnvelope = returning
+          ? buildReturnEnvelope(current, existing.value, classification, pending[0], pending[0].at)
+          : null;
+        if (!returning && (existsSync(scopeReturnPath(cwd, current.prNumber))
+            || existsSync(scopeReturnReceiptPath(cwd, current.prNumber)))) {
+          throw new StateError('Unexpected scope return evidence is pending checkpoint', 'SCOPE_EVIDENCE_CONFLICT');
+        }
+        const returnIdentity = returnEnvelope === null ? null : scopeReturnDigest(returnEnvelope);
         return {
           nextState: buildScopeDecisionTransition(
-            current, existing.value, pending[0], undefined, pendingReturn?.digest ?? null,
+            current, existing.value, pending[0], undefined, returnIdentity,
           ),
           event: event ?? { type: 'scope-decision-recorded', summary: `Recovered ${entry.decisionId}` },
+          ...(returnEnvelope ? {
+            beforeCommit: () => persistScopeReturn(cwd, current, returnEnvelope),
+          } : {}),
         };
       }
       if (entry.decision === 'approve-expansion-and-replan'
@@ -422,7 +434,7 @@ export function checkpointScopeResume({
         throw new StateError('Scope control is not awaiting resume', 'SCOPE_RESUME_NOT_REQUIRED');
       }
       const returned = readScopeReturn(cwd, current);
-      const journalEvidence = readScopeJournal(cwd, current);
+      const journalEvidence = readScopeJournalForUpdate(cwd, current);
       const { amendment = null, ...resumeInput } = resume;
       if (resumeInput.rootCauseId !== returned.value.rootCauseId
           || resumeInput.decisionId !== returned.value.decisionId) {
