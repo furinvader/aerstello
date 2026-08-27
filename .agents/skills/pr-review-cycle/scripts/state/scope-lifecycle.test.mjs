@@ -25,6 +25,11 @@ import {
   scopeReturnReceiptPath,
 } from './locations.mjs';
 import { validateScopeAssessmentApplicability } from '../../../scope-review/scripts/validate-assessment.mjs';
+import {
+  buildScopeClassificationTransition,
+  buildScopeDecisionTransition,
+  buildScopeResumeTransition,
+} from './transitions/scope.mjs';
 
 const DIGEST = `sha256:${'a'.repeat(64)}`;
 const PLAN_DIGEST = `sha256:${'b'.repeat(64)}`;
@@ -453,6 +458,128 @@ test('scope decision rejects a selected root whose own classification needs no d
   }), { code: 'SCOPE_DECISION_NOT_REQUIRED' });
 });
 
+test('scope decision recovers exact pending evidence before rejecting a replayed resolved root', () => {
+  const cwd = harness.repo();
+  const fixture = proposedFixture(cwd, 'decision-replay-root');
+  const selected = classificationInput(fixture, 'human-decision-required', {
+    entryId: 'classification-replay-selected', rootCauseId: 'replay-selected-root',
+  });
+  const selectedClassified = checkpointScopeClassification({
+    cwd, classification: selected, expectedRevision: fixture.adopted.revision,
+  });
+  const outstanding = classificationInput(fixture, 'human-decision-required', {
+    entryId: 'classification-replay-outstanding', rootCauseId: 'replay-outstanding-root',
+  });
+  const bothClassified = checkpointScopeClassification({
+    cwd, classification: outstanding, expectedRevision: selectedClassified.revision,
+  });
+  const decision = {
+    entryId: 'decision-replay-original', at: harness.AT, rootCauseId: selected.rootCauseId,
+    blockerId: 'scope-blocker-replay-original', decisionId: 'scope-decision-replay-original',
+    decision: 'reject-expansion', blockerDigest: DIGEST, approvedDeltaDigest: null,
+    rationale: 'Keep the selected material root within the accepted boundary.', priorDecisionIds: [],
+  };
+
+  assert.throws(() => checkpointScopeDecision({
+    cwd, decision, expectedRevision: bothClassified.revision,
+    event: { type: 'invalid-scope-event', summary: 'x'.repeat(1001) },
+  }), { code: 'INVALID_EVENT' });
+  assert.equal(harness.loadState(cwd).revision, bothClassified.revision);
+
+  const recovered = checkpointScopeDecision({
+    cwd, decision, expectedRevision: bothClassified.revision,
+  });
+  assert.equal(recovered.scopeControl.gate, 'decision-required');
+  assert.equal(scopeStatus({ cwd }).journal.value.entries.filter(
+    (entry) => entry.kind === 'decision' && entry.rootCauseId === selected.rootCauseId,
+  ).length, 1);
+
+  const beforeReplay = scopePersistenceSnapshot(cwd, recovered.prNumber);
+  assert.throws(() => checkpointScopeDecision({
+    cwd, expectedRevision: recovered.revision,
+    decision: {
+      ...decision,
+      entryId: 'decision-replay-second', blockerId: 'scope-blocker-replay-second',
+      decisionId: 'scope-decision-replay-second', priorDecisionIds: [decision.decisionId],
+    },
+  }), { code: 'SCOPE_DECISION_NOT_REQUIRED' });
+  assertScopePersistenceUnchanged(cwd, beforeReplay);
+  assert.equal(harness.loadState(cwd).revision, recovered.revision);
+});
+
+test('ready scope transitions recover only scope-gated human-decision phases', () => {
+  const cwd = harness.repo();
+  const fixture = proposedFixture(cwd, 'scope-phase-exit');
+  const material = classificationInput(fixture, 'human-decision-required');
+  const classified = checkpointScopeClassification({
+    cwd, classification: material, expectedRevision: fixture.adopted.revision,
+  });
+  const decision = {
+    entryId: 'decision-scope-phase-exit', at: harness.AT, rootCauseId: material.rootCauseId,
+    blockerId: 'scope-blocker-phase-exit', decisionId: 'scope-decision-phase-exit',
+    decision: 'reject-expansion', blockerDigest: DIGEST, approvedDeltaDigest: null,
+    rationale: 'Keep the remediation inside the accepted boundary.', priorDecisionIds: [],
+  };
+  const decided = checkpointScopeDecision({
+    cwd, decision, expectedRevision: classified.revision,
+  });
+  assert.equal(decided.scopeControl.gate, 'ready');
+  assert.equal(decided.phase, 'recovering');
+  const readyJournal = scopeStatus({ cwd }).journal.value;
+
+  const readyClassification = classificationInput(fixture, 'within-scope', {
+    entryId: 'classification-scope-phase-ready', rootCauseId: material.rootCauseId,
+  });
+  const reclassified = checkpointScopeClassification({
+    cwd, classification: readyClassification, expectedRevision: decided.revision,
+  });
+  assert.equal(reclassified.phase, 'recovering');
+  const reclassifiedJournal = scopeStatus({ cwd }).journal.value;
+
+  const scopeBlocked = {
+    ...classified,
+    blockedReasons: [`Scope authority: ${material.rootCauseId} requires decision-required.`],
+  };
+  assert.equal(
+    buildScopeClassificationTransition(scopeBlocked, reclassifiedJournal, harness.AT).phase,
+    'recovering',
+  );
+  assert.equal(buildScopeResumeTransition(
+    scopeBlocked, readyJournal, `sha256:${'e'.repeat(64)}`,
+    scopeBlocked.currentIntegrationHeadSha, harness.AT,
+  ).phase, 'recovering');
+  const humanTask = harness.task(classified.currentIntegrationHeadSha, {
+    id: 'unrelated-human-decision', sourceIds: ['local:unrelated-human-decision'],
+    fingerprint: 'fingerprint-unrelated-human-decision', disposition: 'needs-human-decision',
+    status: 'not-applicable', integratedCommitSha: null,
+    resolutionSummary: 'Requires an unrelated human decision.',
+  });
+  const variants = [
+    {
+      name: 'verification escalation',
+      state: { ...scopeBlocked, verificationEscalation: { reason: 'unrelated' } },
+    },
+    {
+      name: 'non-scope blocker',
+      state: { ...scopeBlocked, blockedReasons: [...scopeBlocked.blockedReasons, 'Unrelated blocker.'] },
+    },
+    {
+      name: 'needs-human task',
+      state: { ...scopeBlocked, tasks: [...scopeBlocked.tasks, humanTask] },
+    },
+  ];
+  for (const { name, state } of variants) {
+    const classifiedNext = buildScopeClassificationTransition(state, readyJournal, harness.AT);
+    const decidedNext = buildScopeDecisionTransition(state, readyJournal, decision, harness.AT);
+    const resumedNext = buildScopeResumeTransition(
+      state, readyJournal, `sha256:${'e'.repeat(64)}`, state.currentIntegrationHeadSha, harness.AT,
+    );
+    for (const next of [classifiedNext, decidedNext, resumedNext]) {
+      assert.equal(next.phase, 'awaiting-human-decision', name);
+    }
+  }
+});
+
 test('scope return reconstructs the exact envelope root despite a later unrelated classification', () => {
   const cwd = harness.repo();
   const fixture = proposedFixture(cwd, 'envelope-root-return-task');
@@ -676,6 +803,7 @@ test('minor amendment approval does not consume material expansion allowance', (
   const ready = checkpointScopeClassification({
     cwd, classification: revised, expectedRevision: amended.revision,
   });
+  assert.equal(ready.phase, 'recovering');
 
   const firstMaterial = classificationInput(fixture, 'human-decision-required', {
     entryId: 'classification-first-genuine-material', rootCauseId: minor.rootCauseId,
@@ -906,6 +1034,7 @@ test('minor amendment stays blocked until an atomic authority chain and fresh as
     cwd, classification: fresh, expectedRevision: amended.revision,
   });
   assert.equal(ready.scopeControl.gate, 'ready');
+  assert.equal(ready.phase, 'recovering');
 
   writeFileSync(harness.statePath(cwd, ready.prNumber), `${JSON.stringify({
     ...ready,

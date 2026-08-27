@@ -6,6 +6,24 @@ import { StateError } from '../errors.mjs';
 
 function now(value) { return value ?? new Date().toISOString(); }
 
+function hasUnrelatedHumanGate(state, blockedReasons) {
+  return blockedReasons.some((reason) => !reason.startsWith('Scope authority:'))
+    || state.verificationEscalation !== null
+    || state.tasks.some((task) => task.disposition === 'needs-human-decision');
+}
+
+function phaseAfterReadyScopeGate(state, blockedReasons) {
+  if (state.phase !== 'awaiting-human-decision') return state.phase;
+  if (hasUnrelatedHumanGate(state, blockedReasons)) return state.phase;
+  return state.blockedReasons.some((reason) => reason.startsWith('Scope authority:'))
+    ? 'recovering' : state.phase;
+}
+
+function phaseAfterScopeResume(state, blockedReasons) {
+  return hasUnrelatedHumanGate(state, blockedReasons)
+    ? state.phase : 'recovering';
+}
+
 export function scopeReference({ authorityDigest, journal, gate, returnDigest = null, assessmentHeadSha = null, at }) {
   return {
     authorityDigest,
@@ -43,12 +61,14 @@ export function buildScopeClassificationTransition(state, journal, at) {
   if (latest === null) throw new StateError('Scope classification journal has no classification', 'INVALID_SCOPE_CLASSIFICATION');
   const gate = scopeGateForJournal(journal);
   const blocker = `Scope authority: ${latest.rootCauseId} requires ${gate}.`;
+  const blockedReasons = gate === 'ready'
+    ? state.blockedReasons.filter((reason) => !reason.startsWith('Scope authority:'))
+    : [...state.blockedReasons.filter((reason) => !reason.startsWith('Scope authority:')), blocker];
   return {
     ...state,
-    phase: gate === 'ready' ? state.phase : 'awaiting-human-decision',
-    blockedReasons: gate === 'ready'
-      ? state.blockedReasons.filter((reason) => !reason.startsWith('Scope authority:'))
-      : [...state.blockedReasons.filter((reason) => !reason.startsWith('Scope authority:')), blocker],
+    phase: gate === 'ready'
+      ? phaseAfterReadyScopeGate(state, blockedReasons) : 'awaiting-human-decision',
+    blockedReasons,
     scopeControl: scopeReference({
       authorityDigest: journal.authorityDigest,
       journal,
@@ -68,16 +88,18 @@ export function buildScopeDecisionTransition(state, journal, decision, at, retur
   const classification = latestScopeClassification(journal, decision.rootCauseId);
   const materialReturn = returning && !classification?.authorityAmendmentRequired;
   const gate = materialReturn ? 'return-pending' : scopeGateForJournal(journal);
+  const blockedReasons = materialReturn
+    ? [...state.blockedReasons.filter((reason) => !reason.startsWith('Scope authority:')),
+      `Scope authority: ${decision.rootCauseId} requires guarded return.`]
+    : gate === 'ready'
+      ? state.blockedReasons.filter((reason) => !reason.startsWith('Scope authority:'))
+      : [...state.blockedReasons.filter((reason) => !reason.startsWith('Scope authority:')),
+        `Scope authority: ${decision.rootCauseId} requires a fresh revised-authority assessment.`];
   return {
     ...state,
-    phase: gate === 'ready' ? state.phase : 'awaiting-human-decision',
-    blockedReasons: materialReturn
-      ? [...state.blockedReasons.filter((reason) => !reason.startsWith('Scope authority:')),
-        `Scope authority: ${decision.rootCauseId} requires guarded return.`]
-      : gate === 'ready'
-        ? state.blockedReasons.filter((reason) => !reason.startsWith('Scope authority:'))
-        : [...state.blockedReasons.filter((reason) => !reason.startsWith('Scope authority:')),
-          `Scope authority: ${decision.rootCauseId} requires a fresh revised-authority assessment.`],
+    phase: gate === 'ready'
+      ? phaseAfterReadyScopeGate(state, blockedReasons) : 'awaiting-human-decision',
+    blockedReasons,
     scopeControl: scopeReference({
       authorityDigest: journal.authorityDigest,
       journal,
@@ -112,13 +134,14 @@ export function buildScopeReturnTransition(state, journal, returnDigest, at) {
 
 export function buildScopeResumeTransition(state, journal, returnDigest, headSha, at) {
   const gate = scopeGateForJournal(journal);
+  const blockedReasons = gate === 'ready'
+    ? state.blockedReasons.filter((reason) => !reason.startsWith('Scope authority:'))
+    : [...state.blockedReasons.filter((reason) => !reason.startsWith('Scope authority:')),
+      'Scope authority: resumed authority requires a fresh exact-head assessment.'];
   return {
     ...state,
-    phase: 'recovering',
-    blockedReasons: gate === 'ready'
-      ? state.blockedReasons.filter((reason) => !reason.startsWith('Scope authority:'))
-      : [...state.blockedReasons.filter((reason) => !reason.startsWith('Scope authority:')),
-        'Scope authority: resumed authority requires a fresh exact-head assessment.'],
+    phase: phaseAfterScopeResume(state, blockedReasons),
+    blockedReasons,
     scopeControl: scopeReference({
       authorityDigest: journal.authorityDigest,
       journal,

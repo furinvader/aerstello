@@ -305,6 +305,16 @@ function materialExpansionCount(journal, rootCauseId) {
   }).length;
 }
 
+function classificationDecisionCompleted(journal, classification) {
+  const matchingDecision = journal.entries.some((entry) => entry.kind === 'decision'
+    && entry.sequence > classification.sequence
+    && entry.rootCauseId === classification.rootCauseId
+    && entry.assessmentDigest === classification.assessment.digest);
+  if (!matchingDecision) return false;
+  return !classification.authorityAmendmentRequired
+    || minorAmendmentCompleted(journal, classification);
+}
+
 export function checkpointScopeDecision({
   cwd = process.cwd(), prNumber, decision, expectedRevision, event,
 } = {}) {
@@ -383,6 +393,12 @@ export function checkpointScopeDecision({
             beforeCommit: () => persistScopeReturn(cwd, current, returnEnvelope),
           } : {}),
         };
+      }
+      if (classificationDecisionCompleted(existing.value, classification)) {
+        throw new StateError(
+          `Scope root ${classification.rootCauseId} already has a decision for its current assessment`,
+          'SCOPE_DECISION_NOT_REQUIRED',
+        );
       }
       if (classification.classification === 'material-scope-change'
           && entry.decision === 'approve-expansion-and-replan'
