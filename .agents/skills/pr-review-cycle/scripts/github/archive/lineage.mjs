@@ -497,18 +497,89 @@ export function aggregateFullAuthorityProjection(
       'ARCHIVE_EVIDENCE_MISSING',
     );
   }
-  const projection = aggregateHistoricalProjection(
-    state,
-    full[0],
-    selectedThreadIds,
-    selectedRowsByArchive.get(full[0].archive.archiveId),
-    reservePartition,
-  );
+  const project = (candidate, reserve = null) => {
+    const rows = selectedRowsByArchive.get(candidate.archive.archiveId);
+    const provenanceRows = rows.filter((row) => Object.hasOwn(row, 'archiveProvenance'));
+    if (provenanceRows.length === 0 || provenanceRows.length === rows.length) {
+      return aggregateHistoricalProjection(
+        state, candidate, selectedThreadIds, rows, reserve,
+      );
+    }
+    const olderCandidates = historicalCandidates.filter((older) => (
+      older.archive.archiveId !== candidate.archive.archiveId
+        && Math.max(
+          older.terminalBounds.stateUpdatedAt,
+          older.terminalBounds.terminalEventAt ?? older.terminalBounds.stateUpdatedAt,
+        ) < candidate.terminalBounds.stateUpdatedAt
+    ));
+    const normalizedRows = rows.map((row) => {
+      if (!Object.hasOwn(row, 'archiveProvenance')) return row;
+      const provenance = row.archiveProvenance;
+      const origins = [];
+      for (const older of olderCandidates) {
+        const olderRows = selectedRowsByArchive.get(older.archive.archiveId);
+        const proof = olderRows.find((olderRow) => (
+          olderRow.threadNodeId === row.threadNodeId
+            && !Object.hasOwn(olderRow, 'archiveProvenance')
+            && olderRow.taskIds.length === 1
+            && olderRow.taskIds[0] === provenance.historicalTaskId
+            && isDeepStrictEqual(aggregateProofCore(olderRow), aggregateProofCore(row))
+        ));
+        if (!proof) continue;
+        const matchingTasks = older.archivedState.tasks.filter(
+          (task) => task.id === provenance.historicalTaskId,
+        );
+        if (matchingTasks.length !== 1) continue;
+        const task = matchingTasks[0];
+        const expectedDisposition = task.disposition === 'actionable' ? 'fixed'
+          : task.disposition === 'already-fixed' ? 'already-fixed' : null;
+        if (expectedDisposition !== provenance.historicalDisposition
+            || task.integratedCommitSha !== provenance.historicalIntegratedCommitSha) continue;
+        origins.push({ proof, task });
+      }
+      if (origins.length === 0 || origins.some((origin) => (
+        !isDeepStrictEqual(origin, origins[0])
+      ))) {
+        throw new GitHubWorkflowError(
+          'Mixed aggregate replay lacks one exact older historical authority',
+          'ARCHIVE_EVIDENCE_AMBIGUOUS',
+        );
+      }
+      return origins[0].proof;
+    });
+    const normalizedTasks = [];
+    for (const row of normalizedRows) {
+      const source = Object.hasOwn(rows.find((item) => item.threadNodeId === row.threadNodeId), 'archiveProvenance')
+        ? olderCandidates.flatMap((older) => older.archivedState.tasks)
+        : candidate.archivedState.tasks;
+      const matches = source.filter((task) => task.id === row.taskIds[0]);
+      if (matches.length === 0 || matches.some((task) => !isDeepStrictEqual(task, matches[0]))) {
+        throw new GitHubWorkflowError(
+          'Mixed aggregate historical task authority is missing or divergent',
+          'ARCHIVE_TASK_MISMATCH',
+        );
+      }
+      if (!normalizedTasks.some((task) => task.id === matches[0].id)) normalizedTasks.push(matches[0]);
+    }
+    const normalizedCandidate = {
+      ...candidate,
+      archivedState: {
+        ...candidate.archivedState,
+        tasks: normalizedTasks,
+        threadResolutionStatus: {
+          ...candidate.archivedState.threadResolutionStatus,
+          threads: normalizedRows,
+        },
+      },
+    };
+    return aggregateHistoricalProjection(
+      state, normalizedCandidate, selectedThreadIds, normalizedRows, reserve,
+    );
+  };
+  const projection = project(full[0], reservePartition);
   if (projection.proofRows.length !== selectedThreadIds.length
       || full.slice(1).some((candidate) => !isDeepStrictEqual(
-        aggregateHistoricalProjection(
-          state, candidate, selectedThreadIds, selectedRowsByArchive.get(candidate.archive.archiveId),
-        ),
+        project(candidate),
         projection,
       ))) {
     throw new GitHubWorkflowError(
@@ -624,6 +695,119 @@ export function assertHistoricalCarrierSlice(candidate, projection, rows) {
   return rows;
 }
 
+export function assertMixedHistoricalCarrierSlice(candidate, projection, rows) {
+  const ordinaryRows = rows.filter((row) => !Object.hasOwn(row, 'archiveProvenance'));
+  const replayRows = rows.filter((row) => Object.hasOwn(row, 'archiveProvenance'));
+  if (ordinaryRows.length === 0 || replayRows.length === 0
+      || rows.length !== projection.proofRows.length) {
+    throw new GitHubWorkflowError(
+      'Mixed aggregate authority requires one full replay-and-origin carrier',
+      'ARCHIVE_PROOF_MISMATCH',
+    );
+  }
+  const authorityByRoot = aggregateAuthorityByRoot(projection);
+  const canonicalRootIndex = aggregateCanonicalRootIndex(projection.proofRows);
+  const selectedRoots = new Set(projection.proofRows.map((row) => row.threadNodeId));
+  const anchoredTaskIds = new Set(
+    projection.partitions.map((partition) => partition.historicalTask.id),
+  );
+  const rowsByTask = new Map();
+  for (const row of rows) {
+    if (row.taskIds.length !== 1) {
+      throw new GitHubWorkflowError(
+        'Mixed aggregate carrier rows require one exact task owner',
+        'ARCHIVE_PROOF_MISMATCH',
+      );
+    }
+    const taskRows = rowsByTask.get(row.taskIds[0]) ?? [];
+    taskRows.push(row);
+    rowsByTask.set(row.taskIds[0], taskRows);
+  }
+  for (const task of candidate.archivedState.tasks) {
+    if (task.sourceType !== 'github-thread') continue;
+    const intersecting = taskCanonicalRootIds(task, canonicalRootIndex);
+    if (intersecting.length !== 0 && !rowsByTask.has(task.id)) {
+      throw new GitHubWorkflowError(
+        'Mixed aggregate carrier has an unanchored overlapping task',
+        'ARCHIVE_EVIDENCE_AMBIGUOUS',
+      );
+    }
+  }
+  for (const row of candidate.archivedState.threadResolutionStatus.threads) {
+    if (selectedRoots.has(row.threadNodeId)) continue;
+    if (anchoredTaskIds.has(row.archiveProvenance?.historicalTaskId)
+        || row.taskIds.some((taskId) => anchoredTaskIds.has(taskId))) {
+      throw new GitHubWorkflowError(
+        'Mixed aggregate carrier references anchored authority outside selection',
+        'ARCHIVE_EVIDENCE_AMBIGUOUS',
+      );
+    }
+  }
+  for (const [taskId, taskRows] of rowsByTask) {
+    const matchingTasks = candidate.archivedState.tasks.filter((task) => task.id === taskId);
+    const task = matchingTasks[0];
+    const taskThreadIds = matchingTasks.length === 1 && task?.sourceType === 'github-thread'
+      ? taskCanonicalRootIds(task, canonicalRootIndex, { requireComplete: true }) : null;
+    const rowThreadIds = taskRows.map((row) => row.threadNodeId).sort();
+    const provenanceCount = taskRows.filter((row) => Object.hasOwn(row, 'archiveProvenance')).length;
+    if (matchingTasks.length !== 1 || task.status !== 'completed'
+        || taskThreadIds === null || !isDeepStrictEqual(taskThreadIds, rowThreadIds)
+        || (provenanceCount !== 0 && provenanceCount !== taskRows.length)
+        || (provenanceCount !== 0 && (task.disposition !== 'already-fixed'
+          || task.integratedCommitSha !== null))) {
+      throw new GitHubWorkflowError(
+        'Mixed aggregate carrier task partition is partial, overlapping, or ineligible',
+        'ARCHIVE_TASK_MISMATCH',
+      );
+    }
+  }
+  for (const partition of projection.partitions) {
+    const partitionRows = rows.filter((row) => partition.proofRows.some(
+      (proof) => proof.threadNodeId === row.threadNodeId,
+    ));
+    const provenanceCount = partitionRows.filter(
+      (row) => Object.hasOwn(row, 'archiveProvenance'),
+    ).length;
+    if (partitionRows.length !== partition.proofRows.length
+        || (provenanceCount !== 0 && provenanceCount !== partitionRows.length)) {
+      throw new GitHubWorkflowError(
+        'Mixed aggregate carrier slices an anchored historical partition',
+        'ARCHIVE_PROOF_MISMATCH',
+      );
+    }
+  }
+  for (const row of ordinaryRows) {
+    const authority = authorityByRoot.get(row.threadNodeId);
+    const matchingTasks = candidate.archivedState.tasks.filter(
+      (task) => task.id === authority?.historicalTask.id,
+    );
+    if (!authority || !isDeepStrictEqual(row, authority.proof)
+        || matchingTasks.length !== 1
+        || !isDeepStrictEqual(matchingTasks[0], authority.historicalTask)) {
+      throw new GitHubWorkflowError(
+        'Mixed aggregate origin diverges from its exact completed task partition',
+        'ARCHIVE_EVIDENCE_AMBIGUOUS',
+      );
+    }
+  }
+  for (const row of replayRows) {
+    const authority = authorityByRoot.get(row.threadNodeId);
+    const provenance = row.archiveProvenance;
+    if (!authority
+        || !isDeepStrictEqual(aggregateProofCore(row), aggregateProofCore(authority.proof))
+        || provenance.schemaVersion !== 1
+        || provenance.historicalTaskId !== authority.historicalTask.id
+        || provenance.historicalDisposition !== authority.historicalDisposition
+        || provenance.historicalIntegratedCommitSha !== authority.historicalTask.integratedCommitSha) {
+      throw new GitHubWorkflowError(
+        'Mixed aggregate replay diverges from its older historical authority',
+        'ARCHIVE_EVIDENCE_AMBIGUOUS',
+      );
+    }
+  }
+  return rows;
+}
+
 export function archiveReferencesAnchoredHistoricalTasks(archive, anchoredTaskIds) {
   if (Array.isArray(archive?.state?.tasks)) {
     for (const task of archive.state.tasks) {
@@ -709,6 +893,40 @@ export function aggregateProofCore(proof) {
   };
 }
 
+export function assertAggregateReplayRow(
+  candidate, row, authority, normalizedAuthority, authorityFingerprint, intentFootprints,
+) {
+  const provenance = row.archiveProvenance;
+  const expectedBodyHash = createHash('sha256')
+    .update(normalizedAuthority?.replyBody ?? '', 'utf8').digest('hex');
+  if (!authority || !normalizedAuthority
+      || !isDeepStrictEqual(aggregateProofCore(row), aggregateProofCore(authority.proof))
+      || provenance?.schemaVersion !== 1
+      || provenance.historicalTaskId !== authority.historicalTask.id
+      || provenance.historicalDisposition !== authority.historicalDisposition
+      || provenance.historicalIntegratedCommitSha !== authority.historicalTask.integratedCommitSha
+      || provenance.replyBodySha256 !== expectedBodyHash
+      || provenance.authorityFingerprint !== authorityFingerprint) {
+    throw new GitHubWorkflowError(
+      'Aggregate replay provenance is missing, altered, or inconsistent',
+      'ARCHIVE_EVIDENCE_AMBIGUOUS',
+    );
+  }
+  const footprint = aggregateArchiveIntentFootprint(intentFootprints, row.threadNodeId);
+  if (footprint.length !== 0) {
+    throw new GitHubWorkflowError(
+      'Aggregate replay carrier cannot originate historical authority',
+      'ARCHIVE_INTENT_AMBIGUOUS',
+    );
+  }
+  assertReplayArchiveBounds({ ...candidate, projection: singleRootProjection(authority) });
+  return {
+    historicalTaskId: authority.historicalTask.id,
+    threadNodeId: row.threadNodeId,
+    role: 'replay',
+  };
+}
+
 export function assertAggregateReplayCarrier(
   selectedTask, candidate, rows, selectedThreadIds, projection, authorityRootsByRoot,
   authorityFingerprint, intentFootprints,
@@ -760,36 +978,9 @@ export function assertAggregateReplayCarrier(
   for (const row of rows) {
     const authority = authorityByRoot.get(row.threadNodeId);
     const normalizedAuthority = authorityRootsByRoot.get(row.threadNodeId);
-    const provenance = row.archiveProvenance;
-    const expectedBodyHash = createHash('sha256')
-      .update(normalizedAuthority?.replyBody ?? '', 'utf8').digest('hex');
-    if (!authority || !normalizedAuthority
-        || !isDeepStrictEqual(aggregateProofCore(row), aggregateProofCore(authority.proof))
-        || provenance.schemaVersion !== 1
-        || provenance.historicalTaskId !== authority.historicalTask.id
-        || provenance.historicalDisposition !== authority.historicalDisposition
-        || provenance.historicalIntegratedCommitSha !== authority.historicalTask.integratedCommitSha
-        || provenance.replyBodySha256 !== expectedBodyHash
-        || provenance.authorityFingerprint !== authorityFingerprint) {
-      throw new GitHubWorkflowError(
-        'Active aggregate replay provenance is missing, altered, or inconsistent',
-        'ARCHIVE_EVIDENCE_AMBIGUOUS',
-      );
-    }
-    const projectionForRoot = singleRootProjection(authority);
-    const footprint = aggregateArchiveIntentFootprint(intentFootprints, row.threadNodeId);
-    if (footprint.length !== 0) {
-      throw new GitHubWorkflowError(
-        'Active aggregate carrier may replay but cannot originate historical authority',
-        'ARCHIVE_INTENT_AMBIGUOUS',
-      );
-    }
-    assertReplayArchiveBounds({ ...candidate, projection: projectionForRoot });
-    roles.push({
-      historicalTaskId: authority.historicalTask.id,
-      threadNodeId: row.threadNodeId,
-      role: 'replay',
-    });
+    roles.push(assertAggregateReplayRow(
+      candidate, row, authority, normalizedAuthority, authorityFingerprint, intentFootprints,
+    ));
   }
   return roles;
 }
@@ -878,12 +1069,20 @@ export function validateAggregateArchiveLineage(
       );
     }
   }
-  const historicalRowsByArchive = new Map(historicalCandidates.map((candidate) => [
-    candidate.archive.archiveId,
-    assertHistoricalCarrierSlice(
-      candidate, projection, selectedRowsByArchive.get(candidate.archive.archiveId),
-    ),
-  ]));
+  const mixedHistoricalCandidateIds = new Set();
+  const historicalRowsByArchive = new Map(historicalCandidates.map((candidate) => {
+    const rows = selectedRowsByArchive.get(candidate.archive.archiveId);
+    const provenanceCount = rows.filter((row) => Object.hasOwn(row, 'archiveProvenance')).length;
+    if (provenanceCount !== 0 && provenanceCount !== rows.length) {
+      mixedHistoricalCandidateIds.add(candidate.archive.archiveId);
+      return [candidate.archive.archiveId, assertMixedHistoricalCarrierSlice(
+        candidate, projection, rows,
+      )];
+    }
+    return [candidate.archive.archiveId, assertHistoricalCarrierSlice(
+      candidate, projection, rows,
+    )];
+  }));
   const provenanceRowsByArchive = new Map(provenanceCandidates.map((candidate) => [
     candidate.archive.archiveId,
     selectedRowsByArchive.get(candidate.archive.archiveId),
@@ -904,6 +1103,7 @@ export function validateAggregateArchiveLineage(
   for (const candidate of historicalCandidates) {
     const carriedRows = historicalRowsByArchive.get(candidate.archive.archiveId);
     const carried = new Set(carriedRows.map((row) => row.threadNodeId));
+    const carriedByRoot = new Map(carriedRows.map((row) => [row.threadNodeId, row]));
     const intentFootprints = intentFootprintsByArchive.get(candidate.archive.archiveId);
     for (const threadId of selectedThreadIds) {
       const authority = authorityByRoot.get(threadId);
@@ -916,6 +1116,21 @@ export function validateAggregateArchiveLineage(
             'ARCHIVE_INTENT_AMBIGUOUS',
           );
         }
+        continue;
+      }
+      if (Object.hasOwn(carriedByRoot.get(threadId), 'archiveProvenance')) {
+        if (footprint.length !== 0) {
+          throw new GitHubWorkflowError(
+            'Mixed aggregate replay carries selected-root mutation intent',
+            'ARCHIVE_INTENT_AMBIGUOUS',
+          );
+        }
+        assertReplayArchiveBounds({ ...candidate, projection: rootProjection });
+        roleEntries.get(candidate.archive.archiveId).push({
+          historicalTaskId: authority.historicalTask.id,
+          threadNodeId: threadId,
+          role: 'replay',
+        });
         continue;
       }
       let role = 'replay';
@@ -971,6 +1186,31 @@ export function validateAggregateArchiveLineage(
     .update(JSON.stringify(canonicalJson({ roots: authorityRoots })))
     .digest('hex');
   const authorityRootsByRoot = new Map(authorityRoots.map((root) => [root.threadNodeId, root]));
+  for (const candidate of historicalCandidates) {
+    if (!mixedHistoricalCandidateIds.has(candidate.archive.archiveId)) continue;
+    const rows = historicalRowsByArchive.get(candidate.archive.archiveId);
+    const intents = intentFootprintsByArchive.get(candidate.archive.archiveId);
+    const replayFingerprintsByTask = new Map();
+    for (const taskId of new Set(rows.filter(
+      (row) => Object.hasOwn(row, 'archiveProvenance'),
+    ).map((row) => row.taskIds[0]))) {
+      const roots = new Set(rows.filter(
+        (row) => row.taskIds[0] === taskId && Object.hasOwn(row, 'archiveProvenance'),
+      ).map((row) => row.threadNodeId));
+      replayFingerprintsByTask.set(taskId, createHash('sha256')
+        .update(JSON.stringify(canonicalJson({
+          roots: authorityRoots.filter((root) => roots.has(root.threadNodeId)),
+        })))
+        .digest('hex'));
+    }
+    for (const row of rows) {
+      if (!Object.hasOwn(row, 'archiveProvenance')) continue;
+      assertAggregateReplayRow(
+        candidate, row, authorityByRoot.get(row.threadNodeId),
+        authorityRootsByRoot.get(row.threadNodeId), replayFingerprintsByTask.get(row.taskIds[0]), intents,
+      );
+    }
+  }
   for (const candidate of provenanceCandidates) {
     const roles = assertAggregateReplayCarrier(
       selectedTask, candidate, provenanceRowsByArchive.get(candidate.archive.archiveId),

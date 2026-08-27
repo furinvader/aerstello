@@ -2413,6 +2413,277 @@ test('a later provenance-bound active-task carrier remains a zero-intent aggrega
   assert.deepEqual(retryFixture.client.events, []);
 });
 
+test('a fresh ten-root task adopts a terminal six-replay plus four-origin carrier', async () => {
+  const buildTopology = async () => {
+    const oldArchive = decodedPacketArchive(
+      PACKET_ARCHIVE_NAME, PACKET_ARCHIVE_STATE_BASE64, PACKET_ARCHIVE_EVENTS_BASE64,
+    );
+    const mixedArchive = decodedPacketArchive(
+      PACKET_MIXED_ARCHIVE_NAME, PACKET_MIXED_ARCHIVE_STATE_BASE64, PACKET_MIXED_ARCHIVE_EVENTS_BASE64,
+    );
+    for (const archive of [oldArchive, mixedArchive]) {
+      archive.state.tasks = archive.state.tasks.filter(
+        (task) => !task.sourceIds.includes(`thread:${PACKET_PORTABILITY_THREAD_ID}`),
+      );
+    }
+    const ordinaryTaskId = 'pr-review-worker-commit-delta-integrity-r1';
+    const ordinaryTask = structuredClone(
+      mixedArchive.state.tasks.find((task) => task.id === ordinaryTaskId),
+    );
+    const ordinaryRows = new Map(mixedArchive.state.threadResolutionStatus.threads
+      .filter((row) => row.taskIds[0] === ordinaryTaskId)
+      .map((row) => [row.threadNodeId, structuredClone(row)]));
+    assert.equal(ordinaryRows.size, 3);
+    const fixture = packetAggregateAdoptionFixture(oldArchive, mixedArchive);
+    fixture.aggregateTask.sourceIds = fixture.aggregateTask.sourceIds.filter(
+      (source) => !ordinaryRows.has(/^thread:(.+)$/u.exec(source)?.[1]),
+    );
+    const ordinaryPlaceholderId = 'pending-three-root-origin-placeholder';
+    const ordinaryLive = new Map();
+    for (const threadId of ordinaryRows.keys()) {
+      ordinaryLive.set(threadId, {
+        thread: structuredClone(fixture.client.threads.find((thread) => thread.id === threadId)),
+        comments: structuredClone(fixture.client.threadComments.get(threadId)),
+      });
+      fixture.client.threads.find((thread) => thread.id === threadId).isResolved = false;
+      fixture.client.threadComments.set(
+        threadId,
+        fixture.client.threadComments.get(threadId).filter((comment) => comment.replyTo === null),
+      );
+    }
+    fixture.active.tasks.push({
+      ...structuredClone(ordinaryTask),
+      id: ordinaryPlaceholderId,
+      fingerprint: 'pending-three-root-origin-placeholder-fingerprint',
+      disposition: 'already-fixed', status: 'not-applicable', integratedCommitSha: null,
+      resolutionSummary: 'Retained only to map the roots before the later terminal carrier.',
+    });
+    fixture.active.tasks.find((task) => task.id === fixture.remediation.id).status = 'completed';
+    fixture.active.threadResolutionStatus.threadlessVerification = {
+      status: 'passed', headSha: PACKET_AGGREGATE_HEAD,
+      taskIds: [fixture.remediation.id], updatedAt: '2026-08-20T12:00:00.000Z',
+    };
+    const packetGit = fakeGit({
+      snapshot: async () => ({ headSha: PACKET_AGGREGATE_HEAD, dirty: false }),
+      pushedHead: async () => PACKET_AGGREGATE_HEAD,
+    });
+    const first = workflow(fixture.active, fixture.client, {
+      archiveStore: immutableArchiveStore([oldArchive, mixedArchive]),
+      git: packetGit,
+      journal: fakeJournal(fixture.client.events),
+      clock: { now: () => '2026-08-20T12:05:00.000Z' },
+    });
+    await first.api.replyResolve(35, fixture.aggregateTask.id);
+    await first.api.replyResolve(35, fixture.portabilityTask.id);
+    for (const [threadId, saved] of ordinaryLive) {
+      const index = fixture.client.threads.findIndex((thread) => thread.id === threadId);
+      fixture.client.threads[index] = saved.thread;
+      fixture.client.threadComments.set(threadId, saved.comments);
+    }
+
+    const terminalState = structuredClone(first.state.current);
+    terminalState.threadResolutionStatus.threads = terminalState.threadResolutionStatus.threads
+      .map((row) => ordinaryRows.get(row.threadNodeId) ?? row);
+    terminalState.tasks = terminalState.tasks.filter((task) => task.id !== ordinaryPlaceholderId);
+    const replayRows = terminalState.threadResolutionStatus.threads.filter(
+      (row) => Object.hasOwn(row, 'archiveProvenance'),
+    );
+    assert.equal(replayRows.length, 6);
+    terminalState.tasks.push(ordinaryTask);
+    terminalState.abandonmentReason = 'Preserve the six-replay plus four-origin carrier.';
+    terminalState.updatedAt = '2026-08-20T12:10:00.000Z';
+    const portabilityRow = terminalState.threadResolutionStatus.threads.find(
+      (row) => row.threadNodeId === PACKET_PORTABILITY_THREAD_ID,
+    );
+    const portabilityReply = fixture.client.threadComments.get(PACKET_PORTABILITY_THREAD_ID)[1];
+    portabilityReply.createdAt = '2026-08-20T12:03:30.000Z';
+    const replyOperation = `reply:35:${PACKET_PORTABILITY_THREAD_ID}:${PACKET_AGGREGATE_HEAD}`;
+    const resolveOperation = `resolve:35:${PACKET_PORTABILITY_THREAD_ID}:${PACKET_AGGREGATE_HEAD}`;
+    const terminalCarrier = {
+      archiveId: 'pr-35-2026-08-20T12-10-00-000Z',
+      state: terminalState,
+      events: [
+        ...mixedArchive.events.filter((event) => (
+          event.type === 'github-mutation-intent'
+            && [...ordinaryRows.keys()].some((threadId) => (
+              String(event.details?.operationId ?? '').includes(threadId)
+            ))
+        )).map((event) => structuredClone(event)),
+        archiveIntentEvent('reply', replyOperation, '2026-08-20T12:03:00.000Z'),
+        archiveIntentEvent('resolve', resolveOperation, '2026-08-20T12:04:00.000Z'),
+        {
+          schemaVersion: 1, type: 'abandoned',
+          summary: `Archived without completion: ${terminalState.abandonmentReason}`,
+          at: '2026-08-20T12:10:00.010Z',
+        },
+      ],
+    };
+    assert.equal(portabilityRow.isResolved, true);
+
+    const freshTask = {
+      ...structuredClone(fixture.aggregateTask),
+      id: 'fresh-ten-root-aggregate-carrier-r9',
+      fingerprint: 'fresh-ten-root-aggregate-carrier-r9-fingerprint',
+      sourceIds: terminalState.threadResolutionStatus.threads
+        .map((row) => `thread:${row.threadNodeId}`),
+    };
+    const active = structuredClone(fixture.active);
+    active.tasks = [freshTask, {
+      ...structuredClone(fixture.remediation), status: 'completed',
+    }];
+    active.currentIntegrationHeadSha = OTHER_HEAD;
+    active.git = { ...active.git, headSha: OTHER_HEAD };
+    active.validationStatus = { ...active.validationStatus, headSha: OTHER_HEAD };
+    active.threadResolutionStatus = proof('not-run');
+    active.threadResolutionStatus.threadlessVerification = {
+      status: 'passed', headSha: OTHER_HEAD,
+      taskIds: [fixture.remediation.id], updatedAt: '2026-08-20T12:11:00.000Z',
+    };
+    fixture.client.metadata.headRefOid = OTHER_HEAD;
+    const freshGit = fakeGit({
+      snapshot: async () => ({ headSha: OTHER_HEAD, dirty: false }),
+      pushedHead: async () => OTHER_HEAD,
+    });
+    fixture.client.events.length = 0;
+    fixture.client.calls.length = 0;
+    return {
+      oldArchive, mixedArchive, terminalCarrier, fixture, freshTask, active, freshGit,
+    };
+  };
+
+  const successful = await buildTopology();
+  const records = [successful.terminalCarrier, successful.mixedArchive, successful.oldArchive];
+  const originalRecords = structuredClone(records);
+  const store = immutableArchiveStore(records);
+  const setup = workflow(successful.active, successful.fixture.client, {
+    archiveStore: store, git: successful.freshGit,
+    journal: fakeJournal(successful.fixture.client.events),
+  });
+  const result = await setup.api.replyResolve(35, successful.freshTask.id);
+  const retainedRows = result.threadResolutionStatus.threads.filter(
+    (row) => row.taskIds.includes(successful.freshTask.id),
+  );
+  assert.equal(store.calls, 2);
+  assert.equal(retainedRows.length, 10);
+  assert.equal(retainedRows.every((row) => Object.hasOwn(row, 'archiveProvenance')), true);
+  assert.equal(setup.state.calls.length, 1);
+  assert.equal(setup.state.calls[0].name, 'checkpointArchiveTaskCompletion');
+  assert.equal(
+    successful.fixture.client.calls.some((call) => ['AddThreadReply', 'ResolveThread'].includes(call.name)),
+    false,
+  );
+  assert.deepEqual(successful.fixture.client.events, []);
+  assert.deepEqual(records, originalRecords);
+
+  const cases = [
+    ['partition slicing', ({ terminalCarrier }) => {
+      terminalCarrier.state.tasks.find(
+        (task) => task.id === PACKET_AGGREGATE_TASK_ID,
+      ).sourceIds.pop();
+    }],
+    ['unknown historical authority', ({ terminalCarrier }) => {
+      terminalCarrier.state.threadResolutionStatus.threads.find(
+        (row) => Object.hasOwn(row, 'archiveProvenance'),
+      ).archiveProvenance.historicalTaskId = 'unknown-historical-authority';
+    }],
+    ['changed proof core', ({ terminalCarrier }) => {
+      terminalCarrier.state.threadResolutionStatus.threads.find(
+        (row) => Object.hasOwn(row, 'archiveProvenance'),
+      ).rootCommentDatabaseId += 1;
+    }],
+    ['changed reply digest', ({ terminalCarrier }) => {
+      terminalCarrier.state.threadResolutionStatus.threads.find(
+        (row) => Object.hasOwn(row, 'archiveProvenance'),
+      ).archiveProvenance.replyBodySha256 = '0'.repeat(64);
+    }],
+    ['changed authority fingerprint', ({ terminalCarrier }) => {
+      terminalCarrier.state.threadResolutionStatus.threads.find(
+        (row) => Object.hasOwn(row, 'archiveProvenance'),
+      ).archiveProvenance.authorityFingerprint = '0'.repeat(64);
+    }],
+    ['partial provenance', ({ terminalCarrier }) => {
+      delete terminalCarrier.state.threadResolutionStatus.threads.find(
+        (row) => Object.hasOwn(row, 'archiveProvenance'),
+      ).archiveProvenance;
+    }],
+    ['overlapping partition owner', ({ terminalCarrier }) => {
+      const replayRoot = terminalCarrier.state.threadResolutionStatus.threads.find(
+        (row) => Object.hasOwn(row, 'archiveProvenance'),
+      ).threadNodeId;
+      terminalCarrier.state.tasks.find(
+        (task) => task.id === 'pr-review-worker-commit-delta-integrity-r1',
+      ).sourceIds.push(`thread:${replayRoot}`);
+    }],
+  ];
+  for (const [label, tamper] of cases) {
+    const topology = await buildTopology();
+    tamper(topology);
+    const journal = fakeJournal(topology.fixture.client.events);
+    const failed = workflow(topology.active, topology.fixture.client, {
+      archiveStore: immutableArchiveStore([
+        topology.terminalCarrier, topology.mixedArchive, topology.oldArchive,
+      ]),
+      git: topology.freshGit, journal,
+    });
+    await assert.rejects(
+      () => failed.api.replyResolve(35, topology.freshTask.id),
+      GitHubWorkflowError,
+      label,
+    );
+    assert.equal(failed.state.calls.length, 0, label);
+    assert.equal(journal.intents.size, 0, label);
+    assert.equal(topology.fixture.client.calls.some(
+      (call) => ['AddThreadReply', 'ResolveThread'].includes(call.name),
+    ), false, label);
+    assert.deepEqual(topology.fixture.client.events, [], label);
+  }
+
+  const missingOrigin = await buildTopology();
+  const noOlderOrigin = workflow(missingOrigin.active, missingOrigin.fixture.client, {
+    archiveStore: immutableArchiveStore([missingOrigin.terminalCarrier, missingOrigin.oldArchive]),
+    git: missingOrigin.freshGit, journal: fakeJournal(missingOrigin.fixture.client.events),
+  });
+  await assert.rejects(
+    () => noOlderOrigin.api.replyResolve(35, missingOrigin.freshTask.id),
+    GitHubWorkflowError,
+    'provenance without its older origin',
+  );
+  assert.equal(noOlderOrigin.state.calls.length, 0);
+
+  for (const [label, race] of [
+    ['mixed carrier inventory race', ({ records }) => {
+      records[0].state.nextAction += ' raced';
+    }],
+    ['mixed carrier live-evidence race', ({ topology }) => {
+      const replay = topology.terminalCarrier.state.threadResolutionStatus.threads.find(
+        (row) => Object.hasOwn(row, 'archiveProvenance'),
+      );
+      topology.fixture.client.threadComments.get(replay.threadNodeId)[1].body += '\nraced';
+    }],
+  ]) {
+    const topology = await buildTopology();
+    const raceRecords = [topology.terminalCarrier, topology.mixedArchive, topology.oldArchive];
+    let raced;
+    const raceStore = immutableArchiveStore(raceRecords, (calls) => {
+      if (calls === 2) race({ records: raceRecords, topology });
+    });
+    raced = workflow(topology.active, topology.fixture.client, {
+      archiveStore: raceStore, git: topology.freshGit,
+      journal: fakeJournal(topology.fixture.client.events),
+    });
+    await assert.rejects(
+      () => raced.api.replyResolve(35, topology.freshTask.id),
+      GitHubWorkflowError,
+      label,
+    );
+    assert.equal(raced.state.calls.length, 0, label);
+    assert.equal(topology.fixture.client.calls.some(
+      (call) => ['AddThreadReply', 'ResolveThread'].includes(call.name),
+    ), false, label);
+    assert.deepEqual(topology.fixture.client.events, [], label);
+  }
+});
+
 test('later ordinary gates reject aggregate reply, actor, digest, edit, and historical-task tampering without archive reads', async () => {
   const cases = [
     ['live reply body', ({ client }) => {
