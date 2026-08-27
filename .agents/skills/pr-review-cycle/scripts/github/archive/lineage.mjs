@@ -5,7 +5,7 @@ import { validatePrReviewState } from '../../contracts/contracts.mjs';
 import { GitHubWorkflowError } from '../errors.mjs';
 import { canonicalJson } from '../evidence/review-response.mjs';
 import { MAX_NODES } from '../graphql/client.mjs';
-import { aggregateHistoricalReplyBodyIsAdmissible, intentFor } from '../threads/replies.mjs';
+import { intentFor } from '../threads/replies.mjs';
 import {
   archiveBatchProofProjection,
   archiveContentFingerprint,
@@ -663,22 +663,9 @@ export function validateAggregateRootOrigin(state, live, selectedPlanByRoot, can
       archivedTask: authority.historicalTask,
       projection: singleRootProjection(authority),
     },
+    { aggregateOrigin: true },
   );
-  const evidence = adoption.evidence[0];
-  if (!aggregateHistoricalReplyBodyIsAdmissible(evidence.reply.body, {
-    prNumber: state.prNumber,
-    threadNodeId: authority.proof.threadNodeId,
-    historicalHeadSha: authority.historicalHeadSha,
-    historicalTaskId: authority.historicalTask.id,
-    historicalDisposition: authority.historicalDisposition,
-    historicalIntegratedCommitSha: authority.historicalTask.integratedCommitSha,
-  })) {
-    throw new GitHubWorkflowError(
-      'Historical aggregate reply has ambiguous stable task or marker structure',
-      'ARCHIVE_REPLY_MISMATCH',
-    );
-  }
-  return evidence;
+  return adoption.evidence[0];
 }
 
 export function normalizedAggregateRootAuthority(authority, evidence) {

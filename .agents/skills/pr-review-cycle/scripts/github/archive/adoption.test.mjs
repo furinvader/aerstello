@@ -1091,6 +1091,175 @@ test('byte-faithful PR35 5+3+1 aggregate adoption retains nine roots before ordi
   );
 });
 
+test('aggregate origins retain immutable reply authority across terminal validation-plan drift only', async () => {
+  const oldArchive = decodedPacketArchive(
+    PACKET_ARCHIVE_NAME, PACKET_ARCHIVE_STATE_BASE64, PACKET_ARCHIVE_EVENTS_BASE64,
+  );
+  const mixedArchive = decodedPacketArchive(
+    PACKET_MIXED_ARCHIVE_NAME, PACKET_MIXED_ARCHIVE_STATE_BASE64, PACKET_MIXED_ARCHIVE_EVENTS_BASE64,
+  );
+  const fixture = packetAggregateAdoptionFixture(oldArchive, mixedArchive);
+  fixture.active.tasks.find((task) => task.id === fixture.remediation.id).status = 'completed';
+  fixture.active.threadResolutionStatus.threadlessVerification = {
+    status: 'passed', headSha: PACKET_AGGREGATE_HEAD,
+    taskIds: [fixture.remediation.id], updatedAt: '2026-08-20T12:00:00.000Z',
+  };
+  const liveReplyBodies = new Map(fixture.selectedThreadIds.map((threadId) => (
+    [threadId, fixture.client.threadComments.get(threadId)[1].body]
+  )));
+  for (const archive of [oldArchive, mixedArchive]) {
+    archive.state.validationStatus.checks = [
+      'node --test later-terminal-plan.test.mjs',
+      'npm run check:workflow',
+      'git diff --check',
+    ];
+  }
+  const records = [oldArchive, mixedArchive];
+  const originalRecords = structuredClone(records);
+  const archiveStore = immutableArchiveStore(records);
+  const journal = fakeJournal(fixture.client.events);
+  const setup = workflow(fixture.active, fixture.client, {
+    archiveStore,
+    git: fakeGit({
+      snapshot: async () => ({ headSha: PACKET_AGGREGATE_HEAD, dirty: false }),
+      pushedHead: async () => PACKET_AGGREGATE_HEAD,
+    }),
+    journal,
+  });
+
+  const retained = await setup.api.replyResolve(35, fixture.aggregateTask.id);
+
+  const retainedRows = retained.threadResolutionStatus.threads.filter(
+    (row) => Object.hasOwn(row, 'archiveProvenance'),
+  );
+  assert.equal(retainedRows.length, fixture.selectedThreadIds.length);
+  for (const row of retainedRows) {
+    assert.equal(
+      row.archiveProvenance.replyBodySha256,
+      createHash('sha256').update(liveReplyBodies.get(row.threadNodeId), 'utf8').digest('hex'),
+      row.threadNodeId,
+    );
+  }
+  assert.equal(setup.state.calls.length, 1);
+  assert.equal(setup.state.calls[0].name, 'checkpointArchiveTaskCompletion');
+  assert.equal(journal.intents.size, 0);
+  assert.equal(
+    fixture.client.calls.some((call) => ['AddThreadReply', 'ResolveThread'].includes(call.name)),
+    false,
+  );
+  assert.deepEqual(fixture.client.events, []);
+  assert.deepEqual(records, originalRecords);
+
+  const ordinary = archiveAdoptionFixture();
+  ordinary.archive.state.validationStatus.checks = ['npm run later-terminal-plan'];
+  const ordinarySetup = workflow(ordinary.active, ordinary.client, {
+    archiveStore: immutableArchiveStore([ordinary.archive]), journal: ordinary.journal,
+  });
+  await assert.rejects(
+    () => ordinarySetup.api.replyResolve(2, ARCHIVED_TASK_ID),
+    { code: 'ARCHIVE_REPLY_MISMATCH' },
+  );
+  assert.equal(ordinarySetup.state.calls.length, 0);
+});
+
+test('validation-drift aggregate origins retain every strict live, proof, intent, time, and lineage gate', async () => {
+  const cases = [
+    ['wrong historical head', ({ reply, proofRow }) => {
+      reply.body = reply.body.replace(proofRow.observedHeadSha, OTHER_HEAD);
+    }],
+    ['wrong historical task', ({ reply, historicalTask }) => {
+      reply.body = reply.body.replace(`- ${historicalTask.id}:`, '- altered-historical-task:');
+    }],
+    ['wrong fixed commit', ({ reply, historicalTask }) => {
+      reply.body = reply.body.replace(historicalTask.integratedCommitSha, OTHER_HEAD);
+    }],
+    ['wrong deterministic marker', ({ reply }) => {
+      reply.body = reply.body.replace(
+        /<!-- aerstello-review:[0-9a-f]{24} -->/u,
+        `<!-- aerstello-review:${'f'.repeat(24)} -->`,
+      );
+    }],
+    ['duplicate validation block', ({ reply }) => {
+      reply.body = reply.body.replace('\n<!-- aerstello-review:', '\nValidation: duplicate.\n<!-- aerstello-review:');
+    }],
+    ['edited reply', ({ reply }) => { reply.lastEditedAt = '2026-08-20T12:20:00.000Z'; }],
+    ['foreign reply actor', ({ reply }) => { reply.author = BOT; }],
+    ['wrong reply parent', ({ reply }) => { reply.replyTo = { id: 'PRRC_wrong_parent' }; }],
+    ['extra direct reply', ({ comments, reply }) => {
+      comments.push({ ...structuredClone(reply), id: 'PRRC_extra_reply', databaseId: 9_900_040 });
+    }],
+    ['changed durable proof', ({ proofRow }) => { proofRow.replyId = 'PRRC_changed_reply'; }],
+    ['missing reply intent', ({ records, proofRow }) => {
+      const operationId = `reply:35:${proofRow.threadNodeId}:${proofRow.observedHeadSha}`;
+      records[1].events = records[1].events.filter(
+        (event) => event.details?.operationId !== operationId,
+      );
+    }],
+    ['proof outside terminal time', ({ proofRow }) => {
+      proofRow.resolvedAt = '2099-08-20T12:00:00.000Z';
+    }],
+    ['divergent full-carrier lineage', ({ records, historicalTask }) => {
+      const divergent = structuredClone(records[1]);
+      divergent.archiveId = 'pr-35-2026-08-20T10-00-59-000Z';
+      divergent.state.tasks.find((task) => task.id === historicalTask.id).summary += ' Divergent.';
+      records.push(divergent);
+    }],
+  ];
+
+  for (const [label, tamper] of cases) {
+    const oldArchive = decodedPacketArchive(
+      PACKET_ARCHIVE_NAME, PACKET_ARCHIVE_STATE_BASE64, PACKET_ARCHIVE_EVENTS_BASE64,
+    );
+    const mixedArchive = decodedPacketArchive(
+      PACKET_MIXED_ARCHIVE_NAME, PACKET_MIXED_ARCHIVE_STATE_BASE64, PACKET_MIXED_ARCHIVE_EVENTS_BASE64,
+    );
+    const fixture = packetAggregateAdoptionFixture(oldArchive, mixedArchive);
+    fixture.active.tasks.find((task) => task.id === fixture.remediation.id).status = 'completed';
+    fixture.active.threadResolutionStatus.threadlessVerification = {
+      status: 'passed', headSha: PACKET_AGGREGATE_HEAD,
+      taskIds: [fixture.remediation.id], updatedAt: '2026-08-20T12:00:00.000Z',
+    };
+    for (const archive of [oldArchive, mixedArchive]) {
+      archive.state.validationStatus.checks = ['npm run later-terminal-plan'];
+    }
+    const records = [oldArchive, mixedArchive];
+    const proofRow = mixedArchive.state.threadResolutionStatus.threads.find((row) => {
+      const task = mixedArchive.state.tasks.find((candidate) => candidate.id === row.taskIds[0]);
+      return task?.disposition === 'actionable';
+    });
+    const historicalTask = mixedArchive.state.tasks.find((task) => task.id === proofRow.taskIds[0]);
+    const comments = fixture.client.threadComments.get(proofRow.threadNodeId);
+    const reply = comments[1];
+    tamper({ records, proofRow, historicalTask, comments, reply });
+    const archiveStore = immutableArchiveStore(records);
+    const journal = fakeJournal(fixture.client.events);
+    const setup = workflow(fixture.active, fixture.client, {
+      archiveStore,
+      git: fakeGit({
+        snapshot: async () => ({ headSha: PACKET_AGGREGATE_HEAD, dirty: false }),
+        pushedHead: async () => PACKET_AGGREGATE_HEAD,
+      }),
+      journal,
+    });
+    const durableSnapshot = structuredClone(setup.state.current);
+
+    await assert.rejects(
+      () => setup.api.replyResolve(35, fixture.aggregateTask.id),
+      GitHubWorkflowError,
+      label,
+    );
+    assert.equal(setup.state.calls.length, 0, label);
+    assert.deepEqual(setup.state.current, durableSnapshot, label);
+    assert.equal(journal.intents.size, 0, label);
+    assert.equal(
+      fixture.client.calls.some((call) => ['AddThreadReply', 'ResolveThread'].includes(call.name)),
+      false,
+      label,
+    );
+    assert.deepEqual(fixture.client.events, [], label);
+  }
+});
+
 test('aggregate adoption canonicalizes discussion-only and mixed dual aliases while ignoring unrelated aliases', async () => {
   const oldArchive = decodedPacketArchive(
     PACKET_ARCHIVE_NAME, PACKET_ARCHIVE_STATE_BASE64, PACKET_ARCHIVE_EVENTS_BASE64,
