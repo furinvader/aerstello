@@ -3409,6 +3409,11 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
       const terminalIds = state.execution.tasks.filter(({ status }) => ['integrated', 'no-change'].includes(status)).map(({ id }) => id);
       const terminalLabels = terminalIds.map((id) => `task ${id}`);
       const remediationIds = new Set();
+      if (validationDriven) {
+        for (const task of resultingPlan.tasks) {
+          if (!prior.tasks.some(({ id }) => id === task.id)) remediationIds.add(task.id);
+        }
+      }
       for (const fingerprint of state.verification?.unresolvedFindingFingerprints ?? []) {
         const path = findingDispositionPath(root, state, fingerprint);
         if (!existsSync(path)) continue;

@@ -758,24 +758,37 @@ test('failed validation is private, immutable, and explicitly replaced at the ne
   assert.ok(existsSync(join(changeDirectory(fixture.cwd, state.changeId), 'verification', 'rounds', '0002', 'validation-plan.json')));
   state = runValidation({ cwd: fixture.cwd, expectedRevision: state.revision,
     runner: () => ({ status: 8, signal: null, stdout: '', stderr: 'corrective work required' }) });
+  const verificationDirectory = join(changeDirectory(fixture.cwd, state.changeId), 'verification');
+  const failedValidationEvidence = durableSnapshot(verificationDirectory);
   const original = JSON.parse(readFileSync(join(changeDirectory(fixture.cwd, state.changeId), 'plan', 'plan.json'), 'utf8'));
   const amendedPlan = structuredClone(original); amendedPlan.planRevision = 2;
   amendedPlan.criteria.push({ id: 'validation-remediation', description: 'Correct the failed lifecycle validation.',
     disposition: 'owned', ownerTaskId: 'validation-remediation-task', deferredReason: null });
   amendedPlan.tasks.push({ ...original.tasks[0], id: 'validation-remediation-task', title: 'Remediate validation',
     objective: 'Correct the receipt-bound validation failure.', criterionIds: ['validation-remediation'],
-    checklistItemIds: [], dependsOn: ['state-task'], anticipatedPaths: ['remediation.txt'] });
+    checklistItemIds: [], dependsOn: ['state-task'], anticipatedPaths: ['first.txt'] });
   const amendment = { id: 'validation-remediation', reason: 'The durable failed result requires corrective work.',
     authorization: 'operator', trigger: `validation-failure:${state.verification.validationResultDigests.at(-1)}`,
     delta: { added: ['validation-remediation'] }, invalidatedEvidence: [] };
   assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision, resultingPlan: amendedPlan,
     amendment: { ...amendment, trigger: `validation-failure:sha256:${'0'.repeat(64)}` } }),
   (error) => error.code === 'INVALID_AMENDMENT');
+  const conflictingPlan = structuredClone(amendedPlan);
+  conflictingPlan.criteria.push({ id: 'validation-remediation-conflict', description: 'Keep remediation ownership disjoint.',
+    disposition: 'owned', ownerTaskId: 'validation-remediation-conflict-task', deferredReason: null });
+  conflictingPlan.tasks.push({ ...amendedPlan.tasks.at(-1), id: 'validation-remediation-conflict-task',
+    title: 'Conflict with remediation', objective: 'Attempt overlapping corrective ownership.',
+    criterionIds: ['validation-remediation-conflict'] });
+  assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+    resultingPlan: conflictingPlan, amendment }),
+  (error) => error.code === 'PLAN_NOT_READY' && error.message.includes('overlapping anticipated paths'));
   state = amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision, resultingPlan: amendedPlan, amendment });
   assert.equal(state.phase, 'implementing');
   assert.equal(state.execution.tasks.find(({ id }) => id === 'state-task').status, 'integrated');
   assert.equal(state.execution.tasks.find(({ id }) => id === 'validation-remediation-task').status, 'unbound');
   assert.equal(state.verification, null);
+  assert.deepEqual(durableSnapshot(verificationDirectory), failedValidationEvidence,
+    'failed validation plans and results remain byte-for-byte immutable after remediation admission');
 });
 
 test('late source drift preserves terminal authority and invalidates verification proof', async () => {
