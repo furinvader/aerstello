@@ -8,6 +8,12 @@ function latestClassifications(journal) {
   return [...roots.values()];
 }
 
+function initialAuthorityDigest(journal) {
+  return journal?.entries?.find((entry) => entry.kind === 'amendment')?.priorAuthorityDigest
+    ?? journal?.authorityDigest
+    ?? null;
+}
+
 function canonicalExactHeadManifest(entries) {
   const manifest = entries.at(-1);
   const classification = entries.at(-2);
@@ -39,18 +45,23 @@ export async function readScopeReadiness(stateAdapter, state, liveHeadSha = null
     scopeFailure(`Receipt-valid scope evidence could not be loaded: ${error.message}`, 'SCOPE_EVIDENCE_INVALID');
   }
   const entries = status?.journal?.value?.entries ?? [];
-  const classifications = latestClassifications(status?.journal?.value);
-  const currentHead = state.currentIntegrationHeadSha;
-  const referenceMatchesState = status?.configured === true
-    && JSON.stringify(status.reference) === JSON.stringify(state.scopeControl);
-  const receiptsMatch = status?.authority?.digest === status?.reference?.authorityDigest
-    && status?.journal?.digest === status?.reference?.journalDigest
-    && (status?.return?.digest ?? null) === status?.reference?.returnDigest;
-  const authorityHead = status?.authority?.value?.handoffHeadSha ?? null;
   // scopeStatus validates durable journal variants before they reach this adapter. Keeping
   // the schema discriminator here also leaves old lightweight adapter fixtures equivalent
   // to their original empty-journal authority setup.
   const durableEntries = entries.filter((entry) => entry?.schemaVersion === 1);
+  const classifications = latestClassifications(status?.journal?.value);
+  const currentHead = state.currentIntegrationHeadSha;
+  const referenceMatchesState = status?.configured === true
+    && JSON.stringify(status.reference) === JSON.stringify(state.scopeControl);
+  const effectiveAuthorityDigest = status?.journal?.value?.authorityDigest
+    ?? (durableEntries.length === 0 ? status?.reference?.authorityDigest : null);
+  const journalInitialAuthorityDigest = initialAuthorityDigest(status?.journal?.value)
+    ?? (durableEntries.length === 0 ? effectiveAuthorityDigest : null);
+  const receiptsMatch = status?.authority?.digest === journalInitialAuthorityDigest
+    && effectiveAuthorityDigest === status?.reference?.authorityDigest
+    && status?.journal?.digest === status?.reference?.journalDigest
+    && (status?.return?.digest ?? null) === status?.reference?.returnDigest;
+  const authorityHead = status?.authority?.value?.handoffHeadSha ?? null;
   const hasClassificationHistory = durableEntries.some((entry) => entry.kind === 'classification');
   const exactHeadManifest = hasClassificationHistory
     ? canonicalExactHeadManifest(durableEntries)
@@ -59,7 +70,9 @@ export async function readScopeReadiness(stateAdapter, state, liveHeadSha = null
     && durableEntries.length === 0
     && ['standalone', 'imported'].includes(status?.authority?.value?.authorityKind)
     && authorityHead === currentHead;
-  const manifestMatches = !hasClassificationHistory ? initialAuthorityReady : exactHeadManifest !== null;
+  const manifestMatches = !hasClassificationHistory
+    ? initialAuthorityReady
+    : exactHeadManifest?.manifest.authorityDigest === effectiveAuthorityDigest;
   const exactHead = exactHeadManifest?.manifest.reviewHeadSha
     ?? (initialAuthorityReady ? authorityHead : status?.reference?.assessmentHeadSha ?? null);
   const headMatches = exactHead === currentHead
@@ -75,8 +88,8 @@ export async function readScopeReadiness(stateAdapter, state, liveHeadSha = null
     liveHeadSha,
     exactHeadSha: exactHead,
     authority: status?.authority?.value ?? null,
-    authorityDigest: status?.authority?.digest ?? null,
-    journalAuthorityDigest: status?.journal?.value?.authorityDigest ?? null,
+    authorityDigest: effectiveAuthorityDigest,
+    journalAuthorityDigest: effectiveAuthorityDigest,
     journalDigest: status?.journal?.digest ?? null,
     classifications,
     hasClassificationHistory,

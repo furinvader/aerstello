@@ -14,6 +14,7 @@ import {
 
 const HEAD = 'a'.repeat(40);
 const AUTHORITY = `sha256:${'a'.repeat(64)}`;
+const REVISED_AUTHORITY = `sha256:${'d'.repeat(64)}`;
 const JOURNAL = `sha256:${'b'.repeat(64)}`;
 const ASSESSMENT = `sha256:${'c'.repeat(64)}`;
 
@@ -107,6 +108,21 @@ function scopeRecoveryState() {
       checks: ['scope regression'], updatedAt: '2026-08-27T00:00:00Z',
     },
   });
+}
+
+function amendedWorkflowScope(state) {
+  const status = workflowScope(state, 'within-scope-defect', 'ready', { integratedManifest: true });
+  status.reference.authorityDigest = REVISED_AUTHORITY;
+  state.scopeControl = status.reference;
+  status.journal.value.authorityDigest = REVISED_AUTHORITY;
+  status.journal.value.entries.unshift({
+    schemaVersion: 1, kind: 'amendment', rootCauseId: 'generalized-checker',
+    reviewHeadSha: HEAD, authorityDigest: AUTHORITY,
+    priorAuthorityDigest: AUTHORITY, revisedAuthorityDigest: REVISED_AUTHORITY,
+  });
+  status.journal.value.entries.at(-2).authorityDigest = REVISED_AUTHORITY;
+  status.journal.value.entries.at(-1).authorityDigest = REVISED_AUTHORITY;
+  return status;
 }
 
 test('PR #53 generalized-checker removal or trim branch remains eligible without choosing its disposition', async () => {
@@ -214,4 +230,14 @@ test('PR #53 trim and freshly replanned exact-head branches unlock the same work
   recoverySetup.state.setScopeStatusForTest(recoveryStatus);
   assert.equal((await recoverySetup.api.refreshThreads(2)).threadResolutionStatus.status, 'passed');
   assert.equal(recoverySetup.state.calls[0].name, 'checkpointTaskCompletion');
+});
+
+test('revised authority with a fresh exact-head manifest unlocks GitHub mutation', async () => {
+  const state = readyState();
+  const status = amendedWorkflowScope(state);
+  const setup = workflow(state);
+  setup.state.setScopeStatusForTest(status);
+  const requested = await setup.api.request(2, 'discovery');
+  assert.equal(requested.requested, true);
+  assert.equal(setup.client.events.includes('mutation:AddReviewRequest'), true);
 });

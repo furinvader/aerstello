@@ -11,12 +11,16 @@ import {
 const HEAD = 'a'.repeat(40);
 const DIGEST_A = `sha256:${'a'.repeat(64)}`;
 const DIGEST_B = `sha256:${'b'.repeat(64)}`;
+const DIGEST_D = `sha256:${'d'.repeat(64)}`;
 const ASSESSMENT = `sha256:${'c'.repeat(64)}`;
 
-function classification({ phase = 'integrated-head', headSha = HEAD } = {}) {
+function classification({
+  phase = 'integrated-head', headSha = HEAD, authorityDigest = DIGEST_A,
+  rootCauseId = 'scope-root', findingIds = ['finding-one'],
+} = {}) {
   return {
-    schemaVersion: 1, kind: 'classification', rootCauseId: 'scope-root', findingIds: ['finding-one'],
-    reviewHeadSha: headSha, authorityDigest: DIGEST_A, classification: 'within-scope-defect',
+    schemaVersion: 1, kind: 'classification', rootCauseId, findingIds,
+    reviewHeadSha: headSha, authorityDigest, classification: 'within-scope-defect',
     authorityAmendmentRequired: false,
     assessment: {
       digest: ASSESSMENT,
@@ -26,11 +30,37 @@ function classification({ phase = 'integrated-head', headSha = HEAD } = {}) {
   };
 }
 
-function manifest(headSha = HEAD) {
+function manifest(headSha = HEAD, authorityDigest = DIGEST_A, rootCauseId = 'scope-root') {
   return {
-    schemaVersion: 1, kind: 'exact-head-manifest', rootCauseId: 'scope-root', reviewHeadSha: headSha,
-    authorityDigest: DIGEST_A, assessmentDigest: ASSESSMENT, triggerKinds: ['classification'],
+    schemaVersion: 1, kind: 'exact-head-manifest', rootCauseId, reviewHeadSha: headSha,
+    authorityDigest, assessmentDigest: ASSESSMENT, triggerKinds: ['classification'],
   };
+}
+
+function amendedFixture() {
+  const entries = [
+    classification({
+      phase: 'review-finding', authorityDigest: DIGEST_A,
+      rootCauseId: 'stale-root', findingIds: ['stale-finding'],
+    }),
+    {
+      schemaVersion: 1, kind: 'decision', authorityDigest: DIGEST_A,
+      rootCauseId: 'scope-root', reviewHeadSha: HEAD,
+    },
+    {
+      schemaVersion: 1, kind: 'amendment', authorityDigest: DIGEST_A,
+      rootCauseId: 'scope-root', reviewHeadSha: HEAD,
+      priorAuthorityDigest: DIGEST_A, revisedAuthorityDigest: DIGEST_D,
+    },
+    classification({ authorityDigest: DIGEST_D }),
+    manifest(HEAD, DIGEST_D),
+  ];
+  return fixture({
+    reference: { authorityDigest: DIGEST_D, assessmentHeadSha: HEAD },
+    status: {
+      journal: { digest: DIGEST_B, value: { authorityDigest: DIGEST_D, entries } },
+    },
+  });
 }
 
 function fixture(overrides = {}) {
@@ -148,6 +178,41 @@ test('selected-root readiness is phase-aware and rejects superseded authority', 
   await assert.rejects(() => assertScopeRootReady(adapter, state, HEAD, task), {
     code: 'SCOPE_ROOT_NOT_READY',
   });
+});
+
+test('accepts revised effective authority while rejecting stale or tampered amendment evidence', async () => {
+  const amended = amendedFixture();
+  const adapter = { async scopeStatus() { return amended.status; } };
+  const readiness = await assertScopeReady(adapter, amended.state, HEAD);
+  assert.equal(readiness.ready, true);
+  assert.equal(readiness.authorityDigest, DIGEST_D);
+  assert.equal((await assertScopeRootReady(
+    adapter, amended.state, HEAD, { id: 'scope-root', sourceIds: ['finding-one'] },
+  )).classification.authorityDigest, DIGEST_D);
+  await assert.rejects(() => assertScopeRootReady(
+    adapter, amended.state, HEAD, { id: 'stale-root', sourceIds: ['stale-finding'] },
+  ), { code: 'SCOPE_ROOT_NOT_READY' });
+
+  const tamperedSnapshot = amendedFixture();
+  tamperedSnapshot.status.authority.digest = DIGEST_B;
+  await assert.rejects(
+    () => assertScopeReady({ async scopeStatus() { return tamperedSnapshot.status; } }, tamperedSnapshot.state, HEAD),
+    { code: 'SCOPE_EVIDENCE_INVALID' },
+  );
+
+  const divergentJournal = amendedFixture();
+  divergentJournal.status.journal.value.authorityDigest = ASSESSMENT;
+  await assert.rejects(
+    () => assertScopeReady({ async scopeStatus() { return divergentJournal.status; } }, divergentJournal.state, HEAD),
+    { code: 'SCOPE_EVIDENCE_INVALID' },
+  );
+
+  const staleManifest = amendedFixture();
+  staleManifest.status.journal.value.entries.at(-1).authorityDigest = DIGEST_A;
+  await assert.rejects(
+    () => assertScopeReady({ async scopeStatus() { return staleManifest.status; } }, staleManifest.state, HEAD),
+    { code: 'SCOPE_EVIDENCE_INVALID' },
+  );
 });
 
 test('reports durable decision, return, and resume blockers without trusting compact state alone', async () => {
