@@ -430,6 +430,7 @@ const PRODUCTION_CONTRACT_IMPORTS = new Map([
     ]],
   ])],
   ['scope-control.mjs', new Map([
+    ['node:util', ['isDeepStrictEqual']],
     [scopeReviewValidationModule, [
       'validateAssessmentPacket', 'validateScopeAssessmentApplicability',
       'validateScopeAssessmentResult',
