@@ -447,19 +447,27 @@ export function checkpointScopeReturn({
       if (current.scopeControl?.gate !== 'return-pending') {
         throw new StateError('Scope return is not pending', 'SCOPE_RETURN_NOT_PENDING');
       }
+      if (!existsSync(scopeReturnPath(cwd, current.prNumber))) {
+        throw new StateError('Scope return envelope is missing after its guarded decision', 'INVALID_SCOPE_RETURN');
+      }
+      const returnEvidence = readScopeReturn(cwd, current);
+      if (returnEvidence.digest !== current.scopeControl.returnDigest) {
+        throw new StateError('Scope return identity does not match its receipt-valid envelope', 'INVALID_SCOPE_EVIDENCE');
+      }
+      const envelope = returnEvidence.value;
       const journalEvidence = readScopeJournal(cwd, current);
-      const classification = latestScopeClassification(journalEvidence.value);
+      const classification = latestScopeClassification(journalEvidence.value, envelope.rootCauseId);
       const decision = journalEvidence.value.entries.findLast((entry) => entry.kind === 'decision'
-        && entry.rootCauseId === classification?.rootCauseId);
-      if (!classification || !decision) throw new StateError('Scope return lacks classified decision evidence', 'INVALID_SCOPE_RETURN');
+        && entry.rootCauseId === envelope.rootCauseId
+        && entry.decisionId === envelope.decisionId);
+      if (!classification || classification.assessment.digest !== envelope.assessmentDigest
+          || !decision || decision.assessmentDigest !== envelope.assessmentDigest) {
+        throw new StateError('Scope return lacks classified decision evidence', 'INVALID_SCOPE_RETURN');
+      }
       if (livePrHeadSha !== current.currentIntegrationHeadSha
           || livePrHeadSha !== classification.reviewHeadSha) {
         throw new StateError('Scope return requires the exact live PR HEAD', 'SCOPE_RETURN_STALE');
       }
-      if (!existsSync(scopeReturnPath(cwd, current.prNumber))) {
-        throw new StateError('Scope return envelope is missing after its guarded decision', 'INVALID_SCOPE_RETURN');
-      }
-      const envelope = readScopeReturn(cwd, current).value;
       const expected = buildReturnEnvelope(
         current, journalEvidence.value, classification, decision, envelope.createdAt,
       );

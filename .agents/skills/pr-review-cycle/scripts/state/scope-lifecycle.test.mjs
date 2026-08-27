@@ -434,6 +434,51 @@ test('scope decision rejects a selected root whose own classification needs no d
   }), { code: 'SCOPE_DECISION_NOT_REQUIRED' });
 });
 
+test('scope return reconstructs the exact envelope root despite a later unrelated classification', () => {
+  const cwd = harness.repo();
+  const fixture = proposedFixture(cwd, 'envelope-root-return-task');
+  const returning = classificationInput(fixture, 'human-decision-required', {
+    entryId: 'classification-return-envelope-root', rootCauseId: 'return-envelope-root',
+  });
+  const returningClassified = checkpointScopeClassification({
+    cwd, classification: returning, expectedRevision: fixture.adopted.revision,
+  });
+  const unrelated = classificationInput(fixture, 'within-scope', {
+    entryId: 'classification-later-unrelated-root', rootCauseId: 'later-unrelated-root',
+  });
+  const independentlyClassified = checkpointScopeClassification({
+    cwd, classification: unrelated, expectedRevision: returningClassified.revision,
+  });
+  const decision = {
+    entryId: 'decision-return-envelope-root', at: harness.AT, rootCauseId: returning.rootCauseId,
+    blockerId: 'scope-blocker-return-envelope-root', decisionId: 'scope-decision-return-envelope-root',
+    decision: 'approve-expansion-and-replan', blockerDigest: DIGEST,
+    approvedDeltaDigest: PLAN_DIGEST, rationale: 'Return only the envelope-bound root.',
+    priorDecisionIds: [],
+  };
+  const decided = checkpointScopeDecision({
+    cwd, decision, expectedRevision: independentlyClassified.revision,
+  });
+  const pendingEnvelope = scopeStatus({ cwd }).return;
+
+  const returned = checkpointScopeReturn({
+    cwd, livePrHeadSha: fixture.packet.reviewedHeadSha, expectedRevision: decided.revision,
+  });
+  const returnedEnvelope = scopeStatus({ cwd }).return;
+
+  assert.equal(returned.scopeControl.gate, 'returned');
+  assert.equal(returned.scopeControl.returnDigest, pendingEnvelope.digest);
+  assert.deepEqual(returnedEnvelope, pendingEnvelope);
+  assert.equal(returnedEnvelope.value.rootCauseId, returning.rootCauseId);
+  assert.equal(returnedEnvelope.value.decisionId, decision.decisionId);
+  assert.equal(returnedEnvelope.value.assessmentDigest, returning.assessment.digest);
+  assert.deepEqual(returnedEnvelope.value.findingIds, returning.findingIds);
+  assert.deepEqual(returnedEnvelope.value.findingFingerprints, returning.findingFingerprints);
+  assert.equal(returnedEnvelope.value.smallestExpansion, returning.assessment.result.smallestExpansion);
+  assert.equal(returnedEnvelope.value.narrowAlternative, returning.assessment.result.narrowAlternative);
+  assert.equal(returnedEnvelope.value.trimAlternative, returning.assessment.result.smallerSufficientAlternative);
+});
+
 test('material return and resume preserve review history and stop a second expansion', () => {
   const cwd = harness.repo();
   const fixture = proposedFixture(cwd, 'material-return-task');
