@@ -619,19 +619,25 @@ function fakeState(initial) {
     async load() { return structuredClone(current); },
     async scopeStatus() {
       if (scopeStatusOverride !== null) return structuredClone(scopeStatusOverride);
-      const entries = current.tasks.map((task, index) => ({
-        kind: 'classification',
-        sequence: index + 1,
-        rootCauseId: task.id,
-        findingIds: task.sourceIds ?? [task.id],
-        classification: task.disposition === 'out-of-scope'
-          ? 'unrelated-follow-up' : 'within-scope-defect',
-        reviewHeadSha: current.currentIntegrationHeadSha,
-        assessment: {
-          packet: { minimalClosure: { statement: 'Keep the fixture within its accepted boundary.' } },
-          result: { narrowAlternative: 'Keep only the selected root.' },
-        },
-      }));
+      const entries = current.tasks.map((task, index) => {
+        const findingIds = task.sourceIds ?? [task.id];
+        return {
+          kind: 'classification',
+          sequence: index + 1,
+          rootCauseId: task.id,
+          findingIds,
+          findingFingerprints: findingIds.map(
+            (_findingId, findingIndex) => `${task.fingerprint}-f${findingIndex + 1}`,
+          ),
+          classification: task.disposition === 'out-of-scope'
+            ? 'unrelated-follow-up' : 'within-scope-defect',
+          reviewHeadSha: current.currentIntegrationHeadSha,
+          assessment: {
+            packet: { minimalClosure: { statement: 'Keep the fixture within its accepted boundary.' } },
+            result: { narrowAlternative: 'Keep only the selected root.' },
+          },
+        };
+      });
       return {
         configured: true,
         gate: current.scopeControl.gate,
