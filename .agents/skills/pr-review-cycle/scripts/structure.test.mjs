@@ -877,6 +877,7 @@ PRODUCTION_STATE_IMPORTS.set('services/scope.mjs', new Map([
   ['node:fs', ['existsSync']],
   [join(scriptsDirectory, 'contracts', 'contracts.mjs'), [
     'scopeAuthorityDigest', 'scopeControlJournalDigest', 'scopeExactHeadManifestDigest',
+    'scopeGateForClassificationEntry',
     'validateScopeAuthoritySnapshot', 'validateScopeControlJournal', 'validateScopeReturnEnvelope',
   ]],
   [stateModule('atomic-io.mjs'), ['canonicalSerializedJson']],
