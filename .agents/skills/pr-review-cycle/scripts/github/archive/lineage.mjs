@@ -695,7 +695,7 @@ export function assertHistoricalCarrierSlice(candidate, projection, rows) {
   return rows;
 }
 
-export function assertMixedHistoricalCarrierSlice(candidate, projection, rows) {
+function assertMixedHistoricalCarrierSlice(candidate, projection, rows) {
   const ordinaryRows = rows.filter((row) => !Object.hasOwn(row, 'archiveProvenance'));
   const replayRows = rows.filter((row) => Object.hasOwn(row, 'archiveProvenance'));
   if (ordinaryRows.length === 0 || replayRows.length === 0
@@ -893,7 +893,7 @@ export function aggregateProofCore(proof) {
   };
 }
 
-export function assertAggregateReplayRow(
+function assertAggregateReplayRow(
   candidate, row, authority, normalizedAuthority, authorityFingerprint, intentFootprints,
 ) {
   const provenance = row.archiveProvenance;
