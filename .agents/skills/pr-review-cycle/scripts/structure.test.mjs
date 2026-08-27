@@ -183,6 +183,8 @@ const EXPECTED_CANONICAL_FILES = [
   'scripts/state/recovery.mjs',
   'scripts/state/review-transitions.test.mjs',
   'scripts/state/schema-migration-and-recovery.test.mjs',
+  'scripts/state/scope-classification-head.mjs',
+  'scripts/state/scope-classification-head.test.mjs',
   'scripts/state/scope-lifecycle.test.mjs',
   'scripts/state/services/archive-import.mjs',
   'scripts/state/services/archive-import.test.mjs',
@@ -542,6 +544,7 @@ const stateModule = (path) => join(stateModuleDirectory, path);
 
 const PRODUCTION_STATE_IMPORTS = new Map([
   ['errors.mjs', new Map()],
+  ['scope-classification-head.mjs', new Map()],
   ['atomic-io.mjs', new Map([
     ['node:fs', ['closeSync', 'existsSync', 'fsyncSync', 'mkdirSync', 'openSync', 'readFileSync', 'renameSync', 'rmSync', 'writeFileSync']],
     ['node:crypto', ['randomUUID']],
@@ -893,6 +896,7 @@ PRODUCTION_STATE_IMPORTS.set('services/scope.mjs', new Map([
 
 const PRODUCTION_STATE_EXPORTS = new Map([
   ['errors.mjs', ['StateError']],
+  ['scope-classification-head.mjs', ['resolveScopeClassificationHead']],
   ['atomic-io.mjs', ['serializeJson', 'canonicalJson', 'canonicalSerializedJson', 'atomicWriteText', 'atomicWriteJson', 'readJsonSidecar']],
   ['locations.mjs', ['parsePrNumber', 'stateDirectory', 'statePath', 'validationPlanPath', 'scopeAuthorityPath', 'scopeAuthorityReceiptPath', 'scopeControlJournalPath', 'scopeControlJournalReceiptPath', 'scopeReturnPath', 'scopeReturnReceiptPath', 'taskPacketSidecarPath', 'taskBindingProvenancePath', 'taskBindingProvenanceReceiptPath', 'workerResultEnvelopePath', 'workerResultReceiptPath', 'specialistReviewBundlePath', 'specialistPlanReceiptPath', 'activePointerPath', 'lockPath', 'requestOwnerLockPath', 'legacyLockPath', 'legacyRequestOwnerLockPath']],
   ['locks.mjs', ['withStateLock', 'withGitHubRequestOwnerLock']],
