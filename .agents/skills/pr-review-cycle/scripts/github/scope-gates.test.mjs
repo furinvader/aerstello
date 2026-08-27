@@ -161,26 +161,29 @@ test('selected root gates do not authorize a different unclassified root', async
 });
 
 test('selected root requires classification compatible with immutable task disposition', async () => {
-  for (const [disposition, classification, accepted] of [
-    ['actionable', 'within-scope-defect', true],
-    ['actionable', 'unnecessary-mechanism-defect', true],
-    ['actionable', 'unrelated-follow-up', false],
-    ['out-of-scope', 'within-scope-defect', false],
-    ['out-of-scope', 'unnecessary-mechanism-defect', false],
-    ['out-of-scope', 'unrelated-follow-up', true],
-  ]) {
-    const candidate = branch(classification);
-    candidate.task.disposition = disposition;
-    if (accepted) {
+  const executableDispositions = new Set([
+    'actionable', 'duplicate', 'already-fixed', 'stale', 'invalid', 'policy-conflict',
+  ]);
+  for (const disposition of [...executableDispositions, 'out-of-scope', 'needs-human-decision']) {
+    for (const classification of [
+      'within-scope-defect', 'unnecessary-mechanism-defect', 'unrelated-follow-up',
+    ]) {
+      const candidate = branch(classification);
+      candidate.task.disposition = disposition;
+      const accepted = executableDispositions.has(disposition)
+        ? classification !== 'unrelated-follow-up'
+        : disposition === 'out-of-scope' && classification === 'unrelated-follow-up';
+      if (!accepted) {
+        await assert.rejects(
+          () => assertScopeRootReady(candidate.adapter, candidate.state, HEAD, candidate.task),
+          { code: 'SCOPE_ROOT_NOT_READY' },
+        );
+        continue;
+      }
       assert.equal(
         (await assertScopeRootReady(candidate.adapter, candidate.state, HEAD, candidate.task))
           .classification.classification,
         classification,
-      );
-    } else {
-      await assert.rejects(
-        () => assertScopeRootReady(candidate.adapter, candidate.state, HEAD, candidate.task),
-        { code: 'SCOPE_ROOT_NOT_READY' },
       );
     }
   }

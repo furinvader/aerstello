@@ -13,9 +13,13 @@ function latestClassifications(journal) {
 }
 
 function classificationMatchesDisposition(classification, disposition) {
-  return disposition === 'actionable'
-    ? ['within-scope-defect', 'unnecessary-mechanism-defect'].includes(classification)
-    : disposition === 'out-of-scope' && classification === 'unrelated-follow-up';
+  const executableClassification = ['within-scope-defect', 'unnecessary-mechanism-defect']
+    .includes(classification);
+  const executableDisposition = [
+    'actionable', 'duplicate', 'already-fixed', 'stale', 'invalid', 'policy-conflict',
+  ].includes(disposition);
+  return (executableDisposition && executableClassification)
+    || (disposition === 'out-of-scope' && classification === 'unrelated-follow-up');
 }
 
 function initialAuthorityDigest(journal) {
