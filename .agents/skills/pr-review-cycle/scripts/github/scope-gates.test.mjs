@@ -53,6 +53,7 @@ function branch(classification, decision = null) {
     task: {
       id: 'generalized-checker', sourceIds: ['pr53-checker-root'],
       fingerprint: 'generalized-checker-fingerprint',
+      disposition: 'actionable',
     },
   };
 }
@@ -153,9 +154,94 @@ test('selected root gates do not authorize a different unclassified root', async
   const { adapter, state } = branch('within-scope-defect');
   await assert.rejects(() => assertScopeRootReady(
     adapter, state, HEAD, {
-      id: 'different-root', sourceIds: ['different-finding'], fingerprint: 'different-fingerprint',
+      id: 'different-root', sourceIds: ['different-finding'],
+      fingerprint: 'different-fingerprint', disposition: 'actionable',
     },
   ), { code: 'SCOPE_ROOT_NOT_READY' });
+});
+
+test('selected root requires classification compatible with immutable task disposition', async () => {
+  for (const [disposition, classification, accepted] of [
+    ['actionable', 'within-scope-defect', true],
+    ['actionable', 'unnecessary-mechanism-defect', true],
+    ['actionable', 'unrelated-follow-up', false],
+    ['out-of-scope', 'within-scope-defect', false],
+    ['out-of-scope', 'unnecessary-mechanism-defect', false],
+    ['out-of-scope', 'unrelated-follow-up', true],
+  ]) {
+    const candidate = branch(classification);
+    candidate.task.disposition = disposition;
+    if (accepted) {
+      assert.equal(
+        (await assertScopeRootReady(candidate.adapter, candidate.state, HEAD, candidate.task))
+          .classification.classification,
+        classification,
+      );
+    } else {
+      await assert.rejects(
+        () => assertScopeRootReady(candidate.adapter, candidate.state, HEAD, candidate.task),
+        { code: 'SCOPE_ROOT_NOT_READY' },
+      );
+    }
+  }
+});
+
+test('mismatched resolution classifications fail before workflow mutation or checkpoint', async () => {
+  const actionable = integratedThreadState();
+  const actionableStatus = workflowScope(actionable, 'unrelated-follow-up');
+  const actionableClient = new FakeClient();
+  addThread(actionableClient);
+  const actionableSetup = workflow(actionable, actionableClient);
+  actionableSetup.state.setScopeStatusForTest(actionableStatus);
+  await assert.rejects(() => actionableSetup.api.replyResolve(2, actionable.tasks[0].id), {
+    code: 'SCOPE_ROOT_NOT_READY',
+  });
+  assert.deepEqual(actionableClient.events, []);
+  assert.deepEqual(actionableSetup.state.calls, []);
+
+  const outOfScope = stateFixture({
+    phase: 'verifying',
+    validationStatus: {
+      source: 'orchestrator', scope: 'targeted', status: 'passed', headSha: HEAD,
+      checks: ['scope regression'], updatedAt: '2026-08-27T00:00:00Z',
+    },
+    tasks: [{
+      id: 'out-of-scope-local', sourceIds: ['local:out-of-scope'], sourceType: 'local',
+      fingerprint: 'out-of-scope-fingerprint', summary: 'Defer unrelated work.', severity: 'P2',
+      disposition: 'out-of-scope', status: 'not-applicable', integratedCommitSha: null,
+      resolutionSummary: 'Tracked separately.',
+    }],
+  });
+  const outOfScopeStatus = workflowScope(outOfScope, 'within-scope-defect');
+  const outOfScopeSetup = workflow(outOfScope, new FakeClient());
+  outOfScopeSetup.state.setScopeStatusForTest(outOfScopeStatus);
+  await assert.rejects(() => outOfScopeSetup.api.verifyResolve(2, [outOfScope.tasks[0].id]), {
+    code: 'SCOPE_ROOT_NOT_READY',
+  });
+  assert.deepEqual(outOfScopeSetup.client.events, []);
+  assert.deepEqual(outOfScopeSetup.state.calls, []);
+});
+
+test('compatible out-of-scope resolution remains usable without GitHub mutation', async () => {
+  const state = stateFixture({
+    phase: 'verifying',
+    validationStatus: {
+      source: 'orchestrator', scope: 'targeted', status: 'passed', headSha: HEAD,
+      checks: ['scope regression'], updatedAt: '2026-08-27T00:00:00Z',
+    },
+    tasks: [{
+      id: 'out-of-scope-local', sourceIds: ['local:out-of-scope'], sourceType: 'local',
+      fingerprint: 'out-of-scope-fingerprint', summary: 'Defer unrelated work.', severity: 'P2',
+      disposition: 'out-of-scope', status: 'not-applicable', integratedCommitSha: null,
+      resolutionSummary: 'Tracked separately.',
+    }],
+  });
+  const status = workflowScope(state, 'unrelated-follow-up');
+  const setup = workflow(state, new FakeClient());
+  setup.state.setScopeStatusForTest(status);
+  await setup.api.verifyResolve(2, [state.tasks[0].id]);
+  assert.equal(setup.state.current.tasks[0].status, 'completed');
+  assert.deepEqual(setup.client.events, []);
 });
 
 test('reply resolution rejects partial multi-root classification before mutation', async () => {

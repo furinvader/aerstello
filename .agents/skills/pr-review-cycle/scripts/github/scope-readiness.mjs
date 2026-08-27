@@ -4,9 +4,18 @@ import { GitHubWorkflowError } from './errors.mjs';
 function latestClassifications(journal) {
   const roots = new Map();
   for (const entry of journal?.entries ?? []) {
-    if (entry.kind === 'classification') roots.set(entry.rootCauseId, entry);
+    if (entry.kind === 'classification') {
+      roots.delete(entry.rootCauseId);
+      roots.set(entry.rootCauseId, entry);
+    }
   }
   return [...roots.values()];
+}
+
+function classificationMatchesDisposition(classification, disposition) {
+  return disposition === 'actionable'
+    ? ['within-scope-defect', 'unnecessary-mechanism-defect'].includes(classification)
+    : disposition === 'out-of-scope' && classification === 'unrelated-follow-up';
 }
 
 function initialAuthorityDigest(journal) {
@@ -147,9 +156,7 @@ export async function assertScopeRootReady(stateAdapter, state, liveHeadSha, tas
   if (expectedHead === null || classification.reviewHeadSha !== expectedHead) {
     scopeFailure(`Task ${task.id} has stale scope classification`, 'SCOPE_ROOT_NOT_READY');
   }
-  if (!['within-scope-defect', 'unnecessary-mechanism-defect', 'unrelated-follow-up'].includes(
-    classification.classification,
-  )) {
+  if (!classificationMatchesDisposition(classification.classification, task.disposition)) {
     scopeFailure(`Task ${task.id} has blocked scope classification ${classification.classification}`, 'SCOPE_ROOT_NOT_READY');
   }
   return { ...readiness, classification };

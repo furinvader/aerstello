@@ -18,10 +18,11 @@ function classification({
   phase = 'integrated-head', headSha = HEAD, authorityDigest = DIGEST_A,
   rootCauseId = 'scope-root', findingIds = ['finding-one'],
   findingFingerprints = ['scope-fingerprint-f1'],
+  scopeClassification = 'within-scope-defect',
 } = {}) {
   return {
     schemaVersion: 1, kind: 'classification', rootCauseId, findingIds, findingFingerprints,
-    reviewHeadSha: headSha, authorityDigest, classification: 'within-scope-defect',
+    reviewHeadSha: headSha, authorityDigest, classification: scopeClassification,
     authorityAmendmentRequired: false,
     assessment: {
       digest: ASSESSMENT,
@@ -172,7 +173,10 @@ test('selected-root readiness is phase-aware and rejects superseded authority', 
   });
   state.reviewedHeadSha = reviewedHead;
   const adapter = { async scopeStatus() { return status; } };
-  const task = { id: entry.rootCauseId, sourceIds: entry.findingIds, fingerprint: 'scope-fingerprint' };
+  const task = {
+    id: entry.rootCauseId, sourceIds: entry.findingIds,
+    fingerprint: 'scope-fingerprint', disposition: 'actionable',
+  };
   assert.equal((await assertScopeRootReady(adapter, state, HEAD, task)).classification, entry);
 
   entry.authorityDigest = `sha256:${'d'.repeat(64)}`;
@@ -188,10 +192,16 @@ test('accepts revised effective authority while rejecting stale or tampered amen
   assert.equal(readiness.ready, true);
   assert.equal(readiness.authorityDigest, DIGEST_D);
   assert.equal((await assertScopeRootReady(
-    adapter, amended.state, HEAD, { id: 'scope-root', sourceIds: ['finding-one'], fingerprint: 'scope-fingerprint' },
+    adapter, amended.state, HEAD, {
+      id: 'scope-root', sourceIds: ['finding-one'],
+      fingerprint: 'scope-fingerprint', disposition: 'actionable',
+    },
   )).classification.authorityDigest, DIGEST_D);
   await assert.rejects(() => assertScopeRootReady(
-    adapter, amended.state, HEAD, { id: 'stale-root', sourceIds: ['stale-finding'], fingerprint: 'scope-fingerprint' },
+    adapter, amended.state, HEAD, {
+      id: 'stale-root', sourceIds: ['stale-finding'],
+      fingerprint: 'scope-fingerprint', disposition: 'actionable',
+    },
   ), { code: 'SCOPE_ROOT_NOT_READY' });
 
   const tamperedSnapshot = amendedFixture();
@@ -222,6 +232,7 @@ test('selected-root readiness requires the complete task classification identity
     id: 'multi-root-task',
     sourceIds: ['finding-one', 'finding-two'],
     fingerprint: 'multi-root-fingerprint',
+    disposition: 'actionable',
   };
   const baseEntry = classification({
     phase: 'review-finding', headSha: reviewedHead, rootCauseId: task.id,
@@ -249,6 +260,32 @@ test('selected-root readiness requires the complete task classification identity
     { ...baseEntry, findingIds: ['finding-one', 'finding-one'] },
     { ...baseEntry, findingFingerprints: ['multi-root-fingerprint-f1', 'foreign-f2'] },
   ]) await assert.rejects(() => assertEntry(entry), { code: 'SCOPE_ROOT_NOT_READY' });
+});
+
+test('orders lightweight latest classifications by each root latest journal occurrence', async () => {
+  const task = {
+    id: 'shared-task', sourceIds: ['finding-one'],
+    fingerprint: 'scope-fingerprint', disposition: 'actionable',
+  };
+  const a1 = classification({ rootCauseId: 'root-a' });
+  const b2 = classification({ rootCauseId: 'root-b' });
+  const a3 = classification({
+    rootCauseId: 'root-a', scopeClassification: 'material-scope-change',
+  });
+  const { state, status } = fixture({
+    reference: { assessmentHeadSha: HEAD },
+    status: {
+      journal: { digest: DIGEST_B, value: { authorityDigest: DIGEST_A, entries: [a1, b2, a3] } },
+    },
+  });
+  const adapter = { async scopeStatus() { return status; } };
+  assert.deepEqual(
+    (await readScopeReadiness(adapter, state, HEAD)).classifications.map((entry) => entry.rootCauseId),
+    ['root-b', 'root-a'],
+  );
+  await assert.rejects(() => assertScopeRootReady(adapter, state, HEAD, task), {
+    code: 'SCOPE_ROOT_NOT_READY',
+  });
 });
 
 test('reports durable decision, return, and resume blockers without trusting compact state alone', async () => {
