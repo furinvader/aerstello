@@ -251,12 +251,12 @@ export function readV2CompletedTaskValidationRecoveryEvidence(cwd, state, expect
 }
 
 export function assertCleanExactIntegrationHead(state) {
+  assertCleanExactIntegrationCheckout(state);
   assertValidationBaseAncestry(
     state.integrationWorktree,
     state.baseSha,
     state.currentIntegrationHeadSha,
   );
-  assertCleanExactIntegrationCheckout(state);
 }
 
 

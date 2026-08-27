@@ -445,6 +445,39 @@ test('targeted validation execution rejects initial ancestry drift before invoki
   assert.deepEqual(validationEvidenceSnapshot(cwd), before);
 });
 
+test('targeted validation execution preserves checkout errors over unrelated ancestry', () => {
+  for (const fixture of [
+    { kind: 'stale', code: 'VALIDATION_PLAN_STALE' },
+    { kind: 'dirty', code: 'VALIDATION_CHECKOUT_DIRTY' },
+  ]) {
+    const cwd = repo();
+    const state = init(cwd);
+    buildTargetedValidationPlan({
+      cwd, initialSelection: initialSelection(state.currentIntegrationHeadSha), now: () => AT,
+    });
+    const unrelatedBase = unrelatedCommit(cwd, `${fixture.kind} execution ancestry`);
+    writeFileSync(
+      statePath(cwd, state.prNumber),
+      `${JSON.stringify({ ...state, baseSha: unrelatedBase })}\n`,
+    );
+    const checkoutPath = join(cwd, `${fixture.kind}-execution.txt`);
+    if (fixture.kind === 'stale') {
+      commit(cwd, { [`${fixture.kind}-execution.txt`]: 'stale checkout\n' }, 'stale validation checkout');
+    } else {
+      writeFileSync(checkoutPath, 'dirty checkout\n');
+    }
+    const checkoutContents = readFileSync(checkoutPath, 'utf8');
+    const before = validationEvidenceSnapshot(cwd);
+    let invoked = false;
+    assert.throws(() => executeTargetedValidationPlan({
+      cwd, runCommand: () => { invoked = true; return { status: 0 }; }, now: () => AT,
+    }), { code: fixture.code });
+    assert.equal(invoked, false);
+    assert.deepEqual(validationEvidenceSnapshot(cwd), before);
+    assert.equal(readFileSync(checkoutPath, 'utf8'), checkoutContents);
+  }
+});
+
 test('post-command ancestry drift is rejected before command facts are accepted', () => {
   const cwd = repo();
   const state = init(cwd);
@@ -491,6 +524,45 @@ test('completed validation checkpoint rejects ancestry drift without mutation', 
     cwd, expectedRevision: state.revision,
   }), { code: 'VALIDATION_BASE_ANCESTRY_MISMATCH' });
   assert.deepEqual(validationEvidenceSnapshot(cwd), before);
+});
+
+test('completed validation checkpoint preserves checkout errors over unrelated ancestry', () => {
+  for (const fixture of [
+    { kind: 'stale', code: 'VALIDATION_PLAN_STALE' },
+    { kind: 'dirty', code: 'VALIDATION_CHECKOUT_DIRTY' },
+  ]) {
+    const cwd = repo();
+    const state = init(cwd);
+    const plan = buildTargetedValidationPlan({
+      cwd, initialSelection: initialSelection(state.currentIntegrationHeadSha), now: () => AT,
+    });
+    const completedPlan = {
+      ...plan,
+      commands: plan.commands.map((entry) => ({
+        ...entry, status: 'passed', exitCode: 0, summary: 'Passed.', completedAt: AT,
+      })),
+      updatedAt: AT,
+    };
+    writeFileSync(validationPlanPath(cwd, state.prNumber), `${JSON.stringify(completedPlan)}\n`);
+    const unrelatedBase = unrelatedCommit(cwd, `${fixture.kind} checkpoint ancestry`);
+    writeFileSync(
+      statePath(cwd, state.prNumber),
+      `${JSON.stringify({ ...state, baseSha: unrelatedBase })}\n`,
+    );
+    const checkoutPath = join(cwd, `${fixture.kind}-checkpoint.txt`);
+    if (fixture.kind === 'stale') {
+      commit(cwd, { [`${fixture.kind}-checkpoint.txt`]: 'stale checkout\n' }, 'stale checkpoint checkout');
+    } else {
+      writeFileSync(checkoutPath, 'dirty checkout\n');
+    }
+    const checkoutContents = readFileSync(checkoutPath, 'utf8');
+    const before = validationEvidenceSnapshot(cwd);
+    assert.throws(() => checkpointTargetedValidation({
+      cwd, expectedRevision: state.revision,
+    }), { code: fixture.code });
+    assert.deepEqual(validationEvidenceSnapshot(cwd), before);
+    assert.equal(readFileSync(checkoutPath, 'utf8'), checkoutContents);
+  }
 });
 
 test('pending initial validation plans require an exact immutable definition match', () => {
