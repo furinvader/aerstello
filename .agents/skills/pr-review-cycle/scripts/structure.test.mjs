@@ -185,6 +185,7 @@ const EXPECTED_CANONICAL_FILES = [
   'scripts/state/schema-migration-and-recovery.test.mjs',
   'scripts/state/scope-classification-head.mjs',
   'scripts/state/scope-classification-head.test.mjs',
+  'scripts/state/scope-evidence-recovery.test.mjs',
   'scripts/state/scope-lifecycle.test.mjs',
   'scripts/state/services/archive-import.mjs',
   'scripts/state/services/archive-import.test.mjs',
