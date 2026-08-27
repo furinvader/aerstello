@@ -1181,7 +1181,9 @@ const PRODUCTION_GITHUB_IMPORTS = new Map([
     [githubModule('evidence/primitives.mjs'), ['httpsUrl']],
     [githubModule('evidence/review-response.mjs'), ['canonicalJson']],
     [githubModule('graphql/client.mjs'), ['MAX_NODES']],
-    [githubModule('threads/replies.mjs'), ['deterministicReply', 'intentFor']],
+    [githubModule('threads/replies.mjs'), [
+      'aggregateHistoricalReplyBodyIsAdmissible', 'deterministicReply', 'intentFor',
+    ]],
   ])],
   ['archive/lineage.mjs', new Map([
     ['node:crypto', ['createHash']],
@@ -1195,7 +1197,7 @@ const PRODUCTION_GITHUB_IMPORTS = new Map([
     [githubModule('errors.mjs'), ['GitHubWorkflowError']],
     [githubModule('evidence/review-response.mjs'), ['canonicalJson']],
     [githubModule('graphql/client.mjs'), ['MAX_NODES']],
-    [githubModule('threads/replies.mjs'), ['aggregateHistoricalReplyBodyIsAdmissible', 'intentFor']],
+    [githubModule('threads/replies.mjs'), ['intentFor']],
   ])],
   ['archive/adoption.mjs', new Map([
     ['node:crypto', ['createHash']],
