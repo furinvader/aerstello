@@ -766,6 +766,80 @@ test('change validation executes diff checks across immutable planning and HEAD 
   assert.equal(equalState.verification.validationStatus, 'passed');
 });
 
+test('change validation planning rejects common-directory grafts from a linked worktree without mutation', async () => {
+  const fixture = await integratedSingleTaskFixture('linked validation planning graft authority');
+  git(fixture.cwd, 'switch', '--detach');
+  const linkedCwd = join(mkdtempSync(join(tmpdir(), 'change-validation-planning-linked-')), 'worktree');
+  git(fixture.cwd, 'worktree', 'add', linkedCwd, 'main');
+  const commonGitDirectory = git(linkedCwd, '--no-replace-objects', 'rev-parse', '--path-format=absolute', '--git-common-dir');
+  assert.equal(commonGitDirectory, join(fixture.cwd, '.git'));
+  const graftsPath = join(commonGitDirectory, 'info', 'grafts');
+  mkdirSync(dirname(graftsPath), { recursive: true });
+  writeFileSync(graftsPath, `${fixture.state.git.headSha} ${fixture.state.planningSha}\n`);
+  const before = durableSnapshot(changeDirectory(linkedCwd, fixture.state.changeId));
+
+  assert.throws(() => createValidationPlan({ cwd: linkedCwd, expectedRevision: fixture.state.revision + 1 }),
+    (error) => error.code === 'REVISION_CONFLICT');
+  writeFileSync(join(linkedCwd, 'dirty-validation-authority.txt'), 'dirty\n');
+  assert.throws(() => createValidationPlan({ cwd: linkedCwd, expectedRevision: fixture.state.revision }),
+    (error) => error.code === 'VERIFICATION_HEAD_MISMATCH');
+  unlinkSync(join(linkedCwd, 'dirty-validation-authority.txt'));
+  assert.throws(() => createValidationPlan({ cwd: linkedCwd, expectedRevision: fixture.state.revision }),
+    (error) => error.code === 'VALIDATION_LEGACY_GRAFTS_PRESENT');
+  assert.deepEqual(durableSnapshot(changeDirectory(linkedCwd, fixture.state.changeId)), before);
+
+  unlinkSync(graftsPath);
+  const state = createValidationPlan({ cwd: linkedCwd, expectedRevision: fixture.state.revision });
+  assert.equal(state.phase, 'validating', 'an absent graft file is inert');
+  writeFileSync(graftsPath, `${state.git.headSha} ${state.planningSha}\n`);
+  const validatingBefore = durableSnapshot(changeDirectory(linkedCwd, state.changeId));
+  assert.throws(() => createValidationPlan({ cwd: linkedCwd, expectedRevision: state.revision }),
+    (error) => error.code === 'INVALID_PHASE');
+  assert.deepEqual(durableSnapshot(changeDirectory(linkedCwd, state.changeId)), validatingBefore);
+  unlinkSync(graftsPath);
+});
+
+test('change validation execution rechecks linked-worktree grafts after plan identity without invoking a runner', async () => {
+  const fixture = await integratedSingleTaskFixture('linked validation runtime graft authority');
+  git(fixture.cwd, 'switch', '--detach');
+  const linkedCwd = join(mkdtempSync(join(tmpdir(), 'change-validation-runtime-linked-')), 'worktree');
+  git(fixture.cwd, 'worktree', 'add', linkedCwd, 'main');
+  const commonGitDirectory = git(linkedCwd, '--no-replace-objects', 'rev-parse', '--path-format=absolute', '--git-common-dir');
+  assert.equal(commonGitDirectory, join(fixture.cwd, '.git'));
+  const graftsPath = join(commonGitDirectory, 'info', 'grafts');
+  mkdirSync(dirname(graftsPath), { recursive: true });
+  writeFileSync(graftsPath, '');
+  const state = createValidationPlan({ cwd: linkedCwd, expectedRevision: fixture.state.revision });
+  const planPath = join(changeDirectory(linkedCwd, state.changeId), 'verification', 'rounds', '0001', 'validation-plan.json');
+  const receiptPath = planPath.replace(/\.json$/u, '.sha256');
+  const originalPlan = JSON.parse(readFileSync(planPath, 'utf8'));
+  const originalReceipt = readFileSync(receiptPath);
+  writeFileSync(graftsPath, `${state.git.headSha} ${state.planningSha}\n`);
+  let runnerCalled = false;
+  const runner = () => { runnerCalled = true; return { status: 0, signal: null, stdout: '', stderr: '' }; };
+
+  unlinkSync(receiptPath);
+  const missingReceiptBefore = durableSnapshot(changeDirectory(linkedCwd, state.changeId));
+  assert.throws(() => runValidation({ cwd: linkedCwd, expectedRevision: state.revision, runner }),
+    (error) => error.code === 'RECOVERY_EVIDENCE_INVALID');
+  assert.deepEqual(durableSnapshot(changeDirectory(linkedCwd, state.changeId)), missingReceiptBefore);
+  writeFileSync(receiptPath, originalReceipt);
+
+  writeReceiptJson(planPath, { ...originalPlan, taskSetDigest: `sha256:${'0'.repeat(64)}` });
+  const staleIdentityBefore = durableSnapshot(changeDirectory(linkedCwd, state.changeId));
+  assert.throws(() => runValidation({ cwd: linkedCwd, expectedRevision: state.revision, runner }),
+    (error) => error.code === 'RECOVERY_EVIDENCE_INVALID');
+  assert.deepEqual(durableSnapshot(changeDirectory(linkedCwd, state.changeId)), staleIdentityBefore);
+  writeReceiptJson(planPath, originalPlan);
+
+  const graftBefore = durableSnapshot(changeDirectory(linkedCwd, state.changeId));
+  assert.throws(() => runValidation({ cwd: linkedCwd, expectedRevision: state.revision, runner }),
+    (error) => error.code === 'VALIDATION_LEGACY_GRAFTS_PRESENT');
+  assert.equal(runnerCalled, false);
+  assert.deepEqual(durableSnapshot(changeDirectory(linkedCwd, state.changeId)), graftBefore);
+  unlinkSync(graftsPath);
+});
+
 test('failed validation is private, immutable, and explicitly replaced at the next durable round', async () => {
   const fixture = await integratedSingleTaskFixture('validation replacement');
   let state = createValidationPlan({ cwd: fixture.cwd, expectedRevision: fixture.state.revision });

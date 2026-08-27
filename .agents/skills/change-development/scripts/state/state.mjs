@@ -1649,6 +1649,43 @@ function assertVerificationHead(cwd, state, clock, operation) {
   return current;
 }
 
+function assertValidationGitAuthority(cwd) {
+  let commonGitDirectory;
+  try {
+    commonGitDirectory = String(runGit([
+      '--no-replace-objects', 'rev-parse', '--path-format=absolute', '--git-common-dir',
+    ], { cwd, encoding: 'utf8' }).stdout).trim();
+  } catch (error) {
+    throw new StateError(
+      `Unable to resolve the common Git directory for validation authority: ${error.message}`,
+      'VALIDATION_GIT_AUTHORITY_UNAVAILABLE',
+    );
+  }
+  if (commonGitDirectory === '') {
+    throw new StateError(
+      'Unable to resolve the common Git directory for validation authority',
+      'VALIDATION_GIT_AUTHORITY_UNAVAILABLE',
+    );
+  }
+  const graftsPath = join(commonGitDirectory, 'info', 'grafts');
+  let grafts;
+  try {
+    grafts = statSync(graftsPath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return;
+    throw new StateError(
+      `Unable to inspect legacy Git graft authority at ${graftsPath}: ${error.message}`,
+      'VALIDATION_GIT_AUTHORITY_UNAVAILABLE',
+    );
+  }
+  if (grafts.size > 0) {
+    throw new StateError(
+      `Validation authority refuses nonempty legacy Git grafts at ${graftsPath}`,
+      'VALIDATION_LEGACY_GRAFTS_PRESENT',
+    );
+  }
+}
+
 export function mergeLifecycleValidationCommands(partials) {
   const commands = [];
   for (const candidate of partials.flatMap(({ commands: entries }) => entries)) {
@@ -1694,6 +1731,7 @@ export function createValidationPlan({ cwd = process.cwd(), changeId, expectedRe
     if (replace && !replaceable) throw new StateError('Validation plan replacement is allowed only for an existing failed plan', 'INVALID_PHASE');
     if (state.phase !== 'integrated' && !(replace && replaceable)) throw new StateError('Validation planning requires integrated state or explicit failed-plan replacement', 'INVALID_PHASE');
     const current = assertVerificationHead(root, state, clock, 'Validation planning');
+    assertValidationGitAuthority(root);
     if (runGit(['--no-replace-objects', 'merge-base', '--is-ancestor', state.planningSha, current.headSha], {
       cwd: root, allowFailure: true,
     }).status !== 0) {
@@ -1761,6 +1799,7 @@ function runValidationLocked({ cwd = process.cwd(), changeId, expectedRevision, 
   }, lockOptions);
   const plan = verifyReceipt(validationPlanPath(root, state), 'validation plan').value;
   if (validationPlanDigest(plan) !== state.verification.validationPlanDigest || plan.taskSetDigest !== state.verification.taskSetDigest) throw new StateError('Validation plan identity is stale', 'VALIDATION_PLAN_STALE');
+  assertValidationGitAuthority(root);
   if (runGit(['--no-replace-objects', 'merge-base', '--is-ancestor', state.planningSha, plan.headSha], {
     cwd: root, allowFailure: true,
   }).status !== 0) {
