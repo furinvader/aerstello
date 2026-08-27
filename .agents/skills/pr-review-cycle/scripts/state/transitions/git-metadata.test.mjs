@@ -20,6 +20,25 @@ test('Git metadata builder invalidates exact-HEAD evidence from an explicit snap
   assert.equal(next.threadResolutionStatus.status, 'not-run');
 });
 
+test('Git metadata builder preserves a pending return and only promotes a returned envelope', () => {
+  const cwd = harness.repo();
+  const initial = harness.init(cwd);
+  const git = { headSha: 'f'.repeat(40), branch: 'feature', dirty: false };
+  const scopeControl = {
+    authorityDigest: `sha256:${'a'.repeat(64)}`,
+    journalDigest: `sha256:${'b'.repeat(64)}`,
+    returnDigest: `sha256:${'c'.repeat(64)}`,
+    gate: 'return-pending', assessmentHeadSha: initial.currentIntegrationHeadSha,
+    updatedAt: initial.updatedAt,
+  };
+  const pending = buildGitMetadataTransition({ ...initial, scopeControl }, git);
+  assert.equal(pending.scopeControl.gate, 'return-pending');
+  const returned = buildGitMetadataTransition({
+    ...initial, scopeControl: { ...scopeControl, gate: 'returned' },
+  }, git);
+  assert.equal(returned.scopeControl.gate, 'resume-required');
+});
+
 test('Git metadata builder preserves the original object for equal evidence values', () => {
   const cwd = harness.repo();
   const state = harness.init(cwd);

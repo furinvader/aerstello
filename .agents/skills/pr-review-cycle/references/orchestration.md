@@ -37,7 +37,13 @@ split/defer, or removal/simplification can continue only inside the resulting
 ready boundary. Approved expansion/replan or abandon/rework produces a guarded
 scope-return envelope for change development while retaining plan, task, and
 review history. The review orchestrator never edits change-development state,
-and resume requires the matching return, authority, and current HEAD. A second
+and the existing return command independently reads the live PR HEAD before
+dispatch. It fails closed unless that external SHA matches the integration HEAD
+and classified Review commit. Classification stays locked through pending,
+returned, and resume-required gates; reconciliation preserves a pending return
+and promotes only an emitted return after HEAD drift. Resume requires the
+envelope's matching root and decision identities, return, authority, and current
+HEAD. A second
 approved expansion for the same root activates the churn breaker.
 
 Issue 25/55 may later provide an imported authority/handoff coordinator, but

@@ -319,10 +319,18 @@ test('material return and resume preserve review history and stop a second expan
     cwd, decision, expectedRevision: classified.revision,
   });
   assert.equal(decided.scopeControl.gate, 'return-pending');
+  assert.throws(() => checkpointScopeClassification({
+    cwd, classification: { ...material, entryId: 'classification-during-return-pending' },
+    expectedRevision: decided.revision,
+  }), { code: 'SCOPE_CLASSIFICATION_BLOCKED' });
   const returned = checkpointScopeReturn({
     cwd, livePrHeadSha: fixture.packet.reviewedHeadSha, expectedRevision: decided.revision,
   });
   assert.equal(returned.scopeControl.gate, 'returned');
+  assert.throws(() => checkpointScopeClassification({
+    cwd, classification: { ...material, entryId: 'classification-while-returned' },
+    expectedRevision: returned.revision,
+  }), { code: 'SCOPE_CLASSIFICATION_BLOCKED' });
   assert.deepEqual(returned.tasks, taskSnapshot);
   const returnDigest = returned.scopeControl.returnDigest;
   const resumed = checkpointScopeResume({
@@ -356,6 +364,97 @@ test('material return and resume preserve review history and stop a second expan
   });
   assert.equal(churned.phase, 'blocked');
   assert.match(churned.blockedReasons.join('\n'), /repeated expansion churn/u);
+});
+
+test('scope classification remains locked after returned HEAD drift', () => {
+  const cwd = harness.repo();
+  const fixture = proposedFixture(cwd, 'resume-required-task');
+  const material = classificationInput(fixture, 'human-decision-required');
+  const classified = checkpointScopeClassification({
+    cwd, classification: material, expectedRevision: fixture.adopted.revision,
+  });
+  const decided = checkpointScopeDecision({
+    cwd,
+    expectedRevision: classified.revision,
+    decision: {
+      entryId: 'decision-resume-required', at: harness.AT, rootCauseId: material.rootCauseId,
+      blockerId: 'scope-blocker-resume-required', decisionId: 'scope-decision-resume-required',
+      decision: 'approve-expansion-and-replan', blockerDigest: DIGEST,
+      approvedDeltaDigest: PLAN_DIGEST, rationale: 'Approve the bounded return.',
+      priorDecisionIds: [],
+    },
+  });
+  const returned = checkpointScopeReturn({
+    cwd, livePrHeadSha: fixture.packet.reviewedHeadSha, expectedRevision: decided.revision,
+  });
+  harness.commit(cwd, { 'scripts/scope-head-drift.mjs': 'export const drift = true;\n' }, 'drift scope head');
+  const advanced = harness.checkpointGitMetadata({ cwd }).state;
+  assert.equal(returned.scopeControl.gate, 'returned');
+  assert.equal(advanced.scopeControl.gate, 'resume-required');
+  assert.throws(() => checkpointScopeClassification({
+    cwd, classification: { ...material, entryId: 'classification-during-resume-required' },
+    expectedRevision: advanced.revision,
+  }), { code: 'SCOPE_CLASSIFICATION_BLOCKED' });
+});
+
+test('scope resume identity must match the guarded return envelope, not older journal roots', () => {
+  const cwd = harness.repo();
+  const fixture = proposedFixture(cwd, 'multi-root-resume-task');
+  const older = classificationInput(fixture, 'human-decision-required', {
+    entryId: 'classification-older-root', rootCauseId: 'older-scope-root',
+  });
+  const olderClassified = checkpointScopeClassification({
+    cwd, classification: older, expectedRevision: fixture.adopted.revision,
+  });
+  const olderDecision = {
+    entryId: 'decision-older-root', at: harness.AT, rootCauseId: older.rootCauseId,
+    blockerId: 'scope-blocker-older-root', decisionId: 'scope-decision-older-root',
+    decision: 'reject-expansion', blockerDigest: DIGEST,
+    approvedDeltaDigest: null, rationale: 'Keep the earlier root narrow.', priorDecisionIds: [],
+  };
+  const olderDecided = checkpointScopeDecision({
+    cwd, decision: olderDecision, expectedRevision: olderClassified.revision,
+  });
+  const current = classificationInput(fixture, 'human-decision-required', {
+    entryId: 'classification-current-root', rootCauseId: 'current-scope-root',
+  });
+  const currentClassified = checkpointScopeClassification({
+    cwd, classification: current, expectedRevision: olderDecided.revision,
+  });
+  const currentDecision = {
+    entryId: 'decision-current-root', at: harness.AT, rootCauseId: current.rootCauseId,
+    blockerId: 'scope-blocker-current-root', decisionId: 'scope-decision-current-root',
+    decision: 'approve-expansion-and-replan', blockerDigest: DIGEST,
+    approvedDeltaDigest: PLAN_DIGEST, rationale: 'Return the current bounded root.', priorDecisionIds: [],
+  };
+  const decided = checkpointScopeDecision({
+    cwd, decision: currentDecision, expectedRevision: currentClassified.revision,
+  });
+  const returned = checkpointScopeReturn({
+    cwd, livePrHeadSha: fixture.packet.reviewedHeadSha, expectedRevision: decided.revision,
+  });
+  assert.throws(() => checkpointScopeResume({
+    cwd,
+    expectedRevision: returned.revision,
+    resume: {
+      entryId: 'resume-wrong-journal-root', at: harness.AT,
+      rootCauseId: older.rootCauseId, decisionId: olderDecision.decisionId,
+      scopeReturnDigest: returned.scopeControl.returnDigest,
+      resumedAuthorityDigest: returned.scopeControl.authorityDigest,
+      resumedHeadSha: returned.currentIntegrationHeadSha,
+    },
+  }), { code: 'INVALID_SCOPE_RESUME' });
+  assert.throws(() => checkpointScopeResume({
+    cwd,
+    expectedRevision: returned.revision,
+    resume: {
+      entryId: 'resume-wrong-decision', at: harness.AT,
+      rootCauseId: current.rootCauseId, decisionId: olderDecision.decisionId,
+      scopeReturnDigest: returned.scopeControl.returnDigest,
+      resumedAuthorityDigest: returned.scopeControl.authorityDigest,
+      resumedHeadSha: returned.currentIntegrationHeadSha,
+    },
+  }), { code: 'INVALID_SCOPE_RESUME' });
 });
 
 test('minor amendment stays blocked until an atomic authority chain and fresh assessment', () => {
@@ -481,6 +580,15 @@ test('returned scope atomically imports amendment and resume evidence', () => {
       revisedAuthorityDigest,
     },
   };
+  assert.throws(() => checkpointScopeResume({
+    cwd,
+    expectedRevision: returned.revision,
+    resume: {
+      ...resume,
+      rootCauseId: 'unrelated-amendment-root',
+      amendment: { ...resume.amendment, rootCauseId: 'unrelated-amendment-root' },
+    },
+  }), { code: 'INVALID_SCOPE_RESUME' });
   assert.throws(() => checkpointScopeResume({
     cwd,
     expectedRevision: returned.revision,

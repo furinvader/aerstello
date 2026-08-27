@@ -58,7 +58,8 @@ export function buildGitMetadataTransition(state, git) {
       ...(state.scopeControl ? {
         scopeControl: {
           ...state.scopeControl,
-          gate: state.scopeControl.returnDigest === null ? state.scopeControl.gate : 'resume-required',
+          gate: state.scopeControl.gate === 'returned'
+            ? 'resume-required' : state.scopeControl.gate,
           assessmentHeadSha: null,
           updatedAt: state.updatedAt,
         },

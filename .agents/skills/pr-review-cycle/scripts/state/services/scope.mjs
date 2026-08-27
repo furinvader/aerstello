@@ -168,6 +168,12 @@ export function checkpointScopeClassification({
     cwd, prNumber, expectedRevision, kind: 'scope-classification',
     transaction: (current) => {
       if (!current.scopeControl) throw new StateError('Capture scope authority before classification', 'SCOPE_AUTHORITY_REQUIRED');
+      if (['return-pending', 'returned', 'resume-required'].includes(current.scopeControl.gate)) {
+        throw new StateError(
+          `Scope gate ${current.scopeControl.gate} blocks classification until guarded resume`,
+          'SCOPE_CLASSIFICATION_BLOCKED',
+        );
+      }
       const authority = readScopeAuthority(cwd, current);
       const existing = readScopeJournal(cwd, current);
       if (authority.digest !== initialJournalAuthorityDigest(existing.value)) {
@@ -418,6 +424,13 @@ export function checkpointScopeResume({
       const returned = readScopeReturn(cwd, current);
       const journalEvidence = readScopeJournal(cwd, current);
       const { amendment = null, ...resumeInput } = resume;
+      if (resumeInput.rootCauseId !== returned.value.rootCauseId
+          || resumeInput.decisionId !== returned.value.decisionId) {
+        throw new StateError(
+          'Scope resume root and decision must match the guarded return envelope',
+          'INVALID_SCOPE_RESUME',
+        );
+      }
       const expectedAuthorityDigest = amendment?.revisedAuthorityDigest
         ?? journalEvidence.value.authorityDigest;
       if (resumeInput.scopeReturnDigest !== returned.digest

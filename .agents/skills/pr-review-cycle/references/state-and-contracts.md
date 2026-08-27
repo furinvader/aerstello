@@ -95,10 +95,14 @@ decision, finding, or shape evidence requires a fresh exact-head assessment.
 
 Decisions that approve expansion/replanning or abandon/rework persist the
 return envelope before setting `return-pending`. `scope-return` then proves the
-current integration HEAD still equals the classified live PR HEAD and moves to
-`returned`. Later HEAD drift moves returned state to `resume-required`.
-`scope-resume` requires the exact return digest, journal authority digest, and
-current resumed HEAD, preserving all prior PR review and task history. A
+independently queried live PR HEAD still equals both the current integration
+HEAD and classified Review commit before moving to `returned`; compact state is
+not external live-head evidence. Classification is rejected while the gate is
+`return-pending`, `returned`, or `resume-required`. HEAD drift preserves
+`return-pending` and moves only `returned` state to `resume-required`.
+`scope-resume` requires the envelope's exact root and decision identities, the
+exact return digest, journal authority digest, and current resumed HEAD,
+preserving all prior PR review and task history. A
 returned revised authority is imported as an atomic amendment-plus-resume
 suffix and still requires fresh classification before work continues. A second
 `approve-expansion-and-replan` decision for one root records no expansion;

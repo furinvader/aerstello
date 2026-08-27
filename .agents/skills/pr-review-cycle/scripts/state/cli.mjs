@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
 import { parseOptions, UsageError, writeJson } from '../../../../../scripts/lib/cli.mjs';
+import { createDefaultGitHubClient } from '../github/adapters/gh-cli.mjs';
+import { readPullRequestMetadata } from '../github/graphql/pull-request-reader.mjs';
 import {
   archiveState,
   buildTargetedValidationPlan,
@@ -337,9 +339,12 @@ try {
     if (parsedExpectedRevision === undefined) throw new UsageError('scope-return requires --expected-revision');
     const state = loadState(process.cwd(), options.pr);
     if (!state) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+    const livePr = await readPullRequestMetadata(
+      createDefaultGitHubClient(), state.repository, state.prNumber,
+    );
     writeJson(checkpointScopeReturn({
       prNumber: options.pr,
-      livePrHeadSha: state.currentIntegrationHeadSha,
+      livePrHeadSha: livePr.headRefOid,
       expectedRevision: parsedExpectedRevision,
     }));
   } else if (command === 'migrate') {

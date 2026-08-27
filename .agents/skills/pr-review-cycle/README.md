@@ -115,9 +115,15 @@ shape may reuse its classification, while changed evidence must be reassessed.
 
 Material expansion needs a durable decision. Approved expansion or rework
 enters guarded `scope-return`; review history is preserved and the review cycle
-does not mutate change-development state. `scope-resume` accepts only the
-matching return digest, authority digest, and current HEAD. When change
-development returns revised authority, include the amendment payload in that
+does not mutate change-development state. The existing `scope-return` command
+independently queries the live PR HEAD and fails closed unless it equals both
+the integration HEAD and classified Review commit; a recorded integration SHA
+is never substituted for that external evidence. Classification remains locked
+through `return-pending`, `returned`, and `resume-required`. HEAD reconciliation
+preserves a pending return and promotes only an emitted return to
+`resume-required`. `scope-resume` accepts only the matching envelope root and
+decision identities, return digest, authority digest, and current HEAD. When
+change development returns revised authority, include the amendment payload in that
 existing resume input so the journal appends amendment plus resume atomically;
 a fresh revised-authority classification is still required. A second approved
 material expansion for the same root triggers the churn breaker and requires
