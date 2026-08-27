@@ -547,6 +547,124 @@ test('material return and resume preserve review history and stop a second expan
   assert.match(churned.blockedReasons.join('\n'), /repeated expansion churn/u);
 });
 
+test('minor amendment approval does not consume material expansion allowance', () => {
+  const cwd = harness.repo();
+  const fixture = proposedFixture(cwd, 'minor-before-material-task');
+  const minor = classificationInput(fixture, 'minor-amendment-required');
+  const classified = checkpointScopeClassification({
+    cwd, classification: minor, expectedRevision: fixture.adopted.revision,
+  });
+  const amendmentDigest = `sha256:${'c'.repeat(64)}`;
+  const revisedAuthorityDigest = `sha256:${'d'.repeat(64)}`;
+  const bareDecision = checkpointScopeDecision({
+    cwd,
+    expectedRevision: classified.revision,
+    decision: {
+      entryId: 'decision-minor-bare', at: harness.AT, rootCauseId: minor.rootCauseId,
+      blockerId: 'scope-blocker-minor-bare', decisionId: 'scope-decision-minor-bare',
+      decision: 'approve-expansion-and-replan', blockerDigest: DIGEST,
+      approvedDeltaDigest: amendmentDigest, rationale: 'Record the approval before its amendment.',
+      priorDecisionIds: [],
+    },
+  });
+  assert.equal(bareDecision.scopeControl.gate, 'decision-required');
+
+  const amended = checkpointScopeDecision({
+    cwd,
+    expectedRevision: bareDecision.revision,
+    decision: {
+      entryId: 'decision-minor-amended', at: harness.AT, rootCauseId: minor.rootCauseId,
+      blockerId: 'scope-blocker-minor-amended', decisionId: 'scope-decision-minor-amended',
+      decision: 'approve-expansion-and-replan', blockerDigest: DIGEST,
+      approvedDeltaDigest: amendmentDigest, rationale: 'Complete the bounded authority amendment.',
+      priorDecisionIds: ['scope-decision-minor-bare'],
+      amendment: {
+        entryId: 'amendment-minor-retry', at: harness.AT, rootCauseId: minor.rootCauseId,
+        decisionId: 'scope-decision-minor-amended', amendmentDigest,
+        priorAuthorityDigest: bareDecision.scopeControl.authorityDigest,
+        revisedAuthorityDigest,
+      },
+    },
+  });
+  assert.equal(amended.phase, 'awaiting-human-decision');
+  assert.equal(amended.scopeControl.gate, 'decision-required');
+  assert.doesNotMatch(amended.blockedReasons.join('\n'), /repeated expansion churn/u);
+
+  const revised = classificationInput(fixture, 'within-scope', {
+    entryId: 'classification-after-minor-amendment', rootCauseId: minor.rootCauseId,
+  });
+  revised.assessment.packet.binding.amendmentDigests = [amendmentDigest];
+  revised.assessment.result.binding.amendmentDigests = [amendmentDigest];
+  revised.assessment.digest = pairDigest(revised.assessment.packet, revised.assessment.result);
+  const ready = checkpointScopeClassification({
+    cwd, classification: revised, expectedRevision: amended.revision,
+  });
+
+  const firstMaterial = classificationInput(fixture, 'human-decision-required', {
+    entryId: 'classification-first-genuine-material', rootCauseId: minor.rootCauseId,
+  });
+  firstMaterial.assessment.packet.binding.amendmentDigests = [amendmentDigest];
+  firstMaterial.assessment.result.binding.amendmentDigests = [amendmentDigest];
+  firstMaterial.assessment.digest = pairDigest(
+    firstMaterial.assessment.packet, firstMaterial.assessment.result,
+  );
+  const materiallyClassified = checkpointScopeClassification({
+    cwd, classification: firstMaterial, expectedRevision: ready.revision,
+  });
+  const firstDecision = {
+    entryId: 'decision-first-genuine-material', at: harness.AT,
+    rootCauseId: firstMaterial.rootCauseId, blockerId: 'scope-blocker-first-genuine-material',
+    decisionId: 'scope-decision-first-genuine-material',
+    decision: 'approve-expansion-and-replan', blockerDigest: DIGEST,
+    approvedDeltaDigest: PLAN_DIGEST, rationale: 'Approve the first genuine material expansion.',
+    priorDecisionIds: ['scope-decision-minor-bare', 'scope-decision-minor-amended'],
+  };
+  const firstApproved = checkpointScopeDecision({
+    cwd, decision: firstDecision, expectedRevision: materiallyClassified.revision,
+  });
+  assert.equal(firstApproved.scopeControl.gate, 'return-pending');
+
+  const returned = checkpointScopeReturn({
+    cwd, livePrHeadSha: fixture.packet.reviewedHeadSha, expectedRevision: firstApproved.revision,
+  });
+  const resumed = checkpointScopeResume({
+    cwd,
+    expectedRevision: returned.revision,
+    resume: {
+      entryId: 'resume-first-genuine-material', at: harness.AT,
+      rootCauseId: firstMaterial.rootCauseId, decisionId: firstDecision.decisionId,
+      scopeReturnDigest: returned.scopeControl.returnDigest,
+      resumedAuthorityDigest: returned.scopeControl.authorityDigest,
+      resumedHeadSha: returned.currentIntegrationHeadSha,
+    },
+  });
+  const secondMaterial = classificationInput(fixture, 'human-decision-required', {
+    entryId: 'classification-second-genuine-material', rootCauseId: minor.rootCauseId,
+    remediationShapeDigest: DIGEST,
+  });
+  secondMaterial.assessment.packet.binding.amendmentDigests = [amendmentDigest];
+  secondMaterial.assessment.result.binding.amendmentDigests = [amendmentDigest];
+  secondMaterial.assessment.digest = pairDigest(
+    secondMaterial.assessment.packet, secondMaterial.assessment.result,
+  );
+  const secondClassified = checkpointScopeClassification({
+    cwd, classification: secondMaterial, expectedRevision: resumed.revision,
+  });
+  const churned = checkpointScopeDecision({
+    cwd,
+    expectedRevision: secondClassified.revision,
+    decision: {
+      ...firstDecision,
+      entryId: 'decision-second-genuine-material',
+      blockerId: 'scope-blocker-second-genuine-material',
+      decisionId: 'scope-decision-second-genuine-material',
+      priorDecisionIds: [...firstDecision.priorDecisionIds, firstDecision.decisionId],
+    },
+  });
+  assert.equal(churned.phase, 'blocked');
+  assert.match(churned.blockedReasons.join('\n'), /repeated expansion churn/u);
+});
+
 test('scope classification remains locked after returned HEAD drift', () => {
   const cwd = harness.repo();
   const fixture = proposedFixture(cwd, 'resume-required-task');

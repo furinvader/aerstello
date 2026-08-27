@@ -291,9 +291,17 @@ export function checkpointScopeClassification({
 }
 
 function materialExpansionCount(journal, rootCauseId) {
-  return journal.entries.filter((entry) => entry.kind === 'decision'
-    && entry.rootCauseId === rootCauseId
-    && entry.decision === 'approve-expansion-and-replan').length;
+  return journal.entries.filter((entry) => {
+    if (entry.kind !== 'decision'
+        || entry.rootCauseId !== rootCauseId
+        || entry.decision !== 'approve-expansion-and-replan') return false;
+    const classification = journal.entries.findLast((candidate) => candidate.kind === 'classification'
+      && candidate.sequence < entry.sequence
+      && candidate.rootCauseId === entry.rootCauseId
+      && candidate.authorityDigest === entry.authorityDigest
+      && candidate.assessment?.digest === entry.assessmentDigest);
+    return classification?.classification === 'material-scope-change';
+  }).length;
 }
 
 export function checkpointScopeDecision({
@@ -375,7 +383,8 @@ export function checkpointScopeDecision({
           } : {}),
         };
       }
-      if (entry.decision === 'approve-expansion-and-replan'
+      if (classification.classification === 'material-scope-change'
+          && entry.decision === 'approve-expansion-and-replan'
           && materialExpansionCount(existing.value, entry.rootCauseId) >= 1) {
         const reason = `Scope authority: repeated expansion churn for ${entry.rootCauseId}.`;
         return {
