@@ -1,6 +1,7 @@
 import * as harness from './test-support/state-harness.mjs';
 import { renderRecoverySummary } from './recovery.mjs';
 import {
+  executeTargetedValidationFacts,
   relatedE2EMetadata,
   validateValidationPlan,
 } from './evidence/validation-plans.mjs';
@@ -152,6 +153,23 @@ const {
   acceptedWorkerStateProjection,
 } = harness;
 
+function unrelatedCommit(cwd, message = 'unrelated validation base') {
+  return git(cwd, [
+    'commit-tree', git(cwd, ['rev-parse', 'HEAD^{tree}']), '-m', message,
+  ]);
+}
+
+function validationEvidenceSnapshot(cwd, prNumber = 17) {
+  const directory = stateDirectory(cwd, prNumber);
+  const planPath = validationPlanPath(cwd, prNumber);
+  return {
+    state: readFileSync(statePath(cwd, prNumber), 'utf8'),
+    events: readFileSync(join(directory, 'events.ndjson'), 'utf8'),
+    plan: existsSync(planPath) ? readFileSync(planPath, 'utf8') : null,
+    repository: repositoryAuthoritySnapshot(cwd),
+  };
+}
+
 test('extracted validation evidence owner validates plans and related E2E metadata directly', () => {
   assert.deepEqual(
     relatedE2EMetadata(['npm', 'run', 'test:e2e:related', '--', '--id', 'sample', '--project', 'desktop-firefox']),
@@ -273,6 +291,206 @@ test('PR validation binds diff checks to the durable base and exact validation H
     now: () => AT,
   });
   assert.equal(failed.state.validationStatus.status, 'failed');
+});
+
+test('targeted validation planning proves actual base ancestry without replacement refs', () => {
+  const cwd = repo();
+  const unrelatedBase = unrelatedCommit(cwd);
+  const state = init(cwd, { base: unrelatedBase });
+  const selection = initialSelection(state.currentIntegrationHeadSha);
+  const before = validationEvidenceSnapshot(cwd);
+  assert.throws(
+    () => buildTargetedValidationPlan({ cwd, initialSelection: selection, now: () => AT }),
+    { code: 'VALIDATION_BASE_ANCESTRY_MISMATCH' },
+  );
+  assert.deepEqual(validationEvidenceSnapshot(cwd), before);
+
+  const missingCwd = repo();
+  const valid = init(missingCwd);
+  const missingState = { ...valid, baseSha: 'f'.repeat(40) };
+  writeFileSync(statePath(missingCwd, valid.prNumber), `${JSON.stringify(missingState)}\n`);
+  const missingBefore = validationEvidenceSnapshot(missingCwd);
+  assert.throws(
+    () => buildTargetedValidationPlan({
+      cwd: missingCwd,
+      initialSelection: initialSelection(valid.currentIntegrationHeadSha),
+      now: () => AT,
+    }),
+    { code: 'VALIDATION_BASE_ANCESTRY_MISMATCH' },
+  );
+  assert.deepEqual(validationEvidenceSnapshot(missingCwd), missingBefore);
+
+  const replacementCwd = repo();
+  const replacementBase = unrelatedCommit(replacementCwd, 'replacement-only base');
+  const replacementState = init(replacementCwd, { base: replacementBase });
+  const replacementCommit = git(replacementCwd, [
+    'commit-tree', `${replacementState.currentIntegrationHeadSha}^{tree}`,
+    '-p', replacementBase, '-m', 'forge validation ancestry',
+  ]);
+  git(replacementCwd, [
+    'update-ref', `refs/replace/${replacementState.currentIntegrationHeadSha}`, replacementCommit,
+  ]);
+  assert.equal(spawnSync('git', [
+    'merge-base', '--is-ancestor', replacementBase, replacementState.currentIntegrationHeadSha,
+  ], { cwd: replacementCwd }).status, 0);
+  assert.equal(spawnSync('git', [
+    '--no-replace-objects', 'merge-base', '--is-ancestor',
+    replacementBase, replacementState.currentIntegrationHeadSha,
+  ], { cwd: replacementCwd }).status, 1);
+  const replacementBefore = validationEvidenceSnapshot(replacementCwd);
+  assert.throws(
+    () => buildTargetedValidationPlan({
+      cwd: replacementCwd,
+      initialSelection: initialSelection(replacementState.currentIntegrationHeadSha),
+      now: () => AT,
+    }),
+    { code: 'VALIDATION_BASE_ANCESTRY_MISMATCH' },
+  );
+  assert.deepEqual(validationEvidenceSnapshot(replacementCwd), replacementBefore);
+});
+
+test('targeted validation refuses common-directory graft ancestry from a linked worktree', () => {
+  const primaryCwd = repo();
+  const linkedCwd = join(
+    tmpdir(), `aerstello-validation-linked-${process.pid}-${Date.now()}`,
+  );
+  git(primaryCwd, ['worktree', 'add', '--detach', linkedCwd, 'HEAD']);
+  const commonDirectory = gitCommonDirectory(linkedCwd);
+  const graftsPath = join(commonDirectory, 'info', 'grafts');
+  try {
+    const unrelatedBase = unrelatedCommit(linkedCwd, 'linked graft base');
+    const state = init(linkedCwd, { base: unrelatedBase });
+    mkdirSync(dirname(graftsPath), { recursive: true });
+    writeFileSync(graftsPath, `${state.currentIntegrationHeadSha} ${unrelatedBase}\n`);
+    assert.equal(spawnSync('git', [
+      '--no-replace-objects', 'merge-base', '--is-ancestor',
+      unrelatedBase, state.currentIntegrationHeadSha,
+    ], { cwd: linkedCwd }).status, 0);
+    const before = validationEvidenceSnapshot(linkedCwd);
+    const graftsBefore = readFileSync(graftsPath, 'utf8');
+    assert.throws(
+      () => buildTargetedValidationPlan({
+        cwd: linkedCwd,
+        initialSelection: initialSelection(state.currentIntegrationHeadSha),
+        now: () => AT,
+      }),
+      { code: 'VALIDATION_LEGACY_GRAFTS_PRESENT' },
+    );
+    assert.deepEqual(validationEvidenceSnapshot(linkedCwd), before);
+    assert.equal(readFileSync(graftsPath, 'utf8'), graftsBefore);
+  } finally {
+    rmSync(graftsPath, { force: true });
+    git(primaryCwd, ['worktree', 'remove', '--force', linkedCwd]);
+  }
+});
+
+test('targeted validation execution rechecks ancestry before each pending command', () => {
+  const cwd = repo();
+  const state = init(cwd);
+  buildTargetedValidationPlan({
+    cwd,
+    initialSelection: initialSelection(state.currentIntegrationHeadSha, {
+      requiredValidation: {
+        unit: [
+          { command: 'npm run check:api', reason: 'First validation command.' },
+          { command: 'npm run check:web', reason: 'Second validation command.' },
+        ],
+        system: [],
+      },
+    }),
+    now: () => AT,
+  });
+  const unrelatedBase = unrelatedCommit(cwd, 'between-command base drift');
+  let invoked = 0;
+  let afterDrift;
+  assert.throws(() => executeTargetedValidationPlan({
+    cwd,
+    runCommand: () => { invoked += 1; return { status: 0 }; },
+    now: () => AT,
+    onCommandRecorded: () => {
+      const current = loadState(cwd);
+      writeFileSync(
+        statePath(cwd, current.prNumber),
+        `${JSON.stringify({ ...current, baseSha: unrelatedBase })}\n`,
+      );
+      afterDrift = validationEvidenceSnapshot(cwd);
+    },
+  }), { code: 'VALIDATION_BASE_ANCESTRY_MISMATCH' });
+  assert.equal(invoked, 1);
+  assert.deepEqual(validationEvidenceSnapshot(cwd), afterDrift);
+  const recorded = JSON.parse(readFileSync(validationPlanPath(cwd, state.prNumber), 'utf8'));
+  assert.deepEqual(
+    recorded.commands.map((entry) => entry.status),
+    ['passed', 'pending', 'pending'],
+  );
+});
+
+test('targeted validation execution rejects initial ancestry drift before invoking commands', () => {
+  const cwd = repo();
+  const state = init(cwd);
+  buildTargetedValidationPlan({
+    cwd, initialSelection: initialSelection(state.currentIntegrationHeadSha), now: () => AT,
+  });
+  const unrelatedBase = unrelatedCommit(cwd, 'initial execution base drift');
+  writeFileSync(
+    statePath(cwd, state.prNumber),
+    `${JSON.stringify({ ...state, baseSha: unrelatedBase })}\n`,
+  );
+  const before = validationEvidenceSnapshot(cwd);
+  let invoked = false;
+  assert.throws(() => executeTargetedValidationPlan({
+    cwd, runCommand: () => { invoked = true; return { status: 0 }; }, now: () => AT,
+  }), { code: 'VALIDATION_BASE_ANCESTRY_MISMATCH' });
+  assert.equal(invoked, false);
+  assert.deepEqual(validationEvidenceSnapshot(cwd), before);
+});
+
+test('post-command ancestry drift is rejected before command facts are accepted', () => {
+  const cwd = repo();
+  const state = init(cwd);
+  const plan = buildTargetedValidationPlan({
+    cwd, initialSelection: initialSelection(state.currentIntegrationHeadSha), now: () => AT,
+  });
+  const unrelatedBase = unrelatedCommit(cwd, 'post-command base drift');
+  const before = validationEvidenceSnapshot(cwd);
+  const executionState = { ...state };
+  assert.throws(() => executeTargetedValidationFacts({
+    cwd,
+    state: executionState,
+    plan,
+    runCommand: () => {
+      executionState.baseSha = unrelatedBase;
+      return { status: 0 };
+    },
+    now: () => AT,
+  }), { code: 'VALIDATION_BASE_ANCESTRY_MISMATCH' });
+  assert.deepEqual(validationEvidenceSnapshot(cwd), before);
+});
+
+test('completed validation checkpoint rejects ancestry drift without mutation', () => {
+  const cwd = repo();
+  const state = init(cwd);
+  const plan = buildTargetedValidationPlan({
+    cwd, initialSelection: initialSelection(state.currentIntegrationHeadSha), now: () => AT,
+  });
+  const completedPlan = {
+    ...plan,
+    commands: plan.commands.map((entry) => ({
+      ...entry, status: 'passed', exitCode: 0, summary: 'Passed.', completedAt: AT,
+    })),
+    updatedAt: AT,
+  };
+  writeFileSync(validationPlanPath(cwd, state.prNumber), `${JSON.stringify(completedPlan)}\n`);
+  const unrelatedBase = unrelatedCommit(cwd, 'completed-plan base drift');
+  writeFileSync(
+    statePath(cwd, state.prNumber),
+    `${JSON.stringify({ ...state, baseSha: unrelatedBase })}\n`,
+  );
+  const before = validationEvidenceSnapshot(cwd);
+  assert.throws(() => checkpointTargetedValidation({
+    cwd, expectedRevision: state.revision,
+  }), { code: 'VALIDATION_BASE_ANCESTRY_MISMATCH' });
+  assert.deepEqual(validationEvidenceSnapshot(cwd), before);
 });
 
 test('pending initial validation plans require an exact immutable definition match', () => {

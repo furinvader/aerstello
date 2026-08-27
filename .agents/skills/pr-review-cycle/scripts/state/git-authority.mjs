@@ -16,7 +16,11 @@ function authorityGitText(args, options = {}) {
   return String(runAuthorityGit(args, { ...options, encoding: 'utf8' }).stdout).trim();
 }
 
-function assertLegacyGraftsAreInert(cwd) {
+function assertLegacyGraftsAreInert(cwd, {
+  authorityLabel = 'worker authority',
+  unavailableCode = 'WORKER_RESULT_GIT_AUTHORITY_UNAVAILABLE',
+  graftsCode = 'WORKER_RESULT_LEGACY_GRAFTS_PRESENT',
+} = {}) {
   let commonGitDirectory;
   try {
     commonGitDirectory = authorityGitText([
@@ -24,14 +28,14 @@ function assertLegacyGraftsAreInert(cwd) {
     ], { cwd });
   } catch (error) {
     throw new StateError(
-      `Unable to resolve the common Git directory for worker authority: ${error.message}`,
-      'WORKER_RESULT_GIT_AUTHORITY_UNAVAILABLE',
+      `Unable to resolve the common Git directory for ${authorityLabel}: ${error.message}`,
+      unavailableCode,
     );
   }
   if (commonGitDirectory === '') {
     throw new StateError(
-      'Unable to resolve the common Git directory for worker authority',
-      'WORKER_RESULT_GIT_AUTHORITY_UNAVAILABLE',
+      `Unable to resolve the common Git directory for ${authorityLabel}`,
+      unavailableCode,
     );
   }
   const graftsPath = join(commonGitDirectory, 'info', 'grafts');
@@ -42,13 +46,36 @@ function assertLegacyGraftsAreInert(cwd) {
     if (error?.code === 'ENOENT') return;
     throw new StateError(
       `Unable to inspect legacy Git graft authority at ${graftsPath}: ${error.message}`,
-      'WORKER_RESULT_GIT_AUTHORITY_UNAVAILABLE',
+      unavailableCode,
     );
   }
   if (grafts.size > 0) {
     throw new StateError(
-      `Worker authority refuses nonempty legacy Git grafts at ${graftsPath}`,
-      'WORKER_RESULT_LEGACY_GRAFTS_PRESENT',
+      `${authorityLabel} refuses nonempty legacy Git grafts at ${graftsPath}`,
+      graftsCode,
+    );
+  }
+}
+
+export function assertValidationBaseAncestry(cwd, baseSha, headSha) {
+  assertLegacyGraftsAreInert(cwd, {
+    authorityLabel: 'targeted-validation authority',
+    unavailableCode: 'VALIDATION_GIT_AUTHORITY_UNAVAILABLE',
+    graftsCode: 'VALIDATION_LEGACY_GRAFTS_PRESENT',
+  });
+  assertCommitExists(
+    cwd, 'targeted-validation base', baseSha, 'VALIDATION_BASE_ANCESTRY_MISMATCH',
+  );
+  assertCommitExists(
+    cwd, 'targeted-validation HEAD', headSha, 'VALIDATION_BASE_ANCESTRY_MISMATCH',
+  );
+  if (runAuthorityGit(
+    ['merge-base', '--is-ancestor', baseSha, headSha],
+    { cwd, allowFailure: true },
+  ).status !== 0) {
+    throw new StateError(
+      'Targeted-validation base is not an actual-object ancestor of its HEAD',
+      'VALIDATION_BASE_ANCESTRY_MISMATCH',
     );
   }
 }

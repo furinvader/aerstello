@@ -8,7 +8,7 @@ import {
   atomicWriteJson, canonicalSerializedJson, readJsonSidecar, serializeJson,
 } from '../atomic-io.mjs';
 import { StateError } from '../errors.mjs';
-import { gitSnapshot } from '../git-authority.mjs';
+import { assertValidationBaseAncestry, gitSnapshot } from '../git-authority.mjs';
 import { appendEvent } from '../journal.mjs';
 import { stateDirectory, validationPlanPath } from '../locations.mjs';
 import { migratePrReviewStateV2 } from '../migrations.mjs';
@@ -136,7 +136,7 @@ export function readValidationPlan(cwd, state) {
   return plan;
 }
 
-export function assertCleanExactIntegrationHead(state) {
+function assertCleanExactIntegrationCheckout(state) {
   const actual = gitSnapshot(state.integrationWorktree);
   if (actual.headSha !== state.currentIntegrationHeadSha) {
     throw new StateError('Integration HEAD differs from active state; checkpoint Git metadata first', 'VALIDATION_PLAN_STALE');
@@ -250,6 +250,15 @@ export function readV2CompletedTaskValidationRecoveryEvidence(cwd, state, expect
   }
 }
 
+export function assertCleanExactIntegrationHead(state) {
+  assertValidationBaseAncestry(
+    state.integrationWorktree,
+    state.baseSha,
+    state.currentIntegrationHeadSha,
+  );
+  assertCleanExactIntegrationCheckout(state);
+}
+
 
 export function buildTargetedValidationPlanUnlocked({
   cwd, prNumber, taskPackets, initialSelection, replace, now = utcNow,
@@ -263,7 +272,7 @@ export function buildTargetedValidationPlanUnlocked({
   if (state.validationStatus.status !== 'not-run') {
     throw new StateError('Targeted validation proof must be reset before planning', 'TARGETED_VALIDATION_RESET_REQUIRED');
   }
-  assertCleanExactIntegrationHead(state);
+  assertCleanExactIntegrationCheckout(state);
   const initialMode = initialSelection !== undefined && initialSelection !== null;
   const expectedIds = initialMode
     ? actionableIntegratedTaskIds(state) : actionablePacketValidationTaskIds(state);
@@ -323,6 +332,11 @@ export function buildTargetedValidationPlanUnlocked({
     sortedPackets.forEach((packet) => assertBoundTaskPacket(state, packet, cwd));
     validationInputs = sortedPackets;
   }
+  assertValidationBaseAncestry(
+    state.integrationWorktree,
+    state.baseSha,
+    state.currentIntegrationHeadSha,
+  );
   const validationUnion = initialMode
     ? unionInitialValidationSelection(validationInputs[0])
     : unionRequiredValidation(validationInputs);
@@ -424,6 +438,11 @@ export function executeTargetedValidationFacts({
     const executionArgv = materializeValidationArgv(entry.command, entry.argv, state, plan.headSha);
     if (!executionArgv) throw new StateError('Validation command range is malformed or stale', 'INVALID_VALIDATION_PLAN');
     try { result = runCommand(executionArgv, state.integrationWorktree); } catch (error) { result = { status: 1, error }; }
+    assertValidationBaseAncestry(
+      state.integrationWorktree,
+      state.baseSha,
+      plan.headSha,
+    );
     const exitCode = Number.isInteger(result?.status) && result.status >= 0 ? result.status : 1;
     const completedAt = now();
     const summary = exitCode === 0 ? 'Passed.'
