@@ -212,6 +212,69 @@ test('pristine taskless cycles run an explicit initial targeted validation selec
   }), { code: 'INITIAL_VALIDATION_NOT_ALLOWED' });
 });
 
+test('PR validation binds diff checks to the durable base and exact validation HEAD', () => {
+  const equalCwd = repo();
+  const equalState = init(equalCwd);
+  const diffSelection = initialSelection(equalState.currentIntegrationHeadSha, {
+    requiredValidation: {
+      unit: [{ command: 'git diff --check', reason: 'Check the exact committed range.' }],
+      system: [],
+    },
+  });
+  const fresh = buildTargetedValidationPlan({ cwd: equalCwd, initialSelection: diffSelection, now: () => AT });
+  assert.deepEqual(fresh.commands[0].argv, [
+    'git', 'diff', '--check', equalState.baseSha, equalState.currentIntegrationHeadSha, '--',
+  ]);
+
+  const legacy = {
+    ...fresh,
+    commands: fresh.commands.map((entry) => entry.command === 'git diff --check'
+      ? { ...entry, argv: ['git', 'diff', '--check'] }
+      : entry),
+  };
+  writeFileSync(validationPlanPath(equalCwd, equalState.prNumber), `${JSON.stringify(legacy)}\n`);
+  const attempted = [];
+  const equalResult = executeTargetedValidationPlan({
+    cwd: equalCwd,
+    runCommand(argv, runCwd) {
+      attempted.push(argv);
+      return argv[0] === 'git'
+        ? spawnSync(argv[0], argv.slice(1), { cwd: runCwd, encoding: 'utf8' })
+        : { status: 0 };
+    },
+    now: () => AT,
+  });
+  assert.deepEqual(attempted[0], fresh.commands[0].argv);
+  assert.deepEqual(equalResult.plan.commands[0].argv, ['git', 'diff', '--check']);
+  assert.equal(equalResult.state.validationStatus.status, 'passed');
+
+  const whitespaceCwd = repo();
+  const original = init(whitespaceCwd);
+  writeFileSync(join(whitespaceCwd, 'committed-whitespace.txt'), 'trailing whitespace  \n');
+  git(whitespaceCwd, ['add', 'committed-whitespace.txt']);
+  git(whitespaceCwd, ['commit', '-m', 'test: add committed whitespace']);
+  const advanced = checkpointGitMetadata({ cwd: whitespaceCwd }).state;
+  assert.equal(advanced.baseSha, original.baseSha);
+  buildTargetedValidationPlan({
+    cwd: whitespaceCwd,
+    initialSelection: initialSelection(advanced.currentIntegrationHeadSha, {
+      requiredValidation: {
+        unit: [{ command: 'git diff --check', reason: 'Check the exact committed range.' }],
+        system: [],
+      },
+    }),
+    now: () => AT,
+  });
+  const failed = executeTargetedValidationPlan({
+    cwd: whitespaceCwd,
+    runCommand: (argv, runCwd) => argv[0] === 'git'
+      ? spawnSync(argv[0], argv.slice(1), { cwd: runCwd, encoding: 'utf8' })
+      : { status: 0 },
+    now: () => AT,
+  });
+  assert.equal(failed.state.validationStatus.status, 'failed');
+});
+
 test('pending initial validation plans require an exact immutable definition match', () => {
   const cwd = repo();
   const state = init(cwd);

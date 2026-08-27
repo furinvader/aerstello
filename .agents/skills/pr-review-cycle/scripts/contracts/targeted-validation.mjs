@@ -33,6 +33,7 @@ const ALLOWED_CHECK_COMMANDS = new Set([
   'npm run check:released-migrations',
 ]);
 const ALLOWED_DIRECT_COMMANDS = new Set(['git diff --check']);
+const BARE_DIFF_CHECK_ARGV = Object.freeze(['git', 'diff', '--check']);
 const WRAPPER_EXECUTABLES = new Set(['env', 'bash', 'sh', 'zsh', 'fish', 'command', 'exec', 'xargs']);
 const KNOWN_WORKSPACES = new Set(['@aerstello/api', '@aerstello/web', '@aerstello/shared']);
 const SHELL_SYNTAX_PATTERN = /[;&|<>`$()'"\\*?\[\]{}!#~\t\v\f\r\n]/u;
@@ -140,6 +141,19 @@ export function parseTargetedValidationCommand(command) {
     return tokens.slice(2).every((path) => !path.startsWith('-')
       && parseRepositoryPath(path) && NODE_TEST_PATH_PATTERN.test(path)) ? tokens : null;
   }
+  return null;
+}
+
+export function materializeTargetedValidationArgv(command, argv, { baseSha, headSha } = {}) {
+  const parsed = parseTargetedValidationCommand(command);
+  if (!parsed) return null;
+  if (command !== 'git diff --check') {
+    return JSON.stringify(argv) === JSON.stringify(parsed) ? [...argv] : null;
+  }
+  if (!isSha(baseSha) || !isSha(headSha)) return null;
+  const expected = ['git', 'diff', '--check', baseSha, headSha, '--'];
+  if (JSON.stringify(argv) === JSON.stringify(BARE_DIFF_CHECK_ARGV)
+      || JSON.stringify(argv) === JSON.stringify(expected)) return expected;
   return null;
 }
 

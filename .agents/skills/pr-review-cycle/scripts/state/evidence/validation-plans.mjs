@@ -20,11 +20,23 @@ const ACTIVE_STATE_LIMIT_BYTES = 64 * 1024;
 const VALIDATION_PLAN_LIMIT_BYTES = 64 * 1024;
 const VALIDATION_AREAS = new Set(['api', 'web', 'shared', 'workflow', 'documentation', 'release', 'migration']);
 const VALIDATION_PLANNING_PHASES = new Set(['recovering', 'ready-for-review', 'integrating', 'verifying', 'validating']);
+const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
 function utcNow() { return new Date().toISOString(); }
 function sameEvidence(left, right) { return JSON.stringify(left) === JSON.stringify(right); }
 function staleDiscoveryDispositionForRequest(state, requestId = state?.reviewRequest?.id) {
   const records = Array.isArray(state?.staleDiscoveryDispositions) ? state.staleDiscoveryDispositions : [];
   return records.find((item) => item.requestId === requestId) ?? null;
+}
+function materializeValidationArgv(command, argv, state, headSha) {
+  const parsed = parseTargetedValidationCommand(command);
+  if (!parsed) return null;
+  if (command !== 'git diff --check') {
+    return JSON.stringify(argv) === JSON.stringify(parsed) ? [...argv] : null;
+  }
+  if (!SHA.test(state.baseSha ?? '') || !SHA.test(headSha ?? '')) return null;
+  const expected = ['git', 'diff', '--check', state.baseSha, headSha, '--'];
+  return JSON.stringify(argv) === JSON.stringify(parsed)
+      || JSON.stringify(argv) === JSON.stringify(expected) ? expected : null;
 }
 function readBoundPacketWithProvenance(cwd, state, task, options = {}) {
   const packet = readTaskPacketSidecar(cwd, state, task, options);
@@ -75,15 +87,15 @@ export function validateValidationPlan(plan, state) {
       }
       for (const field of entryFields) if (!Object.prototype.hasOwnProperty.call(entry, field)) errors.push(`${prefix}.${field} is required`);
       for (const field of Object.keys(entry)) if (!entryFields.includes(field)) errors.push(`${prefix}.${field} is not allowed`);
-      const parsed = parseTargetedValidationCommand(entry.command);
-      if (!parsed || JSON.stringify(parsed) !== JSON.stringify(entry.argv)) errors.push(`${prefix} is not a supported exact command`);
+      const executionArgv = materializeValidationArgv(entry.command, entry.argv, state, plan.headSha);
+      if (!executionArgv) errors.push(`${prefix} is not a supported exact command`);
       if (!['unit', 'system'].includes(entry.kind)) errors.push(`${prefix}.kind is invalid`);
       if (typeof entry.reason !== 'string' || entry.reason.length < 1 || entry.reason.length > 1000) errors.push(`${prefix}.reason is invalid`);
       for (const field of ['selectors', 'projects']) {
         if (!Array.isArray(entry[field]) || entry[field].some((item) => typeof item !== 'string')
             || new Set(entry[field]).size !== entry[field].length) errors.push(`${prefix}.${field} is invalid`);
       }
-      const e2eMetadata = parsed ? relatedE2EMetadata(parsed) : null;
+      const e2eMetadata = executionArgv ? relatedE2EMetadata(executionArgv) : null;
       if (entry.kind === 'unit' && (entry.selectors?.length > 0 || entry.projects?.length > 0)) errors.push(`${prefix} unit metadata must be empty`);
       if (entry.kind === 'system' && e2eMetadata === null && (entry.selectors?.length > 0 || entry.projects?.length > 0)) errors.push(`${prefix} non-E2E metadata must be empty`);
       if (entry.kind === 'system' && e2eMetadata !== null
@@ -321,7 +333,13 @@ export function buildTargetedValidationPlanUnlocked({
   if (commands.length === 0) throw new StateError('Targeted validation union must not be empty', 'INVALID_VALIDATION_PLAN');
   const affectedAreas = [...new Set(validationInputs.flatMap((input) => input.affectedAreas))].sort();
   const plannedCommands = commands.map((entry) => ({
-    ...entry, argv: parseTargetedValidationCommand(entry.command),
+    ...entry,
+    argv: materializeValidationArgv(
+      entry.command,
+      parseTargetedValidationCommand(entry.command),
+      state,
+      state.currentIntegrationHeadSha,
+    ),
   }));
   const immutableCommandDefinition = (entry) => ({
     command: entry.command,
@@ -350,14 +368,20 @@ export function buildTargetedValidationPlanUnlocked({
         throw new StateError(`Invalid targeted validation plan:\n- ${historicalErrors.join('\n- ')}`, 'INVALID_VALIDATION_PLAN');
       }
     }
+    const comparableDefinition = (entry) => ({
+      ...immutableCommandDefinition(entry),
+      argv: materializeValidationArgv(
+        entry.command, entry.argv, state, state.currentIntegrationHeadSha,
+      ),
+    });
     const sameDefinition = JSON.stringify({
       taskIds: existing.taskIds,
       affectedAreas: existing.affectedAreas,
-      commands: existing.commands.map(immutableCommandDefinition),
+      commands: existing.commands.map(comparableDefinition),
     }) === JSON.stringify({
       taskIds: packetIds,
       affectedAreas,
-      commands: plannedCommands.map(immutableCommandDefinition),
+      commands: plannedCommands.map(comparableDefinition),
     });
     if (!replace && sameDefinition && existing.commands.every((entry) => entry.status === 'pending')) return existing;
     if (!replace) throw new StateError('A saved validation plan already exists; use --replace to start a fresh plan', 'VALIDATION_PLAN_REPLACE_REQUIRED');
@@ -397,7 +421,9 @@ export function executeTargetedValidationFacts({
     if (entry.status !== 'pending') continue;
     beforeCommand?.(entry, currentPlan);
     let result;
-    try { result = runCommand([...entry.argv], state.integrationWorktree); } catch (error) { result = { status: 1, error }; }
+    const executionArgv = materializeValidationArgv(entry.command, entry.argv, state, plan.headSha);
+    if (!executionArgv) throw new StateError('Validation command range is malformed or stale', 'INVALID_VALIDATION_PLAN');
+    try { result = runCommand(executionArgv, state.integrationWorktree); } catch (error) { result = { status: 1, error }; }
     const exitCode = Number.isInteger(result?.status) && result.status >= 0 ? result.status : 1;
     const completedAt = now();
     const summary = exitCode === 0 ? 'Passed.'

@@ -724,6 +724,48 @@ test('terminal integration authority rejects missing, broken, and ambiguous exac
   assert.throws(() => buildVerifierContext({ cwd: fixture.cwd }), (error) => error.code === 'INTEGRATION_RECEIPT_AMBIGUOUS');
 });
 
+test('change validation executes diff checks across immutable planning and HEAD commits', async () => {
+  const fixture = await integratedSingleTaskFixture(
+    'committed whitespace validation range',
+    specialization(),
+    { validationCommand: 'git diff --check', workerContent: 'trailing whitespace  \n' },
+  );
+  let state = createValidationPlan({ cwd: fixture.cwd, expectedRevision: fixture.state.revision });
+  const planPath = join(changeDirectory(fixture.cwd, state.changeId), 'verification', 'rounds', '0001', 'validation-plan.json');
+  const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+  const diffCommand = plan.commands.find(({ argv }) => argv[0] === 'git');
+  assert.deepEqual(diffCommand.argv, [
+    'git', 'diff', '--check', state.planningSha, state.verification.headSha, '--',
+  ]);
+  state = runValidation({
+    cwd: fixture.cwd,
+    expectedRevision: state.revision,
+    runner(executable, argv, options) {
+      return executable === 'git'
+        ? spawnSync(executable, argv, options)
+        : { status: 0, signal: null, stdout: 'passed', stderr: '' };
+    },
+  });
+  assert.equal(state.verification.validationStatus, 'failed');
+
+  const equal = await integratedSingleTaskFixture(
+    'equal committed validation range',
+    specialization(),
+    { validationCommand: 'git diff --check', noChange: true },
+  );
+  let equalState = createValidationPlan({ cwd: equal.cwd, expectedRevision: equal.state.revision });
+  equalState = runValidation({
+    cwd: equal.cwd,
+    expectedRevision: equalState.revision,
+    runner(executable, argv, options) {
+      return executable === 'git'
+        ? spawnSync(executable, argv, options)
+        : { status: 0, signal: null, stdout: 'passed', stderr: '' };
+    },
+  });
+  assert.equal(equalState.verification.validationStatus, 'passed');
+});
+
 test('failed validation is private, immutable, and explicitly replaced at the next durable round', async () => {
   const fixture = await integratedSingleTaskFixture('validation replacement');
   let state = createValidationPlan({ cwd: fixture.cwd, expectedRevision: fixture.state.revision });
@@ -2557,7 +2599,11 @@ function createWorkerFixture(cwd, state, packet) {
   return { ...identity };
 }
 
-async function integratedSingleTaskFixture(label, specialize = specialization()) {
+async function integratedSingleTaskFixture(label, specialize = specialization(), {
+  validationCommand = 'node --test .agents/skills/change-development/scripts/state/state.test.mjs',
+  workerContent = 'first\n',
+  noChange = false,
+} = {}) {
   const { cwd, sha } = repository(label);
   const planning = await initializeState({ cwd, changeId: label.replaceAll(' ', '-'), mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
   const plan = planFor(planning);
@@ -2568,15 +2614,21 @@ async function integratedSingleTaskFixture(label, specialize = specialization())
     'Accepted behavior coverage is mapped.')] : [];
   let state = acceptPlan({ cwd, plan, expectedRevision: planning.revision, planningEvidence });
   const packet = packetFor(state, plan, 'state-task');
+  packet.requiredValidation.unit[0].command = validationCommand;
   packet.behaviorMapperEvidence = planningEvidence[0] ?? null;
   state = bindTask({ cwd, packet, expectedRevision: state.revision });
   const worker = createWorkerFixture(cwd, state, packet);
   state = scheduleWave({ cwd, expectedRevision: state.revision });
   state = startTask({ cwd, taskId: 'state-task', workerId: 'worker-one', expectedRevision: state.revision });
-  writeFileSync(join(worker.path, 'first.txt'), 'first\n'); git(worker.path, 'add', 'first.txt'); git(worker.path, 'commit', '-m', 'test: lifecycle worker');
-  state = acceptResult({ cwd, result: resultFor(packet, 'implemented', git(worker.path, 'rev-parse', 'HEAD'), ['first.txt']),
-    workerCwd: worker.path, expectedRevision: state.revision });
-  state = integrateTask({ cwd, taskId: 'state-task', expectedRevision: state.revision });
+  if (noChange) {
+    state = acceptResult({ cwd, result: resultFor(packet, 'no-change'),
+      workerCwd: worker.path, expectedRevision: state.revision });
+  } else {
+    writeFileSync(join(worker.path, 'first.txt'), workerContent); git(worker.path, 'add', 'first.txt'); git(worker.path, 'commit', '-m', 'test: lifecycle worker');
+    state = acceptResult({ cwd, result: resultFor(packet, 'implemented', git(worker.path, 'rev-parse', 'HEAD'), ['first.txt']),
+      workerCwd: worker.path, expectedRevision: state.revision });
+    state = integrateTask({ cwd, taskId: 'state-task', expectedRevision: state.revision });
+  }
   removeTaskWorktree({ cwd, changeId: state.changeId, taskId: 'state-task' });
   state = finalizeIntegration({ cwd, expectedRevision: state.revision });
   return { cwd, state };
