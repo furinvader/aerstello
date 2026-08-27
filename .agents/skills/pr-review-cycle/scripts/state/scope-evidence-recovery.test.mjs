@@ -103,9 +103,11 @@ function classificationInput(fixture, verdict = 'within-scope') {
     entryId: `classification-${verdict}`,
     at: harness.AT,
     reviewHeadSha: fixture.packet.reviewedHeadSha,
-    rootCauseId: 'scope-root',
+    rootCauseId: fixture.task.id,
     findingIds: fixture.task.sourceIds,
-    findingFingerprints: fixture.task.sourceIds.map(() => fixture.task.fingerprint),
+    findingFingerprints: fixture.task.sourceIds.map(
+      (_sourceId, index) => `${fixture.task.fingerprint}-f${index + 1}`,
+    ),
     classification: verdict === 'human-decision-required' ? 'material-scope-change' : 'within-scope-defect',
     assessment: { packet: pair.packet, result: pair.result, digest: pairDigest(pair.packet, pair.result) },
     authorityAmendmentRequired: false,
@@ -115,9 +117,9 @@ function classificationInput(fixture, verdict = 'within-scope') {
   };
 }
 
-function decisionInput() {
+function decisionInput(rootCauseId = 'scope-root') {
   return {
-    entryId: 'decision-scope-return', at: harness.AT, rootCauseId: 'scope-root',
+    entryId: 'decision-scope-return', at: harness.AT, rootCauseId,
     blockerId: 'scope-blocker', decisionId: 'scope-decision',
     decision: 'approve-expansion-and-replan', blockerDigest: DIGEST,
     approvedDeltaDigest: PLAN_DIGEST, rationale: 'Approve only the bounded return.', priorDecisionIds: [],
@@ -306,7 +308,7 @@ test('decision retry repairs a receipt-only return after the journal suffix comp
   const classified = checkpointScopeClassification({
     cwd, classification, expectedRevision: fixture.adopted.revision,
   });
-  const decision = decisionInput();
+  const decision = decisionInput(classification.rootCauseId);
   assert.throws(() => checkpointScopeDecision({
     cwd, decision, expectedRevision: classified.revision, event: INVALID_EVENT,
   }), { code: 'INVALID_EVENT' });
@@ -343,7 +345,7 @@ test('resume retry repairs receipt-new document-old without weakening return ide
   const classified = checkpointScopeClassification({
     cwd, classification, expectedRevision: fixture.adopted.revision,
   });
-  const decision = decisionInput();
+  const decision = decisionInput(classification.rootCauseId);
   const decided = checkpointScopeDecision({ cwd, decision, expectedRevision: classified.revision });
   const returned = checkpointScopeReturn({
     cwd, livePrHeadSha: returnedHead(fixture), expectedRevision: decided.revision,
@@ -364,6 +366,61 @@ test('resume retry repairs receipt-new document-old without weakening return ide
   const recovered = checkpointScopeResume({ cwd, resume, expectedRevision: returned.revision });
   assert.equal(recovered.scopeControl.gate, 'ready');
   assert.equal(scopeStatus({ cwd }).journal.value.entries.at(-1).entryId, resume.entryId);
+});
+
+test('reclassification retains return identity and a second-root return retry replaces it exactly', () => {
+  const cwd = harness.repo();
+  const fixture = proposedFixture(cwd, 'second-return-recovery-task');
+  const firstClassification = classificationInput(fixture, 'human-decision-required');
+  const firstClassified = checkpointScopeClassification({
+    cwd, classification: firstClassification, expectedRevision: fixture.adopted.revision,
+  });
+  const firstDecision = decisionInput(firstClassification.rootCauseId);
+  const firstDecided = checkpointScopeDecision({
+    cwd, decision: firstDecision, expectedRevision: firstClassified.revision,
+  });
+  const firstReturned = checkpointScopeReturn({
+    cwd, livePrHeadSha: returnedHead(fixture), expectedRevision: firstDecided.revision,
+  });
+  const firstDigest = firstReturned.scopeControl.returnDigest;
+  const resumed = checkpointScopeResume({
+    cwd,
+    expectedRevision: firstReturned.revision,
+    resume: {
+      entryId: 'resume-first-return', at: harness.AT,
+      rootCauseId: firstClassification.rootCauseId, decisionId: firstDecision.decisionId,
+      scopeReturnDigest: firstDigest,
+      resumedAuthorityDigest: firstReturned.scopeControl.authorityDigest,
+      resumedHeadSha: firstReturned.currentIntegrationHeadSha,
+    },
+  });
+  const readyClassification = classificationInput(fixture, 'within-scope');
+  readyClassification.entryId = 'classification-after-first-return';
+  const reclassified = checkpointScopeClassification({
+    cwd, classification: readyClassification, expectedRevision: resumed.revision,
+  });
+  assert.equal(reclassified.scopeControl.returnDigest, firstDigest);
+
+  const secondClassification = classificationInput(fixture, 'human-decision-required');
+  secondClassification.entryId = 'classification-second-return-root';
+  secondClassification.rootCauseId = 'second-return-root';
+  const secondClassified = checkpointScopeClassification({
+    cwd, classification: secondClassification, expectedRevision: reclassified.revision,
+  });
+  const secondDecision = {
+    ...decisionInput(secondClassification.rootCauseId),
+    entryId: 'decision-second-return', blockerId: 'scope-blocker-second-return',
+    decisionId: 'scope-decision-second-return', priorDecisionIds: [firstDecision.decisionId],
+  };
+  assert.throws(() => checkpointScopeDecision({
+    cwd, decision: secondDecision, expectedRevision: secondClassified.revision, event: INVALID_EVENT,
+  }), { code: 'INVALID_EVENT' });
+  const recovered = checkpointScopeDecision({
+    cwd, decision: secondDecision, expectedRevision: secondClassified.revision,
+  });
+  assert.equal(recovered.scopeControl.gate, 'return-pending');
+  assert.notEqual(recovered.scopeControl.returnDigest, firstDigest);
+  assert.equal(readScopeReturn(cwd, recovered).digest, recovered.scopeControl.returnDigest);
 });
 
 function returnedHead(fixture) {

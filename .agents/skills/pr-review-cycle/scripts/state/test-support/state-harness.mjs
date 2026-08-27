@@ -799,16 +799,17 @@ function scopeReadyForPacket(cwd, state, packet) {
   }
   const durableTask = current.tasks.find((item) => item.id === packet.taskId);
   const pair = scopePair(packet.reviewedHeadSha, packet);
-  const rootCauseId = `scope-root-${createHash('sha256').update(packet.taskId).digest('hex').slice(0, 16)}`;
   return checkpointScopeClassification({
     cwd,
     classification: {
       entryId: `classification-${createHash('sha256').update(packet.taskId).digest('hex').slice(0, 16)}`,
       at: AT,
       reviewHeadSha: packet.reviewedHeadSha,
-      rootCauseId,
+      rootCauseId: durableTask.id,
       findingIds: durableTask.sourceIds,
-      findingFingerprints: durableTask.sourceIds.map(() => durableTask.fingerprint),
+      findingFingerprints: durableTask.sourceIds.map(
+        (_sourceId, index) => `${durableTask.fingerprint}-f${index + 1}`,
+      ),
       classification: 'within-scope-defect', assessment: pair,
       authorityAmendmentRequired: false, unrelatedReference: null,
       remediationShapeDigest: `sha256:${taskPacketDigest(packet)}`, tripwires: [],

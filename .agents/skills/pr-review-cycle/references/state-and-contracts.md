@@ -122,6 +122,9 @@ candidates, or HEAD drift fail closed. Scope documents remain bounded at 256
 KiB—including valid evidence larger than the 64 KiB active-state limit—and
 receipts remain bounded at 128 bytes.
 
+Non-replacing classifications and decisions retain the last validated return
+identity; only persistence of an exact replacement return envelope may change it.
+
 The checked-in state implementation has one dependency direction. Pure builders
 live under `scripts/state/transitions/`; they receive state and evidence and do
 no I/O. Public workflow operations live under `scripts/state/services/` and

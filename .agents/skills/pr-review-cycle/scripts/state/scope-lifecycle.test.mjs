@@ -106,7 +106,7 @@ function assessmentPair(headSha, packet, verdict = 'within-scope') {
   return { packet: assessmentPacket, result, digest: pairDigest(assessmentPacket, result) };
 }
 
-function proposedFixture(cwd, taskId = 'scope-task') {
+function proposedFixture(cwd, taskId = 'scope-task', taskOverrides = {}) {
   const initial = harness.init(cwd);
   const proposed = harness.checkpointState({
     cwd, expectedRevision: initial.revision,
@@ -114,6 +114,7 @@ function proposedFixture(cwd, taskId = 'scope-task') {
       ...initial,
       tasks: [harness.task(initial.currentIntegrationHeadSha, {
         id: taskId, status: 'proposed', integratedCommitSha: null, resolutionSummary: null,
+        ...taskOverrides,
       })],
     },
   });
@@ -139,9 +140,11 @@ function classificationInput(fixture, verdict, overrides = {}) {
     entryId: `classification-${verdict.replaceAll(/[^a-z]+/gu, '-')}`,
     at: harness.AT,
     reviewHeadSha: fixture.packet.reviewedHeadSha,
-    rootCauseId: 'scope-root',
+    rootCauseId: fixture.task.id,
     findingIds: fixture.task.sourceIds,
-    findingFingerprints: fixture.task.sourceIds.map(() => fixture.task.fingerprint),
+    findingFingerprints: fixture.task.sourceIds.map(
+      (_sourceId, index) => `${fixture.task.fingerprint}-f${index + 1}`,
+    ),
     classification: mapping[0], assessment: pair,
     authorityAmendmentRequired: mapping[1], unrelatedReference: null,
     remediationShapeDigest: `sha256:${harness.taskPacketDigest(fixture.packet)}`,
@@ -298,6 +301,95 @@ test('exact packet classification is reusable for duplicate roots and rejects ch
     cwd, packet: fixture.packet, expectedRevision: classified.revision,
   });
   assert.equal(bound.tasks[0].taskPacketDigest, harness.taskPacketDigest(fixture.packet));
+});
+
+test('task binding requires the exact order-independent finding identity map', () => {
+  const sourceIds = ['thread:root-one', 'thread:root-two'];
+  const fingerprint = 'fingerprint-exact-map';
+  const cases = [
+    {
+      name: 'missing',
+      mutate: (classification) => ({
+        ...classification,
+        findingIds: classification.findingIds.slice(0, 1),
+        findingFingerprints: classification.findingFingerprints.slice(0, 1),
+      }),
+      allowed: false,
+    },
+    {
+      name: 'extra',
+      mutate: (classification) => ({
+        ...classification,
+        findingIds: [...classification.findingIds, 'thread:root-extra'],
+        findingFingerprints: [...classification.findingFingerprints, `${fingerprint}-f3`],
+      }),
+      allowed: false,
+    },
+    {
+      name: 'reordered',
+      mutate: (classification) => ({
+        ...classification,
+        findingIds: [...classification.findingIds].reverse(),
+        findingFingerprints: [...classification.findingFingerprints].reverse(),
+      }),
+      allowed: true,
+    },
+    {
+      name: 'foreign',
+      mutate: (classification) => ({
+        ...classification,
+        findingFingerprints: [`${fingerprint}-f1`, 'fingerprint-foreign-f2'],
+      }),
+      allowed: false,
+    },
+  ];
+
+  for (const item of cases) {
+    const cwd = harness.repo();
+    const fixture = proposedFixture(cwd, `identity-${item.name}`, { sourceIds, fingerprint });
+    const classified = checkpointScopeClassification({
+      cwd,
+      classification: item.mutate(classificationInput(fixture, 'within-scope')),
+      expectedRevision: fixture.adopted.revision,
+    });
+    harness.planSpecialists({
+      cwd, input: harness.planInput(classified, fixture.packet), expectedRevision: classified.revision,
+      now: () => harness.AT,
+    });
+    const bind = () => checkpointTaskPacketBinding({
+      cwd, packet: fixture.packet, expectedRevision: classified.revision,
+    });
+    if (item.allowed) assert.equal(bind().tasks[0].taskPacketDigest, harness.taskPacketDigest(fixture.packet));
+    else assert.throws(bind, { code: 'SCOPE_CLASSIFICATION_REQUIRED' }, item.name);
+  }
+});
+
+test('scope decision rejects a selected root whose own classification needs no decision', () => {
+  const cwd = harness.repo();
+  const fixture = proposedFixture(cwd, 'selected-decision-root');
+  const material = classificationInput(fixture, 'human-decision-required', {
+    entryId: 'classification-decision-required-root', rootCauseId: 'decision-required-root',
+  });
+  const materialClassified = checkpointScopeClassification({
+    cwd, classification: material, expectedRevision: fixture.adopted.revision,
+  });
+  const ready = classificationInput(fixture, 'within-scope', {
+    entryId: 'classification-ready-root', rootCauseId: 'ready-root',
+  });
+  const bothClassified = checkpointScopeClassification({
+    cwd, classification: ready, expectedRevision: materialClassified.revision,
+  });
+  assert.equal(bothClassified.scopeControl.gate, 'decision-required');
+  assert.throws(() => checkpointScopeDecision({
+    cwd,
+    expectedRevision: bothClassified.revision,
+    decision: {
+      entryId: 'decision-wrong-selected-root', at: harness.AT, rootCauseId: ready.rootCauseId,
+      blockerId: 'scope-blocker-wrong-root', decisionId: 'scope-decision-wrong-root',
+      decision: 'reject-expansion', blockerDigest: DIGEST, approvedDeltaDigest: null,
+      rationale: 'This root did not require a decision.', priorDecisionIds: [],
+    },
+  }), { code: 'SCOPE_DECISION_NOT_REQUIRED' });
 });
 
 test('material return and resume preserve review history and stop a second expansion', () => {
@@ -461,7 +553,7 @@ test('minor amendment stays blocked until an atomic authority chain and fresh as
   const amendmentDigest = `sha256:${'c'.repeat(64)}`;
   const revisedAuthorityDigest = `sha256:${'d'.repeat(64)}`;
   const decisionInput = {
-    entryId: 'decision-minor-one', at: harness.AT, rootCauseId: 'scope-root',
+    entryId: 'decision-minor-one', at: harness.AT, rootCauseId: 'bare-minor-task',
     blockerId: 'scope-blocker-minor', decisionId: 'scope-decision-minor',
     decision: 'approve-expansion-and-replan', blockerDigest: DIGEST,
     approvedDeltaDigest: amendmentDigest, rationale: 'Approve only the bounded amendment.',
@@ -489,6 +581,7 @@ test('minor amendment stays blocked until an atomic authority chain and fresh as
   const cwd = harness.repo();
   const fixture = proposedFixture(cwd, 'amended-minor-task');
   const minor = classificationInput(fixture, 'minor-amendment-required');
+  decisionInput.rootCauseId = minor.rootCauseId;
   const classified = checkpointScopeClassification({
     cwd, classification: minor, expectedRevision: fixture.adopted.revision,
   });
@@ -531,6 +624,7 @@ test('minor amendment stays blocked until an atomic authority chain and fresh as
   const staleCwd = harness.repo();
   const staleFixture = proposedFixture(staleCwd, 'stale-amendment-task');
   const staleMinor = classificationInput(staleFixture, 'minor-amendment-required');
+  decisionInput.rootCauseId = staleMinor.rootCauseId;
   const staleClassified = checkpointScopeClassification({
     cwd: staleCwd, classification: staleMinor, expectedRevision: staleFixture.adopted.revision,
   });
@@ -540,6 +634,7 @@ test('minor amendment stays blocked until an atomic authority chain and fresh as
       ...decisionInput,
       amendment: {
         ...amendment,
+        rootCauseId: staleMinor.rootCauseId,
         priorAuthorityDigest: revisedAuthorityDigest,
       },
     },
@@ -661,4 +756,31 @@ test('integrated-head classifications append one canonical manifest and reuse it
   });
   assert.equal(retry.revision, classified.revision);
   assert.deepEqual(scopeStatus({ cwd }).journal.value.entries, entries);
+});
+
+test('generated manifest identity is bounded and probes deterministic journal collisions', () => {
+  const cwd = harness.repo();
+  const fixture = proposedFixture(cwd, 'manifest-collision-task');
+  const prior = classificationInput(fixture, 'within-scope', {
+    entryId: 'exact-head-3', rootCauseId: 'prior-manifest-root',
+  });
+  const priorClassified = checkpointScopeClassification({
+    cwd, classification: prior, expectedRevision: fixture.adopted.revision,
+  });
+  const classification = classificationInput(fixture, 'within-scope', {
+    entryId: 'c'.repeat(128),
+  });
+  classification.assessment.packet.binding.phase = 'integrated-head';
+  classification.assessment.result.binding.phase = 'integrated-head';
+  classification.assessment.digest = pairDigest(
+    classification.assessment.packet, classification.assessment.result,
+  );
+  const classified = checkpointScopeClassification({
+    cwd, classification, expectedRevision: priorClassified.revision,
+  });
+  const manifest = scopeStatus({ cwd }).journal.value.entries.at(-1);
+  assert.equal(manifest.kind, 'exact-head-manifest');
+  assert.equal(manifest.entryId, 'exact-head-3-1');
+  assert.ok(manifest.entryId.length <= 128);
+  assert.equal(classified.scopeControl.gate, 'ready');
 });

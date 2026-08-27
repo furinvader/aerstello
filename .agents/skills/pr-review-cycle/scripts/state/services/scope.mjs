@@ -4,6 +4,7 @@ import {
   scopeAuthorityDigest,
   scopeControlJournalDigest,
   scopeExactHeadManifestDigest,
+  scopeGateForClassificationEntry,
   validateScopeAuthoritySnapshot,
   validateScopeControlJournal,
   validateScopeReturnEnvelope,
@@ -162,6 +163,38 @@ function sameEntryPayload(left, right) {
   return canonicalSerializedJson(omitGenerated(left)) === canonicalSerializedJson(omitGenerated(right));
 }
 
+function exactHeadManifestEntryId(journal) {
+  const sequence = journal.entries.length + 1;
+  const used = new Set(journal.entries.map((entry) => entry.entryId));
+  for (let attempt = 0; attempt <= journal.entries.length; attempt += 1) {
+    const candidate = `exact-head-${sequence}${attempt === 0 ? '' : `-${attempt}`}`;
+    if (!used.has(candidate)) return candidate;
+  }
+  throw new StateError('No bounded exact-head manifest identity is available', 'INVALID_SCOPE_EVIDENCE');
+}
+
+function retainedScopeReturnDigest(cwd, state) {
+  const expected = state.scopeControl?.returnDigest ?? null;
+  if (expected === null) return null;
+  const returned = readScopeReturn(cwd, state);
+  if (returned.digest !== expected) {
+    throw new StateError('Scope return identity does not match its receipt-valid envelope', 'INVALID_SCOPE_EVIDENCE');
+  }
+  return returned.digest;
+}
+
+function classificationMatchesTask(classification, task) {
+  if (classification.rootCauseId !== task.id
+      || classification.findingIds.length !== task.sourceIds.length
+      || classification.findingFingerprints.length !== task.sourceIds.length) return false;
+  const actual = new Map(classification.findingIds.map(
+    (findingId, index) => [findingId, classification.findingFingerprints[index]],
+  ));
+  return actual.size === task.sourceIds.length && task.sourceIds.every(
+    (sourceId, index) => actual.get(sourceId) === `${task.fingerprint}-f${index + 1}`,
+  );
+}
+
 export function checkpointScopeClassification({
   cwd = process.cwd(), prNumber, classification, expectedRevision, event,
 } = {}) {
@@ -177,6 +210,7 @@ export function checkpointScopeClassification({
       }
       const authority = readScopeAuthority(cwd, current);
       const existing = readScopeJournalForUpdate(cwd, current);
+      retainedScopeReturnDigest(cwd, current);
       if (authority.digest !== initialJournalAuthorityDigest(existing.value)) {
         throw new StateError('Scope state projection is stale or altered', 'INVALID_SCOPE_EVIDENCE');
       }
@@ -222,7 +256,7 @@ export function checkpointScopeClassification({
         const manifest = {
           schemaVersion: 1,
           sequence: journal.entries.length + 1,
-          entryId: `exact-head-${entry.entryId}`,
+          entryId: exactHeadManifestEntryId(journal),
           kind: 'exact-head-manifest',
           at: entry.at,
           reviewHeadSha: entry.reviewHeadSha,
@@ -262,6 +296,9 @@ export function checkpointScopeDecision({
       }
       const classification = latestScopeClassification(existing.value, decision.rootCauseId);
       if (!classification) throw new StateError('Decision has no classified root cause', 'INVALID_SCOPE_DECISION');
+      if (scopeGateForClassificationEntry(classification) !== 'decision-required') {
+        throw new StateError('The selected scope classification does not require a decision', 'SCOPE_DECISION_NOT_REQUIRED');
+      }
       const { amendment = null, ...decisionInput } = decision;
       const entry = {
         ...decisionInput,
@@ -295,11 +332,13 @@ export function checkpointScopeDecision({
         const returnEnvelope = returning
           ? buildReturnEnvelope(current, existing.value, classification, pending[0], pending[0].at)
           : null;
-        if (!returning && (existsSync(scopeReturnPath(cwd, current.prNumber))
-            || existsSync(scopeReturnReceiptPath(cwd, current.prNumber)))) {
+        if (!returning && current.scopeControl.returnDigest === null
+            && (existsSync(scopeReturnPath(cwd, current.prNumber))
+              || existsSync(scopeReturnReceiptPath(cwd, current.prNumber)))) {
           throw new StateError('Unexpected scope return evidence is pending checkpoint', 'SCOPE_EVIDENCE_CONFLICT');
         }
-        const returnIdentity = returnEnvelope === null ? null : scopeReturnDigest(returnEnvelope);
+        const returnIdentity = returnEnvelope === null
+          ? retainedScopeReturnDigest(cwd, current) : scopeReturnDigest(returnEnvelope);
         return {
           nextState: buildScopeDecisionTransition(
             current, existing.value, pending[0], undefined, returnIdentity,
@@ -334,7 +373,8 @@ export function checkpointScopeDecision({
         && ['approve-expansion-and-replan', 'abandon-or-rework'].includes(entry.decision);
       const returnEnvelope = returning
         ? buildReturnEnvelope(current, journal, classification, entry, entry.at) : null;
-      const returnIdentity = returnEnvelope === null ? null : scopeReturnDigest(returnEnvelope);
+      const returnIdentity = returnEnvelope === null
+        ? retainedScopeReturnDigest(cwd, current) : scopeReturnDigest(returnEnvelope);
       return {
         nextState: buildScopeDecisionTransition(current, journal, entry, undefined, returnIdentity),
         event: event ?? { type: 'scope-decision-recorded', summary: `Recorded ${entry.decisionId}` },
@@ -519,9 +559,9 @@ export function assertScopeTaskAllowed(cwd, state, task, packet) {
   const journal = readScopeJournal(cwd, state).value;
   const expectedShape = `sha256:${taskPacketDigest(packet)}`;
   const classification = journal.entries.findLast((entry) => entry.kind === 'classification'
-    && (entry.rootCauseId === task.id
-      || task.sourceIds.every((sourceId) => entry.findingIds.includes(sourceId))));
+    && entry.rootCauseId === task.id);
   if (!classification
+      || !classificationMatchesTask(classification, task)
       || classification.authorityAmendmentRequired
       || classification.authorityDigest !== journal.authorityDigest
       || classification.reviewHeadSha !== packet.reviewedHeadSha

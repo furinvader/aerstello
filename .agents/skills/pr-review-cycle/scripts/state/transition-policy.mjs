@@ -287,6 +287,15 @@ function assertScopeControlProvenance(current, next, guardedKind, cwd) {
         throw new StateError('Scope authority advancement lacks its exact amendment chain', 'IMMUTABLE_STATE_PROVENANCE');
       }
     }
+    if (currentScope.returnDigest !== nextScope.returnDigest
+        && (guardedKind !== 'scope-decision'
+          || nextScope.gate !== 'return-pending'
+          || nextScope.returnDigest === null)) {
+      throw new StateError(
+        'Only a guarded returning decision may replace scope return identity',
+        'IMMUTABLE_STATE_PROVENANCE',
+      );
+    }
     return;
   }
   if (guardedKind === 'git-metadata') {
@@ -307,8 +316,17 @@ function scopeClassificationForTask(cwd, state, task, packet) {
   const journal = readScopeJournal(cwd, state).value;
   const expectedShape = `sha256:${taskPacketDigest(packet)}`;
   const classification = journal.entries.findLast((entry) => entry.kind === 'classification'
-    && (entry.rootCauseId === task.id
-      || task.sourceIds.every((sourceId) => entry.findingIds.includes(sourceId))));
+    && entry.rootCauseId === task.id);
+  if (classification) {
+    if (classification.findingIds.length !== task.sourceIds.length
+        || classification.findingFingerprints.length !== task.sourceIds.length) return null;
+    const actual = new Map(classification.findingIds.map(
+      (findingId, index) => [findingId, classification.findingFingerprints[index]],
+    ));
+    if (actual.size !== task.sourceIds.length || !task.sourceIds.every(
+      (sourceId, index) => actual.get(sourceId) === `${task.fingerprint}-f${index + 1}`,
+    )) return null;
+  }
   return classification?.reviewHeadSha === packet.reviewedHeadSha
     && classification.authorityDigest === journal.authorityDigest
     && !classification.authorityAmendmentRequired
