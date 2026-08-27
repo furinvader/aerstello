@@ -333,7 +333,15 @@ function assertScopeTaskProgress(cwd, state, task) {
   if (state.scopeControl.gate !== 'ready') {
     throw new StateError(`Scope gate ${state.scopeControl.gate} blocks task ${task.id}`, 'SCOPE_TASK_BLOCKED');
   }
-  const journal = readScopeJournal(cwd, state).value;
+  const journalEvidence = readScopeJournal(cwd, state);
+  if (journalEvidence.digest !== state.scopeControl.journalDigest
+      || journalEvidence.value.authorityDigest !== state.scopeControl.authorityDigest) {
+    throw new StateError(
+      `Scope journal projection is not checkpointed for task ${task.id}`,
+      'INVALID_SCOPE_EVIDENCE',
+    );
+  }
+  const journal = journalEvidence.value;
   const latestAmendment = journal.entries.findLast((entry) => entry.kind === 'amendment');
   const revisedAssessment = latestAmendment === undefined ? true : journal.entries.some(
     (entry) => entry.kind === 'classification'

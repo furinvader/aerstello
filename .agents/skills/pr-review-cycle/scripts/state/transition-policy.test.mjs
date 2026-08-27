@@ -272,6 +272,56 @@ test('transition policy rejects active execution behind a forged ready minor-ame
   );
 });
 
+test('transition policy rejects active execution from an uncheckpointed journal suffix', () => {
+  const cwd = harness.repo();
+  const initial = harness.init(cwd);
+  const proposed = harness.checkpointState({
+    cwd,
+    expectedRevision: initial.revision,
+    nextState: {
+      ...initial,
+      tasks: [harness.task(initial.currentIntegrationHeadSha, {
+        id: 'journal-ahead-policy-task', status: 'proposed', integratedCommitSha: null,
+        resolutionSummary: null,
+      })],
+    },
+  });
+  const packet = harness.taskPacket(initial.currentIntegrationHeadSha, 'journal-ahead-policy-task', {
+    affectedAreas: ['workflow'], command: 'npm run check:workflow',
+  });
+  const scoped = harness.scopeReadyForPacket(cwd, proposed, packet);
+  harness.planSpecialists({
+    cwd, input: harness.planInput(scoped, packet), expectedRevision: scoped.revision,
+    now: () => harness.AT,
+  });
+  const bound = checkpointTaskPacketBinding({ cwd, packet, expectedRevision: scoped.revision });
+  const pair = harness.scopePair(packet.reviewedHeadSha, packet);
+  assert.throws(() => checkpointScopeClassification({
+    cwd,
+    expectedRevision: bound.revision,
+    event: { type: 'invalid-scope-event', summary: 'x'.repeat(1001) },
+    classification: {
+      entryId: 'classification-uncheckpointed-policy-suffix', at: harness.AT,
+      reviewHeadSha: packet.reviewedHeadSha, rootCauseId: 'uncheckpointed-policy-root',
+      findingIds: bound.tasks[0].sourceIds,
+      findingFingerprints: bound.tasks[0].sourceIds.map(
+        (_sourceId, index) => `${bound.tasks[0].fingerprint}-f${index + 1}`,
+      ),
+      classification: 'within-scope-defect', assessment: pair,
+      authorityAmendmentRequired: false, unrelatedReference: null,
+      remediationShapeDigest: `sha256:${harness.taskPacketDigest(packet)}`, tripwires: [],
+    },
+  }), { code: 'INVALID_EVENT' });
+  const queued = {
+    ...bound,
+    tasks: bound.tasks.map((task) => task.id === packet.taskId ? { ...task, status: 'queued' } : task),
+  };
+  assertCode(
+    () => createTransitionPolicy().assertTransitionAllowed(bound, queued, undefined, cwd),
+    'INVALID_SCOPE_EVIDENCE',
+  );
+});
+
 test('transition policy selects the latest exact task evidence independently of scope root identity', () => {
   const cwd = harness.repo();
   const initial = harness.init(cwd);

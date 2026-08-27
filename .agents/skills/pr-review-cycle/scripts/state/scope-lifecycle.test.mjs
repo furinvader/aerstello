@@ -11,6 +11,7 @@ import {
   checkpointScopeResume,
   checkpointScopeReturn,
   checkpointTaskPacketBinding,
+  checkpointWorkerResultAcceptance,
   initializeState,
   scopeStatus,
 } from './state.mjs';
@@ -682,6 +683,82 @@ test('minor amendment stays blocked until an atomic authority chain and fresh as
   }), { code: 'INVALID_SCOPE_EVIDENCE' });
 });
 
+test('minor amendment reclassification is root-local and requires its own linked chain', () => {
+  const cwd = harness.repo();
+  const fixture = proposedFixture(cwd, 'minor-root-identity-task');
+  const minor = classificationInput(fixture, 'minor-amendment-required', {
+    entryId: 'classification-minor-root-identity',
+  });
+  const classified = checkpointScopeClassification({
+    cwd, classification: minor, expectedRevision: fixture.adopted.revision,
+  });
+  const retried = checkpointScopeClassification({
+    cwd, classification: minor, expectedRevision: classified.revision,
+  });
+  assert.equal(retried.revision, classified.revision);
+
+  const replacement = classificationInput(fixture, 'within-scope', {
+    entryId: 'classification-minor-root-replacement', rootCauseId: minor.rootCauseId,
+  });
+  assert.throws(() => checkpointScopeClassification({
+    cwd, classification: replacement, expectedRevision: classified.revision,
+  }), { code: 'SCOPE_CLASSIFICATION_BLOCKED' });
+
+  const independent = classificationInput(fixture, 'within-scope', {
+    entryId: 'classification-independent-root', rootCauseId: 'independent-root',
+  });
+  const independentlyClassified = checkpointScopeClassification({
+    cwd, classification: independent, expectedRevision: classified.revision,
+  });
+  assert.equal(independentlyClassified.scopeControl.gate, 'decision-required');
+
+  const bareDecision = checkpointScopeDecision({
+    cwd,
+    expectedRevision: independentlyClassified.revision,
+    decision: {
+      entryId: 'decision-bare-minor-root', at: harness.AT, rootCauseId: minor.rootCauseId,
+      blockerId: 'scope-blocker-bare-minor-root', decisionId: 'scope-decision-bare-minor-root',
+      decision: 'approve-expansion-and-replan', blockerDigest: DIGEST,
+      approvedDeltaDigest: PLAN_DIGEST, rationale: 'Record the decision without an amendment.',
+      priorDecisionIds: [],
+    },
+  });
+  assert.throws(() => checkpointScopeClassification({
+    cwd, classification: replacement, expectedRevision: bareDecision.revision,
+  }), { code: 'SCOPE_CLASSIFICATION_BLOCKED' });
+
+  const foreignMinor = classificationInput(fixture, 'minor-amendment-required', {
+    entryId: 'classification-foreign-minor-root', rootCauseId: 'foreign-minor-root',
+  });
+  const foreignClassified = checkpointScopeClassification({
+    cwd, classification: foreignMinor, expectedRevision: bareDecision.revision,
+  });
+  const foreignAmendmentDigest = `sha256:${'e'.repeat(64)}`;
+  const revisedAuthorityDigest = `sha256:${'f'.repeat(64)}`;
+  const foreignAmended = checkpointScopeDecision({
+    cwd,
+    expectedRevision: foreignClassified.revision,
+    decision: {
+      entryId: 'decision-foreign-minor-root', at: harness.AT,
+      rootCauseId: foreignMinor.rootCauseId,
+      blockerId: 'scope-blocker-foreign-minor-root', decisionId: 'scope-decision-foreign-minor-root',
+      decision: 'approve-expansion-and-replan', blockerDigest: DIGEST,
+      approvedDeltaDigest: foreignAmendmentDigest, rationale: 'Amend only the foreign root.',
+      priorDecisionIds: [],
+      amendment: {
+        entryId: 'amendment-foreign-minor-root', at: harness.AT,
+        rootCauseId: foreignMinor.rootCauseId, decisionId: 'scope-decision-foreign-minor-root',
+        amendmentDigest: foreignAmendmentDigest,
+        priorAuthorityDigest: foreignClassified.scopeControl.authorityDigest,
+        revisedAuthorityDigest,
+      },
+    },
+  });
+  assert.throws(() => checkpointScopeClassification({
+    cwd, classification: replacement, expectedRevision: foreignAmended.revision,
+  }), { code: 'SCOPE_CLASSIFICATION_BLOCKED' });
+});
+
 test('returned scope atomically imports amendment and resume evidence', () => {
   const cwd = harness.repo();
   const fixture = proposedFixture(cwd, 'returned-amendment-task');
@@ -771,6 +848,61 @@ test('journal checkpoint interruption resumes exact evidence and tampering fails
 
   writeFileSync(scopeControlJournalReceiptPath(cwd, 17), `${DIGEST}\n`);
   assert.throws(() => scopeStatus({ cwd }), { code: 'INVALID_SCOPE_EVIDENCE' });
+});
+
+test('task binding rejects a receipt-valid journal suffix until exact checkpoint recovery', () => {
+  const cwd = harness.repo();
+  const fixture = proposedFixture(cwd, 'journal-ahead-binding-task');
+  const classification = classificationInput(fixture, 'within-scope');
+  const classified = checkpointScopeClassification({
+    cwd, classification, expectedRevision: fixture.adopted.revision,
+  });
+  harness.planSpecialists({
+    cwd, input: harness.planInput(classified, fixture.packet), expectedRevision: classified.revision,
+    now: () => harness.AT,
+  });
+  const pending = classificationInput(fixture, 'within-scope', {
+    entryId: 'classification-pending-binding-suffix', rootCauseId: 'pending-binding-root',
+  });
+  assert.throws(() => checkpointScopeClassification({
+    cwd, classification: pending, expectedRevision: classified.revision,
+    event: { type: 'invalid-scope-event', summary: 'x'.repeat(1001) },
+  }), { code: 'INVALID_EVENT' });
+  assert.equal(harness.loadState(cwd).revision, classified.revision);
+  assert.throws(() => checkpointTaskPacketBinding({
+    cwd, packet: fixture.packet, expectedRevision: classified.revision,
+  }), { code: 'INVALID_SCOPE_EVIDENCE' });
+  assert.equal(harness.loadState(cwd).tasks[0].taskPacketDigest, undefined);
+
+  const recovered = checkpointScopeClassification({
+    cwd, classification: pending, expectedRevision: classified.revision,
+  });
+  harness.planSpecialists({
+    cwd, input: harness.planInput(recovered, fixture.packet), expectedRevision: recovered.revision,
+    now: () => harness.AT,
+  });
+  const bound = checkpointTaskPacketBinding({
+    cwd, packet: fixture.packet, expectedRevision: recovered.revision,
+  });
+  assert.equal(bound.tasks[0].taskPacketDigest, harness.taskPacketDigest(fixture.packet));
+});
+
+test('worker-result preflight rejects a receipt-valid uncheckpointed journal suffix', () => {
+  const cwd = harness.repo();
+  const { bound, packet, result } = harness.boundWorkerResultFixture(
+    cwd, 'journal-ahead-result-task',
+  );
+  const pending = classificationInput({ packet, task: bound.tasks[0] }, 'within-scope', {
+    entryId: 'classification-pending-result-suffix', rootCauseId: 'pending-result-root',
+  });
+  assert.throws(() => checkpointScopeClassification({
+    cwd, classification: pending, expectedRevision: bound.revision,
+    event: { type: 'invalid-scope-event', summary: 'x'.repeat(1001) },
+  }), { code: 'INVALID_EVENT' });
+  assert.throws(() => checkpointWorkerResultAcceptance({
+    cwd, packet, result, preflightOnly: true,
+  }), { code: 'INVALID_SCOPE_EVIDENCE' });
+  assert.equal(harness.loadState(cwd).revision, bound.revision);
 });
 
 test('integrated-head classifications append one canonical manifest and reuse it exactly', () => {

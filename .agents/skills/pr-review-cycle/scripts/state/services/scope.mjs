@@ -184,6 +184,24 @@ function retainedScopeReturnDigest(cwd, state) {
   return returned.digest;
 }
 
+function minorAmendmentCompleted(journal, classification) {
+  return journal.entries.some((entry, index) => {
+    if (entry.kind !== 'decision'
+        || entry.sequence <= classification.sequence
+        || entry.rootCauseId !== classification.rootCauseId
+        || entry.assessmentDigest !== classification.assessment.digest
+        || entry.authorityDigest !== classification.authorityDigest
+        || entry.decision !== 'approve-expansion-and-replan') return false;
+    const amendment = journal.entries[index + 1];
+    return amendment?.kind === 'amendment'
+      && amendment.rootCauseId === classification.rootCauseId
+      && amendment.decisionId === entry.decisionId
+      && amendment.authorityDigest === classification.authorityDigest
+      && amendment.priorAuthorityDigest === classification.authorityDigest
+      && amendment.amendmentDigest === entry.approvedDeltaDigest;
+  });
+}
+
 export function checkpointScopeClassification({
   cwd = process.cwd(), prNumber, classification, expectedRevision, event,
 } = {}) {
@@ -238,6 +256,12 @@ export function checkpointScopeClassification({
       if (prior && canonicalSerializedJson({ ...prior, sequence: entry.sequence, entryId: entry.entryId, at: entry.at })
         === canonicalSerializedJson(entry)) {
         return { nextState: current, result: current, noWrite: true };
+      }
+      if (prior?.authorityAmendmentRequired && !minorAmendmentCompleted(existing.value, prior)) {
+        throw new StateError(
+          `Scope root ${entry.rootCauseId} remains blocked by its required authority amendment`,
+          'SCOPE_CLASSIFICATION_BLOCKED',
+        );
       }
       let journal = appendEntry(existing.value, entry);
       if (entry.assessment.result.verdict === 'within-scope'
@@ -545,7 +569,15 @@ export function assertScopeTaskAllowed(cwd, state, task, packet) {
   if (state.scopeControl.gate !== 'ready') {
     throw new StateError(`Scope gate ${state.scopeControl.gate} blocks task ${task.id}`, 'SCOPE_TASK_BLOCKED');
   }
-  const journal = readScopeJournal(cwd, state).value;
+  const journalEvidence = readScopeJournal(cwd, state);
+  if (journalEvidence.digest !== state.scopeControl.journalDigest
+      || journalEvidence.value.authorityDigest !== state.scopeControl.authorityDigest) {
+    throw new StateError(
+      `Scope journal projection is not checkpointed for task ${task.id}`,
+      'INVALID_SCOPE_EVIDENCE',
+    );
+  }
+  const journal = journalEvidence.value;
   const expectedShape = `sha256:${taskPacketDigest(packet)}`;
   const classification = journal.entries.findLast((entry) => entry.kind === 'classification'
     && scopeClassificationMatchesTask(entry, task));
