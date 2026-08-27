@@ -13,6 +13,7 @@ import {
   checkpointTaskPacketBinding,
   checkpointWorkerResultAcceptance,
   initializeState,
+  reconcileState,
   scopeStatus,
 } from './state.mjs';
 import {
@@ -171,6 +172,7 @@ test('initialization atomically captures explicit authority and its empty journa
   ]) assert.equal(existsSync(path), true, path);
   assert.match(readFileSync(scopeAuthorityReceiptPath(cwd, 17), 'utf8'), /^sha256:[0-9a-f]{64}\n$/u);
   assert.deepEqual(scopeStatus({ cwd, prNumber: 17 }).journal.value.entries, []);
+  assert.equal(reconcileState({ cwd, prNumber: 17 }).scope.status, 'valid');
 });
 
 test('legacy schema-v3 stays readable but cannot bind before guarded adoption and classification', () => {
@@ -650,6 +652,7 @@ test('minor amendment stays blocked until an atomic authority chain and fresh as
   assert.deepEqual(scopeStatus({ cwd }).journal.value.entries.slice(-2).map((entry) => entry.kind), [
     'decision', 'amendment',
   ]);
+  assert.equal(reconcileState({ cwd }).scope.status, 'valid');
 
   const fresh = classificationInput(fixture, 'within-scope', {
     entryId: 'classification-revised-authority',
@@ -661,6 +664,14 @@ test('minor amendment stays blocked until an atomic authority chain and fresh as
     cwd, classification: fresh, expectedRevision: amended.revision,
   });
   assert.equal(ready.scopeControl.gate, 'ready');
+
+  writeFileSync(harness.statePath(cwd, ready.prNumber), `${JSON.stringify({
+    ...ready,
+    scopeControl: { ...ready.scopeControl, authorityDigest: priorAuthorityDigest },
+  })}\n`);
+  const forged = reconcileState({ cwd });
+  assert.equal(forged.scope.status, 'invalid');
+  assert.match(forged.evidenceErrors.join('\n'), /compact state reference does not match durable scope evidence/u);
 
   const staleCwd = harness.repo();
   const staleFixture = proposedFixture(staleCwd, 'stale-amendment-task');
@@ -817,6 +828,7 @@ test('returned scope atomically imports amendment and resume evidence', () => {
   assert.deepEqual(scopeStatus({ cwd }).journal.value.entries.slice(-2).map((entry) => entry.kind), [
     'amendment', 'resume',
   ]);
+  assert.equal(reconcileState({ cwd }).scope.status, 'valid');
 
   const fresh = classificationInput(fixture, 'within-scope', {
     entryId: 'classification-returned-revised-authority',

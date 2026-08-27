@@ -55,7 +55,11 @@ export function reconcileState({ cwd = process.cwd(), prNumber } = {}) {
       const authority = readScopeAuthority(cwd, state);
       const journal = readScopeJournal(cwd, state);
       const returned = state.scopeControl.returnDigest === null ? null : readScopeReturn(cwd, state);
-      if (authority.digest !== state.scopeControl.authorityDigest
+      const initialAuthorityDigest = journal.value.entries.find(
+        (entry) => entry.kind === 'amendment',
+      )?.priorAuthorityDigest ?? journal.value.authorityDigest;
+      if (authority.digest !== initialAuthorityDigest
+          || journal.value.authorityDigest !== state.scopeControl.authorityDigest
           || journal.digest !== state.scopeControl.journalDigest
           || (returned?.digest ?? null) !== state.scopeControl.returnDigest) {
         throw new Error('compact state reference does not match durable scope evidence');
