@@ -172,6 +172,11 @@ test('imported authority requires complete real scope identities and a current w
 
   assert.match(validateScopeAuthoritySnapshot(authority({ planDigest: null })).join('\n'), /planDigest is required/u);
   assert.match(validateScopeAuthoritySnapshot(authority({ integratedHeadAssessment: null })).join('\n'), /integratedHeadAssessment is required/u);
+  const wrongPhase = assessmentPair();
+  wrongPhase.packet.binding.phase = 'task';
+  wrongPhase.result.binding.phase = 'task';
+  wrongPhase.digest = `sha256:${sha256CanonicalContractJson({ packet: wrongPhase.packet, result: wrongPhase.result })}`;
+  assert.match(validateScopeAuthoritySnapshot(authority({ integratedHeadAssessment: wrongPhase })).join('\n'), /canonical integrated-head/u);
   const stale = assessmentPair();
   stale.packet.binding.subject.sha = OTHER_HEAD;
   stale.result.binding.subject.sha = OTHER_HEAD;
@@ -191,7 +196,7 @@ test('journal is append-only shaped and embeds exact canonical assessment eviden
   })).join('\n'), /one-based position/u);
   assert.match(validateScopeControlJournal(journal(authorityDigest, {
     entries: [classificationEntry(authorityDigest, { authorityDigest: OTHER_DIGEST })],
-  })).join('\n'), /journal authority/u);
+  })).join('\n'), /authority effective/u);
   const changedPair = assessmentPair();
   changedPair.digest = DIGEST;
   assert.match(validateScopeControlJournal(journal(authorityDigest, {
@@ -209,8 +214,8 @@ test('all non-assessment journal variants are closed and exact-evidence-bound', 
   entries.push(
     {
       ...common, sequence: 2, entryId: 'decision-one', kind: 'decision', blockerId: 'blocker-one',
-      decisionId: 'decision-one', decision: 'approve-expansion-and-replan', assessmentDigest: DIGEST,
-      blockerDigest: OTHER_DIGEST, approvedDeltaDigest: THIRD_DIGEST, rationale: 'Approve the bounded delta.',
+      decisionId: 'decision-one', decision: 'approve-expansion-and-replan', assessmentDigest: entries[0].assessment.digest,
+      blockerDigest: OTHER_DIGEST, approvedDeltaDigest: DIGEST, rationale: 'Approve the bounded delta.',
       priorDecisionIds: [],
     },
     {
@@ -218,21 +223,32 @@ test('all non-assessment journal variants are closed and exact-evidence-bound', 
       amendmentDigest: DIGEST, priorAuthorityDigest: authorityDigest, revisedAuthorityDigest: OTHER_DIGEST,
     },
   );
+  const revised = classificationEntry(OTHER_DIGEST, {
+    sequence: 5, entryId: 'classification-revised',
+  });
+  revised.assessment.packet.binding.amendmentDigests = [DIGEST];
+  revised.assessment.result.binding.amendmentDigests = [DIGEST];
+  revised.assessment.digest = `sha256:${sha256CanonicalContractJson({
+    packet: revised.assessment.packet, result: revised.assessment.result,
+  })}`;
   entries.push(
     {
-      ...common, sequence: 4, entryId: 'manifest-one', kind: 'exact-head-manifest',
-      manifestDigest: scopeExactHeadManifestDigest(entries, HEAD), assessmentDigest: OTHER_DIGEST, triggerKinds: ['persistent-surface'],
+      ...common, authorityDigest: OTHER_DIGEST, sequence: 4, entryId: 'resume-one', kind: 'resume',
+      decisionId: 'decision-one', scopeReturnDigest: DIGEST,
+      resumedAuthorityDigest: OTHER_DIGEST, resumedHeadSha: HEAD,
     },
-    {
-      ...common, sequence: 5, entryId: 'resume-one', kind: 'resume', decisionId: 'decision-one',
-      scopeReturnDigest: DIGEST, resumedAuthorityDigest: OTHER_DIGEST, resumedHeadSha: HEAD,
-    },
+    revised,
   );
-  assert.deepEqual(validateScopeControlJournal(journal(authorityDigest, { entries })), []);
+  entries.push({
+    ...common, authorityDigest: OTHER_DIGEST, sequence: 6, entryId: 'manifest-one', kind: 'exact-head-manifest',
+    manifestDigest: scopeExactHeadManifestDigest(entries, HEAD),
+    assessmentDigest: revised.assessment.digest, triggerKinds: ['classification'],
+  });
+  assert.deepEqual(validateScopeControlJournal(journal(OTHER_DIGEST, { entries })), []);
   const invalid = structuredClone(entries);
   invalid[1].approvedDeltaDigest = null;
-  invalid[4].resumedHeadSha = OTHER_HEAD;
-  const errors = validateScopeControlJournal(journal(authorityDigest, { entries: invalid })).join('\n');
+  invalid[3].resumedHeadSha = OTHER_HEAD;
+  const errors = validateScopeControlJournal(journal(OTHER_DIGEST, { entries: invalid })).join('\n');
   assert.match(errors, /approvedDeltaDigest is required/u);
   assert.match(errors, /resumedHeadSha must equal reviewHeadSha/u);
 });

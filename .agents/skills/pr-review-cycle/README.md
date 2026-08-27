@@ -94,7 +94,11 @@ pair. The five classifications are `within-scope-defect`,
 map respectively from `within-scope`, `trim-required`,
 `human-decision-required`, and `insufficient-evidence`; a
 `minor-amendment-required` verdict remains a within-scope defect but requires
-an authority amendment and keeps the decision gate closed. Prefer removal or
+an authority amendment and keeps the decision gate closed. Supply the closed
+`amendment` journal payload with the existing `scope-decision --input` command;
+the decision and amendment are one atomic suffix. A bare decision stays
+blocked, and execution remains blocked until `scope-classify --input` records
+a fresh applicable non-minor assessment under the revised authority. Prefer removal or
 simplification for unnecessary machinery. The governing correctness rule is
 the smallest current-PR implementation that satisfies the accepted authority,
 not preservation of an earlier PR revision.
@@ -112,7 +116,10 @@ shape may reuse its classification, while changed evidence must be reassessed.
 Material expansion needs a durable decision. Approved expansion or rework
 enters guarded `scope-return`; review history is preserved and the review cycle
 does not mutate change-development state. `scope-resume` accepts only the
-matching return digest, authority digest, and current HEAD. A second approved
+matching return digest, authority digest, and current HEAD. When change
+development returns revised authority, include the amendment payload in that
+existing resume input so the journal appends amendment plus resume atomically;
+a fresh revised-authority classification is still required. A second approved
 material expansion for the same root triggers the churn breaker and requires
 human disposition. Recovery verifies receipts, pending append-only journal
 suffixes, compact projection, return envelope, and current HEAD before it can

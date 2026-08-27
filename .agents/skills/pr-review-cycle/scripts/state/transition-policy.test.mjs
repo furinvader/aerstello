@@ -2,6 +2,11 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 
+import * as harness from './test-support/state-harness.mjs';
+import {
+  checkpointScopeClassification,
+  checkpointTaskPacketBinding,
+} from './state.mjs';
 import { createTransitionPolicy } from './transition-policy.mjs';
 
 const SHA = 'a'.repeat(40);
@@ -202,5 +207,65 @@ test('archive authorization validates an immutable exact envelope', () => {
       cwd,
     ),
     'INVALID_ARCHIVE_IMPORT',
+  );
+});
+
+test('transition policy rejects active execution behind a forged ready minor-amendment gate', () => {
+  const cwd = harness.repo();
+  const initial = harness.init(cwd);
+  const proposed = harness.checkpointState({
+    cwd,
+    expectedRevision: initial.revision,
+    nextState: {
+      ...initial,
+      tasks: [harness.task(initial.currentIntegrationHeadSha, {
+        id: 'minor-policy-task', status: 'proposed', integratedCommitSha: null,
+        resolutionSummary: null,
+      })],
+    },
+  });
+  const packet = harness.taskPacket(initial.currentIntegrationHeadSha, 'minor-policy-task', {
+    affectedAreas: ['workflow'], command: 'npm run check:workflow',
+  });
+  const scoped = harness.scopeReadyForPacket(cwd, proposed, packet);
+  harness.planSpecialists({
+    cwd, input: harness.planInput(scoped, packet), expectedRevision: scoped.revision,
+    now: () => harness.AT,
+  });
+  const bound = checkpointTaskPacketBinding({ cwd, packet, expectedRevision: scoped.revision });
+  const pair = harness.scopePair(packet.reviewedHeadSha, packet);
+  pair.result.verdict = 'minor-amendment-required';
+  pair.result.coverage[0].classification = 'necessary-minor-expansion';
+  pair.result.scopeDelta = {
+    description: 'Authorize the bounded adjacent workflow behavior.',
+    sourceCriterionIds: ['bounded-remediation'], acceptedCriterionIds: ['bounded-remediation'],
+    invariantIds: [], materialSurfaces: [],
+  };
+  pair.digest = `sha256:${fingerprint({ packet: pair.packet, result: pair.result })}`;
+  const classified = checkpointScopeClassification({
+    cwd,
+    expectedRevision: bound.revision,
+    classification: {
+      entryId: 'classification-minor-policy', at: harness.AT,
+      reviewHeadSha: packet.reviewedHeadSha, rootCauseId: 'minor-policy-task',
+      findingIds: bound.tasks[0].sourceIds,
+      findingFingerprints: bound.tasks[0].sourceIds.map(() => bound.tasks[0].fingerprint),
+      classification: 'within-scope-defect', assessment: pair,
+      authorityAmendmentRequired: true, unrelatedReference: null,
+      remediationShapeDigest: `sha256:${harness.taskPacketDigest(packet)}`, tripwires: [],
+    },
+  });
+  const forged = {
+    ...classified,
+    scopeControl: { ...classified.scopeControl, gate: 'ready' },
+  };
+  const next = {
+    ...forged,
+    tasks: forged.tasks.map((task) => task.id === 'minor-policy-task'
+      ? { ...task, status: 'queued' } : task),
+  };
+  assertCode(
+    () => createTransitionPolicy().assertTransitionAllowed(forged, next, undefined, cwd),
+    'SCOPE_CLASSIFICATION_REQUIRED',
   );
 });

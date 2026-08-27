@@ -887,6 +887,7 @@ PRODUCTION_STATE_IMPORTS.set('services/scope.mjs', new Map([
   [stateModule('state-store.mjs'), ['activePrNumber', 'loadState']],
   [stateModule('evidence/task-packets.mjs'), ['taskPacketDigest']],
   [stateModule('locations.mjs'), ['scopeReturnPath']],
+  [stateModule('scope-classification-head.mjs'), ['resolveScopeClassificationHead']],
   [stateModule('transitions/scope.mjs'), [
     'buildScopeAuthorityTransition', 'buildScopeClassificationTransition',
     'buildScopeDecisionTransition', 'buildScopeResumeTransition',

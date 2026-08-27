@@ -56,7 +56,10 @@ planning error, never permission to run a full local suite.
 
 Bind each root to one of the five canonical classifications documented in the
 [state reference](references/state-and-contracts.md). A minor-amendment verdict
-still requires a decision and authority amendment. Remove or simplify an
+still requires a decision and authority amendment supplied atomically through
+the existing decision input; imported amended authority is supplied atomically
+through the existing resume input. Neither path is executable until a fresh
+applicable non-minor assessment binds the revised authority. Remove or simplify an
 unnecessary mechanism first; judge correctness against the accepted scope and
 the current PR, not an obsolete intermediate implementation. Task binding and
 worker progress require a receipt-valid exact-HEAD classification for the exact

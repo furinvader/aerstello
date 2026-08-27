@@ -272,9 +272,20 @@ function assertScopeControlProvenance(current, next, guardedKind, cwd) {
     return;
   }
   if (SCOPE_TRANSITION_KINDS.has(guardedKind)) {
-    if (currentScope === undefined || nextScope === undefined
-        || currentScope.authorityDigest !== nextScope.authorityDigest) {
+    if (currentScope === undefined || nextScope === undefined) {
       throw new StateError('Guarded scope transition must preserve captured authority', 'IMMUTABLE_STATE_PROVENANCE');
+    }
+    if (currentScope.authorityDigest !== nextScope.authorityDigest) {
+      if (!['scope-decision', 'scope-resume'].includes(guardedKind)) {
+        throw new StateError('Only guarded decision or resume may advance scope authority', 'IMMUTABLE_STATE_PROVENANCE');
+      }
+      const journal = readScopeJournal(cwd, next).value;
+      const amendment = journal.entries.findLast((entry) => entry.kind === 'amendment');
+      if (!amendment || amendment.priorAuthorityDigest !== currentScope.authorityDigest
+          || amendment.revisedAuthorityDigest !== nextScope.authorityDigest
+          || journal.authorityDigest !== nextScope.authorityDigest) {
+        throw new StateError('Scope authority advancement lacks its exact amendment chain', 'IMMUTABLE_STATE_PROVENANCE');
+      }
     }
     return;
   }
@@ -295,12 +306,15 @@ function scopeClassificationForTask(cwd, state, task, packet) {
   if (!state.scopeControl) return null;
   const journal = readScopeJournal(cwd, state).value;
   const expectedShape = `sha256:${taskPacketDigest(packet)}`;
-  return journal.entries.findLast((entry) => entry.kind === 'classification'
+  const classification = journal.entries.findLast((entry) => entry.kind === 'classification'
     && (entry.rootCauseId === task.id
-      || task.sourceIds.every((sourceId) => entry.findingIds.includes(sourceId)))
-    && entry.reviewHeadSha === packet.reviewedHeadSha
-    && entry.remediationShapeDigest === expectedShape
-    && ['within-scope-defect', 'unnecessary-mechanism-defect'].includes(entry.classification));
+      || task.sourceIds.every((sourceId) => entry.findingIds.includes(sourceId))));
+  return classification?.reviewHeadSha === packet.reviewedHeadSha
+    && classification.authorityDigest === journal.authorityDigest
+    && !classification.authorityAmendmentRequired
+    && classification.remediationShapeDigest === expectedShape
+    && ['within-scope-defect', 'unnecessary-mechanism-defect'].includes(classification.classification)
+    ? classification : null;
 }
 
 function assertScopeTaskProgress(cwd, state, task) {
@@ -309,6 +323,17 @@ function assertScopeTaskProgress(cwd, state, task) {
   }
   if (state.scopeControl.gate !== 'ready') {
     throw new StateError(`Scope gate ${state.scopeControl.gate} blocks task ${task.id}`, 'SCOPE_TASK_BLOCKED');
+  }
+  const journal = readScopeJournal(cwd, state).value;
+  const latestAmendment = journal.entries.findLast((entry) => entry.kind === 'amendment');
+  const revisedAssessment = latestAmendment === undefined ? true : journal.entries.some(
+    (entry) => entry.kind === 'classification'
+      && entry.sequence > latestAmendment.sequence
+      && entry.authorityDigest === journal.authorityDigest
+      && !entry.authorityAmendmentRequired,
+  );
+  if (!revisedAssessment) {
+    throw new StateError(`Scope authority amendment blocks task ${task.id}`, 'SCOPE_TASK_BLOCKED');
   }
   if (typeof task.taskPacketDigest !== 'string') {
     throw new StateError(`Task ${task.id} has no packet for scope classification`, 'SCOPE_CLASSIFICATION_REQUIRED');

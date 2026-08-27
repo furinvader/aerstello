@@ -159,6 +159,10 @@ test('state CLI preserves help and malformed-usage exit behavior', () => {
   assert.equal(help.status, 0, help.stderr);
   assert.equal(noCommand.stdout, help.stdout);
   assert.match(noCommand.stdout, /^Usage: node .*state\/cli\.mjs <command> \[options\]/u);
+  for (const command of [
+    'init', 'scope-authority', 'scope-classify', 'scope-decision', 'scope-return', 'scope-resume',
+  ]) assert.match(noCommand.stdout, new RegExp(`^  ${command}\\s`, 'mu'));
+  assert.doesNotMatch(noCommand.stdout, /scope-amendment/u);
 
   assert.equal(unknown.status, 2);
   assert.match(unknown.stderr, /^Unknown command not-a-command\nUsage:/u);

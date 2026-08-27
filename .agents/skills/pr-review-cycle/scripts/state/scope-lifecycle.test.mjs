@@ -358,6 +358,143 @@ test('material return and resume preserve review history and stop a second expan
   assert.match(churned.blockedReasons.join('\n'), /repeated expansion churn/u);
 });
 
+test('minor amendment stays blocked until an atomic authority chain and fresh assessment', () => {
+  const amendmentDigest = `sha256:${'c'.repeat(64)}`;
+  const revisedAuthorityDigest = `sha256:${'d'.repeat(64)}`;
+  const decisionInput = {
+    entryId: 'decision-minor-one', at: harness.AT, rootCauseId: 'scope-root',
+    blockerId: 'scope-blocker-minor', decisionId: 'scope-decision-minor',
+    decision: 'approve-expansion-and-replan', blockerDigest: DIGEST,
+    approvedDeltaDigest: amendmentDigest, rationale: 'Approve only the bounded amendment.',
+    priorDecisionIds: [],
+  };
+
+  const bareCwd = harness.repo();
+  const bareFixture = proposedFixture(bareCwd, 'bare-minor-task');
+  const bareClassification = classificationInput(bareFixture, 'minor-amendment-required');
+  const bareClassified = checkpointScopeClassification({
+    cwd: bareCwd, classification: bareClassification, expectedRevision: bareFixture.adopted.revision,
+  });
+  const bareDecision = checkpointScopeDecision({
+    cwd: bareCwd, decision: decisionInput, expectedRevision: bareClassified.revision,
+  });
+  assert.equal(bareDecision.scopeControl.gate, 'decision-required');
+  harness.planSpecialists({
+    cwd: bareCwd, input: harness.planInput(bareDecision, bareFixture.packet),
+    expectedRevision: bareDecision.revision, now: () => harness.AT,
+  });
+  assert.throws(() => checkpointTaskPacketBinding({
+    cwd: bareCwd, packet: bareFixture.packet, expectedRevision: bareDecision.revision,
+  }), { code: 'SCOPE_TASK_BLOCKED' });
+
+  const cwd = harness.repo();
+  const fixture = proposedFixture(cwd, 'amended-minor-task');
+  const minor = classificationInput(fixture, 'minor-amendment-required');
+  const classified = checkpointScopeClassification({
+    cwd, classification: minor, expectedRevision: fixture.adopted.revision,
+  });
+  const priorAuthorityDigest = classified.scopeControl.authorityDigest;
+  const amendment = {
+    entryId: 'amendment-minor-one', at: harness.AT,
+    rootCauseId: minor.rootCauseId, decisionId: decisionInput.decisionId,
+    amendmentDigest, priorAuthorityDigest, revisedAuthorityDigest,
+  };
+  const amended = checkpointScopeDecision({
+    cwd,
+    decision: { ...decisionInput, amendment },
+    expectedRevision: classified.revision,
+  });
+  assert.equal(amended.scopeControl.authorityDigest, revisedAuthorityDigest);
+  assert.equal(amended.scopeControl.gate, 'decision-required');
+  assert.deepEqual(scopeStatus({ cwd }).journal.value.entries.slice(-2).map((entry) => entry.kind), [
+    'decision', 'amendment',
+  ]);
+
+  const fresh = classificationInput(fixture, 'within-scope', {
+    entryId: 'classification-revised-authority',
+  });
+  fresh.assessment.packet.binding.amendmentDigests = [amendmentDigest];
+  fresh.assessment.result.binding.amendmentDigests = [amendmentDigest];
+  fresh.assessment.digest = pairDigest(fresh.assessment.packet, fresh.assessment.result);
+  const ready = checkpointScopeClassification({
+    cwd, classification: fresh, expectedRevision: amended.revision,
+  });
+  assert.equal(ready.scopeControl.gate, 'ready');
+
+  const staleCwd = harness.repo();
+  const staleFixture = proposedFixture(staleCwd, 'stale-amendment-task');
+  const staleMinor = classificationInput(staleFixture, 'minor-amendment-required');
+  const staleClassified = checkpointScopeClassification({
+    cwd: staleCwd, classification: staleMinor, expectedRevision: staleFixture.adopted.revision,
+  });
+  assert.throws(() => checkpointScopeDecision({
+    cwd: staleCwd,
+    decision: {
+      ...decisionInput,
+      amendment: {
+        ...amendment,
+        priorAuthorityDigest: revisedAuthorityDigest,
+      },
+    },
+    expectedRevision: staleClassified.revision,
+  }), { code: 'INVALID_SCOPE_EVIDENCE' });
+});
+
+test('returned scope atomically imports amendment and resume evidence', () => {
+  const cwd = harness.repo();
+  const fixture = proposedFixture(cwd, 'returned-amendment-task');
+  const material = classificationInput(fixture, 'human-decision-required');
+  const classified = checkpointScopeClassification({
+    cwd, classification: material, expectedRevision: fixture.adopted.revision,
+  });
+  const decision = {
+    entryId: 'decision-return-amendment', at: harness.AT, rootCauseId: material.rootCauseId,
+    blockerId: 'scope-blocker-return', decisionId: 'scope-decision-return',
+    decision: 'approve-expansion-and-replan', blockerDigest: DIGEST,
+    approvedDeltaDigest: PLAN_DIGEST, rationale: 'Approve the returned bounded authority.',
+    priorDecisionIds: [],
+  };
+  const decided = checkpointScopeDecision({
+    cwd, decision, expectedRevision: classified.revision,
+  });
+  const returned = checkpointScopeReturn({
+    cwd, livePrHeadSha: fixture.packet.reviewedHeadSha, expectedRevision: decided.revision,
+  });
+  const revisedAuthorityDigest = `sha256:${'e'.repeat(64)}`;
+  const resumed = checkpointScopeResume({
+    cwd,
+    expectedRevision: returned.revision,
+    resume: {
+      entryId: 'resume-return-amendment', at: harness.AT, rootCauseId: material.rootCauseId,
+      decisionId: decision.decisionId, scopeReturnDigest: returned.scopeControl.returnDigest,
+      resumedAuthorityDigest: revisedAuthorityDigest,
+      resumedHeadSha: returned.currentIntegrationHeadSha,
+      amendment: {
+        entryId: 'amendment-return-one', at: harness.AT, rootCauseId: material.rootCauseId,
+        decisionId: decision.decisionId, amendmentDigest: PLAN_DIGEST,
+        priorAuthorityDigest: returned.scopeControl.authorityDigest,
+        revisedAuthorityDigest,
+      },
+    },
+  });
+  assert.equal(resumed.scopeControl.gate, 'decision-required');
+  assert.equal(resumed.scopeControl.authorityDigest, revisedAuthorityDigest);
+  assert.deepEqual(scopeStatus({ cwd }).journal.value.entries.slice(-2).map((entry) => entry.kind), [
+    'amendment', 'resume',
+  ]);
+
+  const fresh = classificationInput(fixture, 'within-scope', {
+    entryId: 'classification-returned-revised-authority',
+  });
+  fresh.assessment.packet.binding.amendmentDigests = [PLAN_DIGEST];
+  fresh.assessment.result.binding.amendmentDigests = [PLAN_DIGEST];
+  fresh.assessment.digest = pairDigest(fresh.assessment.packet, fresh.assessment.result);
+  const ready = checkpointScopeClassification({
+    cwd, classification: fresh, expectedRevision: resumed.revision,
+  });
+  assert.equal(ready.scopeControl.gate, 'ready');
+});
+
 test('journal checkpoint interruption resumes exact evidence and tampering fails closed', () => {
   const cwd = harness.repo();
   const fixture = proposedFixture(cwd, 'journal-recovery-task');

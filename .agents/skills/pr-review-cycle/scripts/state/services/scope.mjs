@@ -23,6 +23,7 @@ import {
 import { activePrNumber, loadState } from '../state-store.mjs';
 import { taskPacketDigest } from '../evidence/task-packets.mjs';
 import { scopeReturnPath } from '../locations.mjs';
+import { resolveScopeClassificationHead } from '../scope-classification-head.mjs';
 import {
   buildScopeAuthorityTransition,
   buildScopeClassificationTransition,
@@ -97,9 +98,47 @@ export function checkpointScopeAuthority({
 function appendEntry(journal, entry) {
   const next = structuredClone(entry);
   next.sequence = journal.entries.length + 1;
-  const value = { ...journal, entries: [...journal.entries, next] };
+  const value = {
+    ...journal,
+    authorityDigest: next.kind === 'amendment' ? next.revisedAuthorityDigest : journal.authorityDigest,
+    entries: [...journal.entries, next],
+  };
   validateInput(value, validateScopeControlJournal, 'scope control journal');
   return value;
+}
+
+function initialJournalAuthorityDigest(journal) {
+  return journal.entries.find((entry) => entry.kind === 'amendment')?.priorAuthorityDigest
+    ?? journal.authorityDigest;
+}
+
+function amendmentEntry(amendment, journal, classification, decision, transitionAt) {
+  if (amendment === null || typeof amendment !== 'object' || Array.isArray(amendment)) {
+    throw new StateError('Scope amendment payload is invalid', 'INVALID_SCOPE_AMENDMENT');
+  }
+  if (amendment.priorAuthorityDigest !== journal.authorityDigest) {
+    throw new StateError('Scope amendment prior authority is stale', 'INVALID_SCOPE_EVIDENCE');
+  }
+  const fields = [
+    'entryId', 'at', 'rootCauseId', 'decisionId', 'amendmentDigest',
+    'priorAuthorityDigest', 'revisedAuthorityDigest',
+  ];
+  if (Object.keys(amendment).sort().join('\n') !== [...fields].sort().join('\n')
+      || amendment.at !== transitionAt
+      || amendment.rootCauseId !== classification.rootCauseId
+      || amendment.decisionId !== decision.decisionId) {
+    throw new StateError('Scope amendment payload does not match its atomic authority chain', 'INVALID_SCOPE_AMENDMENT');
+  }
+  return {
+    ...amendment,
+    schemaVersion: 1,
+    sequence: journal.entries.length + 1,
+    kind: 'amendment',
+    reviewHeadSha: classification.reviewHeadSha,
+    authorityDigest: journal.authorityDigest,
+    rootCauseId: classification.rootCauseId,
+    decisionId: decision.decisionId,
+  };
 }
 
 function journalPrefixLength(journal, expectedDigest) {
@@ -128,7 +167,7 @@ export function checkpointScopeClassification({
       if (!current.scopeControl) throw new StateError('Capture scope authority before classification', 'SCOPE_AUTHORITY_REQUIRED');
       const authority = readScopeAuthority(cwd, current);
       const existing = readScopeJournal(cwd, current);
-      if (authority.digest !== current.scopeControl.authorityDigest) {
+      if (authority.digest !== initialJournalAuthorityDigest(existing.value)) {
         throw new StateError('Scope state projection is stale or altered', 'INVALID_SCOPE_EVIDENCE');
       }
       const entry = {
@@ -136,9 +175,13 @@ export function checkpointScopeClassification({
         schemaVersion: 1,
         sequence: existing.value.entries.length + 1,
         kind: 'classification',
-        authorityDigest: authority.digest,
+        authorityDigest: existing.value.authorityDigest,
       };
-      const reviewHeadSha = current.reviewedHeadSha ?? current.currentIntegrationHeadSha;
+      const reviewHeadSha = resolveScopeClassificationHead({
+        phase: entry.assessment?.packet?.binding?.phase,
+        reviewedHeadSha: current.reviewedHeadSha,
+        currentIntegrationHeadSha: current.currentIntegrationHeadSha,
+      });
       if (entry.reviewHeadSha !== reviewHeadSha) {
         throw new StateError('Scope classification must bind the exact Review commit', 'SCOPE_CLASSIFICATION_STALE');
       }
@@ -173,7 +216,7 @@ export function checkpointScopeClassification({
           kind: 'exact-head-manifest',
           at: entry.at,
           reviewHeadSha: entry.reviewHeadSha,
-          authorityDigest: authority.digest,
+          authorityDigest: existing.value.authorityDigest,
           rootCauseId: entry.rootCauseId,
           manifestDigest: scopeExactHeadManifestDigest(journal.entries, entry.reviewHeadSha),
           assessmentDigest: entry.assessment.digest,
@@ -209,8 +252,9 @@ export function checkpointScopeDecision({
       }
       const classification = latestScopeClassification(existing.value, decision.rootCauseId);
       if (!classification) throw new StateError('Decision has no classified root cause', 'INVALID_SCOPE_DECISION');
+      const { amendment = null, ...decisionInput } = decision;
       const entry = {
-        ...decision,
+        ...decisionInput,
         schemaVersion: 1,
         sequence: existing.value.entries.length + 1,
         kind: 'decision',
@@ -224,8 +268,16 @@ export function checkpointScopeDecision({
       }
       if (existing.digest !== current.scopeControl.journalDigest) {
         const pending = existing.value.entries.slice(prefixLength);
-        if (pending.length !== 1 || pending[0].kind !== 'decision'
-            || !sameEntryPayload(pending[0], entry)) {
+        const expectedKinds = amendment === null ? ['decision'] : ['decision', 'amendment'];
+        const expectedAmendment = amendment === null ? null
+          : amendmentEntry(amendment, {
+            ...existing.value,
+            authorityDigest: current.scopeControl.authorityDigest,
+            entries: existing.value.entries.slice(0, prefixLength + 1),
+          }, classification, entry, entry.at);
+        if (canonicalSerializedJson(pending.map((item) => item.kind)) !== canonicalSerializedJson(expectedKinds)
+            || !sameEntryPayload(pending[0], entry)
+            || (expectedAmendment && !sameEntryPayload(pending[1], expectedAmendment))) {
           throw new StateError('Different scope decision evidence is pending checkpoint', 'SCOPE_EVIDENCE_CONFLICT');
         }
         const pendingReturn = existsSync(scopeReturnPath(cwd, current.prNumber))
@@ -250,8 +302,15 @@ export function checkpointScopeDecision({
           event: { type: 'scope-churn-blocked', summary: `Stopped repeated expansion for ${entry.rootCauseId}` },
         };
       }
-      const journal = appendEntry(existing.value, entry);
-      const returning = ['approve-expansion-and-replan', 'abandon-or-rework'].includes(entry.decision);
+      let journal = appendEntry(existing.value, entry);
+      if (amendment !== null) {
+        if (!classification.authorityAmendmentRequired) {
+          throw new StateError('Authority amendment is not required by the classified scope verdict', 'INVALID_SCOPE_AMENDMENT');
+        }
+        journal = appendEntry(journal, amendmentEntry(amendment, journal, classification, entry, entry.at));
+      }
+      const returning = !classification.authorityAmendmentRequired
+        && ['approve-expansion-and-replan', 'abandon-or-rework'].includes(entry.decision);
       const returnEnvelope = returning
         ? buildReturnEnvelope(current, journal, classification, entry, entry.at) : null;
       const returnIdentity = returnEnvelope === null ? null : scopeReturnDigest(returnEnvelope);
@@ -355,45 +414,66 @@ export function checkpointScopeResume({
       }
       const returned = readScopeReturn(cwd, current);
       const journalEvidence = readScopeJournal(cwd, current);
-      if (resume.scopeReturnDigest !== returned.digest
-          || resume.resumedAuthorityDigest !== journalEvidence.value.authorityDigest
+      const { amendment = null, ...resumeInput } = resume;
+      const expectedAuthorityDigest = amendment?.revisedAuthorityDigest
+        ?? journalEvidence.value.authorityDigest;
+      if (resumeInput.scopeReturnDigest !== returned.digest
+          || resumeInput.resumedAuthorityDigest !== expectedAuthorityDigest
           || resume.resumedHeadSha !== current.currentIntegrationHeadSha) {
         throw new StateError('Scope resume input is stale or does not match durable evidence', 'INVALID_SCOPE_RESUME');
       }
       const entry = {
         schemaVersion: 1,
         sequence: journalEvidence.value.entries.length + 1,
-        entryId: resume.entryId,
+        entryId: resumeInput.entryId,
         kind: 'resume',
-        at: resume.at,
-        reviewHeadSha: resume.resumedHeadSha,
-        authorityDigest: journalEvidence.value.authorityDigest,
-        rootCauseId: resume.rootCauseId,
-        decisionId: resume.decisionId,
-        scopeReturnDigest: resume.scopeReturnDigest,
-        resumedAuthorityDigest: resume.resumedAuthorityDigest,
-        resumedHeadSha: resume.resumedHeadSha,
+        at: resumeInput.at,
+        reviewHeadSha: resumeInput.resumedHeadSha,
+        authorityDigest: expectedAuthorityDigest,
+        rootCauseId: resumeInput.rootCauseId,
+        decisionId: resumeInput.decisionId,
+        scopeReturnDigest: resumeInput.scopeReturnDigest,
+        resumedAuthorityDigest: resumeInput.resumedAuthorityDigest,
+        resumedHeadSha: resumeInput.resumedHeadSha,
       };
+      const classification = latestScopeClassification(journalEvidence.value, entry.rootCauseId);
+      const decision = journalEvidence.value.entries.findLast((candidate) => candidate.kind === 'decision'
+        && candidate.rootCauseId === entry.rootCauseId && candidate.decisionId === entry.decisionId);
+      if (!classification || !decision) {
+        throw new StateError('Scope resume lacks its classified decision', 'INVALID_SCOPE_RESUME');
+      }
       const prefixLength = journalPrefixLength(journalEvidence.value, current.scopeControl.journalDigest);
       if (prefixLength === null) {
         throw new StateError('Scope journal does not extend the compact state projection', 'INVALID_SCOPE_EVIDENCE');
       }
       if (journalEvidence.digest !== current.scopeControl.journalDigest) {
         const pending = journalEvidence.value.entries.slice(prefixLength);
-        if (pending.length !== 1 || pending[0].kind !== 'resume'
-            || !sameEntryPayload(pending[0], entry)) {
+        const expectedKinds = amendment === null ? ['resume'] : ['amendment', 'resume'];
+        const expectedAmendment = amendment === null ? null
+          : amendmentEntry(amendment, {
+            ...journalEvidence.value,
+            authorityDigest: current.scopeControl.authorityDigest,
+            entries: journalEvidence.value.entries.slice(0, prefixLength),
+          }, classification, decision, entry.at);
+        if (canonicalSerializedJson(pending.map((item) => item.kind)) !== canonicalSerializedJson(expectedKinds)
+            || !sameEntryPayload(pending.at(-1), entry)
+            || (expectedAmendment && !sameEntryPayload(pending[0], expectedAmendment))) {
           throw new StateError('Different scope resume evidence is pending checkpoint', 'SCOPE_EVIDENCE_CONFLICT');
         }
         return {
           nextState: buildScopeResumeTransition(
-            current, journalEvidence.value, returned.digest, resume.resumedHeadSha,
+            current, journalEvidence.value, returned.digest, resumeInput.resumedHeadSha,
           ),
           event: event ?? { type: 'scope-resumed', summary: `Recovered scope resume ${entry.entryId}` },
         };
       }
-      const journal = appendEntry(journalEvidence.value, entry);
+      let journal = journalEvidence.value;
+      if (amendment !== null) {
+        journal = appendEntry(journal, amendmentEntry(amendment, journal, classification, decision, entry.at));
+      }
+      journal = appendEntry(journal, entry);
       return {
-        nextState: buildScopeResumeTransition(current, journal, returned.digest, resume.resumedHeadSha),
+        nextState: buildScopeResumeTransition(current, journal, returned.digest, resumeInput.resumedHeadSha),
         event: event ?? { type: 'scope-resumed', summary: `Resumed scope control for ${entry.rootCauseId}` },
         beforeCommit: () => persistScopeJournal(cwd, current, journal),
       };
@@ -410,10 +490,12 @@ export function assertScopeTaskAllowed(cwd, state, task, packet) {
   }
   const journal = readScopeJournal(cwd, state).value;
   const expectedShape = `sha256:${taskPacketDigest(packet)}`;
-  const classification = latestScopeClassification(journal, task.id)
-    ?? journal.entries.findLast((entry) => entry.kind === 'classification'
-      && task.sourceIds.every((sourceId) => entry.findingIds.includes(sourceId)));
+  const classification = journal.entries.findLast((entry) => entry.kind === 'classification'
+    && (entry.rootCauseId === task.id
+      || task.sourceIds.every((sourceId) => entry.findingIds.includes(sourceId))));
   if (!classification
+      || classification.authorityAmendmentRequired
+      || classification.authorityDigest !== journal.authorityDigest
       || classification.reviewHeadSha !== packet.reviewedHeadSha
       || classification.remediationShapeDigest !== expectedShape
       || !['within-scope-defect', 'unnecessary-mechanism-defect'].includes(classification.classification)) {

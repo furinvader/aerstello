@@ -23,6 +23,14 @@ export function latestScopeClassification(journal, rootCauseId = null) {
 }
 
 export function scopeGateForJournal(journal) {
+  const latestAmendment = journal.entries.findLast((entry) => entry.kind === 'amendment');
+  if (latestAmendment) {
+    const revisedAssessment = journal.entries.findLast((entry) => entry.kind === 'classification'
+      && entry.sequence > latestAmendment.sequence
+      && entry.authorityDigest === journal.authorityDigest
+      && !entry.authorityAmendmentRequired);
+    if (!revisedAssessment) return 'decision-required';
+  }
   const latestByRoot = new Map();
   for (const entry of journal.entries) {
     if (entry.kind === 'classification') latestByRoot.set(entry.rootCauseId, entry);
@@ -33,6 +41,10 @@ export function scopeGateForJournal(journal) {
     const entryGate = scopeGateForClassificationEntry(entry);
     if (entryGate === 'insufficient-authority') return entryGate;
     if (entryGate !== 'decision-required') continue;
+    if (entry.authorityAmendmentRequired) {
+      decisionRequired = true;
+      continue;
+    }
     const resolved = journal.entries.some((candidate) => candidate.kind === 'decision'
       && candidate.rootCauseId === entry.rootCauseId
       && candidate.assessmentDigest === entry.assessment.digest
@@ -84,14 +96,19 @@ export function buildScopeClassificationTransition(state, journal, at) {
 
 export function buildScopeDecisionTransition(state, journal, decision, at, returnDigest = null) {
   const returning = ['approve-expansion-and-replan', 'abandon-or-rework'].includes(decision.decision);
-  const gate = returning ? 'return-pending' : 'ready';
+  const classification = latestScopeClassification(journal, decision.rootCauseId);
+  const materialReturn = returning && !classification?.authorityAmendmentRequired;
+  const gate = materialReturn ? 'return-pending' : scopeGateForJournal(journal);
   return {
     ...state,
-    phase: returning ? 'awaiting-human-decision' : state.phase,
-    blockedReasons: returning
+    phase: gate === 'ready' ? state.phase : 'awaiting-human-decision',
+    blockedReasons: materialReturn
       ? [...state.blockedReasons.filter((reason) => !reason.startsWith('Scope authority:')),
         `Scope authority: ${decision.rootCauseId} requires guarded return.`]
-      : state.blockedReasons.filter((reason) => !reason.startsWith('Scope authority:')),
+      : gate === 'ready'
+        ? state.blockedReasons.filter((reason) => !reason.startsWith('Scope authority:'))
+        : [...state.blockedReasons.filter((reason) => !reason.startsWith('Scope authority:')),
+          `Scope authority: ${decision.rootCauseId} requires a fresh revised-authority assessment.`],
     scopeControl: scopeReference({
       authorityDigest: journal.authorityDigest,
       journal,
@@ -100,9 +117,11 @@ export function buildScopeDecisionTransition(state, journal, decision, at, retur
       assessmentHeadSha: decision.reviewHeadSha,
       at,
     }),
-    nextAction: returning
+    nextAction: materialReturn
       ? 'Emit the guarded scope-return envelope for change-development disposition.'
-      : 'Apply the approved narrow disposition and classify any changed remediation shape.',
+      : gate === 'ready'
+        ? 'Apply the approved narrow disposition and classify any changed remediation shape.'
+        : 'Classify the exact remediation shape under the revised authority before execution.',
   };
 }
 
@@ -123,18 +142,24 @@ export function buildScopeReturnTransition(state, journal, returnDigest, at) {
 }
 
 export function buildScopeResumeTransition(state, journal, returnDigest, headSha, at) {
+  const gate = scopeGateForJournal(journal);
   return {
     ...state,
     phase: 'recovering',
-    blockedReasons: state.blockedReasons.filter((reason) => !reason.startsWith('Scope authority:')),
+    blockedReasons: gate === 'ready'
+      ? state.blockedReasons.filter((reason) => !reason.startsWith('Scope authority:'))
+      : [...state.blockedReasons.filter((reason) => !reason.startsWith('Scope authority:')),
+        'Scope authority: resumed authority requires a fresh exact-head assessment.'],
     scopeControl: scopeReference({
       authorityDigest: journal.authorityDigest,
       journal,
-      gate: 'ready',
+      gate,
       returnDigest,
       assessmentHeadSha: headSha,
       at,
     }),
-    nextAction: 'Reconcile the resumed exact HEAD and classify any changed remediation shape.',
+    nextAction: gate === 'ready'
+      ? 'Reconcile the resumed exact HEAD and classify any changed remediation shape.'
+      : 'Classify the resumed exact HEAD under the revised authority before execution.',
   };
 }

@@ -76,13 +76,20 @@ Classification uses exactly five values:
 
 Canonical `minor-amendment-required` is represented as
 `within-scope-defect` plus `authorityAmendmentRequired: true`, so its compact
-gate stays `decision-required` until the decision and amendment evidence are
-recorded. A canonical packet/result mismatch, wrong verdict mapping, changed
+gate stays `decision-required` through a bare decision. The existing decision
+input may append one matching decision-plus-amendment suffix; the existing
+resume input may import one matching amendment-plus-resume suffix. Each
+amendment must chain the effective prior authority, matching classified
+decision and approved delta, and distinct revised authority. The gate remains
+closed until a fresh applicable non-minor classification binds that revised
+authority. A canonical packet/result mismatch, wrong verdict mapping, changed
 remediation-shape digest, or stale assessment HEAD is invalid evidence.
 
 Integration-HEAD change clears only the compact `assessmentHeadSha`; it never
 rewrites the append-only journal. Exact-head manifests digest the complete
-ordered prior journal. An identical root, findings, fingerprints, packet, and
+ordered prior journal and immediately follow the canonical `integrated-head`,
+`within-scope` classification they identify. Imported handoff authority must
+carry that same canonical integrated-HEAD assessment. An identical root, findings, fingerprints, packet, and
 remediation shape may reuse its applicable classification. New HEAD, authority,
 decision, finding, or shape evidence requires a fresh exact-head assessment.
 
@@ -91,7 +98,9 @@ return envelope before setting `return-pending`. `scope-return` then proves the
 current integration HEAD still equals the classified live PR HEAD and moves to
 `returned`. Later HEAD drift moves returned state to `resume-required`.
 `scope-resume` requires the exact return digest, journal authority digest, and
-current resumed HEAD, preserving all prior PR review and task history. A second
+current resumed HEAD, preserving all prior PR review and task history. A
+returned revised authority is imported as an atomic amendment-plus-resume
+suffix and still requires fresh classification before work continues. A second
 `approve-expansion-and-replan` decision for one root records no expansion;
 instead it blocks on repeated-expansion churn for explicit human disposition.
 

@@ -169,6 +169,10 @@ export function validateScopeAuthoritySnapshot(value) {
     validateAssessmentPair(value.integratedHeadAssessment, '$.integratedHeadAssessment', errors, {
       requiredVerdict: 'within-scope', expectedHeadSha: value.handoffHeadSha,
     });
+    if (value.integratedHeadAssessment.packet?.binding?.phase !== 'integrated-head'
+        || value.integratedHeadAssessment.result?.binding?.phase !== 'integrated-head') {
+      errors.push('$.integratedHeadAssessment must be a canonical integrated-head assessment');
+    }
   }
   validateApprovedDecisions(value.approvedDecisions, '$.approvedDecisions', errors);
   validateDeferredFollowUps(value.deferredFollowUps, '$.deferredFollowUps', errors);
@@ -323,17 +327,83 @@ export function validateScopeControlJournal(value) {
     if (new Set(value.entries.map((entry) => entry?.entryId)).size !== value.entries.length) {
       errors.push('$.entries contains duplicate entry IDs');
     }
+    const firstAmendment = value.entries.find((entry) => entry?.kind === 'amendment');
+    let effectiveAuthority = firstAmendment?.priorAuthorityDigest ?? value.authorityDigest;
+    const decisions = new Map();
+    const classifications = new Map();
+    const amendmentDigests = [];
     for (const [index, entry] of value.entries.entries()) {
-      if (entry?.authorityDigest !== value.authorityDigest
-          && !['amendment', 'resume'].includes(entry?.kind)) {
-        errors.push(`$.entries[${index}].authorityDigest must equal the journal authority`);
+      const path = `$.entries[${index}]`;
+      if (entry?.authorityDigest !== effectiveAuthority) {
+        errors.push(`${path}.authorityDigest must equal the authority effective at its sequence`);
+      }
+      if (entry?.kind === 'classification') {
+        classifications.set(entry.rootCauseId, entry);
+        if (amendmentDigests.some(
+          (digest) => !entry.assessment?.packet?.binding?.amendmentDigests?.includes(digest),
+        )) {
+          errors.push(`${path}.assessment must bind every preceding journal amendment`);
+        }
+      }
+      if (entry?.kind === 'decision') {
+        const classification = classifications.get(entry.rootCauseId);
+        if (!classification || classification.authorityDigest !== effectiveAuthority
+            || entry.assessmentDigest !== classification.assessment?.digest) {
+          errors.push(`${path} must bind the latest classification for its root cause`);
+        }
+        decisions.set(entry.decisionId, entry);
+      }
+      if (entry?.kind === 'amendment') {
+        const decision = decisions.get(entry.decisionId);
+        const classification = classifications.get(entry.rootCauseId);
+        if (entry.priorAuthorityDigest !== effectiveAuthority) {
+          errors.push(`${path}.priorAuthorityDigest must equal the authority effective before amendment`);
+        }
+        if (entry.revisedAuthorityDigest === entry.priorAuthorityDigest) {
+          errors.push(`${path}.revisedAuthorityDigest must differ from priorAuthorityDigest`);
+        }
+        if (!decision || decision.rootCauseId !== entry.rootCauseId
+            || decision.assessmentDigest !== classification?.assessment?.digest
+            || decision.approvedDeltaDigest !== entry.amendmentDigest) {
+          errors.push(`${path} must bind the matching classified decision and approved delta`);
+        }
+        amendmentDigests.push(entry.amendmentDigest);
+        effectiveAuthority = entry.revisedAuthorityDigest;
       }
       if (entry?.kind === 'exact-head-manifest') {
         const expected = scopeExactHeadManifestDigest(value.entries.slice(0, index), entry.reviewHeadSha);
         if (entry.manifestDigest !== expected) {
           errors.push(`$.entries[${index}].manifestDigest must bind the complete ordered prior journal evidence`);
         }
+        const classification = value.entries[index - 1];
+        if (classification?.kind !== 'classification'
+            || classification.reviewHeadSha !== entry.reviewHeadSha
+            || classification.rootCauseId !== entry.rootCauseId
+            || classification.authorityDigest !== entry.authorityDigest
+            || classification.assessment?.digest !== entry.assessmentDigest
+            || classification.assessment?.packet?.binding?.phase !== 'integrated-head'
+            || classification.assessment?.result?.verdict !== 'within-scope'
+            || classification.classification !== 'within-scope-defect'
+            || classification.authorityAmendmentRequired
+            || entry.triggerKinds?.length !== 1
+            || entry.triggerKinds[0] !== 'classification') {
+          errors.push(`${path} must identify the immediately prior canonical integrated-head within-scope classification`);
+        }
       }
+      if (entry?.kind === 'resume') {
+        const prior = value.entries[index - 1];
+        if (entry.resumedAuthorityDigest !== effectiveAuthority) {
+          errors.push(`${path}.resumedAuthorityDigest must equal the authority effective at resume`);
+        }
+        if (prior?.kind === 'amendment' && (prior.decisionId !== entry.decisionId
+            || prior.rootCauseId !== entry.rootCauseId
+            || prior.revisedAuthorityDigest !== entry.resumedAuthorityDigest)) {
+          errors.push(`${path} must bind the immediately preceding authority amendment`);
+        }
+      }
+    }
+    if (value.authorityDigest !== effectiveAuthority) {
+      errors.push('$.authorityDigest must equal the final effective authority');
     }
   }
   return errors;

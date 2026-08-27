@@ -11,7 +11,10 @@ and exact packet shape. The five lifecycle classifications and their canonical
 verdict mapping are defined in
 [State and contracts](state-and-contracts.md#scope-authority-and-receipts).
 `minor-amendment-required` is not an execution shortcut: it remains decision
-gated until the authority amendment is recorded.
+gated through a bare decision. Record decision plus amendment atomically with
+`scope-decision --input`, or amendment plus guarded resume atomically with
+`scope-resume --input` after a material return. Both paths require a fresh
+applicable non-minor assessment under the revised authority before execution.
 
 Use removal-first analysis for newly introduced machinery. If removing or
 simplifying it still closes the accepted authority, classify it
@@ -25,7 +28,9 @@ start, accept, integrate, resolve, request review, refresh threads, or finish.
 The classification's root/finding identity, exact HEAD, and
 remediation-shape digest must match. Duplicate evidence may reuse the same exact
 classification; changed HEAD, findings, authority, decision, or shape requires
-a new assessment and exact-head manifest.
+a new assessment and exact-head manifest. A manifest is canonical only when it
+immediately identifies the integrated-HEAD, `within-scope` classification for
+that exact authority and Review commit.
 
 A material expansion needs one evidence-bound decision. Narrow rejection,
 split/defer, or removal/simplification can continue only inside the resulting
