@@ -517,6 +517,12 @@ function assertCheckpointProvenance(current, next, guardedKind, evidence, cwd) {
       && updated.status === 'integrated';
     const entersActiveExecution = !['queued', 'running', 'implemented', 'integrated', 'completed'].includes(task.status)
       && ['queued', 'running', 'implemented', 'integrated'].includes(updated.status);
+    const advancesActiveExecution = task.status !== updated.status
+      && ['queued', 'running', 'implemented'].includes(task.status)
+      && ['queued', 'running', 'implemented', 'integrated'].includes(updated.status);
+    if (advancesActiveExecution && updated.disposition === 'actionable') {
+      assertScopeTaskProgress(cwd, next, updated);
+    }
     if ((entersImplementedOrIntegrated || entersIntegrated) && task.disposition === 'actionable') {
       if (typeof task.taskPacketDigest !== 'string') {
         throw new StateError(
