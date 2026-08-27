@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 
+import { scopeClassificationMatchesTask } from '../contracts/contracts.mjs';
 import { canonicalJson } from './atomic-io.mjs';
 import { StateError } from './errors.mjs';
 import { assertIntegratedWorkerCommit } from './git-authority.mjs';
@@ -315,17 +316,8 @@ function scopeClassificationForTask(cwd, state, task, packet) {
   if (!state.scopeControl) return null;
   const journal = readScopeJournal(cwd, state).value;
   const expectedShape = `sha256:${taskPacketDigest(packet)}`;
-  const classification = journal.entries.findLast((entry) => {
-    if (entry.kind !== 'classification'
-        || entry.findingIds.length !== task.sourceIds.length
-        || entry.findingFingerprints.length !== task.sourceIds.length) return false;
-    const actual = new Map(entry.findingIds.map(
-      (findingId, index) => [findingId, entry.findingFingerprints[index]],
-    ));
-    return actual.size === task.sourceIds.length && task.sourceIds.every(
-      (sourceId, index) => actual.get(sourceId) === `${task.fingerprint}-f${index + 1}`,
-    );
-  });
+  const classification = journal.entries.findLast((entry) => entry.kind === 'classification'
+    && scopeClassificationMatchesTask(entry, task));
   return classification?.reviewHeadSha === packet.reviewedHeadSha
     && classification.authorityDigest === journal.authorityDigest
     && !classification.authorityAmendmentRequired

@@ -172,6 +172,33 @@ test('scope-control exports closed policy vocabularies', () => {
   ]);
 });
 
+test('scope classification task identity requires the exact indexed finding map', () => {
+  const { scopeClassificationMatchesTask } = contract;
+  const task = {
+    id: 'task-identity',
+    sourceIds: ['thread:one', 'thread:two'],
+    fingerprint: 'task-fingerprint',
+  };
+  const exact = {
+    rootCauseId: 'independent-lifecycle-root',
+    findingIds: ['thread:one', 'thread:two'],
+    findingFingerprints: ['task-fingerprint-f1', 'task-fingerprint-f2'],
+  };
+  assert.equal(scopeClassificationMatchesTask(exact, task), true);
+  assert.equal(scopeClassificationMatchesTask({
+    ...exact,
+    findingIds: [...exact.findingIds].reverse(),
+    findingFingerprints: [...exact.findingFingerprints].reverse(),
+  }, task), true);
+  for (const classification of [
+    { ...exact, findingIds: ['thread:one'], findingFingerprints: ['task-fingerprint-f1'] },
+    { ...exact, findingIds: ['thread:one', 'thread:two', 'thread:three'], findingFingerprints: ['task-fingerprint-f1', 'task-fingerprint-f2', 'task-fingerprint-f3'] },
+    { ...exact, findingIds: ['thread:one', 'thread:foreign'] },
+    { ...exact, findingIds: ['thread:one', 'thread:one'] },
+    { ...exact, findingFingerprints: ['task-fingerprint-f1', 'foreign-f2'] },
+  ]) assert.equal(scopeClassificationMatchesTask(classification, task), false);
+});
+
 test('imported authority requires complete real scope identities and a current within-scope assessment', () => {
   const { scopeAuthorityDigest, validateScopeAuthoritySnapshot } = contract;
   const imported = authority();

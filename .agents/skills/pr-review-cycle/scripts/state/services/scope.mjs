@@ -4,6 +4,7 @@ import {
   scopeAuthorityDigest,
   scopeControlJournalDigest,
   scopeExactHeadManifestDigest,
+  scopeClassificationMatchesTask,
   scopeGateForClassificationEntry,
   validateScopeAuthoritySnapshot,
   validateScopeControlJournal,
@@ -181,17 +182,6 @@ function retainedScopeReturnDigest(cwd, state) {
     throw new StateError('Scope return identity does not match its receipt-valid envelope', 'INVALID_SCOPE_EVIDENCE');
   }
   return returned.digest;
-}
-
-function classificationMatchesTask(classification, task) {
-  if (classification.findingIds.length !== task.sourceIds.length
-      || classification.findingFingerprints.length !== task.sourceIds.length) return false;
-  const actual = new Map(classification.findingIds.map(
-    (findingId, index) => [findingId, classification.findingFingerprints[index]],
-  ));
-  return actual.size === task.sourceIds.length && task.sourceIds.every(
-    (sourceId, index) => actual.get(sourceId) === `${task.fingerprint}-f${index + 1}`,
-  );
 }
 
 export function checkpointScopeClassification({
@@ -558,9 +548,9 @@ export function assertScopeTaskAllowed(cwd, state, task, packet) {
   const journal = readScopeJournal(cwd, state).value;
   const expectedShape = `sha256:${taskPacketDigest(packet)}`;
   const classification = journal.entries.findLast((entry) => entry.kind === 'classification'
-    && classificationMatchesTask(entry, task));
+    && scopeClassificationMatchesTask(entry, task));
   if (!classification
-      || !classificationMatchesTask(classification, task)
+      || !scopeClassificationMatchesTask(classification, task)
       || classification.authorityAmendmentRequired
       || classification.authorityDigest !== journal.authorityDigest
       || classification.reviewHeadSha !== packet.reviewedHeadSha

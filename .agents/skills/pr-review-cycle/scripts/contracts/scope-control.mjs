@@ -54,6 +54,24 @@ export const SCOPE_CONTROL_GATES = [
   'resume-required',
 ];
 
+export function scopeClassificationMatchesTask(classification, task) {
+  const findingIds = classification?.findingIds;
+  const findingFingerprints = classification?.findingFingerprints;
+  const sourceIds = task?.sourceIds;
+  if (!Array.isArray(findingIds) || !Array.isArray(findingFingerprints)
+      || !Array.isArray(sourceIds) || typeof task?.fingerprint !== 'string'
+      || findingIds.length !== sourceIds.length
+      || findingFingerprints.length !== sourceIds.length
+      || new Set(findingIds).size !== findingIds.length
+      || new Set(sourceIds).size !== sourceIds.length) return false;
+  const actual = new Map(findingIds.map(
+    (findingId, index) => [findingId, findingFingerprints[index]],
+  ));
+  return sourceIds.every(
+    (sourceId, index) => actual.get(sourceId) === `${task.fingerprint}-f${index + 1}`,
+  );
+}
+
 function isDigest(value, nullable = false) {
   return nullable && value === null ? true : typeof value === 'string' && DIGEST_PATTERN.test(value);
 }

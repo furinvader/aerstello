@@ -17,9 +17,10 @@ const ASSESSMENT = `sha256:${'c'.repeat(64)}`;
 function classification({
   phase = 'integrated-head', headSha = HEAD, authorityDigest = DIGEST_A,
   rootCauseId = 'scope-root', findingIds = ['finding-one'],
+  findingFingerprints = ['scope-fingerprint-f1'],
 } = {}) {
   return {
-    schemaVersion: 1, kind: 'classification', rootCauseId, findingIds,
+    schemaVersion: 1, kind: 'classification', rootCauseId, findingIds, findingFingerprints,
     reviewHeadSha: headSha, authorityDigest, classification: 'within-scope-defect',
     authorityAmendmentRequired: false,
     assessment: {
@@ -171,7 +172,7 @@ test('selected-root readiness is phase-aware and rejects superseded authority', 
   });
   state.reviewedHeadSha = reviewedHead;
   const adapter = { async scopeStatus() { return status; } };
-  const task = { id: entry.rootCauseId, sourceIds: entry.findingIds };
+  const task = { id: entry.rootCauseId, sourceIds: entry.findingIds, fingerprint: 'scope-fingerprint' };
   assert.equal((await assertScopeRootReady(adapter, state, HEAD, task)).classification, entry);
 
   entry.authorityDigest = `sha256:${'d'.repeat(64)}`;
@@ -187,10 +188,10 @@ test('accepts revised effective authority while rejecting stale or tampered amen
   assert.equal(readiness.ready, true);
   assert.equal(readiness.authorityDigest, DIGEST_D);
   assert.equal((await assertScopeRootReady(
-    adapter, amended.state, HEAD, { id: 'scope-root', sourceIds: ['finding-one'] },
+    adapter, amended.state, HEAD, { id: 'scope-root', sourceIds: ['finding-one'], fingerprint: 'scope-fingerprint' },
   )).classification.authorityDigest, DIGEST_D);
   await assert.rejects(() => assertScopeRootReady(
-    adapter, amended.state, HEAD, { id: 'stale-root', sourceIds: ['stale-finding'] },
+    adapter, amended.state, HEAD, { id: 'stale-root', sourceIds: ['stale-finding'], fingerprint: 'scope-fingerprint' },
   ), { code: 'SCOPE_ROOT_NOT_READY' });
 
   const tamperedSnapshot = amendedFixture();
@@ -213,6 +214,41 @@ test('accepts revised effective authority while rejecting stale or tampered amen
     () => assertScopeReady({ async scopeStatus() { return staleManifest.status; } }, staleManifest.state, HEAD),
     { code: 'SCOPE_EVIDENCE_INVALID' },
   );
+});
+
+test('selected-root readiness requires the complete task classification identity', async () => {
+  const reviewedHead = 'b'.repeat(40);
+  const task = {
+    id: 'multi-root-task',
+    sourceIds: ['finding-one', 'finding-two'],
+    fingerprint: 'multi-root-fingerprint',
+  };
+  const baseEntry = classification({
+    phase: 'review-finding', headSha: reviewedHead, rootCauseId: task.id,
+    findingIds: task.sourceIds,
+    findingFingerprints: ['multi-root-fingerprint-f1', 'multi-root-fingerprint-f2'],
+  });
+  const assertEntry = async (entry) => {
+    const { state, status } = fixture({
+      reference: { assessmentHeadSha: reviewedHead },
+      status: { journal: { digest: DIGEST_B, value: { authorityDigest: DIGEST_A, entries: [entry] } } },
+    });
+    state.reviewedHeadSha = reviewedHead;
+    return assertScopeRootReady({ async scopeStatus() { return status; } }, state, HEAD, task);
+  };
+
+  assert.equal((await assertEntry({
+    ...baseEntry,
+    rootCauseId: 'independent-lifecycle-root',
+    findingIds: [...baseEntry.findingIds].reverse(),
+    findingFingerprints: [...baseEntry.findingFingerprints].reverse(),
+  })).classification.rootCauseId, 'independent-lifecycle-root');
+  for (const entry of [
+    { ...baseEntry, findingIds: ['finding-one'], findingFingerprints: ['multi-root-fingerprint-f1'] },
+    { ...baseEntry, findingIds: ['finding-one', 'finding-foreign'] },
+    { ...baseEntry, findingIds: ['finding-one', 'finding-one'] },
+    { ...baseEntry, findingFingerprints: ['multi-root-fingerprint-f1', 'foreign-f2'] },
+  ]) await assert.rejects(() => assertEntry(entry), { code: 'SCOPE_ROOT_NOT_READY' });
 });
 
 test('reports durable decision, return, and resume blockers without trusting compact state alone', async () => {

@@ -1,3 +1,4 @@
+import { scopeClassificationMatchesTask } from '../contracts/contracts.mjs';
 import { GitHubWorkflowError } from './errors.mjs';
 
 function latestClassifications(journal) {
@@ -126,10 +127,9 @@ export async function assertScopeRootReady(stateAdapter, state, liveHeadSha, tas
   if (liveHeadSha !== null && liveHeadSha !== readiness.currentHeadSha) {
     scopeFailure('Scope evidence does not apply to the exact active and live PR HEAD', 'SCOPE_EVIDENCE_STALE');
   }
-  const sourceIds = new Set([task.id, ...(task.sourceIds ?? [])]);
-  const classification = readiness.classifications.findLast((entry) => (
-    entry.rootCauseId === task.id || entry.findingIds.some((id) => sourceIds.has(id))
-  ));
+  const classification = readiness.classifications.findLast(
+    (entry) => scopeClassificationMatchesTask(entry, task),
+  );
   if (!classification) scopeFailure(`Task ${task.id} lacks receipt-valid scope classification`, 'SCOPE_ROOT_NOT_READY');
   const phase = classification.assessment?.packet?.binding?.phase;
   const expectedHead = classification.schemaVersion !== 1

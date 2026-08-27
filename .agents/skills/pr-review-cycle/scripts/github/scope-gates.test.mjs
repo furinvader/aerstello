@@ -25,6 +25,7 @@ function branch(classification, decision = null) {
   };
   const entries = [{
     kind: 'classification', rootCauseId: 'generalized-checker', findingIds: ['pr53-checker-root'],
+    findingFingerprints: ['generalized-checker-fingerprint-f1'],
     reviewHeadSha: HEAD, classification,
     assessment: {
       packet: { minimalClosure: { statement: 'Preserve the accepted boundary.' } },
@@ -49,7 +50,10 @@ function branch(classification, decision = null) {
         journal: { digest: JOURNAL, value: { authorityDigest: AUTHORITY, entries } }, return: null,
       };
     } },
-    task: { id: 'generalized-checker', sourceIds: ['pr53-checker-root'] },
+    task: {
+      id: 'generalized-checker', sourceIds: ['pr53-checker-root'],
+      fingerprint: 'generalized-checker-fingerprint',
+    },
   };
 }
 
@@ -73,6 +77,9 @@ function workflowScope(state, classification, gate = 'ready', { integratedManife
   const classificationEntry = {
     schemaVersion: 1, kind: 'classification', rootCauseId: state.tasks[0]?.id ?? 'generalized-checker',
     findingIds: state.tasks[0]?.sourceIds ?? ['pr53-checker-root'],
+    findingFingerprints: (state.tasks[0]?.sourceIds ?? ['pr53-checker-root']).map(
+      (_sourceId, index) => `${state.tasks[0]?.fingerprint ?? 'generalized-checker-fingerprint'}-f${index + 1}`,
+    ),
     reviewHeadSha: HEAD, authorityDigest: AUTHORITY, classification,
     authorityAmendmentRequired: false, assessment,
   };
@@ -145,8 +152,30 @@ test('PR #53 explicitly approved expansion requires a replan and new exact-head 
 test('selected root gates do not authorize a different unclassified root', async () => {
   const { adapter, state } = branch('within-scope-defect');
   await assert.rejects(() => assertScopeRootReady(
-    adapter, state, HEAD, { id: 'different-root', sourceIds: ['different-finding'] },
+    adapter, state, HEAD, {
+      id: 'different-root', sourceIds: ['different-finding'], fingerprint: 'different-fingerprint',
+    },
   ), { code: 'SCOPE_ROOT_NOT_READY' });
+});
+
+test('reply resolution rejects partial multi-root classification before mutation', async () => {
+  const state = integratedThreadState();
+  state.tasks[0].sourceIds = ['thread:THREAD_1', 'thread:THREAD_2'];
+  const status = workflowScope(state, 'within-scope-defect');
+  status.journal.value.entries[0].findingIds = status.journal.value.entries[0].findingIds.slice(0, 1);
+  status.journal.value.entries[0].findingFingerprints = status.journal.value.entries[0]
+    .findingFingerprints.slice(0, 1);
+  const client = new FakeClient();
+  addThread(client);
+  addThread(client, { id: 'THREAD_2' });
+  const setup = workflow(state, client);
+  setup.state.setScopeStatusForTest(status);
+
+  await assert.rejects(() => setup.api.replyResolve(2, state.tasks[0].id), {
+    code: 'SCOPE_ROOT_NOT_READY',
+  });
+  assert.deepEqual(client.events, []);
+  assert.deepEqual(setup.state.calls, []);
 });
 
 test('PR #53 material expansion blocks GitHub mutation, journal, checkpoints, request, and Done', async () => {
