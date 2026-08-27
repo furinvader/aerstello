@@ -84,6 +84,30 @@ test('adds integrated checks for affected areas in canonical order', () => {
   });
 });
 
+test('retains the explicit diff check with workflow and release checks', () => {
+  const focused = packet({
+    riskTags: ['workflow', 'release'],
+    affectedAreas: ['workflow', 'release'],
+    requiredValidation: {
+      unit: [{
+        command: 'git diff --check',
+        reason: 'Checks the exact packet and integrated HEAD for whitespace errors.',
+      }],
+      system: [],
+    },
+  });
+
+  assert.deepEqual(unionRequiredValidation([focused]), {
+    unit: [
+      focused.requiredValidation.unit[0],
+      { command: 'npm run check:workflow', reason: 'Orchestrator integrated check for affected area: workflow.' },
+      { command: 'npm run check:release-state', reason: 'Orchestrator integrated check for affected area: release.' },
+      { command: 'npm run check:released-migrations', reason: 'Orchestrator integrated check for affected area: release.' },
+    ],
+    system: [],
+  });
+});
+
 test('reports array and packet validation failures with existing ordering and text', () => {
   assert.throws(() => unionRequiredValidation(null), {
     name: 'TypeError', message: 'taskPackets must be an array',
