@@ -418,8 +418,9 @@ export function validateScopeControlJournal(value, authority = null) {
         }
         if (!decision || decision.rootCauseId !== entry.rootCauseId
             || decision.assessmentDigest !== classification?.assessment?.digest
+            || decision.decision !== 'approve-expansion-and-replan'
             || decision.approvedDeltaDigest !== entry.amendmentDigest) {
-          errors.push(`${path} must bind the matching classified decision and approved delta`);
+          errors.push(`${path} must bind an approved expansion decision and its matching classified delta`);
         }
         amendmentDigests.push(entry.amendmentDigest);
         effectiveAuthority = entry.revisedAuthorityDigest;

@@ -21,6 +21,8 @@ import {
   scopeAuthorityReceiptPath,
   scopeControlJournalPath,
   scopeControlJournalReceiptPath,
+  scopeReturnPath,
+  scopeReturnReceiptPath,
 } from './locations.mjs';
 import { validateScopeAssessmentApplicability } from '../../../scope-review/scripts/validate-assessment.mjs';
 
@@ -737,6 +739,114 @@ test('minor amendment stays blocked until an atomic authority chain and fresh as
     },
     expectedRevision: staleClassified.revision,
   }), { code: 'INVALID_SCOPE_EVIDENCE' });
+});
+
+test('minor amendment rejects every non-approval decision without changing durable evidence', () => {
+  const amendmentDigest = `sha256:${'c'.repeat(64)}`;
+  const revisedAuthorityDigest = `sha256:${'d'.repeat(64)}`;
+  const decisions = [
+    'remove-or-simplify', 'split-or-defer', 'reject-expansion', 'abandon-or-rework',
+  ];
+
+  for (const decision of decisions) {
+    const cwd = harness.repo();
+    const fixture = proposedFixture(cwd, `nonapproval-amendment-${decision}`);
+    const minor = classificationInput(fixture, 'minor-amendment-required');
+    const classified = checkpointScopeClassification({
+      cwd, classification: minor, expectedRevision: fixture.adopted.revision,
+    });
+    const decisionId = `scope-decision-${decision}`;
+    const decisionInput = {
+      entryId: `decision-${decision}`, at: harness.AT, rootCauseId: minor.rootCauseId,
+      blockerId: `scope-blocker-${decision}`, decisionId, decision,
+      blockerDigest: DIGEST, approvedDeltaDigest: amendmentDigest,
+      rationale: 'Keep the authority unchanged.', priorDecisionIds: [],
+      amendment: {
+        entryId: `amendment-${decision}`, at: harness.AT, rootCauseId: minor.rootCauseId,
+        decisionId, amendmentDigest,
+        priorAuthorityDigest: classified.scopeControl.authorityDigest,
+        revisedAuthorityDigest,
+      },
+    };
+    const stateBefore = readFileSync(harness.statePath(cwd, classified.prNumber), 'utf8');
+    const journalBefore = readFileSync(scopeControlJournalPath(cwd, classified.prNumber), 'utf8');
+    const receiptBefore = readFileSync(scopeControlJournalReceiptPath(cwd, classified.prNumber), 'utf8');
+    const projectionBefore = structuredClone(classified.scopeControl);
+
+    assert.throws(() => checkpointScopeDecision({
+      cwd, decision: decisionInput, expectedRevision: classified.revision,
+    }), { code: 'INVALID_SCOPE_AMENDMENT' });
+
+    assert.equal(readFileSync(harness.statePath(cwd, classified.prNumber), 'utf8'), stateBefore);
+    assert.equal(readFileSync(scopeControlJournalPath(cwd, classified.prNumber), 'utf8'), journalBefore);
+    assert.equal(readFileSync(scopeControlJournalReceiptPath(cwd, classified.prNumber), 'utf8'), receiptBefore);
+    assert.deepEqual(harness.loadState(cwd).scopeControl, projectionBefore);
+    assert.equal(existsSync(scopeReturnPath(cwd, classified.prNumber)), false);
+    assert.equal(existsSync(scopeReturnReceiptPath(cwd, classified.prNumber)), false);
+  }
+
+  const cwd = harness.repo();
+  const fixture = proposedFixture(cwd, 'pending-nonapproval-amendment');
+  const minor = classificationInput(fixture, 'minor-amendment-required');
+  const classified = checkpointScopeClassification({
+    cwd, classification: minor, expectedRevision: fixture.adopted.revision,
+  });
+  const status = scopeStatus({ cwd });
+  const decision = {
+    schemaVersion: 1, sequence: status.journal.value.entries.length + 1,
+    entryId: 'decision-pending-nonapproval', kind: 'decision', at: harness.AT,
+    reviewHeadSha: minor.reviewHeadSha, authorityDigest: classified.scopeControl.authorityDigest,
+    rootCauseId: minor.rootCauseId, blockerId: 'scope-blocker-pending-nonapproval',
+    decisionId: 'scope-decision-pending-nonapproval', decision: 'remove-or-simplify',
+    assessmentDigest: minor.assessment.digest, blockerDigest: DIGEST,
+    approvedDeltaDigest: amendmentDigest, rationale: 'Keep the authority unchanged.',
+    priorDecisionIds: [],
+  };
+  const amendment = {
+    schemaVersion: 1, sequence: decision.sequence + 1,
+    entryId: 'amendment-pending-nonapproval', kind: 'amendment', at: harness.AT,
+    reviewHeadSha: minor.reviewHeadSha, authorityDigest: classified.scopeControl.authorityDigest,
+    rootCauseId: minor.rootCauseId, decisionId: decision.decisionId, amendmentDigest,
+    priorAuthorityDigest: classified.scopeControl.authorityDigest, revisedAuthorityDigest,
+  };
+  const pendingJournal = {
+    ...status.journal.value,
+    authorityDigest: revisedAuthorityDigest,
+    entries: [...status.journal.value.entries, decision, amendment],
+  };
+  writeFileSync(scopeControlJournalPath(cwd, classified.prNumber), `${JSON.stringify(pendingJournal)}\n`);
+  writeFileSync(
+    scopeControlJournalReceiptPath(cwd, classified.prNumber),
+    `sha256:${createHash('sha256').update(JSON.stringify(
+      harness.canonicalJsonForTest(pendingJournal),
+    )).digest('hex')}\n`,
+  );
+  const stateBefore = readFileSync(harness.statePath(cwd, classified.prNumber), 'utf8');
+  const journalBefore = readFileSync(scopeControlJournalPath(cwd, classified.prNumber), 'utf8');
+  const receiptBefore = readFileSync(scopeControlJournalReceiptPath(cwd, classified.prNumber), 'utf8');
+
+  assert.throws(() => checkpointScopeDecision({
+    cwd,
+    expectedRevision: classified.revision,
+    decision: {
+      entryId: decision.entryId, at: decision.at, rootCauseId: decision.rootCauseId,
+      blockerId: decision.blockerId, decisionId: decision.decisionId, decision: decision.decision,
+      blockerDigest: decision.blockerDigest, approvedDeltaDigest: decision.approvedDeltaDigest,
+      rationale: decision.rationale, priorDecisionIds: decision.priorDecisionIds,
+      amendment: {
+        entryId: amendment.entryId, at: amendment.at, rootCauseId: amendment.rootCauseId,
+        decisionId: amendment.decisionId, amendmentDigest: amendment.amendmentDigest,
+        priorAuthorityDigest: amendment.priorAuthorityDigest,
+        revisedAuthorityDigest: amendment.revisedAuthorityDigest,
+      },
+    },
+  }), { code: 'INVALID_SCOPE_AMENDMENT' });
+  assert.equal(readFileSync(harness.statePath(cwd, classified.prNumber), 'utf8'), stateBefore);
+  assert.equal(readFileSync(scopeControlJournalPath(cwd, classified.prNumber), 'utf8'), journalBefore);
+  assert.equal(readFileSync(scopeControlJournalReceiptPath(cwd, classified.prNumber), 'utf8'), receiptBefore);
+  assert.deepEqual(harness.loadState(cwd).scopeControl, classified.scopeControl);
+  assert.equal(existsSync(scopeReturnPath(cwd, classified.prNumber)), false);
+  assert.equal(existsSync(scopeReturnReceiptPath(cwd, classified.prNumber)), false);
 });
 
 test('minor amendment reclassification is root-local and requires its own linked chain', () => {

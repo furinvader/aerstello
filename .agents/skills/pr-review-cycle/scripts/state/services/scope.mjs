@@ -299,6 +299,13 @@ function materialExpansionCount(journal, rootCauseId) {
 export function checkpointScopeDecision({
   cwd = process.cwd(), prNumber, decision, expectedRevision, event,
 } = {}) {
+  if (decision?.amendment !== null && decision?.amendment !== undefined
+      && decision.decision !== 'approve-expansion-and-replan') {
+    throw new StateError(
+      'Scope authority amendments require an approve-expansion-and-replan decision',
+      'INVALID_SCOPE_AMENDMENT',
+    );
+  }
   return transact({
     cwd, prNumber, expectedRevision, kind: 'scope-decision',
     transaction: (current) => {
@@ -322,6 +329,12 @@ export function checkpointScopeDecision({
         reviewHeadSha: classification.reviewHeadSha,
         assessmentDigest: classification.assessment.digest,
       };
+      if (amendment !== null && !classification.authorityAmendmentRequired) {
+        throw new StateError(
+          'Authority amendment is not required by the classified scope verdict',
+          'INVALID_SCOPE_AMENDMENT',
+        );
+      }
       const prefixLength = journalPrefixLength(existing.value, current.scopeControl.journalDigest);
       if (prefixLength === null) {
         throw new StateError('Scope journal does not extend the compact state projection', 'INVALID_SCOPE_EVIDENCE');
@@ -377,9 +390,6 @@ export function checkpointScopeDecision({
       }
       let journal = appendEntry(existing.value, entry);
       if (amendment !== null) {
-        if (!classification.authorityAmendmentRequired) {
-          throw new StateError('Authority amendment is not required by the classified scope verdict', 'INVALID_SCOPE_AMENDMENT');
-        }
         journal = appendEntry(journal, amendmentEntry(amendment, journal, classification, entry, entry.at));
       }
       const returning = !classification.authorityAmendmentRequired

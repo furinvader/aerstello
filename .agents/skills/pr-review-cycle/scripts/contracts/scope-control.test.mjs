@@ -305,6 +305,13 @@ test('classification assessments bind captured and journal authority in exact ap
   const exactJournal = journal(OTHER_DIGEST, { entries });
   assert.deepEqual(validateScopeControlJournal(exactJournal, authorityValue), []);
 
+  const nonApprovalAmendment = structuredClone(exactJournal);
+  nonApprovalAmendment.entries[1].decision = 'remove-or-simplify';
+  assert.match(
+    validateScopeControlJournal(nonApprovalAmendment, authorityValue).join('\n'),
+    /approved expansion decision/u,
+  );
+
   for (const amendments of [
     [THIRD_DIGEST],
     [THIRD_DIGEST, DIGEST],
