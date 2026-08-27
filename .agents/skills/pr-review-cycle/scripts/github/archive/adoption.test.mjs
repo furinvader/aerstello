@@ -2413,7 +2413,7 @@ test('a later provenance-bound active-task carrier remains a zero-intent aggrega
   assert.deepEqual(retryFixture.client.events, []);
 });
 
-test('a fresh ten-root task adopts a terminal six-replay plus four-origin carrier', async () => {
+test('a fresh ten-root task adopts the PR59 proofless predecessor and mixed carrier', async () => {
   const buildTopology = async () => {
     const oldArchive = decodedPacketArchive(
       PACKET_ARCHIVE_NAME, PACKET_ARCHIVE_STATE_BASE64, PACKET_ARCHIVE_EVENTS_BASE64,
@@ -2520,6 +2520,73 @@ test('a fresh ten-root task adopts a terminal six-replay plus four-origin carrie
     };
     assert.equal(portabilityRow.isResolved, true);
 
+    const successorTaskId = 'close-round-two-scope-evidence-invariants-r3';
+    const predecessorTaskId = 'close-round-two-scope-evidence-invariants-r2';
+    const successorCommit = 'b1a2135aa09417e825707b415bfcd9cae89e15b1';
+    const predecessorCommit = '62fef0589e2edc7c87c06e8f5de26c12d3fbc6b4';
+    const successorRoots = new Set([
+      ...ordinaryRows.keys(),
+      PACKET_PORTABILITY_THREAD_ID,
+    ]);
+    const successorSourceIds = [...successorRoots].map((threadId) => `thread:${threadId}`);
+    terminalState.tasks = terminalState.tasks.filter((task) => (
+      ![ordinaryTaskId, PACKET_PORTABILITY_TASK_ID].includes(task.id)
+    ));
+    terminalState.tasks.push({
+      ...structuredClone(ordinaryTask),
+      id: successorTaskId,
+      sourceIds: successorSourceIds,
+      fingerprint: `${successorTaskId}-fingerprint`,
+      integratedCommitSha: successorCommit,
+      resolutionSummary: 'The completed successor owns the exact four-root partition.',
+    });
+    for (const row of terminalState.threadResolutionStatus.threads) {
+      if (!successorRoots.has(row.threadNodeId)) continue;
+      row.taskIds = [successorTaskId];
+      row.observedHeadSha = successorCommit;
+      row.disposition = 'fixed';
+      const reply = fixture.client.threadComments.get(row.threadNodeId)[1];
+      reply.body = reply.body
+        .replace(/^Aerstello review resolution at [0-9a-f]+\./u,
+          `Aerstello review resolution at ${successorCommit}.`)
+        .replace(/^Tasks:\n(?:- [^\n]+\n)+Validation:/mu,
+          `Tasks:\n- ${successorTaskId}: ${successorCommit}\nValidation:`)
+        .replace(/<!-- aerstello-review:[0-9a-f]{24} -->/u, markerFor(
+          `reply:35:${row.threadNodeId}:${successorCommit}`,
+        ));
+    }
+    for (const event of terminalCarrier.events) {
+      const match = /^(reply|resolve):35:([^:]+):[0-9a-f]+$/u.exec(
+        event.details?.operationId ?? '',
+      );
+      if (!match || !successorRoots.has(match[2])) continue;
+      const operationId = `${match[1]}:35:${match[2]}:${successorCommit}`;
+      event.summary = `Intent ${match[1]} ${operationId}`;
+      event.details.operationId = operationId;
+      event.details.clientMutationId = priorIntent(match[1], operationId).clientMutationId;
+    }
+
+    const ordinaryCarrier = structuredClone(mixedArchive);
+    ordinaryCarrier.state.tasks = ordinaryCarrier.state.tasks.filter((task) => (
+      ![ordinaryTaskId, PACKET_PORTABILITY_TASK_ID].includes(task.id)
+    ));
+    ordinaryCarrier.state.threadResolutionStatus.threads = ordinaryCarrier.state
+      .threadResolutionStatus.threads.filter((row) => !ordinaryRows.has(row.threadNodeId));
+    ordinaryCarrier.events = ordinaryCarrier.events.filter((event) => (
+      ![...ordinaryRows.keys()].some((threadId) => (
+        String(event.details?.operationId ?? '').includes(`:${threadId}:`)
+      ))
+    ));
+    ordinaryCarrier.state.tasks.push({
+      ...structuredClone(ordinaryTask),
+      id: predecessorTaskId,
+      sourceIds: successorSourceIds,
+      fingerprint: `${predecessorTaskId}-fingerprint`,
+      status: 'integrated',
+      integratedCommitSha: predecessorCommit,
+      resolutionSummary: 'Integrated before the exact-partition successor replaced it.',
+    });
+
     const freshTask = {
       ...structuredClone(fixture.aggregateTask),
       id: 'fresh-ten-root-aggregate-carrier-r9',
@@ -2540,14 +2607,30 @@ test('a fresh ten-root task adopts a terminal six-replay plus four-origin carrie
       taskIds: [fixture.remediation.id], updatedAt: '2026-08-20T12:11:00.000Z',
     };
     fixture.client.metadata.headRefOid = OTHER_HEAD;
+    const ancestryCalls = [];
     const freshGit = fakeGit({
       snapshot: async () => ({ headSha: OTHER_HEAD, dirty: false }),
       pushedHead: async () => OTHER_HEAD,
+      isAncestor: async (ancestorSha, descendantSha) => {
+        ancestryCalls.push({ ancestorSha, descendantSha });
+        return true;
+      },
     });
+    freshGit.ancestryCalls = ancestryCalls;
     fixture.client.events.length = 0;
     fixture.client.calls.length = 0;
     return {
-      oldArchive, mixedArchive, terminalCarrier, fixture, freshTask, active, freshGit,
+      oldArchive,
+      mixedArchive: ordinaryCarrier,
+      terminalCarrier,
+      fixture,
+      freshTask,
+      active,
+      freshGit,
+      predecessorTaskId,
+      successorTaskId,
+      predecessorCommit,
+      successorCommit,
     };
   };
 
@@ -2568,6 +2651,10 @@ test('a fresh ten-root task adopts a terminal six-replay plus four-origin carrie
   assert.equal(retainedRows.every((row) => Object.hasOwn(row, 'archiveProvenance')), true);
   assert.equal(setup.state.calls.length, 1);
   assert.equal(setup.state.calls[0].name, 'checkpointArchiveTaskCompletion');
+  assert.equal(successful.freshGit.ancestryCalls.filter((call) => (
+    call.ancestorSha === successful.predecessorCommit
+      && call.descendantSha === successful.successorCommit
+  )).length, 2);
   assert.equal(
     successful.fixture.client.calls.some((call) => ['AddThreadReply', 'ResolveThread'].includes(call.name)),
     false,
@@ -2576,6 +2663,87 @@ test('a fresh ten-root task adopts a terminal six-replay plus four-origin carrie
   assert.deepEqual(records, originalRecords);
 
   const cases = [
+    ['partial predecessor partition', ({ mixedArchive, predecessorTaskId }) => {
+      mixedArchive.state.tasks.find((task) => task.id === predecessorTaskId).sourceIds.pop();
+    }],
+    ['multi-partition predecessor', ({ mixedArchive, terminalCarrier, predecessorTaskId }) => {
+      const replayRoot = terminalCarrier.state.threadResolutionStatus.threads.find(
+        (row) => Object.hasOwn(row, 'archiveProvenance'),
+      ).threadNodeId;
+      mixedArchive.state.tasks.find(
+        (task) => task.id === predecessorTaskId,
+      ).sourceIds.push(`thread:${replayRoot}`);
+    }],
+    ['ambiguous predecessor', ({ mixedArchive, predecessorTaskId }) => {
+      const predecessor = mixedArchive.state.tasks.find(
+        (task) => task.id === predecessorTaskId,
+      );
+      mixedArchive.state.tasks.push({
+        ...structuredClone(predecessor),
+        id: 'close-round-two-scope-evidence-invariants-r2-ambiguous',
+        fingerprint: 'close-round-two-scope-evidence-invariants-r2-ambiguous-fingerprint',
+        integratedCommitSha: ADVANCED_HEAD,
+      });
+    }],
+    ['proof-bearing predecessor', ({ mixedArchive, terminalCarrier, predecessorTaskId }) => {
+      const row = structuredClone(terminalCarrier.state.threadResolutionStatus.threads.find(
+        (candidate) => !Object.hasOwn(candidate, 'archiveProvenance'),
+      ));
+      row.taskIds = [predecessorTaskId];
+      mixedArchive.state.threadResolutionStatus.threads.push(row);
+    }],
+    ['provenance-bearing predecessor', ({
+      mixedArchive, terminalCarrier, predecessorTaskId,
+    }) => {
+      const row = structuredClone(terminalCarrier.state.threadResolutionStatus.threads.find(
+        (candidate) => !Object.hasOwn(candidate, 'archiveProvenance'),
+      ));
+      row.taskIds = [predecessorTaskId];
+      row.archiveProvenance = structuredClone(terminalCarrier.state.threadResolutionStatus.threads.find(
+        (candidate) => Object.hasOwn(candidate, 'archiveProvenance'),
+      ).archiveProvenance);
+      row.archiveProvenance.historicalTaskId = predecessorTaskId;
+      mixedArchive.state.threadResolutionStatus.threads.push(row);
+    }],
+    ['reply-intent-bearing predecessor', ({
+      mixedArchive, predecessorTaskId, predecessorCommit,
+    }) => {
+      const root = /^thread:(.+)$/u.exec(mixedArchive.state.tasks.find(
+        (task) => task.id === predecessorTaskId,
+      ).sourceIds[0])[1];
+      mixedArchive.events.splice(-1, 0, archiveIntentEvent(
+        'reply', `reply:35:${root}:${predecessorCommit}`, '2026-08-20T09:30:00.000Z',
+      ));
+    }],
+    ['resolve-intent-bearing predecessor', ({
+      mixedArchive, predecessorTaskId, predecessorCommit,
+    }) => {
+      const root = /^thread:(.+)$/u.exec(mixedArchive.state.tasks.find(
+        (task) => task.id === predecessorTaskId,
+      ).sourceIds[0])[1];
+      mixedArchive.events.splice(-1, 0, archiveIntentEvent(
+        'resolve', `resolve:35:${root}:${predecessorCommit}`, '2026-08-20T09:30:00.000Z',
+      ));
+    }],
+    ['terminal predecessor', ({ mixedArchive, predecessorTaskId }) => {
+      mixedArchive.state.tasks.find((task) => task.id === predecessorTaskId).status = 'completed';
+    }],
+    ['null-commit predecessor', ({ mixedArchive, predecessorTaskId }) => {
+      mixedArchive.state.tasks.find((task) => task.id === predecessorTaskId).integratedCommitSha = null;
+    }],
+    ['equal-commit predecessor and successor', ({
+      mixedArchive, predecessorTaskId, successorCommit,
+    }) => {
+      mixedArchive.state.tasks.find(
+        (task) => task.id === predecessorTaskId,
+      ).integratedCommitSha = successorCommit;
+    }],
+    ['predecessor placed in mixed carrier', ({
+      mixedArchive, terminalCarrier, predecessorTaskId,
+    }) => {
+      const index = mixedArchive.state.tasks.findIndex((task) => task.id === predecessorTaskId);
+      terminalCarrier.state.tasks.push(mixedArchive.state.tasks.splice(index, 1)[0]);
+    }],
     ['partition slicing', ({ terminalCarrier }) => {
       terminalCarrier.state.tasks.find(
         (task) => task.id === PACKET_AGGREGATE_TASK_ID,
@@ -2606,12 +2774,12 @@ test('a fresh ten-root task adopts a terminal six-replay plus four-origin carrie
         (row) => Object.hasOwn(row, 'archiveProvenance'),
       ).archiveProvenance;
     }],
-    ['overlapping partition owner', ({ terminalCarrier }) => {
+    ['overlapping partition owner', ({ terminalCarrier, successorTaskId }) => {
       const replayRoot = terminalCarrier.state.threadResolutionStatus.threads.find(
         (row) => Object.hasOwn(row, 'archiveProvenance'),
       ).threadNodeId;
       terminalCarrier.state.tasks.find(
-        (task) => task.id === 'pr-review-worker-commit-delta-integrity-r1',
+        (task) => task.id === successorTaskId,
       ).sourceIds.push(`thread:${replayRoot}`);
     }],
   ];
@@ -2637,6 +2805,32 @@ test('a fresh ten-root task adopts a terminal six-replay plus four-origin carrie
     ), false, label);
     assert.deepEqual(topology.fixture.client.events, [], label);
   }
+
+  const nonAncestral = await buildTopology();
+  nonAncestral.freshGit.isAncestor = async (ancestorSha, descendantSha) => {
+    nonAncestral.freshGit.ancestryCalls.push({ ancestorSha, descendantSha });
+    return ancestorSha !== nonAncestral.predecessorCommit
+      || descendantSha !== nonAncestral.successorCommit;
+  };
+  const nonAncestralJournal = fakeJournal(nonAncestral.fixture.client.events);
+  const nonAncestralSetup = workflow(nonAncestral.active, nonAncestral.fixture.client, {
+    archiveStore: immutableArchiveStore([
+      nonAncestral.terminalCarrier, nonAncestral.mixedArchive, nonAncestral.oldArchive,
+    ]),
+    git: nonAncestral.freshGit,
+    journal: nonAncestralJournal,
+  });
+  await assert.rejects(
+    () => nonAncestralSetup.api.replyResolve(35, nonAncestral.freshTask.id),
+    { code: 'MUTATION_NOT_READY' },
+    'non-ancestral predecessor',
+  );
+  assert.equal(nonAncestralSetup.state.calls.length, 0);
+  assert.equal(nonAncestralJournal.intents.size, 0);
+  assert.equal(nonAncestral.fixture.client.calls.some(
+    (call) => ['AddThreadReply', 'ResolveThread'].includes(call.name),
+  ), false);
+  assert.deepEqual(nonAncestral.fixture.client.events, []);
 
   const missingOrigin = await buildTopology();
   const noOlderOrigin = workflow(missingOrigin.active, missingOrigin.fixture.client, {

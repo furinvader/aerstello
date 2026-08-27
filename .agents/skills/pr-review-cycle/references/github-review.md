@@ -304,6 +304,18 @@ two inventory reads fingerprint archive ID, content, partition/root role, and
 normalized authority in stable order and rerun every distinct ancestry
 relation. Harmless enumeration reordering does not change the fingerprint.
 
+One ordinary historical slice may retain a proofless unresolved Integrated
+predecessor when its canonical roots equal exactly one whole completed
+actionable successor partition. The predecessor must have a distinct non-null
+integration commit, carry no proof, provenance, reply intent, or resolve intent,
+and be an ancestor of that successor commit under both ancestry preflights. It
+is retained only as superseded implementation history: the completed successor
+remains the sole origin, replay, proof, disposition, provenance, reply, and
+resolve authority. Partial, overlapping, ambiguous, multi-partition,
+proof-bearing, terminal, intent-bearing, mixed-carrier, null-commit,
+equal-commit, and non-ancestral shapes remain fatal. This is not a generalized
+task-supersession mechanism.
+
 Successful aggregate adoption still performs zero GitHub, journal, or archive
 mutation and one guarded task-completion checkpoint. Imported rows map to the
 fresh active task and `already-fixed` disposition, retain their per-root
