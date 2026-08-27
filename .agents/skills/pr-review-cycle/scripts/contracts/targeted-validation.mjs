@@ -32,6 +32,7 @@ const ALLOWED_CHECK_COMMANDS = new Set([
   'npm run check:release-state',
   'npm run check:released-migrations',
 ]);
+const ALLOWED_DIRECT_COMMANDS = new Set(['git diff --check']);
 const WRAPPER_EXECUTABLES = new Set(['env', 'bash', 'sh', 'zsh', 'fish', 'command', 'exec', 'xargs']);
 const KNOWN_WORKSPACES = new Set(['@aerstello/api', '@aerstello/web', '@aerstello/shared']);
 const SHELL_SYNTAX_PATTERN = /[;&|<>`$()'"\\*?\[\]{}!#~\t\v\f\r\n]/u;
@@ -131,6 +132,7 @@ export function parseTargetedValidationCommand(command) {
   const tokens = command.split(' ');
   if (tokens.some((token) => !isSafeCommandArgument(token))
       || WRAPPER_EXECUTABLES.has(tokens[0]) || /^\w+=/u.test(tokens[0])) return null;
+  if (ALLOWED_DIRECT_COMMANDS.has(command)) return tokens;
   if (ALLOWED_CHECK_COMMANDS.has(command)) return tokens;
   if (parseRelatedE2ECommand(command)) return tokens;
   if (tokens[0] === 'npm') return isTargetedNpmTest(tokens) ? tokens : null;

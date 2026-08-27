@@ -19,6 +19,7 @@ const featureRoot = join(dirname(fileURLToPath(import.meta.url)), '../../../../.
 
 test('targeted command parsing accepts direct focused commands and rejects wrappers and shell syntax', () => {
   for (const command of [
+    'git diff --check',
     'npm run check:workflow',
     'npm test -w @aerstello/api -- routes',
     'npm run test --workspace=@aerstello/web -- tests/example.test.ts',
@@ -26,6 +27,16 @@ test('targeted command parsing accepts direct focused commands and rejects wrapp
   ]) assert.deepEqual(parseTargetedValidationCommand(command), command.split(' '), command);
 
   for (const command of [
+    'git diff',
+    'git diff --check HEAD',
+    'git diff HEAD --check',
+    'git diff --check -- .agents',
+    'git diff --cached --check',
+    'git diff --staged --check',
+    'git status --check',
+    'env git diff --check',
+    'CI=1 git diff --check',
+    'git diff --check && git status',
     'npm run check:full',
     'env CI=1 npm run check:workflow',
     'npm run check:workflow && npm run check:api',
