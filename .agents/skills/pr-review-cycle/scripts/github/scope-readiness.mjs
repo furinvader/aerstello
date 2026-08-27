@@ -8,6 +8,24 @@ function latestClassifications(journal) {
   return [...roots.values()];
 }
 
+function canonicalExactHeadManifest(entries) {
+  const manifest = entries.at(-1);
+  const classification = entries.at(-2);
+  if (manifest?.kind !== 'exact-head-manifest' || classification?.kind !== 'classification') return null;
+  const canonical = manifest.reviewHeadSha === classification.reviewHeadSha
+    && manifest.rootCauseId === classification.rootCauseId
+    && manifest.authorityDigest === classification.authorityDigest
+    && manifest.assessmentDigest === classification.assessment?.digest
+    && classification.assessment?.packet?.binding?.phase === 'integrated-head'
+    && classification.assessment?.result?.binding?.phase === 'integrated-head'
+    && classification.assessment?.result?.verdict === 'within-scope'
+    && classification.classification === 'within-scope-defect'
+    && classification.authorityAmendmentRequired === false
+    && manifest.triggerKinds?.length === 1
+    && manifest.triggerKinds[0] === 'classification';
+  return canonical ? { manifest, classification } : null;
+}
+
 function scopeFailure(message, code = 'SCOPE_NOT_READY') {
   throw new GitHubWorkflowError(message, code);
 }
@@ -20,6 +38,7 @@ export async function readScopeReadiness(stateAdapter, state, liveHeadSha = null
   } catch (error) {
     scopeFailure(`Receipt-valid scope evidence could not be loaded: ${error.message}`, 'SCOPE_EVIDENCE_INVALID');
   }
+  const entries = status?.journal?.value?.entries ?? [];
   const classifications = latestClassifications(status?.journal?.value);
   const currentHead = state.currentIntegrationHeadSha;
   const referenceMatchesState = status?.configured === true
@@ -27,15 +46,27 @@ export async function readScopeReadiness(stateAdapter, state, liveHeadSha = null
   const receiptsMatch = status?.authority?.digest === status?.reference?.authorityDigest
     && status?.journal?.digest === status?.reference?.journalDigest
     && (status?.return?.digest ?? null) === status?.reference?.returnDigest;
-  const assessmentHeads = classifications.map((entry) => entry.reviewHeadSha);
   const authorityHead = status?.authority?.value?.handoffHeadSha ?? null;
-  const exactHead = status?.reference?.assessmentHeadSha
-    ?? classifications[0]?.reviewHeadSha
-    ?? authorityHead;
+  // scopeStatus validates durable journal variants before they reach this adapter. Keeping
+  // the schema discriminator here also leaves old lightweight adapter fixtures equivalent
+  // to their original empty-journal authority setup.
+  const durableEntries = entries.filter((entry) => entry?.schemaVersion === 1);
+  const hasClassificationHistory = durableEntries.some((entry) => entry.kind === 'classification');
+  const exactHeadManifest = hasClassificationHistory
+    ? canonicalExactHeadManifest(durableEntries)
+    : null;
+  const initialAuthorityReady = !hasClassificationHistory
+    && durableEntries.length === 0
+    && ['standalone', 'imported'].includes(status?.authority?.value?.authorityKind)
+    && authorityHead === currentHead;
+  const manifestMatches = !hasClassificationHistory ? initialAuthorityReady : exactHeadManifest !== null;
+  const exactHead = exactHeadManifest?.manifest.reviewHeadSha
+    ?? (initialAuthorityReady ? authorityHead : status?.reference?.assessmentHeadSha ?? null);
   const headMatches = exactHead === currentHead
     && (liveHeadSha === null || liveHeadSha === currentHead)
-    && assessmentHeads.every((headSha) => headSha === currentHead);
-  const ready = referenceMatchesState && receiptsMatch && status.gate === 'ready' && headMatches;
+    && status?.reference?.assessmentHeadSha === (hasClassificationHistory ? currentHead : null);
+  const ready = referenceMatchesState && receiptsMatch && status.gate === 'ready'
+    && manifestMatches && headMatches;
   return {
     ready,
     configured: status?.configured === true,
@@ -45,8 +76,12 @@ export async function readScopeReadiness(stateAdapter, state, liveHeadSha = null
     exactHeadSha: exactHead,
     authority: status?.authority?.value ?? null,
     authorityDigest: status?.authority?.digest ?? null,
+    journalAuthorityDigest: status?.journal?.value?.authorityDigest ?? null,
     journalDigest: status?.journal?.digest ?? null,
     classifications,
+    hasClassificationHistory,
+    exactHeadManifest,
+    manifestMatches,
     referenceMatchesState,
     receiptsMatch,
     headMatches,
@@ -61,17 +96,44 @@ export async function assertScopeReady(stateAdapter, state, liveHeadSha = null) 
     scopeFailure('Durable scope evidence does not match the active state projection', 'SCOPE_EVIDENCE_INVALID');
   }
   if (readiness.gate !== 'ready') scopeFailure(`Scope gate ${readiness.gate} blocks expanded review execution`);
+  if (!readiness.manifestMatches) {
+    scopeFailure('Scope history lacks a terminal canonical integrated-HEAD manifest', 'SCOPE_EVIDENCE_INVALID');
+  }
   if (!readiness.headMatches) scopeFailure('Scope evidence does not apply to the exact active and live PR HEAD', 'SCOPE_EVIDENCE_STALE');
   return readiness;
 }
 
 export async function assertScopeRootReady(stateAdapter, state, liveHeadSha, task) {
-  const readiness = await assertScopeReady(stateAdapter, state, liveHeadSha);
+  const readiness = await readScopeReadiness(stateAdapter, state, liveHeadSha);
+  if (!readiness.configured) scopeFailure('Explicit scope authority is required before expanded review execution');
+  if (!readiness.referenceMatchesState || !readiness.receiptsMatch) {
+    scopeFailure('Durable scope evidence does not match the active state projection', 'SCOPE_EVIDENCE_INVALID');
+  }
+  if (readiness.gate !== 'ready') scopeFailure(`Scope gate ${readiness.gate} blocks expanded review execution`);
+  if (liveHeadSha !== null && liveHeadSha !== readiness.currentHeadSha) {
+    scopeFailure('Scope evidence does not apply to the exact active and live PR HEAD', 'SCOPE_EVIDENCE_STALE');
+  }
   const sourceIds = new Set([task.id, ...(task.sourceIds ?? [])]);
   const classification = readiness.classifications.findLast((entry) => (
     entry.rootCauseId === task.id || entry.findingIds.some((id) => sourceIds.has(id))
   ));
   if (!classification) scopeFailure(`Task ${task.id} lacks receipt-valid scope classification`, 'SCOPE_ROOT_NOT_READY');
+  const phase = classification.assessment?.packet?.binding?.phase;
+  const expectedHead = classification.schemaVersion !== 1
+    ? readiness.currentHeadSha
+    : phase === 'integrated-head'
+      ? readiness.currentHeadSha
+      : ['task', 'review-finding'].includes(phase)
+        ? state.reviewedHeadSha ?? readiness.currentHeadSha
+        : null;
+  if (classification.schemaVersion === 1
+      && (classification.authorityDigest !== readiness.authorityDigest
+        || classification.authorityDigest !== readiness.journalAuthorityDigest)) {
+    scopeFailure(`Task ${task.id} has superseded scope authority`, 'SCOPE_ROOT_NOT_READY');
+  }
+  if (expectedHead === null || classification.reviewHeadSha !== expectedHead) {
+    scopeFailure(`Task ${task.id} has stale scope classification`, 'SCOPE_ROOT_NOT_READY');
+  }
   if (!['within-scope-defect', 'unnecessary-mechanism-defect', 'unrelated-follow-up'].includes(
     classification.classification,
   )) {
@@ -95,6 +157,7 @@ export function scopeStatusSummary(readiness) {
   }));
   const blocker = readiness.ready ? null
     : readiness.gate !== 'ready' ? `scope gate ${readiness.gate}`
+      : !readiness.manifestMatches ? 'scope history lacks a terminal integrated-HEAD manifest'
       : !readiness.headMatches ? 'scope evidence is stale for the live PR HEAD'
         : 'scope evidence receipts do not match active state';
   return {

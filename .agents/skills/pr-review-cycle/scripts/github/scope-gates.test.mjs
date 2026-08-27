@@ -15,6 +15,7 @@ import {
 const HEAD = 'a'.repeat(40);
 const AUTHORITY = `sha256:${'a'.repeat(64)}`;
 const JOURNAL = `sha256:${'b'.repeat(64)}`;
+const ASSESSMENT = `sha256:${'c'.repeat(64)}`;
 
 function branch(classification, decision = null) {
   const reference = {
@@ -44,16 +45,42 @@ function branch(classification, decision = null) {
             minimalClosure: { statement: 'Preserve the accepted boundary.' }, handoffHeadSha: HEAD,
           },
         },
-        journal: { digest: JOURNAL, value: { entries } }, return: null,
+        journal: { digest: JOURNAL, value: { authorityDigest: AUTHORITY, entries } }, return: null,
       };
     } },
     task: { id: 'generalized-checker', sourceIds: ['pr53-checker-root'] },
   };
 }
 
-function workflowScope(state, classification, gate = 'ready') {
+function workflowScope(state, classification, gate = 'ready', { integratedManifest = false } = {}) {
   const reference = { ...state.scopeControl, gate, assessmentHeadSha: HEAD };
   state.scopeControl = reference;
+  const assessment = {
+    digest: ASSESSMENT,
+    packet: {
+      binding: { phase: integratedManifest ? 'integrated-head' : 'review-finding' },
+      minimalClosure: { statement: 'Preserve the accepted boundary.' },
+    },
+    result: {
+      binding: { phase: integratedManifest ? 'integrated-head' : 'review-finding' },
+      verdict: classification === 'within-scope-defect' ? 'within-scope' : 'human-decision-required',
+      ...(classification === 'unnecessary-mechanism-defect'
+        ? { verdict: 'trim-required', smallerSufficientAlternative: 'Remove or trim the generalized checker.' }
+        : { smallestExpansion: 'Use only the explicitly approved replanned boundary.' }),
+    },
+  };
+  const classificationEntry = {
+    schemaVersion: 1, kind: 'classification', rootCauseId: state.tasks[0]?.id ?? 'generalized-checker',
+    findingIds: state.tasks[0]?.sourceIds ?? ['pr53-checker-root'],
+    reviewHeadSha: HEAD, authorityDigest: AUTHORITY, classification,
+    authorityAmendmentRequired: false, assessment,
+  };
+  const entries = [classificationEntry];
+  if (integratedManifest) entries.push({
+    schemaVersion: 1, kind: 'exact-head-manifest', rootCauseId: classificationEntry.rootCauseId,
+    reviewHeadSha: HEAD, authorityDigest: AUTHORITY,
+    assessmentDigest: ASSESSMENT, triggerKinds: ['classification'],
+  });
   return {
     configured: true,
     gate,
@@ -67,17 +94,7 @@ function workflowScope(state, classification, gate = 'ready') {
     },
     journal: {
       digest: reference.journalDigest,
-      value: { entries: [{
-        kind: 'classification', rootCauseId: state.tasks[0]?.id ?? 'generalized-checker',
-        findingIds: state.tasks[0]?.sourceIds ?? ['pr53-checker-root'],
-        reviewHeadSha: HEAD, classification,
-        assessment: {
-          packet: { minimalClosure: { statement: 'Preserve the accepted boundary.' } },
-          result: classification === 'unnecessary-mechanism-defect'
-            ? { smallerSufficientAlternative: 'Remove or trim the generalized checker.' }
-            : { smallestExpansion: 'Use only the explicitly approved replanned boundary.' },
-        },
-      }] },
+      value: { authorityDigest: AUTHORITY, entries },
     },
     return: null,
   };
@@ -152,6 +169,26 @@ test('PR #53 material expansion blocks GitHub mutation, journal, checkpoints, re
   assert.deepEqual(doneSetup.client.events, []);
 });
 
+test('review request, Review-ready recovery, and Done fail closed without the exact-head manifest', async () => {
+  const requestState = readyState();
+  const requestSetup = workflow(requestState);
+  requestSetup.state.setScopeStatusForTest(workflowScope(requestState, 'within-scope-defect'));
+  await assert.rejects(() => requestSetup.api.request(2, 'discovery'), { code: 'SCOPE_EVIDENCE_INVALID' });
+  assert.deepEqual(requestSetup.client.events, []);
+
+  const recoveryState = scopeRecoveryState();
+  const recoverySetup = workflow(recoveryState);
+  recoverySetup.state.setScopeStatusForTest(workflowScope(recoveryState, 'within-scope-defect'));
+  await assert.rejects(() => recoverySetup.api.refreshThreads(2), { code: 'SCOPE_EVIDENCE_INVALID' });
+  assert.deepEqual(recoverySetup.state.calls, []);
+
+  const doneState = completedState();
+  const doneSetup = workflow(doneState);
+  doneSetup.state.setScopeStatusForTest(workflowScope(doneState, 'within-scope-defect'));
+  await assert.rejects(() => doneSetup.api.complete(2), { code: 'SCOPE_EVIDENCE_INVALID' });
+  assert.deepEqual(doneSetup.state.calls, []);
+});
+
 test('PR #53 trim and freshly replanned exact-head branches unlock the same workflow gates', async () => {
   const trimState = integratedThreadState();
   const trimStatus = workflowScope(trimState, 'unnecessary-mechanism-defect');
@@ -164,7 +201,7 @@ test('PR #53 trim and freshly replanned exact-head branches unlock the same work
   assert.equal(trimClient.events.includes('mutation:ResolveThread'), true);
 
   const replannedState = readyState();
-  const replannedStatus = workflowScope(replannedState, 'within-scope-defect');
+  const replannedStatus = workflowScope(replannedState, 'within-scope-defect', 'ready', { integratedManifest: true });
   const replannedSetup = workflow(replannedState);
   replannedSetup.state.setScopeStatusForTest(replannedStatus);
   const requested = await replannedSetup.api.request(2, 'discovery');
@@ -172,7 +209,7 @@ test('PR #53 trim and freshly replanned exact-head branches unlock the same work
   assert.equal(replannedSetup.client.events.includes('mutation:AddReviewRequest'), true);
 
   const recoveryState = scopeRecoveryState();
-  const recoveryStatus = workflowScope(recoveryState, 'within-scope-defect');
+  const recoveryStatus = workflowScope(recoveryState, 'within-scope-defect', 'ready', { integratedManifest: true });
   const recoverySetup = workflow(recoveryState);
   recoverySetup.state.setScopeStatusForTest(recoveryStatus);
   assert.equal((await recoverySetup.api.refreshThreads(2)).threadResolutionStatus.status, 'passed');
