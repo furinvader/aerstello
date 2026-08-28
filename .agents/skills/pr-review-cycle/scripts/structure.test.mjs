@@ -753,7 +753,9 @@ const PRODUCTION_STATE_IMPORTS = new Map([
 // modules use exact dependency allowlists so additions cannot acquire persistence authority by drift.
 PRODUCTION_STATE_IMPORTS.set('transition-policy.mjs', new Map([
   ['node:crypto', ['createHash']],
-  [join(scriptsDirectory, 'contracts', 'contracts.mjs'), ['scopeClassificationMatchesTask']],
+  [join(scriptsDirectory, 'contracts', 'contracts.mjs'), [
+    'scopeClassificationMatchesTask', 'scopeGateForJournal',
+  ]],
   [stateModule('atomic-io.mjs'), ['canonicalJson']],
   [stateModule('errors.mjs'), ['StateError']],
   [stateModule('git-authority.mjs'), ['assertIntegratedWorkerCommit']],
@@ -881,7 +883,7 @@ PRODUCTION_STATE_IMPORTS.set('services/scope.mjs', new Map([
   ['node:fs', ['existsSync']],
   [join(scriptsDirectory, 'contracts', 'contracts.mjs'), [
     'scopeAuthorityDigest', 'scopeControlJournalDigest', 'scopeExactHeadManifestDigest',
-    'scopeClassificationMatchesTask', 'scopeGateForClassificationEntry',
+    'scopeClassificationMatchesTask', 'scopeGateForClassificationEntry', 'scopeGateForJournal',
     'validateScopeAuthoritySnapshot', 'validateScopeControlJournal', 'validateScopeReturnEnvelope',
   ]],
   [stateModule('atomic-io.mjs'), ['canonicalSerializedJson']],
