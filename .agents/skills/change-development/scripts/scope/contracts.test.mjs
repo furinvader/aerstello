@@ -162,6 +162,25 @@ test('scope decisions bind all exact evidence and only approval authorizes shape
   })), []);
 });
 
+test('split-defer follow-ups are bounded canonical criterion IDs without tightening approved shape', () => {
+  const splitDecision = decision({
+    disposition: 'split-defer',
+    approvedShape: [],
+    deferredFollowups: ['follow-up-alpha', 'follow-up-beta'],
+  });
+  assert.deepEqual(validateScopeDecision(splitDecision), []);
+  for (const deferredFollowups of [
+    ['Issue #25'],
+    ['Follow-Up'],
+    ['a'.repeat(129)],
+    ['duplicate-follow-up', 'duplicate-follow-up'],
+    Array.from({ length: 257 }, (_, index) => `follow-up-${index}`),
+  ]) {
+    assert.notDeepEqual(validateScopeDecision({ ...splitDecision, deferredFollowups }), []);
+  }
+  assert.deepEqual(validateScopeDecision(decision({ approvedShape: ['Material subsystem / v2'] })), []);
+});
+
 test('scope evidence binds canonical packet, result, cadence, and exact applicability', () => {
   const packet = assessmentPacket();
   const result = assessmentResult(packet);

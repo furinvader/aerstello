@@ -604,9 +604,15 @@ test('split-defer preserves the exact deferred prefix and appends only decision 
   const fixture = await materialDecisionFixture('material-split-followups',
     ['material-alpha'], { deferredFollowups: priorFollowups });
   const decision = materialScopeDecision(fixture.state, fixture.evidence, 'split-defer', [], 'split-followups');
+  const directory = changeDirectory(fixture.cwd, fixture.state.changeId);
+  const beforeInvalidDecision = durableSnapshot(directory);
+  assert.throws(() => recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision,
+    decision: { ...decision, deferredFollowups: ['Issue #25'] } }),
+  (error) => error.code === 'SCOPE_DECISION_INVALID');
+  assert.deepEqual(durableSnapshot(directory), beforeInvalidDecision,
+    'invalid split-defer identity changes no receipt, state revision, event, phase, or blocked reason');
   decision.deferredFollowups = ['follow-up-alpha', 'follow-up-beta'];
   const state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision, decision });
-  const directory = changeDirectory(fixture.cwd, state.changeId);
   const before = durableSnapshot(directory);
   const exactFollowups = [...priorFollowups,
     { id: 'follow-up-alpha', text: 'follow-up-alpha' },
@@ -631,6 +637,10 @@ test('split-defer preserves the exact deferred prefix and appends only decision 
     { deferredFollowups: exactFollowups });
   const amended = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...exact });
   assert.equal(amended.phase, 'implementing');
+  const amendedClosure = JSON.parse(readFileSync(join(directory,
+    'scope', 'minimal-closure', '0002.json'), 'utf8'));
+  assert.deepEqual(amendedClosure.deferredFollowups, exactFollowups);
+  assert.equal(validateState({ cwd: fixture.cwd }).valid, true);
 });
 
 test('material dispositions other than split-defer cannot change deferred follow-ups', async () => {

@@ -14,7 +14,7 @@
     "evidence": { "$ref": "#/$defs/evidence" },
     "rationale": { "$ref": "#/$defs/text" },
     "approvedShape": { "$ref": "#/$defs/identities" },
-    "deferredFollowups": { "$ref": "#/$defs/identities" }
+    "deferredFollowups": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } }
   },
   "allOf": [
     { "if": { "properties": { "disposition": { "const": "approve-material-amendment" } }, "required": ["disposition"] }, "then": { "properties": { "approvedShape": { "type": "array", "minItems": 1 } } }, "else": { "properties": { "approvedShape": { "type": "array", "maxItems": 0 } } } }
