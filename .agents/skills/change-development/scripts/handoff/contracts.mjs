@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
+import { canonicalJsonText } from '../contracts/contracts.mjs';
 import {
   scopeContractDigest,
   validateMinimalClosureContract,
@@ -157,7 +159,9 @@ export function buildDevelopmentScopeHandoff(input) {
     integratedHeadAssessment: {
       packet: clone(evidence.packet),
       result: clone(evidence.result),
-      digest: scopeContractDigest({ packet: evidence.packet, result: evidence.result }),
+      digest: `sha256:${createHash('sha256').update(canonicalJsonText({
+        packet: evidence.packet, result: evidence.result,
+      }).slice(0, -1), 'utf8').digest('hex')}`,
     },
     approvedDecisions: clone(decisionReceipts),
     deferredFollowUps: clone(deferredFollowUps(input.minimalClosure)),

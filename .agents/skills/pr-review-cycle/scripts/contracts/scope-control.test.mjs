@@ -5,6 +5,8 @@ import { test } from 'node:test';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 
+import { buildDevelopmentScopeHandoff } from '../../../change-development/scripts/handoff/contracts.mjs';
+import { scopeContractDigest } from '../../../change-development/scripts/scope/contracts.mjs';
 import { sha256CanonicalContractJson } from './contract-identities.mjs';
 let contract;
 
@@ -112,6 +114,46 @@ function authority(overrides = {}) {
     deferredFollowUps: [{ id: 'delivery-linkage', reference: 'furinvader/aerstello#26' }],
     capturedAt: AT,
     ...overrides,
+  };
+}
+
+function developmentReceipt(value) {
+  return { value, digest: scopeContractDigest(value) };
+}
+
+function developmentHandoffInput() {
+  const effectivePlan = developmentReceipt({
+    schemaVersion: 1, changeId: 'issue-55', planRevision: 1,
+    source: { kind: 'github-issue', reference: 'furinvader/aerstello#56', captureDigest: DIGEST },
+    planning: { planningSha: HEAD },
+  });
+  const minimalClosure = developmentReceipt({
+    schemaVersion: 1, changeId: 'issue-55', revision: 1,
+    source: { type: 'github-issue', identity: 'furinvader/aerstello#56', digest: DIGEST },
+    planningSha: HEAD, planDigest: effectivePlan.digest, previousContractDigest: null,
+    outcome: 'A bounded scope gate is sufficient.',
+    requiredCriteria: [{ id: 'scope-gate', text: 'Gate expanded remediation.' }],
+    invariants: [], nonGoals: [], mandatoryConstraints: [], optionalGuidance: [],
+    authorizedShape: ['scope-gate'], unauthorizedExpansion: ['generalized-policy-engine'],
+    deferredFollowups: [], operatorDecisionDigests: [],
+  });
+  const pair = assessmentPair();
+  const projectedAuthority = {
+    source: minimalClosure.value.source,
+    planDigest: effectivePlan.digest,
+    amendmentDigests: [],
+  };
+  bindAssessmentAuthority(pair, projectedAuthority);
+  const integratedScopeEvidence = developmentReceipt({
+    schemaVersion: 1, changeId: 'issue-55', evidenceId: 'integrated-head-1', revision: 1,
+    cadence: { boundary: 'integrated-head', trigger: null },
+    packet: pair.packet, packetDigest: scopeContractDigest(pair.packet),
+    result: pair.result, resultDigest: scopeContractDigest(pair.result),
+    closureDigest: minimalClosure.digest,
+  });
+  return {
+    changeId: 'issue-55', headSha: HEAD, capturedAt: AT,
+    minimalClosure, effectivePlan, amendments: [], decisions: [], integratedScopeEvidence,
   };
 }
 
@@ -251,6 +293,13 @@ test('imported authority requires complete real scope identities and a current w
     authorityKind: 'standalone', planDigest: null, amendmentDigests: [DIGEST],
     integratedHeadAssessment: null,
   })).join('\n'), /amendmentDigests requires a plan digest/u);
+});
+
+test('accepts the real development scope handoff and its canonical authority digest', () => {
+  const { scopeAuthorityDigest, validateScopeAuthoritySnapshot } = contract;
+  const handoff = buildDevelopmentScopeHandoff(developmentHandoffInput());
+  assert.deepEqual(validateScopeAuthoritySnapshot(handoff), []);
+  assert.match(scopeAuthorityDigest(handoff), /^sha256:[0-9a-f]{64}$/u);
 });
 
 test('journal is append-only shaped and embeds exact canonical assessment evidence', () => {
