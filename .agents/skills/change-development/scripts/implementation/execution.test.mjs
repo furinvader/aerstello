@@ -952,7 +952,7 @@ test('a real central cherry-pick conflict preserves its intent and requires abor
       validation: siblingPacket.requiredValidation.unit.map(({ command }) => ({
         command, result: 'failed', summary: 'Sibling validation failed.',
       })),
-      unexpectedDependencies: ['Sibling validation exposed an unrelated dependency.'],
+      unexpectedDependencies: [],
       summary: 'Sibling validation failed.',
     },
   });
