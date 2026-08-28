@@ -58,6 +58,7 @@ import {
   validateClosureForState,
   validateDecisionForEvidence,
   validateEvidenceForBoundary,
+  validateAdmissionScopeSemantics,
   validateMinorAmendmentAuthority,
   validateActiveHandoffAuthority,
   validateScopeReturnResume,
@@ -1130,6 +1131,10 @@ export function acceptPlan({ cwd = process.cwd(), changeId, plan, planningEviden
       state: authorityState, closureDigest, amendmentRecords: [], boundary: 'admission',
       subjectDigest: planDigest, subjectSha: state.planningSha, taskPacketDigest: null,
     });
+    scopeErrors.push(...validateAdmissionScopeSemantics(scopeEvidence, {
+      effectivePlan: plan,
+      minimalClosure,
+    }));
     if (closureErrors.length > 0 || scopeErrors.length > 0) {
       throw new StateError(`Plan admission scope evidence is invalid:\n- ${[...closureErrors, ...scopeErrors].join('\n- ')}`,
         'PLAN_SCOPE_INVALID');
@@ -1212,6 +1217,10 @@ export function adoptScope({ cwd = process.cwd(), changeId, minimalClosure, scop
     if (!current.clean || current.headSha !== state.git.headSha || current.branch !== state.git.branch) {
       throw new StateError('Scope adoption requires the exact clean durable checkout', 'SCOPE_ADOPTION_INVALID');
     }
+    const effectivePlan = readEffectivePlan(root, state);
+    if (objectDigest(effectivePlan) !== state.plan.effectiveDigest) {
+      throw new StateError('Effective plan receipt is inconsistent', 'SCOPE_ADOPTION_INVALID');
+    }
     const closureErrors = validateClosureForState(minimalClosure, state);
     if (minimalClosure?.revision !== 1 || minimalClosure?.previousContractDigest !== null) {
       closureErrors.push('$ legacy adoption must begin one append-only closure history');
@@ -1220,9 +1229,13 @@ export function adoptScope({ cwd = process.cwd(), changeId, minimalClosure, scop
     const closureDigest = scopeContractDigest(minimalClosure);
     const evidenceErrors = validateEvidenceForBoundary(scopeEvidence, {
       state, closureDigest, amendmentRecords: scopeAmendmentRecords(root, state), boundary: 'admission',
-      subjectDigest: state.plan.originalDigest, subjectSha: state.planningSha, taskPacketDigest: null,
+      subjectDigest: state.plan.effectiveDigest, subjectSha: state.planningSha, taskPacketDigest: null,
       verdict: 'within-scope',
     });
+    evidenceErrors.push(...validateAdmissionScopeSemantics(scopeEvidence, {
+      effectivePlan,
+      minimalClosure,
+    }));
     if (evidenceErrors.length > 0) throw new StateError(`Scope adoption evidence is invalid:\n- ${evidenceErrors.join('\n- ')}`, 'SCOPE_ADOPTION_INVALID');
     const timestamp = now(clock); const evidenceDigest = scopeContractDigest(scopeEvidence);
     const scope = {
@@ -1392,6 +1405,15 @@ function validateMaterialDecisionAmendment({ root, state, evidence, amendment, p
   if (expectedAuthorized.size !== actualAuthorized.size
       || [...expectedAuthorized].some((mechanism) => !actualAuthorized.has(mechanism))) {
     errors.push('$ amended authorizedShape must preserve unrelated authority and contain exactly the material decision approvedShape');
+  }
+  const appendedFollowups = authority.decision.disposition === 'split-defer'
+    ? authority.decision.deferredFollowups.map((identity) => ({ id: identity, text: identity }))
+    : [];
+  const expectedFollowups = [...priorClosure.deferredFollowups, ...appendedFollowups];
+  if (serialized(minimalClosure?.deferredFollowups) !== serialized(expectedFollowups)) {
+    errors.push(authority.decision.disposition === 'split-defer'
+      ? '$ split-defer must preserve the prior deferred-follow-up prefix and append exactly the decision-recorded identities and text in order'
+      : `$ ${authority.decision.disposition} cannot change deferred follow-ups`);
   }
   return errors;
 }

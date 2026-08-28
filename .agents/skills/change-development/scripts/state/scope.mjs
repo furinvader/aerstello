@@ -78,6 +78,42 @@ export function validateEvidenceForBoundary(evidence, { state, closureDigest, am
   return [...new Set(errors)].sort();
 }
 
+function criterionFromPlan({ id, description }) {
+  return { id, text: description };
+}
+
+export function validateAdmissionScopeSemantics(evidence, { effectivePlan, minimalClosure }) {
+  const errors = [];
+  const expectedSourceScope = {
+    objective: effectivePlan?.objective,
+    requiredCriteria: minimalClosure?.requiredCriteria,
+    nonGoals: minimalClosure?.nonGoals,
+    implementationGuidance: minimalClosure?.optionalGuidance,
+  };
+  const expectedAcceptedScope = {
+    criteria: (effectivePlan?.criteria ?? []).map(criterionFromPlan),
+    invariants: [
+      ...(minimalClosure?.invariants ?? []),
+      ...(minimalClosure?.mandatoryConstraints ?? []),
+    ],
+    minimalClosure: minimalClosure?.outcome,
+    authorizedShape: minimalClosure?.authorizedShape,
+    unauthorizedShape: minimalClosure?.unauthorizedExpansion,
+    deferredShape: (minimalClosure?.deferredFollowups ?? []).map(({ id }) => id),
+  };
+  if (!isDeepStrictEqual(evidence?.packet?.sourceScope, expectedSourceScope)) {
+    errors.push('$ packet.sourceScope does not equal the canonical source and minimal-closure projection');
+  }
+  const actualAcceptedScope = evidence?.packet?.acceptedScope;
+  const actualProjection = actualAcceptedScope === null || typeof actualAcceptedScope !== 'object'
+    ? actualAcceptedScope
+    : Object.fromEntries(Object.keys(expectedAcceptedScope).map((key) => [key, actualAcceptedScope[key]]));
+  if (!isDeepStrictEqual(actualProjection, expectedAcceptedScope)) {
+    errors.push('$ packet.acceptedScope does not equal the exact effective-plan and minimal-closure projection');
+  }
+  return errors;
+}
+
 export function scopeGateForVerdict(verdict) {
   if (verdict === ADMITTING_VERDICT) return { status: 'current', phase: null, blocker: null };
   if (verdict === 'human-decision-required') {

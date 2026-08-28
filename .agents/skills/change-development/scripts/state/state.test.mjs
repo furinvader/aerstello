@@ -91,10 +91,12 @@ function testScopeEvidence(state, plan, closure, { boundary = 'admission', subje
     acceptedCriterionIds: [criterion.id], invariantIds: [], nonGoalIds: [], guidanceIds: [],
     rationale: 'The mechanism directly implements the accepted test criterion.' };
   const packet = { schemaVersion: 1, binding,
-    sourceScope: { objective: plan.objective, requiredCriteria: [{ id: criterion.id, text: criterion.description }],
-      nonGoals: [], implementationGuidance: [] },
-    acceptedScope: { criteria: [{ id: criterion.id, text: criterion.description }], invariants: [],
-      minimalClosure: closure.outcome, authorizedShape: ['durable-test-change'], unauthorizedShape: [], deferredShape: [],
+    sourceScope: { objective: plan.objective, requiredCriteria: [...closure.requiredCriteria],
+      nonGoals: [...closure.nonGoals], implementationGuidance: [...closure.optionalGuidance] },
+    acceptedScope: { criteria: plan.criteria.map(({ id, description }) => ({ id, text: description })),
+      invariants: [...closure.invariants, ...closure.mandatoryConstraints],
+      minimalClosure: closure.outcome, authorizedShape: [...closure.authorizedShape],
+      unauthorizedShape: [...closure.unauthorizedExpansion], deferredShape: closure.deferredFollowups.map(({ id }) => id),
       ...(authorityDecisions.length > 0 ? { authorityDecisions } : {}) },
     changeInventory: { summary: 'Exercise one durable test mechanism.', paths: [], dependencies: [],
       publicSurfaces: [], persistentSurfaces: [], subsystems: [], mappings: [mapping] }, tripwires: [] };
@@ -156,11 +158,12 @@ function materialScopeDecision(state, evidence, disposition, approvedShape, deci
   };
 }
 
-function materialAmendment(state, plan, priorClosure, authorizedShape, id = 'apply-material-decision') {
+function materialAmendment(state, plan, priorClosure, authorizedShape, id = 'apply-material-decision',
+  closureOverrides = {}) {
   const resultingPlan = structuredClone(plan); resultingPlan.planRevision = state.plan.revision + 1;
   const minimalClosure = testMinimalClosure(state, resultingPlan, {
     revision: priorClosure.revision + 1, previousContractDigest: state.scope.closureDigest,
-    authorizedShape, operatorDecisionDigests: [...state.scope.decisionDigests],
+    authorizedShape, operatorDecisionDigests: [...state.scope.decisionDigests], ...closureOverrides,
   });
   const amendment = { id, reason: 'Apply the exact recorded material disposition.', authorization: 'operator',
     trigger: state.scope.currentEvidenceDigest, delta: { changed: ['authorizedShape'] },
@@ -168,13 +171,14 @@ function materialAmendment(state, plan, priorClosure, authorizedShape, id = 'app
   return { amendment, resultingPlan, minimalClosure };
 }
 
-async function materialDecisionFixture(name, mechanisms = ['material-alpha', 'material-beta']) {
+async function materialDecisionFixture(name, mechanisms = ['material-alpha', 'material-beta'], closureOverrides = {}) {
   const fixture = repository(name);
   const planning = await initializeState({ cwd: fixture.cwd, changeId: name, mode: 'implement',
     baseBranch: 'main', planningRef: fixture.sha, source: descriptor });
   const plan = planFor(planning);
   const closure = testMinimalClosure(planning, plan, {
     authorizedShape: ['durable-test-change', 'unrelated-existing-shape', ...mechanisms],
+    ...closureOverrides,
   });
   const admission = testScopeEvidence(planning, plan, closure);
   admission.packet.acceptedScope.authorizedShape = [...closure.authorizedShape];
@@ -367,6 +371,46 @@ test('binding rejects command-kind conflicts before packet evidence or revision 
   assert.equal(existsSync(join(changeDirectory(historical.cwd, state.changeId), 'implementation', 'tasks', 'second-task')), false);
 });
 
+test('plan admission rejects every contradictory scope semantic projection without durable mutation', async () => {
+  const fixture = repository('semantic plan admission');
+  const planning = await initializeState({ cwd: fixture.cwd, changeId: 'semantic-plan-admission', mode: 'implement',
+    baseBranch: 'main', planningRef: fixture.sha, source: descriptor });
+  const plan = planFor(planning);
+  const closure = testMinimalClosure(planning, plan, {
+    optionalGuidance: [{ id: 'keep-local', text: 'Keep the implementation local.' }],
+    unauthorizedExpansion: ['repository-wide-framework'],
+    deferredFollowups: [{ id: 'later-delivery', text: 'Deliver through the later workflow.' }],
+  });
+  const exact = testScopeEvidence(planning, plan, closure);
+  const mutations = [
+    (packet) => { packet.sourceScope.objective = 'Contradict the accepted objective.'; },
+    (packet) => { packet.sourceScope.requiredCriteria[0].text = 'Rewrite the source requirement.'; },
+    (packet) => { packet.sourceScope.nonGoals[0].text = 'Rewrite the non-goal.'; },
+    (packet) => { packet.sourceScope.implementationGuidance[0].text = 'Rewrite optional guidance.'; },
+    (packet) => { packet.acceptedScope.criteria[0].text = 'Rewrite the effective-plan criterion.'; },
+    (packet) => { packet.acceptedScope.invariants[0].text = 'Rewrite an invariant.'; },
+    (packet) => { packet.acceptedScope.invariants[1].text = 'Rewrite a mandatory constraint.'; },
+    (packet) => { packet.acceptedScope.minimalClosure = 'Replace the closure outcome.'; },
+    (packet) => { packet.acceptedScope.authorizedShape = ['different-mechanism']; },
+    (packet) => { packet.acceptedScope.unauthorizedShape = ['different-expansion']; },
+    (packet) => { packet.acceptedScope.deferredShape = ['different-follow-up']; },
+  ];
+  const directory = changeDirectory(fixture.cwd, planning.changeId);
+  const before = durableSnapshot(directory);
+  for (const mutate of mutations) {
+    const contradictory = structuredClone(exact);
+    mutate(contradictory.packet);
+    contradictory.packetDigest = digestJson(contradictory.packet);
+    assert.throws(() => acceptPlanWithScope({ cwd: fixture.cwd, plan, minimalClosure: closure,
+      scopeEvidence: contradictory, expectedRevision: planning.revision }),
+    (error) => error.code === 'PLAN_SCOPE_INVALID' && /projection/u.test(error.message));
+    assert.deepEqual(durableSnapshot(directory), before, 'semantic mismatch writes no durable bytes');
+  }
+  const accepted = acceptPlanWithScope({ cwd: fixture.cwd, plan, minimalClosure: closure,
+    scopeEvidence: exact, expectedRevision: planning.revision });
+  assert.equal(accepted.phase, 'ready-to-implement');
+});
+
 test('new bindings require minimality authority atomically while historical packet shapes remain readable', async () => {
   const fixture = repository('mandatory task minimality');
   const planning = await initializeState({ cwd: fixture.cwd, changeId: 'mandatory-task-minimality', mode: 'implement',
@@ -551,6 +595,67 @@ test('narrow material dispositions remove every assessed mechanism and preserve 
     const amendedClosure = JSON.parse(readFileSync(join(directory, 'scope', 'minimal-closure', '0002.json'), 'utf8'));
     assert.deepEqual(new Set(amendedClosure.authorizedShape),
       new Set(['durable-test-change', 'unrelated-existing-shape']));
+  }
+});
+
+test('split-defer preserves the exact deferred prefix and appends only decision follow-ups in order', async () => {
+  const priorFollowups = [{ id: 'existing-follow-up', text: 'Preserve the existing follow-up.' }];
+  const fixture = await materialDecisionFixture('material-split-followups',
+    ['material-alpha'], { deferredFollowups: priorFollowups });
+  const decision = materialScopeDecision(fixture.state, fixture.evidence, 'split-defer', [], 'split-followups');
+  decision.deferredFollowups = ['follow-up-alpha', 'follow-up-beta'];
+  const state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision, decision });
+  const directory = changeDirectory(fixture.cwd, state.changeId);
+  const before = durableSnapshot(directory);
+  const exactFollowups = [...priorFollowups,
+    { id: 'follow-up-alpha', text: 'follow-up-alpha' },
+    { id: 'follow-up-beta', text: 'follow-up-beta' }];
+  const mismatches = [
+    exactFollowups.slice(1),
+    [{ ...priorFollowups[0], text: 'Rewrite the existing follow-up.' }, ...exactFollowups.slice(1)],
+    exactFollowups.slice(0, -1),
+    [...exactFollowups, { id: 'extra-follow-up', text: 'extra-follow-up' }],
+    [priorFollowups[0], exactFollowups[2], exactFollowups[1]],
+  ];
+  for (const [index, deferredFollowups] of mismatches.entries()) {
+    const amendment = materialAmendment(state, fixture.plan, fixture.closure,
+      ['unrelated-existing-shape', 'durable-test-change'], `invalid-split-followups-${index + 1}`,
+      { deferredFollowups });
+    assert.throws(() => amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...amendment }),
+      (error) => error.code === 'SCOPE_AMENDMENT_INVALID' && /deferred-follow-up prefix/u.test(error.message));
+    assert.deepEqual(durableSnapshot(directory), before, 'invalid split-defer follow-ups write no durable bytes');
+  }
+  const exact = materialAmendment(state, fixture.plan, fixture.closure,
+    ['unrelated-existing-shape', 'durable-test-change'], 'exact-split-followups',
+    { deferredFollowups: exactFollowups });
+  const amended = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...exact });
+  assert.equal(amended.phase, 'implementing');
+});
+
+test('material dispositions other than split-defer cannot change deferred follow-ups', async () => {
+  for (const disposition of ['approve-material-amendment', 'reject-use-narrow']) {
+    const fixture = await materialDecisionFixture(`material-${disposition}-followups`, ['material-alpha'], {
+      deferredFollowups: [{ id: 'existing-follow-up', text: 'Preserve the existing follow-up.' }],
+    });
+    const approvedShape = disposition === 'approve-material-amendment' ? ['material-alpha'] : [];
+    const decision = materialScopeDecision(fixture.state, fixture.evidence, disposition, approvedShape,
+      `${disposition}-followups`);
+    const state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision, decision });
+    const authorizedShape = disposition === 'approve-material-amendment'
+      ? ['unrelated-existing-shape', 'durable-test-change', 'material-alpha']
+      : ['unrelated-existing-shape', 'durable-test-change'];
+    const amendment = materialAmendment(state, fixture.plan, fixture.closure, authorizedShape,
+      `${disposition}-changes-followups`, {
+        deferredFollowups: [
+          ...fixture.closure.deferredFollowups,
+          { id: 'unauthorized-follow-up', text: 'unauthorized-follow-up' },
+        ],
+      });
+    const directory = changeDirectory(fixture.cwd, state.changeId);
+    const before = durableSnapshot(directory);
+    assert.throws(() => amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...amendment }),
+      (error) => error.code === 'SCOPE_AMENDMENT_INVALID' && /cannot change deferred follow-ups/u.test(error.message));
+    assert.deepEqual(durableSnapshot(directory), before, `${disposition} follow-up change writes no durable bytes`);
   }
 });
 
@@ -3723,26 +3828,47 @@ test('historical accepted Git metadata ownership replays but requires an explici
   const safePlan = planFor(planning);
   const accepted = acceptPlan({ cwd: fixture.cwd, expectedRevision: planning.revision, plan: safePlan });
   const root = changeDirectory(fixture.cwd, accepted.changeId);
-  const historicalPlan = structuredClone(safePlan); historicalPlan.tasks[0].anticipatedPaths = ['.git/config'];
+  const historicalPlan = structuredClone(safePlan); historicalPlan.planRevision = 2;
+  historicalPlan.tasks[0].anticipatedPaths = ['.git/config'];
   const historicalDigest = digestJson(historicalPlan);
   const historicalState = structuredClone(accepted);
   delete historicalState.scope;
-  historicalState.plan.originalDigest = historicalDigest;
+  historicalState.plan.originalDigest = digestJson(safePlan);
   historicalState.plan.effectiveDigest = historicalDigest;
+  historicalState.plan.revision = 2;
+  historicalState.plan.amendmentCount = 1;
   historicalState.execution.planDigest = historicalDigest;
   historicalState.execution.tasks[0].anticipatedPaths = ['.git/config'];
-  writeReceiptJson(join(root, 'plan', 'plan.json'), historicalPlan);
+  const amendmentRecord = {
+    schemaVersion: 1, amendmentId: 'historical-unsafe-path', reason: 'Historical accepted amendment.',
+    trigger: 'historical-operator-decision', delta: { changed: ['anticipatedPaths'] },
+    previousDigest: historicalState.plan.originalDigest, newDigest: historicalDigest,
+    repositorySha: fixture.sha, authorization: 'operator', invalidatedEvidence: [],
+    resultingPlan: historicalPlan, createdAt: accepted.updatedAt,
+  };
+  const amendmentPath = join(root, 'plan', 'amendments', '0001.json');
+  const amendmentEvidencePath = join(root, 'plan', 'amendments', '0001.evidence.json');
+  writeReceiptJson(amendmentPath, amendmentRecord);
+  writeReceiptJson(amendmentEvidencePath, []);
   const transition = join(root, 'transitions', '00000001');
   const intentPath = join(transition, 'intent.json');
   const intent = JSON.parse(readFileSync(intentPath, 'utf8'));
   intent.nextState = historicalState;
   intent.nextStateDigest = digestJson(historicalState);
-  intent.evidence.planDigest = historicalDigest;
   for (const key of ['minimalClosureDigest', 'scopeAdmissionEvidenceDigest']) {
     delete intent.evidence[key]; delete intent.evidencePaths[key]; delete intent.authoritativeEvidence[key];
   }
-  intent.authoritativeEvidence.planDigest = {
-    ...intent.authoritativeEvidence.planDigest, digest: historicalDigest, value: historicalPlan,
+  intent.evidence.amendmentDigest = digestJson(amendmentRecord);
+  intent.evidence.amendmentPlanningEvidenceDigest = digestJson([]);
+  intent.evidencePaths.amendmentDigest = 'plan/amendments/0001.json';
+  intent.evidencePaths.amendmentPlanningEvidenceDigest = 'plan/amendments/0001.evidence.json';
+  intent.authoritativeEvidence.amendmentDigest = {
+    path: 'plan/amendments/0001.json', label: 'historical plan amendment',
+    digest: intent.evidence.amendmentDigest, value: amendmentRecord,
+  };
+  intent.authoritativeEvidence.amendmentPlanningEvidenceDigest = {
+    path: 'plan/amendments/0001.evidence.json', label: 'historical plan amendment evidence',
+    digest: intent.evidence.amendmentPlanningEvidenceDigest, value: [],
   };
   writeReceiptJson(intentPath, intent);
   const receiptPath = join(transition, 'receipt.json');
@@ -3760,15 +3886,32 @@ test('historical accepted Git metadata ownership replays but requires an explici
   assert.throws(() => bindTask({ cwd: fixture.cwd, packet: unsafePacket, expectedRevision: historicalState.revision }),
     (error) => error instanceof StateError && error.code === 'SCOPE_ADOPTION_REQUIRED');
   const closure = testMinimalClosure(historicalState, historicalPlan);
+  const staleOriginalEvidence = testScopeEvidence(historicalState, historicalPlan, closure, {
+    subjectDigest: historicalState.plan.originalDigest,
+    amendmentDigests: [digestJson(amendmentRecord)],
+  });
+  const beforeAdoption = durableSnapshot(root);
+  assert.throws(() => adoptScope({ cwd: fixture.cwd, expectedRevision: historicalState.revision,
+    minimalClosure: closure, scopeEvidence: staleOriginalEvidence }),
+  (error) => error.code === 'SCOPE_ADOPTION_INVALID');
+  assert.deepEqual(durableSnapshot(root), beforeAdoption,
+    'legacy adoption rejects an assessment of the obsolete original plan without durable mutation');
   const adopted = adoptScope({ cwd: fixture.cwd, expectedRevision: historicalState.revision, minimalClosure: closure,
-    scopeEvidence: testScopeEvidence(historicalState, historicalPlan, closure) });
+    scopeEvidence: testScopeEvidence(historicalState, historicalPlan, closure, {
+      amendmentDigests: [digestJson(amendmentRecord)],
+    }) });
   assert.throws(() => bindTask({ cwd: fixture.cwd, packet: unsafePacket, expectedRevision: adopted.revision }),
     (error) => error instanceof StateError && error.code === 'INVALID_TASK_PACKET');
   assert.equal(loadState(fixture.cwd).revision, adopted.revision);
 
-  const amendedPlan = structuredClone(historicalPlan); amendedPlan.planRevision = 2;
+  const amendedPlan = structuredClone(historicalPlan); amendedPlan.planRevision = 3;
   amendedPlan.tasks[0].anticipatedPaths = ['.gitignore'];
-  const amended = amendPlan({ cwd: fixture.cwd, expectedRevision: adopted.revision, resultingPlan: amendedPlan,
+  const replacementClosure = testMinimalClosure(adopted, amendedPlan, {
+    revision: 2, previousContractDigest: adopted.scope.closureDigest,
+    operatorDecisionDigests: [...adopted.scope.decisionDigests],
+  });
+  const amended = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: adopted.revision,
+    resultingPlan: amendedPlan, minimalClosure: replacementClosure,
     amendment: { id: 'replace-git-metadata', reason: 'Replace historical unsafe ownership.', authorization: 'operator',
       trigger: 'operator-decision', delta: { changed: ['anticipatedPaths'] }, invalidatedEvidence: [] } });
   const safePacket = packetFor(amended, amendedPlan, 'state-task');
