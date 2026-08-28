@@ -38,6 +38,7 @@ import { compareChecklistMappings } from '../source/checklists.mjs';
 import { captureSource, refreshSource as captureSourceRefresh } from '../source/source.mjs';
 import { createGhGraphqlAdapter } from '../source/gh-adapter.mjs';
 import { readGithubIssue } from '../source/github.mjs';
+import { buildDevelopmentScopeHandoff } from '../handoff/contracts.mjs';
 import { requiredSpecialistIds, validateSpecialistEvidence } from '../../../aerstello-specialists/scripts/validate-registry.mjs';
 import {
   affectedAreaCommands,
@@ -58,6 +59,7 @@ import {
   validateDecisionForEvidence,
   validateEvidenceForBoundary,
   validateMinorAmendmentAuthority,
+  validateActiveHandoffAuthority,
   validateScopeReturnResume,
 } from './scope.mjs';
 import {
@@ -920,6 +922,50 @@ function assertCurrentIntegratedScope(cwd, state, taskEvidence = null) {
   return { ...receipts, taskDigest };
 }
 
+function activeDevelopmentHandoffDigest(cwd, state, activeHandoffAuthority) {
+  const authorityErrors = validateActiveHandoffAuthority(activeHandoffAuthority);
+  if (authorityErrors.length > 0) {
+    throw new StateError(`Active development handoff authority is invalid:\n- ${authorityErrors.join('\n- ')}`,
+      'SCOPE_RETURN_INVALID');
+  }
+  const receipts = assertCurrentIntegratedScope(cwd, state);
+  const terminalIdentities = terminalTaskEvidence(cwd, state).map((entry) => ({
+    taskId: entry.packet.taskId,
+    binding: entry.binding,
+    packetDigest: entry.packetDigest,
+    resultDigest: entry.resultDigest,
+    provenanceDigest: entry.provenanceDigest,
+    terminalStatus: entry.terminalStatus,
+    integratedCommit: entry.integratedCommit,
+    integrationReceiptDigest: entry.integrationReceiptDigest,
+  }));
+  const terminalTaskSet = {
+    value: terminalIdentities,
+    digest: integratedTaskSetDigest(terminalIdentities),
+  };
+  const effectivePlan = readEffectivePlan(cwd, state);
+  const derived = buildDevelopmentScopeHandoff({
+    changeId: state.changeId,
+    headSha: state.git.headSha,
+    capturedAt: activeHandoffAuthority.value.capturedAt,
+    effectivePlan: { value: effectivePlan, digest: state.plan.effectiveDigest },
+    minimalClosure: receipts.closure,
+    amendments: receipts.amendmentRecords.map((value) => ({
+      value,
+      digest: scopeContractDigest(value),
+    })),
+    decisions: state.scope.decisionDigests.map((digest) =>
+      findScopeReceipt(cwd, state, 'decisions', digest, 'active handoff scope decision')),
+    terminalTaskSet,
+    integratedScopeEvidence: receipts.evidence,
+  });
+  if (serialized(derived) !== serialized(activeHandoffAuthority.value)) {
+    throw new StateError('Active handoff authority does not derive from the exact current development receipts',
+      'SCOPE_RETURN_INVALID');
+  }
+  return activeHandoffAuthority.digest;
+}
+
 export function integratedScopeAssessmentIdentity({ cwd = process.cwd(), changeId } = {}) {
   const root = repositoryRoot(cwd); const state = loadState(root, changeId);
   if (!state || state.phase !== 'integrated') {
@@ -1350,7 +1396,8 @@ function validateMaterialDecisionAmendment({ root, state, evidence, amendment, p
   return errors;
 }
 
-export function resumeScopeReturn({ cwd = process.cwd(), changeId, scopeReturn, expectedRevision,
+export function resumeScopeReturn({ cwd = process.cwd(), changeId, scopeReturn, activeHandoffAuthority,
+  expectedRevision,
   clock, crashStep, lockOptions } = {}) {
   const root = repositoryRoot(cwd); const selected = selectedChangeId(root, changeId);
   return withChangeLock(root, selected, () => {
@@ -1360,11 +1407,24 @@ export function resumeScopeReturn({ cwd = process.cwd(), changeId, scopeReturn, 
       throw new StateError('Guarded scope return requires preserved completed development authority', 'SCOPE_RETURN_INVALID');
     }
     const current = gitObservation(root, clock);
-    const errors = validateScopeReturnResume(scopeReturn, { currentHeadSha: current.headSha });
+    const activeHandoffAuthorityDigest = activeDevelopmentHandoffDigest(
+      root,
+      state,
+      activeHandoffAuthority,
+    );
+    const errors = validateScopeReturnResume(scopeReturn, {
+      currentHeadSha: current.headSha,
+      expectedAuthorityDigest: activeHandoffAuthorityDigest,
+    });
     if (!current.clean || current.branch !== state.git.branch) errors.push('$ scope return requires the exact clean owning branch');
     if (errors.length > 0) throw new StateError(`Scope return is invalid:\n- ${errors.join('\n- ')}`, 'SCOPE_RETURN_INVALID');
     const timestamp = now(clock);
-    const record = developmentScopeResumeRecord(scopeReturn, { changeId: state.changeId, currentHeadSha: current.headSha, resumedAt: timestamp });
+    const record = developmentScopeResumeRecord(scopeReturn, {
+      activeHandoffAuthorityDigest,
+      changeId: state.changeId,
+      currentHeadSha: current.headSha,
+      resumedAt: timestamp,
+    });
     const digest = scopeContractDigest(record);
     if (state.scope.returnDigests.includes(digest)) throw new StateError('Scope return is already recorded', 'SCOPE_RETURN_INVALID');
     const scope = { ...state.scope, status: 'assessment-required', currentEvidenceDigest: null,

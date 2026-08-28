@@ -8,7 +8,9 @@ import {
   validateScopeEvidence,
 } from '../scope/contracts.mjs';
 import {
+  scopeAuthorityDigest,
   scopeReturnResumeIdentity,
+  validateScopeAuthoritySnapshot,
   validateScopeReturnEnvelope,
 } from '../../../pr-review-cycle/scripts/contracts/scope-control.mjs';
 
@@ -30,6 +32,7 @@ export function expectedScopeIdentity({ state, closureDigest, amendmentRecords =
     sourceDigest: state.plan?.sourceCaptureDigest ?? state.source.latestDigest,
     planDigest: state.plan.effectiveDigest,
     amendmentDigests: amendmentDigests(amendmentRecords),
+    decisionDigests: [...(state.scope?.decisionDigests ?? [])],
     taskPacketDigest,
     subjectDigest,
     subjectSha,
@@ -140,19 +143,43 @@ export function validateMinorAmendmentAuthority({ evidence, amendment }) {
   return errors;
 }
 
-export function validateScopeReturnResume(envelope, { currentHeadSha, expectedAuthorityDigest = null } = {}) {
+export function validateActiveHandoffAuthority(receipt) {
+  const errors = [];
+  if (receipt === null || typeof receipt !== 'object' || Array.isArray(receipt)
+      || !isDeepStrictEqual(Object.keys(receipt).sort(), ['digest', 'value'])) {
+    return ['$ active handoff authority must contain exactly digest and value'];
+  }
+  const authorityErrors = validateScopeAuthoritySnapshot(receipt.value);
+  errors.push(...authorityErrors.map((error) => `authority: ${error}`));
+  if (receipt.value?.authorityKind !== 'imported') {
+    errors.push('$ active handoff authority must be an imported development handoff');
+  }
+  if (receipt.digest !== scopeAuthorityDigest(receipt.value)) {
+    errors.push('$ active handoff authority receipt digest does not match its canonical value');
+  }
+  return [...new Set(errors)].sort();
+}
+
+export function validateScopeReturnResume(envelope, { currentHeadSha, expectedAuthorityDigest } = {}) {
   const errors = validateScopeReturnEnvelope(envelope);
   if (envelope?.reviewHeadSha !== currentHeadSha || envelope?.livePrHeadSha !== currentHeadSha) {
     errors.push('$ scope return must bind the exact clean current PR head');
   }
-  if (expectedAuthorityDigest !== null && envelope?.authorityDigest !== expectedAuthorityDigest) {
+  if (typeof expectedAuthorityDigest !== 'string') {
+    errors.push('$ active handoff authority digest is required independently of the scope return envelope');
+  } else if (envelope?.authorityDigest !== expectedAuthorityDigest) {
     errors.push('$ scope return authority does not match the current development authority');
   }
   return [...new Set(errors)].sort();
 }
 
-export function developmentScopeResumeRecord(envelope, { changeId, currentHeadSha, resumedAt }) {
-  const errors = validateScopeReturnResume(envelope, { currentHeadSha });
+export function developmentScopeResumeRecord(envelope, {
+  activeHandoffAuthorityDigest, changeId, currentHeadSha, resumedAt,
+}) {
+  const errors = validateScopeReturnResume(envelope, {
+    currentHeadSha,
+    expectedAuthorityDigest: activeHandoffAuthorityDigest,
+  });
   if (errors.length > 0) throw new TypeError(`Invalid scope return: ${errors.join('; ')}`);
   return {
     schemaVersion: 1,

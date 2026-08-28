@@ -12,6 +12,14 @@ function receipt(value) {
 }
 
 function fixture() {
+  const terminalTaskSet = receipt([{
+    taskId: 'operator-contract', binding: 1,
+    packetDigest: `sha256:${'1'.repeat(64)}`,
+    resultDigest: `sha256:${'2'.repeat(64)}`,
+    provenanceDigest: `sha256:${'3'.repeat(64)}`,
+    terminalStatus: 'integrated', integratedCommit: HEAD,
+    integrationReceiptDigest: `sha256:${'4'.repeat(64)}`,
+  }]);
   const effectivePlan = receipt({
     schemaVersion: 1, changeId: 'issue-55', planRevision: 1,
     source: { kind: 'github-issue', reference: 'furinvader/aerstello#55', captureDigest: SOURCE_DIGEST },
@@ -30,9 +38,9 @@ function fixture() {
   });
   const binding = {
     phase: 'integrated-head', source: minimalClosure.value.source,
-    subject: { digest: scopeContractDigest({ headSha: HEAD }), sha: HEAD },
+    subject: { digest: scopeContractDigest({ headSha: HEAD, taskSetDigest: terminalTaskSet.digest }), sha: HEAD },
     planDigest: effectivePlan.digest, amendmentDigests: [],
-    taskPacketDigest: scopeContractDigest({ tasks: ['operator-contract'] }),
+    taskPacketDigest: terminalTaskSet.digest,
   };
   const mappings = [
     ['handoff-scope-proof', 'The projection directly carries the required proof.'],
@@ -78,6 +86,7 @@ function fixture() {
   return {
     changeId: 'issue-55', headSha: HEAD, capturedAt: '2026-08-28T12:00:00.000Z',
     minimalClosure, effectivePlan, amendments: [], decisions: [],
+    terminalTaskSet,
     integratedScopeEvidence: receipt({
       schemaVersion: 1, changeId: 'issue-55', evidenceId: 'integrated-head-1', revision: 8,
       cadence: { boundary: 'integrated-head', trigger: null },
@@ -109,6 +118,8 @@ test('fails closed for stale receipt and authority identities', () => {
     (input) => { input.effectivePlan.digest = `sha256:${'b'.repeat(64)}`; },
     (input) => { input.minimalClosure.value.outcome = 'tampered'; },
     (input) => { input.integratedScopeEvidence.value.result.verdict = 'trim-required'; },
+    (input) => { input.terminalTaskSet.value[0].resultDigest = `sha256:${'5'.repeat(64)}`; },
+    (input) => { input.integratedScopeEvidence.value.packet.binding.subject.digest = `sha256:${'6'.repeat(64)}`; },
   ];
   for (const mutate of mutations) {
     const input = fixture();
@@ -122,4 +133,21 @@ test('rejects unknown input fields and bounded-list overflow', () => {
   const input = fixture();
   input.decisions = Array.from({ length: 129 }, () => input.minimalClosure);
   assert.throws(() => buildDevelopmentScopeHandoff(input), /at most 128/u);
+});
+
+test('derives terminal task and subject authority instead of trusting caller identities', () => {
+  const omitted = fixture();
+  delete omitted.terminalTaskSet;
+  assert.throws(() => buildDevelopmentScopeHandoff(omitted), /exactly/u);
+
+  const reordered = fixture();
+  const second = { ...reordered.terminalTaskSet.value[0], taskId: 'second-contract' };
+  reordered.terminalTaskSet.value.push(second);
+  reordered.terminalTaskSet.digest = scopeContractDigest(reordered.terminalTaskSet.value);
+  assert.throws(() => buildDevelopmentScopeHandoff(reordered), /terminal task set/u);
+
+  const forged = fixture();
+  forged.terminalTaskSet.digest = forged.integratedScopeEvidence.value.packet.binding.taskPacketDigest;
+  forged.terminalTaskSet.value[0].packetDigest = `sha256:${'7'.repeat(64)}`;
+  assert.throws(() => buildDevelopmentScopeHandoff(forged), /digest/u);
 });

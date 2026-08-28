@@ -4,6 +4,8 @@ import { isDeepStrictEqual } from 'node:util';
 import { canonicalJsonText } from '../contracts/contracts.mjs';
 import {
   scopeContractDigest,
+  taskSetDigest,
+  taskSetIdentity,
   validateMinimalClosureContract,
   validateScopeDecision,
   validateScopeEvidence,
@@ -104,6 +106,15 @@ function deferredFollowUps(closure) {
   return projected;
 }
 
+function terminalTaskSetAuthority(receipt) {
+  assertReceipt(receipt, 'terminalTaskSet');
+  const identity = taskSetIdentity(receipt.value);
+  if (!isDeepStrictEqual(identity, receipt.value) || receipt.digest !== taskSetDigest(identity)) {
+    throw new TypeError('terminalTaskSet must be the exact receipt-valid canonical terminal task identity');
+  }
+  return receipt.digest;
+}
+
 export function buildDevelopmentScopeHandoff(input) {
   assertFields(input, [
     'amendments',
@@ -114,6 +125,7 @@ export function buildDevelopmentScopeHandoff(input) {
     'headSha',
     'integratedScopeEvidence',
     'minimalClosure',
+    'terminalTaskSet',
   ], 'handoff input');
   if (!SHA.test(input.headSha ?? '')) throw new TypeError('headSha must be a full Git SHA');
   if (!DATE_TIME.test(input.capturedAt ?? '') || Number.isNaN(Date.parse(input.capturedAt))) {
@@ -122,6 +134,7 @@ export function buildDevelopmentScopeHandoff(input) {
   assertReceipt(input.effectivePlan, 'effectivePlan');
   assertReceipt(input.minimalClosure, 'minimalClosure', validateMinimalClosureContract);
   assertReceipt(input.integratedScopeEvidence, 'integratedScopeEvidence', validateScopeEvidence);
+  const terminalTaskSetDigest = terminalTaskSetAuthority(input.terminalTaskSet);
 
   const plan = input.effectivePlan.value;
   const closure = input.minimalClosure.value;
@@ -142,8 +155,20 @@ export function buildDevelopmentScopeHandoff(input) {
     errors.push('integrated assessment is stale for the handoff HEAD');
   }
   if (!isDeepStrictEqual(binding?.source, source) || binding?.planDigest !== input.effectivePlan.digest
-      || !isDeepStrictEqual(binding?.amendmentDigests, amendmentReceiptDigests)) {
+      || !isDeepStrictEqual(binding?.amendmentDigests, amendmentReceiptDigests)
+      || !isDeepStrictEqual(binding?.decisionDigests ?? [], decisionReceipts.map(({ digest }) => digest))) {
     errors.push('integrated assessment is stale for the effective authority');
+  }
+  if (binding?.taskPacketDigest !== terminalTaskSetDigest) {
+    errors.push('integrated assessment is stale for the terminal task set');
+  }
+  const expectedSubjectDigest = scopeContractDigest({
+    headSha: input.headSha,
+    taskSetDigest: terminalTaskSetDigest,
+  });
+  if (binding?.subject?.digest !== expectedSubjectDigest
+      || evidence.result?.binding?.subject?.digest !== expectedSubjectDigest) {
+    errors.push('integrated assessment subject is stale for the handoff HEAD and terminal task set');
   }
   if (evidence.closureDigest !== input.minimalClosure.digest) errors.push('integrated assessment is stale for minimal closure');
   if (errors.length > 0) throw new TypeError(`Cannot build development scope handoff: ${errors.join('; ')}`);

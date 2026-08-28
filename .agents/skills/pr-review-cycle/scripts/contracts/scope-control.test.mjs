@@ -122,6 +122,14 @@ function developmentReceipt(value) {
 }
 
 function developmentHandoffInput() {
+  const terminalTaskSet = developmentReceipt([{
+    taskId: 'scope-control-contract', binding: 1,
+    packetDigest: `sha256:${'1'.repeat(64)}`,
+    resultDigest: `sha256:${'2'.repeat(64)}`,
+    provenanceDigest: `sha256:${'3'.repeat(64)}`,
+    terminalStatus: 'integrated', integratedCommit: HEAD,
+    integrationReceiptDigest: `sha256:${'4'.repeat(64)}`,
+  }]);
   const effectivePlan = developmentReceipt({
     schemaVersion: 1, changeId: 'issue-55', planRevision: 1,
     source: { kind: 'github-issue', reference: 'furinvader/aerstello#56', captureDigest: DIGEST },
@@ -144,6 +152,12 @@ function developmentHandoffInput() {
     amendmentDigests: [],
   };
   bindAssessmentAuthority(pair, projectedAuthority);
+  pair.packet.binding.taskPacketDigest = terminalTaskSet.digest;
+  pair.packet.binding.subject.digest = scopeContractDigest({
+    headSha: HEAD,
+    taskSetDigest: terminalTaskSet.digest,
+  });
+  pair.result.binding = structuredClone(pair.packet.binding);
   const integratedScopeEvidence = developmentReceipt({
     schemaVersion: 1, changeId: 'issue-55', evidenceId: 'integrated-head-1', revision: 1,
     cadence: { boundary: 'integrated-head', trigger: null },
@@ -153,7 +167,8 @@ function developmentHandoffInput() {
   });
   return {
     changeId: 'issue-55', headSha: HEAD, capturedAt: AT,
-    minimalClosure, effectivePlan, amendments: [], decisions: [], integratedScopeEvidence,
+    minimalClosure, effectivePlan, amendments: [], decisions: [], terminalTaskSet,
+    integratedScopeEvidence,
   };
 }
 

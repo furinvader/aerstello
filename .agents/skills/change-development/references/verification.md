@@ -20,7 +20,9 @@ specialist finding may remain unresolved. Missing, malformed, oversized,
 incomplete, dirty, or stale input is not verifier-ready and must fail closed.
 Admission also requires the receipt-authoritative minimal-closure digest and a
 current applicable `within-scope` assessment for the exact integrated HEAD,
-effective plan, ordered amendment receipts, and terminal task-set digest. The
+effective plan, ordered amendment receipts, ordered operator-decision receipt
+digests, and terminal task-set digest. Historical zero-decision evidence may
+omit the optional decision sequence. The
 verifier reviews that supplied proof; it never reruns canonical scope analysis
 or substitutes a live assessment.
 One canonical composer defines the semantic item identities, kinds, digests,
@@ -145,5 +147,7 @@ a separate workflow.
 
 Separate PR preparation may transform the exact current scope receipts with
 [`buildDevelopmentScopeHandoff`](../scripts/handoff/contracts.mjs). That pure,
-bounded projection is compatible input authority, not evidence that targeted
+bounded projection requires the receipt-valid canonical terminal task set and
+recomputes its digest plus the exact HEAD/task-set subject digest. The resulting
+projection is compatible input authority, not evidence that targeted
 validation, official review, CI, E2E, threads, delivery, or merge gates passed.

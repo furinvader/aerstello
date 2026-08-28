@@ -152,9 +152,12 @@ export function scopeEvidenceIsCurrent(evidence, expected) {
     ['sourceDigest', evidence.packet.binding.source.digest],
     ['planDigest', evidence.packet.binding.planDigest],
     ['amendmentDigests', evidence.packet.binding.amendmentDigests],
+    ['decisionDigests', evidence.packet.binding.decisionDigests ?? []],
     ['taskPacketDigest', evidence.packet.binding.taskPacketDigest],
     ['subjectDigest', evidence.packet.binding.subject.digest],
     ['subjectSha', evidence.packet.binding.subject.sha],
     ['closureDigest', evidence.closureDigest],
-  ].every(([field, actual]) => digestJson(actual) === digestJson(expected[field]));
+  ].every(([field, actual]) => digestJson(actual) === digestJson(
+    field === 'decisionDigests' ? expected[field] ?? [] : expected[field],
+  ));
 }

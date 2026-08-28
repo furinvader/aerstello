@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 
 import { readGithubIssue } from '../source/github.mjs';
 import { refreshSource as captureSourceRefresh } from '../source/source.mjs';
+import { buildDevelopmentScopeHandoff } from '../handoff/contracts.mjs';
+import { scopeAuthorityDigest } from '../../../pr-review-cycle/scripts/contracts/scope-control.mjs';
 
 import {
   acceptPlan as acceptPlanWithScope,
@@ -48,6 +50,7 @@ import {
   renderStatus,
   reconcileIntegration,
   rejectTask,
+  resumeScopeReturn,
   runValidation,
   scheduleWave,
   startTask,
@@ -78,11 +81,12 @@ function testMinimalClosure(state, plan, overrides = {}) {
 
 function testScopeEvidence(state, plan, closure, { boundary = 'admission', subjectDigest = digestJson(plan),
   subjectSha = state.planningSha, taskPacketDigest = null, amendmentDigests = [], revision = state.revision + 1,
-  trigger = boundary === 'task' ? 'test-task-tripwire' : null } = {}) {
+  trigger = boundary === 'task' ? 'test-task-tripwire' : null, authorityDecisions = [] } = {}) {
   const criterion = plan.criteria[0];
   const binding = { phase: boundary === 'admission' ? 'plan' : boundary,
     source: closure.source, subject: { digest: subjectDigest, sha: subjectSha },
-    planDigest: digestJson(plan), amendmentDigests, taskPacketDigest };
+    planDigest: digestJson(plan), amendmentDigests, taskPacketDigest,
+    ...(authorityDecisions.length > 0 ? { decisionDigests: authorityDecisions.map(({ digest }) => digest) } : {}) };
   const mapping = { mechanism: 'durable-test-change', sourceCriterionIds: [criterion.id],
     acceptedCriterionIds: [criterion.id], invariantIds: [], nonGoalIds: [], guidanceIds: [],
     rationale: 'The mechanism directly implements the accepted test criterion.' };
@@ -90,7 +94,8 @@ function testScopeEvidence(state, plan, closure, { boundary = 'admission', subje
     sourceScope: { objective: plan.objective, requiredCriteria: [{ id: criterion.id, text: criterion.description }],
       nonGoals: [], implementationGuidance: [] },
     acceptedScope: { criteria: [{ id: criterion.id, text: criterion.description }], invariants: [],
-      minimalClosure: closure.outcome, authorizedShape: ['durable-test-change'], unauthorizedShape: [], deferredShape: [] },
+      minimalClosure: closure.outcome, authorizedShape: ['durable-test-change'], unauthorizedShape: [], deferredShape: [],
+      ...(authorityDecisions.length > 0 ? { authorityDecisions } : {}) },
     changeInventory: { summary: 'Exercise one durable test mechanism.', paths: [], dependencies: [],
       publicSurfaces: [], persistentSurfaces: [], subsystems: [], mappings: [mapping] }, tripwires: [] };
   const result = { schemaVersion: 1, binding, verdict: 'within-scope', summary: 'The test mechanism is within scope.',
@@ -103,11 +108,11 @@ function testScopeEvidence(state, plan, closure, { boundary = 'admission', subje
     closureDigest: digestJson(closure) };
 }
 
-function materialScopeEvidence(state, plan, closure, mechanisms, amendmentDigests = []) {
+function materialScopeEvidence(state, plan, closure, mechanisms, amendmentDigests = [], authorityDecisions = []) {
   const taskPacketDigest = digestJson({ test: 'material-decision', mechanisms });
   const evidence = testScopeEvidence(state, plan, closure, {
     boundary: 'task', subjectDigest: taskPacketDigest, subjectSha: state.git.headSha, taskPacketDigest,
-    amendmentDigests,
+    amendmentDigests, authorityDecisions,
   });
   const materialMappings = mechanisms.map((mechanism) => ({
     mechanism, sourceCriterionIds: [], acceptedCriterionIds: [], invariantIds: [], nonGoalIds: [], guidanceIds: [],
@@ -258,10 +263,18 @@ function integratedScopeEvidenceFor(options) {
       : JSON.parse(readFileSync(join(directory, 'plan', 'amendments', `${String(state.plan.amendmentCount).padStart(4, '0')}.json`), 'utf8')).resultingPlan;
     const closureFiles = readdirSync(join(directory, 'scope', 'minimal-closure')).filter((name) => name.endsWith('.json')).sort();
     const closure = JSON.parse(readFileSync(join(directory, 'scope', 'minimal-closure', closureFiles.at(-1)), 'utf8'));
+    const authorityDecisions = state.scope.decisionDigests.map((digest) => {
+      const decision = readdirSync(join(directory, 'scope', 'decisions'))
+        .filter((name) => name.endsWith('.json'))
+        .map((name) => JSON.parse(readFileSync(join(directory, 'scope', 'decisions', name), 'utf8')))
+        .find((candidate) => digestJson(candidate) === digest);
+      return { id: decision.decisionId, digest, disposition: decision.disposition,
+        authorizedShape: [...decision.approvedShape] };
+    });
     const identity = integratedScopeAssessmentIdentity({ cwd: options.cwd, changeId: options.changeId });
     return testScopeEvidence(state, plan, closure, { boundary: 'integrated-head',
       amendmentDigests: identity.amendmentDigests, subjectDigest: identity.subjectDigest,
-      subjectSha: identity.subjectSha, taskPacketDigest: identity.taskPacketDigest });
+      subjectSha: identity.subjectSha, taskPacketDigest: identity.taskPacketDigest, authorityDecisions });
   }
   return null;
 }
@@ -569,7 +582,12 @@ test('unknown and historical material approvals cannot authorize the current ame
     'plan', 'amendments', '0001.json'), 'utf8'));
   const currentPlan = first.resultingPlan;
   const currentEvidence = materialScopeEvidence(state, currentPlan, firstClosure, ['material-gamma'],
-    [digestJson(firstAmendment)]);
+    [digestJson(firstAmendment)], [{
+      id: 'approve-historical-alpha',
+      digest: state.scope.decisionDigests[0],
+      disposition: 'approve-material-amendment',
+      authorizedShape: ['material-alpha'],
+    }]);
   state = assessScope({ cwd: historical.cwd, changeId: state.changeId, scopeEvidence: currentEvidence,
     expectedRevision: state.revision });
   state = recordScopeDecision({ cwd: historical.cwd, expectedRevision: state.revision,
@@ -1127,6 +1145,85 @@ test('two same-base workers integrate by delta, resume intent-only integration, 
   writeFileSync(join(cwd, 'request.md'), '# Request\n\n- [ ] <!-- aerstello:item=durable-state --> Add durable state\n');
   state = await finalizeDevelopment({ cwd, expectedRevision: state.revision });
   assert.equal(state.phase, 'development-ready');
+  assert.equal(validateState({ cwd }).valid, true);
+
+  const changePath = changeDirectory(cwd, state.changeId);
+  const closure = testMinimalClosure(planning, plan);
+  const integratedEvidenceDirectory = join(changePath, 'scope', 'evidence', 'integrated-head');
+  const integratedScopeEvidenceValue = readdirSync(integratedEvidenceDirectory)
+    .filter((name) => name.endsWith('.json'))
+    .map((name) => JSON.parse(readFileSync(join(integratedEvidenceDirectory, name), 'utf8')))
+    .find((value) => digestJson(value) === state.scope.currentEvidenceDigest);
+  const terminalTaskSetValue = state.execution.tasks.map((task) => {
+    const integrationReceipt = readdirSync(join(changePath, 'transitions'))
+      .map((name) => join(changePath, 'transitions', name))
+      .filter((path) => existsSync(join(path, 'complete')))
+      .map((path) => ({
+        intent: JSON.parse(readFileSync(join(path, 'intent.json'), 'utf8')),
+        receipt: JSON.parse(readFileSync(join(path, 'receipt.json'), 'utf8')),
+      }))
+      .find(({ intent }) => intent.type === 'task-integrated'
+        && intent.nextState.execution.tasks.some(({ id, status }) => id === task.id && status === 'integrated'));
+    return {
+      taskId: task.id,
+      binding: task.binding,
+      packetDigest: task.packetDigest,
+      resultDigest: task.resultDigest,
+      provenanceDigest: digestJson(JSON.parse(readFileSync(join(changePath, 'implementation', 'provenance',
+        task.id, `${String(task.binding).padStart(4, '0')}.json`), 'utf8'))),
+      terminalStatus: task.status,
+      integratedCommit: task.integratedCommit,
+      integrationReceiptDigest: digestJson(integrationReceipt.receipt),
+    };
+  });
+  const handoff = buildDevelopmentScopeHandoff({
+    changeId: state.changeId,
+    headSha: state.git.headSha,
+    capturedAt: '2026-08-18T12:30:00.000Z',
+    effectivePlan: { value: plan, digest: digestJson(plan) },
+    minimalClosure: { value: closure, digest: digestJson(closure) },
+    amendments: [],
+    decisions: [],
+    terminalTaskSet: { value: terminalTaskSetValue, digest: taskSetDigest(terminalTaskSetValue) },
+    integratedScopeEvidence: {
+      value: integratedScopeEvidenceValue,
+      digest: digestJson(integratedScopeEvidenceValue),
+    },
+  });
+  const activeHandoffAuthority = { value: handoff, digest: scopeAuthorityDigest(handoff) };
+  const scopeReturn = {
+    schemaVersion: 1,
+    repository: 'owner/repository',
+    prNumber: 60,
+    authorityDigest: activeHandoffAuthority.digest,
+    journalDigest: `sha256:${'a'.repeat(64)}`,
+    blockerId: 'scope-blocker',
+    decisionId: 'scope-decision',
+    reviewHeadSha: state.git.headSha,
+    livePrHeadSha: state.git.headSha,
+    rootCauseId: 'scope-root',
+    findingIds: ['thread:PRRT_scope'],
+    findingFingerprints: ['scope-fingerprint'],
+    assessmentDigest: handoff.integratedHeadAssessment.digest,
+    smallestExpansion: 'Apply only the returned bounded scope change.',
+    narrowAlternative: 'Retain the already accepted development authority.',
+    trimAlternative: 'Remove the returned expansion.',
+    inventory: {
+      paths: ['.agents/skills/change-development'], dependencies: [], publicSurfaces: [],
+      persistentSurfaces: [], validation: ['node --test'],
+    },
+    priorDecisionIds: [],
+    createdAt: '2026-08-18T12:31:00.000Z',
+  };
+  const beforeForeignReturn = durableSnapshot(changePath);
+  assert.throws(() => resumeScopeReturn({ cwd, expectedRevision: state.revision,
+    activeHandoffAuthority, scopeReturn: { ...scopeReturn, authorityDigest: `sha256:${'b'.repeat(64)}` } }),
+  (error) => error.code === 'SCOPE_RETURN_INVALID');
+  assert.deepEqual(durableSnapshot(changePath), beforeForeignReturn,
+    'foreign same-HEAD return authority cannot advance state, sidecars, transitions, or events');
+  state = resumeScopeReturn({ cwd, expectedRevision: state.revision, activeHandoffAuthority, scopeReturn });
+  assert.equal(state.phase, 'integrated');
+  assert.equal(state.scope.status, 'assessment-required');
   assert.equal(validateState({ cwd }).valid, true);
 });
 

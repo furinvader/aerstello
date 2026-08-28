@@ -260,8 +260,15 @@ try {
     writeJson(recordScopeDecision({ ...common, expectedRevision: parseRevision(parsed['expected-revision'], true),
       decision: json(parsed.decision, '--decision') }));
   } else if (command === 'resume-scope-return') {
+    const input = json(parsed.input, '--input');
+    if (input === null || typeof input !== 'object' || Array.isArray(input)
+        || JSON.stringify(Object.keys(input).sort()) !== JSON.stringify([
+          'activeHandoffAuthority', 'scopeReturn',
+        ])) {
+      throw new UsageError('resume-scope-return --input must contain exactly activeHandoffAuthority and scopeReturn');
+    }
     writeJson(resumeScopeReturn({ ...common, expectedRevision: parseRevision(parsed['expected-revision'], true),
-      scopeReturn: json(parsed.input, '--input') }));
+      activeHandoffAuthority: input.activeHandoffAuthority, scopeReturn: input.scopeReturn }));
   } else if (command === 'record-decision') {
     writeJson(recordDecision({
       ...common,

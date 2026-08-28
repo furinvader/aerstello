@@ -154,6 +154,12 @@ scope return is appended only for the exact clean returned HEAD, clears current
 assessment authority, and requires a fresh integrated-HEAD assessment plus the
 ordinary validation and verifier lifecycle before a later Development-ready
 handoff. Prior plans, handoffs, and review history remain immutable.
+The resume input also carries the receipt-valid active imported handoff
+authority independently of the return envelope. Under the existing change
+lock, the lifecycle derives that handoff from the exact active plan, closure,
+ordered amendments and decisions, terminal task receipts, and integrated
+assessment, then requires the derived canonical authority digest to equal the
+envelope before committing any return evidence.
 
 Run `npm run change:status` first. Use `recover` only when its exact next action identifies an interrupted transition. Recovery may complete a transition only when its intact committed intent, current revision, digests, repository observation, and enumerated crash boundary match exactly. From the intent's authoritative bundle it may materialize only the exact bound domain sidecar or a missing matching sidecar receipt. It may also reconstruct the exact deterministic transition receipt, canonical event history, and completion marker.
 

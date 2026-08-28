@@ -280,6 +280,9 @@ test('operator contracts expose bounded scope cadence and pure handoff authority
   assert.match(docs['references/implementation.md'], /worker discovery return contract/u);
   assert.match(docs['references/state-and-recovery.md'], /recovery never reruns scope analysis/u);
   assert.match(docs['references/verification.md'], /never reruns canonical scope analysis/u);
+  assert.match(docs['README.md'], /canonical terminal task-set/u);
+  assert.match(docs['README.md'], /activeHandoffAuthority/u);
+  assert.match(docs['references/state-and-recovery.md'], /receipt-valid active imported handoff/u);
 
   const handoff = readFileSync(join(skillDirectory, 'scripts', 'handoff', 'contracts.mjs'), 'utf8');
   assert.match(handoff, /export function buildDevelopmentScopeHandoff/u);

@@ -182,6 +182,7 @@ test('scope evidence binds canonical packet, result, cadence, and exact applicab
     sourceDigest: A,
     planDigest: C,
     amendmentDigests: [],
+    decisionDigests: [],
     taskPacketDigest: D,
     subjectDigest: B,
     subjectSha: SHA,
@@ -191,6 +192,7 @@ test('scope evidence binds canonical packet, result, cadence, and exact applicab
     sourceDigest: A,
     planDigest: C,
     amendmentDigests: [],
+    decisionDigests: [],
     taskPacketDigest: D,
     subjectDigest: B,
     subjectSha: '2'.repeat(40),
@@ -198,6 +200,33 @@ test('scope evidence binds canonical packet, result, cadence, and exact applicab
   }), false);
   assert.ok(validateScopeEvidence({ ...evidence, packetDigest: B })
     .includes('$ packetDigest must equal the canonical assessment packet digest'));
+});
+
+test('scope freshness binds ordered decision receipts while legacy zero-decision evidence remains readable', () => {
+  const packet = assessmentPacket();
+  const result = assessmentResult(packet);
+  const evidence = {
+    schemaVersion: 1, changeId: 'issue-55-minimal-scope', evidenceId: 'decision-bound', revision: 2,
+    cadence: { boundary: 'integrated-head', trigger: null }, packet,
+    packetDigest: scopeContractDigest(packet), result, resultDigest: scopeContractDigest(result), closureDigest: A,
+  };
+  const expected = {
+    sourceDigest: A, planDigest: C, amendmentDigests: [], decisionDigests: [], taskPacketDigest: D,
+    subjectDigest: B, subjectSha: SHA, closureDigest: A,
+  };
+  assert.equal(scopeEvidenceIsCurrent(evidence, expected), true);
+
+  packet.binding.decisionDigests = [A, B];
+  packet.acceptedScope.authorityDecisions = [
+    { id: 'first-decision', digest: A, disposition: 'split-defer', authorizedShape: [] },
+    { id: 'second-decision', digest: B, disposition: 'reject-use-narrow', authorizedShape: [] },
+  ];
+  result.binding = packet.binding;
+  evidence.packetDigest = scopeContractDigest(packet);
+  evidence.resultDigest = scopeContractDigest(result);
+  assert.equal(scopeEvidenceIsCurrent(evidence, { ...expected, decisionDigests: [A, B] }), true);
+  assert.equal(scopeEvidenceIsCurrent(evidence, { ...expected, decisionDigests: [B, A] }), false);
+  assert.equal(scopeEvidenceIsCurrent(evidence, { ...expected, decisionDigests: [A] }), false);
 });
 
 test('integrated task packet identity is the canonical task-set projection', () => {
