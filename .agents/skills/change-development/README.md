@@ -30,6 +30,41 @@ the standalone source adapter are read-only.
 - **Development-ready**: local proof that the exact HEAD, source, plan, task set, validation, specialist evidence, and final verifier result are all current and clean; it is not delivery authority.
 - **Exact next action**: one bounded command or operator action stored in state and emitted by status/hooks.
 
+## Minimality and scope authority
+
+Every newly accepted plan carries a receipt-protected minimal-closure contract
+and an applicable canonical scope assessment bound to its source, Planning SHA,
+and exact candidate plan. Only `within-scope` admits the plan. Trim and bounded
+minor-amendment outcomes return to planning; material change enters the durable
+human-decision route; insufficient evidence fails closed. Historical accepted
+records remain readable, but an unfinished legacy change must adopt this
+authority append-only before gaining new execution or finalization authority.
+
+Assessment cadence is limited to admission, a task boundary when packet
+tripwires or worker discovery require it, and the exact integrated HEAD. Task
+evidence binds criterion need, removal counterfactual, forbidden expansion,
+deterministic inventories, and a fail-closed discovery return. A worker never
+expands its packet. Decisions and amendments are append-only and
+exact-evidence-bound; a minor amendment covers only necessary adjacent work
+with no material trigger or independent workstream.
+
+`npm run change:status` reports the compact current scope status, boundary,
+decision count, and guarded-return count. Validation, verification, and
+Development-ready require a current `within-scope` assessment for the exact
+integrated HEAD, effective plan and ordered amendments, minimal closure, and
+terminal task-set identity. A `trim-required` integrated result returns to
+bounded removal or simplification work.
+
+After Development-ready, separate PR preparation may call the pure
+[`buildDevelopmentScopeHandoff`](scripts/handoff/contracts.mjs) projection with
+receipt-validated closure, effective-plan, ordered amendment, decision, and
+integrated-assessment records. It returns only bounded source, plan, amendment,
+closure, exact-HEAD, canonical assessment-pair, decision, deferred-follow-up,
+and capture-time identities. It does not read or mutate durable state, create a
+sidecar, initialize PR review, satisfy review or CI gates, or carry raw issue,
+plan, diff, log, or transcript payloads. Issues 25 and 26 own PR preparation and
+delivery coordination.
+
 ## Start or resume
 
 Run commands from the repository root or use `npm --prefix /path/to/aerstello run …` from a nested workspace.

@@ -28,8 +28,13 @@ const EXPECTED_CANONICAL_FILES = [
   'schemas/implementation-plan.schema.json',
   'schemas/implementation-result.schema.json',
   'schemas/implementation-task.schema.json',
+  'schemas/minimal-closure-contract.schema.json',
+  'schemas/scope-decision.schema.json',
+  'schemas/scope-evidence.schema.json',
   'scripts/contracts/contracts.mjs',
   'scripts/contracts/contracts.test.mjs',
+  'scripts/handoff/contracts.mjs',
+  'scripts/handoff/contracts.test.mjs',
   'scripts/hooks/hooks.test.mjs',
   'scripts/hooks/pre-compact.mjs',
   'scripts/hooks/session-start.mjs',
@@ -38,6 +43,8 @@ const EXPECTED_CANONICAL_FILES = [
   'scripts/implementation/contracts.test.mjs',
   'scripts/implementation/execution.test.mjs',
   'scripts/paths.mjs',
+  'scripts/scope/contracts.mjs',
+  'scripts/scope/contracts.test.mjs',
   'scripts/source/checklists.mjs',
   'scripts/source/checklists.test.mjs',
   'scripts/source/fixtures/issue-22.md',
@@ -48,6 +55,7 @@ const EXPECTED_CANONICAL_FILES = [
   'scripts/source/source.test.mjs',
   'scripts/state/cli.mjs',
   'scripts/state/fixtures/hold-change-lock.mjs',
+  'scripts/state/scope.mjs',
   'scripts/state/state.mjs',
   'scripts/state/state.test.mjs',
   'scripts/structure.test.mjs',
@@ -71,6 +79,7 @@ const EXPECTED_ADAPTERS = {
   '.codex/agents/development-integration-verifier.toml': [
     'README.md',
     'references/verification.md',
+    'scripts/handoff/contracts.mjs',
     'schemas/development-verification-result.schema.json',
     'schemas/development-verifier-context.schema.json',
   ],
@@ -255,6 +264,31 @@ test('operator docs expose exact source descriptors and durable state layout', (
   assert.match(planningReference, /Decisions, scenarios, and the product-scenario disposition remain separate plan records/u);
 });
 
+test('operator contracts expose bounded scope cadence and pure handoff authority', () => {
+  const docs = Object.fromEntries(DOCUMENTATION_FILES.map((name) => [
+    name,
+    readFileSync(join(skillDirectory, name), 'utf8'),
+  ]));
+  for (const fragment of [
+    'receipt-protected minimal-closure',
+    'integrated HEAD',
+    'Development-ready',
+    'buildDevelopmentScopeHandoff',
+    'Issues 25 and 26',
+  ]) assert.ok(docs['README.md'].includes(fragment), `operator guide misses ${fragment}`);
+  assert.match(docs['references/planning.md'], /Only `within-scope` freezes the\s+candidate/u);
+  assert.match(docs['references/implementation.md'], /worker discovery return contract/u);
+  assert.match(docs['references/state-and-recovery.md'], /recovery never reruns scope analysis/u);
+  assert.match(docs['references/verification.md'], /never reruns canonical scope analysis/u);
+
+  const handoff = readFileSync(join(skillDirectory, 'scripts', 'handoff', 'contracts.mjs'), 'utf8');
+  assert.match(handoff, /export function buildDevelopmentScopeHandoff/u);
+  assert.equal(handoff.includes('pr-review-cycle'), false, 'production handoff must not import PR-review authority');
+  for (const forbidden of ['writeFile', 'mkdir', 'spawn', 'fetch(', 'gh ']) {
+    assert.equal(handoff.includes(forbidden), false, `handoff projection contains ${forbidden}`);
+  }
+});
+
 test('schema identifiers and the operator guide each have one canonical copy', () => {
   const files = repositoryFiles();
   const schemaPaths = [
@@ -268,6 +302,9 @@ test('schema identifiers and the operator guide each have one canonical copy', (
     '.agents/skills/change-development/schemas/implementation-plan.schema.json',
     '.agents/skills/change-development/schemas/implementation-result.schema.json',
     '.agents/skills/change-development/schemas/implementation-task.schema.json',
+    '.agents/skills/change-development/schemas/minimal-closure-contract.schema.json',
+    '.agents/skills/change-development/schemas/scope-decision.schema.json',
+    '.agents/skills/change-development/schemas/scope-evidence.schema.json',
   ];
   const ids = schemaPaths.map((path) => JSON.parse(readRepositoryFile(path)).$id);
   assert.equal(ids.every((id) => typeof id === 'string' && id.length > 0), true);

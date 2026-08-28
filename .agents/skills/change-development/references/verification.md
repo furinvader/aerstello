@@ -18,6 +18,11 @@ must have passed, every reviewer selected by each immutable stored specialist
 route must have supplied exact-HEAD evidence in canonical order, and no
 specialist finding may remain unresolved. Missing, malformed, oversized,
 incomplete, dirty, or stale input is not verifier-ready and must fail closed.
+Admission also requires the receipt-authoritative minimal-closure digest and a
+current applicable `within-scope` assessment for the exact integrated HEAD,
+effective plan, ordered amendment receipts, and terminal task-set digest. The
+verifier reviews that supplied proof; it never reruns canonical scope analysis
+or substitutes a live assessment.
 One canonical composer defines the semantic item identities, kinds, digests,
 summaries, ordering, UTF-8 chunking, 500-item limit, and 256-KiB full-context
 limit used by both admission and final context construction. It accepts
@@ -137,3 +142,8 @@ outside the lock and rechecks revision plus exact HEAD under lock. Capture
 errors or races do not mutate state; progress drift starts a fresh integrated
 round and material drift follows the decision/amendment route. Delivery remains
 a separate workflow.
+
+Separate PR preparation may transform the exact current scope receipts with
+[`buildDevelopmentScopeHandoff`](../scripts/handoff/contracts.mjs). That pure,
+bounded projection is compatible input authority, not evidence that targeted
+validation, official review, CI, E2E, threads, delivery, or merge gates passed.

@@ -1,0 +1,166 @@
+import { isDeepStrictEqual } from 'node:util';
+
+import {
+  scopeContractDigest,
+  validateMinimalClosureContract,
+  validateScopeDecision,
+  validateScopeEvidence,
+} from '../scope/contracts.mjs';
+
+const DIGEST = /^sha256:[0-9a-f]{64}$/u;
+const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
+const DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u;
+const MAX_AMENDMENTS = 128;
+const MAX_DECISIONS = 128;
+const MAX_FOLLOW_UPS = 128;
+
+function assertObject(value, label) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(`${label} must be an object`);
+  }
+}
+
+function assertFields(value, fields, label) {
+  assertObject(value, label);
+  const actual = Object.keys(value).sort();
+  const expected = [...fields].sort();
+  if (!isDeepStrictEqual(actual, expected)) {
+    throw new TypeError(`${label} must contain exactly ${expected.join(', ')}`);
+  }
+}
+
+function assertReceipt(receipt, label, validate = null) {
+  assertFields(receipt, ['digest', 'value'], label);
+  if (!DIGEST.test(receipt.digest ?? '') || receipt.digest !== scopeContractDigest(receipt.value)) {
+    throw new TypeError(`${label} digest does not match its canonical value`);
+  }
+  const errors = validate?.(receipt.value) ?? [];
+  if (errors.length > 0) throw new TypeError(`${label} is invalid: ${errors.join('; ')}`);
+}
+
+function assertUnique(values, label) {
+  if (new Set(values).size !== values.length) throw new TypeError(`${label} contains duplicates`);
+}
+
+function clone(value) {
+  return structuredClone(value);
+}
+
+function amendmentDigests(amendments, effectivePlan) {
+  if (!Array.isArray(amendments) || amendments.length > MAX_AMENDMENTS) {
+    throw new TypeError(`amendments must contain at most ${MAX_AMENDMENTS} receipt records`);
+  }
+  let previousDigest = null;
+  const digests = amendments.map((receipt, index) => {
+    assertReceipt(receipt, `amendments[${index}]`);
+    const amendment = receipt.value;
+    assertObject(amendment, `amendments[${index}].value`);
+    if (!DIGEST.test(amendment.previousDigest ?? '') || !DIGEST.test(amendment.newDigest ?? '')) {
+      throw new TypeError(`amendments[${index}] lacks canonical plan digests`);
+    }
+    if (index > 0 && amendment.previousDigest !== previousDigest) {
+      throw new TypeError('amendments do not form one ordered effective-plan chain');
+    }
+    if (scopeContractDigest(amendment.resultingPlan) !== amendment.newDigest) {
+      throw new TypeError(`amendments[${index}] resulting plan digest does not match`);
+    }
+    previousDigest = amendment.newDigest;
+    return receipt.digest;
+  });
+  if (amendments.length > 0 && previousDigest !== effectivePlan.digest) {
+    throw new TypeError('final amendment does not produce the effective plan');
+  }
+  assertUnique(digests, 'amendment digests');
+  return digests;
+}
+
+function approvedDecisions(decisions, closure) {
+  if (!Array.isArray(decisions) || decisions.length > MAX_DECISIONS) {
+    throw new TypeError(`decisions must contain at most ${MAX_DECISIONS} receipt records`);
+  }
+  const projected = decisions.map((receipt, index) => {
+    assertReceipt(receipt, `decisions[${index}]`, validateScopeDecision);
+    return { id: receipt.value.decisionId, digest: receipt.digest };
+  });
+  assertUnique(projected.map(({ id }) => id), 'decision IDs');
+  if (!isDeepStrictEqual(projected.map(({ digest }) => digest), closure.value.operatorDecisionDigests)) {
+    throw new TypeError('decision receipts do not match minimal-closure decision authority');
+  }
+  return projected;
+}
+
+function deferredFollowUps(closure) {
+  const entries = closure.value.deferredFollowups;
+  if (entries.length > MAX_FOLLOW_UPS) {
+    throw new TypeError(`deferred follow-ups must contain at most ${MAX_FOLLOW_UPS} entries`);
+  }
+  const projected = entries.map(({ id, text: reference }) => ({ id, reference }));
+  if (projected.some(({ reference }) => reference.length > 1000)) {
+    throw new TypeError('deferred follow-up reference exceeds 1000 characters');
+  }
+  assertUnique(projected.map(({ id }) => id), 'deferred follow-up IDs');
+  return projected;
+}
+
+export function buildDevelopmentScopeHandoff(input) {
+  assertFields(input, [
+    'amendments',
+    'capturedAt',
+    'changeId',
+    'decisions',
+    'effectivePlan',
+    'headSha',
+    'integratedScopeEvidence',
+    'minimalClosure',
+  ], 'handoff input');
+  if (!SHA.test(input.headSha ?? '')) throw new TypeError('headSha must be a full Git SHA');
+  if (!DATE_TIME.test(input.capturedAt ?? '') || Number.isNaN(Date.parse(input.capturedAt))) {
+    throw new TypeError('capturedAt must be an RFC 3339 timestamp');
+  }
+  assertReceipt(input.effectivePlan, 'effectivePlan');
+  assertReceipt(input.minimalClosure, 'minimalClosure', validateMinimalClosureContract);
+  assertReceipt(input.integratedScopeEvidence, 'integratedScopeEvidence', validateScopeEvidence);
+
+  const plan = input.effectivePlan.value;
+  const closure = input.minimalClosure.value;
+  const evidence = input.integratedScopeEvidence.value;
+  const amendmentReceiptDigests = amendmentDigests(input.amendments, input.effectivePlan);
+  const decisionReceipts = approvedDecisions(input.decisions, input.minimalClosure);
+  const errors = [];
+  if (input.changeId !== closure.changeId || input.changeId !== evidence.changeId
+      || input.changeId !== plan.changeId) errors.push('change identity is inconsistent');
+  if (closure.planDigest !== input.effectivePlan.digest) errors.push('minimal closure is stale for the effective plan');
+  if (closure.planningSha !== plan.planning?.planningSha) errors.push('minimal closure Planning SHA is stale');
+  const source = { type: plan.source?.kind, identity: plan.source?.reference, digest: plan.source?.captureDigest };
+  if (!isDeepStrictEqual(closure.source, source)) errors.push('minimal closure source is stale');
+  const binding = evidence.packet?.binding;
+  if (evidence.cadence?.boundary !== 'integrated-head' || binding?.phase !== 'integrated-head'
+      || evidence.result?.verdict !== 'within-scope') errors.push('current evidence is not an integrated-HEAD within-scope assessment');
+  if (binding?.subject?.sha !== input.headSha || evidence.result?.binding?.subject?.sha !== input.headSha) {
+    errors.push('integrated assessment is stale for the handoff HEAD');
+  }
+  if (!isDeepStrictEqual(binding?.source, source) || binding?.planDigest !== input.effectivePlan.digest
+      || !isDeepStrictEqual(binding?.amendmentDigests, amendmentReceiptDigests)) {
+    errors.push('integrated assessment is stale for the effective authority');
+  }
+  if (evidence.closureDigest !== input.minimalClosure.digest) errors.push('integrated assessment is stale for minimal closure');
+  if (errors.length > 0) throw new TypeError(`Cannot build development scope handoff: ${errors.join('; ')}`);
+
+  return {
+    schemaVersion: 1,
+    authorityKind: 'imported',
+    source: clone(source),
+    planDigest: input.effectivePlan.digest,
+    amendmentDigests: clone(amendmentReceiptDigests),
+    minimalClosure: { statement: closure.outcome, digest: input.minimalClosure.digest },
+    handoffHeadSha: input.headSha,
+    integratedHeadAssessment: {
+      packet: clone(evidence.packet),
+      result: clone(evidence.result),
+      digest: scopeContractDigest({ packet: evidence.packet, result: evidence.result }),
+    },
+    approvedDecisions: clone(decisionReceipts),
+    deferredFollowUps: clone(deferredFollowUps(input.minimalClosure)),
+    capturedAt: input.capturedAt,
+  };
+}

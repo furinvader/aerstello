@@ -18,7 +18,8 @@ request, run CI, mutate GitHub, or merge.
 4. Read [implementation](references/implementation.md) before upgrading state, binding a task packet, creating a worker worktree, accepting a result, or integrating a commit.
 5. Read [verification](references/verification.md) before exact-HEAD validation, stored-route specialist review, final verification, finding disposition, remediation, or Development-ready finalization.
 6. Apply the selected profile and deterministic routes from the [Aerstello specialist capability](../aerstello-specialists/SKILL.md). Treat its guidance as advisory; the accepted plan and immutable task packet remain authoritative.
-7. Use `npm run change:state -- <command>` for lifecycle transitions, `npm run change:worktree -- <command>` for owned worker worktrees, and `npm run change:status` for bounded human-readable context. Stop on ambiguous input, invalid evidence, or a blocked recovery instead of guessing.
+7. Keep the receipt-protected minimal closure and current exact-boundary scope assessment authoritative through admission, triggered task work, integrated-HEAD verification, decisions, amendments, and recovery. Use the pure [handoff projection](scripts/handoff/contracts.mjs) only after Development-ready to carry that proof into separate PR preparation; it grants no PR-review authority by itself.
+8. Use `npm run change:state -- <command>` for lifecycle transitions, `npm run change:worktree -- <command>` for owned worker worktrees, and `npm run change:status` for bounded human-readable context. Stop on ambiguous input, invalid evidence, or a blocked recovery instead of guessing.
 
 An accepted plan is immutable. Record an authorized amendment as a new append-only artifact; never rewrite the accepted plan or an earlier amendment.
 

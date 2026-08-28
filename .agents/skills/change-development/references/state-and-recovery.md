@@ -36,6 +36,12 @@ change-development/
     │       ├── <number>.json[.sha256]
     │       └── <number>.evidence.json[.sha256]
     ├── decisions/<decision-id>.json[.sha256]
+    ├── scope/
+    │   ├── candidates/<plan-digest>.json[.sha256]
+    │   ├── minimal-closure/<revision>.json[.sha256]
+    │   ├── evidence/<boundary>/<revision-and-identity>.json[.sha256]
+    │   ├── decisions/<revision-and-identity>.json[.sha256]
+    │   └── returns/<revision>.json[.sha256]
     ├── implementation/
     │   ├── tasks/<task-id>/<binding>.json[.sha256]
     │   ├── provenance/<task-id>/<binding>.json[.sha256]
@@ -97,6 +103,12 @@ archived. `implement` and `full` continue through bounded execution,
 integration, and local verification to `development-ready`. Push, PR, GitHub,
 CI, review-cycle, delivery, and merge work remain outside this state machine.
 
+The compact `scope` projection records `current`, `assessment-required`, or
+`awaiting-decision`, the closure/admission/current evidence digests, current
+boundary and subject SHA, and ordered decision and guarded-return digests. It
+never replaces the receipt-protected sidecars. `change:status` exposes only the
+bounded status, boundary, counts, and exact next action.
+
 ## Locking and transitions
 
 Initialization, `active.json`, and archive operations take the global lifecycle lock. State transitions take the per-change lock. If both are needed, always acquire global then change; never invert that order. A stale lock is reclaimed only after the fixed threshold when its recorded process is dead on the current host, or when an incomplete lock has remained stale for that threshold. Other contention times out; never delete a lock heuristically.
@@ -133,6 +145,15 @@ receipt-protected finalization transition that also proves every terminal
 worker manifest has a matching removal tombstone.
 
 ## Recovery
+
+Scope recovery follows the same receipt rule: reconstruct only evidence named
+by an intact committed transition intent. Missing, stale, duplicated, or
+tampered closure, assessment, decision, amendment, or return evidence blocks;
+recovery never reruns scope analysis or guesses a disposition. A guarded PR
+scope return is appended only for the exact clean returned HEAD, clears current
+assessment authority, and requires a fresh integrated-HEAD assessment plus the
+ordinary validation and verifier lifecycle before a later Development-ready
+handoff. Prior plans, handoffs, and review history remain immutable.
 
 Run `npm run change:status` first. Use `recover` only when its exact next action identifies an interrupted transition. Recovery may complete a transition only when its intact committed intent, current revision, digests, repository observation, and enumerated crash boundary match exactly. From the intent's authoritative bundle it may materialize only the exact bound domain sidecar or a missing matching sidecar receipt. It may also reconstruct the exact deterministic transition receipt, canonical event history, and completion marker.
 
