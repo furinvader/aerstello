@@ -21,7 +21,9 @@ import {
   validateState,
 } from '../state/state.mjs';
 import { createTaskWorktree } from '../worktree/worktree.mjs';
-import { implementationTaskDigest } from './contracts.mjs';
+import {
+  SCOPE_TRIPWIRE_CATEGORIES, evaluateScopeTripwires, implementationTaskDigest,
+} from './contracts.mjs';
 
 const repositories = [];
 const registry = loadRegistry();
@@ -161,6 +163,40 @@ function packetFor(context, taskId, overrides = {}) {
     ...overrides,
   };
 }
+
+test('worker execution inventories trigger assessment on exact changes and remain neutral when unchanged', () => {
+  const tripwires = SCOPE_TRIPWIRE_CATEGORIES.map((category, index) => ({
+    id: `execution-${String(index).padStart(2, '0')}-${category}`,
+    category,
+    inventory: [`${category}-baseline`],
+  }));
+  const governed = {
+    schemaVersion: 1, changeId: 'execution-tripwires', taskId: 'inventory-check', planRevision: 1,
+    planDigest: `sha256:${'a'.repeat(64)}`, planningSha: 'b'.repeat(40), taskBaseSha: 'b'.repeat(40),
+    specialization: 'ops-workflow', riskTags: ['workflow'], affectedAreas: ['workflow'],
+    planningSignals: { browserVisible: false, relatedTestSelectionUncertain: false },
+    specialistRoute: profile().route, behaviorMapperEvidence: null,
+    objective: 'Observe bounded scope inventories.', evidence: 'Exact inventory changes request scope assessment.',
+    decisionIds: [], decisionContext: [], acceptanceCriteriaIds: ['inventory-observed'],
+    acceptanceCriteria: [{ id: 'inventory-observed', description: 'Every named inventory is observed.' }],
+    allowedPaths: ['output/**'], forbiddenPaths: [], dependencies: [],
+    minimalityAuthority: {
+      closureDigest: `sha256:${'c'.repeat(64)}`,
+      criterionNeed: [{ criterionId: 'inventory-observed', rationale: 'Removal leaves scope changes unobserved.' }],
+      removalCounterfactual: 'Without exact inventory comparison, unexpected scope can pass unnoticed.',
+      forbiddenExpansion: ['Tripwires do not authorize or reject implementation work.'], tripwires,
+      discoveryReturn: { status: 'blocked', workerCommit: null, authority: 'unchanged' },
+    },
+    requiredValidation: { unit: [{ command: 'node --test tests/execution.test.mjs', reason: 'Observe inventories.' }], system: [] },
+  };
+  const baseline = Object.fromEntries(tripwires.map(({ id, inventory }) => [id, inventory]));
+  assert.deepEqual(evaluateScopeTripwires(governed, baseline), []);
+  for (const tripwire of tripwires) {
+    const observed = structuredClone(baseline);
+    observed[tripwire.id] = [`${tripwire.category}-changed`];
+    assert.deepEqual(evaluateScopeTripwires(governed, observed).map(({ id }) => id), [tripwire.id]);
+  }
+});
 
 function bind(context, taskId) {
   const packet = packetFor(context, taskId);

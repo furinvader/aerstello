@@ -22,6 +22,9 @@
     "changedPaths": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/repositoryPath" } },
     "validation": { "type": "array", "items": { "$ref": "#/$defs/validationResult" } },
     "unexpectedDependencies": { "$ref": "#/$defs/textList" },
+    "scopeDiscovery": {
+      "oneOf": [{ "$ref": "#/$defs/scopeDiscovery" }, { "type": "null" }]
+    },
     "summary": { "$ref": "#/$defs/text" }
   },
   "allOf": [
@@ -49,6 +52,20 @@
           "unexpectedDependencies": { "type": "array", "maxItems": 0 }
         }
       }
+    },
+    {
+      "if": {
+        "properties": { "scopeDiscovery": { "type": "object" } },
+        "required": ["scopeDiscovery"]
+      },
+      "then": {
+        "properties": {
+          "status": { "const": "blocked" },
+          "workerCommit": { "type": "null" },
+          "changedPaths": { "type": "array", "maxItems": 0 },
+          "unexpectedDependencies": { "type": "array", "minItems": 1, "maxItems": 1 }
+        }
+      }
     }
   ],
   "$defs": {
@@ -61,6 +78,32 @@
       "pattern": "^(?!/)(?!.*//)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*(?:^|/)\\.git(?:/|$))(?!.*[\\u0000-\\u001f\\u007f-\\u009f])[^/*?\\[\\]{}]+(?:/[^/*?\\[\\]{}]+)*$"
     },
     "textList": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/text" } },
+    "scopeEvidence": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "identity", "detail"],
+      "properties": {
+        "kind": { "enum": ["git-path", "owned-path", "package", "schema", "state-path", "public-surface", "persistent-surface", "capability", "task", "validation", "non-goal", "repeated-root", "dependency"] },
+        "identity": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "\\S" },
+        "detail": { "$ref": "#/$defs/text" }
+      }
+    },
+    "authorityRequest": {
+      "type": "object", "additionalProperties": false, "required": ["field", "values"],
+      "properties": {
+        "field": { "enum": ["paths", "criteria", "dependencies", "public-surfaces", "persistent-surfaces", "validation", "durable-authority"] },
+        "values": { "type": "array", "minItems": 1, "maxItems": 256, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "\\S" } }
+      }
+    },
+    "scopeDiscovery": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "summary", "evidence", "triggeredTripwireIds", "requestedAuthority"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "summary": { "$ref": "#/$defs/text" },
+        "evidence": { "type": "array", "minItems": 1, "maxItems": 256, "items": { "$ref": "#/$defs/scopeEvidence" } },
+        "triggeredTripwireIds": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "requestedAuthority": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/$defs/authorityRequest" } }
+      }
+    },
     "validationResult": {
       "type": "object", "additionalProperties": false, "required": ["command", "result", "summary"],
       "properties": {
