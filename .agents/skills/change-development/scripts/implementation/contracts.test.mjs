@@ -335,7 +335,7 @@ test('implemented, blocked, failed, and no-change outcomes are explicit and raw 
   for (const status of ['blocked', 'failed']) {
     assert.deepEqual(validateImplementationResult(result(task, {
       status, workerCommit: null, changedPaths: [], validation: [],
-      unexpectedDependencies: status === 'blocked' ? ['An unplanned producer is required.'] : [],
+      unexpectedDependencies: [],
     })), [], status);
   }
   assert.deepEqual(validateImplementationResult(result(task, {
@@ -382,11 +382,16 @@ test('structured scope discovery stops without a commit and cannot grant packet 
       summary: 'The ordinary blocker occurred before validation.' })),
     unexpectedDependencies: ['An unowned lifecycle path is required.'],
   });
-  assert.deepEqual(validateImplementationResultAgainstTask(governed, unstructured, []), [],
-    'an ordinary blocked result is not reclassified as structured discovery');
+  assert.match(validateImplementationResultAgainstTask(governed, unstructured, []).join('\n'),
+    /requires structured scopeDiscovery/u,
+    'an unexpected dependency cannot bypass structured discovery governance');
   const failed = { ...unstructured, status: 'failed' };
-  assert.deepEqual(validateImplementationResultAgainstTask(governed, failed, []), [],
-    'an ordinary failed result is not reclassified as structured discovery');
+  assert.match(validateImplementationResultAgainstTask(governed, failed, []).join('\n'),
+    /requires structured scopeDiscovery/u,
+    'a failed result cannot bypass structured discovery governance');
+  const ordinaryBlocked = { ...unstructured, unexpectedDependencies: [] };
+  assert.deepEqual(validateImplementationResultAgainstTask(governed, ordinaryBlocked, []), [],
+    'an ordinary blocker without an unexpected dependency remains distinct from scope discovery');
 
   const unboundTripwire = structuredClone(blocked);
   unboundTripwire.scopeDiscovery.triggeredTripwireIds = ['not-bound'];
@@ -439,7 +444,7 @@ test('planned E2E selectors require implementation while blocked and failed rema
   for (const status of ['blocked', 'failed']) {
     const failClosed = result(planned, {
       status, workerCommit: null, changedPaths: [], validation,
-      unexpectedDependencies: ['The planned selector could not be realized.'],
+      unexpectedDependencies: [],
     });
     assert.deepEqual(validateImplementationResultAgainstTask(planned, failClosed, []), [], status);
   }

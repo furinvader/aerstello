@@ -567,14 +567,12 @@ export function nextActionFor(state) {
     ? 'Archive this completed plan-only change.'
     : state.schemaVersion === 1 ? 'Run change:state upgrade-state with the current expected revision.'
       : !state.scope ? 'Run change:state adopt-scope, then continue with the implementation capability before binding new task authority.'
-        : state.scope.status !== 'current' ? 'Run change:state assess-scope for the exact next task authority.'
-          : 'Continue with the implementation capability by binding the next dependency-ready task.';
+        : 'Continue with the implementation capability by binding the next dependency-ready task; assess task scope only if binding reports exact changed tripwire IDs.';
   if (state.phase === 'implementing') {
     if (state.execution?.activeWave.length) return 'Start or accept results for every task in the active implementation wave.';
     if (state.execution?.tasks.some((task) => task.status === 'accepted')) return 'Integrate the next accepted task in dependency order.';
     if (state.execution?.tasks.every((task) => ['integrated', 'no-change'].includes(task.status))) return 'Remove every task worktree, then run change:state finalize-integration.';
-    if (state.scope?.status !== 'current' || state.scope.currentBoundary !== 'task') return 'Run change:state assess-scope for the exact next task packet before binding it.';
-    return 'Bind or schedule the next dependency-ready implementation task.';
+    return 'Bind or schedule the next dependency-ready implementation task; assess task scope only if binding reports exact changed tripwire IDs.';
   }
   if (state.phase === 'integrating') return 'Run change:state reconcile-integration for the exact persisted integration intent.';
   if (state.phase === 'integrated') return state.scope?.status === 'current' && state.scope.currentBoundary === 'integrated-head'
@@ -598,7 +596,7 @@ export function nextActionFor(state) {
         : state.blockedReasons?.some((reason) => reason.includes('insufficient evidence'))
           ? 'Run change:state assess-scope again with sufficient exact evidence for the unchanged authority.'
     : state.scope?.status === 'assessment-required'
-      && state.execution?.tasks.some((task) => task.status === 'blocked')
+      && state.blockedReasons?.filter((reason) => reason.includes('reported blocked scope discovery:')).length === 1
       ? 'Run change:state assess-scope for the exact receipt-backed worker scope discovery; task authority remains unchanged.'
     : state.execution?.tasks.some((task) => task.status === 'accepted')
       ? 'Integrate the next dependency-ready accepted task, then resolve the remaining blocked or failed work.'
@@ -1774,7 +1772,8 @@ function canonicalTaskBlockers(cwd, state, execution, inFlight = null) {
       if (objectDigest(result) !== task.resultDigest || result.taskId !== task.id || result.status !== task.status) {
         throw new StateError(`Task ${task.id} failure evidence does not match its execution summary`, 'TASK_RESULT_MISMATCH');
       }
-      return [boundedTaskBlocker(`Task ${task.id} reported ${task.status}: `, result.summary)];
+      const report = result.scopeDiscovery ? 'blocked scope discovery' : task.status;
+      return [boundedTaskBlocker(`Task ${task.id} reported ${report}: `, result.summary)];
     }
     if (task.status === 'rejected') {
       const rejection = rejectionEvidence(cwd, state, task, inFlight);

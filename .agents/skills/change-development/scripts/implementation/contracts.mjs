@@ -321,6 +321,9 @@ export function validateImplementationResult(value) {
   if (errors.length > 0) return [...new Set(errors)];
   if (['implemented', 'no-change'].includes(value.status) && value.validation.some(({ result }) => result !== 'passed')) errors.push('$.validation must contain only passed commands for a successful result');
   if (new Set(value.validation.map(({ command }) => command)).size !== value.validation.length) errors.push('$.validation must not report a command more than once');
+  if (value.unexpectedDependencies.length > 0 && !value.scopeDiscovery) {
+    errors.push('$.unexpectedDependencies requires structured scopeDiscovery');
+  }
   if (value.scopeDiscovery) {
     if (!sameJson(value.unexpectedDependencies, [value.scopeDiscovery.summary])) {
       errors.push('$.unexpectedDependencies must contain exactly the structured scope discovery summary');

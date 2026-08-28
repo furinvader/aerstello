@@ -305,6 +305,8 @@ test('task scope cadence binds unchanged observations directly and gates exact c
   const directlyBound = bindTaskWithScope({ cwd: unchanged.cwd, packet: unchangedPacket,
     expectedRevision: unchangedState.revision });
   assert.equal(directlyBound.execution.tasks[0].status, 'bound');
+  assert.match(directlyBound.nextAction, /Bind or schedule/u);
+  assert.match(directlyBound.nextAction, /only if binding reports exact changed tripwire IDs/u);
   assert.equal(directlyBound.scope.currentBoundary, 'admission');
   assert.equal(directlyBound.scope.currentEvidenceDigest, admissionDigest,
     'non-triggering binding leaves the existing scope evidence untouched');
@@ -378,6 +380,7 @@ test('structured worker discovery invalidates task scope and admits only its exa
   assert.equal(state.phase, 'blocked');
   assert.equal(state.scope.status, 'assessment-required');
   assert.equal(state.scope.currentEvidenceDigest, null);
+  assert.match(state.blockedReasons[0], /reported blocked scope discovery/u);
   assert.match(state.nextAction, /receipt-backed worker scope discovery/u);
 
   const packetDigest = implementationTaskDigest(packet);
@@ -3771,6 +3774,17 @@ test('every phase exposes one exact next action', () => {
   ]);
   for (const [phase, pattern] of expected) assert.match(nextActionFor({ ...state, phase }), pattern, phase);
   assert.match(nextActionFor({ ...state, phase: 'ready-to-implement', mode: 'full' }), /implementation capability/u);
+  assert.match(nextActionFor({ ...state, phase: 'ready-to-implement', mode: 'full', schemaVersion: 2,
+    scope: { status: 'assessment-required' } }), /only if binding reports exact changed tripwire IDs/u);
+  assert.match(nextActionFor({ ...state, phase: 'implementing', mode: 'full', schemaVersion: 2,
+    scope: { status: 'assessment-required' }, execution: { activeWave: [], tasks: [{ status: 'bound' }] } }),
+  /Bind or schedule/u);
+  assert.doesNotMatch(nextActionFor({ ...state, phase: 'blocked', scope: { status: 'assessment-required' },
+    blockedReasons: ['Task state-task reported blocked: An ordinary blocker.'],
+    execution: { activeWave: [], tasks: [{ status: 'blocked' }] } }), /assess-scope/u);
+  assert.match(nextActionFor({ ...state, phase: 'blocked', scope: { status: 'assessment-required' },
+    blockedReasons: ['Task state-task reported blocked scope discovery: One unexpected dependency.'],
+    execution: { activeWave: [], tasks: [{ status: 'blocked' }] } }), /receipt-backed worker scope discovery/u);
   assert.match(nextActionFor({ ...state, phase: 'blocked', verification: {
     humanDecisionRequiredFingerprints: ['sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
   } }), /durable human authorization/u);
