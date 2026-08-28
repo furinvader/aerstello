@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   getKnownE2ESelectors,
+  materializeTargetedValidationArgv,
   normalizeSelector,
   parseRelatedE2ECommand,
   parseTargetedValidationCommand,
@@ -16,9 +17,12 @@ import {
 } from './targeted-validation.mjs';
 
 const featureRoot = join(dirname(fileURLToPath(import.meta.url)), '../../../../..', 'specs', 'features');
+const BASE_SHA = 'a'.repeat(40);
+const HEAD_SHA = 'b'.repeat(40);
 
 test('targeted command parsing accepts direct focused commands and rejects wrappers and shell syntax', () => {
   for (const command of [
+    'git diff --check',
     'npm run check:workflow',
     'npm test -w @aerstello/api -- routes',
     'npm run test --workspace=@aerstello/web -- tests/example.test.ts',
@@ -26,12 +30,55 @@ test('targeted command parsing accepts direct focused commands and rejects wrapp
   ]) assert.deepEqual(parseTargetedValidationCommand(command), command.split(' '), command);
 
   for (const command of [
+    'git diff',
+    'git diff --check HEAD',
+    'git diff HEAD --check',
+    'git diff --check -- .agents',
+    'git diff --cached --check',
+    'git diff --staged --check',
+    'git status --check',
+    'env git diff --check',
+    'CI=1 git diff --check',
+    'git diff --check && git status',
     'npm run check:full',
     'env CI=1 npm run check:workflow',
     'npm run check:workflow && npm run check:api',
     'node --test .agents/skills/pr-review-cycle/scripts/contracts',
     'npm test -w @aerstello/api -w @aerstello/web -- routes',
   ]) assert.equal(parseTargetedValidationCommand(command), null, command);
+});
+
+test('diff validation execution materializes only the canonical exact range', () => {
+  const bare = ['git', 'diff', '--check'];
+  const legacyRanged = ['git', 'diff', '--check', BASE_SHA, HEAD_SHA, '--'];
+  const ranged = ['git', '--no-replace-objects', 'diff', '--check', BASE_SHA, HEAD_SHA, '--'];
+  assert.deepEqual(materializeTargetedValidationArgv('git diff --check', bare, {
+    baseSha: BASE_SHA, headSha: HEAD_SHA,
+  }), ranged);
+  assert.deepEqual(materializeTargetedValidationArgv('git diff --check', legacyRanged, {
+    baseSha: BASE_SHA, headSha: HEAD_SHA,
+  }), ranged);
+  assert.deepEqual(materializeTargetedValidationArgv('git diff --check', ranged, {
+    baseSha: BASE_SHA, headSha: HEAD_SHA,
+  }), ranged);
+  assert.equal(materializeTargetedValidationArgv('git diff --check', [
+    'git', 'diff', '--check', HEAD_SHA, BASE_SHA, '--',
+  ], { baseSha: BASE_SHA, headSha: HEAD_SHA }), null);
+  for (const argv of [
+    ['git', 'diff', '--no-replace-objects', '--check', BASE_SHA, HEAD_SHA, '--'],
+    ['git', '--no-replace-objects', 'diff', '--check', BASE_SHA, HEAD_SHA],
+    ['git', '--no-replace-objects', 'diff', '--check', BASE_SHA, HEAD_SHA, '--', 'extra'],
+  ]) assert.equal(materializeTargetedValidationArgv(
+    'git diff --check', argv, { baseSha: BASE_SHA, headSha: HEAD_SHA },
+  ), null);
+  assert.equal(materializeTargetedValidationArgv('git diff --check', bare, {
+    baseSha: 'not-a-sha', headSha: HEAD_SHA,
+  }), null);
+  assert.deepEqual(materializeTargetedValidationArgv(
+    'npm run check:workflow', ['npm', 'run', 'check:workflow'], {
+      baseSha: BASE_SHA, headSha: HEAD_SHA,
+    },
+  ), ['npm', 'run', 'check:workflow']);
 });
 
 test('related E2E parsing preserves selector normalization, defaults, order, and discovery caching', () => {

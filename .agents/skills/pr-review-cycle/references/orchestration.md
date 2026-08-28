@@ -3,6 +3,63 @@
 Read this reference before assigning workers, managing worktrees, integrating
 fixes, or choosing local tests.
 
+## Establish the scope boundary
+
+Before binding a remediation packet, load verified authority and classify its
+root against a canonical scope-review assessment for the exact Review commit
+and exact packet shape. The five lifecycle classifications and their canonical
+verdict mapping are defined in
+[State and contracts](state-and-contracts.md#scope-authority-and-receipts).
+`minor-amendment-required` is not an execution shortcut: it remains decision
+gated through a bare decision. Record decision plus amendment atomically with
+`scope-decision --input`, or amendment plus guarded resume atomically with
+`scope-resume --input` after a material return. Both paths require a fresh
+applicable non-minor assessment under the revised authority before execution.
+
+Use removal-first analysis for newly introduced machinery. If removing or
+simplifying it still closes the accepted authority, classify it
+`unnecessary-mechanism-defect` and use the smaller sufficient alternative.
+Current-PR correctness is authoritative; an earlier implementation or review
+round does not justify preserving unnecessary infrastructure. Unrelated work
+is recorded as a referenced follow-up rather than folded into remediation.
+
+Only a receipt-valid `ready` gate and matching root classification may bind,
+start, accept, integrate, resolve, request review, refresh threads, or finish.
+The classification's root/finding identity, exact HEAD, and
+remediation-shape digest must match. Duplicate evidence may reuse the same exact
+classification; changed HEAD, findings, authority, decision, or shape requires
+a new assessment and exact-head manifest. A manifest is canonical only when it
+immediately identifies the integrated-HEAD, `within-scope` classification for
+that exact authority and Review commit.
+
+A material expansion needs one evidence-bound decision. Narrow rejection,
+split/defer, or removal/simplification can continue only inside the resulting
+ready boundary. Approved expansion/replan or abandon/rework produces a guarded
+scope-return envelope for change development while retaining plan, task, and
+review history. The review orchestrator never edits change-development state,
+and the existing return command independently reads the live PR HEAD before
+dispatch. It fails closed unless that external SHA matches the integration HEAD
+and classified Review commit. Classification stays locked through pending,
+returned, and resume-required gates; reconciliation preserves a pending return
+and promotes only an emitted return after HEAD drift. Resume requires the
+envelope's matching root and decision identities, return, authority, and current
+HEAD. A second
+approved expansion for the same root activates the churn breaker.
+
+If a receipt-first scope write is interrupted, rerun only the exact original
+scope command with the same candidate and expected revision. While holding the
+existing PR lock, that retry may finish one receipt-new/document-old pair only
+when the document still matches compact state and the receipt binds the exact
+candidate; an initial receipt-only create additionally requires no prior
+compact identity. Do not use status, manual sidecar edits, or a broader retry
+to repair evidence. Ordinary reads remain non-mutating and every ambiguous or
+foreign combination fails closed.
+
+Issue 25/55 may later provide an imported authority/handoff coordinator, but
+this cycle consumes only the normalized authority contract and guarded return
+boundary. It does not implement, synthesize, or declare that future production
+handoff complete.
+
 ## Plan fixed tasks
 
 Group comments that share one root cause under one stable finding key. Each task

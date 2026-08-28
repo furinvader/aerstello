@@ -7,6 +7,7 @@ import {
   checkpointVerificationEscalation,
   loadState,
   readSpecialistStatus,
+  scopeStatus,
 } from '../../state/state.mjs';
 
 const DEFAULT_STATE_OPERATIONS = {
@@ -18,11 +19,13 @@ const DEFAULT_STATE_OPERATIONS = {
   checkpointVerificationEscalation,
   loadState,
   readSpecialistStatus,
+  scopeStatus,
 };
 
 export function createDefaultStateAdapter(cwd, operations = DEFAULT_STATE_OPERATIONS) {
   return {
     load: (prNumber) => operations.loadState(cwd, prNumber),
+    scopeStatus: (prNumber) => operations.scopeStatus({ cwd, prNumber }),
     checkpointCiValidation: (input) => operations.checkpointCiValidation({ cwd, ...input }),
     checkpointReviewRequest: (input) => operations.checkpointReviewRequest({ cwd, ...input }),
     checkpointReviewOutcome: (input) => operations.checkpointReviewOutcome({ cwd, ...input }),

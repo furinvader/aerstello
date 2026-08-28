@@ -6,7 +6,11 @@ import { isCanonicalActor, isViewerActor } from '../evidence/actors.mjs';
 import { httpsUrl } from '../evidence/primitives.mjs';
 import { canonicalJson } from '../evidence/review-response.mjs';
 import { MAX_NODES } from '../graphql/client.mjs';
-import { deterministicReply, intentFor } from '../threads/replies.mjs';
+import {
+  aggregateHistoricalReplyBodyIsAdmissible,
+  deterministicReply,
+  intentFor,
+} from '../threads/replies.mjs';
 
 export function parsedTime(value, label) {
   const time = Date.parse(value);
@@ -134,11 +138,32 @@ export function archiveIntent(events, type, operationId) {
   return { event, intent };
 }
 
-export function assertArchiveReplyBody(archivedState, archivedTask, threadId, historicalHeadSha, body) {
+export function assertArchiveReplyBody(
+  archivedState, archivedTask, threadId, historicalHeadSha, body,
+  { aggregateOrigin = false } = {},
+) {
   if (typeof body !== 'string') {
     throw new GitHubWorkflowError('Archived live reply body is missing', 'ARCHIVE_REPLY_MISMATCH');
   }
   const operationId = `reply:${archivedTask.prNumber ?? ''}:${threadId}:${historicalHeadSha}`;
+  if (aggregateOrigin) {
+    const historicalDisposition = archivedTask.disposition === 'actionable' ? 'fixed'
+      : archivedTask.disposition === 'already-fixed' ? 'already-fixed' : null;
+    if (!aggregateHistoricalReplyBodyIsAdmissible(body, {
+      prNumber: archivedTask.prNumber,
+      threadNodeId: threadId,
+      historicalHeadSha,
+      historicalTaskId: archivedTask.id,
+      historicalDisposition,
+      historicalIntegratedCommitSha: archivedTask.integratedCommitSha,
+    })) {
+      throw new GitHubWorkflowError(
+        'Historical aggregate reply has ambiguous stable task or marker structure',
+        'ARCHIVE_REPLY_MISMATCH',
+      );
+    }
+    return operationId;
+  }
   const expectedBody = deterministicReply(
     { ...archivedState, currentIntegrationHeadSha: historicalHeadSha },
     { tasks: [archivedTask] },
@@ -169,7 +194,10 @@ export function stableCommentEvidence(comment) {
   };
 }
 
-export function validateArchiveBatchLive(state, live, selectedTask, selectedPlan, selectedArchive) {
+export function validateArchiveBatchLive(
+  state, live, selectedTask, selectedPlan, selectedArchive,
+  { aggregateOrigin = false } = {},
+) {
   const {
     archivedState, archivedTask, archive, terminalBounds, projection,
   } = selectedArchive;
@@ -208,7 +236,7 @@ export function validateArchiveBatchLive(state, live, selectedTask, selectedPlan
     }
     const replyOperationId = assertArchiveReplyBody(
       archivedState, { ...archivedTask, prNumber: state.prNumber },
-      thread.id, historicalHeadSha, reply.body,
+      thread.id, historicalHeadSha, reply.body, { aggregateOrigin },
     );
     const resolveOperationId = `resolve:${state.prNumber}:${thread.id}:${historicalHeadSha}`;
     const replyIntent = archiveIntent(archive.events, 'reply', replyOperationId);

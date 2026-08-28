@@ -2,7 +2,10 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { gitText, resolveCommit, runGit } from '../../../../../scripts/lib/git.mjs';
 import { inspectReleaseState } from '../../../../../scripts/lib/release-state.mjs';
-import { validatePrReviewState, validatePrReviewStateV1 } from '../contracts/contracts.mjs';
+import {
+  scopeAuthorityDigest, scopeControlJournalDigest,
+  validatePrReviewState, validatePrReviewStateV1, validateScopeAuthoritySnapshot,
+} from '../contracts/contracts.mjs';
 import { repositoryRoot } from '../paths.mjs';
 import { atomicWriteJson, serializeJson } from './atomic-io.mjs';
 import { StateError } from './errors.mjs';
@@ -16,6 +19,7 @@ import {
 } from './locations.mjs';
 import { withStateLock } from './locks.mjs';
 import { migratePrReviewStateV2 } from './migrations.mjs';
+import { persistScopeAuthority, persistScopeJournal } from './evidence/scope-control.mjs';
 
 export const ACTIVE_STATE_LIMIT_BYTES = 64 * 1024;
 function utcNow() { return new Date().toISOString(); }
@@ -164,6 +168,8 @@ export function initializeState({
   releaseRef = 'origin/main',
   orchestratorSessionId = null,
   reviewRequestLimit = null,
+  scopeAuthorityRequired = false,
+  scopeAuthority = undefined,
 } = {}) {
   const selectedPr = parsePrNumber(prNumber);
   const repo = repository ?? originRepository(cwd);
@@ -182,18 +188,31 @@ export function initializeState({
   if (releaseState.status === 'inconsistent') {
     throw new StateError('Release metadata is inconsistent; PR review state was not initialized', 'RELEASE_STATE_INCONSISTENT');
   }
+  if (scopeAuthority !== undefined) {
+    const errors = validateScopeAuthoritySnapshot(scopeAuthority);
+    if (errors.length > 0) {
+      throw new StateError(`Invalid scope authority:\n- ${errors.join('\n- ')}`, 'INVALID_SCOPE_EVIDENCE');
+    }
+    if (scopeAuthority.handoffHeadSha !== currentIntegrationHeadSha) {
+      throw new StateError('Scope authority handoff HEAD is stale', 'SCOPE_AUTHORITY_STALE');
+    }
+  }
 
   return withStateLock(cwd, selectedPr, () => {
     const existingActive = activePrNumber(cwd);
     if (existingActive !== null) throw new StateError(`PR ${existingActive} is already active`, 'ACTIVE_STATE_EXISTS');
     const path = statePath(cwd, selectedPr);
     if (existsSync(path)) throw new StateError(`State already exists for PR ${selectedPr}`, 'STATE_EXISTS');
+    const authorityDigest = scopeAuthority === undefined ? null : scopeAuthorityDigest(scopeAuthority);
+    const scopeJournal = authorityDigest === null ? null : {
+      schemaVersion: 1, prNumber: selectedPr, authorityDigest, entries: [],
+    };
     const state = {
       schemaVersion: 3,
       revision: 0,
       repository: repo,
       prNumber: selectedPr,
-      phase: 'recovering',
+      phase: scopeAuthorityRequired ? 'blocked' : 'recovering',
       baseSha,
       requestedHeadSha: null,
       reviewedHeadSha: null,
@@ -211,18 +230,35 @@ export function initializeState({
       staleDiscoveryDispositions: [],
       verificationEscalation: null,
       threadResolutionStatus: emptyThreadProof(),
-      blockedReasons: [],
+      blockedReasons: scopeAuthorityRequired
+        ? ['Scope authority: capture explicit verified authority before remediation.'] : [],
       validationStatus: emptyTargetedValidation(),
       ciValidationStatus: emptyCiValidation(),
       ciValidationHistory: [],
-      nextAction: 'Resolve the PR and pushed head metadata before requesting review.',
+      nextAction: scopeAuthorityRequired
+        ? 'Capture explicit verified scope authority; incomplete authority fails closed.'
+        : 'Resolve the PR and pushed head metadata before requesting review.',
       integrationWorktree: root,
       orchestratorSessionId,
       abandonmentReason: null,
       git: gitSnapshot(root),
       updatedAt: utcNow(),
+      ...(scopeJournal ? {
+        scopeControl: {
+          authorityDigest,
+          journalDigest: scopeControlJournalDigest(scopeJournal),
+          returnDigest: null,
+          gate: 'ready',
+          assessmentHeadSha: null,
+          updatedAt: utcNow(),
+        },
+      } : {}),
     };
     validateStateForWrite(state);
+    if (scopeJournal) {
+      persistScopeAuthority(cwd, state, scopeAuthority, { previousDigest: null });
+      persistScopeJournal(cwd, state, scopeJournal, { previousDigest: null });
+    }
     atomicWriteJson(path, state);
     atomicWriteJson(activePointerPath(cwd), { schemaVersion: 3, prNumber: selectedPr });
     appendEvent(cwd, selectedPr, { type: 'initialized', summary: `Initialized PR ${selectedPr}` });

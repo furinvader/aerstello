@@ -25,6 +25,7 @@ import {
   validateProof,
   validateThreadStatus,
 } from './thread-proof.mjs';
+import { validateScopeControlReference } from './scope-control.mjs';
 
 export const STATE_PHASES = [
   'recovering',
@@ -137,7 +138,7 @@ export function validatePrReviewState(value) {
     'threadResolutionStatus', 'blockedReasons', 'validationStatus', 'ciValidationStatus', 'ciValidationHistory', 'nextAction',
     'integrationWorktree', 'orchestratorSessionId', 'abandonmentReason', 'git', 'updatedAt',
   ];
-  const fields = [...requiredFields, 'reviewRequestLimit', 'staleDiscoveryDispositions'];
+  const fields = [...requiredFields, 'reviewRequestLimit', 'staleDiscoveryDispositions', 'scopeControl'];
   if (!requireFields(value, requiredFields, '$', errors)) return errors;
   rejectUnknownFields(value, fields, '$', errors);
   if (value.schemaVersion !== 3) errors.push('$.schemaVersion must equal 3');
@@ -154,6 +155,9 @@ export function validatePrReviewState(value) {
       && !(value.reviewRequestLimit === null
         || (Number.isSafeInteger(value.reviewRequestLimit) && value.reviewRequestLimit > 0))) {
     errors.push(`$.reviewRequestLimit must be null or a positive safe integer up to ${Number.MAX_SAFE_INTEGER}`);
+  }
+  if (Object.hasOwn(value, 'scopeControl')) {
+    errors.push(...validateScopeControlReference(value.scopeControl));
   }
   if (!(value.legacyReviewProvenance === null || (
     isObject(value.legacyReviewProvenance)

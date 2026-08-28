@@ -159,6 +159,10 @@ test('state CLI preserves help and malformed-usage exit behavior', () => {
   assert.equal(help.status, 0, help.stderr);
   assert.equal(noCommand.stdout, help.stdout);
   assert.match(noCommand.stdout, /^Usage: node .*state\/cli\.mjs <command> \[options\]/u);
+  for (const command of [
+    'init', 'scope-authority', 'scope-classify', 'scope-decision', 'scope-return', 'scope-resume',
+  ]) assert.match(noCommand.stdout, new RegExp(`^  ${command}\\s`, 'mu'));
+  assert.doesNotMatch(noCommand.stdout, /scope-amendment/u);
 
   assert.equal(unknown.status, 2);
   assert.match(unknown.stderr, /^Unknown command not-a-command\nUsage:/u);
@@ -208,6 +212,44 @@ test('state CLI renders representative JSON and recovery output exactly', () => 
   assert.match(recovered.stdout, /^PR review recovery: example\/aerstello#17\nPhase: recovering;/u);
 });
 
+test('scope-return CLI independently reads the live PR HEAD before dispatch', () => {
+  const cwd = repo();
+  const state = init(cwd);
+  const fakeBin = join(cwd, 'fake-bin');
+  const ghLog = join(cwd, 'gh-args.json');
+  const ghPath = join(fakeBin, 'gh');
+  mkdirSync(fakeBin);
+  writeFileSync(ghPath, `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs';
+writeFileSync(${JSON.stringify(ghLog)}, JSON.stringify(process.argv.slice(2)));
+process.stdout.write(JSON.stringify({ data: {
+  rateLimit: { cost: 1, remaining: 100 },
+  viewer: { login: 'operator', id: 'viewer-id' },
+  repository: { pullRequest: {
+    id: 'pull-request-id', number: 17, url: 'https://example.test/pr/17',
+    headRefOid: '${'b'.repeat(40)}', state: 'OPEN', isDraft: false,
+  } },
+} }));
+`);
+  chmodSync(ghPath, 0o755);
+
+  const result = spawnSync(process.execPath, [
+    STATE_CLI, 'scope-return', '--pr', '17', '--expected-revision', String(state.revision),
+  ], {
+    cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` },
+  });
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /^SCOPE_RETURN_NOT_PENDING:/u);
+  const args = JSON.parse(readFileSync(ghLog, 'utf8'));
+  assert.deepEqual(args.slice(0, 2), ['api', 'graphql']);
+  assert.equal(args.includes('pr=17'), true);
+  const source = readFileSync(STATE_CLI, 'utf8');
+  assert.match(source, /livePrHeadSha: livePr\.headRefOid/u);
+  assert.doesNotMatch(source, /livePrHeadSha: state\.currentIntegrationHeadSha/u);
+});
+
 test('validate-result CLI enforces the exact task validation commands', () => {
   const cwd = repo();
   const reviewedHeadSha = commit(cwd, {
@@ -240,6 +282,7 @@ test('validate-result CLI enforces the exact task validation commands', () => {
       }],
     },
   });
+  state = harness.scopeReadyForPacket(cwd, state, packet);
   planSpecialists({
     cwd,
     expectedRevision: state.revision,
@@ -464,10 +507,11 @@ test('targeted validation CLI saves and executes the exact durable plan', () => 
   commit(cwd, {
     'tests/focused.test.mjs': "import test from 'node:test';\ntest('focused command', () => {});\n",
   }, 'add focused validation fixture');
-  const state = integratedTasks(cwd, ['task-a']);
+  let state = integratedTasks(cwd, ['task-a']);
   const packet = taskPacket(state.currentIntegrationHeadSha, 'task-a', {
     affectedAreas: ['documentation'], command: 'node --test tests/focused.test.mjs',
   });
+  state = harness.scopeReadyForPacket(cwd, state, packet);
   const packetPath = join(stateDirectory(cwd, state.prNumber), 'task-a.json');
   const specialistPlanInputPath = join(stateDirectory(cwd, state.prNumber), 'specialist-plan-input.json');
   writeFileSync(packetPath, `${JSON.stringify(packet)}\n`);

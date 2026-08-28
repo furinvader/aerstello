@@ -42,7 +42,24 @@ const AREA_ORDER = Object.freeze([...AREA_COMMANDS.keys()]);
 const PROJECT_ORDER = Object.freeze([...KNOWN_PROJECTS]);
 const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
 const DIGEST = /^sha256:[0-9a-f]{64}$/u;
+const BARE_DIFF_CHECK_ARGV = Object.freeze(['git', 'diff', '--check']);
 export const PROTECTED_RELEASE_REF = 'origin/main';
+
+export function materializeValidationArgv(argv, { planningSha, headSha } = {}) {
+  if (!SHA.test(planningSha ?? '')) throw new TypeError('planningSha must be an exact commit');
+  if (!SHA.test(headSha ?? '')) throw new TypeError('headSha must be an exact commit');
+  const legacyExpected = ['git', 'diff', '--check', planningSha, headSha, '--'];
+  const protectedExpected = ['git', '--no-replace-objects', 'diff', '--check', planningSha, headSha, '--'];
+  if (JSON.stringify(argv) === JSON.stringify(BARE_DIFF_CHECK_ARGV)
+      || JSON.stringify(argv) === JSON.stringify(legacyExpected)
+      || JSON.stringify(argv) === JSON.stringify(protectedExpected)) return protectedExpected;
+  if (argv?.[0] === 'git' && (argv?.[1] === 'diff' || argv?.[1] === '--no-replace-objects')) {
+    if (JSON.stringify(argv) !== JSON.stringify(protectedExpected)) {
+      throw new TypeError('git diff --check validation argv does not match the exact validation range');
+    }
+  }
+  return [...argv];
+}
 
 function schemaErrors(validator, value) {
   if (validator(value)) return [];
@@ -171,8 +188,9 @@ export function assertValidationCommandCompatibility(packets, { featureDirectory
   return ordered;
 }
 
-export function deriveValidationPlan({ changeId, effectivePlanDigest, headSha, taskEvidence, createdAt,
+export function deriveValidationPlan({ changeId, effectivePlanDigest, planningSha, headSha, taskEvidence, createdAt,
   featureDirectory, releaseEvidence = null } = {}) {
+  if (!SHA.test(planningSha ?? '')) throw new TypeError('planningSha must be an exact commit');
   if (!SHA.test(headSha ?? '')) throw new TypeError('headSha must be an exact commit');
   if (!DIGEST.test(effectivePlanDigest ?? '')) throw new TypeError('effectivePlanDigest must be canonical');
   if (!Array.isArray(taskEvidence) || taskEvidence.length === 0) throw new TypeError('taskEvidence must be nonempty');
@@ -182,11 +200,13 @@ export function deriveValidationPlan({ changeId, effectivePlanDigest, headSha, t
   const ordered = []; const byArgv = new Map();
   for (const evidence of taskEvidence) for (const kind of ['unit', 'system']) for (const entry of evidence.packet.requiredValidation[kind]) {
     const normalized = canonicalizeValidationEntry(entry, { featureDirectory });
+    normalized.argv = materializeValidationArgv(normalized.argv, { planningSha, headSha });
     addCommand(byArgv, ordered, { ...normalized, kind, reasons: [entry.reason], taskIds: [evidence.packet.taskId] });
   }
   const affected = new Set(taskEvidence.flatMap(({ packet }) => packet.affectedAreas));
   for (const area of AREA_ORDER) if (affected.has(area)) for (const command of AREA_COMMANDS.get(area)) {
     const normalized = canonicalizeValidationEntry({ command, reason: `Integrated affected-area check: ${area}.` });
+    normalized.argv = materializeValidationArgv(normalized.argv, { planningSha, headSha });
     addCommand(byArgv, ordered, { ...normalized, kind: 'unit', reasons: [`Integrated affected-area check: ${area}.`],
       taskIds: taskEvidence.filter(({ packet }) => packet.affectedAreas.includes(area)).map(({ packet }) => packet.taskId) });
   }

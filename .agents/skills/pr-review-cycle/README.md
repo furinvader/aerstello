@@ -65,6 +65,79 @@ npm run review:github -- advance --pr 123
 npm run review:worktree -- inspect --pr 123 --task finding-a
 ```
 
+Scope control is part of the existing state façade, not a second workflow. A
+new cycle must receive verified authority at initialization or it starts with
+an explicit insufficient-authority blocker. The complete public scope surface
+is exactly:
+
+```bash
+npm run review:state -- init --pr 123 --scope-authority /tmp/scope-authority.json
+npm run review:state -- scope-authority --pr 123 --input /tmp/scope-authority.json --expected-revision 2
+npm run review:state -- scope-classify --pr 123 --input /tmp/scope-classification.json --expected-revision 3
+npm run review:state -- scope-decision --pr 123 --input /tmp/scope-decision.json --expected-revision 4
+npm run review:state -- scope-return --pr 123 --expected-revision 5
+npm run review:state -- scope-resume --pr 123 --input /tmp/scope-resume.json --expected-revision 6
+```
+
+`init --scope-authority` accepts standalone, imported, or legacy-adoption
+authority. Omitting it deliberately fails closed. Legacy adoption is guarded,
+rejects an active worker, preserves existing review and task history, and
+requires every nonterminal bound root to be classified before progress.
+Imported authority additionally requires real plan and exact integrated-HEAD
+assessment identities; the future issue 25/55 coordinator must supply those
+identities, and no production handoff is implied here.
+
+Classify each finding root against the canonical scope-review packet/result
+pair. The five classifications are `within-scope-defect`,
+`unnecessary-mechanism-defect`, `material-scope-change`,
+`unrelated-follow-up`, and `insufficient-scope-authority`. Canonical verdicts
+map respectively from `within-scope`, `trim-required`,
+`human-decision-required`, and `insufficient-evidence`; a
+`minor-amendment-required` verdict remains a within-scope defect but requires
+an authority amendment and keeps the decision gate closed. Supply the closed
+`amendment` journal payload with the existing `scope-decision --input` command;
+the decision and amendment are one atomic suffix. A bare decision stays
+blocked, and execution remains blocked until `scope-classify --input` records
+a fresh applicable non-minor assessment under the revised authority. Prefer removal or
+simplification for unnecessary machinery. The governing correctness rule is
+the smallest current-PR implementation that satisfies the accepted authority,
+not preservation of an earlier PR revision.
+
+Receipt-backed scope persistence has exactly three rich surfaces: one immutable
+authority snapshot, one append-only typed journal (including canonical
+classification packet/result pairs, decisions, amendments, exact-head
+manifests, and resumes), and one guarded return envelope. Schema-v3 state stores
+only the compact optional `scopeControl` projection. Exact-head proof is
+invalidated when integration or live PR HEAD changes, when the classified
+remediation shape changes, or when authority/decision evidence changes; the
+ordered journal remains historical. An unchanged exact root and remediation
+shape may reuse its classification, while changed evidence must be reassessed.
+
+Material expansion needs a durable decision. Approved expansion or rework
+enters guarded `scope-return`; review history is preserved and the review cycle
+does not mutate change-development state. The existing `scope-return` command
+independently queries the live PR HEAD and fails closed unless it equals both
+the integration HEAD and classified Review commit; a recorded integration SHA
+is never substituted for that external evidence. Classification remains locked
+through `return-pending`, `returned`, and `resume-required`. HEAD reconciliation
+preserves a pending return and promotes only an emitted return to
+`resume-required`. `scope-resume` accepts only the matching envelope root and
+decision identities, return digest, authority digest, and current HEAD. When
+change development returns revised authority, include the amendment payload in that
+existing resume input so the journal appends amendment plus resume atomically;
+a fresh revised-authority classification is still required. A second approved
+material expansion for the same root triggers the churn breaker and requires
+human disposition. Recovery verifies receipts, pending append-only journal
+suffixes, compact projection, return envelope, and current HEAD before it can
+continue.
+Scope writes remain receipt-first. Under the existing PR lock, an exact retry
+may finish only one uniquely proven receipt-new/document-old update whose old
+document matches the compact projection and whose receipt matches the exact
+retried candidate. A receipt-only create is recoverable only when the compact
+projection proves no prior document. Ordinary reads never repair evidence;
+foreign, malformed, orphaned, stale, or ambiguous pairs fail closed. Scope
+documents retain the 256 KiB limit and receipts the 128-byte limit.
+
 New cycles have no configured review-request count cap. To start with a finite
 total limit, pass `--review-limit <positive-safe-integer>` to `review:state init`.
 Change that policy with an exact revision guard:

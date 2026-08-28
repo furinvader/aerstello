@@ -29,6 +29,17 @@ export function renderHumanStatus(status) {
   const specialistReviewers = status.specialistReviews?.requiredReviewerIds ?? [];
   const specialists = `${titleCase(specialistStatus)}${specialistReviewers.length > 0
     ? ` (required: ${specialistReviewers.join(', ')})` : ''}`;
+  const scope = status.scope ?? {
+    configured: false, authority: null, exactHeadSha: null, headMatches: false,
+    roots: [], blocker: 'scope status unavailable', nextAction: 'Load durable scope status.',
+  };
+  const scopeAuthority = scope.authority
+    ? `${scope.authority.kind} ${scope.authority.source} — ${scope.authority.minimalClosure}`
+    : 'Insufficient authority';
+  const scopeRoots = scope.roots.length === 0 ? ['  - none'] : scope.roots.map((root) => (
+    `  - ${root.rootCauseId} [${root.findingIds.join(', ')}]: ${root.classification}; `
+      + `smallest: ${root.smallestAlternative}; boundary: ${root.approvedBoundary}`
+  ));
   return [
     `PR: #${status.prNumber}`,
     `PR readiness: ${status.pullRequest?.state ?? 'unknown'}${status.pullRequest?.isDraft ? ' draft' : ''}`,
@@ -45,6 +56,11 @@ export function renderHumanStatus(status) {
     `Specialist reviews: ${specialists}`,
     `Full CI: ${ci}`,
     `Open Codex threads: ${status.openCodexThreads}`,
+    `Scope authority: ${scopeAuthority}`,
+    `Scope exact HEAD: ${scope.exactHeadSha ?? 'none'} (${scope.headMatches ? 'current' : 'stale'})`,
+    'Scope roots:',
+    ...scopeRoots,
+    `Scope blocker: ${scope.blocker ?? 'none'}`,
     `Next action: ${headMatches ? status.nextAction
       : `Reconcile recorded commit with live PR head ${status.liveHeadSha}. Recorded next action: ${status.nextAction}`}`,
   ].join('\n');

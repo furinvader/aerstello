@@ -1,11 +1,18 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
 import { parseOptions, UsageError, writeJson } from '../../../../../scripts/lib/cli.mjs';
+import { createDefaultGitHubClient } from '../github/adapters/gh-cli.mjs';
+import { readPullRequestMetadata } from '../github/graphql/pull-request-reader.mjs';
 import {
   archiveState,
   buildTargetedValidationPlan,
   checkpointState,
   checkpointReviewRequestLimit,
+  checkpointScopeAuthority,
+  checkpointScopeClassification,
+  checkpointScopeDecision,
+  checkpointScopeResume,
+  checkpointScopeReturn,
   checkpointTaskPacketBinding,
   checkpointTaskPacketReplan,
   checkpointWorkerResultAcceptance,
@@ -27,7 +34,7 @@ function usage() {
   return `Usage: node .agents/skills/pr-review-cycle/scripts/state/cli.mjs <command> [options]
 
 Commands:
-  init                Start durable state for a PR review cycle
+  init                Start durable state for a PR review cycle (--scope-authority <file>)
   path                Print the active state path
   validate            Check state and durable evidence against the integration checkout
   specialist-plan     Save a guarded pre-bind or post-integration routing plan
@@ -43,6 +50,11 @@ Commands:
   show                Print active state JSON
   checkpoint          Replace ordinary operational state from --input
   set-review-limit    Set a positive durable request limit or restore unlimited reviews
+  scope-authority     Capture explicit standalone, imported, or legacy authority
+  scope-classify      Append one exact-HEAD canonical classification
+  scope-decision      Append one evidence-bound scope decision
+  scope-return        Emit the guarded return envelope for change development
+  scope-resume        Resume only from the matching guarded return
   migrate             Explicitly migrate active schema v1 or v2 state to v3
   recover             Print compact recovery context
   archive             Archive a Done or explicitly abandoned cycle
@@ -80,7 +92,12 @@ Checkpoint options:
   --expected-revision <number>
 
 Init options:
+  --scope-authority <file>      Explicit verified authority; omission fails closed
   --review-limit <number>       Optional positive safe-integer limit; omitted means unlimited
+
+Scope authority, classify, decision, and resume options:
+  --input <file>
+  --expected-revision <number>
 
 Set-review-limit options:
   --expected-revision <number>
@@ -100,7 +117,7 @@ Review, CI, task-resolution, targeted-validation, specialist-evidence, and Done 
 function optionsFor(command, argv) {
   const common = { booleans: ['help'], values: ['pr', 'expected-revision'] };
   if (command === 'init') {
-    common.values.push('repository', 'base', 'head', 'release-ref', 'session-id', 'review-limit');
+    common.values.push('repository', 'base', 'head', 'release-ref', 'session-id', 'review-limit', 'scope-authority');
   } else if (command === 'set-review-limit') {
     common.booleans.push('unlimited');
     common.values.push('limit');
@@ -117,7 +134,7 @@ function optionsFor(command, argv) {
     common.values.push('initial-selection');
   } else if (command === 'archive') {
     common.values.push('abandon-reason');
-  } else if (['specialist-plan', 'specialist-record'].includes(command)) {
+  } else if (['specialist-plan', 'specialist-record', 'scope-authority', 'scope-classify', 'scope-decision', 'scope-resume'].includes(command)) {
     common.values.push('input');
   }
   return parseOptions(argv, common);
@@ -140,7 +157,7 @@ try {
     process.stdout.write(usage());
     process.exit(0);
   }
-  if (!['init', 'path', 'validate', 'specialist-plan', 'specialist-record', 'specialist-context', 'bind-task-packet', 'replan-task-packet', 'validate-result', 'accept-result', 'backfill-result', 'validation-plan', 'run-validation', 'show', 'checkpoint', 'set-review-limit', 'migrate', 'recover', 'archive'].includes(command)) {
+  if (!['init', 'path', 'validate', 'specialist-plan', 'specialist-record', 'specialist-context', 'bind-task-packet', 'replan-task-packet', 'validate-result', 'accept-result', 'backfill-result', 'validation-plan', 'run-validation', 'show', 'checkpoint', 'set-review-limit', 'scope-authority', 'scope-classify', 'scope-decision', 'scope-return', 'scope-resume', 'migrate', 'recover', 'archive'].includes(command)) {
     throw new UsageError(`Unknown command ${command}`);
   }
   const options = optionsFor(command, argv);
@@ -161,6 +178,8 @@ try {
     if (!options.pr) throw new UsageError('init requires --pr');
     const reviewRequestLimit = options['review-limit'] === undefined
       ? null : positiveSafeInteger(options['review-limit'], '--review-limit');
+    const scopeAuthority = options['scope-authority'] === undefined
+      ? undefined : JSON.parse(readFileSync(options['scope-authority'], 'utf8'));
     const state = initializeState({
       prNumber: options.pr,
       repository: options.repository,
@@ -169,6 +188,8 @@ try {
       releaseRef: options['release-ref'] ?? 'origin/main',
       orchestratorSessionId: options['session-id'] ?? null,
       reviewRequestLimit,
+      scopeAuthorityRequired: options['scope-authority'] === undefined,
+      scopeAuthority,
     });
     writeJson(state);
   } else if (command === 'path') {
@@ -293,6 +314,37 @@ try {
     writeJson(checkpointReviewRequestLimit({
       prNumber: options.pr,
       reviewRequestLimit,
+      expectedRevision: parsedExpectedRevision,
+    }));
+  } else if (['scope-authority', 'scope-classify', 'scope-decision', 'scope-resume'].includes(command)) {
+    if (!options.input) throw new UsageError(`${command} requires --input`);
+    if (parsedExpectedRevision === undefined) throw new UsageError(`${command} requires --expected-revision`);
+    const input = JSON.parse(readFileSync(options.input, 'utf8'));
+    const transition = {
+      'scope-authority': checkpointScopeAuthority,
+      'scope-classify': checkpointScopeClassification,
+      'scope-decision': checkpointScopeDecision,
+      'scope-resume': checkpointScopeResume,
+    }[command];
+    const key = {
+      'scope-authority': 'authority',
+      'scope-classify': 'classification',
+      'scope-decision': 'decision',
+      'scope-resume': 'resume',
+    }[command];
+    writeJson(transition({
+      prNumber: options.pr, [key]: input, expectedRevision: parsedExpectedRevision,
+    }));
+  } else if (command === 'scope-return') {
+    if (parsedExpectedRevision === undefined) throw new UsageError('scope-return requires --expected-revision');
+    const state = loadState(process.cwd(), options.pr);
+    if (!state) throw new StateError('No active PR state', 'STATE_NOT_FOUND');
+    const livePr = await readPullRequestMetadata(
+      createDefaultGitHubClient(), state.repository, state.prNumber,
+    );
+    writeJson(checkpointScopeReturn({
+      prNumber: options.pr,
+      livePrHeadSha: livePr.headRefOid,
       expectedRevision: parsedExpectedRevision,
     }));
   } else if (command === 'migrate') {

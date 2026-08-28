@@ -94,6 +94,7 @@ export function samePendingResponseObservation(left, right) {
 export function createRefreshThreadsUseCase(context) {
   const {
     client, stateAdapter, git, clock, load, assertCurrent,
+    assertScopeCurrent,
     checkpointPendingRecoveryEscalation,
   } = context;
   async function refreshThreads(prNumber) {
@@ -237,6 +238,7 @@ export function createRefreshThreadsUseCase(context) {
         );
       }
     }
+    await assertScopeCurrent(active, live.metadata.headRefOid);
     await assertCurrent(active);
     if (pendingHeadDriftRecovery
         && active.threadResolutionStatus.status === 'passed'

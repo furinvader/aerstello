@@ -70,7 +70,7 @@ export function staleDiscoveryRecoverySummary(state) {
 
 export function renderRecoverySummary({ cwd = process.cwd(), prNumber, maxCharacters = 9000 } = {}) {
   const {
-    state, warnings, evidenceErrors, packetSidecars, bindingProvenance, workerResults, specialist,
+    state, warnings, evidenceErrors, packetSidecars, bindingProvenance, workerResults, specialist, scope,
   } = reconcileState({ cwd, prNumber });
   if (!state) return '';
   const release = state.releaseBaseline ? `${state.releaseBaseline.tag} (${state.releaseBaseline.commit})` : 'pre-release';
@@ -95,6 +95,7 @@ export function renderRecoverySummary({ cwd = process.cwd(), prNumber, maxCharac
     `Task packet sidecars: ${packetSidecars.length === 0 ? 'none' : packetSidecars.map((entry) => `${entry.taskId}=${entry.status}`).join(', ')}`,
     `Task binding provenance: ${bindingProvenance.length === 0 ? 'none' : bindingProvenance.map((entry) => `${entry.taskId ?? 'unknown'}=${entry.status}`).join(', ')}`,
     `Worker results: ${workerResults.length === 0 ? 'none' : workerResults.map((entry) => `${entry.taskId ?? 'unknown'}=${entry.status}`).join(', ')}`,
+    `Scope control: ${scope.status}${scope.gate ? `; gate ${scope.gate}` : ''}`,
     `Specialist evidence: ${specialist.status}${specialist.requiredReviewerIds.length > 0 ? `; required ${specialist.requiredReviewerIds.join(', ')}` : ''}`,
     `Targeted validation plan: ${validationPlanRecoverySummary(cwd, state)}`,
     'Tasks:',

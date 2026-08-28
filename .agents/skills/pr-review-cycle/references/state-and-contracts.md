@@ -24,6 +24,12 @@ Mutable state is repository-scoped and outside tracked worktrees:
 │   ├── specialist-reviews/
 │   │   ├── <head>-r<revision>.json
 │   │   └── <head>-r<revision>.plan.sha256
+│   ├── scope-authority.json
+│   ├── scope-authority.sha256
+│   ├── scope-control-journal.json
+│   ├── scope-control-journal.sha256
+│   ├── scope-return.json
+│   ├── scope-return.sha256
 │   ├── targeted-validation-plan.json
 │   └── events.ndjson
 └── archive/
@@ -32,6 +38,92 @@ Mutable state is repository-scoped and outside tracked worktrees:
 Only the main orchestrator is the logical writer. Writes are locked,
 revision-checked, schema-validated, limited to 64 KiB, and committed by atomic
 rename. Keep raw logs, full diffs, stack traces, and transcripts out of state.
+
+## Scope authority and receipts
+
+Scope control owns exactly three rich receipt-backed documents. The authority
+snapshot is immutable. The single append-only journal owns classifications,
+decisions, amendments, exact-head manifests, and resume records; every
+classification embeds the canonical scope-review packet/result pair and its
+digest. The guarded return envelope binds the live PR HEAD, findings,
+alternatives, inventory, decision, and prior decisions. Do not create a fourth
+scope sidecar or copy the separately owned
+`../../scope-review/schemas/scope-assessment.schema.json` contract.
+
+The optional schema-v3 `scopeControl` field is only a compact projection of the
+three documents: authority, journal, and optional return digests; gate; exact
+assessment HEAD; and update time. Its gates are `insufficient-authority`,
+`ready`, `decision-required`, `return-pending`, `returned`, and
+`resume-required`. A state without the projection remains readable for guarded
+legacy adoption but cannot bind or progress expanded remediation first.
+
+Authority has one normalized contract with `standalone`, `imported`, and
+`legacy-adoption` kinds. Imported authority requires a real accepted-plan
+digest and canonical `within-scope` integrated-HEAD assessment at the handoff
+HEAD. Standalone authority may lack those downstream identities only when its
+other required source and minimal-closure evidence is complete. Missing or
+placeholder identities fail closed. Legacy adoption refuses queued, running,
+or implemented workers, retains completed and Integrated history, and requires
+classification of nonterminal bound roots before execution continues.
+
+Classification uses exactly five values:
+
+- `within-scope-defect` for canonical `within-scope`;
+- `unnecessary-mechanism-defect` for `trim-required`;
+- `material-scope-change` for `human-decision-required`;
+- `unrelated-follow-up` with an external reference; and
+- `insufficient-scope-authority` for `insufficient-evidence`.
+
+Canonical `minor-amendment-required` is represented as
+`within-scope-defect` plus `authorityAmendmentRequired: true`, so its compact
+gate stays `decision-required` through a bare decision. The existing decision
+input may append one matching decision-plus-amendment suffix; the existing
+resume input may import one matching amendment-plus-resume suffix. Each
+amendment must chain the effective prior authority, matching classified
+decision and approved delta, and distinct revised authority. The gate remains
+closed until a fresh applicable non-minor classification binds that revised
+authority. A canonical packet/result mismatch, wrong verdict mapping, changed
+remediation-shape digest, or stale assessment HEAD is invalid evidence.
+
+Integration-HEAD change clears only the compact `assessmentHeadSha`; it never
+rewrites the append-only journal. Exact-head manifests digest the complete
+ordered prior journal and immediately follow the canonical `integrated-head`,
+`within-scope` classification they identify. Imported handoff authority must
+carry that same canonical integrated-HEAD assessment. An identical root, findings, fingerprints, packet, and
+remediation shape may reuse its applicable classification. New HEAD, authority,
+decision, finding, or shape evidence requires a fresh exact-head assessment.
+
+Decisions that approve expansion/replanning or abandon/rework persist the
+return envelope before setting `return-pending`. `scope-return` then proves the
+independently queried live PR HEAD still equals both the current integration
+HEAD and classified Review commit before moving to `returned`; compact state is
+not external live-head evidence. Classification is rejected while the gate is
+`return-pending`, `returned`, or `resume-required`. HEAD drift preserves
+`return-pending` and moves only `returned` state to `resume-required`.
+`scope-resume` requires the envelope's exact root and decision identities, the
+exact return digest, journal authority digest, and current resumed HEAD,
+preserving all prior PR review and task history. A
+returned revised authority is imported as an atomic amendment-plus-resume
+suffix and still requires fresh classification before work continues. A second
+`approve-expansion-and-replan` decision for one root records no expansion;
+instead it blocks on repeated-expansion churn for explicit human disposition.
+
+Recovery trusts receipt-valid documents, their canonical digests, and the
+compact projection. It may finish a single interrupted append-only suffix or
+return checkpoint only during the exact revision-guarded retry under the PR
+lock. For receipt-new/document-old evidence, the old document must match the
+compact state's prior digest and the pending receipt must match the complete
+retried candidate. Receipt-only recovery is limited to an exact create whose
+compact projection proves no prior document. Pair-complete/state-old suffix
+recovery remains unchanged. Status and other ordinary reads are strictly
+read-only. Missing or oversized documents, malformed or foreign receipts,
+divergent suffixes, stale return identity, orphan sidecars, ambiguous
+candidates, or HEAD drift fail closed. Scope documents remain bounded at 256
+KiB—including valid evidence larger than the 64 KiB active-state limit—and
+receipts remain bounded at 128 bytes.
+
+Non-replacing classifications and decisions retain the last validated return
+identity; only persistence of an exact replacement return envelope may change it.
 
 The checked-in state implementation has one dependency direction. Pure builders
 live under `scripts/state/transitions/`; they receive state and evidence and do

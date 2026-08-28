@@ -29,6 +29,30 @@ export function validationPlanPath(cwd, prNumber) {
   return join(stateDirectory(cwd, prNumber), 'targeted-validation-plan.json');
 }
 
+export function scopeAuthorityPath(cwd, prNumber) {
+  return join(stateDirectory(cwd, prNumber), 'scope-authority.json');
+}
+
+export function scopeAuthorityReceiptPath(cwd, prNumber) {
+  return join(stateDirectory(cwd, prNumber), 'scope-authority.sha256');
+}
+
+export function scopeControlJournalPath(cwd, prNumber) {
+  return join(stateDirectory(cwd, prNumber), 'scope-control-journal.json');
+}
+
+export function scopeControlJournalReceiptPath(cwd, prNumber) {
+  return join(stateDirectory(cwd, prNumber), 'scope-control-journal.sha256');
+}
+
+export function scopeReturnPath(cwd, prNumber) {
+  return join(stateDirectory(cwd, prNumber), 'scope-return.json');
+}
+
+export function scopeReturnReceiptPath(cwd, prNumber) {
+  return join(stateDirectory(cwd, prNumber), 'scope-return.sha256');
+}
+
 function opaqueName(value) {
   return createHash('sha256').update(String(value)).digest('hex');
 }

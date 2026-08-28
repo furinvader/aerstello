@@ -32,6 +32,8 @@ const ALLOWED_CHECK_COMMANDS = new Set([
   'npm run check:release-state',
   'npm run check:released-migrations',
 ]);
+const ALLOWED_DIRECT_COMMANDS = new Set(['git diff --check']);
+const BARE_DIFF_CHECK_ARGV = Object.freeze(['git', 'diff', '--check']);
 const WRAPPER_EXECUTABLES = new Set(['env', 'bash', 'sh', 'zsh', 'fish', 'command', 'exec', 'xargs']);
 const KNOWN_WORKSPACES = new Set(['@aerstello/api', '@aerstello/web', '@aerstello/shared']);
 const SHELL_SYNTAX_PATTERN = /[;&|<>`$()'"\\*?\[\]{}!#~\t\v\f\r\n]/u;
@@ -131,6 +133,7 @@ export function parseTargetedValidationCommand(command) {
   const tokens = command.split(' ');
   if (tokens.some((token) => !isSafeCommandArgument(token))
       || WRAPPER_EXECUTABLES.has(tokens[0]) || /^\w+=/u.test(tokens[0])) return null;
+  if (ALLOWED_DIRECT_COMMANDS.has(command)) return tokens;
   if (ALLOWED_CHECK_COMMANDS.has(command)) return tokens;
   if (parseRelatedE2ECommand(command)) return tokens;
   if (tokens[0] === 'npm') return isTargetedNpmTest(tokens) ? tokens : null;
@@ -138,6 +141,21 @@ export function parseTargetedValidationCommand(command) {
     return tokens.slice(2).every((path) => !path.startsWith('-')
       && parseRepositoryPath(path) && NODE_TEST_PATH_PATTERN.test(path)) ? tokens : null;
   }
+  return null;
+}
+
+export function materializeTargetedValidationArgv(command, argv, { baseSha, headSha } = {}) {
+  const parsed = parseTargetedValidationCommand(command);
+  if (!parsed) return null;
+  if (command !== 'git diff --check') {
+    return JSON.stringify(argv) === JSON.stringify(parsed) ? [...argv] : null;
+  }
+  if (!isSha(baseSha) || !isSha(headSha)) return null;
+  const legacyExpected = ['git', 'diff', '--check', baseSha, headSha, '--'];
+  const protectedExpected = ['git', '--no-replace-objects', 'diff', '--check', baseSha, headSha, '--'];
+  if (JSON.stringify(argv) === JSON.stringify(BARE_DIFF_CHECK_ARGV)
+      || JSON.stringify(argv) === JSON.stringify(legacyExpected)
+      || JSON.stringify(argv) === JSON.stringify(protectedExpected)) return protectedExpected;
   return null;
 }
 

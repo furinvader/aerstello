@@ -29,6 +29,7 @@ import * as gitMetadataServices from './services/git-metadata.mjs';
 import * as archiveImportServices from './services/archive-import.mjs';
 import * as validationServices from './services/validation.mjs';
 import * as taskServices from './services/tasks.mjs';
+import * as scopeServices from './services/scope.mjs';
 
 const EXPECTED_STATE_EXPORTS = [
   'ACTIVE_STATE_LIMIT_BYTES',
@@ -39,6 +40,7 @@ const EXPECTED_STATE_EXPORTS = [
   'archiveState',
   'assertCompletionAllowed',
   'assertReviewRequestAllowed',
+  'assertScopeTaskAllowed',
   'assertTaskPacketBound',
   'atomicWriteJson',
   'buildCiValidationTransition',
@@ -54,6 +56,11 @@ const EXPECTED_STATE_EXPORTS = [
   'checkpointReviewOutcome',
   'checkpointReviewRequest',
   'checkpointReviewRequestLimit',
+  'checkpointScopeAuthority',
+  'checkpointScopeClassification',
+  'checkpointScopeDecision',
+  'checkpointScopeResume',
+  'checkpointScopeReturn',
   'checkpointState',
   'checkpointTargetedValidation',
   'checkpointTargetedValidationReset',
@@ -87,6 +94,13 @@ const EXPECTED_STATE_EXPORTS = [
   'reviewRequestGate',
   'reviewRequestUsage',
   'reviewRoot',
+  'scopeAuthorityPath',
+  'scopeAuthorityReceiptPath',
+  'scopeControlJournalPath',
+  'scopeControlJournalReceiptPath',
+  'scopeReturnPath',
+  'scopeReturnReceiptPath',
+  'scopeStatus',
   'specialistContext',
   'specialistPlanReceiptPath',
   'specialistReviewBundlePath',
@@ -109,6 +123,8 @@ const EXPECTED_EXPORT_OWNERS = new Map([
   [{ StateError: OwnerStateError }, ['StateError']],
   [locations, [
     'activePointerPath', 'specialistPlanReceiptPath', 'specialistReviewBundlePath',
+    'scopeAuthorityPath', 'scopeAuthorityReceiptPath', 'scopeControlJournalPath',
+    'scopeControlJournalReceiptPath', 'scopeReturnPath', 'scopeReturnReceiptPath',
     'stateDirectory', 'statePath', 'taskBindingProvenancePath',
     'taskBindingProvenanceReceiptPath', 'taskPacketSidecarPath', 'validationPlanPath',
     'workerResultEnvelopePath', 'workerResultReceiptPath',
@@ -154,6 +170,10 @@ const EXPECTED_EXPORT_OWNERS = new Map([
   [taskServices, [
     'checkpointTaskCompletion', 'checkpointTaskPacketBinding', 'checkpointTaskPacketReplan',
     'checkpointWorkerResultAcceptance', 'checkpointWorkerResultBackfill',
+  ]],
+  [scopeServices, [
+    'assertScopeTaskAllowed', 'checkpointScopeAuthority', 'checkpointScopeClassification',
+    'checkpointScopeDecision', 'checkpointScopeResume', 'checkpointScopeReturn', 'scopeStatus',
   ]],
 ]);
 

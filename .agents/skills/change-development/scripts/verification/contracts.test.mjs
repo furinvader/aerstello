@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import { digestJson } from '../contracts/contracts.mjs';
 import { implementationTaskDigest } from '../implementation/contracts.mjs';
 import { assertValidationCommandCompatibility, canonicalizeValidationEntry, deriveValidationPlan, findingFingerprint,
+  materializeValidationArgv,
   PROTECTED_RELEASE_REF,
   validateVerificationContract, validationPlanDigest, validationPlanReceiptDigest,
 } from './contracts.mjs';
@@ -102,7 +103,7 @@ test('validation union is receipt-bound, deterministic, reason-preserving, and a
   const releaseEvidence = { schemaVersion: 1, baseSha: SHA, headSha: SHA, releaseRef: 'main', releaseRefSha: SHA,
     status: 'pre-release', latestRelease: null, frozenMigrationCount: 0, evidenceDigest: `sha256:${'e'.repeat(64)}` };
   const plan = deriveValidationPlan({ changeId: first.packet.changeId, effectivePlanDigest: first.packet.planDigest,
-    headSha: SHA, taskEvidence: [first, second], createdAt: AT, releaseEvidence });
+    planningSha: SHA, headSha: SHA, taskEvidence: [first, second], createdAt: AT, releaseEvidence });
   assert.deepEqual(plan.commands.map(({ argv }) => argv.join(' ')), ['npm run check:workflow', 'npm run check:shared',
     'npm run check:api', 'npm run check:web', 'npm run check:release-state', 'npm run check:released-migrations']);
   assert.deepEqual(plan.commands[0].reasons, ['Packet workflow check.', 'Second task reason.', 'Integrated affected-area check: workflow.']);
@@ -110,24 +111,58 @@ test('validation union is receipt-bound, deterministic, reason-preserving, and a
   assert.equal(plan.tasks[0].binding, 1); assert.equal(plan.tasks[0].integratedCommit, 'd'.repeat(40));
   assert.equal(plan.tasks[0].integrationReceiptDigest, first.integrationReceiptDigest);
   assert.notEqual(validationPlanDigest(plan), validationPlanReceiptDigest(plan));
-  assert.throws(() => deriveValidationPlan({ changeId: first.packet.changeId, effectivePlanDigest: first.packet.planDigest, headSha: SHA,
+  assert.throws(() => deriveValidationPlan({ changeId: first.packet.changeId, effectivePlanDigest: first.packet.planDigest, planningSha: SHA, headSha: SHA,
     taskEvidence: [{ ...first, packetDigest: `sha256:${'0'.repeat(64)}` }], createdAt: AT }), /packet receipt does not match/u);
-  assert.throws(() => deriveValidationPlan({ changeId: 'other-change', effectivePlanDigest: first.packet.planDigest, headSha: SHA,
+  assert.throws(() => deriveValidationPlan({ changeId: 'other-change', effectivePlanDigest: first.packet.planDigest, planningSha: SHA, headSha: SHA,
     taskEvidence: [first], createdAt: AT }), /changeId does not match/u);
-  assert.throws(() => deriveValidationPlan({ changeId: first.packet.changeId, effectivePlanDigest: first.packet.planDigest, headSha: SHA,
+  assert.throws(() => deriveValidationPlan({ changeId: first.packet.changeId, effectivePlanDigest: first.packet.planDigest, planningSha: SHA, headSha: SHA,
     taskEvidence: [first], createdAt: AT, releaseEvidence }), /not relevant/u);
 });
 
 test('validation plan semantic identity ignores timestamps but binds HEAD, task set, and commands', () => {
   const selected = evidence(packet());
   const plan = deriveValidationPlan({ changeId: selected.packet.changeId, effectivePlanDigest: selected.packet.planDigest,
-    headSha: SHA, taskEvidence: [selected], createdAt: AT });
+    planningSha: SHA, headSha: SHA, taskEvidence: [selected], createdAt: AT });
   const identity = validationPlanDigest(plan);
   assert.equal(validationPlanDigest({ ...plan, createdAt: '2026-08-18T10:01:00Z' }), identity);
   assert.notEqual(validationPlanDigest({ ...plan, headSha: 'f'.repeat(40) }), identity);
   const changedTasks = [{ ...plan.tasks[0], binding: 2 }];
   assert.notEqual(validationPlanDigest({ ...plan, tasks: changedTasks, taskSetDigest: digestJson(changedTasks) }), identity);
   assert.notEqual(validationPlanDigest({ ...plan, commands: [{ ...plan.commands[0], reasons: ['Changed semantic reason.'] }] }), identity);
+});
+
+test('validation plans bind the canonical diff check to planning and validation commits', () => {
+  const headSha = 'f'.repeat(40);
+  const selected = evidence(packet({ areas: ['documentation'], unit: [{
+    command: 'git diff --check', reason: 'Check the exact committed range.',
+  }] }));
+  const plan = deriveValidationPlan({
+    changeId: selected.packet.changeId,
+    effectivePlanDigest: selected.packet.planDigest,
+    planningSha: SHA,
+    headSha,
+    taskEvidence: [selected],
+    createdAt: AT,
+  });
+  const legacy = ['git', 'diff', '--check', SHA, headSha, '--'];
+  const protectedArgv = ['git', '--no-replace-objects', 'diff', '--check', SHA, headSha, '--'];
+  assert.deepEqual(plan.commands[0].argv, protectedArgv);
+  for (const argv of [['git', 'diff', '--check'], legacy, protectedArgv]) {
+    assert.deepEqual(materializeValidationArgv(argv, { planningSha: SHA, headSha }), protectedArgv);
+  }
+  for (const argv of [
+    ['git', 'diff', '--check', headSha, SHA, '--'],
+    ['git', 'diff', '--no-replace-objects', '--check', SHA, headSha, '--'],
+    ['git', '--no-replace-objects', 'diff', '--check', SHA, headSha],
+    ['git', '--no-replace-objects', 'diff', '--check', SHA, headSha, '--', 'extra'],
+  ]) assert.throws(() => materializeValidationArgv(argv, { planningSha: SHA, headSha }), /exact validation range/u);
+  assert.throws(() => deriveValidationPlan({
+    changeId: selected.packet.changeId,
+    effectivePlanDigest: selected.packet.planDigest,
+    headSha,
+    taskEvidence: [selected],
+    createdAt: AT,
+  }), /planningSha must be an exact commit/u);
 });
 
 test('related E2E canonicalization reuses the planner and rejects empty, unknown, and full scopes', () => {

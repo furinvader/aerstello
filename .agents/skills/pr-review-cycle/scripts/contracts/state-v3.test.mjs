@@ -276,3 +276,23 @@ test('schema-v3 preserves aggregate error order and lifecycle cross-field invari
     assert.deepEqual(errors, validateAggregateState(fixture));
   }
 });
+
+test('schema-v3 accepts the optional compact scope-control reference and preserves legacy readability', () => {
+  const legacy = stateFixture();
+  assert.deepEqual(validatePrReviewState(legacy), []);
+  const scopeControl = {
+    authorityDigest: `sha256:${'a'.repeat(64)}`,
+    journalDigest: `sha256:${'b'.repeat(64)}`,
+    returnDigest: null,
+    gate: 'ready',
+    assessmentHeadSha: HEAD,
+    updatedAt: AT,
+  };
+  assert.deepEqual(validatePrReviewState(stateFixture({ scopeControl })), []);
+  assert.match(validatePrReviewState(stateFixture({
+    scopeControl: { ...scopeControl, packet: {} },
+  })).join('\n'), /scopeControl.packet is not supported/u);
+  assert.match(validatePrReviewState(stateFixture({
+    scopeControl: { ...scopeControl, gate: 'return-pending' },
+  })).join('\n'), /returnDigest is required/u);
+});

@@ -7,6 +7,7 @@ import { assertMutationReady } from '../mutation-readiness.mjs';
 import { readLiveSnapshot } from '../snapshot.mjs';
 import { assertRecordedRequestComment } from '../mutations/draft-review-request.mjs';
 import { tasklessPendingReviewHeadDriftRefreshAllowed } from './refresh-threads.mjs';
+import { scopeStatusSummary } from '../scope-readiness.mjs';
 
 export function codexReviewStatus(state, liveHeadSha) {
   const request = state.reviewRequest;
@@ -130,7 +131,7 @@ export function staleDiscoveryNextAction(status, fallback) {
 }
 
 export function createStatusUseCase(context) {
-  const { client, stateAdapter, git, load } = context;
+  const { client, stateAdapter, git, load, scopeReadiness } = context;
   async function status(prNumber) {
     const active = await load(prNumber);
     const live = await readLiveSnapshot(client, active, { reactionsFor: active.reviewRequest?.id ?? null });
@@ -152,6 +153,7 @@ export function createStatusUseCase(context) {
     const requestUsage = reviewRequestUsage(active);
     const staleDiscoveryEvidence = await staleDiscoveryStatus(active, live, git);
     const observation = await reviewObservation(active, live, git);
+    const scope = scopeStatusSummary(await scopeReadiness(active, live.metadata.headRefOid));
     const specialistReviews = stateAdapter.specialistStatus
       ? await stateAdapter.specialistStatus(active.prNumber)
       : {
@@ -194,7 +196,8 @@ export function createStatusUseCase(context) {
       recordedCiValidation: active.ciValidationStatus,
       liveCiValidation: liveCi,
       openCodexThreads: openThreads,
-      nextAction: staleDiscoveryNextAction(staleDiscoveryEvidence,
+      scope,
+      nextAction: scope.blocker ? scope.nextAction : staleDiscoveryNextAction(staleDiscoveryEvidence,
         active.phase === 'ready-for-review' && requestUsage.exhausted
         ? `Review request limit ${requestUsage.limit} is exhausted after ${requestUsage.used} durable requests; run npm run review:state -- set-review-limit --pr ${active.prNumber} --expected-revision ${active.revision} --limit <higher-number> or --unlimited before the next request.`
         : active.nextAction),

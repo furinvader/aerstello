@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { afterEach, test } from 'node:test';
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
@@ -17,6 +24,7 @@ import { createRepository, git } from '../../../../../tests/support/git-fixtures
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryDirectory = resolveRepositoryDirectory();
+const nodeModulesDirectory = dirname(dirname(fileURLToPath(import.meta.resolve('ajv/package.json'))));
 const hooksDirectory = testDirectory;
 const repositories = [];
 
@@ -72,7 +80,13 @@ function repositoryWithSpacePath() {
     join(cwd, '.agents', 'skills', 'aerstello-specialists'),
     { recursive: true },
   );
+  cpSync(
+    join(dirname(skillDirectory), 'scope-review'),
+    join(cwd, '.agents', 'skills', 'scope-review'),
+    { recursive: true },
+  );
   cpSync(join(repositoryDirectory, 'scripts', 'lib'), join(cwd, 'scripts', 'lib'), { recursive: true });
+  symlinkSync(nodeModulesDirectory, join(cwd, 'node_modules'), 'dir');
   return cwd;
 }
 

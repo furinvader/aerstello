@@ -724,6 +724,139 @@ test('terminal integration authority rejects missing, broken, and ambiguous exac
   assert.throws(() => buildVerifierContext({ cwd: fixture.cwd }), (error) => error.code === 'INTEGRATION_RECEIPT_AMBIGUOUS');
 });
 
+test('change validation executes diff checks across immutable planning and HEAD commits', async () => {
+  const fixture = await integratedSingleTaskFixture(
+    'committed whitespace validation range',
+    specialization(),
+    { validationCommand: 'git diff --check', workerContent: 'trailing whitespace  \n' },
+  );
+  let state = createValidationPlan({ cwd: fixture.cwd, expectedRevision: fixture.state.revision });
+  const planPath = join(changeDirectory(fixture.cwd, state.changeId), 'verification', 'rounds', '0001', 'validation-plan.json');
+  const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+  const diffCommand = plan.commands.find(({ argv }) => argv[0] === 'git');
+  assert.deepEqual(diffCommand.argv, [
+    'git', '--no-replace-objects', 'diff', '--check', state.planningSha, state.verification.headSha, '--',
+  ]);
+  const replacementCommit = git(fixture.cwd, 'commit-tree', `${state.planningSha}^{tree}`,
+    '-p', state.planningSha, '-m', 'hide committed whitespace');
+  const replacementRef = `refs/replace/${state.verification.headSha}`;
+  const attempted = [];
+  state = runValidation({
+    cwd: fixture.cwd,
+    expectedRevision: state.revision,
+    runner(executable, argv, options) {
+      attempted.push([executable, ...argv]);
+      if (executable === 'git') {
+        git(fixture.cwd, 'update-ref', replacementRef, replacementCommit);
+        assert.equal(spawnSync('git', [
+          'diff', '--check', state.planningSha, state.verification.headSha, '--',
+        ], { cwd: fixture.cwd }).status, 0,
+        'the replacement would hide the whitespace from an unprotected diff');
+        const result = spawnSync(executable, argv, options);
+        git(fixture.cwd, 'update-ref', '-d', replacementRef);
+        return result;
+      }
+      return { status: 0, signal: null, stdout: 'passed', stderr: '' };
+    },
+  });
+  assert.deepEqual(attempted.find((argv) => argv[0] === 'git'), diffCommand.argv);
+  assert.equal(state.verification.validationStatus, 'failed');
+  assert.equal(spawnSync('git', ['show-ref', '--verify', '--quiet', replacementRef], {
+    cwd: fixture.cwd,
+  }).status, 1);
+
+  const equal = await integratedSingleTaskFixture(
+    'equal committed validation range',
+    specialization(),
+    { validationCommand: 'git diff --check', noChange: true },
+  );
+  let equalState = createValidationPlan({ cwd: equal.cwd, expectedRevision: equal.state.revision });
+  equalState = runValidation({
+    cwd: equal.cwd,
+    expectedRevision: equalState.revision,
+    runner(executable, argv, options) {
+      return executable === 'git'
+        ? spawnSync(executable, argv, options)
+        : { status: 0, signal: null, stdout: 'passed', stderr: '' };
+    },
+  });
+  assert.equal(equalState.verification.validationStatus, 'passed');
+});
+
+test('change validation planning rejects common-directory grafts from a linked worktree without mutation', async () => {
+  const fixture = await integratedSingleTaskFixture('linked validation planning graft authority');
+  git(fixture.cwd, 'switch', '--detach');
+  const linkedCwd = join(mkdtempSync(join(tmpdir(), 'change-validation-planning-linked-')), 'worktree');
+  git(fixture.cwd, 'worktree', 'add', linkedCwd, 'main');
+  const commonGitDirectory = git(linkedCwd, '--no-replace-objects', 'rev-parse', '--path-format=absolute', '--git-common-dir');
+  assert.equal(commonGitDirectory, join(fixture.cwd, '.git'));
+  const graftsPath = join(commonGitDirectory, 'info', 'grafts');
+  mkdirSync(dirname(graftsPath), { recursive: true });
+  writeFileSync(graftsPath, `${fixture.state.git.headSha} ${fixture.state.planningSha}\n`);
+  const before = durableSnapshot(changeDirectory(linkedCwd, fixture.state.changeId));
+
+  assert.throws(() => createValidationPlan({ cwd: linkedCwd, expectedRevision: fixture.state.revision + 1 }),
+    (error) => error.code === 'REVISION_CONFLICT');
+  writeFileSync(join(linkedCwd, 'dirty-validation-authority.txt'), 'dirty\n');
+  assert.throws(() => createValidationPlan({ cwd: linkedCwd, expectedRevision: fixture.state.revision }),
+    (error) => error.code === 'VERIFICATION_HEAD_MISMATCH');
+  unlinkSync(join(linkedCwd, 'dirty-validation-authority.txt'));
+  assert.throws(() => createValidationPlan({ cwd: linkedCwd, expectedRevision: fixture.state.revision }),
+    (error) => error.code === 'VALIDATION_LEGACY_GRAFTS_PRESENT');
+  assert.deepEqual(durableSnapshot(changeDirectory(linkedCwd, fixture.state.changeId)), before);
+
+  unlinkSync(graftsPath);
+  const state = createValidationPlan({ cwd: linkedCwd, expectedRevision: fixture.state.revision });
+  assert.equal(state.phase, 'validating', 'an absent graft file is inert');
+  writeFileSync(graftsPath, `${state.git.headSha} ${state.planningSha}\n`);
+  const validatingBefore = durableSnapshot(changeDirectory(linkedCwd, state.changeId));
+  assert.throws(() => createValidationPlan({ cwd: linkedCwd, expectedRevision: state.revision }),
+    (error) => error.code === 'INVALID_PHASE');
+  assert.deepEqual(durableSnapshot(changeDirectory(linkedCwd, state.changeId)), validatingBefore);
+  unlinkSync(graftsPath);
+});
+
+test('change validation execution rechecks linked-worktree grafts after plan identity without invoking a runner', async () => {
+  const fixture = await integratedSingleTaskFixture('linked validation runtime graft authority');
+  git(fixture.cwd, 'switch', '--detach');
+  const linkedCwd = join(mkdtempSync(join(tmpdir(), 'change-validation-runtime-linked-')), 'worktree');
+  git(fixture.cwd, 'worktree', 'add', linkedCwd, 'main');
+  const commonGitDirectory = git(linkedCwd, '--no-replace-objects', 'rev-parse', '--path-format=absolute', '--git-common-dir');
+  assert.equal(commonGitDirectory, join(fixture.cwd, '.git'));
+  const graftsPath = join(commonGitDirectory, 'info', 'grafts');
+  mkdirSync(dirname(graftsPath), { recursive: true });
+  writeFileSync(graftsPath, '');
+  const state = createValidationPlan({ cwd: linkedCwd, expectedRevision: fixture.state.revision });
+  const planPath = join(changeDirectory(linkedCwd, state.changeId), 'verification', 'rounds', '0001', 'validation-plan.json');
+  const receiptPath = planPath.replace(/\.json$/u, '.sha256');
+  const originalPlan = JSON.parse(readFileSync(planPath, 'utf8'));
+  const originalReceipt = readFileSync(receiptPath);
+  writeFileSync(graftsPath, `${state.git.headSha} ${state.planningSha}\n`);
+  let runnerCalled = false;
+  const runner = () => { runnerCalled = true; return { status: 0, signal: null, stdout: '', stderr: '' }; };
+
+  unlinkSync(receiptPath);
+  const missingReceiptBefore = durableSnapshot(changeDirectory(linkedCwd, state.changeId));
+  assert.throws(() => runValidation({ cwd: linkedCwd, expectedRevision: state.revision, runner }),
+    (error) => error.code === 'RECOVERY_EVIDENCE_INVALID');
+  assert.deepEqual(durableSnapshot(changeDirectory(linkedCwd, state.changeId)), missingReceiptBefore);
+  writeFileSync(receiptPath, originalReceipt);
+
+  writeReceiptJson(planPath, { ...originalPlan, taskSetDigest: `sha256:${'0'.repeat(64)}` });
+  const staleIdentityBefore = durableSnapshot(changeDirectory(linkedCwd, state.changeId));
+  assert.throws(() => runValidation({ cwd: linkedCwd, expectedRevision: state.revision, runner }),
+    (error) => error.code === 'RECOVERY_EVIDENCE_INVALID');
+  assert.deepEqual(durableSnapshot(changeDirectory(linkedCwd, state.changeId)), staleIdentityBefore);
+  writeReceiptJson(planPath, originalPlan);
+
+  const graftBefore = durableSnapshot(changeDirectory(linkedCwd, state.changeId));
+  assert.throws(() => runValidation({ cwd: linkedCwd, expectedRevision: state.revision, runner }),
+    (error) => error.code === 'VALIDATION_LEGACY_GRAFTS_PRESENT');
+  assert.equal(runnerCalled, false);
+  assert.deepEqual(durableSnapshot(changeDirectory(linkedCwd, state.changeId)), graftBefore);
+  unlinkSync(graftsPath);
+});
+
 test('failed validation is private, immutable, and explicitly replaced at the next durable round', async () => {
   const fixture = await integratedSingleTaskFixture('validation replacement');
   let state = createValidationPlan({ cwd: fixture.cwd, expectedRevision: fixture.state.revision });
@@ -758,24 +891,37 @@ test('failed validation is private, immutable, and explicitly replaced at the ne
   assert.ok(existsSync(join(changeDirectory(fixture.cwd, state.changeId), 'verification', 'rounds', '0002', 'validation-plan.json')));
   state = runValidation({ cwd: fixture.cwd, expectedRevision: state.revision,
     runner: () => ({ status: 8, signal: null, stdout: '', stderr: 'corrective work required' }) });
+  const verificationDirectory = join(changeDirectory(fixture.cwd, state.changeId), 'verification');
+  const failedValidationEvidence = durableSnapshot(verificationDirectory);
   const original = JSON.parse(readFileSync(join(changeDirectory(fixture.cwd, state.changeId), 'plan', 'plan.json'), 'utf8'));
   const amendedPlan = structuredClone(original); amendedPlan.planRevision = 2;
   amendedPlan.criteria.push({ id: 'validation-remediation', description: 'Correct the failed lifecycle validation.',
     disposition: 'owned', ownerTaskId: 'validation-remediation-task', deferredReason: null });
   amendedPlan.tasks.push({ ...original.tasks[0], id: 'validation-remediation-task', title: 'Remediate validation',
     objective: 'Correct the receipt-bound validation failure.', criterionIds: ['validation-remediation'],
-    checklistItemIds: [], dependsOn: ['state-task'], anticipatedPaths: ['remediation.txt'] });
+    checklistItemIds: [], dependsOn: ['state-task'], anticipatedPaths: ['first.txt'] });
   const amendment = { id: 'validation-remediation', reason: 'The durable failed result requires corrective work.',
     authorization: 'operator', trigger: `validation-failure:${state.verification.validationResultDigests.at(-1)}`,
     delta: { added: ['validation-remediation'] }, invalidatedEvidence: [] };
   assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision, resultingPlan: amendedPlan,
     amendment: { ...amendment, trigger: `validation-failure:sha256:${'0'.repeat(64)}` } }),
   (error) => error.code === 'INVALID_AMENDMENT');
+  const conflictingPlan = structuredClone(amendedPlan);
+  conflictingPlan.criteria.push({ id: 'validation-remediation-conflict', description: 'Keep remediation ownership disjoint.',
+    disposition: 'owned', ownerTaskId: 'validation-remediation-conflict-task', deferredReason: null });
+  conflictingPlan.tasks.push({ ...amendedPlan.tasks.at(-1), id: 'validation-remediation-conflict-task',
+    title: 'Conflict with remediation', objective: 'Attempt overlapping corrective ownership.',
+    criterionIds: ['validation-remediation-conflict'] });
+  assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+    resultingPlan: conflictingPlan, amendment }),
+  (error) => error.code === 'PLAN_NOT_READY' && error.message.includes('overlapping anticipated paths'));
   state = amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision, resultingPlan: amendedPlan, amendment });
   assert.equal(state.phase, 'implementing');
   assert.equal(state.execution.tasks.find(({ id }) => id === 'state-task').status, 'integrated');
   assert.equal(state.execution.tasks.find(({ id }) => id === 'validation-remediation-task').status, 'unbound');
   assert.equal(state.verification, null);
+  assert.deepEqual(durableSnapshot(verificationDirectory), failedValidationEvidence,
+    'failed validation plans and results remain byte-for-byte immutable after remediation admission');
 });
 
 test('late source drift preserves terminal authority and invalidates verification proof', async () => {
@@ -2544,7 +2690,11 @@ function createWorkerFixture(cwd, state, packet) {
   return { ...identity };
 }
 
-async function integratedSingleTaskFixture(label, specialize = specialization()) {
+async function integratedSingleTaskFixture(label, specialize = specialization(), {
+  validationCommand = 'node --test .agents/skills/change-development/scripts/state/state.test.mjs',
+  workerContent = 'first\n',
+  noChange = false,
+} = {}) {
   const { cwd, sha } = repository(label);
   const planning = await initializeState({ cwd, changeId: label.replaceAll(' ', '-'), mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
   const plan = planFor(planning);
@@ -2555,15 +2705,21 @@ async function integratedSingleTaskFixture(label, specialize = specialization())
     'Accepted behavior coverage is mapped.')] : [];
   let state = acceptPlan({ cwd, plan, expectedRevision: planning.revision, planningEvidence });
   const packet = packetFor(state, plan, 'state-task');
+  packet.requiredValidation.unit[0].command = validationCommand;
   packet.behaviorMapperEvidence = planningEvidence[0] ?? null;
   state = bindTask({ cwd, packet, expectedRevision: state.revision });
   const worker = createWorkerFixture(cwd, state, packet);
   state = scheduleWave({ cwd, expectedRevision: state.revision });
   state = startTask({ cwd, taskId: 'state-task', workerId: 'worker-one', expectedRevision: state.revision });
-  writeFileSync(join(worker.path, 'first.txt'), 'first\n'); git(worker.path, 'add', 'first.txt'); git(worker.path, 'commit', '-m', 'test: lifecycle worker');
-  state = acceptResult({ cwd, result: resultFor(packet, 'implemented', git(worker.path, 'rev-parse', 'HEAD'), ['first.txt']),
-    workerCwd: worker.path, expectedRevision: state.revision });
-  state = integrateTask({ cwd, taskId: 'state-task', expectedRevision: state.revision });
+  if (noChange) {
+    state = acceptResult({ cwd, result: resultFor(packet, 'no-change'),
+      workerCwd: worker.path, expectedRevision: state.revision });
+  } else {
+    writeFileSync(join(worker.path, 'first.txt'), workerContent); git(worker.path, 'add', 'first.txt'); git(worker.path, 'commit', '-m', 'test: lifecycle worker');
+    state = acceptResult({ cwd, result: resultFor(packet, 'implemented', git(worker.path, 'rev-parse', 'HEAD'), ['first.txt']),
+      workerCwd: worker.path, expectedRevision: state.revision });
+    state = integrateTask({ cwd, taskId: 'state-task', expectedRevision: state.revision });
+  }
   removeTaskWorktree({ cwd, changeId: state.changeId, taskId: 'state-task' });
   state = finalizeIntegration({ cwd, expectedRevision: state.revision });
   return { cwd, state };

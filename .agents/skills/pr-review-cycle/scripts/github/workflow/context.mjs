@@ -1,6 +1,7 @@
 import { validatePrReviewState } from '../../contracts/contracts.mjs';
 import { GitHubWorkflowError } from '../errors.mjs';
 import { assertMutationReady } from '../mutation-readiness.mjs';
+import { assertScopeReady, assertScopeRootReady, readScopeReadiness } from '../scope-readiness.mjs';
 
 export function validateWorkflowState(state, prNumber) {
   const errors = validatePrReviewState(state);
@@ -51,6 +52,12 @@ export function createWorkflowContext({ client, state: stateAdapter, git, clock,
     }
   }
 
+  const scopeReadiness = (state, liveHeadSha = null) => readScopeReadiness(stateAdapter, state, liveHeadSha);
+  const assertScopeCurrent = (state, liveHeadSha = null) => assertScopeReady(stateAdapter, state, liveHeadSha);
+  const assertScopeRootCurrent = (state, liveHeadSha, task) => (
+    assertScopeRootReady(stateAdapter, state, liveHeadSha, task)
+  );
+
   async function checkpointPendingRecoveryEscalation(active, live, evidenceIds, reason) {
     if (!stateAdapter.checkpointVerificationEscalation) {
       throw new GitHubWorkflowError('The verification escalation checkpoint is unavailable', 'INVALID_ADAPTERS');
@@ -84,6 +91,7 @@ export function createWorkflowContext({ client, state: stateAdapter, git, clock,
 
   return {
     client, stateAdapter, git, clock, journal, archiveStore,
-    load, assertCurrent, checkpointPendingRecoveryEscalation,
+    load, assertCurrent, scopeReadiness, assertScopeCurrent, assertScopeRootCurrent,
+    checkpointPendingRecoveryEscalation,
   };
 }

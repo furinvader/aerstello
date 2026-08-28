@@ -50,17 +50,18 @@ test('public facade composes task evidence before its single state write and exa
   const packet = harness.taskPacket(initial.currentIntegrationHeadSha, taskId, {
     affectedAreas: ['workflow'], command: 'npm run check:workflow',
   });
+  const scoped = harness.scopeReadyForPacket(cwd, proposed, packet);
   planSpecialists({
     cwd,
-    input: harness.planInput(proposed, packet),
-    expectedRevision: proposed.revision,
+    input: harness.planInput(scoped, packet),
+    expectedRevision: scoped.revision,
     now: () => harness.AT,
   });
 
   const bound = checkpointTaskPacketBinding({
-    cwd, packet, expectedRevision: proposed.revision,
+    cwd, packet, expectedRevision: scoped.revision,
   });
-  assert.equal(bound.revision, proposed.revision + 1, 'binding performs one state checkpoint');
+  assert.equal(bound.revision, scoped.revision + 1, 'binding performs one state checkpoint');
   assert.equal(existsSync(taskPacketSidecarPath(cwd, 17, taskId)), true);
   assert.equal(existsSync(taskBindingProvenanceReceiptPath(cwd, 17, taskId)), true);
   const boundBytes = readFileSync(statePath(cwd, 17), 'utf8');

@@ -32,6 +32,7 @@ import {
   buildTaskPacketBindingTransition, buildTaskPacketReplanTransition,
   buildWorkerResultTransition,
 } from '../transitions/transactional-evidence.mjs';
+import { assertScopeTaskAllowed } from './scope.mjs';
 
 const REPLANNABLE_EXECUTION_STATUSES = new Set(['proposed', 'blocked', 'failed']);
 const REPLANNABLE_NEUTRAL_EXECUTION_FIELDS = ['worker', 'branch', 'worktree', 'workerCommitSha'];
@@ -191,6 +192,7 @@ export function checkpointTaskPacketBinding({
         throw new StateError('New task packet bindings require explicit schema v3 instructions', 'TASK_PACKET_V3_REQUIRED');
       }
       const planning = assertBehaviorMapperPlanningComplete(cwd, current, packet);
+      assertScopeTaskAllowed(cwd, current, task, packet);
       const provenance = buildTaskBindingProvenance(current, packet, planning);
       return {
         nextState: buildTaskPacketBindingTransition(current, packet.taskId, digest),
@@ -219,6 +221,7 @@ function preflightWorkerResultAcceptance({ cwd, state, packet, result, backfill 
   if (canonicalSerializedJson(durablePacket) !== canonicalSerializedJson(packet)) {
     throw new StateError('Worker result packet differs from its durable sidecar', 'TASK_PACKET_CONFLICT');
   }
+  assertScopeTaskAllowed(cwd, state, task, packet);
   const { authority, envelope } = proveWorkerResultEvidence({ cwd, state, task, packet, result });
   if (typeof task.workerResultDigest === 'string') {
     if (backfill && !['integrated', 'completed'].includes(task.status)) {

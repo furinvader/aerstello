@@ -212,10 +212,12 @@ test('ownership paths reject absolute, traversal, glob, and non-trailing recursi
 test('only direct targeted validation commands and bounded browser projects are accepted', () => {
   assert.ok(parseImplementationValidationCommand('node --test .agents/skills/change-development/scripts/implementation/contracts.test.mjs'));
   assert.ok(parseImplementationValidationCommand('npm test -w @aerstello/api -- src/orders/policy.test.ts'));
+  assert.deepEqual(parseImplementationValidationCommand('git diff --check'), ['git', 'diff', '--check']);
   for (const broad of [
     'npm test', 'npm run check:full', 'npm run test:e2e:full',
     'env CI=1 node --test apps/api/src/orders/policy.test.ts',
     'node --test apps/api/src/orders/policy.test.ts && npm run check:full',
+    'git diff', 'git diff --check HEAD', 'git diff --check --cached',
   ]) assert.equal(parseImplementationValidationCommand(broad), null, broad);
 
   const broad = packet(); broad.requiredValidation.unit[0].command = 'npm run check:full';

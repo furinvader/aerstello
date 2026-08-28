@@ -44,6 +44,7 @@ import {
   captureReleaseEvidence,
   deriveValidationPlan,
   findingFingerprint,
+  materializeValidationArgv,
   PROTECTED_RELEASE_REF,
   validateVerificationContract,
   validationPlanDigest,
@@ -1648,6 +1649,43 @@ function assertVerificationHead(cwd, state, clock, operation) {
   return current;
 }
 
+function assertValidationGitAuthority(cwd) {
+  let commonGitDirectory;
+  try {
+    commonGitDirectory = String(runGit([
+      '--no-replace-objects', 'rev-parse', '--path-format=absolute', '--git-common-dir',
+    ], { cwd, encoding: 'utf8' }).stdout).trim();
+  } catch (error) {
+    throw new StateError(
+      `Unable to resolve the common Git directory for validation authority: ${error.message}`,
+      'VALIDATION_GIT_AUTHORITY_UNAVAILABLE',
+    );
+  }
+  if (commonGitDirectory === '') {
+    throw new StateError(
+      'Unable to resolve the common Git directory for validation authority',
+      'VALIDATION_GIT_AUTHORITY_UNAVAILABLE',
+    );
+  }
+  const graftsPath = join(commonGitDirectory, 'info', 'grafts');
+  let grafts;
+  try {
+    grafts = statSync(graftsPath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return;
+    throw new StateError(
+      `Unable to inspect legacy Git graft authority at ${graftsPath}: ${error.message}`,
+      'VALIDATION_GIT_AUTHORITY_UNAVAILABLE',
+    );
+  }
+  if (grafts.size > 0) {
+    throw new StateError(
+      `Validation authority refuses nonempty legacy Git grafts at ${graftsPath}`,
+      'VALIDATION_LEGACY_GRAFTS_PRESENT',
+    );
+  }
+}
+
 export function mergeLifecycleValidationCommands(partials) {
   const commands = [];
   for (const candidate of partials.flatMap(({ commands: entries }) => entries)) {
@@ -1663,7 +1701,7 @@ export function mergeLifecycleValidationCommands(partials) {
   return commands;
 }
 
-function deriveLifecycleValidationPlan({ changeId, effectivePlanDigest, headSha, taskEvidence, createdAt, releaseEvidence }) {
+function deriveLifecycleValidationPlan({ changeId, effectivePlanDigest, planningSha, headSha, taskEvidence, createdAt, releaseEvidence }) {
   const groups = new Map();
   for (const evidence of taskEvidence) {
     const digest = evidence.packet.planDigest;
@@ -1671,7 +1709,7 @@ function deriveLifecycleValidationPlan({ changeId, effectivePlanDigest, headSha,
   }
   const partials = [...groups].map(([boundPlanDigest, evidence]) => {
     const needsRelease = evidence.some(({ packet }) => packet.affectedAreas.some((area) => ['release', 'migration'].includes(area)));
-    return deriveValidationPlan({ changeId, effectivePlanDigest: boundPlanDigest, headSha, taskEvidence: evidence,
+    return deriveValidationPlan({ changeId, effectivePlanDigest: boundPlanDigest, planningSha, headSha, taskEvidence: evidence,
       createdAt, releaseEvidence: needsRelease ? releaseEvidence : null });
   });
   if (partials.length === 1 && partials[0].effectivePlanDigest === effectivePlanDigest) return partials[0];
@@ -1693,13 +1731,19 @@ export function createValidationPlan({ cwd = process.cwd(), changeId, expectedRe
     if (replace && !replaceable) throw new StateError('Validation plan replacement is allowed only for an existing failed plan', 'INVALID_PHASE');
     if (state.phase !== 'integrated' && !(replace && replaceable)) throw new StateError('Validation planning requires integrated state or explicit failed-plan replacement', 'INVALID_PHASE');
     const current = assertVerificationHead(root, state, clock, 'Validation planning');
+    assertValidationGitAuthority(root);
+    if (runGit(['--no-replace-objects', 'merge-base', '--is-ancestor', state.planningSha, current.headSha], {
+      cwd: root, allowFailure: true,
+    }).status !== 0) {
+      throw new StateError('Immutable Planning SHA must be an ancestor of the validation HEAD', 'VALIDATION_PLAN_INVALID');
+    }
     const taskEvidence = terminalTaskEvidence(root, state);
     const affectedAreas = new Set(taskEvidence.flatMap(({ packet }) => packet.affectedAreas));
     const releaseEvidence = affectedAreas.has('release') || affectedAreas.has('migration')
       ? captureReleaseEvidence({ cwd: root, base: PROTECTED_RELEASE_REF, head: current.headSha, releaseRef: PROTECTED_RELEASE_REF }) : null;
     const round = nextVerificationRound(root, state);
     const plan = deriveLifecycleValidationPlan({ changeId: state.changeId, effectivePlanDigest: state.plan.effectiveDigest,
-      headSha: current.headSha, taskEvidence, createdAt: now(clock), releaseEvidence });
+      planningSha: state.planningSha, headSha: current.headSha, taskEvidence, createdAt: now(clock), releaseEvidence });
     assertStateVerifierCapacity(root, state, { validationPlan: plan, verificationRound: round });
     const semanticDigest = validationPlanDigest(plan);
     const verification = { round, headSha: current.headSha, taskSetDigest: plan.taskSetDigest,
@@ -1755,6 +1799,12 @@ function runValidationLocked({ cwd = process.cwd(), changeId, expectedRevision, 
   }, lockOptions);
   const plan = verifyReceipt(validationPlanPath(root, state), 'validation plan').value;
   if (validationPlanDigest(plan) !== state.verification.validationPlanDigest || plan.taskSetDigest !== state.verification.taskSetDigest) throw new StateError('Validation plan identity is stale', 'VALIDATION_PLAN_STALE');
+  assertValidationGitAuthority(root);
+  if (runGit(['--no-replace-objects', 'merge-base', '--is-ancestor', state.planningSha, plan.headSha], {
+    cwd: root, allowFailure: true,
+  }).status !== 0) {
+    throw new StateError('Immutable Planning SHA must be an ancestor of the validation HEAD', 'VALIDATION_PLAN_STALE');
+  }
   let results = existingCommandResults(root, state, plan);
   for (const command of plan.commands) {
     if (results.has(command.id)) continue;
@@ -1771,7 +1821,10 @@ function runValidationLocked({ cwd = process.cwd(), changeId, expectedRevision, 
       }, lockOptions);
     }
     const intentRevision = state.revision;
-    const executed = runner(command.argv[0], command.argv.slice(1), { cwd: root, shell: false, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+    const executionArgv = materializeValidationArgv(command.argv, {
+      planningSha: state.planningSha, headSha: plan.headSha,
+    });
+    const executed = runner(executionArgv[0], executionArgv.slice(1), { cwd: root, shell: false, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
     const completedAt = now(clock); const startedAt = intent.startedAt;
     const status = executed.status === 0 && !executed.signal && !executed.error ? 'passed' : 'failed';
     const output = `${executed.stdout ?? ''}${executed.stderr ?? ''}${executed.error?.message ?? ''}`;
@@ -3409,6 +3462,11 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
       const terminalIds = state.execution.tasks.filter(({ status }) => ['integrated', 'no-change'].includes(status)).map(({ id }) => id);
       const terminalLabels = terminalIds.map((id) => `task ${id}`);
       const remediationIds = new Set();
+      if (validationDriven) {
+        for (const task of resultingPlan.tasks) {
+          if (!prior.tasks.some(({ id }) => id === task.id)) remediationIds.add(task.id);
+        }
+      }
       for (const fingerprint of state.verification?.unresolvedFindingFingerprints ?? []) {
         const path = findingDispositionPath(root, state, fingerprint);
         if (!existsSync(path)) continue;

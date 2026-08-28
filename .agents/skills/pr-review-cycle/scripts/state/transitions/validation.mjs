@@ -4,6 +4,21 @@ import { StateError } from '../errors.mjs';
 const VALIDATION_AREAS = new Set([
   'api', 'web', 'shared', 'workflow', 'documentation', 'release', 'migration',
 ]);
+const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
+
+function materializeValidationArgv(command, argv, state, headSha) {
+  const parsed = parseTargetedValidationCommand(command);
+  if (!parsed) return null;
+  if (command !== 'git diff --check') {
+    return JSON.stringify(argv) === JSON.stringify(parsed) ? [...argv] : null;
+  }
+  if (!SHA.test(state.baseSha ?? '') || !SHA.test(headSha ?? '')) return null;
+  const legacyExpected = ['git', 'diff', '--check', state.baseSha, headSha, '--'];
+  const protectedExpected = ['git', '--no-replace-objects', 'diff', '--check', state.baseSha, headSha, '--'];
+  return JSON.stringify(argv) === JSON.stringify(parsed)
+      || JSON.stringify(argv) === JSON.stringify(legacyExpected)
+      || JSON.stringify(argv) === JSON.stringify(protectedExpected) ? protectedExpected : null;
+}
 
 function sameEvidence(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
@@ -74,8 +89,8 @@ function validateValidationPlan(plan, state) {
       for (const field of Object.keys(entry)) {
         if (!entryFields.includes(field)) errors.push(`${prefix}.${field} is not allowed`);
       }
-      const parsed = parseTargetedValidationCommand(entry.command);
-      if (!parsed || JSON.stringify(parsed) !== JSON.stringify(entry.argv)) {
+      const executionArgv = materializeValidationArgv(entry.command, entry.argv, state, plan.headSha);
+      if (!executionArgv) {
         errors.push(`${prefix} is not a supported exact command`);
       }
       if (!['unit', 'system'].includes(entry.kind)) errors.push(`${prefix}.kind is invalid`);
@@ -88,7 +103,7 @@ function validateValidationPlan(plan, state) {
           errors.push(`${prefix}.${field} is invalid`);
         }
       }
-      const e2eMetadata = parsed ? relatedE2EMetadata(parsed) : null;
+      const e2eMetadata = executionArgv ? relatedE2EMetadata(executionArgv) : null;
       if (entry.kind === 'unit'
           && (entry.selectors?.length > 0 || entry.projects?.length > 0)) {
         errors.push(`${prefix} unit metadata must be empty`);

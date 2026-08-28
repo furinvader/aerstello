@@ -138,6 +138,7 @@ const {
   bindPackets,
   planInput,
   bindPacket,
+  scopeReadyForPacket,
   writePreAuthorityImplementedState,
   writePreAuthorityTasks,
   canonicalBoundIntegratedTask,
@@ -493,6 +494,7 @@ test('schema-v3 packet sidecars are canonical, immutable, digest-verified, and r
   }), { code: 'SPECIALIST_PLAN_REQUIRED' });
   assert.equal(existsSync(taskPacketSidecarPath(cwd, state.prNumber, packet.taskId)), false);
 
+  state = scopeReadyForPacket(cwd, state, packet);
   planSpecialists({ cwd, input: planInput(state, packet), expectedRevision: state.revision, now: () => AT });
   assert.throws(() => checkpointTaskPacketBinding({
     cwd, packet, expectedRevision: state.revision,
@@ -620,11 +622,12 @@ test('migration-origin v2 binding replanning is guarded, neutral, and followed b
   assert.throws(() => checkpointTaskPacketBinding({
     cwd, packet, expectedRevision: replanned.revision,
   }), { code: 'SPECIALIST_PLAN_REQUIRED' });
+  const scoped = scopeReadyForPacket(cwd, replanned, packet);
   planSpecialists({
-    cwd, input: planInput(replanned, packet), expectedRevision: replanned.revision, now: () => AT,
+    cwd, input: planInput(scoped, packet), expectedRevision: scoped.revision, now: () => AT,
   });
   const rebound = checkpointTaskPacketBinding({
-    cwd, packet, expectedRevision: replanned.revision,
+    cwd, packet, expectedRevision: scoped.revision,
   });
   assert.equal(rebound.tasks[0].taskPacketDigest, taskPacketDigest(packet));
   assert.equal(existsSync(taskPacketSidecarPath(cwd, rebound.prNumber, opaqueTaskId)), true);

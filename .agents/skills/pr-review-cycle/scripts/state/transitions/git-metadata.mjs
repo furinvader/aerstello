@@ -55,6 +55,15 @@ export function buildGitMetadataTransition(state, git) {
         headSha: null,
         updatedAt: null,
       },
+      ...(state.scopeControl ? {
+        scopeControl: {
+          ...state.scopeControl,
+          gate: state.scopeControl.gate === 'returned'
+            ? 'resume-required' : state.scopeControl.gate,
+          assessmentHeadSha: null,
+          updatedAt: state.updatedAt,
+        },
+      } : {}),
       ...(state.phase === 'awaiting-review' ? {
         phase: 'recovering',
         nextAction: usage.exhausted
