@@ -59,9 +59,10 @@ function admissionAuthority(state, plan) {
   const packet = { schemaVersion: 1, binding,
     sourceScope: { objective: plan.objective,
       requiredCriteria: plan.criteria.map(({ id, description }) => ({ id, text: description })),
-      nonGoals: [], implementationGuidance: [] },
+      nonGoals: closure.nonGoals, implementationGuidance: [] },
     acceptedScope: { criteria: plan.criteria.map(({ id, description }) => ({ id, text: description })),
-      invariants: [], minimalClosure: closure.outcome, authorizedShape: ['worktree-lifecycle'],
+      invariants: [...closure.invariants, ...closure.mandatoryConstraints],
+      minimalClosure: closure.outcome, authorizedShape: ['worktree-lifecycle'],
       unauthorizedShape: [], deferredShape: [] },
     changeInventory: { summary: 'Exercise worktree lifecycle.', paths: [], dependencies: [],
       publicSurfaces: [], persistentSurfaces: [], subsystems: [], mappings: [mapping] }, tripwires: [] };
