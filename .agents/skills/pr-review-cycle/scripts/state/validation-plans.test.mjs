@@ -241,13 +241,16 @@ test('PR validation binds diff checks to the durable base and exact validation H
   });
   const fresh = buildTargetedValidationPlan({ cwd: equalCwd, initialSelection: diffSelection, now: () => AT });
   assert.deepEqual(fresh.commands[0].argv, [
-    'git', 'diff', '--check', equalState.baseSha, equalState.currentIntegrationHeadSha, '--',
+    'git', '--no-replace-objects', 'diff', '--check', equalState.baseSha,
+    equalState.currentIntegrationHeadSha, '--',
   ]);
 
   const legacy = {
     ...fresh,
     commands: fresh.commands.map((entry) => entry.command === 'git diff --check'
-      ? { ...entry, argv: ['git', 'diff', '--check'] }
+      ? { ...entry, argv: [
+        'git', 'diff', '--check', equalState.baseSha, equalState.currentIntegrationHeadSha, '--',
+      ] }
       : entry),
   };
   writeFileSync(validationPlanPath(equalCwd, equalState.prNumber), `${JSON.stringify(legacy)}\n`);
@@ -263,7 +266,9 @@ test('PR validation binds diff checks to the durable base and exact validation H
     now: () => AT,
   });
   assert.deepEqual(attempted[0], fresh.commands[0].argv);
-  assert.deepEqual(equalResult.plan.commands[0].argv, ['git', 'diff', '--check']);
+  assert.deepEqual(equalResult.plan.commands[0].argv, [
+    'git', 'diff', '--check', equalState.baseSha, equalState.currentIntegrationHeadSha, '--',
+  ]);
   assert.equal(equalResult.state.validationStatus.status, 'passed');
 
   const whitespaceCwd = repo();
@@ -283,14 +288,37 @@ test('PR validation binds diff checks to the durable base and exact validation H
     }),
     now: () => AT,
   });
+  const replacementCommit = git(whitespaceCwd, [
+    'commit-tree', `${advanced.baseSha}^{tree}`, '-p', advanced.baseSha, '-m', 'hide committed whitespace',
+  ]);
+  const replacementRef = `refs/replace/${advanced.currentIntegrationHeadSha}`;
+  const whitespaceAttempts = [];
   const failed = executeTargetedValidationPlan({
     cwd: whitespaceCwd,
-    runCommand: (argv, runCwd) => argv[0] === 'git'
-      ? spawnSync(argv[0], argv.slice(1), { cwd: runCwd, encoding: 'utf8' })
-      : { status: 0 },
+    runCommand: (argv, runCwd) => {
+      whitespaceAttempts.push(argv);
+      if (argv[0] === 'git') {
+        git(whitespaceCwd, ['update-ref', replacementRef, replacementCommit]);
+        assert.equal(spawnSync('git', [
+          'diff', '--check', advanced.baseSha, advanced.currentIntegrationHeadSha, '--',
+        ], { cwd: whitespaceCwd }).status, 0,
+        'the replacement would hide whitespace from an unprotected diff');
+        const result = spawnSync(argv[0], argv.slice(1), { cwd: runCwd, encoding: 'utf8' });
+        git(whitespaceCwd, ['update-ref', '-d', replacementRef]);
+        return result;
+      }
+      return { status: 0 };
+    },
     now: () => AT,
   });
+  assert.deepEqual(whitespaceAttempts[0], [
+    'git', '--no-replace-objects', 'diff', '--check', advanced.baseSha,
+    advanced.currentIntegrationHeadSha, '--',
+  ]);
   assert.equal(failed.state.validationStatus.status, 'failed');
+  assert.equal(spawnSync('git', ['show-ref', '--verify', '--quiet', replacementRef], {
+    cwd: whitespaceCwd,
+  }).status, 1);
 });
 
 test('targeted validation planning proves actual base ancestry without replacement refs', () => {

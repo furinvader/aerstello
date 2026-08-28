@@ -13,9 +13,11 @@ function materializeValidationArgv(command, argv, state, headSha) {
     return JSON.stringify(argv) === JSON.stringify(parsed) ? [...argv] : null;
   }
   if (!SHA.test(state.baseSha ?? '') || !SHA.test(headSha ?? '')) return null;
-  const expected = ['git', 'diff', '--check', state.baseSha, headSha, '--'];
+  const legacyExpected = ['git', 'diff', '--check', state.baseSha, headSha, '--'];
+  const protectedExpected = ['git', '--no-replace-objects', 'diff', '--check', state.baseSha, headSha, '--'];
   return JSON.stringify(argv) === JSON.stringify(parsed)
-      || JSON.stringify(argv) === JSON.stringify(expected) ? expected : null;
+      || JSON.stringify(argv) === JSON.stringify(legacyExpected)
+      || JSON.stringify(argv) === JSON.stringify(protectedExpected) ? protectedExpected : null;
 }
 
 function sameEvidence(left, right) {

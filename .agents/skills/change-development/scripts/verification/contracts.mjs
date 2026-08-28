@@ -48,10 +48,13 @@ export const PROTECTED_RELEASE_REF = 'origin/main';
 export function materializeValidationArgv(argv, { planningSha, headSha } = {}) {
   if (!SHA.test(planningSha ?? '')) throw new TypeError('planningSha must be an exact commit');
   if (!SHA.test(headSha ?? '')) throw new TypeError('headSha must be an exact commit');
-  const expected = ['git', 'diff', '--check', planningSha, headSha, '--'];
-  if (JSON.stringify(argv) === JSON.stringify(BARE_DIFF_CHECK_ARGV)) return expected;
-  if (argv?.[0] === 'git' && argv?.[1] === 'diff') {
-    if (JSON.stringify(argv) !== JSON.stringify(expected)) {
+  const legacyExpected = ['git', 'diff', '--check', planningSha, headSha, '--'];
+  const protectedExpected = ['git', '--no-replace-objects', 'diff', '--check', planningSha, headSha, '--'];
+  if (JSON.stringify(argv) === JSON.stringify(BARE_DIFF_CHECK_ARGV)
+      || JSON.stringify(argv) === JSON.stringify(legacyExpected)
+      || JSON.stringify(argv) === JSON.stringify(protectedExpected)) return protectedExpected;
+  if (argv?.[0] === 'git' && (argv?.[1] === 'diff' || argv?.[1] === '--no-replace-objects')) {
+    if (JSON.stringify(argv) !== JSON.stringify(protectedExpected)) {
       throw new TypeError('git diff --check validation argv does not match the exact validation range');
     }
   }

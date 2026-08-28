@@ -735,18 +735,35 @@ test('change validation executes diff checks across immutable planning and HEAD 
   const plan = JSON.parse(readFileSync(planPath, 'utf8'));
   const diffCommand = plan.commands.find(({ argv }) => argv[0] === 'git');
   assert.deepEqual(diffCommand.argv, [
-    'git', 'diff', '--check', state.planningSha, state.verification.headSha, '--',
+    'git', '--no-replace-objects', 'diff', '--check', state.planningSha, state.verification.headSha, '--',
   ]);
+  const replacementCommit = git(fixture.cwd, 'commit-tree', `${state.planningSha}^{tree}`,
+    '-p', state.planningSha, '-m', 'hide committed whitespace');
+  const replacementRef = `refs/replace/${state.verification.headSha}`;
+  const attempted = [];
   state = runValidation({
     cwd: fixture.cwd,
     expectedRevision: state.revision,
     runner(executable, argv, options) {
-      return executable === 'git'
-        ? spawnSync(executable, argv, options)
-        : { status: 0, signal: null, stdout: 'passed', stderr: '' };
+      attempted.push([executable, ...argv]);
+      if (executable === 'git') {
+        git(fixture.cwd, 'update-ref', replacementRef, replacementCommit);
+        assert.equal(spawnSync('git', [
+          'diff', '--check', state.planningSha, state.verification.headSha, '--',
+        ], { cwd: fixture.cwd }).status, 0,
+        'the replacement would hide the whitespace from an unprotected diff');
+        const result = spawnSync(executable, argv, options);
+        git(fixture.cwd, 'update-ref', '-d', replacementRef);
+        return result;
+      }
+      return { status: 0, signal: null, stdout: 'passed', stderr: '' };
     },
   });
+  assert.deepEqual(attempted.find((argv) => argv[0] === 'git'), diffCommand.argv);
   assert.equal(state.verification.validationStatus, 'failed');
+  assert.equal(spawnSync('git', ['show-ref', '--verify', '--quiet', replacementRef], {
+    cwd: fixture.cwd,
+  }).status, 1);
 
   const equal = await integratedSingleTaskFixture(
     'equal committed validation range',

@@ -151,9 +151,11 @@ export function materializeTargetedValidationArgv(command, argv, { baseSha, head
     return JSON.stringify(argv) === JSON.stringify(parsed) ? [...argv] : null;
   }
   if (!isSha(baseSha) || !isSha(headSha)) return null;
-  const expected = ['git', 'diff', '--check', baseSha, headSha, '--'];
+  const legacyExpected = ['git', 'diff', '--check', baseSha, headSha, '--'];
+  const protectedExpected = ['git', '--no-replace-objects', 'diff', '--check', baseSha, headSha, '--'];
   if (JSON.stringify(argv) === JSON.stringify(BARE_DIFF_CHECK_ARGV)
-      || JSON.stringify(argv) === JSON.stringify(expected)) return expected;
+      || JSON.stringify(argv) === JSON.stringify(legacyExpected)
+      || JSON.stringify(argv) === JSON.stringify(protectedExpected)) return protectedExpected;
   return null;
 }
 

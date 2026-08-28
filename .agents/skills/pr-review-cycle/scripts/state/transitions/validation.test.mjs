@@ -40,6 +40,26 @@ test('targeted validation builder consumes an explicit timestamp and completed p
     headSha: state.currentIntegrationHeadSha, checks: ['npm run check:workflow'],
     updatedAt: harness.AT,
   });
+  const bare = ['git', 'diff', '--check'];
+  const legacy = ['git', 'diff', '--check', state.baseSha, state.currentIntegrationHeadSha, '--'];
+  const protectedArgv = [
+    'git', '--no-replace-objects', 'diff', '--check', state.baseSha,
+    state.currentIntegrationHeadSha, '--',
+  ];
+  for (const argv of [bare, legacy, protectedArgv]) {
+    const diffPlan = { ...plan, commands: [{ ...plan.commands[0], command: 'git diff --check', argv }] };
+    assert.deepEqual(buildTargetedValidationTransition(state, diffPlan, harness.AT).validationStatus.checks,
+      ['git diff --check']);
+  }
+  for (const argv of [
+    ['git', 'diff', '--check', 'f'.repeat(40), state.currentIntegrationHeadSha, '--'],
+    ['git', 'diff', '--no-replace-objects', '--check', state.baseSha, state.currentIntegrationHeadSha, '--'],
+    [...protectedArgv, 'extra'],
+  ]) {
+    const diffPlan = { ...plan, commands: [{ ...plan.commands[0], command: 'git diff --check', argv }] };
+    assert.throws(() => buildTargetedValidationTransition(state, diffPlan, harness.AT),
+      (error) => error.code === 'INVALID_VALIDATION_PLAN');
+  }
   assert.throws(
     () => buildTargetedValidationTransition(state, {
       ...plan, commands: [{ ...plan.commands[0], status: 'pending', exitCode: null,

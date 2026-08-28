@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import { digestJson } from '../contracts/contracts.mjs';
 import { implementationTaskDigest } from '../implementation/contracts.mjs';
 import { assertValidationCommandCompatibility, canonicalizeValidationEntry, deriveValidationPlan, findingFingerprint,
+  materializeValidationArgv,
   PROTECTED_RELEASE_REF,
   validateVerificationContract, validationPlanDigest, validationPlanReceiptDigest,
 } from './contracts.mjs';
@@ -143,7 +144,18 @@ test('validation plans bind the canonical diff check to planning and validation 
     taskEvidence: [selected],
     createdAt: AT,
   });
-  assert.deepEqual(plan.commands[0].argv, ['git', 'diff', '--check', SHA, headSha, '--']);
+  const legacy = ['git', 'diff', '--check', SHA, headSha, '--'];
+  const protectedArgv = ['git', '--no-replace-objects', 'diff', '--check', SHA, headSha, '--'];
+  assert.deepEqual(plan.commands[0].argv, protectedArgv);
+  for (const argv of [['git', 'diff', '--check'], legacy, protectedArgv]) {
+    assert.deepEqual(materializeValidationArgv(argv, { planningSha: SHA, headSha }), protectedArgv);
+  }
+  for (const argv of [
+    ['git', 'diff', '--check', headSha, SHA, '--'],
+    ['git', 'diff', '--no-replace-objects', '--check', SHA, headSha, '--'],
+    ['git', '--no-replace-objects', 'diff', '--check', SHA, headSha],
+    ['git', '--no-replace-objects', 'diff', '--check', SHA, headSha, '--', 'extra'],
+  ]) assert.throws(() => materializeValidationArgv(argv, { planningSha: SHA, headSha }), /exact validation range/u);
   assert.throws(() => deriveValidationPlan({
     changeId: selected.packet.changeId,
     effectivePlanDigest: selected.packet.planDigest,

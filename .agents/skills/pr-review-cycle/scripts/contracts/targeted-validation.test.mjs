@@ -50,8 +50,12 @@ test('targeted command parsing accepts direct focused commands and rejects wrapp
 
 test('diff validation execution materializes only the canonical exact range', () => {
   const bare = ['git', 'diff', '--check'];
-  const ranged = ['git', 'diff', '--check', BASE_SHA, HEAD_SHA, '--'];
+  const legacyRanged = ['git', 'diff', '--check', BASE_SHA, HEAD_SHA, '--'];
+  const ranged = ['git', '--no-replace-objects', 'diff', '--check', BASE_SHA, HEAD_SHA, '--'];
   assert.deepEqual(materializeTargetedValidationArgv('git diff --check', bare, {
+    baseSha: BASE_SHA, headSha: HEAD_SHA,
+  }), ranged);
+  assert.deepEqual(materializeTargetedValidationArgv('git diff --check', legacyRanged, {
     baseSha: BASE_SHA, headSha: HEAD_SHA,
   }), ranged);
   assert.deepEqual(materializeTargetedValidationArgv('git diff --check', ranged, {
@@ -60,6 +64,13 @@ test('diff validation execution materializes only the canonical exact range', ()
   assert.equal(materializeTargetedValidationArgv('git diff --check', [
     'git', 'diff', '--check', HEAD_SHA, BASE_SHA, '--',
   ], { baseSha: BASE_SHA, headSha: HEAD_SHA }), null);
+  for (const argv of [
+    ['git', 'diff', '--no-replace-objects', '--check', BASE_SHA, HEAD_SHA, '--'],
+    ['git', '--no-replace-objects', 'diff', '--check', BASE_SHA, HEAD_SHA],
+    ['git', '--no-replace-objects', 'diff', '--check', BASE_SHA, HEAD_SHA, '--', 'extra'],
+  ]) assert.equal(materializeTargetedValidationArgv(
+    'git diff --check', argv, { baseSha: BASE_SHA, headSha: HEAD_SHA },
+  ), null);
   assert.equal(materializeTargetedValidationArgv('git diff --check', bare, {
     baseSha: 'not-a-sha', headSha: HEAD_SHA,
   }), null);
