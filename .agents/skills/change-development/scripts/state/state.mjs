@@ -589,6 +589,8 @@ export function nextActionFor(state) {
   if (state.phase === 'recovering') return 'Run change:state recover to finish the exact interrupted transition.';
   if (state.phase === 'blocked') return state.execution?.activeWave.length
     ? 'Resolve the listed blocking evidence by accepting or finishing every active-wave task result, then reject/replan.'
+    : state.blockedReasons?.some((reason) => reason.includes('Recorded material scope decision'))
+      ? 'Run change:state amend-plan from the exact current material decision and assessment; implementation authority remains blocked.'
     : state.blockedReasons?.some((reason) => reason.includes('bounded minor amendment'))
       ? 'Run change:state amend-plan from the exact minor scope evidence, invalidate that evidence, then reassess the next authority boundary.'
       : state.blockedReasons?.some((reason) => reason.includes('removal or simplification'))
@@ -1111,7 +1113,7 @@ export function acceptPlan({ cwd = process.cwd(), changeId, plan, planningEviden
       const next = revised(state, {
         phase: gate.phase === 'awaiting-scope-decision' ? gate.phase : 'planning',
         scope,
-        blockedReasons: gate.blocker ? [gate.blocker] : [],
+        blockedReasons: [],
         git: currentGit,
       }, () => new Date(timestamp));
       return commitTransition({
@@ -1239,8 +1241,9 @@ export function assessScope({ cwd = process.cwd(), changeId, scopeEvidence, expe
     const scope = { ...state.scope, status: gate.status, candidatePlanDigest: null,
       currentEvidenceDigest: evidenceDigest, currentBoundary: boundary, currentSubjectSha: subjectSha };
     const phase = gate.phase ?? state.phase;
-    const blockedReasons = gate.blocker ? [gate.blocker]
-      : phase === 'blocked' ? state.blockedReasons : [];
+    const blockedReasons = phase === 'blocked'
+      ? gate.blocker ? [gate.blocker] : state.blockedReasons
+      : [];
     const next = revised(state, { phase, scope, blockedReasons }, clock);
     return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'scope-assessed',
       summary: `Recorded ${scopeEvidence.result.verdict} scope verdict at ${boundary}`, crashStep,
@@ -1267,18 +1270,84 @@ export function recordScopeDecision({ cwd = process.cwd(), changeId, decision, e
     const digest = scopeContractDigest(decision);
     if (state.scope.decisionDigests.includes(digest)) throw new StateError('Scope decision is already recorded', 'SCOPE_DECISION_INVALID');
     const abandons = decision.disposition === 'abandon-replan';
+    const requiresAmendment = state.plan && !abandons;
     const scope = { ...state.scope, status: 'assessment-required',
       decisionDigests: [...state.scope.decisionDigests, digest] };
-    const acceptedPhase = state.execution?.tasks.some(({ status }) => status !== 'unbound') ? 'implementing' : 'ready-to-implement';
     const next = revised(state, {
-      phase: abandons ? 'abandoned' : state.plan ? acceptedPhase : 'planning', scope,
+      phase: abandons ? 'abandoned' : requiresAmendment ? 'blocked' : 'planning', scope,
       abandonmentReason: abandons ? decision.rationale : state.abandonmentReason,
-      blockedReasons: [],
+      blockedReasons: requiresAmendment
+        ? ['Recorded material scope decision requires its exact authorized plan amendment before implementation can continue.']
+        : [],
     }, clock);
     return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'scope-decision-recorded',
       summary: `Recorded ${decision.disposition} scope disposition`, crashStep,
       pendingEvidence: [{ key: 'scopeDecisionDigest', path: relative(changeDirectory(root, state.changeId), scopeDecisionPath(root, state, decision)), value: decision, label: `scope decision ${decision.decisionId}` }] });
   }, lockOptions);
+}
+
+function exactMaterialDecisionAuthority(root, state, evidence) {
+  if (evidence?.result?.verdict !== 'human-decision-required') {
+    throw new StateError('Current scope evidence does not require a material decision', 'SCOPE_AMENDMENT_INVALID');
+  }
+  const expectedEvidence = {
+    sourceDigest: state.plan.sourceCaptureDigest,
+    planningSha: state.planningSha,
+    planDigest: state.plan.effectiveDigest,
+    amendmentDigests: scopeAmendmentRecords(root, state).map((record) => scopeContractDigest(record)),
+    closureDigest: state.scope.closureDigest,
+    subjectDigest: evidence.packet.binding.subject.digest,
+    subjectSha: evidence.packet.binding.subject.sha,
+    assessmentPacketDigest: evidence.packetDigest,
+    assessmentResultDigest: evidence.resultDigest,
+  };
+  const matching = state.scope.decisionDigests.flatMap((digest) => {
+    const receipt = findScopeReceipt(root, state, 'decisions', digest, 'material scope decision');
+    return serialized(receipt.value.evidence) === serialized(expectedEvidence)
+      ? [{ digest: receipt.digest, decision: receipt.value }] : [];
+  });
+  if (matching.length !== 1) {
+    throw new StateError('Material amendment requires exactly one receipt-protected decision bound to the current assessment',
+      'SCOPE_AMENDMENT_INVALID');
+  }
+  const materialMechanisms = [...new Set(evidence.result.coverage
+    .filter(({ classification }) => classification === 'material-scope-change')
+    .map(({ mechanism }) => mechanism))].sort();
+  if (materialMechanisms.length === 0) {
+    throw new StateError('Current material assessment contains no material mechanisms', 'SCOPE_AMENDMENT_INVALID');
+  }
+  return { ...matching[0], materialMechanisms };
+}
+
+function validateMaterialDecisionAmendment({ root, state, evidence, amendment, priorClosure, minimalClosure }) {
+  const errors = [];
+  let authority;
+  try { authority = exactMaterialDecisionAuthority(root, state, evidence); }
+  catch (error) { return [error.message]; }
+  if (amendment.trigger !== state.scope.currentEvidenceDigest) {
+    errors.push('$ material amendment trigger must name the exact current human-decision-required evidence');
+  }
+  if (!amendment.invalidatedEvidence.includes(state.scope.currentEvidenceDigest)) {
+    errors.push('$ material amendment must invalidate the exact current human-decision-required evidence');
+  }
+  const assessed = new Set(authority.materialMechanisms);
+  const approved = new Set(authority.decision.approvedShape);
+  if ([...approved].some((mechanism) => !assessed.has(mechanism))) {
+    errors.push('$ material decision approvedShape must be a subset of the exact assessed material mechanisms');
+  }
+  if (authority.decision.disposition !== 'approve-material-amendment' && approved.size > 0) {
+    errors.push(`$ ${authority.decision.disposition} cannot authorize material shape`);
+  }
+  const expectedAuthorized = new Set([
+    ...priorClosure.authorizedShape.filter((mechanism) => !assessed.has(mechanism)),
+    ...approved,
+  ]);
+  const actualAuthorized = new Set(minimalClosure?.authorizedShape ?? []);
+  if (expectedAuthorized.size !== actualAuthorized.size
+      || [...expectedAuthorized].some((mechanism) => !actualAuthorized.has(mechanism))) {
+    errors.push('$ amended authorizedShape must preserve unrelated authority and contain exactly the material decision approvedShape');
+  }
+  return errors;
 }
 
 export function resumeScopeReturn({ cwd = process.cwd(), changeId, scopeReturn, expectedRevision,
@@ -3890,6 +3959,13 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
     const scopeDriven = state.scope?.currentEvidenceDigest === amendment.trigger;
     const findingDriven = /^sha256:[0-9a-f]{64}$/u.test(amendment.trigger) && !scopeDriven;
     const sourceDriven = state.phase === 'awaiting-decision';
+    const currentScopeEvidence = state.scope?.currentEvidenceDigest
+      ? findScopeReceipt(root, state, 'evidence', state.scope.currentEvidenceDigest, 'scope amendment evidence').value
+      : null;
+    if (currentScopeEvidence?.result?.verdict === 'human-decision-required' && !scopeDriven) {
+      throw new StateError('Material amendment must trigger from the exact current human-decision-required evidence',
+        'SCOPE_AMENDMENT_INVALID');
+    }
     if (findingDriven && !state.verification) throw new StateError('Finding-driven amendment requires active verification evidence', 'INVALID_AMENDMENT');
     if (state.verification && !findingDriven && !validationDriven && !sourceDriven && !scopeDriven) throw new StateError('Verification-state amendments require exact finding, failed-validation, source-decision, or scope authority', 'INVALID_AMENDMENT');
     let scopeOverlapAuthority = null;
@@ -4030,8 +4106,11 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
           criterionIds.some((id) => newCriteria.some((criterion) => criterion.id === id)))) {
           closureErrors.push('$ trim remediation must add one ordinary criterion-linked removal or simplification task');
         }
-      } else if (evidence.result.verdict !== 'human-decision-required'
-          || state.scope.decisionDigests.length === 0) {
+      } else if (evidence.result.verdict === 'human-decision-required') {
+        closureErrors.push(...validateMaterialDecisionAmendment({
+          root, state, evidence, amendment, priorClosure, minimalClosure,
+        }));
+      } else {
         closureErrors.push('$ scope-driven amendment requires minor authority or an exact material scope decision');
       }
     }
@@ -4830,6 +4909,19 @@ function amendmentForRecovery(cwd, intent, predecessor) {
   if (closureErrors.length > 0) throw new StateError('Interrupted plan amendment has invalid minimal closure authority', 'RECOVERY_EVIDENCE_INVALID');
   if (predecessor.phase === 'awaiting-decision' && !hasBoundResolveDecision(cwd, predecessor, record.trigger)) {
     throw new StateError('Interrupted source-driven amendment lacks its bound resolve decision', 'RECOVERY_EVIDENCE_INVALID');
+  }
+  if (predecessor.scope.currentEvidenceDigest) {
+    const evidence = findScopeReceipt(cwd, predecessor, 'evidence', predecessor.scope.currentEvidenceDigest,
+      'recovered scope amendment evidence').value;
+    if (evidence.result.verdict === 'human-decision-required') {
+      const materialErrors = validateMaterialDecisionAmendment({
+        root: cwd, state: predecessor, evidence,
+        amendment: record, priorClosure, minimalClosure,
+      });
+      if (materialErrors.length > 0) {
+        throw new StateError('Interrupted material amendment lacks exact decision authority', 'RECOVERY_EVIDENCE_INVALID');
+      }
+    }
   }
   const expected = deriveAmendedTransition(predecessor, record.resultingPlan, intent.nextState.git, record.createdAt, number);
   expected.scope = { ...predecessor.scope, status: 'assessment-required', closureDigest,
