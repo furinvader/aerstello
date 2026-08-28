@@ -41,10 +41,15 @@ records remain readable, but an unfinished legacy change must adopt this
 authority append-only before gaining new execution or finalization authority.
 
 Assessment cadence is limited to admission, a task boundary when packet
-tripwires or worker discovery require it, and the exact integrated HEAD. Task
-evidence binds criterion need, removal counterfactual, forbidden expansion,
-deterministic inventories, and a fail-closed discovery return. A worker never
-expands its packet. Decisions and amendments are append-only and
+tripwires or worker discovery require it, and the exact integrated HEAD. Every
+new packet binds both the accepted and observed deterministic inventories. An
+unchanged comparison binds without model assessment and preserves the current
+scope evidence; changed inventories require `within-scope` task evidence naming
+the exact canonical trigger IDs. Structured worker discovery invalidates the
+prior task evidence and admits assessment only for the exact packet, result,
+and discovery receipts. Task evidence also binds criterion need, removal
+counterfactual, forbidden expansion, and a fail-closed discovery return. A
+worker never expands its packet. Decisions and amendments are append-only and
 exact-evidence-bound; a minor amendment covers only necessary adjacent work
 with no material trigger or independent workstream.
 

@@ -249,27 +249,46 @@ export function validateImplementationTaskStructure(value) {
       if (!sortedUniqueStrings(tripwire.inventory)) {
         errors.push(`$.minimalityAuthority.tripwires[${index}].inventory must be a sorted unique string inventory`);
       }
+      if (Object.hasOwn(tripwire, 'observedInventory')
+          && !sortedUniqueStrings(tripwire.observedInventory)) {
+        errors.push(`$.minimalityAuthority.tripwires[${index}].observedInventory must be a sorted unique string inventory`);
+      }
     }
   }
   validateRequiredValidation(value.requiredValidation, errors, value);
   return [...new Set(errors)];
 }
 
-export function evaluateScopeTripwires(packet, observedInventories) {
+export function taskObservedScopeInventories(packet) {
+  const errors = validateImplementationTaskStructure(packet);
+  if (errors.length > 0) throw new TypeError(`invalid implementation task packet: ${errors.join('; ')}`);
+  if (!packet.minimalityAuthority) return {};
+  const missing = packet.minimalityAuthority.tripwires
+    .filter((tripwire) => !Object.hasOwn(tripwire, 'observedInventory'))
+    .map(({ id }) => id);
+  if (missing.length > 0) {
+    throw new TypeError(`new task binding requires packet-bound observed scope inventories; missing: ${missing.join(', ')}`);
+  }
+  return Object.fromEntries(packet.minimalityAuthority.tripwires
+    .map(({ id, observedInventory }) => [id, observedInventory]));
+}
+
+export function evaluateScopeTripwires(packet, observedInventories = undefined) {
   const errors = validateImplementationTaskStructure(packet);
   if (errors.length > 0) throw new TypeError(`invalid implementation task packet: ${errors.join('; ')}`);
   if (!packet.minimalityAuthority) return [];
-  if (!isRecord(observedInventories)) throw new TypeError('observed scope inventories must be an object');
+  const observations = observedInventories ?? taskObservedScopeInventories(packet);
+  if (!isRecord(observations)) throw new TypeError('observed scope inventories must be an object');
   const tripwires = packet.minimalityAuthority.tripwires;
   const expectedIds = new Set(tripwires.map(({ id }) => id));
-  const actualIds = Object.keys(observedInventories);
-  const missing = [...expectedIds].filter((id) => !Object.hasOwn(observedInventories, id));
+  const actualIds = Object.keys(observations);
+  const missing = [...expectedIds].filter((id) => !Object.hasOwn(observations, id));
   const unknown = actualIds.filter((id) => !expectedIds.has(id));
   if (missing.length > 0 || unknown.length > 0) {
     throw new TypeError(`observed scope inventories must exactly match tripwire IDs; missing: ${missing.join(', ') || 'none'}; unknown: ${unknown.join(', ') || 'none'}`);
   }
   return tripwires.flatMap(({ id, category, inventory }) => {
-    const observed = observedInventories[id];
+    const observed = observations[id];
     if (!sortedUniqueStrings(observed) || observed.some((item) => item.length < 1 || item.length > 512 || !/\S/u.test(item))) {
       throw new TypeError(`observed scope inventory ${id} must be a sorted unique bounded string array`);
     }
@@ -340,9 +359,6 @@ export function validateImplementationResultAgainstTask(packet, result, actualCh
     errors.push('worker result scopeDiscovery requires a packet-bound minimalityAuthority');
   }
   if (packet.minimalityAuthority) {
-    if (result.unexpectedDependencies.length > 0 && !result.scopeDiscovery) {
-      errors.push('worker result unexpected scope requires a structured scopeDiscovery');
-    }
     if (result.scopeDiscovery) {
       const tripwireIds = new Set(packet.minimalityAuthority.tripwires.map(({ id }) => id));
       for (const id of result.scopeDiscovery.triggeredTripwireIds) {

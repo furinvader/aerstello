@@ -76,7 +76,8 @@ function testMinimalClosure(state, plan, overrides = {}) {
 }
 
 function testScopeEvidence(state, plan, closure, { boundary = 'admission', subjectDigest = digestJson(plan),
-  subjectSha = state.planningSha, taskPacketDigest = null, amendmentDigests = [], revision = state.revision + 1 } = {}) {
+  subjectSha = state.planningSha, taskPacketDigest = null, amendmentDigests = [], revision = state.revision + 1,
+  trigger = boundary === 'task' ? 'test-task-tripwire' : null } = {}) {
   const criterion = plan.criteria[0];
   const binding = { phase: boundary === 'admission' ? 'plan' : boundary,
     source: closure.source, subject: { digest: subjectDigest, sha: subjectSha },
@@ -96,7 +97,7 @@ function testScopeEvidence(state, plan, closure, { boundary = 'admission', subje
     smallerSufficientAlternative: null, scopeDelta: null, materialityTriggers: [], smallestExpansion: null,
     narrowAlternative: null, deferralConsequences: null, missingEvidence: [], humanDecision: false };
   return { schemaVersion: 1, changeId: state.changeId, evidenceId: `${boundary}-test-${revision}`,
-    revision, cadence: { boundary, trigger: boundary === 'task' ? 'test-task-tripwire' : null },
+    revision, cadence: { boundary, trigger },
     packet, packetDigest: digestJson(packet), result, resultDigest: digestJson(result),
     closureDigest: digestJson(closure) };
 }
@@ -290,6 +291,115 @@ test('new bindings require minimality authority atomically while historical pack
     (error) => error.code === 'TASK_SCOPE_REQUIRED');
   assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), before,
     'missing minimality authority writes no state, event, transition, receipt, or task sidecar bytes');
+});
+
+test('task scope cadence binds unchanged observations directly and gates exact changed tripwire IDs atomically', async () => {
+  const unchanged = repository('conditional task scope unchanged');
+  const unchangedPlanning = await initializeState({ cwd: unchanged.cwd, changeId: 'conditional-task-unchanged',
+    mode: 'implement', baseBranch: 'main', planningRef: unchanged.sha, source: descriptor });
+  const unchangedPlan = planFor(unchangedPlanning);
+  const unchangedState = acceptPlan({ cwd: unchanged.cwd, plan: unchangedPlan,
+    expectedRevision: unchangedPlanning.revision });
+  const unchangedPacket = packetFor(unchangedState, unchangedPlan, 'state-task');
+  const admissionDigest = unchangedState.scope.currentEvidenceDigest;
+  const directlyBound = bindTaskWithScope({ cwd: unchanged.cwd, packet: unchangedPacket,
+    expectedRevision: unchangedState.revision });
+  assert.equal(directlyBound.execution.tasks[0].status, 'bound');
+  assert.equal(directlyBound.scope.currentBoundary, 'admission');
+  assert.equal(directlyBound.scope.currentEvidenceDigest, admissionDigest,
+    'non-triggering binding leaves the existing scope evidence untouched');
+
+  const changed = repository('conditional task scope changed');
+  const changedPlanning = await initializeState({ cwd: changed.cwd, changeId: 'conditional-task-changed',
+    mode: 'implement', baseBranch: 'main', planningRef: changed.sha, source: descriptor });
+  const changedPlan = planFor(changedPlanning);
+  let state = acceptPlan({ cwd: changed.cwd, plan: changedPlan, expectedRevision: changedPlanning.revision });
+  const packet = packetFor(state, changedPlan, 'state-task');
+  packet.minimalityAuthority.tripwires[0].observedInventory = ['changed-path'];
+  const directory = changeDirectory(changed.cwd, state.changeId);
+  const before = durableSnapshot(directory);
+  assert.throws(() => bindTaskWithScope({ cwd: changed.cwd, packet, expectedRevision: state.revision }),
+    (error) => error.code === 'TASK_SCOPE_REQUIRED');
+  assert.deepEqual(durableSnapshot(directory), before, 'a changed observation fails without partial evidence');
+  const packetDigest = implementationTaskDigest(packet);
+  const closure = testMinimalClosure(state, changedPlan);
+  const incorrect = testScopeEvidence(state, changedPlan, closure, { boundary: 'task',
+    subjectDigest: packetDigest, subjectSha: packet.taskBaseSha, taskPacketDigest: packetDigest,
+    trigger: 'task-tripwires:wrong-id' });
+  state = assessScope({ cwd: changed.cwd, changeId: state.changeId, scopeEvidence: incorrect,
+    expectedRevision: state.revision });
+  assert.throws(() => bindTaskWithScope({ cwd: changed.cwd, packet, expectedRevision: state.revision }),
+    (error) => error.code === 'TASK_SCOPE_REQUIRED');
+  const exact = testScopeEvidence(state, changedPlan, closure, { boundary: 'task', subjectDigest: packetDigest,
+    subjectSha: packet.taskBaseSha, taskPacketDigest: packetDigest,
+    trigger: 'task-tripwires:test-task-paths' });
+  state = assessScope({ cwd: changed.cwd, changeId: state.changeId, scopeEvidence: exact,
+    expectedRevision: state.revision });
+  state = bindTaskWithScope({ cwd: changed.cwd, packet, expectedRevision: state.revision });
+  assert.equal(state.execution.tasks[0].status, 'bound');
+
+  const missing = repository('conditional task scope missing observation');
+  const missingPlanning = await initializeState({ cwd: missing.cwd, changeId: 'conditional-task-missing',
+    mode: 'implement', baseBranch: 'main', planningRef: missing.sha, source: descriptor });
+  const missingPlan = planFor(missingPlanning);
+  const missingState = acceptPlan({ cwd: missing.cwd, plan: missingPlan, expectedRevision: missingPlanning.revision });
+  const historical = packetFor(missingState, missingPlan, 'state-task');
+  delete historical.minimalityAuthority.tripwires[0].observedInventory;
+  assert.deepEqual(validateImplementationTask(historical), [], 'historical packet shape remains readable');
+  assert.throws(() => bindTaskWithScope({ cwd: missing.cwd, packet: historical,
+    expectedRevision: missingState.revision }), (error) => error.code === 'INVALID_TASK_PACKET');
+});
+
+test('structured worker discovery invalidates task scope and admits only its exact receipt-bound assessment', async () => {
+  const fixture = repository('worker scope discovery assessment');
+  const planning = await initializeState({ cwd: fixture.cwd, changeId: 'worker-scope-discovery',
+    mode: 'implement', baseBranch: 'main', planningRef: fixture.sha, source: descriptor });
+  const plan = planFor(planning);
+  let state = acceptPlan({ cwd: fixture.cwd, plan, expectedRevision: planning.revision });
+  const closure = testMinimalClosure(state, plan);
+  const packet = packetFor(state, plan, 'state-task');
+  state = bindTaskWithScope({ cwd: fixture.cwd, packet, expectedRevision: state.revision });
+  const worker = createWorkerFixture(fixture.cwd, state, packet);
+  state = scheduleWave({ cwd: fixture.cwd, expectedRevision: state.revision });
+  state = startTask({ cwd: fixture.cwd, taskId: packet.taskId, workerId: 'discovery-worker',
+    expectedRevision: state.revision });
+  const scopeDiscovery = {
+    schemaVersion: 1,
+    summary: 'The worker found one unowned lifecycle path.',
+    evidence: [{ kind: 'state-path', identity: 'unowned/lifecycle.json',
+      detail: 'The exact task cannot complete without authority for this additional state path.' }],
+    triggeredTripwireIds: ['test-task-paths'],
+    requestedAuthority: [{ field: 'paths', values: ['unowned/lifecycle.json'] }],
+  };
+  const blocked = { ...resultFor(packet, 'blocked'), unexpectedDependencies: [scopeDiscovery.summary],
+    scopeDiscovery, summary: scopeDiscovery.summary };
+  state = acceptResult({ cwd: fixture.cwd, result: blocked, workerCwd: worker.path,
+    expectedRevision: state.revision });
+  assert.equal(state.phase, 'blocked');
+  assert.equal(state.scope.status, 'assessment-required');
+  assert.equal(state.scope.currentEvidenceDigest, null);
+  assert.match(state.nextAction, /receipt-backed worker scope discovery/u);
+
+  const packetDigest = implementationTaskDigest(packet);
+  const resultDigest = digestJson(blocked);
+  const discoveryDigest = digestJson(scopeDiscovery);
+  const subjectDigest = digestJson({ taskPacketDigest: packetDigest, resultDigest, discoveryDigest });
+  const trigger = `worker-scope-discovery:${packet.taskId}:${resultDigest}:${discoveryDigest}`;
+  const stale = testScopeEvidence(state, plan, closure, { boundary: 'task', subjectDigest: packetDigest,
+    subjectSha: packet.taskBaseSha, taskPacketDigest: packetDigest, trigger });
+  assert.throws(() => assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: stale,
+    expectedRevision: state.revision }), (error) => error.code === 'SCOPE_ASSESSMENT_INVALID');
+  const wrongTrigger = testScopeEvidence(state, plan, closure, { boundary: 'task', subjectDigest,
+    subjectSha: packet.taskBaseSha, taskPacketDigest: packetDigest, trigger: 'worker-scope-discovery:stale' });
+  assert.throws(() => assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: wrongTrigger,
+    expectedRevision: state.revision }), (error) => error.code === 'SCOPE_ASSESSMENT_INVALID');
+  const exact = testScopeEvidence(state, plan, closure, { boundary: 'task', subjectDigest,
+    subjectSha: packet.taskBaseSha, taskPacketDigest: packetDigest, trigger });
+  state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: exact,
+    expectedRevision: state.revision });
+  assert.equal(state.phase, 'blocked', 'assessment never expands or executes the immutable worker packet');
+  assert.equal(state.scope.status, 'current');
+  assert.equal(state.scope.currentBoundary, 'task');
 });
 
 test('verifier evidence remains deterministic and schema-bounded at the upper limit', () => {
@@ -2874,7 +2984,8 @@ function packetFor(state, plan, taskId) {
         rationale: 'The exact accepted criterion requires this bounded task.' })),
       removalCounterfactual: 'Removing the task leaves its accepted criteria without an implementation owner.',
       forbiddenExpansion: ['Do not expand beyond the exact test packet.'],
-      tripwires: [{ id: 'test-task-paths', category: 'git-paths', inventory: [...task.anticipatedPaths].sort() }],
+      tripwires: [{ id: 'test-task-paths', category: 'git-paths', inventory: [...task.anticipatedPaths].sort(),
+        observedInventory: [...task.anticipatedPaths].sort() }],
       discoveryReturn: { status: 'blocked', workerCommit: null, authority: 'unchanged' },
     } } : {}),
     requiredValidation: { unit: [{ command: 'node --test .agents/skills/change-development/scripts/state/state.test.mjs', reason: 'Exercise state behavior.' }], system: [] },

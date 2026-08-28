@@ -27,6 +27,7 @@ import {
 } from '../contracts/contracts.mjs';
 import {
   implementationTaskDigest,
+  evaluateScopeTripwires,
   pathMatchesOwnership,
   validateImplementationResult,
   validateImplementationResultAgainstTask,
@@ -596,6 +597,9 @@ export function nextActionFor(state) {
         ? 'Run change:state amend-plan from the exact trim-required evidence with one bounded removal or simplification task.'
         : state.blockedReasons?.some((reason) => reason.includes('insufficient evidence'))
           ? 'Run change:state assess-scope again with sufficient exact evidence for the unchanged authority.'
+    : state.scope?.status === 'assessment-required'
+      && state.execution?.tasks.some((task) => task.status === 'blocked')
+      ? 'Run change:state assess-scope for the exact receipt-backed worker scope discovery; task authority remains unchanged.'
     : state.execution?.tasks.some((task) => task.status === 'accepted')
       ? 'Integrate the next dependency-ready accepted task, then resolve the remaining blocked or failed work.'
       : state.verification
@@ -605,6 +609,35 @@ export function nextActionFor(state) {
         : 'Resolve the listed blocking evidence by rejecting/replanning the blocked work, or explicitly abandon the change.';
   if (state.phase === 'abandoned') return 'Archive the explicitly abandoned change.';
   return 'Inspect durable state.';
+}
+
+function canonicalTaskTripwireTrigger(triggerIds) {
+  return `task-tripwires:${[...triggerIds].sort().join(',')}`;
+}
+
+function workerDiscoveryAssessmentIdentity(cwd, state) {
+  const discoveries = state.execution?.tasks.flatMap((task) => {
+    if (task.status !== 'blocked' || !task.resultDigest || task.binding < 1) return [];
+    const result = verifyReceipt(join(changeDirectory(cwd, state.changeId), resultEvidencePath(task.id, task.attempt)),
+      `implementation result ${task.id}`).value;
+    if (objectDigest(result) !== task.resultDigest || !result.scopeDiscovery) return [];
+    const packet = verifyReceipt(implementationTaskPacketPath(cwd, state.changeId, task.id, task.binding),
+      `task packet ${task.id}`);
+    if (packet.digest !== task.packetDigest) return [];
+    const discoveryDigest = objectDigest(result.scopeDiscovery);
+    return [{
+      taskPacketDigest: packet.digest,
+      subjectDigest: objectDigest({ taskPacketDigest: packet.digest,
+        resultDigest: task.resultDigest, discoveryDigest }),
+      subjectSha: packet.value.taskBaseSha,
+      trigger: `worker-scope-discovery:${task.id}:${task.resultDigest}:${discoveryDigest}`,
+    }];
+  }) ?? [];
+  if (discoveries.length !== 1) {
+    throw new StateError('Blocked task scope assessment requires one exact receipt-backed worker discovery',
+      'SCOPE_ASSESSMENT_INVALID');
+  }
+  return discoveries[0];
 }
 
 function buildInitialState({ changeId, mode, baseBranch, expectedPrBaseBranch, planningRef, planningSha, observation, descriptor, git, timestamp }) {
@@ -1187,8 +1220,17 @@ export function assessScope({ cwd = process.cwd(), changeId, scopeEvidence, expe
       })));
       subjectDigest = objectDigest({ headSha: state.git.headSha, taskSetDigest: taskPacketDigest });
       subjectSha = state.git.headSha;
+    } else if (state.phase === 'blocked') {
+      const discovery = workerDiscoveryAssessmentIdentity(root, state);
+      taskPacketDigest = discovery.taskPacketDigest;
+      subjectDigest = discovery.subjectDigest;
+      subjectSha = discovery.subjectSha;
+      if (scopeEvidence.cadence.trigger !== discovery.trigger) {
+        throw new StateError('Worker discovery scope assessment trigger is stale or does not match its exact receipt',
+          'SCOPE_ASSESSMENT_INVALID');
+      }
     } else if (!['ready-to-implement', 'implementing'].includes(state.phase)) {
-      throw new StateError('Task scope assessment requires ready-to-implement or implementing phase', 'INVALID_PHASE');
+      throw new StateError('Task scope assessment requires ready-to-implement, implementing, or exact worker-discovery blocked phase', 'INVALID_PHASE');
     }
     const errors = validateEvidenceForBoundary(scopeEvidence, {
       state, closureDigest: receipts.closure.digest, amendmentRecords: receipts.amendmentRecords,
@@ -1199,7 +1241,9 @@ export function assessScope({ cwd = process.cwd(), changeId, scopeEvidence, expe
     const scope = { ...state.scope, status: gate.status, candidatePlanDigest: null,
       currentEvidenceDigest: evidenceDigest, currentBoundary: boundary, currentSubjectSha: subjectSha };
     const phase = gate.phase ?? state.phase;
-    const next = revised(state, { phase, scope, blockedReasons: gate.blocker ? [gate.blocker] : [] }, clock);
+    const blockedReasons = gate.blocker ? [gate.blocker]
+      : phase === 'blocked' ? state.blockedReasons : [];
+    const next = revised(state, { phase, scope, blockedReasons }, clock);
     return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'scope-assessed',
       summary: `Recorded ${scopeEvidence.result.verdict} scope verdict at ${boundary}`, crashStep,
       pendingEvidence: [{ key: 'scopeEvidenceDigest', path: relative(changeDirectory(root, state.changeId), scopeEvidencePath(root, state, scopeEvidence)), value: scopeEvidence, label: `${boundary} scope evidence` }] });
@@ -1564,17 +1608,28 @@ export function bindTask({ cwd = process.cwd(), changeId, packet, expectedRevisi
     assertStateVerifierCapacity(root, state, { packet });
     const packetDigest = implementationTaskDigest(packet);
     const scopeReceipts = currentScopeReceipts(root, state);
-    if (packet.minimalityAuthority.closureDigest !== scopeReceipts.closure.digest
-        || state.scope.status !== 'current' || state.scope.currentBoundary !== 'task'
-        || !scopeReceipts.evidence || scopeReceipts.evidence.value.result.verdict !== 'within-scope') {
-      throw new StateError(`Task ${task.id} requires current exact task scope evidence and the active closure digest`, 'TASK_SCOPE_REQUIRED');
+    if (packet.minimalityAuthority.closureDigest !== scopeReceipts.closure.digest) {
+      throw new StateError(`Task ${task.id} requires the active minimal-closure digest`, 'TASK_SCOPE_REQUIRED');
     }
-    const scopeErrors = validateEvidenceForBoundary(scopeReceipts.evidence.value, {
-      state, closureDigest: scopeReceipts.closure.digest, amendmentRecords: scopeReceipts.amendmentRecords,
-      boundary: 'task', subjectDigest: packetDigest, subjectSha: packet.taskBaseSha,
-      taskPacketDigest: packetDigest, verdict: 'within-scope',
-    });
-    if (scopeErrors.length > 0) throw new StateError(`Task ${task.id} scope evidence is stale:\n- ${scopeErrors.join('\n- ')}`, 'TASK_SCOPE_REQUIRED');
+    let triggers;
+    try { triggers = evaluateScopeTripwires(packet); }
+    catch (error) { throw new StateError(error.message, 'INVALID_TASK_PACKET'); }
+    if (triggers.length > 0) {
+      if (state.scope.status !== 'current' || state.scope.currentBoundary !== 'task'
+          || !scopeReceipts.evidence || scopeReceipts.evidence.value.result.verdict !== 'within-scope') {
+        throw new StateError(`Task ${task.id} changed scope tripwires and requires current exact task scope evidence`, 'TASK_SCOPE_REQUIRED');
+      }
+      const triggerIds = triggers.map(({ id }) => id).sort();
+      if (scopeReceipts.evidence.value.cadence.trigger !== canonicalTaskTripwireTrigger(triggerIds)) {
+        throw new StateError(`Task ${task.id} scope evidence does not name the exact changed tripwire IDs`, 'TASK_SCOPE_REQUIRED');
+      }
+      const scopeErrors = validateEvidenceForBoundary(scopeReceipts.evidence.value, {
+        state, closureDigest: scopeReceipts.closure.digest, amendmentRecords: scopeReceipts.amendmentRecords,
+        boundary: 'task', subjectDigest: packetDigest, subjectSha: packet.taskBaseSha,
+        taskPacketDigest: packetDigest, verdict: 'within-scope',
+      });
+      if (scopeErrors.length > 0) throw new StateError(`Task ${task.id} scope evidence is stale:\n- ${scopeErrors.join('\n- ')}`, 'TASK_SCOPE_REQUIRED');
+    }
     const binding = task.binding + 1;
     const next = revised(state, { phase: 'implementing', git: current,
       execution: replaceExecutionTask(state, task.id, { status: 'bound', binding, packetDigest, taskBaseSha: packet.taskBaseSha }) }, clock);
@@ -1794,7 +1849,9 @@ export function acceptResult({ cwd = process.cwd(), changeId, result, workerCwd,
     const taskBlockers = canonicalTaskBlockers(root, state, execution, { taskId: task.id, result });
     const blockedReasons = [...preservedBlockers, ...taskBlockers];
     const nextPhase = blockedReasons.length ? 'blocked' : 'implementing';
-    const next = revised(state, { phase: nextPhase, blockedReasons, execution }, clock);
+    const scope = result.scopeDiscovery ? { ...state.scope, status: 'assessment-required',
+      currentEvidenceDigest: null, currentBoundary: null, currentSubjectSha: null } : state.scope;
+    const next = revised(state, { phase: nextPhase, blockedReasons, execution, scope }, clock);
     return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'result-accepted', summary: `Accepted ${terminal} result for ${task.id}`, crashStep,
       pendingEvidence: [{ key: 'implementationResultDigest', path: resultEvidencePath(task.id, task.attempt), value: result, label: `implementation result ${task.id} attempt ${task.attempt}` }] });
   }, lockOptions);

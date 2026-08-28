@@ -5,6 +5,7 @@ import { afterEach, test } from 'node:test';
 
 import { loadRegistry, routeSpecialists } from '../../../aerstello-specialists/scripts/validate-registry.mjs';
 import { commit, createRepository, git, writeFiles } from '../../../../../tests/support/git-fixtures.mjs';
+import { digestJson } from '../contracts/contracts.mjs';
 import { changeDirectory } from '../paths.mjs';
 import {
   acceptPlan,
@@ -71,6 +72,46 @@ function task(id, anticipatedPaths, dependsOn = []) {
   };
 }
 
+function admissionAuthority(state, plan) {
+  const closure = {
+    schemaVersion: 1, changeId: state.changeId, revision: 1,
+    source: { type: state.source.kind, identity: state.source.reference, digest: plan.source.captureDigest },
+    planningSha: state.planningSha, planDigest: digestJson(plan), previousContractDigest: null,
+    outcome: 'Exercise the smallest sufficient worker execution lifecycle.',
+    requiredCriteria: plan.criteria.map(({ id, description }) => ({ id, text: description })),
+    invariants: [{ id: 'exact-worker-authority', text: 'Keep execution evidence bound to exact worker authority.' }],
+    nonGoals: [{ id: 'no-product-change', text: 'Do not change product behavior.' }],
+    mandatoryConstraints: [{ id: 'receipt-evidence', text: 'Persist exact receipt-backed lifecycle evidence.' }],
+    optionalGuidance: [], authorizedShape: ['worker-execution-lifecycle'], unauthorizedExpansion: [],
+    deferredFollowups: [], operatorDecisionDigests: [],
+  };
+  const mapping = { mechanism: 'worker-execution-lifecycle',
+    sourceCriterionIds: plan.criteria.map(({ id }) => id), acceptedCriterionIds: plan.criteria.map(({ id }) => id),
+    invariantIds: [], nonGoalIds: [], guidanceIds: [],
+    rationale: 'The lifecycle fixture directly exercises every accepted execution criterion.' };
+  const binding = { phase: 'plan', source: closure.source,
+    subject: { digest: digestJson(plan), sha: state.planningSha }, planDigest: digestJson(plan),
+    amendmentDigests: [], taskPacketDigest: null };
+  const packet = { schemaVersion: 1, binding,
+    sourceScope: { objective: plan.objective,
+      requiredCriteria: plan.criteria.map(({ id, description }) => ({ id, text: description })),
+      nonGoals: [], implementationGuidance: [] },
+    acceptedScope: { criteria: plan.criteria.map(({ id, description }) => ({ id, text: description })),
+      invariants: [], minimalClosure: closure.outcome, authorizedShape: ['worker-execution-lifecycle'],
+      unauthorizedShape: [], deferredShape: [] },
+    changeInventory: { summary: 'Exercise worker execution lifecycle.', paths: [], dependencies: [],
+      publicSurfaces: [], persistentSurfaces: [], subsystems: [], mappings: [mapping] }, tripwires: [] };
+  const result = { schemaVersion: 1, binding, verdict: 'within-scope',
+    summary: 'The exact worker execution lifecycle is within scope.',
+    coverage: [{ ...mapping, classification: 'required', rationale: mapping.rationale }], unnecessaryWork: [],
+    smallerSufficientAlternative: null, scopeDelta: null, materialityTriggers: [], smallestExpansion: null,
+    narrowAlternative: null, deferralConsequences: null, missingEvidence: [], humanDecision: false };
+  const scopeEvidence = { schemaVersion: 1, changeId: state.changeId, evidenceId: 'admission-execution',
+    revision: state.revision + 1, cadence: { boundary: 'admission', trigger: null }, packet,
+    packetDigest: digestJson(packet), result, resultDigest: digestJson(result), closureDigest: digestJson(closure) };
+  return { closure, scopeEvidence };
+}
+
 async function fixture(tasks, initialFiles = {}) {
   const cwd = createRepository();
   repositories.push(cwd);
@@ -121,7 +162,9 @@ async function fixture(tasks, initialFiles = {}) {
     checklistMappings: [],
     tasks,
   };
-  const accepted = acceptPlan({ cwd, expectedRevision: planning.revision, plan, planningEvidence: [] });
+  const authority = admissionAuthority(planning, plan);
+  const accepted = acceptPlan({ cwd, expectedRevision: planning.revision, plan, planningEvidence: [],
+    minimalClosure: authority.closure, scopeEvidence: authority.scopeEvidence });
   return { cwd, base, plan, state: accepted, changeId: planning.changeId };
 }
 
@@ -156,6 +199,16 @@ function packetFor(context, taskId, overrides = {}) {
     allowedPaths: planned.anticipatedPaths.map((path) => path.includes('.') ? path : `${path}/**`),
     forbiddenPaths: [],
     dependencies: planned.dependsOn,
+    minimalityAuthority: {
+      closureDigest: context.state.scope.closureDigest,
+      criterionNeed: planned.criterionIds.map((criterionId) => ({ criterionId,
+        rationale: 'The exact accepted criterion requires this bounded execution task.' })),
+      removalCounterfactual: 'Removing the task leaves its accepted criterion without worker execution proof.',
+      forbiddenExpansion: ['Do not expand beyond the exact worker execution packet.'],
+      tripwires: [{ id: 'execution-task-paths', category: 'git-paths',
+        inventory: [...planned.anticipatedPaths].sort(), observedInventory: [...planned.anticipatedPaths].sort() }],
+      discoveryReturn: { status: 'blocked', workerCommit: null, authority: 'unchanged' },
+    },
     requiredValidation: {
       unit: [{ command: 'node --test tests/execution.test.mjs', reason: 'Exercise the exact worker result.' }],
       system: [],
@@ -169,6 +222,7 @@ test('worker execution inventories trigger assessment on exact changes and remai
     id: `execution-${String(index).padStart(2, '0')}-${category}`,
     category,
     inventory: [`${category}-baseline`],
+    observedInventory: [`${category}-baseline`],
   }));
   const governed = {
     schemaVersion: 1, changeId: 'execution-tripwires', taskId: 'inventory-check', planRevision: 1,
@@ -191,6 +245,7 @@ test('worker execution inventories trigger assessment on exact changes and remai
   };
   const baseline = Object.fromEntries(tripwires.map(({ id, inventory }) => [id, inventory]));
   assert.deepEqual(evaluateScopeTripwires(governed, baseline), []);
+  assert.deepEqual(evaluateScopeTripwires(governed), []);
   for (const tripwire of tripwires) {
     const observed = structuredClone(baseline);
     observed[tripwire.id] = [`${tripwire.category}-changed`];

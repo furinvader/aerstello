@@ -64,12 +64,25 @@ through a later registry revision; a packet bound after that revision must obey 
 
 Each packet also binds the current minimal-closure digest, criterion need,
 removal counterfactual, forbidden-expansion statements, deterministic scope
-tripwires, and worker discovery return contract. A triggered task boundary
-requires a current applicable `task`-phase scope assessment before binding.
-Workers report structured tripwire differences and unexpected dependencies but
-cannot change paths, criteria, dependencies, public or persistent surfaces,
-validation, or authority. Discovery returns to central assessment and replan;
-it is never silently absorbed into the worker commit.
+tripwires, and their exact observed inventories.
+The worker discovery return contract is bound beside them. Structural validation
+keeps historical packets without observations readable, but every new binding
+requires one sorted observation per exact
+tripwire ID. An unchanged comparison binds directly without replacing the
+current admission or task evidence. A changed comparison fails closed until a
+current applicable `task`-phase `within-scope` assessment names the sorted
+changed IDs as `task-tripwires:<id,...>` and binds the exact packet digest and
+base SHA. Missing, unknown, stale, or incorrectly named observations and
+evidence write no task authority.
+
+Workers cannot change paths, criteria, dependencies, public or persistent
+surfaces, validation, or authority. A blocked, null-commit result with a valid
+structured `scopeDiscovery` invalidates current task evidence. The blocked
+lifecycle then accepts task assessment only when its subject and cadence trigger
+bind the exact packet receipt, result receipt, and discovery digest; pre-worker
+or unrelated blocked-result evidence cannot replay. Assessment never expands
+the immutable worker packet. Discovery returns to central rejection, amendment,
+or replan and is never silently absorbed into a worker commit.
 
 Plan ownership can never name `.git` as a root or nested exact path segment;
 `.git`, `.git/config`, and `nested/.git/hooks` are repository metadata rather
