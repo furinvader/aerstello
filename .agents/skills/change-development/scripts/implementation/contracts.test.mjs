@@ -374,6 +374,18 @@ test('structured scope discovery stops without a commit and cannot grant packet 
   });
   assert.deepEqual(validateImplementationResultAgainstTask(governed, blocked, []), []);
 
+  const legacy = packet();
+  const historical = result(legacy, {
+    status: 'blocked', workerCommit: null, changedPaths: [],
+    validation: legacy.requiredValidation.unit.map(({ command }) => ({ command, result: 'skipped',
+      summary: 'Historical unexpected dependency evidence predates structured scope discovery.' })),
+    unexpectedDependencies: ['An unowned lifecycle path is required.'],
+  });
+  assert.deepEqual(validateImplementationResult(historical), [],
+    'historical unstructured unexpected-dependency results remain readable');
+  assert.deepEqual(validateImplementationResultAgainstTask(legacy, historical, []), [],
+    'historical packets do not retroactively acquire structured discovery governance');
+
   const committed = result(governed, { scopeDiscovery, unexpectedDependencies: [scopeDiscovery.summary] });
   assert.match(validateImplementationResult(committed).join('\n'), /must be equal to constant|blocked/u);
   const unstructured = result(governed, {
@@ -408,7 +420,6 @@ test('structured scope discovery stops without a commit and cannot grant packet 
     assert.match(validateImplementationResultAgainstTask(governed, current, []).join('\n'), pattern, field);
     if (field === 'dependencies') governed.dependencies.pop();
   }
-  const legacy = packet();
   const legacyDiscovery = result(legacy, {
     status: 'blocked', workerCommit: null, changedPaths: [], validation: [],
     unexpectedDependencies: [scopeDiscovery.summary], scopeDiscovery,

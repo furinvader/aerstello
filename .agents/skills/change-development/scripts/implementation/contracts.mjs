@@ -321,9 +321,6 @@ export function validateImplementationResult(value) {
   if (errors.length > 0) return [...new Set(errors)];
   if (['implemented', 'no-change'].includes(value.status) && value.validation.some(({ result }) => result !== 'passed')) errors.push('$.validation must contain only passed commands for a successful result');
   if (new Set(value.validation.map(({ command }) => command)).size !== value.validation.length) errors.push('$.validation must not report a command more than once');
-  if (value.unexpectedDependencies.length > 0 && !value.scopeDiscovery) {
-    errors.push('$.unexpectedDependencies requires structured scopeDiscovery');
-  }
   if (value.scopeDiscovery) {
     if (!sameJson(value.unexpectedDependencies, [value.scopeDiscovery.summary])) {
       errors.push('$.unexpectedDependencies must contain exactly the structured scope discovery summary');
@@ -357,6 +354,9 @@ export function validateImplementationResultAgainstTask(packet, result, actualCh
   if (result.packetDigest !== implementationTaskDigest(packet)) errors.push('worker result packetDigest must equal the canonical task packet digest');
   if (result.status === 'no-change' && (packet.plannedE2ESelectors?.length ?? 0) > 0) {
     errors.push('worker result cannot be no-change when the task packet declares planned E2E selectors');
+  }
+  if (packet.minimalityAuthority && result.unexpectedDependencies.length > 0 && !result.scopeDiscovery) {
+    errors.push('worker result unexpectedDependencies requires structured scopeDiscovery');
   }
   if (!packet.minimalityAuthority && result.scopeDiscovery) {
     errors.push('worker result scopeDiscovery requires a packet-bound minimalityAuthority');
