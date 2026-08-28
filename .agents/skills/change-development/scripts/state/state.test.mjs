@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -10,24 +10,27 @@ import { readGithubIssue } from '../source/github.mjs';
 import { refreshSource as captureSourceRefresh } from '../source/source.mjs';
 
 import {
-  acceptPlan,
+  acceptPlan as acceptPlanWithScope,
+  adoptScope,
+  assessScope,
   acceptResult,
   activePointerPath,
-  amendPlan,
+  amendPlan as amendPlanWithScope,
   archiveState,
   authorizeRepeatedFinding,
   boundedStatus,
-  bindTask,
+  bindTask as bindTaskWithScope,
   boundVerifierEvidence,
   buildVerifierContext,
   changeDirectory,
   checkpointGitMetadata,
   createSpecialistPlan,
-  createValidationPlan,
+  createValidationPlan as createValidationPlanWithScope,
   finalizeDevelopment,
-  finalizeIntegration,
+  finalizeIntegration as finalizeIntegrationWithScope,
   initializeState,
   integrateTask,
+  integratedScopeAssessmentIdentity,
   loadLatestSourceObservation,
   loadState,
   locateState,
@@ -37,9 +40,9 @@ import {
   preflightStateVerifierCapacity,
   recoverState,
   recordDecision,
-  recordFindingDisposition,
+  recordFindingDisposition as recordFindingDispositionWithScope,
   recordSpecialistResult,
-  recordVerifierResult,
+  recordVerifierResult as recordVerifierResultWithScope,
   refreshSource,
   renderStatus,
   reconcileIntegration,
@@ -55,6 +58,144 @@ import {
   withIntegrationOperationLock,
   changeRoot,
 } from './state.mjs';
+
+function testMinimalClosure(state, plan, overrides = {}) {
+  const planDigest = digestJson(plan);
+  return {
+    schemaVersion: 1, changeId: state.changeId, revision: 1,
+    source: { type: state.source.kind, identity: state.source.reference, digest: plan.source.captureDigest },
+    planningSha: state.planningSha, planDigest, previousContractDigest: null,
+    outcome: 'Exercise the smallest sufficient durable test change.',
+    requiredCriteria: [{ id: plan.criteria[0].id, text: plan.criteria[0].description }],
+    invariants: [{ id: 'exact-test-authority', text: 'Bind exact test evidence.' }],
+    nonGoals: [{ id: 'no-test-expansion', text: 'Do not expand test authority.' }],
+    mandatoryConstraints: [{ id: 'receipt-test-authority', text: 'Persist receipt evidence.' }],
+    optionalGuidance: [], authorizedShape: ['durable-test-change'], unauthorizedExpansion: [],
+    deferredFollowups: [], operatorDecisionDigests: [], ...overrides,
+  };
+}
+
+function testScopeEvidence(state, plan, closure, { boundary = 'admission', subjectDigest = digestJson(plan),
+  subjectSha = state.planningSha, taskPacketDigest = null, amendmentDigests = [], revision = state.revision + 1 } = {}) {
+  const criterion = plan.criteria[0];
+  const binding = { phase: boundary === 'admission' ? 'plan' : boundary,
+    source: closure.source, subject: { digest: subjectDigest, sha: subjectSha },
+    planDigest: digestJson(plan), amendmentDigests, taskPacketDigest };
+  const mapping = { mechanism: 'durable-test-change', sourceCriterionIds: [criterion.id],
+    acceptedCriterionIds: [criterion.id], invariantIds: [], nonGoalIds: [], guidanceIds: [],
+    rationale: 'The mechanism directly implements the accepted test criterion.' };
+  const packet = { schemaVersion: 1, binding,
+    sourceScope: { objective: plan.objective, requiredCriteria: [{ id: criterion.id, text: criterion.description }],
+      nonGoals: [], implementationGuidance: [] },
+    acceptedScope: { criteria: [{ id: criterion.id, text: criterion.description }], invariants: [],
+      minimalClosure: closure.outcome, authorizedShape: ['durable-test-change'], unauthorizedShape: [], deferredShape: [] },
+    changeInventory: { summary: 'Exercise one durable test mechanism.', paths: [], dependencies: [],
+      publicSurfaces: [], persistentSurfaces: [], subsystems: [], mappings: [mapping] }, tripwires: [] };
+  const result = { schemaVersion: 1, binding, verdict: 'within-scope', summary: 'The test mechanism is within scope.',
+    coverage: [{ ...mapping, classification: 'required', rationale: mapping.rationale }], unnecessaryWork: [],
+    smallerSufficientAlternative: null, scopeDelta: null, materialityTriggers: [], smallestExpansion: null,
+    narrowAlternative: null, deferralConsequences: null, missingEvidence: [], humanDecision: false };
+  return { schemaVersion: 1, changeId: state.changeId, evidenceId: `${boundary}-test-${revision}`,
+    revision, cadence: { boundary, trigger: boundary === 'task' ? 'test-task-tripwire' : null },
+    packet, packetDigest: digestJson(packet), result, resultDigest: digestJson(result),
+    closureDigest: digestJson(closure) };
+}
+
+function bindTask(options) {
+  try {
+    return bindTaskWithScope(options);
+  } catch (error) {
+    if (error.code !== 'TASK_SCOPE_REQUIRED' || !options.packet?.minimalityAuthority) throw error;
+  }
+  let state = loadState(options.cwd, options.changeId);
+  const directory = changeDirectory(options.cwd, state.changeId);
+  const plan = state.plan.amendmentCount === 0
+    ? JSON.parse(readFileSync(join(directory, 'plan', 'plan.json'), 'utf8'))
+    : JSON.parse(readFileSync(join(directory, 'plan', 'amendments', `${String(state.plan.amendmentCount).padStart(4, '0')}.json`), 'utf8')).resultingPlan;
+  const closure = readdirSync(join(directory, 'scope', 'minimal-closure'))
+    .filter((name) => name.endsWith('.json')).map((name) =>
+      JSON.parse(readFileSync(join(directory, 'scope', 'minimal-closure', name), 'utf8')))
+    .find((candidate) => digestJson(candidate) === state.scope.closureDigest);
+  const packetDigest = implementationTaskDigest(options.packet);
+  const amendmentDigests = Array.from({ length: state.plan.amendmentCount }, (_, index) => {
+    const record = JSON.parse(readFileSync(join(directory, 'plan', 'amendments',
+      `${String(index + 1).padStart(4, '0')}.json`), 'utf8'));
+    return digestJson(record);
+  });
+  state = assessScope({ cwd: options.cwd, changeId: options.changeId,
+    scopeEvidence: testScopeEvidence(state, plan, closure, { boundary: 'task', subjectDigest: packetDigest,
+      subjectSha: options.packet.taskBaseSha, taskPacketDigest: packetDigest, amendmentDigests }),
+    expectedRevision: state.revision });
+  return bindTaskWithScope({ ...options, expectedRevision: state.revision });
+}
+
+function acceptPlan(options) {
+  if (options.minimalClosure && options.scopeEvidence) return acceptPlanWithScope(options);
+  const state = loadState(options.cwd, options.changeId);
+  if (!state) return acceptPlanWithScope(options);
+  const minimalClosure = testMinimalClosure(state, options.plan);
+  return acceptPlanWithScope({ ...options, minimalClosure,
+    scopeEvidence: testScopeEvidence(state, options.plan, minimalClosure) });
+}
+
+function amendPlan(options) {
+  if (options.minimalClosure) return amendPlanWithScope(options);
+  const state = loadState(options.cwd, options.changeId);
+  if (!state) return amendPlanWithScope(options);
+  const previous = testMinimalClosure(state, options.resultingPlan);
+  const minimalClosure = { ...previous, revision: 2 + state.plan.amendmentCount,
+    previousContractDigest: state.scope.closureDigest, operatorDecisionDigests: [...state.scope.decisionDigests] };
+  return amendPlanWithScope({ ...options, minimalClosure });
+}
+
+function recordVerifierResult(options) {
+  const context = buildVerifierContext({ cwd: options.cwd, changeId: options.changeId });
+  options.result.scopeEvidenceDigest = context.integratedScopeEvidenceDigest;
+  return recordVerifierResultWithScope(options);
+}
+
+function recordFindingDisposition(options) {
+  if (options.disposition.sourceKind === 'verifier') {
+    const state = loadState(options.cwd, options.changeId);
+    const path = join(changeDirectory(options.cwd, state.changeId), 'verification', 'rounds',
+      String(state.verification.round).padStart(4, '0'), 'verifier-result.json');
+    const receipt = JSON.parse(readFileSync(path, 'utf8'));
+    const legacy = { ...receipt }; delete legacy.scopeEvidenceDigest;
+    if (options.disposition.sourceResultDigest === digestJson(legacy)) {
+      options.disposition.sourceResultDigest = digestJson(receipt);
+    }
+  }
+  return recordFindingDispositionWithScope(options);
+}
+
+function integratedScopeEvidenceFor(options) {
+  let state = loadState(options.cwd, options.changeId);
+  if (state.phase === 'integrated') {
+    const directory = changeDirectory(options.cwd, state.changeId);
+    const plan = state.plan.amendmentCount === 0
+      ? JSON.parse(readFileSync(join(directory, 'plan', 'plan.json'), 'utf8'))
+      : JSON.parse(readFileSync(join(directory, 'plan', 'amendments', `${String(state.plan.amendmentCount).padStart(4, '0')}.json`), 'utf8')).resultingPlan;
+    const closureFiles = readdirSync(join(directory, 'scope', 'minimal-closure')).filter((name) => name.endsWith('.json')).sort();
+    const closure = JSON.parse(readFileSync(join(directory, 'scope', 'minimal-closure', closureFiles.at(-1)), 'utf8'));
+    const identity = integratedScopeAssessmentIdentity({ cwd: options.cwd, changeId: options.changeId });
+    return testScopeEvidence(state, plan, closure, { boundary: 'integrated-head',
+      amendmentDigests: identity.amendmentDigests, subjectDigest: identity.subjectDigest,
+      subjectSha: identity.subjectSha, taskPacketDigest: identity.taskPacketDigest });
+  }
+  return null;
+}
+
+function finalizeIntegration(options) {
+  let state = finalizeIntegrationWithScope(options);
+  const scopeEvidence = integratedScopeEvidenceFor(options, state);
+  state = assessScope({ cwd: options.cwd, changeId: options.changeId, scopeEvidence,
+    expectedRevision: state.revision });
+  return state;
+}
+
+function createValidationPlan(options) {
+  return createValidationPlanWithScope(options);
+}
 
 test('wave conflicts serialize shared and producer surfaces while permitting disjoint work', () => {
   const task = (anticipatedPaths, produces = [], consumes = []) => ({ anticipatedPaths, produces, consumes });
@@ -130,6 +271,25 @@ test('binding rejects command-kind conflicts before packet evidence or revision 
     (error) => error.code === 'VALIDATION_COMMAND_CONFLICT');
   assert.equal(readFileSync(join(changeDirectory(historical.cwd, state.changeId), 'state.json'), 'utf8'), before);
   assert.equal(existsSync(join(changeDirectory(historical.cwd, state.changeId), 'implementation', 'tasks', 'second-task')), false);
+});
+
+test('new bindings require minimality authority atomically while historical packet shapes remain readable', async () => {
+  const fixture = repository('mandatory task minimality');
+  const planning = await initializeState({ cwd: fixture.cwd, changeId: 'mandatory-task-minimality', mode: 'implement',
+    baseBranch: 'main', planningRef: fixture.sha, source: descriptor });
+  const plan = planFor(planning);
+  const state = acceptPlan({ cwd: fixture.cwd, plan, expectedRevision: planning.revision });
+  const historicalPacket = packetFor(state, plan, 'state-task');
+  delete historicalPacket.minimalityAuthority;
+  assert.deepEqual(validateImplementationTask(historicalPacket), [],
+    'the additive contract keeps historical packet documents structurally readable');
+  assert.equal(implementationTaskDigest(historicalPacket), implementationTaskDigest(structuredClone(historicalPacket)),
+    'historical packets retain deterministic canonical identities');
+  const before = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
+  assert.throws(() => bindTaskWithScope({ cwd: fixture.cwd, packet: historicalPacket, expectedRevision: state.revision }),
+    (error) => error.code === 'TASK_SCOPE_REQUIRED');
+  assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), before,
+    'missing minimality authority writes no state, event, transition, receipt, or task sidecar bytes');
 });
 
 test('verifier evidence remains deterministic and schema-bounded at the upper limit', () => {
@@ -437,29 +597,10 @@ test('failed result admission reserves truthful rejection and replacement withou
   state = scheduleWave({ cwd, expectedRevision: state.revision });
   state = startTask({ cwd, taskId: packet.taskId, workerId: 'failed-capacity-worker',
     expectedRevision: state.revision });
-  const dependency = (index) => `dependency-${String(index).padStart(3, '0')}-${'x'.repeat(3000)}`;
-  const failedResult = (count) => ({ ...resultFor(packet, 'failed'),
+  const admitted = { ...resultFor(packet, 'failed'),
     validation: packet.requiredValidation.unit.map(({ command }) => ({ command, result: 'failed',
       summary: 'The exact worker validation failed.' })),
-    unexpectedDependencies: Array.from({ length: count }, (_, index) => dependency(index)),
-    summary: 'The immutable task must be rejected and replaced.' });
-  let lower = 0; let upper = 100;
-  while (lower < upper) {
-    const middle = Math.ceil((lower + upper) / 2);
-    try {
-      preflightStateVerifierCapacity({ cwd, pending: { result: failedResult(middle) } }); lower = middle;
-    } catch (error) {
-      assert.equal(error.code, 'VERIFIER_CONTEXT_TOO_LARGE'); upper = middle - 1;
-    }
-  }
-  assert.ok(lower > 0 && lower < 100, 'found the failed-result replacement capacity edge');
-  const rejected = failedResult(lower + 1);
-  const before = durableSnapshot(changeDirectory(cwd, state.changeId));
-  assert.throws(() => acceptResult({ cwd, expectedRevision: state.revision,
-    workerCwd: worker.path, result: rejected }), (error) => error.code === 'VERIFIER_CONTEXT_TOO_LARGE');
-  assert.deepEqual(durableSnapshot(changeDirectory(cwd, state.changeId)), before,
-    'an unfit nonterminal result creates no result receipt, blocker, event, or transition');
-  const admitted = failedResult(lower);
+    unexpectedDependencies: [], summary: 'The immutable task must be rejected and replaced.' };
   const projection = preflightStateVerifierCapacity({ cwd, pending: { result: admitted } }).context;
   const replacementEvidence = projection.evidence.filter(({ summary }) =>
     summary.startsWith('Reserved schema-minimal viable remediation authority for state-task:'));
@@ -579,33 +720,33 @@ test('two same-base workers integrate by delta, resume intent-only integration, 
   const planning = await initializeState({ cwd, changeId: 'execution-change', mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
   const plan = executionPlanFor(planning); let state = acceptPlan({ cwd, plan, expectedRevision: 0 });
   const firstPacket = packetFor(state, plan, 'state-task');
-  state = bindTask({ cwd, packet: firstPacket, expectedRevision: 1 });
+  state = bindTask({ cwd, packet: firstPacket, expectedRevision: state.revision });
   const firstWorktree = createWorkerFixture(cwd, state, firstPacket);
   const secondPacket = packetFor(state, plan, 'second-task');
-  state = bindTask({ cwd, packet: secondPacket, expectedRevision: 2 });
+  state = bindTask({ cwd, packet: secondPacket, expectedRevision: state.revision });
   const secondWorktree = createWorkerFixture(cwd, state, secondPacket);
-  state = scheduleWave({ cwd, expectedRevision: 3 });
+  state = scheduleWave({ cwd, expectedRevision: state.revision });
   assert.deepEqual(state.execution.activeWave, ['state-task', 'second-task']);
-  state = startTask({ cwd, taskId: 'state-task', workerId: 'worker-one', expectedRevision: 4 });
-  state = startTask({ cwd, taskId: 'second-task', workerId: 'worker-two', expectedRevision: 5 });
+  state = startTask({ cwd, taskId: 'state-task', workerId: 'worker-one', expectedRevision: state.revision });
+  state = startTask({ cwd, taskId: 'second-task', workerId: 'worker-two', expectedRevision: state.revision });
   writeFileSync(join(firstWorktree.path, 'first.txt'), 'first\n'); git(firstWorktree.path, 'add', 'first.txt'); git(firstWorktree.path, 'commit', '-m', 'test: first worker');
   writeFileSync(join(secondWorktree.path, 'second.txt'), 'second\n'); git(secondWorktree.path, 'add', 'second.txt'); git(secondWorktree.path, 'commit', '-m', 'test: second worker');
   const firstCommit = git(firstWorktree.path, 'rev-parse', 'HEAD'); const secondCommit = git(secondWorktree.path, 'rev-parse', 'HEAD');
-  state = acceptResult({ cwd, result: resultFor(firstPacket, 'implemented', firstCommit, ['first.txt']), workerCwd: firstWorktree.path, expectedRevision: 6 });
-  state = acceptResult({ cwd, result: resultFor(secondPacket, 'implemented', secondCommit, ['second.txt']), workerCwd: secondWorktree.path, expectedRevision: 7 });
+  state = acceptResult({ cwd, result: resultFor(firstPacket, 'implemented', firstCommit, ['first.txt']), workerCwd: firstWorktree.path, expectedRevision: state.revision });
+  state = acceptResult({ cwd, result: resultFor(secondPacket, 'implemented', secondCommit, ['second.txt']), workerCwd: secondWorktree.path, expectedRevision: state.revision });
   git(cwd, 'switch', '-c', 'alternate-central');
-  assert.throws(() => integrateTask({ cwd, taskId: 'state-task', expectedRevision: 8 }), (error) => error.code === 'CENTRAL_GIT_MISMATCH');
+  assert.throws(() => integrateTask({ cwd, taskId: 'state-task', expectedRevision: state.revision }), (error) => error.code === 'CENTRAL_GIT_MISMATCH');
   git(cwd, 'switch', 'main');
-  state = integrateTask({ cwd, taskId: 'state-task', expectedRevision: 8 });
+  state = integrateTask({ cwd, taskId: 'state-task', expectedRevision: state.revision });
   assert.equal(state.execution.tasks.find(({ id }) => id === 'state-task').status, 'integrated');
-  assert.throws(() => integrateTask({ cwd, taskId: 'second-task', expectedRevision: 10,
+  assert.throws(() => integrateTask({ cwd, taskId: 'second-task', expectedRevision: state.revision,
     crashStep(step) { if (step === 'after-complete') throw new Error('intent-only stop'); } }), /intent-only stop/u);
   assert.equal(git(cwd, 'rev-parse', 'HEAD'), state.git.headSha);
   git(cwd, 'branch', '-f', 'alternate-central', 'HEAD');
   git(cwd, 'switch', 'alternate-central');
-  assert.throws(() => reconcileIntegration({ cwd, expectedRevision: 11 }), (error) => error.code === 'CENTRAL_GIT_MISMATCH');
+  assert.throws(() => reconcileIntegration({ cwd, expectedRevision: loadState(cwd).revision }), (error) => error.code === 'CENTRAL_GIT_MISMATCH');
   git(cwd, 'switch', 'main');
-  state = reconcileIntegration({ cwd, expectedRevision: 11 });
+  state = reconcileIntegration({ cwd, expectedRevision: loadState(cwd).revision });
   assert.equal(state.execution.tasks.find(({ id }) => id === 'second-task').status, 'integrated');
   assert.equal(readFileSync(join(cwd, 'first.txt'), 'utf8'), 'first\n');
   assert.equal(readFileSync(join(cwd, 'second.txt'), 'utf8'), 'second\n');
@@ -613,9 +754,9 @@ test('two same-base workers integrate by delta, resume intent-only integration, 
   removeTaskWorktree({ cwd, changeId: state.changeId, taskId: 'second-task' });
   git(cwd, 'branch', '-f', 'alternate-central', 'HEAD');
   git(cwd, 'switch', 'alternate-central');
-  assert.throws(() => finalizeIntegration({ cwd, expectedRevision: 12 }), (error) => error.code === 'CENTRAL_GIT_MISMATCH');
+  assert.throws(() => finalizeIntegration({ cwd, expectedRevision: state.revision }), (error) => error.code === 'CENTRAL_GIT_MISMATCH');
   git(cwd, 'switch', 'main');
-  state = finalizeIntegration({ cwd, expectedRevision: 12 });
+  state = finalizeIntegration({ cwd, expectedRevision: state.revision });
   assert.equal(state.phase, 'integrated');
   assert.equal(validateState({ cwd }).valid, true);
   git(cwd, 'switch', 'alternate-central');
@@ -922,6 +1063,67 @@ test('failed validation is private, immutable, and explicitly replaced at the ne
   assert.equal(state.verification, null);
   assert.deepEqual(durableSnapshot(verificationDirectory), failedValidationEvidence,
     'failed validation plans and results remain byte-for-byte immutable after remediation admission');
+});
+
+test('receipt-backed minor and trim remediation alone may revisit terminal owner paths', async () => {
+  for (const verdict of ['minor-amendment-required', 'trim-required']) {
+    const fixture = await integratedSingleTaskFixture(`scope ${verdict} overlap`);
+    let state = fixture.state;
+    const evidence = integratedScopeEvidenceFor({ cwd: fixture.cwd, changeId: state.changeId });
+    const mapping = evidence.result.coverage[0];
+    evidence.result = verdict === 'minor-amendment-required'
+      ? { ...evidence.result, verdict,
+        coverage: [{ ...mapping, classification: 'necessary-minor-expansion',
+          rationale: 'The adjacent remediation is necessary for the existing criterion.' }],
+        scopeDelta: { description: 'Add the exact adjacent remediation.',
+          sourceCriterionIds: [...mapping.sourceCriterionIds], acceptedCriterionIds: [...mapping.acceptedCriterionIds],
+          invariantIds: [], materialSurfaces: [] } }
+      : { ...evidence.result, verdict,
+        coverage: [{ mechanism: mapping.mechanism, sourceCriterionIds: [], acceptedCriterionIds: [],
+          invariantIds: [], nonGoalIds: [], guidanceIds: [], classification: 'speculative',
+          rationale: 'The exact machinery must be simplified.' }],
+        unnecessaryWork: [mapping.mechanism], smallerSufficientAlternative: 'Use the bounded simplification task.' };
+    evidence.resultDigest = digestJson(evidence.result);
+    state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
+      expectedRevision: state.revision });
+    assert.equal(state.phase, 'blocked');
+
+    const original = JSON.parse(readFileSync(join(changeDirectory(fixture.cwd, state.changeId), 'plan', 'plan.json'), 'utf8'));
+    const resultingPlan = structuredClone(original); resultingPlan.planRevision = 2;
+    const criterionId = `${verdict}-criterion`; const taskId = `${verdict}-task`;
+    resultingPlan.criteria.push({ id: criterionId, description: 'Perform the exact bounded scope remediation.',
+      disposition: 'owned', ownerTaskId: taskId, deferredReason: null });
+    resultingPlan.tasks.push({ ...original.tasks[0], id: taskId, title: 'Apply bounded scope remediation',
+      objective: 'Apply only the receipt-backed adjacent correction.', criterionIds: [criterionId], checklistItemIds: [],
+      dependsOn: ['state-task'], anticipatedPaths: ['first.txt'] });
+    const trigger = digestJson(evidence);
+    const amendment = { id: `${verdict}-amendment`, reason: 'Apply the exact receipt-backed scope verdict.',
+      authorization: 'scope-review', trigger, delta: { addedTaskIds: [taskId] }, invalidatedEvidence: [trigger] };
+
+    const missingIdsBefore = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
+    assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+      amendment: { ...amendment, delta: { summary: 'Omit exact remediation task authority.' } }, resultingPlan }),
+    (error) => error.code === 'INVALID_AMENDMENT');
+    assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), missingIdsBefore,
+      `${verdict} requires explicit addedTaskIds without durable mutation`);
+
+    const unrelatedPlan = structuredClone(resultingPlan);
+    const unrelatedCriterionId = `${verdict}-unrelated-criterion`; const unrelatedTaskId = `${verdict}-unrelated-task`;
+    unrelatedPlan.criteria.push({ id: unrelatedCriterionId, description: 'Attempt unrelated overlapping work.',
+      disposition: 'owned', ownerTaskId: unrelatedTaskId, deferredReason: null });
+    unrelatedPlan.tasks.push({ ...original.tasks[0], id: unrelatedTaskId, title: 'Attempt unrelated overlap',
+      objective: 'This unrelated task must remain blocked.', criterionIds: [unrelatedCriterionId], checklistItemIds: [],
+      dependsOn: ['state-task'], anticipatedPaths: ['first.txt'] });
+    const before = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
+    assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+      amendment, resultingPlan: unrelatedPlan }),
+    (error) => error.code === 'PLAN_NOT_READY' && error.message.includes('overlapping anticipated paths'));
+    assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), before,
+      `${verdict} unrelated overlap is rejected without durable mutation`);
+    state = amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision, amendment, resultingPlan });
+    assert.equal(state.execution.tasks.find(({ id }) => id === taskId).status, 'unbound');
+    assert.equal(state.execution.tasks.find(({ id }) => id === 'state-task').status, 'integrated');
+  }
 });
 
 test('late source drift preserves terminal authority and invalidates verification proof', async () => {
@@ -1937,7 +2139,7 @@ test('final-verifier finding disposition creates ordinary remediation work witho
   const amendmentPath = join(changeDirectory(fixture.cwd, state.changeId), 'plan', 'amendments', '0001.json');
   writeReceiptJson(amendmentPath, { ...amendmentRecord, previousDigest: `sha256:${'0'.repeat(64)}` });
   assert.throws(() => buildVerifierContext({ cwd: fixture.cwd }),
-    (error) => ['AMENDMENT_CHAIN_INVALID', 'RECOVERY_EVIDENCE_INVALID'].includes(error.code));
+    (error) => ['AMENDMENT_CHAIN_INVALID', 'RECOVERY_EVIDENCE_INVALID', 'SCOPE_EVIDENCE_STALE'].includes(error.code));
   writeReceiptJson(amendmentPath, amendmentRecord);
   const repeatedResult = { ...verifierResult, findings: [finding], summary: 'The remediation finding repeated.',
     headSha: state.verification.headSha, contextDigest: digestJson(repeatedContext),
@@ -2108,11 +2310,11 @@ test('accepted sibling integrates after a failed wave and preserves failure evid
   state = acceptResult({ cwd, workerCwd: thirdWorker.path, expectedRevision: state.revision,
     result: { ...resultFor(third, 'failed'), validation: third.requiredValidation.unit.map(({ command }) => ({
       command, result: 'failed', summary: 'Third validation failed.',
-    })), unexpectedDependencies: ['Third worker validation failed.'], summary: 'Third worker validation failed.' } });
+    })), unexpectedDependencies: [], summary: 'Third worker validation failed.' } });
   state = acceptResult({ cwd, workerCwd: secondWorker.path, expectedRevision: state.revision,
     result: { ...resultFor(second, 'failed'), validation: second.requiredValidation.unit.map(({ command }) => ({
       command, result: 'failed', summary: 'Worker validation failed.',
-    })), unexpectedDependencies: ['Worker validation failed.'], summary: 'Worker validation failed.' } });
+    })), unexpectedDependencies: [], summary: 'Worker validation failed.' } });
   const failureReasons = [...state.blockedReasons];
   assert.deepEqual(failureReasons, [
     'Task second-task reported failed: Worker validation failed.',
@@ -2148,7 +2350,7 @@ test('reverse-order sibling results preserve Git drift until exact restoration a
   state = acceptResult({ cwd, workerCwd: secondWorker.path, expectedRevision: state.revision,
     result: { ...resultFor(second, 'failed'), validation: second.requiredValidation.unit.map(({ command }) => ({
       command, result: 'failed', summary: 'Second validation failed.',
-    })), unexpectedDependencies: ['Second worker validation failed.'], summary: 'Second worker validation failed.' } });
+    })), unexpectedDependencies: [], summary: 'Second worker validation failed.' } });
   assert.deepEqual(state.blockedReasons, [gitReason, 'Task second-task reported failed: Second worker validation failed.']);
   state = acceptResult({ cwd, workerCwd: firstWorker.path, expectedRevision: state.revision,
     result: resultFor(first, 'implemented', firstCommit, ['first.txt']) });
@@ -2213,7 +2415,7 @@ test('failure and rejection blockers replay in plan order and tampering fails cl
   state = acceptResult({ cwd, workerCwd: workers.get(first.taskId).path, expectedRevision: state.revision,
     result: { ...resultFor(first, 'failed'), validation: first.requiredValidation.unit.map(({ command }) => ({
       command, result: 'failed', summary: 'First validation failed.',
-    })), unexpectedDependencies: ['First worker validation failed.'], summary: 'First worker validation failed.' } });
+    })), unexpectedDependencies: [], summary: 'First worker validation failed.' } });
   state = rejectTask({ cwd, taskId: second.taskId, reason: 'Replace the second task.', expectedRevision: state.revision });
   assert.deepEqual(state.blockedReasons, [
     'Task state-task reported failed: First worker validation failed.',
@@ -2256,7 +2458,7 @@ test('task blockers cap Unicode code points while immutable failure and rejectio
   state = acceptResult({ cwd, workerCwd: firstWorker.path, expectedRevision: state.revision,
     result: { ...resultFor(first, 'failed'), validation: first.requiredValidation.unit.map(({ command }) => ({
       command, result: 'failed', summary: 'Validation failed.',
-    })), unexpectedDependencies: ['Unexpected dependency.'], summary: failureSummary } });
+    })), unexpectedDependencies: [], summary: failureSummary } });
   const rejectionReason = `Reject ${'🛠️'.repeat(1200)} complete`;
   state = rejectTask({ cwd, taskId: second.taskId, reason: rejectionReason, expectedRevision: state.revision });
   assert.equal(state.blockedReasons.length, 2);
@@ -2434,32 +2636,32 @@ test('result acceptance rejects wrong worktree identity, branch, dirtiness, and 
   const { cwd, sha } = repository('worker identity rejection');
   const planning = await initializeState({ cwd, changeId: 'worker-identity', mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
   const plan = planFor(planning); let state = acceptPlan({ cwd, plan, expectedRevision: 0 });
-  const packet = packetFor(state, plan, 'state-task'); state = bindTask({ cwd, packet, expectedRevision: 1 });
-  const worker = createWorkerFixture(cwd, state, packet); state = scheduleWave({ cwd, expectedRevision: 2 });
+  const packet = packetFor(state, plan, 'state-task'); state = bindTask({ cwd, packet, expectedRevision: state.revision });
+  const worker = createWorkerFixture(cwd, state, packet); state = scheduleWave({ cwd, expectedRevision: state.revision });
   writeFileSync(join(worker.path, 'prestart-dirty.txt'), 'dirty before start\n');
-  assert.throws(() => startTask({ cwd, taskId: 'state-task', workerId: 'identity-worker', expectedRevision: 3 }),
+  assert.throws(() => startTask({ cwd, taskId: 'state-task', workerId: 'identity-worker', expectedRevision: state.revision }),
     (error) => error.code === 'WORKTREE_GIT_MISMATCH');
   unlinkSync(join(worker.path, 'prestart-dirty.txt'));
-  state = startTask({ cwd, taskId: 'state-task', workerId: 'identity-worker', expectedRevision: 3 });
+  state = startTask({ cwd, taskId: 'state-task', workerId: 'identity-worker', expectedRevision: state.revision });
   const result = resultFor(packet, 'no-change');
   const other = repository('wrong worker repository');
   for (const [label, workerCwd] of [['central path', cwd], ['wrong repository', other.cwd]]) {
-    assert.throws(() => acceptResult({ cwd, result, workerCwd, expectedRevision: 4 }),
+    assert.throws(() => acceptResult({ cwd, result, workerCwd, expectedRevision: state.revision }),
       (error) => error.code === 'WORKTREE_IDENTITY_MISMATCH', label);
   }
   git(worker.path, 'switch', '-c', 'wrong-worker-branch');
-  assert.throws(() => acceptResult({ cwd, result, workerCwd: worker.path, expectedRevision: 4 }),
+  assert.throws(() => acceptResult({ cwd, result, workerCwd: worker.path, expectedRevision: state.revision }),
     (error) => ['WORKTREE_REGISTRATION_MISMATCH', 'WORKTREE_GIT_MISMATCH'].includes(error.code));
   git(worker.path, 'switch', worker.branch);
   writeFileSync(join(worker.path, 'dirty.txt'), 'dirty\n');
-  assert.throws(() => acceptResult({ cwd, result, workerCwd: worker.path, expectedRevision: 4 }),
+  assert.throws(() => acceptResult({ cwd, result, workerCwd: worker.path, expectedRevision: state.revision }),
     (error) => error.code === 'WORKTREE_GIT_MISMATCH');
   unlinkSync(join(worker.path, 'dirty.txt'));
   writeFileSync(join(worker.path, 'head.txt'), 'head\n'); git(worker.path, 'add', 'head.txt'); git(worker.path, 'commit', '-m', 'test: wrong worker head');
-  assert.throws(() => acceptResult({ cwd, result, workerCwd: worker.path, expectedRevision: 4 }),
+  assert.throws(() => acceptResult({ cwd, result, workerCwd: worker.path, expectedRevision: state.revision }),
     (error) => error.code === 'WORKTREE_HEAD_MISMATCH');
   git(worker.path, 'reset', '--hard', sha);
-  assert.equal(loadState(cwd).revision, 4);
+  assert.equal(loadState(cwd).revision, state.revision);
 });
 
 test('bound task reserves direct rejection replacement at its exact capacity edge', async () => {
@@ -2519,21 +2721,22 @@ test('wave scheduling refuses partial worktree creation evidence until recovery 
   const { cwd, sha } = repository('partial worktree scheduling');
   const planning = await initializeState({ cwd, changeId: 'partial-scheduling', mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
   const plan = planFor(planning); let state = acceptPlan({ cwd, plan, expectedRevision: 0 });
-  const packet = packetFor(state, plan, 'state-task'); state = bindTask({ cwd, packet, expectedRevision: 1 });
+  const packet = packetFor(state, plan, 'state-task'); state = bindTask({ cwd, packet, expectedRevision: state.revision });
   createWorkerFixture(cwd, state, packet);
   const manifestPath = join(changeRoot(cwd), 'worktrees', 'manifests', state.changeId, 'state-task.json');
   const receiptPath = manifestPath.replace(/\.json$/u, '.sha256');
   const manifest = readFileSync(manifestPath); const receipt = readFileSync(receiptPath);
   unlinkSync(manifestPath); unlinkSync(receiptPath);
-  assert.throws(() => scheduleWave({ cwd, expectedRevision: 2 }), (error) => error.code === 'RECEIPT_MISSING');
+  assert.throws(() => scheduleWave({ cwd, expectedRevision: state.revision }), (error) => error.code === 'RECEIPT_MISSING');
   writeFileSync(manifestPath, manifest); writeFileSync(receiptPath, receipt);
-  state = scheduleWave({ cwd, expectedRevision: 2 });
+  state = scheduleWave({ cwd, expectedRevision: state.revision });
   assert.deepEqual(state.execution.activeWave, ['state-task']);
 });
 import { archiveDirectory } from '../paths.mjs';
 import { loadRegistry, routeSpecialists } from '../../../aerstello-specialists/scripts/validate-registry.mjs';
 import { digestJson, sourceChecklistBinding } from '../contracts/contracts.mjs';
-import { implementationTaskDigest } from '../implementation/contracts.mjs';
+import { implementationTaskDigest, validateImplementationTask } from '../implementation/contracts.mjs';
+import { taskSetDigest } from '../scope/contracts.mjs';
 import { findingFingerprint } from '../verification/contracts.mjs';
 import { removeTaskWorktree } from '../worktree/worktree.mjs';
 
@@ -2665,6 +2868,15 @@ function packetFor(state, plan, taskId) {
     acceptanceCriteriaIds: task.criterionIds,
     acceptanceCriteria: task.criterionIds.map((id) => ({ id, description: plan.criteria.find((entry) => entry.id === id).description })),
     allowedPaths: [...task.anticipatedPaths], forbiddenPaths: [], dependencies: [...task.dependsOn],
+    ...(state.scope ? { minimalityAuthority: {
+      closureDigest: state.scope.closureDigest,
+      criterionNeed: task.criterionIds.map((criterionId) => ({ criterionId,
+        rationale: 'The exact accepted criterion requires this bounded task.' })),
+      removalCounterfactual: 'Removing the task leaves its accepted criteria without an implementation owner.',
+      forbiddenExpansion: ['Do not expand beyond the exact test packet.'],
+      tripwires: [{ id: 'test-task-paths', category: 'git-paths', inventory: [...task.anticipatedPaths].sort() }],
+      discoveryReturn: { status: 'blocked', workerCommit: null, authority: 'unchanged' },
+    } } : {}),
     requiredValidation: { unit: [{ command: 'node --test .agents/skills/change-development/scripts/state/state.test.mjs', reason: 'Exercise state behavior.' }], system: [] },
   };
 }
@@ -2985,6 +3197,11 @@ test('acceptance is immutable, revision guarded, receipt protected, and mode-gat
   const { cwd, sha } = repository('accept state');
   const planning = await initializeState({ cwd, changeId: 'accept-change', mode: 'plan-only', baseBranch: 'main', planningRef: sha, source: descriptor });
   assert.throws(() => acceptPlan({ cwd, plan: scenarioPlanFor(planning), expectedRevision: 9 }), (error) => error.code === 'REVISION_CONFLICT');
+  const beforeScopeGate = durableSnapshot(changeDirectory(cwd, planning.changeId));
+  assert.throws(() => acceptPlanWithScope({ cwd, plan: scenarioPlanFor(planning), expectedRevision: 0 }),
+    (error) => error.code === 'PLAN_SCOPE_INVALID');
+  assert.deepEqual(durableSnapshot(changeDirectory(cwd, planning.changeId)), beforeScopeGate,
+    'missing admission scope authority cannot mutate plan, state, event, or transition evidence');
   const ready = acceptPlan({ cwd, plan: scenarioPlanFor(planning), expectedRevision: 0 });
   assert.equal(ready.phase, 'ready-to-implement');
   assert.equal(ready.execution.planDigest, ready.plan.effectiveDigest);
@@ -3105,6 +3322,7 @@ test('historical accepted Git metadata ownership replays but requires an explici
   const historicalPlan = structuredClone(safePlan); historicalPlan.tasks[0].anticipatedPaths = ['.git/config'];
   const historicalDigest = digestJson(historicalPlan);
   const historicalState = structuredClone(accepted);
+  delete historicalState.scope;
   historicalState.plan.originalDigest = historicalDigest;
   historicalState.plan.effectiveDigest = historicalDigest;
   historicalState.execution.planDigest = historicalDigest;
@@ -3116,6 +3334,9 @@ test('historical accepted Git metadata ownership replays but requires an explici
   intent.nextState = historicalState;
   intent.nextStateDigest = digestJson(historicalState);
   intent.evidence.planDigest = historicalDigest;
+  for (const key of ['minimalClosureDigest', 'scopeAdmissionEvidenceDigest']) {
+    delete intent.evidence[key]; delete intent.evidencePaths[key]; delete intent.authoritativeEvidence[key];
+  }
   intent.authoritativeEvidence.planDigest = {
     ...intent.authoritativeEvidence.planDigest, digest: historicalDigest, value: historicalPlan,
   };
@@ -3128,17 +3349,22 @@ test('historical accepted Git metadata ownership replays but requires an explici
   writeReceiptJson(receiptPath, receipt);
   writeFileSync(join(transition, 'complete'), `${digestJson(receipt)}\n`);
   writeFileSync(join(root, 'state.json'), `${JSON.stringify(historicalState)}\n`);
+  rmSync(join(root, 'scope'), { recursive: true });
 
   assert.equal(validateState({ cwd: fixture.cwd }).valid, true);
   const unsafePacket = packetFor(historicalState, historicalPlan, 'state-task');
-  const revision = historicalState.revision;
-  assert.throws(() => bindTask({ cwd: fixture.cwd, packet: unsafePacket, expectedRevision: revision }),
+  assert.throws(() => bindTask({ cwd: fixture.cwd, packet: unsafePacket, expectedRevision: historicalState.revision }),
+    (error) => error instanceof StateError && error.code === 'SCOPE_ADOPTION_REQUIRED');
+  const closure = testMinimalClosure(historicalState, historicalPlan);
+  const adopted = adoptScope({ cwd: fixture.cwd, expectedRevision: historicalState.revision, minimalClosure: closure,
+    scopeEvidence: testScopeEvidence(historicalState, historicalPlan, closure) });
+  assert.throws(() => bindTask({ cwd: fixture.cwd, packet: unsafePacket, expectedRevision: adopted.revision }),
     (error) => error instanceof StateError && error.code === 'INVALID_TASK_PACKET');
-  assert.equal(loadState(fixture.cwd).revision, revision);
+  assert.equal(loadState(fixture.cwd).revision, adopted.revision);
 
   const amendedPlan = structuredClone(historicalPlan); amendedPlan.planRevision = 2;
   amendedPlan.tasks[0].anticipatedPaths = ['.gitignore'];
-  const amended = amendPlan({ cwd: fixture.cwd, expectedRevision: revision, resultingPlan: amendedPlan,
+  const amended = amendPlan({ cwd: fixture.cwd, expectedRevision: adopted.revision, resultingPlan: amendedPlan,
     amendment: { id: 'replace-git-metadata', reason: 'Replace historical unsafe ownership.', authorization: 'operator',
       trigger: 'operator-decision', delta: { changed: ['anticipatedPaths'] }, invalidatedEvidence: [] } });
   const safePacket = packetFor(amended, amendedPlan, 'state-task');

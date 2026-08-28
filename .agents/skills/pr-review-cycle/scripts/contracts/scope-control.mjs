@@ -573,6 +573,23 @@ export function validateScopeReturnEnvelope(value) {
   return errors;
 }
 
+export function scopeReturnResumeIdentity(value) {
+  const errors = validateScopeReturnEnvelope(value);
+  if (errors.length > 0) throw new Error(`Invalid scope return: ${errors.join('; ')}`);
+  return `sha256:${sha256CanonicalContractJson({
+    authorityDigest: value.authorityDigest,
+    journalDigest: value.journalDigest,
+    blockerId: value.blockerId,
+    decisionId: value.decisionId,
+    reviewHeadSha: value.reviewHeadSha,
+    livePrHeadSha: value.livePrHeadSha,
+    rootCauseId: value.rootCauseId,
+    assessmentDigest: value.assessmentDigest,
+    findingIds: value.findingIds,
+    findingFingerprints: value.findingFingerprints,
+  })}`;
+}
+
 export function validateScopeControlReference(value, path = '$.scopeControl') {
   const errors = [];
   const fields = ['authorityDigest', 'journalDigest', 'returnDigest', 'gate', 'assessmentHeadSha', 'updatedAt'];

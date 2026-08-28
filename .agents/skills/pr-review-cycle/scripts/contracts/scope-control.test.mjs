@@ -454,11 +454,17 @@ test('minor amendments remain fail-closed through a decision-required projection
 });
 
 test('guarded scope return binds exact live head, findings, alternatives, and inventory', () => {
-  const { scopeAuthorityDigest, scopeControlJournalDigest, validateScopeReturnEnvelope } = contract;
+  const { scopeAuthorityDigest, scopeControlJournalDigest, scopeReturnResumeIdentity,
+    validateScopeReturnEnvelope } = contract;
   const authorityDigest = scopeAuthorityDigest(authority());
   const journalDigest = scopeControlJournalDigest(journal(authorityDigest));
   const value = scopeReturn(authorityDigest, journalDigest);
   assert.deepEqual(validateScopeReturnEnvelope(value), []);
+  assert.equal(scopeReturnResumeIdentity(value), scopeReturnResumeIdentity(structuredClone(value)));
+  assert.notEqual(scopeReturnResumeIdentity(value), scopeReturnResumeIdentity({
+    ...value, decisionId: 'scope-decision-next',
+  }));
+  assert.throws(() => scopeReturnResumeIdentity({ ...value, livePrHeadSha: OTHER_HEAD }), /Invalid scope return/u);
   assert.match(validateScopeReturnEnvelope({ ...value, livePrHeadSha: OTHER_HEAD }).join('\n'), /must equal livePrHeadSha/u);
   assert.match(validateScopeReturnEnvelope({ ...value, narrowAlternative: null }).join('\n'), /narrowAlternative is required/u);
 });

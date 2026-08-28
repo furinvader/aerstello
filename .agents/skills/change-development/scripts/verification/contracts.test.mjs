@@ -69,11 +69,14 @@ test('all six exact-HEAD contracts are strict and enforce clean/finding consiste
   assert.ok(validateVerificationContract('specialistResult', { ...specialist, findings: [finding] }).length > 0);
   const tooManyFindings = Array.from({ length: 101 }, (_, index) => ({ ...finding, id: `finding-${index}` }));
   assert.ok(validateVerificationContract('specialistResult', { ...specialist, status: 'findings', findings: tooManyFindings }).length > 0);
-  const verification = { schemaVersion: 1, headSha: SHA, contextDigest: digest, status: 'findings', summary: 'One finding.', findings: [finding], recordedAt: AT };
+  const verification = { schemaVersion: 1, headSha: SHA, contextDigest: digest, scopeEvidenceDigest: digest,
+    status: 'findings', summary: 'One finding.', findings: [finding], recordedAt: AT };
   assert.deepEqual(validateVerificationContract('verificationResult', verification), []);
   const context = { schemaVersion: 1, verifierId: 'development_integration_verifier', finalVerificationPriority: 'high',
     verificationRound: 1, inputIdentityDigest: digest, changeId: 'issue-24', headSha: SHA, planningSha: SHA,
     originalPlanDigest: digest, effectivePlanDigest: digest, taskSetDigest: digest,
+    minimalClosureDigest: digest, integratedScopeEvidenceDigest: digest,
+    scopeDecisionDigests: [], scopeAmendmentDigests: [],
     sourceIdentity: { kind: 'github-issue', reference: 'furinvader/aerstello#24', digest }, validationPlanDigest: digest,
     validationResultDigests: [digest], specialistResultDigests: [], evidence: [
       { kind: 'checklist', id: 'validation-union', digest, summary: 'Covered.' },

@@ -7,12 +7,13 @@
   "properties": {
     "schemaVersion": { "enum": [1, 2] }, "changeId": { "$ref": "#/$defs/id" },
     "mode": { "enum": ["plan-only", "implement", "full"] },
-    "phase": { "enum": ["initializing", "planning", "awaiting-decision", "ready-to-implement", "implementing", "integrating", "integrated", "validating", "specialist-review", "verifying", "development-ready", "blocked", "recovering", "abandoned"] },
+    "phase": { "enum": ["initializing", "planning", "awaiting-decision", "awaiting-scope-decision", "ready-to-implement", "implementing", "integrating", "integrated", "validating", "specialist-review", "verifying", "development-ready", "blocked", "recovering", "abandoned"] },
     "revision": { "type": "integer", "minimum": 0 }, "baseBranch": { "type": "string", "minLength": 1, "maxLength": 255 }, "expectedPrBaseBranch": { "type": "string", "minLength": 1, "maxLength": 255 }, "planningRef": { "type": "string", "minLength": 1, "maxLength": 255 }, "planningSha": { "$ref": "#/$defs/sha" },
     "source": { "$ref": "#/$defs/sourceSummary" }, "plan": { "$ref": "#/$defs/planSummary" }, "git": { "$ref": "#/$defs/gitObservation" },
     "unresolvedDecisionIds": { "$ref": "#/$defs/idList" }, "checklist": { "type": "array", "items": { "$ref": "#/$defs/checklistStatus" } }, "blockedReasons": { "$ref": "#/$defs/textList" }, "abandonmentReason": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 2000 }, { "type": "null" }] },
     "execution": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/executionSummary" }] },
     "verification": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/verificationSummary" }] },
+    "scope": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/scopeSummary" }] },
     "nextAction": { "type": "string", "minLength": 1, "maxLength": 1000 }, "createdAt": { "type": "string", "format": "date-time" }, "updatedAt": { "type": "string", "format": "date-time" }
   },
   "$defs": {
@@ -24,6 +25,22 @@
     "checklistStatus": { "type": "object", "additionalProperties": false, "required": ["id", "checked", "status", "externalChange"], "properties": { "id": { "$ref": "#/$defs/id" }, "checked": { "type": "boolean" }, "status": { "enum": ["current", "ambiguous", "removed"] }, "externalChange": { "type": "boolean" } } },
     "nullableDigest": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
     "nullableSha": { "oneOf": [{ "$ref": "#/$defs/sha" }, { "type": "null" }] },
+    "scopeSummary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "closureDigest", "candidatePlanDigest", "admissionEvidenceDigest", "currentEvidenceDigest", "currentBoundary", "currentSubjectSha", "decisionDigests", "returnDigests", "adoptedAt"],
+      "properties": {
+        "status": { "enum": ["current", "assessment-required", "awaiting-decision"] },
+        "closureDigest": { "$ref": "#/$defs/digest" },
+        "candidatePlanDigest": { "$ref": "#/$defs/nullableDigest" },
+        "admissionEvidenceDigest": { "$ref": "#/$defs/digest" },
+        "currentEvidenceDigest": { "$ref": "#/$defs/nullableDigest" },
+        "currentBoundary": { "oneOf": [{ "enum": ["admission", "task", "integrated-head"] }, { "type": "null" }] },
+        "currentSubjectSha": { "$ref": "#/$defs/nullableSha" },
+        "decisionDigests": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/digest" } },
+        "returnDigests": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/digest" } },
+        "adoptedAt": { "type": "string", "format": "date-time" }
+      }
+    },
     "taskSummary": {
       "type": "object", "additionalProperties": false,
       "required": ["id", "dependsOn", "anticipatedPaths", "produces", "consumes", "status", "binding", "attempt", "packetDigest", "taskBaseSha", "resultDigest", "workerCommit", "integratedCommit", "workerId", "worktreePath", "branch", "worktreeManifestDigest"],

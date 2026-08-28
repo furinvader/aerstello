@@ -50,6 +50,23 @@ import {
   validationPlanDigest,
 } from '../verification/contracts.mjs';
 import {
+  developmentScopeResumeRecord,
+  expectedScopeIdentity,
+  scopeGateForVerdict,
+  validateClosureForState,
+  validateDecisionForEvidence,
+  validateEvidenceForBoundary,
+  validateMinorAmendmentAuthority,
+  validateScopeReturnResume,
+} from './scope.mjs';
+import {
+  scopeContractDigest,
+  scopeEvidenceIsCurrent,
+  taskSetDigest as integratedTaskSetDigest,
+  validateScopeDecision,
+  validateScopeEvidence,
+} from '../scope/contracts.mjs';
+import {
   activePointerPath,
   archiveDirectory,
   changeDirectory,
@@ -540,20 +557,28 @@ export function nextActionFor(state) {
   if (state.phase === 'initializing') return 'Complete source capture and enter planning.';
   if (state.phase === 'planning') return state.unresolvedDecisionIds.length > 0
     ? 'Record or resolve every unresolved decision before accepting the plan.'
-    : 'Validate and accept an implementation plan.';
+    : state.scope?.status === 'assessment-required'
+      ? 'Provide a revised candidate plan with exact admission scope evidence.'
+      : 'Validate and accept an implementation plan with exact admission scope evidence.';
   if (state.phase === 'awaiting-decision') return 'Record a decision, then amend or retain the accepted plan explicitly.';
+  if (state.phase === 'awaiting-scope-decision') return 'Run change:state record-scope-decision for the exact current assessment, then revise or amend authority as directed.';
   if (state.phase === 'ready-to-implement') return state.mode === 'plan-only'
     ? 'Archive this completed plan-only change.'
     : state.schemaVersion === 1 ? 'Run change:state upgrade-state with the current expected revision.'
-      : 'Continue with the implementation capability by binding the next dependency-ready task.';
+      : !state.scope ? 'Run change:state adopt-scope, then continue with the implementation capability before binding new task authority.'
+        : state.scope.status !== 'current' ? 'Run change:state assess-scope for the exact next task authority.'
+          : 'Continue with the implementation capability by binding the next dependency-ready task.';
   if (state.phase === 'implementing') {
     if (state.execution?.activeWave.length) return 'Start or accept results for every task in the active implementation wave.';
     if (state.execution?.tasks.some((task) => task.status === 'accepted')) return 'Integrate the next accepted task in dependency order.';
     if (state.execution?.tasks.every((task) => ['integrated', 'no-change'].includes(task.status))) return 'Remove every task worktree, then run change:state finalize-integration.';
+    if (state.scope?.status !== 'current' || state.scope.currentBoundary !== 'task') return 'Run change:state assess-scope for the exact next task packet before binding it.';
     return 'Bind or schedule the next dependency-ready implementation task.';
   }
   if (state.phase === 'integrating') return 'Run change:state reconcile-integration for the exact persisted integration intent.';
-  if (state.phase === 'integrated') return 'Run change:state validation-plan for the exact integrated HEAD.';
+  if (state.phase === 'integrated') return state.scope?.status === 'current' && state.scope.currentBoundary === 'integrated-head'
+    ? 'Run change:state validation-plan for the exact integrated HEAD.'
+    : 'Run change:state assess-scope with exact integrated-HEAD evidence.';
   if (state.phase === 'validating') return state.verification?.validationStatus === 'failed'
     ? 'Replace the failed validation plan for a transient rerun, or amend the plan from its exact failed-result receipt for corrective work.'
     : 'Run change:state run-validation to resume exact pending validation commands.';
@@ -565,6 +590,12 @@ export function nextActionFor(state) {
   if (state.phase === 'recovering') return 'Run change:state recover to finish the exact interrupted transition.';
   if (state.phase === 'blocked') return state.execution?.activeWave.length
     ? 'Resolve the listed blocking evidence by accepting or finishing every active-wave task result, then reject/replan.'
+    : state.blockedReasons?.some((reason) => reason.includes('bounded minor amendment'))
+      ? 'Run change:state amend-plan from the exact minor scope evidence, invalidate that evidence, then reassess the next authority boundary.'
+      : state.blockedReasons?.some((reason) => reason.includes('removal or simplification'))
+        ? 'Run change:state amend-plan from the exact trim-required evidence with one bounded removal or simplification task.'
+        : state.blockedReasons?.some((reason) => reason.includes('insufficient evidence'))
+          ? 'Run change:state assess-scope again with sufficient exact evidence for the unchanged authority.'
     : state.execution?.tasks.some((task) => task.status === 'accepted')
       ? 'Integrate the next dependency-ready accepted task, then resolve the remaining blocked or failed work.'
       : state.verification
@@ -774,6 +805,107 @@ function readEffectivePlan(cwd, state) {
   return verifyReceipt(join(changeDirectory(cwd, state.changeId), 'plan', 'amendments', name), 'latest plan amendment').value.resultingPlan;
 }
 
+function scopeClosurePath(cwd, state, revision) {
+  return join(changeDirectory(cwd, state.changeId), 'scope', 'minimal-closure', `${String(revision).padStart(4, '0')}.json`);
+}
+
+function scopeEvidencePath(cwd, state, evidence) {
+  return join(changeDirectory(cwd, state.changeId), 'scope', 'evidence', evidence.cadence.boundary,
+    `${String(evidence.revision).padStart(8, '0')}-${evidence.evidenceId}.json`);
+}
+
+function scopeDecisionPath(cwd, state, decision) {
+  return join(changeDirectory(cwd, state.changeId), 'scope', 'decisions',
+    `${String(decision.revision).padStart(8, '0')}-${decision.decisionId}.json`);
+}
+
+function scopeAmendmentRecords(cwd, state) {
+  const records = [];
+  for (let number = 1; number <= (state.plan?.amendmentCount ?? 0); number += 1) {
+    const name = `${String(number).padStart(4, '0')}.json`;
+    records.push(verifyReceipt(join(changeDirectory(cwd, state.changeId), 'plan', 'amendments', name),
+      `plan amendment ${number}`).value);
+  }
+  return records;
+}
+
+function findScopeReceipt(cwd, state, subdirectory, digest, label) {
+  const directory = join(changeDirectory(cwd, state.changeId), 'scope', subdirectory);
+  if (!existsSync(directory)) throw new StateError(`${label} is missing`, 'SCOPE_EVIDENCE_MISSING');
+  const matches = [];
+  const visit = (root) => {
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      const path = join(root, entry.name);
+      if (entry.isDirectory()) visit(path);
+      else if (entry.name.endsWith('.json')) {
+        const receipt = verifyReceipt(path, label);
+        if (receipt.digest === digest) matches.push(receipt);
+      }
+    }
+  };
+  visit(directory);
+  if (matches.length !== 1) throw new StateError(`${label} does not have one exact receipt`, 'SCOPE_EVIDENCE_INVALID');
+  return matches[0];
+}
+
+function currentScopeReceipts(cwd, state) {
+  if (!state.scope) throw new StateError('Append-only scope adoption is required before authority can advance', 'SCOPE_ADOPTION_REQUIRED');
+  const closure = findScopeReceipt(cwd, state, 'minimal-closure', state.scope.closureDigest, 'minimal closure');
+  const admission = findScopeReceipt(cwd, state, 'evidence', state.scope.admissionEvidenceDigest, 'admission scope evidence');
+  const evidence = state.scope.currentEvidenceDigest === null ? null
+    : findScopeReceipt(cwd, state, 'evidence', state.scope.currentEvidenceDigest, 'current scope evidence');
+  if (validateClosureForState(closure.value, state).length > 0) {
+    throw new StateError('Minimal closure is stale for the current source or effective plan', 'SCOPE_EVIDENCE_STALE');
+  }
+  return { closure, admission, evidence, amendmentRecords: scopeAmendmentRecords(cwd, state) };
+}
+
+function assertCurrentIntegratedScope(cwd, state, taskEvidence = null) {
+  const receipts = currentScopeReceipts(cwd, state);
+  if (state.scope.status !== 'current' || state.scope.currentBoundary !== 'integrated-head'
+      || !receipts.evidence || receipts.evidence.value.result.verdict !== 'within-scope') {
+    throw new StateError('Exact integrated-HEAD within-scope evidence is required', 'INTEGRATED_SCOPE_REQUIRED');
+  }
+  const terminal = taskEvidence ?? terminalTaskEvidence(cwd, state);
+  const taskDigest = integratedTaskSetDigest(terminal.map((entry) => ({
+    taskId: entry.packet.taskId, binding: entry.binding, packetDigest: entry.packetDigest,
+    resultDigest: entry.resultDigest, provenanceDigest: entry.provenanceDigest,
+    terminalStatus: entry.terminalStatus, integratedCommit: entry.integratedCommit,
+    integrationReceiptDigest: entry.integrationReceiptDigest,
+  })));
+  const expected = expectedScopeIdentity({
+    state,
+    closureDigest: receipts.closure.digest,
+    amendmentRecords: receipts.amendmentRecords,
+    taskPacketDigest: taskDigest,
+    subjectDigest: objectDigest({ headSha: state.git.headSha, taskSetDigest: taskDigest }),
+    subjectSha: state.git.headSha,
+  });
+  if (!scopeEvidenceIsCurrent(receipts.evidence.value, expected)) {
+    throw new StateError('Integrated scope evidence is stale for source, plan, amendment order, closure, task set, or HEAD', 'SCOPE_EVIDENCE_STALE');
+  }
+  return { ...receipts, taskDigest };
+}
+
+export function integratedScopeAssessmentIdentity({ cwd = process.cwd(), changeId } = {}) {
+  const root = repositoryRoot(cwd); const state = loadState(root, changeId);
+  if (!state || state.phase !== 'integrated') {
+    throw new StateError('Integrated scope identity requires the exact integrated state', 'INVALID_PHASE');
+  }
+  const receipts = currentScopeReceipts(root, state);
+  const terminal = terminalTaskEvidence(root, state);
+  const taskPacketDigest = integratedTaskSetDigest(terminal.map((entry) => ({
+    taskId: entry.packet.taskId, binding: entry.binding, packetDigest: entry.packetDigest,
+    resultDigest: entry.resultDigest, provenanceDigest: entry.provenanceDigest,
+    terminalStatus: entry.terminalStatus, integratedCommit: entry.integratedCommit,
+    integrationReceiptDigest: entry.integrationReceiptDigest,
+  })));
+  return expectedScopeIdentity({ state, closureDigest: receipts.closure.digest,
+    amendmentRecords: receipts.amendmentRecords, taskPacketDigest,
+    subjectDigest: objectDigest({ headSha: state.git.headSha, taskSetDigest: taskPacketDigest }),
+    subjectSha: state.git.headSha });
+}
+
 function executionFromPlan(plan, baseSha) {
   return {
     planDigest: objectDigest(plan),
@@ -870,7 +1002,8 @@ function assertNoLegacyPreacceptDecisionEvidence(cwd, state) {
   );
 }
 
-export function acceptPlan({ cwd = process.cwd(), changeId, plan, planningEvidence = [], expectedRevision, clock, crashStep, lockOptions }) {
+export function acceptPlan({ cwd = process.cwd(), changeId, plan, planningEvidence = [], minimalClosure,
+  scopeEvidence, expectedRevision, clock, crashStep, lockOptions }) {
   const root = repositoryRoot(cwd);
   const selected = selectedChangeId(root, changeId);
   return withChangeLock(root, selected, () => {
@@ -899,10 +1032,66 @@ export function acceptPlan({ cwd = process.cwd(), changeId, plan, planningEviden
       return !item || item.checked !== mapping.checked || item.status !== mapping.status
         || item.externalChange !== mapping.externalChange;
     })) throw new StateError('Plan checklist mappings must exactly match the latest source observation', 'PLAN_CHECKLIST_MISMATCH');
+    const planDigest = objectDigest(plan);
+    const authorityState = { ...state, plan: { effectiveDigest: planDigest } };
+    const closureErrors = validateClosureForState(minimalClosure, authorityState, planDigest);
+    if (state.scope) {
+      const priorClosure = findScopeReceipt(root, state, 'minimal-closure', state.scope.closureDigest, 'prior minimal closure').value;
+      if (minimalClosure.revision !== priorClosure.revision + 1
+          || minimalClosure.previousContractDigest !== state.scope.closureDigest) {
+        closureErrors.push('$ revised minimal closure must append directly to the current receipt');
+      }
+    }
+    if (closureErrors.length > 0) {
+      throw new StateError(`Plan admission minimal closure is invalid:\n- ${closureErrors.join('\n- ')}`,
+        'PLAN_SCOPE_INVALID');
+    }
+    const closureDigest = scopeContractDigest(minimalClosure);
+    const scopeErrors = validateEvidenceForBoundary(scopeEvidence, {
+      state: authorityState, closureDigest, amendmentRecords: [], boundary: 'admission',
+      subjectDigest: planDigest, subjectSha: state.planningSha, taskPacketDigest: null,
+    });
+    if (closureErrors.length > 0 || scopeErrors.length > 0) {
+      throw new StateError(`Plan admission scope evidence is invalid:\n- ${[...closureErrors, ...scopeErrors].join('\n- ')}`,
+        'PLAN_SCOPE_INVALID');
+    }
     preflightVerifierCapacity({ originalPlan: plan, planningEvidence, sourceDigest: state.source.observationDigest,
       featureDirectory: join(root, 'specs', 'features') });
-    const planDigest = objectDigest(plan);
     const timestamp = now(clock);
+    const evidenceDigest = scopeContractDigest(scopeEvidence);
+    const gate = scopeGateForVerdict(scopeEvidence.result.verdict);
+    const scope = {
+      status: gate.status,
+      closureDigest,
+      candidatePlanDigest: scopeEvidence.result.verdict === 'within-scope' ? null : planDigest,
+      admissionEvidenceDigest: evidenceDigest,
+      currentEvidenceDigest: evidenceDigest,
+      currentBoundary: 'admission',
+      currentSubjectSha: state.planningSha,
+      decisionDigests: state.scope?.decisionDigests ?? [],
+      returnDigests: state.scope?.returnDigests ?? [],
+      adoptedAt: state.scope?.adoptedAt ?? timestamp,
+    };
+    const scopeEvidenceRecords = [
+      { key: 'minimalClosureDigest', path: `scope/minimal-closure/${String(minimalClosure.revision).padStart(4, '0')}.json`, value: minimalClosure, label: `minimal closure revision ${minimalClosure.revision}` },
+      { key: 'scopeAdmissionEvidenceDigest', path: relative(changeDirectory(root, state.changeId), scopeEvidencePath(root, state, scopeEvidence)), value: scopeEvidence, label: 'plan admission scope evidence' },
+    ];
+    if (scopeEvidence.result.verdict !== 'within-scope') {
+      const next = revised(state, {
+        phase: gate.phase === 'awaiting-scope-decision' ? gate.phase : 'planning',
+        scope,
+        blockedReasons: gate.blocker ? [gate.blocker] : [],
+        git: currentGit,
+      }, () => new Date(timestamp));
+      return commitTransition({
+        cwd: root, previousState: state, nextState: next, type: 'plan-scope-assessed',
+        summary: `Recorded non-admitting ${scopeEvidence.result.verdict} plan scope verdict`, crashStep,
+        pendingEvidence: [
+          ...scopeEvidenceRecords,
+          { key: 'candidatePlanDigest', path: `scope/candidates/${planDigest.slice('sha256:'.length)}.json`, value: plan, label: 'scope-assessed candidate plan' },
+        ],
+      });
+    }
     const next = revised(state, {
       phase: 'ready-to-implement',
       plan: {
@@ -917,6 +1106,7 @@ export function acceptPlan({ cwd = process.cwd(), changeId, plan, planningEviden
       source: { ...state.source, classification: 'unchanged' },
       blockedReasons: [],
       git: currentGit,
+      scope,
       ...(state.schemaVersion === 2 ? { execution: executionFromPlan(plan, currentGit.headSha) } : {}),
     }, () => new Date(timestamp));
     return commitTransition({
@@ -925,8 +1115,153 @@ export function acceptPlan({ cwd = process.cwd(), changeId, plan, planningEviden
       pendingEvidence: [
         { key: 'planDigest', path: 'plan/plan.json', value: plan, label: 'accepted plan' },
         { key: 'planningEvidenceDigest', path: 'plan/planning-evidence.json', value: planningEvidence, label: 'planning evidence' },
+        ...scopeEvidenceRecords,
       ],
     });
+  }, lockOptions);
+}
+
+export function adoptScope({ cwd = process.cwd(), changeId, minimalClosure, scopeEvidence,
+  expectedRevision, clock, crashStep, lockOptions } = {}) {
+  const root = repositoryRoot(cwd); const selected = selectedChangeId(root, changeId);
+  return withChangeLock(root, selected, () => {
+    const state = loadState(root, selected); assertRevision(state, expectedRevision);
+    validateState({ cwd: root, changeId: selected });
+    if (!state.plan || state.scope) throw new StateError('Scope adoption requires one unfinished legacy accepted plan without scope authority', 'SCOPE_ADOPTION_INVALID');
+    if (['development-ready', 'abandoned'].includes(state.phase)) throw new StateError('Terminal change state cannot adopt new execution authority', 'SCOPE_ADOPTION_INVALID');
+    const current = gitObservation(root, clock);
+    if (!current.clean || current.headSha !== state.git.headSha || current.branch !== state.git.branch) {
+      throw new StateError('Scope adoption requires the exact clean durable checkout', 'SCOPE_ADOPTION_INVALID');
+    }
+    const closureErrors = validateClosureForState(minimalClosure, state);
+    if (minimalClosure?.revision !== 1 || minimalClosure?.previousContractDigest !== null) {
+      closureErrors.push('$ legacy adoption must begin one append-only closure history');
+    }
+    if (closureErrors.length > 0) throw new StateError(`Scope adoption closure is invalid:\n- ${closureErrors.join('\n- ')}`, 'SCOPE_ADOPTION_INVALID');
+    const closureDigest = scopeContractDigest(minimalClosure);
+    const evidenceErrors = validateEvidenceForBoundary(scopeEvidence, {
+      state, closureDigest, amendmentRecords: scopeAmendmentRecords(root, state), boundary: 'admission',
+      subjectDigest: state.plan.originalDigest, subjectSha: state.planningSha, taskPacketDigest: null,
+      verdict: 'within-scope',
+    });
+    if (evidenceErrors.length > 0) throw new StateError(`Scope adoption evidence is invalid:\n- ${evidenceErrors.join('\n- ')}`, 'SCOPE_ADOPTION_INVALID');
+    const timestamp = now(clock); const evidenceDigest = scopeContractDigest(scopeEvidence);
+    const scope = {
+      status: 'current', closureDigest, candidatePlanDigest: null,
+      admissionEvidenceDigest: evidenceDigest, currentEvidenceDigest: evidenceDigest,
+      currentBoundary: 'admission', currentSubjectSha: state.planningSha,
+      decisionDigests: [], returnDigests: [], adoptedAt: timestamp,
+    };
+    const next = revised(state, { scope, blockedReasons: [], git: current }, () => new Date(timestamp));
+    return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'scope-adopted',
+      summary: 'Adopted append-only scope authority for a legacy unfinished change', crashStep,
+      pendingEvidence: [
+        { key: 'minimalClosureDigest', path: 'scope/minimal-closure/0001.json', value: minimalClosure, label: 'adopted minimal closure' },
+        { key: 'scopeAdmissionEvidenceDigest', path: relative(changeDirectory(root, state.changeId), scopeEvidencePath(root, state, scopeEvidence)), value: scopeEvidence, label: 'adopted admission scope evidence' },
+      ] });
+  }, lockOptions);
+}
+
+export function assessScope({ cwd = process.cwd(), changeId, scopeEvidence, expectedRevision,
+  clock, crashStep, lockOptions } = {}) {
+  const root = repositoryRoot(cwd); const selected = selectedChangeId(root, changeId);
+  return withChangeLock(root, selected, () => {
+    const state = loadState(root, selected); assertRevision(state, expectedRevision);
+    validateState({ cwd: root, changeId: selected });
+    if (!state.plan || !state.scope || !['task', 'integrated-head'].includes(scopeEvidence?.cadence?.boundary)) {
+      throw new StateError('Scope assessment requires adopted accepted authority at a task or integrated-head boundary', 'SCOPE_ASSESSMENT_INVALID');
+    }
+    const receipts = currentScopeReceipts(root, state);
+    const boundary = scopeEvidence.cadence.boundary;
+    let taskPacketDigest = scopeEvidence.packet?.binding?.taskPacketDigest ?? null;
+    let subjectDigest = scopeEvidence.packet?.binding?.subject?.digest;
+    let subjectSha = scopeEvidence.packet?.binding?.subject?.sha;
+    if (boundary === 'integrated-head') {
+      if (state.phase !== 'integrated') throw new StateError('Integrated-head assessment requires integrated phase', 'INVALID_PHASE');
+      const terminal = terminalTaskEvidence(root, state);
+      taskPacketDigest = integratedTaskSetDigest(terminal.map((entry) => ({
+        taskId: entry.packet.taskId, binding: entry.binding, packetDigest: entry.packetDigest,
+        resultDigest: entry.resultDigest, provenanceDigest: entry.provenanceDigest,
+        terminalStatus: entry.terminalStatus, integratedCommit: entry.integratedCommit,
+        integrationReceiptDigest: entry.integrationReceiptDigest,
+      })));
+      subjectDigest = objectDigest({ headSha: state.git.headSha, taskSetDigest: taskPacketDigest });
+      subjectSha = state.git.headSha;
+    } else if (!['ready-to-implement', 'implementing'].includes(state.phase)) {
+      throw new StateError('Task scope assessment requires ready-to-implement or implementing phase', 'INVALID_PHASE');
+    }
+    const errors = validateEvidenceForBoundary(scopeEvidence, {
+      state, closureDigest: receipts.closure.digest, amendmentRecords: receipts.amendmentRecords,
+      boundary, subjectDigest, subjectSha, taskPacketDigest,
+    });
+    if (errors.length > 0) throw new StateError(`Scope assessment is invalid or stale:\n- ${errors.join('\n- ')}`, 'SCOPE_ASSESSMENT_INVALID');
+    const evidenceDigest = scopeContractDigest(scopeEvidence); const gate = scopeGateForVerdict(scopeEvidence.result.verdict);
+    const scope = { ...state.scope, status: gate.status, candidatePlanDigest: null,
+      currentEvidenceDigest: evidenceDigest, currentBoundary: boundary, currentSubjectSha: subjectSha };
+    const phase = gate.phase ?? state.phase;
+    const next = revised(state, { phase, scope, blockedReasons: gate.blocker ? [gate.blocker] : [] }, clock);
+    return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'scope-assessed',
+      summary: `Recorded ${scopeEvidence.result.verdict} scope verdict at ${boundary}`, crashStep,
+      pendingEvidence: [{ key: 'scopeEvidenceDigest', path: relative(changeDirectory(root, state.changeId), scopeEvidencePath(root, state, scopeEvidence)), value: scopeEvidence, label: `${boundary} scope evidence` }] });
+  }, lockOptions);
+}
+
+export function recordScopeDecision({ cwd = process.cwd(), changeId, decision, expectedRevision,
+  clock, crashStep, lockOptions } = {}) {
+  const root = repositoryRoot(cwd); const selected = selectedChangeId(root, changeId);
+  return withChangeLock(root, selected, () => {
+    const state = loadState(root, selected); assertRevision(state, expectedRevision);
+    validateState({ cwd: root, changeId: selected });
+    if (state.phase !== 'awaiting-scope-decision' || state.scope?.status !== 'awaiting-decision'
+        || !state.scope.currentEvidenceDigest) throw new StateError('No exact scope decision is pending', 'INVALID_PHASE');
+    const evidence = findScopeReceipt(root, state, 'evidence', state.scope.currentEvidenceDigest, 'scope decision evidence').value;
+    const closure = findScopeReceipt(root, state, 'minimal-closure', state.scope.closureDigest, 'scope decision closure');
+    const authorityState = state.plan ? state : { ...state, plan: { effectiveDigest: state.scope.candidatePlanDigest } };
+    const errors = validateDecisionForEvidence(decision, {
+      state: authorityState, evidence, closureDigest: closure.digest ?? state.scope.closureDigest,
+      amendmentRecords: scopeAmendmentRecords(root, state),
+    });
+    if (errors.length > 0) throw new StateError(`Scope decision is invalid or stale:\n- ${errors.join('\n- ')}`, 'SCOPE_DECISION_INVALID');
+    const digest = scopeContractDigest(decision);
+    if (state.scope.decisionDigests.includes(digest)) throw new StateError('Scope decision is already recorded', 'SCOPE_DECISION_INVALID');
+    const abandons = decision.disposition === 'abandon-replan';
+    const scope = { ...state.scope, status: 'assessment-required',
+      decisionDigests: [...state.scope.decisionDigests, digest] };
+    const acceptedPhase = state.execution?.tasks.some(({ status }) => status !== 'unbound') ? 'implementing' : 'ready-to-implement';
+    const next = revised(state, {
+      phase: abandons ? 'abandoned' : state.plan ? acceptedPhase : 'planning', scope,
+      abandonmentReason: abandons ? decision.rationale : state.abandonmentReason,
+      blockedReasons: [],
+    }, clock);
+    return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'scope-decision-recorded',
+      summary: `Recorded ${decision.disposition} scope disposition`, crashStep,
+      pendingEvidence: [{ key: 'scopeDecisionDigest', path: relative(changeDirectory(root, state.changeId), scopeDecisionPath(root, state, decision)), value: decision, label: `scope decision ${decision.decisionId}` }] });
+  }, lockOptions);
+}
+
+export function resumeScopeReturn({ cwd = process.cwd(), changeId, scopeReturn, expectedRevision,
+  clock, crashStep, lockOptions } = {}) {
+  const root = repositoryRoot(cwd); const selected = selectedChangeId(root, changeId);
+  return withChangeLock(root, selected, () => {
+    const state = loadState(root, selected); assertRevision(state, expectedRevision);
+    validateState({ cwd: root, changeId: selected });
+    if (!state.plan || !state.scope || !['development-ready', 'integrated'].includes(state.phase)) {
+      throw new StateError('Guarded scope return requires preserved completed development authority', 'SCOPE_RETURN_INVALID');
+    }
+    const current = gitObservation(root, clock);
+    const errors = validateScopeReturnResume(scopeReturn, { currentHeadSha: current.headSha });
+    if (!current.clean || current.branch !== state.git.branch) errors.push('$ scope return requires the exact clean owning branch');
+    if (errors.length > 0) throw new StateError(`Scope return is invalid:\n- ${errors.join('\n- ')}`, 'SCOPE_RETURN_INVALID');
+    const timestamp = now(clock);
+    const record = developmentScopeResumeRecord(scopeReturn, { changeId: state.changeId, currentHeadSha: current.headSha, resumedAt: timestamp });
+    const digest = scopeContractDigest(record);
+    if (state.scope.returnDigests.includes(digest)) throw new StateError('Scope return is already recorded', 'SCOPE_RETURN_INVALID');
+    const scope = { ...state.scope, status: 'assessment-required', currentEvidenceDigest: null,
+      currentBoundary: null, currentSubjectSha: null, returnDigests: [...state.scope.returnDigests, digest] };
+    const next = revised(state, { phase: 'integrated', scope, git: current, blockedReasons: [] }, () => new Date(timestamp));
+    return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'scope-return-resumed',
+      summary: `Resumed guarded development authority at exact PR head ${current.headSha}`, crashStep,
+      pendingEvidence: [{ key: 'scopeReturnDigest', path: `scope/returns/${String(state.scope.returnDigests.length + 1).padStart(4, '0')}.json`, value: record, label: 'guarded PR scope return' }] });
   }, lockOptions);
 }
 
@@ -1204,6 +1539,7 @@ export function bindTask({ cwd = process.cwd(), changeId, packet, expectedRevisi
     const state = loadState(root, selected); assertWritableV2(state); assertImplementationMode(state, 'Task binding'); assertRevision(state, expectedRevision);
     validateState({ cwd: root, changeId: selected });
     if (!['ready-to-implement', 'implementing'].includes(state.phase)) throw new StateError(`Cannot bind a task in ${state.phase}`, 'INVALID_PHASE');
+    if (!state.scope) throw new StateError('Append-only scope adoption is required before binding new task authority', 'SCOPE_ADOPTION_REQUIRED');
     const task = executionTask(state, packet?.taskId);
     if (task.status !== 'unbound') throw new StateError(`Task ${task.id} is already bound or executed`, 'TASK_STATE_CONFLICT');
     if (!task.dependsOn.every((id) => ['integrated', 'no-change'].includes(executionTask(state, id).status))) {
@@ -1215,6 +1551,9 @@ export function bindTask({ cwd = process.cwd(), changeId, packet, expectedRevisi
     assertExactCentralObservation(current, state, 'Task binding');
     const plan = readEffectivePlan(root, state); assertPacketPlanBinding(packet, plan, state, current.headSha);
     assertPacketMapperProvenance(root, state, packet);
+    if (!packet.minimalityAuthority) {
+      throw new StateError(`Task ${task.id} requires packet-bound minimality authority`, 'TASK_SCOPE_REQUIRED');
+    }
     assertPacketSelectorsAtBase(root, packet);
     const authoritativePackets = state.execution.tasks
       .filter((entry) => entry.binding > 0 && entry.status !== 'rejected')
@@ -1223,7 +1562,20 @@ export function bindTask({ cwd = process.cwd(), changeId, packet, expectedRevisi
     try { assertValidationCommandCompatibility([...authoritativePackets, packet], { featureDirectory: join(root, 'specs', 'features') }); }
     catch (error) { throw new StateError(error.message, 'VALIDATION_COMMAND_CONFLICT'); }
     assertStateVerifierCapacity(root, state, { packet });
-    const packetDigest = implementationTaskDigest(packet); const binding = task.binding + 1;
+    const packetDigest = implementationTaskDigest(packet);
+    const scopeReceipts = currentScopeReceipts(root, state);
+    if (packet.minimalityAuthority.closureDigest !== scopeReceipts.closure.digest
+        || state.scope.status !== 'current' || state.scope.currentBoundary !== 'task'
+        || !scopeReceipts.evidence || scopeReceipts.evidence.value.result.verdict !== 'within-scope') {
+      throw new StateError(`Task ${task.id} requires current exact task scope evidence and the active closure digest`, 'TASK_SCOPE_REQUIRED');
+    }
+    const scopeErrors = validateEvidenceForBoundary(scopeReceipts.evidence.value, {
+      state, closureDigest: scopeReceipts.closure.digest, amendmentRecords: scopeReceipts.amendmentRecords,
+      boundary: 'task', subjectDigest: packetDigest, subjectSha: packet.taskBaseSha,
+      taskPacketDigest: packetDigest, verdict: 'within-scope',
+    });
+    if (scopeErrors.length > 0) throw new StateError(`Task ${task.id} scope evidence is stale:\n- ${scopeErrors.join('\n- ')}`, 'TASK_SCOPE_REQUIRED');
+    const binding = task.binding + 1;
     const next = revised(state, { phase: 'implementing', git: current,
       execution: replaceExecutionTask(state, task.id, { status: 'bound', binding, packetDigest, taskBaseSha: packet.taskBaseSha }) }, clock);
     return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'task-bound',
@@ -1547,7 +1899,10 @@ export function finalizeIntegration({ cwd = process.cwd(), changeId, expectedRev
     for (const task of state.execution.tasks) verifiedWorkerTombstone(root, state, task);
     const current = gitObservation(root, clock);
     assertExactCentralObservation(current, state, 'Integration finalization');
-    const next = revised(state, { phase: 'integrated', git: current }, clock);
+    if (!state.scope) throw new StateError('Append-only scope adoption is required before integration can finalize', 'SCOPE_ADOPTION_REQUIRED');
+    const scope = { ...state.scope, status: 'assessment-required', currentEvidenceDigest: null,
+      currentBoundary: null, currentSubjectSha: null };
+    const next = revised(state, { phase: 'integrated', git: current, scope }, clock);
     return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'implementation-finalized',
       summary: 'Finalized integrated implementation after every worker worktree was removed', crashStep });
   }, lockOptions);
@@ -1738,6 +2093,7 @@ export function createValidationPlan({ cwd = process.cwd(), changeId, expectedRe
       throw new StateError('Immutable Planning SHA must be an ancestor of the validation HEAD', 'VALIDATION_PLAN_INVALID');
     }
     const taskEvidence = terminalTaskEvidence(root, state);
+    assertCurrentIntegratedScope(root, state, taskEvidence);
     const affectedAreas = new Set(taskEvidence.flatMap(({ packet }) => packet.affectedAreas));
     const releaseEvidence = affectedAreas.has('release') || affectedAreas.has('migration')
       ? captureReleaseEvidence({ cwd: root, base: PROTECTED_RELEASE_REF, head: current.headSha, releaseRef: PROTECTED_RELEASE_REF }) : null;
@@ -2382,7 +2738,11 @@ function composeVerifierProjection(input = {}) {
   headSha = effectivePlan.planning.planningSha, planningSha = effectivePlan.planning.planningSha,
   verificationRound = 1, taskSetDigest = objectDigest(effectivePlan.tasks),
   generatedAt = '2000-01-01T00:00:00.000Z', releaseApplicable = false,
-  reservedEvidence = [] } = input;
+  scopeAuthority = {
+    minimalClosureDigest: objectDigest({ authority: 'required-minimal-closure' }),
+    integratedScopeEvidenceDigest: objectDigest({ authority: 'required-integrated-scope-evidence' }),
+    scopeDecisionDigests: [], scopeAmendmentDigests: [],
+  }, reservedEvidence = [] } = input;
   const allocationBranches = specialistReservationAllocations(specialistPlan, specialistResults,
     findingRecords, verificationRound);
   const defaultAllocation = allocationBranches.at(-1) ?? [];
@@ -2414,6 +2774,10 @@ function composeVerifierProjection(input = {}) {
   const evidence = [
     { kind: 'source', id: 'source-observation', digest: sourceDigest,
       summary: `${effectivePlan.source.kind}:${effectivePlan.source.reference}` },
+    { kind: 'scope', id: 'minimal-closure', digest: scopeAuthority.minimalClosureDigest,
+      summary: 'Receipt-protected minimal closure for the exact effective plan.' },
+    { kind: 'scope', id: 'integrated-head-assessment', digest: scopeAuthority.integratedScopeEvidenceDigest,
+      summary: `Current within-scope assessment for exact integrated HEAD ${headSha}.` },
     { kind: 'criterion', id: 'original-plan-objective', digest: originalPlanDigest,
       summary: `Original objective: ${originalPlan.objective}` },
     { kind: 'criterion', id: 'original-plan-scope',
@@ -2552,11 +2916,12 @@ function composeVerifierProjection(input = {}) {
     ?? objectDigest({ reviewerId: id, authority: 'inevitable-specialist-result' }));
   const contextIdentity = { verifierId: 'development_integration_verifier', verificationRound,
     headSha, effectivePlanDigest, taskSetDigest, validationPlanDigest: validationPlanDigestValue,
-    specialistResultDigests };
+    specialistResultDigests, ...scopeAuthority };
   const context = { schemaVersion: 1, verifierId: 'development_integration_verifier',
     finalVerificationPriority: specialistPlan.finalVerificationPriority, verificationRound,
     inputIdentityDigest: objectDigest(contextIdentity), changeId: effectivePlan.changeId,
     headSha, planningSha, originalPlanDigest, effectivePlanDigest, taskSetDigest,
+    ...scopeAuthority,
     sourceIdentity: { kind: effectivePlan.source.kind, reference: effectivePlan.source.reference, digest: sourceDigest },
     validationPlanDigest: validationPlanDigestValue, validationResultDigests, specialistResultDigests,
     evidence: boundedEvidence, generatedAt };
@@ -2862,6 +3227,16 @@ function verifierProjectionFromState(cwd, state, pending = {}) {
   if (pending.specialistResult && (pending.findingRound ?? projectionRound) < projectionRound) {
     specialistResultHistory.push({ round: pending.findingRound, sourceRole: pending.specialistResult.reviewerId });
   }
+  let scopeAuthority;
+  if (state.scope?.currentEvidenceDigest && state.scope.currentBoundary === 'integrated-head') {
+    const scopeReceipts = currentScopeReceipts(cwd, state);
+    scopeAuthority = {
+      minimalClosureDigest: scopeReceipts.closure.digest,
+      integratedScopeEvidenceDigest: scopeReceipts.evidence.digest,
+      scopeDecisionDigests: [...state.scope.decisionDigests],
+      scopeAmendmentDigests: scopeReceipts.amendmentRecords.map((record) => scopeContractDigest(record)),
+    };
+  }
   return { originalPlan: originalReceipt.value, originalPlanDigest: originalReceipt.digest,
     effectivePlan, effectivePlanDigest, taskRecords, amendments,
     validationPlan: validationPlanValue, validationPlanReceiptDigest: validationPlanReceipt.digest,
@@ -2873,6 +3248,7 @@ function verifierProjectionFromState(cwd, state, pending = {}) {
       : state.source.observationDigest,
     headSha: validationPlanValue.headSha, planningSha: state.planningSha,
     verificationRound: projectionRound,
+    ...(scopeAuthority ? { scopeAuthority } : {}),
     taskSetDigest: pending.validationPlan?.taskSetDigest ?? state.verification?.taskSetDigest
       ?? objectDigest(effectivePlan.tasks), generatedAt: validationPlanValue.createdAt
       ?? '2000-01-01T00:00:00.000Z',
@@ -2898,6 +3274,7 @@ export function buildVerifierContext({ cwd = process.cwd(), changeId } = {}) {
     throw new StateError('Verifier context requires clean targeted validation and specialist review', 'INVALID_PHASE');
   }
   assertVerificationHead(root, state, undefined, 'Verifier context');
+  assertCurrentIntegratedScope(root, state);
   if (state.verification.requiredReviewerIds.length !== state.verification.specialistResultDigests.length) {
     throw new StateError('Verifier context requires every routed specialist result', 'SPECIALIST_RESULT_MISSING');
   }
@@ -2922,7 +3299,8 @@ export function recordVerifierResult({ cwd = process.cwd(), changeId, expectedRe
     assertVerificationHead(root, state, clock, 'Verifier result');
     const context = buildVerifierContext({ cwd: root, changeId: selected }); const contextDigest = objectDigest(context);
     const errors = validateVerificationContract('verificationResult', result);
-    if (errors.length || result.headSha !== state.verification.headSha || result.contextDigest !== contextDigest) throw new StateError(`Verifier result is malformed or stale: ${errors.join('; ')}`, 'VERIFIER_RESULT_INVALID');
+    if (errors.length || result.headSha !== state.verification.headSha || result.contextDigest !== contextDigest
+        || result.scopeEvidenceDigest !== context.integratedScopeEvidenceDigest) throw new StateError(`Verifier result is malformed or stale: ${errors.join('; ')}`, 'VERIFIER_RESULT_INVALID');
     const fingerprints = result.findings.map((finding) => findingFingerprint({ sourceKind: 'verifier', sourceRole: 'development_integration_verifier', finding }));
     const repeated = repeatedFindingFingerprints(root, state, 'verifier', 'development_integration_verifier', fingerprints);
     const capacityPending = { verifierResult: result,
@@ -3059,6 +3437,7 @@ export async function finalizeDevelopment({ cwd = process.cwd(), changeId, expec
     const state = loadState(root, selected); assertRevision(state, expectedRevision); validateState({ cwd: root, changeId: selected });
     if (state.phase !== 'verifying' || !state.verification?.verifierResultDigest) throw new StateError('Development-ready requires a recorded final verifier result', 'INVALID_PHASE');
     const current = assertVerificationHead(root, state, clock, 'Development-ready finalization');
+    assertCurrentIntegratedScope(root, state);
     const timestamp = now(clock);
     assertRefreshChecklistRepresentable(observation);
     const { classification, next: refreshedState } = deriveSourceRefreshTransition(state, {
@@ -3408,7 +3787,8 @@ function deriveAmendedTransition(state, resultingPlan, currentGit, timestamp, nu
   }, () => new Date(timestamp));
 }
 
-export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingPlan, planningEvidence = [], expectedRevision, clock, crashStep, lockOptions }) {
+export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingPlan, planningEvidence = [],
+  minimalClosure, expectedRevision, clock, crashStep, lockOptions }) {
   const root = repositoryRoot(cwd);
   const selected = selectedChangeId(root, changeId);
   return withChangeLock(root, selected, () => {
@@ -3451,10 +3831,32 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
     if (state.phase === 'validating' && !validationDriven) {
       throw new StateError('Failed-validation remediation trigger must name an exact receipt-bound failed result', 'INVALID_AMENDMENT');
     }
-    const findingDriven = /^sha256:[0-9a-f]{64}$/u.test(amendment.trigger);
+    const scopeDriven = state.scope?.currentEvidenceDigest === amendment.trigger;
+    const findingDriven = /^sha256:[0-9a-f]{64}$/u.test(amendment.trigger) && !scopeDriven;
     const sourceDriven = state.phase === 'awaiting-decision';
     if (findingDriven && !state.verification) throw new StateError('Finding-driven amendment requires active verification evidence', 'INVALID_AMENDMENT');
-    if (state.verification && !findingDriven && !validationDriven && !sourceDriven) throw new StateError('Verification-state amendments require exact finding, failed-validation, or source-decision authority', 'INVALID_AMENDMENT');
+    if (state.verification && !findingDriven && !validationDriven && !sourceDriven && !scopeDriven) throw new StateError('Verification-state amendments require exact finding, failed-validation, source-decision, or scope authority', 'INVALID_AMENDMENT');
+    let scopeOverlapAuthority = null;
+    if (scopeDriven) {
+      const evidence = findScopeReceipt(root, state, 'evidence', state.scope.currentEvidenceDigest, 'scope amendment evidence').value;
+      if (['minor-amendment-required', 'trim-required'].includes(evidence.result.verdict)) {
+        const newCriteria = resultingPlan.criteria.filter(({ id }) => !prior.criteria.some((entry) => entry.id === id));
+        const newTasks = resultingPlan.tasks.filter(({ id }) => !prior.tasks.some((entry) => entry.id === id));
+        const declaredTaskIds = amendment.delta.addedTaskIds;
+        if (!validUniqueStrings(declaredTaskIds) || declaredTaskIds.length === 0) {
+          throw new StateError('Scope-driven remediation must explicitly declare addedTaskIds', 'INVALID_AMENDMENT');
+        }
+        const newOwnedCriteria = new Map(newCriteria
+          .filter(({ disposition, ownerTaskId }) => disposition === 'owned' && nonemptyString(ownerTaskId))
+          .map((criterion) => [criterion.id, criterion.ownerTaskId]));
+        const authorizedTaskIds = new Set(newTasks.filter((task) => task.criterionIds.some((criterionId) =>
+          newOwnedCriteria.get(criterionId) === task.id)).map(({ id }) => id));
+        if (declaredTaskIds.some((id) => !authorizedTaskIds.has(id))) {
+          throw new StateError('Scope-driven remediation tasks must be new and linked to genuinely new owned criteria', 'INVALID_AMENDMENT');
+        }
+        scopeOverlapAuthority = new Set(declaredTaskIds);
+      }
+    }
     let errors = readinessErrors(resultingPlan, planningEvidence, sourceObservation,
       ({ planningSha, path }) => readTreeFile(root, planningSha, path));
     if (findingDriven || validationDriven || sourceDriven) {
@@ -3483,6 +3885,18 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
             || (leftTerminal && remediationIds.has(match[2]))
             || (rightTerminal && remediationIds.has(match[1]));
         })()));
+    }
+    if (scopeOverlapAuthority) {
+      const terminalIds = new Set(state.execution.tasks
+        .filter(({ status }) => ['integrated', 'no-change'].includes(status)).map(({ id }) => id));
+      errors = errors.filter((error) => {
+        const match = /^tasks ([a-z0-9]+(?:-[a-z0-9]+)*) and ([a-z0-9]+(?:-[a-z0-9]+)*) have overlapping anticipated paths:/u.exec(error);
+        if (!match) return true;
+        const leftTerminal = terminalIds.has(match[1]); const rightTerminal = terminalIds.has(match[2]);
+        return !((leftTerminal && rightTerminal)
+          || (leftTerminal && scopeOverlapAuthority.has(match[2]))
+          || (rightTerminal && scopeOverlapAuthority.has(match[1])));
+      });
     }
     if (errors.length > 0) throw new StateError(`Amended plan is not ready:\n- ${errors.join('\n- ')}`, 'PLAN_NOT_READY');
     if (validationDriven) {
@@ -3534,6 +3948,39 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
       resultingPlan,
       createdAt: timestamp,
     };
+    if (!state.scope) throw new StateError('Append-only scope adoption is required before plan amendment', 'SCOPE_ADOPTION_REQUIRED');
+    const priorClosure = findScopeReceipt(root, state, 'minimal-closure', state.scope.closureDigest, 'prior minimal closure').value;
+    const closureErrors = validateClosureForState(minimalClosure, { ...state,
+      plan: { ...state.plan, effectiveDigest: newDigest, sourceCaptureDigest: resultingPlan.source.captureDigest } }, newDigest);
+    if (minimalClosure?.revision !== priorClosure.revision + 1
+        || minimalClosure?.previousContractDigest !== state.scope.closureDigest) {
+      closureErrors.push('$ amended minimal closure must append directly to the prior closure receipt');
+    }
+    if (!state.scope.decisionDigests.every((digest) => minimalClosure?.operatorDecisionDigests?.includes(digest))) {
+      closureErrors.push('$ amended minimal closure must retain every append-only operator scope decision digest');
+    }
+    if (scopeDriven) {
+      const evidence = findScopeReceipt(root, state, 'evidence', state.scope.currentEvidenceDigest, 'scope amendment evidence').value;
+      if (evidence.result.verdict === 'minor-amendment-required') {
+        closureErrors.push(...validateMinorAmendmentAuthority({ evidence, amendment }));
+      } else if (evidence.result.verdict === 'trim-required') {
+        if (amendment.trigger !== state.scope.currentEvidenceDigest
+            || !amendment.invalidatedEvidence.includes(state.scope.currentEvidenceDigest)) {
+          closureErrors.push('$ trim remediation must trigger from and invalidate the exact trim-required assessment');
+        }
+        const newCriteria = resultingPlan.criteria.filter(({ id }) => !prior.criteria.some((entry) => entry.id === id));
+        const newTasks = resultingPlan.tasks.filter(({ id }) => !prior.tasks.some((entry) => entry.id === id));
+        if (newCriteria.length === 0 || !newTasks.some(({ criterionIds }) =>
+          criterionIds.some((id) => newCriteria.some((criterion) => criterion.id === id)))) {
+          closureErrors.push('$ trim remediation must add one ordinary criterion-linked removal or simplification task');
+        }
+      } else if (evidence.result.verdict !== 'human-decision-required'
+          || state.scope.decisionDigests.length === 0) {
+        closureErrors.push('$ scope-driven amendment requires minor authority or an exact material scope decision');
+      }
+    }
+    if (closureErrors.length > 0) throw new StateError(`Amended minimal closure is invalid:\n- ${closureErrors.join('\n- ')}`, 'SCOPE_AMENDMENT_INVALID');
+    const closureDigest = scopeContractDigest(minimalClosure);
     const number = state.plan.amendmentCount + 1;
     const terminalTasks = state.schemaVersion === 2 ? state.execution.tasks.filter((task) => ['integrated', 'no-change'].includes(task.status)) : [];
     for (const terminal of terminalTasks) {
@@ -3587,7 +4034,10 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
     assertStateVerifierCapacity(root, state, { effectivePlan: resultingPlan,
       effectivePlanDigest: newDigest, planningEvidence,
       amendments: verifierCapacityAmendments(root, state, { record, planningEvidence }) });
-    const next = deriveAmendedTransition(state, resultingPlan, currentGit, timestamp, number);
+    const amendedScope = { ...state.scope, status: 'assessment-required', closureDigest,
+      candidatePlanDigest: null, currentEvidenceDigest: null, currentBoundary: null, currentSubjectSha: null };
+    const next = { ...deriveAmendedTransition(state, resultingPlan, currentGit, timestamp, number), scope: amendedScope };
+    next.nextAction = nextActionFor(next);
     return commitTransition({
       cwd: root, previousState: state, nextState: next, type: 'plan-amended',
       summary: `Appended plan amendment ${amendment.id}`, crashStep,
@@ -3595,6 +4045,8 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
         { key: 'amendmentDigest', path: `plan/amendments/${String(number).padStart(4, '0')}.json`, value: record, label: `plan amendment ${number}` },
         { key: 'planningEvidenceDigest', path: `plan/amendments/${String(number).padStart(4, '0')}.evidence.json`, value: planningEvidence,
           label: `plan amendment ${number} planning evidence` },
+        { key: 'minimalClosureDigest', path: `scope/minimal-closure/${String(minimalClosure.revision).padStart(4, '0')}.json`, value: minimalClosure,
+          label: `minimal closure revision ${minimalClosure.revision}` },
       ],
     });
   }, lockOptions);
@@ -3671,7 +4123,7 @@ function authoritativeEvidenceRecords(intent) {
   for (const [key, record] of Object.entries(records)) {
     const segments = typeof record?.path === 'string' ? record.path.split('/') : [];
     const canonicalRoot = record?.path === 'worktree.json'
-      || /^(?:source|plan|decisions|implementation|verification)\//u.test(record?.path ?? '');
+      || /^(?:source|plan|decisions|implementation|verification|scope)\//u.test(record?.path ?? '');
     if (!record || typeof record !== 'object' || Array.isArray(record)
         || !nonemptyString(record.path) || !nonemptyString(record.label)
         || record.path !== intent.evidencePaths?.[key] || record.digest !== intent.evidence[key]
@@ -3784,7 +4236,7 @@ function validateLoadedState(root, state) {
       throw new StateError(`Transition ${index} is incomplete; run recover`, 'RECOVERY_REQUIRED');
     } else throw new StateError(`Transition ${index} is incomplete; run recover`, 'RECOVERY_REQUIRED');
   }
-  const receiptRoots = ['source', 'plan', 'decisions', 'implementation', 'verification'].map((name) => join(changeDirectory(root, state.changeId), name));
+  const receiptRoots = ['source', 'plan', 'decisions', 'implementation', 'verification', 'scope'].map((name) => join(changeDirectory(root, state.changeId), name));
   const evidenceDigests = new Set();
   for (const receiptRoot of receiptRoots) verifyReceiptTree(receiptRoot, evidenceDigests);
   evidenceDigests.add(verifyReceipt(join(changeDirectory(root, state.changeId), 'worktree.json'), 'owning worktree identity').digest);
@@ -3807,6 +4259,35 @@ function validateLoadedState(root, state) {
   const latestObservation = readObservationByDigest(root, state);
   if ((latestObservation.digest ?? objectDigest(latestObservation)) !== state.source.latestDigest) {
     throw new StateError('Latest source observation does not match state summary', 'SOURCE_OBSERVATION_INVALID');
+  }
+  if (state.scope) {
+    const closure = findScopeReceipt(root, state, 'minimal-closure', state.scope.closureDigest, 'minimal closure');
+    const authorityState = state.plan ? state : { ...state, plan: { effectiveDigest: state.scope.candidatePlanDigest } };
+    if (validateClosureForState(closure.value, authorityState).length > 0) {
+      throw new StateError('Minimal closure projection is stale or malformed', 'SCOPE_EVIDENCE_INVALID');
+    }
+    const admission = findScopeReceipt(root, state, 'evidence', state.scope.admissionEvidenceDigest, 'admission scope evidence');
+    if (validateScopeEvidence(admission.value).length > 0 || admission.value.cadence.boundary !== 'admission') {
+      throw new StateError('Admission scope evidence projection is malformed', 'SCOPE_EVIDENCE_INVALID');
+    }
+    if (state.scope.currentEvidenceDigest !== null) {
+      const currentScope = findScopeReceipt(root, state, 'evidence', state.scope.currentEvidenceDigest, 'current scope evidence');
+      if (validateScopeEvidence(currentScope.value).length > 0
+          || currentScope.value.cadence.boundary !== state.scope.currentBoundary
+          || currentScope.value.packet.binding.subject.sha !== state.scope.currentSubjectSha) {
+        throw new StateError('Current scope evidence projection is malformed', 'SCOPE_EVIDENCE_INVALID');
+      }
+      if (state.scope.status === 'current' && currentScope.value.result.verdict !== 'within-scope') {
+        throw new StateError('Current scope authority requires a within-scope verdict', 'SCOPE_EVIDENCE_INVALID');
+      }
+    } else if (state.scope.currentBoundary !== null || state.scope.currentSubjectSha !== null) {
+      throw new StateError('Empty current scope evidence must clear its boundary and subject projection', 'SCOPE_EVIDENCE_INVALID');
+    }
+    for (const digest of state.scope.decisionDigests) {
+      const decision = findScopeReceipt(root, state, 'decisions', digest, 'scope decision');
+      if (validateScopeDecision(decision.value).length > 0) throw new StateError('Scope decision projection is malformed', 'SCOPE_EVIDENCE_INVALID');
+    }
+    for (const digest of state.scope.returnDigests) findScopeReceipt(root, state, 'returns', digest, 'scope return');
   }
   if (state.plan) {
     const original = verifyReceipt(join(changeDirectory(root, state.changeId), 'plan', 'plan.json'), 'accepted plan');
@@ -3963,7 +4444,7 @@ function immutableEvidencePaths(cwd, changeId) {
       else if (entry.name.endsWith('.json')) result.push(relative(directory, path));
     }
   }
-  for (const name of ['source', 'plan', 'decisions', 'implementation', 'verification']) visit(join(directory, name));
+  for (const name of ['source', 'plan', 'decisions', 'implementation', 'verification', 'scope']) visit(join(directory, name));
   result.push('worktree.json');
   return result;
 }
@@ -4251,15 +4732,17 @@ function amendmentForRecovery(cwd, intent, predecessor) {
   const records = authoritativeEvidenceRecords(intent);
   const record = records.amendmentDigest?.value;
   const planningEvidence = records.planningEvidenceDigest?.value;
+  const minimalClosure = records.minimalClosureDigest?.value;
   const number = (predecessor?.plan?.amendmentCount ?? -1) + 1;
   const stem = `plan/amendments/${String(number).padStart(4, '0')}`;
   const fields = ['schemaVersion', 'amendmentId', 'reason', 'trigger', 'delta', 'previousDigest', 'newDigest',
     'repositorySha', 'authorization', 'invalidatedEvidence', 'resultingPlan', 'createdAt'];
   let validId = true;
   try { validateChangeId(record?.amendmentId); } catch { validId = false; }
-  if (!predecessor?.plan || Object.keys(records).length !== 2 || amendmentPaths.length !== 2
+  if (!predecessor?.plan || !predecessor.scope || Object.keys(records).length !== 3 || amendmentPaths.length !== 2
       || records.amendmentDigest?.path !== `${stem}.json`
       || records.planningEvidenceDigest?.path !== `${stem}.evidence.json`
+      || records.minimalClosureDigest?.path !== `scope/minimal-closure/${String(minimalClosure?.revision ?? 0).padStart(4, '0')}.json`
       || !isPlainObject(record) || serialized(Object.keys(record).sort()) !== serialized(fields.sort())
       || record.schemaVersion !== 1 || !validId || !nonemptyString(record.reason)
       || !nonemptyString(record.authorization) || !nonemptyString(record.trigger)
@@ -4277,10 +4760,25 @@ function amendmentForRecovery(cwd, intent, predecessor) {
       || intent.summary !== `Appended plan amendment ${record.amendmentId}`) {
     throw new StateError('Interrupted plan amendment lacks exact semantic authority', 'RECOVERY_EVIDENCE_INVALID');
   }
+  const closureDigest = scopeContractDigest(minimalClosure);
+  const closureErrors = validateClosureForState(minimalClosure, { ...predecessor,
+    plan: { ...predecessor.plan, effectiveDigest: record.newDigest,
+      sourceCaptureDigest: record.resultingPlan.source.captureDigest } }, record.newDigest);
+  const priorClosure = findScopeReceipt(cwd, predecessor, 'minimal-closure', predecessor.scope.closureDigest,
+    'prior recovery minimal closure').value;
+  if (minimalClosure?.revision !== priorClosure.revision + 1
+      || minimalClosure?.previousContractDigest !== predecessor.scope.closureDigest
+      || !predecessor.scope.decisionDigests.every((digest) => minimalClosure?.operatorDecisionDigests?.includes(digest))) {
+    closureErrors.push('$ recovered minimal closure does not append to exact prior scope authority');
+  }
+  if (closureErrors.length > 0) throw new StateError('Interrupted plan amendment has invalid minimal closure authority', 'RECOVERY_EVIDENCE_INVALID');
   if (predecessor.phase === 'awaiting-decision' && !hasBoundResolveDecision(cwd, predecessor, record.trigger)) {
     throw new StateError('Interrupted source-driven amendment lacks its bound resolve decision', 'RECOVERY_EVIDENCE_INVALID');
   }
   const expected = deriveAmendedTransition(predecessor, record.resultingPlan, intent.nextState.git, record.createdAt, number);
+  expected.scope = { ...predecessor.scope, status: 'assessment-required', closureDigest,
+    candidatePlanDigest: null, currentEvidenceDigest: null, currentBoundary: null, currentSubjectSha: null };
+  expected.nextAction = nextActionFor(expected);
   if (serialized(expected) !== serialized(intent.nextState)) {
     throw new StateError('Interrupted plan amendment is semantically inconsistent', 'RECOVERY_EVIDENCE_INVALID');
   }
@@ -4690,6 +5188,14 @@ export function statusObject({ cwd = process.cwd(), changeId } = {}) {
       verifierRecorded: state.verification.verifierResultDigest !== null,
       unresolvedFindings: state.verification.unresolvedFindingFingerprints.length,
     } : null,
+    scope: state.scope ? {
+      status: state.scope.status,
+      closureDigest: state.scope.closureDigest,
+      boundary: state.scope.currentBoundary,
+      evidenceDigest: state.scope.currentEvidenceDigest,
+      decisions: state.scope.decisionDigests.length,
+      returns: state.scope.returnDigests.length,
+    } : null,
     nextAction: state.nextAction,
   };
 }
@@ -4744,6 +5250,7 @@ export function renderStatus(options = {}) {
     `Source drift: ${status.sourceDrift}`,
     `Checklist: ${status.checklist.current} current, ${status.checklist.ambiguous} ambiguous, ${status.checklist.removed} removed`,
     `Unresolved decisions: ${status.unresolvedDecisionIds.length ? status.unresolvedDecisionIds.join(', ') : 'none'}`,
+    `Scope authority: ${status.scope ? `${status.scope.status}; boundary ${status.scope.boundary ?? 'none'}; decisions ${status.scope.decisions}; returns ${status.scope.returns}` : 'legacy adoption required'}`,
     `Task graph: ${status.taskGraph.tasks} tasks, ${status.taskGraph.dependencies} dependencies`,
     ...(status.execution ? [`Execution: ${Object.entries(status.execution.statuses).map(([key, count]) => `${count} ${key}`).join(', ')}; active wave: ${status.execution.activeWave.join(', ') || 'none'}`] : []),
     ...(status.verification ? [`Verification round ${status.verification.round}: ${status.verification.validationStatus}; ${status.verification.validationResults} validation result(s); ${status.verification.specialistResults}/${status.verification.requiredReviewers.length} specialist result(s); verifier ${status.verification.verifierRecorded ? 'recorded' : 'pending'}; ${status.verification.unresolvedFindings} unresolved finding(s)`] : []),

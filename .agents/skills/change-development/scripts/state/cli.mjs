@@ -6,6 +6,8 @@ import { readTreeFile } from '../../../../../scripts/lib/git.mjs';
 import { planReadiness, validateImplementationPlan } from '../contracts/contracts.mjs';
 import {
   acceptPlan,
+  adoptScope,
+  assessScope,
   acceptResult,
   authorizeRepeatedFinding,
   amendPlan,
@@ -22,12 +24,14 @@ import {
   loadState,
   locateState,
   recordDecision,
+  recordScopeDecision,
   recordFindingDisposition,
   recordSpecialistResult,
   recordVerifierResult,
   reconcileIntegration,
   rejectTask,
   recoverState,
+  resumeScopeReturn,
   refreshSource,
   renderStatus,
   repositoryRoot,
@@ -42,6 +46,7 @@ import {
 
 const COMMANDS = new Set([
   'init', 'path', 'show', 'validate', 'refresh-source', 'accept-plan',
+  'adopt-scope', 'assess-scope', 'record-scope-decision', 'resume-scope-return',
   'record-decision', 'amend-plan', 'recover', 'archive', 'status',
   'upgrade-state', 'bind-task', 'schedule-wave', 'start-task', 'accept-result',
   'integrate-task', 'reconcile-integration',
@@ -61,6 +66,10 @@ Commands:
   validate          Verify state, receipts, transitions, plan, and Git observation
   refresh-source    Refresh the configured source without holding a state lock
   accept-plan       Accept an immutable normalized plan
+  adopt-scope       Append exact scope authority to one unfinished legacy accepted plan
+  assess-scope      Record exact task or integrated-HEAD canonical scope evidence
+  record-scope-decision  Record one exact append-only human scope disposition
+  resume-scope-return   Resume at one exact guarded PR-review scope-return HEAD
   record-decision   Append an authorized decision record
   amend-plan        Append an amendment containing the complete resulting plan
   recover           Finish one exact matching interrupted transition
@@ -92,9 +101,15 @@ Init options:
 
 Transition options:
   --change-id <id> --expected-revision <number>
-  accept-plan: --plan <plan.json> [--planning-evidence <evidence.json>]
+  accept-plan: --plan <plan.json> --minimal-closure <closure.json>
+               --scope-evidence <evidence.json> [--planning-evidence <evidence.json>]
+  adopt-scope: --minimal-closure <closure.json> --scope-evidence <evidence.json>
+  assess-scope: --scope-evidence <evidence.json>
+  record-scope-decision: --decision <decision.json>
+  resume-scope-return: --input <scope-return.json>
   record-decision: --decision <decision.json>
   amend-plan: --amendment <amendment.json> --plan <resulting-plan.json>
+              --minimal-closure <closure.json>
               [--planning-evidence <evidence.json>]
   archive: [--abandon-reason <reason>]
 `;
@@ -119,7 +134,7 @@ function options(argv) {
     values: [
       'change-id', 'mode', 'base-branch', 'expected-pr-base-branch', 'planning-ref',
       'source', 'expected-revision', 'plan', 'planning-evidence', 'decision',
-      'amendment', 'abandon-reason', 'packet', 'result', 'input', 'task-id', 'worker-id', 'worker-cwd', 'reason',
+      'minimal-closure', 'scope-evidence', 'amendment', 'abandon-reason', 'packet', 'result', 'input', 'task-id', 'worker-id', 'worker-cwd', 'reason',
     ],
   });
 }
@@ -129,9 +144,13 @@ const COMMAND_OPTIONS = Object.freeze({
   path: ['change-id'], show: ['change-id'],
   validate: ['change-id', 'plan', 'planning-evidence'],
   'refresh-source': ['change-id', 'expected-revision'],
-  'accept-plan': ['change-id', 'expected-revision', 'plan', 'planning-evidence'],
+  'accept-plan': ['change-id', 'expected-revision', 'plan', 'planning-evidence', 'minimal-closure', 'scope-evidence'],
+  'adopt-scope': ['change-id', 'expected-revision', 'minimal-closure', 'scope-evidence'],
+  'assess-scope': ['change-id', 'expected-revision', 'scope-evidence'],
+  'record-scope-decision': ['change-id', 'expected-revision', 'decision'],
+  'resume-scope-return': ['change-id', 'expected-revision', 'input'],
   'record-decision': ['change-id', 'expected-revision', 'decision'],
-  'amend-plan': ['change-id', 'expected-revision', 'amendment', 'plan', 'planning-evidence'],
+  'amend-plan': ['change-id', 'expected-revision', 'amendment', 'plan', 'planning-evidence', 'minimal-closure'],
   recover: ['change-id'], archive: ['change-id', 'expected-revision', 'abandon-reason'],
   status: ['change-id', 'human'],
   'upgrade-state': ['change-id', 'expected-revision'],
@@ -226,8 +245,23 @@ try {
       ...common,
       expectedRevision: parseRevision(parsed['expected-revision'], true),
       plan: json(parsed.plan, '--plan'),
+      minimalClosure: json(parsed['minimal-closure'], '--minimal-closure'),
+      scopeEvidence: json(parsed['scope-evidence'], '--scope-evidence'),
       planningEvidence: parsed['planning-evidence'] ? json(parsed['planning-evidence'], '--planning-evidence') : [],
     }));
+  } else if (command === 'adopt-scope') {
+    writeJson(adoptScope({ ...common, expectedRevision: parseRevision(parsed['expected-revision'], true),
+      minimalClosure: json(parsed['minimal-closure'], '--minimal-closure'),
+      scopeEvidence: json(parsed['scope-evidence'], '--scope-evidence') }));
+  } else if (command === 'assess-scope') {
+    writeJson(assessScope({ ...common, expectedRevision: parseRevision(parsed['expected-revision'], true),
+      scopeEvidence: json(parsed['scope-evidence'], '--scope-evidence') }));
+  } else if (command === 'record-scope-decision') {
+    writeJson(recordScopeDecision({ ...common, expectedRevision: parseRevision(parsed['expected-revision'], true),
+      decision: json(parsed.decision, '--decision') }));
+  } else if (command === 'resume-scope-return') {
+    writeJson(resumeScopeReturn({ ...common, expectedRevision: parseRevision(parsed['expected-revision'], true),
+      scopeReturn: json(parsed.input, '--input') }));
   } else if (command === 'record-decision') {
     writeJson(recordDecision({
       ...common,
@@ -240,6 +274,7 @@ try {
       expectedRevision: parseRevision(parsed['expected-revision'], true),
       amendment: json(parsed.amendment, '--amendment'),
       resultingPlan: json(parsed.plan, '--plan'),
+      minimalClosure: json(parsed['minimal-closure'], '--minimal-closure'),
       planningEvidence: parsed['planning-evidence'] ? json(parsed['planning-evidence'], '--planning-evidence') : [],
     }));
   } else if (command === 'recover') {
