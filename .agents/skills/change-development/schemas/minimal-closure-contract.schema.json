@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aerstello.local/schemas/change-development/minimal-closure-contract-v1.schema.json",
+  "title": "Change-development minimal closure contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "changeId", "revision", "source", "planningSha", "planDigest", "previousContractDigest", "outcome", "requiredCriteria", "invariants", "nonGoals", "mandatoryConstraints", "optionalGuidance", "authorizedShape", "unauthorizedExpansion", "deferredFollowups", "operatorDecisionDigests"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "changeId": { "$ref": "#/$defs/id" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "source": { "$ref": "#/$defs/source" },
+    "planningSha": { "$ref": "#/$defs/sha" },
+    "planDigest": { "$ref": "#/$defs/digest" },
+    "previousContractDigest": { "$ref": "#/$defs/nullableDigest" },
+    "outcome": { "$ref": "#/$defs/text" },
+    "requiredCriteria": { "$ref": "#/$defs/criteria" },
+    "invariants": { "$ref": "#/$defs/criteria" },
+    "nonGoals": { "$ref": "#/$defs/criteria" },
+    "mandatoryConstraints": { "$ref": "#/$defs/criteria" },
+    "optionalGuidance": { "$ref": "#/$defs/criteria" },
+    "authorizedShape": { "$ref": "#/$defs/identities" },
+    "unauthorizedExpansion": { "$ref": "#/$defs/identities" },
+    "deferredFollowups": { "$ref": "#/$defs/criteria" },
+    "operatorDecisionDigests": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/digest" } }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 128 },
+    "text": { "type": "string", "minLength": 1, "maxLength": 4000, "pattern": "\\S" },
+    "identity": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "\\S" },
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "nullableDigest": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+    "criterion": { "type": "object", "additionalProperties": false, "required": ["id", "text"], "properties": { "id": { "$ref": "#/$defs/id" }, "text": { "$ref": "#/$defs/text" } } },
+    "criteria": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/criterion" } },
+    "identities": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/identity" } },
+    "source": { "type": "object", "additionalProperties": false, "required": ["type", "identity", "digest"], "properties": { "type": { "enum": ["github-issue", "direct-request", "repository-plan", "partial-implementation"] }, "identity": { "$ref": "#/$defs/identity" }, "digest": { "$ref": "#/$defs/digest" } } }
+  }
+}

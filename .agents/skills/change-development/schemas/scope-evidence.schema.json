@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aerstello.local/schemas/change-development/scope-evidence-v1.schema.json",
+  "title": "Change-development scope evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "changeId", "evidenceId", "revision", "cadence", "packet", "packetDigest", "result", "resultDigest", "closureDigest"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "changeId": { "$ref": "#/$defs/id" },
+    "evidenceId": { "$ref": "#/$defs/id" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "cadence": { "$ref": "#/$defs/cadence" },
+    "packet": { "$ref": "https://aerstello.local/schemas/scope-review/scope-assessment-v1.schema.json#/$defs/assessmentPacket" },
+    "packetDigest": { "$ref": "#/$defs/digest" },
+    "result": { "$ref": "https://aerstello.local/schemas/scope-review/scope-assessment-v1.schema.json" },
+    "resultDigest": { "$ref": "#/$defs/digest" },
+    "closureDigest": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 128 },
+    "text": { "type": "string", "minLength": 1, "maxLength": 4000, "pattern": "\\S" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "cadence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["boundary", "trigger"],
+      "properties": {
+        "boundary": { "enum": ["admission", "task", "integrated-head"] },
+        "trigger": { "oneOf": [{ "$ref": "#/$defs/text" }, { "type": "null" }] }
+      },
+      "allOf": [
+        { "if": { "properties": { "boundary": { "enum": ["admission", "integrated-head"] } }, "required": ["boundary"] }, "then": { "properties": { "trigger": { "type": "null" } } }, "else": { "properties": { "trigger": { "$ref": "#/$defs/text" } } } }
+      ]
+    }
+  }
+}

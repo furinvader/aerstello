@@ -42,8 +42,10 @@ const AUTHORITY_FIELDS = [
   'invariantIds',
   'nonGoalIds',
   'guidanceIds',
+  'decisionIds',
 ];
 const POSITIVE_AUTHORITY_FIELDS = AUTHORITY_FIELDS.slice(0, 3);
+const AFFIRMATIVE_AUTHORITY_FIELDS = [...POSITIVE_AUTHORITY_FIELDS, 'decisionIds'];
 
 const schema = JSON.parse(readFileSync(
   new URL('../schemas/scope-assessment.schema.json', import.meta.url),
@@ -115,11 +117,11 @@ function unmappedMaterialInventory(packet) {
   return errors;
 }
 
-function shortestMappedAuthority(mapping, allowedFields = POSITIVE_AUTHORITY_FIELDS) {
+function shortestMappedAuthority(mapping, allowedFields = AFFIRMATIVE_AUTHORITY_FIELDS) {
   let shortest = null;
   let shortestBytes = Number.POSITIVE_INFINITY;
   for (const field of allowedFields) {
-    for (const id of mapping[field]) {
+    for (const id of mapping[field] ?? []) {
       const bytes = Buffer.byteLength(JSON.stringify(id), 'utf8');
       if (
         bytes < shortestBytes
@@ -161,11 +163,23 @@ function materialInventoryState(packet) {
     packet.changeInventory.mappings.map((entry) => [entry.mechanism, entry]),
   );
   const authorizedShape = new Set(packet.acceptedScope?.authorizedShape ?? []);
+  const approvedDecisions = new Map(
+    (packet.acceptedScope?.authorityDecisions ?? [])
+      .filter(({ disposition }) => disposition === 'approve-material-amendment')
+      .map((decision) => [decision.id, new Set(decision.authorizedShape)]),
+  );
   for (const field of MATERIAL_INVENTORY_FIELDS) {
     for (const mechanism of packet.changeInventory[field]) {
       materialMechanisms.add(mechanism);
       const mapping = mappings.get(mechanism);
-      if (!mapping || mapping.sourceCriterionIds.length === 0 || !authorizedShape.has(mechanism)) {
+      const hasDecisionAuthority = (mapping?.decisionIds ?? []).some(
+        (id) => approvedDecisions.get(id)?.has(mechanism),
+      );
+      if (
+        !mapping
+        || (mapping.sourceCriterionIds.length === 0 && !hasDecisionAuthority)
+        || !authorizedShape.has(mechanism)
+      ) {
         forcedMechanisms.add(mechanism);
         forcedCategories.add(MATERIAL_INVENTORY_CATEGORIES.get(field));
       }
@@ -909,6 +923,11 @@ function materialInventoryCorrespondence(packet, result) {
   );
   const coverage = new Map(result.coverage.map((entry) => [entry.mechanism, entry]));
   const authorizedShape = new Set(packet.acceptedScope?.authorizedShape ?? []);
+  const approvedDecisions = new Map(
+    (packet.acceptedScope?.authorityDecisions ?? [])
+      .filter(({ disposition }) => disposition === 'approve-material-amendment')
+      .map((decision) => [decision.id, new Set(decision.authorizedShape)]),
+  );
   const materialSurfaces = new Set(result.scopeDelta?.materialSurfaces ?? []);
   const materialityTriggers = new Set(
     result.materialityTriggers.map(({ category }) => category),
@@ -918,8 +937,11 @@ function materialInventoryCorrespondence(packet, result) {
     for (const surface of packet.changeInventory[field]) {
       const mapping = mappings.get(surface);
       const missingAuthorities = [];
-      if (!mapping || mapping.sourceCriterionIds.length === 0) {
-        missingAuthorities.push('explicit authoritative-source support');
+      const hasDecisionAuthority = (mapping?.decisionIds ?? []).some(
+        (id) => approvedDecisions.get(id)?.has(surface),
+      );
+      if (!mapping || (mapping.sourceCriterionIds.length === 0 && !hasDecisionAuthority)) {
+        missingAuthorities.push('explicit authoritative-source or approved-decision support');
       }
       if (!authorizedShape.has(surface)) {
         missingAuthorities.push('accepted-scope authorization');
@@ -961,14 +983,11 @@ function positiveCoverageAuthority(coverage) {
   const errors = [];
   for (const [index, entry] of coverage.entries()) {
     if (!entry || !AFFIRMATIVE_CLASSIFICATIONS.has(entry.classification)) continue;
-    const hasPositiveAuthority = [
-      entry.sourceCriterionIds,
-      entry.acceptedCriterionIds,
-      entry.invariantIds,
-    ].some((ids) => Array.isArray(ids) && ids.length > 0);
+    const hasPositiveAuthority = AFFIRMATIVE_AUTHORITY_FIELDS
+      .some((field) => Array.isArray(entry[field]) && entry[field].length > 0);
     if (!hasPositiveAuthority) {
       errors.push(
-        `$ coverage[${index}] ${entry.classification} classification lacks positive source, accepted-criterion, or invariant authority`,
+        `$ coverage[${index}] ${entry.classification} classification lacks positive source, accepted-criterion, invariant, or approved-decision authority`,
       );
     }
   }
@@ -1052,8 +1071,8 @@ function mappingAuthorityCorrespondence(packet, result) {
     const mapping = mappings.get(entry.mechanism);
     if (!mapping) continue;
     for (const field of AUTHORITY_FIELDS) {
-      const mappedIds = new Set(mapping[field]);
-      for (const id of entry[field]) {
+      const mappedIds = new Set(mapping[field] ?? []);
+      for (const id of entry[field] ?? []) {
         if (!mappedIds.has(id)) {
           errors.push(
             `$ coverage[${index}].${field} authority ${JSON.stringify(id)} is not mapped to mechanism ${JSON.stringify(entry.mechanism)} in changeInventory.mappings`,
@@ -1139,6 +1158,7 @@ function unknownReferences(
   invariants,
   nonGoals,
   guidance,
+  decisions,
   label,
 ) {
   if (!Array.isArray(entries)) return [];
@@ -1164,8 +1184,24 @@ function unknownReferences(
     for (const id of Array.isArray(entry.guidanceIds) ? entry.guidanceIds : []) {
       if (!guidance.has(id)) errors.push(`$ ${label}[${index}] references unknown guidance ${id}`);
     }
+    for (const id of Array.isArray(entry.decisionIds) ? entry.decisionIds : []) {
+      if (!decisions.has(id)) errors.push(`$ ${label}[${index}] references unknown authority decision ${id}`);
+    }
   }
   return errors;
+}
+
+function decisionAuthorityCorrespondence(packet) {
+  const decisions = packet?.acceptedScope?.authorityDecisions ?? [];
+  const decisionDigests = packet?.binding?.decisionDigests;
+  if (decisionDigests === undefined && decisions.length === 0) return [];
+  if (!Array.isArray(decisionDigests)) {
+    return ['$ binding.decisionDigests is required when acceptedScope.authorityDecisions is present'];
+  }
+  const expected = decisions.map(({ digest }) => digest);
+  return isDeepStrictEqual(decisionDigests, expected)
+    ? []
+    : ['$ binding.decisionDigests must exactly match acceptedScope.authorityDecisions digests in order'];
 }
 
 export function validateAssessmentPacket(packet) {
@@ -1184,9 +1220,11 @@ export function validateAssessmentPacket(packet) {
   errors.push(...repeatedIds(packet?.sourceScope?.implementationGuidance, 'sourceScope.implementationGuidance'));
   errors.push(...repeatedIds(packet?.acceptedScope?.criteria, 'acceptedScope.criteria'));
   errors.push(...repeatedIds(packet?.acceptedScope?.invariants, 'acceptedScope.invariants'));
+  errors.push(...repeatedIds(packet?.acceptedScope?.authorityDecisions, 'acceptedScope.authorityDecisions'));
   errors.push(...repeatedIds(packet?.tripwires, 'tripwires'));
   errors.push(...repeatedMechanisms(packet?.changeInventory?.mappings, 'changeInventory.mappings'));
   errors.push(...overlappingAcceptedShapes(packet?.acceptedScope));
+  errors.push(...decisionAuthorityCorrespondence(packet));
 
   if (packetSchemaValid) {
     errors.push(...unmappedMaterialInventory(packet));
@@ -1206,6 +1244,7 @@ export function validateAssessmentPacket(packet) {
   const invariants = new Set(idsFrom(packet?.acceptedScope?.invariants));
   const nonGoals = new Set(idsFrom(packet?.sourceScope?.nonGoals));
   const guidance = new Set(idsFrom(packet?.sourceScope?.implementationGuidance));
+  const decisions = new Set(idsFrom(packet?.acceptedScope?.authorityDecisions));
   errors.push(...unknownReferences(
     packet?.changeInventory?.mappings,
     sourceCriteria,
@@ -1213,6 +1252,7 @@ export function validateAssessmentPacket(packet) {
     invariants,
     nonGoals,
     guidance,
+    decisions,
     'changeInventory.mappings',
   ));
   return normalize(errors);
@@ -1252,6 +1292,7 @@ export function validateScopeAssessmentApplicability(packet, result) {
   const invariants = new Set((packet.acceptedScope?.invariants ?? []).map(({ id }) => id));
   const nonGoals = new Set(packet.sourceScope.nonGoals.map(({ id }) => id));
   const guidance = new Set(packet.sourceScope.implementationGuidance.map(({ id }) => id));
+  const decisions = new Set((packet.acceptedScope?.authorityDecisions ?? []).map(({ id }) => id));
   errors.push(...unknownReferences(
     result.coverage,
     sourceCriteria,
@@ -1259,6 +1300,7 @@ export function validateScopeAssessmentApplicability(packet, result) {
     invariants,
     nonGoals,
     guidance,
+    decisions,
     'coverage',
   ));
   if (result.scopeDelta) {
@@ -1269,6 +1311,7 @@ export function validateScopeAssessmentApplicability(packet, result) {
       invariants,
       nonGoals,
       guidance,
+      decisions,
       'scopeDelta',
     ));
   }

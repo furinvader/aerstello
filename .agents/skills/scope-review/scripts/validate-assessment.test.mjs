@@ -425,7 +425,7 @@ test('accepted-only material authority lacks authoritative-source support', () =
     const errors = validateScopeAssessmentApplicability(input, candidate);
     assert.ok(
       errors.includes(
-        `$ changeInventory.publicSurfaces material surface ${JSON.stringify(surface)} lacks explicit authoritative-source support and requires human-decision-required material-scope-change coverage with category public-surface`,
+        `$ changeInventory.publicSurfaces material surface ${JSON.stringify(surface)} lacks explicit authoritative-source or approved-decision support and requires human-decision-required material-scope-change coverage with category public-surface`,
       ),
       `${candidate.verdict}: missing material-surface rejection`,
     );
@@ -461,6 +461,66 @@ test('exact source and accepted-scope authority allow a material surface', () =>
     ],
   });
   assert.deepEqual(validateScopeAssessmentApplicability(input, assessment), []);
+});
+
+test('an exact approved decision can supply material source authority', () => {
+  const surface = 'decision-authorized-public-api';
+  const decisionDigest = `sha256:${'e'.repeat(64)}`;
+  const decisionId = 'approve-public-api';
+  const input = packet({
+    binding: binding({ decisionDigests: [decisionDigest] }),
+    acceptedScope: {
+      ...packet().acceptedScope,
+      authorizedShape: [...packet().acceptedScope.authorizedShape, surface],
+      authorityDecisions: [{
+        id: decisionId,
+        digest: decisionDigest,
+        disposition: 'approve-material-amendment',
+        authorizedShape: [surface],
+      }],
+    },
+    changeInventory: {
+      ...packet().changeInventory,
+      publicSurfaces: [surface],
+      mappings: [
+        ...packet().changeInventory.mappings,
+        {
+          mechanism: surface,
+          sourceCriterionIds: [],
+          acceptedCriterionIds: [],
+          invariantIds: [],
+          nonGoalIds: [],
+          guidanceIds: [],
+          decisionIds: [decisionId],
+          rationale: 'The exact approved decision authorizes this material surface.',
+        },
+      ],
+    },
+  });
+  const assessment = result('within-scope', {
+    binding: input.binding,
+    coverage: [
+      ...result('within-scope').coverage,
+      {
+        mechanism: surface,
+        sourceCriterionIds: [],
+        acceptedCriterionIds: [],
+        invariantIds: [],
+        nonGoalIds: [],
+        guidanceIds: [],
+        decisionIds: [decisionId],
+        classification: 'required',
+        rationale: 'The approved decision and accepted shape provide exact authority.',
+      },
+    ],
+  });
+  assert.deepEqual(validateScopeAssessmentApplicability(input, assessment), []);
+
+  const stale = structuredClone(input);
+  stale.binding.decisionDigests = [`sha256:${'f'.repeat(64)}`];
+  assert.ok(validateAssessmentPacket(stale).includes(
+    '$ binding.decisionDigests must exactly match acceptedScope.authorityDecisions digests in order',
+  ));
 });
 
 test('dual-authorized material inventory cannot be relabeled with its native category', () => {
@@ -579,7 +639,7 @@ test('affirmative coverage requires positive authority rather than non-goals or 
       });
       assert.deepEqual(
         validateScopeAssessmentResult(assessment),
-        [`$ coverage[0] ${classification} classification lacks positive source, accepted-criterion, or invariant authority`],
+        [`$ coverage[0] ${classification} classification lacks positive source, accepted-criterion, invariant, or approved-decision authority`],
       );
     }
   }
@@ -1255,7 +1315,7 @@ test('arbitrary missing evidence takes precedence over affirmative material enfo
   const affirmativeErrors = validateScopeAssessmentApplicability(input, affirmative);
   assert.ok(
     affirmativeErrors.includes(
-      `$ changeInventory.subsystems material surface ${JSON.stringify(unsupportedSurface)} lacks explicit authoritative-source support and accepted-scope authorization and requires human-decision-required material-scope-change coverage with category new-subsystem`,
+      `$ changeInventory.subsystems material surface ${JSON.stringify(unsupportedSurface)} lacks explicit authoritative-source or approved-decision support and accepted-scope authorization and requires human-decision-required material-scope-change coverage with category new-subsystem`,
     ),
   );
   assert.match(affirmativeErrors.join('\n'), /is not mapped to mechanism/u);

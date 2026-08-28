@@ -38,6 +38,10 @@ const EXPECTED_ADAPTERS = [
     path: '.agents/skills/pr-review-cycle/scripts/structure.test.mjs',
     targets: [],
   },
+  {
+    path: '.agents/skills/change-development/scripts/scope/contracts.mjs',
+    targets: ['schemas/scope-assessment.schema.json', 'scripts/validate-assessment.mjs'],
+  },
 ];
 
 function sorted(values) {
@@ -170,8 +174,10 @@ test('documentation links resolve and defines invocation and authority boundarie
   assert.match(contract, /paths, dependencies, public surfaces, persistent surfaces, subsystems/u);
   assert.match(contract, /independent workstream, new criterion, non-goal reversal, sensitive policy/u);
   assert.match(contract, /without authorizing either/u);
+  assert.match(contract, /receipt-protected `approve-material-amendment` decision/u);
+  assert.match(contract, /`taskPacketDigest` is the canonical change-development\s+`taskSetDigest`/u);
   assert.match(contract, /both the\s+authoritative source and accepted scope provide that exact authority/u);
-  assert.match(contract, /must cite positive\s+authority through a source-required criterion, accepted criterion, or invariant/u);
+  assert.match(contract, /must cite positive\s+authority through a source-required criterion, accepted criterion, invariant,\s+or exact approved decision/u);
   assert.match(contract, /same\s+authority field of that mechanism's `changeInventory\.mappings` row/u);
   assert.match(contract, /Positive authority in an inventory mapping establishes relevance and\s+traceability, not counterfactual necessity/u);
   assert.match(contract, /removing it preserves the authoritative outcome, accepted scope, and\s+minimal closure/u);
