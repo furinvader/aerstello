@@ -6,6 +6,7 @@ import {
   scopeExactHeadManifestDigest,
   scopeClassificationMatchesTask,
   scopeGateForClassificationEntry,
+  scopeGateForJournal,
   validateScopeAuthoritySnapshot,
   validateScopeControlJournal,
   validateScopeReturnEnvelope,
@@ -617,9 +618,6 @@ export function assertScopeTaskAllowed(cwd, state, task, packet) {
   if (!state.scopeControl) {
     throw new StateError(`Scope authority is insufficient for task ${task.id}`, 'SCOPE_AUTHORITY_REQUIRED');
   }
-  if (state.scopeControl.gate !== 'ready') {
-    throw new StateError(`Scope gate ${state.scopeControl.gate} blocks task ${task.id}`, 'SCOPE_TASK_BLOCKED');
-  }
   const journalEvidence = readScopeJournal(cwd, state);
   if (journalEvidence.digest !== state.scopeControl.journalDigest
       || journalEvidence.value.authorityDigest !== state.scopeControl.authorityDigest) {
@@ -629,6 +627,12 @@ export function assertScopeTaskAllowed(cwd, state, task, packet) {
     );
   }
   const journal = journalEvidence.value;
+  const gate = state.scopeControl.gate === 'ready'
+    ? scopeGateForJournal(journal)
+    : state.scopeControl.gate;
+  if (gate !== 'ready') {
+    throw new StateError(`Scope gate ${gate} blocks task ${task.id}`, 'SCOPE_TASK_BLOCKED');
+  }
   const expectedShape = `sha256:${taskPacketDigest(packet)}`;
   const classification = journal.entries.findLast((entry) => entry.kind === 'classification'
     && scopeClassificationMatchesTask(entry, task));

@@ -308,7 +308,7 @@ test('transition policy rejects active execution behind a forged ready minor-ame
   };
   assertCode(
     () => createTransitionPolicy().assertTransitionAllowed(forged, next, undefined, cwd),
-    'SCOPE_CLASSIFICATION_REQUIRED',
+    'SCOPE_TASK_BLOCKED',
   );
 });
 
@@ -408,6 +408,7 @@ test('transition policy rechecks a later decision-required gate on every executi
   ]) {
     const current = {
       ...blocked,
+      scopeControl: { ...blocked.scopeControl, gate: 'ready' },
       tasks: blocked.tasks.map((task) => task.id === packet.taskId
         ? { ...task, status: currentStatus } : task),
     };

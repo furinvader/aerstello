@@ -282,6 +282,9 @@ function validateClassificationEntry(entry, path, errors) {
     ['insufficient-evidence', 'insufficient-scope-authority'],
   ]).get(verdict);
   if (entry.classification === 'unrelated-follow-up') {
+    if (verdict !== 'within-scope') {
+      errors.push(`${path}.classification does not match the canonical scope verdict`);
+    }
     if (entry.unrelatedReference === null) {
       errors.push(`${path}.unrelatedReference is required for unrelated-follow-up`);
     }

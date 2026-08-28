@@ -5,6 +5,7 @@ import test from 'node:test';
 
 import * as harness from './test-support/state-harness.mjs';
 import {
+  assertScopeTaskAllowed,
   checkpointScopeAuthority,
   checkpointScopeClassification,
   checkpointScopeDecision,
@@ -1376,6 +1377,67 @@ test('task binding rejects a receipt-valid journal suffix until exact checkpoint
     cwd, packet: fixture.packet, expectedRevision: recovered.revision,
   });
   assert.equal(bound.tasks[0].taskPacketDigest, harness.taskPacketDigest(fixture.packet));
+});
+
+test('task execution derives the global journal gate before task-specific classification', () => {
+  const cwd = harness.repo();
+  const fixture = proposedFixture(cwd, 'derived-journal-gate-task');
+  const ready = checkpointScopeClassification({
+    cwd,
+    classification: classificationInput(fixture, 'within-scope'),
+    expectedRevision: fixture.adopted.revision,
+  });
+  const unrelatedRoot = checkpointScopeClassification({
+    cwd,
+    expectedRevision: ready.revision,
+    classification: classificationInput(fixture, 'human-decision-required', {
+      entryId: 'classification-derived-global-blocker', rootCauseId: 'global-material-root',
+    }),
+  });
+  const compactReady = {
+    ...unrelatedRoot,
+    scopeControl: { ...unrelatedRoot.scopeControl, gate: 'ready' },
+  };
+  const snapshot = scopePersistenceSnapshot(cwd, unrelatedRoot.prNumber);
+  assert.throws(
+    () => assertScopeTaskAllowed(cwd, compactReady, compactReady.tasks[0], fixture.packet),
+    { code: 'SCOPE_TASK_BLOCKED' },
+  );
+  assertScopePersistenceUnchanged(cwd, snapshot);
+
+  const lifecycleCwd = harness.repo();
+  const lifecycleFixture = proposedFixture(lifecycleCwd, 'compact-lifecycle-gate-task');
+  const lifecycleReady = checkpointScopeClassification({
+    cwd: lifecycleCwd,
+    classification: classificationInput(lifecycleFixture, 'within-scope'),
+    expectedRevision: lifecycleFixture.adopted.revision,
+  });
+  const compactLifecycleBlock = {
+    ...lifecycleReady,
+    scopeControl: { ...lifecycleReady.scopeControl, gate: 'resume-required' },
+  };
+  assert.throws(
+    () => assertScopeTaskAllowed(
+      lifecycleCwd, compactLifecycleBlock, lifecycleReady.tasks[0], lifecycleFixture.packet,
+    ),
+    { code: 'SCOPE_TASK_BLOCKED' },
+  );
+
+  writeFileSync(scopeControlJournalReceiptPath(lifecycleCwd, lifecycleReady.prNumber), `${DIGEST}\n`);
+  assert.throws(
+    () => assertScopeTaskAllowed(
+      lifecycleCwd, compactLifecycleBlock, lifecycleReady.tasks[0], lifecycleFixture.packet,
+    ),
+    { code: 'INVALID_SCOPE_EVIDENCE' },
+  );
+  const noAuthority = { ...lifecycleReady };
+  delete noAuthority.scopeControl;
+  assert.throws(
+    () => assertScopeTaskAllowed(
+      lifecycleCwd, noAuthority, lifecycleReady.tasks[0], lifecycleFixture.packet,
+    ),
+    { code: 'SCOPE_AUTHORITY_REQUIRED' },
+  );
 });
 
 test('worker-result preflight rejects a receipt-valid uncheckpointed journal suffix', () => {

@@ -273,6 +273,44 @@ test('journal is append-only shaped and embeds exact canonical assessment eviden
   })).join('\n'), /canonical packet\/result pair/u);
 });
 
+test('unrelated follow-up requires affirmative canonical scope evidence and a stable reference', () => {
+  const { scopeAuthorityDigest, scopeGateForJournal, validateScopeControlJournal } = contract;
+  const authorityDigest = scopeAuthorityDigest(authority());
+  const affirmative = classificationEntry(authorityDigest, {
+    classification: 'unrelated-follow-up', unrelatedReference: 'furinvader/aerstello#25',
+  });
+  assert.deepEqual(validateScopeControlJournal(journal(authorityDigest, {
+    entries: [affirmative],
+  })), []);
+  assert.equal(scopeGateForJournal(journal(authorityDigest, { entries: [affirmative] })), 'ready');
+
+  const missingReference = { ...affirmative, unrelatedReference: null };
+  assert.match(
+    validateScopeControlJournal(journal(authorityDigest, { entries: [missingReference] })).join('\n'),
+    /unrelatedReference is required/u,
+  );
+  const amendmentRequired = { ...affirmative, authorityAmendmentRequired: true };
+  assert.match(
+    validateScopeControlJournal(journal(authorityDigest, { entries: [amendmentRequired] })).join('\n'),
+    /authorityAmendmentRequired must equal/u,
+  );
+
+  for (const verdict of [
+    'trim-required', 'minor-amendment-required', 'human-decision-required', 'insufficient-evidence',
+  ]) {
+    const rejected = structuredClone(affirmative);
+    rejected.assessment.result.verdict = verdict;
+    rejected.assessment.digest = `sha256:${sha256CanonicalContractJson({
+      packet: rejected.assessment.packet, result: rejected.assessment.result,
+    })}`;
+    assert.match(
+      validateScopeControlJournal(journal(authorityDigest, { entries: [rejected] })).join('\n'),
+      /classification does not match the canonical scope verdict/u,
+      verdict,
+    );
+  }
+});
+
 test('classification assessments bind captured and journal authority in exact append order', () => {
   const { scopeAuthorityDigest, validateScopeControlJournal } = contract;
   const authorityValue = authority({ amendmentDigests: [DIGEST] });

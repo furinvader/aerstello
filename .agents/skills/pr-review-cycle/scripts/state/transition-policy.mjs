@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { scopeClassificationMatchesTask } from '../contracts/contracts.mjs';
+import { scopeClassificationMatchesTask, scopeGateForJournal } from '../contracts/contracts.mjs';
 import { canonicalJson } from './atomic-io.mjs';
 import { StateError } from './errors.mjs';
 import { assertIntegratedWorkerCommit } from './git-authority.mjs';
@@ -330,9 +330,6 @@ function assertScopeTaskProgress(cwd, state, task) {
   if (!state.scopeControl) {
     throw new StateError(`Scope authority is insufficient for task ${task.id}`, 'SCOPE_AUTHORITY_REQUIRED');
   }
-  if (state.scopeControl.gate !== 'ready') {
-    throw new StateError(`Scope gate ${state.scopeControl.gate} blocks task ${task.id}`, 'SCOPE_TASK_BLOCKED');
-  }
   const journalEvidence = readScopeJournal(cwd, state);
   if (journalEvidence.digest !== state.scopeControl.journalDigest
       || journalEvidence.value.authorityDigest !== state.scopeControl.authorityDigest) {
@@ -342,6 +339,12 @@ function assertScopeTaskProgress(cwd, state, task) {
     );
   }
   const journal = journalEvidence.value;
+  const gate = state.scopeControl.gate === 'ready'
+    ? scopeGateForJournal(journal)
+    : state.scopeControl.gate;
+  if (gate !== 'ready') {
+    throw new StateError(`Scope gate ${gate} blocks task ${task.id}`, 'SCOPE_TASK_BLOCKED');
+  }
   const latestAmendment = journal.entries.findLast((entry) => entry.kind === 'amendment');
   const revisedAssessment = latestAmendment === undefined ? true : journal.entries.some(
     (entry) => entry.kind === 'classification'
