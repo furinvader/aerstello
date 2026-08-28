@@ -3936,6 +3936,18 @@ function validUniqueStrings(values) {
   return Array.isArray(values) && values.every(nonemptyString) && new Set(values).size === values.length;
 }
 
+const MAX_PLAN_AMENDMENTS = 128;
+
+export function nextPlanAmendmentNumber(amendmentCount) {
+  if (!Number.isSafeInteger(amendmentCount) || amendmentCount < 0) {
+    throw new StateError('Plan amendment count must be a non-negative safe integer', 'AMENDMENT_COUNT_INVALID');
+  }
+  if (amendmentCount >= MAX_PLAN_AMENDMENTS) {
+    throw new StateError(`Plan amendment limit of ${MAX_PLAN_AMENDMENTS} has been reached`, 'AMENDMENT_LIMIT_REACHED');
+  }
+  return amendmentCount + 1;
+}
+
 function hasBoundResolveDecision(cwd, state, decisionId) {
   try { validateChangeId(decisionId); } catch { return false; }
   const relativePath = `decisions/${decisionId}.json`;
@@ -4006,6 +4018,7 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
     if (!['ready-to-implement', 'awaiting-decision', 'implementing', 'validating', 'blocked'].includes(state.phase)) {
       throw new StateError(`Plan amendment is not permitted in phase ${state.phase}`, 'INVALID_PHASE');
     }
+    const amendmentNumber = nextPlanAmendmentNumber(state.plan.amendmentCount);
     if (!isPlainObject(amendment) || !['id', 'reason', 'authorization', 'trigger'].every((key) => nonemptyString(amendment[key]))
         || !isPlainObject(amendment.delta) || Object.keys(amendment.delta).length === 0
         || !validUniqueStrings(amendment.invalidatedEvidence)
@@ -4059,6 +4072,11 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
         const declaredTaskIds = amendment.delta.addedTaskIds;
         if (!validUniqueStrings(declaredTaskIds) || declaredTaskIds.length === 0) {
           throw new StateError('Scope-driven remediation must explicitly declare addedTaskIds', 'INVALID_AMENDMENT');
+        }
+        const newTaskIds = new Set(newTasks.map(({ id }) => id));
+        if (declaredTaskIds.length !== newTaskIds.size || declaredTaskIds.some((id) => !newTaskIds.has(id))) {
+          throw new StateError('Scope-driven remediation addedTaskIds must equal the complete set of newly introduced tasks',
+            'INVALID_AMENDMENT');
         }
         const newOwnedCriteria = new Map(newCriteria
           .filter(({ disposition, ownerTaskId }) => disposition === 'owned' && nonemptyString(ownerTaskId))
@@ -4198,7 +4216,7 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
     }
     if (closureErrors.length > 0) throw new StateError(`Amended minimal closure is invalid:\n- ${closureErrors.join('\n- ')}`, 'SCOPE_AMENDMENT_INVALID');
     const closureDigest = scopeContractDigest(minimalClosure);
-    const number = state.plan.amendmentCount + 1;
+    const number = amendmentNumber;
     const terminalTasks = state.schemaVersion === 2 ? state.execution.tasks.filter((task) => ['integrated', 'no-change'].includes(task.status)) : [];
     for (const terminal of terminalTasks) {
       const before = prior.tasks.find((task) => task.id === terminal.id); const after = resultingPlan.tasks.find((task) => task.id === terminal.id);
@@ -4945,6 +4963,15 @@ function amendmentForRecovery(cwd, intent, predecessor) {
       throw new StateError('Amendment evidence is attached to a non-amendment transition', 'RECOVERY_EVIDENCE_INVALID');
     }
     return false;
+  }
+  try {
+    nextPlanAmendmentNumber(predecessor?.plan?.amendmentCount);
+  } catch (error) {
+    if (error instanceof StateError && ['AMENDMENT_COUNT_INVALID', 'AMENDMENT_LIMIT_REACHED'].includes(error.code)) {
+      throw new StateError(`Interrupted plan amendment exceeds the ${MAX_PLAN_AMENDMENTS}-amendment limit`,
+        'RECOVERY_EVIDENCE_INVALID');
+    }
+    throw error;
   }
   const records = authoritativeEvidenceRecords(intent);
   const record = records.amendmentDigest?.value;

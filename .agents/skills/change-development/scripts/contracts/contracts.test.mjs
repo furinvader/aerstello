@@ -188,6 +188,10 @@ test('validation intent cannot smuggle exact commands', () => {
 
 test('development state gates readiness, blocking, abandonment, and exact observations', () => {
   assert.deepEqual(validateDevelopmentState(state()), []);
+  const amendmentEdge = state(); amendmentEdge.plan.amendmentCount = 128;
+  assert.deepEqual(validateDevelopmentState(amendmentEdge), []);
+  amendmentEdge.plan.amendmentCount = 129;
+  assert.match(validateDevelopmentState(amendmentEdge).join('\n'), /must be <= 128/u);
   const dirty = state(); dirty.git.clean = false;
   assert.match(validateDevelopmentState(dirty).join('\n'), /clean Git observation/u);
   const drift = state(); drift.source.classification = 'unreviewed-material';

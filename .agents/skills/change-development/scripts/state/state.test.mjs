@@ -37,6 +37,7 @@ import {
   loadState,
   locateState,
   mergeLifecycleValidationCommands,
+  nextPlanAmendmentNumber,
   nextActionFor,
   preflightVerifierCapacity,
   preflightStateVerifierCapacity,
@@ -1144,6 +1145,102 @@ test('oversized amendment projection fails before append-only authority mutates'
   assert.deepEqual(durableSnapshot(root), before, 'oversized amendment creates no sidecar, receipt, event, or transition');
 });
 
+test('ordinary amendment 128 commits and amendment 129 rejects before durable mutation', async () => {
+  assert.equal(nextPlanAmendmentNumber(127), 128);
+  assert.throws(() => nextPlanAmendmentNumber(128),
+    (error) => error.code === 'AMENDMENT_LIMIT_REACHED');
+  for (const invalid of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() => nextPlanAmendmentNumber(invalid),
+      (error) => error.code === 'AMENDMENT_COUNT_INVALID');
+  }
+
+  const { cwd, sha } = repository('amendment count boundary');
+  const planning = await initializeState({ cwd, changeId: 'amendment-count-boundary', mode: 'plan-only',
+    baseBranch: 'main', planningRef: sha, source: descriptor });
+  let resultingPlan = planFor(planning);
+  let state = acceptPlan({ cwd, plan: resultingPlan, expectedRevision: planning.revision });
+  const directory = changeDirectory(cwd, state.changeId);
+  const eventsPath = join(directory, 'events.jsonl');
+  const events = readFileSync(eventsPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  for (let number = 1; number <= 128; number += 1) {
+    const previousState = state;
+    resultingPlan = structuredClone(resultingPlan);
+    resultingPlan.planRevision += 1;
+    resultingPlan.objective = `Exercise bounded amendment ${number}.`;
+    const timestamp = new Date(Date.parse(previousState.updatedAt) + 1).toISOString();
+    const record = {
+      schemaVersion: 1, amendmentId: `bounded-amendment-${number}`, reason: `Exercise amendment ${number}.`,
+      trigger: 'operator-decision', delta: { summary: `Amendment ${number}.` },
+      previousDigest: previousState.plan.effectiveDigest, newDigest: digestJson(resultingPlan),
+      repositorySha: previousState.git.headSha, authorization: 'operator', invalidatedEvidence: [],
+      resultingPlan, createdAt: timestamp,
+    };
+    const closure = { ...testMinimalClosure(previousState, resultingPlan),
+      revision: 2 + previousState.plan.amendmentCount,
+      previousContractDigest: previousState.scope.closureDigest,
+      operatorDecisionDigests: [...previousState.scope.decisionDigests] };
+    const stem = `plan/amendments/${String(number).padStart(4, '0')}`;
+    const closurePath = `scope/minimal-closure/${String(closure.revision).padStart(4, '0')}.json`;
+    const evidence = {
+      amendmentDigest: digestJson(record), planningEvidenceDigest: digestJson([]),
+      minimalClosureDigest: digestJson(closure),
+    };
+    const evidencePaths = {
+      amendmentDigest: `${stem}.json`, planningEvidenceDigest: `${stem}.evidence.json`,
+      minimalClosureDigest: closurePath,
+    };
+    const authoritativeEvidence = {
+      amendmentDigest: { path: evidencePaths.amendmentDigest, label: `plan amendment ${number}`,
+        digest: evidence.amendmentDigest, value: record },
+      planningEvidenceDigest: { path: evidencePaths.planningEvidenceDigest,
+        label: `plan amendment ${number} planning evidence`, digest: evidence.planningEvidenceDigest, value: [] },
+      minimalClosureDigest: { path: closurePath, label: `minimal closure revision ${closure.revision}`,
+        digest: evidence.minimalClosureDigest, value: closure },
+    };
+    state = {
+      ...previousState, phase: 'ready-to-implement', revision: previousState.revision + 1,
+      plan: { ...previousState.plan, revision: resultingPlan.planRevision, effectiveDigest: record.newDigest,
+        amendmentCount: number, sourceCaptureDigest: resultingPlan.source.captureDigest },
+      execution: previousState.execution ? { ...previousState.execution, planDigest: record.newDigest } : previousState.execution,
+      source: { ...previousState.source, classification: 'unchanged' },
+      git: { ...previousState.git, observedAt: timestamp },
+      unresolvedDecisionIds: resultingPlan.decisions.filter(({ status }) => status !== 'resolved').map(({ id }) => id),
+      checklist: resultingPlan.checklistMappings.map(({ id, checked, status, externalChange }) =>
+        ({ id, checked, status, externalChange })),
+      blockedReasons: [], scope: { ...previousState.scope, status: 'assessment-required',
+        closureDigest: evidence.minimalClosureDigest, candidatePlanDigest: null, currentEvidenceDigest: null,
+        currentBoundary: null, currentSubjectSha: null }, updatedAt: timestamp,
+    };
+    state.nextAction = nextActionFor(state);
+    const intent = {
+      schemaVersion: 1, changeId: state.changeId, revision: state.revision, type: 'plan-amended',
+      summary: `Appended plan amendment ${record.amendmentId}`,
+      previousStateDigest: digestJson(previousState), nextStateDigest: digestJson(state), nextState: state,
+      evidence, evidencePaths, authoritativeEvidence, createdAt: timestamp,
+    };
+    writeReceiptJson(join(directory, evidencePaths.amendmentDigest), record);
+    writeReceiptJson(join(directory, evidencePaths.planningEvidenceDigest), []);
+    writeReceiptJson(join(directory, closurePath), closure);
+    writeCompleteTransitionFixture(join(directory, 'transitions', String(state.revision).padStart(8, '0')), intent);
+    events.push({ revision: state.revision, type: intent.type, summary: intent.summary, at: timestamp });
+  }
+  writeFileSync(join(directory, 'state.json'), `${JSON.stringify(state)}\n`);
+  writeFileSync(eventsPath, `${events.map((event) => JSON.stringify(event)).join('\n')}\n`);
+  assert.equal(state.plan.amendmentCount, 128);
+  assert.equal(validateState({ cwd }).valid, true, 'receipt-valid amendment 128 is representable');
+
+  const rejectedPlan = structuredClone(resultingPlan);
+  rejectedPlan.planRevision += 1;
+  rejectedPlan.objective = 'Attempt unrepresentable amendment 129.';
+  const before = durableSnapshot(directory);
+  assert.throws(() => amendPlan({ cwd, expectedRevision: state.revision, resultingPlan: rejectedPlan,
+    amendment: { id: 'bounded-amendment-129', reason: 'Attempt amendment 129.', authorization: 'operator',
+      trigger: 'operator-decision', delta: { summary: 'Amendment 129.' }, invalidatedEvidence: [] } }),
+  (error) => error.code === 'AMENDMENT_LIMIT_REACHED');
+  assert.deepEqual(durableSnapshot(directory), before,
+    'amendment 129 creates no sidecar, receipt, event, state, or interrupted transition intent');
+});
+
 test('two same-base workers integrate by delta, resume intent-only integration, clean up, and finalize', async () => {
   const { cwd, sha } = repository('execution integration');
   const planning = await initializeState({ cwd, changeId: 'execution-change', mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
@@ -1615,6 +1712,31 @@ test('receipt-backed minor and trim remediation alone may revisit terminal owner
     assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), missingIdsBefore,
       `${verdict} requires explicit addedTaskIds without durable mutation`);
 
+    for (const [label, addedTaskIds] of [
+      ['missing', []],
+      ['duplicate', [taskId, taskId]],
+      ['extra', [taskId, 'state-task']],
+    ]) {
+      const exactSetBefore = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
+      assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+        amendment: { ...amendment, delta: { addedTaskIds } }, resultingPlan }),
+      (error) => error.code === 'INVALID_AMENDMENT', `${verdict} rejects ${label} added-task authority`);
+      assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), exactSetBefore,
+        `${verdict} rejects ${label} added-task authority atomically`);
+    }
+
+    const unownedPlan = structuredClone(resultingPlan);
+    const unownedTaskId = `${verdict}-unowned-task`;
+    unownedPlan.tasks.push({ ...original.tasks[0], id: unownedTaskId, title: 'Attempt unowned remediation',
+      objective: 'Attempt remediation without a genuinely new owned criterion.', criterionIds: [original.criteria[0].id],
+      checklistItemIds: [], dependsOn: ['state-task'], anticipatedPaths: ['unowned.txt'] });
+    const unownedBefore = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
+    assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+      amendment: { ...amendment, delta: { addedTaskIds: [taskId, unownedTaskId] } }, resultingPlan: unownedPlan }),
+    (error) => error.code === 'INVALID_AMENDMENT');
+    assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), unownedBefore,
+      `${verdict} requires every declared new task to own a genuinely new criterion`);
+
     const unrelatedPlan = structuredClone(resultingPlan);
     const unrelatedCriterionId = `${verdict}-unrelated-criterion`; const unrelatedTaskId = `${verdict}-unrelated-task`;
     unrelatedPlan.criteria.push({ id: unrelatedCriterionId, description: 'Attempt unrelated overlapping work.',
@@ -1625,7 +1747,8 @@ test('receipt-backed minor and trim remediation alone may revisit terminal owner
     const before = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
     assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
       amendment, resultingPlan: unrelatedPlan }),
-    (error) => error.code === 'PLAN_NOT_READY' && error.message.includes('overlapping anticipated paths'));
+    (error) => error.code === 'INVALID_AMENDMENT'
+      && error.message.includes('complete set of newly introduced tasks'));
     assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), before,
       `${verdict} unrelated overlap is rejected without durable mutation`);
     state = amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision, amendment, resultingPlan });
