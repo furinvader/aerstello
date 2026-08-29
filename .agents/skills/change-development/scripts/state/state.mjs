@@ -884,6 +884,21 @@ function findScopeReceipt(cwd, state, subdirectory, digest, label) {
   return matches[0];
 }
 
+function validateScopeDecisionHistory(cwd, state) {
+  const decisionIds = new Set();
+  for (const digest of state.scope?.decisionDigests ?? []) {
+    const decision = findScopeReceipt(cwd, state, 'decisions', digest, 'scope decision');
+    if (validateScopeDecision(decision.value).length > 0) {
+      throw new StateError('Scope decision projection is malformed', 'SCOPE_EVIDENCE_INVALID');
+    }
+    if (decisionIds.has(decision.value.decisionId)) {
+      throw new StateError('Scope decision history contains duplicate decision IDs', 'SCOPE_EVIDENCE_INVALID');
+    }
+    decisionIds.add(decision.value.decisionId);
+  }
+  return decisionIds;
+}
+
 function currentScopeReceipts(cwd, state) {
   if (!state.scope) throw new StateError('Append-only scope adoption is required before authority can advance', 'SCOPE_ADOPTION_REQUIRED');
   const closure = findScopeReceipt(cwd, state, 'minimal-closure', state.scope.closureDigest, 'minimal closure');
@@ -1328,6 +1343,9 @@ export function recordScopeDecision({ cwd = process.cwd(), changeId, decision, e
     if (errors.length > 0) throw new StateError(`Scope decision is invalid or stale:\n- ${errors.join('\n- ')}`, 'SCOPE_DECISION_INVALID');
     const digest = scopeContractDigest(decision);
     if (state.scope.decisionDigests.includes(digest)) throw new StateError('Scope decision is already recorded', 'SCOPE_DECISION_INVALID');
+    if (validateScopeDecisionHistory(root, state).has(decision.decisionId)) {
+      throw new StateError(`Scope decision ID ${decision.decisionId} is already recorded`, 'SCOPE_DECISION_INVALID');
+    }
     const abandons = decision.disposition === 'abandon-replan';
     const requiresAmendment = state.plan && !abandons;
     const scope = { ...state.scope, status: 'assessment-required',
@@ -4188,9 +4206,6 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
         || minimalClosure?.previousContractDigest !== state.scope.closureDigest) {
       closureErrors.push('$ amended minimal closure must append directly to the prior closure receipt');
     }
-    if (!state.scope.decisionDigests.every((digest) => minimalClosure?.operatorDecisionDigests?.includes(digest))) {
-      closureErrors.push('$ amended minimal closure must retain every append-only operator scope decision digest');
-    }
     if (scopeDriven) {
       const evidence = findScopeReceipt(root, state, 'evidence', state.scope.currentEvidenceDigest, 'scope amendment evidence').value;
       if (evidence.result.verdict === 'minor-amendment-required') {
@@ -4498,7 +4513,16 @@ function validateLoadedState(root, state) {
   if (state.scope) {
     const closure = findScopeReceipt(root, state, 'minimal-closure', state.scope.closureDigest, 'minimal closure');
     const authorityState = state.plan ? state : { ...state, plan: { effectiveDigest: state.scope.candidatePlanDigest } };
-    if (validateClosureForState(closure.value, authorityState).length > 0) {
+    const unincorporatedMaterialDecision = (state.phase === 'blocked'
+      && state.blockedReasons.includes('Recorded material scope decision requires its exact authorized plan amendment before implementation can continue.')
+      || state.phase === 'abandoned' && nonemptyString(state.abandonmentReason)
+      || state.phase === 'planning' && state.plan === null && nonemptyString(state.scope.candidatePlanDigest))
+      && state.scope.decisionDigests.length > 0;
+    const closureState = unincorporatedMaterialDecision
+      ? { ...authorityState, scope: { ...authorityState.scope,
+        decisionDigests: authorityState.scope.decisionDigests.slice(0, -1) } }
+      : authorityState;
+    if (validateClosureForState(closure.value, closureState).length > 0) {
       throw new StateError('Minimal closure projection is stale or malformed', 'SCOPE_EVIDENCE_INVALID');
     }
     const admission = findScopeReceipt(root, state, 'evidence', state.scope.admissionEvidenceDigest, 'admission scope evidence');
@@ -4515,13 +4539,13 @@ function validateLoadedState(root, state) {
       if (state.scope.status === 'current' && currentScope.value.result.verdict !== 'within-scope') {
         throw new StateError('Current scope authority requires a within-scope verdict', 'SCOPE_EVIDENCE_INVALID');
       }
+      if (unincorporatedMaterialDecision && currentScope.value.result.verdict !== 'human-decision-required') {
+        throw new StateError('Unincorporated material decision requires its exact human-decision scope evidence', 'SCOPE_EVIDENCE_INVALID');
+      }
     } else if (state.scope.currentBoundary !== null || state.scope.currentSubjectSha !== null) {
       throw new StateError('Empty current scope evidence must clear its boundary and subject projection', 'SCOPE_EVIDENCE_INVALID');
     }
-    for (const digest of state.scope.decisionDigests) {
-      const decision = findScopeReceipt(root, state, 'decisions', digest, 'scope decision');
-      if (validateScopeDecision(decision.value).length > 0) throw new StateError('Scope decision projection is malformed', 'SCOPE_EVIDENCE_INVALID');
-    }
+    validateScopeDecisionHistory(root, state);
     for (const digest of state.scope.returnDigests) findScopeReceipt(root, state, 'returns', digest, 'scope return');
   }
   if (state.plan) {
@@ -5011,8 +5035,7 @@ function amendmentForRecovery(cwd, intent, predecessor) {
   const priorClosure = findScopeReceipt(cwd, predecessor, 'minimal-closure', predecessor.scope.closureDigest,
     'prior recovery minimal closure').value;
   if (minimalClosure?.revision !== priorClosure.revision + 1
-      || minimalClosure?.previousContractDigest !== predecessor.scope.closureDigest
-      || !predecessor.scope.decisionDigests.every((digest) => minimalClosure?.operatorDecisionDigests?.includes(digest))) {
+      || minimalClosure?.previousContractDigest !== predecessor.scope.closureDigest) {
     closureErrors.push('$ recovered minimal closure does not append to exact prior scope authority');
   }
   if (closureErrors.length > 0) throw new StateError('Interrupted plan amendment has invalid minimal closure authority', 'RECOVERY_EVIDENCE_INVALID');
@@ -5235,6 +5258,7 @@ export function recoverState({ cwd = process.cwd(), changeId, crashStep, lockOpt
       for (const key of ['kind', 'reference', 'relationship', 'initialDigest']) {
         if (intent.nextState.source[key] !== predecessor.source[key]) throw new StateError(`Interrupted transition changed immutable source.${key}`, 'RECOVERY_EVIDENCE_INVALID');
       }
+      if (predecessor.scope) validateScopeDecisionHistory(root, predecessor);
     }
     const decisionDisposition = decisionDispositionForRecovery(intent, predecessor);
     const semanticSourceRefresh = sourceRefreshForRecovery(root, intent, predecessor);

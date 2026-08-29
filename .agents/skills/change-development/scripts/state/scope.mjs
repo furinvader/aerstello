@@ -58,6 +58,9 @@ export function validateClosureForState(closure, state, planDigest = state.plan?
     ['planningSha', closure?.planningSha, expected.planningSha],
     ['planDigest', closure?.planDigest, expected.planDigest],
   ]) if (actual !== value) errors.push(`$ ${label} does not match the exact durable authority`);
+  if (!isDeepStrictEqual(closure?.operatorDecisionDigests, state.scope?.decisionDigests ?? [])) {
+    errors.push('$ operatorDecisionDigests must equal the exact ordered durable scope decision digests');
+  }
   return [...new Set(errors)].sort();
 }
 

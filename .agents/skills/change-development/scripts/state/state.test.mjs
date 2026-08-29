@@ -398,6 +398,13 @@ test('plan admission rejects every contradictory scope semantic projection witho
   ];
   const directory = changeDirectory(fixture.cwd, planning.changeId);
   const before = durableSnapshot(directory);
+  const foreignClosure = { ...closure, operatorDecisionDigests: [`sha256:${'f'.repeat(64)}`] };
+  assert.throws(() => acceptPlanWithScope({ cwd: fixture.cwd, plan, minimalClosure: foreignClosure,
+    scopeEvidence: testScopeEvidence(planning, plan, foreignClosure), expectedRevision: planning.revision }),
+  (error) => error.code === 'PLAN_SCOPE_INVALID'
+    && /exact ordered durable scope decision digests/u.test(error.message));
+  assert.deepEqual(durableSnapshot(directory), before,
+    'admission rejects foreign closure decision authority without durable mutation');
   for (const mutate of mutations) {
     const contradictory = structuredClone(exact);
     mutate(contradictory.packet);
@@ -764,6 +771,149 @@ test('unknown and historical material approvals cannot authorize the current ame
   assert.throws(() => amendPlanWithScope({ cwd: historical.cwd, expectedRevision: state.revision, ...staleShape }),
     (error) => error.code === 'SCOPE_AMENDMENT_INVALID');
   assert.deepEqual(durableSnapshot(directory), before, 'historical approval cannot stand in for current decision shape');
+});
+
+test('material closure authority requires unique IDs and exact ordered decision digests', async () => {
+  const fixture = await materialDecisionFixture('exact-material-decision-authority', ['material-alpha']);
+  const firstDecisionId = 'approve-exact-alpha';
+  let state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision,
+    decision: materialScopeDecision(fixture.state, fixture.evidence, 'approve-material-amendment',
+      ['material-alpha'], firstDecisionId) });
+  const first = materialAmendment(state, fixture.plan, fixture.closure,
+    ['durable-test-change', 'unrelated-existing-shape', 'material-alpha'], 'apply-exact-alpha');
+  state = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...first });
+
+  const directory = changeDirectory(fixture.cwd, state.changeId);
+  const firstClosure = JSON.parse(readFileSync(join(directory,
+    'scope', 'minimal-closure', '0002.json'), 'utf8'));
+  const firstAmendment = JSON.parse(readFileSync(join(directory,
+    'plan', 'amendments', '0001.json'), 'utf8'));
+  const secondEvidence = materialScopeEvidence(state, first.resultingPlan, firstClosure,
+    ['material-beta'], [digestJson(firstAmendment)], [{
+      id: firstDecisionId, digest: state.scope.decisionDigests[0],
+      disposition: 'approve-material-amendment', authorizedShape: ['material-alpha'],
+    }]);
+  state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: secondEvidence,
+    expectedRevision: state.revision });
+
+  const beforeDuplicate = durableSnapshot(directory);
+  assert.throws(() => recordScopeDecision({ cwd: fixture.cwd, expectedRevision: state.revision,
+    decision: materialScopeDecision(state, secondEvidence, 'approve-material-amendment',
+      ['material-beta'], firstDecisionId) }),
+  (error) => error.code === 'SCOPE_DECISION_INVALID' && /already recorded/u.test(error.message));
+  assert.deepEqual(durableSnapshot(directory), beforeDuplicate,
+    'a duplicate decision ID writes no receipt, transition, event, revision, or phase');
+
+  state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: state.revision,
+    decision: materialScopeDecision(state, secondEvidence, 'approve-material-amendment',
+      ['material-beta'], 'approve-exact-beta') });
+  const [firstDigest, secondDigest] = state.scope.decisionDigests;
+  const beforeInvalidClosure = durableSnapshot(directory);
+  const invalidSequences = [
+    [firstDigest],
+    [secondDigest, firstDigest],
+    [firstDigest, secondDigest, `sha256:${'f'.repeat(64)}`],
+  ];
+  for (const [index, operatorDecisionDigests] of invalidSequences.entries()) {
+    const invalid = materialAmendment(state, first.resultingPlan, firstClosure,
+      ['durable-test-change', 'unrelated-existing-shape', 'material-alpha', 'material-beta'],
+      `invalid-decision-sequence-${index + 1}`, { operatorDecisionDigests });
+    assert.throws(() => amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...invalid }),
+      (error) => error.code === 'SCOPE_AMENDMENT_INVALID'
+        && /exact ordered durable scope decision digests/u.test(error.message));
+    assert.deepEqual(durableSnapshot(directory), beforeInvalidClosure,
+      'missing, reordered, or extra decision authority writes no durable bytes');
+  }
+
+  const exact = materialAmendment(state, first.resultingPlan, firstClosure,
+    ['durable-test-change', 'unrelated-existing-shape', 'material-alpha', 'material-beta'],
+    'apply-exact-beta');
+  state = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...exact });
+  assert.deepEqual(state.scope.decisionDigests, [firstDigest, secondDigest]);
+  assert.equal(validateState({ cwd: fixture.cwd }).valid, true,
+    'unique multi-decision authority with exact digest order remains replayable');
+});
+
+test('interrupted amendment recovery rejects non-exact decision authority before mutation', async () => {
+  const fixture = await materialDecisionFixture('recovery-exact-decision-authority', ['material-alpha']);
+  const state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision,
+    decision: materialScopeDecision(fixture.state, fixture.evidence, 'approve-material-amendment',
+      ['material-alpha'], 'recovery-approve-alpha') });
+  const exact = materialAmendment(state, fixture.plan, fixture.closure,
+    ['durable-test-change', 'unrelated-existing-shape', 'material-alpha'], 'recovery-apply-alpha');
+  assert.throws(() => amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...exact,
+    crashStep(step) { if (step === 'after-intent') throw new Error('pause amendment recovery'); } }),
+  /pause amendment recovery/u);
+
+  const directory = changeDirectory(fixture.cwd, state.changeId);
+  const transitionDirectory = join(directory, 'transitions', String(state.revision + 1).padStart(8, '0'));
+  const intentPath = join(transitionDirectory, 'intent.json');
+  const intent = JSON.parse(readFileSync(intentPath, 'utf8'));
+  const closureRecord = intent.authoritativeEvidence.minimalClosureDigest;
+  closureRecord.value.operatorDecisionDigests = [
+    ...closureRecord.value.operatorDecisionDigests,
+    `sha256:${'f'.repeat(64)}`,
+  ];
+  closureRecord.digest = digestJson(closureRecord.value);
+  intent.evidence.minimalClosureDigest = closureRecord.digest;
+  intent.nextState.scope.closureDigest = closureRecord.digest;
+  intent.nextStateDigest = digestJson(intent.nextState);
+  writeReceiptJson(intentPath, intent);
+
+  const beforeRecovery = durableSnapshot(directory);
+  assert.throws(() => recoverState({ cwd: fixture.cwd }),
+    (error) => error.code === 'RECOVERY_EVIDENCE_INVALID'
+      && /invalid minimal closure authority/u.test(error.message));
+  assert.deepEqual(durableSnapshot(directory), beforeRecovery,
+    'recovery rejects extra decision authority before sidecars, state, events, or completion mutate');
+});
+
+test('durable replay rejects receipt-consistent duplicate scope decision IDs', async () => {
+  const fixture = await materialDecisionFixture('duplicate-decision-replay', ['material-alpha']);
+  const duplicateId = 'duplicate-replay-id';
+  let state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision,
+    decision: materialScopeDecision(fixture.state, fixture.evidence, 'approve-material-amendment',
+      ['material-alpha'], duplicateId) });
+  const first = materialAmendment(state, fixture.plan, fixture.closure,
+    ['durable-test-change', 'unrelated-existing-shape', 'material-alpha'], 'duplicate-replay-first');
+  state = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...first });
+  const directory = changeDirectory(fixture.cwd, state.changeId);
+  const firstClosure = JSON.parse(readFileSync(join(directory,
+    'scope', 'minimal-closure', '0002.json'), 'utf8'));
+  const firstAmendment = JSON.parse(readFileSync(join(directory,
+    'plan', 'amendments', '0001.json'), 'utf8'));
+  const evidence = materialScopeEvidence(state, first.resultingPlan, firstClosure,
+    ['material-beta'], [digestJson(firstAmendment)], [{
+      id: duplicateId, digest: state.scope.decisionDigests[0],
+      disposition: 'approve-material-amendment', authorizedShape: ['material-alpha'],
+    }]);
+  state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
+    expectedRevision: state.revision });
+  state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: state.revision,
+    decision: materialScopeDecision(state, evidence, 'approve-material-amendment',
+      ['material-beta'], 'unique-before-tamper') });
+
+  const decisionPath = join(directory, 'scope', 'decisions',
+    `${String(state.revision).padStart(8, '0')}-unique-before-tamper.json`);
+  const duplicatedDecision = JSON.parse(readFileSync(decisionPath, 'utf8'));
+  duplicatedDecision.decisionId = duplicateId;
+  const duplicatedDigest = digestJson(duplicatedDecision);
+  writeReceiptJson(decisionPath, duplicatedDecision);
+
+  const duplicatedState = structuredClone(state);
+  duplicatedState.scope.decisionDigests[duplicatedState.scope.decisionDigests.length - 1] = duplicatedDigest;
+  const transitionDirectory = join(directory, 'transitions', String(state.revision).padStart(8, '0'));
+  const intent = JSON.parse(readFileSync(join(transitionDirectory, 'intent.json'), 'utf8'));
+  intent.nextState = duplicatedState;
+  intent.nextStateDigest = digestJson(duplicatedState);
+  intent.evidence.scopeDecisionDigest = duplicatedDigest;
+  intent.authoritativeEvidence.scopeDecisionDigest.value = duplicatedDecision;
+  intent.authoritativeEvidence.scopeDecisionDigest.digest = duplicatedDigest;
+  writeCompleteTransitionFixture(transitionDirectory, intent);
+  writeFileSync(join(directory, 'state.json'), `${JSON.stringify(duplicatedState)}\n`);
+
+  assert.throws(() => validateState({ cwd: fixture.cwd }),
+    (error) => error.code === 'SCOPE_EVIDENCE_INVALID' && /duplicate decision IDs/u.test(error.message));
 });
 
 test('abandon material disposition remains terminal and cannot be amended', async () => {
@@ -4067,6 +4217,15 @@ test('historical accepted Git metadata ownership replays but requires an explici
   assert.throws(() => bindTask({ cwd: fixture.cwd, packet: unsafePacket, expectedRevision: historicalState.revision }),
     (error) => error instanceof StateError && error.code === 'SCOPE_ADOPTION_REQUIRED');
   const closure = testMinimalClosure(historicalState, historicalPlan);
+  const foreignDecisionClosure = { ...closure, operatorDecisionDigests: [`sha256:${'f'.repeat(64)}`] };
+  const beforeForeignDecisionAdoption = durableSnapshot(root);
+  assert.throws(() => adoptScope({ cwd: fixture.cwd, expectedRevision: historicalState.revision,
+    minimalClosure: foreignDecisionClosure, scopeEvidence: testScopeEvidence(historicalState,
+      historicalPlan, foreignDecisionClosure, { amendmentDigests: [digestJson(amendmentRecord)] }) }),
+  (error) => error.code === 'SCOPE_ADOPTION_INVALID'
+    && /exact ordered durable scope decision digests/u.test(error.message));
+  assert.deepEqual(durableSnapshot(root), beforeForeignDecisionAdoption,
+    'legacy adoption rejects foreign decision authority without durable mutation');
   const staleOriginalEvidence = testScopeEvidence(historicalState, historicalPlan, closure, {
     subjectDigest: historicalState.plan.originalDigest,
     amendmentDigests: [digestJson(amendmentRecord)],
