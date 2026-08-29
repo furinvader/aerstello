@@ -145,6 +145,62 @@ function materialScopeEvidence(state, plan, closure, mechanisms, amendmentDigest
   return evidence;
 }
 
+function planningMaterialScopeEvidence(state, plan, closure, mechanism = 'material-alpha') {
+  const evidence = testScopeEvidence(state, plan, closure);
+  const mapping = {
+    mechanism, sourceCriterionIds: [], acceptedCriterionIds: [], invariantIds: [], nonGoalIds: [], guidanceIds: [],
+    rationale: `${mechanism} is a proposed material subsystem without accepted criterion authority.`,
+  };
+  evidence.packet.changeInventory.subsystems = [mechanism];
+  evidence.packet.changeInventory.mappings.push(mapping);
+  evidence.result = {
+    ...evidence.result,
+    binding: evidence.packet.binding,
+    verdict: 'human-decision-required',
+    summary: 'The proposed subsystem requires an exact human material-scope decision.',
+    coverage: [evidence.result.coverage[0], { ...mapping, classification: 'material-scope-change' }],
+    scopeDelta: { description: 'Decide the exact proposed material subsystem.', sourceCriterionIds: [],
+      acceptedCriterionIds: [], invariantIds: [], materialSurfaces: ['new-subsystem'] },
+    materialityTriggers: [{ category: 'new-subsystem', evidence: 'The inventory proposes a new subsystem.' }],
+    smallestExpansion: 'Authorize only the proposed subsystem.',
+    narrowAlternative: 'Remove the proposed subsystem and retain existing authority.',
+    deferralConsequences: 'The subsystem remains outside implementation authority.',
+    humanDecision: true,
+  };
+  evidence.packetDigest = digestJson(evidence.packet);
+  evidence.resultDigest = digestJson(evidence.result);
+  return evidence;
+}
+
+function nonAdmittingPlanningEvidence(state, plan, closure, verdict) {
+  const evidence = testScopeEvidence(state, plan, closure, {
+    authorityDecisions: [{ id: 'planning-material-decision', digest: state.scope.decisionDigests[0],
+      disposition: 'reject-use-narrow', authorizedShape: [] }],
+  });
+  const mapping = evidence.result.coverage[0];
+  if (verdict === 'minor-amendment-required') {
+    evidence.result = { ...evidence.result, verdict,
+      coverage: [{ ...mapping, classification: 'necessary-minor-expansion',
+        rationale: 'The revised candidate needs one bounded adjacent mechanism.' }],
+      scopeDelta: { description: 'Add one bounded adjacent mechanism.',
+        sourceCriterionIds: [...mapping.sourceCriterionIds], acceptedCriterionIds: [...mapping.acceptedCriterionIds],
+        invariantIds: [], materialSurfaces: [] } };
+  } else if (verdict === 'trim-required') {
+    evidence.result = { ...evidence.result, verdict,
+      coverage: [{ ...mapping, sourceCriterionIds: [], acceptedCriterionIds: [], classification: 'speculative',
+        rationale: 'The revised candidate retains unnecessary machinery.' }],
+      unnecessaryWork: [mapping.mechanism], smallerSufficientAlternative: 'Remove the unnecessary machinery.' };
+  } else {
+    evidence.result = { ...evidence.result, verdict,
+      coverage: [{ ...mapping, classification: 'insufficient-evidence',
+        rationale: 'The revised candidate lacks exact evidence.' }],
+      missingEvidence: ['Exact evidence for the revised candidate is missing.'] };
+  }
+  evidence.packetDigest = digestJson(evidence.packet);
+  evidence.resultDigest = digestJson(evidence.result);
+  return evidence;
+}
+
 function materialScopeDecision(state, evidence, disposition, approvedShape, decisionId) {
   return {
     schemaVersion: 1, changeId: state.changeId, decisionId, revision: state.revision + 1, disposition,
@@ -832,6 +888,69 @@ test('material closure authority requires unique IDs and exact ordered decision 
   assert.deepEqual(state.scope.decisionDigests, [firstDigest, secondDigest]);
   assert.equal(validateState({ cwd: fixture.cwd }).valid, true,
     'unique multi-decision authority with exact digest order remains replayable');
+});
+
+test('revised planning verdicts retain incorporated material decision authority', async () => {
+  for (const verdict of ['minor-amendment-required', 'trim-required', 'insufficient-evidence']) {
+    const fixture = repository(`revised planning ${verdict}`);
+    let state = await initializeState({ cwd: fixture.cwd, changeId: `revised-planning-${verdict}`,
+      mode: 'implement', baseBranch: 'main', planningRef: fixture.sha, source: descriptor });
+    const firstPlan = planFor(state);
+    const firstClosure = testMinimalClosure(state, firstPlan);
+    const materialEvidence = planningMaterialScopeEvidence(state, firstPlan, firstClosure);
+    state = acceptPlanWithScope({ cwd: fixture.cwd, plan: firstPlan, minimalClosure: firstClosure,
+      scopeEvidence: materialEvidence, expectedRevision: state.revision });
+    const decision = {
+      schemaVersion: 1, changeId: state.changeId, decisionId: 'planning-material-decision',
+      revision: state.revision + 1, disposition: 'reject-use-narrow',
+      evidence: {
+        sourceDigest: state.source.latestDigest, planningSha: state.planningSha,
+        planDigest: state.scope.candidatePlanDigest, amendmentDigests: [],
+        closureDigest: state.scope.closureDigest, subjectDigest: materialEvidence.packet.binding.subject.digest,
+        subjectSha: materialEvidence.packet.binding.subject.sha,
+        assessmentPacketDigest: materialEvidence.packetDigest,
+        assessmentResultDigest: materialEvidence.resultDigest,
+      },
+      rationale: 'Use the narrow planning candidate.', approvedShape: [], deferredFollowups: [],
+    };
+    state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: state.revision, decision });
+
+    const revisedPlan = structuredClone(firstPlan);
+    revisedPlan.objective = `Exercise the revised ${verdict} planning candidate.`;
+    const revisedClosure = testMinimalClosure(state, revisedPlan, {
+      revision: 2, previousContractDigest: state.scope.closureDigest,
+      operatorDecisionDigests: [...state.scope.decisionDigests],
+    });
+    const revisedEvidence = nonAdmittingPlanningEvidence(state, revisedPlan, revisedClosure, verdict);
+    state = acceptPlanWithScope({ cwd: fixture.cwd, plan: revisedPlan, minimalClosure: revisedClosure,
+      scopeEvidence: revisedEvidence, expectedRevision: state.revision });
+
+    assert.equal(state.phase, verdict === 'human-decision-required' ? 'awaiting-scope-decision' : 'planning');
+    assert.equal(state.scope.currentEvidenceDigest, digestJson(revisedEvidence));
+    assert.deepEqual(state.scope.decisionDigests, [digestJson(decision)]);
+    assert.equal(validateState({ cwd: fixture.cwd }).valid, true,
+      `${verdict} replays with the full incorporated decision sequence`);
+  }
+});
+
+test('ordinary abandonment retains incorporated material decision authority', async () => {
+  const fixture = await materialDecisionFixture('post-material-ordinary-abandonment', ['material-alpha']);
+  let state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision,
+    decision: materialScopeDecision(fixture.state, fixture.evidence, 'approve-material-amendment',
+      ['material-alpha'], 'approve-before-ordinary-abandonment') });
+  const amendment = materialAmendment(state, fixture.plan, fixture.closure,
+    ['durable-test-change', 'unrelated-existing-shape', 'material-alpha'], 'incorporate-before-abandonment');
+  state = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...amendment });
+  assert.throws(() => archiveState({ cwd: fixture.cwd, expectedRevision: state.revision,
+    abandonReason: 'Stop this already-authorized implementation.',
+    crashStep(step) { if (step === 'archive-after-intent') throw new Error('pause ordinary archive'); } }),
+  /pause ordinary archive/u);
+
+  const abandoned = loadState(fixture.cwd);
+  assert.equal(abandoned.phase, 'abandoned');
+  assert.deepEqual(abandoned.scope.decisionDigests, state.scope.decisionDigests);
+  assert.equal(validateState({ cwd: fixture.cwd }).valid, true,
+    'ordinary abandonment replays the full incorporated decision sequence');
 });
 
 test('interrupted amendment recovery rejects non-exact decision authority before mutation', async () => {

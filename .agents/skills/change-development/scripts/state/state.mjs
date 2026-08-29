@@ -899,6 +899,44 @@ function validateScopeDecisionHistory(cwd, state) {
   return decisionIds;
 }
 
+function pendingMaterialDecisionForClosure(root, state, currentScope) {
+  if (currentScope?.value?.result?.verdict !== 'human-decision-required'
+      || validateScopeEvidence(currentScope.value).length > 0
+      || state.scope?.status !== 'assessment-required'
+      || (state.scope?.decisionDigests?.length ?? 0) === 0) return null;
+  const digest = state.scope.decisionDigests.at(-1);
+  const receipt = findScopeReceipt(root, state, 'decisions', digest, 'pending material scope decision');
+  const decision = receipt.value;
+  if (validateScopeDecision(decision).length > 0) return null;
+  const evidence = currentScope.value;
+  const expectedEvidence = {
+    sourceDigest: state.plan?.sourceCaptureDigest ?? state.source.latestDigest,
+    planningSha: state.planningSha,
+    planDigest: state.plan?.effectiveDigest ?? state.scope.candidatePlanDigest,
+    amendmentDigests: evidence.packet.binding.amendmentDigests,
+    closureDigest: state.scope.closureDigest,
+    subjectDigest: evidence.packet.binding.subject.digest,
+    subjectSha: evidence.packet.binding.subject.sha,
+    assessmentPacketDigest: evidence.packetDigest,
+    assessmentResultDigest: evidence.resultDigest,
+  };
+  if (serialized(decision.evidence) !== serialized(expectedEvidence)) return null;
+  const awaitingAmendment = state.plan !== null
+    && decision.disposition !== 'abandon-replan'
+    && state.phase === 'blocked'
+    && state.blockedReasons.includes(
+      'Recorded material scope decision requires its exact authorized plan amendment before implementation can continue.',
+    );
+  const awaitingRevisedPlan = state.plan === null
+    && decision.disposition !== 'abandon-replan'
+    && state.phase === 'planning'
+    && state.scope.candidatePlanDigest === decision.evidence.planDigest;
+  const materialAbandonment = decision.disposition === 'abandon-replan'
+    && state.phase === 'abandoned'
+    && state.abandonmentReason === decision.rationale;
+  return awaitingAmendment || awaitingRevisedPlan || materialAbandonment ? receipt : null;
+}
+
 function currentScopeReceipts(cwd, state) {
   if (!state.scope) throw new StateError('Append-only scope adoption is required before authority can advance', 'SCOPE_ADOPTION_REQUIRED');
   const closure = findScopeReceipt(cwd, state, 'minimal-closure', state.scope.closureDigest, 'minimal closure');
@@ -4513,16 +4551,17 @@ function validateLoadedState(root, state) {
   if (state.scope) {
     const closure = findScopeReceipt(root, state, 'minimal-closure', state.scope.closureDigest, 'minimal closure');
     const authorityState = state.plan ? state : { ...state, plan: { effectiveDigest: state.scope.candidatePlanDigest } };
-    const unincorporatedMaterialDecision = (state.phase === 'blocked'
-      && state.blockedReasons.includes('Recorded material scope decision requires its exact authorized plan amendment before implementation can continue.')
-      || state.phase === 'abandoned' && nonemptyString(state.abandonmentReason)
-      || state.phase === 'planning' && state.plan === null && nonemptyString(state.scope.candidatePlanDigest))
-      && state.scope.decisionDigests.length > 0;
-    const closureState = unincorporatedMaterialDecision
-      ? { ...authorityState, scope: { ...authorityState.scope,
-        decisionDigests: authorityState.scope.decisionDigests.slice(0, -1) } }
-      : authorityState;
-    if (validateClosureForState(closure.value, closureState).length > 0) {
+    const currentScope = state.scope.currentEvidenceDigest === null ? null
+      : findScopeReceipt(root, state, 'evidence', state.scope.currentEvidenceDigest, 'current scope evidence');
+    const fullClosureErrors = validateClosureForState(closure.value, authorityState);
+    const pendingMaterialDecision = fullClosureErrors.length > 0
+      ? pendingMaterialDecisionForClosure(root, state, currentScope)
+      : null;
+    const closureErrors = pendingMaterialDecision
+      ? validateClosureForState(closure.value, { ...authorityState, scope: { ...authorityState.scope,
+        decisionDigests: authorityState.scope.decisionDigests.slice(0, -1) } })
+      : fullClosureErrors;
+    if (closureErrors.length > 0) {
       throw new StateError('Minimal closure projection is stale or malformed', 'SCOPE_EVIDENCE_INVALID');
     }
     const admission = findScopeReceipt(root, state, 'evidence', state.scope.admissionEvidenceDigest, 'admission scope evidence');
@@ -4530,7 +4569,6 @@ function validateLoadedState(root, state) {
       throw new StateError('Admission scope evidence projection is malformed', 'SCOPE_EVIDENCE_INVALID');
     }
     if (state.scope.currentEvidenceDigest !== null) {
-      const currentScope = findScopeReceipt(root, state, 'evidence', state.scope.currentEvidenceDigest, 'current scope evidence');
       if (validateScopeEvidence(currentScope.value).length > 0
           || currentScope.value.cadence.boundary !== state.scope.currentBoundary
           || currentScope.value.packet.binding.subject.sha !== state.scope.currentSubjectSha) {
@@ -4538,9 +4576,6 @@ function validateLoadedState(root, state) {
       }
       if (state.scope.status === 'current' && currentScope.value.result.verdict !== 'within-scope') {
         throw new StateError('Current scope authority requires a within-scope verdict', 'SCOPE_EVIDENCE_INVALID');
-      }
-      if (unincorporatedMaterialDecision && currentScope.value.result.verdict !== 'human-decision-required') {
-        throw new StateError('Unincorporated material decision requires its exact human-decision scope evidence', 'SCOPE_EVIDENCE_INVALID');
       }
     } else if (state.scope.currentBoundary !== null || state.scope.currentSubjectSha !== null) {
       throw new StateError('Empty current scope evidence must clear its boundary and subject projection', 'SCOPE_EVIDENCE_INVALID');
