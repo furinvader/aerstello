@@ -161,7 +161,7 @@ function validateApprovedDecisions(value, path, errors) {
 }
 
 function validateDeferredFollowUps(value, path, errors) {
-  if (!Array.isArray(value) || value.length > 128) {
+  if (!Array.isArray(value) || value.length > 256) {
     errors.push(`${path} is invalid`);
     return;
   }
@@ -171,7 +171,7 @@ function validateDeferredFollowUps(value, path, errors) {
     if (!requireFields(entry, fields, entryPath, errors)) return;
     rejectUnknownFields(entry, fields, entryPath, errors);
     if (!isId(entry.id)) errors.push(`${entryPath}.id is invalid`);
-    if (!isString(entry.reference, { min: 1, max: 1000 })) errors.push(`${entryPath}.reference is invalid`);
+    if (!isString(entry.reference, { min: 1, max: 4000 })) errors.push(`${entryPath}.reference is invalid`);
   });
   if (new Set(value.map((entry) => entry?.id)).size !== value.length) errors.push(`${path} contains duplicate IDs`);
 }

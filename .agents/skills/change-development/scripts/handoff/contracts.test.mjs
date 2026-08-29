@@ -96,6 +96,14 @@ function fixture() {
   };
 }
 
+function withDeferredFollowUps(input, deferredFollowups) {
+  input.minimalClosure.value.deferredFollowups = deferredFollowups;
+  input.minimalClosure.digest = scopeContractDigest(input.minimalClosure.value);
+  input.integratedScopeEvidence.value.closureDigest = input.minimalClosure.digest;
+  input.integratedScopeEvidence.digest = scopeContractDigest(input.integratedScopeEvidence.value);
+  return input;
+}
+
 test('builds a bounded detached imported authority snapshot', () => {
   const input = fixture();
   const before = structuredClone(input);
@@ -133,6 +141,31 @@ test('rejects unknown input fields and bounded-list overflow', () => {
   const input = fixture();
   input.decisions = Array.from({ length: 129 }, () => input.minimalClosure);
   assert.throws(() => buildDevelopmentScopeHandoff(input), /at most 128/u);
+});
+
+test('projects the complete canonical deferred follow-up domain', () => {
+  const deferredFollowups = Array.from({ length: 256 }, (_, index) => ({
+    id: `follow-up-${index + 1}`,
+    text: index === 255 ? 'x'.repeat(4000) : `Deferred follow-up ${index + 1}.`,
+  }));
+  const handoff = buildDevelopmentScopeHandoff(withDeferredFollowUps(fixture(), deferredFollowups));
+  assert.equal(handoff.deferredFollowUps.length, 256);
+  assert.deepEqual(handoff.deferredFollowUps.map(({ id }) => id), deferredFollowups.map(({ id }) => id));
+  assert.equal(handoff.deferredFollowUps[255].reference.length, 4000);
+
+  assert.throws(
+    () => buildDevelopmentScopeHandoff(withDeferredFollowUps(fixture(), [
+      ...deferredFollowups,
+      { id: 'follow-up-257', text: 'One entry beyond the canonical closure domain.' },
+    ])),
+    TypeError,
+  );
+  assert.throws(
+    () => buildDevelopmentScopeHandoff(withDeferredFollowUps(fixture(), [
+      { id: 'follow-up-reference-overflow', text: 'x'.repeat(4001) },
+    ])),
+    TypeError,
+  );
 });
 
 test('derives terminal task and subject authority instead of trusting caller identities', () => {

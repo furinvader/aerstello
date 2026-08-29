@@ -317,6 +317,36 @@ test('accepts the real development scope handoff and its canonical authority dig
   assert.match(scopeAuthorityDigest(handoff), /^sha256:[0-9a-f]{64}$/u);
 });
 
+test('accepts the complete deferred follow-up domain across producer, runtime, and schema', () => {
+  const { validateScopeAuthoritySnapshot } = contract;
+  const input = developmentHandoffInput();
+  input.minimalClosure.value.deferredFollowups = Array.from({ length: 256 }, (_, index) => ({
+    id: `follow-up-${index + 1}`,
+    text: index === 255 ? 'x'.repeat(4000) : `Deferred follow-up ${index + 1}.`,
+  }));
+  input.minimalClosure.digest = scopeContractDigest(input.minimalClosure.value);
+  input.integratedScopeEvidence.value.closureDigest = input.minimalClosure.digest;
+  input.integratedScopeEvidence.digest = scopeContractDigest(input.integratedScopeEvidence.value);
+  const handoff = buildDevelopmentScopeHandoff(input);
+
+  const schema = JSON.parse(readFileSync(new URL('../../schemas/scope-control.schema.json', import.meta.url), 'utf8'));
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajv);
+  const validateSchema = ajv.compile(schema);
+  assert.deepEqual(validateScopeAuthoritySnapshot(handoff), []);
+  assert.equal(validateSchema(handoff), true, JSON.stringify(validateSchema.errors));
+
+  const tooMany = structuredClone(handoff);
+  tooMany.deferredFollowUps.push({ id: 'follow-up-257', reference: 'Overflow.' });
+  assert.notDeepEqual(validateScopeAuthoritySnapshot(tooMany), []);
+  assert.equal(validateSchema(tooMany), false);
+
+  const tooLong = structuredClone(handoff);
+  tooLong.deferredFollowUps[255].reference = 'x'.repeat(4001);
+  assert.notDeepEqual(validateScopeAuthoritySnapshot(tooLong), []);
+  assert.equal(validateSchema(tooLong), false);
+});
+
 test('journal is append-only shaped and embeds exact canonical assessment evidence', () => {
   const { scopeAuthorityDigest, scopeControlJournalDigest, validateScopeControlJournal } = contract;
   const authorityDigest = scopeAuthorityDigest(authority());

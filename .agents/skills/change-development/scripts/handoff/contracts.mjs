@@ -16,7 +16,8 @@ const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
 const DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u;
 const MAX_AMENDMENTS = 128;
 const MAX_DECISIONS = 128;
-const MAX_FOLLOW_UPS = 128;
+const MAX_FOLLOW_UPS = 256;
+const MAX_FOLLOW_UP_REFERENCE_LENGTH = 4000;
 
 function assertObject(value, label) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -99,8 +100,10 @@ function deferredFollowUps(closure) {
     throw new TypeError(`deferred follow-ups must contain at most ${MAX_FOLLOW_UPS} entries`);
   }
   const projected = entries.map(({ id, text: reference }) => ({ id, reference }));
-  if (projected.some(({ reference }) => reference.length > 1000)) {
-    throw new TypeError('deferred follow-up reference exceeds 1000 characters');
+  if (projected.some(({ reference }) => reference.length > MAX_FOLLOW_UP_REFERENCE_LENGTH)) {
+    throw new TypeError(
+      `deferred follow-up reference exceeds ${MAX_FOLLOW_UP_REFERENCE_LENGTH} characters`,
+    );
   }
   assertUnique(projected.map(({ id }) => id), 'deferred follow-up IDs');
   return projected;
