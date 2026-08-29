@@ -171,7 +171,9 @@ function validateDeferredFollowUps(value, path, errors) {
     if (!requireFields(entry, fields, entryPath, errors)) return;
     rejectUnknownFields(entry, fields, entryPath, errors);
     if (!isId(entry.id)) errors.push(`${entryPath}.id is invalid`);
-    if (!isString(entry.reference, { min: 1, max: 4000 })) errors.push(`${entryPath}.reference is invalid`);
+    if (!isString(entry.reference, { min: 1 }) || Array.from(entry.reference).length > 4000) {
+      errors.push(`${entryPath}.reference is invalid`);
+    }
   });
   if (new Set(value.map((entry) => entry?.id)).size !== value.length) errors.push(`${path} contains duplicate IDs`);
 }

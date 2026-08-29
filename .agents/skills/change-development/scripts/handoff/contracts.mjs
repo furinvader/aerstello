@@ -100,7 +100,9 @@ function deferredFollowUps(closure) {
     throw new TypeError(`deferred follow-ups must contain at most ${MAX_FOLLOW_UPS} entries`);
   }
   const projected = entries.map(({ id, text: reference }) => ({ id, reference }));
-  if (projected.some(({ reference }) => reference.length > MAX_FOLLOW_UP_REFERENCE_LENGTH)) {
+  if (projected.some(
+    ({ reference }) => Array.from(reference).length > MAX_FOLLOW_UP_REFERENCE_LENGTH,
+  )) {
     throw new TypeError(
       `deferred follow-up reference exceeds ${MAX_FOLLOW_UP_REFERENCE_LENGTH} characters`,
     );

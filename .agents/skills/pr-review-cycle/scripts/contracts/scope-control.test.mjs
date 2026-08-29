@@ -319,10 +319,11 @@ test('accepts the real development scope handoff and its canonical authority dig
 
 test('accepts the complete deferred follow-up domain across producer, runtime, and schema', () => {
   const { validateScopeAuthoritySnapshot } = contract;
+  const astralReference = '💠'.repeat(4000);
   const input = developmentHandoffInput();
   input.minimalClosure.value.deferredFollowups = Array.from({ length: 256 }, (_, index) => ({
     id: `follow-up-${index + 1}`,
-    text: index === 255 ? 'x'.repeat(4000) : `Deferred follow-up ${index + 1}.`,
+    text: index === 255 ? astralReference : `Deferred follow-up ${index + 1}.`,
   }));
   input.minimalClosure.digest = scopeContractDigest(input.minimalClosure.value);
   input.integratedScopeEvidence.value.closureDigest = input.minimalClosure.digest;
@@ -335,6 +336,8 @@ test('accepts the complete deferred follow-up domain across producer, runtime, a
   const validateSchema = ajv.compile(schema);
   assert.deepEqual(validateScopeAuthoritySnapshot(handoff), []);
   assert.equal(validateSchema(handoff), true, JSON.stringify(validateSchema.errors));
+  assert.equal(Array.from(handoff.deferredFollowUps[255].reference).length, 4000);
+  assert.equal(handoff.deferredFollowUps[255].reference.length, 8000);
 
   const tooMany = structuredClone(handoff);
   tooMany.deferredFollowUps.push({ id: 'follow-up-257', reference: 'Overflow.' });
@@ -342,7 +345,7 @@ test('accepts the complete deferred follow-up domain across producer, runtime, a
   assert.equal(validateSchema(tooMany), false);
 
   const tooLong = structuredClone(handoff);
-  tooLong.deferredFollowUps[255].reference = 'x'.repeat(4001);
+  tooLong.deferredFollowUps[255].reference = '💠'.repeat(4001);
   assert.notDeepEqual(validateScopeAuthoritySnapshot(tooLong), []);
   assert.equal(validateSchema(tooLong), false);
 });

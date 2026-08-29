@@ -144,14 +144,16 @@ test('rejects unknown input fields and bounded-list overflow', () => {
 });
 
 test('projects the complete canonical deferred follow-up domain', () => {
+  const astralReference = '💠'.repeat(4000);
   const deferredFollowups = Array.from({ length: 256 }, (_, index) => ({
     id: `follow-up-${index + 1}`,
-    text: index === 255 ? 'x'.repeat(4000) : `Deferred follow-up ${index + 1}.`,
+    text: index === 255 ? astralReference : `Deferred follow-up ${index + 1}.`,
   }));
   const handoff = buildDevelopmentScopeHandoff(withDeferredFollowUps(fixture(), deferredFollowups));
   assert.equal(handoff.deferredFollowUps.length, 256);
   assert.deepEqual(handoff.deferredFollowUps.map(({ id }) => id), deferredFollowups.map(({ id }) => id));
-  assert.equal(handoff.deferredFollowUps[255].reference.length, 4000);
+  assert.equal(Array.from(handoff.deferredFollowUps[255].reference).length, 4000);
+  assert.equal(handoff.deferredFollowUps[255].reference.length, 8000);
 
   assert.throws(
     () => buildDevelopmentScopeHandoff(withDeferredFollowUps(fixture(), [
@@ -162,7 +164,7 @@ test('projects the complete canonical deferred follow-up domain', () => {
   );
   assert.throws(
     () => buildDevelopmentScopeHandoff(withDeferredFollowUps(fixture(), [
-      { id: 'follow-up-reference-overflow', text: 'x'.repeat(4001) },
+      { id: 'follow-up-reference-overflow', text: '💠'.repeat(4001) },
     ])),
     TypeError,
   );
