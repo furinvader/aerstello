@@ -58,6 +58,11 @@ function emptyLocalVerification() {
   return { status: 'not-run', headSha: null, taskIds: [], updatedAt: null };
 }
 
+function isPristineVerification(proof) {
+  return proof.status === 'not-run' && proof.headSha === null
+    && proof.taskIds.length === 0 && proof.updatedAt === null;
+}
+
 function emptyTargetedValidation() {
   return {
     source: 'orchestrator', scope: 'targeted', status: 'not-run',
@@ -278,6 +283,31 @@ function assertArchiveImportEnvelope(current, next, envelope) {
       || nextTask.status !== 'completed') {
     throw new StateError('Archive import task is not an eligible already-fixed transition', 'INVALID_ARCHIVE_IMPORT');
   }
+  const remediations = current.tasks.filter((task) => (
+    ['local', 'github-threadless'].includes(task.sourceType)
+      && task.disposition === 'actionable'
+      && ['integrated', 'completed'].includes(task.status)
+  ));
+  const remediation = remediations[0];
+  const localProof = current.threadResolutionStatus.localVerification ?? emptyLocalVerification();
+  const selectedProof = remediation?.sourceType === 'local'
+    ? localProof
+    : current.threadResolutionStatus.threadlessVerification;
+  const oppositeProof = remediation?.sourceType === 'local'
+    ? current.threadResolutionStatus.threadlessVerification
+    : localProof;
+  if (remediations.length !== 1 || remediation?.status !== 'completed'
+      || typeof remediation.integratedCommitSha !== 'string'
+      || selectedProof.status !== 'passed'
+      || selectedProof.headSha !== current.currentIntegrationHeadSha
+      || !sameEvidence(selectedProof.taskIds, [remediation.id])
+      || selectedProof.updatedAt === null
+      || !isPristineVerification(oppositeProof)) {
+    throw new StateError(
+      'Archive import requires one source-matching current-head bootstrap proof',
+      'INVALID_ARCHIVE_IMPORT',
+    );
+  }
   for (const task of current.tasks) {
     const updated = next.tasks.find((candidate) => candidate.id === task.id);
     if (task.id === envelope.taskId) {
@@ -337,10 +367,6 @@ function assertArchiveImportEnvelope(current, next, envelope) {
         || current.threadResolutionStatus.headSha !== null
         || current.threadResolutionStatus.threads.length !== 0
         || current.threadResolutionStatus.updatedAt !== null
-        || current.threadResolutionStatus.threadlessVerification.status !== 'passed'
-        || current.threadResolutionStatus.threadlessVerification.headSha
-          !== current.currentIntegrationHeadSha
-        || current.threadResolutionStatus.threadlessVerification.taskIds.length === 0
         || next.threadResolutionStatus.headSha !== current.currentIntegrationHeadSha) {
       throw new StateError('Archive import requires the exact pristine aggregate transition', 'INVALID_ARCHIVE_IMPORT');
     }

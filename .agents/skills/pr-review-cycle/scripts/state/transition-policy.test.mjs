@@ -52,7 +52,7 @@ function fingerprint(value) {
   return createHash('sha256').update(JSON.stringify(canonicalJson(value))).digest('hex');
 }
 
-function archiveFixture() {
+function archiveFixture(sourceType = 'github-threadless') {
   const task = {
     id: 'archive-task', sourceIds: ['thread:root-a', 'discussion:2'], sourceType: 'github-thread',
     fingerprint: 'task-fingerprint', summary: 'Archive task.', severity: 'P2',
@@ -60,14 +60,17 @@ function archiveFixture() {
     resolutionSummary: 'Already fixed.',
   };
   const remediation = {
-    ...task, id: 'remediation', sourceIds: ['local:remediation'], sourceType: 'local',
+    ...task, id: 'remediation', sourceIds: [`${sourceType}:remediation`], sourceType,
     disposition: 'actionable', status: 'completed', integratedCommitSha: SHA,
   };
+  const selectedProof = { status: 'passed', headSha: SHA, taskIds: ['remediation'], updatedAt: AT };
   const current = {
     ...baseState(), tasks: [remediation, task],
     threadResolutionStatus: {
       ...baseState().threadResolutionStatus,
-      threadlessVerification: { status: 'passed', headSha: SHA, taskIds: ['remediation'], updatedAt: AT },
+      ...(sourceType === 'local'
+        ? { localVerification: selectedProof }
+        : { threadlessVerification: selectedProof }),
     },
   };
   const authorityFingerprint = 'b'.repeat(64);
@@ -241,8 +244,32 @@ test('absence of authorization retains the generic append-only policy path', () 
   );
 });
 
-test('archive authorization validates an immutable exact envelope', () => {
+test('archive authorization validates immutable exact envelopes for either bootstrap lane', () => {
   const cwd = '/tmp/aerstello-policy';
+  const policy = createTransitionPolicy();
+  for (const sourceType of ['github-threadless', 'local']) {
+    const fixture = archiveFixture(sourceType);
+    const next = {
+      ...fixture.current,
+      tasks: fixture.current.tasks.map((task) => (
+        task.id === fixture.envelope.taskId ? { ...task, status: 'completed' } : task
+      )),
+      threadResolutionStatus: fixture.threadResolutionStatus,
+    };
+    const authorization = policy.authorizeProtectedTransition(
+      fixture.current,
+      next,
+      'archive-task-completion',
+      { archiveImportEnvelope: fixture.envelope },
+    );
+    assert.doesNotThrow(() => policy.assertTransitionAllowed(
+      fixture.current,
+      next,
+      authorization,
+      cwd,
+    ));
+  }
+
   const fixture = archiveFixture();
   const next = {
     ...fixture.current,
@@ -251,20 +278,6 @@ test('archive authorization validates an immutable exact envelope', () => {
     )),
     threadResolutionStatus: fixture.threadResolutionStatus,
   };
-  const policy = createTransitionPolicy();
-  const authorization = policy.authorizeProtectedTransition(
-    fixture.current,
-    next,
-    'archive-task-completion',
-    { archiveImportEnvelope: fixture.envelope },
-  );
-  assert.doesNotThrow(() => policy.assertTransitionAllowed(
-    fixture.current,
-    next,
-    authorization,
-    cwd,
-  ));
-
   const malformedEnvelope = {
     ...fixture.envelope,
     rows: fixture.envelope.rows.slice().reverse(),
@@ -284,6 +297,48 @@ test('archive authorization validates an immutable exact envelope', () => {
     ),
     'INVALID_ARCHIVE_IMPORT',
   );
+});
+
+test('archive authorization rejects malformed or ambiguous bootstrap proof lanes', () => {
+  const policy = createTransitionPolicy();
+  for (const [label, mutate] of [
+    ['both lanes passed', (copy) => { copy.current.threadResolutionStatus.localVerification = {
+      status: 'passed', headSha: SHA, taskIds: ['remediation'], updatedAt: AT,
+    }; }],
+    ['neither lane passed', (copy) => { copy.current.threadResolutionStatus.threadlessVerification = {
+      status: 'not-run', headSha: null, taskIds: [], updatedAt: null,
+    }; }],
+    ['wrong source', (copy) => { copy.current.tasks[0].sourceType = 'local'; }],
+    ['stale head', (copy) => { copy.current.threadResolutionStatus.threadlessVerification.headSha = 'b'.repeat(40); }],
+    ['multiple proof tasks', (copy) => { copy.current.threadResolutionStatus.threadlessVerification.taskIds.push('other'); }],
+    ['non-actionable remediation', (copy) => { copy.current.tasks[0].disposition = 'already-fixed'; }],
+    ['null integration commit', (copy) => { copy.current.tasks[0].integratedCommitSha = null; }],
+    ['non-pristine opposite lane', (copy) => { copy.current.threadResolutionStatus.localVerification.updatedAt = AT; }],
+    ['multiple remediations', (copy) => { copy.current.tasks.push({
+      ...copy.current.tasks[0], id: 'other', integratedCommitSha: null,
+    }); }],
+  ]) {
+    const fixture = archiveFixture();
+    const next = {
+      ...fixture.current,
+      tasks: fixture.current.tasks.map((task) => task.id === fixture.envelope.taskId
+        ? { ...task, status: 'completed' } : task),
+      threadResolutionStatus: fixture.threadResolutionStatus,
+    };
+    const copy = { current: structuredClone(fixture.current), next: structuredClone(next) };
+    mutate(copy);
+    const authorization = policy.authorizeProtectedTransition(
+      copy.current, copy.next, 'archive-task-completion',
+      { archiveImportEnvelope: fixture.envelope },
+    );
+    assertCode(
+      () => policy.assertTransitionAllowed(
+        copy.current, copy.next, authorization, '/tmp/aerstello-policy',
+      ),
+      'INVALID_ARCHIVE_IMPORT',
+      label,
+    );
+  }
 });
 
 test('archive authorization admits only the closed singleton local verifier bootstrap delta', () => {

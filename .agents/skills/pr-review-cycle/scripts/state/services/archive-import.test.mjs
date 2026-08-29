@@ -39,7 +39,7 @@ test('archive import service revalidates exact protected evidence on write and r
   assert.equal(loadState(cwd).revision, completed.revision);
 });
 
-test('archive service accepts one closed local verifier-bootstrap envelope and rejects mixed lanes', () => {
+test('archive service bootstraps local proof then imports the archive through production checkpoints', () => {
   const cwd = repo();
   const fixture = archiveImportStateFixture(cwd);
   const local = fixture.current.tasks[0];
@@ -95,10 +95,29 @@ test('archive service accepts one closed local verifier-bootstrap envelope and r
     fixture.current.threadResolutionStatus.threadlessVerification);
   assert.deepEqual(completed.threadResolutionStatus.localVerification, nextProof.localVerification);
 
-  throwsCode(() => checkpointArchiveTaskCompletion({
+  const importedProof = {
+    ...fixture.threadResolutionStatus,
+    threadlessVerification: completed.threadResolutionStatus.threadlessVerification,
+    localVerification: completed.threadResolutionStatus.localVerification,
+  };
+  const imported = checkpointArchiveTaskCompletion({
     cwd,
     expectedRevision: completed.revision,
-    threadResolutionStatus: completed.threadResolutionStatus,
+    threadResolutionStatus: importedProof,
+    archiveImportEnvelope: fixture.envelope,
+  });
+  assert.equal(imported.tasks.find((task) => task.id === fixture.aggregate.id).status, 'completed');
+  assert.equal(imported.threadResolutionStatus.status, 'passed');
+  assert.equal(imported.threadResolutionStatus.threads.length, 2);
+  assert.deepEqual(imported.threadResolutionStatus.localVerification, nextProof.localVerification);
+  assert.deepEqual(imported.threadResolutionStatus.threadlessVerification, {
+    status: 'not-run', headSha: null, taskIds: [], updatedAt: null,
+  });
+
+  throwsCode(() => checkpointArchiveTaskCompletion({
+    cwd,
+    expectedRevision: imported.revision,
+    threadResolutionStatus: imported.threadResolutionStatus,
     archiveImportEnvelope: fixture.envelope,
     verifierBootstrapEnvelope,
   }), 'INVALID_ARCHIVE_IMPORT');
