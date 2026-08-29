@@ -140,9 +140,21 @@ export function scopeGateForVerdict(verdict) {
   };
 }
 
-export function validateDecisionForEvidence(decision, { state, evidence, closureDigest,
+export function validateDecisionForEvidence(decision, { state, evidence, closure,
   amendmentRecords = [] }) {
   const errors = validateScopeDecision(decision);
+  const closureDigest = scopeContractDigest(closure);
+  if (decision?.disposition === 'split-defer' && Array.isArray(decision.deferredFollowups)) {
+    const projectedClosure = {
+      ...closure,
+      deferredFollowups: [
+        ...(closure?.deferredFollowups ?? []),
+        ...decision.deferredFollowups.map((identity) => ({ id: identity, text: identity })),
+      ],
+    };
+    errors.push(...validateMinimalClosureContract(projectedClosure)
+      .map((error) => `projected split-defer closure: ${error}`));
+  }
   const expected = {
     sourceDigest: state.plan?.sourceCaptureDigest ?? state.source.latestDigest,
     planningSha: state.planningSha,

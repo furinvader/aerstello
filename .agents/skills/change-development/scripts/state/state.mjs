@@ -1322,7 +1322,7 @@ export function recordScopeDecision({ cwd = process.cwd(), changeId, decision, e
     const closure = findScopeReceipt(root, state, 'minimal-closure', state.scope.closureDigest, 'scope decision closure');
     const authorityState = state.plan ? state : { ...state, plan: { effectiveDigest: state.scope.candidatePlanDigest } };
     const errors = validateDecisionForEvidence(decision, {
-      state: authorityState, evidence, closureDigest: closure.digest ?? state.scope.closureDigest,
+      state: authorityState, evidence, closure: closure.value,
       amendmentRecords: scopeAmendmentRecords(root, state),
     });
     if (errors.length > 0) throw new StateError(`Scope decision is invalid or stale:\n- ${errors.join('\n- ')}`, 'SCOPE_DECISION_INVALID');
