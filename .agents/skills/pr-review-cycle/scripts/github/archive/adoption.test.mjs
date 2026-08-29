@@ -2747,6 +2747,174 @@ test('archive adoption accepts exact 6-to-10-to-14 partial-mixed lineage and pro
   assert.deepEqual(successful.fixture.client.events, []);
   assert.deepEqual(records, originalRecords);
 
+  const buildPredecessorOnlyTopology = async () => {
+    const topology = await buildTopology();
+    topology.mixedArchive.state.tasks = topology.mixedArchive.state.tasks.filter(
+      (task) => task.id !== topology.predecessorTaskId,
+    );
+    const successor = topology.terminalCarrier.state.tasks.find(
+      (task) => task.id === topology.successorTaskId,
+    );
+    const predecessorTask = {
+      ...structuredClone(successor),
+      disposition: 'actionable',
+      status: 'integrated',
+      integratedCommitSha: topology.predecessorCommit,
+      resolutionSummary: 'Integrated before the terminal proof origin superseded this task.',
+      taskPacketDigest: '1'.repeat(64),
+      workerResultDigest: '2'.repeat(64),
+    };
+    const predecessorState = structuredClone(topology.mixedArchive.state);
+    predecessorState.tasks = [predecessorTask];
+    predecessorState.threadResolutionStatus = proof('not-run');
+    predecessorState.phase = 'triaging';
+    predecessorState.abandonmentReason = 'Preserve terminal proofless predecessor authority.';
+    predecessorState.updatedAt = '2026-08-01T09:00:00.000Z';
+    const predecessorArchive = {
+      archiveId: 'pr-35-2026-08-01T09-00-00-000Z',
+      state: predecessorState,
+      events: [{
+        schemaVersion: 1,
+        type: 'abandoned',
+        summary: `Archived without completion: ${predecessorState.abandonmentReason}`,
+        at: '2026-08-01T09:00:00.010Z',
+      }],
+    };
+    return {
+      ...topology,
+      predecessorArchive,
+      predecessorTask,
+      records: [
+        topology.terminalCarrier,
+        topology.mixedArchive,
+        topology.oldArchive,
+        predecessorArchive,
+      ],
+    };
+  };
+
+  const predecessorOnly = await buildPredecessorOnlyTopology();
+  const predecessorOnlyOriginal = structuredClone(predecessorOnly.records);
+  const predecessorOnlyStore = immutableArchiveStore(predecessorOnly.records);
+  const predecessorOnlySetup = workflow(
+    predecessorOnly.active, predecessorOnly.fixture.client,
+    {
+      archiveStore: predecessorOnlyStore,
+      git: predecessorOnly.freshGit,
+      journal: fakeJournal(predecessorOnly.fixture.client.events),
+    },
+  );
+  const predecessorOnlyResult = await predecessorOnlySetup.api.replyResolve(
+    35, predecessorOnly.freshTask.id,
+  );
+  assert.equal(predecessorOnlyStore.calls, 2);
+  assert.equal(predecessorOnlyResult.threadResolutionStatus.threads.filter(
+    (row) => row.taskIds.includes(predecessorOnly.freshTask.id),
+  ).length, 10);
+  assert.equal(predecessorOnlySetup.state.calls.length, 1);
+  assert.equal(predecessorOnlySetup.state.calls[0].name, 'checkpointArchiveTaskCompletion');
+  assert.equal(predecessorOnly.freshGit.ancestryCalls.filter((call) => (
+    call.ancestorSha === predecessorOnly.predecessorCommit
+      && call.descendantSha === predecessorOnly.successorCommit
+  )).length, 2);
+  assert.equal(predecessorOnly.fixture.client.calls.some(
+    (call) => ['AddThreadReply', 'ResolveThread'].includes(call.name),
+  ), false);
+  assert.deepEqual(predecessorOnly.fixture.client.events, []);
+  assert.deepEqual(predecessorOnly.records, predecessorOnlyOriginal);
+
+  const predecessorOnlyCases = [
+    ['partial partition', ({ predecessorTask }) => predecessorTask.sourceIds.pop()],
+    ['divergent fingerprint', ({ predecessorTask }) => {
+      predecessorTask.fingerprint = 'divergent-predecessor-fingerprint';
+    }],
+    ['selected proof row', ({ predecessorArchive, terminalCarrier, successorTaskId }) => {
+      predecessorArchive.state.threadResolutionStatus.threads.push(structuredClone(
+        terminalCarrier.state.threadResolutionStatus.threads.find(
+          (row) => row.taskIds.includes(successorTaskId),
+        ),
+      ));
+    }],
+    ['late terminal chronology', ({ predecessorArchive }) => {
+      predecessorArchive.state.updatedAt = '2026-08-20T12:30:00.000Z';
+      predecessorArchive.events.at(-1).at = '2026-08-20T12:30:00.010Z';
+    }],
+  ];
+  for (const [label, tamper] of predecessorOnlyCases) {
+    const topology = await buildPredecessorOnlyTopology();
+    tamper(topology);
+    topology.fixture.client.calls.length = 0;
+    topology.fixture.client.events.length = 0;
+    const journal = fakeJournal(topology.fixture.client.events);
+    const failed = workflow(topology.active, topology.fixture.client, {
+      archiveStore: immutableArchiveStore(topology.records),
+      git: topology.freshGit,
+      journal,
+    });
+    await assert.rejects(
+      () => failed.api.replyResolve(35, topology.freshTask.id),
+      GitHubWorkflowError,
+      label,
+    );
+    assert.equal(failed.state.calls.length, 0, label);
+    assert.equal(journal.intents.size, 0, label);
+    assert.equal(topology.fixture.client.calls.some(
+      (call) => ['AddThreadReply', 'ResolveThread'].includes(call.name),
+    ), false, label);
+    assert.deepEqual(topology.fixture.client.events, [], label);
+  }
+
+  const predecessorOnlyNonAncestral = await buildPredecessorOnlyTopology();
+  predecessorOnlyNonAncestral.freshGit.isAncestor = async (ancestorSha, descendantSha) => {
+    predecessorOnlyNonAncestral.freshGit.ancestryCalls.push({ ancestorSha, descendantSha });
+    return ancestorSha !== predecessorOnlyNonAncestral.predecessorCommit
+      || descendantSha !== predecessorOnlyNonAncestral.successorCommit;
+  };
+  const predecessorOnlyAncestryJournal = fakeJournal(
+    predecessorOnlyNonAncestral.fixture.client.events,
+  );
+  const predecessorOnlyAncestryFailure = workflow(
+    predecessorOnlyNonAncestral.active, predecessorOnlyNonAncestral.fixture.client,
+    {
+      archiveStore: immutableArchiveStore(predecessorOnlyNonAncestral.records),
+      git: predecessorOnlyNonAncestral.freshGit,
+      journal: predecessorOnlyAncestryJournal,
+    },
+  );
+  await assert.rejects(
+    () => predecessorOnlyAncestryFailure.api.replyResolve(
+      35, predecessorOnlyNonAncestral.freshTask.id,
+    ),
+    { code: 'MUTATION_NOT_READY' },
+    'terminal proofless predecessor ancestry',
+  );
+  assert.equal(predecessorOnlyAncestryFailure.state.calls.length, 0);
+  assert.equal(predecessorOnlyAncestryJournal.intents.size, 0);
+
+  for (const [label, race] of [[
+    'predecessor content race',
+    (records) => { records.at(-1).state.nextAction += ' raced'; },
+  ]]) {
+    const topology = await buildPredecessorOnlyTopology();
+    const journal = fakeJournal(topology.fixture.client.events);
+    const store = immutableArchiveStore(topology.records, (calls) => {
+      if (calls === 2) race(topology.records);
+    });
+    const failed = workflow(topology.active, topology.fixture.client, {
+      archiveStore: store, git: topology.freshGit, journal,
+    });
+    await assert.rejects(
+      () => failed.api.replyResolve(35, topology.freshTask.id),
+      GitHubWorkflowError,
+      label,
+    );
+    assert.equal(failed.state.calls.length, 0, label);
+    assert.equal(journal.intents.size, 0, label);
+    assert.equal(topology.fixture.client.calls.some(
+      (call) => ['AddThreadReply', 'ResolveThread'].includes(call.name),
+    ), false, label);
+  }
+
   const cases = [
     ['partial predecessor partition', ({ mixedArchive, predecessorTaskId }) => {
       mixedArchive.state.tasks.find((task) => task.id === predecessorTaskId).sourceIds.pop();

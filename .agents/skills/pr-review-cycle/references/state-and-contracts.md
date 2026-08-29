@@ -241,6 +241,31 @@ carriers, carrier/root roles, and selected intent footprints share one
 cumulative node bound before projection cloning, sorting, intent indexing, and
 live lineage checks.
 
+One off-selection carrier may enter a transient terminal-proofless-predecessor
+role only after the complete aggregate projection has anchored its historical
+task partitions. The carrier is independently schema-v3-valid and terminal,
+has no selected-root proof or provenance row and no selected-root reply or
+resolve intent, and contains no alternate selected-root task authority. Each
+accepted task appears exactly once as an actionable Integrated GitHub-thread
+task with a non-null commit. It keeps the successor partition's exact task ID,
+canonical thread/discussion sources, fingerprint, summary, and severity, covers
+that whole partition only, and may differ only in disposition, status, commit,
+resolution summary, and receipt-sidecar projection. Predecessor partitions are
+unique and disjoint across carriers; their commits are distinct from and
+ancestral to the partition proof HEAD, their terminal boundary precedes every
+partition proof-origin reply intent, and each carrier HEAD is ancestral to the
+current integration HEAD.
+
+The predecessor carrier's complete content fingerprint and exact per-root role
+are included in the sorted aggregate inventory and both immutable archive
+reads. Its commit-to-proof and carrier-to-current ancestry relations are also
+rechecked twice. A duplicate, partial, overlapping, divergent, proof-bearing,
+provenance-bearing, intent-bearing, nonterminal, late, non-ancestral, added,
+removed, or changed predecessor carrier therefore fails closed before the one
+protected archive-completion checkpoint. This role changes no archive or state
+format, copies no evidence, appends no mutation intent, and never replies to or
+resolves a GitHub thread.
+
 `threadRecord.archiveProvenance` is optional so ordinary schema-v3 rows remain
 byte-for-byte compatible. When present it is a closed version-1 object with
 exactly `historicalTaskId`, `historicalDisposition` (`fixed` or
