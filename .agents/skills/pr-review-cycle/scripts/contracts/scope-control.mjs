@@ -130,6 +130,18 @@ function validateAssessmentPair(value, path, errors, { requiredVerdict = null, e
 }
 
 function validateAssessmentAuthority(value, authority, amendmentDigests, path, errors) {
+  const approvedDecisions = Array.isArray(authority?.approvedDecisions)
+    ? authority.approvedDecisions
+    : [];
+  const expectedDecisionAuthority = approvedDecisions.map(({ id, digest }) => ({ id, digest }));
+  const acceptedDecisions = Array.isArray(value?.packet?.acceptedScope?.authorityDecisions)
+    ? value.packet.acceptedScope.authorityDecisions
+    : [];
+  const acceptedDecisionAuthority = acceptedDecisions.map(({ id, digest }) => ({ id, digest }));
+  if (!isDeepStrictEqual(acceptedDecisionAuthority, expectedDecisionAuthority)) {
+    errors.push(`${path}.packet.acceptedScope.authorityDecisions must equal the ordered captured approved decisions`);
+  }
+  const decisionDigests = approvedDecisions.map(({ digest }) => digest);
   for (const side of ['packet', 'result']) {
     const binding = value?.[side]?.binding;
     if (!isDeepStrictEqual(binding?.source, authority?.source)) {
@@ -140,6 +152,9 @@ function validateAssessmentAuthority(value, authority, amendmentDigests, path, e
     }
     if (!isDeepStrictEqual(binding?.amendmentDigests, amendmentDigests)) {
       errors.push(`${path}.${side}.binding.amendmentDigests must equal the ordered effective authority amendments`);
+    }
+    if (!isDeepStrictEqual(binding?.decisionDigests ?? [], decisionDigests)) {
+      errors.push(`${path}.${side}.binding.decisionDigests must equal the ordered captured approved decision digests`);
     }
   }
 }
