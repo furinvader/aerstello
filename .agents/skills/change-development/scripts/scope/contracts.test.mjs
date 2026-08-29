@@ -178,6 +178,17 @@ test('split-defer follow-ups are bounded canonical criterion IDs without tighten
   ]) {
     assert.notDeepEqual(validateScopeDecision({ ...splitDecision, deferredFollowups }), []);
   }
+  for (const [disposition, approvedShape] of [
+    ['approve-material-amendment', ['Material subsystem / v2']],
+    ['reject-use-narrow', []],
+    ['abandon-replan', []],
+  ]) {
+    assert.deepEqual(validateScopeDecision(decision({
+      disposition,
+      approvedShape,
+      deferredFollowups: ['Issue #25'],
+    })), []);
+  }
   assert.deepEqual(validateScopeDecision(decision({ approvedShape: ['Material subsystem / v2'] })), []);
 });
 
