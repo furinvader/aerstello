@@ -17,6 +17,13 @@ function emptyLocalVerification() {
   return { status: 'not-run', headSha: null, taskIds: [], updatedAt: null };
 }
 
+function verificationProofIsPristine(verification) {
+  return verification?.status === 'not-run'
+    && verification.headSha === null
+    && verification.taskIds.length === 0
+    && verification.updatedAt === null;
+}
+
 function taskIsEligibleForVerifierCompletion(task) {
   const actionable = task.disposition === 'actionable'
     && ['integrated', 'completed'].includes(task.status)
@@ -104,6 +111,7 @@ function appendStaleDiscoveryDisposition(state, disposition) {
 
 export function completeIntegratedTasks(state, {
   threadResolutionStatus, verifiedLocalTaskIds = [], staleDiscoveryDisposition = null,
+  archiveVerifierBootstrapTaskId = null,
 }) {
   if (!threadResolutionStatus || typeof threadResolutionStatus !== 'object'
       || Array.isArray(threadResolutionStatus)) {
@@ -121,6 +129,15 @@ export function completeIntegratedTasks(state, {
     );
   }
   const verifiedLocalTasks = new Set(verifiedLocalTaskIds);
+  const archiveVerifierBootstrap = archiveVerifierBootstrapTaskId !== null;
+  if (archiveVerifierBootstrap
+      && (verifiedLocalTaskIds.length !== 1
+        || verifiedLocalTaskIds[0] !== archiveVerifierBootstrapTaskId)) {
+    throw new StateError(
+      'Archive verifier bootstrap must select exactly its authorized local task',
+      'INVALID_TASK_COMPLETION',
+    );
+  }
   for (const taskId of verifiedLocalTasks) {
     const task = state.tasks.find((candidate) => candidate.id === taskId);
     if (!task) {
@@ -150,9 +167,20 @@ export function completeIntegratedTasks(state, {
     ? { ...threadProofWithoutLocal, localVerification: previousLocalVerification }
     : threadProofWithoutLocal;
   if (verifiedLocalTasks.size > 0) {
-    if (threadResolutionStatus.status === 'not-run'
+    const bootstrapProof = archiveVerifierBootstrap
+      && threadResolutionStatus.status === 'not-run'
+      && threadResolutionStatus.headSha === null
+      && threadResolutionStatus.threads.length === 0
+      && threadResolutionStatus.updatedAt === null
+      && verificationProofIsPristine(threadResolutionStatus.threadlessVerification)
+      && previousLocalVerification.status === 'not-run'
+      && threadResolutionStatus.localVerification?.status === 'passed'
+      && threadResolutionStatus.localVerification.headSha === state.currentIntegrationHeadSha
+      && sameEvidence(threadResolutionStatus.localVerification.taskIds, verifiedLocalTaskIds)
+      && threadResolutionStatus.localVerification.updatedAt !== null;
+    if (!bootstrapProof && (threadResolutionStatus.status === 'not-run'
         || threadResolutionStatus.headSha !== state.currentIntegrationHeadSha
-        || threadResolutionStatus.updatedAt === null) {
+        || threadResolutionStatus.updatedAt === null)) {
       throw new StateError(
         'Verified local tasks require a current-HEAD aggregate observation and timestamp',
         'INVALID_TASK_COMPLETION',
@@ -167,7 +195,8 @@ export function completeIntegratedTasks(state, {
         status: 'passed',
         headSha: state.currentIntegrationHeadSha,
         taskIds: [...new Set([...retainedIds, ...verifiedLocalTasks])].sort(),
-        updatedAt: threadResolutionStatus.updatedAt,
+        updatedAt: bootstrapProof
+          ? threadResolutionStatus.localVerification.updatedAt : threadResolutionStatus.updatedAt,
       },
     };
   }

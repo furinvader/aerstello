@@ -508,8 +508,9 @@ rows and authority.
 When the resolved archive batch itself prevents the remediation's ordinary
 aggregate-proof gate, use a two-command state-only bootstrap. First run
 `verify-resolve --task <remediation-id>` for the sole actionable Integrated
-GitHub-threadless remediation. This exception exists only when the aggregate,
-threadless, and local proofs are pristine; one exclusive terminal
+remediation. Its source must be either GitHub-threadless or local integration-verifier
+evidence. This exception exists only when the aggregate and both source proof
+lanes are pristine; one exclusive terminal
 `already-fixed`, null-commit, `not-applicable` GitHub-thread task owns at least
 two live resolved roots; and
 every other fully paginated canonical root is unresolved and maps exclusively
@@ -519,9 +520,12 @@ ordinary `reply-resolve` afterward. The command proves
 twice that the hypothetical singleton remediation proof enables the existing
 archive-adoption predicate, while rechecking clean equal local, pushed, live,
 and durable heads plus the exact state revision. It then completes only that
-remediation and records only singleton exact-current-HEAD threadless coverage.
-Aggregate status, head, rows, timestamp, and local proof remain byte-for-byte
-unchanged. An exact retry repeats all topology, pagination, head, checkout, and
+remediation and records singleton exact-current-HEAD coverage only in the
+matching source lane. The opposite lane and aggregate status, head, rows, and
+timestamp remain byte-for-byte unchanged. The local lane completes only through
+`checkpointArchiveTaskCompletion` with a closed envelope binding the task,
+commit, head, proof lane, full stable root topology, terminal aggregate task,
+and exact state delta; it is never relabeled as threadless proof. An exact retry repeats all topology, pagination, head, checkout, and
 revision guards before returning idempotently. Completed-retry bootstrap
 handling is armed only when the terminal task's immutable `thread:` and
 `discussion:` aliases resolve through the canonical live mapping to at least

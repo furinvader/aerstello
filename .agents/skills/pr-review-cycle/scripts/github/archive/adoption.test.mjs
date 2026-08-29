@@ -417,6 +417,91 @@ test('verify-resolve bootstraps only the exact archive-adoption topology before 
   assert.deepEqual(fixture.client.events, []);
 });
 
+test('local verifier bootstraps archive adoption through only its closed archive checkpoint lane', async () => {
+  const fixture = archiveBootstrapFixture();
+  const remediation = fixture.active.tasks.find((task) => task.id === ARCHIVE_REMEDIATION_ID);
+  remediation.sourceType = 'local';
+  remediation.sourceIds = ['orchestrator:integration-verifier'];
+  const archiveStore = immutableArchiveStore([fixture.archive]);
+  const setup = workflow(fixture.active, fixture.client, {
+    archiveStore, journal: fixture.journal,
+  });
+  const pristine = structuredClone(fixture.active.threadResolutionStatus);
+
+  const verified = await setup.api.verifyResolve(2, [ARCHIVE_REMEDIATION_ID]);
+
+  assert.equal(archiveStore.calls, 0);
+  assert.equal(setup.state.calls.length, 1);
+  assert.equal(setup.state.calls[0].name, 'checkpointArchiveTaskCompletion');
+  assert.equal(setup.state.calls[0].input.verifierBootstrapEnvelope.proofLane, 'localVerification');
+  assert.equal(setup.state.calls[0].input.verifierBootstrapEnvelope.taskId, ARCHIVE_REMEDIATION_ID);
+  assert.equal(setup.state.calls[0].input.verifierBootstrapEnvelope.archiveTaskId, ARCHIVED_TASK_ID);
+  assert.equal(setup.state.calls[0].input.verifierBootstrapEnvelope.roots.length, 3);
+  assert.deepEqual(verified.threadResolutionStatus.threadlessVerification,
+    pristine.threadlessVerification);
+  assert.deepEqual(verified.threadResolutionStatus.localVerification, {
+    status: 'passed', headSha: HEAD, taskIds: [ARCHIVE_REMEDIATION_ID], updatedAt: AT,
+  });
+  for (const key of ['status', 'headSha', 'threads', 'updatedAt']) {
+    assert.deepEqual(verified.threadResolutionStatus[key], pristine[key], key);
+  }
+  assert.equal(fixture.client.calls.some(
+    (call) => ['AddThreadReply', 'ResolveThread'].includes(call.name),
+  ), false);
+  assert.deepEqual(fixture.client.events, []);
+
+  const checkpoints = setup.state.calls.length;
+  const retry = await setup.api.verifyResolve(2, [ARCHIVE_REMEDIATION_ID]);
+  assert.equal(retry.stateRevision, verified.stateRevision);
+  assert.equal(setup.state.calls.length, checkpoints);
+  assert.equal(archiveStore.calls, 0);
+
+  const adopted = await setup.api.replyResolve(2, ARCHIVED_TASK_ID);
+  assert.equal(archiveStore.calls, 2);
+  assert.equal(setup.state.calls.length, 2);
+  assert.deepEqual(adopted.threadResolutionStatus.localVerification,
+    verified.threadResolutionStatus.localVerification);
+  assert.deepEqual(adopted.threadResolutionStatus.threadlessVerification,
+    pristine.threadlessVerification);
+  assert.deepEqual(fixture.client.events, []);
+});
+
+test('local archive bootstrap rejects mixed proof lanes and ambiguous cross-source remediations', async () => {
+  for (const [label, mutate] of [
+    ['mixed lanes', (fixture) => {
+      fixture.active.threadResolutionStatus.threadlessVerification = {
+        status: 'passed', headSha: HEAD, taskIds: ['foreign-threadless'], updatedAt: AT,
+      };
+    }],
+    ['cross-source remediation', (fixture) => {
+      const remediation = fixture.active.tasks.find((task) => task.id === ARCHIVE_REMEDIATION_ID);
+      fixture.active.tasks.push({
+        ...structuredClone(remediation), id: 'foreign-threadless',
+        sourceType: 'github-threadless', sourceIds: ['review:foreign-threadless'],
+        fingerprint: 'foreign-threadless-fingerprint',
+      });
+    }],
+  ]) {
+    const fixture = archiveBootstrapFixture();
+    const remediation = fixture.active.tasks.find((task) => task.id === ARCHIVE_REMEDIATION_ID);
+    remediation.sourceType = 'local';
+    remediation.sourceIds = ['orchestrator:integration-verifier'];
+    mutate(fixture);
+    const archiveStore = immutableArchiveStore([fixture.archive]);
+    const setup = workflow(fixture.active, fixture.client, {
+      archiveStore, journal: fixture.journal,
+    });
+    await assert.rejects(
+      () => setup.api.verifyResolve(2, [ARCHIVE_REMEDIATION_ID]),
+      GitHubWorkflowError,
+      label,
+    );
+    assert.equal(setup.state.calls.length, 0, label);
+    assert.equal(archiveStore.calls, 0, label);
+    assert.deepEqual(fixture.client.events, [], label);
+  }
+});
+
 test('archive-adoption verifier bootstrap retries a discussion-only multi-root declaration', async () => {
   const fixture = archiveBootstrapFixture();
   fixture.active.tasks.find((task) => task.id === ARCHIVED_TASK_ID).sourceIds = [

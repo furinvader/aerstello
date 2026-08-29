@@ -787,6 +787,22 @@ function fakeState(initial) {
       return structuredClone(current);
     },
     async checkpointArchiveTaskCompletion(input) {
+      if (input.verifierBootstrapEnvelope !== undefined) {
+        if (input.expectedRevision !== current.revision) {
+          const error = new Error('State revision changed during archive verifier bootstrap');
+          error.code = 'STATE_REVISION_CONFLICT';
+          throw error;
+        }
+        calls.push({ name: 'checkpointArchiveTaskCompletion', input });
+        current = {
+          ...current,
+          revision: current.revision + 1,
+          tasks: current.tasks.map((task) => task.id === input.verifierBootstrapEnvelope.taskId
+            ? { ...task, status: 'completed' } : task),
+          threadResolutionStatus: structuredClone(input.threadResolutionStatus),
+        };
+        return structuredClone(current);
+      }
       const callIndex = calls.length;
       const next = await this.checkpointTaskCompletion(input);
       calls[callIndex] = { ...calls[callIndex], name: 'checkpointArchiveTaskCompletion' };

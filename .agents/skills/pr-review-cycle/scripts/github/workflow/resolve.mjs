@@ -324,6 +324,18 @@ export function createResolveUseCases(context) {
     if (preflightBootstrap !== null) {
       if (preflightBootstrap.mode === 'retry') return verifyResolveResult(taskIds, active);
       const verifiedAt = clock.now();
+      const localBootstrap = preflightBootstrap.proofLane === 'localVerification'
+        ? archiveAdoptionVerifierBootstrapPlan(
+          active, live, selectedTask.id, finalHeads, verifiedAt,
+        ).completion : null;
+      if (localBootstrap !== null) {
+        active = await archiveTaskCheckpoint(stateAdapter, active)({
+          prNumber, expectedRevision: active.revision,
+          threadResolutionStatus: localBootstrap.threadResolutionStatus,
+          verifierBootstrapEnvelope: localBootstrap.envelope,
+        });
+        return verifyResolveResult(taskIds, active);
+      }
       const threadResolutionStatus = {
         ...active.threadResolutionStatus,
         threadlessVerification: {

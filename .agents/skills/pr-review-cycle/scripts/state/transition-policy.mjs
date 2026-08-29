@@ -115,6 +115,134 @@ function canonicalImportedTaskRoots(task, rows) {
   return [...roots].sort();
 }
 
+function bootstrapStateProjection(state) {
+  return { tasks: state.tasks, threadResolutionStatus: state.threadResolutionStatus };
+}
+
+function assertVerifierBootstrapEnvelope(current, next, envelope) {
+  const fields = [
+    'schemaVersion', 'taskId', 'integratedCommitSha', 'headSha', 'proofLane',
+    'archiveTaskId', 'roots', 'priorStateFingerprint', 'nextStateFingerprint',
+  ];
+  const rootFields = [
+    'threadNodeId', 'rootCommentNodeId', 'rootCommentDatabaseId', 'isResolved', 'taskId',
+  ];
+  if (!exactObjectFields(envelope, fields)
+      || envelope.schemaVersion !== 1
+      || envelope.proofLane !== 'localVerification'
+      || typeof envelope.taskId !== 'string' || envelope.taskId.length === 0
+      || typeof envelope.integratedCommitSha !== 'string'
+      || envelope.integratedCommitSha.length < 40
+      || envelope.headSha !== current.currentIntegrationHeadSha
+      || typeof envelope.archiveTaskId !== 'string' || envelope.archiveTaskId.length === 0
+      || !/^[0-9a-f]{64}$/u.test(envelope.priorStateFingerprint ?? '')
+      || !/^[0-9a-f]{64}$/u.test(envelope.nextStateFingerprint ?? '')
+      || !Array.isArray(envelope.roots) || envelope.roots.length < 2
+      || envelope.roots.length > MAX_NODES) {
+    throw new StateError('Verifier bootstrap completion envelope is malformed', 'INVALID_ARCHIVE_IMPORT');
+  }
+  const sortedRoots = envelope.roots.slice().sort(
+    (left, right) => String(left?.threadNodeId).localeCompare(String(right?.threadNodeId)),
+  );
+  if (!sameEvidence(envelope.roots, sortedRoots)
+      || new Set(envelope.roots.map((root) => root?.threadNodeId)).size !== envelope.roots.length
+      || new Set(envelope.roots.map((root) => root?.rootCommentNodeId)).size !== envelope.roots.length
+      || new Set(envelope.roots.map((root) => root?.rootCommentDatabaseId)).size !== envelope.roots.length
+      || envelope.roots.some((root) => !exactObjectFields(root, rootFields)
+        || typeof root.threadNodeId !== 'string' || root.threadNodeId.length === 0
+        || typeof root.rootCommentNodeId !== 'string' || root.rootCommentNodeId.length === 0
+        || !Number.isSafeInteger(root.rootCommentDatabaseId) || root.rootCommentDatabaseId <= 0
+        || typeof root.isResolved !== 'boolean'
+        || typeof root.taskId !== 'string' || root.taskId.length === 0)) {
+    throw new StateError('Verifier bootstrap roots are malformed or unordered', 'INVALID_ARCHIVE_IMPORT');
+  }
+
+  const task = current.tasks.find((candidate) => candidate.id === envelope.taskId);
+  const nextTask = next.tasks.find((candidate) => candidate.id === envelope.taskId);
+  const archiveTask = current.tasks.find((candidate) => candidate.id === envelope.archiveTaskId);
+  if (!task || !nextTask || task.sourceType !== 'local' || task.disposition !== 'actionable'
+      || task.status !== 'integrated' || task.integratedCommitSha !== envelope.integratedCommitSha
+      || nextTask.status !== 'completed'
+      || !archiveTask || archiveTask.sourceType !== 'github-thread'
+      || archiveTask.disposition !== 'already-fixed' || archiveTask.status !== 'not-applicable'
+      || archiveTask.integratedCommitSha !== null) {
+    throw new StateError('Verifier bootstrap tasks do not match the authorized transition', 'INVALID_ARCHIVE_IMPORT');
+  }
+  for (const currentTask of current.tasks) {
+    const updated = next.tasks.find((candidate) => candidate.id === currentTask.id);
+    assertImmutableValue(
+      currentTask.id === task.id ? { ...currentTask, status: 'completed' } : currentTask,
+      updated,
+      `verifier bootstrap task ${currentTask.id}`,
+    );
+  }
+  const remediations = current.tasks.filter((candidate) => (
+    ['local', 'github-threadless'].includes(candidate.sourceType)
+      && candidate.disposition === 'actionable' && candidate.status === 'integrated'
+      && typeof candidate.integratedCommitSha === 'string'
+  ));
+  if (remediations.length !== 1 || remediations[0].id !== task.id) {
+    throw new StateError('Verifier bootstrap remediation is missing or ambiguous', 'INVALID_ARCHIVE_IMPORT');
+  }
+  const rootsByTask = new Map();
+  for (const root of envelope.roots) {
+    const roots = rootsByTask.get(root.taskId) ?? [];
+    roots.push(root);
+    rootsByTask.set(root.taskId, roots);
+  }
+  const archiveRoots = rootsByTask.get(archiveTask.id) ?? [];
+  if (archiveRoots.length < 2 || archiveRoots.some((root) => !root.isResolved)) {
+    throw new StateError('Verifier bootstrap archive task lacks its resolved multi-root topology', 'INVALID_ARCHIVE_IMPORT');
+  }
+  const mappedArchiveRoots = canonicalImportedTaskRoots(archiveTask, archiveRoots.map((root) => ({
+    ...root, taskIds: [archiveTask.id], disposition: 'already-fixed',
+  })));
+  if (mappedArchiveRoots === null
+      || !sameEvidence(mappedArchiveRoots, archiveRoots.map((root) => root.threadNodeId).sort())) {
+    throw new StateError('Verifier bootstrap archive sources do not cover its roots', 'INVALID_ARCHIVE_IMPORT');
+  }
+  for (const [taskId, roots] of rootsByTask) {
+    const mappedTask = current.tasks.find((candidate) => candidate.id === taskId);
+    if (!mappedTask || taskId === task.id || (taskId !== archiveTask.id
+        && (roots.some((root) => root.isResolved)
+          || mappedTask.sourceType !== 'github-thread'
+          || !((mappedTask.disposition === 'actionable'
+            && ['integrated', 'completed'].includes(mappedTask.status)
+            && typeof mappedTask.integratedCommitSha === 'string')
+            || (mappedTask.disposition === 'already-fixed'
+              && mappedTask.status === 'not-applicable'
+              && mappedTask.integratedCommitSha === null))))) {
+      throw new StateError('Verifier bootstrap contains an ineligible exclusive root mapping', 'INVALID_ARCHIVE_IMPORT');
+    }
+  }
+  const aggregate = current.threadResolutionStatus;
+  const nextAggregate = next.threadResolutionStatus;
+  if (aggregate.status !== 'not-run' || aggregate.headSha !== null
+      || aggregate.threads.length !== 0 || aggregate.updatedAt !== null
+      || aggregate.threadlessVerification.status !== 'not-run'
+      || aggregate.threadlessVerification.headSha !== null
+      || aggregate.threadlessVerification.taskIds.length !== 0
+      || aggregate.threadlessVerification.updatedAt !== null
+      || (aggregate.localVerification ?? emptyLocalVerification()).status !== 'not-run'
+      || nextAggregate.localVerification?.status !== 'passed'
+      || nextAggregate.localVerification.headSha !== current.currentIntegrationHeadSha
+      || !sameEvidence(nextAggregate.localVerification.taskIds, [task.id])
+      || nextAggregate.localVerification.updatedAt === null) {
+    throw new StateError('Verifier bootstrap requires the pristine local-only proof delta', 'INVALID_ARCHIVE_IMPORT');
+  }
+  const { localVerification: _oldLocal, ...oldWithoutLocal } = aggregate;
+  const { localVerification: _newLocal, ...newWithoutLocal } = nextAggregate;
+  if (!sameEvidence(oldWithoutLocal, newWithoutLocal)) {
+    throw new StateError('Verifier bootstrap changed proof outside the local lane', 'INVALID_ARCHIVE_IMPORT');
+  }
+  const priorFingerprint = archiveImportFingerprint(bootstrapStateProjection(current));
+  const nextFingerprint = archiveImportFingerprint(bootstrapStateProjection(next));
+  if (priorFingerprint !== envelope.priorStateFingerprint
+      || nextFingerprint !== envelope.nextStateFingerprint) {
+    throw new StateError('Verifier bootstrap state delta does not match its envelope', 'INVALID_ARCHIVE_IMPORT');
+  }
+}
+
 function assertArchiveImportEnvelope(current, next, envelope) {
   const envelopeFields = ['schemaVersion', 'taskId', 'authorityFingerprint', 'rows'];
   const rowFields = [
@@ -380,7 +508,16 @@ function assertCheckpointProvenance(current, next, guardedKind, evidence, cwd) {
     );
   }
   if (guardedKind === 'archive-task-completion') {
-    assertArchiveImportEnvelope(current, next, evidence.archiveImportEnvelope);
+    const hasImport = evidence.archiveImportEnvelope !== undefined;
+    const hasBootstrap = evidence.verifierBootstrapEnvelope !== undefined;
+    if (hasImport === hasBootstrap) {
+      throw new StateError(
+        'Archive completion requires exactly one protected envelope',
+        'INVALID_ARCHIVE_IMPORT',
+      );
+    }
+    if (hasImport) assertArchiveImportEnvelope(current, next, evidence.archiveImportEnvelope);
+    else assertVerifierBootstrapEnvelope(current, next, evidence.verifierBootstrapEnvelope);
   }
   if (guardedKind !== 'review-request-limit') {
     assertImmutableValue(

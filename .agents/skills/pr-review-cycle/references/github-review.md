@@ -350,7 +350,8 @@ byte-identical provenance and authority.
 
 If the live resolved batch makes ordinary `verify-resolve` circular, the first
 command has one state-only bootstrap topology. The selection must be a singleton
-and the sole actionable Integrated GitHub-threadless remediation. Aggregate,
+and the sole actionable Integrated remediation, whose source is either
+GitHub-threadless or local integration-verifier evidence. Aggregate,
 threadless, and local proof must all be pristine. Exactly one exclusive terminal
 `already-fixed`, null-commit, `not-applicable` GitHub-thread task must own at
 least two live resolved roots;
@@ -362,9 +363,9 @@ duplicate, shared, additionally resolved, or ambiguously remediated roots fail
 closed. Two complete live snapshots must reproduce the exact candidate, root
 mapping, local/pushed/live/durable head identities, and state revision.
 
-Success completes only the selected remediation and replaces only pristine
-threadless proof with singleton exact-current-HEAD coverage. It preserves the
-aggregate status, head, rows, timestamp, and local proof byte-for-byte and is
+Success completes only the selected remediation and replaces only its matching
+pristine proof lane with singleton exact-current-HEAD coverage. It preserves the
+opposite proof lane plus aggregate status, head, rows, and timestamp byte-for-byte and is
 idempotent only after all guards run again. A completed retry enters this
 bootstrap only when the terminal task's immutable `thread:` and `discussion:`
 aliases resolve through the canonical live mapping to at least two distinct
@@ -375,6 +376,11 @@ two fully paginated GitHub reads are intentional. It never synthesizes
 aggregate proof. Run `reply-resolve` second; it alone selects and trusts one
 immutable archive and retains every ordinary projection, intent, reply-body,
 timestamp, ancestry, live-evidence, and race gate.
+Local provenance passes through a distinct closed archive-only bootstrap envelope
+binding the selected task and commit, current head, local lane, full stable root
+topology, exclusive terminal aggregate task, and exact state delta. Ordinary
+task completion cannot use that exception, and local IDs never enter
+`threadlessVerification`.
 For a composite retained batch followed by new current work, use exactly:
 `verify-resolve --task <remediation-id>`,
 `reply-resolve --task <retained-aggregate-id>`, and then ordinary
