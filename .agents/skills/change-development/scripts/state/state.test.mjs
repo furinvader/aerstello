@@ -340,6 +340,33 @@ function integratedScopeEvidenceFor(options) {
   return null;
 }
 
+function materialIntegratedScopeEvidence(options, mechanism = 'material-integrated-recovery') {
+  const evidence = integratedScopeEvidenceFor(options);
+  const mapping = {
+    mechanism, sourceCriterionIds: [], acceptedCriterionIds: [], invariantIds: [], nonGoalIds: [], guidanceIds: [],
+    rationale: `${mechanism} is a proposed material subsystem without accepted criterion authority.`,
+  };
+  evidence.packet.changeInventory.subsystems = [mechanism];
+  evidence.packet.changeInventory.mappings.push(mapping);
+  evidence.result = {
+    ...evidence.result,
+    binding: evidence.packet.binding,
+    verdict: 'human-decision-required',
+    summary: 'The integrated candidate requires an exact human material-scope decision.',
+    coverage: [...evidence.result.coverage, { ...mapping, classification: 'material-scope-change' }],
+    scopeDelta: { description: 'Decide the exact integrated material subsystem.', sourceCriterionIds: [],
+      acceptedCriterionIds: [], invariantIds: [], materialSurfaces: ['new-subsystem'] },
+    materialityTriggers: [{ category: 'new-subsystem', evidence: 'The integrated inventory proposes a new subsystem.' }],
+    smallestExpansion: 'Authorize only the proposed integrated subsystem.',
+    narrowAlternative: 'Remove the proposed subsystem and retain existing authority.',
+    deferralConsequences: 'The subsystem remains outside implementation authority.',
+    humanDecision: true,
+  };
+  evidence.packetDigest = digestJson(evidence.packet);
+  evidence.resultDigest = digestJson(evidence.result);
+  return evidence;
+}
+
 function finalizeIntegration(options) {
   let state = finalizeIntegrationWithScope(options);
   const scopeEvidence = integratedScopeEvidenceFor(options, state);
@@ -5027,6 +5054,72 @@ test('relabeled transition intent cannot claim decision-observation recovery', a
   writeFileSync(intentPath, `${JSON.stringify(intent)}\n`);
   writeFileSync(intentPath.replace(/\.json$/u, '.sha256'), `${digestJson(intent)}\n`);
   assert.throws(() => recoverState({ cwd }), (error) => error.code === 'RECOVERY_EVIDENCE_INVALID');
+});
+
+test('interrupted scope decisions recover at the exact clean integrated HEAD', async () => {
+  const fixture = await integratedSingleTaskFixture('integrated scope decision recovery');
+  assert.notEqual(fixture.state.git.headSha, fixture.state.planningSha,
+    'the fixture exercises an integrated HEAD beyond the immutable Planning SHA');
+  const evidence = materialIntegratedScopeEvidence({ cwd: fixture.cwd });
+  const state = assessScope({ cwd: fixture.cwd, scopeEvidence: evidence,
+    expectedRevision: fixture.state.revision });
+  const decision = materialScopeDecision(state, evidence, 'approve-material-amendment',
+    ['material-integrated-recovery'], 'recover-integrated-scope-decision');
+  assert.throws(() => recordScopeDecision({ cwd: fixture.cwd, expectedRevision: state.revision, decision,
+    crashStep(step) { if (step === 'after-intent') throw new Error('pause integrated scope decision'); } }),
+  /pause integrated scope decision/u);
+
+  const recovered = recoverState({ cwd: fixture.cwd });
+  assert.equal(recovered.recovered, true);
+  assert.equal(recovered.state.git.headSha, fixture.state.git.headSha);
+  assert.equal(recovered.state.scope.decisionDigests.at(-1), digestJson(decision));
+  assert.equal(validateState({ cwd: fixture.cwd }).valid, true);
+});
+
+test('scope decision recovery rejects a receipt-consistent duplicate ID before mutation', async () => {
+  const fixture = await materialDecisionFixture('duplicate-decision-recovery', ['material-alpha']);
+  const duplicateId = 'duplicate-recovery-id';
+  let state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision,
+    decision: materialScopeDecision(fixture.state, fixture.evidence, 'approve-material-amendment',
+      ['material-alpha'], duplicateId) });
+  const first = materialAmendment(state, fixture.plan, fixture.closure,
+    ['durable-test-change', 'unrelated-existing-shape', 'material-alpha'], 'duplicate-recovery-first');
+  state = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...first });
+  const directory = changeDirectory(fixture.cwd, state.changeId);
+  const firstClosure = JSON.parse(readFileSync(join(directory, 'scope', 'minimal-closure', '0002.json'), 'utf8'));
+  const firstAmendment = JSON.parse(readFileSync(join(directory, 'plan', 'amendments', '0001.json'), 'utf8'));
+  const evidence = materialScopeEvidence(state, first.resultingPlan, firstClosure,
+    ['material-beta'], [digestJson(firstAmendment)], [{
+      id: duplicateId, digest: state.scope.decisionDigests[0],
+      disposition: 'approve-material-amendment', authorizedShape: ['material-alpha'],
+    }]);
+  state = assessScope({ cwd: fixture.cwd, scopeEvidence: evidence, expectedRevision: state.revision });
+  const decision = materialScopeDecision(state, evidence, 'approve-material-amendment',
+    ['material-beta'], 'unique-before-recovery-tamper');
+  assert.throws(() => recordScopeDecision({ cwd: fixture.cwd, expectedRevision: state.revision, decision,
+    crashStep(step) { if (step === 'after-intent') throw new Error('pause duplicate recovery'); } }),
+  /pause duplicate recovery/u);
+
+  const intentPath = join(directory, 'transitions', String(state.revision + 1).padStart(8, '0'), 'intent.json');
+  const intent = JSON.parse(readFileSync(intentPath, 'utf8'));
+  const duplicatedDecision = { ...decision, decisionId: duplicateId };
+  const duplicatedDigest = digestJson(duplicatedDecision);
+  const duplicatedPath = `scope/decisions/${String(duplicatedDecision.revision).padStart(8, '0')}-${duplicateId}.json`;
+  intent.evidence.scopeDecisionDigest = duplicatedDigest;
+  intent.evidencePaths.scopeDecisionDigest = duplicatedPath;
+  intent.authoritativeEvidence.scopeDecisionDigest = {
+    ...intent.authoritativeEvidence.scopeDecisionDigest,
+    path: duplicatedPath, digest: duplicatedDigest, value: duplicatedDecision,
+  };
+  intent.nextState.scope.decisionDigests[intent.nextState.scope.decisionDigests.length - 1] = duplicatedDigest;
+  intent.nextStateDigest = digestJson(intent.nextState);
+  writeReceiptJson(intentPath, intent);
+
+  const beforeRecovery = durableSnapshot(directory);
+  assert.throws(() => recoverState({ cwd: fixture.cwd }),
+    (error) => error.code === 'RECOVERY_EVIDENCE_INVALID' && /already recorded/u.test(error.message));
+  assert.deepEqual(durableSnapshot(directory), beforeRecovery,
+    'duplicate candidate evidence, state, event, receipt, and completion remain absent');
 });
 
 test('retain-plan recovery still requires clean HEAD at the Planning SHA', async () => {

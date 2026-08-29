@@ -1384,21 +1384,25 @@ export function recordScopeDecision({ cwd = process.cwd(), changeId, decision, e
     if (validateScopeDecisionHistory(root, state).has(decision.decisionId)) {
       throw new StateError(`Scope decision ID ${decision.decisionId} is already recorded`, 'SCOPE_DECISION_INVALID');
     }
-    const abandons = decision.disposition === 'abandon-replan';
-    const requiresAmendment = state.plan && !abandons;
-    const scope = { ...state.scope, status: 'assessment-required',
-      decisionDigests: [...state.scope.decisionDigests, digest] };
-    const next = revised(state, {
-      phase: abandons ? 'abandoned' : requiresAmendment ? 'blocked' : 'planning', scope,
-      abandonmentReason: abandons ? decision.rationale : state.abandonmentReason,
-      blockedReasons: requiresAmendment
-        ? ['Recorded material scope decision requires its exact authorized plan amendment before implementation can continue.']
-        : [],
-    }, clock);
+    const next = deriveScopeDecisionTransition(state, decision, clock);
     return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'scope-decision-recorded',
       summary: `Recorded ${decision.disposition} scope disposition`, crashStep,
       pendingEvidence: [{ key: 'scopeDecisionDigest', path: relative(changeDirectory(root, state.changeId), scopeDecisionPath(root, state, decision)), value: decision, label: `scope decision ${decision.decisionId}` }] });
   }, lockOptions);
+}
+
+function deriveScopeDecisionTransition(state, decision, clock) {
+  const abandons = decision.disposition === 'abandon-replan';
+  const requiresAmendment = state.plan && !abandons;
+  const scope = { ...state.scope, status: 'assessment-required',
+    decisionDigests: [...state.scope.decisionDigests, scopeContractDigest(decision)] };
+  return revised(state, {
+    phase: abandons ? 'abandoned' : requiresAmendment ? 'blocked' : 'planning', scope,
+    abandonmentReason: abandons ? decision.rationale : state.abandonmentReason,
+    blockedReasons: requiresAmendment
+      ? ['Recorded material scope decision requires its exact authorized plan amendment before implementation can continue.']
+      : [],
+  }, clock);
 }
 
 function exactMaterialDecisionAuthority(root, state, evidence) {
@@ -4982,6 +4986,53 @@ function decisionDispositionForRecovery(intent, predecessor) {
   return record.disposition;
 }
 
+function scopeDecisionForRecovery(cwd, intent, predecessor) {
+  const decisionPaths = Object.values(intent.evidencePaths ?? {})
+    .filter((path) => typeof path === 'string' && path.startsWith('scope/decisions/'));
+  if (intent.type !== 'scope-decision-recorded') {
+    if (decisionPaths.length > 0) {
+      throw new StateError('Scope decision evidence is attached to a non-scope-decision transition',
+        'RECOVERY_EVIDENCE_INVALID');
+    }
+    return false;
+  }
+  const records = authoritativeEvidenceRecords(intent);
+  const decision = records.scopeDecisionDigest?.value;
+  if (!predecessor?.scope || Object.keys(records).length !== 1 || decisionPaths.length !== 1
+      || validateScopeDecision(decision).length > 0
+      || predecessor.phase !== 'awaiting-scope-decision' || predecessor.scope.status !== 'awaiting-decision'
+      || !predecessor.scope.currentEvidenceDigest
+      || records.scopeDecisionDigest.path !== relative(changeDirectory(cwd, predecessor.changeId),
+        scopeDecisionPath(cwd, predecessor, decision))
+      || intent.summary !== `Recorded ${decision?.disposition} scope disposition`
+      || intent.createdAt !== intent.nextState.updatedAt) {
+    throw new StateError('Interrupted scope decision lacks exact semantic authority', 'RECOVERY_EVIDENCE_INVALID');
+  }
+  const evidence = findScopeReceipt(cwd, predecessor, 'evidence', predecessor.scope.currentEvidenceDigest,
+    'recovered scope decision evidence').value;
+  const closure = findScopeReceipt(cwd, predecessor, 'minimal-closure', predecessor.scope.closureDigest,
+    'recovered scope decision closure').value;
+  const authorityState = predecessor.plan ? predecessor
+    : { ...predecessor, plan: { effectiveDigest: predecessor.scope.candidatePlanDigest } };
+  const errors = validateDecisionForEvidence(decision, {
+    state: authorityState, evidence, closure, amendmentRecords: scopeAmendmentRecords(cwd, predecessor),
+  });
+  if (errors.length > 0 || predecessor.scope.decisionDigests.includes(scopeContractDigest(decision))) {
+    throw new StateError('Interrupted scope decision is invalid or stale', 'RECOVERY_EVIDENCE_INVALID');
+  }
+  if (validateScopeDecisionHistory(cwd, predecessor).has(decision.decisionId)) {
+    throw new StateError(`Interrupted scope decision ID ${decision.decisionId} is already recorded`,
+      'RECOVERY_EVIDENCE_INVALID');
+  }
+  const expected = deriveScopeDecisionTransition(predecessor, decision,
+    () => new Date(intent.nextState.updatedAt));
+  if (serialized(expected) !== serialized(intent.nextState)) {
+    throw new StateError('Interrupted scope decision does not match its recorded operation',
+      'RECOVERY_EVIDENCE_INVALID');
+  }
+  return true;
+}
+
 function sourceRefreshForRecovery(cwd, intent, predecessor) {
   const sourcePaths = Object.values(intent.evidencePaths ?? {})
     .filter((path) => typeof path === 'string' && path.startsWith('source/observations/'));
@@ -5296,6 +5347,7 @@ export function recoverState({ cwd = process.cwd(), changeId, crashStep, lockOpt
       if (predecessor.scope) validateScopeDecisionHistory(root, predecessor);
     }
     const decisionDisposition = decisionDispositionForRecovery(intent, predecessor);
+    const semanticScopeDecision = scopeDecisionForRecovery(root, intent, predecessor);
     const semanticSourceRefresh = sourceRefreshForRecovery(root, intent, predecessor);
     const semanticAmendment = amendmentForRecovery(root, intent, predecessor);
     const finalizedIntegration = prefix.intents.some((item) => item.type === 'implementation-finalized');
@@ -5327,11 +5379,13 @@ export function recoverState({ cwd = process.cwd(), changeId, crashStep, lockOpt
     const recordedGit = semanticGitCheckpoint ? checkpointObservation(intent) : intent.nextState.git;
     const exactLateTransition = semanticSourceRefresh?.late === true || semanticAmendment;
     const exactRecordedObservation = (semanticGitCheckpoint || semanticAbandonment || exactDecisionObservation || exactLateRetain
+      || semanticScopeDecision
       || exactLateTransition || executionTransition)
       && currentGit.headSha === recordedGit.headSha
       && currentGit.branch === recordedGit.branch
       && currentGit.clean === recordedGit.clean;
     const recoveryGitInvalid = semanticGitCheckpoint || semanticAbandonment || exactDecisionObservation || exactLateRetain
+      || semanticScopeDecision
       || exactLateTransition || executionTransition
       ? !exactRecordedObservation
       : !exactRecordedObservation && (!currentGit.clean || currentGit.headSha !== intent.nextState.planningSha);
@@ -5340,7 +5394,7 @@ export function recoverState({ cwd = process.cwd(), changeId, crashStep, lockOpt
         ? 'the exact branch, HEAD, and cleanliness recorded by the Git checkpoint'
         : semanticAbandonment
         ? 'the exact Git observation recorded by the abandonment transition'
-        : exactDecisionObservation || exactLateTransition || executionTransition
+        : exactDecisionObservation || semanticScopeDecision || exactLateTransition || executionTransition
           ? 'the exact clean branch and HEAD recorded by the semantic transition'
         : 'clean HEAD at the transition Planning SHA';
       throw new StateError(`Recovery requires ${requirement}`, 'PLANNING_SNAPSHOT_MISMATCH');
