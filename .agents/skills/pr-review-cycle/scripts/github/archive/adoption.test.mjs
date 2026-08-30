@@ -3337,6 +3337,263 @@ test('archive adoption accepts exact 6-to-10-to-14 partial-mixed lineage and pro
   assert.deepEqual(predecessorOnly.fixture.client.events, []);
   assert.deepEqual(predecessorOnly.records, predecessorOnlyOriginal);
 
+  const buildAuthorityNeutralCarrierChain = async () => {
+    const topology = await buildPredecessorOnlyTopology();
+    const fourRootSuccessor = topology.terminalCarrier.state.tasks.find(
+      (task) => task.id === topology.successorTaskId,
+    );
+    const splitRow = topology.terminalCarrier.state.threadResolutionStatus.threads.find(
+      (row) => row.taskIds.includes(topology.successorTaskId),
+    );
+    const splitTaskId = `${topology.successorTaskId}-singleton`;
+    const splitCommit = '1710000000000000000000000000000000000001';
+    const splitSource = `thread:${splitRow.threadNodeId}`;
+    fourRootSuccessor.sourceIds = fourRootSuccessor.sourceIds.filter(
+      (source) => source !== splitSource,
+    );
+    topology.terminalCarrier.state.tasks.push({
+      ...structuredClone(fourRootSuccessor),
+      id: splitTaskId,
+      sourceIds: [splitSource],
+      fingerprint: `${splitTaskId}-fingerprint`,
+      integratedCommitSha: splitCommit,
+      resolutionSummary: 'The proof origin retains one exact singleton partition.',
+    });
+    splitRow.taskIds = [splitTaskId];
+    const splitReply = topology.fixture.client.threadComments.get(splitRow.threadNodeId)[1];
+    splitReply.body = splitReply.body.replace(
+      `- ${topology.successorTaskId}: ${topology.successorCommit}`,
+      `- ${splitTaskId}: ${splitCommit}`,
+    );
+    const rowsByHistoricalTask = new Map();
+    for (const row of topology.terminalCarrier.state.threadResolutionStatus.threads) {
+      const historicalTaskId = row.archiveProvenance?.historicalTaskId ?? row.taskIds[0];
+      const roots = rowsByHistoricalTask.get(historicalTaskId) ?? [];
+      roots.push(row.threadNodeId);
+      rowsByHistoricalTask.set(historicalTaskId, roots);
+    }
+    const sourceStates = [
+      topology.oldArchive.state,
+      topology.mixedArchive.state,
+      topology.terminalCarrier.state,
+    ];
+    const singletonPartitions = [...rowsByHistoricalTask]
+      .filter(([, roots]) => roots.length === 1)
+      .map(([taskId, roots]) => ({
+        historicalTask: sourceStates.flatMap((state) => state.tasks)
+          .find((task) => task.id === taskId),
+        roots,
+      }))
+      .filter((partition) => partition.historicalTask !== undefined)
+      .slice(0, 2);
+    assert.equal(singletonPartitions.length, 2);
+
+    const predecessorCommits = [
+      '1426000000000000000000000000000000000001',
+      '1426000000000000000000000000000000000002',
+    ];
+    const predecessorTasks = singletonPartitions.map((partition, index) => ({
+      ...structuredClone(partition.historicalTask),
+      disposition: 'actionable',
+      status: 'integrated',
+      integratedCommitSha: predecessorCommits[index],
+      resolutionSummary: 'Integrated predecessor authority retained before the proof origin.',
+    }));
+    const predecessorRoots = new Set(singletonPartitions.flatMap((partition) => partition.roots));
+    const wrapperRoots = topology.freshTask.sourceIds
+      .map((source) => /^thread:(.+)$/u.exec(source)?.[1])
+      .filter((root) => root !== undefined && !predecessorRoots.has(root));
+    assert.equal(wrapperRoots.length, 8);
+    const wrapperTask = {
+      ...structuredClone(topology.freshTask),
+      id: 'retained-older-eight-proofless-wrapper-r21',
+      fingerprint: 'retained-older-eight-proofless-wrapper-r21-fingerprint',
+      sourceIds: wrapperRoots.map((root) => `thread:${root}`),
+      disposition: 'already-fixed',
+      status: 'proposed',
+      integratedCommitSha: null,
+      resolutionSummary: 'Authority-neutral complete wrapper for the older eight roots.',
+      execution: {
+        dependencies: [],
+        ownedPaths: [],
+        worker: null,
+        branch: null,
+        worktree: null,
+        workerCommitSha: null,
+        validationSummaries: [],
+        lastError: null,
+      },
+    };
+    const archiveAt = (archiveId, updatedAt, tasks) => {
+      const state = structuredClone(topology.predecessorArchive.state);
+      state.tasks = tasks;
+      state.threadResolutionStatus = proof('not-run');
+      state.phase = 'triaging';
+      state.abandonmentReason = 'Retain exact authority-neutral proofless carrier inventory.';
+      state.updatedAt = updatedAt;
+      return {
+        archiveId,
+        state,
+        events: [{
+          schemaVersion: 1,
+          type: 'abandoned',
+          summary: `Archived without completion: ${state.abandonmentReason}`,
+          at: new Date(Date.parse(updatedAt) + 10).toISOString(),
+        }],
+      };
+    };
+    const actionableCarrier = archiveAt(
+      'pr-35-2026-08-01T14-26-00-000Z',
+      '2026-08-01T14:26:00.000Z',
+      [...predecessorTasks.map((task) => structuredClone(task)), structuredClone(wrapperTask)],
+    );
+    const neutralTaskAtStatus = (task, status) => {
+      const neutral = {
+        ...structuredClone(task),
+        disposition: 'already-fixed',
+        status,
+        integratedCommitSha: null,
+        resolutionSummary: 'Authority-neutral exact carry-forward shell.',
+      };
+      if (status === 'proposed') {
+        neutral.execution = structuredClone(wrapperTask.execution);
+      } else {
+        delete neutral.execution;
+      }
+      return neutral;
+    };
+    const neutralTasks = (status) => [
+      ...predecessorTasks.map((task) => neutralTaskAtStatus(task, status)),
+      neutralTaskAtStatus(wrapperTask, status),
+    ];
+    const neutralCarriers = [
+      archiveAt('pr-35-2026-08-01T15-14-00-000Z', '2026-08-01T15:14:00.000Z', neutralTasks('proposed')),
+      archiveAt('pr-35-2026-08-01T15-18-00-000Z', '2026-08-01T15:18:00.000Z', neutralTasks('not-applicable')),
+      archiveAt('pr-35-2026-08-01T16-07-00-000Z', '2026-08-01T16:07:00.000Z', neutralTasks('proposed')),
+    ];
+    return {
+      ...topology,
+      actionableCarrier,
+      neutralCarriers,
+      predecessorCommits,
+      predecessorTasks,
+      wrapperTask,
+      records: [
+        topology.terminalCarrier,
+        topology.mixedArchive,
+        topology.oldArchive,
+        actionableCarrier,
+        ...neutralCarriers,
+      ],
+    };
+  };
+
+  const authorityNeutral = await buildAuthorityNeutralCarrierChain();
+  const authorityNeutralOriginal = structuredClone(authorityNeutral.records);
+  const authorityNeutralStore = immutableArchiveStore(authorityNeutral.records);
+  const authorityNeutralJournal = fakeJournal(authorityNeutral.fixture.client.events);
+  const authorityNeutralSetup = workflow(authorityNeutral.active, authorityNeutral.fixture.client, {
+    archiveStore: authorityNeutralStore,
+    git: authorityNeutral.freshGit,
+    journal: authorityNeutralJournal,
+  });
+  const authorityNeutralResult = await authorityNeutralSetup.api.replyResolve(
+    35, authorityNeutral.freshTask.id,
+  );
+  assert.equal(authorityNeutralStore.calls, 2);
+  assert.equal(authorityNeutralResult.threadResolutionStatus.threads.filter(
+    (row) => row.taskIds.includes(authorityNeutral.freshTask.id),
+  ).length, 10);
+  assert.equal(authorityNeutralSetup.state.calls.length, 1);
+  assert.equal(authorityNeutralSetup.state.calls[0].name, 'checkpointArchiveTaskCompletion');
+  assert.equal(authorityNeutralJournal.intents.size, 0);
+  assert.equal(authorityNeutral.fixture.client.calls.some(
+    (call) => ['AddThreadReply', 'ResolveThread'].includes(call.name),
+  ), false);
+  assert.deepEqual(authorityNeutral.fixture.client.events, []);
+  assert.deepEqual(authorityNeutral.records, authorityNeutralOriginal);
+  for (const predecessorCommit of authorityNeutral.predecessorCommits) {
+    assert.equal(authorityNeutral.freshGit.ancestryCalls.filter(
+      (call) => call.ancestorSha === predecessorCommit,
+    ).length, 2);
+  }
+
+  const authorityNeutralCases = [
+    ['changed shell stable identity', ({ neutralCarriers }) => {
+      neutralCarriers[0].state.tasks[0].fingerprint += '-changed';
+    }],
+    ['actionable shell', ({ neutralCarriers }) => {
+      neutralCarriers[0].state.tasks[0].disposition = 'actionable';
+    }],
+    ['completed shell', ({ neutralCarriers }) => {
+      neutralCarriers[0].state.tasks[0].status = 'completed';
+    }],
+    ['non-null shell commit', ({ neutralCarriers }) => {
+      neutralCarriers[0].state.tasks[0].integratedCommitSha = ADVANCED_HEAD;
+    }],
+    ['non-null wrapper commit', ({ neutralCarriers }) => {
+      neutralCarriers[0].state.tasks.at(-1).integratedCommitSha = ADVANCED_HEAD;
+    }],
+    ['single-partition wrapper', ({ neutralCarriers, predecessorTasks }) => {
+      neutralCarriers[0].state.tasks.at(-1).sourceIds = structuredClone(
+        predecessorTasks[0].sourceIds,
+      );
+      neutralCarriers[0].state.tasks.splice(0, 1);
+    }],
+    ['partial wrapper partition', ({ neutralCarriers }) => {
+      neutralCarriers[0].state.tasks.at(-1).sourceIds.pop();
+    }],
+    ['overlapping wrapper partition', ({ neutralCarriers, predecessorTasks }) => {
+      neutralCarriers[0].state.tasks.at(-1).sourceIds.push(predecessorTasks[0].sourceIds[0]);
+    }],
+    ['shell without predecessor authority', ({ actionableCarrier }) => {
+      actionableCarrier.state.tasks = actionableCarrier.state.tasks.filter(
+        (task) => task.disposition !== 'actionable',
+      );
+    }],
+    ['post-origin neutral carrier', ({ neutralCarriers }) => {
+      neutralCarriers[2].state.updatedAt = '2026-08-21T16:07:00.000Z';
+      neutralCarriers[2].events.at(-1).at = '2026-08-21T16:07:00.010Z';
+    }],
+  ];
+  for (const [label, tamper] of authorityNeutralCases) {
+    const topology = await buildAuthorityNeutralCarrierChain();
+    tamper(topology);
+    const journal = fakeJournal(topology.fixture.client.events);
+    const failed = workflow(topology.active, topology.fixture.client, {
+      archiveStore: immutableArchiveStore(topology.records),
+      git: topology.freshGit,
+      journal,
+    });
+    await assert.rejects(
+      () => failed.api.replyResolve(35, topology.freshTask.id),
+      GitHubWorkflowError,
+      label,
+    );
+    assert.equal(failed.state.calls.length, 0, label);
+    assert.equal(journal.intents.size, 0, label);
+    assert.equal(topology.fixture.client.calls.some(
+      (call) => ['AddThreadReply', 'ResolveThread'].includes(call.name),
+    ), false, label);
+    assert.deepEqual(topology.fixture.client.events, [], label);
+  }
+
+  const neutralRace = await buildAuthorityNeutralCarrierChain();
+  const neutralRaceJournal = fakeJournal(neutralRace.fixture.client.events);
+  const neutralRaceStore = immutableArchiveStore(neutralRace.records, (calls) => {
+    if (calls === 2) neutralRace.neutralCarriers[1].state.tasks.at(-1).summary += ' raced';
+  });
+  const neutralRaceFailure = workflow(neutralRace.active, neutralRace.fixture.client, {
+    archiveStore: neutralRaceStore, git: neutralRace.freshGit, journal: neutralRaceJournal,
+  });
+  await assert.rejects(
+    () => neutralRaceFailure.api.replyResolve(35, neutralRace.freshTask.id),
+    GitHubWorkflowError,
+    'authority-neutral carrier content race',
+  );
+  assert.equal(neutralRaceFailure.state.calls.length, 0);
+  assert.equal(neutralRaceJournal.intents.size, 0);
+
   const equalPredecessorSuccessor = await buildPredecessorOnlyTopology();
   equalPredecessorSuccessor.predecessorTask.integratedCommitSha =
     equalPredecessorSuccessor.successorCommit;

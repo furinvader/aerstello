@@ -1047,14 +1047,12 @@ function terminalProoflessPredecessorCarrier(
     );
   }
 
-  const matchingTasks = candidate.archivedState.tasks.filter((task) => (
+  const selectedRootTasks = candidate.archivedState.tasks.filter((task) => (
     anchoredTaskIds.has(task.id)
+      || (task.sourceType === 'github-thread'
+        && taskCanonicalRootIds(task, canonicalRootIndex).length !== 0)
   ));
-  const overlappingTasks = candidate.archivedState.tasks.filter((task) => (
-    task.sourceType === 'github-thread'
-      && taskCanonicalRootIds(task, canonicalRootIndex).length !== 0
-  ));
-  if (matchingTasks.length === 0 || overlappingTasks.some((task) => !anchoredTaskIds.has(task.id))) {
+  if (selectedRootTasks.length === 0) {
     throw new GitHubWorkflowError(
       'Terminal proofless predecessor carrier has alternate or missing selected-root authority',
       'ARCHIVE_EVIDENCE_AMBIGUOUS',
@@ -1066,29 +1064,66 @@ function terminalProoflessPredecessorCarrier(
   const coveredRoots = new Set();
   const seenTaskIds = new Set();
   const seenCommits = new Set();
+  let aggregateWrapperCount = 0;
   reserveNode();
-  for (const task of matchingTasks) {
-    const partition = anchoredPartitions.get(task.id);
-    const partitionRoots = partition.proofRows.map((row) => row.threadNodeId).sort();
+  for (const task of selectedRootTasks) {
     const taskRoots = taskCanonicalRootIds(task, canonicalRootIndex, { requireComplete: true });
-    if (seenTaskIds.has(task.id) || seenCommits.has(task.integratedCommitSha)
-        || task.sourceType !== 'github-thread' || task.disposition !== 'actionable'
-        || task.status !== 'integrated' || typeof task.integratedCommitSha !== 'string'
-        || (typeof partition.historicalTask.integratedCommitSha === 'string'
-          && task.integratedCommitSha === partition.historicalTask.integratedCommitSha)
-        || task.integratedCommitSha === partition.historicalHeadSha
-        || taskRoots === null || !isDeepStrictEqual(taskRoots, partitionRoots)
-        || !isDeepStrictEqual(
-          stablePredecessorTaskIdentity(task),
-          stablePredecessorTaskIdentity(partition.historicalTask),
-        )) {
+    const canonicalSources = task.sourceIds.filter(
+      (source) => /^(?:thread|discussion):/u.test(source),
+    );
+    const coveredPartitions = taskRoots === null ? [] : projection.partitions.filter((partition) => {
+      const partitionRoots = partition.proofRows.map((row) => row.threadNodeId);
+      return partitionRoots.some((root) => taskRoots.includes(root));
+    });
+    const completePartitionRoots = coveredPartitions.flatMap(
+      (partition) => partition.proofRows.map((row) => row.threadNodeId),
+    ).sort();
+    if (seenTaskIds.has(task.id) || task.sourceType !== 'github-thread'
+        || taskRoots === null || taskRoots.length === 0
+        || !isDeepStrictEqual(taskRoots, completePartitionRoots)) {
       throw new GitHubWorkflowError(
         'Terminal proofless predecessor task is duplicated, divergent, partial, or ineligible',
         'ARCHIVE_EVIDENCE_AMBIGUOUS',
       );
     }
     seenTaskIds.add(task.id);
-    seenCommits.add(task.integratedCommitSha);
+    let role;
+    let partition = null;
+    if (coveredPartitions.length === 1
+        && task.id === coveredPartitions[0].historicalTask.id
+        && isDeepStrictEqual(
+          stablePredecessorTaskIdentity(task),
+          stablePredecessorTaskIdentity(coveredPartitions[0].historicalTask),
+        )) {
+      partition = coveredPartitions[0];
+      if (task.disposition === 'actionable' && task.status === 'integrated'
+          && typeof task.integratedCommitSha === 'string'
+          && !seenCommits.has(task.integratedCommitSha)
+          && (typeof partition.historicalTask.integratedCommitSha !== 'string'
+            || task.integratedCommitSha !== partition.historicalTask.integratedCommitSha)
+          && task.integratedCommitSha !== partition.historicalHeadSha) {
+        role = 'predecessor';
+        seenCommits.add(task.integratedCommitSha);
+      } else if (task.disposition === 'already-fixed'
+          && ['proposed', 'not-applicable'].includes(task.status)
+          && task.integratedCommitSha === null) {
+        role = 'carry-forward-shell';
+      }
+    } else if (!anchoredTaskIds.has(task.id)
+        && coveredPartitions.length >= 2
+        && canonicalSources.length === taskRoots.length
+        && task.disposition === 'already-fixed'
+        && ['proposed', 'not-applicable'].includes(task.status)
+        && task.integratedCommitSha === null) {
+      aggregateWrapperCount += 1;
+      if (aggregateWrapperCount === 1) role = 'aggregate-wrapper';
+    }
+    if (role === undefined) {
+      throw new GitHubWorkflowError(
+        'Terminal proofless predecessor task is duplicated, divergent, partial, or ineligible',
+        'ARCHIVE_EVIDENCE_AMBIGUOUS',
+      );
+    }
     for (const root of taskRoots) {
       if (coveredRoots.has(root)) {
         throw new GitHubWorkflowError(
@@ -1099,23 +1134,27 @@ function terminalProoflessPredecessorCarrier(
       coveredRoots.add(root);
       reserveNode();
       roles.push({
-        historicalTaskId: partition.historicalTask.id,
-        predecessorTaskId: task.id,
+        historicalTaskIds: coveredPartitions.map(
+          (coveredPartition) => coveredPartition.historicalTask.id,
+        ).sort(),
+        carrierTaskId: task.id,
         threadNodeId: root,
-        role: 'predecessor',
+        role,
       });
     }
-    relations.push({
-      ancestorSha: task.integratedCommitSha,
-      descendantSha: partition.historicalHeadSha,
-      label: `terminal proofless predecessor ${task.id} to partition proof`,
-      predecessorTaskId: task.id,
-      successorTaskId: partition.historicalTask.id,
-      archiveId: candidate.archive.archiveId,
-      roots: taskRoots,
-    });
+    if (role === 'predecessor') {
+      relations.push({
+        ancestorSha: task.integratedCommitSha,
+        descendantSha: partition.historicalHeadSha,
+        label: `terminal proofless predecessor ${task.id} to partition proof`,
+        predecessorTaskId: task.id,
+        successorTaskId: partition.historicalTask.id,
+        archiveId: candidate.archive.archiveId,
+        roots: taskRoots,
+      });
+    }
   }
-  return { candidate, roles, relations };
+  return { candidate, roles, relations, carrierRoots: [...coveredRoots].sort() };
 }
 
 export function singleRootProjection(authority) {
@@ -1386,6 +1425,19 @@ export function validateAggregateArchiveLineage(
       'ARCHIVE_EVIDENCE_AMBIGUOUS',
     );
   }
+  const predecessorAuthorityIds = new Set(predecessorOnlyCarriers.flatMap(({ relations }) => (
+    relations.map((relation) => relation.successorTaskId)
+  )));
+  const neutralShellAuthorityIds = new Set(predecessorOnlyCarriers.flatMap(({ roles }) => (
+    roles.filter((role) => role.role === 'carry-forward-shell')
+      .flatMap((role) => role.historicalTaskIds)
+  )));
+  if ([...neutralShellAuthorityIds].some((taskId) => !predecessorAuthorityIds.has(taskId))) {
+    throw new GitHubWorkflowError(
+      'Terminal proofless carry-forward shell lacks unique predecessor authority',
+      'ARCHIVE_EVIDENCE_AMBIGUOUS',
+    );
+  }
   const provenanceHistoricalCandidateIds = new Set();
   const supersededPredecessorRelations = [];
   const supersededPredecessorCovers = [];
@@ -1547,19 +1599,17 @@ export function validateAggregateArchiveLineage(
   }
   for (const predecessor of predecessorOnlyCarriers) {
     const predecessorAt = terminalArchiveUpperBound(predecessor.candidate);
-    for (const relation of predecessor.relations) {
-      const relationOrigins = relation.roots.flatMap((root) => origins.get(root));
-      if (relationOrigins.length === 0 || relationOrigins.some((origin) => (
+    const carrierOrigins = predecessor.carrierRoots.flatMap((root) => origins.get(root));
+    if (carrierOrigins.length === 0 || carrierOrigins.some((origin) => (
         predecessorAt >= parsedTime(
           origin.evidence.intents.reply.intent.at,
           'Aggregate proof origin reply intent',
         )
-      ))) {
-        throw new GitHubWorkflowError(
-          'Terminal proofless predecessor carrier is not earlier than its proof origin',
-          'ARCHIVE_EVIDENCE_AMBIGUOUS',
-        );
-      }
+    ))) {
+      throw new GitHubWorkflowError(
+        'Terminal proofless predecessor carrier is not earlier than its proof origin',
+        'ARCHIVE_EVIDENCE_AMBIGUOUS',
+      );
     }
   }
   const authorityFingerprint = createHash('sha256')

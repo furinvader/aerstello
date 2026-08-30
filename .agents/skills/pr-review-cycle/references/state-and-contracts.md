@@ -251,27 +251,46 @@ One off-selection carrier may enter a transient terminal-proofless-predecessor
 role only after the complete aggregate projection has anchored its historical
 task partitions. The carrier is independently schema-v3-valid and terminal,
 has no selected-root proof or provenance row and no selected-root reply or
-resolve intent, and contains no alternate selected-root task authority. Each
-accepted task appears exactly once as an actionable Integrated GitHub-thread
-task with a non-null commit. It keeps the successor partition's exact task ID,
-canonical thread/discussion sources, fingerprint, summary, and severity, covers
-that whole partition only, and may differ only in disposition, status, commit,
-resolution summary, and receipt-sidecar projection. Predecessor partitions are
-unique and disjoint across carriers. Each predecessor integration commit is
-distinct from both the anchored successor task's non-null integration commit
-and the partition proof HEAD while remaining ancestral to the partition proof
-HEAD. Their terminal boundary precedes every partition proof-origin reply
-intent, and each carrier HEAD is ancestral to the current integration HEAD.
+resolve intent, and contains no alternate selected-root task authority. Every
+selected-root task object is classified exactly once as one of three closed
+inventory roles. The authority-bearing role is the existing unique actionable
+Integrated GitHub-thread predecessor with a non-null commit. It keeps the
+successor partition's exact task ID, canonical thread/discussion sources,
+fingerprint, summary, and severity, covers that whole partition only, and may
+differ only in disposition, status, commit, resolution summary, and
+receipt-sidecar projection.
 
-The predecessor carrier's complete content fingerprint and exact per-root role
-are included in the sorted aggregate inventory and both immutable archive
-reads. Its commit-to-proof and carrier-to-current ancestry relations are also
-rechecked twice. A duplicate, partial, overlapping, divergent, proof-bearing,
+Two retained roles are authority-neutral. An exact carry-forward shell keeps
+that same stable predecessor identity and one whole anchored partition, but is
+`already-fixed`, remains `proposed` or `not-applicable`, and has a null
+integration commit. It is accepted only when the inventory also contains the
+unique authority-bearing predecessor for that partition. At most one aggregate
+wrapper in a carrier may cover the exact disjoint union of at least two whole
+anchored partitions; it has the same neutral disposition, status, and null
+commit constraints. Duplicate aliases, sliced partitions, single-partition
+wrappers, and any overlap between predecessor, shell, or wrapper tasks are
+rejected. Neither neutral role contributes origin, replay, predecessor, intent,
+or commit authority.
+
+Predecessor partitions are unique and disjoint across carriers. Each
+predecessor integration commit is distinct from both the anchored successor
+task's non-null integration commit and the partition proof HEAD while remaining
+ancestral to the partition proof HEAD. Every authority-bearing or neutral
+carrier's terminal boundary precedes every covered partition's proof-origin
+reply intent, and each carrier HEAD is ancestral to the current integration
+HEAD.
+
+Each proofless carrier, selected-root role, and intent footprint consumes the
+shared cumulative node budget. The carrier's complete content fingerprint and
+exact per-root authority-bearing or neutral role are included in the sorted
+aggregate inventory and both immutable archive reads. Its commit-to-proof
+relations, when any, and carrier-to-current ancestry are also rechecked twice.
+A duplicate, partial, overlapping, divergent, proof-bearing,
 provenance-bearing, intent-bearing, nonterminal, late, non-ancestral, added,
-removed, or changed predecessor carrier therefore fails closed before the one
-protected archive-completion checkpoint. This role changes no archive or state
-format, copies no evidence, appends no mutation intent, and never replies to or
-resolves a GitHub thread.
+removed, or changed carrier therefore fails closed before the one protected
+archive-completion checkpoint. These transient roles change no archive or state
+format, copy no evidence, append no mutation intent, and never reply to or
+resolve a GitHub thread.
 
 `threadRecord.archiveProvenance` is optional so ordinary schema-v3 rows remain
 byte-for-byte compatible. When present it is a closed version-1 object with
