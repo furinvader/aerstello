@@ -117,11 +117,27 @@ function unmappedMaterialInventory(packet) {
   return errors;
 }
 
-function shortestMappedAuthority(mapping, allowedFields = AFFIRMATIVE_AUTHORITY_FIELDS) {
+function eligibleDecisionIds(packet, mechanism) {
+  return new Set(
+    (packet.acceptedScope?.authorityDecisions ?? [])
+      .filter((decision) => (
+        decision.disposition === 'approve-material-amendment'
+        && decision.authorizedShape.includes(mechanism)
+      ))
+      .map(({ id }) => id),
+  );
+}
+
+function shortestMappedAuthority(
+  mapping,
+  allowedFields = AFFIRMATIVE_AUTHORITY_FIELDS,
+  eligibleDecisions = new Set(),
+) {
   let shortest = null;
   let shortestBytes = Number.POSITIVE_INFINITY;
   for (const field of allowedFields) {
     for (const id of mapping[field] ?? []) {
+      if (field === 'decisionIds' && !eligibleDecisions.has(id)) continue;
       const bytes = Buffer.byteLength(JSON.stringify(id), 'utf8');
       if (
         bytes < shortestBytes
@@ -163,18 +179,13 @@ function materialInventoryState(packet) {
     packet.changeInventory.mappings.map((entry) => [entry.mechanism, entry]),
   );
   const authorizedShape = new Set(packet.acceptedScope?.authorizedShape ?? []);
-  const approvedDecisions = new Map(
-    (packet.acceptedScope?.authorityDecisions ?? [])
-      .filter(({ disposition }) => disposition === 'approve-material-amendment')
-      .map((decision) => [decision.id, new Set(decision.authorizedShape)]),
-  );
   for (const field of MATERIAL_INVENTORY_FIELDS) {
     for (const mechanism of packet.changeInventory[field]) {
       materialMechanisms.add(mechanism);
       const mapping = mappings.get(mechanism);
-      const hasDecisionAuthority = (mapping?.decisionIds ?? []).some(
-        (id) => approvedDecisions.get(id)?.has(mechanism),
-      );
+      const eligibleDecisions = eligibleDecisionIds(packet, mechanism);
+      const hasDecisionAuthority = (mapping?.decisionIds ?? [])
+        .some((id) => eligibleDecisions.has(id));
       if (
         !mapping
         || (mapping.sourceCriterionIds.length === 0 && !hasDecisionAuthority)
@@ -188,9 +199,13 @@ function materialInventoryState(packet) {
   return { materialMechanisms, forcedMechanisms, forcedCategories };
 }
 
-function affirmativeCoverage(mapping, rejectedShape) {
+function affirmativeCoverage(packet, mapping, rejectedShape) {
   if (rejectedShape.has(mapping.mechanism)) return null;
-  const authority = shortestMappedAuthority(mapping);
+  const authority = shortestMappedAuthority(
+    mapping,
+    AFFIRMATIVE_AUTHORITY_FIELDS,
+    eligibleDecisionIds(packet, mapping.mechanism),
+  );
   return authority ? minimalCoverage(mapping.mechanism, 'required', authority) : null;
 }
 
@@ -306,7 +321,7 @@ function initialMinorAssignments(rows, requireSourceOrAccepted) {
 
 function minorProjectionChoices(packet, mapping, materialMechanisms, rejectedShape, authorityMode) {
   const choices = [];
-  const affirmative = affirmativeCoverage(mapping, rejectedShape);
+  const affirmative = affirmativeCoverage(packet, mapping, rejectedShape);
   if (affirmative) choices.push({ kind: 'affirmative', coverage: affirmative });
   if (
     !materialMechanisms.has(mapping.mechanism)
@@ -687,12 +702,12 @@ function minimalResult(packet, verdict) {
 
   if (verdict === 'within-scope') {
     if (forcedMechanisms.size > 0) return null;
-    coverage = mappings.map((mapping) => affirmativeCoverage(mapping, rejectedShape));
+    coverage = mappings.map((mapping) => affirmativeCoverage(packet, mapping, rejectedShape));
     if (coverage.some((entry) => entry === null)) return null;
   } else if (verdict === 'trim-required') {
     if (forcedMechanisms.size > 0) return null;
     const choices = mappings.map((mapping) => {
-      const affirmative = affirmativeCoverage(mapping, rejectedShape);
+      const affirmative = affirmativeCoverage(packet, mapping, rejectedShape);
       if (materialMechanisms.has(mapping.mechanism)) return { affirmative, speculative: null };
       return {
         affirmative,
@@ -742,10 +757,10 @@ function minimalResult(packet, verdict) {
           return minimalCoverage(mapping.mechanism, 'material-scope-change');
         }
         if (materialMechanisms.has(mapping.mechanism)) {
-          return affirmativeCoverage(mapping, rejectedShape);
+          return affirmativeCoverage(packet, mapping, rejectedShape);
         }
         const speculative = minimalCoverage(mapping.mechanism, 'speculative');
-        const affirmative = affirmativeCoverage(mapping, rejectedShape);
+        const affirmative = affirmativeCoverage(packet, mapping, rejectedShape);
         if (!affirmative) return speculative;
         return serializedBytes(affirmative, 'coverage').bytes <= serializedBytes(speculative, 'coverage').bytes
           ? affirmative
@@ -778,10 +793,10 @@ function minimalResult(packet, verdict) {
       const material = minimalCoverage(mapping.mechanism, 'material-scope-change');
       let ordinary;
       if (materialMechanisms.has(mapping.mechanism)) {
-        ordinary = affirmativeCoverage(mapping, rejectedShape);
+        ordinary = affirmativeCoverage(packet, mapping, rejectedShape);
       } else {
         const speculative = minimalCoverage(mapping.mechanism, 'speculative');
-        const affirmative = affirmativeCoverage(mapping, rejectedShape);
+        const affirmative = affirmativeCoverage(packet, mapping, rejectedShape);
         ordinary = !affirmative
           || serializedBytes(speculative, 'coverage').bytes < serializedBytes(affirmative, 'coverage').bytes
           ? speculative
@@ -923,11 +938,6 @@ function materialInventoryCorrespondence(packet, result) {
   );
   const coverage = new Map(result.coverage.map((entry) => [entry.mechanism, entry]));
   const authorizedShape = new Set(packet.acceptedScope?.authorizedShape ?? []);
-  const approvedDecisions = new Map(
-    (packet.acceptedScope?.authorityDecisions ?? [])
-      .filter(({ disposition }) => disposition === 'approve-material-amendment')
-      .map((decision) => [decision.id, new Set(decision.authorizedShape)]),
-  );
   const materialSurfaces = new Set(result.scopeDelta?.materialSurfaces ?? []);
   const materialityTriggers = new Set(
     result.materialityTriggers.map(({ category }) => category),
@@ -937,9 +947,9 @@ function materialInventoryCorrespondence(packet, result) {
     for (const surface of packet.changeInventory[field]) {
       const mapping = mappings.get(surface);
       const missingAuthorities = [];
-      const hasDecisionAuthority = (mapping?.decisionIds ?? []).some(
-        (id) => approvedDecisions.get(id)?.has(surface),
-      );
+      const eligibleDecisions = eligibleDecisionIds(packet, surface);
+      const hasDecisionAuthority = (mapping?.decisionIds ?? [])
+        .some((id) => eligibleDecisions.has(id));
       if (!mapping || (mapping.sourceCriterionIds.length === 0 && !hasDecisionAuthority)) {
         missingAuthorities.push('explicit authoritative-source or approved-decision support');
       }
@@ -1076,6 +1086,16 @@ function mappingAuthorityCorrespondence(packet, result) {
         if (!mappedIds.has(id)) {
           errors.push(
             `$ coverage[${index}].${field} authority ${JSON.stringify(id)} is not mapped to mechanism ${JSON.stringify(entry.mechanism)} in changeInventory.mappings`,
+          );
+        }
+      }
+    }
+    if (AFFIRMATIVE_CLASSIFICATIONS.has(entry.classification)) {
+      const eligibleDecisions = eligibleDecisionIds(packet, entry.mechanism);
+      for (const id of entry.decisionIds ?? []) {
+        if (!eligibleDecisions.has(id)) {
+          errors.push(
+            `$ coverage[${index}].decisionIds authority ${JSON.stringify(id)} is not an approve-material-amendment decision authorizing mechanism ${JSON.stringify(entry.mechanism)}`,
           );
         }
       }
