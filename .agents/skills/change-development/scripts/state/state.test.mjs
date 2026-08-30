@@ -710,14 +710,20 @@ test('accepted material approval remains blocked until its exact approved shape 
     (error) => error.code === 'SCOPE_AMENDMENT_INVALID');
   assert.deepEqual(durableSnapshot(directory), beforeMismatch,
     'an approval cannot retain an assessed mechanism outside approvedShape');
+  const reordered = materialAmendment(state, fixture.plan, fixture.closure,
+    ['unrelated-existing-shape', 'durable-test-change', 'material-alpha'], 'reordered-approval');
+  assert.throws(() => amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...reordered }),
+    (error) => error.code === 'SCOPE_AMENDMENT_INVALID' && /preserve unrelated authority in order/u.test(error.message));
+  assert.deepEqual(durableSnapshot(directory), beforeMismatch,
+    'an approval cannot reorder unrelated authority');
 
   const exact = materialAmendment(state, fixture.plan, fixture.closure,
-    ['unrelated-existing-shape', 'material-alpha', 'durable-test-change']);
+    ['durable-test-change', 'unrelated-existing-shape', 'material-alpha']);
   state = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...exact });
   assert.equal(state.phase, 'implementing');
   const amendedClosure = JSON.parse(readFileSync(join(directory, 'scope', 'minimal-closure', '0002.json'), 'utf8'));
-  assert.deepEqual(new Set(amendedClosure.authorizedShape),
-    new Set(['durable-test-change', 'unrelated-existing-shape', 'material-alpha']));
+  assert.deepEqual(amendedClosure.authorizedShape,
+    ['durable-test-change', 'unrelated-existing-shape', 'material-alpha']);
   assert.equal(validateState({ cwd: fixture.cwd }).valid, true);
 });
 
@@ -734,12 +740,87 @@ test('narrow material dispositions remove every assessed mechanism and preserve 
       (error) => error.code === 'SCOPE_AMENDMENT_INVALID');
     assert.deepEqual(durableSnapshot(directory), before, `${disposition} rejects retained material atomically`);
     const narrowed = materialAmendment(state, fixture.plan, fixture.closure,
-      ['unrelated-existing-shape', 'durable-test-change'], `${disposition}-narrows`);
+      ['durable-test-change', 'unrelated-existing-shape'], `${disposition}-narrows`);
     state = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...narrowed });
     assert.equal(state.phase, 'implementing');
     const amendedClosure = JSON.parse(readFileSync(join(directory, 'scope', 'minimal-closure', '0002.json'), 'utf8'));
-    assert.deepEqual(new Set(amendedClosure.authorizedShape),
-      new Set(['durable-test-change', 'unrelated-existing-shape']));
+    assert.deepEqual(amendedClosure.authorizedShape,
+      ['durable-test-change', 'unrelated-existing-shape']);
+  }
+});
+
+test('every material disposition preserves unrelated semantic closure fields exactly', async () => {
+  for (const disposition of ['approve-material-amendment', 'reject-use-narrow', 'split-defer']) {
+    const closureOverrides = {
+      invariants: [
+        { id: 'exact-test-authority', text: 'Bind exact test evidence.' },
+        { id: 'stable-test-authority', text: 'Preserve stable test evidence.' },
+      ],
+      nonGoals: [
+        { id: 'no-test-expansion', text: 'Do not expand test authority.' },
+        { id: 'no-policy-rewrite', text: 'Do not rewrite policy authority.' },
+      ],
+      mandatoryConstraints: [
+        { id: 'receipt-test-authority', text: 'Persist receipt evidence.' },
+        { id: 'atomic-test-authority', text: 'Reject invalid evidence atomically.' },
+      ],
+      optionalGuidance: [
+        { id: 'keep-local', text: 'Keep the implementation local.' },
+        { id: 'keep-small', text: 'Keep the implementation small.' },
+      ],
+      unauthorizedExpansion: ['repository-wide-framework', 'unrelated-product-change'],
+    };
+    const fixture = await materialDecisionFixture(`material-${disposition}-semantic-preservation`,
+      ['material-alpha'], closureOverrides);
+    const approvedShape = disposition === 'approve-material-amendment' ? ['material-alpha'] : [];
+    const decision = materialScopeDecision(fixture.state, fixture.evidence, disposition, approvedShape,
+      `${disposition}-semantic-preservation`);
+    const state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision, decision });
+    const directory = changeDirectory(fixture.cwd, state.changeId);
+    const before = durableSnapshot(directory);
+    const authorizedShape = disposition === 'approve-material-amendment'
+      ? ['durable-test-change', 'unrelated-existing-shape', 'material-alpha']
+      : ['durable-test-change', 'unrelated-existing-shape'];
+    const semanticFields = [
+      'outcome',
+      'requiredCriteria',
+      'invariants',
+      'nonGoals',
+      'mandatoryConstraints',
+      'optionalGuidance',
+      'unauthorizedExpansion',
+    ];
+    const preserved = Object.fromEntries(semanticFields.map((field) => [field, fixture.closure[field]]));
+    const mismatches = {
+      outcome: 'Rewrite the accepted material outcome.',
+      requiredCriteria: fixture.closure.requiredCriteria.map((entry, index) => index === 0
+        ? { ...entry, text: 'Rewrite the required criterion.' } : entry),
+      invariants: [...fixture.closure.invariants].reverse(),
+      nonGoals: fixture.closure.nonGoals.slice(0, -1),
+      mandatoryConstraints: [
+        ...fixture.closure.mandatoryConstraints,
+        { id: 'extra-constraint', text: 'Add an unrelated constraint.' },
+      ],
+      optionalGuidance: fixture.closure.optionalGuidance.map((entry, index) => index === 0
+        ? { ...entry, text: 'Rewrite optional guidance.' } : entry),
+      unauthorizedExpansion: [...fixture.closure.unauthorizedExpansion].reverse(),
+    };
+    for (const [index, [field, value]] of Object.entries(mismatches).entries()) {
+      const amendment = materialAmendment(state, fixture.plan, fixture.closure, authorizedShape,
+        `${disposition}-semantic-mismatch-${index + 1}`, { ...preserved, [field]: value });
+      assert.throws(() => amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...amendment }),
+        (error) => error.code === 'SCOPE_AMENDMENT_INVALID'
+          && error.message.includes(`preserve prior ${field} exactly`));
+      assert.deepEqual(durableSnapshot(directory), before,
+        `${disposition} ${field} mismatch writes no sidecar, state, event, transition, or plan bytes`);
+    }
+    const exact = materialAmendment(state, fixture.plan, fixture.closure, authorizedShape,
+      `${disposition}-semantic-preservation-success`, preserved);
+    const amended = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...exact });
+    assert.equal(amended.phase, 'implementing');
+    const amendedClosure = JSON.parse(readFileSync(join(directory,
+      'scope', 'minimal-closure', '0002.json'), 'utf8'));
+    for (const field of semanticFields) assert.deepEqual(amendedClosure[field], fixture.closure[field]);
   }
 });
 
@@ -770,14 +851,14 @@ test('split-defer preserves the exact deferred prefix and appends only decision 
   ];
   for (const [index, deferredFollowups] of mismatches.entries()) {
     const amendment = materialAmendment(state, fixture.plan, fixture.closure,
-      ['unrelated-existing-shape', 'durable-test-change'], `invalid-split-followups-${index + 1}`,
+      ['durable-test-change', 'unrelated-existing-shape'], `invalid-split-followups-${index + 1}`,
       { deferredFollowups });
     assert.throws(() => amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...amendment }),
       (error) => error.code === 'SCOPE_AMENDMENT_INVALID' && /deferred-follow-up prefix/u.test(error.message));
     assert.deepEqual(durableSnapshot(directory), before, 'invalid split-defer follow-ups write no durable bytes');
   }
   const exact = materialAmendment(state, fixture.plan, fixture.closure,
-    ['unrelated-existing-shape', 'durable-test-change'], 'exact-split-followups',
+    ['durable-test-change', 'unrelated-existing-shape'], 'exact-split-followups',
     { deferredFollowups: exactFollowups });
   const amended = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...exact });
   assert.equal(amended.phase, 'implementing');
@@ -825,7 +906,7 @@ test('split-defer rejects an unrepresentable combined closure before recording i
   ];
   assert.equal(exactFollowups.length, 256);
   const exact = materialAmendment(state, fixture.plan, fixture.closure,
-    ['unrelated-existing-shape', 'durable-test-change'], 'exact-full-split-followups',
+    ['durable-test-change', 'unrelated-existing-shape'], 'exact-full-split-followups',
     { deferredFollowups: exactFollowups });
   const amended = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...exact });
   assert.equal(amended.phase, 'implementing');
@@ -845,8 +926,8 @@ test('material dispositions other than split-defer cannot change deferred follow
       `${disposition}-followups`);
     const state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision, decision });
     const authorizedShape = disposition === 'approve-material-amendment'
-      ? ['unrelated-existing-shape', 'durable-test-change', 'material-alpha']
-      : ['unrelated-existing-shape', 'durable-test-change'];
+      ? ['durable-test-change', 'unrelated-existing-shape', 'material-alpha']
+      : ['durable-test-change', 'unrelated-existing-shape'];
     const amendment = materialAmendment(state, fixture.plan, fixture.closure, authorizedShape,
       `${disposition}-changes-followups`, {
         deferredFollowups: [
@@ -1066,6 +1147,37 @@ test('interrupted amendment recovery rejects non-exact decision authority before
       && /invalid minimal closure authority/u.test(error.message));
   assert.deepEqual(durableSnapshot(directory), beforeRecovery,
     'recovery rejects extra decision authority before sidecars, state, events, or completion mutate');
+});
+
+test('interrupted material amendment recovery rejects receipt-consistent semantic closure tampering', async () => {
+  const fixture = await materialDecisionFixture('recovery-semantic-closure-preservation', ['material-alpha']);
+  const state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision,
+    decision: materialScopeDecision(fixture.state, fixture.evidence, 'approve-material-amendment',
+      ['material-alpha'], 'recovery-preserve-semantic-closure') });
+  const exact = materialAmendment(state, fixture.plan, fixture.closure,
+    ['durable-test-change', 'unrelated-existing-shape', 'material-alpha'], 'recovery-semantic-amendment');
+  assert.throws(() => amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...exact,
+    crashStep(step) { if (step === 'after-intent') throw new Error('pause semantic amendment recovery'); } }),
+  /pause semantic amendment recovery/u);
+
+  const directory = changeDirectory(fixture.cwd, state.changeId);
+  const transitionDirectory = join(directory, 'transitions', String(state.revision + 1).padStart(8, '0'));
+  const intentPath = join(transitionDirectory, 'intent.json');
+  const intent = JSON.parse(readFileSync(intentPath, 'utf8'));
+  const closureRecord = intent.authoritativeEvidence.minimalClosureDigest;
+  closureRecord.value.outcome = 'Receipt-consistent tampering rewrites the unrelated outcome.';
+  closureRecord.digest = digestJson(closureRecord.value);
+  intent.evidence.minimalClosureDigest = closureRecord.digest;
+  intent.nextState.scope.closureDigest = closureRecord.digest;
+  intent.nextStateDigest = digestJson(intent.nextState);
+  writeReceiptJson(intentPath, intent);
+
+  const beforeRecovery = durableSnapshot(directory);
+  assert.throws(() => recoverState({ cwd: fixture.cwd }),
+    (error) => error.code === 'RECOVERY_EVIDENCE_INVALID'
+      && /exact decision authority/u.test(error.message));
+  assert.deepEqual(durableSnapshot(directory), beforeRecovery,
+    'recovery rejects semantic closure tampering before any durable mutation');
 });
 
 test('durable replay rejects receipt-consistent duplicate scope decision IDs', async () => {

@@ -1461,14 +1461,26 @@ function validateMaterialDecisionAmendment({ root, state, evidence, amendment, p
   if (authority.decision.disposition !== 'approve-material-amendment' && approved.size > 0) {
     errors.push(`$ ${authority.decision.disposition} cannot authorize material shape`);
   }
-  const expectedAuthorized = new Set([
+  const preservedFields = [
+    'outcome',
+    'requiredCriteria',
+    'invariants',
+    'nonGoals',
+    'mandatoryConstraints',
+    'optionalGuidance',
+    'unauthorizedExpansion',
+  ];
+  for (const field of preservedFields) {
+    if (serialized(minimalClosure?.[field]) !== serialized(priorClosure[field])) {
+      errors.push(`$ material amendment must preserve prior ${field} exactly`);
+    }
+  }
+  const expectedAuthorized = [
     ...priorClosure.authorizedShape.filter((mechanism) => !assessed.has(mechanism)),
-    ...approved,
-  ]);
-  const actualAuthorized = new Set(minimalClosure?.authorizedShape ?? []);
-  if (expectedAuthorized.size !== actualAuthorized.size
-      || [...expectedAuthorized].some((mechanism) => !actualAuthorized.has(mechanism))) {
-    errors.push('$ amended authorizedShape must preserve unrelated authority and contain exactly the material decision approvedShape');
+    ...authority.decision.approvedShape,
+  ];
+  if (serialized(minimalClosure?.authorizedShape) !== serialized(expectedAuthorized)) {
+    errors.push('$ amended authorizedShape must preserve unrelated authority in order and append exactly the material decision approvedShape');
   }
   const appendedFollowups = authority.decision.disposition === 'split-defer'
     ? authority.decision.deferredFollowups.map((identity) => ({ id: identity, text: identity }))
