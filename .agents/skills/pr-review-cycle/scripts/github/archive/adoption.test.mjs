@@ -3337,7 +3337,7 @@ test('archive adoption accepts exact 6-to-10-to-14 partial-mixed lineage and pro
   assert.deepEqual(predecessorOnly.fixture.client.events, []);
   assert.deepEqual(predecessorOnly.records, predecessorOnlyOriginal);
 
-  const buildAuthorityNeutralCarrierChain = async () => {
+  const buildAuthorityNeutralCarrierChain = async (wrapperAliasMode = 'dual') => {
     const topology = await buildPredecessorOnlyTopology();
     const fourRootSuccessor = topology.terminalCarrier.state.tasks.find(
       (task) => task.id === topology.successorTaskId,
@@ -3404,22 +3404,23 @@ test('archive adoption accepts exact 6-to-10-to-14 partial-mixed lineage and pro
       .map((source) => /^thread:(.+)$/u.exec(source)?.[1])
       .filter((root) => root !== undefined && !predecessorRoots.has(root));
     assert.equal(wrapperRoots.length, 8);
-    const wrapperRowsByRoot = new Map(
-      topology.terminalCarrier.state.threadResolutionStatus.threads.map(
-        (row) => [row.threadNodeId, row],
-      ),
-    );
-    const wrapperSources = wrapperRoots.flatMap((root) => {
-      const row = wrapperRowsByRoot.get(root);
-      assert.notEqual(row, undefined);
-      return [`thread:${root}`, `discussion:${row.rootCommentDatabaseId}`];
+    const wrapperSourceIds = wrapperRoots.flatMap((root, index) => {
+      const threadSource = `thread:${root}`;
+      const rootComment = topology.fixture.client.threadComments.get(root)[0];
+      const discussionSource = `discussion:${rootComment.databaseId}`;
+      if (wrapperAliasMode === 'thread-only') return [threadSource];
+      if (wrapperAliasMode === 'discussion-only') return [discussionSource];
+      if (wrapperAliasMode === 'mixed') {
+        return [index % 2 === 0 ? threadSource : discussionSource];
+      }
+      return [threadSource, discussionSource];
     });
-    assert.equal(wrapperSources.length, 16);
+    assert.equal(wrapperSourceIds.length, wrapperAliasMode === 'dual' ? 16 : 8);
     const wrapperTask = {
       ...structuredClone(topology.freshTask),
       id: 'retained-older-eight-proofless-wrapper-r21',
       fingerprint: 'retained-older-eight-proofless-wrapper-r21-fingerprint',
-      sourceIds: wrapperSources,
+      sourceIds: wrapperSourceIds,
       disposition: 'already-fixed',
       status: 'proposed',
       integratedCommitSha: null,
@@ -3529,6 +3530,37 @@ test('archive adoption accepts exact 6-to-10-to-14 partial-mixed lineage and pro
     ).length, 2);
   }
 
+  for (const wrapperAliasMode of ['thread-only', 'discussion-only', 'mixed']) {
+    const compatible = await buildAuthorityNeutralCarrierChain(wrapperAliasMode);
+    const compatibleOriginal = structuredClone(compatible.records);
+    const compatibleStore = immutableArchiveStore(compatible.records);
+    const compatibleJournal = fakeJournal(compatible.fixture.client.events);
+    const compatibleSetup = workflow(compatible.active, compatible.fixture.client, {
+      archiveStore: compatibleStore,
+      git: compatible.freshGit,
+      journal: compatibleJournal,
+    });
+    const compatibleResult = await compatibleSetup.api.replyResolve(
+      35, compatible.freshTask.id,
+    );
+    assert.equal(compatibleStore.calls, 2, wrapperAliasMode);
+    assert.equal(compatibleResult.threadResolutionStatus.threads.filter(
+      (row) => row.taskIds.includes(compatible.freshTask.id),
+    ).length, 10, wrapperAliasMode);
+    assert.equal(compatibleSetup.state.calls.length, 1, wrapperAliasMode);
+    assert.equal(
+      compatibleSetup.state.calls[0].name,
+      'checkpointArchiveTaskCompletion',
+      wrapperAliasMode,
+    );
+    assert.equal(compatibleJournal.intents.size, 0, wrapperAliasMode);
+    assert.equal(compatible.fixture.client.calls.some(
+      (call) => ['AddThreadReply', 'ResolveThread'].includes(call.name),
+    ), false, wrapperAliasMode);
+    assert.deepEqual(compatible.fixture.client.events, [], wrapperAliasMode);
+    assert.deepEqual(compatible.records, compatibleOriginal, wrapperAliasMode);
+  }
+
   const authorityNeutralCases = [
     ['changed shell stable identity', ({ neutralCarriers }) => {
       neutralCarriers[0].state.tasks[0].fingerprint += '-changed';
@@ -3551,8 +3583,17 @@ test('archive adoption accepts exact 6-to-10-to-14 partial-mixed lineage and pro
       );
       neutralCarriers[0].state.tasks.splice(0, 1);
     }],
-    ['partial wrapper partition', ({ neutralCarriers }) => {
-      neutralCarriers[0].state.tasks.at(-1).sourceIds.splice(-2);
+    ['unknown wrapper alias', ({ neutralCarriers }) => {
+      neutralCarriers[0].state.tasks.at(-1).sourceIds.push('discussion:999999999');
+    }],
+    ['partial wrapper partition', ({ neutralCarriers, fixture }) => {
+      const wrapper = neutralCarriers[0].state.tasks.at(-1);
+      const missingRoot = /^thread:(.+)$/u.exec(wrapper.sourceIds[0])[1];
+      const missingDiscussion =
+        `discussion:${fixture.client.threadComments.get(missingRoot)[0].databaseId}`;
+      wrapper.sourceIds = wrapper.sourceIds.filter(
+        (source) => source !== `thread:${missingRoot}` && source !== missingDiscussion,
+      );
     }],
     ['overlapping wrapper partition', ({ neutralCarriers, predecessorTasks }) => {
       neutralCarriers[0].state.tasks.at(-1).sourceIds.push(predecessorTasks[0].sourceIds[0]);
