@@ -2823,6 +2823,92 @@ test('archive adoption accepts exact 6-to-10-to-14 partial-mixed lineage and pro
   assert.deepEqual(predecessorOnly.fixture.client.events, []);
   assert.deepEqual(predecessorOnly.records, predecessorOnlyOriginal);
 
+  const crossLaneDuplicate = await buildPredecessorOnlyTopology();
+  crossLaneDuplicate.mixedArchive.state.tasks.push(
+    structuredClone(crossLaneDuplicate.predecessorTask),
+  );
+  const crossLaneRecords = crossLaneDuplicate.records;
+  const crossLaneOriginal = structuredClone(crossLaneRecords);
+  const crossLaneJournal = fakeJournal(crossLaneDuplicate.fixture.client.events);
+  const crossLaneFailure = workflow(
+    crossLaneDuplicate.active, crossLaneDuplicate.fixture.client,
+    {
+      archiveStore: immutableArchiveStore(crossLaneRecords),
+      git: crossLaneDuplicate.freshGit,
+      journal: crossLaneJournal,
+    },
+  );
+  await assert.rejects(
+    () => crossLaneFailure.api.replyResolve(35, crossLaneDuplicate.freshTask.id),
+    { code: 'ARCHIVE_EVIDENCE_AMBIGUOUS' },
+    'mixed and predecessor-only carriers cannot claim the same predecessor partition',
+  );
+  assert.equal(crossLaneFailure.state.calls.length, 0);
+  assert.equal(crossLaneJournal.intents.size, 0);
+  assert.equal(crossLaneDuplicate.freshGit.ancestryCalls.some((call) => (
+    call.ancestorSha === crossLaneDuplicate.predecessorCommit
+      && call.descendantSha === crossLaneDuplicate.successorCommit
+  )), false);
+  assert.equal(crossLaneDuplicate.fixture.client.calls.some(
+    (call) => ['AddThreadReply', 'ResolveThread'].includes(call.name),
+  ), false);
+  assert.deepEqual(crossLaneDuplicate.fixture.client.events, []);
+  assert.deepEqual(crossLaneRecords, crossLaneOriginal);
+
+  const predecessorRoleOverflow = await buildPredecessorOnlyTopology();
+  const overflowRecords = predecessorRoleOverflow.records.slice();
+  const uniqueArchive = (archive, offset) => ({
+    ...archive,
+    archiveId: `pr-35-${new Date(Date.parse('2026-08-21T00:00:00.000Z') + offset)
+      .toISOString().replaceAll(':', '-').replace('.', '-')}`,
+  });
+  for (let index = 0; index < 905; index += 1) {
+    overflowRecords.push(uniqueArchive(predecessorRoleOverflow.terminalCarrier, index));
+  }
+  const overflowOriginal = structuredClone(predecessorRoleOverflow.records);
+  const overflowArchiveIds = overflowRecords.map((archive) => archive.archiveId);
+  const predecessorSources = predecessorRoleOverflow.predecessorTask.sourceIds;
+  let predecessorSourceReads = 0;
+  Object.defineProperty(predecessorRoleOverflow.predecessorTask, 'sourceIds', {
+    configurable: true,
+    enumerable: true,
+    get() {
+      predecessorSourceReads += 1;
+      return predecessorSources;
+    },
+  });
+  assert.equal(predecessorSources.length, 4);
+  const overflowJournal = fakeJournal(predecessorRoleOverflow.fixture.client.events);
+  const overflowFailure = workflow(
+    predecessorRoleOverflow.active, predecessorRoleOverflow.fixture.client,
+    {
+      archiveStore: immutableArchiveStore(overflowRecords, null, { clone: false }),
+      git: predecessorRoleOverflow.freshGit,
+      journal: overflowJournal,
+    },
+  );
+  await assert.rejects(
+    () => overflowFailure.api.replyResolve(35, predecessorRoleOverflow.freshTask.id),
+    {
+      code: 'ARCHIVE_EVIDENCE_INVALID',
+      message: 'Aggregate partitions, carriers, roles, and intent footprints exceed the cumulative node bound',
+    },
+    'the fourth root role exceeds the inclusive cumulative predecessor carrier bound',
+  );
+  assert.equal(overflowFailure.state.calls.length, 0);
+  assert.equal(overflowJournal.intents.size, 0);
+  assert.equal(predecessorSourceReads > 0, true);
+  assert.equal(predecessorRoleOverflow.freshGit.ancestryCalls.some((call) => (
+    call.ancestorSha === predecessorRoleOverflow.predecessorCommit
+      && call.descendantSha === predecessorRoleOverflow.successorCommit
+  )), false);
+  assert.equal(predecessorRoleOverflow.fixture.client.calls.some(
+    (call) => ['AddThreadReply', 'ResolveThread'].includes(call.name),
+  ), false);
+  assert.deepEqual(predecessorRoleOverflow.fixture.client.events, []);
+  assert.deepEqual(predecessorRoleOverflow.records, overflowOriginal);
+  assert.deepEqual(overflowRecords.map((archive) => archive.archiveId), overflowArchiveIds);
+
   const predecessorOnlyCases = [
     ['partial partition', ({ predecessorTask }) => predecessorTask.sourceIds.pop()],
     ['divergent fingerprint', ({ predecessorTask }) => {

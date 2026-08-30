@@ -981,8 +981,8 @@ function terminalProoflessPredecessorCarrier(
   const coveredRoots = new Set();
   const seenTaskIds = new Set();
   const seenCommits = new Set();
+  reserveNode();
   for (const task of matchingTasks) {
-    reserveNode();
     const partition = anchoredPartitions.get(task.id);
     const partitionRoots = partition.proofRows.map((row) => row.threadNodeId).sort();
     const taskRoots = taskCanonicalRootIds(task, canonicalRootIndex, { requireComplete: true });
@@ -1010,6 +1010,7 @@ function terminalProoflessPredecessorCarrier(
         );
       }
       coveredRoots.add(root);
+      reserveNode();
       roles.push({
         historicalTaskId: partition.historicalTask.id,
         predecessorTaskId: task.id,
@@ -1326,6 +1327,29 @@ export function validateAggregateArchiveLineage(
       )).size !== supersededPredecessorCovers.length) {
     throw new GitHubWorkflowError(
       'Superseded proofless predecessor authority is duplicated or ambiguous',
+      'ARCHIVE_EVIDENCE_AMBIGUOUS',
+    );
+  }
+  const predecessorOnlyRelations = predecessorOnlyCarriers.flatMap(
+    ({ relations }) => relations,
+  );
+  const predecessorOnlySuccessorTaskIds = new Set(predecessorOnlyRelations.map(
+    (relation) => relation.successorTaskId,
+  ));
+  const predecessorOnlyTaskIds = new Set(predecessorOnlyRelations.map(
+    (relation) => relation.predecessorTaskId,
+  ));
+  const predecessorOnlyCommits = new Set(predecessorOnlyRelations.map(
+    (relation) => relation.ancestorSha,
+  ));
+  if (supersededPredecessorCovers.some(
+    (cover) => predecessorOnlySuccessorTaskIds.has(cover.successorTaskId),
+  ) || supersededPredecessorRelations.some((relation) => (
+    predecessorOnlyTaskIds.has(relation.predecessorTaskId)
+      || predecessorOnlyCommits.has(relation.ancestorSha)
+  ))) {
+    throw new GitHubWorkflowError(
+      'Superseded proofless predecessor authority overlaps carrier lanes',
       'ARCHIVE_EVIDENCE_AMBIGUOUS',
     );
   }
