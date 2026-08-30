@@ -374,6 +374,20 @@ test('structured scope discovery stops without a commit and cannot grant packet 
   });
   assert.deepEqual(validateImplementationResultAgainstTask(governed, blocked, []), []);
 
+  const emptyTripwires = structuredClone(blocked);
+  emptyTripwires.scopeDiscovery.triggeredTripwireIds = [];
+  assert.match(validateImplementationResult(emptyTripwires).join('\n'), /must NOT have fewer than 1 items/u,
+    'the result schema rejects a structured discovery without a triggered tripwire');
+  assert.match(validateImplementationResultAgainstTask(governed, emptyTripwires, []).join('\n'),
+    /must NOT have fewer than 1 items/u,
+    'task-aware validation rejects a structured discovery without a triggered tripwire');
+
+  const multipleBoundTripwires = structuredClone(blocked);
+  multipleBoundTripwires.scopeDiscovery.triggeredTripwireIds = governed.minimalityAuthority.tripwires
+    .slice(0, 2).map(({ id }) => id);
+  assert.deepEqual(validateImplementationResultAgainstTask(governed, multipleBoundTripwires, []), [],
+    'one or more unique packet-bound triggered tripwires remain valid');
+
   const legacy = packet();
   const historical = result(legacy, {
     status: 'blocked', workerCommit: null, changedPaths: [],

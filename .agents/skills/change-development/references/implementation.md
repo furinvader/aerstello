@@ -77,8 +77,9 @@ evidence write no task authority.
 
 Workers cannot change paths, criteria, dependencies, public or persistent
 surfaces, validation, or authority. A blocked, null-commit result with a valid
-structured `scopeDiscovery` invalidates current task evidence. The blocked
-lifecycle then accepts task assessment only when its subject and cadence trigger
+structured `scopeDiscovery` must identify at least one packet-bound triggered
+tripwire and invalidates current task evidence. The blocked lifecycle then
+accepts task assessment only when its subject and cadence trigger
 bind the exact packet receipt, result receipt, and discovery digest; pre-worker
 or unrelated blocked-result evidence cannot replay. Assessment never expands
 the immutable worker packet. Discovery returns to central rejection, amendment,

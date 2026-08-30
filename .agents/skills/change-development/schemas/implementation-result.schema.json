@@ -100,7 +100,7 @@
         "schemaVersion": { "const": 1 },
         "summary": { "$ref": "#/$defs/text" },
         "evidence": { "type": "array", "minItems": 1, "maxItems": 256, "items": { "$ref": "#/$defs/scopeEvidence" } },
-        "triggeredTripwireIds": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "triggeredTripwireIds": { "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
         "requestedAuthority": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/$defs/authorityRequest" } }
       }
     },
