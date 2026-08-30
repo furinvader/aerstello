@@ -334,6 +334,18 @@ test('accepts the real development scope handoff and its canonical authority dig
   assert.match(scopeAuthorityDigest(handoff), /^sha256:[0-9a-f]{64}$/u);
 });
 
+test('malformed approved decisions return structural errors instead of throwing', () => {
+  const { validateScopeAuthoritySnapshot } = contract;
+  for (const entry of [null, 0, false, 'invalid', [], {}]) {
+    let errors;
+    assert.doesNotThrow(() => {
+      errors = validateScopeAuthoritySnapshot(authority({ approvedDecisions: [entry] }));
+    });
+    assert.ok(errors.length > 0);
+    assert.ok(errors.some((error) => error.includes('$.approvedDecisions[0]')));
+  }
+});
+
 test('imported authority binds exact ordered approved decisions across assessment surfaces', () => {
   const { validateScopeAuthoritySnapshot } = contract;
   const approvedDecisions = [

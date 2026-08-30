@@ -133,15 +133,21 @@ function validateAssessmentAuthority(value, authority, amendmentDigests, path, e
   const approvedDecisions = Array.isArray(authority?.approvedDecisions)
     ? authority.approvedDecisions
     : [];
-  const expectedDecisionAuthority = approvedDecisions.map(({ id, digest }) => ({ id, digest }));
+  const expectedDecisionAuthority = approvedDecisions.map((entry) => ({
+    id: entry?.id,
+    digest: entry?.digest,
+  }));
   const acceptedDecisions = Array.isArray(value?.packet?.acceptedScope?.authorityDecisions)
     ? value.packet.acceptedScope.authorityDecisions
     : [];
-  const acceptedDecisionAuthority = acceptedDecisions.map(({ id, digest }) => ({ id, digest }));
+  const acceptedDecisionAuthority = acceptedDecisions.map((entry) => ({
+    id: entry?.id,
+    digest: entry?.digest,
+  }));
   if (!isDeepStrictEqual(acceptedDecisionAuthority, expectedDecisionAuthority)) {
     errors.push(`${path}.packet.acceptedScope.authorityDecisions must equal the ordered captured approved decisions`);
   }
-  const decisionDigests = approvedDecisions.map(({ digest }) => digest);
+  const decisionDigests = approvedDecisions.map((entry) => entry?.digest);
   for (const side of ['packet', 'result']) {
     const binding = value?.[side]?.binding;
     if (!isDeepStrictEqual(binding?.source, authority?.source)) {
