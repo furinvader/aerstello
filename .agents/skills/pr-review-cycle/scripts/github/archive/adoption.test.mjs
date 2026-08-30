@@ -3404,11 +3404,22 @@ test('archive adoption accepts exact 6-to-10-to-14 partial-mixed lineage and pro
       .map((source) => /^thread:(.+)$/u.exec(source)?.[1])
       .filter((root) => root !== undefined && !predecessorRoots.has(root));
     assert.equal(wrapperRoots.length, 8);
+    const wrapperRowsByRoot = new Map(
+      topology.terminalCarrier.state.threadResolutionStatus.threads.map(
+        (row) => [row.threadNodeId, row],
+      ),
+    );
+    const wrapperSources = wrapperRoots.flatMap((root) => {
+      const row = wrapperRowsByRoot.get(root);
+      assert.notEqual(row, undefined);
+      return [`thread:${root}`, `discussion:${row.rootCommentDatabaseId}`];
+    });
+    assert.equal(wrapperSources.length, 16);
     const wrapperTask = {
       ...structuredClone(topology.freshTask),
       id: 'retained-older-eight-proofless-wrapper-r21',
       fingerprint: 'retained-older-eight-proofless-wrapper-r21-fingerprint',
-      sourceIds: wrapperRoots.map((root) => `thread:${root}`),
+      sourceIds: wrapperSources,
       disposition: 'already-fixed',
       status: 'proposed',
       integratedCommitSha: null,
@@ -3541,7 +3552,7 @@ test('archive adoption accepts exact 6-to-10-to-14 partial-mixed lineage and pro
       neutralCarriers[0].state.tasks.splice(0, 1);
     }],
     ['partial wrapper partition', ({ neutralCarriers }) => {
-      neutralCarriers[0].state.tasks.at(-1).sourceIds.pop();
+      neutralCarriers[0].state.tasks.at(-1).sourceIds.splice(-2);
     }],
     ['overlapping wrapper partition', ({ neutralCarriers, predecessorTasks }) => {
       neutralCarriers[0].state.tasks.at(-1).sourceIds.push(predecessorTasks[0].sourceIds[0]);

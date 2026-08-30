@@ -1068,9 +1068,6 @@ function terminalProoflessPredecessorCarrier(
   reserveNode();
   for (const task of selectedRootTasks) {
     const taskRoots = taskCanonicalRootIds(task, canonicalRootIndex, { requireComplete: true });
-    const canonicalSources = task.sourceIds.filter(
-      (source) => /^(?:thread|discussion):/u.test(source),
-    );
     const coveredPartitions = taskRoots === null ? [] : projection.partitions.filter((partition) => {
       const partitionRoots = partition.proofRows.map((row) => row.threadNodeId);
       return partitionRoots.some((root) => taskRoots.includes(root));
@@ -1111,7 +1108,6 @@ function terminalProoflessPredecessorCarrier(
       }
     } else if (!anchoredTaskIds.has(task.id)
         && coveredPartitions.length >= 2
-        && canonicalSources.length === taskRoots.length
         && task.disposition === 'already-fixed'
         && ['proposed', 'not-applicable'].includes(task.status)
         && task.integratedCommitSha === null) {
