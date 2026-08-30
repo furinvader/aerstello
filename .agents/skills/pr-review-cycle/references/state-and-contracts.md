@@ -318,6 +318,14 @@ to match, and its sole marker anchor,
 actor, parent, URL, no-edit state, and historical task line to remain exact. A
 later archived active-task carrier may replay the aggregate only when every
 selected row has consistent provenance and no selected-root mutation intent.
+One full all-provenance historical carrier may instead be owned by a prior
+aggregate task ID. It remains replay-only when one completed GitHub-thread
+`already-fixed` null-commit owner covers exactly the selected canonical roots
+and every row normalizes to one older ordinary provenance-free authority with
+the exact proof core, historical task, disposition, nullable commit, reply-body
+hash, and shared authority fingerprint. It cannot become an origin, and it
+does not alter the native archive inventory, chronology, ancestry, two-snapshot,
+live resolution, review, CI, or Done contracts.
 Already-fixed task content may contain newlines, but its body hash, historical
 task prefix, unique validation boundary, and sole marker remain exact; marker
 collisions or structurally ambiguous multiline content fail before import.

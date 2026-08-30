@@ -2516,21 +2516,200 @@ test('a later provenance-bound active-task carrier remains a zero-intent aggrega
     status: 'passed', headSha: PACKET_AGGREGATE_HEAD,
     taskIds: [alternateFixture.remediation.id], updatedAt: '2026-08-20T12:11:00.000Z',
   };
+  const alternateCarrierSnapshot = structuredClone(alternateTaskCarrier);
+  const alternateStore = immutableArchiveStore([alternateTaskCarrier, mixedArchive, oldArchive]);
+  const alternateJournal = fakeJournal(alternateFixture.client.events);
   const alternate = workflow(alternateFixture.active, alternateFixture.client, {
-    archiveStore: immutableArchiveStore([alternateTaskCarrier, mixedArchive, oldArchive]),
+    archiveStore: alternateStore,
     git: packetGit,
-    journal: fakeJournal(alternateFixture.client.events),
+    journal: alternateJournal,
   });
-  await assert.rejects(
-    () => alternate.api.replyResolve(35, alternateFixture.aggregateTask.id),
-    GitHubWorkflowError,
-  );
-  assert.equal(alternate.state.calls.length, 0);
+  const alternateResult = await alternate.api.replyResolve(35, alternateFixture.aggregateTask.id);
+  assert.equal(alternateStore.calls, 2);
+  assert.equal(alternate.state.calls.length, 1);
+  assert.equal(alternateResult.threadResolutionStatus.threads.filter(
+    (row) => row.archiveProvenance?.authorityFingerprint === authorityFingerprint,
+  ).length, 9);
   assert.equal(
     alternateFixture.client.calls.some((call) => ['AddThreadReply', 'ResolveThread'].includes(call.name)),
     false,
   );
   assert.deepEqual(alternateFixture.client.events, []);
+  assert.equal(alternateJournal.intents.size, 0);
+  assert.deepEqual(alternateTaskCarrier, alternateCarrierSnapshot);
+
+  const priorReplayRejections = [
+    ['partial owner source coverage', ({ carrier }) => {
+      const row = carrier.state.threadResolutionStatus.threads.find(
+        (item) => Object.hasOwn(item, 'archiveProvenance'),
+      );
+      const owner = carrier.state.tasks.find((task) => task.id === alternateTaskId);
+      owner.sourceIds = owner.sourceIds.filter((source) => (
+        source !== `thread:${row.threadNodeId}`
+          && source !== `discussion:${row.rootCommentDatabaseId}`
+      ));
+    }],
+    ['extra owner source coverage', ({ carrier }) => {
+      carrier.state.tasks.find((task) => task.id === alternateTaskId)
+        .sourceIds.push('thread:PRRT_prior_replay_extra');
+    }],
+    ['multiple row owners', ({ carrier }) => {
+      const owner = carrier.state.tasks.find((task) => task.id === alternateTaskId);
+      const secondOwner = { ...structuredClone(owner), id: 'prior-replay-second-owner' };
+      carrier.state.tasks.push(secondOwner);
+      carrier.state.threadResolutionStatus.threads.find(
+        (row) => Object.hasOwn(row, 'archiveProvenance'),
+      ).taskIds = [secondOwner.id];
+    }],
+    ['multiple prior replay carriers', ({ carrier, records }) => {
+      const secondCarrier = structuredClone(carrier);
+      secondCarrier.archiveId = 'pr-35-2026-08-20T12-10-45-000Z';
+      secondCarrier.state.updatedAt = '2026-08-20T12:10:45.000Z';
+      secondCarrier.events[secondCarrier.events.length - 1].at = '2026-08-20T12:10:45.010Z';
+      records.push(secondCarrier);
+    }],
+    ['duplicate owner task', ({ carrier }) => {
+      carrier.state.tasks.push(structuredClone(
+        carrier.state.tasks.find((task) => task.id === alternateTaskId),
+      ));
+    }],
+    ['owner source drift', ({ carrier }) => {
+      carrier.state.tasks.find((task) => task.id === alternateTaskId).sourceType = 'local';
+    }],
+    ['owner status drift', ({ carrier }) => {
+      carrier.state.tasks.find((task) => task.id === alternateTaskId).status = 'not-applicable';
+    }],
+    ['owner disposition drift', ({ carrier }) => {
+      carrier.state.tasks.find((task) => task.id === alternateTaskId).disposition = 'actionable';
+    }],
+    ['owner commit drift', ({ carrier }) => {
+      carrier.state.tasks.find((task) => task.id === alternateTaskId)
+        .integratedCommitSha = '9'.repeat(40);
+    }],
+    ['missing older ordinary origin', ({ records }) => records.splice(1)],
+    ['divergent older ordinary origin', ({ records }) => {
+      const divergent = structuredClone(records[2]);
+      divergent.archiveId = 'pr-35-2026-08-20T11-59-30-000Z';
+      divergent.state.tasks[0].summary += ' divergent';
+      records.push(divergent);
+    }],
+    ['proof core drift', ({ carrier }) => {
+      carrier.state.threadResolutionStatus.threads.find(
+        (row) => Object.hasOwn(row, 'archiveProvenance'),
+      ).replyUrl += '?drifted=1';
+    }],
+    ['historical task drift', ({ carrier }) => {
+      carrier.state.threadResolutionStatus.threads.find(
+        (row) => Object.hasOwn(row, 'archiveProvenance'),
+      ).archiveProvenance.historicalTaskId = 'prior-replay-drifted-task';
+    }],
+    ['historical disposition drift', ({ carrier }) => {
+      carrier.state.threadResolutionStatus.threads.find(
+        (row) => row.archiveProvenance?.historicalDisposition === 'fixed',
+      ).archiveProvenance.historicalDisposition = 'already-fixed';
+    }],
+    ['historical commit drift', ({ carrier }) => {
+      carrier.state.threadResolutionStatus.threads.find(
+        (row) => row.archiveProvenance?.historicalDisposition === 'fixed',
+      ).archiveProvenance.historicalIntegratedCommitSha = '8'.repeat(40);
+    }],
+    ['reply body hash drift', ({ carrier }) => {
+      carrier.state.threadResolutionStatus.threads.find(
+        (row) => Object.hasOwn(row, 'archiveProvenance'),
+      ).archiveProvenance.replyBodySha256 = '7'.repeat(64);
+    }],
+    ['authority fingerprint drift', ({ carrier }) => {
+      carrier.state.threadResolutionStatus.threads.find(
+        (row) => Object.hasOwn(row, 'archiveProvenance'),
+      ).archiveProvenance.authorityFingerprint = '6'.repeat(64);
+    }],
+    ['selected-root mutation intent', ({ carrier }) => {
+      const row = carrier.state.threadResolutionStatus.threads.find(
+        (item) => Object.hasOwn(item, 'archiveProvenance'),
+      );
+      carrier.events.splice(-1, 0, archiveIntentEvent(
+        'reply', `reply:35:${row.threadNodeId}:${row.observedHeadSha}`,
+        '2026-08-20T12:09:00.000Z', '2026-08-20T12:09:00.010Z',
+      ));
+    }],
+    ['unanchored selected-root task', ({ carrier }) => {
+      const row = carrier.state.threadResolutionStatus.threads.find(
+        (item) => Object.hasOwn(item, 'archiveProvenance'),
+      );
+      carrier.state.tasks.push({
+        id: 'prior-replay-unanchored-selected-task',
+        sourceIds: [`thread:${row.threadNodeId}`],
+        sourceType: 'github-thread', fingerprint: 'prior-replay-unanchored-fingerprint',
+        summary: 'Overlap one selected replay root.', severity: 'P2',
+        disposition: 'already-fixed', status: 'not-applicable',
+        integratedCommitSha: null, resolutionSummary: 'Not an authority owner.',
+      });
+    }],
+    ['off-selection owner proof', ({ carrier }) => {
+      const source = carrier.state.threadResolutionStatus.threads.find(
+        (row) => Object.hasOwn(row, 'archiveProvenance'),
+      );
+      carrier.state.threadResolutionStatus.threads.push({
+        ...structuredClone(source),
+        threadNodeId: 'PRRT_prior_replay_off_selection',
+        rootCommentNodeId: 'PRRC_prior_replay_off_selection',
+        rootCommentDatabaseId: 9_902_000,
+        replyId: 'PRRC_prior_replay_off_selection_reply',
+        replyUrl: 'https://github.com/furinvader/aerstello/pull/35#discussion_r9902000',
+      });
+    }],
+    ['off-selection anchored provenance', ({ carrier }) => {
+      const source = carrier.state.threadResolutionStatus.threads.find(
+        (row) => Object.hasOwn(row, 'archiveProvenance'),
+      );
+      const ownerId = 'prior-replay-off-selection-owner';
+      carrier.state.tasks.push({
+        id: ownerId,
+        sourceIds: ['thread:PRRT_prior_replay_off_selection_anchor'],
+        sourceType: 'github-thread', fingerprint: 'prior-replay-off-selection-fingerprint',
+        summary: 'Own unrelated off-selection proof.', severity: 'P2',
+        disposition: 'already-fixed', status: 'completed', integratedCommitSha: null,
+        resolutionSummary: 'Retain separate proof.',
+      });
+      carrier.state.threadResolutionStatus.threads.push({
+        ...structuredClone(source),
+        threadNodeId: 'PRRT_prior_replay_off_selection_anchor',
+        rootCommentNodeId: 'PRRC_prior_replay_off_selection_anchor',
+        rootCommentDatabaseId: 9_902_001,
+        taskIds: [ownerId],
+        replyId: 'PRRC_prior_replay_off_selection_anchor_reply',
+        replyUrl: 'https://github.com/furinvader/aerstello/pull/35#discussion_r9902001',
+      });
+    }],
+  ];
+  for (const [label, mutate] of priorReplayRejections) {
+    const fixture = packetAggregateAdoptionFixture(oldArchive, mixedArchive);
+    fixture.active.tasks.find((task) => task.id === fixture.remediation.id).status = 'completed';
+    fixture.active.threadResolutionStatus.threadlessVerification = {
+      status: 'passed', headSha: PACKET_AGGREGATE_HEAD,
+      taskIds: [fixture.remediation.id], updatedAt: '2026-08-20T12:11:00.000Z',
+    };
+    const carrier = structuredClone(alternateTaskCarrier);
+    const records = [carrier, structuredClone(mixedArchive), structuredClone(oldArchive)];
+    mutate({ carrier, records });
+    const journal = fakeJournal(fixture.client.events);
+    const rejected = workflow(fixture.active, fixture.client, {
+      archiveStore: immutableArchiveStore(records), git: packetGit, journal,
+    });
+    const durableSnapshot = structuredClone(rejected.state.current);
+    await assert.rejects(
+      () => rejected.api.replyResolve(35, fixture.aggregateTask.id),
+      GitHubWorkflowError,
+      label,
+    );
+    assert.equal(rejected.state.calls.length, 0, label);
+    assert.deepEqual(rejected.state.current, durableSnapshot, label);
+    assert.equal(journal.intents.size, 0, label);
+    assert.equal(fixture.client.calls.some(
+      (call) => ['AddThreadReply', 'ResolveThread'].includes(call.name),
+    ), false, label);
+    assert.deepEqual(fixture.client.events, [], label);
+  }
 
   const replayClosureCases = [
     ['active replay unanchored selected-root task', () => {

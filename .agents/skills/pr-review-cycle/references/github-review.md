@@ -349,8 +349,16 @@ URL, no-edit state, historical task
 line, and body digest without rereading archives. A later full active-task
 carrier is a valid aggregate replay only when every selected row retains
 consistent provenance, it has zero selected-root intents, and it contains no
-unanchored selected-root task or off-partition historical proof. Legacy rows
-remain provenance-free. A genuine valid provenance-free active-task carrier
+unanchored selected-root task or off-partition historical proof. Selection may
+also encounter one full all-provenance carrier owned by a prior aggregate
+task ID. That carrier is historical replay only: its sole owner must be a
+completed GitHub-thread `already-fixed` null-commit task whose canonical sources
+cover exactly the selected roots, and every row must normalize to one older
+ordinary provenance-free authority with the exact proof core, task,
+disposition, commit, reply-body hash, and common authority fingerprint. It
+never supplies origin intent, and all native inventory, chronology, ancestry,
+two-snapshot, live resolution, review, CI, and Done gates still apply. Legacy
+rows remain provenance-free. A genuine valid provenance-free active-task carrier
 uses ordinary single-head adoption; malformed ordinary carriers fail there,
 while stripping an aggregate carrier to active-ID legacy rows never falls
 through to aggregate recovery.

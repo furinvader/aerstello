@@ -484,7 +484,16 @@ historical task line, and body hash against this immutable provenance. A later
 terminal carrier for an aggregate task is reusable only as a zero-intent replay
 when every selected row retains consistent provenance and the carrier contains
 no unanchored selected-root task or off-partition historical proof. Historical
-reply headers accept exact lowercase 40- or 64-hex object IDs. Stripping an
+selection may also encounter one full carrier owned by a prior aggregate task
+ID. It is replay-only authority when every selected row is provenance-bearing,
+one completed GitHub-thread `already-fixed` null-commit owner covers exactly the
+selected canonical roots, and every row normalizes to one older ordinary
+provenance-free authority with the exact proof, task, disposition, commit,
+reply-body hash, and shared authority fingerprint. It can never originate
+authority or carry selected-root mutation intents. All archive inventory,
+chronology, ancestry, two-snapshot, live resolution, review, CI, and Done gates
+remain unchanged. Historical reply headers accept exact lowercase 40- or
+64-hex object IDs. Stripping an
 aggregate carrier into an active-ID legacy carrier is an error, while a genuine
 schema-valid provenance-free ordinary carrier continues through the legacy
 single-head path. Ordinary schema-v3 rows without provenance
