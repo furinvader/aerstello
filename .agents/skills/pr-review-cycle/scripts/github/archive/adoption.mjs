@@ -71,6 +71,21 @@ export function archiveBatchAdoptionReady(state, selectedTask, selectedPlan) {
   return true;
 }
 
+function githubThreadArchiveAttestationCandidate(state, selectedTask, selectedPlan) {
+  const aggregate = state.threadResolutionStatus;
+  return selectedTask?.sourceType === 'github-thread'
+    && selectedTask.status === 'not-applicable'
+    && selectedTask.disposition === 'already-fixed'
+    && selectedTask.integratedCommitSha === null
+    && selectedPlan.length >= 2
+    && selectedPlan.every((entry) => entry.thread.isResolved
+      && entry.tasks.length === 1 && entry.tasks[0].id === selectedTask.id)
+    && aggregate.status === 'not-run' && aggregate.headSha === null
+    && aggregate.threads.length === 0 && aggregate.updatedAt === null
+    && verificationProofIsPristine(aggregate.localVerification)
+    && verificationProofIsPristine(aggregate.threadlessVerification);
+}
+
 export function verificationProofIsPristine(verification) {
   return verification?.status === 'not-run'
     && verification.headSha === null
@@ -319,19 +334,47 @@ export function archiveImportCompletionEnvelope(selectedTask, proof, adoption) {
   };
 }
 
+function githubThreadArchiveImportCompletionEnvelope(
+  state, selectedTask, proof, adoption, attestation,
+) {
+  const ordinary = archiveImportCompletionEnvelope(selectedTask, proof, adoption);
+  const nextState = {
+    ...state,
+    tasks: state.tasks.map((task) => task.id === selectedTask.id
+      ? { ...task, status: 'completed' } : task),
+    threadResolutionStatus: proof,
+  };
+  return {
+    ...ordinary,
+    schemaVersion: 2,
+    attestation: {
+      ...attestation,
+      priorStateFingerprint: evidenceFingerprint(bootstrapStateProjection(state)),
+      nextStateFingerprint: evidenceFingerprint(bootstrapStateProjection(nextState)),
+    },
+  };
+}
+
 export async function adoptArchiveBatch({
   state, live, taskId, selectedTask, selectedPlan, archiveStore, git, clock,
   readLiveSnapshot, assertMutationReady, assertCurrent,
-  checkpointArchiveTaskCompletion, checkpointTaskCompletion,
+  checkpointArchiveTaskCompletion, checkpointTaskCompletion, readGitHubThreadAttestation,
 }) {
   const preflightAdoption = await prepareArchiveBatchAdoption({
     state, live, selectedTask, selectedPlan, archiveStore, git,
   });
+  const preflightAttestation = readGitHubThreadAttestation === undefined ? null
+    : await readGitHubThreadAttestation(state, live, selectedTask, selectedPlan);
   const finalLineage = await selectArchiveForBatch(state, selectedTask, selectedPlan, archiveStore);
   const finalLive = await readLiveSnapshot(state);
   await assertMutationReady({ state, git }, finalLive);
   const finalPlan = buildCanonicalRootPlan(state, finalLive, taskId);
-  if (!archiveBatchAdoptionReady(state, finalPlan.selected, finalPlan.selectedPlan)) {
+  const finalRouteReady = preflightAttestation === null
+    ? archiveBatchAdoptionReady(state, finalPlan.selected, finalPlan.selectedPlan)
+    : githubThreadArchiveAttestationCandidate(
+      state, finalPlan.selected, finalPlan.selectedPlan,
+    );
+  if (!finalRouteReady) {
     throw new GitHubWorkflowError('Archive adoption prerequisites changed after preflight', 'THREAD_PROOF_STALE');
   }
   const finalAdoption = validateArchiveBatchLineage(
@@ -357,15 +400,40 @@ export async function adoptArchiveBatch({
   if (!isDeepStrictEqual(preflightAdoption, finalAdoption)) {
     throw new GitHubWorkflowError('Archive or live resolved-root evidence changed after preflight', 'THREAD_PROOF_STALE');
   }
+  let finalAttestation = null;
+  if (preflightAttestation !== null) {
+    finalAttestation = await readGitHubThreadAttestation(
+      state, finalLive, finalPlan.selected, finalPlan.selectedPlan,
+    );
+    if (finalAttestation === null || !isDeepStrictEqual(preflightAttestation, finalAttestation)) {
+      throw new GitHubWorkflowError(
+        'GitHub-thread archive attestation changed after preflight',
+        'THREAD_PROOF_STALE',
+      );
+    }
+    for (const remediation of finalAttestation.remediations) {
+      if (!(await git.isAncestor(
+        remediation.integratedCommitSha, state.currentIntegrationHeadSha, state.integrationWorktree,
+      ))) {
+        throw new GitHubWorkflowError(
+          `Attested remediation ${remediation.taskId} is not an integration ancestor`,
+          'MUTATION_NOT_READY',
+        );
+      }
+    }
+  }
+  const completedAt = clock.now();
   const proof = buildThreadProof(
-    state, finalLive, archiveAdoptionEvidenceMap(finalAdoption), clock.now(),
+    state, finalLive, archiveAdoptionEvidenceMap(finalAdoption), completedAt,
   );
   await assertCurrent(state);
   let active;
   if (finalAdoption.mode === 'aggregate') {
-    const archiveImportEnvelope = archiveImportCompletionEnvelope(
-      finalPlan.selected, proof, finalAdoption,
-    );
+    const archiveImportEnvelope = finalAttestation === null
+      ? archiveImportCompletionEnvelope(finalPlan.selected, proof, finalAdoption)
+      : githubThreadArchiveImportCompletionEnvelope(
+        state, finalPlan.selected, proof, finalAdoption, finalAttestation,
+      );
     active = await checkpointArchiveTaskCompletion({
       prNumber: state.prNumber,
       expectedRevision: state.revision,

@@ -70,6 +70,187 @@ function verifyResolveResult(taskIds, active) {
   };
 }
 
+function verificationProofIsPristine(verification) {
+  return verification?.status === 'not-run'
+    && verification.headSha === null
+    && verification.taskIds.length === 0
+    && verification.updatedAt === null;
+}
+
+function githubThreadArchiveAttestationCandidate(state, selectedTask, selectedPlan) {
+  const aggregate = state.threadResolutionStatus;
+  return selectedTask?.sourceType === 'github-thread'
+    && selectedTask.status === 'not-applicable'
+    && selectedTask.disposition === 'already-fixed'
+    && selectedTask.integratedCommitSha === null
+    && selectedPlan.length >= 2
+    && selectedPlan.every((entry) => entry.thread.isResolved
+      && entry.tasks.length === 1 && entry.tasks[0].id === selectedTask.id)
+    && aggregate.status === 'not-run' && aggregate.headSha === null
+    && aggregate.threads.length === 0 && aggregate.updatedAt === null
+    && verificationProofIsPristine(aggregate.localVerification)
+    && verificationProofIsPristine(aggregate.threadlessVerification);
+}
+
+function githubThreadArchiveAttestationRetryReady(state, selectedTask, selectedPlan) {
+  const aggregate = state.threadResolutionStatus;
+  const recorded = new Map(aggregate.threads.map((row) => [row.threadNodeId, row]));
+  if (selectedTask?.sourceType !== 'github-thread' || selectedTask.status !== 'completed'
+      || selectedTask.disposition !== 'already-fixed' || selectedTask.integratedCommitSha !== null
+      || selectedPlan.length < 2
+      || aggregate.status !== 'failed' || aggregate.headSha !== state.currentIntegrationHeadSha
+      || aggregate.updatedAt === null
+      || !verificationProofIsPristine(aggregate.localVerification)
+      || !verificationProofIsPristine(aggregate.threadlessVerification)) return false;
+  return selectedPlan.every((entry) => {
+    const row = recorded.get(entry.thread.id);
+    return entry.thread.isResolved && entry.tasks.length === 1
+      && entry.tasks[0].id === selectedTask.id
+      && row?.isResolved === true && row.taskIds.length === 1
+      && row.taskIds[0] === selectedTask.id
+      && Object.hasOwn(row, 'archiveProvenance');
+  });
+}
+
+function exactClassificationDigest(scope) {
+  const digest = scope?.classification?.assessment?.digest;
+  return typeof digest === 'string' && /^sha256:[0-9a-f]{64}$/u.test(digest) ? digest : null;
+}
+
+function githubThreadArchiveAttestationPlan({
+  state, live, selectedTask, selectedPlan, heads, scopes, verifierAssertion,
+}) {
+  if (!githubThreadArchiveAttestationCandidate(state, selectedTask, selectedPlan)) return null;
+  const { plan } = buildCanonicalRootPlan(state, live);
+  const canonicalRoots = live.threads.filter((thread) => thread.canonical);
+  if (plan.length !== canonicalRoots.length
+      || plan.some((entry) => entry.tasks.length !== 1)) {
+    throw new GitHubWorkflowError(
+      'GitHub-thread archive attestation requires complete exclusive canonical-root mappings',
+      'ROOT_IDENTITY_MISMATCH',
+    );
+  }
+  const selectedRoots = plan.filter((entry) => entry.tasks[0].id === selectedTask.id);
+  if (selectedRoots.length !== selectedPlan.length
+      || selectedRoots.length < 2
+      || selectedRoots.some((entry) => !entry.thread.isResolved)) {
+    throw new GitHubWorkflowError(
+      'GitHub-thread archive attestation requires exactly one resolved multi-root aggregate',
+      'TASK_NOT_READY',
+    );
+  }
+  const remediationTasks = new Map();
+  for (const entry of plan.filter((candidate) => candidate.tasks[0].id !== selectedTask.id)) {
+    const task = entry.tasks[0];
+    if (entry.thread.isResolved || task.sourceType !== 'github-thread'
+        || task.disposition !== 'actionable' || task.status !== 'integrated'
+        || typeof task.integratedCommitSha !== 'string') {
+      throw new GitHubWorkflowError(
+        'GitHub-thread archive attestation found an ineligible root outside the aggregate',
+        'TASK_NOT_READY',
+      );
+    }
+    remediationTasks.set(task.id, task);
+  }
+  if (remediationTasks.size === 0) {
+    throw new GitHubWorkflowError(
+      'GitHub-thread archive attestation requires an unresolved Integrated remediation',
+      'TASK_NOT_READY',
+    );
+  }
+  const actionableGitHubTasks = state.tasks.filter((task) => task.sourceType === 'github-thread'
+    && task.disposition === 'actionable' && task.status === 'integrated'
+    && typeof task.integratedCommitSha === 'string');
+  if (actionableGitHubTasks.length !== remediationTasks.size
+      || actionableGitHubTasks.some((task) => !remediationTasks.has(task.id))) {
+    throw new GitHubWorkflowError(
+      'GitHub-thread archive attestation remediation set is incomplete',
+      'TASK_NOT_READY',
+    );
+  }
+  const attestedTasks = [selectedTask, ...state.tasks.filter((task) => (
+    task.disposition === 'actionable' && task.status === 'integrated'
+      && typeof task.integratedCommitSha === 'string'
+  ))];
+  const classifications = attestedTasks.map((task) => {
+    const scope = scopes.get(task.id);
+    const digest = exactClassificationDigest(scope);
+    if (scope?.authorityDigest !== state.scopeControl?.authorityDigest
+        || scope?.journalDigest !== state.scopeControl?.journalDigest
+        || digest === null) {
+      throw new GitHubWorkflowError(
+        `GitHub-thread archive attestation lacks current scope evidence for task ${task.id}`,
+        'SCOPE_ROOT_NOT_READY',
+      );
+    }
+    return { taskId: task.id, digest };
+  }).sort((left, right) => left.taskId.localeCompare(right.taskId));
+  const roots = plan.map((entry) => ({
+    threadNodeId: entry.thread.id,
+    rootCommentNodeId: entry.thread.root.id,
+    rootCommentDatabaseId: entry.thread.root.databaseId,
+    isResolved: entry.thread.isResolved,
+    taskId: entry.tasks[0].id,
+  })).sort((left, right) => left.threadNodeId.localeCompare(right.threadNodeId));
+  const remediations = [...remediationTasks.values()].map((task) => ({
+    taskId: task.id, integratedCommitSha: task.integratedCommitSha,
+  })).sort((left, right) => left.taskId.localeCompare(right.taskId));
+  return {
+    schemaVersion: 1,
+    headSha: state.currentIntegrationHeadSha,
+    stateRevision: state.revision,
+    heads: {
+      durable: state.currentIntegrationHeadSha,
+      local: heads.localHeadSha,
+      pushed: heads.pushedHeadSha,
+      live: live.metadata.headRefOid,
+    },
+    remediations,
+    roots,
+    scope: {
+      authorityDigest: state.scopeControl.authorityDigest,
+      journalDigest: state.scopeControl.journalDigest,
+      classifications,
+    },
+    verifierAssertion: structuredClone(verifierAssertion),
+  };
+}
+
+function integrationVerifierAssertion(state) {
+  const raw = process.env.AERSTELLO_INTEGRATION_VERIFIER_ASSERTION;
+  let assertion;
+  try {
+    assertion = JSON.parse(raw ?? 'null');
+  } catch {
+    throw new GitHubWorkflowError(
+      'GitHub-thread archive attestation requires valid integration-verifier assertion JSON',
+      'TASK_NOT_READY',
+    );
+  }
+  const fields = [
+    'schemaVersion', 'verifierId', 'status', 'headSha', 'stateRevision',
+    'scopeAuthorityDigest', 'scopeJournalDigest', 'assertedAt',
+  ];
+  if (assertion === null || typeof assertion !== 'object' || Array.isArray(assertion)
+      || Object.keys(assertion).length !== fields.length
+      || fields.some((field) => !Object.hasOwn(assertion, field))
+      || assertion.schemaVersion !== 1
+      || assertion.verifierId !== 'integration_verifier'
+      || assertion.status !== 'clean'
+      || assertion.headSha !== state.currentIntegrationHeadSha
+      || assertion.stateRevision !== state.revision
+      || assertion.scopeAuthorityDigest !== state.scopeControl?.authorityDigest
+      || assertion.scopeJournalDigest !== state.scopeControl?.journalDigest
+      || typeof assertion.assertedAt !== 'string'
+      || !Number.isFinite(Date.parse(assertion.assertedAt))) {
+    throw new GitHubWorkflowError(
+      'GitHub-thread archive attestation requires a clean exact-HEAD integration-verifier assertion',
+      'TASK_NOT_READY',
+    );
+  }
+  return assertion;
+}
+
 export function archiveTaskCheckpoint(stateAdapter, active, fallback = checkpointArchiveTaskCompletion) {
   return stateAdapter.checkpointArchiveTaskCompletion
     ? (input) => stateAdapter.checkpointArchiveTaskCompletion(input)
@@ -93,6 +274,73 @@ export function createResolveUseCases(context) {
     let live = await readLiveSnapshot(client, active);
     const { plan, selected: selectedTask, selectedPlan } = buildCanonicalRootPlan(active, live, taskId);
     await assertSelectedRootReady(active, live, selectedTask);
+    if (githubThreadArchiveAttestationRetryReady(active, selectedTask, selectedPlan)) {
+      const assertRetrySnapshot = async (snapshot) => {
+        await assertMutationReady({ state: active, git }, snapshot);
+        assertRecordedThreadsLive(active, snapshot);
+        for (const task of [selectedTask, ...active.tasks.filter((candidate) => (
+          candidate.disposition === 'actionable' && candidate.status === 'integrated'
+            && typeof candidate.integratedCommitSha === 'string'
+        ))]) {
+          await assertScopeRootCurrent(active, snapshot.metadata.headRefOid, task);
+          if (task.id !== selectedTask.id && !(await git.isAncestor(
+            task.integratedCommitSha, active.currentIntegrationHeadSha,
+            active.integrationWorktree,
+          ))) {
+            throw new GitHubWorkflowError(
+              `Attested task ${task.id} is not an integration ancestor`,
+              'MUTATION_NOT_READY',
+            );
+          }
+        }
+        await assertCurrent(active);
+      };
+      await assertRetrySnapshot(live);
+      live = await readLiveSnapshot(client, active);
+      await assertRetrySnapshot(live);
+      return verifyResolveResult([taskId], active);
+    }
+    if (githubThreadArchiveAttestationCandidate(active, selectedTask, selectedPlan)) {
+      const verifierAssertion = integrationVerifierAssertion(active);
+      const readGitHubThreadAttestation = async (
+        state, snapshot, aggregateTask, aggregatePlan,
+      ) => {
+        const heads = await assertMutationReady({ state, git }, snapshot);
+        const tasks = [aggregateTask, ...state.tasks.filter((task) => (
+          task.disposition === 'actionable' && task.status === 'integrated'
+            && typeof task.integratedCommitSha === 'string'
+        ))];
+        const scopes = new Map();
+        for (const task of tasks) {
+          scopes.set(task.id, await assertScopeRootCurrent(
+            state, snapshot.metadata.headRefOid, task,
+          ));
+          if (task.id !== aggregateTask.id && !(await git.isAncestor(
+            task.integratedCommitSha, state.currentIntegrationHeadSha, state.integrationWorktree,
+          ))) {
+            throw new GitHubWorkflowError(
+              `Attested task ${task.id} is not an integration ancestor`,
+              'MUTATION_NOT_READY',
+            );
+          }
+        }
+        return githubThreadArchiveAttestationPlan({
+          state, live: snapshot, selectedTask: aggregateTask,
+          selectedPlan: aggregatePlan, heads, scopes, verifierAssertion,
+        });
+      };
+      return adoptArchiveBatch({
+        state: active, live, taskId, selectedTask, selectedPlan, archiveStore, git, clock,
+        readLiveSnapshot: (state) => readLiveSnapshot(client, state),
+        assertMutationReady: ({ state }, snapshot) => assertSelectedRootReady(
+          state, snapshot, selectedTask,
+        ),
+        assertCurrent,
+        checkpointArchiveTaskCompletion: archiveTaskCheckpoint(stateAdapter, active),
+        checkpointTaskCompletion: (input) => stateAdapter.checkpointTaskCompletion(input),
+        readGitHubThreadAttestation,
+      });
+    }
     if (archiveBatchAdoptionReady(active, selectedTask, selectedPlan)) {
       return adoptArchiveBatch({
         state: active,

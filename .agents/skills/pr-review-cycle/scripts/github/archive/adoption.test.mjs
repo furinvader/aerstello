@@ -851,6 +851,175 @@ test('archive-adoption verifier bootstrap never weakens later archive evidence g
   }
 });
 
+test('reply-resolve attests one exact GitHub-thread aggregate with zero mutation', async () => {
+  const oldArchive = decodedPacketArchive(
+    PACKET_ARCHIVE_NAME, PACKET_ARCHIVE_STATE_BASE64, PACKET_ARCHIVE_EVENTS_BASE64,
+  );
+  const mixedArchive = decodedPacketArchive(
+    PACKET_MIXED_ARCHIVE_NAME,
+    PACKET_MIXED_ARCHIVE_STATE_BASE64,
+    PACKET_MIXED_ARCHIVE_EVENTS_BASE64,
+  );
+  const fixture = packetAggregateAdoptionFixture(oldArchive, mixedArchive);
+  const localImplementation = fixture.remediation;
+  localImplementation.status = 'integrated';
+  localImplementation.sourceType = 'local';
+  localImplementation.sourceIds = ['orchestrator:integration-verifier'];
+  const githubRemediation = fixture.active.tasks.find(
+    (task) => task.id === PACKET_PORTABILITY_TASK_ID,
+  );
+  githubRemediation.disposition = 'actionable';
+  githubRemediation.status = 'integrated';
+  githubRemediation.integratedCommitSha = PACKET_AGGREGATE_HEAD;
+  const archiveStore = immutableArchiveStore([oldArchive, mixedArchive]);
+  const setup = workflow(fixture.active, fixture.client, {
+    archiveStore, journal: fakeJournal(fixture.client.events),
+    git: fakeGit({
+      snapshot: async () => ({ headSha: PACKET_AGGREGATE_HEAD, dirty: false }),
+      pushedHead: async () => PACKET_AGGREGATE_HEAD,
+    }),
+  });
+
+  process.env.AERSTELLO_INTEGRATION_VERIFIER_ASSERTION = JSON.stringify({
+    schemaVersion: 1, verifierId: 'integration_verifier', status: 'clean',
+    headSha: PACKET_AGGREGATE_HEAD, stateRevision: fixture.active.revision,
+    scopeAuthorityDigest: fixture.active.scopeControl.authorityDigest,
+    scopeJournalDigest: fixture.active.scopeControl.journalDigest, assertedAt: AT,
+  });
+  let result;
+  try {
+    result = await setup.api.replyResolve(fixture.active.prNumber, PACKET_AGGREGATE_TASK_ID);
+  } finally {
+    delete process.env.AERSTELLO_INTEGRATION_VERIFIER_ASSERTION;
+  }
+
+  assert.equal(archiveStore.calls, 2);
+  assert.equal(setup.state.calls.length, 1);
+  assert.equal(setup.state.calls[0].name, 'checkpointArchiveTaskCompletion');
+  const envelope = setup.state.calls[0].input.archiveImportEnvelope;
+  assert.equal(envelope.schemaVersion, 2);
+  assert.equal(envelope.attestation.verifierAssertion.verifierId, 'integration_verifier');
+  assert.equal(envelope.attestation.verifierAssertion.status, 'clean');
+  assert.deepEqual(envelope.attestation.remediations, [{
+    taskId: PACKET_PORTABILITY_TASK_ID, integratedCommitSha: PACKET_AGGREGATE_HEAD,
+  }]);
+  assert.deepEqual(envelope.attestation.scope.classifications.map((item) => item.taskId), [
+    localImplementation.id, PACKET_AGGREGATE_TASK_ID, PACKET_PORTABILITY_TASK_ID,
+  ]);
+  assert.equal(envelope.attestation.roots.length, 10);
+  assert.deepEqual(
+    envelope.attestation.roots.filter((root) => !root.isResolved).map((root) => root.taskId),
+    [PACKET_PORTABILITY_TASK_ID],
+  );
+  assert.equal(result.threadResolutionStatus.status, 'failed');
+  assert.deepEqual(result.threadResolutionStatus.localVerification, proof('not-run').localVerification);
+  assert.deepEqual(result.threadResolutionStatus.threadlessVerification,
+    proof('not-run').threadlessVerification);
+  assert.deepEqual(setup.state.current.tasks.map((task) => [task.id, task.status]), [
+    [PACKET_AGGREGATE_TASK_ID, 'completed'],
+    [localImplementation.id, 'integrated'],
+    [PACKET_PORTABILITY_TASK_ID, 'integrated'],
+  ]);
+  assert.equal(fixture.client.calls.some((call) => [
+    'AddThreadReply', 'ResolveThread',
+  ].includes(call.name)), false);
+  assert.deepEqual(fixture.client.events, []);
+
+  const retry = await setup.api.replyResolve(fixture.active.prNumber, PACKET_AGGREGATE_TASK_ID);
+  assert.equal(retry.stateRevision, result.stateRevision);
+  assert.equal(setup.state.calls.length, 1, 'fresh exact retry is a protected no-op');
+
+  await setup.api.verifyResolve(fixture.active.prNumber, [localImplementation.id]);
+  assert.deepEqual(setup.state.current.tasks.map((task) => [task.id, task.status]), [
+    [PACKET_AGGREGATE_TASK_ID, 'completed'],
+    [localImplementation.id, 'completed'],
+    [PACKET_PORTABILITY_TASK_ID, 'integrated'],
+  ]);
+  await setup.api.replyResolve(fixture.active.prNumber, PACKET_PORTABILITY_TASK_ID);
+  assert.deepEqual(setup.state.current.tasks.map((task) => [task.id, task.status]), [
+    [PACKET_AGGREGATE_TASK_ID, 'completed'],
+    [localImplementation.id, 'completed'],
+    [PACKET_PORTABILITY_TASK_ID, 'completed'],
+  ]);
+  assert.deepEqual(fixture.client.events, [
+    'intent:reply', 'mutation:AddThreadReply', 'intent:resolve', 'mutation:ResolveThread',
+  ]);
+});
+
+test('GitHub-thread attestation rejects second-snapshot archive, topology, head, scope, revision, and ancestry drift', async () => {
+  for (const label of ['archive', 'topology', 'head', 'scope', 'revision', 'ancestry']) {
+    const oldArchive = decodedPacketArchive(
+      PACKET_ARCHIVE_NAME, PACKET_ARCHIVE_STATE_BASE64, PACKET_ARCHIVE_EVENTS_BASE64,
+    );
+    const mixedArchive = decodedPacketArchive(
+      PACKET_MIXED_ARCHIVE_NAME,
+      PACKET_MIXED_ARCHIVE_STATE_BASE64,
+      PACKET_MIXED_ARCHIVE_EVENTS_BASE64,
+    );
+    const fixture = packetAggregateAdoptionFixture(oldArchive, mixedArchive);
+    fixture.remediation.sourceType = 'local';
+    fixture.remediation.sourceIds = ['orchestrator:integration-verifier'];
+    const githubTask = fixture.active.tasks.find(
+      (task) => task.id === PACKET_PORTABILITY_TASK_ID,
+    );
+    githubTask.disposition = 'actionable';
+    githubTask.status = 'integrated';
+    githubTask.integratedCommitSha = PACKET_AGGREGATE_HEAD;
+    const records = [oldArchive, mixedArchive];
+    let setup;
+    let scopeSnapshot;
+    const archiveStore = immutableArchiveStore(records, (calls) => {
+      if (calls !== 2) return;
+      if (label === 'archive') records[1].events[0].at = AT;
+      if (label === 'topology') fixture.client.threads.find(
+        (thread) => thread.id === PACKET_PORTABILITY_THREAD_ID,
+      ).isResolved = true;
+      if (label === 'head') fixture.client.metadata.headRefOid = HEAD;
+      if (label === 'scope') setup.state.setScopeStatusForTest({
+        ...scopeSnapshot,
+        journal: { ...scopeSnapshot.journal, digest: `sha256:${'f'.repeat(64)}` },
+      });
+      if (label === 'revision') setup.state.advanceRevisionForTest();
+    });
+    let sameHeadAncestryChecks = 0;
+    setup = workflow(fixture.active, fixture.client, {
+      archiveStore, journal: fakeJournal(fixture.client.events),
+      git: fakeGit({
+        snapshot: async () => ({ headSha: PACKET_AGGREGATE_HEAD, dirty: false }),
+        pushedHead: async () => PACKET_AGGREGATE_HEAD,
+        isAncestor: async (ancestor, descendant) => {
+          if (ancestor === PACKET_AGGREGATE_HEAD && descendant === PACKET_AGGREGATE_HEAD) {
+            sameHeadAncestryChecks += 1;
+            if (label === 'ancestry' && sameHeadAncestryChecks >= 3) return false;
+          }
+          return true;
+        },
+      }),
+    });
+    scopeSnapshot = await setup.state.scopeStatus();
+    process.env.AERSTELLO_INTEGRATION_VERIFIER_ASSERTION = JSON.stringify({
+      schemaVersion: 1, verifierId: 'integration_verifier', status: 'clean',
+      headSha: PACKET_AGGREGATE_HEAD, stateRevision: fixture.active.revision,
+      scopeAuthorityDigest: fixture.active.scopeControl.authorityDigest,
+      scopeJournalDigest: fixture.active.scopeControl.journalDigest, assertedAt: AT,
+    });
+    try {
+      await assert.rejects(
+        () => setup.api.replyResolve(fixture.active.prNumber, PACKET_AGGREGATE_TASK_ID),
+        GitHubWorkflowError,
+        label,
+      );
+    } finally {
+      delete process.env.AERSTELLO_INTEGRATION_VERIFIER_ASSERTION;
+    }
+    assert.equal(setup.state.calls.length, 0, label);
+    assert.equal(fixture.client.calls.some((call) => [
+      'AddThreadReply', 'ResolveThread',
+    ].includes(call.name)), false, label);
+    assert.deepEqual(fixture.client.events, [], label);
+  }
+});
+
 test('reply-resolve adopts one exact archived resolved-root batch with zero GitHub or journal writes', async () => {
   const fixture = archiveAdoptionFixture();
   const archiveStore = immutableArchiveStore([fixture.archive]);
@@ -4000,9 +4169,10 @@ test('archive batch adoption requires pristine proof, current verifier coverage,
         })),
       };
     }],
-    ['absent verifier coverage', (fixture) => {
+    ['resolved GitHub-thread remediation', (fixture) => {
       fixture.active.threadResolutionStatus.threadlessVerification = proof('not-run').threadlessVerification;
       fixture.active.tasks.find((task) => task.id === ARCHIVE_REMEDIATION_ID).status = 'integrated';
+      fixture.active.tasks.find((task) => task.id === 'current-thread-fix').status = 'completed';
     }],
     ['incomplete root mapping', (fixture) => {
       addThread(fixture.client, { id: 'THREAD_UNMAPPED', root: rootComment('THREAD_UNMAPPED', { databaseId: 777 }) });

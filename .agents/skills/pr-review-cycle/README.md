@@ -505,6 +505,36 @@ generic `checkpointState` cannot add it either. Every resolved adopted row is
 then immutable under all transitions, and exact retry requires byte-identical
 rows and authority.
 
+One narrower fallback applies when the retained aggregate is already resolved
+but every remaining canonical root belongs exclusively to an actionable
+Integrated GitHub-thread task and both native verifier lanes must stay
+pristine. After the orchestrator has run the read-only `integration_verifier`
+clean at the exact current HEAD, it supplies that result only as transient
+guarded command input:
+
+```bash
+AERSTELLO_INTEGRATION_VERIFIER_ASSERTION='{"schemaVersion":1,"verifierId":"integration_verifier","status":"clean","headSha":"<exact-head>","stateRevision":<revision>,"scopeAuthorityDigest":"<sha256-digest>","scopeJournalDigest":"<sha256-digest>","assertedAt":"<iso-time>"}' \
+  npm run review:github -- reply-resolve --pr <number> --task <retained-aggregate-id>
+```
+
+This schema-v2 archive envelope is accepted only for one `already-fixed`,
+null-commit, `not-applicable` aggregate with at least two resolved exclusive
+roots, pristine aggregate and native proof lanes, unresolved exclusive
+Integrated GitHub-thread remediations with ancestral commits, passed
+exact-HEAD targeted validation, and current receipt-valid scope
+classifications for the aggregate and every actionable Integrated task. Two
+complete snapshots recheck clean equal durable/local/pushed/live heads, scope,
+root topology, archive inventory and lineage, remediation ancestry, and state
+revision. The protected transition completes and imports only the aggregate;
+it leaves the GitHub-thread remediations and any local implementation task
+Integrated and leaves both native proof lanes pristine. The envelope and
+verifier assertion are transition input, not persisted state or a claimed
+verifier artifact, and this route performs no GitHub or mutation-journal
+operation. Run ordinary verifier-backed `verify-resolve` for the local
+implementation only after aggregate adoption, then ordinary `reply-resolve`
+for each actionable GitHub-thread remediation. All normal exact-HEAD review,
+thread, CI, and Done gates remain authoritative.
+
 When the resolved archive batch itself prevents the remediation's ordinary
 aggregate-proof gate, use a two-command state-only bootstrap. First run
 `verify-resolve --task <remediation-id>` for the sole actionable Integrated

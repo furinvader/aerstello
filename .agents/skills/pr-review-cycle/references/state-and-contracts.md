@@ -287,6 +287,30 @@ provenance. Generic `checkpointState` cannot create it either, and later guarded
 or generic transitions cannot alter or remove a resolved provenance-bearing
 row. Exact retry requires byte-identical rows and authority.
 
+A protected schema-v2 archive-import envelope is a transient alternative only
+for the closed GitHub-thread-remediation attestation. It requires one terminal
+`already-fixed`, null-commit aggregate with at least two resolved exclusive
+roots; pristine aggregate, local, and threadless proof; and every remaining
+canonical root unresolved and exclusively mapped to an actionable Integrated
+GitHub-thread task with an ancestral commit. Its attestation binds the
+orchestrator's exact-HEAD clean `integration_verifier` assertion time and exact
+pre-checkpoint state revision, effective scope authority and journal digests,
+sorted GitHub-thread task/commit set, sorted full live-root topology, current
+classification digests for the aggregate and every actionable Integrated task,
+and prior/next task-plus-thread proof fingerprints. The transition rereads the
+receipt-valid scope journal and independently permits only aggregate completion
+plus immutable imported rows; actionable GitHub-thread and local implementation
+tasks remain Integrated, and both native proof lanes remain pristine. The
+envelope is protected transition evidence only: no state field, schema
+migration, archive write, packet or worker-result import, mutation-journal
+access, GitHub mutation, or proof-lane reinterpretation is allowed.
+
+The ordering for this fallback is retained aggregate `reply-resolve` first,
+ordinary verifier-backed local `verify-resolve` second, and ordinary
+GitHub-thread `reply-resolve` last. Exact command retries use the already
+recorded immutable proof; an in-process checkpoint retry requires the identical
+envelope. All native review, CI, thread, and Done proof remains required.
+
 Later request, retry, advance, CI, completion, and Done proof gates use this
 durable provenance rather than archives. They require the live reply's header
 HEAD to equal `observedHeadSha` as exact lowercase 40 or 64 hex, its body digest

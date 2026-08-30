@@ -138,6 +138,128 @@ function localBootstrapFixture() {
   return { current, next, envelope };
 }
 
+function githubThreadAttestationFixture(cwd) {
+  const initial = harness.init(cwd);
+  const head = initial.currentIntegrationHeadSha;
+  const aggregate = harness.task(head, {
+    id: 'aggregate', sourceIds: ['thread:root-a', 'discussion:2'],
+    sourceType: 'github-thread', disposition: 'already-fixed', status: 'proposed',
+    integratedCommitSha: null, resolutionSummary: null,
+  });
+  const remediation = harness.task(head, {
+    id: 'remediation', sourceIds: ['thread:root-c'], sourceType: 'github-thread',
+    disposition: 'actionable', status: 'proposed', integratedCommitSha: null,
+  });
+  const localImplementation = harness.task(head, {
+    id: 'local-implementation', sourceIds: ['orchestrator:integration-verifier'],
+    sourceType: 'local', disposition: 'actionable', status: 'proposed',
+    integratedCommitSha: null,
+  });
+  let current = harness.checkpointState({
+    cwd, expectedRevision: initial.revision,
+    nextState: { ...initial, tasks: [aggregate, remediation, localImplementation] },
+  });
+  const aggregatePacket = harness.taskPacket(head, aggregate.id, {
+    affectedAreas: ['workflow'], command: 'npm run check:workflow',
+  });
+  const remediationPacket = harness.taskPacket(head, remediation.id, {
+    affectedAreas: ['workflow'], command: 'npm run check:workflow',
+  });
+  const localPacket = harness.taskPacket(head, localImplementation.id, {
+    affectedAreas: ['workflow'], command: 'npm run check:workflow',
+  });
+  current = harness.scopeReadyForPacket(cwd, current, aggregatePacket);
+  current = harness.scopeReadyForPacket(cwd, current, remediationPacket);
+  current = harness.scopeReadyForPacket(cwd, current, localPacket);
+  current = {
+    ...current,
+    tasks: current.tasks.map((task) => task.id === aggregate.id ? {
+      ...task, status: 'not-applicable', integratedCommitSha: null,
+      resolutionSummary: 'Retained immutable aggregate.',
+    } : {
+      ...task, status: 'integrated', integratedCommitSha: head,
+      resolutionSummary: 'Integrated and validated.',
+    }),
+    validationStatus: {
+      source: 'orchestrator', scope: 'targeted', status: 'passed', headSha: head,
+      checks: ['npm run check:workflow'], updatedAt: AT,
+    },
+  };
+  const authorityFingerprint = 'b'.repeat(64);
+  const archiveRows = [
+    ['root-a', 'comment-a', 1, 'reply-a', 'c'.repeat(64)],
+    ['root-b', 'comment-b', 2, 'reply-b', 'd'.repeat(64)],
+  ].map(([threadNodeId, rootCommentNodeId, rootCommentDatabaseId, replyId, replyBodySha256]) => ({
+    threadNodeId, rootCommentNodeId, rootCommentDatabaseId, taskIds: [aggregate.id],
+    disposition: 'already-fixed', replyId, replyUrl: `https://example.test/${replyId}`,
+    isResolved: true, resolvedAt: AT, resolvedBy: 'maintainer', observedHeadSha: head,
+    archiveProvenance: {
+      schemaVersion: 1, historicalTaskId: threadNodeId, historicalDisposition: 'already-fixed',
+      historicalIntegratedCommitSha: null, replyBodySha256, authorityFingerprint,
+    },
+  }));
+  const unresolvedRow = {
+    threadNodeId: 'root-c', rootCommentNodeId: 'comment-c', rootCommentDatabaseId: 3,
+    taskIds: [remediation.id], disposition: 'fixed', replyId: null, replyUrl: null,
+    isResolved: false, resolvedAt: null, resolvedBy: null, observedHeadSha: head,
+  };
+  const threadResolutionStatus = {
+    status: 'failed', headSha: head, threads: [...archiveRows, unresolvedRow],
+    threadlessVerification: current.threadResolutionStatus.threadlessVerification,
+    localVerification: current.threadResolutionStatus.localVerification, updatedAt: AT,
+  };
+  const next = {
+    ...current,
+    tasks: current.tasks.map((task) => task.id === aggregate.id
+      ? { ...task, status: 'completed' } : task),
+    threadResolutionStatus,
+  };
+  const classifications = [
+    { taskId: aggregate.id, digest: harness.scopePair(head, aggregatePacket).digest },
+    { taskId: localImplementation.id, digest: harness.scopePair(head, localPacket).digest },
+    { taskId: remediation.id, digest: harness.scopePair(head, remediationPacket).digest },
+  ].sort((left, right) => left.taskId.localeCompare(right.taskId));
+  const roots = threadResolutionStatus.threads.map((row) => ({
+    threadNodeId: row.threadNodeId,
+    rootCommentNodeId: row.rootCommentNodeId,
+    rootCommentDatabaseId: row.rootCommentDatabaseId,
+    isResolved: row.isResolved,
+    taskId: row.taskIds[0],
+  })).sort((left, right) => left.threadNodeId.localeCompare(right.threadNodeId));
+  const envelope = {
+    schemaVersion: 2, taskId: aggregate.id, authorityFingerprint,
+    rows: archiveRows.map((row) => ({
+      threadNodeId: row.threadNodeId, replyId: row.replyId,
+      replyBodySha256: row.archiveProvenance.replyBodySha256,
+      provenanceFingerprint: fingerprint(row.archiveProvenance), rowFingerprint: fingerprint(row),
+    })).sort((left, right) => left.threadNodeId.localeCompare(right.threadNodeId)),
+    attestation: {
+      schemaVersion: 1, headSha: head, stateRevision: current.revision,
+      heads: { durable: head, local: head, pushed: head, live: head },
+      remediations: [{ taskId: remediation.id, integratedCommitSha: head }],
+      roots,
+      scope: {
+        authorityDigest: current.scopeControl.authorityDigest,
+        journalDigest: current.scopeControl.journalDigest,
+        classifications,
+      },
+      verifierAssertion: {
+        schemaVersion: 1, verifierId: 'integration_verifier', status: 'clean', headSha: head,
+        stateRevision: current.revision,
+        scopeAuthorityDigest: current.scopeControl.authorityDigest,
+        scopeJournalDigest: current.scopeControl.journalDigest, assertedAt: AT,
+      },
+      priorStateFingerprint: fingerprint({
+        tasks: current.tasks, threadResolutionStatus: current.threadResolutionStatus,
+      }),
+      nextStateFingerprint: fingerprint({
+        tasks: next.tasks, threadResolutionStatus: next.threadResolutionStatus,
+      }),
+    },
+  };
+  return { current, next, envelope };
+}
+
 function reviewLimitTransition(current, reviewRequestLimit = 5) {
   return { ...current, reviewRequestLimit };
 }
@@ -368,6 +490,72 @@ test('archive authorization admits only the closed singleton local verifier boot
     );
     assertCode(
       () => policy.assertTransitionAllowed(copy.current, copy.next, rejected, '/tmp/aerstello-policy'),
+      'INVALID_ARCHIVE_IMPORT',
+      label,
+    );
+  }
+});
+
+test('archive authorization admits only the exact transient GitHub-thread attestation delta', () => {
+  const cwd = harness.repo();
+  const fixture = githubThreadAttestationFixture(cwd);
+  const policy = createTransitionPolicy();
+  const authorization = policy.authorizeProtectedTransition(
+    fixture.current, fixture.next, 'archive-task-completion',
+    { archiveImportEnvelope: fixture.envelope },
+  );
+  assert.doesNotThrow(() => policy.assertTransitionAllowed(
+    fixture.current, fixture.next, authorization, cwd,
+  ));
+
+  for (const [label, mutate] of [
+    ['unsorted remediation set', (copy) => { copy.envelope.attestation.remediations.push({
+      ...copy.envelope.attestation.remediations[0], taskId: 'a-extra',
+    }); }],
+    ['resolved remediation', (copy) => {
+      copy.envelope.attestation.roots.find((root) => root.taskId === 'remediation').isResolved = true;
+    }],
+    ['duplicated root', (copy) => {
+      copy.envelope.attestation.roots.push(structuredClone(copy.envelope.attestation.roots[0]));
+    }],
+    ['shared aggregate root', (copy) => {
+      copy.envelope.attestation.roots.find((root) => root.threadNodeId === 'root-c').taskId = 'aggregate';
+    }],
+    ['wrong remediation source', (copy) => {
+      copy.current.tasks.find((task) => task.id === 'remediation').sourceType = 'local';
+    }],
+    ['wrong remediation commit', (copy) => {
+      copy.envelope.attestation.remediations[0].integratedCommitSha = 'f'.repeat(40);
+    }],
+    ['unsorted classifications', (copy) => {
+      copy.envelope.attestation.scope.classifications.reverse();
+    }],
+    ['forged verifier assertion', (copy) => {
+      copy.envelope.attestation.verifierAssertion.status = 'findings';
+    }],
+    ['stale verifier revision', (copy) => {
+      copy.envelope.attestation.verifierAssertion.stateRevision -= 1;
+    }],
+    ['persisted proof-lane delta', (copy) => {
+      copy.next.threadResolutionStatus.localVerification = {
+        status: 'passed', headSha: SHA, taskIds: ['remediation'], updatedAt: AT,
+      };
+    }],
+    ['scope digest drift', (copy) => {
+      copy.envelope.attestation.scope.journalDigest = `sha256:${'f'.repeat(64)}`;
+    }],
+    ['forged next fingerprint', (copy) => {
+      copy.envelope.attestation.nextStateFingerprint = 'f'.repeat(64);
+    }],
+  ]) {
+    const copy = structuredClone(fixture);
+    mutate(copy);
+    const rejected = policy.authorizeProtectedTransition(
+      copy.current, copy.next, 'archive-task-completion',
+      { archiveImportEnvelope: copy.envelope },
+    );
+    assertCode(
+      () => policy.assertTransitionAllowed(copy.current, copy.next, rejected, cwd),
       'INVALID_ARCHIVE_IMPORT',
       label,
     );

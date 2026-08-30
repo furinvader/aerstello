@@ -217,7 +217,28 @@ and intent authority is identical. A later replay carrier is allowed only with
 that exact task-and-proof projection and zero selected-root intents. Partial or
 conflicting intents and missing, duplicated, or divergent proof fail closed;
 archive names, timestamps, ordering, and latest or earliest position are never
-authority. Every authoritative archived proof row, historical HEAD, reply and resolve intent,
+authority.
+
+When both native proof lanes must remain pristine and every root outside the
+resolved aggregate maps exclusively to an actionable Integrated GitHub-thread
+task, do not run that bootstrap first. Run the read-only
+`integration_verifier` clean at the exact HEAD, then invoke aggregate
+`reply-resolve` with the transient
+`AERSTELLO_INTEGRATION_VERIFIER_ASSERTION` JSON documented in the operator
+guide. That assertion must bind the exact head, state revision, effective scope
+authority and journal digests, and assertion time from the completed verifier
+run; it is not reusable specialist evidence. The fallback rechecks complete
+topology, equal clean heads, ancestry, targeted validation, receipt-valid scope
+for the aggregate and every actionable Integrated task, immutable archive
+authority, and revision across two snapshots. It imports and completes only
+the aggregate with no GitHub mutation or mutation-journal access, persists
+neither the schema-v2 envelope nor a verifier artifact, and leaves both
+verifier lanes pristine. Only afterward run ordinary `verify-resolve` for the
+local implementation task, followed by ordinary `reply-resolve` for unresolved
+GitHub-thread tasks. Native Codex review, thread, CI, and Done gates are
+unchanged.
+
+Every authoritative archived proof row, historical HEAD, reply and resolve intent,
 deterministic client ID, live canonical root, root comment, direct reply,
 exact deterministic body, marker, author, parent, URL, timestamp, and resolution
 state must agree, while all other live canonical roots still map uniquely to
