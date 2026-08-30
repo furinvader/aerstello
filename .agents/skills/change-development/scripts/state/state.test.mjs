@@ -502,6 +502,60 @@ test('plan admission rejects every contradictory scope semantic projection witho
   assert.equal(accepted.phase, 'ready-to-implement');
 });
 
+test('later scope boundaries revalidate canonical semantic projections atomically', async () => {
+  const taskFixture = repository('semantic task assessment');
+  const planning = await initializeState({ cwd: taskFixture.cwd, changeId: 'semantic-task-assessment',
+    mode: 'implement', baseBranch: 'main', planningRef: taskFixture.sha, source: descriptor });
+  const plan = planFor(planning);
+  const closure = testMinimalClosure(planning, plan);
+  let state = acceptPlanWithScope({ cwd: taskFixture.cwd, plan, minimalClosure: closure,
+    scopeEvidence: testScopeEvidence(planning, plan, closure), expectedRevision: planning.revision });
+  const packet = packetFor(state, plan, 'state-task');
+  const packetDigest = implementationTaskDigest(packet);
+  const taskEvidence = testScopeEvidence(state, plan, closure, { boundary: 'task',
+    subjectDigest: packetDigest, subjectSha: packet.taskBaseSha, taskPacketDigest: packetDigest });
+  const taskDirectory = changeDirectory(taskFixture.cwd, state.changeId);
+  const taskBefore = durableSnapshot(taskDirectory);
+  for (const mutate of [
+    (candidate) => { candidate.packet.sourceScope.objective = 'Invent a different task-boundary objective.'; },
+    (candidate) => { candidate.packet.acceptedScope.criteria[0].text = 'Invent different task authority.'; },
+  ]) {
+    const contradictory = structuredClone(taskEvidence);
+    mutate(contradictory);
+    contradictory.packetDigest = digestJson(contradictory.packet);
+    assert.throws(() => assessScope({ cwd: taskFixture.cwd, changeId: state.changeId,
+      scopeEvidence: contradictory, expectedRevision: state.revision }),
+    (error) => error.code === 'SCOPE_ASSESSMENT_INVALID' && /projection/u.test(error.message));
+    assert.deepEqual(durableSnapshot(taskDirectory), taskBefore,
+      'task-boundary semantic rejection leaves every durable byte unchanged');
+  }
+  state = assessScope({ cwd: taskFixture.cwd, changeId: state.changeId,
+    scopeEvidence: taskEvidence, expectedRevision: state.revision });
+  assert.equal(state.scope.currentBoundary, 'task');
+
+  const integrated = await integratedSingleTaskFixture('semantic integrated assessment');
+  const integratedDirectory = changeDirectory(integrated.cwd, integrated.state.changeId);
+  const integratedEvidence = integratedScopeEvidenceFor({ cwd: integrated.cwd,
+    changeId: integrated.state.changeId });
+  const integratedBefore = durableSnapshot(integratedDirectory);
+  for (const mutate of [
+    (candidate) => { candidate.packet.sourceScope.objective = 'Invent a different integrated objective.'; },
+    (candidate) => { candidate.packet.acceptedScope.criteria[0].text = 'Invent different integrated authority.'; },
+  ]) {
+    const contradictory = structuredClone(integratedEvidence);
+    mutate(contradictory);
+    contradictory.packetDigest = digestJson(contradictory.packet);
+    assert.throws(() => assessScope({ cwd: integrated.cwd, changeId: integrated.state.changeId,
+      scopeEvidence: contradictory, expectedRevision: integrated.state.revision }),
+    (error) => error.code === 'SCOPE_ASSESSMENT_INVALID' && /projection/u.test(error.message));
+    assert.deepEqual(durableSnapshot(integratedDirectory), integratedBefore,
+      'integrated-head semantic rejection leaves every durable byte unchanged');
+  }
+  state = assessScope({ cwd: integrated.cwd, changeId: integrated.state.changeId,
+    scopeEvidence: integratedEvidence, expectedRevision: integrated.state.revision });
+  assert.equal(state.scope.currentBoundary, 'integrated-head');
+});
+
 test('new bindings require minimality authority atomically while historical packet shapes remain readable', async () => {
   const fixture = repository('mandatory task minimality');
   const planning = await initializeState({ cwd: fixture.cwd, changeId: 'mandatory-task-minimality', mode: 'implement',
@@ -2108,6 +2162,58 @@ test('receipt-backed minor and trim remediation alone may revisit terminal owner
     state = amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision, amendment, resultingPlan });
     assert.equal(state.execution.tasks.find(({ id }) => id === taskId).status, 'unbound');
     assert.equal(state.execution.tasks.find(({ id }) => id === 'state-task').status, 'integrated');
+  }
+});
+
+test('scope-blocked amendments require the exact active evidence trigger atomically', async () => {
+  for (const verdict of ['human-decision-required', 'minor-amendment-required', 'trim-required']) {
+    const fixture = await integratedSingleTaskFixture(`scope active trigger ${verdict}`);
+    let state = fixture.state;
+    let evidence;
+    if (verdict === 'human-decision-required') {
+      evidence = materialIntegratedScopeEvidence({ cwd: fixture.cwd, changeId: state.changeId },
+        'active-trigger-material');
+    } else {
+      evidence = integratedScopeEvidenceFor({ cwd: fixture.cwd, changeId: state.changeId });
+      const mapping = evidence.result.coverage[0];
+      evidence.result = verdict === 'minor-amendment-required'
+        ? { ...evidence.result, verdict,
+          coverage: [{ ...mapping, classification: 'necessary-minor-expansion',
+            rationale: 'The exact adjacent mechanism is required.' }],
+          scopeDelta: { description: 'Add the exact adjacent mechanism.',
+            sourceCriterionIds: [...mapping.sourceCriterionIds],
+            acceptedCriterionIds: [...mapping.acceptedCriterionIds], invariantIds: [], materialSurfaces: [] } }
+        : { ...evidence.result, verdict,
+          coverage: [{ ...mapping, sourceCriterionIds: [], acceptedCriterionIds: [],
+            classification: 'speculative', rationale: 'The mechanism is unnecessary.' }],
+          unnecessaryWork: [mapping.mechanism],
+          smallerSufficientAlternative: 'Remove the unnecessary mechanism.' };
+      evidence.resultDigest = digestJson(evidence.result);
+    }
+    state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
+      expectedRevision: state.revision });
+    if (verdict === 'human-decision-required') {
+      state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: state.revision,
+        decision: materialScopeDecision(state, evidence, 'approve-material-amendment',
+          ['active-trigger-material'], 'approve-active-trigger-material') });
+    }
+
+    const directory = changeDirectory(fixture.cwd, state.changeId);
+    const plan = JSON.parse(readFileSync(join(directory, 'plan', 'plan.json'), 'utf8'));
+    const closureName = readdirSync(join(directory, 'scope', 'minimal-closure'))
+      .filter((name) => name.endsWith('.json')).sort().at(-1);
+    const closure = JSON.parse(readFileSync(join(directory, 'scope', 'minimal-closure', closureName), 'utf8'));
+    const authorizedShape = verdict === 'human-decision-required'
+      ? [...closure.authorizedShape, 'active-trigger-material'] : [...closure.authorizedShape];
+    const candidate = materialAmendment(state, plan, closure, authorizedShape,
+      `wrong-active-trigger-${verdict}`);
+    candidate.amendment.trigger = `sha256:${verdict === 'human-decision-required' ? '1' : verdict === 'minor-amendment-required' ? '2' : '3'}`.padEnd(71, '0');
+    const before = durableSnapshot(directory);
+    assert.throws(() => amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...candidate }),
+      (error) => error.code === 'SCOPE_AMENDMENT_INVALID'
+        && /exact current scope evidence/u.test(error.message));
+    assert.deepEqual(durableSnapshot(directory), before,
+      `${verdict} rejects a non-current trigger without changing state, events, transitions, receipts, or plan bytes`);
   }
 });
 

@@ -1348,6 +1348,10 @@ export function assessScope({ cwd = process.cwd(), changeId, scopeEvidence, expe
       state, closureDigest: receipts.closure.digest, amendmentRecords: receipts.amendmentRecords,
       boundary, subjectDigest, subjectSha, taskPacketDigest,
     });
+    errors.push(...validateAdmissionScopeSemantics(scopeEvidence, {
+      effectivePlan: readEffectivePlan(root, state),
+      minimalClosure: receipts.closure.value,
+    }));
     if (errors.length > 0) throw new StateError(`Scope assessment is invalid or stale:\n- ${errors.join('\n- ')}`, 'SCOPE_ASSESSMENT_INVALID');
     const evidenceDigest = scopeContractDigest(scopeEvidence); const gate = scopeGateForVerdict(scopeEvidence.result.verdict);
     const scope = { ...state.scope, status: gate.status, candidatePlanDigest: null,
@@ -4117,8 +4121,9 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
     const currentScopeEvidence = state.scope?.currentEvidenceDigest
       ? findScopeReceipt(root, state, 'evidence', state.scope.currentEvidenceDigest, 'scope amendment evidence').value
       : null;
-    if (currentScopeEvidence?.result?.verdict === 'human-decision-required' && !scopeDriven) {
-      throw new StateError('Material amendment must trigger from the exact current human-decision-required evidence',
+    if (['human-decision-required', 'minor-amendment-required', 'trim-required']
+      .includes(currentScopeEvidence?.result?.verdict) && !scopeDriven) {
+      throw new StateError('Scope-authorized amendment must trigger from the exact current scope evidence',
         'SCOPE_AMENDMENT_INVALID');
     }
     if (findingDriven && !state.verification) throw new StateError('Finding-driven amendment requires active verification evidence', 'INVALID_AMENDMENT');
