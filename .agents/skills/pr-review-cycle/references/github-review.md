@@ -305,7 +305,11 @@ row is relevant, including an active carrier whose provenance is wholly
 off-selection or whose task object is missing. After the full carrier anchors
 historical task IDs, any same-repository/PR archive naming one of those IDs in
 a task object, proof-row `taskIds`, or `archiveProvenance.historicalTaskId` is
-relevant too. For each relevant historical or
+relevant too. An abandoned proofless wrapper that names the prior
+active aggregate task requires the next cycle to use a genuinely fresh
+aggregate task ID. Reusing the prior ID remains fail-closed relevance; it is
+not task-ID alias compatibility, a rename, or permission to filter that
+archive. For each relevant historical or
 active-replay carrier, selection scans every archived GitHub-thread task whose
 canonical thread/discussion sources touch a selected root and all proof rows
 naming an anchored task. Hidden off-selection proof, unanchored overlap, or an
