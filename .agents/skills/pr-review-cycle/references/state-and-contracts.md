@@ -233,11 +233,13 @@ row is relevant even when its provenance is wholly off-selection or the task
 object is absent. After the full carrier anchors historical task IDs, every
 same-repository/PR archive naming one of those IDs in a task object, proof-row
 `taskIds`, or `archiveProvenance.historicalTaskId` is relevant too. Every
-abandoned proofless wrapper that names the prior active aggregate task therefore
-requires a genuinely fresh aggregate task ID in its successor cycle. Reusing
-the prior ID remains relevant and fails closed; this lifecycle rule is neither
-task-ID alias compatibility nor permission to rename or filter archived task
-objects. Every relevant historical or active-replay carrier is
+abandoned proofless aggregate wrapper therefore requires a globally fresh
+aggregate task ID in its successor cycle. Fresh means absent from every same-PR
+archive task object, proof row, and provenance identity across the complete
+immutable inventory, not merely absent from the immediate predecessor archive.
+Reusing any archived identity remains relevant and fails closed; this lifecycle
+rule is neither task-ID alias compatibility nor permission to rename or filter
+archived task objects. Every relevant historical or active-replay carrier is
 checked across all proof rows that name an anchored historical task and every
 GitHub-thread task whose canonical thread/discussion sources intersect selected
 roots. The selected-root count, minimum and actual partitions, relevant

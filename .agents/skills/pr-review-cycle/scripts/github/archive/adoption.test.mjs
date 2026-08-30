@@ -2846,7 +2846,7 @@ test('a later provenance-bound active-task carrier remains a zero-intent aggrega
   assert.deepEqual(retryFixture.client.events, []);
 });
 
-test('a fresh aggregate identity bypasses a later proofless wrapper without hiding same-ID evidence', async () => {
+test('a globally fresh aggregate identity bypasses multiple proofless wrappers without hiding same-ID evidence', async () => {
   const oldArchive = decodedPacketArchive(
     PACKET_ARCHIVE_NAME, PACKET_ARCHIVE_STATE_BASE64, PACKET_ARCHIVE_EVENTS_BASE64,
   );
@@ -2888,20 +2888,42 @@ test('a fresh aggregate identity bypasses a later proofless wrapper without hidi
     }],
   };
 
-  const prooflessWrapperReason = 'Abandon the proofless wrapper before starting a fresh aggregate.';
-  const prooflessWrapper = {
+  const firstProoflessWrapperReason = 'Abandon the first proofless wrapper before starting a fresh aggregate.';
+  const firstProoflessWrapper = {
     archiveId: 'pr-35-2026-08-20T12-20-00-000Z',
     state: {
       ...structuredClone(priorFixture.active),
       tasks: [structuredClone(priorFixture.aggregateTask)],
-      abandonmentReason: prooflessWrapperReason,
+      abandonmentReason: firstProoflessWrapperReason,
       updatedAt: '2026-08-20T12:20:00.000Z',
     },
     events: [{
       schemaVersion: 1,
       type: 'abandoned',
-      summary: `Archived without completion: ${prooflessWrapperReason}`,
+      summary: `Archived without completion: ${firstProoflessWrapperReason}`,
       at: '2026-08-20T12:20:00.010Z',
+    }],
+  };
+  const secondProoflessTaskId = 'abandoned-proofless-aggregate-r2';
+  const secondProoflessTask = {
+    ...structuredClone(priorFixture.aggregateTask),
+    id: secondProoflessTaskId,
+    fingerprint: 'fp-abandoned-proofless-aggregate-r2',
+  };
+  const secondProoflessWrapperReason = 'Abandon the second proofless wrapper before starting a fresh aggregate.';
+  const secondProoflessWrapper = {
+    archiveId: 'pr-35-2026-08-20T12-25-00-000Z',
+    state: {
+      ...structuredClone(priorFixture.active),
+      tasks: [secondProoflessTask],
+      abandonmentReason: secondProoflessWrapperReason,
+      updatedAt: '2026-08-20T12:25:00.000Z',
+    },
+    events: [{
+      schemaVersion: 1,
+      type: 'abandoned',
+      summary: `Archived without completion: ${secondProoflessWrapperReason}`,
+      at: '2026-08-20T12:25:00.010Z',
     }],
   };
 
@@ -2915,7 +2937,13 @@ test('a fresh aggregate identity bypasses a later proofless wrapper without hidi
   const freshAggregateTaskId = 'fresh-after-proofless-wrapper-r1';
   freshFixture.aggregateTask.id = freshAggregateTaskId;
   freshFixture.aggregateTask.fingerprint = 'fp-fresh-after-proofless-wrapper-r1';
-  const inventory = [prooflessWrapper, priorAggregateCarrier, mixedArchive, oldArchive];
+  const inventory = [
+    secondProoflessWrapper,
+    firstProoflessWrapper,
+    priorAggregateCarrier,
+    mixedArchive,
+    oldArchive,
+  ];
   const inventorySnapshot = structuredClone(inventory);
   const inventoryBytes = JSON.stringify(inventory);
   const freshStore = immutableArchiveStore(inventory);
@@ -2944,36 +2972,42 @@ test('a fresh aggregate identity bypasses a later proofless wrapper without hidi
   assert.deepEqual(inventory, inventorySnapshot);
   assert.equal(JSON.stringify(inventory), inventoryBytes);
 
-  const sameIdFixture = packetAggregateAdoptionFixture(oldArchive, mixedArchive);
-  sameIdFixture.active.tasks.find((task) => task.id === sameIdFixture.remediation.id).status = 'completed';
-  sameIdFixture.active.threadResolutionStatus.threadlessVerification = {
-    status: 'passed', headSha: PACKET_AGGREGATE_HEAD,
-    taskIds: [sameIdFixture.remediation.id], updatedAt: '2026-08-20T12:30:00.000Z',
-  };
-  assert.equal(sameIdFixture.aggregateTask.id, priorAggregateTaskId);
-  const sameIdInventory = structuredClone(inventorySnapshot);
-  const sameIdSnapshot = structuredClone(sameIdInventory);
-  const sameIdBytes = JSON.stringify(sameIdInventory);
-  const sameIdStore = immutableArchiveStore(sameIdInventory);
-  const sameIdJournal = fakeJournal(sameIdFixture.client.events);
-  const sameId = workflow(sameIdFixture.active, sameIdFixture.client, {
-    archiveStore: sameIdStore, git: packetGit, journal: sameIdJournal,
-  });
-  const durableSnapshot = structuredClone(sameId.state.current);
+  for (const collidingTaskId of [priorAggregateTaskId, secondProoflessTaskId]) {
+    const sameIdFixture = packetAggregateAdoptionFixture(oldArchive, mixedArchive);
+    sameIdFixture.active.tasks.find(
+      (task) => task.id === sameIdFixture.remediation.id,
+    ).status = 'completed';
+    sameIdFixture.active.threadResolutionStatus.threadlessVerification = {
+      status: 'passed', headSha: PACKET_AGGREGATE_HEAD,
+      taskIds: [sameIdFixture.remediation.id], updatedAt: '2026-08-20T12:30:00.000Z',
+    };
+    sameIdFixture.aggregateTask.id = collidingTaskId;
+    sameIdFixture.aggregateTask.fingerprint = `fp-collision-${collidingTaskId}`;
+    const sameIdInventory = structuredClone(inventorySnapshot);
+    const sameIdSnapshot = structuredClone(sameIdInventory);
+    const sameIdBytes = JSON.stringify(sameIdInventory);
+    const sameIdStore = immutableArchiveStore(sameIdInventory);
+    const sameIdJournal = fakeJournal(sameIdFixture.client.events);
+    const sameId = workflow(sameIdFixture.active, sameIdFixture.client, {
+      archiveStore: sameIdStore, git: packetGit, journal: sameIdJournal,
+    });
+    const durableSnapshot = structuredClone(sameId.state.current);
 
-  await assert.rejects(
-    () => sameId.api.replyResolve(35, priorAggregateTaskId),
-    GitHubWorkflowError,
-  );
-  assert.equal(sameId.state.calls.length, 0);
-  assert.deepEqual(sameId.state.current, durableSnapshot);
-  assert.equal(sameIdJournal.intents.size, 0);
-  assert.equal(sameIdFixture.client.calls.some(
-    (call) => ['AddThreadReply', 'ResolveThread'].includes(call.name),
-  ), false);
-  assert.deepEqual(sameIdFixture.client.events, []);
-  assert.deepEqual(sameIdInventory, sameIdSnapshot);
-  assert.equal(JSON.stringify(sameIdInventory), sameIdBytes);
+    await assert.rejects(
+      () => sameId.api.replyResolve(35, collidingTaskId),
+      GitHubWorkflowError,
+      collidingTaskId,
+    );
+    assert.equal(sameId.state.calls.length, 0, collidingTaskId);
+    assert.deepEqual(sameId.state.current, durableSnapshot, collidingTaskId);
+    assert.equal(sameIdJournal.intents.size, 0, collidingTaskId);
+    assert.equal(sameIdFixture.client.calls.some(
+      (call) => ['AddThreadReply', 'ResolveThread'].includes(call.name),
+    ), false, collidingTaskId);
+    assert.deepEqual(sameIdFixture.client.events, [], collidingTaskId);
+    assert.deepEqual(sameIdInventory, sameIdSnapshot, collidingTaskId);
+    assert.equal(JSON.stringify(sameIdInventory), sameIdBytes, collidingTaskId);
+  }
 });
 
 test('archive adoption accepts exact 6-to-10-to-14 partial-mixed lineage and proofless covers', async () => {

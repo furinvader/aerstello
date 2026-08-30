@@ -451,11 +451,13 @@ or any proof row is relevant even if its proof is wholly off-selection. Once
 the full carrier anchors historical task IDs, every same-repository/PR archive
 that names one of those IDs in a task object, proof-row `taskIds`, or
 `archiveProvenance.historicalTaskId` is relevant too.
-After abandoning a proofless wrapper that names the prior active aggregate
-task, the successor cycle must bind a genuinely fresh aggregate task ID.
-Reusing the prior ID keeps that wrapper relevant and fails closed; this is a
-lifecycle identity rule, not task-ID alias compatibility, renaming, or archive
-filtering.
+After abandoning any proofless aggregate wrapper, the successor cycle must
+bind a globally fresh aggregate task ID: that identity must be absent from
+every same-PR archive task object, proof row, and provenance identity across
+the complete immutable inventory, not merely absent from the immediate
+predecessor archive. Reusing any archived identity keeps every matching carrier
+relevant and fails closed; this is a lifecycle identity rule, not task-ID alias
+compatibility, renaming, or archive filtering.
 Every relevant historical or active-replay carrier is scanned across all proof
 rows and every GitHub-thread task whose canonical thread or discussion sources
 intersect the selected roots. Those tasks must be exact anchored whole
