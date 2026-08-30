@@ -989,6 +989,8 @@ function terminalProoflessPredecessorCarrier(
     if (seenTaskIds.has(task.id) || seenCommits.has(task.integratedCommitSha)
         || task.sourceType !== 'github-thread' || task.disposition !== 'actionable'
         || task.status !== 'integrated' || typeof task.integratedCommitSha !== 'string'
+        || (typeof partition.historicalTask.integratedCommitSha === 'string'
+          && task.integratedCommitSha === partition.historicalTask.integratedCommitSha)
         || task.integratedCommitSha === partition.historicalHeadSha
         || taskRoots === null || !isDeepStrictEqual(taskRoots, partitionRoots)
         || !isDeepStrictEqual(

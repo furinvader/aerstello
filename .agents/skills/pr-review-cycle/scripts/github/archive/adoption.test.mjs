@@ -2608,6 +2608,7 @@ test('archive adoption accepts exact 6-to-10-to-14 partial-mixed lineage and pro
     const successorTaskId = 'close-round-two-scope-evidence-invariants-r3';
     const predecessorTaskId = 'close-round-two-scope-evidence-invariants-r2';
     const successorCommit = 'b1a2135aa09417e825707b415bfcd9cae89e15b1';
+    const successorProofHead = 'c2b3246bb10528f936818c526ceda0dbf90f26c2';
     const predecessorCommit = '62fef0589e2edc7c87c06e8f5de26c12d3fbc6b4';
     const successorRoots = new Set([
       ...ordinaryRows.keys(),
@@ -2628,16 +2629,16 @@ test('archive adoption accepts exact 6-to-10-to-14 partial-mixed lineage and pro
     for (const row of terminalState.threadResolutionStatus.threads) {
       if (!successorRoots.has(row.threadNodeId)) continue;
       row.taskIds = [successorTaskId];
-      row.observedHeadSha = successorCommit;
+      row.observedHeadSha = successorProofHead;
       row.disposition = 'fixed';
       const reply = fixture.client.threadComments.get(row.threadNodeId)[1];
       reply.body = reply.body
         .replace(/^Aerstello review resolution at [0-9a-f]+\./u,
-          `Aerstello review resolution at ${successorCommit}.`)
+          `Aerstello review resolution at ${successorProofHead}.`)
         .replace(/^Tasks:\n(?:- [^\n]+\n)+Validation:/mu,
           `Tasks:\n- ${successorTaskId}: ${successorCommit}\nValidation:`)
         .replace(/<!-- aerstello-review:[0-9a-f]{24} -->/u, markerFor(
-          `reply:35:${row.threadNodeId}:${successorCommit}`,
+          `reply:35:${row.threadNodeId}:${successorProofHead}`,
         ));
     }
     for (const event of terminalCarrier.events) {
@@ -2645,7 +2646,7 @@ test('archive adoption accepts exact 6-to-10-to-14 partial-mixed lineage and pro
         event.details?.operationId ?? '',
       );
       if (!match || !successorRoots.has(match[2])) continue;
-      const operationId = `${match[1]}:35:${match[2]}:${successorCommit}`;
+      const operationId = `${match[1]}:35:${match[2]}:${successorProofHead}`;
       event.summary = `Intent ${match[1]} ${operationId}`;
       event.details.operationId = operationId;
       event.details.clientMutationId = priorIntent(match[1], operationId).clientMutationId;
@@ -2716,6 +2717,7 @@ test('archive adoption accepts exact 6-to-10-to-14 partial-mixed lineage and pro
       successorTaskId,
       predecessorCommit,
       successorCommit,
+      successorProofHead,
     };
   };
 
@@ -2815,13 +2817,43 @@ test('archive adoption accepts exact 6-to-10-to-14 partial-mixed lineage and pro
   assert.equal(predecessorOnlySetup.state.calls[0].name, 'checkpointArchiveTaskCompletion');
   assert.equal(predecessorOnly.freshGit.ancestryCalls.filter((call) => (
     call.ancestorSha === predecessorOnly.predecessorCommit
-      && call.descendantSha === predecessorOnly.successorCommit
+      && call.descendantSha === predecessorOnly.successorProofHead
   )).length, 2);
   assert.equal(predecessorOnly.fixture.client.calls.some(
     (call) => ['AddThreadReply', 'ResolveThread'].includes(call.name),
   ), false);
   assert.deepEqual(predecessorOnly.fixture.client.events, []);
   assert.deepEqual(predecessorOnly.records, predecessorOnlyOriginal);
+
+  const equalPredecessorSuccessor = await buildPredecessorOnlyTopology();
+  equalPredecessorSuccessor.predecessorTask.integratedCommitSha =
+    equalPredecessorSuccessor.successorCommit;
+  const equalCommitOriginal = structuredClone(equalPredecessorSuccessor.records);
+  const equalCommitJournal = fakeJournal(equalPredecessorSuccessor.fixture.client.events);
+  const equalCommitFailure = workflow(
+    equalPredecessorSuccessor.active, equalPredecessorSuccessor.fixture.client,
+    {
+      archiveStore: immutableArchiveStore(equalPredecessorSuccessor.records),
+      git: equalPredecessorSuccessor.freshGit,
+      journal: equalCommitJournal,
+    },
+  );
+  await assert.rejects(
+    () => equalCommitFailure.api.replyResolve(35, equalPredecessorSuccessor.freshTask.id),
+    { code: 'ARCHIVE_EVIDENCE_AMBIGUOUS' },
+    'a predecessor commit equal to the anchored successor commit is ambiguous',
+  );
+  assert.equal(equalCommitFailure.state.calls.length, 0);
+  assert.equal(equalCommitJournal.intents.size, 0);
+  assert.equal(equalPredecessorSuccessor.freshGit.ancestryCalls.some((call) => (
+    call.ancestorSha === equalPredecessorSuccessor.successorCommit
+      && call.descendantSha === equalPredecessorSuccessor.successorProofHead
+  )), false);
+  assert.equal(equalPredecessorSuccessor.fixture.client.calls.some(
+    (call) => ['AddThreadReply', 'ResolveThread'].includes(call.name),
+  ), false);
+  assert.deepEqual(equalPredecessorSuccessor.fixture.client.events, []);
+  assert.deepEqual(equalPredecessorSuccessor.records, equalCommitOriginal);
 
   const crossLaneDuplicate = await buildPredecessorOnlyTopology();
   crossLaneDuplicate.mixedArchive.state.tasks.push(
@@ -2954,7 +2986,7 @@ test('archive adoption accepts exact 6-to-10-to-14 partial-mixed lineage and pro
   predecessorOnlyNonAncestral.freshGit.isAncestor = async (ancestorSha, descendantSha) => {
     predecessorOnlyNonAncestral.freshGit.ancestryCalls.push({ ancestorSha, descendantSha });
     return ancestorSha !== predecessorOnlyNonAncestral.predecessorCommit
-      || descendantSha !== predecessorOnlyNonAncestral.successorCommit;
+      || descendantSha !== predecessorOnlyNonAncestral.successorProofHead;
   };
   const predecessorOnlyAncestryJournal = fakeJournal(
     predecessorOnlyNonAncestral.fixture.client.events,
