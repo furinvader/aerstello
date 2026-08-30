@@ -5,7 +5,8 @@ import { test } from 'node:test';
 
 import { loadRegistry, routeSpecialists } from '../../../aerstello-specialists/scripts/validate-registry.mjs';
 import {
-  canonicalJsonText, contractPaths, digestJson, planReadiness,
+  canonicalJsonText, contractPaths, DEVELOPMENT_PHASES, developmentStateSchema,
+  digestJson, implementationPlanSchema, planReadiness, STATE_PHASES,
   sourceChecklistBinding, validateDevelopmentState, validateImplementationPlan,
 } from './contracts.mjs';
 import { parseChecklist } from '../source/checklists.mjs';
@@ -54,6 +55,20 @@ function plan() {
     checklistMappings: [{ id: 'durable-state', identity: { kind: 'stable-marker', stableId: 'durable-state' }, capturedText: 'State is durable', criterionIds: ['durable-state'], taskIds: ['contracts'], relationship: 'resolves', checked: false, status: 'current', ambiguity: null, externalChange: false }],
     tasks: [{ id: 'contracts', title: 'Add contracts', objective: 'Define strict contracts.', rationale: 'Later execution requires stable inputs.', specialization: metadata(), criterionIds: ['durable-state'], decisionIds: ['state-root'], scenarioIds: [], checklistItemIds: ['durable-state'], dependsOn: [], anticipatedPaths: ['.agents/skills/change-development/schemas'], produces: ['plan-contract'], consumes: [], validationIntent: ['Validate schema and manual invariants'], unsplittable: null }],
   };
+}
+
+function planWithCriterionCount(count) {
+  const value = plan();
+  const additionalCriteria = Array.from({ length: count - 1 }, (_, index) => ({
+    id: `criterion-${index + 2}`,
+    description: `Criterion ${index + 2} is covered.`,
+    disposition: 'owned',
+    ownerTaskId: 'contracts',
+    deferredReason: null,
+  }));
+  value.criteria.push(...additionalCriteria);
+  value.tasks[0].criterionIds.push(...additionalCriteria.map(({ id }) => id));
+  return value;
 }
 
 function state() {
@@ -105,6 +120,27 @@ function bindObservation(value, sourceObservation) {
 test('schemas compile independently in strict Draft 2020-12 mode', () => {
   const ajv = new Ajv2020({ strict: true, allErrors: true }); addFormats(ajv);
   for (const path of Object.values(contractPaths)) assert.doesNotThrow(() => ajv.compile(JSON.parse(readFileSync(path, 'utf8'))));
+});
+
+test('public development phases exactly match the canonical state schema', () => {
+  assert.deepEqual(DEVELOPMENT_PHASES, developmentStateSchema.properties.phase.enum);
+  assert.ok(DEVELOPMENT_PHASES.includes('awaiting-scope-decision'));
+  assert.equal(STATE_PHASES, DEVELOPMENT_PHASES);
+});
+
+test('implementation plans enforce the exact 256-criterion capacity', () => {
+  const ajv = new Ajv2020({ strict: true, allErrors: true }); addFormats(ajv);
+  const validateSchema = ajv.compile(implementationPlanSchema);
+  const atCapacity = planWithCriterionCount(256);
+  assert.equal(validateSchema(atCapacity), true);
+  assert.deepEqual(validateImplementationPlan(atCapacity), []);
+  assert.deepEqual(planReadiness(atCapacity), { ready: true, errors: [] });
+
+  const aboveCapacity = planWithCriterionCount(257);
+  assert.equal(validateSchema(aboveCapacity), false);
+  assert.ok(validateSchema.errors.some(({ instancePath, keyword }) => instancePath === '/criteria' && keyword === 'maxItems'));
+  assert.match(validateImplementationPlan(aboveCapacity).join('\n'), /criteria must NOT have more than 256 items/u);
+  assert.match(planReadiness(aboveCapacity).errors.join('\n'), /criteria must NOT have more than 256 items/u);
 });
 
 test('canonical JSON is stable and its receipt includes the canonical newline', () => {
