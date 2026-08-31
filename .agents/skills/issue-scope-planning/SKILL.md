@@ -15,7 +15,10 @@ recommends issue wording and boundaries but does not authorize scope changes.
    `updatedAt`, and a digest of that exact source. Record the exact repository
    SHA being inspected. Fail closed when the source is incomplete or drifts
    while planning.
-2. Inspect every named dependency and related issue plus the relevant feature
+2. For every dependency or related issue used as evidence or in a delivery
+   recommendation, capture its identifier, title, body, state, complete
+   comments, `updatedAt`, and an exact-source digest. Revalidate that revision
+   before the recommendation and handoff. Also inspect the relevant feature
    specifications, architecture rules, shared contracts, and current code
    seams. Use `$aerstello-specialists` to select the repository guidance and
    risk signals that apply to the proposed work.
@@ -73,8 +76,9 @@ dropped or owned by both a tracking parent and a resolving child.
 ## Check and hand off
 
 Run `$scope-review` at each material draft commitment boundary for the exact
-retained issue or exact child draft. Preserve its evidence and verdict without
-using it to authorize additions or removals; a human accepts material scope and
+retained issue or, for a split, the exact rewritten tracking-parent draft and
+each exact child draft. Preserve its evidence and verdict without using it to
+authorize additions or removals; a human accepts material scope and
 issue-boundary changes.
 
 After acceptance, hand each resolving issue source separately to
