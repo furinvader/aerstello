@@ -30,6 +30,51 @@ the standalone source adapter are read-only.
 - **Development-ready**: local proof that the exact HEAD, source, plan, task set, validation, specialist evidence, and final verifier result are all current and clean; it is not delivery authority.
 - **Exact next action**: one bounded command or operator action stored in state and emitted by status/hooks.
 
+## Minimality and scope authority
+
+Every newly accepted plan carries a receipt-protected minimal-closure contract
+and an applicable canonical scope assessment bound to its source, Planning SHA,
+and exact candidate plan. Only `within-scope` admits the plan. Trim and bounded
+minor-amendment outcomes return to planning; material change enters the durable
+human-decision route; insufficient evidence fails closed. Historical accepted
+records remain readable, but an unfinished legacy change must adopt this
+authority append-only before gaining new execution or finalization authority.
+
+Assessment cadence is limited to admission, a task boundary when packet
+tripwires or worker discovery require it, and the exact integrated HEAD. Every
+new packet binds both the accepted and observed deterministic inventories. An
+unchanged comparison binds without model assessment and preserves the current
+scope evidence; changed inventories require `within-scope` task evidence naming
+the exact canonical trigger IDs. Structured worker discovery invalidates the
+prior task evidence and admits assessment only for the exact packet, result,
+and discovery receipts. Task evidence also binds criterion need, removal
+counterfactual, forbidden expansion, and a fail-closed discovery return. A
+worker never expands its packet. Decisions and amendments are append-only and
+exact-evidence-bound; a minor amendment covers only necessary adjacent work
+with no material trigger or independent workstream.
+
+`npm run change:status` reports the compact current scope status, boundary,
+decision count, and guarded-return count. Validation, verification, and
+Development-ready require a current `within-scope` assessment for the exact
+integrated HEAD, effective plan, ordered amendments and operator-decision
+receipt digests, minimal closure, and terminal task-set identity. Historical
+zero-decision assessments may omit the optional decision sequence. A
+`trim-required` integrated result returns to
+bounded removal or simplification work.
+
+After Development-ready, separate PR preparation may call the pure
+[`buildDevelopmentScopeHandoff`](scripts/handoff/contracts.mjs) projection with
+receipt-validated closure, effective-plan, ordered amendment, decision,
+canonical terminal task-set, and integrated-assessment records. The terminal
+task-set receipt is required; the builder recomputes both its digest and the
+subject digest from the exact handoff HEAD instead of accepting caller-declared
+task or subject identities. It returns only bounded source, plan, amendment,
+closure, exact-HEAD, canonical assessment-pair, decision, deferred-follow-up,
+and capture-time identities. It does not read or mutate durable state, create a
+sidecar, initialize PR review, satisfy review or CI gates, or carry raw issue,
+plan, diff, log, or transcript payloads. Issues 25 and 26 own PR preparation and
+delivery coordination.
+
 ## Start or resume
 
 Run commands from the repository root or use `npm --prefix /path/to/aerstello run …` from a nested workspace.
@@ -82,6 +127,10 @@ Use the following lifecycle commands through `npm run change:state --`:
 | `validate` | Validate the candidate or accepted plan and its evidence |
 | `refresh-source` | Read the source outside the lock, then classify drift |
 | `accept-plan` | Persist the immutable accepted plan and receipts |
+| `adopt-scope` | Append scope authority to an unfinished legacy accepted plan |
+| `assess-scope` | Record exact task or integrated-HEAD scope evidence |
+| `record-scope-decision` | Append one exact operator scope decision receipt |
+| `resume-scope-return` | Resume a guarded return bound to the active handoff authority |
 | `record-decision` | Resolve accepted-plan source drift while `awaiting-decision` |
 | `amend-plan` | Append an authorized complete resulting plan without rewriting history |
 | `recover` | Finish only an exact matching interrupted transition |
@@ -122,6 +171,14 @@ work instead uses an amendment triggered by
 `validation-failure:<result-digest>` and adds a new owned criterion and task.
 See [verification](references/verification.md) for
 the full lifecycle and evidence constraints.
+
+`resume-scope-return --input <json>` accepts exactly `scopeReturn` plus
+`activeHandoffAuthority`. The latter is a `{ "value": <imported handoff>,
+"digest": <canonical PR scope-authority digest> }` receipt. Under the change
+lock, the lifecycle validates that receipt, derives the same handoff from the
+active effective plan, closure, ordered amendments and decisions, terminal task
+receipts, integrated assessment, and returned capture time, then requires its
+digest to equal the envelope authority before any durable record can advance.
 
 Pass the current state revision with `--expected-revision` to every mutating
 state command. Revision conflicts fail closed. `recover` instead verifies the

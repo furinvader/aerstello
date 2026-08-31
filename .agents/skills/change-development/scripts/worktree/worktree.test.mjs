@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import { loadRegistry, routeSpecialists } from '../../../aerstello-specialists/scripts/validate-registry.mjs';
 import { commit, createRepository, git } from '../../../../../tests/support/git-fixtures.mjs';
+import { digestJson } from '../contracts/contracts.mjs';
 import { implementationTaskDigest, validateImplementationTask } from '../implementation/contracts.mjs';
 import {
   implementationTaskPacketPath,
@@ -35,6 +36,47 @@ function specialization() {
     browserVisible: value.browserVisible, testSelectionUncertain: value.relatedTestSelectionUncertain }, registry) };
 }
 
+function admissionAuthority(state, plan) {
+  const closure = {
+    schemaVersion: 1, changeId: state.changeId, revision: 1,
+    source: { type: state.source.kind, identity: state.source.reference, digest: plan.source.captureDigest },
+    planningSha: state.planningSha, planDigest: digestJson(plan), previousContractDigest: null,
+    outcome: 'Exercise the smallest sufficient worktree lifecycle.',
+    requiredCriteria: plan.criteria.map(({ id, description }) => ({ id, text: description })),
+    invariants: [{ id: 'exact-worktree-authority', text: 'Keep worktree evidence bound to exact task authority.' }],
+    nonGoals: [{ id: 'no-product-change', text: 'Do not change product behavior.' }],
+    mandatoryConstraints: [{ id: 'receipt-evidence', text: 'Persist exact receipt-backed lifecycle evidence.' }],
+    optionalGuidance: [], authorizedShape: ['worktree-lifecycle'], unauthorizedExpansion: [],
+    deferredFollowups: [], operatorDecisionDigests: [],
+  };
+  const mapping = { mechanism: 'worktree-lifecycle',
+    sourceCriterionIds: plan.criteria.map(({ id }) => id), acceptedCriterionIds: plan.criteria.map(({ id }) => id),
+    invariantIds: [], nonGoalIds: [], guidanceIds: [],
+    rationale: 'The worktree fixture directly exercises every accepted lifecycle criterion.' };
+  const binding = { phase: 'plan', source: closure.source,
+    subject: { digest: digestJson(plan), sha: state.planningSha }, planDigest: digestJson(plan),
+    amendmentDigests: [], taskPacketDigest: null };
+  const packet = { schemaVersion: 1, binding,
+    sourceScope: { objective: plan.objective,
+      requiredCriteria: plan.criteria.map(({ id, description }) => ({ id, text: description })),
+      nonGoals: closure.nonGoals, implementationGuidance: [] },
+    acceptedScope: { criteria: plan.criteria.map(({ id, description }) => ({ id, text: description })),
+      invariants: [...closure.invariants, ...closure.mandatoryConstraints],
+      minimalClosure: closure.outcome, authorizedShape: ['worktree-lifecycle'],
+      unauthorizedShape: [], deferredShape: [] },
+    changeInventory: { summary: 'Exercise worktree lifecycle.', paths: [], dependencies: [],
+      publicSurfaces: [], persistentSurfaces: [], subsystems: [], mappings: [mapping] }, tripwires: [] };
+  const result = { schemaVersion: 1, binding, verdict: 'within-scope',
+    summary: 'The exact worktree lifecycle is within scope.',
+    coverage: [{ ...mapping, classification: 'required', rationale: mapping.rationale }], unnecessaryWork: [],
+    smallerSufficientAlternative: null, scopeDelta: null, materialityTriggers: [], smallestExpansion: null,
+    narrowAlternative: null, deferralConsequences: null, missingEvidence: [], humanDecision: false };
+  const scopeEvidence = { schemaVersion: 1, changeId: state.changeId, evidenceId: 'admission-worktree',
+    revision: state.revision + 1, cadence: { boundary: 'admission', trigger: null }, packet,
+    packetDigest: digestJson(packet), result, resultDigest: digestJson(result), closureDigest: digestJson(closure) };
+  return { closure, scopeEvidence };
+}
+
 async function boundRepository(taskId = 'worker-layer') {
   const cwd = createRepository(); repositories.push(cwd);
   const base = commit(cwd, { 'request.md': '# Worktree request\n' }, 'test: add worktree request');
@@ -56,7 +98,9 @@ async function boundRepository(taskId = 'worker-layer') {
       decisionIds: [], scenarioIds: [], checklistItemIds: [], dependsOn: [], anticipatedPaths: ['src'],
       produces: [], consumes: [], validationIntent: ['Exercise the focused worktree lifecycle'], unsplittable: null }],
   };
-  const accepted = acceptPlan({ cwd, expectedRevision: planning.revision, plan, planningEvidence: [] });
+  const authority = admissionAuthority(planning, plan);
+  const accepted = acceptPlan({ cwd, expectedRevision: planning.revision, plan, planningEvidence: [],
+    minimalClosure: authority.closure, scopeEvidence: authority.scopeEvidence });
   const packet = {
     schemaVersion: 1, changeId: 'issue-23', taskId, planRevision: 1,
     planDigest: accepted.plan.effectiveDigest, planningSha: base, taskBaseSha: base,
@@ -68,11 +112,22 @@ async function boundRepository(taskId = 'worker-layer') {
     decisionIds: [], decisionContext: [], acceptanceCriteriaIds: ['safe-worktree'],
     acceptanceCriteria: [{ id: 'safe-worktree', description: 'Worker worktrees recover safely.' }],
     allowedPaths: ['src/**'], forbiddenPaths: [], dependencies: [],
+    minimalityAuthority: {
+      closureDigest: accepted.scope.closureDigest,
+      criterionNeed: [{ criterionId: 'safe-worktree',
+        rationale: 'The exact accepted criterion requires this bounded worktree task.' }],
+      removalCounterfactual: 'Removing the task leaves the accepted worktree criterion without lifecycle proof.',
+      forbiddenExpansion: ['Do not expand beyond the exact worktree lifecycle packet.'],
+      tripwires: [{ id: 'worktree-task-paths', category: 'git-paths',
+        inventory: ['src/**'], observedInventory: ['src/**'] }],
+      discoveryReturn: { status: 'blocked', workerCommit: null, authority: 'unchanged' },
+    },
     requiredValidation: { unit: [{ command: 'node --test src/example.test.mjs', reason: 'Exercise the exact task.' }], system: [] },
   };
   const packetDigest = implementationTaskDigest(packet);
   const bound = bindTask({ cwd, changeId: 'issue-23', packet, expectedRevision: accepted.revision });
-  return { cwd, base, priorBase: git(cwd, ['rev-parse', 'HEAD^']), plan, packet, packetDigest, bound, taskId };
+  return { cwd, base, priorBase: git(cwd, ['rev-parse', 'HEAD^']), plan, packet, packetDigest, bound, taskId,
+    closure: authority.closure };
 }
 
 function create(context, options = {}) {
@@ -426,14 +481,17 @@ test('recovery completes an exact rejected-task creation before authorized remov
       `implementation/specialist-routes/${context.taskId}/0001.json`,
     ],
   };
+  const minimalClosure = { ...context.closure, revision: context.closure.revision + 1,
+    planDigest: digestJson(resultingPlan), previousContractDigest: context.bound.scope.closureDigest };
   assert.throws(() => amendPlan({ cwd: context.cwd, changeId: 'issue-23', expectedRevision: rejected.revision,
-    resultingPlan, amendment }), (error) => error instanceof StateError && error.code === 'RECEIPT_MISSING');
+    resultingPlan, amendment, minimalClosure }),
+  (error) => error instanceof StateError && error.code === 'RECEIPT_MISSING');
   const recovered = recoverTaskWorktree({ cwd: context.cwd, changeId: 'issue-23', taskId: context.taskId });
   assert.equal(recovered.status, 'active'); assert.equal(recovered.baseSha, context.base);
   const removed = removeTaskWorktree({ cwd: context.cwd, changeId: 'issue-23', taskId: context.taskId });
   assert.equal(removed.status, 'removed'); assert.equal(removed.exists, false);
   const amended = amendPlan({ cwd: context.cwd, changeId: 'issue-23', expectedRevision: rejected.revision,
-    resultingPlan, amendment });
+    resultingPlan, amendment, minimalClosure });
   assert.deepEqual(amended.execution.tasks.map(({ id, status }) => ({ id, status })),
     [{ id: replacementId, status: 'unbound' }]);
 });

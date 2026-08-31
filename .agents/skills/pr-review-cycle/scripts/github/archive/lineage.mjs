@@ -487,20 +487,36 @@ export function aggregateHistoricalProjection(
 
 export function aggregateFullAuthorityProjection(
   state, historicalCandidates, selectedThreadIds, selectedRowsByArchive, reservePartition,
+  priorAggregateReplayCandidate = null,
 ) {
-  const full = historicalCandidates.filter((candidate) => (
-    selectedRowsByArchive.get(candidate.archive.archiveId).length === selectedThreadIds.length
-  ));
+  const full = historicalCandidates.filter((candidate) => {
+    const rows = selectedRowsByArchive.get(candidate.archive.archiveId);
+    return rows.length === selectedThreadIds.length
+      && rows.some((row) => !Object.hasOwn(row, 'archiveProvenance'));
+  });
   if (full.length === 0) {
     throw new GitHubWorkflowError(
       'Aggregate adoption requires one complete historical full carrier',
       'ARCHIVE_EVIDENCE_MISSING',
     );
   }
+  if (priorAggregateReplayCandidate !== null) {
+    const priorAggregateTerminalBound = terminalArchiveUpperBound(priorAggregateReplayCandidate);
+    const hasLaterCompleteCarrier = full.some((candidate) => (
+      candidate.archive.archiveId !== priorAggregateReplayCandidate.archive.archiveId
+        && priorAggregateTerminalBound < candidate.terminalBounds.stateUpdatedAt
+    ));
+    if (!hasLaterCompleteCarrier) {
+      throw new GitHubWorkflowError(
+        'Prior aggregate replay lacks a strictly later complete historical carrier',
+        'ARCHIVE_EVIDENCE_AMBIGUOUS',
+      );
+    }
+  }
   const project = (candidate, reserve = null) => {
     const rows = selectedRowsByArchive.get(candidate.archive.archiveId);
     const provenanceRows = rows.filter((row) => Object.hasOwn(row, 'archiveProvenance'));
-    if (provenanceRows.length === 0 || provenanceRows.length === rows.length) {
+    if (provenanceRows.length === 0) {
       return aggregateHistoricalProjection(
         state, candidate, selectedThreadIds, rows, reserve,
       );
@@ -901,6 +917,96 @@ function assertMixedHistoricalCarrierSlice(
   return rows;
 }
 
+function assertPriorAggregateReplayCarrierSlice(candidate, projection, rows) {
+  const selectedThreadIds = projection.proofRows.map((row) => row.threadNodeId).sort();
+  const selectedRoots = new Set(selectedThreadIds);
+  const carriedThreadIds = rows.map((row) => row.threadNodeId).sort();
+  const carriedRoots = new Set(carriedThreadIds);
+  const authorityByRoot = aggregateAuthorityByRoot(projection);
+  const canonicalRootIndex = aggregateCanonicalRootIndex(projection.proofRows);
+  const anchoredHistoricalTaskIds = new Set(
+    projection.partitions.map((partition) => partition.historicalTask.id),
+  );
+  const ownerIds = new Set(rows.flatMap((row) => row.taskIds));
+  const ownerId = ownerIds.size === 1 ? [...ownerIds][0] : null;
+  const matchingOwners = ownerId === null ? []
+    : candidate.archivedState.tasks.filter((task) => task.id === ownerId);
+  const owner = matchingOwners[0];
+  const ownerThreadIds = matchingOwners.length === 1 && owner?.sourceType === 'github-thread'
+    ? taskCanonicalRootIds(owner, canonicalRootIndex, { requireComplete: true }) : null;
+  const ownerRows = ownerId === null ? []
+    : candidate.archivedState.threadResolutionStatus.threads.filter(
+      (row) => row.taskIds.includes(ownerId),
+    );
+  if (rows.length === 0
+      || rows.some((row) => !Object.hasOwn(row, 'archiveProvenance')
+        || row.taskIds.length !== 1 || row.taskIds[0] !== ownerId
+        || row.disposition !== 'already-fixed')
+      || matchingOwners.length !== 1
+      || owner.sourceType !== 'github-thread'
+      || owner.status !== 'completed'
+      || owner.disposition !== 'already-fixed'
+      || owner.integratedCommitSha !== null
+      || ownerThreadIds === null
+      || !isDeepStrictEqual(ownerThreadIds, carriedThreadIds)
+      || ownerRows.length !== rows.length
+      || !isDeepStrictEqual(
+        ownerRows.map((row) => row.threadNodeId).sort(),
+        carriedThreadIds,
+      )) {
+    throw new GitHubWorkflowError(
+      'Prior aggregate replay carrier owner is incomplete, divergent, or ineligible',
+      'ARCHIVE_TASK_MISMATCH',
+    );
+  }
+  for (const partition of projection.partitions) {
+    const partitionRoots = partition.proofRows.map((row) => row.threadNodeId);
+    const carriedCount = partitionRoots.filter((root) => carriedRoots.has(root)).length;
+    if (carriedCount !== 0 && carriedCount !== partitionRoots.length) {
+      throw new GitHubWorkflowError(
+        'Prior aggregate replay carrier slices an anchored historical partition',
+        'ARCHIVE_PROOF_MISMATCH',
+      );
+    }
+  }
+  for (const task of candidate.archivedState.tasks) {
+    if (task.sourceType !== 'github-thread' || task.id === ownerId) continue;
+    if (taskCanonicalRootIds(task, canonicalRootIndex).length !== 0) {
+      throw new GitHubWorkflowError(
+        'Prior aggregate replay carrier has an unanchored overlapping task',
+        'ARCHIVE_EVIDENCE_AMBIGUOUS',
+      );
+    }
+  }
+  for (const row of candidate.archivedState.threadResolutionStatus.threads) {
+    if (selectedRoots.has(row.threadNodeId)) continue;
+    if (row.taskIds.includes(ownerId)
+        || anchoredHistoricalTaskIds.has(row.archiveProvenance?.historicalTaskId)
+        || row.taskIds.some((taskId) => anchoredHistoricalTaskIds.has(taskId))) {
+      throw new GitHubWorkflowError(
+        'Prior aggregate replay carrier references anchored authority outside selection',
+        'ARCHIVE_EVIDENCE_AMBIGUOUS',
+      );
+    }
+  }
+  for (const row of rows) {
+    const authority = authorityByRoot.get(row.threadNodeId);
+    const provenance = row.archiveProvenance;
+    if (!authority
+        || !isDeepStrictEqual(aggregateProofCore(row), aggregateProofCore(authority.proof))
+        || provenance.schemaVersion !== 1
+        || provenance.historicalTaskId !== authority.historicalTask.id
+        || provenance.historicalDisposition !== authority.historicalDisposition
+        || provenance.historicalIntegratedCommitSha !== authority.historicalTask.integratedCommitSha) {
+      throw new GitHubWorkflowError(
+        'Prior aggregate replay carrier diverges from older historical authority',
+        'ARCHIVE_EVIDENCE_AMBIGUOUS',
+      );
+    }
+  }
+  return rows;
+}
+
 export function archiveReferencesAnchoredHistoricalTasks(archive, anchoredTaskIds) {
   if (Array.isArray(archive?.state?.tasks)) {
     for (const task of archive.state.tasks) {
@@ -917,6 +1023,155 @@ export function archiveReferencesAnchoredHistoricalTasks(archive, anchoredTaskId
     }
   }
   return false;
+}
+
+function stablePredecessorTaskIdentity(task) {
+  return {
+    id: task.id,
+    sourceIds: task.sourceIds,
+    sourceType: task.sourceType,
+    fingerprint: task.fingerprint,
+    summary: task.summary,
+    severity: task.severity,
+  };
+}
+
+function terminalArchiveUpperBound(candidate) {
+  return Math.max(
+    candidate.terminalBounds.stateUpdatedAt,
+    candidate.terminalBounds.terminalEventAt ?? candidate.terminalBounds.stateUpdatedAt,
+  );
+}
+
+function terminalProoflessPredecessorCarrier(
+  state, archive, projection, selectedThreadIds, reserveNode,
+) {
+  const anchoredPartitions = new Map(projection.partitions.map((partition) => (
+    [partition.historicalTask.id, partition]
+  )));
+  const anchoredTaskIds = new Set(anchoredPartitions.keys());
+  if (!archiveReferencesAnchoredHistoricalTasks(archive, anchoredTaskIds)) return null;
+
+  const candidate = validatedAggregateCarrier(state, archive);
+  const selectedRoots = new Set(selectedThreadIds);
+  const canonicalRootIndex = aggregateCanonicalRootIndex(projection.proofRows);
+  const rows = candidate.archivedState.threadResolutionStatus.threads;
+  if (rows.some((row) => selectedRoots.has(row.threadNodeId)
+      || anchoredTaskIds.has(row.archiveProvenance?.historicalTaskId)
+      || row.taskIds.some((taskId) => anchoredTaskIds.has(taskId)))
+      || candidate.archive.events.some((event) => (
+        eventCarriesSelectedArchiveIntent(event, selectedRoots)
+      ))) {
+    throw new GitHubWorkflowError(
+      'Terminal proofless predecessor carrier includes selected proof, provenance, or intent evidence',
+      'ARCHIVE_EVIDENCE_AMBIGUOUS',
+    );
+  }
+
+  const selectedRootTasks = candidate.archivedState.tasks.filter((task) => (
+    anchoredTaskIds.has(task.id)
+      || (task.sourceType === 'github-thread'
+        && taskCanonicalRootIds(task, canonicalRootIndex).length !== 0)
+  ));
+  if (selectedRootTasks.length === 0) {
+    throw new GitHubWorkflowError(
+      'Terminal proofless predecessor carrier has alternate or missing selected-root authority',
+      'ARCHIVE_EVIDENCE_AMBIGUOUS',
+    );
+  }
+
+  const roles = [];
+  const relations = [];
+  const coveredRoots = new Set();
+  const seenTaskIds = new Set();
+  const seenCommits = new Set();
+  let aggregateWrapperCount = 0;
+  reserveNode();
+  for (const task of selectedRootTasks) {
+    const taskRoots = taskCanonicalRootIds(task, canonicalRootIndex, { requireComplete: true });
+    const coveredPartitions = taskRoots === null ? [] : projection.partitions.filter((partition) => {
+      const partitionRoots = partition.proofRows.map((row) => row.threadNodeId);
+      return partitionRoots.some((root) => taskRoots.includes(root));
+    });
+    const completePartitionRoots = coveredPartitions.flatMap(
+      (partition) => partition.proofRows.map((row) => row.threadNodeId),
+    ).sort();
+    if (seenTaskIds.has(task.id) || task.sourceType !== 'github-thread'
+        || taskRoots === null || taskRoots.length === 0
+        || !isDeepStrictEqual(taskRoots, completePartitionRoots)) {
+      throw new GitHubWorkflowError(
+        'Terminal proofless predecessor task is duplicated, divergent, partial, or ineligible',
+        'ARCHIVE_EVIDENCE_AMBIGUOUS',
+      );
+    }
+    seenTaskIds.add(task.id);
+    let role;
+    let partition = null;
+    if (coveredPartitions.length === 1
+        && task.id === coveredPartitions[0].historicalTask.id
+        && isDeepStrictEqual(
+          stablePredecessorTaskIdentity(task),
+          stablePredecessorTaskIdentity(coveredPartitions[0].historicalTask),
+        )) {
+      partition = coveredPartitions[0];
+      if (task.disposition === 'actionable' && task.status === 'integrated'
+          && typeof task.integratedCommitSha === 'string'
+          && !seenCommits.has(task.integratedCommitSha)
+          && (typeof partition.historicalTask.integratedCommitSha !== 'string'
+            || task.integratedCommitSha !== partition.historicalTask.integratedCommitSha)
+          && task.integratedCommitSha !== partition.historicalHeadSha) {
+        role = 'predecessor';
+        seenCommits.add(task.integratedCommitSha);
+      } else if (task.disposition === 'already-fixed'
+          && ['proposed', 'not-applicable'].includes(task.status)
+          && task.integratedCommitSha === null) {
+        role = 'carry-forward-shell';
+      }
+    } else if (!anchoredTaskIds.has(task.id)
+        && coveredPartitions.length >= 2
+        && task.disposition === 'already-fixed'
+        && ['proposed', 'not-applicable'].includes(task.status)
+        && task.integratedCommitSha === null) {
+      aggregateWrapperCount += 1;
+      if (aggregateWrapperCount === 1) role = 'aggregate-wrapper';
+    }
+    if (role === undefined) {
+      throw new GitHubWorkflowError(
+        'Terminal proofless predecessor task is duplicated, divergent, partial, or ineligible',
+        'ARCHIVE_EVIDENCE_AMBIGUOUS',
+      );
+    }
+    for (const root of taskRoots) {
+      if (coveredRoots.has(root)) {
+        throw new GitHubWorkflowError(
+          'Terminal proofless predecessor partitions overlap',
+          'ARCHIVE_EVIDENCE_AMBIGUOUS',
+        );
+      }
+      coveredRoots.add(root);
+      reserveNode();
+      roles.push({
+        historicalTaskIds: coveredPartitions.map(
+          (coveredPartition) => coveredPartition.historicalTask.id,
+        ).sort(),
+        carrierTaskId: task.id,
+        threadNodeId: root,
+        role,
+      });
+    }
+    if (role === 'predecessor') {
+      relations.push({
+        ancestorSha: task.integratedCommitSha,
+        descendantSha: partition.historicalHeadSha,
+        label: `terminal proofless predecessor ${task.id} to partition proof`,
+        predecessorTaskId: task.id,
+        successorTaskId: partition.historicalTask.id,
+        archiveId: candidate.archive.archiveId,
+        roots: taskRoots,
+      });
+    }
+  }
+  return { candidate, roles, relations, carrierRoots: [...coveredRoots].sort() };
 }
 
 export function singleRootProjection(authority) {
@@ -1131,6 +1386,17 @@ export function validateAggregateArchiveLineage(
   const historicalCandidates = candidates.filter((candidate) => !provenanceIds.has(candidate.archive.archiveId));
   const boundedRows = boundedAggregateSelectedRows(candidates, selectedThreadIds);
   const selectedRowsByArchive = boundedRows.rowsByArchive;
+  const priorAggregateReplayCandidates = historicalCandidates.filter((candidate) => {
+    const rows = selectedRowsByArchive.get(candidate.archive.archiveId);
+    return rows.length !== 0
+      && rows.every((row) => Object.hasOwn(row, 'archiveProvenance'));
+  });
+  if (priorAggregateReplayCandidates.length > 1) {
+    throw new GitHubWorkflowError(
+      'Aggregate adoption permits only one terminal prior-aggregate replay carrier',
+      'ARCHIVE_EVIDENCE_AMBIGUOUS',
+    );
+  }
   let aggregateNodeCount = boundedRows.nodeCount;
   const reserveAggregateNode = (count = 1) => {
     aggregateNodeCount += count;
@@ -1143,6 +1409,7 @@ export function validateAggregateArchiveLineage(
   };
   const projection = aggregateFullAuthorityProjection(
     state, historicalCandidates, selectedThreadIds, selectedRowsByArchive, reserveAggregateNode,
+    priorAggregateReplayCandidates[0] ?? null,
   );
   if (projection.partitions.length < 2 || projection.partitions.length > MAX_NODES) {
     throw new GitHubWorkflowError(
@@ -1156,27 +1423,67 @@ export function validateAggregateArchiveLineage(
   for (const partition of projection.partitions) {
     anchoredHistoricalTaskIds.add(partition.historicalTask.id);
   }
+  const predecessorOnlyCarriers = [];
   for (const archive of archiveInventory) {
     if (candidateIds.has(archive.archiveId)
         || archive?.state?.repository !== state.repository
         || archive?.state?.prNumber !== state.prNumber) continue;
     if (archiveReferencesAnchoredHistoricalTasks(archive, anchoredHistoricalTaskIds)) {
-      throw new GitHubWorkflowError(
-        'An off-selection archive carrier references anchored historical authority',
-        'ARCHIVE_EVIDENCE_AMBIGUOUS',
+      const predecessor = terminalProoflessPredecessorCarrier(
+        state, archive, projection, selectedThreadIds, reserveAggregateNode,
       );
+      predecessorOnlyCarriers.push(predecessor);
+      candidateIds.add(archive.archiveId);
+      selectedRowsByArchive.set(archive.archiveId, []);
     }
   }
-  const mixedHistoricalCandidateIds = new Set();
+  const aggregateCandidates = [
+    ...candidates,
+    ...predecessorOnlyCarriers.map(({ candidate }) => candidate),
+  ];
+  const predecessorTaskIds = predecessorOnlyCarriers.flatMap(({ relations }) => (
+    relations.map((relation) => relation.predecessorTaskId)
+  ));
+  const predecessorCommits = predecessorOnlyCarriers.flatMap(({ relations }) => (
+    relations.map((relation) => relation.ancestorSha)
+  ));
+  if (new Set(predecessorTaskIds).size !== predecessorTaskIds.length
+      || new Set(predecessorCommits).size !== predecessorCommits.length) {
+    throw new GitHubWorkflowError(
+      'Terminal proofless predecessor authority is duplicated across archive carriers',
+      'ARCHIVE_EVIDENCE_AMBIGUOUS',
+    );
+  }
+  const predecessorAuthorityIds = new Set(predecessorOnlyCarriers.flatMap(({ relations }) => (
+    relations.map((relation) => relation.successorTaskId)
+  )));
+  const neutralShellAuthorityIds = new Set(predecessorOnlyCarriers.flatMap(({ roles }) => (
+    roles.filter((role) => role.role === 'carry-forward-shell')
+      .flatMap((role) => role.historicalTaskIds)
+  )));
+  if ([...neutralShellAuthorityIds].some((taskId) => !predecessorAuthorityIds.has(taskId))) {
+    throw new GitHubWorkflowError(
+      'Terminal proofless carry-forward shell lacks unique predecessor authority',
+      'ARCHIVE_EVIDENCE_AMBIGUOUS',
+    );
+  }
+  const provenanceHistoricalCandidateIds = new Set();
   const supersededPredecessorRelations = [];
   const supersededPredecessorCovers = [];
   const historicalRowsByArchive = new Map(historicalCandidates.map((candidate) => {
     const rows = selectedRowsByArchive.get(candidate.archive.archiveId);
     const provenanceCount = rows.filter((row) => Object.hasOwn(row, 'archiveProvenance')).length;
+    if (provenanceCount !== 0) {
+      provenanceHistoricalCandidateIds.add(candidate.archive.archiveId);
+    }
     if (provenanceCount !== 0 && provenanceCount !== rows.length) {
-      mixedHistoricalCandidateIds.add(candidate.archive.archiveId);
       return [candidate.archive.archiveId, assertMixedHistoricalCarrierSlice(
         candidate, projection, rows, supersededPredecessorRelations, supersededPredecessorCovers,
+      )];
+    }
+    if (provenanceCount !== 0) {
+      return [candidate.archive.archiveId, assertPriorAggregateReplayCarrierSlice(
+        candidate, projection, rows,
       )];
     }
     return [candidate.archive.archiveId, assertHistoricalCarrierSlice(
@@ -1198,8 +1505,31 @@ export function validateAggregateArchiveLineage(
       'ARCHIVE_EVIDENCE_AMBIGUOUS',
     );
   }
+  const predecessorOnlyRelations = predecessorOnlyCarriers.flatMap(
+    ({ relations }) => relations,
+  );
+  const predecessorOnlySuccessorTaskIds = new Set(predecessorOnlyRelations.map(
+    (relation) => relation.successorTaskId,
+  ));
+  const predecessorOnlyTaskIds = new Set(predecessorOnlyRelations.map(
+    (relation) => relation.predecessorTaskId,
+  ));
+  const predecessorOnlyCommits = new Set(predecessorOnlyRelations.map(
+    (relation) => relation.ancestorSha,
+  ));
+  if (supersededPredecessorCovers.some(
+    (cover) => predecessorOnlySuccessorTaskIds.has(cover.successorTaskId),
+  ) || supersededPredecessorRelations.some((relation) => (
+    predecessorOnlyTaskIds.has(relation.predecessorTaskId)
+      || predecessorOnlyCommits.has(relation.ancestorSha)
+  ))) {
+    throw new GitHubWorkflowError(
+      'Superseded proofless predecessor authority overlaps carrier lanes',
+      'ARCHIVE_EVIDENCE_AMBIGUOUS',
+    );
+  }
   const intentFootprintsByArchive = new Map();
-  for (const candidate of candidates) {
+  for (const candidate of aggregateCandidates) {
     intentFootprintsByArchive.set(
       candidate.archive.archiveId,
       indexedAggregateArchiveIntentFootprints(
@@ -1210,7 +1540,10 @@ export function validateAggregateArchiveLineage(
   const authorityByRoot = aggregateAuthorityByRoot(projection);
   const selectedPlanByRoot = new Map(selectedPlan.map((entry) => [entry.thread.id, entry]));
   const origins = new Map(selectedThreadIds.map((threadId) => [threadId, []]));
-  const roleEntries = new Map(candidates.map((candidate) => [candidate.archive.archiveId, []]));
+  const roleEntries = new Map(aggregateCandidates.map((candidate) => [candidate.archive.archiveId, []]));
+  for (const predecessor of predecessorOnlyCarriers) {
+    roleEntries.set(predecessor.candidate.archive.archiveId, predecessor.roles);
+  }
   for (const candidate of historicalCandidates) {
     const carriedRows = historicalRowsByArchive.get(candidate.archive.archiveId);
     const carried = new Set(carriedRows.map((row) => row.threadNodeId));
@@ -1293,12 +1626,31 @@ export function validateAggregateArchiveLineage(
       historicalHeadSha: authority.historicalHeadSha,
     });
   }
+  for (const predecessor of predecessorOnlyCarriers) {
+    const predecessorAt = terminalArchiveUpperBound(predecessor.candidate);
+    const predecessorRoots = [...new Set(predecessor.relations.flatMap(
+      (relation) => relation.roots,
+    ))];
+    if (predecessorRoots.length === 0) continue;
+    const carrierOrigins = predecessorRoots.flatMap((root) => origins.get(root));
+    if (carrierOrigins.length === 0 || carrierOrigins.some((origin) => (
+        predecessorAt >= parsedTime(
+          origin.evidence.intents.reply.intent.at,
+          'Aggregate proof origin reply intent',
+        )
+    ))) {
+      throw new GitHubWorkflowError(
+        'Terminal proofless predecessor carrier is not earlier than its proof origin',
+        'ARCHIVE_EVIDENCE_AMBIGUOUS',
+      );
+    }
+  }
   const authorityFingerprint = createHash('sha256')
     .update(JSON.stringify(canonicalJson({ roots: authorityRoots })))
     .digest('hex');
   const authorityRootsByRoot = new Map(authorityRoots.map((root) => [root.threadNodeId, root]));
   for (const candidate of historicalCandidates) {
-    if (!mixedHistoricalCandidateIds.has(candidate.archive.archiveId)) continue;
+    if (!provenanceHistoricalCandidateIds.has(candidate.archive.archiveId)) continue;
     const rows = historicalRowsByArchive.get(candidate.archive.archiveId);
     const intents = intentFootprintsByArchive.get(candidate.archive.archiveId);
     const replayFingerprintsByTask = new Map();
@@ -1342,16 +1694,22 @@ export function validateAggregateArchiveLineage(
       authorityFingerprint,
     },
   }));
-  const inventory = aggregateInventoryFingerprint(candidates, roleEntries, authorityFingerprint);
+  const inventory = aggregateInventoryFingerprint(
+    aggregateCandidates, roleEntries, authorityFingerprint,
+  );
   return {
     mode: 'aggregate',
     evidence: finalizedEvidence,
     archiveLineage: { ...inventory, authorityFingerprint },
     ancestryRelations: aggregateAncestryRelations(
-      state, candidates, projection, new Map([
+      state, aggregateCandidates, projection, new Map([
         ...historicalRowsByArchive,
         ...provenanceRowsByArchive,
-      ]), supersededPredecessorRelations,
+        ...predecessorOnlyCarriers.map(({ candidate }) => [candidate.archive.archiveId, []]),
+      ]), [
+        ...supersededPredecessorRelations,
+        ...predecessorOnlyCarriers.flatMap(({ relations }) => relations),
+      ],
     ),
   };
 }

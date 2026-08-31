@@ -58,6 +58,11 @@ function emptyLocalVerification() {
   return { status: 'not-run', headSha: null, taskIds: [], updatedAt: null };
 }
 
+function isPristineVerification(proof) {
+  return proof.status === 'not-run' && proof.headSha === null
+    && proof.taskIds.length === 0 && proof.updatedAt === null;
+}
+
 function emptyTargetedValidation() {
   return {
     source: 'orchestrator', scope: 'targeted', status: 'not-run',
@@ -115,7 +120,375 @@ function canonicalImportedTaskRoots(task, rows) {
   return [...roots].sort();
 }
 
-function assertArchiveImportEnvelope(current, next, envelope) {
+function bootstrapStateProjection(state) {
+  return { tasks: state.tasks, threadResolutionStatus: state.threadResolutionStatus };
+}
+
+function assertGithubThreadArchiveAttestationEnvelope(current, next, envelope, cwd) {
+  const envelopeFields = ['schemaVersion', 'taskId', 'authorityFingerprint', 'rows', 'attestation'];
+  const rowFields = [
+    'threadNodeId', 'replyId', 'replyBodySha256', 'provenanceFingerprint', 'rowFingerprint',
+  ];
+  const attestationFields = [
+    'schemaVersion', 'headSha', 'stateRevision', 'heads', 'remediations', 'roots', 'scope',
+    'verifierAssertion', 'priorStateFingerprint', 'nextStateFingerprint',
+  ];
+  const rootFields = [
+    'threadNodeId', 'rootCommentNodeId', 'rootCommentDatabaseId', 'isResolved', 'taskId',
+  ];
+  if (!exactObjectFields(envelope, envelopeFields) || envelope.schemaVersion !== 2
+      || typeof envelope.taskId !== 'string' || envelope.taskId.length === 0
+      || !/^[0-9a-f]{64}$/u.test(envelope.authorityFingerprint ?? '')
+      || !Array.isArray(envelope.rows) || envelope.rows.length < 2
+      || envelope.rows.length > MAX_NODES
+      || !exactObjectFields(envelope.attestation, attestationFields)) {
+    throw new StateError('GitHub-thread archive attestation envelope is malformed', 'INVALID_ARCHIVE_IMPORT');
+  }
+  const attestation = envelope.attestation;
+  const sortedRows = envelope.rows.slice().sort(
+    (left, right) => String(left?.threadNodeId).localeCompare(String(right?.threadNodeId)),
+  );
+  if (!sameEvidence(envelope.rows, sortedRows)
+      || new Set(envelope.rows.map((row) => row?.threadNodeId)).size !== envelope.rows.length
+      || envelope.rows.some((row) => !exactObjectFields(row, rowFields)
+        || typeof row.threadNodeId !== 'string' || row.threadNodeId.length === 0
+        || typeof row.replyId !== 'string' || row.replyId.length === 0
+        || !/^[0-9a-f]{64}$/u.test(row.replyBodySha256 ?? '')
+        || !/^[0-9a-f]{64}$/u.test(row.provenanceFingerprint ?? '')
+        || !/^[0-9a-f]{64}$/u.test(row.rowFingerprint ?? ''))) {
+    throw new StateError('GitHub-thread archive attestation rows are malformed or unordered', 'INVALID_ARCHIVE_IMPORT');
+  }
+  const aggregateTask = current.tasks.find((task) => task.id === envelope.taskId);
+  const retry = aggregateTask?.status === 'completed';
+  if (attestation.schemaVersion !== 1
+      || attestation.headSha !== current.currentIntegrationHeadSha
+      || (!retry && attestation.stateRevision !== current.revision)
+      || (retry && ![current.revision, current.revision - 1].includes(attestation.stateRevision))
+      || !exactObjectFields(attestation.heads, ['durable', 'local', 'pushed', 'live'])
+      || Object.values(attestation.heads).some((head) => head !== current.currentIntegrationHeadSha)
+      || !Array.isArray(attestation.remediations) || attestation.remediations.length === 0
+      || !Array.isArray(attestation.roots) || attestation.roots.length < 3
+      || attestation.roots.length > MAX_NODES
+      || !exactObjectFields(attestation.scope, [
+        'authorityDigest', 'journalDigest', 'classifications',
+      ])
+      || !exactObjectFields(attestation.verifierAssertion, [
+        'schemaVersion', 'verifierId', 'status', 'headSha', 'stateRevision',
+        'scopeAuthorityDigest', 'scopeJournalDigest', 'assertedAt',
+      ])
+      || attestation.verifierAssertion.schemaVersion !== 1
+      || attestation.verifierAssertion.verifierId !== 'integration_verifier'
+      || attestation.verifierAssertion.status !== 'clean'
+      || attestation.verifierAssertion.headSha !== current.currentIntegrationHeadSha
+      || attestation.verifierAssertion.stateRevision !== attestation.stateRevision
+      || attestation.verifierAssertion.scopeAuthorityDigest !== attestation.scope.authorityDigest
+      || attestation.verifierAssertion.scopeJournalDigest !== attestation.scope.journalDigest
+      || typeof attestation.verifierAssertion.assertedAt !== 'string'
+      || !Number.isFinite(Date.parse(attestation.verifierAssertion.assertedAt))
+      || !/^[0-9a-f]{64}$/u.test(attestation.priorStateFingerprint ?? '')
+      || !/^[0-9a-f]{64}$/u.test(attestation.nextStateFingerprint ?? '')) {
+    throw new StateError('GitHub-thread archive attestation is malformed or stale', 'INVALID_ARCHIVE_IMPORT');
+  }
+  const sortedRemediations = attestation.remediations.slice().sort(
+    (left, right) => String(left?.taskId).localeCompare(String(right?.taskId)),
+  );
+  const sortedRoots = attestation.roots.slice().sort(
+    (left, right) => String(left?.threadNodeId).localeCompare(String(right?.threadNodeId)),
+  );
+  const sortedClassifications = attestation.scope.classifications.slice().sort(
+    (left, right) => String(left?.taskId).localeCompare(String(right?.taskId)),
+  );
+  if (!sameEvidence(attestation.remediations, sortedRemediations)
+      || new Set(attestation.remediations.map((item) => item?.taskId)).size
+        !== attestation.remediations.length
+      || attestation.remediations.some((item) => !exactObjectFields(
+        item, ['taskId', 'integratedCommitSha'],
+      ) || typeof item.taskId !== 'string' || item.taskId.length === 0
+        || typeof item.integratedCommitSha !== 'string' || item.integratedCommitSha.length < 40)
+      || !sameEvidence(attestation.roots, sortedRoots)
+      || new Set(attestation.roots.map((root) => root?.threadNodeId)).size !== attestation.roots.length
+      || new Set(attestation.roots.map((root) => root?.rootCommentNodeId)).size !== attestation.roots.length
+      || new Set(attestation.roots.map((root) => root?.rootCommentDatabaseId)).size !== attestation.roots.length
+      || attestation.roots.some((root) => !exactObjectFields(root, rootFields)
+        || typeof root.threadNodeId !== 'string' || root.threadNodeId.length === 0
+        || typeof root.rootCommentNodeId !== 'string' || root.rootCommentNodeId.length === 0
+        || !Number.isSafeInteger(root.rootCommentDatabaseId) || root.rootCommentDatabaseId <= 0
+        || typeof root.isResolved !== 'boolean'
+        || typeof root.taskId !== 'string' || root.taskId.length === 0)
+      || !Array.isArray(attestation.scope.classifications)
+      || !sameEvidence(attestation.scope.classifications, sortedClassifications)
+      || new Set(attestation.scope.classifications.map((item) => item?.taskId)).size
+        !== attestation.scope.classifications.length
+      || attestation.scope.classifications.some((item) => !exactObjectFields(item, ['taskId', 'digest'])
+        || typeof item.taskId !== 'string' || item.taskId.length === 0
+        || !/^sha256:[0-9a-f]{64}$/u.test(item.digest ?? ''))) {
+    throw new StateError('GitHub-thread archive attestation sets are malformed or unordered', 'INVALID_ARCHIVE_IMPORT');
+  }
+
+  const nextAggregateTask = next.tasks.find((task) => task.id === envelope.taskId);
+  if (!aggregateTask || !nextAggregateTask || aggregateTask.sourceType !== 'github-thread'
+      || aggregateTask.disposition !== 'already-fixed'
+      || !['not-applicable', 'completed'].includes(aggregateTask.status)
+      || aggregateTask.integratedCommitSha !== null || nextAggregateTask.status !== 'completed') {
+    throw new StateError('GitHub-thread archive aggregate is not eligible', 'INVALID_ARCHIVE_IMPORT');
+  }
+  const remediationIds = new Set(attestation.remediations.map((item) => item.taskId));
+  const attestedActionable = current.tasks.filter((task) => task.disposition === 'actionable'
+    && task.status === 'integrated' && typeof task.integratedCommitSha === 'string');
+  const actionable = current.tasks.filter((task) => task.sourceType === 'github-thread'
+    && task.disposition === 'actionable' && task.status === 'integrated'
+    && typeof task.integratedCommitSha === 'string');
+  if (actionable.length !== attestation.remediations.length
+      || actionable.some((task) => !remediationIds.has(task.id))) {
+    throw new StateError('GitHub-thread archive remediation set is incomplete', 'INVALID_ARCHIVE_IMPORT');
+  }
+  for (const remediation of attestation.remediations) {
+    const task = current.tasks.find((candidate) => candidate.id === remediation.taskId);
+    if (!task || task.integratedCommitSha !== remediation.integratedCommitSha) {
+      throw new StateError('GitHub-thread archive remediation identity changed', 'INVALID_ARCHIVE_IMPORT');
+    }
+  }
+  for (const task of current.tasks) {
+    const updated = next.tasks.find((candidate) => candidate.id === task.id);
+    assertImmutableValue(
+      task.id === aggregateTask.id && !retry ? { ...task, status: 'completed' } : task,
+      updated,
+      `GitHub-thread archive task ${task.id}`,
+    );
+  }
+  const currentProof = current.threadResolutionStatus;
+  if ((!retry && (currentProof.status !== 'not-run' || currentProof.headSha !== null
+      || currentProof.threads.length !== 0 || currentProof.updatedAt !== null))
+      || (retry && !sameEvidence(currentProof, next.threadResolutionStatus))
+      || !isPristineVerification(currentProof.localVerification ?? emptyLocalVerification())
+      || !isPristineVerification(currentProof.threadlessVerification)) {
+    throw new StateError('GitHub-thread archive attestation requires pristine proof lanes', 'INVALID_ARCHIVE_IMPORT');
+  }
+  const nextProof = next.threadResolutionStatus;
+  if (nextProof.status !== 'failed' || nextProof.headSha !== current.currentIntegrationHeadSha
+      || !isPristineVerification(nextProof.localVerification ?? emptyLocalVerification())
+      || !isPristineVerification(nextProof.threadlessVerification)
+      || nextProof.threads.length !== attestation.roots.length) {
+    throw new StateError('GitHub-thread archive proof delta is not exact', 'INVALID_ARCHIVE_IMPORT');
+  }
+  const nextRows = new Map(nextProof.threads.map((row) => [row.threadNodeId, row]));
+  const importedIds = new Set(envelope.rows.map((row) => row.threadNodeId));
+  for (const root of attestation.roots) {
+    const row = nextRows.get(root.threadNodeId);
+    if (!row || row.rootCommentNodeId !== root.rootCommentNodeId
+        || row.rootCommentDatabaseId !== root.rootCommentDatabaseId
+        || row.isResolved !== root.isResolved || !sameEvidence(row.taskIds, [root.taskId])
+        || row.disposition !== (root.taskId === aggregateTask.id ? 'already-fixed' : 'fixed')) {
+      throw new StateError('GitHub-thread archive root topology changed', 'INVALID_ARCHIVE_IMPORT');
+    }
+    if ((root.taskId === aggregateTask.id) !== importedIds.has(root.threadNodeId)
+        || (root.taskId === aggregateTask.id) !== root.isResolved
+        || (root.taskId !== aggregateTask.id && !remediationIds.has(root.taskId))) {
+      throw new StateError('GitHub-thread archive root disposition is ineligible', 'INVALID_ARCHIVE_IMPORT');
+    }
+  }
+  const aggregateRoots = attestation.roots.filter((root) => root.taskId === aggregateTask.id);
+  if (aggregateRoots.length < 2
+      || canonicalImportedTaskRoots(aggregateTask, aggregateRoots) === null
+      || !sameEvidence(
+        canonicalImportedTaskRoots(aggregateTask, aggregateRoots),
+        aggregateRoots.map((root) => root.threadNodeId).sort(),
+      )) {
+    throw new StateError('GitHub-thread archive sources do not cover the aggregate', 'INVALID_ARCHIVE_IMPORT');
+  }
+  for (const remediation of attestation.remediations) {
+    const task = current.tasks.find((candidate) => candidate.id === remediation.taskId);
+    const roots = attestation.roots.filter((root) => root.taskId === task.id);
+    if (roots.length === 0 || canonicalImportedTaskRoots(task, roots) === null
+        || !sameEvidence(
+          canonicalImportedTaskRoots(task, roots), roots.map((root) => root.threadNodeId).sort(),
+        )) {
+      throw new StateError('GitHub-thread remediation sources do not cover its roots', 'INVALID_ARCHIVE_IMPORT');
+    }
+  }
+  for (const expected of envelope.rows) {
+    const row = nextRows.get(expected.threadNodeId);
+    const provenance = row?.archiveProvenance;
+    if (!row || row.replyId !== expected.replyId || row.replyUrl === null
+        || row.resolvedAt === null || row.resolvedBy === null
+        || provenance?.authorityFingerprint !== envelope.authorityFingerprint
+        || provenance?.replyBodySha256 !== expected.replyBodySha256
+        || archiveImportFingerprint(provenance) !== expected.provenanceFingerprint
+        || archiveImportFingerprint(row) !== expected.rowFingerprint) {
+      throw new StateError('GitHub-thread archive row does not match immutable evidence', 'INVALID_ARCHIVE_IMPORT');
+    }
+  }
+  if (nextProof.threads.filter((row) => Object.hasOwn(row, 'archiveProvenance')).length
+      !== envelope.rows.length) {
+    throw new StateError('GitHub-thread archive provenance exceeds its aggregate', 'INVALID_ARCHIVE_IMPORT');
+  }
+
+  const journal = readScopeJournal(cwd, current);
+  if (current.scopeControl?.authorityDigest !== attestation.scope.authorityDigest
+      || current.scopeControl?.journalDigest !== attestation.scope.journalDigest
+      || journal.value.authorityDigest !== attestation.scope.authorityDigest
+      || journal.digest !== attestation.scope.journalDigest) {
+    throw new StateError('GitHub-thread archive scope evidence drifted', 'INVALID_ARCHIVE_IMPORT');
+  }
+  const classifiedTasks = [aggregateTask, ...attestedActionable]
+    .sort((left, right) => left.id.localeCompare(right.id));
+  if (classifiedTasks.length !== attestation.scope.classifications.length) {
+    throw new StateError('GitHub-thread archive scope classifications are incomplete', 'INVALID_ARCHIVE_IMPORT');
+  }
+  for (const task of classifiedTasks) {
+    const expected = attestation.scope.classifications.find((item) => item.taskId === task.id);
+    const classification = journal.value.entries.findLast((entry) => entry.kind === 'classification'
+      && scopeClassificationMatchesTask(entry, task));
+    if (!expected || classification?.assessment?.digest !== expected.digest
+        || classification.reviewHeadSha !== current.currentIntegrationHeadSha
+        || classification.authorityDigest !== journal.value.authorityDigest
+        || classification.authorityAmendmentRequired
+        || !['within-scope-defect', 'unnecessary-mechanism-defect'].includes(
+          classification.classification,
+        )) {
+      throw new StateError('GitHub-thread archive scope classification is stale', 'INVALID_ARCHIVE_IMPORT');
+    }
+  }
+  if (current.validationStatus.status !== 'passed'
+      || current.validationStatus.headSha !== current.currentIntegrationHeadSha) {
+    throw new StateError('GitHub-thread archive targeted validation is stale', 'INVALID_ARCHIVE_IMPORT');
+  }
+  if ((!retry && archiveImportFingerprint(bootstrapStateProjection(current))
+      !== attestation.priorStateFingerprint)
+      || archiveImportFingerprint(bootstrapStateProjection(next)) !== attestation.nextStateFingerprint) {
+    throw new StateError('GitHub-thread archive state delta does not match its attestation', 'INVALID_ARCHIVE_IMPORT');
+  }
+}
+
+function assertVerifierBootstrapEnvelope(current, next, envelope) {
+  const fields = [
+    'schemaVersion', 'taskId', 'integratedCommitSha', 'headSha', 'proofLane',
+    'archiveTaskId', 'roots', 'priorStateFingerprint', 'nextStateFingerprint',
+  ];
+  const rootFields = [
+    'threadNodeId', 'rootCommentNodeId', 'rootCommentDatabaseId', 'isResolved', 'taskId',
+  ];
+  if (!exactObjectFields(envelope, fields)
+      || envelope.schemaVersion !== 1
+      || envelope.proofLane !== 'localVerification'
+      || typeof envelope.taskId !== 'string' || envelope.taskId.length === 0
+      || typeof envelope.integratedCommitSha !== 'string'
+      || envelope.integratedCommitSha.length < 40
+      || envelope.headSha !== current.currentIntegrationHeadSha
+      || typeof envelope.archiveTaskId !== 'string' || envelope.archiveTaskId.length === 0
+      || !/^[0-9a-f]{64}$/u.test(envelope.priorStateFingerprint ?? '')
+      || !/^[0-9a-f]{64}$/u.test(envelope.nextStateFingerprint ?? '')
+      || !Array.isArray(envelope.roots) || envelope.roots.length < 2
+      || envelope.roots.length > MAX_NODES) {
+    throw new StateError('Verifier bootstrap completion envelope is malformed', 'INVALID_ARCHIVE_IMPORT');
+  }
+  const sortedRoots = envelope.roots.slice().sort(
+    (left, right) => String(left?.threadNodeId).localeCompare(String(right?.threadNodeId)),
+  );
+  if (!sameEvidence(envelope.roots, sortedRoots)
+      || new Set(envelope.roots.map((root) => root?.threadNodeId)).size !== envelope.roots.length
+      || new Set(envelope.roots.map((root) => root?.rootCommentNodeId)).size !== envelope.roots.length
+      || new Set(envelope.roots.map((root) => root?.rootCommentDatabaseId)).size !== envelope.roots.length
+      || envelope.roots.some((root) => !exactObjectFields(root, rootFields)
+        || typeof root.threadNodeId !== 'string' || root.threadNodeId.length === 0
+        || typeof root.rootCommentNodeId !== 'string' || root.rootCommentNodeId.length === 0
+        || !Number.isSafeInteger(root.rootCommentDatabaseId) || root.rootCommentDatabaseId <= 0
+        || typeof root.isResolved !== 'boolean'
+        || typeof root.taskId !== 'string' || root.taskId.length === 0)) {
+    throw new StateError('Verifier bootstrap roots are malformed or unordered', 'INVALID_ARCHIVE_IMPORT');
+  }
+
+  const task = current.tasks.find((candidate) => candidate.id === envelope.taskId);
+  const nextTask = next.tasks.find((candidate) => candidate.id === envelope.taskId);
+  const archiveTask = current.tasks.find((candidate) => candidate.id === envelope.archiveTaskId);
+  if (!task || !nextTask || task.sourceType !== 'local' || task.disposition !== 'actionable'
+      || task.status !== 'integrated' || task.integratedCommitSha !== envelope.integratedCommitSha
+      || nextTask.status !== 'completed'
+      || !archiveTask || archiveTask.sourceType !== 'github-thread'
+      || archiveTask.disposition !== 'already-fixed' || archiveTask.status !== 'not-applicable'
+      || archiveTask.integratedCommitSha !== null) {
+    throw new StateError('Verifier bootstrap tasks do not match the authorized transition', 'INVALID_ARCHIVE_IMPORT');
+  }
+  for (const currentTask of current.tasks) {
+    const updated = next.tasks.find((candidate) => candidate.id === currentTask.id);
+    assertImmutableValue(
+      currentTask.id === task.id ? { ...currentTask, status: 'completed' } : currentTask,
+      updated,
+      `verifier bootstrap task ${currentTask.id}`,
+    );
+  }
+  const remediations = current.tasks.filter((candidate) => (
+    ['local', 'github-threadless'].includes(candidate.sourceType)
+      && candidate.disposition === 'actionable' && candidate.status === 'integrated'
+      && typeof candidate.integratedCommitSha === 'string'
+  ));
+  if (remediations.length !== 1 || remediations[0].id !== task.id) {
+    throw new StateError('Verifier bootstrap remediation is missing or ambiguous', 'INVALID_ARCHIVE_IMPORT');
+  }
+  const rootsByTask = new Map();
+  for (const root of envelope.roots) {
+    const roots = rootsByTask.get(root.taskId) ?? [];
+    roots.push(root);
+    rootsByTask.set(root.taskId, roots);
+  }
+  const archiveRoots = rootsByTask.get(archiveTask.id) ?? [];
+  if (archiveRoots.length < 2 || archiveRoots.some((root) => !root.isResolved)) {
+    throw new StateError('Verifier bootstrap archive task lacks its resolved multi-root topology', 'INVALID_ARCHIVE_IMPORT');
+  }
+  const mappedArchiveRoots = canonicalImportedTaskRoots(archiveTask, archiveRoots.map((root) => ({
+    ...root, taskIds: [archiveTask.id], disposition: 'already-fixed',
+  })));
+  if (mappedArchiveRoots === null
+      || !sameEvidence(mappedArchiveRoots, archiveRoots.map((root) => root.threadNodeId).sort())) {
+    throw new StateError('Verifier bootstrap archive sources do not cover its roots', 'INVALID_ARCHIVE_IMPORT');
+  }
+  for (const [taskId, roots] of rootsByTask) {
+    const mappedTask = current.tasks.find((candidate) => candidate.id === taskId);
+    if (!mappedTask || taskId === task.id || (taskId !== archiveTask.id
+        && (roots.some((root) => root.isResolved)
+          || mappedTask.sourceType !== 'github-thread'
+          || !((mappedTask.disposition === 'actionable'
+            && ['integrated', 'completed'].includes(mappedTask.status)
+            && typeof mappedTask.integratedCommitSha === 'string')
+            || (mappedTask.disposition === 'already-fixed'
+              && mappedTask.status === 'not-applicable'
+              && mappedTask.integratedCommitSha === null))))) {
+      throw new StateError('Verifier bootstrap contains an ineligible exclusive root mapping', 'INVALID_ARCHIVE_IMPORT');
+    }
+  }
+  const aggregate = current.threadResolutionStatus;
+  const nextAggregate = next.threadResolutionStatus;
+  if (aggregate.status !== 'not-run' || aggregate.headSha !== null
+      || aggregate.threads.length !== 0 || aggregate.updatedAt !== null
+      || aggregate.threadlessVerification.status !== 'not-run'
+      || aggregate.threadlessVerification.headSha !== null
+      || aggregate.threadlessVerification.taskIds.length !== 0
+      || aggregate.threadlessVerification.updatedAt !== null
+      || (aggregate.localVerification ?? emptyLocalVerification()).status !== 'not-run'
+      || nextAggregate.localVerification?.status !== 'passed'
+      || nextAggregate.localVerification.headSha !== current.currentIntegrationHeadSha
+      || !sameEvidence(nextAggregate.localVerification.taskIds, [task.id])
+      || nextAggregate.localVerification.updatedAt === null) {
+    throw new StateError('Verifier bootstrap requires the pristine local-only proof delta', 'INVALID_ARCHIVE_IMPORT');
+  }
+  const { localVerification: _oldLocal, ...oldWithoutLocal } = aggregate;
+  const { localVerification: _newLocal, ...newWithoutLocal } = nextAggregate;
+  if (!sameEvidence(oldWithoutLocal, newWithoutLocal)) {
+    throw new StateError('Verifier bootstrap changed proof outside the local lane', 'INVALID_ARCHIVE_IMPORT');
+  }
+  const priorFingerprint = archiveImportFingerprint(bootstrapStateProjection(current));
+  const nextFingerprint = archiveImportFingerprint(bootstrapStateProjection(next));
+  if (priorFingerprint !== envelope.priorStateFingerprint
+      || nextFingerprint !== envelope.nextStateFingerprint) {
+    throw new StateError('Verifier bootstrap state delta does not match its envelope', 'INVALID_ARCHIVE_IMPORT');
+  }
+}
+
+function assertArchiveImportEnvelope(current, next, envelope, cwd) {
+  if (envelope?.schemaVersion === 2) {
+    assertGithubThreadArchiveAttestationEnvelope(current, next, envelope, cwd);
+    return;
+  }
   const envelopeFields = ['schemaVersion', 'taskId', 'authorityFingerprint', 'rows'];
   const rowFields = [
     'threadNodeId', 'replyId', 'replyBodySha256', 'provenanceFingerprint', 'rowFingerprint',
@@ -149,6 +522,31 @@ function assertArchiveImportEnvelope(current, next, envelope) {
       || !['not-applicable', 'completed'].includes(currentTask.status)
       || nextTask.status !== 'completed') {
     throw new StateError('Archive import task is not an eligible already-fixed transition', 'INVALID_ARCHIVE_IMPORT');
+  }
+  const remediations = current.tasks.filter((task) => (
+    ['local', 'github-threadless'].includes(task.sourceType)
+      && task.disposition === 'actionable'
+      && ['integrated', 'completed'].includes(task.status)
+  ));
+  const remediation = remediations[0];
+  const localProof = current.threadResolutionStatus.localVerification ?? emptyLocalVerification();
+  const selectedProof = remediation?.sourceType === 'local'
+    ? localProof
+    : current.threadResolutionStatus.threadlessVerification;
+  const oppositeProof = remediation?.sourceType === 'local'
+    ? current.threadResolutionStatus.threadlessVerification
+    : localProof;
+  if (remediations.length !== 1 || remediation?.status !== 'completed'
+      || typeof remediation.integratedCommitSha !== 'string'
+      || selectedProof.status !== 'passed'
+      || selectedProof.headSha !== current.currentIntegrationHeadSha
+      || !sameEvidence(selectedProof.taskIds, [remediation.id])
+      || selectedProof.updatedAt === null
+      || !isPristineVerification(oppositeProof)) {
+    throw new StateError(
+      'Archive import requires one source-matching current-head bootstrap proof',
+      'INVALID_ARCHIVE_IMPORT',
+    );
   }
   for (const task of current.tasks) {
     const updated = next.tasks.find((candidate) => candidate.id === task.id);
@@ -209,10 +607,6 @@ function assertArchiveImportEnvelope(current, next, envelope) {
         || current.threadResolutionStatus.headSha !== null
         || current.threadResolutionStatus.threads.length !== 0
         || current.threadResolutionStatus.updatedAt !== null
-        || current.threadResolutionStatus.threadlessVerification.status !== 'passed'
-        || current.threadResolutionStatus.threadlessVerification.headSha
-          !== current.currentIntegrationHeadSha
-        || current.threadResolutionStatus.threadlessVerification.taskIds.length === 0
         || next.threadResolutionStatus.headSha !== current.currentIntegrationHeadSha) {
       throw new StateError('Archive import requires the exact pristine aggregate transition', 'INVALID_ARCHIVE_IMPORT');
     }
@@ -380,7 +774,16 @@ function assertCheckpointProvenance(current, next, guardedKind, evidence, cwd) {
     );
   }
   if (guardedKind === 'archive-task-completion') {
-    assertArchiveImportEnvelope(current, next, evidence.archiveImportEnvelope);
+    const hasImport = evidence.archiveImportEnvelope !== undefined;
+    const hasBootstrap = evidence.verifierBootstrapEnvelope !== undefined;
+    if (hasImport === hasBootstrap) {
+      throw new StateError(
+        'Archive completion requires exactly one protected envelope',
+        'INVALID_ARCHIVE_IMPORT',
+      );
+    }
+    if (hasImport) assertArchiveImportEnvelope(current, next, evidence.archiveImportEnvelope, cwd);
+    else assertVerifierBootstrapEnvelope(current, next, evidence.verifierBootstrapEnvelope);
   }
   if (guardedKind !== 'review-request-limit') {
     assertImmutableValue(

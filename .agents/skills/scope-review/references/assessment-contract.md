@@ -10,10 +10,12 @@ Include:
 
 - the phase and exact source type, identity, and digest;
 - the accepted plan digest, ordered amendment digests, and task-packet digest when those artifacts exist; `planDigest` and `taskPacketDigest` are null before their respective artifacts exist and must never contain placeholders, task-packet identity can exist only after accepted-plan identity, amendment digests must remain empty until an accepted-plan digest exists, and `source-draft` requires both downstream digests to be null and the amendment list to be empty;
+- ordered `decisionDigests` when receipt-protected human decisions contribute authority; the order must exactly match `acceptedScope.authorityDecisions`, and omitting both fields preserves historical packet compatibility;
 - the subject digest and, for `task`, `integrated-head`, and `review-finding`, its exact Git SHA; phase never implies that a plan or task-packet artifact exists, so their digests remain null-capable and missing artifacts require `insufficient-evidence`;
 - the semantic `acceptedScope` candidate during `plan`, even before an accepted-plan digest exists; only `source-draft` uses null because no accepted-scope candidate exists yet;
 - source-required criteria, source non-goals, accepted criteria and invariants, and optional implementation guidance in separate stable-ID lists;
 - a concise deterministic change inventory naming paths, dependencies, public surfaces, persistent surfaces, subsystems, and every implementation mechanism mapped separately to source criteria, accepted criteria, invariants, non-goals, or guidance;
+- exact decision IDs on mappings and coverage when a recorded `approve-material-amendment` decision supplies authority. Other decision dispositions never authorize implementation shape;
 - any quantitative tripwires as observations only.
 
 The 64 KiB packet and 32 KiB result limits bound context. They are never scope or materiality evidence.
@@ -23,7 +25,8 @@ The 64 KiB packet and 32 KiB result limits bound context. They are never scope o
 Classify each mechanism as `required`, `implementation-choice`, `speculative`, `necessary-minor-expansion`, `material-scope-change`, or `insufficient-evidence`. Judge necessity from the source objective and requirements together with the accepted criteria, invariants, minimal closure, and authorized/unauthorized/deferred shape, not from line, file, diff, byte, or token counts.
 
 Every `required` or `implementation-choice` coverage row must cite positive
-authority through a source-required criterion, accepted criterion, or invariant.
+authority through a source-required criterion, accepted criterion, invariant,
+or exact approved decision.
 Non-goals and optional implementation guidance may explain a classification,
 but cannot provide that affirmative authority by themselves. A mechanism named
 in unauthorized or deferred accepted shape cannot be classified `required` or
@@ -76,7 +79,13 @@ authority incidence is minimized exactly. Shared-authority search is bounded;
 an incomplete search may reject an oversized witness only when a globally
 admissible relaxed lower bound also exceeds the result envelope.
 
-Materiality triggers are closed and complete: a new subsystem, new dependency, public surface, persistent surface, cross-capability work, policy change, repository-wide enforcement, independent workstream, new criterion, non-goal reversal, sensitive policy, replacement of the accepted approach, or repeated expansion. A tripwire can request closer inspection but cannot select or exclude any verdict.
+Materiality triggers are closed and complete: a new subsystem, new dependency, public surface, persistent surface, cross-capability work, policy change, repository-wide enforcement, independent workstream, new criterion, non-goal reversal, sensitive policy, replacement of the accepted approach, or repeated expansion. A tripwire can request closer inspection but cannot select or exclude any verdict. A material inventory surface has affirmative authority only when accepted shape authorizes it and either an exact source-required criterion or a receipt-protected `approve-material-amendment` decision names that same shape.
+
+For `integrated-head`, `taskPacketDigest` is the canonical change-development
+`taskSetDigest`: the digest of the ordered receipt-valid task identity projection
+containing task ID, binding, packet, result, provenance, terminal status,
+integrated commit, and integration-receipt identities. It is not one arbitrary
+worker packet digest.
 
 Apply authority before materiality and materiality before trimming. First
 determine whether the named material surface is explicitly required by the

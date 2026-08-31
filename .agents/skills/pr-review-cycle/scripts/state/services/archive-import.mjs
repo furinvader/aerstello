@@ -17,6 +17,7 @@ function sameEvidence(left, right) {
 
 export function checkpointArchiveTaskCompletion({
   cwd = process.cwd(), prNumber, threadResolutionStatus, archiveImportEnvelope,
+  verifierBootstrapEnvelope,
   expectedRevision, event,
 } = {}) {
   const pr = selectedPr(cwd, prNumber);
@@ -26,29 +27,38 @@ export function checkpointArchiveTaskCompletion({
       'STATE_REVISION_CONFLICT',
     );
   }
+  const hasImport = archiveImportEnvelope !== undefined;
+  const hasBootstrap = verifierBootstrapEnvelope !== undefined;
+  if (hasImport === hasBootstrap) {
+    throw new StateError(
+      'Archive completion requires exactly one closed import or verifier-bootstrap envelope',
+      'INVALID_ARCHIVE_IMPORT',
+    );
+  }
   return checkpointProtectedStateTransaction({
     cwd,
     prNumber: pr,
     expectedRevision,
     transitionKind: 'archive-task-completion',
-    transitionEvidence: { archiveImportEnvelope },
+    transitionEvidence: { archiveImportEnvelope, verifierBootstrapEnvelope },
     transaction: (current) => {
       const nextState = completeIntegratedTasks(current, {
         threadResolutionStatus,
-        verifiedLocalTaskIds: [],
+        verifiedLocalTaskIds: hasBootstrap ? [verifierBootstrapEnvelope.taskId] : [],
         staleDiscoveryDisposition: null,
+        archiveVerifierBootstrapTaskId: hasBootstrap ? verifierBootstrapEnvelope.taskId : null,
       });
       return sameEvidence(nextState, current)
         ? {
             nextState: current,
             result: current,
             noWrite: true,
-            transitionEvidence: { archiveImportEnvelope },
+            transitionEvidence: { archiveImportEnvelope, verifierBootstrapEnvelope },
           }
         : {
             nextState,
             event,
-            transitionEvidence: { archiveImportEnvelope },
+            transitionEvidence: { archiveImportEnvelope, verifierBootstrapEnvelope },
           };
     },
   });

@@ -8,9 +8,19 @@ import {
   AT,
   FakeClient,
   HEAD,
+  PACKET_AGGREGATE_HEAD,
+  PACKET_AGGREGATE_TASK_ID,
+  PACKET_ARCHIVE_EVENTS_BASE64,
+  PACKET_ARCHIVE_NAME,
+  PACKET_ARCHIVE_STATE_BASE64,
+  PACKET_MIXED_ARCHIVE_EVENTS_BASE64,
+  PACKET_MIXED_ARCHIVE_NAME,
+  PACKET_MIXED_ARCHIVE_STATE_BASE64,
+  PACKET_PORTABILITY_TASK_ID,
   VIEWER,
   addThread,
   archiveAdoptionFixture,
+  decodedPacketArchive,
   fakeGit,
   fakeJournal,
   fakeState,
@@ -18,6 +28,7 @@ import {
   integratedNonThreadState,
   integratedThreadState,
   markerFor,
+  packetAggregateAdoptionFixture,
   rootComment,
 } from '../test-support/workflow-harness.mjs';
 
@@ -72,6 +83,110 @@ test('resolve owner performs repeated archive and live reads before one adoption
   assert.deepEqual(stateAdapter.calls.map(({ name }) => name), ['checkpointTaskCompletion']);
   assert.equal(result.threadResolutionStatus.threads.filter(({ isResolved }) => isResolved).length, 2);
   assert.equal(fixture.client.events.length, 0);
+});
+
+test('resolve owner selects only the closed GitHub-thread attestation fallback', async () => {
+  const oldArchive = decodedPacketArchive(
+    PACKET_ARCHIVE_NAME, PACKET_ARCHIVE_STATE_BASE64, PACKET_ARCHIVE_EVENTS_BASE64,
+  );
+  const mixedArchive = decodedPacketArchive(
+    PACKET_MIXED_ARCHIVE_NAME,
+    PACKET_MIXED_ARCHIVE_STATE_BASE64,
+    PACKET_MIXED_ARCHIVE_EVENTS_BASE64,
+  );
+  const fixture = packetAggregateAdoptionFixture(oldArchive, mixedArchive);
+  const localTask = fixture.remediation;
+  localTask.status = 'integrated';
+  localTask.sourceType = 'local';
+  localTask.sourceIds = ['orchestrator:integration-verifier'];
+  const githubTask = fixture.active.tasks.find((task) => task.id === PACKET_PORTABILITY_TASK_ID);
+  githubTask.disposition = 'actionable';
+  githubTask.status = 'integrated';
+  githubTask.integratedCommitSha = PACKET_AGGREGATE_HEAD;
+  const archiveStore = immutableArchiveStore([oldArchive, mixedArchive]);
+  const stateAdapter = fakeState(fixture.active);
+  const context = createWorkflowContext({
+    client: fixture.client,
+    state: stateAdapter,
+    git: fakeGit({
+      snapshot: async () => ({ headSha: PACKET_AGGREGATE_HEAD, dirty: false }),
+      pushedHead: async () => PACKET_AGGREGATE_HEAD,
+    }),
+    clock: { now: () => AT },
+    journal: fixture.journal,
+    archiveStore,
+  });
+
+  process.env.AERSTELLO_INTEGRATION_VERIFIER_ASSERTION = JSON.stringify({
+    schemaVersion: 1, verifierId: 'integration_verifier', status: 'clean',
+    headSha: PACKET_AGGREGATE_HEAD, stateRevision: fixture.active.revision,
+    scopeAuthorityDigest: fixture.active.scopeControl.authorityDigest,
+    scopeJournalDigest: fixture.active.scopeControl.journalDigest, assertedAt: AT,
+  });
+  try {
+    await createResolveUseCases(context).replyResolve(
+      fixture.active.prNumber, PACKET_AGGREGATE_TASK_ID,
+    );
+  } finally {
+    delete process.env.AERSTELLO_INTEGRATION_VERIFIER_ASSERTION;
+  }
+
+  assert.deepEqual(stateAdapter.calls.map(({ name }) => name), ['checkpointArchiveTaskCompletion']);
+  assert.equal(stateAdapter.calls[0].input.archiveImportEnvelope.schemaVersion, 2);
+  assert.equal(stateAdapter.calls[0].input.verifierBootstrapEnvelope, undefined);
+  assert.deepEqual(
+    stateAdapter.calls[0].input.archiveImportEnvelope.attestation.scope.classifications
+      .map((item) => item.taskId),
+    [localTask.id, PACKET_AGGREGATE_TASK_ID, PACKET_PORTABILITY_TASK_ID],
+  );
+  assert.equal(fixture.client.calls.some(({ name }) => [
+    'AddThreadReply', 'ResolveThread',
+  ].includes(name)), false);
+  assert.deepEqual(fixture.client.events, []);
+});
+
+test('resolve owner rejects absent, malformed, and stale verifier assertions before archive reads', async () => {
+  for (const [label, assertion] of [
+    ['absent', null],
+    ['malformed', '{'],
+    ['old revision', JSON.stringify({
+      schemaVersion: 1, verifierId: 'integration_verifier', status: 'clean',
+      headSha: HEAD, stateRevision: 0,
+      scopeAuthorityDigest: `sha256:${'a'.repeat(64)}`,
+      scopeJournalDigest: `sha256:${'b'.repeat(64)}`, assertedAt: AT,
+    })],
+  ]) {
+    const fixture = archiveAdoptionFixture();
+    fixture.active.threadResolutionStatus.threadlessVerification = {
+      status: 'not-run', headSha: null, taskIds: [], updatedAt: null,
+    };
+    const localTask = fixture.active.tasks.find(
+      (task) => task.id === 'archive-adoption-remediation',
+    );
+    localTask.status = 'integrated';
+    localTask.sourceType = 'local';
+    localTask.sourceIds = ['orchestrator:integration-verifier'];
+    const archiveStore = immutableArchiveStore([fixture.archive]);
+    const stateAdapter = fakeState(fixture.active);
+    const context = createWorkflowContext({
+      client: fixture.client, state: stateAdapter, git: fakeGit(),
+      clock: { now: () => AT }, journal: fixture.journal, archiveStore,
+    });
+    if (assertion === null) delete process.env.AERSTELLO_INTEGRATION_VERIFIER_ASSERTION;
+    else process.env.AERSTELLO_INTEGRATION_VERIFIER_ASSERTION = assertion;
+    try {
+      await assert.rejects(
+        () => createResolveUseCases(context).replyResolve(2, ARCHIVED_TASK_ID),
+        { code: 'TASK_NOT_READY' },
+        label,
+      );
+    } finally {
+      delete process.env.AERSTELLO_INTEGRATION_VERIFIER_ASSERTION;
+    }
+    assert.equal(archiveStore.calls, 0, label);
+    assert.deepEqual(stateAdapter.calls, [], label);
+    assert.deepEqual(fixture.client.events, [], label);
+  }
 });
 
 test('verify-resolve owner repeats exact-head proof before one local completion checkpoint', async () => {

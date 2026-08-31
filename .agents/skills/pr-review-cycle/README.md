@@ -451,6 +451,13 @@ or any proof row is relevant even if its proof is wholly off-selection. Once
 the full carrier anchors historical task IDs, every same-repository/PR archive
 that names one of those IDs in a task object, proof-row `taskIds`, or
 `archiveProvenance.historicalTaskId` is relevant too.
+After abandoning any proofless aggregate wrapper, the successor cycle must
+bind a globally fresh aggregate task ID: that identity must be absent from
+every same-PR archive task object, proof row, and provenance identity across
+the complete immutable inventory, not merely absent from the immediate
+predecessor archive. Reusing any archived identity keeps every matching carrier
+relevant and fails closed; this is a lifecycle identity rule, not task-ID alias
+compatibility, renaming, or archive filtering.
 Every relevant historical or active-replay carrier is scanned across all proof
 rows and every GitHub-thread task whose canonical thread or discussion sources
 intersect the selected roots. Those tasks must be exact anchored whole
@@ -472,6 +479,12 @@ integration HEAD. Both archive inventories rerun every distinct ancestry
 relation and bind a sorted archive/content/partition-root-role fingerprint;
 enumeration-only reordering remains harmless.
 
+For proofless carriers, strict terminal-before-proof-origin chronology applies
+only to roots supplied by authority-bearing predecessor relations. Neutral
+carry-forward shells and aggregate wrappers neither establish nor invalidate
+that chronology; a neutral-only carrier skips only this predicate and remains
+subject to every role, partition, ancestry, inventory, race, and budget gate.
+
 The one adoption checkpoint maps every imported row to the fresh active task
 and `already-fixed` disposition while retaining its own historical observed
 HEAD. It also stores closed `archiveProvenance` version 1 with the historical
@@ -484,7 +497,25 @@ historical task line, and body hash against this immutable provenance. A later
 terminal carrier for an aggregate task is reusable only as a zero-intent replay
 when every selected row retains consistent provenance and the carrier contains
 no unanchored selected-root task or off-partition historical proof. Historical
-reply headers accept exact lowercase 40- or 64-hex object IDs. Stripping an
+selection may also encounter one provenance-only carrier owned by a prior
+aggregate task ID. It may carry all selected roots or a nonempty strict subset,
+but a subset must equal an exact union of complete anchored historical
+partitions. One later historical full carrier must still cover the complete
+selected-root set. This is existential across agreeing complete ordinary or
+mixed carriers: at least one such carrier's archived-state `updatedAt` must be
+strictly greater than the prior aggregate carrier's canonical terminal envelope,
+the maximum of its state `updatedAt` and terminal `abandoned.at`. Archive IDs
+and inventory order never establish that chronology. The prior aggregate
+carrier has exactly one completed GitHub-thread `already-fixed` null-commit
+owner whose canonical sources and
+proof rows equal exactly its carried roots, and every row normalizes to one
+older ordinary provenance-free authority with the exact proof, task,
+disposition, commit, reply-body hash, and shared authority fingerprint. It can
+never originate authority, replace the complete carrier, or carry selected-root
+mutation intents. All archive inventory,
+chronology, ancestry, two-snapshot, live resolution, review, CI, and Done gates
+remain unchanged. Historical reply headers accept exact lowercase 40- or
+64-hex object IDs. Stripping an
 aggregate carrier into an active-ID legacy carrier is an error, while a genuine
 schema-valid provenance-free ordinary carrier continues through the legacy
 single-head path. Ordinary schema-v3 rows without provenance
@@ -505,11 +536,42 @@ generic `checkpointState` cannot add it either. Every resolved adopted row is
 then immutable under all transitions, and exact retry requires byte-identical
 rows and authority.
 
+One narrower fallback applies when the retained aggregate is already resolved
+but every remaining canonical root belongs exclusively to an actionable
+Integrated GitHub-thread task and both native verifier lanes must stay
+pristine. After the orchestrator has run the read-only `integration_verifier`
+clean at the exact current HEAD, it supplies that result only as transient
+guarded command input:
+
+```bash
+AERSTELLO_INTEGRATION_VERIFIER_ASSERTION='{"schemaVersion":1,"verifierId":"integration_verifier","status":"clean","headSha":"<exact-head>","stateRevision":<revision>,"scopeAuthorityDigest":"<sha256-digest>","scopeJournalDigest":"<sha256-digest>","assertedAt":"<iso-time>"}' \
+  npm run review:github -- reply-resolve --pr <number> --task <retained-aggregate-id>
+```
+
+This schema-v2 archive envelope is accepted only for one `already-fixed`,
+null-commit, `not-applicable` aggregate with at least two resolved exclusive
+roots, pristine aggregate and native proof lanes, unresolved exclusive
+Integrated GitHub-thread remediations with ancestral commits, passed
+exact-HEAD targeted validation, and current receipt-valid scope
+classifications for the aggregate and every actionable Integrated task. Two
+complete snapshots recheck clean equal durable/local/pushed/live heads, scope,
+root topology, archive inventory and lineage, remediation ancestry, and state
+revision. The protected transition completes and imports only the aggregate;
+it leaves the GitHub-thread remediations and any local implementation task
+Integrated and leaves both native proof lanes pristine. The envelope and
+verifier assertion are transition input, not persisted state or a claimed
+verifier artifact, and this route performs no GitHub or mutation-journal
+operation. Run ordinary verifier-backed `verify-resolve` for the local
+implementation only after aggregate adoption, then ordinary `reply-resolve`
+for each actionable GitHub-thread remediation. All normal exact-HEAD review,
+thread, CI, and Done gates remain authoritative.
+
 When the resolved archive batch itself prevents the remediation's ordinary
 aggregate-proof gate, use a two-command state-only bootstrap. First run
 `verify-resolve --task <remediation-id>` for the sole actionable Integrated
-GitHub-threadless remediation. This exception exists only when the aggregate,
-threadless, and local proofs are pristine; one exclusive terminal
+remediation. Its source must be either GitHub-threadless or local integration-verifier
+evidence. This exception exists only when the aggregate and both source proof
+lanes are pristine; one exclusive terminal
 `already-fixed`, null-commit, `not-applicable` GitHub-thread task owns at least
 two live resolved roots; and
 every other fully paginated canonical root is unresolved and maps exclusively
@@ -519,9 +581,12 @@ ordinary `reply-resolve` afterward. The command proves
 twice that the hypothetical singleton remediation proof enables the existing
 archive-adoption predicate, while rechecking clean equal local, pushed, live,
 and durable heads plus the exact state revision. It then completes only that
-remediation and records only singleton exact-current-HEAD threadless coverage.
-Aggregate status, head, rows, timestamp, and local proof remain byte-for-byte
-unchanged. An exact retry repeats all topology, pagination, head, checkout, and
+remediation and records singleton exact-current-HEAD coverage only in the
+matching source lane. The opposite lane and aggregate status, head, rows, and
+timestamp remain byte-for-byte unchanged. The local lane completes only through
+`checkpointArchiveTaskCompletion` with a closed envelope binding the task,
+commit, head, proof lane, full stable root topology, terminal aggregate task,
+and exact state delta; it is never relabeled as threadless proof. An exact retry repeats all topology, pagination, head, checkout, and
 revision guards before returning idempotently. Completed-retry bootstrap
 handling is armed only when the terminal task's immutable `thread:` and
 `discussion:` aliases resolve through the canonical live mapping to at least

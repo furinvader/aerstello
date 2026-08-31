@@ -62,6 +62,29 @@ the receipt-bound route, planning-signal, and behavior-mapper sidecars. Results,
 recovery, cleanup, and finalization never reinterpret historical packet authority
 through a later registry revision; a packet bound after that revision must obey it.
 
+Each packet also binds the current minimal-closure digest, criterion need,
+removal counterfactual, forbidden-expansion statements, deterministic scope
+tripwires, and their exact observed inventories.
+The worker discovery return contract is bound beside them. Structural validation
+keeps historical packets without observations readable, but every new binding
+requires one sorted observation per exact
+tripwire ID. An unchanged comparison binds directly without replacing the
+current admission or task evidence. A changed comparison fails closed until a
+current applicable `task`-phase `within-scope` assessment names the sorted
+changed IDs as `task-tripwires:<id,...>` and binds the exact packet digest and
+base SHA. Missing, unknown, stale, or incorrectly named observations and
+evidence write no task authority.
+
+Workers cannot change paths, criteria, dependencies, public or persistent
+surfaces, validation, or authority. A blocked, null-commit result with a valid
+structured `scopeDiscovery` must identify at least one packet-bound triggered
+tripwire and invalidates current task evidence. The blocked lifecycle then
+accepts task assessment only when its subject and cadence trigger
+bind the exact packet receipt, result receipt, and discovery digest; pre-worker
+or unrelated blocked-result evidence cannot replay. Assessment never expands
+the immutable worker packet. Discovery returns to central rejection, amendment,
+or replan and is never silently absorbed into a worker commit.
+
 Plan ownership can never name `.git` as a root or nested exact path segment;
 `.git`, `.git/config`, and `nested/.git/hooks` are repository metadata rather
 than implementation surfaces. Lookalikes such as `.gitignore`, `.github`, and
@@ -307,6 +330,14 @@ plan, derive reusable reviewers from receipt-valid stored packet routes, record
 their results in canonical order, run the workflow-owned read-only final
 verifier, and disposition any findings. The validation and specialist phases
 never reinterpret a terminal packet through the live registry.
+
+Before targeted validation starts, the exact integrated HEAD needs one current
+applicable `within-scope` assessment bound to the effective plan, ordered
+amendment receipts, current minimal closure, terminal task-set digest, and
+exact HEAD. Trim creates bounded removal or simplification work; material or
+insufficient authority blocks. Later handoff consumes only the pure bounded
+projection documented in the [operator guide](../README.md), never worker or
+integration lifecycle authority.
 
 An actionable finding returns to ordinary implementation only through a
 fingerprint-triggered append-only amendment that adds new remediation criterion

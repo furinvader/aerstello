@@ -24,6 +24,10 @@
     {
       "path": ".agents/skills/pr-review-cycle/scripts/structure.test.mjs",
       "targets": []
+    },
+    {
+      "path": ".agents/skills/change-development/scripts/scope/contracts.mjs",
+      "targets": ["schemas/scope-assessment.schema.json", "scripts/validate-assessment.mjs"]
     }
   ],
   "consumedCapabilities": {

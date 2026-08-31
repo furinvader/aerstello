@@ -140,6 +140,31 @@ test('implementation worker stop hook accepts exact raw result JSON', () => {
   assert.deepEqual(output, { continue: true });
 });
 
+test('implementation worker stop hook accepts fail-closed discovery and rejects authority-expanding success', () => {
+  const discovery = {
+    schemaVersion: 1, summary: 'An unowned state path is required.',
+    evidence: [{ kind: 'state-path', identity: '.agents/skills/change-development/scripts/state/state.mjs',
+      detail: 'The packet does not own the lifecycle state module.' }],
+    triggeredTripwireIds: ['state-paths'],
+    requestedAuthority: [{ field: 'paths', values: ['.agents/skills/change-development/scripts/state/state.mjs'] }],
+  };
+  const blocked = validImplementationResult();
+  Object.assign(blocked, { status: 'blocked', workerCommit: null, changedPaths: [], validation: [],
+    unexpectedDependencies: [discovery.summary], scopeDiscovery: discovery });
+  assert.deepEqual(JSON.parse(hook('subagent-stop.mjs', process.cwd(), {
+    agent_type: 'implementation_worker', last_assistant_message: JSON.stringify(blocked),
+  }).stdout), { continue: true });
+
+  const expanded = validImplementationResult();
+  Object.assign(expanded, { unexpectedDependencies: [discovery.summary], scopeDiscovery: discovery });
+  const output = JSON.parse(hook('subagent-stop.mjs', process.cwd(), {
+    agent_type: 'implementation_worker', stop_hook_active: false,
+    last_assistant_message: JSON.stringify(expanded),
+  }).stdout);
+  assert.equal(output.decision, 'block');
+  assert.match(output.reason, /corrected raw JSON implementation-result/u);
+});
+
 test('implementation worker stop hook requests one correction and then warns without looping', () => {
   const first = JSON.parse(hook('subagent-stop.mjs', process.cwd(), {
     agent_type: 'implementation_worker', stop_hook_active: false, last_assistant_message: 'not json',

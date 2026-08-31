@@ -217,7 +217,28 @@ and intent authority is identical. A later replay carrier is allowed only with
 that exact task-and-proof projection and zero selected-root intents. Partial or
 conflicting intents and missing, duplicated, or divergent proof fail closed;
 archive names, timestamps, ordering, and latest or earliest position are never
-authority. Every authoritative archived proof row, historical HEAD, reply and resolve intent,
+authority.
+
+When both native proof lanes must remain pristine and every root outside the
+resolved aggregate maps exclusively to an actionable Integrated GitHub-thread
+task, do not run that bootstrap first. Run the read-only
+`integration_verifier` clean at the exact HEAD, then invoke aggregate
+`reply-resolve` with the transient
+`AERSTELLO_INTEGRATION_VERIFIER_ASSERTION` JSON documented in the operator
+guide. That assertion must bind the exact head, state revision, effective scope
+authority and journal digests, and assertion time from the completed verifier
+run; it is not reusable specialist evidence. The fallback rechecks complete
+topology, equal clean heads, ancestry, targeted validation, receipt-valid scope
+for the aggregate and every actionable Integrated task, immutable archive
+authority, and revision across two snapshots. It imports and completes only
+the aggregate with no GitHub mutation or mutation-journal access, persists
+neither the schema-v2 envelope nor a verifier artifact, and leaves both
+verifier lanes pristine. Only afterward run ordinary `verify-resolve` for the
+local implementation task, followed by ordinary `reply-resolve` for unresolved
+GitHub-thread tasks. Native Codex review, thread, CI, and Done gates are
+unchanged.
+
+Every authoritative archived proof row, historical HEAD, reply and resolve intent,
 deterministic client ID, live canonical root, root comment, direct reply,
 exact deterministic body, marker, author, parent, URL, timestamp, and resolution
 state must agree, while all other live canonical roots still map uniquely to
@@ -284,7 +305,13 @@ row is relevant, including an active carrier whose provenance is wholly
 off-selection or whose task object is missing. After the full carrier anchors
 historical task IDs, any same-repository/PR archive naming one of those IDs in
 a task object, proof-row `taskIds`, or `archiveProvenance.historicalTaskId` is
-relevant too. For each relevant historical or
+relevant too. Any abandoned proofless aggregate wrapper requires the next
+cycle to use a globally fresh aggregate task ID. Fresh means absent from every
+same-PR archive task object, proof row, and provenance identity across the
+complete immutable inventory, not merely absent from the immediate predecessor
+archive. Reusing any archived identity remains fail-closed relevance; it is not
+task-ID alias compatibility, a rename, or permission to filter that archive.
+For each relevant historical or
 active-replay carrier, selection scans every archived GitHub-thread task whose
 canonical thread/discussion sources touch a selected root and all proof rows
 naming an anchored task. Hidden off-selection proof, unanchored overlap, or an
@@ -316,6 +343,12 @@ proof-bearing, terminal, intent-bearing, mixed-carrier, null-commit,
 equal-commit, and non-ancestral shapes remain fatal. This is not a generalized
 task-supersession mechanism.
 
+Strict terminal-before-proof-origin chronology is evaluated only for roots in
+authority-bearing predecessor relations. Carry-forward shells and aggregate
+wrappers are authority-neutral: they neither establish nor invalidate that
+chronology, and a neutral-only carrier skips only this predicate while all
+role, partition, ancestry, inventory, race, and budget gates remain mandatory.
+
 Successful aggregate adoption still performs zero GitHub, journal, or archive
 mutation and one guarded task-completion checkpoint. Imported rows map to the
 fresh active task and `already-fixed` disposition, retain their per-root
@@ -328,8 +361,24 @@ URL, no-edit state, historical task
 line, and body digest without rereading archives. A later full active-task
 carrier is a valid aggregate replay only when every selected row retains
 consistent provenance, it has zero selected-root intents, and it contains no
-unanchored selected-root task or off-partition historical proof. Legacy rows
-remain provenance-free. A genuine valid provenance-free active-task carrier
+unanchored selected-root task or off-partition historical proof. Selection may
+also encounter one all-provenance carrier owned by a prior aggregate task ID.
+It may cover all selected roots or a nonempty strict subset that equals an exact
+union of complete anchored historical partitions; one later complete
+historical carrier remains mandatory. This is existential across agreeing
+complete ordinary or mixed carriers: at least one carrier's archived-state
+`updatedAt` must be strictly greater than the prior aggregate carrier's canonical
+terminal envelope, the maximum of its state `updatedAt` and terminal
+`abandoned.at`; archive IDs and inventory order are irrelevant. The prior
+aggregate carrier is historical replay only: its sole owner must be a completed GitHub-thread
+`already-fixed` null-commit task whose canonical sources and proof rows cover
+exactly its carried roots, and every row must normalize to one older
+ordinary provenance-free authority with the exact proof core, task,
+disposition, commit, reply-body hash, and common authority fingerprint. It
+never supplies origin intent or complete-carrier authority, and all native
+inventory, chronology, ancestry, two-snapshot, live resolution, review, CI, and
+Done gates still apply. Legacy
+rows remain provenance-free. A genuine valid provenance-free active-task carrier
 uses ordinary single-head adoption; malformed ordinary carriers fail there,
 while stripping an aggregate carrier to active-ID legacy rows never falls
 through to aggregate recovery.
@@ -350,7 +399,8 @@ byte-identical provenance and authority.
 
 If the live resolved batch makes ordinary `verify-resolve` circular, the first
 command has one state-only bootstrap topology. The selection must be a singleton
-and the sole actionable Integrated GitHub-threadless remediation. Aggregate,
+and the sole actionable Integrated remediation, whose source is either
+GitHub-threadless or local integration-verifier evidence. Aggregate,
 threadless, and local proof must all be pristine. Exactly one exclusive terminal
 `already-fixed`, null-commit, `not-applicable` GitHub-thread task must own at
 least two live resolved roots;
@@ -362,9 +412,9 @@ duplicate, shared, additionally resolved, or ambiguously remediated roots fail
 closed. Two complete live snapshots must reproduce the exact candidate, root
 mapping, local/pushed/live/durable head identities, and state revision.
 
-Success completes only the selected remediation and replaces only pristine
-threadless proof with singleton exact-current-HEAD coverage. It preserves the
-aggregate status, head, rows, timestamp, and local proof byte-for-byte and is
+Success completes only the selected remediation and replaces only its matching
+pristine proof lane with singleton exact-current-HEAD coverage. It preserves the
+opposite proof lane plus aggregate status, head, rows, and timestamp byte-for-byte and is
 idempotent only after all guards run again. A completed retry enters this
 bootstrap only when the terminal task's immutable `thread:` and `discussion:`
 aliases resolve through the canonical live mapping to at least two distinct
@@ -375,6 +425,11 @@ two fully paginated GitHub reads are intentional. It never synthesizes
 aggregate proof. Run `reply-resolve` second; it alone selects and trusts one
 immutable archive and retains every ordinary projection, intent, reply-body,
 timestamp, ancestry, live-evidence, and race gate.
+Local provenance passes through a distinct closed archive-only bootstrap envelope
+binding the selected task and commit, current head, local lane, full stable root
+topology, exclusive terminal aggregate task, and exact state delta. Ordinary
+task completion cannot use that exception, and local IDs never enter
+`threadlessVerification`.
 For a composite retained batch followed by new current work, use exactly:
 `verify-resolve --task <remediation-id>`,
 `reply-resolve --task <retained-aggregate-id>`, and then ordinary

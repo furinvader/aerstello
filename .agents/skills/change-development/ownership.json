@@ -20,8 +20,13 @@
     "schemas/implementation-plan.schema.json",
     "schemas/implementation-result.schema.json",
     "schemas/implementation-task.schema.json",
+    "schemas/minimal-closure-contract.schema.json",
+    "schemas/scope-decision.schema.json",
+    "schemas/scope-evidence.schema.json",
     "scripts/contracts/contracts.mjs",
     "scripts/contracts/contracts.test.mjs",
+    "scripts/handoff/contracts.mjs",
+    "scripts/handoff/contracts.test.mjs",
     "scripts/hooks/hooks.test.mjs",
     "scripts/hooks/pre-compact.mjs",
     "scripts/hooks/session-start.mjs",
@@ -30,6 +35,8 @@
     "scripts/implementation/contracts.test.mjs",
     "scripts/implementation/execution.test.mjs",
     "scripts/paths.mjs",
+    "scripts/scope/contracts.mjs",
+    "scripts/scope/contracts.test.mjs",
     "scripts/source/checklists.mjs",
     "scripts/source/checklists.test.mjs",
     "scripts/source/fixtures/issue-22.md",
@@ -40,6 +47,7 @@
     "scripts/source/source.test.mjs",
     "scripts/state/cli.mjs",
     "scripts/state/fixtures/hold-change-lock.mjs",
+    "scripts/state/scope.mjs",
     "scripts/state/state.mjs",
     "scripts/state/state.test.mjs",
     "scripts/structure.test.mjs",
@@ -55,6 +63,7 @@
       "targets": [
         "README.md",
         "references/verification.md",
+        "scripts/handoff/contracts.mjs",
         "schemas/development-verification-result.schema.json",
         "schemas/development-verifier-context.schema.json"
       ]

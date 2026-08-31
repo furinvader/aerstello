@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -8,42 +8,50 @@ import { fileURLToPath } from 'node:url';
 
 import { readGithubIssue } from '../source/github.mjs';
 import { refreshSource as captureSourceRefresh } from '../source/source.mjs';
+import { buildDevelopmentScopeHandoff } from '../handoff/contracts.mjs';
+import { scopeAuthorityDigest } from '../../../pr-review-cycle/scripts/contracts/scope-control.mjs';
 
 import {
-  acceptPlan,
+  acceptPlan as acceptPlanWithScope,
+  adoptScope,
+  assessScope,
   acceptResult,
   activePointerPath,
-  amendPlan,
+  amendPlan as amendPlanWithScope,
   archiveState,
   authorizeRepeatedFinding,
   boundedStatus,
-  bindTask,
+  bindTask as bindTaskWithScope,
   boundVerifierEvidence,
   buildVerifierContext,
   changeDirectory,
   checkpointGitMetadata,
   createSpecialistPlan,
-  createValidationPlan,
+  createValidationPlan as createValidationPlanWithScope,
   finalizeDevelopment,
-  finalizeIntegration,
+  finalizeIntegration as finalizeIntegrationWithScope,
   initializeState,
   integrateTask,
+  integratedScopeAssessmentIdentity,
   loadLatestSourceObservation,
   loadState,
   locateState,
   mergeLifecycleValidationCommands,
+  nextPlanAmendmentNumber,
   nextActionFor,
   preflightVerifierCapacity,
   preflightStateVerifierCapacity,
   recoverState,
   recordDecision,
-  recordFindingDisposition,
+  recordFindingDisposition as recordFindingDispositionWithScope,
+  recordScopeDecision,
   recordSpecialistResult,
-  recordVerifierResult,
+  recordVerifierResult as recordVerifierResultWithScope,
   refreshSource,
   renderStatus,
   reconcileIntegration,
   rejectTask,
+  resumeScopeReturn,
   runValidation,
   scheduleWave,
   startTask,
@@ -55,6 +63,386 @@ import {
   withIntegrationOperationLock,
   changeRoot,
 } from './state.mjs';
+import { projectNonmaterialScopeRemediation } from './scope.mjs';
+
+test('mixed minor remediation removes exact speculative work and adds only necessary authority', () => {
+  const priorClosure = {
+    outcome: 'Keep the bounded result.', requiredCriteria: [{ id: 'criterion', text: 'Required.' }],
+    invariants: [], nonGoals: [], mandatoryConstraints: [], optionalGuidance: [],
+    authorizedShape: ['unrelated-authority', 'speculative-helper'],
+    unauthorizedExpansion: ['necessary-helper', 'unrelated-unauthorized'],
+    deferredFollowups: [{ id: 'necessary-helper', text: 'Necessary helper.' },
+      { id: 'unrelated-followup', text: 'Unrelated.' }],
+  };
+  const evidence = { result: {
+    verdict: 'minor-amendment-required',
+    coverage: [
+      { mechanism: 'speculative-helper', classification: 'speculative' },
+      { mechanism: 'necessary-helper', classification: 'necessary-minor-expansion' },
+    ],
+    unnecessaryWork: ['speculative-helper'],
+    scopeDelta: { description: 'Add only the necessary helper.', sourceCriterionIds: [],
+      acceptedCriterionIds: ['criterion'], invariantIds: [], materialSurfaces: [] },
+    smallerSufficientAlternative: 'Remove the speculative helper.',
+  } };
+  const minimalClosure = { ...structuredClone(priorClosure),
+    authorizedShape: ['unrelated-authority', 'necessary-helper'],
+    unauthorizedExpansion: ['unrelated-unauthorized'],
+    deferredFollowups: [{ id: 'unrelated-followup', text: 'Unrelated.' }] };
+  const exact = projectNonmaterialScopeRemediation({ evidence, priorClosure, minimalClosure });
+  assert.deepEqual(exact.errors, []);
+  assert.deepEqual(exact.remediation.unnecessaryWork, ['speculative-helper']);
+  assert.deepEqual(exact.remediation.necessaryMechanisms, ['necessary-helper']);
+  assert.deepEqual(exact.remediation.scopeDelta, evidence.result.scopeDelta);
+  assert.equal(exact.remediation.smallerSufficientAlternative, 'Remove the speculative helper.');
+  const tampered = projectNonmaterialScopeRemediation({ evidence, priorClosure,
+    minimalClosure: { ...minimalClosure,
+      authorizedShape: ['unrelated-authority', 'speculative-helper', 'necessary-helper'] } });
+  assert.ok(tampered.errors.some((error) => /exact assessed authorizedShape transformation/u.test(error)));
+});
+
+function testMinimalClosure(state, plan, overrides = {}) {
+  const planDigest = digestJson(plan);
+  return {
+    schemaVersion: 1, changeId: state.changeId, revision: 1,
+    source: { type: state.source.kind, identity: state.source.reference, digest: plan.source.captureDigest },
+    planningSha: state.planningSha, planDigest, previousContractDigest: null,
+    outcome: 'Exercise the smallest sufficient durable test change.',
+    requiredCriteria: [{ id: plan.criteria[0].id, text: plan.criteria[0].description }],
+    invariants: [{ id: 'exact-test-authority', text: 'Bind exact test evidence.' }],
+    nonGoals: [{ id: 'no-test-expansion', text: 'Do not expand test authority.' }],
+    mandatoryConstraints: [{ id: 'receipt-test-authority', text: 'Persist receipt evidence.' }],
+    optionalGuidance: [], authorizedShape: ['durable-test-change'], unauthorizedExpansion: [],
+    deferredFollowups: [], operatorDecisionDigests: [], ...overrides,
+  };
+}
+
+function testScopeEvidence(state, plan, closure, { boundary = 'admission', subjectDigest = digestJson(plan),
+  subjectSha = state.planningSha, taskPacketDigest = null, amendmentDigests = [], revision = state.revision + 1,
+  trigger = boundary === 'task' ? 'test-task-tripwire' : null, authorityDecisions = [] } = {}) {
+  const criterion = plan.criteria[0];
+  const binding = { phase: boundary === 'admission' ? 'plan' : boundary,
+    source: closure.source, subject: { digest: subjectDigest, sha: subjectSha },
+    planDigest: digestJson(plan), amendmentDigests, taskPacketDigest,
+    ...(authorityDecisions.length > 0 ? { decisionDigests: authorityDecisions.map(({ digest }) => digest) } : {}) };
+  const mapping = { mechanism: 'durable-test-change', sourceCriterionIds: [criterion.id],
+    acceptedCriterionIds: [criterion.id], invariantIds: [], nonGoalIds: [], guidanceIds: [],
+    rationale: 'The mechanism directly implements the accepted test criterion.' };
+  const packet = { schemaVersion: 1, binding,
+    sourceScope: { objective: plan.objective, requiredCriteria: [...closure.requiredCriteria],
+      nonGoals: [...closure.nonGoals], implementationGuidance: [...closure.optionalGuidance] },
+    acceptedScope: { criteria: plan.criteria.map(({ id, description }) => ({ id, text: description })),
+      invariants: [...closure.invariants, ...closure.mandatoryConstraints],
+      minimalClosure: closure.outcome, authorizedShape: [...closure.authorizedShape],
+      unauthorizedShape: [...closure.unauthorizedExpansion], deferredShape: closure.deferredFollowups.map(({ id }) => id),
+      ...(authorityDecisions.length > 0 ? { authorityDecisions } : {}) },
+    changeInventory: { summary: 'Exercise one durable test mechanism.', paths: [], dependencies: [],
+      publicSurfaces: [], persistentSurfaces: [], subsystems: [], mappings: [mapping] }, tripwires: [] };
+  const result = { schemaVersion: 1, binding, verdict: 'within-scope', summary: 'The test mechanism is within scope.',
+    coverage: [{ ...mapping, classification: 'required', rationale: mapping.rationale }], unnecessaryWork: [],
+    smallerSufficientAlternative: null, scopeDelta: null, materialityTriggers: [], smallestExpansion: null,
+    narrowAlternative: null, deferralConsequences: null, missingEvidence: [], humanDecision: false };
+  return { schemaVersion: 1, changeId: state.changeId, evidenceId: `${boundary}-test-${revision}`,
+    revision, cadence: { boundary, trigger },
+    packet, packetDigest: digestJson(packet), result, resultDigest: digestJson(result),
+    closureDigest: digestJson(closure) };
+}
+
+function materialScopeEvidence(state, plan, closure, mechanisms, amendmentDigests = [], authorityDecisions = []) {
+  const taskPacketDigest = digestJson({ test: 'material-decision', mechanisms });
+  const evidence = testScopeEvidence(state, plan, closure, {
+    boundary: 'task', subjectDigest: taskPacketDigest, subjectSha: state.git.headSha, taskPacketDigest,
+    amendmentDigests, authorityDecisions,
+  });
+  const materialMappings = mechanisms.map((mechanism) => ({
+    mechanism, sourceCriterionIds: [], acceptedCriterionIds: [], invariantIds: [], nonGoalIds: [], guidanceIds: [],
+    rationale: `${mechanism} is a proposed material subsystem without accepted criterion authority.`,
+  }));
+  evidence.packet.acceptedScope.authorizedShape = [...closure.authorizedShape];
+  evidence.packet.changeInventory.subsystems = [...mechanisms];
+  evidence.packet.changeInventory.mappings.push(...materialMappings);
+  evidence.result = {
+    ...evidence.result,
+    binding: evidence.packet.binding,
+    verdict: 'human-decision-required',
+    summary: 'The proposed subsystems require an exact human material-scope decision.',
+    coverage: [evidence.result.coverage[0], ...materialMappings.map((mapping) => ({
+      ...mapping, classification: 'material-scope-change',
+    }))],
+    scopeDelta: { description: 'Decide the exact proposed material subsystems.', sourceCriterionIds: [],
+      acceptedCriterionIds: [], invariantIds: [], materialSurfaces: ['new-subsystem'] },
+    materialityTriggers: [{ category: 'new-subsystem', evidence: 'The inventory proposes new subsystems.' }],
+    smallestExpansion: 'Authorize only the selected proposed subsystems.',
+    narrowAlternative: 'Remove the proposed subsystems and retain existing authorized shape.',
+    deferralConsequences: 'The unapproved subsystems remain outside implementation authority.',
+    humanDecision: true,
+  };
+  evidence.packetDigest = digestJson(evidence.packet);
+  evidence.resultDigest = digestJson(evidence.result);
+  return evidence;
+}
+
+function planningMaterialScopeEvidence(state, plan, closure, mechanism = 'material-alpha') {
+  const evidence = testScopeEvidence(state, plan, closure);
+  const mapping = {
+    mechanism, sourceCriterionIds: [], acceptedCriterionIds: [], invariantIds: [], nonGoalIds: [], guidanceIds: [],
+    rationale: `${mechanism} is a proposed material subsystem without accepted criterion authority.`,
+  };
+  evidence.packet.changeInventory.subsystems = [mechanism];
+  evidence.packet.changeInventory.mappings.push(mapping);
+  evidence.result = {
+    ...evidence.result,
+    binding: evidence.packet.binding,
+    verdict: 'human-decision-required',
+    summary: 'The proposed subsystem requires an exact human material-scope decision.',
+    coverage: [evidence.result.coverage[0], { ...mapping, classification: 'material-scope-change' }],
+    scopeDelta: { description: 'Decide the exact proposed material subsystem.', sourceCriterionIds: [],
+      acceptedCriterionIds: [], invariantIds: [], materialSurfaces: ['new-subsystem'] },
+    materialityTriggers: [{ category: 'new-subsystem', evidence: 'The inventory proposes a new subsystem.' }],
+    smallestExpansion: 'Authorize only the proposed subsystem.',
+    narrowAlternative: 'Remove the proposed subsystem and retain existing authority.',
+    deferralConsequences: 'The subsystem remains outside implementation authority.',
+    humanDecision: true,
+  };
+  evidence.packetDigest = digestJson(evidence.packet);
+  evidence.resultDigest = digestJson(evidence.result);
+  return evidence;
+}
+
+function nonAdmittingPlanningEvidence(state, plan, closure, verdict) {
+  const evidence = testScopeEvidence(state, plan, closure, {
+    authorityDecisions: [{ id: 'planning-material-decision', digest: state.scope.decisionDigests[0],
+      disposition: 'reject-use-narrow', authorizedShape: [] }],
+  });
+  const mapping = evidence.result.coverage[0];
+  if (verdict === 'minor-amendment-required') {
+    evidence.result = { ...evidence.result, verdict,
+      coverage: [{ ...mapping, classification: 'necessary-minor-expansion',
+        rationale: 'The revised candidate needs one bounded adjacent mechanism.' }],
+      scopeDelta: { description: 'Add one bounded adjacent mechanism.',
+        sourceCriterionIds: [...mapping.sourceCriterionIds], acceptedCriterionIds: [...mapping.acceptedCriterionIds],
+        invariantIds: [], materialSurfaces: [] } };
+  } else if (verdict === 'trim-required') {
+    evidence.result = { ...evidence.result, verdict,
+      coverage: [{ ...mapping, sourceCriterionIds: [], acceptedCriterionIds: [], classification: 'speculative',
+        rationale: 'The revised candidate retains unnecessary machinery.' }],
+      unnecessaryWork: [mapping.mechanism], smallerSufficientAlternative: 'Remove the unnecessary machinery.' };
+  } else {
+    evidence.result = { ...evidence.result, verdict,
+      coverage: [{ ...mapping, classification: 'insufficient-evidence',
+        rationale: 'The revised candidate lacks exact evidence.' }],
+      missingEvidence: ['Exact evidence for the revised candidate is missing.'] };
+  }
+  evidence.packetDigest = digestJson(evidence.packet);
+  evidence.resultDigest = digestJson(evidence.result);
+  return evidence;
+}
+
+function materialScopeDecision(state, evidence, disposition, approvedShape, decisionId) {
+  return {
+    schemaVersion: 1, changeId: state.changeId, decisionId, revision: state.revision + 1, disposition,
+    evidence: {
+      sourceDigest: state.plan.sourceCaptureDigest, planningSha: state.planningSha,
+      planDigest: state.plan.effectiveDigest, amendmentDigests: evidence.packet.binding.amendmentDigests,
+      closureDigest: state.scope.closureDigest, subjectDigest: evidence.packet.binding.subject.digest,
+      subjectSha: evidence.packet.binding.subject.sha, assessmentPacketDigest: evidence.packetDigest,
+      assessmentResultDigest: evidence.resultDigest,
+    },
+    rationale: `Apply the exact ${disposition} material disposition.`, approvedShape, deferredFollowups: [],
+  };
+}
+
+function materialAmendment(state, plan, priorClosure, authorizedShape, id = 'apply-material-decision',
+  closureOverrides = {}) {
+  const resultingPlan = structuredClone(plan); resultingPlan.planRevision = state.plan.revision + 1;
+  const minimalClosure = testMinimalClosure(state, resultingPlan, {
+    revision: priorClosure.revision + 1, previousContractDigest: state.scope.closureDigest,
+    authorizedShape, operatorDecisionDigests: [...state.scope.decisionDigests], ...closureOverrides,
+  });
+  const amendment = { id, reason: 'Apply the exact recorded material disposition.', authorization: 'operator',
+    trigger: state.scope.currentEvidenceDigest, delta: { changed: ['authorizedShape'] },
+    invalidatedEvidence: [state.scope.currentEvidenceDigest] };
+  return { amendment, resultingPlan, minimalClosure };
+}
+
+async function materialDecisionFixture(name, mechanisms = ['material-alpha', 'material-beta'], closureOverrides = {}) {
+  const fixture = repository(name);
+  const planning = await initializeState({ cwd: fixture.cwd, changeId: name, mode: 'implement',
+    baseBranch: 'main', planningRef: fixture.sha, source: descriptor });
+  const plan = planFor(planning);
+  const closure = testMinimalClosure(planning, plan, {
+    authorizedShape: ['durable-test-change', 'unrelated-existing-shape', ...mechanisms],
+    ...closureOverrides,
+  });
+  const admission = testScopeEvidence(planning, plan, closure);
+  admission.packet.acceptedScope.authorizedShape = [...closure.authorizedShape];
+  admission.packetDigest = digestJson(admission.packet);
+  let state = acceptPlanWithScope({ cwd: fixture.cwd, plan, minimalClosure: closure,
+    scopeEvidence: admission, expectedRevision: planning.revision });
+  const evidence = materialScopeEvidence(state, plan, closure, mechanisms);
+  state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
+    expectedRevision: state.revision });
+  return { ...fixture, state, plan, closure, evidence, mechanisms };
+}
+
+function bindTask(options) {
+  try {
+    return bindTaskWithScope(options);
+  } catch (error) {
+    if (error.code !== 'TASK_SCOPE_REQUIRED' || !options.packet?.minimalityAuthority) throw error;
+  }
+  let state = loadState(options.cwd, options.changeId);
+  const directory = changeDirectory(options.cwd, state.changeId);
+  const plan = state.plan.amendmentCount === 0
+    ? JSON.parse(readFileSync(join(directory, 'plan', 'plan.json'), 'utf8'))
+    : JSON.parse(readFileSync(join(directory, 'plan', 'amendments', `${String(state.plan.amendmentCount).padStart(4, '0')}.json`), 'utf8')).resultingPlan;
+  const closure = readdirSync(join(directory, 'scope', 'minimal-closure'))
+    .filter((name) => name.endsWith('.json')).map((name) =>
+      JSON.parse(readFileSync(join(directory, 'scope', 'minimal-closure', name), 'utf8')))
+    .find((candidate) => digestJson(candidate) === state.scope.closureDigest);
+  const packetDigest = implementationTaskDigest(options.packet);
+  const amendmentDigests = Array.from({ length: state.plan.amendmentCount }, (_, index) => {
+    const record = JSON.parse(readFileSync(join(directory, 'plan', 'amendments',
+      `${String(index + 1).padStart(4, '0')}.json`), 'utf8'));
+    return digestJson(record);
+  });
+  state = assessScope({ cwd: options.cwd, changeId: options.changeId,
+    scopeEvidence: testScopeEvidence(state, plan, closure, { boundary: 'task', subjectDigest: packetDigest,
+      subjectSha: options.packet.taskBaseSha, taskPacketDigest: packetDigest, amendmentDigests }),
+    expectedRevision: state.revision });
+  return bindTaskWithScope({ ...options, expectedRevision: state.revision });
+}
+
+function acceptPlan(options) {
+  if (options.minimalClosure && options.scopeEvidence) return acceptPlanWithScope(options);
+  const state = loadState(options.cwd, options.changeId);
+  if (!state) return acceptPlanWithScope(options);
+  const minimalClosure = testMinimalClosure(state, options.plan);
+  return acceptPlanWithScope({ ...options, minimalClosure,
+    scopeEvidence: testScopeEvidence(state, options.plan, minimalClosure) });
+}
+
+function amendPlan(options) {
+  if (options.minimalClosure) return amendPlanWithScope(options);
+  const state = loadState(options.cwd, options.changeId);
+  if (!state) return amendPlanWithScope(options);
+  const directory = changeDirectory(options.cwd, state.changeId);
+  const priorClosure = readdirSync(join(directory, 'scope', 'minimal-closure'))
+    .filter((name) => name.endsWith('.json'))
+    .map((name) => JSON.parse(readFileSync(join(directory, 'scope', 'minimal-closure', name), 'utf8')))
+    .find((candidate) => digestJson(candidate) === state.scope.closureDigest);
+  const evidenceDirectory = state.scope.currentBoundary === null ? null
+    : join(directory, 'scope', 'evidence', state.scope.currentBoundary);
+  const currentEvidence = evidenceDirectory === null ? null
+    : readdirSync(evidenceDirectory).filter((name) => name.endsWith('.json'))
+      .map((name) => JSON.parse(readFileSync(join(evidenceDirectory, name), 'utf8')))
+      .find((candidate) => digestJson(candidate) === state.scope.currentEvidenceDigest);
+  const previous = testMinimalClosure(state, options.resultingPlan);
+  const minimalClosure = { ...previous, revision: priorClosure.revision + 1,
+    previousContractDigest: state.scope.closureDigest, operatorDecisionDigests: [...state.scope.decisionDigests] };
+  if (currentEvidence?.result?.verdict === 'minor-amendment-required') {
+    const mechanisms = currentEvidence.result.coverage
+      .filter(({ classification }) => classification === 'necessary-minor-expansion')
+      .map(({ mechanism }) => mechanism);
+    minimalClosure.authorizedShape = [...priorClosure.authorizedShape
+      .filter((mechanism) => !currentEvidence.result.unnecessaryWork.includes(mechanism)),
+      ...mechanisms.filter((mechanism) => !priorClosure.authorizedShape.includes(mechanism))];
+    minimalClosure.unauthorizedExpansion = priorClosure.unauthorizedExpansion
+      .filter((mechanism) => !mechanisms.includes(mechanism));
+    minimalClosure.deferredFollowups = priorClosure.deferredFollowups
+      .filter(({ id }) => !mechanisms.includes(id));
+  } else if (currentEvidence?.result?.verdict === 'trim-required') {
+    minimalClosure.authorizedShape = priorClosure.authorizedShape
+      .filter((mechanism) => !currentEvidence.result.unnecessaryWork.includes(mechanism));
+    minimalClosure.unauthorizedExpansion = [...priorClosure.unauthorizedExpansion];
+    minimalClosure.deferredFollowups = [...priorClosure.deferredFollowups];
+  }
+  return amendPlanWithScope({ ...options, minimalClosure });
+}
+
+function recordVerifierResult(options) {
+  const context = buildVerifierContext({ cwd: options.cwd, changeId: options.changeId });
+  options.result.scopeEvidenceDigest = context.integratedScopeEvidenceDigest;
+  return recordVerifierResultWithScope(options);
+}
+
+function recordFindingDisposition(options) {
+  if (options.disposition.sourceKind === 'verifier') {
+    const state = loadState(options.cwd, options.changeId);
+    const path = join(changeDirectory(options.cwd, state.changeId), 'verification', 'rounds',
+      String(state.verification.round).padStart(4, '0'), 'verifier-result.json');
+    const receipt = JSON.parse(readFileSync(path, 'utf8'));
+    const legacy = { ...receipt }; delete legacy.scopeEvidenceDigest;
+    if (options.disposition.sourceResultDigest === digestJson(legacy)) {
+      options.disposition.sourceResultDigest = digestJson(receipt);
+    }
+  }
+  return recordFindingDispositionWithScope(options);
+}
+
+function integratedScopeEvidenceFor(options) {
+  let state = loadState(options.cwd, options.changeId);
+  if (state.phase === 'integrated') {
+    const directory = changeDirectory(options.cwd, state.changeId);
+    const plan = state.plan.amendmentCount === 0
+      ? JSON.parse(readFileSync(join(directory, 'plan', 'plan.json'), 'utf8'))
+      : JSON.parse(readFileSync(join(directory, 'plan', 'amendments', `${String(state.plan.amendmentCount).padStart(4, '0')}.json`), 'utf8')).resultingPlan;
+    const closureFiles = readdirSync(join(directory, 'scope', 'minimal-closure')).filter((name) => name.endsWith('.json')).sort();
+    const closure = JSON.parse(readFileSync(join(directory, 'scope', 'minimal-closure', closureFiles.at(-1)), 'utf8'));
+    const authorityDecisions = state.scope.decisionDigests.map((digest) => {
+      const decision = readdirSync(join(directory, 'scope', 'decisions'))
+        .filter((name) => name.endsWith('.json'))
+        .map((name) => JSON.parse(readFileSync(join(directory, 'scope', 'decisions', name), 'utf8')))
+        .find((candidate) => digestJson(candidate) === digest);
+      return { id: decision.decisionId, digest, disposition: decision.disposition,
+        authorizedShape: [...decision.approvedShape] };
+    });
+    const identity = integratedScopeAssessmentIdentity({ cwd: options.cwd, changeId: options.changeId });
+    return testScopeEvidence(state, plan, closure, { boundary: 'integrated-head',
+      amendmentDigests: identity.amendmentDigests, subjectDigest: identity.subjectDigest,
+      subjectSha: identity.subjectSha, taskPacketDigest: identity.taskPacketDigest, authorityDecisions });
+  }
+  return null;
+}
+
+function materialIntegratedScopeEvidence(options, mechanism = 'material-integrated-recovery') {
+  const evidence = integratedScopeEvidenceFor(options);
+  const mapping = {
+    mechanism, sourceCriterionIds: [], acceptedCriterionIds: [], invariantIds: [], nonGoalIds: [], guidanceIds: [],
+    rationale: `${mechanism} is a proposed material subsystem without accepted criterion authority.`,
+  };
+  evidence.packet.changeInventory.subsystems = [mechanism];
+  evidence.packet.changeInventory.mappings.push(mapping);
+  evidence.result = {
+    ...evidence.result,
+    binding: evidence.packet.binding,
+    verdict: 'human-decision-required',
+    summary: 'The integrated candidate requires an exact human material-scope decision.',
+    coverage: [...evidence.result.coverage, { ...mapping, classification: 'material-scope-change' }],
+    scopeDelta: { description: 'Decide the exact integrated material subsystem.', sourceCriterionIds: [],
+      acceptedCriterionIds: [], invariantIds: [], materialSurfaces: ['new-subsystem'] },
+    materialityTriggers: [{ category: 'new-subsystem', evidence: 'The integrated inventory proposes a new subsystem.' }],
+    smallestExpansion: 'Authorize only the proposed integrated subsystem.',
+    narrowAlternative: 'Remove the proposed subsystem and retain existing authority.',
+    deferralConsequences: 'The subsystem remains outside implementation authority.',
+    humanDecision: true,
+  };
+  evidence.packetDigest = digestJson(evidence.packet);
+  evidence.resultDigest = digestJson(evidence.result);
+  return evidence;
+}
+
+function finalizeIntegration(options) {
+  let state = finalizeIntegrationWithScope(options);
+  const scopeEvidence = integratedScopeEvidenceFor(options, state);
+  state = assessScope({ cwd: options.cwd, changeId: options.changeId, scopeEvidence,
+    expectedRevision: state.revision });
+  return state;
+}
+
+function createValidationPlan(options) {
+  return createValidationPlanWithScope(options);
+}
 
 test('wave conflicts serialize shared and producer surfaces while permitting disjoint work', () => {
   const task = (anticipatedPaths, produces = [], consumes = []) => ({ anticipatedPaths, produces, consumes });
@@ -130,6 +518,896 @@ test('binding rejects command-kind conflicts before packet evidence or revision 
     (error) => error.code === 'VALIDATION_COMMAND_CONFLICT');
   assert.equal(readFileSync(join(changeDirectory(historical.cwd, state.changeId), 'state.json'), 'utf8'), before);
   assert.equal(existsSync(join(changeDirectory(historical.cwd, state.changeId), 'implementation', 'tasks', 'second-task')), false);
+});
+
+test('plan admission rejects every contradictory scope semantic projection without durable mutation', async () => {
+  const fixture = repository('semantic plan admission');
+  const planning = await initializeState({ cwd: fixture.cwd, changeId: 'semantic-plan-admission', mode: 'implement',
+    baseBranch: 'main', planningRef: fixture.sha, source: descriptor });
+  const plan = planFor(planning);
+  const closure = testMinimalClosure(planning, plan, {
+    optionalGuidance: [{ id: 'keep-local', text: 'Keep the implementation local.' }],
+    unauthorizedExpansion: ['repository-wide-framework'],
+    deferredFollowups: [{ id: 'later-delivery', text: 'Deliver through the later workflow.' }],
+  });
+  const exact = testScopeEvidence(planning, plan, closure);
+  const mutations = [
+    (packet) => { packet.sourceScope.objective = 'Contradict the accepted objective.'; },
+    (packet) => { packet.sourceScope.requiredCriteria[0].text = 'Rewrite the source requirement.'; },
+    (packet) => { packet.sourceScope.nonGoals[0].text = 'Rewrite the non-goal.'; },
+    (packet) => { packet.sourceScope.implementationGuidance[0].text = 'Rewrite optional guidance.'; },
+    (packet) => { packet.acceptedScope.criteria[0].text = 'Rewrite the effective-plan criterion.'; },
+    (packet) => { packet.acceptedScope.invariants[0].text = 'Rewrite an invariant.'; },
+    (packet) => { packet.acceptedScope.invariants[1].text = 'Rewrite a mandatory constraint.'; },
+    (packet) => { packet.acceptedScope.minimalClosure = 'Replace the closure outcome.'; },
+    (packet) => { packet.acceptedScope.authorizedShape = ['different-mechanism']; },
+    (packet) => { packet.acceptedScope.unauthorizedShape = ['different-expansion']; },
+    (packet) => { packet.acceptedScope.deferredShape = ['different-follow-up']; },
+  ];
+  const directory = changeDirectory(fixture.cwd, planning.changeId);
+  const before = durableSnapshot(directory);
+  const foreignClosure = { ...closure, operatorDecisionDigests: [`sha256:${'f'.repeat(64)}`] };
+  assert.throws(() => acceptPlanWithScope({ cwd: fixture.cwd, plan, minimalClosure: foreignClosure,
+    scopeEvidence: testScopeEvidence(planning, plan, foreignClosure), expectedRevision: planning.revision }),
+  (error) => error.code === 'PLAN_SCOPE_INVALID'
+    && /exact ordered durable scope decision digests/u.test(error.message));
+  assert.deepEqual(durableSnapshot(directory), before,
+    'admission rejects foreign closure decision authority without durable mutation');
+  for (const mutate of mutations) {
+    const contradictory = structuredClone(exact);
+    mutate(contradictory.packet);
+    contradictory.packetDigest = digestJson(contradictory.packet);
+    assert.throws(() => acceptPlanWithScope({ cwd: fixture.cwd, plan, minimalClosure: closure,
+      scopeEvidence: contradictory, expectedRevision: planning.revision }),
+    (error) => error.code === 'PLAN_SCOPE_INVALID' && /projection/u.test(error.message));
+    assert.deepEqual(durableSnapshot(directory), before, 'semantic mismatch writes no durable bytes');
+  }
+  const accepted = acceptPlanWithScope({ cwd: fixture.cwd, plan, minimalClosure: closure,
+    scopeEvidence: exact, expectedRevision: planning.revision });
+  assert.equal(accepted.phase, 'ready-to-implement');
+});
+
+test('later scope boundaries revalidate canonical semantic projections atomically', async () => {
+  const taskFixture = repository('semantic task assessment');
+  const planning = await initializeState({ cwd: taskFixture.cwd, changeId: 'semantic-task-assessment',
+    mode: 'implement', baseBranch: 'main', planningRef: taskFixture.sha, source: descriptor });
+  const plan = planFor(planning);
+  const closure = testMinimalClosure(planning, plan);
+  let state = acceptPlanWithScope({ cwd: taskFixture.cwd, plan, minimalClosure: closure,
+    scopeEvidence: testScopeEvidence(planning, plan, closure), expectedRevision: planning.revision });
+  const packet = packetFor(state, plan, 'state-task');
+  const packetDigest = implementationTaskDigest(packet);
+  const taskEvidence = testScopeEvidence(state, plan, closure, { boundary: 'task',
+    subjectDigest: packetDigest, subjectSha: packet.taskBaseSha, taskPacketDigest: packetDigest });
+  const taskDirectory = changeDirectory(taskFixture.cwd, state.changeId);
+  const taskBefore = durableSnapshot(taskDirectory);
+  for (const mutate of [
+    (candidate) => { candidate.packet.sourceScope.objective = 'Invent a different task-boundary objective.'; },
+    (candidate) => { candidate.packet.acceptedScope.criteria[0].text = 'Invent different task authority.'; },
+  ]) {
+    const contradictory = structuredClone(taskEvidence);
+    mutate(contradictory);
+    contradictory.packetDigest = digestJson(contradictory.packet);
+    assert.throws(() => assessScope({ cwd: taskFixture.cwd, changeId: state.changeId,
+      scopeEvidence: contradictory, expectedRevision: state.revision }),
+    (error) => error.code === 'SCOPE_ASSESSMENT_INVALID' && /projection/u.test(error.message));
+    assert.deepEqual(durableSnapshot(taskDirectory), taskBefore,
+      'task-boundary semantic rejection leaves every durable byte unchanged');
+  }
+  state = assessScope({ cwd: taskFixture.cwd, changeId: state.changeId,
+    scopeEvidence: taskEvidence, expectedRevision: state.revision });
+  assert.equal(state.scope.currentBoundary, 'task');
+
+  const integrated = await integratedSingleTaskFixture('semantic integrated assessment');
+  const integratedDirectory = changeDirectory(integrated.cwd, integrated.state.changeId);
+  const integratedEvidence = integratedScopeEvidenceFor({ cwd: integrated.cwd,
+    changeId: integrated.state.changeId });
+  const integratedBefore = durableSnapshot(integratedDirectory);
+  for (const mutate of [
+    (candidate) => { candidate.packet.sourceScope.objective = 'Invent a different integrated objective.'; },
+    (candidate) => { candidate.packet.acceptedScope.criteria[0].text = 'Invent different integrated authority.'; },
+  ]) {
+    const contradictory = structuredClone(integratedEvidence);
+    mutate(contradictory);
+    contradictory.packetDigest = digestJson(contradictory.packet);
+    assert.throws(() => assessScope({ cwd: integrated.cwd, changeId: integrated.state.changeId,
+      scopeEvidence: contradictory, expectedRevision: integrated.state.revision }),
+    (error) => error.code === 'SCOPE_ASSESSMENT_INVALID' && /projection/u.test(error.message));
+    assert.deepEqual(durableSnapshot(integratedDirectory), integratedBefore,
+      'integrated-head semantic rejection leaves every durable byte unchanged');
+  }
+  state = assessScope({ cwd: integrated.cwd, changeId: integrated.state.changeId,
+    scopeEvidence: integratedEvidence, expectedRevision: integrated.state.revision });
+  assert.equal(state.scope.currentBoundary, 'integrated-head');
+});
+
+test('integrated-head insufficient evidence admits only an exact blocked reassessment', async () => {
+  const fixture = await integratedSingleTaskFixture('integrated insufficient evidence reassessment');
+  const directory = changeDirectory(fixture.cwd, fixture.state.changeId);
+  const withinScope = integratedScopeEvidenceFor({ cwd: fixture.cwd, changeId: fixture.state.changeId });
+  const insufficient = structuredClone(withinScope);
+  const mapping = insufficient.result.coverage[0];
+  insufficient.result = {
+    ...insufficient.result,
+    verdict: 'insufficient-evidence',
+    coverage: [{ ...mapping, classification: 'insufficient-evidence',
+      rationale: 'The integrated candidate needs exact supporting evidence.' }],
+    missingEvidence: ['Exact integrated-head evidence is missing.'],
+  };
+  insufficient.resultDigest = digestJson(insufficient.result);
+  let state = assessScope({ cwd: fixture.cwd, changeId: fixture.state.changeId,
+    scopeEvidence: insufficient, expectedRevision: fixture.state.revision });
+  const insufficientDigest = digestJson(insufficient);
+  assert.equal(state.phase, 'blocked');
+  assert.equal(state.scope.status, 'assessment-required');
+  assert.equal(state.scope.currentBoundary, 'integrated-head');
+  assert.equal(state.scope.currentSubjectSha, state.git.headSha);
+  assert.equal(state.scope.currentEvidenceDigest, insufficientDigest);
+  assert.deepEqual(state.blockedReasons,
+    ['Scope assessment has insufficient evidence; authority remains unchanged.']);
+
+  const corrected = structuredClone(withinScope);
+  corrected.revision = state.revision + 1;
+  corrected.evidenceId = `integrated-head-test-${corrected.revision}`;
+  const staleSubject = structuredClone(corrected);
+  staleSubject.packet.binding.subject.sha = 'f'.repeat(40);
+  staleSubject.result.binding.subject.sha = 'f'.repeat(40);
+  staleSubject.packetDigest = digestJson(staleSubject.packet);
+  staleSubject.resultDigest = digestJson(staleSubject.result);
+  const beforeStale = durableSnapshot(directory);
+  assert.throws(() => assessScope({ cwd: fixture.cwd, changeId: state.changeId,
+    scopeEvidence: staleSubject, expectedRevision: state.revision }),
+  (error) => error.code === 'SCOPE_ASSESSMENT_INVALID');
+  assert.deepEqual(durableSnapshot(directory), beforeStale,
+    'a stale retry subject writes no evidence, receipt, event, transition, or state');
+
+  const changedSubject = structuredClone(corrected);
+  changedSubject.packet.binding.subject.digest = digestJson({ changed: true });
+  changedSubject.result.binding.subject.digest = changedSubject.packet.binding.subject.digest;
+  changedSubject.packetDigest = digestJson(changedSubject.packet);
+  changedSubject.resultDigest = digestJson(changedSubject.result);
+  assert.throws(() => assessScope({ cwd: fixture.cwd, changeId: state.changeId,
+    scopeEvidence: changedSubject, expectedRevision: state.revision }),
+  (error) => error.code === 'SCOPE_ASSESSMENT_INVALID');
+  assert.deepEqual(durableSnapshot(directory), beforeStale,
+    'a changed retry subject writes no evidence, receipt, event, transition, or state');
+
+  state = assessScope({ cwd: fixture.cwd, changeId: state.changeId,
+    scopeEvidence: corrected, expectedRevision: state.revision });
+  assert.equal(state.phase, 'integrated');
+  assert.equal(state.scope.status, 'current');
+  assert.equal(state.scope.currentEvidenceDigest, digestJson(corrected));
+  assert.deepEqual(state.blockedReasons, []);
+  assert.match(state.nextAction, /validation-plan/u);
+  assert.equal(validateState({ cwd: fixture.cwd }).valid, true);
+  assert.equal(existsSync(join(directory, 'scope', 'evidence', 'integrated-head',
+    `${String(insufficient.revision).padStart(8, '0')}-${insufficient.evidenceId}.json`)), true,
+  'the prior insufficient-evidence receipt remains preserved');
+
+  const trimFixture = await integratedSingleTaskFixture('integrated trim retry remains blocked');
+  const trimWithinScope = integratedScopeEvidenceFor({
+    cwd: trimFixture.cwd, changeId: trimFixture.state.changeId,
+  });
+  const trim = structuredClone(trimWithinScope);
+  trim.result = {
+    ...trim.result,
+    verdict: 'trim-required',
+    coverage: [{ ...trim.result.coverage[0], sourceCriterionIds: [], acceptedCriterionIds: [],
+      classification: 'speculative', rationale: 'The mechanism is unnecessary.' }],
+    unnecessaryWork: [trim.result.coverage[0].mechanism],
+    smallerSufficientAlternative: 'Remove the unnecessary mechanism.',
+  };
+  trim.resultDigest = digestJson(trim.result);
+  const trimState = assessScope({ cwd: trimFixture.cwd, changeId: trimFixture.state.changeId,
+    scopeEvidence: trim, expectedRevision: trimFixture.state.revision });
+  const invalidTrimRetry = structuredClone(trimWithinScope);
+  invalidTrimRetry.revision = trimState.revision + 1;
+  invalidTrimRetry.evidenceId = `integrated-head-test-${invalidTrimRetry.revision}`;
+  assert.throws(() => assessScope({ cwd: trimFixture.cwd, changeId: trimState.changeId,
+    scopeEvidence: invalidTrimRetry, expectedRevision: trimState.revision }),
+  (error) => error.code === 'INVALID_PHASE');
+});
+
+test('new bindings require minimality authority atomically while historical packet shapes remain readable', async () => {
+  const fixture = repository('mandatory task minimality');
+  const planning = await initializeState({ cwd: fixture.cwd, changeId: 'mandatory-task-minimality', mode: 'implement',
+    baseBranch: 'main', planningRef: fixture.sha, source: descriptor });
+  const plan = planFor(planning);
+  const state = acceptPlan({ cwd: fixture.cwd, plan, expectedRevision: planning.revision });
+  const historicalPacket = packetFor(state, plan, 'state-task');
+  delete historicalPacket.minimalityAuthority;
+  assert.deepEqual(validateImplementationTask(historicalPacket), [],
+    'the additive contract keeps historical packet documents structurally readable');
+  assert.equal(implementationTaskDigest(historicalPacket), implementationTaskDigest(structuredClone(historicalPacket)),
+    'historical packets retain deterministic canonical identities');
+  const before = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
+  assert.throws(() => bindTaskWithScope({ cwd: fixture.cwd, packet: historicalPacket, expectedRevision: state.revision }),
+    (error) => error.code === 'TASK_SCOPE_REQUIRED');
+  assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), before,
+    'missing minimality authority writes no state, event, transition, receipt, or task sidecar bytes');
+});
+
+test('task scope cadence binds unchanged observations directly and gates exact changed tripwire IDs atomically', async () => {
+  const unchanged = repository('conditional task scope unchanged');
+  const unchangedPlanning = await initializeState({ cwd: unchanged.cwd, changeId: 'conditional-task-unchanged',
+    mode: 'implement', baseBranch: 'main', planningRef: unchanged.sha, source: descriptor });
+  const unchangedPlan = planFor(unchangedPlanning);
+  const unchangedState = acceptPlan({ cwd: unchanged.cwd, plan: unchangedPlan,
+    expectedRevision: unchangedPlanning.revision });
+  const unchangedPacket = packetFor(unchangedState, unchangedPlan, 'state-task');
+  const admissionDigest = unchangedState.scope.currentEvidenceDigest;
+  const directlyBound = bindTaskWithScope({ cwd: unchanged.cwd, packet: unchangedPacket,
+    expectedRevision: unchangedState.revision });
+  assert.equal(directlyBound.execution.tasks[0].status, 'bound');
+  assert.match(directlyBound.nextAction, /Bind or schedule/u);
+  assert.match(directlyBound.nextAction, /only if binding reports exact changed tripwire IDs/u);
+  assert.equal(directlyBound.scope.currentBoundary, 'admission');
+  assert.equal(directlyBound.scope.currentEvidenceDigest, admissionDigest,
+    'non-triggering binding leaves the existing scope evidence untouched');
+
+  const changed = repository('conditional task scope changed');
+  const changedPlanning = await initializeState({ cwd: changed.cwd, changeId: 'conditional-task-changed',
+    mode: 'implement', baseBranch: 'main', planningRef: changed.sha, source: descriptor });
+  const changedPlan = planFor(changedPlanning);
+  let state = acceptPlan({ cwd: changed.cwd, plan: changedPlan, expectedRevision: changedPlanning.revision });
+  const packet = packetFor(state, changedPlan, 'state-task');
+  packet.minimalityAuthority.tripwires[0].observedInventory = ['changed-path'];
+  const directory = changeDirectory(changed.cwd, state.changeId);
+  const before = durableSnapshot(directory);
+  assert.throws(() => bindTaskWithScope({ cwd: changed.cwd, packet, expectedRevision: state.revision }),
+    (error) => error.code === 'TASK_SCOPE_REQUIRED');
+  assert.deepEqual(durableSnapshot(directory), before, 'a changed observation fails without partial evidence');
+  const packetDigest = implementationTaskDigest(packet);
+  const closure = testMinimalClosure(state, changedPlan);
+  const incorrect = testScopeEvidence(state, changedPlan, closure, { boundary: 'task',
+    subjectDigest: packetDigest, subjectSha: packet.taskBaseSha, taskPacketDigest: packetDigest,
+    trigger: 'task-tripwires:wrong-id' });
+  state = assessScope({ cwd: changed.cwd, changeId: state.changeId, scopeEvidence: incorrect,
+    expectedRevision: state.revision });
+  assert.throws(() => bindTaskWithScope({ cwd: changed.cwd, packet, expectedRevision: state.revision }),
+    (error) => error.code === 'TASK_SCOPE_REQUIRED');
+  const exact = testScopeEvidence(state, changedPlan, closure, { boundary: 'task', subjectDigest: packetDigest,
+    subjectSha: packet.taskBaseSha, taskPacketDigest: packetDigest,
+    trigger: 'task-tripwires:test-task-paths' });
+  state = assessScope({ cwd: changed.cwd, changeId: state.changeId, scopeEvidence: exact,
+    expectedRevision: state.revision });
+  state = bindTaskWithScope({ cwd: changed.cwd, packet, expectedRevision: state.revision });
+  assert.equal(state.execution.tasks[0].status, 'bound');
+
+  const missing = repository('conditional task scope missing observation');
+  const missingPlanning = await initializeState({ cwd: missing.cwd, changeId: 'conditional-task-missing',
+    mode: 'implement', baseBranch: 'main', planningRef: missing.sha, source: descriptor });
+  const missingPlan = planFor(missingPlanning);
+  const missingState = acceptPlan({ cwd: missing.cwd, plan: missingPlan, expectedRevision: missingPlanning.revision });
+  const historical = packetFor(missingState, missingPlan, 'state-task');
+  delete historical.minimalityAuthority.tripwires[0].observedInventory;
+  assert.deepEqual(validateImplementationTask(historical), [], 'historical packet shape remains readable');
+  assert.throws(() => bindTaskWithScope({ cwd: missing.cwd, packet: historical,
+    expectedRevision: missingState.revision }), (error) => error.code === 'INVALID_TASK_PACKET');
+});
+
+test('structured worker discovery invalidates task scope and admits only its exact receipt-bound assessment', async () => {
+  const fixture = repository('worker scope discovery assessment');
+  const planning = await initializeState({ cwd: fixture.cwd, changeId: 'worker-scope-discovery',
+    mode: 'implement', baseBranch: 'main', planningRef: fixture.sha, source: descriptor });
+  const plan = planFor(planning);
+  let state = acceptPlan({ cwd: fixture.cwd, plan, expectedRevision: planning.revision });
+  const closure = testMinimalClosure(state, plan);
+  const packet = packetFor(state, plan, 'state-task');
+  state = bindTaskWithScope({ cwd: fixture.cwd, packet, expectedRevision: state.revision });
+  const worker = createWorkerFixture(fixture.cwd, state, packet);
+  state = scheduleWave({ cwd: fixture.cwd, expectedRevision: state.revision });
+  state = startTask({ cwd: fixture.cwd, taskId: packet.taskId, workerId: 'discovery-worker',
+    expectedRevision: state.revision });
+  const scopeDiscovery = {
+    schemaVersion: 1,
+    summary: 'The worker found one unowned lifecycle path.',
+    evidence: [{ kind: 'state-path', identity: 'unowned/lifecycle.json',
+      detail: 'The exact task cannot complete without authority for this additional state path.' }],
+    triggeredTripwireIds: ['test-task-paths'],
+    requestedAuthority: [{ field: 'paths', values: ['unowned/lifecycle.json'] }],
+  };
+  const blocked = { ...resultFor(packet, 'blocked'), unexpectedDependencies: [scopeDiscovery.summary],
+    scopeDiscovery, summary: scopeDiscovery.summary };
+  state = acceptResult({ cwd: fixture.cwd, result: blocked, workerCwd: worker.path,
+    expectedRevision: state.revision });
+  assert.equal(state.phase, 'blocked');
+  assert.equal(state.scope.status, 'assessment-required');
+  assert.equal(state.scope.currentEvidenceDigest, null);
+  assert.match(state.blockedReasons[0], /reported blocked scope discovery/u);
+  assert.match(state.nextAction, /receipt-backed worker scope discovery/u);
+
+  const packetDigest = implementationTaskDigest(packet);
+  const resultDigest = digestJson(blocked);
+  const discoveryDigest = digestJson(scopeDiscovery);
+  const subjectDigest = digestJson({ taskPacketDigest: packetDigest, resultDigest, discoveryDigest });
+  const trigger = `worker-scope-discovery:${packet.taskId}:${resultDigest}:${discoveryDigest}`;
+  const stale = testScopeEvidence(state, plan, closure, { boundary: 'task', subjectDigest: packetDigest,
+    subjectSha: packet.taskBaseSha, taskPacketDigest: packetDigest, trigger });
+  assert.throws(() => assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: stale,
+    expectedRevision: state.revision }), (error) => error.code === 'SCOPE_ASSESSMENT_INVALID');
+  const wrongTrigger = testScopeEvidence(state, plan, closure, { boundary: 'task', subjectDigest,
+    subjectSha: packet.taskBaseSha, taskPacketDigest: packetDigest, trigger: 'worker-scope-discovery:stale' });
+  assert.throws(() => assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: wrongTrigger,
+    expectedRevision: state.revision }), (error) => error.code === 'SCOPE_ASSESSMENT_INVALID');
+  const exact = testScopeEvidence(state, plan, closure, { boundary: 'task', subjectDigest,
+    subjectSha: packet.taskBaseSha, taskPacketDigest: packetDigest, trigger });
+  state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: exact,
+    expectedRevision: state.revision });
+  assert.equal(state.phase, 'blocked', 'assessment never expands or executes the immutable worker packet');
+  assert.equal(state.scope.status, 'current');
+  assert.equal(state.scope.currentBoundary, 'task');
+});
+
+test('accepted material approval remains blocked until its exact approved shape is amended', async () => {
+  const fixture = await materialDecisionFixture('material-approval');
+  const directory = changeDirectory(fixture.cwd, fixture.state.changeId);
+  const missingDecisionSnapshot = durableSnapshot(directory);
+  const premature = materialAmendment(fixture.state, fixture.plan, fixture.closure,
+    ['durable-test-change', 'unrelated-existing-shape', 'material-alpha']);
+  assert.throws(() => amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: fixture.state.revision, ...premature }),
+    (error) => error.code === 'INVALID_PHASE');
+  assert.deepEqual(durableSnapshot(directory), missingDecisionSnapshot,
+    'missing decision authority rejects without durable writes');
+
+  let state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision,
+    decision: materialScopeDecision(fixture.state, fixture.evidence, 'approve-material-amendment',
+      ['material-alpha'], 'approve-alpha') });
+  assert.equal(state.phase, 'blocked');
+  assert.match(state.nextAction, /exact current material decision/u);
+  const beforeMismatch = durableSnapshot(directory);
+  const overbroad = materialAmendment(state, fixture.plan, fixture.closure,
+    ['durable-test-change', 'unrelated-existing-shape', 'material-alpha', 'material-beta'], 'overbroad-approval');
+  assert.throws(() => amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...overbroad }),
+    (error) => error.code === 'SCOPE_AMENDMENT_INVALID');
+  assert.deepEqual(durableSnapshot(directory), beforeMismatch,
+    'an approval cannot retain an assessed mechanism outside approvedShape');
+  const reordered = materialAmendment(state, fixture.plan, fixture.closure,
+    ['unrelated-existing-shape', 'durable-test-change', 'material-alpha'], 'reordered-approval');
+  assert.throws(() => amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...reordered }),
+    (error) => error.code === 'SCOPE_AMENDMENT_INVALID' && /preserve unrelated authority in order/u.test(error.message));
+  assert.deepEqual(durableSnapshot(directory), beforeMismatch,
+    'an approval cannot reorder unrelated authority');
+
+  const exact = materialAmendment(state, fixture.plan, fixture.closure,
+    ['durable-test-change', 'unrelated-existing-shape', 'material-alpha']);
+  state = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...exact });
+  assert.equal(state.phase, 'implementing');
+  const amendedClosure = JSON.parse(readFileSync(join(directory, 'scope', 'minimal-closure', '0002.json'), 'utf8'));
+  assert.deepEqual(amendedClosure.authorizedShape,
+    ['durable-test-change', 'unrelated-existing-shape', 'material-alpha']);
+  assert.equal(validateState({ cwd: fixture.cwd }).valid, true);
+});
+
+test('narrow material dispositions remove every assessed mechanism and preserve unrelated authority', async () => {
+  for (const disposition of ['split-defer', 'reject-use-narrow']) {
+    const fixture = await materialDecisionFixture(`material-${disposition}`);
+    let state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision,
+      decision: materialScopeDecision(fixture.state, fixture.evidence, disposition, [], `${disposition}-decision`) });
+    const directory = changeDirectory(fixture.cwd, state.changeId);
+    const before = durableSnapshot(directory);
+    const retaining = materialAmendment(state, fixture.plan, fixture.closure,
+      ['durable-test-change', 'unrelated-existing-shape', 'material-alpha'], `${disposition}-retains-material`);
+    assert.throws(() => amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...retaining }),
+      (error) => error.code === 'SCOPE_AMENDMENT_INVALID');
+    assert.deepEqual(durableSnapshot(directory), before, `${disposition} rejects retained material atomically`);
+    const narrowed = materialAmendment(state, fixture.plan, fixture.closure,
+      ['durable-test-change', 'unrelated-existing-shape'], `${disposition}-narrows`);
+    state = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...narrowed });
+    assert.equal(state.phase, 'implementing');
+    const amendedClosure = JSON.parse(readFileSync(join(directory, 'scope', 'minimal-closure', '0002.json'), 'utf8'));
+    assert.deepEqual(amendedClosure.authorizedShape,
+      ['durable-test-change', 'unrelated-existing-shape']);
+  }
+});
+
+test('every material disposition preserves unrelated semantic closure fields exactly', async () => {
+  for (const disposition of ['approve-material-amendment', 'reject-use-narrow', 'split-defer']) {
+    const closureOverrides = {
+      invariants: [
+        { id: 'exact-test-authority', text: 'Bind exact test evidence.' },
+        { id: 'stable-test-authority', text: 'Preserve stable test evidence.' },
+      ],
+      nonGoals: [
+        { id: 'no-test-expansion', text: 'Do not expand test authority.' },
+        { id: 'no-policy-rewrite', text: 'Do not rewrite policy authority.' },
+      ],
+      mandatoryConstraints: [
+        { id: 'receipt-test-authority', text: 'Persist receipt evidence.' },
+        { id: 'atomic-test-authority', text: 'Reject invalid evidence atomically.' },
+      ],
+      optionalGuidance: [
+        { id: 'keep-local', text: 'Keep the implementation local.' },
+        { id: 'keep-small', text: 'Keep the implementation small.' },
+      ],
+      unauthorizedExpansion: ['repository-wide-framework', 'unrelated-product-change'],
+    };
+    const fixture = await materialDecisionFixture(`material-${disposition}-semantic-preservation`,
+      ['material-alpha'], closureOverrides);
+    const approvedShape = disposition === 'approve-material-amendment' ? ['material-alpha'] : [];
+    const decision = materialScopeDecision(fixture.state, fixture.evidence, disposition, approvedShape,
+      `${disposition}-semantic-preservation`);
+    const state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision, decision });
+    const directory = changeDirectory(fixture.cwd, state.changeId);
+    const before = durableSnapshot(directory);
+    const authorizedShape = disposition === 'approve-material-amendment'
+      ? ['durable-test-change', 'unrelated-existing-shape', 'material-alpha']
+      : ['durable-test-change', 'unrelated-existing-shape'];
+    const semanticFields = [
+      'outcome',
+      'requiredCriteria',
+      'invariants',
+      'nonGoals',
+      'mandatoryConstraints',
+      'optionalGuidance',
+      'unauthorizedExpansion',
+    ];
+    const preserved = Object.fromEntries(semanticFields.map((field) => [field, fixture.closure[field]]));
+    const mismatches = {
+      outcome: 'Rewrite the accepted material outcome.',
+      requiredCriteria: fixture.closure.requiredCriteria.map((entry, index) => index === 0
+        ? { ...entry, text: 'Rewrite the required criterion.' } : entry),
+      invariants: [...fixture.closure.invariants].reverse(),
+      nonGoals: fixture.closure.nonGoals.slice(0, -1),
+      mandatoryConstraints: [
+        ...fixture.closure.mandatoryConstraints,
+        { id: 'extra-constraint', text: 'Add an unrelated constraint.' },
+      ],
+      optionalGuidance: fixture.closure.optionalGuidance.map((entry, index) => index === 0
+        ? { ...entry, text: 'Rewrite optional guidance.' } : entry),
+      unauthorizedExpansion: [...fixture.closure.unauthorizedExpansion].reverse(),
+    };
+    for (const [index, [field, value]] of Object.entries(mismatches).entries()) {
+      const amendment = materialAmendment(state, fixture.plan, fixture.closure, authorizedShape,
+        `${disposition}-semantic-mismatch-${index + 1}`, { ...preserved, [field]: value });
+      assert.throws(() => amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...amendment }),
+        (error) => error.code === 'SCOPE_AMENDMENT_INVALID'
+          && error.message.includes(`preserve prior ${field} exactly`));
+      assert.deepEqual(durableSnapshot(directory), before,
+        `${disposition} ${field} mismatch writes no sidecar, state, event, transition, or plan bytes`);
+    }
+    const exact = materialAmendment(state, fixture.plan, fixture.closure, authorizedShape,
+      `${disposition}-semantic-preservation-success`, preserved);
+    const amended = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...exact });
+    assert.equal(amended.phase, 'implementing');
+    const amendedClosure = JSON.parse(readFileSync(join(directory,
+      'scope', 'minimal-closure', '0002.json'), 'utf8'));
+    for (const field of semanticFields) assert.deepEqual(amendedClosure[field], fixture.closure[field]);
+  }
+});
+
+test('split-defer preserves the exact deferred prefix and appends only decision follow-ups in order', async () => {
+  const priorFollowups = [{ id: 'existing-follow-up', text: 'Preserve the existing follow-up.' }];
+  const fixture = await materialDecisionFixture('material-split-followups',
+    ['material-alpha'], { deferredFollowups: priorFollowups });
+  const decision = materialScopeDecision(fixture.state, fixture.evidence, 'split-defer', [], 'split-followups');
+  const directory = changeDirectory(fixture.cwd, fixture.state.changeId);
+  const beforeInvalidDecision = durableSnapshot(directory);
+  assert.throws(() => recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision,
+    decision: { ...decision, deferredFollowups: ['Issue #25'] } }),
+  (error) => error.code === 'SCOPE_DECISION_INVALID');
+  assert.deepEqual(durableSnapshot(directory), beforeInvalidDecision,
+    'invalid split-defer identity changes no receipt, state revision, event, phase, or blocked reason');
+  decision.deferredFollowups = ['follow-up-alpha', 'follow-up-beta'];
+  const state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision, decision });
+  const before = durableSnapshot(directory);
+  const exactFollowups = [...priorFollowups,
+    { id: 'follow-up-alpha', text: 'follow-up-alpha' },
+    { id: 'follow-up-beta', text: 'follow-up-beta' }];
+  const mismatches = [
+    exactFollowups.slice(1),
+    [{ ...priorFollowups[0], text: 'Rewrite the existing follow-up.' }, ...exactFollowups.slice(1)],
+    exactFollowups.slice(0, -1),
+    [...exactFollowups, { id: 'extra-follow-up', text: 'extra-follow-up' }],
+    [priorFollowups[0], exactFollowups[2], exactFollowups[1]],
+  ];
+  for (const [index, deferredFollowups] of mismatches.entries()) {
+    const amendment = materialAmendment(state, fixture.plan, fixture.closure,
+      ['durable-test-change', 'unrelated-existing-shape'], `invalid-split-followups-${index + 1}`,
+      { deferredFollowups });
+    assert.throws(() => amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...amendment }),
+      (error) => error.code === 'SCOPE_AMENDMENT_INVALID' && /deferred-follow-up prefix/u.test(error.message));
+    assert.deepEqual(durableSnapshot(directory), before, 'invalid split-defer follow-ups write no durable bytes');
+  }
+  const exact = materialAmendment(state, fixture.plan, fixture.closure,
+    ['durable-test-change', 'unrelated-existing-shape'], 'exact-split-followups',
+    { deferredFollowups: exactFollowups });
+  const amended = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...exact });
+  assert.equal(amended.phase, 'implementing');
+  const amendedClosure = JSON.parse(readFileSync(join(directory,
+    'scope', 'minimal-closure', '0002.json'), 'utf8'));
+  assert.deepEqual(amendedClosure.deferredFollowups, exactFollowups);
+  assert.equal(validateState({ cwd: fixture.cwd }).valid, true);
+});
+
+test('split-defer rejects an unrepresentable combined closure before recording its decision', async () => {
+  const priorFollowups = Array.from({ length: 255 }, (_, index) => {
+    const id = `prior-follow-up-${index + 1}`;
+    return { id, text: id };
+  });
+  const fixture = await materialDecisionFixture('material-split-combined-capacity',
+    ['material-alpha'], { deferredFollowups: priorFollowups });
+  const directory = changeDirectory(fixture.cwd, fixture.state.changeId);
+  const before = durableSnapshot(directory);
+  const decision = materialScopeDecision(fixture.state, fixture.evidence,
+    'split-defer', [], 'split-combined-capacity');
+  const invalidAdditions = [
+    ['prior-follow-up-1'],
+    ['final-follow-up', 'overflow-follow-up'],
+  ];
+  for (const deferredFollowups of invalidAdditions) {
+    assert.throws(() => recordScopeDecision({
+      cwd: fixture.cwd,
+      expectedRevision: fixture.state.revision,
+      decision: { ...decision, deferredFollowups },
+    }), (error) => error.code === 'SCOPE_DECISION_INVALID'
+      && /projected split-defer closure/u.test(error.message));
+    assert.deepEqual(durableSnapshot(directory), before,
+      'an invalid combined closure writes no decision receipt, state revision, event, phase, or blocked reason');
+  }
+
+  decision.deferredFollowups = ['final-follow-up'];
+  const state = recordScopeDecision({
+    cwd: fixture.cwd,
+    expectedRevision: fixture.state.revision,
+    decision,
+  });
+  const exactFollowups = [
+    ...priorFollowups,
+    { id: 'final-follow-up', text: 'final-follow-up' },
+  ];
+  assert.equal(exactFollowups.length, 256);
+  const exact = materialAmendment(state, fixture.plan, fixture.closure,
+    ['durable-test-change', 'unrelated-existing-shape'], 'exact-full-split-followups',
+    { deferredFollowups: exactFollowups });
+  const amended = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...exact });
+  assert.equal(amended.phase, 'implementing');
+  const amendedClosure = JSON.parse(readFileSync(join(directory,
+    'scope', 'minimal-closure', '0002.json'), 'utf8'));
+  assert.deepEqual(amendedClosure.deferredFollowups, exactFollowups);
+  assert.equal(validateState({ cwd: fixture.cwd }).valid, true);
+});
+
+test('material dispositions other than split-defer cannot change deferred follow-ups', async () => {
+  for (const disposition of ['approve-material-amendment', 'reject-use-narrow']) {
+    const fixture = await materialDecisionFixture(`material-${disposition}-followups`, ['material-alpha'], {
+      deferredFollowups: [{ id: 'existing-follow-up', text: 'Preserve the existing follow-up.' }],
+    });
+    const approvedShape = disposition === 'approve-material-amendment' ? ['material-alpha'] : [];
+    const decision = materialScopeDecision(fixture.state, fixture.evidence, disposition, approvedShape,
+      `${disposition}-followups`);
+    const state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision, decision });
+    const authorizedShape = disposition === 'approve-material-amendment'
+      ? ['durable-test-change', 'unrelated-existing-shape', 'material-alpha']
+      : ['durable-test-change', 'unrelated-existing-shape'];
+    const amendment = materialAmendment(state, fixture.plan, fixture.closure, authorizedShape,
+      `${disposition}-changes-followups`, {
+        deferredFollowups: [
+          ...fixture.closure.deferredFollowups,
+          { id: 'unauthorized-follow-up', text: 'unauthorized-follow-up' },
+        ],
+      });
+    const directory = changeDirectory(fixture.cwd, state.changeId);
+    const before = durableSnapshot(directory);
+    assert.throws(() => amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...amendment }),
+      (error) => error.code === 'SCOPE_AMENDMENT_INVALID' && /cannot change deferred follow-ups/u.test(error.message));
+    assert.deepEqual(durableSnapshot(directory), before, `${disposition} follow-up change writes no durable bytes`);
+  }
+});
+
+test('unknown and historical material approvals cannot authorize the current amendment', async () => {
+  const unknown = await materialDecisionFixture('material-unknown-approval');
+  let unknownState = recordScopeDecision({ cwd: unknown.cwd, expectedRevision: unknown.state.revision,
+    decision: materialScopeDecision(unknown.state, unknown.evidence, 'approve-material-amendment',
+      ['unknown-material-shape'], 'approve-unknown') });
+  const unknownDirectory = changeDirectory(unknown.cwd, unknownState.changeId);
+  const unknownBefore = durableSnapshot(unknownDirectory);
+  const unknownAmendment = materialAmendment(unknownState, unknown.plan, unknown.closure,
+    ['durable-test-change', 'unrelated-existing-shape', 'unknown-material-shape']);
+  assert.throws(() => amendPlanWithScope({ cwd: unknown.cwd, expectedRevision: unknownState.revision,
+    ...unknownAmendment }), (error) => error.code === 'SCOPE_AMENDMENT_INVALID');
+  assert.deepEqual(durableSnapshot(unknownDirectory), unknownBefore,
+    'shape outside the assessed material set writes no durable bytes');
+
+  const historical = await materialDecisionFixture('material-historical-approval', ['material-alpha']);
+  let state = recordScopeDecision({ cwd: historical.cwd, expectedRevision: historical.state.revision,
+    decision: materialScopeDecision(historical.state, historical.evidence, 'approve-material-amendment',
+      ['material-alpha'], 'approve-historical-alpha') });
+  const first = materialAmendment(state, historical.plan, historical.closure,
+    ['durable-test-change', 'unrelated-existing-shape', 'material-alpha'], 'apply-historical-alpha');
+  state = amendPlanWithScope({ cwd: historical.cwd, expectedRevision: state.revision, ...first });
+  const historicalDirectory = changeDirectory(historical.cwd, state.changeId);
+  const firstClosure = JSON.parse(readFileSync(join(historicalDirectory,
+    'scope', 'minimal-closure', '0002.json'), 'utf8'));
+  const firstAmendment = JSON.parse(readFileSync(join(historicalDirectory,
+    'plan', 'amendments', '0001.json'), 'utf8'));
+  const currentPlan = first.resultingPlan;
+  const currentEvidence = materialScopeEvidence(state, currentPlan, firstClosure, ['material-gamma'],
+    [digestJson(firstAmendment)], [{
+      id: 'approve-historical-alpha',
+      digest: state.scope.decisionDigests[0],
+      disposition: 'approve-material-amendment',
+      authorizedShape: ['material-alpha'],
+    }]);
+  state = assessScope({ cwd: historical.cwd, changeId: state.changeId, scopeEvidence: currentEvidence,
+    expectedRevision: state.revision });
+  state = recordScopeDecision({ cwd: historical.cwd, expectedRevision: state.revision,
+    decision: materialScopeDecision(state, currentEvidence, 'approve-material-amendment',
+      ['material-gamma'], 'approve-current-gamma') });
+  const directory = changeDirectory(historical.cwd, state.changeId);
+  const before = durableSnapshot(directory);
+  const staleShape = materialAmendment(state, currentPlan, firstClosure,
+    ['durable-test-change', 'unrelated-existing-shape', 'material-alpha'], 'reuse-historical-approval');
+  assert.throws(() => amendPlanWithScope({ cwd: historical.cwd, expectedRevision: state.revision, ...staleShape }),
+    (error) => error.code === 'SCOPE_AMENDMENT_INVALID');
+  assert.deepEqual(durableSnapshot(directory), before, 'historical approval cannot stand in for current decision shape');
+});
+
+test('material closure authority requires unique IDs and exact ordered decision digests', async () => {
+  const fixture = await materialDecisionFixture('exact-material-decision-authority', ['material-alpha']);
+  const firstDecisionId = 'approve-exact-alpha';
+  let state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision,
+    decision: materialScopeDecision(fixture.state, fixture.evidence, 'approve-material-amendment',
+      ['material-alpha'], firstDecisionId) });
+  const first = materialAmendment(state, fixture.plan, fixture.closure,
+    ['durable-test-change', 'unrelated-existing-shape', 'material-alpha'], 'apply-exact-alpha');
+  state = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...first });
+
+  const directory = changeDirectory(fixture.cwd, state.changeId);
+  const firstClosure = JSON.parse(readFileSync(join(directory,
+    'scope', 'minimal-closure', '0002.json'), 'utf8'));
+  const firstAmendment = JSON.parse(readFileSync(join(directory,
+    'plan', 'amendments', '0001.json'), 'utf8'));
+  const secondEvidence = materialScopeEvidence(state, first.resultingPlan, firstClosure,
+    ['material-beta'], [digestJson(firstAmendment)], [{
+      id: firstDecisionId, digest: state.scope.decisionDigests[0],
+      disposition: 'approve-material-amendment', authorizedShape: ['material-alpha'],
+    }]);
+  state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: secondEvidence,
+    expectedRevision: state.revision });
+
+  const beforeDuplicate = durableSnapshot(directory);
+  assert.throws(() => recordScopeDecision({ cwd: fixture.cwd, expectedRevision: state.revision,
+    decision: materialScopeDecision(state, secondEvidence, 'approve-material-amendment',
+      ['material-beta'], firstDecisionId) }),
+  (error) => error.code === 'SCOPE_DECISION_INVALID' && /already recorded/u.test(error.message));
+  assert.deepEqual(durableSnapshot(directory), beforeDuplicate,
+    'a duplicate decision ID writes no receipt, transition, event, revision, or phase');
+
+  state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: state.revision,
+    decision: materialScopeDecision(state, secondEvidence, 'approve-material-amendment',
+      ['material-beta'], 'approve-exact-beta') });
+  const [firstDigest, secondDigest] = state.scope.decisionDigests;
+  const beforeInvalidClosure = durableSnapshot(directory);
+  const invalidSequences = [
+    [firstDigest],
+    [secondDigest, firstDigest],
+    [firstDigest, secondDigest, `sha256:${'f'.repeat(64)}`],
+  ];
+  for (const [index, operatorDecisionDigests] of invalidSequences.entries()) {
+    const invalid = materialAmendment(state, first.resultingPlan, firstClosure,
+      ['durable-test-change', 'unrelated-existing-shape', 'material-alpha', 'material-beta'],
+      `invalid-decision-sequence-${index + 1}`, { operatorDecisionDigests });
+    assert.throws(() => amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...invalid }),
+      (error) => error.code === 'SCOPE_AMENDMENT_INVALID'
+        && /exact ordered durable scope decision digests/u.test(error.message));
+    assert.deepEqual(durableSnapshot(directory), beforeInvalidClosure,
+      'missing, reordered, or extra decision authority writes no durable bytes');
+  }
+
+  const exact = materialAmendment(state, first.resultingPlan, firstClosure,
+    ['durable-test-change', 'unrelated-existing-shape', 'material-alpha', 'material-beta'],
+    'apply-exact-beta');
+  state = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...exact });
+  assert.deepEqual(state.scope.decisionDigests, [firstDigest, secondDigest]);
+  assert.equal(validateState({ cwd: fixture.cwd }).valid, true,
+    'unique multi-decision authority with exact digest order remains replayable');
+});
+
+test('revised planning verdicts retain incorporated material decision authority', async () => {
+  for (const verdict of ['minor-amendment-required', 'trim-required', 'insufficient-evidence']) {
+    const fixture = repository(`revised planning ${verdict}`);
+    let state = await initializeState({ cwd: fixture.cwd, changeId: `revised-planning-${verdict}`,
+      mode: 'implement', baseBranch: 'main', planningRef: fixture.sha, source: descriptor });
+    const firstPlan = planFor(state);
+    const firstClosure = testMinimalClosure(state, firstPlan);
+    const materialEvidence = planningMaterialScopeEvidence(state, firstPlan, firstClosure);
+    state = acceptPlanWithScope({ cwd: fixture.cwd, plan: firstPlan, minimalClosure: firstClosure,
+      scopeEvidence: materialEvidence, expectedRevision: state.revision });
+    const decision = {
+      schemaVersion: 1, changeId: state.changeId, decisionId: 'planning-material-decision',
+      revision: state.revision + 1, disposition: 'reject-use-narrow',
+      evidence: {
+        sourceDigest: state.source.latestDigest, planningSha: state.planningSha,
+        planDigest: state.scope.candidatePlanDigest, amendmentDigests: [],
+        closureDigest: state.scope.closureDigest, subjectDigest: materialEvidence.packet.binding.subject.digest,
+        subjectSha: materialEvidence.packet.binding.subject.sha,
+        assessmentPacketDigest: materialEvidence.packetDigest,
+        assessmentResultDigest: materialEvidence.resultDigest,
+      },
+      rationale: 'Use the narrow planning candidate.', approvedShape: [], deferredFollowups: [],
+    };
+    state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: state.revision, decision });
+
+    const revisedPlan = structuredClone(firstPlan);
+    revisedPlan.objective = `Exercise the revised ${verdict} planning candidate.`;
+    const revisedClosure = testMinimalClosure(state, revisedPlan, {
+      revision: 2, previousContractDigest: state.scope.closureDigest,
+      operatorDecisionDigests: [...state.scope.decisionDigests],
+    });
+    const revisedEvidence = nonAdmittingPlanningEvidence(state, revisedPlan, revisedClosure, verdict);
+    for (const authorityDecision of [
+      { ...revisedEvidence.packet.acceptedScope.authorityDecisions[0], disposition: 'split-defer' },
+      { ...revisedEvidence.packet.acceptedScope.authorityDecisions[0], disposition: 'approve-material-amendment',
+        authorizedShape: ['forged-decision-shape'] },
+    ]) {
+      const forged = structuredClone(revisedEvidence);
+      forged.packet.acceptedScope.authorityDecisions = [authorityDecision];
+      forged.packetDigest = digestJson(forged.packet);
+      const before = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
+      assert.throws(() => acceptPlanWithScope({ cwd: fixture.cwd, plan: revisedPlan,
+        minimalClosure: revisedClosure, scopeEvidence: forged, expectedRevision: state.revision }),
+      (error) => error.code === 'PLAN_SCOPE_INVALID'
+        && /exact effective-plan and minimal-closure projection/u.test(error.message));
+      assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), before,
+        'forged decision disposition or detached authorized shape fails atomically');
+    }
+    state = acceptPlanWithScope({ cwd: fixture.cwd, plan: revisedPlan, minimalClosure: revisedClosure,
+      scopeEvidence: revisedEvidence, expectedRevision: state.revision });
+
+    assert.equal(state.phase, verdict === 'human-decision-required' ? 'awaiting-scope-decision' : 'planning');
+    assert.equal(state.scope.currentEvidenceDigest, digestJson(revisedEvidence));
+    assert.deepEqual(state.scope.decisionDigests, [digestJson(decision)]);
+    assert.equal(validateState({ cwd: fixture.cwd }).valid, true,
+      `${verdict} replays with the full incorporated decision sequence`);
+  }
+});
+
+test('ordinary abandonment retains incorporated material decision authority', async () => {
+  const fixture = await materialDecisionFixture('post-material-ordinary-abandonment', ['material-alpha']);
+  let state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision,
+    decision: materialScopeDecision(fixture.state, fixture.evidence, 'approve-material-amendment',
+      ['material-alpha'], 'approve-before-ordinary-abandonment') });
+  const amendment = materialAmendment(state, fixture.plan, fixture.closure,
+    ['durable-test-change', 'unrelated-existing-shape', 'material-alpha'], 'incorporate-before-abandonment');
+  state = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...amendment });
+  assert.throws(() => archiveState({ cwd: fixture.cwd, expectedRevision: state.revision,
+    abandonReason: 'Stop this already-authorized implementation.',
+    crashStep(step) { if (step === 'archive-after-intent') throw new Error('pause ordinary archive'); } }),
+  /pause ordinary archive/u);
+
+  const abandoned = loadState(fixture.cwd);
+  assert.equal(abandoned.phase, 'abandoned');
+  assert.deepEqual(abandoned.scope.decisionDigests, state.scope.decisionDigests);
+  assert.equal(validateState({ cwd: fixture.cwd }).valid, true,
+    'ordinary abandonment replays the full incorporated decision sequence');
+});
+
+test('interrupted amendment recovery rejects non-exact decision authority before mutation', async () => {
+  const fixture = await materialDecisionFixture('recovery-exact-decision-authority', ['material-alpha']);
+  const state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision,
+    decision: materialScopeDecision(fixture.state, fixture.evidence, 'approve-material-amendment',
+      ['material-alpha'], 'recovery-approve-alpha') });
+  const exact = materialAmendment(state, fixture.plan, fixture.closure,
+    ['durable-test-change', 'unrelated-existing-shape', 'material-alpha'], 'recovery-apply-alpha');
+  assert.throws(() => amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...exact,
+    crashStep(step) { if (step === 'after-intent') throw new Error('pause amendment recovery'); } }),
+  /pause amendment recovery/u);
+
+  const directory = changeDirectory(fixture.cwd, state.changeId);
+  const transitionDirectory = join(directory, 'transitions', String(state.revision + 1).padStart(8, '0'));
+  const intentPath = join(transitionDirectory, 'intent.json');
+  const intent = JSON.parse(readFileSync(intentPath, 'utf8'));
+  const closureRecord = intent.authoritativeEvidence.minimalClosureDigest;
+  closureRecord.value.operatorDecisionDigests = [
+    ...closureRecord.value.operatorDecisionDigests,
+    `sha256:${'f'.repeat(64)}`,
+  ];
+  closureRecord.digest = digestJson(closureRecord.value);
+  intent.evidence.minimalClosureDigest = closureRecord.digest;
+  intent.nextState.scope.closureDigest = closureRecord.digest;
+  intent.nextStateDigest = digestJson(intent.nextState);
+  writeReceiptJson(intentPath, intent);
+
+  const beforeRecovery = durableSnapshot(directory);
+  assert.throws(() => recoverState({ cwd: fixture.cwd }),
+    (error) => error.code === 'RECOVERY_EVIDENCE_INVALID'
+      && /invalid minimal closure authority/u.test(error.message));
+  assert.deepEqual(durableSnapshot(directory), beforeRecovery,
+    'recovery rejects extra decision authority before sidecars, state, events, or completion mutate');
+});
+
+test('interrupted material amendment recovery rejects receipt-consistent semantic closure tampering', async () => {
+  const fixture = await materialDecisionFixture('recovery-semantic-closure-preservation', ['material-alpha']);
+  const state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision,
+    decision: materialScopeDecision(fixture.state, fixture.evidence, 'approve-material-amendment',
+      ['material-alpha'], 'recovery-preserve-semantic-closure') });
+  const exact = materialAmendment(state, fixture.plan, fixture.closure,
+    ['durable-test-change', 'unrelated-existing-shape', 'material-alpha'], 'recovery-semantic-amendment');
+  assert.throws(() => amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...exact,
+    crashStep(step) { if (step === 'after-intent') throw new Error('pause semantic amendment recovery'); } }),
+  /pause semantic amendment recovery/u);
+
+  const directory = changeDirectory(fixture.cwd, state.changeId);
+  const transitionDirectory = join(directory, 'transitions', String(state.revision + 1).padStart(8, '0'));
+  const intentPath = join(transitionDirectory, 'intent.json');
+  const intent = JSON.parse(readFileSync(intentPath, 'utf8'));
+  const closureRecord = intent.authoritativeEvidence.minimalClosureDigest;
+  closureRecord.value.outcome = 'Receipt-consistent tampering rewrites the unrelated outcome.';
+  closureRecord.digest = digestJson(closureRecord.value);
+  intent.evidence.minimalClosureDigest = closureRecord.digest;
+  intent.nextState.scope.closureDigest = closureRecord.digest;
+  intent.nextStateDigest = digestJson(intent.nextState);
+  writeReceiptJson(intentPath, intent);
+
+  const beforeRecovery = durableSnapshot(directory);
+  assert.throws(() => recoverState({ cwd: fixture.cwd }),
+    (error) => error.code === 'RECOVERY_EVIDENCE_INVALID'
+      && /exact decision authority/u.test(error.message));
+  assert.deepEqual(durableSnapshot(directory), beforeRecovery,
+    'recovery rejects semantic closure tampering before any durable mutation');
+});
+
+test('durable replay rejects receipt-consistent duplicate scope decision IDs', async () => {
+  const fixture = await materialDecisionFixture('duplicate-decision-replay', ['material-alpha']);
+  const duplicateId = 'duplicate-replay-id';
+  let state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision,
+    decision: materialScopeDecision(fixture.state, fixture.evidence, 'approve-material-amendment',
+      ['material-alpha'], duplicateId) });
+  const first = materialAmendment(state, fixture.plan, fixture.closure,
+    ['durable-test-change', 'unrelated-existing-shape', 'material-alpha'], 'duplicate-replay-first');
+  state = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...first });
+  const directory = changeDirectory(fixture.cwd, state.changeId);
+  const firstClosure = JSON.parse(readFileSync(join(directory,
+    'scope', 'minimal-closure', '0002.json'), 'utf8'));
+  const firstAmendment = JSON.parse(readFileSync(join(directory,
+    'plan', 'amendments', '0001.json'), 'utf8'));
+  const evidence = materialScopeEvidence(state, first.resultingPlan, firstClosure,
+    ['material-beta'], [digestJson(firstAmendment)], [{
+      id: duplicateId, digest: state.scope.decisionDigests[0],
+      disposition: 'approve-material-amendment', authorizedShape: ['material-alpha'],
+    }]);
+  state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
+    expectedRevision: state.revision });
+  state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: state.revision,
+    decision: materialScopeDecision(state, evidence, 'approve-material-amendment',
+      ['material-beta'], 'unique-before-tamper') });
+
+  const decisionPath = join(directory, 'scope', 'decisions',
+    `${String(state.revision).padStart(8, '0')}-unique-before-tamper.json`);
+  const duplicatedDecision = JSON.parse(readFileSync(decisionPath, 'utf8'));
+  duplicatedDecision.decisionId = duplicateId;
+  const duplicatedDigest = digestJson(duplicatedDecision);
+  writeReceiptJson(decisionPath, duplicatedDecision);
+
+  const duplicatedState = structuredClone(state);
+  duplicatedState.scope.decisionDigests[duplicatedState.scope.decisionDigests.length - 1] = duplicatedDigest;
+  const transitionDirectory = join(directory, 'transitions', String(state.revision).padStart(8, '0'));
+  const intent = JSON.parse(readFileSync(join(transitionDirectory, 'intent.json'), 'utf8'));
+  intent.nextState = duplicatedState;
+  intent.nextStateDigest = digestJson(duplicatedState);
+  intent.evidence.scopeDecisionDigest = duplicatedDigest;
+  intent.authoritativeEvidence.scopeDecisionDigest.value = duplicatedDecision;
+  intent.authoritativeEvidence.scopeDecisionDigest.digest = duplicatedDigest;
+  writeCompleteTransitionFixture(transitionDirectory, intent);
+  writeFileSync(join(directory, 'state.json'), `${JSON.stringify(duplicatedState)}\n`);
+
+  assert.throws(() => validateState({ cwd: fixture.cwd }),
+    (error) => error.code === 'SCOPE_EVIDENCE_INVALID' && /duplicate decision IDs/u.test(error.message));
+});
+
+test('abandon material disposition remains terminal and cannot be amended', async () => {
+  const fixture = await materialDecisionFixture('material-abandon');
+  const state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision,
+    decision: materialScopeDecision(fixture.state, fixture.evidence, 'abandon-replan', [], 'abandon-material') });
+  assert.equal(state.phase, 'abandoned');
+  const directory = changeDirectory(fixture.cwd, state.changeId);
+  const before = durableSnapshot(directory);
+  const amendment = materialAmendment(state, fixture.plan, fixture.closure,
+    ['durable-test-change', 'unrelated-existing-shape']);
+  assert.throws(() => amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...amendment }),
+    (error) => error.code === 'INVALID_PHASE');
+  assert.deepEqual(durableSnapshot(directory), before);
 });
 
 test('verifier evidence remains deterministic and schema-bounded at the upper limit', () => {
@@ -437,29 +1715,10 @@ test('failed result admission reserves truthful rejection and replacement withou
   state = scheduleWave({ cwd, expectedRevision: state.revision });
   state = startTask({ cwd, taskId: packet.taskId, workerId: 'failed-capacity-worker',
     expectedRevision: state.revision });
-  const dependency = (index) => `dependency-${String(index).padStart(3, '0')}-${'x'.repeat(3000)}`;
-  const failedResult = (count) => ({ ...resultFor(packet, 'failed'),
+  const admitted = { ...resultFor(packet, 'failed'),
     validation: packet.requiredValidation.unit.map(({ command }) => ({ command, result: 'failed',
       summary: 'The exact worker validation failed.' })),
-    unexpectedDependencies: Array.from({ length: count }, (_, index) => dependency(index)),
-    summary: 'The immutable task must be rejected and replaced.' });
-  let lower = 0; let upper = 100;
-  while (lower < upper) {
-    const middle = Math.ceil((lower + upper) / 2);
-    try {
-      preflightStateVerifierCapacity({ cwd, pending: { result: failedResult(middle) } }); lower = middle;
-    } catch (error) {
-      assert.equal(error.code, 'VERIFIER_CONTEXT_TOO_LARGE'); upper = middle - 1;
-    }
-  }
-  assert.ok(lower > 0 && lower < 100, 'found the failed-result replacement capacity edge');
-  const rejected = failedResult(lower + 1);
-  const before = durableSnapshot(changeDirectory(cwd, state.changeId));
-  assert.throws(() => acceptResult({ cwd, expectedRevision: state.revision,
-    workerCwd: worker.path, result: rejected }), (error) => error.code === 'VERIFIER_CONTEXT_TOO_LARGE');
-  assert.deepEqual(durableSnapshot(changeDirectory(cwd, state.changeId)), before,
-    'an unfit nonterminal result creates no result receipt, blocker, event, or transition');
-  const admitted = failedResult(lower);
+    unexpectedDependencies: [], summary: 'The immutable task must be rejected and replaced.' };
   const projection = preflightStateVerifierCapacity({ cwd, pending: { result: admitted } }).context;
   const replacementEvidence = projection.evidence.filter(({ summary }) =>
     summary.startsWith('Reserved schema-minimal viable remediation authority for state-task:'));
@@ -574,38 +1833,139 @@ test('oversized amendment projection fails before append-only authority mutates'
   assert.deepEqual(durableSnapshot(root), before, 'oversized amendment creates no sidecar, receipt, event, or transition');
 });
 
+test('ordinary amendment 128 commits and amendment 129 rejects before durable mutation', async () => {
+  assert.equal(nextPlanAmendmentNumber(127), 128);
+  assert.throws(() => nextPlanAmendmentNumber(128),
+    (error) => error.code === 'AMENDMENT_LIMIT_REACHED');
+  for (const invalid of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() => nextPlanAmendmentNumber(invalid),
+      (error) => error.code === 'AMENDMENT_COUNT_INVALID');
+  }
+
+  const { cwd, sha } = repository('amendment count boundary');
+  const planning = await initializeState({ cwd, changeId: 'amendment-count-boundary', mode: 'plan-only',
+    baseBranch: 'main', planningRef: sha, source: descriptor });
+  let resultingPlan = planFor(planning);
+  let state = acceptPlan({ cwd, plan: resultingPlan, expectedRevision: planning.revision });
+  const directory = changeDirectory(cwd, state.changeId);
+  const eventsPath = join(directory, 'events.jsonl');
+  const events = readFileSync(eventsPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  for (let number = 1; number <= 128; number += 1) {
+    const previousState = state;
+    resultingPlan = structuredClone(resultingPlan);
+    resultingPlan.planRevision += 1;
+    resultingPlan.objective = `Exercise bounded amendment ${number}.`;
+    const timestamp = new Date(Date.parse(previousState.updatedAt) + 1).toISOString();
+    const record = {
+      schemaVersion: 1, amendmentId: `bounded-amendment-${number}`, reason: `Exercise amendment ${number}.`,
+      trigger: 'operator-decision', delta: { summary: `Amendment ${number}.` },
+      previousDigest: previousState.plan.effectiveDigest, newDigest: digestJson(resultingPlan),
+      repositorySha: previousState.git.headSha, authorization: 'operator', invalidatedEvidence: [],
+      resultingPlan, createdAt: timestamp,
+    };
+    const closure = { ...testMinimalClosure(previousState, resultingPlan),
+      revision: 2 + previousState.plan.amendmentCount,
+      previousContractDigest: previousState.scope.closureDigest,
+      operatorDecisionDigests: [...previousState.scope.decisionDigests] };
+    const stem = `plan/amendments/${String(number).padStart(4, '0')}`;
+    const closurePath = `scope/minimal-closure/${String(closure.revision).padStart(4, '0')}.json`;
+    const evidence = {
+      amendmentDigest: digestJson(record), planningEvidenceDigest: digestJson([]),
+      minimalClosureDigest: digestJson(closure),
+    };
+    const evidencePaths = {
+      amendmentDigest: `${stem}.json`, planningEvidenceDigest: `${stem}.evidence.json`,
+      minimalClosureDigest: closurePath,
+    };
+    const authoritativeEvidence = {
+      amendmentDigest: { path: evidencePaths.amendmentDigest, label: `plan amendment ${number}`,
+        digest: evidence.amendmentDigest, value: record },
+      planningEvidenceDigest: { path: evidencePaths.planningEvidenceDigest,
+        label: `plan amendment ${number} planning evidence`, digest: evidence.planningEvidenceDigest, value: [] },
+      minimalClosureDigest: { path: closurePath, label: `minimal closure revision ${closure.revision}`,
+        digest: evidence.minimalClosureDigest, value: closure },
+    };
+    state = {
+      ...previousState, phase: 'ready-to-implement', revision: previousState.revision + 1,
+      plan: { ...previousState.plan, revision: resultingPlan.planRevision, effectiveDigest: record.newDigest,
+        amendmentCount: number, sourceCaptureDigest: resultingPlan.source.captureDigest },
+      execution: previousState.execution ? { ...previousState.execution, planDigest: record.newDigest } : previousState.execution,
+      source: { ...previousState.source, classification: 'unchanged' },
+      git: { ...previousState.git, observedAt: timestamp },
+      unresolvedDecisionIds: resultingPlan.decisions.filter(({ status }) => status !== 'resolved').map(({ id }) => id),
+      checklist: resultingPlan.checklistMappings.map(({ id, checked, status, externalChange }) =>
+        ({ id, checked, status, externalChange })),
+      blockedReasons: [], scope: { ...previousState.scope, status: 'assessment-required',
+        closureDigest: evidence.minimalClosureDigest, candidatePlanDigest: null, currentEvidenceDigest: null,
+        currentBoundary: null, currentSubjectSha: null }, updatedAt: timestamp,
+    };
+    state.nextAction = nextActionFor(state);
+    const intent = {
+      schemaVersion: 1, changeId: state.changeId, revision: state.revision, type: 'plan-amended',
+      summary: `Appended plan amendment ${record.amendmentId}`,
+      previousStateDigest: digestJson(previousState), nextStateDigest: digestJson(state), nextState: state,
+      evidence, evidencePaths, authoritativeEvidence, createdAt: timestamp,
+    };
+    writeReceiptJson(join(directory, evidencePaths.amendmentDigest), record);
+    writeReceiptJson(join(directory, evidencePaths.planningEvidenceDigest), []);
+    writeReceiptJson(join(directory, closurePath), closure);
+    writeCompleteTransitionFixture(join(directory, 'transitions', String(state.revision).padStart(8, '0')), intent);
+    events.push({ revision: state.revision, type: intent.type, summary: intent.summary, at: timestamp });
+  }
+  writeFileSync(join(directory, 'state.json'), `${JSON.stringify(state)}\n`);
+  writeFileSync(eventsPath, `${events.map((event) => JSON.stringify(event)).join('\n')}\n`);
+  assert.equal(state.plan.amendmentCount, 128);
+  assert.equal(validateState({ cwd }).valid, true, 'receipt-valid amendment 128 is representable');
+
+  const rejectedPlan = structuredClone(resultingPlan);
+  rejectedPlan.planRevision += 1;
+  rejectedPlan.objective = 'Attempt unrepresentable amendment 129.';
+  const before = durableSnapshot(directory);
+  assert.throws(() => amendPlan({ cwd, expectedRevision: state.revision, resultingPlan: rejectedPlan,
+    amendment: { id: 'bounded-amendment-129', reason: 'Attempt amendment 129.', authorization: 'operator',
+      trigger: 'operator-decision', delta: { summary: 'Amendment 129.' }, invalidatedEvidence: [] } }),
+  (error) => error.code === 'AMENDMENT_LIMIT_REACHED');
+  assert.deepEqual(durableSnapshot(directory), before,
+    'amendment 129 creates no sidecar, receipt, event, state, or interrupted transition intent');
+});
+
 test('two same-base workers integrate by delta, resume intent-only integration, clean up, and finalize', async () => {
   const { cwd, sha } = repository('execution integration');
   const planning = await initializeState({ cwd, changeId: 'execution-change', mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
-  const plan = executionPlanFor(planning); let state = acceptPlan({ cwd, plan, expectedRevision: 0 });
+  const plan = executionPlanFor(planning);
+  plan.tasks.find(({ id }) => id === 'second-task').anticipatedPaths = ['second.txt', 'review'];
+  let state = acceptPlan({ cwd, plan, expectedRevision: 0 });
   const firstPacket = packetFor(state, plan, 'state-task');
-  state = bindTask({ cwd, packet: firstPacket, expectedRevision: 1 });
+  firstPacket.forbiddenPaths = ['second.txt'];
+  state = bindTask({ cwd, packet: firstPacket, expectedRevision: state.revision });
   const firstWorktree = createWorkerFixture(cwd, state, firstPacket);
   const secondPacket = packetFor(state, plan, 'second-task');
-  state = bindTask({ cwd, packet: secondPacket, expectedRevision: 2 });
+  secondPacket.allowedPaths = ['second.txt', 'review/**'];
+  secondPacket.forbiddenPaths = ['review/forbidden.txt'];
+  state = bindTask({ cwd, packet: secondPacket, expectedRevision: state.revision });
   const secondWorktree = createWorkerFixture(cwd, state, secondPacket);
-  state = scheduleWave({ cwd, expectedRevision: 3 });
+  state = scheduleWave({ cwd, expectedRevision: state.revision });
   assert.deepEqual(state.execution.activeWave, ['state-task', 'second-task']);
-  state = startTask({ cwd, taskId: 'state-task', workerId: 'worker-one', expectedRevision: 4 });
-  state = startTask({ cwd, taskId: 'second-task', workerId: 'worker-two', expectedRevision: 5 });
+  state = startTask({ cwd, taskId: 'state-task', workerId: 'worker-one', expectedRevision: state.revision });
+  state = startTask({ cwd, taskId: 'second-task', workerId: 'worker-two', expectedRevision: state.revision });
   writeFileSync(join(firstWorktree.path, 'first.txt'), 'first\n'); git(firstWorktree.path, 'add', 'first.txt'); git(firstWorktree.path, 'commit', '-m', 'test: first worker');
   writeFileSync(join(secondWorktree.path, 'second.txt'), 'second\n'); git(secondWorktree.path, 'add', 'second.txt'); git(secondWorktree.path, 'commit', '-m', 'test: second worker');
   const firstCommit = git(firstWorktree.path, 'rev-parse', 'HEAD'); const secondCommit = git(secondWorktree.path, 'rev-parse', 'HEAD');
-  state = acceptResult({ cwd, result: resultFor(firstPacket, 'implemented', firstCommit, ['first.txt']), workerCwd: firstWorktree.path, expectedRevision: 6 });
-  state = acceptResult({ cwd, result: resultFor(secondPacket, 'implemented', secondCommit, ['second.txt']), workerCwd: secondWorktree.path, expectedRevision: 7 });
+  state = acceptResult({ cwd, result: resultFor(firstPacket, 'implemented', firstCommit, ['first.txt']), workerCwd: firstWorktree.path, expectedRevision: state.revision });
+  state = acceptResult({ cwd, result: resultFor(secondPacket, 'implemented', secondCommit, ['second.txt']), workerCwd: secondWorktree.path, expectedRevision: state.revision });
   git(cwd, 'switch', '-c', 'alternate-central');
-  assert.throws(() => integrateTask({ cwd, taskId: 'state-task', expectedRevision: 8 }), (error) => error.code === 'CENTRAL_GIT_MISMATCH');
+  assert.throws(() => integrateTask({ cwd, taskId: 'state-task', expectedRevision: state.revision }), (error) => error.code === 'CENTRAL_GIT_MISMATCH');
   git(cwd, 'switch', 'main');
-  state = integrateTask({ cwd, taskId: 'state-task', expectedRevision: 8 });
+  state = integrateTask({ cwd, taskId: 'state-task', expectedRevision: state.revision });
   assert.equal(state.execution.tasks.find(({ id }) => id === 'state-task').status, 'integrated');
-  assert.throws(() => integrateTask({ cwd, taskId: 'second-task', expectedRevision: 10,
+  assert.throws(() => integrateTask({ cwd, taskId: 'second-task', expectedRevision: state.revision,
     crashStep(step) { if (step === 'after-complete') throw new Error('intent-only stop'); } }), /intent-only stop/u);
   assert.equal(git(cwd, 'rev-parse', 'HEAD'), state.git.headSha);
   git(cwd, 'branch', '-f', 'alternate-central', 'HEAD');
   git(cwd, 'switch', 'alternate-central');
-  assert.throws(() => reconcileIntegration({ cwd, expectedRevision: 11 }), (error) => error.code === 'CENTRAL_GIT_MISMATCH');
+  assert.throws(() => reconcileIntegration({ cwd, expectedRevision: loadState(cwd).revision }), (error) => error.code === 'CENTRAL_GIT_MISMATCH');
   git(cwd, 'switch', 'main');
-  state = reconcileIntegration({ cwd, expectedRevision: 11 });
+  state = reconcileIntegration({ cwd, expectedRevision: loadState(cwd).revision });
   assert.equal(state.execution.tasks.find(({ id }) => id === 'second-task').status, 'integrated');
   assert.equal(readFileSync(join(cwd, 'first.txt'), 'utf8'), 'first\n');
   assert.equal(readFileSync(join(cwd, 'second.txt'), 'utf8'), 'second\n');
@@ -613,9 +1973,9 @@ test('two same-base workers integrate by delta, resume intent-only integration, 
   removeTaskWorktree({ cwd, changeId: state.changeId, taskId: 'second-task' });
   git(cwd, 'branch', '-f', 'alternate-central', 'HEAD');
   git(cwd, 'switch', 'alternate-central');
-  assert.throws(() => finalizeIntegration({ cwd, expectedRevision: 12 }), (error) => error.code === 'CENTRAL_GIT_MISMATCH');
+  assert.throws(() => finalizeIntegration({ cwd, expectedRevision: state.revision }), (error) => error.code === 'CENTRAL_GIT_MISMATCH');
   git(cwd, 'switch', 'main');
-  state = finalizeIntegration({ cwd, expectedRevision: 12 });
+  state = finalizeIntegration({ cwd, expectedRevision: state.revision });
   assert.equal(state.phase, 'integrated');
   assert.equal(validateState({ cwd }).valid, true);
   git(cwd, 'switch', 'alternate-central');
@@ -659,7 +2019,7 @@ test('two same-base workers integrate by delta, resume intent-only integration, 
   assert.notEqual(integrationEvidence['state-task-integration'].digest, integrationEvidence['second-task-integration'].digest,
     'each task binds its own task-integrated transition receipt');
   assert.match(context.evidence.find(({ kind, id }) => kind === 'packet' && id === 'state-task-ownership').summary,
-    /Allowed paths: first\.txt; forbidden paths: none/u);
+    /Allowed paths: first\.txt; forbidden paths: second\.txt/u);
   assert.match(context.evidence.find(({ kind, id }) => kind === 'packet' && id === 'state-task-validation').summary,
     /Required validation: node --test/u);
   assert.ok(context.evidence.some(({ id, summary }) => id === 'original-plan-scope' && summary.includes('Original scope')));
@@ -680,6 +2040,142 @@ test('two same-base workers integrate by delta, resume intent-only integration, 
   writeFileSync(join(cwd, 'request.md'), '# Request\n\n- [ ] <!-- aerstello:item=durable-state --> Add durable state\n');
   state = await finalizeDevelopment({ cwd, expectedRevision: state.revision });
   assert.equal(state.phase, 'development-ready');
+  assert.equal(validateState({ cwd }).valid, true);
+
+  const changePath = changeDirectory(cwd, state.changeId);
+  const closure = testMinimalClosure(planning, plan);
+  const integratedEvidenceDirectory = join(changePath, 'scope', 'evidence', 'integrated-head');
+  const integratedScopeEvidenceValue = readdirSync(integratedEvidenceDirectory)
+    .filter((name) => name.endsWith('.json'))
+    .map((name) => JSON.parse(readFileSync(join(integratedEvidenceDirectory, name), 'utf8')))
+    .find((value) => digestJson(value) === state.scope.currentEvidenceDigest);
+  const terminalTaskSetValue = state.execution.tasks.map((task) => {
+    const integrationReceipt = readdirSync(join(changePath, 'transitions'))
+      .map((name) => join(changePath, 'transitions', name))
+      .filter((path) => existsSync(join(path, 'complete')))
+      .map((path) => ({
+        intent: JSON.parse(readFileSync(join(path, 'intent.json'), 'utf8')),
+        receipt: JSON.parse(readFileSync(join(path, 'receipt.json'), 'utf8')),
+      }))
+      .find(({ intent }) => intent.type === 'task-integrated'
+        && intent.nextState.execution.tasks.some(({ id, status }) => id === task.id && status === 'integrated'));
+    return {
+      taskId: task.id,
+      binding: task.binding,
+      packetDigest: task.packetDigest,
+      resultDigest: task.resultDigest,
+      provenanceDigest: digestJson(JSON.parse(readFileSync(join(changePath, 'implementation', 'provenance',
+        task.id, `${String(task.binding).padStart(4, '0')}.json`), 'utf8'))),
+      terminalStatus: task.status,
+      integratedCommit: task.integratedCommit,
+      integrationReceiptDigest: digestJson(integrationReceipt.receipt),
+    };
+  });
+  const handoff = buildDevelopmentScopeHandoff({
+    changeId: state.changeId,
+    headSha: state.git.headSha,
+    capturedAt: '2026-08-18T12:30:00.000Z',
+    acceptedPlan: { value: plan, digest: digestJson(plan) },
+    effectivePlan: { value: plan, digest: digestJson(plan) },
+    minimalClosure: { value: closure, digest: digestJson(closure) },
+    amendments: [],
+    decisions: [],
+    terminalTaskSet: { value: terminalTaskSetValue, digest: taskSetDigest(terminalTaskSetValue) },
+    integratedScopeEvidence: {
+      value: integratedScopeEvidenceValue,
+      digest: digestJson(integratedScopeEvidenceValue),
+    },
+  });
+  const activeHandoffAuthority = { value: handoff, digest: scopeAuthorityDigest(handoff) };
+  writeFileSync(join(cwd, 'first.txt'), 'first\nreview remediation\n');
+  writeFileSync(join(cwd, 'second.txt'), 'second\nreview remediation\n');
+  git(cwd, 'add', 'first.txt', 'second.txt');
+  git(cwd, 'commit', '-m', 'test: returned review remediation');
+  const resumedHeadSha = git(cwd, 'rev-parse', 'HEAD');
+  const scopeReturn = {
+    schemaVersion: 1,
+    repository: 'owner/repository',
+    prNumber: 60,
+    authorityDigest: activeHandoffAuthority.digest,
+    journalDigest: `sha256:${'a'.repeat(64)}`,
+    blockerId: 'scope-blocker',
+    decisionId: 'scope-decision',
+    reviewHeadSha: resumedHeadSha,
+    livePrHeadSha: resumedHeadSha,
+    rootCauseId: 'scope-root',
+    findingIds: ['thread:PRRT_scope'],
+    findingFingerprints: ['scope-fingerprint'],
+    assessmentDigest: handoff.integratedHeadAssessment.digest,
+    smallestExpansion: 'Apply only the returned bounded scope change.',
+    narrowAlternative: 'Retain the already accepted development authority.',
+    trimAlternative: 'Remove the returned expansion.',
+    inventory: {
+      paths: ['first.txt', 'second.txt'], dependencies: [], publicSurfaces: [],
+      persistentSurfaces: [],
+      validation: ['node --test .agents/skills/change-development/scripts/state/state.test.mjs'],
+    },
+    priorDecisionIds: [],
+    createdAt: '2026-08-18T12:31:00.000Z',
+  };
+  const beforeForeignReturn = durableSnapshot(changePath);
+  git(cwd, 'switch', '-c', 'nonancestor-return', `${state.git.headSha}^`);
+  writeFileSync(join(cwd, 'first.txt'), 'nonancestor review remediation\n');
+  git(cwd, 'add', 'first.txt');
+  git(cwd, 'commit', '-m', 'test: nonancestor returned remediation');
+  const nonancestorHead = git(cwd, 'rev-parse', 'HEAD');
+  assert.throws(() => resumeScopeReturn({ cwd, expectedRevision: state.revision,
+    activeHandoffAuthority, scopeReturn: { ...scopeReturn,
+      reviewHeadSha: nonancestorHead, livePrHeadSha: nonancestorHead } }),
+  (error) => error.code === 'SCOPE_RETURN_INVALID' && /must descend from the prior development HEAD/u.test(error.message));
+  assert.deepEqual(durableSnapshot(changePath), beforeForeignReturn,
+    'a nonancestor returned HEAD fails before durable mutation');
+  git(cwd, 'switch', 'main');
+  git(cwd, 'switch', '-c', 'forbidden-return', resumedHeadSha);
+  mkdirSync(join(cwd, 'review'));
+  writeFileSync(join(cwd, 'review', 'forbidden.txt'), 'forbidden review remediation\n');
+  git(cwd, 'add', 'review/forbidden.txt');
+  git(cwd, 'commit', '-m', 'test: forbidden returned remediation');
+  const forbiddenHead = git(cwd, 'rev-parse', 'HEAD');
+  assert.throws(() => resumeScopeReturn({ cwd, expectedRevision: state.revision,
+    activeHandoffAuthority, scopeReturn: { ...scopeReturn,
+      reviewHeadSha: forbiddenHead, livePrHeadSha: forbiddenHead,
+      inventory: { ...scopeReturn.inventory,
+        paths: ['first.txt', 'review/forbidden.txt', 'second.txt'] } } }),
+  (error) => error.code === 'SCOPE_RETURN_INVALID' && /forbidden by every matching/u.test(error.message));
+  assert.deepEqual(durableSnapshot(changePath), beforeForeignReturn,
+    'a forbidden returned path fails before durable mutation');
+  git(cwd, 'switch', 'main');
+  git(cwd, 'switch', '-c', 'unowned-return', resumedHeadSha);
+  writeFileSync(join(cwd, 'unowned.txt'), 'unowned review remediation\n');
+  git(cwd, 'add', 'unowned.txt');
+  git(cwd, 'commit', '-m', 'test: unowned returned remediation');
+  const unownedHead = git(cwd, 'rev-parse', 'HEAD');
+  assert.throws(() => resumeScopeReturn({ cwd, expectedRevision: state.revision,
+    activeHandoffAuthority, scopeReturn: { ...scopeReturn,
+      reviewHeadSha: unownedHead, livePrHeadSha: unownedHead,
+      inventory: { ...scopeReturn.inventory, paths: ['first.txt', 'second.txt', 'unowned.txt'] } } }),
+  (error) => error.code === 'SCOPE_RETURN_INVALID' && /changed path is unowned/u.test(error.message));
+  assert.deepEqual(durableSnapshot(changePath), beforeForeignReturn,
+    'an unowned returned path fails before durable mutation');
+  git(cwd, 'switch', 'main');
+  assert.throws(() => resumeScopeReturn({ cwd, expectedRevision: state.revision,
+    activeHandoffAuthority, scopeReturn: { ...scopeReturn, authorityDigest: `sha256:${'b'.repeat(64)}` } }),
+  (error) => error.code === 'SCOPE_RETURN_INVALID');
+  assert.deepEqual(durableSnapshot(changePath), beforeForeignReturn,
+    'foreign same-HEAD return authority cannot advance state, sidecars, transitions, or events');
+  for (const inventory of [
+    { ...scopeReturn.inventory, paths: ['first.txt'] },
+    { ...scopeReturn.inventory, validation: ['node --test unrepresented.test.mjs'] },
+  ]) {
+    assert.throws(() => resumeScopeReturn({ cwd, expectedRevision: state.revision,
+      activeHandoffAuthority, scopeReturn: { ...scopeReturn, inventory } }),
+    (error) => error.code === 'SCOPE_RETURN_INVALID');
+    assert.deepEqual(durableSnapshot(changePath), beforeForeignReturn,
+      'unowned or unrepresented resumed authority fails before durable mutation');
+  }
+  state = resumeScopeReturn({ cwd, expectedRevision: state.revision, activeHandoffAuthority, scopeReturn });
+  assert.equal(state.phase, 'integrated');
+  assert.equal(state.scope.status, 'assessment-required');
   assert.equal(validateState({ cwd }).valid, true);
 });
 
@@ -922,6 +2418,232 @@ test('failed validation is private, immutable, and explicitly replaced at the ne
   assert.equal(state.verification, null);
   assert.deepEqual(durableSnapshot(verificationDirectory), failedValidationEvidence,
     'failed validation plans and results remain byte-for-byte immutable after remediation admission');
+});
+
+test('receipt-backed minor and trim remediation alone may revisit terminal owner paths', async () => {
+  for (const verdict of ['minor-amendment-required', 'trim-required']) {
+    const fixture = await integratedSingleTaskFixture(`scope ${verdict} overlap`);
+    let state = fixture.state;
+    const evidence = integratedScopeEvidenceFor({ cwd: fixture.cwd, changeId: state.changeId });
+    const mapping = evidence.result.coverage[0];
+    evidence.result = verdict === 'minor-amendment-required'
+      ? { ...evidence.result, verdict,
+        coverage: [{ ...mapping, classification: 'necessary-minor-expansion',
+          rationale: 'The adjacent remediation is necessary for the existing criterion.' }],
+        scopeDelta: { description: 'Add the exact adjacent remediation.',
+          sourceCriterionIds: [...mapping.sourceCriterionIds], acceptedCriterionIds: [...mapping.acceptedCriterionIds],
+          invariantIds: [], materialSurfaces: [] } }
+      : { ...evidence.result, verdict,
+        coverage: [{ mechanism: mapping.mechanism, sourceCriterionIds: [], acceptedCriterionIds: [],
+          invariantIds: [], nonGoalIds: [], guidanceIds: [], classification: 'speculative',
+          rationale: 'The exact machinery must be simplified.' }],
+        unnecessaryWork: [mapping.mechanism], smallerSufficientAlternative: 'Use the bounded simplification task.' };
+    evidence.resultDigest = digestJson(evidence.result);
+    state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
+      expectedRevision: state.revision });
+    assert.equal(state.phase, 'blocked');
+
+    const original = JSON.parse(readFileSync(join(changeDirectory(fixture.cwd, state.changeId), 'plan', 'plan.json'), 'utf8'));
+    const resultingPlan = structuredClone(original); resultingPlan.planRevision = 2;
+    const criterionId = `${verdict}-criterion`; const taskId = `${verdict}-task`;
+    resultingPlan.criteria.push({ id: criterionId, description: 'Perform the exact bounded scope remediation.',
+      disposition: 'owned', ownerTaskId: taskId, deferredReason: null });
+    resultingPlan.tasks.push({ ...original.tasks[0], id: taskId, title: 'Apply bounded scope remediation',
+      objective: 'Apply only the receipt-backed adjacent correction.', criterionIds: [criterionId], checklistItemIds: [],
+      dependsOn: ['state-task'], anticipatedPaths: ['first.txt'] });
+    const trigger = digestJson(evidence);
+    const amendment = { id: `${verdict}-amendment`, reason: 'Apply the exact receipt-backed scope verdict.',
+      authorization: 'scope-review', trigger, delta: { addedTaskIds: [taskId] }, invalidatedEvidence: [trigger] };
+
+    const missingIdsBefore = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
+    assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+      amendment: { ...amendment, delta: { summary: 'Omit exact remediation task authority.' } }, resultingPlan }),
+    (error) => error.code === 'INVALID_AMENDMENT');
+    assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), missingIdsBefore,
+      `${verdict} requires explicit addedTaskIds without durable mutation`);
+
+    for (const [label, addedTaskIds] of [
+      ['missing', []],
+      ['duplicate', [taskId, taskId]],
+      ['extra', [taskId, 'state-task']],
+    ]) {
+      const exactSetBefore = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
+      assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+        amendment: { ...amendment, delta: { addedTaskIds } }, resultingPlan }),
+      (error) => error.code === 'INVALID_AMENDMENT', `${verdict} rejects ${label} added-task authority`);
+      assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), exactSetBefore,
+        `${verdict} rejects ${label} added-task authority atomically`);
+    }
+
+    const unownedPlan = structuredClone(resultingPlan);
+    const unownedTaskId = `${verdict}-unowned-task`;
+    unownedPlan.tasks.push({ ...original.tasks[0], id: unownedTaskId, title: 'Attempt unowned remediation',
+      objective: 'Attempt remediation without a genuinely new owned criterion.', criterionIds: [original.criteria[0].id],
+      checklistItemIds: [], dependsOn: ['state-task'], anticipatedPaths: ['unowned.txt'] });
+    const unownedBefore = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
+    assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+      amendment: { ...amendment, delta: { addedTaskIds: [taskId, unownedTaskId] } }, resultingPlan: unownedPlan }),
+    (error) => error.code === 'INVALID_AMENDMENT');
+    assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), unownedBefore,
+      `${verdict} requires every declared new task to own a genuinely new criterion`);
+
+    const unrelatedPlan = structuredClone(resultingPlan);
+    const unrelatedCriterionId = `${verdict}-unrelated-criterion`; const unrelatedTaskId = `${verdict}-unrelated-task`;
+    unrelatedPlan.criteria.push({ id: unrelatedCriterionId, description: 'Attempt unrelated overlapping work.',
+      disposition: 'owned', ownerTaskId: unrelatedTaskId, deferredReason: null });
+    unrelatedPlan.tasks.push({ ...original.tasks[0], id: unrelatedTaskId, title: 'Attempt unrelated overlap',
+      objective: 'This unrelated task must remain blocked.', criterionIds: [unrelatedCriterionId], checklistItemIds: [],
+      dependsOn: ['state-task'], anticipatedPaths: ['first.txt'] });
+    const before = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
+    assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+      amendment, resultingPlan: unrelatedPlan }),
+    (error) => error.code === 'INVALID_AMENDMENT'
+      && error.message.includes('complete set of newly introduced tasks'));
+    assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), before,
+      `${verdict} unrelated overlap is rejected without durable mutation`);
+    const closureDirectory = join(changeDirectory(fixture.cwd, state.changeId), 'scope', 'minimal-closure');
+    const priorClosure = readdirSync(closureDirectory).filter((name) => name.endsWith('.json'))
+      .map((name) => JSON.parse(readFileSync(join(closureDirectory, name), 'utf8')))
+      .find((candidate) => digestJson(candidate) === state.scope.closureDigest);
+    const exactClosure = testMinimalClosure(state, resultingPlan, {
+      revision: priorClosure.revision + 1, previousContractDigest: state.scope.closureDigest,
+      operatorDecisionDigests: [...state.scope.decisionDigests],
+      authorizedShape: verdict === 'trim-required'
+        ? priorClosure.authorizedShape.filter((mechanism) => mechanism !== mapping.mechanism)
+        : [...priorClosure.authorizedShape],
+      unauthorizedExpansion: [...priorClosure.unauthorizedExpansion],
+      deferredFollowups: [...priorClosure.deferredFollowups],
+    });
+    for (const tamperedClosure of [
+      { ...exactClosure, outcome: 'Rewrite an unrelated preserved closure field.' },
+      { ...exactClosure, authorizedShape: [...exactClosure.authorizedShape, 'unrelated-authority'] },
+      { ...exactClosure, unauthorizedExpansion: [...exactClosure.unauthorizedExpansion, 'unrelated-unauthorized'] },
+      { ...exactClosure, deferredFollowups: [...exactClosure.deferredFollowups,
+        { id: 'unrelated-followup', text: 'Unrelated follow-up.' }] },
+    ]) {
+      const closureBefore = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
+      assert.throws(() => amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision,
+        amendment, resultingPlan, minimalClosure: tamperedClosure }),
+      (error) => error.code === 'SCOPE_AMENDMENT_INVALID');
+      assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), closureBefore,
+        `${verdict} preserves unrelated closure semantics atomically`);
+    }
+    const reservedBefore = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
+    assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+      amendment: { ...amendment, delta: { ...amendment.delta, scopeRemediation: { forged: true } } },
+      resultingPlan }),
+    (error) => error.code === 'INVALID_AMENDMENT' && /reserved canonical/u.test(error.message));
+    assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), reservedBefore,
+      `${verdict} rejects caller-supplied scopeRemediation atomically`);
+    state = amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision, amendment, resultingPlan });
+    assert.equal(state.execution.tasks.find(({ id }) => id === taskId).status, 'unbound');
+    assert.equal(state.execution.tasks.find(({ id }) => id === 'state-task').status, 'integrated');
+    const stored = JSON.parse(readFileSync(join(changeDirectory(fixture.cwd, state.changeId),
+      'plan', 'amendments', '0001.json'), 'utf8'));
+    assert.equal(stored.delta.scopeRemediation.verdict, verdict);
+    assert.equal(stored.delta.scopeRemediation.evidenceDigest, trigger);
+    assert.deepEqual(stored.delta.scopeRemediation.unnecessaryWork,
+      verdict === 'trim-required' ? [mapping.mechanism] : []);
+    assert.deepEqual(stored.delta.scopeRemediation.scopeDelta, evidence.result.scopeDelta);
+    assert.equal(stored.delta.scopeRemediation.smallerSufficientAlternative,
+      evidence.result.smallerSufficientAlternative);
+  }
+});
+
+test('interrupted nonmaterial amendment recovery revalidates its canonical projection', async () => {
+  const fixture = await integratedSingleTaskFixture('nonmaterial projection recovery');
+  let state = fixture.state;
+  const evidence = integratedScopeEvidenceFor({ cwd: fixture.cwd, changeId: state.changeId });
+  const mapping = evidence.result.coverage[0];
+  evidence.result = { ...evidence.result, verdict: 'trim-required',
+    coverage: [{ ...mapping, sourceCriterionIds: [], acceptedCriterionIds: [],
+      classification: 'speculative', rationale: 'Remove the exact unnecessary mechanism.' }],
+    unnecessaryWork: [mapping.mechanism],
+    smallerSufficientAlternative: 'Use only the bounded simplification task.' };
+  evidence.resultDigest = digestJson(evidence.result);
+  state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
+    expectedRevision: state.revision });
+  const directory = changeDirectory(fixture.cwd, state.changeId);
+  const original = JSON.parse(readFileSync(join(directory, 'plan', 'plan.json'), 'utf8'));
+  const resultingPlan = structuredClone(original); resultingPlan.planRevision = 2;
+  resultingPlan.criteria.push({ id: 'trim-recovery', description: 'Remove the exact unnecessary mechanism.',
+    disposition: 'owned', ownerTaskId: 'trim-recovery-task', deferredReason: null });
+  resultingPlan.tasks.push({ ...original.tasks[0], id: 'trim-recovery-task', title: 'Apply exact trim',
+    objective: 'Apply only the assessment-bound simplification.', criterionIds: ['trim-recovery'],
+    checklistItemIds: [], dependsOn: ['state-task'], anticipatedPaths: ['first.txt'] });
+  const amendment = { id: 'trim-recovery-amendment', reason: 'Apply the exact trim assessment.',
+    authorization: 'scope-review', trigger: digestJson(evidence),
+    delta: { addedTaskIds: ['trim-recovery-task'] }, invalidatedEvidence: [digestJson(evidence)] };
+  assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+    amendment, resultingPlan,
+    crashStep(step) { if (step === 'after-intent') throw new Error('pause nonmaterial recovery'); } }),
+  /pause nonmaterial recovery/u);
+  const transition = join(directory, 'transitions', String(state.revision + 1).padStart(8, '0'));
+  const intentPath = join(transition, 'intent.json');
+  const intent = JSON.parse(readFileSync(intentPath, 'utf8'));
+  const record = intent.authoritativeEvidence.amendmentDigest;
+  record.value.delta.scopeRemediation.unnecessaryWork = [];
+  record.digest = digestJson(record.value);
+  intent.evidence.amendmentDigest = record.digest;
+  writeReceiptJson(intentPath, intent);
+  const before = durableSnapshot(directory);
+  assert.throws(() => recoverState({ cwd: fixture.cwd }),
+    (error) => error.code === 'RECOVERY_EVIDENCE_INVALID'
+      && /assessment-bound remediation projection/u.test(error.message));
+  assert.deepEqual(durableSnapshot(directory), before,
+    'tampered nonmaterial recovery fails before sidecars, state, events, or completion mutate');
+});
+
+test('scope-blocked amendments require the exact active evidence trigger atomically', async () => {
+  for (const verdict of ['human-decision-required', 'minor-amendment-required', 'trim-required']) {
+    const fixture = await integratedSingleTaskFixture(`scope active trigger ${verdict}`);
+    let state = fixture.state;
+    let evidence;
+    if (verdict === 'human-decision-required') {
+      evidence = materialIntegratedScopeEvidence({ cwd: fixture.cwd, changeId: state.changeId },
+        'active-trigger-material');
+    } else {
+      evidence = integratedScopeEvidenceFor({ cwd: fixture.cwd, changeId: state.changeId });
+      const mapping = evidence.result.coverage[0];
+      evidence.result = verdict === 'minor-amendment-required'
+        ? { ...evidence.result, verdict,
+          coverage: [{ ...mapping, classification: 'necessary-minor-expansion',
+            rationale: 'The exact adjacent mechanism is required.' }],
+          scopeDelta: { description: 'Add the exact adjacent mechanism.',
+            sourceCriterionIds: [...mapping.sourceCriterionIds],
+            acceptedCriterionIds: [...mapping.acceptedCriterionIds], invariantIds: [], materialSurfaces: [] } }
+        : { ...evidence.result, verdict,
+          coverage: [{ ...mapping, sourceCriterionIds: [], acceptedCriterionIds: [],
+            classification: 'speculative', rationale: 'The mechanism is unnecessary.' }],
+          unnecessaryWork: [mapping.mechanism],
+          smallerSufficientAlternative: 'Remove the unnecessary mechanism.' };
+      evidence.resultDigest = digestJson(evidence.result);
+    }
+    state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
+      expectedRevision: state.revision });
+    if (verdict === 'human-decision-required') {
+      state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: state.revision,
+        decision: materialScopeDecision(state, evidence, 'approve-material-amendment',
+          ['active-trigger-material'], 'approve-active-trigger-material') });
+    }
+
+    const directory = changeDirectory(fixture.cwd, state.changeId);
+    const plan = JSON.parse(readFileSync(join(directory, 'plan', 'plan.json'), 'utf8'));
+    const closureName = readdirSync(join(directory, 'scope', 'minimal-closure'))
+      .filter((name) => name.endsWith('.json')).sort().at(-1);
+    const closure = JSON.parse(readFileSync(join(directory, 'scope', 'minimal-closure', closureName), 'utf8'));
+    const authorizedShape = verdict === 'human-decision-required'
+      ? [...closure.authorizedShape, 'active-trigger-material'] : [...closure.authorizedShape];
+    const candidate = materialAmendment(state, plan, closure, authorizedShape,
+      `wrong-active-trigger-${verdict}`);
+    candidate.amendment.trigger = `sha256:${verdict === 'human-decision-required' ? '1' : verdict === 'minor-amendment-required' ? '2' : '3'}`.padEnd(71, '0');
+    const before = durableSnapshot(directory);
+    assert.throws(() => amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...candidate }),
+      (error) => error.code === 'SCOPE_AMENDMENT_INVALID'
+        && /exact current scope evidence/u.test(error.message));
+    assert.deepEqual(durableSnapshot(directory), before,
+      `${verdict} rejects a non-current trigger without changing state, events, transitions, receipts, or plan bytes`);
+  }
 });
 
 test('late source drift preserves terminal authority and invalidates verification proof', async () => {
@@ -1937,7 +3659,7 @@ test('final-verifier finding disposition creates ordinary remediation work witho
   const amendmentPath = join(changeDirectory(fixture.cwd, state.changeId), 'plan', 'amendments', '0001.json');
   writeReceiptJson(amendmentPath, { ...amendmentRecord, previousDigest: `sha256:${'0'.repeat(64)}` });
   assert.throws(() => buildVerifierContext({ cwd: fixture.cwd }),
-    (error) => ['AMENDMENT_CHAIN_INVALID', 'RECOVERY_EVIDENCE_INVALID'].includes(error.code));
+    (error) => ['AMENDMENT_CHAIN_INVALID', 'RECOVERY_EVIDENCE_INVALID', 'SCOPE_EVIDENCE_STALE'].includes(error.code));
   writeReceiptJson(amendmentPath, amendmentRecord);
   const repeatedResult = { ...verifierResult, findings: [finding], summary: 'The remediation finding repeated.',
     headSha: state.verification.headSha, contextDigest: digestJson(repeatedContext),
@@ -2108,11 +3830,11 @@ test('accepted sibling integrates after a failed wave and preserves failure evid
   state = acceptResult({ cwd, workerCwd: thirdWorker.path, expectedRevision: state.revision,
     result: { ...resultFor(third, 'failed'), validation: third.requiredValidation.unit.map(({ command }) => ({
       command, result: 'failed', summary: 'Third validation failed.',
-    })), unexpectedDependencies: ['Third worker validation failed.'], summary: 'Third worker validation failed.' } });
+    })), unexpectedDependencies: [], summary: 'Third worker validation failed.' } });
   state = acceptResult({ cwd, workerCwd: secondWorker.path, expectedRevision: state.revision,
     result: { ...resultFor(second, 'failed'), validation: second.requiredValidation.unit.map(({ command }) => ({
       command, result: 'failed', summary: 'Worker validation failed.',
-    })), unexpectedDependencies: ['Worker validation failed.'], summary: 'Worker validation failed.' } });
+    })), unexpectedDependencies: [], summary: 'Worker validation failed.' } });
   const failureReasons = [...state.blockedReasons];
   assert.deepEqual(failureReasons, [
     'Task second-task reported failed: Worker validation failed.',
@@ -2148,7 +3870,7 @@ test('reverse-order sibling results preserve Git drift until exact restoration a
   state = acceptResult({ cwd, workerCwd: secondWorker.path, expectedRevision: state.revision,
     result: { ...resultFor(second, 'failed'), validation: second.requiredValidation.unit.map(({ command }) => ({
       command, result: 'failed', summary: 'Second validation failed.',
-    })), unexpectedDependencies: ['Second worker validation failed.'], summary: 'Second worker validation failed.' } });
+    })), unexpectedDependencies: [], summary: 'Second worker validation failed.' } });
   assert.deepEqual(state.blockedReasons, [gitReason, 'Task second-task reported failed: Second worker validation failed.']);
   state = acceptResult({ cwd, workerCwd: firstWorker.path, expectedRevision: state.revision,
     result: resultFor(first, 'implemented', firstCommit, ['first.txt']) });
@@ -2213,7 +3935,7 @@ test('failure and rejection blockers replay in plan order and tampering fails cl
   state = acceptResult({ cwd, workerCwd: workers.get(first.taskId).path, expectedRevision: state.revision,
     result: { ...resultFor(first, 'failed'), validation: first.requiredValidation.unit.map(({ command }) => ({
       command, result: 'failed', summary: 'First validation failed.',
-    })), unexpectedDependencies: ['First worker validation failed.'], summary: 'First worker validation failed.' } });
+    })), unexpectedDependencies: [], summary: 'First worker validation failed.' } });
   state = rejectTask({ cwd, taskId: second.taskId, reason: 'Replace the second task.', expectedRevision: state.revision });
   assert.deepEqual(state.blockedReasons, [
     'Task state-task reported failed: First worker validation failed.',
@@ -2256,7 +3978,7 @@ test('task blockers cap Unicode code points while immutable failure and rejectio
   state = acceptResult({ cwd, workerCwd: firstWorker.path, expectedRevision: state.revision,
     result: { ...resultFor(first, 'failed'), validation: first.requiredValidation.unit.map(({ command }) => ({
       command, result: 'failed', summary: 'Validation failed.',
-    })), unexpectedDependencies: ['Unexpected dependency.'], summary: failureSummary } });
+    })), unexpectedDependencies: [], summary: failureSummary } });
   const rejectionReason = `Reject ${'🛠️'.repeat(1200)} complete`;
   state = rejectTask({ cwd, taskId: second.taskId, reason: rejectionReason, expectedRevision: state.revision });
   assert.equal(state.blockedReasons.length, 2);
@@ -2434,32 +4156,32 @@ test('result acceptance rejects wrong worktree identity, branch, dirtiness, and 
   const { cwd, sha } = repository('worker identity rejection');
   const planning = await initializeState({ cwd, changeId: 'worker-identity', mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
   const plan = planFor(planning); let state = acceptPlan({ cwd, plan, expectedRevision: 0 });
-  const packet = packetFor(state, plan, 'state-task'); state = bindTask({ cwd, packet, expectedRevision: 1 });
-  const worker = createWorkerFixture(cwd, state, packet); state = scheduleWave({ cwd, expectedRevision: 2 });
+  const packet = packetFor(state, plan, 'state-task'); state = bindTask({ cwd, packet, expectedRevision: state.revision });
+  const worker = createWorkerFixture(cwd, state, packet); state = scheduleWave({ cwd, expectedRevision: state.revision });
   writeFileSync(join(worker.path, 'prestart-dirty.txt'), 'dirty before start\n');
-  assert.throws(() => startTask({ cwd, taskId: 'state-task', workerId: 'identity-worker', expectedRevision: 3 }),
+  assert.throws(() => startTask({ cwd, taskId: 'state-task', workerId: 'identity-worker', expectedRevision: state.revision }),
     (error) => error.code === 'WORKTREE_GIT_MISMATCH');
   unlinkSync(join(worker.path, 'prestart-dirty.txt'));
-  state = startTask({ cwd, taskId: 'state-task', workerId: 'identity-worker', expectedRevision: 3 });
+  state = startTask({ cwd, taskId: 'state-task', workerId: 'identity-worker', expectedRevision: state.revision });
   const result = resultFor(packet, 'no-change');
   const other = repository('wrong worker repository');
   for (const [label, workerCwd] of [['central path', cwd], ['wrong repository', other.cwd]]) {
-    assert.throws(() => acceptResult({ cwd, result, workerCwd, expectedRevision: 4 }),
+    assert.throws(() => acceptResult({ cwd, result, workerCwd, expectedRevision: state.revision }),
       (error) => error.code === 'WORKTREE_IDENTITY_MISMATCH', label);
   }
   git(worker.path, 'switch', '-c', 'wrong-worker-branch');
-  assert.throws(() => acceptResult({ cwd, result, workerCwd: worker.path, expectedRevision: 4 }),
+  assert.throws(() => acceptResult({ cwd, result, workerCwd: worker.path, expectedRevision: state.revision }),
     (error) => ['WORKTREE_REGISTRATION_MISMATCH', 'WORKTREE_GIT_MISMATCH'].includes(error.code));
   git(worker.path, 'switch', worker.branch);
   writeFileSync(join(worker.path, 'dirty.txt'), 'dirty\n');
-  assert.throws(() => acceptResult({ cwd, result, workerCwd: worker.path, expectedRevision: 4 }),
+  assert.throws(() => acceptResult({ cwd, result, workerCwd: worker.path, expectedRevision: state.revision }),
     (error) => error.code === 'WORKTREE_GIT_MISMATCH');
   unlinkSync(join(worker.path, 'dirty.txt'));
   writeFileSync(join(worker.path, 'head.txt'), 'head\n'); git(worker.path, 'add', 'head.txt'); git(worker.path, 'commit', '-m', 'test: wrong worker head');
-  assert.throws(() => acceptResult({ cwd, result, workerCwd: worker.path, expectedRevision: 4 }),
+  assert.throws(() => acceptResult({ cwd, result, workerCwd: worker.path, expectedRevision: state.revision }),
     (error) => error.code === 'WORKTREE_HEAD_MISMATCH');
   git(worker.path, 'reset', '--hard', sha);
-  assert.equal(loadState(cwd).revision, 4);
+  assert.equal(loadState(cwd).revision, state.revision);
 });
 
 test('bound task reserves direct rejection replacement at its exact capacity edge', async () => {
@@ -2519,21 +4241,22 @@ test('wave scheduling refuses partial worktree creation evidence until recovery 
   const { cwd, sha } = repository('partial worktree scheduling');
   const planning = await initializeState({ cwd, changeId: 'partial-scheduling', mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
   const plan = planFor(planning); let state = acceptPlan({ cwd, plan, expectedRevision: 0 });
-  const packet = packetFor(state, plan, 'state-task'); state = bindTask({ cwd, packet, expectedRevision: 1 });
+  const packet = packetFor(state, plan, 'state-task'); state = bindTask({ cwd, packet, expectedRevision: state.revision });
   createWorkerFixture(cwd, state, packet);
   const manifestPath = join(changeRoot(cwd), 'worktrees', 'manifests', state.changeId, 'state-task.json');
   const receiptPath = manifestPath.replace(/\.json$/u, '.sha256');
   const manifest = readFileSync(manifestPath); const receipt = readFileSync(receiptPath);
   unlinkSync(manifestPath); unlinkSync(receiptPath);
-  assert.throws(() => scheduleWave({ cwd, expectedRevision: 2 }), (error) => error.code === 'RECEIPT_MISSING');
+  assert.throws(() => scheduleWave({ cwd, expectedRevision: state.revision }), (error) => error.code === 'RECEIPT_MISSING');
   writeFileSync(manifestPath, manifest); writeFileSync(receiptPath, receipt);
-  state = scheduleWave({ cwd, expectedRevision: 2 });
+  state = scheduleWave({ cwd, expectedRevision: state.revision });
   assert.deepEqual(state.execution.activeWave, ['state-task']);
 });
 import { archiveDirectory } from '../paths.mjs';
 import { loadRegistry, routeSpecialists } from '../../../aerstello-specialists/scripts/validate-registry.mjs';
 import { digestJson, sourceChecklistBinding } from '../contracts/contracts.mjs';
-import { implementationTaskDigest } from '../implementation/contracts.mjs';
+import { implementationTaskDigest, validateImplementationTask } from '../implementation/contracts.mjs';
+import { taskSetDigest } from '../scope/contracts.mjs';
 import { findingFingerprint } from '../verification/contracts.mjs';
 import { removeTaskWorktree } from '../worktree/worktree.mjs';
 
@@ -2665,6 +4388,16 @@ function packetFor(state, plan, taskId) {
     acceptanceCriteriaIds: task.criterionIds,
     acceptanceCriteria: task.criterionIds.map((id) => ({ id, description: plan.criteria.find((entry) => entry.id === id).description })),
     allowedPaths: [...task.anticipatedPaths], forbiddenPaths: [], dependencies: [...task.dependsOn],
+    ...(state.scope ? { minimalityAuthority: {
+      closureDigest: state.scope.closureDigest,
+      criterionNeed: task.criterionIds.map((criterionId) => ({ criterionId,
+        rationale: 'The exact accepted criterion requires this bounded task.' })),
+      removalCounterfactual: 'Removing the task leaves its accepted criteria without an implementation owner.',
+      forbiddenExpansion: ['Do not expand beyond the exact test packet.'],
+      tripwires: [{ id: 'test-task-paths', category: 'git-paths', inventory: [...task.anticipatedPaths].sort(),
+        observedInventory: [...task.anticipatedPaths].sort() }],
+      discoveryReturn: { status: 'blocked', workerCommit: null, authority: 'unchanged' },
+    } } : {}),
     requiredValidation: { unit: [{ command: 'node --test .agents/skills/change-development/scripts/state/state.test.mjs', reason: 'Exercise state behavior.' }], system: [] },
   };
 }
@@ -2985,6 +4718,11 @@ test('acceptance is immutable, revision guarded, receipt protected, and mode-gat
   const { cwd, sha } = repository('accept state');
   const planning = await initializeState({ cwd, changeId: 'accept-change', mode: 'plan-only', baseBranch: 'main', planningRef: sha, source: descriptor });
   assert.throws(() => acceptPlan({ cwd, plan: scenarioPlanFor(planning), expectedRevision: 9 }), (error) => error.code === 'REVISION_CONFLICT');
+  const beforeScopeGate = durableSnapshot(changeDirectory(cwd, planning.changeId));
+  assert.throws(() => acceptPlanWithScope({ cwd, plan: scenarioPlanFor(planning), expectedRevision: 0 }),
+    (error) => error.code === 'PLAN_SCOPE_INVALID');
+  assert.deepEqual(durableSnapshot(changeDirectory(cwd, planning.changeId)), beforeScopeGate,
+    'missing admission scope authority cannot mutate plan, state, event, or transition evidence');
   const ready = acceptPlan({ cwd, plan: scenarioPlanFor(planning), expectedRevision: 0 });
   assert.equal(ready.phase, 'ready-to-implement');
   assert.equal(ready.execution.planDigest, ready.plan.effectiveDigest);
@@ -3102,22 +4840,47 @@ test('historical accepted Git metadata ownership replays but requires an explici
   const safePlan = planFor(planning);
   const accepted = acceptPlan({ cwd: fixture.cwd, expectedRevision: planning.revision, plan: safePlan });
   const root = changeDirectory(fixture.cwd, accepted.changeId);
-  const historicalPlan = structuredClone(safePlan); historicalPlan.tasks[0].anticipatedPaths = ['.git/config'];
+  const historicalPlan = structuredClone(safePlan); historicalPlan.planRevision = 2;
+  historicalPlan.tasks[0].anticipatedPaths = ['.git/config'];
   const historicalDigest = digestJson(historicalPlan);
   const historicalState = structuredClone(accepted);
-  historicalState.plan.originalDigest = historicalDigest;
+  delete historicalState.scope;
+  historicalState.plan.originalDigest = digestJson(safePlan);
   historicalState.plan.effectiveDigest = historicalDigest;
+  historicalState.plan.revision = 2;
+  historicalState.plan.amendmentCount = 1;
   historicalState.execution.planDigest = historicalDigest;
   historicalState.execution.tasks[0].anticipatedPaths = ['.git/config'];
-  writeReceiptJson(join(root, 'plan', 'plan.json'), historicalPlan);
+  const amendmentRecord = {
+    schemaVersion: 1, amendmentId: 'historical-unsafe-path', reason: 'Historical accepted amendment.',
+    trigger: 'historical-operator-decision', delta: { changed: ['anticipatedPaths'] },
+    previousDigest: historicalState.plan.originalDigest, newDigest: historicalDigest,
+    repositorySha: fixture.sha, authorization: 'operator', invalidatedEvidence: [],
+    resultingPlan: historicalPlan, createdAt: accepted.updatedAt,
+  };
+  const amendmentPath = join(root, 'plan', 'amendments', '0001.json');
+  const amendmentEvidencePath = join(root, 'plan', 'amendments', '0001.evidence.json');
+  writeReceiptJson(amendmentPath, amendmentRecord);
+  writeReceiptJson(amendmentEvidencePath, []);
   const transition = join(root, 'transitions', '00000001');
   const intentPath = join(transition, 'intent.json');
   const intent = JSON.parse(readFileSync(intentPath, 'utf8'));
   intent.nextState = historicalState;
   intent.nextStateDigest = digestJson(historicalState);
-  intent.evidence.planDigest = historicalDigest;
-  intent.authoritativeEvidence.planDigest = {
-    ...intent.authoritativeEvidence.planDigest, digest: historicalDigest, value: historicalPlan,
+  for (const key of ['minimalClosureDigest', 'scopeAdmissionEvidenceDigest']) {
+    delete intent.evidence[key]; delete intent.evidencePaths[key]; delete intent.authoritativeEvidence[key];
+  }
+  intent.evidence.amendmentDigest = digestJson(amendmentRecord);
+  intent.evidence.amendmentPlanningEvidenceDigest = digestJson([]);
+  intent.evidencePaths.amendmentDigest = 'plan/amendments/0001.json';
+  intent.evidencePaths.amendmentPlanningEvidenceDigest = 'plan/amendments/0001.evidence.json';
+  intent.authoritativeEvidence.amendmentDigest = {
+    path: 'plan/amendments/0001.json', label: 'historical plan amendment',
+    digest: intent.evidence.amendmentDigest, value: amendmentRecord,
+  };
+  intent.authoritativeEvidence.amendmentPlanningEvidenceDigest = {
+    path: 'plan/amendments/0001.evidence.json', label: 'historical plan amendment evidence',
+    digest: intent.evidence.amendmentPlanningEvidenceDigest, value: [],
   };
   writeReceiptJson(intentPath, intent);
   const receiptPath = join(transition, 'receipt.json');
@@ -3128,17 +4891,48 @@ test('historical accepted Git metadata ownership replays but requires an explici
   writeReceiptJson(receiptPath, receipt);
   writeFileSync(join(transition, 'complete'), `${digestJson(receipt)}\n`);
   writeFileSync(join(root, 'state.json'), `${JSON.stringify(historicalState)}\n`);
+  rmSync(join(root, 'scope'), { recursive: true });
 
   assert.equal(validateState({ cwd: fixture.cwd }).valid, true);
   const unsafePacket = packetFor(historicalState, historicalPlan, 'state-task');
-  const revision = historicalState.revision;
-  assert.throws(() => bindTask({ cwd: fixture.cwd, packet: unsafePacket, expectedRevision: revision }),
+  assert.throws(() => bindTask({ cwd: fixture.cwd, packet: unsafePacket, expectedRevision: historicalState.revision }),
+    (error) => error instanceof StateError && error.code === 'SCOPE_ADOPTION_REQUIRED');
+  const closure = testMinimalClosure(historicalState, historicalPlan);
+  const foreignDecisionClosure = { ...closure, operatorDecisionDigests: [`sha256:${'f'.repeat(64)}`] };
+  const beforeForeignDecisionAdoption = durableSnapshot(root);
+  assert.throws(() => adoptScope({ cwd: fixture.cwd, expectedRevision: historicalState.revision,
+    minimalClosure: foreignDecisionClosure, scopeEvidence: testScopeEvidence(historicalState,
+      historicalPlan, foreignDecisionClosure, { amendmentDigests: [digestJson(amendmentRecord)] }) }),
+  (error) => error.code === 'SCOPE_ADOPTION_INVALID'
+    && /exact ordered durable scope decision digests/u.test(error.message));
+  assert.deepEqual(durableSnapshot(root), beforeForeignDecisionAdoption,
+    'legacy adoption rejects foreign decision authority without durable mutation');
+  const staleOriginalEvidence = testScopeEvidence(historicalState, historicalPlan, closure, {
+    subjectDigest: historicalState.plan.originalDigest,
+    amendmentDigests: [digestJson(amendmentRecord)],
+  });
+  const beforeAdoption = durableSnapshot(root);
+  assert.throws(() => adoptScope({ cwd: fixture.cwd, expectedRevision: historicalState.revision,
+    minimalClosure: closure, scopeEvidence: staleOriginalEvidence }),
+  (error) => error.code === 'SCOPE_ADOPTION_INVALID');
+  assert.deepEqual(durableSnapshot(root), beforeAdoption,
+    'legacy adoption rejects an assessment of the obsolete original plan without durable mutation');
+  const adopted = adoptScope({ cwd: fixture.cwd, expectedRevision: historicalState.revision, minimalClosure: closure,
+    scopeEvidence: testScopeEvidence(historicalState, historicalPlan, closure, {
+      amendmentDigests: [digestJson(amendmentRecord)],
+    }) });
+  assert.throws(() => bindTask({ cwd: fixture.cwd, packet: unsafePacket, expectedRevision: adopted.revision }),
     (error) => error instanceof StateError && error.code === 'INVALID_TASK_PACKET');
-  assert.equal(loadState(fixture.cwd).revision, revision);
+  assert.equal(loadState(fixture.cwd).revision, adopted.revision);
 
-  const amendedPlan = structuredClone(historicalPlan); amendedPlan.planRevision = 2;
+  const amendedPlan = structuredClone(historicalPlan); amendedPlan.planRevision = 3;
   amendedPlan.tasks[0].anticipatedPaths = ['.gitignore'];
-  const amended = amendPlan({ cwd: fixture.cwd, expectedRevision: revision, resultingPlan: amendedPlan,
+  const replacementClosure = testMinimalClosure(adopted, amendedPlan, {
+    revision: 2, previousContractDigest: adopted.scope.closureDigest,
+    operatorDecisionDigests: [...adopted.scope.decisionDigests],
+  });
+  const amended = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: adopted.revision,
+    resultingPlan: amendedPlan, minimalClosure: replacementClosure,
     amendment: { id: 'replace-git-metadata', reason: 'Replace historical unsafe ownership.', authorization: 'operator',
       trigger: 'operator-decision', delta: { changed: ['anticipatedPaths'] }, invalidatedEvidence: [] } });
   const safePacket = packetFor(amended, amendedPlan, 'state-task');
@@ -3434,6 +5228,17 @@ test('every phase exposes one exact next action', () => {
   ]);
   for (const [phase, pattern] of expected) assert.match(nextActionFor({ ...state, phase }), pattern, phase);
   assert.match(nextActionFor({ ...state, phase: 'ready-to-implement', mode: 'full' }), /implementation capability/u);
+  assert.match(nextActionFor({ ...state, phase: 'ready-to-implement', mode: 'full', schemaVersion: 2,
+    scope: { status: 'assessment-required' } }), /only if binding reports exact changed tripwire IDs/u);
+  assert.match(nextActionFor({ ...state, phase: 'implementing', mode: 'full', schemaVersion: 2,
+    scope: { status: 'assessment-required' }, execution: { activeWave: [], tasks: [{ status: 'bound' }] } }),
+  /Bind or schedule/u);
+  assert.doesNotMatch(nextActionFor({ ...state, phase: 'blocked', scope: { status: 'assessment-required' },
+    blockedReasons: ['Task state-task reported blocked: An ordinary blocker.'],
+    execution: { activeWave: [], tasks: [{ status: 'blocked' }] } }), /assess-scope/u);
+  assert.match(nextActionFor({ ...state, phase: 'blocked', scope: { status: 'assessment-required' },
+    blockedReasons: ['Task state-task reported blocked scope discovery: One unexpected dependency.'],
+    execution: { activeWave: [], tasks: [{ status: 'blocked' }] } }), /receipt-backed worker scope discovery/u);
   assert.match(nextActionFor({ ...state, phase: 'blocked', verification: {
     humanDecisionRequiredFingerprints: ['sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
   } }), /durable human authorization/u);
@@ -3784,6 +5589,72 @@ test('relabeled transition intent cannot claim decision-observation recovery', a
   writeFileSync(intentPath, `${JSON.stringify(intent)}\n`);
   writeFileSync(intentPath.replace(/\.json$/u, '.sha256'), `${digestJson(intent)}\n`);
   assert.throws(() => recoverState({ cwd }), (error) => error.code === 'RECOVERY_EVIDENCE_INVALID');
+});
+
+test('interrupted scope decisions recover at the exact clean integrated HEAD', async () => {
+  const fixture = await integratedSingleTaskFixture('integrated scope decision recovery');
+  assert.notEqual(fixture.state.git.headSha, fixture.state.planningSha,
+    'the fixture exercises an integrated HEAD beyond the immutable Planning SHA');
+  const evidence = materialIntegratedScopeEvidence({ cwd: fixture.cwd });
+  const state = assessScope({ cwd: fixture.cwd, scopeEvidence: evidence,
+    expectedRevision: fixture.state.revision });
+  const decision = materialScopeDecision(state, evidence, 'approve-material-amendment',
+    ['material-integrated-recovery'], 'recover-integrated-scope-decision');
+  assert.throws(() => recordScopeDecision({ cwd: fixture.cwd, expectedRevision: state.revision, decision,
+    crashStep(step) { if (step === 'after-intent') throw new Error('pause integrated scope decision'); } }),
+  /pause integrated scope decision/u);
+
+  const recovered = recoverState({ cwd: fixture.cwd });
+  assert.equal(recovered.recovered, true);
+  assert.equal(recovered.state.git.headSha, fixture.state.git.headSha);
+  assert.equal(recovered.state.scope.decisionDigests.at(-1), digestJson(decision));
+  assert.equal(validateState({ cwd: fixture.cwd }).valid, true);
+});
+
+test('scope decision recovery rejects a receipt-consistent duplicate ID before mutation', async () => {
+  const fixture = await materialDecisionFixture('duplicate-decision-recovery', ['material-alpha']);
+  const duplicateId = 'duplicate-recovery-id';
+  let state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: fixture.state.revision,
+    decision: materialScopeDecision(fixture.state, fixture.evidence, 'approve-material-amendment',
+      ['material-alpha'], duplicateId) });
+  const first = materialAmendment(state, fixture.plan, fixture.closure,
+    ['durable-test-change', 'unrelated-existing-shape', 'material-alpha'], 'duplicate-recovery-first');
+  state = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, ...first });
+  const directory = changeDirectory(fixture.cwd, state.changeId);
+  const firstClosure = JSON.parse(readFileSync(join(directory, 'scope', 'minimal-closure', '0002.json'), 'utf8'));
+  const firstAmendment = JSON.parse(readFileSync(join(directory, 'plan', 'amendments', '0001.json'), 'utf8'));
+  const evidence = materialScopeEvidence(state, first.resultingPlan, firstClosure,
+    ['material-beta'], [digestJson(firstAmendment)], [{
+      id: duplicateId, digest: state.scope.decisionDigests[0],
+      disposition: 'approve-material-amendment', authorizedShape: ['material-alpha'],
+    }]);
+  state = assessScope({ cwd: fixture.cwd, scopeEvidence: evidence, expectedRevision: state.revision });
+  const decision = materialScopeDecision(state, evidence, 'approve-material-amendment',
+    ['material-beta'], 'unique-before-recovery-tamper');
+  assert.throws(() => recordScopeDecision({ cwd: fixture.cwd, expectedRevision: state.revision, decision,
+    crashStep(step) { if (step === 'after-intent') throw new Error('pause duplicate recovery'); } }),
+  /pause duplicate recovery/u);
+
+  const intentPath = join(directory, 'transitions', String(state.revision + 1).padStart(8, '0'), 'intent.json');
+  const intent = JSON.parse(readFileSync(intentPath, 'utf8'));
+  const duplicatedDecision = { ...decision, decisionId: duplicateId };
+  const duplicatedDigest = digestJson(duplicatedDecision);
+  const duplicatedPath = `scope/decisions/${String(duplicatedDecision.revision).padStart(8, '0')}-${duplicateId}.json`;
+  intent.evidence.scopeDecisionDigest = duplicatedDigest;
+  intent.evidencePaths.scopeDecisionDigest = duplicatedPath;
+  intent.authoritativeEvidence.scopeDecisionDigest = {
+    ...intent.authoritativeEvidence.scopeDecisionDigest,
+    path: duplicatedPath, digest: duplicatedDigest, value: duplicatedDecision,
+  };
+  intent.nextState.scope.decisionDigests[intent.nextState.scope.decisionDigests.length - 1] = duplicatedDigest;
+  intent.nextStateDigest = digestJson(intent.nextState);
+  writeReceiptJson(intentPath, intent);
+
+  const beforeRecovery = durableSnapshot(directory);
+  assert.throws(() => recoverState({ cwd: fixture.cwd }),
+    (error) => error.code === 'RECOVERY_EVIDENCE_INVALID' && /already recorded/u.test(error.message));
+  assert.deepEqual(durableSnapshot(directory), beforeRecovery,
+    'duplicate candidate evidence, state, event, receipt, and completion remain absent');
 });
 
 test('retain-plan recovery still requires clean HEAD at the Planning SHA', async () => {

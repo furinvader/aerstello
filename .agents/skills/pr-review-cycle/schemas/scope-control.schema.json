@@ -15,6 +15,7 @@
     "nullableDigest": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
     "idList": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
     "stringList": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } },
+    "authorizedShape": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "\\S" } },
     "source": {
       "type": "object", "additionalProperties": false,
       "required": ["type", "identity", "digest"],
@@ -56,15 +57,25 @@
         "approvedDecisions": {
           "type": "array", "maxItems": 128,
           "items": {
-            "type": "object", "additionalProperties": false, "required": ["id", "digest"],
-            "properties": { "id": { "$ref": "#/$defs/id" }, "digest": { "$ref": "#/$defs/digest" } }
+            "type": "object", "additionalProperties": false, "required": ["id", "digest", "disposition", "authorizedShape"],
+            "properties": {
+              "id": { "$ref": "#/$defs/id" },
+              "digest": { "$ref": "#/$defs/digest" },
+              "disposition": { "enum": ["approve-material-amendment", "split-defer", "reject-use-narrow", "abandon-replan"] },
+              "authorizedShape": { "$ref": "#/$defs/authorizedShape" }
+            },
+            "allOf": [{
+              "if": { "properties": { "disposition": { "const": "approve-material-amendment" } }, "required": ["disposition"] },
+              "then": { "properties": { "authorizedShape": { "type": "array", "minItems": 1 } } },
+              "else": { "properties": { "authorizedShape": { "type": "array", "maxItems": 0 } } }
+            }]
           }
         },
         "deferredFollowUps": {
-          "type": "array", "maxItems": 128,
+          "type": "array", "maxItems": 256,
           "items": {
             "type": "object", "additionalProperties": false, "required": ["id", "reference"],
-            "properties": { "id": { "$ref": "#/$defs/id" }, "reference": { "type": "string", "minLength": 1, "maxLength": 1000 } }
+            "properties": { "id": { "$ref": "#/$defs/id" }, "reference": { "type": "string", "minLength": 1, "maxLength": 4000 } }
           }
         },
         "capturedAt": { "type": "string", "format": "date-time" }

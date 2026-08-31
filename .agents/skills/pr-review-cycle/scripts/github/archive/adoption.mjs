@@ -16,9 +16,48 @@ function sameTaskIds(left, right) {
     && left.every((taskId, index) => taskId === right[index]);
 }
 
+function bootstrapStateProjection(state) {
+  return { tasks: state.tasks, threadResolutionStatus: state.threadResolutionStatus };
+}
+
+function evidenceFingerprint(value) {
+  return createHash('sha256').update(JSON.stringify(canonicalJson(value))).digest('hex');
+}
+
+function currentBootstrapLane(state) {
+  const aggregate = state.threadResolutionStatus;
+  const candidates = [
+    ['threadlessVerification', 'github-threadless'],
+    ['localVerification', 'local'],
+  ].filter(([lane]) => {
+    const proof = aggregate[lane];
+    return proof?.status === 'passed'
+      && proof.headSha === state.currentIntegrationHeadSha
+      && proof.taskIds.length === 1
+      && proof.updatedAt !== null;
+  });
+  if (candidates.length !== 1) return null;
+  const [proofLane, sourceType] = candidates[0];
+  const oppositeLane = proofLane === 'localVerification'
+    ? 'threadlessVerification' : 'localVerification';
+  if (!verificationProofIsPristine(aggregate[oppositeLane])) return null;
+  const [taskId] = aggregate[proofLane].taskIds;
+  const task = state.tasks.find((candidate) => candidate.id === taskId);
+  if (task?.sourceType !== sourceType || task.disposition !== 'actionable'
+      || task.status !== 'completed' || typeof task.integratedCommitSha !== 'string') return null;
+  const remediations = state.tasks.filter((candidate) => (
+    ['local', 'github-threadless'].includes(candidate.sourceType)
+      && candidate.disposition === 'actionable'
+      && ['integrated', 'completed'].includes(candidate.status)
+      && typeof candidate.integratedCommitSha === 'string'
+  ));
+  return remediations.length === 1 && remediations[0].id === taskId
+    ? { proofLane, sourceType, task } : null;
+}
+
 export function archiveBatchAdoptionReady(state, selectedTask, selectedPlan) {
   const aggregate = state.threadResolutionStatus;
-  const verification = aggregate.threadlessVerification;
+  const bootstrap = currentBootstrapLane(state);
   if (selectedTask?.sourceType !== 'github-thread'
       || selectedTask.status !== 'not-applicable'
       || !VERIFIED_NON_ACTIONABLE_DISPOSITIONS.has(selectedTask.disposition)
@@ -28,16 +67,23 @@ export function archiveBatchAdoptionReady(state, selectedTask, selectedPlan) {
         || entry.tasks.length !== 1 || entry.tasks[0].id !== selectedTask.id)
       || aggregate.status !== 'not-run' || aggregate.headSha !== null
       || aggregate.threads.length !== 0 || aggregate.updatedAt !== null
-      || verification.status !== 'passed'
-      || verification.headSha !== state.currentIntegrationHeadSha
-      || verification.taskIds.length === 0 || verification.updatedAt === null) return false;
-  const byId = new Map(state.tasks.map((task) => [task.id, task]));
-  return verification.taskIds.every((taskId) => {
-    const task = byId.get(taskId);
-    return task?.sourceType === 'github-threadless'
-      && task.disposition === 'actionable' && task.status === 'completed'
-      && typeof task.integratedCommitSha === 'string';
-  });
+      || bootstrap === null) return false;
+  return true;
+}
+
+function githubThreadArchiveAttestationCandidate(state, selectedTask, selectedPlan) {
+  const aggregate = state.threadResolutionStatus;
+  return selectedTask?.sourceType === 'github-thread'
+    && selectedTask.status === 'not-applicable'
+    && selectedTask.disposition === 'already-fixed'
+    && selectedTask.integratedCommitSha === null
+    && selectedPlan.length >= 2
+    && selectedPlan.every((entry) => entry.thread.isResolved
+      && entry.tasks.length === 1 && entry.tasks[0].id === selectedTask.id)
+    && aggregate.status === 'not-run' && aggregate.headSha === null
+    && aggregate.threads.length === 0 && aggregate.updatedAt === null
+    && verificationProofIsPristine(aggregate.localVerification)
+    && verificationProofIsPristine(aggregate.threadlessVerification);
 }
 
 export function verificationProofIsPristine(verification) {
@@ -47,35 +93,44 @@ export function verificationProofIsPristine(verification) {
     && verification.updatedAt === null;
 }
 
-export function archiveBootstrapScaffoldIsPristine(state) {
+export function archiveBootstrapScaffoldIsPristine(state, proofLane = 'threadlessVerification') {
   const aggregate = state.threadResolutionStatus;
+  const oppositeLane = proofLane === 'localVerification'
+    ? 'threadlessVerification' : 'localVerification';
   return aggregate.status === 'not-run'
     && aggregate.headSha === null
     && aggregate.threads.length === 0
     && aggregate.updatedAt === null
-    && Object.hasOwn(aggregate, 'localVerification')
-    && verificationProofIsPristine(aggregate.localVerification);
+    && Object.hasOwn(aggregate, oppositeLane)
+    && verificationProofIsPristine(aggregate[oppositeLane]);
 }
 
 export function immutableSourcesDeclareMultiRootArchiveBatch(task, live) {
   return canonicalRootsForTask(task, live).length >= 2;
 }
 
-export function archiveAdoptionVerifierBootstrapPlan(state, live, selectedTaskId, heads) {
+export function archiveAdoptionVerifierBootstrapPlan(
+  state, live, selectedTaskId, heads, verifiedAt = null,
+) {
   const selectedTask = state.tasks.find((task) => task.id === selectedTaskId);
   const terminalThreadTasks = state.tasks.filter((task) => task.sourceType === 'github-thread'
     && task.status === 'not-applicable' && task.disposition === 'already-fixed'
     && task.integratedCommitSha === null);
-  const verification = state.threadResolutionStatus.threadlessVerification;
+  const proofLane = selectedTask?.sourceType === 'local'
+    ? 'localVerification' : 'threadlessVerification';
+  const oppositeLane = proofLane === 'localVerification'
+    ? 'threadlessVerification' : 'localVerification';
+  const verification = state.threadResolutionStatus[proofLane];
   const retry = selectedTask?.disposition === 'actionable'
     && selectedTask.status === 'completed'
     && typeof selectedTask.integratedCommitSha === 'string'
     && verification.status === 'passed'
     && verification.headSha === state.currentIntegrationHeadSha
     && sameTaskIds([...verification.taskIds].sort(), [selectedTask.id])
-    && verification.updatedAt !== null;
-  const potentialBootstrap = selectedTask?.sourceType === 'github-threadless'
-    && archiveBootstrapScaffoldIsPristine(state)
+    && verification.updatedAt !== null
+    && verificationProofIsPristine(state.threadResolutionStatus[oppositeLane]);
+  const potentialBootstrap = ['github-threadless', 'local'].includes(selectedTask?.sourceType)
+    && archiveBootstrapScaffoldIsPristine(state, proofLane)
     && terminalThreadTasks.length > 0
     && (selectedTask.status !== 'completed' || (retry && terminalThreadTasks.some(
       (task) => immutableSourcesDeclareMultiRootArchiveBatch(task, live),
@@ -93,7 +148,7 @@ export function archiveAdoptionVerifierBootstrapPlan(state, live, selectedTaskId
     );
   }
 
-  const eligibleRemediations = state.tasks.filter((task) => task.sourceType === 'github-threadless'
+  const eligibleRemediations = state.tasks.filter((task) => ['github-threadless', 'local'].includes(task.sourceType)
     && task.disposition === 'actionable' && task.status === 'integrated'
     && typeof task.integratedCommitSha === 'string');
   if ((pending && (eligibleRemediations.length !== 1 || eligibleRemediations[0].id !== selectedTask.id))
@@ -149,7 +204,7 @@ export function archiveAdoptionVerifierBootstrapPlan(state, live, selectedTaskId
       ? { ...task, status: 'completed' } : task),
     threadResolutionStatus: {
       ...state.threadResolutionStatus,
-      threadlessVerification: {
+      [proofLane]: {
         status: 'passed',
         headSha: state.currentIntegrationHeadSha,
         taskIds: [selectedTask.id],
@@ -164,12 +219,13 @@ export function archiveAdoptionVerifierBootstrapPlan(state, live, selectedTaskId
     );
   }
 
-  return {
+  const bootstrapPlan = {
     mode: pending ? 'pending' : 'retry',
     stateRevision: state.revision,
     selectedTaskId: selectedTask.id,
     selectedIntegratedCommitSha: selectedTask.integratedCommitSha,
     archiveTaskId: archiveTask.id,
+    proofLane,
     heads: {
       durable: state.currentIntegrationHeadSha,
       local: heads.localHeadSha,
@@ -183,6 +239,40 @@ export function archiveAdoptionVerifierBootstrapPlan(state, live, selectedTaskId
       isResolved: entry.thread.isResolved,
       taskId: entry.tasks[0].id,
     })),
+  };
+  if (verifiedAt === null || bootstrapPlan.mode !== 'pending'
+      || bootstrapPlan.proofLane !== 'localVerification') return bootstrapPlan;
+  const threadResolutionStatus = {
+    ...state.threadResolutionStatus,
+    localVerification: {
+      status: 'passed', headSha: state.currentIntegrationHeadSha,
+      taskIds: [bootstrapPlan.selectedTaskId], updatedAt: verifiedAt,
+    },
+  };
+  const nextState = {
+    ...state,
+    tasks: state.tasks.map((task) => task.id === bootstrapPlan.selectedTaskId
+      ? { ...task, status: 'completed' } : task),
+    threadResolutionStatus,
+  };
+  return {
+    ...bootstrapPlan,
+    completion: {
+      envelope: {
+      schemaVersion: 1,
+      taskId: bootstrapPlan.selectedTaskId,
+      integratedCommitSha: bootstrapPlan.selectedIntegratedCommitSha,
+      headSha: state.currentIntegrationHeadSha,
+      proofLane: 'localVerification',
+      archiveTaskId: bootstrapPlan.archiveTaskId,
+      roots: structuredClone(bootstrapPlan.roots).sort(
+        (left, right) => left.threadNodeId.localeCompare(right.threadNodeId),
+      ),
+      priorStateFingerprint: evidenceFingerprint(bootstrapStateProjection(state)),
+      nextStateFingerprint: evidenceFingerprint(bootstrapStateProjection(nextState)),
+      },
+      threadResolutionStatus,
+    },
   };
 }
 
@@ -244,19 +334,47 @@ export function archiveImportCompletionEnvelope(selectedTask, proof, adoption) {
   };
 }
 
+function githubThreadArchiveImportCompletionEnvelope(
+  state, selectedTask, proof, adoption, attestation,
+) {
+  const ordinary = archiveImportCompletionEnvelope(selectedTask, proof, adoption);
+  const nextState = {
+    ...state,
+    tasks: state.tasks.map((task) => task.id === selectedTask.id
+      ? { ...task, status: 'completed' } : task),
+    threadResolutionStatus: proof,
+  };
+  return {
+    ...ordinary,
+    schemaVersion: 2,
+    attestation: {
+      ...attestation,
+      priorStateFingerprint: evidenceFingerprint(bootstrapStateProjection(state)),
+      nextStateFingerprint: evidenceFingerprint(bootstrapStateProjection(nextState)),
+    },
+  };
+}
+
 export async function adoptArchiveBatch({
   state, live, taskId, selectedTask, selectedPlan, archiveStore, git, clock,
   readLiveSnapshot, assertMutationReady, assertCurrent,
-  checkpointArchiveTaskCompletion, checkpointTaskCompletion,
+  checkpointArchiveTaskCompletion, checkpointTaskCompletion, readGitHubThreadAttestation,
 }) {
   const preflightAdoption = await prepareArchiveBatchAdoption({
     state, live, selectedTask, selectedPlan, archiveStore, git,
   });
+  const preflightAttestation = readGitHubThreadAttestation === undefined ? null
+    : await readGitHubThreadAttestation(state, live, selectedTask, selectedPlan);
   const finalLineage = await selectArchiveForBatch(state, selectedTask, selectedPlan, archiveStore);
   const finalLive = await readLiveSnapshot(state);
   await assertMutationReady({ state, git }, finalLive);
   const finalPlan = buildCanonicalRootPlan(state, finalLive, taskId);
-  if (!archiveBatchAdoptionReady(state, finalPlan.selected, finalPlan.selectedPlan)) {
+  const finalRouteReady = preflightAttestation === null
+    ? archiveBatchAdoptionReady(state, finalPlan.selected, finalPlan.selectedPlan)
+    : githubThreadArchiveAttestationCandidate(
+      state, finalPlan.selected, finalPlan.selectedPlan,
+    );
+  if (!finalRouteReady) {
     throw new GitHubWorkflowError('Archive adoption prerequisites changed after preflight', 'THREAD_PROOF_STALE');
   }
   const finalAdoption = validateArchiveBatchLineage(
@@ -282,15 +400,40 @@ export async function adoptArchiveBatch({
   if (!isDeepStrictEqual(preflightAdoption, finalAdoption)) {
     throw new GitHubWorkflowError('Archive or live resolved-root evidence changed after preflight', 'THREAD_PROOF_STALE');
   }
+  let finalAttestation = null;
+  if (preflightAttestation !== null) {
+    finalAttestation = await readGitHubThreadAttestation(
+      state, finalLive, finalPlan.selected, finalPlan.selectedPlan,
+    );
+    if (finalAttestation === null || !isDeepStrictEqual(preflightAttestation, finalAttestation)) {
+      throw new GitHubWorkflowError(
+        'GitHub-thread archive attestation changed after preflight',
+        'THREAD_PROOF_STALE',
+      );
+    }
+    for (const remediation of finalAttestation.remediations) {
+      if (!(await git.isAncestor(
+        remediation.integratedCommitSha, state.currentIntegrationHeadSha, state.integrationWorktree,
+      ))) {
+        throw new GitHubWorkflowError(
+          `Attested remediation ${remediation.taskId} is not an integration ancestor`,
+          'MUTATION_NOT_READY',
+        );
+      }
+    }
+  }
+  const completedAt = clock.now();
   const proof = buildThreadProof(
-    state, finalLive, archiveAdoptionEvidenceMap(finalAdoption), clock.now(),
+    state, finalLive, archiveAdoptionEvidenceMap(finalAdoption), completedAt,
   );
   await assertCurrent(state);
   let active;
   if (finalAdoption.mode === 'aggregate') {
-    const archiveImportEnvelope = archiveImportCompletionEnvelope(
-      finalPlan.selected, proof, finalAdoption,
-    );
+    const archiveImportEnvelope = finalAttestation === null
+      ? archiveImportCompletionEnvelope(finalPlan.selected, proof, finalAdoption)
+      : githubThreadArchiveImportCompletionEnvelope(
+        state, finalPlan.selected, proof, finalAdoption, finalAttestation,
+      );
     active = await checkpointArchiveTaskCompletion({
       prNumber: state.prNumber,
       expectedRevision: state.revision,

@@ -633,6 +633,7 @@ function fakeState(initial) {
             ? 'unrelated-follow-up' : 'within-scope-defect',
           reviewHeadSha: current.currentIntegrationHeadSha,
           assessment: {
+            digest: `sha256:${'a'.repeat(64)}`,
             packet: { minimalClosure: { statement: 'Keep the fixture within its accepted boundary.' } },
             result: { narrowAlternative: 'Keep only the selected root.' },
           },
@@ -787,6 +788,27 @@ function fakeState(initial) {
       return structuredClone(current);
     },
     async checkpointArchiveTaskCompletion(input) {
+      if (input.archiveImportEnvelope?.schemaVersion === 2
+          && current.tasks.find((task) => task.id === input.archiveImportEnvelope.taskId)?.status === 'completed'
+          && JSON.stringify(current.threadResolutionStatus) === JSON.stringify(input.threadResolutionStatus)) {
+        return structuredClone(current);
+      }
+      if (input.verifierBootstrapEnvelope !== undefined) {
+        if (input.expectedRevision !== current.revision) {
+          const error = new Error('State revision changed during archive verifier bootstrap');
+          error.code = 'STATE_REVISION_CONFLICT';
+          throw error;
+        }
+        calls.push({ name: 'checkpointArchiveTaskCompletion', input });
+        current = {
+          ...current,
+          revision: current.revision + 1,
+          tasks: current.tasks.map((task) => task.id === input.verifierBootstrapEnvelope.taskId
+            ? { ...task, status: 'completed' } : task),
+          threadResolutionStatus: structuredClone(input.threadResolutionStatus),
+        };
+        return structuredClone(current);
+      }
       const callIndex = calls.length;
       const next = await this.checkpointTaskCompletion(input);
       calls[callIndex] = { ...calls[callIndex], name: 'checkpointArchiveTaskCompletion' };

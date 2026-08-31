@@ -398,6 +398,38 @@ test('guarded verifier completion selects only unique integrated local task IDs'
   }
 });
 
+test('pristine local bootstrap completion requires the archive-only internal exception', () => {
+  const cwd = repo();
+  const state = init(cwd);
+  const head = state.currentIntegrationHeadSha;
+  const local = task(head, {
+    id: 'archive-local', status: 'integrated', sourceType: 'local',
+    sourceIds: ['orchestrator:integration-verifier'],
+  });
+  const proof = {
+    ...state.threadResolutionStatus,
+    localVerification: {
+      status: 'passed', headSha: head, taskIds: [local.id], updatedAt: AT,
+    },
+  };
+  assert.throws(() => completeIntegratedTasks(
+    { ...state, tasks: [local] },
+    { threadResolutionStatus: proof, verifiedLocalTaskIds: [local.id] },
+  ), { code: 'INVALID_TASK_COMPLETION' });
+  const completed = completeIntegratedTasks(
+    { ...state, tasks: [local] },
+    {
+      threadResolutionStatus: proof,
+      verifiedLocalTaskIds: [local.id],
+      archiveVerifierBootstrapTaskId: local.id,
+    },
+  );
+  assert.equal(completed.tasks[0].status, 'completed');
+  assert.deepEqual(completed.threadResolutionStatus.threadlessVerification,
+    state.threadResolutionStatus.threadlessVerification);
+  assert.deepEqual(completed.threadResolutionStatus.localVerification, proof.localVerification);
+});
+
 test('completion requires every exact source root to have disposition-matched replied resolved proof', () => {
   const cwd = repo();
   const state = init(cwd);

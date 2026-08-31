@@ -5,6 +5,8 @@ import { test } from 'node:test';
 
 import { loadRegistry, routeSpecialists } from '../../../aerstello-specialists/scripts/validate-registry.mjs';
 import {
+  SCOPE_TRIPWIRE_CATEGORIES,
+  evaluateScopeTripwires,
   implementationContractPaths,
   implementationTaskDigest,
   parseImplementationValidationCommand,
@@ -91,6 +93,36 @@ function result(task = packet(), overrides = {}) {
   };
 }
 
+function minimalityAuthority(task = packet()) {
+  return {
+    closureDigest: `sha256:${'f'.repeat(64)}`,
+    criterionNeed: task.acceptanceCriteriaIds.map((criterionId) => ({
+      criterionId, rationale: `Removing this task leaves ${criterionId} unsatisfied.`,
+    })),
+    removalCounterfactual: 'Removing the packet leaves its exact criteria without implementation or proof.',
+    forbiddenExpansion: ['Do not change product behavior or durable lifecycle state.'],
+    tripwires: SCOPE_TRIPWIRE_CATEGORIES.map((category, index) => ({
+      id: `scope-${String(index).padStart(2, '0')}-${category}`,
+      category,
+      inventory: [`${category}-baseline`],
+      observedInventory: [`${category}-baseline`],
+    })),
+    discoveryReturn: { status: 'blocked', workerCommit: null, authority: 'unchanged' },
+  };
+}
+
+function discovery(task) {
+  const tripwireId = task.minimalityAuthority.tripwires[0].id;
+  return {
+    schemaVersion: 1,
+    summary: 'An unowned lifecycle path is required.',
+    evidence: [{ kind: 'state-path', identity: '.agents/skills/change-development/scripts/state/state.mjs',
+      detail: 'The lifecycle must consume the new contract before the behavior can be complete.' }],
+    triggeredTripwireIds: [tripwireId],
+    requestedAuthority: [{ field: 'paths', values: ['.agents/skills/change-development/scripts/state/state.mjs'] }],
+  };
+}
+
 test('both closed schemas compile independently in strict Draft 2020-12 mode', () => {
   const ajv = new Ajv2020({ allErrors: true, strict: true });
   addFormats(ajv);
@@ -126,6 +158,46 @@ test('valid packet has a canonical digest that binds every packet field', () => 
   };
   assert.deepEqual(validateImplementationTask(planned), []);
   assert.notEqual(implementationTaskDigest(planned), implementationTaskDigest(value));
+});
+
+test('minimality authority binds exact criterion need, closure, removal, forbidden expansion, and discovery return', () => {
+  const legacy = packet();
+  assert.deepEqual(validateImplementationTaskStructure(legacy), [], 'historical packets remain readable');
+  const governed = packet(); governed.minimalityAuthority = minimalityAuthority(governed);
+  assert.deepEqual(validateImplementationTask(governed), []);
+  assert.notEqual(implementationTaskDigest(governed), implementationTaskDigest(legacy));
+
+  const wrongCriterion = structuredClone(governed);
+  wrongCriterion.minimalityAuthority.criterionNeed[0].criterionId = 'different-criterion';
+  assert.match(validateImplementationTask(wrongCriterion).join('\n'), /criterionNeed IDs must exactly match/u);
+  const duplicateCategory = structuredClone(governed);
+  duplicateCategory.minimalityAuthority.tripwires[1].category = duplicateCategory.minimalityAuthority.tripwires[0].category;
+  assert.match(validateImplementationTask(duplicateCategory).join('\n'), /must not repeat a category/u);
+  const unordered = structuredClone(governed);
+  unordered.minimalityAuthority.tripwires[0].inventory = ['second', 'first'];
+  assert.match(validateImplementationTask(unordered).join('\n'), /sorted unique string inventory/u);
+  const unorderedObservation = structuredClone(governed);
+  unorderedObservation.minimalityAuthority.tripwires[0].observedInventory = ['second', 'first'];
+  assert.match(validateImplementationTask(unorderedObservation).join('\n'), /observedInventory must be a sorted unique/u);
+});
+
+test('every bounded inventory category is a verdict-neutral exact-change tripwire', () => {
+  const governed = packet(); governed.minimalityAuthority = minimalityAuthority(governed);
+  const unchanged = Object.fromEntries(governed.minimalityAuthority.tripwires
+    .map(({ id, inventory }) => [id, [...inventory]]));
+  assert.deepEqual(evaluateScopeTripwires(governed, unchanged), []);
+  assert.deepEqual(evaluateScopeTripwires(governed), [], 'packet-bound observations are recovery-safe');
+  const changed = Object.fromEntries(governed.minimalityAuthority.tripwires
+    .map(({ id, category }) => [id, [`${category}-observed`]]));
+  const triggers = evaluateScopeTripwires(governed, changed);
+  assert.deepEqual(triggers.map(({ category }) => category), SCOPE_TRIPWIRE_CATEGORIES);
+  assert.ok(triggers.every((trigger) => !Object.hasOwn(trigger, 'verdict')),
+    'tripwires request assessment without selecting a verdict');
+  assert.throws(() => evaluateScopeTripwires(governed, { ...unchanged, unknown: [] }), /exactly match tripwire IDs/u);
+  const historical = structuredClone(governed);
+  for (const tripwire of historical.minimalityAuthority.tripwires) delete tripwire.observedInventory;
+  assert.deepEqual(validateImplementationTaskStructure(historical), [], 'historical packets remain structurally readable');
+  assert.throws(() => evaluateScopeTripwires(historical), /new task binding requires packet-bound observed/u);
 });
 
 test('immutable packet digest and replay use structural authority while new binding uses the supplied live registry', () => {
@@ -263,7 +335,7 @@ test('implemented, blocked, failed, and no-change outcomes are explicit and raw 
   for (const status of ['blocked', 'failed']) {
     assert.deepEqual(validateImplementationResult(result(task, {
       status, workerCommit: null, changedPaths: [], validation: [],
-      unexpectedDependencies: status === 'blocked' ? ['An unplanned producer is required.'] : [],
+      unexpectedDependencies: [],
     })), [], status);
   }
   assert.deepEqual(validateImplementationResult(result(task, {
@@ -288,6 +360,85 @@ test('implemented, blocked, failed, and no-change outcomes are explicit and raw 
   const raw = result(task); raw.stackTrace = 'full failure details';
   const errors = validateImplementationResult(raw).join('\n');
   assert.match(errors, /stackTrace is not allowed/u);
+});
+
+test('structured scope discovery stops without a commit and cannot grant packet authority', () => {
+  const governed = packet(); governed.minimalityAuthority = minimalityAuthority(governed);
+  const scopeDiscovery = discovery(governed);
+  const blocked = result(governed, {
+    status: 'blocked', workerCommit: null, changedPaths: [],
+    validation: governed.requiredValidation.unit.map(({ command }) => ({
+      command, result: 'skipped', summary: 'Unexpected scope stopped implementation before validation.',
+    })),
+    unexpectedDependencies: [scopeDiscovery.summary], scopeDiscovery,
+  });
+  assert.deepEqual(validateImplementationResultAgainstTask(governed, blocked, []), []);
+
+  const emptyTripwires = structuredClone(blocked);
+  emptyTripwires.scopeDiscovery.triggeredTripwireIds = [];
+  assert.match(validateImplementationResult(emptyTripwires).join('\n'), /must NOT have fewer than 1 items/u,
+    'the result schema rejects a structured discovery without a triggered tripwire');
+  assert.match(validateImplementationResultAgainstTask(governed, emptyTripwires, []).join('\n'),
+    /must NOT have fewer than 1 items/u,
+    'task-aware validation rejects a structured discovery without a triggered tripwire');
+
+  const multipleBoundTripwires = structuredClone(blocked);
+  multipleBoundTripwires.scopeDiscovery.triggeredTripwireIds = governed.minimalityAuthority.tripwires
+    .slice(0, 2).map(({ id }) => id);
+  assert.deepEqual(validateImplementationResultAgainstTask(governed, multipleBoundTripwires, []), [],
+    'one or more unique packet-bound triggered tripwires remain valid');
+
+  const legacy = packet();
+  const historical = result(legacy, {
+    status: 'blocked', workerCommit: null, changedPaths: [],
+    validation: legacy.requiredValidation.unit.map(({ command }) => ({ command, result: 'skipped',
+      summary: 'Historical unexpected dependency evidence predates structured scope discovery.' })),
+    unexpectedDependencies: ['An unowned lifecycle path is required.'],
+  });
+  assert.deepEqual(validateImplementationResult(historical), [],
+    'historical unstructured unexpected-dependency results remain readable');
+  assert.deepEqual(validateImplementationResultAgainstTask(legacy, historical, []), [],
+    'historical packets do not retroactively acquire structured discovery governance');
+
+  const committed = result(governed, { scopeDiscovery, unexpectedDependencies: [scopeDiscovery.summary] });
+  assert.match(validateImplementationResult(committed).join('\n'), /must be equal to constant|blocked/u);
+  const unstructured = result(governed, {
+    status: 'blocked', workerCommit: null, changedPaths: [],
+    validation: governed.requiredValidation.unit.map(({ command }) => ({ command, result: 'skipped',
+      summary: 'The ordinary blocker occurred before validation.' })),
+    unexpectedDependencies: ['An unowned lifecycle path is required.'],
+  });
+  assert.match(validateImplementationResultAgainstTask(governed, unstructured, []).join('\n'),
+    /requires structured scopeDiscovery/u,
+    'an unexpected dependency cannot bypass structured discovery governance');
+  const failed = { ...unstructured, status: 'failed' };
+  assert.match(validateImplementationResultAgainstTask(governed, failed, []).join('\n'),
+    /requires structured scopeDiscovery/u,
+    'a failed result cannot bypass structured discovery governance');
+  const ordinaryBlocked = { ...unstructured, unexpectedDependencies: [] };
+  assert.deepEqual(validateImplementationResultAgainstTask(governed, ordinaryBlocked, []), [],
+    'an ordinary blocker without an unexpected dependency remains distinct from scope discovery');
+
+  const unboundTripwire = structuredClone(blocked);
+  unboundTripwire.scopeDiscovery.triggeredTripwireIds = ['not-bound'];
+  assert.match(validateImplementationResultAgainstTask(governed, unboundTripwire, []).join('\n'), /unbound tripwire/u);
+  for (const [field, value, pattern] of [
+    ['criteria', governed.acceptanceCriteriaIds[0], /criterion is already authorized/u],
+    ['dependencies', 'existing-dependency', /dependency is already authorized/u],
+    ['validation', governed.requiredValidation.unit[0].command, /validation is already authorized/u],
+    ['paths', '.agents/skills/change-development/scripts/implementation/contracts.mjs', /path is already authorized/u],
+  ]) {
+    const current = structuredClone(blocked);
+    if (field === 'dependencies') governed.dependencies.push(value);
+    current.scopeDiscovery.requestedAuthority = [{ field, values: [value] }];
+    assert.match(validateImplementationResultAgainstTask(governed, current, []).join('\n'), pattern, field);
+    if (field === 'dependencies') governed.dependencies.pop();
+  }
+  const legacyDiscovery = result(legacy, {
+    status: 'blocked', workerCommit: null, changedPaths: [], validation: [],
+    unexpectedDependencies: [scopeDiscovery.summary], scopeDiscovery,
+  });
+  assert.match(validateImplementationResultAgainstTask(legacy, legacyDiscovery, []).join('\n'), /packet-bound minimalityAuthority/u);
 });
 
 test('planned E2E selectors require implementation while blocked and failed remain valid', () => {
@@ -318,7 +469,7 @@ test('planned E2E selectors require implementation while blocked and failed rema
   for (const status of ['blocked', 'failed']) {
     const failClosed = result(planned, {
       status, workerCommit: null, changedPaths: [], validation,
-      unexpectedDependencies: ['The planned selector could not be realized.'],
+      unexpectedDependencies: [],
     });
     assert.deepEqual(validateImplementationResultAgainstTask(planned, failClosed, []), [], status);
   }

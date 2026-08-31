@@ -5,6 +5,8 @@ import { test } from 'node:test';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 
+import { buildDevelopmentScopeHandoff } from '../../../change-development/scripts/handoff/contracts.mjs';
+import { scopeContractDigest } from '../../../change-development/scripts/scope/contracts.mjs';
 import { sha256CanonicalContractJson } from './contract-identities.mjs';
 let contract;
 
@@ -98,6 +100,22 @@ function bindAssessmentAuthority(pair, authorityValue, amendmentDigests = author
   return pair;
 }
 
+function bindAssessmentDecisions(pair, approvedDecisions) {
+  if (approvedDecisions.length === 0) {
+    delete pair.packet.acceptedScope.authorityDecisions;
+    delete pair.packet.binding.decisionDigests;
+    delete pair.result.binding.decisionDigests;
+  } else {
+    pair.packet.acceptedScope.authorityDecisions = approvedDecisions.map((entry) =>
+      structuredClone(entry));
+    const decisionDigests = approvedDecisions.map(({ digest }) => digest);
+    pair.packet.binding.decisionDigests = [...decisionDigests];
+    pair.result.binding.decisionDigests = [...decisionDigests];
+  }
+  pair.digest = `sha256:${sha256CanonicalContractJson({ packet: pair.packet, result: pair.result })}`;
+  return pair;
+}
+
 function authority(overrides = {}) {
   return {
     schemaVersion: 1,
@@ -108,10 +126,66 @@ function authority(overrides = {}) {
     minimalClosure: { statement: 'A bounded scope gate is sufficient.', digest: OTHER_DIGEST },
     handoffHeadSha: HEAD,
     integratedHeadAssessment: assessmentPair(),
-    approvedDecisions: [{ id: 'initial-scope', digest: DIGEST }],
+    approvedDecisions: [],
     deferredFollowUps: [{ id: 'delivery-linkage', reference: 'furinvader/aerstello#26' }],
     capturedAt: AT,
     ...overrides,
+  };
+}
+
+function developmentReceipt(value) {
+  return { value, digest: scopeContractDigest(value) };
+}
+
+function developmentHandoffInput() {
+  const terminalTaskSet = developmentReceipt([{
+    taskId: 'scope-control-contract', binding: 1,
+    packetDigest: `sha256:${'1'.repeat(64)}`,
+    resultDigest: `sha256:${'2'.repeat(64)}`,
+    provenanceDigest: `sha256:${'3'.repeat(64)}`,
+    terminalStatus: 'integrated', integratedCommit: HEAD,
+    integrationReceiptDigest: `sha256:${'4'.repeat(64)}`,
+  }]);
+  const effectivePlan = developmentReceipt({
+    schemaVersion: 1, changeId: 'issue-55', planRevision: 1,
+    source: { kind: 'github-issue', reference: 'furinvader/aerstello#56', captureDigest: DIGEST },
+    planning: { planningSha: HEAD },
+  });
+  const minimalClosure = developmentReceipt({
+    schemaVersion: 1, changeId: 'issue-55', revision: 1,
+    source: { type: 'github-issue', identity: 'furinvader/aerstello#56', digest: DIGEST },
+    planningSha: HEAD, planDigest: effectivePlan.digest, previousContractDigest: null,
+    outcome: 'A bounded scope gate is sufficient.',
+    requiredCriteria: [{ id: 'scope-gate', text: 'Gate expanded remediation.' }],
+    invariants: [], nonGoals: [], mandatoryConstraints: [], optionalGuidance: [],
+    authorizedShape: ['scope-gate'], unauthorizedExpansion: ['generalized-policy-engine'],
+    deferredFollowups: [], operatorDecisionDigests: [],
+  });
+  const pair = assessmentPair();
+  const projectedAuthority = {
+    source: minimalClosure.value.source,
+    planDigest: effectivePlan.digest,
+    amendmentDigests: [],
+  };
+  bindAssessmentAuthority(pair, projectedAuthority);
+  pair.packet.binding.taskPacketDigest = terminalTaskSet.digest;
+  pair.packet.binding.subject.digest = scopeContractDigest({
+    headSha: HEAD,
+    taskSetDigest: terminalTaskSet.digest,
+  });
+  pair.result.binding = structuredClone(pair.packet.binding);
+  const integratedScopeEvidence = developmentReceipt({
+    schemaVersion: 1, changeId: 'issue-55', evidenceId: 'integrated-head-1', revision: 1,
+    cadence: { boundary: 'integrated-head', trigger: null },
+    packet: pair.packet, packetDigest: scopeContractDigest(pair.packet),
+    result: pair.result, resultDigest: scopeContractDigest(pair.result),
+    closureDigest: minimalClosure.digest,
+  });
+  return {
+    changeId: 'issue-55', headSha: HEAD, capturedAt: AT,
+    minimalClosure, acceptedPlan: structuredClone(effectivePlan), effectivePlan,
+    amendments: [], decisions: [], terminalTaskSet,
+    integratedScopeEvidence,
   };
 }
 
@@ -251,6 +325,200 @@ test('imported authority requires complete real scope identities and a current w
     authorityKind: 'standalone', planDigest: null, amendmentDigests: [DIGEST],
     integratedHeadAssessment: null,
   })).join('\n'), /amendmentDigests requires a plan digest/u);
+});
+
+test('accepts the real development scope handoff and its canonical authority digest', () => {
+  const { scopeAuthorityDigest, validateScopeAuthoritySnapshot } = contract;
+  const handoff = buildDevelopmentScopeHandoff(developmentHandoffInput());
+  assert.deepEqual(validateScopeAuthoritySnapshot(handoff), []);
+  assert.match(scopeAuthorityDigest(handoff), /^sha256:[0-9a-f]{64}$/u);
+});
+
+test('malformed approved decisions return structural errors instead of throwing', () => {
+  const { validateScopeAuthoritySnapshot } = contract;
+  for (const entry of [null, 0, false, 'invalid', [], {}]) {
+    let errors;
+    assert.doesNotThrow(() => {
+      errors = validateScopeAuthoritySnapshot(authority({ approvedDecisions: [entry] }));
+    });
+    assert.ok(errors.length > 0);
+    assert.ok(errors.some((error) => error.includes('$.approvedDecisions[0]')));
+  }
+});
+
+test('imported authority binds exact ordered approved decisions across assessment surfaces', () => {
+  const { validateScopeAuthoritySnapshot } = contract;
+  const approvedDecisions = [
+    { id: 'initial-scope', digest: DIGEST, disposition: 'split-defer', authorizedShape: [] },
+    { id: 'bounded-follow-up', digest: OTHER_DIGEST,
+      disposition: 'approve-material-amendment', authorizedShape: ['bounded-follow-up-shape'] },
+  ];
+  const correlated = authority({ approvedDecisions });
+  correlated.integratedHeadAssessment = bindAssessmentDecisions(
+    correlated.integratedHeadAssessment,
+    approvedDecisions,
+  );
+  assert.deepEqual(validateScopeAuthoritySnapshot(correlated), []);
+  const schema = JSON.parse(readFileSync(new URL('../../schemas/scope-control.schema.json', import.meta.url), 'utf8'));
+  const validateSchema = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(validateSchema);
+  const validateAuthority = validateSchema.compile(schema);
+  assert.equal(validateAuthority(correlated), true, JSON.stringify(validateAuthority.errors));
+
+  const mismatches = [
+    {
+      label: 'top-level decision addition',
+      mutate(value) {
+        value.approvedDecisions.push({
+          id: 'foreign-decision', digest: THIRD_DIGEST,
+          disposition: 'split-defer', authorizedShape: [],
+        });
+      },
+    },
+    {
+      label: 'assessment decision addition',
+      mutate(value) {
+        value.integratedHeadAssessment.packet.acceptedScope.authorityDecisions.push({
+          id: 'foreign-decision', digest: THIRD_DIGEST, disposition: 'split-defer', authorizedShape: [],
+        });
+        value.integratedHeadAssessment.packet.binding.decisionDigests.push(THIRD_DIGEST);
+        value.integratedHeadAssessment.result.binding.decisionDigests.push(THIRD_DIGEST);
+      },
+    },
+    {
+      label: 'decision ID drift',
+      mutate(value) {
+        value.integratedHeadAssessment.packet.acceptedScope.authorityDecisions[0].id = 'foreign-decision';
+      },
+    },
+    {
+      label: 'decision digest drift',
+      mutate(value) {
+        value.integratedHeadAssessment.packet.acceptedScope.authorityDecisions[0].digest = THIRD_DIGEST;
+        value.integratedHeadAssessment.packet.binding.decisionDigests[0] = THIRD_DIGEST;
+        value.integratedHeadAssessment.result.binding.decisionDigests[0] = THIRD_DIGEST;
+      },
+    },
+    {
+      label: 'decision disposition drift',
+      mutate(value) {
+        value.integratedHeadAssessment.packet.acceptedScope.authorityDecisions[0].disposition = 'reject-use-narrow';
+      },
+    },
+    {
+      label: 'decision authorized shape drift',
+      mutate(value) {
+        value.integratedHeadAssessment.packet.acceptedScope.authorityDecisions[1].authorizedShape = ['foreign-shape'];
+      },
+    },
+    {
+      label: 'decision omission',
+      mutate(value) {
+        value.integratedHeadAssessment.packet.acceptedScope.authorityDecisions.pop();
+        value.integratedHeadAssessment.packet.binding.decisionDigests.pop();
+        value.integratedHeadAssessment.result.binding.decisionDigests.pop();
+      },
+    },
+    {
+      label: 'decision ordering drift',
+      mutate(value) {
+        value.integratedHeadAssessment.packet.acceptedScope.authorityDecisions.reverse();
+        value.integratedHeadAssessment.packet.binding.decisionDigests.reverse();
+        value.integratedHeadAssessment.result.binding.decisionDigests.reverse();
+      },
+    },
+    {
+      label: 'packet binding omission',
+      mutate(value) { delete value.integratedHeadAssessment.packet.binding.decisionDigests; },
+    },
+    {
+      label: 'result binding omission',
+      mutate(value) { delete value.integratedHeadAssessment.result.binding.decisionDigests; },
+    },
+  ];
+  for (const { label, mutate } of mismatches) {
+    const mismatched = structuredClone(correlated);
+    mutate(mismatched);
+    mismatched.integratedHeadAssessment.digest = `sha256:${sha256CanonicalContractJson({
+      packet: mismatched.integratedHeadAssessment.packet,
+      result: mismatched.integratedHeadAssessment.result,
+    })}`;
+    assert.notDeepEqual(validateScopeAuthoritySnapshot(mismatched), [], label);
+  }
+
+  for (const [label, mismatched] of [
+    ['foreign top-level receipt', authority({ approvedDecisions: [approvedDecisions[0]] })],
+    ['foreign assessment authority', authority()],
+  ]) {
+    if (label === 'foreign assessment authority') {
+      mismatched.integratedHeadAssessment = bindAssessmentDecisions(
+        mismatched.integratedHeadAssessment,
+        [approvedDecisions[0]],
+      );
+    }
+    assert.notDeepEqual(validateScopeAuthoritySnapshot(mismatched), [], label);
+  }
+});
+
+test('journal classification reuses imported approved-decision authority validation', () => {
+  const { scopeAuthorityDigest, validateScopeControlJournal } = contract;
+  const approvedDecisions = [{
+    id: 'initial-scope', digest: DIGEST, disposition: 'split-defer', authorizedShape: [],
+  }];
+  const authorityValue = authority({ approvedDecisions });
+  authorityValue.integratedHeadAssessment = bindAssessmentDecisions(
+    authorityValue.integratedHeadAssessment,
+    approvedDecisions,
+  );
+  const authorityDigest = scopeAuthorityDigest(authorityValue);
+  const entry = classificationEntry(authorityDigest);
+  entry.assessment = bindAssessmentDecisions(entry.assessment, approvedDecisions);
+  const exactJournal = journal(authorityDigest, { entries: [entry] });
+  assert.deepEqual(validateScopeControlJournal(exactJournal, authorityValue), []);
+
+  const foreign = structuredClone(exactJournal);
+  foreign.entries[0].assessment.packet.acceptedScope.authorityDecisions[0].id = 'foreign-decision';
+  foreign.entries[0].assessment.digest = `sha256:${sha256CanonicalContractJson({
+    packet: foreign.entries[0].assessment.packet,
+    result: foreign.entries[0].assessment.result,
+  })}`;
+  assert.match(
+    validateScopeControlJournal(foreign, authorityValue).join('\n'),
+    /ordered captured approved decisions/u,
+  );
+});
+
+test('accepts the complete deferred follow-up domain across producer, runtime, and schema', () => {
+  const { validateScopeAuthoritySnapshot } = contract;
+  const astralReference = '💠'.repeat(4000);
+  const input = developmentHandoffInput();
+  input.minimalClosure.value.deferredFollowups = Array.from({ length: 256 }, (_, index) => ({
+    id: `follow-up-${index + 1}`,
+    text: index === 255 ? astralReference : `Deferred follow-up ${index + 1}.`,
+  }));
+  input.minimalClosure.digest = scopeContractDigest(input.minimalClosure.value);
+  input.integratedScopeEvidence.value.closureDigest = input.minimalClosure.digest;
+  input.integratedScopeEvidence.digest = scopeContractDigest(input.integratedScopeEvidence.value);
+  const handoff = buildDevelopmentScopeHandoff(input);
+
+  const schema = JSON.parse(readFileSync(new URL('../../schemas/scope-control.schema.json', import.meta.url), 'utf8'));
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajv);
+  const validateSchema = ajv.compile(schema);
+  assert.deepEqual(validateScopeAuthoritySnapshot(handoff), []);
+  assert.equal(validateSchema(handoff), true, JSON.stringify(validateSchema.errors));
+  assert.equal(Array.from(handoff.deferredFollowUps[255].reference).length, 4000);
+  assert.equal(handoff.deferredFollowUps[255].reference.length, 8000);
+
+  const tooMany = structuredClone(handoff);
+  tooMany.deferredFollowUps.push({ id: 'follow-up-257', reference: 'Overflow.' });
+  assert.notDeepEqual(validateScopeAuthoritySnapshot(tooMany), []);
+  assert.equal(validateSchema(tooMany), false);
+
+  const tooLong = structuredClone(handoff);
+  tooLong.deferredFollowUps[255].reference = '💠'.repeat(4001);
+  assert.notDeepEqual(validateScopeAuthoritySnapshot(tooLong), []);
+  assert.equal(validateSchema(tooLong), false);
 });
 
 test('journal is append-only shaped and embeds exact canonical assessment evidence', () => {
@@ -454,11 +722,17 @@ test('minor amendments remain fail-closed through a decision-required projection
 });
 
 test('guarded scope return binds exact live head, findings, alternatives, and inventory', () => {
-  const { scopeAuthorityDigest, scopeControlJournalDigest, validateScopeReturnEnvelope } = contract;
+  const { scopeAuthorityDigest, scopeControlJournalDigest, scopeReturnResumeIdentity,
+    validateScopeReturnEnvelope } = contract;
   const authorityDigest = scopeAuthorityDigest(authority());
   const journalDigest = scopeControlJournalDigest(journal(authorityDigest));
   const value = scopeReturn(authorityDigest, journalDigest);
   assert.deepEqual(validateScopeReturnEnvelope(value), []);
+  assert.equal(scopeReturnResumeIdentity(value), scopeReturnResumeIdentity(structuredClone(value)));
+  assert.notEqual(scopeReturnResumeIdentity(value), scopeReturnResumeIdentity({
+    ...value, decisionId: 'scope-decision-next',
+  }));
+  assert.throws(() => scopeReturnResumeIdentity({ ...value, livePrHeadSha: OTHER_HEAD }), /Invalid scope return/u);
   assert.match(validateScopeReturnEnvelope({ ...value, livePrHeadSha: OTHER_HEAD }).join('\n'), /must equal livePrHeadSha/u);
   assert.match(validateScopeReturnEnvelope({ ...value, narrowAlternative: null }).join('\n'), /narrowAlternative is required/u);
 });

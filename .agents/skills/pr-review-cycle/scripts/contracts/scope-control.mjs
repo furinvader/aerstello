@@ -20,6 +20,12 @@ import {
 const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 const SOURCE_TYPES = new Set(['github-issue', 'direct-request', 'repository-plan', 'partial-implementation']);
+const DEVELOPMENT_DECISION_DISPOSITIONS = new Set([
+  'approve-material-amendment',
+  'split-defer',
+  'reject-use-narrow',
+  'abandon-replan',
+]);
 
 export const SCOPE_CLASSIFICATIONS = [
   'within-scope-defect',
@@ -130,6 +136,28 @@ function validateAssessmentPair(value, path, errors, { requiredVerdict = null, e
 }
 
 function validateAssessmentAuthority(value, authority, amendmentDigests, path, errors) {
+  const approvedDecisions = Array.isArray(authority?.approvedDecisions)
+    ? authority.approvedDecisions
+    : [];
+  const expectedDecisionAuthority = approvedDecisions.map((entry) => ({
+    id: entry?.id,
+    digest: entry?.digest,
+    disposition: entry?.disposition,
+    authorizedShape: entry?.authorizedShape,
+  }));
+  const acceptedDecisions = Array.isArray(value?.packet?.acceptedScope?.authorityDecisions)
+    ? value.packet.acceptedScope.authorityDecisions
+    : [];
+  const acceptedDecisionAuthority = acceptedDecisions.map((entry) => ({
+    id: entry?.id,
+    digest: entry?.digest,
+    disposition: entry?.disposition,
+    authorizedShape: entry?.authorizedShape,
+  }));
+  if (!isDeepStrictEqual(acceptedDecisionAuthority, expectedDecisionAuthority)) {
+    errors.push(`${path}.packet.acceptedScope.authorityDecisions must equal the ordered captured approved decisions`);
+  }
+  const decisionDigests = approvedDecisions.map((entry) => entry?.digest);
   for (const side of ['packet', 'result']) {
     const binding = value?.[side]?.binding;
     if (!isDeepStrictEqual(binding?.source, authority?.source)) {
@@ -141,6 +169,9 @@ function validateAssessmentAuthority(value, authority, amendmentDigests, path, e
     if (!isDeepStrictEqual(binding?.amendmentDigests, amendmentDigests)) {
       errors.push(`${path}.${side}.binding.amendmentDigests must equal the ordered effective authority amendments`);
     }
+    if (!isDeepStrictEqual(binding?.decisionDigests ?? [], decisionDigests)) {
+      errors.push(`${path}.${side}.binding.decisionDigests must equal the ordered captured approved decision digests`);
+    }
   }
 }
 
@@ -151,17 +182,29 @@ function validateApprovedDecisions(value, path, errors) {
   }
   value.forEach((entry, index) => {
     const entryPath = `${path}[${index}]`;
-    const fields = ['id', 'digest'];
+    const fields = ['id', 'digest', 'disposition', 'authorizedShape'];
     if (!requireFields(entry, fields, entryPath, errors)) return;
     rejectUnknownFields(entry, fields, entryPath, errors);
     if (!isId(entry.id)) errors.push(`${entryPath}.id is invalid`);
     if (!isDigest(entry.digest)) errors.push(`${entryPath}.digest is invalid`);
+    if (!DEVELOPMENT_DECISION_DISPOSITIONS.has(entry.disposition)) {
+      errors.push(`${entryPath}.disposition is invalid`);
+    }
+    validateStringList(entry.authorizedShape, `${entryPath}.authorizedShape`, errors, 512);
+    if (Array.isArray(entry.authorizedShape) && entry.authorizedShape.length > 256) {
+      errors.push(`${entryPath}.authorizedShape exceeds 256 entries`);
+    }
+    if (Array.isArray(entry.authorizedShape)
+        && ((entry.disposition === 'approve-material-amendment' && entry.authorizedShape.length === 0)
+          || (entry.disposition !== 'approve-material-amendment' && entry.authorizedShape.length > 0))) {
+      errors.push(`${entryPath}.authorizedShape does not match the decision disposition`);
+    }
   });
   if (new Set(value.map((entry) => entry?.id)).size !== value.length) errors.push(`${path} contains duplicate IDs`);
 }
 
 function validateDeferredFollowUps(value, path, errors) {
-  if (!Array.isArray(value) || value.length > 128) {
+  if (!Array.isArray(value) || value.length > 256) {
     errors.push(`${path} is invalid`);
     return;
   }
@@ -171,7 +214,9 @@ function validateDeferredFollowUps(value, path, errors) {
     if (!requireFields(entry, fields, entryPath, errors)) return;
     rejectUnknownFields(entry, fields, entryPath, errors);
     if (!isId(entry.id)) errors.push(`${entryPath}.id is invalid`);
-    if (!isString(entry.reference, { min: 1, max: 1000 })) errors.push(`${entryPath}.reference is invalid`);
+    if (!isString(entry.reference, { min: 1 }) || Array.from(entry.reference).length > 4000) {
+      errors.push(`${entryPath}.reference is invalid`);
+    }
   });
   if (new Set(value.map((entry) => entry?.id)).size !== value.length) errors.push(`${path} contains duplicate IDs`);
 }
@@ -571,6 +616,23 @@ export function validateScopeReturnEnvelope(value) {
   validateIdList(value.priorDecisionIds, '$.priorDecisionIds', errors);
   if (!isDateTime(value.createdAt)) errors.push('$.createdAt must be RFC 3339');
   return errors;
+}
+
+export function scopeReturnResumeIdentity(value) {
+  const errors = validateScopeReturnEnvelope(value);
+  if (errors.length > 0) throw new Error(`Invalid scope return: ${errors.join('; ')}`);
+  return `sha256:${sha256CanonicalContractJson({
+    authorityDigest: value.authorityDigest,
+    journalDigest: value.journalDigest,
+    blockerId: value.blockerId,
+    decisionId: value.decisionId,
+    reviewHeadSha: value.reviewHeadSha,
+    livePrHeadSha: value.livePrHeadSha,
+    rootCauseId: value.rootCauseId,
+    assessmentDigest: value.assessmentDigest,
+    findingIds: value.findingIds,
+    findingFingerprints: value.findingFingerprints,
+  })}`;
 }
 
 export function validateScopeControlReference(value, path = '$.scopeControl') {

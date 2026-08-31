@@ -24,7 +24,7 @@ export const DEVELOPMENT_STATE_SCHEMA_VERSION = 2;
 export const HISTORICAL_DEVELOPMENT_STATE_SCHEMA_VERSIONS = Object.freeze([1, 2]);
 export const CHANGE_MODES = Object.freeze(['plan-only', 'implement', 'full']);
 export const DEVELOPMENT_PHASES = Object.freeze([
-  'initializing', 'planning', 'awaiting-decision', 'ready-to-implement',
+  'initializing', 'planning', 'awaiting-decision', 'awaiting-scope-decision', 'ready-to-implement',
   'implementing', 'integrating', 'integrated', 'validating', 'specialist-review',
   'verifying', 'development-ready', 'blocked', 'recovering', 'abandoned',
 ]);

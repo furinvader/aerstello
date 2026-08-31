@@ -34,6 +34,11 @@ const WORKSPACES = new Set(['@aerstello/api', '@aerstello/web', '@aerstello/shar
 const WRAPPERS = new Set(['env', 'bash', 'sh', 'zsh', 'fish', 'command', 'exec', 'xargs']);
 const SHELL_SYNTAX = /[;&|<>`$()'"\\*?\[\]{}!#~\t\v\f\r\n]/u;
 const NODE_TEST_PATH = /(?:^|\/)[^/]+\.(?:test|spec)\.(?:[cm]?[jt]s|[jt]sx)$/u;
+export const SCOPE_TRIPWIRE_CATEGORIES = Object.freeze([
+  'git-paths', 'owned-paths', 'packages', 'schemas', 'state-paths',
+  'public-surfaces', 'capabilities', 'tasks', 'validations', 'non-goals',
+  'repeated-roots',
+]);
 
 function schemaErrors(validator, value) {
   if (validator(value)) return [];
@@ -60,6 +65,11 @@ function digestJson(value) {
   return `sha256:${createHash('sha256').update(canonicalJsonText(value), 'utf8').digest('hex')}`;
 }
 function sameJson(left, right) { return canonicalJsonText(left) === canonicalJsonText(right); }
+function sortedUniqueStrings(values) {
+  return Array.isArray(values) && values.every((value) => typeof value === 'string')
+    && new Set(values).size === values.length
+    && sameJson(values, [...values].sort());
+}
 function findRawFields(value, path = '$', errors = []) {
   if (Array.isArray(value)) value.forEach((entry, index) => findRawFields(entry, `${path}[${index}]`, errors));
   else if (isRecord(value)) for (const [key, entry] of Object.entries(value)) {
@@ -221,8 +231,69 @@ export function validateImplementationTaskStructure(value) {
   if (!sameJson(value.acceptanceCriteria.map(({ id }) => id), value.acceptanceCriteriaIds)) {
     errors.push('$.acceptanceCriteria IDs must exactly match acceptanceCriteriaIds');
   }
+  if (value.minimalityAuthority) {
+    const authority = value.minimalityAuthority;
+    const criterionIds = authority.criterionNeed?.map(({ criterionId }) => criterionId) ?? [];
+    if (!sameJson(criterionIds, value.acceptanceCriteriaIds)) {
+      errors.push('$.minimalityAuthority.criterionNeed IDs must exactly match acceptanceCriteriaIds');
+    }
+    const tripwireIds = authority.tripwires?.map(({ id }) => id) ?? [];
+    if (new Set(tripwireIds).size !== tripwireIds.length) {
+      errors.push('$.minimalityAuthority.tripwires must not repeat an ID');
+    }
+    const categories = authority.tripwires?.map(({ category }) => category) ?? [];
+    if (new Set(categories).size !== categories.length) {
+      errors.push('$.minimalityAuthority.tripwires must not repeat a category');
+    }
+    for (const [index, tripwire] of (authority.tripwires ?? []).entries()) {
+      if (!sortedUniqueStrings(tripwire.inventory)) {
+        errors.push(`$.minimalityAuthority.tripwires[${index}].inventory must be a sorted unique string inventory`);
+      }
+      if (Object.hasOwn(tripwire, 'observedInventory')
+          && !sortedUniqueStrings(tripwire.observedInventory)) {
+        errors.push(`$.minimalityAuthority.tripwires[${index}].observedInventory must be a sorted unique string inventory`);
+      }
+    }
+  }
   validateRequiredValidation(value.requiredValidation, errors, value);
   return [...new Set(errors)];
+}
+
+export function taskObservedScopeInventories(packet) {
+  const errors = validateImplementationTaskStructure(packet);
+  if (errors.length > 0) throw new TypeError(`invalid implementation task packet: ${errors.join('; ')}`);
+  if (!packet.minimalityAuthority) return {};
+  const missing = packet.minimalityAuthority.tripwires
+    .filter((tripwire) => !Object.hasOwn(tripwire, 'observedInventory'))
+    .map(({ id }) => id);
+  if (missing.length > 0) {
+    throw new TypeError(`new task binding requires packet-bound observed scope inventories; missing: ${missing.join(', ')}`);
+  }
+  return Object.fromEntries(packet.minimalityAuthority.tripwires
+    .map(({ id, observedInventory }) => [id, observedInventory]));
+}
+
+export function evaluateScopeTripwires(packet, observedInventories = undefined) {
+  const errors = validateImplementationTaskStructure(packet);
+  if (errors.length > 0) throw new TypeError(`invalid implementation task packet: ${errors.join('; ')}`);
+  if (!packet.minimalityAuthority) return [];
+  const observations = observedInventories ?? taskObservedScopeInventories(packet);
+  if (!isRecord(observations)) throw new TypeError('observed scope inventories must be an object');
+  const tripwires = packet.minimalityAuthority.tripwires;
+  const expectedIds = new Set(tripwires.map(({ id }) => id));
+  const actualIds = Object.keys(observations);
+  const missing = [...expectedIds].filter((id) => !Object.hasOwn(observations, id));
+  const unknown = actualIds.filter((id) => !expectedIds.has(id));
+  if (missing.length > 0 || unknown.length > 0) {
+    throw new TypeError(`observed scope inventories must exactly match tripwire IDs; missing: ${missing.join(', ') || 'none'}; unknown: ${unknown.join(', ') || 'none'}`);
+  }
+  return tripwires.flatMap(({ id, category, inventory }) => {
+    const observed = observations[id];
+    if (!sortedUniqueStrings(observed) || observed.some((item) => item.length < 1 || item.length > 512 || !/\S/u.test(item))) {
+      throw new TypeError(`observed scope inventory ${id} must be a sorted unique bounded string array`);
+    }
+    return sameJson(observed, inventory) ? [] : [{ id, category, expected: inventory, observed }];
+  });
 }
 
 export function validateImplementationTask(value, { registry = loadRegistry() } = {}) {
@@ -250,6 +321,20 @@ export function validateImplementationResult(value) {
   if (errors.length > 0) return [...new Set(errors)];
   if (['implemented', 'no-change'].includes(value.status) && value.validation.some(({ result }) => result !== 'passed')) errors.push('$.validation must contain only passed commands for a successful result');
   if (new Set(value.validation.map(({ command }) => command)).size !== value.validation.length) errors.push('$.validation must not report a command more than once');
+  if (value.scopeDiscovery) {
+    if (!sameJson(value.unexpectedDependencies, [value.scopeDiscovery.summary])) {
+      errors.push('$.unexpectedDependencies must contain exactly the structured scope discovery summary');
+    }
+    const requestFields = value.scopeDiscovery.requestedAuthority.map(({ field }) => field);
+    if (new Set(requestFields).size !== requestFields.length) {
+      errors.push('$.scopeDiscovery.requestedAuthority must not repeat an authority field');
+    }
+    for (const [index, request] of value.scopeDiscovery.requestedAuthority.entries()) {
+      if (!sortedUniqueStrings(request.values)) {
+        errors.push(`$.scopeDiscovery.requestedAuthority[${index}].values must be a sorted unique string inventory`);
+      }
+    }
+  }
   return [...new Set(errors)];
 }
 
@@ -269,6 +354,42 @@ export function validateImplementationResultAgainstTask(packet, result, actualCh
   if (result.packetDigest !== implementationTaskDigest(packet)) errors.push('worker result packetDigest must equal the canonical task packet digest');
   if (result.status === 'no-change' && (packet.plannedE2ESelectors?.length ?? 0) > 0) {
     errors.push('worker result cannot be no-change when the task packet declares planned E2E selectors');
+  }
+  if (packet.minimalityAuthority && result.unexpectedDependencies.length > 0 && !result.scopeDiscovery) {
+    errors.push('worker result unexpectedDependencies requires structured scopeDiscovery');
+  }
+  if (!packet.minimalityAuthority && result.scopeDiscovery) {
+    errors.push('worker result scopeDiscovery requires a packet-bound minimalityAuthority');
+  }
+  if (packet.minimalityAuthority) {
+    if (result.scopeDiscovery) {
+      const tripwireIds = new Set(packet.minimalityAuthority.tripwires.map(({ id }) => id));
+      for (const id of result.scopeDiscovery.triggeredTripwireIds) {
+        if (!tripwireIds.has(id)) errors.push(`worker result scopeDiscovery names an unbound tripwire: ${id}`);
+      }
+      const declaredValidation = new Set([
+        ...packet.requiredValidation.unit, ...packet.requiredValidation.system,
+      ].map(({ command }) => command));
+      for (const request of result.scopeDiscovery.requestedAuthority) {
+        if (request.field === 'criteria') for (const id of request.values) {
+          if (packet.acceptanceCriteriaIds.includes(id)) errors.push(`worker result scopeDiscovery criterion is already authorized: ${id}`);
+        }
+        if (request.field === 'dependencies') for (const id of request.values) {
+          if (packet.dependencies.includes(id)) errors.push(`worker result scopeDiscovery dependency is already authorized: ${id}`);
+        }
+        if (request.field === 'validation') for (const command of request.values) {
+          if (declaredValidation.has(command)) errors.push(`worker result scopeDiscovery validation is already authorized: ${command}`);
+        }
+        if (request.field === 'paths') for (const path of request.values) {
+          if (!parseRepositoryPath(path, { allowOwnershipPattern: true })) {
+            errors.push(`worker result scopeDiscovery path is not a safe repository ownership path: ${path}`);
+          } else if (packet.allowedPaths.some((pattern) => pathMatchesOwnership(path.replace(/\/\*\*$/u, ''), pattern))
+              && !packet.forbiddenPaths.some((pattern) => pathMatchesOwnership(path.replace(/\/\*\*$/u, ''), pattern))) {
+            errors.push(`worker result scopeDiscovery path is already authorized: ${path}`);
+          }
+        }
+      }
+    }
   }
   const paths = result.status === 'implemented' && Array.isArray(actualChangedPaths) ? actualChangedPaths : result.changedPaths;
   if (result.status === 'implemented') {

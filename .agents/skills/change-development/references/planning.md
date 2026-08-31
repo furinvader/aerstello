@@ -46,6 +46,21 @@ An implementation-plan v1 records:
 - checklist mappings; and
 - a planned dependency DAG with anticipated paths, ownership, validation intent, and specialist-routing signals.
 
+Plan admission also requires a revisioned minimal-closure contract and a
+canonical `plan`-phase assessment bound to the exact source capture, Planning
+SHA, candidate digest, and closure receipt. Only `within-scope` freezes the
+candidate. Other verdicts retain planning authority or enter the explicit
+human-decision boundary without granting worker authority. The closure keeps
+required criteria, invariants, non-goals, constraints, guidance, authorized
+shape, unauthorized expansion, deferred follow-ups, and operator decision
+digests distinct; none is inferred from plan prose.
+
+After acceptance, scope decisions and amendments append exact receipt-bound
+authority. A bounded minor amendment must be necessary, adjacent, free of
+material triggers and independent workstreams, and invalidate its triggering
+evidence. Material expansion requires the durable human-decision state and an
+exact decision receipt before a resulting plan can advance.
+
 Anticipated paths and validation intent are non-executable planning data. Implementation-plan v1 represents anticipated paths as unambiguous, whitespace-free repository-relative ownership prefixes; it does not accept whitespace-bearing path strings, environment assignments, or shell syntax that could instead be executable input. `bind-task` converts one dependency-ready planned task into a narrower immutable packet with exact allowed and forbidden paths and direct validation commands; it cannot expand the accepted plan.
 
 Repository-relative ownership excludes any root or nested exact `.git` path
