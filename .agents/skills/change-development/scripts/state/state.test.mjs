@@ -556,6 +556,93 @@ test('later scope boundaries revalidate canonical semantic projections atomicall
   assert.equal(state.scope.currentBoundary, 'integrated-head');
 });
 
+test('integrated-head insufficient evidence admits only an exact blocked reassessment', async () => {
+  const fixture = await integratedSingleTaskFixture('integrated insufficient evidence reassessment');
+  const directory = changeDirectory(fixture.cwd, fixture.state.changeId);
+  const withinScope = integratedScopeEvidenceFor({ cwd: fixture.cwd, changeId: fixture.state.changeId });
+  const insufficient = structuredClone(withinScope);
+  const mapping = insufficient.result.coverage[0];
+  insufficient.result = {
+    ...insufficient.result,
+    verdict: 'insufficient-evidence',
+    coverage: [{ ...mapping, classification: 'insufficient-evidence',
+      rationale: 'The integrated candidate needs exact supporting evidence.' }],
+    missingEvidence: ['Exact integrated-head evidence is missing.'],
+  };
+  insufficient.resultDigest = digestJson(insufficient.result);
+  let state = assessScope({ cwd: fixture.cwd, changeId: fixture.state.changeId,
+    scopeEvidence: insufficient, expectedRevision: fixture.state.revision });
+  const insufficientDigest = digestJson(insufficient);
+  assert.equal(state.phase, 'blocked');
+  assert.equal(state.scope.status, 'assessment-required');
+  assert.equal(state.scope.currentBoundary, 'integrated-head');
+  assert.equal(state.scope.currentSubjectSha, state.git.headSha);
+  assert.equal(state.scope.currentEvidenceDigest, insufficientDigest);
+  assert.deepEqual(state.blockedReasons,
+    ['Scope assessment has insufficient evidence; authority remains unchanged.']);
+
+  const corrected = structuredClone(withinScope);
+  corrected.revision = state.revision + 1;
+  corrected.evidenceId = `integrated-head-test-${corrected.revision}`;
+  const staleSubject = structuredClone(corrected);
+  staleSubject.packet.binding.subject.sha = 'f'.repeat(40);
+  staleSubject.result.binding.subject.sha = 'f'.repeat(40);
+  staleSubject.packetDigest = digestJson(staleSubject.packet);
+  staleSubject.resultDigest = digestJson(staleSubject.result);
+  const beforeStale = durableSnapshot(directory);
+  assert.throws(() => assessScope({ cwd: fixture.cwd, changeId: state.changeId,
+    scopeEvidence: staleSubject, expectedRevision: state.revision }),
+  (error) => error.code === 'SCOPE_ASSESSMENT_INVALID');
+  assert.deepEqual(durableSnapshot(directory), beforeStale,
+    'a stale retry subject writes no evidence, receipt, event, transition, or state');
+
+  const changedSubject = structuredClone(corrected);
+  changedSubject.packet.binding.subject.digest = digestJson({ changed: true });
+  changedSubject.result.binding.subject.digest = changedSubject.packet.binding.subject.digest;
+  changedSubject.packetDigest = digestJson(changedSubject.packet);
+  changedSubject.resultDigest = digestJson(changedSubject.result);
+  assert.throws(() => assessScope({ cwd: fixture.cwd, changeId: state.changeId,
+    scopeEvidence: changedSubject, expectedRevision: state.revision }),
+  (error) => error.code === 'SCOPE_ASSESSMENT_INVALID');
+  assert.deepEqual(durableSnapshot(directory), beforeStale,
+    'a changed retry subject writes no evidence, receipt, event, transition, or state');
+
+  state = assessScope({ cwd: fixture.cwd, changeId: state.changeId,
+    scopeEvidence: corrected, expectedRevision: state.revision });
+  assert.equal(state.phase, 'integrated');
+  assert.equal(state.scope.status, 'current');
+  assert.equal(state.scope.currentEvidenceDigest, digestJson(corrected));
+  assert.deepEqual(state.blockedReasons, []);
+  assert.match(state.nextAction, /validation-plan/u);
+  assert.equal(validateState({ cwd: fixture.cwd }).valid, true);
+  assert.equal(existsSync(join(directory, 'scope', 'evidence', 'integrated-head',
+    `${String(insufficient.revision).padStart(8, '0')}-${insufficient.evidenceId}.json`)), true,
+  'the prior insufficient-evidence receipt remains preserved');
+
+  const trimFixture = await integratedSingleTaskFixture('integrated trim retry remains blocked');
+  const trimWithinScope = integratedScopeEvidenceFor({
+    cwd: trimFixture.cwd, changeId: trimFixture.state.changeId,
+  });
+  const trim = structuredClone(trimWithinScope);
+  trim.result = {
+    ...trim.result,
+    verdict: 'trim-required',
+    coverage: [{ ...trim.result.coverage[0], sourceCriterionIds: [], acceptedCriterionIds: [],
+      classification: 'speculative', rationale: 'The mechanism is unnecessary.' }],
+    unnecessaryWork: [trim.result.coverage[0].mechanism],
+    smallerSufficientAlternative: 'Remove the unnecessary mechanism.',
+  };
+  trim.resultDigest = digestJson(trim.result);
+  const trimState = assessScope({ cwd: trimFixture.cwd, changeId: trimFixture.state.changeId,
+    scopeEvidence: trim, expectedRevision: trimFixture.state.revision });
+  const invalidTrimRetry = structuredClone(trimWithinScope);
+  invalidTrimRetry.revision = trimState.revision + 1;
+  invalidTrimRetry.evidenceId = `integrated-head-test-${invalidTrimRetry.revision}`;
+  assert.throws(() => assessScope({ cwd: trimFixture.cwd, changeId: trimState.changeId,
+    scopeEvidence: invalidTrimRetry, expectedRevision: trimState.revision }),
+  (error) => error.code === 'INVALID_PHASE');
+});
+
 test('new bindings require minimality authority atomically while historical packet shapes remain readable', async () => {
   const fixture = repository('mandatory task minimality');
   const planning = await initializeState({ cwd: fixture.cwd, changeId: 'mandatory-task-minimality', mode: 'implement',

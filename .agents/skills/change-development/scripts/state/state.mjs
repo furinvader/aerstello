@@ -1326,8 +1326,20 @@ export function assessScope({ cwd = process.cwd(), changeId, scopeEvidence, expe
     let taskPacketDigest = scopeEvidence.packet?.binding?.taskPacketDigest ?? null;
     let subjectDigest = scopeEvidence.packet?.binding?.subject?.digest;
     let subjectSha = scopeEvidence.packet?.binding?.subject?.sha;
+    let integratedHeadReassessment = false;
     if (boundary === 'integrated-head') {
-      if (state.phase !== 'integrated') throw new StateError('Integrated-head assessment requires integrated phase', 'INVALID_PHASE');
+      const insufficientEvidenceBlocker = scopeGateForVerdict('insufficient-evidence').blocker;
+      const blockedRetryCandidate = state.phase === 'blocked'
+        && state.scope.status === 'assessment-required'
+        && state.scope.currentBoundary === 'integrated-head'
+        && state.scope.currentSubjectSha === state.git.headSha
+        && state.blockedReasons.length === 1
+        && state.blockedReasons[0] === insufficientEvidenceBlocker
+        && receipts.evidence?.value?.cadence?.boundary === 'integrated-head'
+        && receipts.evidence.value.result?.verdict === 'insufficient-evidence';
+      if (state.phase !== 'integrated' && !blockedRetryCandidate) {
+        throw new StateError('Integrated-head assessment requires integrated phase', 'INVALID_PHASE');
+      }
       const terminal = terminalTaskEvidence(root, state);
       taskPacketDigest = integratedTaskSetDigest(terminal.map((entry) => ({
         taskId: entry.packet.taskId, binding: entry.binding, packetDigest: entry.packetDigest,
@@ -1337,6 +1349,15 @@ export function assessScope({ cwd = process.cwd(), changeId, scopeEvidence, expe
       })));
       subjectDigest = objectDigest({ headSha: state.git.headSha, taskSetDigest: taskPacketDigest });
       subjectSha = state.git.headSha;
+      integratedHeadReassessment = blockedRetryCandidate
+        && validateScopeEvidence(receipts.evidence.value).length === 0
+        && scopeEvidenceIsCurrent(receipts.evidence.value, expectedScopeIdentity({
+          state, closureDigest: receipts.closure.digest, amendmentRecords: receipts.amendmentRecords,
+          taskPacketDigest, subjectDigest, subjectSha,
+        }));
+      if (state.phase !== 'integrated' && !integratedHeadReassessment) {
+        throw new StateError('Integrated-head assessment requires integrated phase', 'INVALID_PHASE');
+      }
     } else if (state.phase === 'blocked') {
       const discovery = workerDiscoveryAssessmentIdentity(root, state);
       taskPacketDigest = discovery.taskPacketDigest;
@@ -1361,7 +1382,7 @@ export function assessScope({ cwd = process.cwd(), changeId, scopeEvidence, expe
     const evidenceDigest = scopeContractDigest(scopeEvidence); const gate = scopeGateForVerdict(scopeEvidence.result.verdict);
     const scope = { ...state.scope, status: gate.status, candidatePlanDigest: null,
       currentEvidenceDigest: evidenceDigest, currentBoundary: boundary, currentSubjectSha: subjectSha };
-    const phase = gate.phase ?? state.phase;
+    const phase = gate.phase ?? (integratedHeadReassessment ? 'integrated' : state.phase);
     const blockedReasons = phase === 'blocked'
       ? gate.blocker ? [gate.blocker] : state.blockedReasons
       : [];
