@@ -491,13 +491,22 @@ historical task line, and body hash against this immutable provenance. A later
 terminal carrier for an aggregate task is reusable only as a zero-intent replay
 when every selected row retains consistent provenance and the carrier contains
 no unanchored selected-root task or off-partition historical proof. Historical
-selection may also encounter one full carrier owned by a prior aggregate task
-ID. It is replay-only authority when every selected row is provenance-bearing,
-one completed GitHub-thread `already-fixed` null-commit owner covers exactly the
-selected canonical roots, and every row normalizes to one older ordinary
-provenance-free authority with the exact proof, task, disposition, commit,
-reply-body hash, and shared authority fingerprint. It can never originate
-authority or carry selected-root mutation intents. All archive inventory,
+selection may also encounter one provenance-only carrier owned by a prior
+aggregate task ID. It may carry all selected roots or a nonempty strict subset,
+but a subset must equal an exact union of complete anchored historical
+partitions. One later historical full carrier must still cover the complete
+selected-root set. This is existential across agreeing complete ordinary or
+mixed carriers: at least one such carrier's archived-state `updatedAt` must be
+strictly greater than the prior aggregate carrier's canonical terminal envelope,
+the maximum of its state `updatedAt` and terminal `abandoned.at`. Archive IDs
+and inventory order never establish that chronology. The prior aggregate
+carrier has exactly one completed GitHub-thread `already-fixed` null-commit
+owner whose canonical sources and
+proof rows equal exactly its carried roots, and every row normalizes to one
+older ordinary provenance-free authority with the exact proof, task,
+disposition, commit, reply-body hash, and shared authority fingerprint. It can
+never originate authority, replace the complete carrier, or carry selected-root
+mutation intents. All archive inventory,
 chronology, ancestry, two-snapshot, live resolution, review, CI, and Done gates
 remain unchanged. Historical reply headers accept exact lowercase 40- or
 64-hex object IDs. Stripping an

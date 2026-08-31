@@ -487,25 +487,31 @@ export function aggregateHistoricalProjection(
 
 export function aggregateFullAuthorityProjection(
   state, historicalCandidates, selectedThreadIds, selectedRowsByArchive, reservePartition,
+  priorAggregateReplayCandidate = null,
 ) {
-  const full = historicalCandidates.filter((candidate) => (
-    selectedRowsByArchive.get(candidate.archive.archiveId).length === selectedThreadIds.length
-  ));
+  const full = historicalCandidates.filter((candidate) => {
+    const rows = selectedRowsByArchive.get(candidate.archive.archiveId);
+    return rows.length === selectedThreadIds.length
+      && rows.some((row) => !Object.hasOwn(row, 'archiveProvenance'));
+  });
   if (full.length === 0) {
     throw new GitHubWorkflowError(
       'Aggregate adoption requires one complete historical full carrier',
       'ARCHIVE_EVIDENCE_MISSING',
     );
   }
-  const priorAggregateReplayFull = full.filter((candidate) => {
-    const rows = selectedRowsByArchive.get(candidate.archive.archiveId);
-    return rows.length !== 0 && rows.every((row) => Object.hasOwn(row, 'archiveProvenance'));
-  });
-  if (priorAggregateReplayFull.length > 1) {
-    throw new GitHubWorkflowError(
-      'Aggregate adoption permits only one terminal prior-aggregate replay carrier',
-      'ARCHIVE_EVIDENCE_AMBIGUOUS',
-    );
+  if (priorAggregateReplayCandidate !== null) {
+    const priorAggregateTerminalBound = terminalArchiveUpperBound(priorAggregateReplayCandidate);
+    const hasLaterCompleteCarrier = full.some((candidate) => (
+      candidate.archive.archiveId !== priorAggregateReplayCandidate.archive.archiveId
+        && priorAggregateTerminalBound < candidate.terminalBounds.stateUpdatedAt
+    ));
+    if (!hasLaterCompleteCarrier) {
+      throw new GitHubWorkflowError(
+        'Prior aggregate replay lacks a strictly later complete historical carrier',
+        'ARCHIVE_EVIDENCE_AMBIGUOUS',
+      );
+    }
   }
   const project = (candidate, reserve = null) => {
     const rows = selectedRowsByArchive.get(candidate.archive.archiveId);
@@ -914,6 +920,8 @@ function assertMixedHistoricalCarrierSlice(
 function assertPriorAggregateReplayCarrierSlice(candidate, projection, rows) {
   const selectedThreadIds = projection.proofRows.map((row) => row.threadNodeId).sort();
   const selectedRoots = new Set(selectedThreadIds);
+  const carriedThreadIds = rows.map((row) => row.threadNodeId).sort();
+  const carriedRoots = new Set(carriedThreadIds);
   const authorityByRoot = aggregateAuthorityByRoot(projection);
   const canonicalRootIndex = aggregateCanonicalRootIndex(projection.proofRows);
   const anchoredHistoricalTaskIds = new Set(
@@ -930,7 +938,7 @@ function assertPriorAggregateReplayCarrierSlice(candidate, projection, rows) {
     : candidate.archivedState.threadResolutionStatus.threads.filter(
       (row) => row.taskIds.includes(ownerId),
     );
-  if (rows.length !== selectedThreadIds.length
+  if (rows.length === 0
       || rows.some((row) => !Object.hasOwn(row, 'archiveProvenance')
         || row.taskIds.length !== 1 || row.taskIds[0] !== ownerId
         || row.disposition !== 'already-fixed')
@@ -940,13 +948,26 @@ function assertPriorAggregateReplayCarrierSlice(candidate, projection, rows) {
       || owner.disposition !== 'already-fixed'
       || owner.integratedCommitSha !== null
       || ownerThreadIds === null
-      || !isDeepStrictEqual(ownerThreadIds, selectedThreadIds)
+      || !isDeepStrictEqual(ownerThreadIds, carriedThreadIds)
       || ownerRows.length !== rows.length
-      || ownerRows.some((row) => !selectedRoots.has(row.threadNodeId))) {
+      || !isDeepStrictEqual(
+        ownerRows.map((row) => row.threadNodeId).sort(),
+        carriedThreadIds,
+      )) {
     throw new GitHubWorkflowError(
       'Prior aggregate replay carrier owner is incomplete, divergent, or ineligible',
       'ARCHIVE_TASK_MISMATCH',
     );
+  }
+  for (const partition of projection.partitions) {
+    const partitionRoots = partition.proofRows.map((row) => row.threadNodeId);
+    const carriedCount = partitionRoots.filter((root) => carriedRoots.has(root)).length;
+    if (carriedCount !== 0 && carriedCount !== partitionRoots.length) {
+      throw new GitHubWorkflowError(
+        'Prior aggregate replay carrier slices an anchored historical partition',
+        'ARCHIVE_PROOF_MISMATCH',
+      );
+    }
   }
   for (const task of candidate.archivedState.tasks) {
     if (task.sourceType !== 'github-thread' || task.id === ownerId) continue;
@@ -1365,6 +1386,17 @@ export function validateAggregateArchiveLineage(
   const historicalCandidates = candidates.filter((candidate) => !provenanceIds.has(candidate.archive.archiveId));
   const boundedRows = boundedAggregateSelectedRows(candidates, selectedThreadIds);
   const selectedRowsByArchive = boundedRows.rowsByArchive;
+  const priorAggregateReplayCandidates = historicalCandidates.filter((candidate) => {
+    const rows = selectedRowsByArchive.get(candidate.archive.archiveId);
+    return rows.length !== 0
+      && rows.every((row) => Object.hasOwn(row, 'archiveProvenance'));
+  });
+  if (priorAggregateReplayCandidates.length > 1) {
+    throw new GitHubWorkflowError(
+      'Aggregate adoption permits only one terminal prior-aggregate replay carrier',
+      'ARCHIVE_EVIDENCE_AMBIGUOUS',
+    );
+  }
   let aggregateNodeCount = boundedRows.nodeCount;
   const reserveAggregateNode = (count = 1) => {
     aggregateNodeCount += count;
@@ -1377,6 +1409,7 @@ export function validateAggregateArchiveLineage(
   };
   const projection = aggregateFullAuthorityProjection(
     state, historicalCandidates, selectedThreadIds, selectedRowsByArchive, reserveAggregateNode,
+    priorAggregateReplayCandidates[0] ?? null,
   );
   if (projection.partitions.length < 2 || projection.partitions.length > MAX_NODES) {
     throw new GitHubWorkflowError(

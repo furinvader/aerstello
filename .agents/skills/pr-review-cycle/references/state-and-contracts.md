@@ -214,7 +214,17 @@ GitHub-thread tasks form one unique disjoint cover of whole source partitions;
 each partition has one observed historical HEAD and projects only actionable
 to `fixed` with a commit or already-fixed to `already-fixed` with null. Every
 relevant partial carrier must equal an exact union of whole partitions from the
-full anchor. Missing, overlapping, sliced, duplicated, divergent, alternate,
+full anchor. A provenance-only prior-aggregate carrier follows that same rule:
+its one completed `already-fixed` null-commit owner and owner proof rows equal
+exactly the nonempty roots carried by that archive. One later complete
+historical carrier covering every selected root remains mandatory, while the
+requirement is existential across agreeing complete ordinary or mixed carriers:
+at least one carrier's archived-state `updatedAt` must be strictly greater than
+the prior aggregate carrier's canonical terminal envelope, the maximum of its
+state `updatedAt` and terminal `abandoned.at`. Archive IDs and inventory order
+do not establish chronology. The prior-aggregate slice contributes neither
+origin nor complete-carrier authority. Missing, overlapping, sliced,
+duplicated, divergent, alternate,
 intent-only, or provenance-stripped covers fail closed.
 
 Aggregate carrier roles are stored only in transient selection evidence and
