@@ -286,9 +286,12 @@ Predecessor partitions are unique and disjoint across carriers. Each
 predecessor integration commit is distinct from both the anchored successor
 task's non-null integration commit and the partition proof HEAD while remaining
 ancestral to the partition proof HEAD. Every authority-bearing or neutral
-carrier's terminal boundary precedes every covered partition's proof-origin
-reply intent, and each carrier HEAD is ancestral to the current integration
-HEAD.
+carrier HEAD is ancestral to the current integration HEAD. Strict
+terminal-before-proof-origin chronology applies only to roots supplied by
+authority-bearing predecessor relations. Neutral carry-forward shells and
+aggregate wrappers neither establish nor invalidate that chronology; a
+neutral-only carrier skips only this predicate while every other role,
+partition, ancestry, inventory, race, and budget gate remains authoritative.
 
 Each proofless carrier, selected-root role, and intent footprint consumes the
 shared cumulative node budget. The carrier's complete content fingerprint and

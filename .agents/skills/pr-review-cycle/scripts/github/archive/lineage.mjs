@@ -1628,7 +1628,11 @@ export function validateAggregateArchiveLineage(
   }
   for (const predecessor of predecessorOnlyCarriers) {
     const predecessorAt = terminalArchiveUpperBound(predecessor.candidate);
-    const carrierOrigins = predecessor.carrierRoots.flatMap((root) => origins.get(root));
+    const predecessorRoots = [...new Set(predecessor.relations.flatMap(
+      (relation) => relation.roots,
+    ))];
+    if (predecessorRoots.length === 0) continue;
+    const carrierOrigins = predecessorRoots.flatMap((root) => origins.get(root));
     if (carrierOrigins.length === 0 || carrierOrigins.some((origin) => (
         predecessorAt >= parsedTime(
           origin.evidence.intents.reply.intent.at,

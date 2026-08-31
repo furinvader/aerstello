@@ -343,6 +343,12 @@ proof-bearing, terminal, intent-bearing, mixed-carrier, null-commit,
 equal-commit, and non-ancestral shapes remain fatal. This is not a generalized
 task-supersession mechanism.
 
+Strict terminal-before-proof-origin chronology is evaluated only for roots in
+authority-bearing predecessor relations. Carry-forward shells and aggregate
+wrappers are authority-neutral: they neither establish nor invalidate that
+chronology, and a neutral-only carrier skips only this predicate while all
+role, partition, ancestry, inventory, race, and budget gates remain mandatory.
+
 Successful aggregate adoption still performs zero GitHub, journal, or archive
 mutation and one guarded task-completion checkpoint. Imported rows map to the
 fresh active task and `already-fixed` disposition, retain their per-root

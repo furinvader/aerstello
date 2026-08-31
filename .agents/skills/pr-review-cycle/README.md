@@ -479,6 +479,12 @@ integration HEAD. Both archive inventories rerun every distinct ancestry
 relation and bind a sorted archive/content/partition-root-role fingerprint;
 enumeration-only reordering remains harmless.
 
+For proofless carriers, strict terminal-before-proof-origin chronology applies
+only to roots supplied by authority-bearing predecessor relations. Neutral
+carry-forward shells and aggregate wrappers neither establish nor invalidate
+that chronology; a neutral-only carrier skips only this predicate and remains
+subject to every role, partition, ancestry, inventory, race, and budget gate.
+
 The one adoption checkpoint maps every imported row to the fresh active task
 and `already-fixed` disposition while retaining its own historical observed
 HEAD. It also stores closed `archiveProvenance` version 1 with the historical

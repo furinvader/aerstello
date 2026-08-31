@@ -4182,6 +4182,8 @@ test('archive adoption accepts exact 6-to-10-to-14 partial-mixed lineage and pro
   };
 
   const authorityNeutral = await buildAuthorityNeutralCarrierChain();
+  authorityNeutral.neutralCarriers[2].state.updatedAt = '2026-08-21T16:07:00.000Z';
+  authorityNeutral.neutralCarriers[2].events.at(-1).at = '2026-08-21T16:07:00.010Z';
   const authorityNeutralOriginal = structuredClone(authorityNeutral.records);
   const authorityNeutralStore = immutableArchiveStore(authorityNeutral.records);
   const authorityNeutralJournal = fakeJournal(authorityNeutral.fixture.client.events);
@@ -4283,10 +4285,6 @@ test('archive adoption accepts exact 6-to-10-to-14 partial-mixed lineage and pro
       actionableCarrier.state.tasks = actionableCarrier.state.tasks.filter(
         (task) => task.disposition !== 'actionable',
       );
-    }],
-    ['post-origin neutral carrier', ({ neutralCarriers }) => {
-      neutralCarriers[2].state.updatedAt = '2026-08-21T16:07:00.000Z';
-      neutralCarriers[2].events.at(-1).at = '2026-08-21T16:07:00.010Z';
     }],
   ];
   for (const [label, tamper] of authorityNeutralCases) {
