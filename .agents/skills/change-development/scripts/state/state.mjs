@@ -998,10 +998,15 @@ function activeDevelopmentHandoffDigest(cwd, state, activeHandoffAuthority) {
     digest: integratedTaskSetDigest(terminalIdentities),
   };
   const effectivePlan = readEffectivePlan(cwd, state);
+  const acceptedPlan = verifyReceipt(
+    join(changeDirectory(cwd, state.changeId), 'plan', 'plan.json'),
+    'accepted plan',
+  );
   const derived = buildDevelopmentScopeHandoff({
     changeId: state.changeId,
     headSha: state.git.headSha,
     capturedAt: activeHandoffAuthority.value.capturedAt,
+    acceptedPlan,
     effectivePlan: { value: effectivePlan, digest: state.plan.effectiveDigest },
     minimalClosure: receipts.closure,
     amendments: receipts.amendmentRecords.map((value) => ({

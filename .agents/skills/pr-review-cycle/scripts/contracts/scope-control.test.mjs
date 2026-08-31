@@ -106,9 +106,8 @@ function bindAssessmentDecisions(pair, approvedDecisions) {
     delete pair.packet.binding.decisionDigests;
     delete pair.result.binding.decisionDigests;
   } else {
-    pair.packet.acceptedScope.authorityDecisions = approvedDecisions.map(({ id, digest }) => ({
-      id, digest, disposition: 'split-defer', authorizedShape: [],
-    }));
+    pair.packet.acceptedScope.authorityDecisions = approvedDecisions.map((entry) =>
+      structuredClone(entry));
     const decisionDigests = approvedDecisions.map(({ digest }) => digest);
     pair.packet.binding.decisionDigests = [...decisionDigests];
     pair.result.binding.decisionDigests = [...decisionDigests];
@@ -184,7 +183,8 @@ function developmentHandoffInput() {
   });
   return {
     changeId: 'issue-55', headSha: HEAD, capturedAt: AT,
-    minimalClosure, effectivePlan, amendments: [], decisions: [], terminalTaskSet,
+    minimalClosure, acceptedPlan: structuredClone(effectivePlan), effectivePlan,
+    amendments: [], decisions: [], terminalTaskSet,
     integratedScopeEvidence,
   };
 }
@@ -349,8 +349,9 @@ test('malformed approved decisions return structural errors instead of throwing'
 test('imported authority binds exact ordered approved decisions across assessment surfaces', () => {
   const { validateScopeAuthoritySnapshot } = contract;
   const approvedDecisions = [
-    { id: 'initial-scope', digest: DIGEST },
-    { id: 'bounded-follow-up', digest: OTHER_DIGEST },
+    { id: 'initial-scope', digest: DIGEST, disposition: 'split-defer', authorizedShape: [] },
+    { id: 'bounded-follow-up', digest: OTHER_DIGEST,
+      disposition: 'approve-material-amendment', authorizedShape: ['bounded-follow-up-shape'] },
   ];
   const correlated = authority({ approvedDecisions });
   correlated.integratedHeadAssessment = bindAssessmentDecisions(
@@ -358,11 +359,21 @@ test('imported authority binds exact ordered approved decisions across assessmen
     approvedDecisions,
   );
   assert.deepEqual(validateScopeAuthoritySnapshot(correlated), []);
+  const schema = JSON.parse(readFileSync(new URL('../../schemas/scope-control.schema.json', import.meta.url), 'utf8'));
+  const validateSchema = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(validateSchema);
+  const validateAuthority = validateSchema.compile(schema);
+  assert.equal(validateAuthority(correlated), true, JSON.stringify(validateAuthority.errors));
 
   const mismatches = [
     {
       label: 'top-level decision addition',
-      mutate(value) { value.approvedDecisions.push({ id: 'foreign-decision', digest: THIRD_DIGEST }); },
+      mutate(value) {
+        value.approvedDecisions.push({
+          id: 'foreign-decision', digest: THIRD_DIGEST,
+          disposition: 'split-defer', authorizedShape: [],
+        });
+      },
     },
     {
       label: 'assessment decision addition',
@@ -386,6 +397,18 @@ test('imported authority binds exact ordered approved decisions across assessmen
         value.integratedHeadAssessment.packet.acceptedScope.authorityDecisions[0].digest = THIRD_DIGEST;
         value.integratedHeadAssessment.packet.binding.decisionDigests[0] = THIRD_DIGEST;
         value.integratedHeadAssessment.result.binding.decisionDigests[0] = THIRD_DIGEST;
+      },
+    },
+    {
+      label: 'decision disposition drift',
+      mutate(value) {
+        value.integratedHeadAssessment.packet.acceptedScope.authorityDecisions[0].disposition = 'reject-use-narrow';
+      },
+    },
+    {
+      label: 'decision authorized shape drift',
+      mutate(value) {
+        value.integratedHeadAssessment.packet.acceptedScope.authorityDecisions[1].authorizedShape = ['foreign-shape'];
       },
     },
     {
@@ -439,7 +462,9 @@ test('imported authority binds exact ordered approved decisions across assessmen
 
 test('journal classification reuses imported approved-decision authority validation', () => {
   const { scopeAuthorityDigest, validateScopeControlJournal } = contract;
-  const approvedDecisions = [{ id: 'initial-scope', digest: DIGEST }];
+  const approvedDecisions = [{
+    id: 'initial-scope', digest: DIGEST, disposition: 'split-defer', authorizedShape: [],
+  }];
   const authorityValue = authority({ approvedDecisions });
   authorityValue.integratedHeadAssessment = bindAssessmentDecisions(
     authorityValue.integratedHeadAssessment,

@@ -51,11 +51,23 @@ function clone(value) {
   return structuredClone(value);
 }
 
-function amendmentDigests(amendments, effectivePlan) {
+function amendmentDigests(amendments, acceptedPlan, effectivePlan) {
   if (!Array.isArray(amendments) || amendments.length > MAX_AMENDMENTS) {
     throw new TypeError(`amendments must contain at most ${MAX_AMENDMENTS} receipt records`);
   }
-  let previousDigest = null;
+  const original = acceptedPlan.value;
+  const effective = effectivePlan.value;
+  if (!Number.isSafeInteger(original.planRevision) || original.planRevision < 1
+      || !Number.isSafeInteger(effective.planRevision) || effective.planRevision < 1) {
+    throw new TypeError('original and effective plan revisions must be positive safe integers');
+  }
+  if (original.changeId !== effective.changeId) {
+    throw new TypeError('original and effective plan change identities must match');
+  }
+  if (amendments.length !== effective.planRevision - original.planRevision) {
+    throw new TypeError('amendment count must exactly span the original and effective plan revisions');
+  }
+  let previousDigest = acceptedPlan.digest;
   const digests = amendments.map((receipt, index) => {
     assertReceipt(receipt, `amendments[${index}]`);
     const amendment = receipt.value;
@@ -63,16 +75,20 @@ function amendmentDigests(amendments, effectivePlan) {
     if (!DIGEST.test(amendment.previousDigest ?? '') || !DIGEST.test(amendment.newDigest ?? '')) {
       throw new TypeError(`amendments[${index}] lacks canonical plan digests`);
     }
-    if (index > 0 && amendment.previousDigest !== previousDigest) {
+    if (amendment.previousDigest !== previousDigest) {
       throw new TypeError('amendments do not form one ordered effective-plan chain');
     }
     if (scopeContractDigest(amendment.resultingPlan) !== amendment.newDigest) {
       throw new TypeError(`amendments[${index}] resulting plan digest does not match`);
     }
+    if (amendment.resultingPlan?.changeId !== original.changeId
+        || amendment.resultingPlan?.planRevision !== original.planRevision + index + 1) {
+      throw new TypeError(`amendments[${index}] resulting plan identity or revision is not contiguous`);
+    }
     previousDigest = amendment.newDigest;
     return receipt.digest;
   });
-  if (amendments.length > 0 && previousDigest !== effectivePlan.digest) {
+  if (previousDigest !== effectivePlan.digest) {
     throw new TypeError('final amendment does not produce the effective plan');
   }
   assertUnique(digests, 'amendment digests');
@@ -85,7 +101,12 @@ function approvedDecisions(decisions, closure) {
   }
   const projected = decisions.map((receipt, index) => {
     assertReceipt(receipt, `decisions[${index}]`, validateScopeDecision);
-    return { id: receipt.value.decisionId, digest: receipt.digest };
+    return {
+      id: receipt.value.decisionId,
+      digest: receipt.digest,
+      disposition: receipt.value.disposition,
+      authorizedShape: clone(receipt.value.approvedShape),
+    };
   });
   assertUnique(projected.map(({ id }) => id), 'decision IDs');
   if (!isDeepStrictEqual(projected.map(({ digest }) => digest), closure.value.operatorDecisionDigests)) {
@@ -130,12 +151,14 @@ export function buildDevelopmentScopeHandoff(input) {
     'headSha',
     'integratedScopeEvidence',
     'minimalClosure',
+    'acceptedPlan',
     'terminalTaskSet',
   ], 'handoff input');
   if (!SHA.test(input.headSha ?? '')) throw new TypeError('headSha must be a full Git SHA');
   if (!DATE_TIME.test(input.capturedAt ?? '') || Number.isNaN(Date.parse(input.capturedAt))) {
     throw new TypeError('capturedAt must be an RFC 3339 timestamp');
   }
+  assertReceipt(input.acceptedPlan, 'acceptedPlan');
   assertReceipt(input.effectivePlan, 'effectivePlan');
   assertReceipt(input.minimalClosure, 'minimalClosure', validateMinimalClosureContract);
   assertReceipt(input.integratedScopeEvidence, 'integratedScopeEvidence', validateScopeEvidence);
@@ -144,11 +167,17 @@ export function buildDevelopmentScopeHandoff(input) {
   const plan = input.effectivePlan.value;
   const closure = input.minimalClosure.value;
   const evidence = input.integratedScopeEvidence.value;
-  const amendmentReceiptDigests = amendmentDigests(input.amendments, input.effectivePlan);
+  const amendmentReceiptDigests = amendmentDigests(
+    input.amendments,
+    input.acceptedPlan,
+    input.effectivePlan,
+  );
   const decisionReceipts = approvedDecisions(input.decisions, input.minimalClosure);
   const errors = [];
   if (input.changeId !== closure.changeId || input.changeId !== evidence.changeId
-      || input.changeId !== plan.changeId) errors.push('change identity is inconsistent');
+      || input.changeId !== plan.changeId || input.changeId !== input.acceptedPlan.value.changeId) {
+    errors.push('change identity is inconsistent');
+  }
   if (closure.planDigest !== input.effectivePlan.digest) errors.push('minimal closure is stale for the effective plan');
   if (closure.planningSha !== plan.planning?.planningSha) errors.push('minimal closure Planning SHA is stale');
   const source = { type: plan.source?.kind, identity: plan.source?.reference, digest: plan.source?.captureDigest };

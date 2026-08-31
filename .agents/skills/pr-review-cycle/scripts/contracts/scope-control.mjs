@@ -20,6 +20,12 @@ import {
 const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 const SOURCE_TYPES = new Set(['github-issue', 'direct-request', 'repository-plan', 'partial-implementation']);
+const DEVELOPMENT_DECISION_DISPOSITIONS = new Set([
+  'approve-material-amendment',
+  'split-defer',
+  'reject-use-narrow',
+  'abandon-replan',
+]);
 
 export const SCOPE_CLASSIFICATIONS = [
   'within-scope-defect',
@@ -136,6 +142,8 @@ function validateAssessmentAuthority(value, authority, amendmentDigests, path, e
   const expectedDecisionAuthority = approvedDecisions.map((entry) => ({
     id: entry?.id,
     digest: entry?.digest,
+    disposition: entry?.disposition,
+    authorizedShape: entry?.authorizedShape,
   }));
   const acceptedDecisions = Array.isArray(value?.packet?.acceptedScope?.authorityDecisions)
     ? value.packet.acceptedScope.authorityDecisions
@@ -143,6 +151,8 @@ function validateAssessmentAuthority(value, authority, amendmentDigests, path, e
   const acceptedDecisionAuthority = acceptedDecisions.map((entry) => ({
     id: entry?.id,
     digest: entry?.digest,
+    disposition: entry?.disposition,
+    authorizedShape: entry?.authorizedShape,
   }));
   if (!isDeepStrictEqual(acceptedDecisionAuthority, expectedDecisionAuthority)) {
     errors.push(`${path}.packet.acceptedScope.authorityDecisions must equal the ordered captured approved decisions`);
@@ -172,11 +182,23 @@ function validateApprovedDecisions(value, path, errors) {
   }
   value.forEach((entry, index) => {
     const entryPath = `${path}[${index}]`;
-    const fields = ['id', 'digest'];
+    const fields = ['id', 'digest', 'disposition', 'authorizedShape'];
     if (!requireFields(entry, fields, entryPath, errors)) return;
     rejectUnknownFields(entry, fields, entryPath, errors);
     if (!isId(entry.id)) errors.push(`${entryPath}.id is invalid`);
     if (!isDigest(entry.digest)) errors.push(`${entryPath}.digest is invalid`);
+    if (!DEVELOPMENT_DECISION_DISPOSITIONS.has(entry.disposition)) {
+      errors.push(`${entryPath}.disposition is invalid`);
+    }
+    validateStringList(entry.authorizedShape, `${entryPath}.authorizedShape`, errors, 512);
+    if (Array.isArray(entry.authorizedShape) && entry.authorizedShape.length > 256) {
+      errors.push(`${entryPath}.authorizedShape exceeds 256 entries`);
+    }
+    if (Array.isArray(entry.authorizedShape)
+        && ((entry.disposition === 'approve-material-amendment' && entry.authorizedShape.length === 0)
+          || (entry.disposition !== 'approve-material-amendment' && entry.authorizedShape.length > 0))) {
+      errors.push(`${entryPath}.authorizedShape does not match the decision disposition`);
+    }
   });
   if (new Set(value.map((entry) => entry?.id)).size !== value.length) errors.push(`${path} contains duplicate IDs`);
 }
