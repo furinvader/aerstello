@@ -18,7 +18,7 @@ import { spawnSync } from 'node:child_process';
 import { hostname } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 
-import { gitBuffer, gitText, listTree, readTreeFile, resolveCommit, runGit } from '../../../../../scripts/lib/git.mjs';
+import { gitBuffer, gitText, isAncestor, listTree, readTreeFile, resolveCommit, runGit } from '../../../../../scripts/lib/git.mjs';
 import {
   digestJson,
   planReadiness,
@@ -60,6 +60,8 @@ import {
   validateEvidenceForBoundary,
   validateAdmissionScopeSemantics,
   validateMinorAmendmentAuthority,
+  projectNonmaterialScopeRemediation,
+  scopeAuthorityDecisionProjection,
   validateActiveHandoffAuthority,
   validateScopeReturnResume,
 } from './scope.mjs';
@@ -899,6 +901,15 @@ function validateScopeDecisionHistory(cwd, state) {
   return decisionIds;
 }
 
+function scopeDecisionReceipts(cwd, state) {
+  return (state.scope?.decisionDigests ?? []).map((digest) =>
+    findScopeReceipt(cwd, state, 'decisions', digest, 'scope decision'));
+}
+
+function durableScopeDecisionProjection(cwd, state) {
+  return scopeAuthorityDecisionProjection(scopeDecisionReceipts(cwd, state));
+}
+
 function pendingMaterialDecisionForClosure(root, state, currentScope) {
   if (currentScope?.value?.result?.verdict !== 'human-decision-required'
       || validateScopeEvidence(currentScope.value).length > 0
@@ -1023,6 +1034,50 @@ function activeDevelopmentHandoffDigest(cwd, state, activeHandoffAuthority) {
       'SCOPE_RETURN_INVALID');
   }
   return activeHandoffAuthority.digest;
+}
+
+function validateResumedHeadAuthority(cwd, state, scopeReturn, currentHeadSha) {
+  const errors = [];
+  if (!isAncestor(cwd, state.git.headSha, currentHeadSha)) {
+    return ['$ resumed PR head must descend from the prior development HEAD'];
+  }
+  const changedPaths = gitBuffer([
+    '--no-replace-objects', 'diff', '--name-only', '-z', '--no-renames',
+    state.git.headSha, currentHeadSha, '--',
+  ], { cwd }).toString('utf8').split('\0').filter(Boolean);
+  if (!isDeepStrictStringList(scopeReturn.inventory.paths, changedPaths)) {
+    errors.push('$ scope return inventory.paths must exactly equal the resumed PR-head changed paths');
+  }
+  const terminal = terminalTaskEvidence(cwd, state);
+  for (const path of changedPaths) {
+    const matchingOwners = terminal.filter(({ packet }) =>
+      packet.allowedPaths.some((pattern) => pathMatchesOwnership(path, pattern)));
+    const owned = matchingOwners.some(({ packet }) =>
+      !packet.forbiddenPaths.some((pattern) => pathMatchesOwnership(path, pattern)));
+    if (matchingOwners.length === 0) {
+      errors.push(`$ resumed PR-head changed path is unowned by terminal task authority: ${path}`);
+    } else if (!owned) {
+      errors.push(`$ resumed PR-head changed path is forbidden by every matching terminal task authority: ${path}`);
+    }
+  }
+  const authorizedCommands = new Set(terminal.flatMap(({ packet }) => [
+    ...packet.requiredValidation.unit,
+    ...packet.requiredValidation.system,
+  ].map(({ command }) => command)));
+  for (const command of scopeReturn.inventory.validation) {
+    if (!authorizedCommands.has(command)) {
+      errors.push(`$ scope return validation command is unrepresented by terminal task authority: ${command}`);
+    }
+  }
+  if (changedPaths.length > 0 && scopeReturn.inventory.validation.length === 0) {
+    errors.push('$ a resumed PR-head delta requires at least one represented validation command');
+  }
+  return [...new Set(errors)].sort();
+}
+
+function isDeepStrictStringList(actual, expected) {
+  return Array.isArray(actual) && actual.length === expected.length
+    && actual.every((value, index) => value === expected[index]);
 }
 
 export function integratedScopeAssessmentIdentity({ cwd = process.cwd(), changeId } = {}) {
@@ -1192,6 +1247,7 @@ export function acceptPlan({ cwd = process.cwd(), changeId, plan, planningEviden
     scopeErrors.push(...validateAdmissionScopeSemantics(scopeEvidence, {
       effectivePlan: plan,
       minimalClosure,
+      authorityDecisions: durableScopeDecisionProjection(root, state),
     }));
     if (closureErrors.length > 0 || scopeErrors.length > 0) {
       throw new StateError(`Plan admission scope evidence is invalid:\n- ${[...closureErrors, ...scopeErrors].join('\n- ')}`,
@@ -1293,6 +1349,7 @@ export function adoptScope({ cwd = process.cwd(), changeId, minimalClosure, scop
     evidenceErrors.push(...validateAdmissionScopeSemantics(scopeEvidence, {
       effectivePlan,
       minimalClosure,
+      authorityDecisions: durableScopeDecisionProjection(root, state),
     }));
     if (evidenceErrors.length > 0) throw new StateError(`Scope adoption evidence is invalid:\n- ${evidenceErrors.join('\n- ')}`, 'SCOPE_ADOPTION_INVALID');
     const timestamp = now(clock); const evidenceDigest = scopeContractDigest(scopeEvidence);
@@ -1377,6 +1434,7 @@ export function assessScope({ cwd = process.cwd(), changeId, scopeEvidence, expe
     errors.push(...validateAdmissionScopeSemantics(scopeEvidence, {
       effectivePlan: readEffectivePlan(root, state),
       minimalClosure: receipts.closure.value,
+      authorityDecisions: durableScopeDecisionProjection(root, state),
     }));
     if (errors.length > 0) throw new StateError(`Scope assessment is invalid or stale:\n- ${errors.join('\n- ')}`, 'SCOPE_ASSESSMENT_INVALID');
     const evidenceDigest = scopeContractDigest(scopeEvidence); const gate = scopeGateForVerdict(scopeEvidence.result.verdict);
@@ -1541,6 +1599,7 @@ export function resumeScopeReturn({ cwd = process.cwd(), changeId, scopeReturn, 
       expectedAuthorityDigest: activeHandoffAuthorityDigest,
     });
     if (!current.clean || current.branch !== state.git.branch) errors.push('$ scope return requires the exact clean owning branch');
+    errors.push(...validateResumedHeadAuthority(root, state, scopeReturn, current.headSha));
     if (errors.length > 0) throw new StateError(`Scope return is invalid:\n- ${errors.join('\n- ')}`, 'SCOPE_RETURN_INVALID');
     const timestamp = now(clock);
     const record = developmentScopeResumeRecord(scopeReturn, {
@@ -4170,6 +4229,9 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
     if (scopeDriven) {
       const evidence = findScopeReceipt(root, state, 'evidence', state.scope.currentEvidenceDigest, 'scope amendment evidence').value;
       if (['minor-amendment-required', 'trim-required'].includes(evidence.result.verdict)) {
+        if (Object.hasOwn(amendment.delta, 'scopeRemediation')) {
+          throw new StateError('scopeRemediation is a reserved canonical amendment projection', 'INVALID_AMENDMENT');
+        }
         const newCriteria = resultingPlan.criteria.filter(({ id }) => !prior.criteria.some((entry) => entry.id === id));
         const newTasks = resultingPlan.tasks.filter(({ id }) => !prior.tasks.some((entry) => entry.id === id));
         const declaredTaskIds = amendment.delta.addedTaskIds;
@@ -4295,6 +4357,9 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
       const evidence = findScopeReceipt(root, state, 'evidence', state.scope.currentEvidenceDigest, 'scope amendment evidence').value;
       if (evidence.result.verdict === 'minor-amendment-required') {
         closureErrors.push(...validateMinorAmendmentAuthority({ evidence, amendment }));
+        const projected = projectNonmaterialScopeRemediation({ evidence, priorClosure, minimalClosure });
+        closureErrors.push(...projected.errors);
+        record.delta = { ...record.delta, scopeRemediation: projected.remediation };
       } else if (evidence.result.verdict === 'trim-required') {
         if (amendment.trigger !== state.scope.currentEvidenceDigest
             || !amendment.invalidatedEvidence.includes(state.scope.currentEvidenceDigest)) {
@@ -4306,6 +4371,9 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
           criterionIds.some((id) => newCriteria.some((criterion) => criterion.id === id)))) {
           closureErrors.push('$ trim remediation must add one ordinary criterion-linked removal or simplification task');
         }
+        const projected = projectNonmaterialScopeRemediation({ evidence, priorClosure, minimalClosure });
+        closureErrors.push(...projected.errors);
+        record.delta = { ...record.delta, scopeRemediation: projected.remediation };
       } else if (evidence.result.verdict === 'human-decision-required') {
         closureErrors.push(...validateMaterialDecisionAmendment({
           root, state, evidence, amendment, priorClosure, minimalClosure,
@@ -5181,6 +5249,18 @@ function amendmentForRecovery(cwd, intent, predecessor) {
       });
       if (materialErrors.length > 0) {
         throw new StateError('Interrupted material amendment lacks exact decision authority', 'RECOVERY_EVIDENCE_INVALID');
+      }
+    } else if (['minor-amendment-required', 'trim-required'].includes(evidence.result.verdict)) {
+      const nonmaterial = projectNonmaterialScopeRemediation({ evidence, priorClosure, minimalClosure });
+      const authorityErrors = evidence.result.verdict === 'minor-amendment-required'
+        ? validateMinorAmendmentAuthority({ evidence, amendment: record })
+        : record.trigger === predecessor.scope.currentEvidenceDigest
+          && record.invalidatedEvidence.includes(predecessor.scope.currentEvidenceDigest)
+          ? [] : ['$ recovered trim amendment lacks its exact assessment trigger'];
+      if (nonmaterial.errors.length > 0 || authorityErrors.length > 0
+          || serialized(record.delta.scopeRemediation) !== serialized(nonmaterial.remediation)) {
+        throw new StateError('Interrupted nonmaterial amendment lacks its exact assessment-bound remediation projection',
+          'RECOVERY_EVIDENCE_INVALID');
       }
     }
   }

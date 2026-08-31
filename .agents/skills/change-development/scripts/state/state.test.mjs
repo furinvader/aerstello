@@ -63,6 +63,43 @@ import {
   withIntegrationOperationLock,
   changeRoot,
 } from './state.mjs';
+import { projectNonmaterialScopeRemediation } from './scope.mjs';
+
+test('mixed minor remediation removes exact speculative work and adds only necessary authority', () => {
+  const priorClosure = {
+    outcome: 'Keep the bounded result.', requiredCriteria: [{ id: 'criterion', text: 'Required.' }],
+    invariants: [], nonGoals: [], mandatoryConstraints: [], optionalGuidance: [],
+    authorizedShape: ['unrelated-authority', 'speculative-helper'],
+    unauthorizedExpansion: ['necessary-helper', 'unrelated-unauthorized'],
+    deferredFollowups: [{ id: 'necessary-helper', text: 'Necessary helper.' },
+      { id: 'unrelated-followup', text: 'Unrelated.' }],
+  };
+  const evidence = { result: {
+    verdict: 'minor-amendment-required',
+    coverage: [
+      { mechanism: 'speculative-helper', classification: 'speculative' },
+      { mechanism: 'necessary-helper', classification: 'necessary-minor-expansion' },
+    ],
+    unnecessaryWork: ['speculative-helper'],
+    scopeDelta: { description: 'Add only the necessary helper.', sourceCriterionIds: [],
+      acceptedCriterionIds: ['criterion'], invariantIds: [], materialSurfaces: [] },
+    smallerSufficientAlternative: 'Remove the speculative helper.',
+  } };
+  const minimalClosure = { ...structuredClone(priorClosure),
+    authorizedShape: ['unrelated-authority', 'necessary-helper'],
+    unauthorizedExpansion: ['unrelated-unauthorized'],
+    deferredFollowups: [{ id: 'unrelated-followup', text: 'Unrelated.' }] };
+  const exact = projectNonmaterialScopeRemediation({ evidence, priorClosure, minimalClosure });
+  assert.deepEqual(exact.errors, []);
+  assert.deepEqual(exact.remediation.unnecessaryWork, ['speculative-helper']);
+  assert.deepEqual(exact.remediation.necessaryMechanisms, ['necessary-helper']);
+  assert.deepEqual(exact.remediation.scopeDelta, evidence.result.scopeDelta);
+  assert.equal(exact.remediation.smallerSufficientAlternative, 'Remove the speculative helper.');
+  const tampered = projectNonmaterialScopeRemediation({ evidence, priorClosure,
+    minimalClosure: { ...minimalClosure,
+      authorizedShape: ['unrelated-authority', 'speculative-helper', 'necessary-helper'] } });
+  assert.ok(tampered.errors.some((error) => /exact assessed authorizedShape transformation/u.test(error)));
+});
 
 function testMinimalClosure(state, plan, overrides = {}) {
   const planDigest = digestJson(plan);
@@ -289,9 +326,37 @@ function amendPlan(options) {
   if (options.minimalClosure) return amendPlanWithScope(options);
   const state = loadState(options.cwd, options.changeId);
   if (!state) return amendPlanWithScope(options);
+  const directory = changeDirectory(options.cwd, state.changeId);
+  const priorClosure = readdirSync(join(directory, 'scope', 'minimal-closure'))
+    .filter((name) => name.endsWith('.json'))
+    .map((name) => JSON.parse(readFileSync(join(directory, 'scope', 'minimal-closure', name), 'utf8')))
+    .find((candidate) => digestJson(candidate) === state.scope.closureDigest);
+  const evidenceDirectory = state.scope.currentBoundary === null ? null
+    : join(directory, 'scope', 'evidence', state.scope.currentBoundary);
+  const currentEvidence = evidenceDirectory === null ? null
+    : readdirSync(evidenceDirectory).filter((name) => name.endsWith('.json'))
+      .map((name) => JSON.parse(readFileSync(join(evidenceDirectory, name), 'utf8')))
+      .find((candidate) => digestJson(candidate) === state.scope.currentEvidenceDigest);
   const previous = testMinimalClosure(state, options.resultingPlan);
-  const minimalClosure = { ...previous, revision: 2 + state.plan.amendmentCount,
+  const minimalClosure = { ...previous, revision: priorClosure.revision + 1,
     previousContractDigest: state.scope.closureDigest, operatorDecisionDigests: [...state.scope.decisionDigests] };
+  if (currentEvidence?.result?.verdict === 'minor-amendment-required') {
+    const mechanisms = currentEvidence.result.coverage
+      .filter(({ classification }) => classification === 'necessary-minor-expansion')
+      .map(({ mechanism }) => mechanism);
+    minimalClosure.authorizedShape = [...priorClosure.authorizedShape
+      .filter((mechanism) => !currentEvidence.result.unnecessaryWork.includes(mechanism)),
+      ...mechanisms.filter((mechanism) => !priorClosure.authorizedShape.includes(mechanism))];
+    minimalClosure.unauthorizedExpansion = priorClosure.unauthorizedExpansion
+      .filter((mechanism) => !mechanisms.includes(mechanism));
+    minimalClosure.deferredFollowups = priorClosure.deferredFollowups
+      .filter(({ id }) => !mechanisms.includes(id));
+  } else if (currentEvidence?.result?.verdict === 'trim-required') {
+    minimalClosure.authorizedShape = priorClosure.authorizedShape
+      .filter((mechanism) => !currentEvidence.result.unnecessaryWork.includes(mechanism));
+    minimalClosure.unauthorizedExpansion = [...priorClosure.unauthorizedExpansion];
+    minimalClosure.deferredFollowups = [...priorClosure.deferredFollowups];
+  }
   return amendPlanWithScope({ ...options, minimalClosure });
 }
 
@@ -1171,6 +1236,22 @@ test('revised planning verdicts retain incorporated material decision authority'
       operatorDecisionDigests: [...state.scope.decisionDigests],
     });
     const revisedEvidence = nonAdmittingPlanningEvidence(state, revisedPlan, revisedClosure, verdict);
+    for (const authorityDecision of [
+      { ...revisedEvidence.packet.acceptedScope.authorityDecisions[0], disposition: 'split-defer' },
+      { ...revisedEvidence.packet.acceptedScope.authorityDecisions[0], disposition: 'approve-material-amendment',
+        authorizedShape: ['forged-decision-shape'] },
+    ]) {
+      const forged = structuredClone(revisedEvidence);
+      forged.packet.acceptedScope.authorityDecisions = [authorityDecision];
+      forged.packetDigest = digestJson(forged.packet);
+      const before = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
+      assert.throws(() => acceptPlanWithScope({ cwd: fixture.cwd, plan: revisedPlan,
+        minimalClosure: revisedClosure, scopeEvidence: forged, expectedRevision: state.revision }),
+      (error) => error.code === 'PLAN_SCOPE_INVALID'
+        && /exact effective-plan and minimal-closure projection/u.test(error.message));
+      assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), before,
+        'forged decision disposition or detached authorized shape fails atomically');
+    }
     state = acceptPlanWithScope({ cwd: fixture.cwd, plan: revisedPlan, minimalClosure: revisedClosure,
       scopeEvidence: revisedEvidence, expectedRevision: state.revision });
 
@@ -1851,11 +1932,16 @@ test('ordinary amendment 128 commits and amendment 129 rejects before durable mu
 test('two same-base workers integrate by delta, resume intent-only integration, clean up, and finalize', async () => {
   const { cwd, sha } = repository('execution integration');
   const planning = await initializeState({ cwd, changeId: 'execution-change', mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
-  const plan = executionPlanFor(planning); let state = acceptPlan({ cwd, plan, expectedRevision: 0 });
+  const plan = executionPlanFor(planning);
+  plan.tasks.find(({ id }) => id === 'second-task').anticipatedPaths = ['second.txt', 'review'];
+  let state = acceptPlan({ cwd, plan, expectedRevision: 0 });
   const firstPacket = packetFor(state, plan, 'state-task');
+  firstPacket.forbiddenPaths = ['second.txt'];
   state = bindTask({ cwd, packet: firstPacket, expectedRevision: state.revision });
   const firstWorktree = createWorkerFixture(cwd, state, firstPacket);
   const secondPacket = packetFor(state, plan, 'second-task');
+  secondPacket.allowedPaths = ['second.txt', 'review/**'];
+  secondPacket.forbiddenPaths = ['review/forbidden.txt'];
   state = bindTask({ cwd, packet: secondPacket, expectedRevision: state.revision });
   const secondWorktree = createWorkerFixture(cwd, state, secondPacket);
   state = scheduleWave({ cwd, expectedRevision: state.revision });
@@ -1933,7 +2019,7 @@ test('two same-base workers integrate by delta, resume intent-only integration, 
   assert.notEqual(integrationEvidence['state-task-integration'].digest, integrationEvidence['second-task-integration'].digest,
     'each task binds its own task-integrated transition receipt');
   assert.match(context.evidence.find(({ kind, id }) => kind === 'packet' && id === 'state-task-ownership').summary,
-    /Allowed paths: first\.txt; forbidden paths: none/u);
+    /Allowed paths: first\.txt; forbidden paths: second\.txt/u);
   assert.match(context.evidence.find(({ kind, id }) => kind === 'packet' && id === 'state-task-validation').summary,
     /Required validation: node --test/u);
   assert.ok(context.evidence.some(({ id, summary }) => id === 'original-plan-scope' && summary.includes('Original scope')));
@@ -2001,6 +2087,11 @@ test('two same-base workers integrate by delta, resume intent-only integration, 
     },
   });
   const activeHandoffAuthority = { value: handoff, digest: scopeAuthorityDigest(handoff) };
+  writeFileSync(join(cwd, 'first.txt'), 'first\nreview remediation\n');
+  writeFileSync(join(cwd, 'second.txt'), 'second\nreview remediation\n');
+  git(cwd, 'add', 'first.txt', 'second.txt');
+  git(cwd, 'commit', '-m', 'test: returned review remediation');
+  const resumedHeadSha = git(cwd, 'rev-parse', 'HEAD');
   const scopeReturn = {
     schemaVersion: 1,
     repository: 'owner/repository',
@@ -2009,8 +2100,8 @@ test('two same-base workers integrate by delta, resume intent-only integration, 
     journalDigest: `sha256:${'a'.repeat(64)}`,
     blockerId: 'scope-blocker',
     decisionId: 'scope-decision',
-    reviewHeadSha: state.git.headSha,
-    livePrHeadSha: state.git.headSha,
+    reviewHeadSha: resumedHeadSha,
+    livePrHeadSha: resumedHeadSha,
     rootCauseId: 'scope-root',
     findingIds: ['thread:PRRT_scope'],
     findingFingerprints: ['scope-fingerprint'],
@@ -2019,18 +2110,69 @@ test('two same-base workers integrate by delta, resume intent-only integration, 
     narrowAlternative: 'Retain the already accepted development authority.',
     trimAlternative: 'Remove the returned expansion.',
     inventory: {
-      paths: ['.agents/skills/change-development'], dependencies: [], publicSurfaces: [],
-      persistentSurfaces: [], validation: ['node --test'],
+      paths: ['first.txt', 'second.txt'], dependencies: [], publicSurfaces: [],
+      persistentSurfaces: [],
+      validation: ['node --test .agents/skills/change-development/scripts/state/state.test.mjs'],
     },
     priorDecisionIds: [],
     createdAt: '2026-08-18T12:31:00.000Z',
   };
   const beforeForeignReturn = durableSnapshot(changePath);
+  git(cwd, 'switch', '-c', 'nonancestor-return', `${state.git.headSha}^`);
+  writeFileSync(join(cwd, 'first.txt'), 'nonancestor review remediation\n');
+  git(cwd, 'add', 'first.txt');
+  git(cwd, 'commit', '-m', 'test: nonancestor returned remediation');
+  const nonancestorHead = git(cwd, 'rev-parse', 'HEAD');
+  assert.throws(() => resumeScopeReturn({ cwd, expectedRevision: state.revision,
+    activeHandoffAuthority, scopeReturn: { ...scopeReturn,
+      reviewHeadSha: nonancestorHead, livePrHeadSha: nonancestorHead } }),
+  (error) => error.code === 'SCOPE_RETURN_INVALID' && /must descend from the prior development HEAD/u.test(error.message));
+  assert.deepEqual(durableSnapshot(changePath), beforeForeignReturn,
+    'a nonancestor returned HEAD fails before durable mutation');
+  git(cwd, 'switch', 'main');
+  git(cwd, 'switch', '-c', 'forbidden-return', resumedHeadSha);
+  mkdirSync(join(cwd, 'review'));
+  writeFileSync(join(cwd, 'review', 'forbidden.txt'), 'forbidden review remediation\n');
+  git(cwd, 'add', 'review/forbidden.txt');
+  git(cwd, 'commit', '-m', 'test: forbidden returned remediation');
+  const forbiddenHead = git(cwd, 'rev-parse', 'HEAD');
+  assert.throws(() => resumeScopeReturn({ cwd, expectedRevision: state.revision,
+    activeHandoffAuthority, scopeReturn: { ...scopeReturn,
+      reviewHeadSha: forbiddenHead, livePrHeadSha: forbiddenHead,
+      inventory: { ...scopeReturn.inventory,
+        paths: ['first.txt', 'review/forbidden.txt', 'second.txt'] } } }),
+  (error) => error.code === 'SCOPE_RETURN_INVALID' && /forbidden by every matching/u.test(error.message));
+  assert.deepEqual(durableSnapshot(changePath), beforeForeignReturn,
+    'a forbidden returned path fails before durable mutation');
+  git(cwd, 'switch', 'main');
+  git(cwd, 'switch', '-c', 'unowned-return', resumedHeadSha);
+  writeFileSync(join(cwd, 'unowned.txt'), 'unowned review remediation\n');
+  git(cwd, 'add', 'unowned.txt');
+  git(cwd, 'commit', '-m', 'test: unowned returned remediation');
+  const unownedHead = git(cwd, 'rev-parse', 'HEAD');
+  assert.throws(() => resumeScopeReturn({ cwd, expectedRevision: state.revision,
+    activeHandoffAuthority, scopeReturn: { ...scopeReturn,
+      reviewHeadSha: unownedHead, livePrHeadSha: unownedHead,
+      inventory: { ...scopeReturn.inventory, paths: ['first.txt', 'second.txt', 'unowned.txt'] } } }),
+  (error) => error.code === 'SCOPE_RETURN_INVALID' && /changed path is unowned/u.test(error.message));
+  assert.deepEqual(durableSnapshot(changePath), beforeForeignReturn,
+    'an unowned returned path fails before durable mutation');
+  git(cwd, 'switch', 'main');
   assert.throws(() => resumeScopeReturn({ cwd, expectedRevision: state.revision,
     activeHandoffAuthority, scopeReturn: { ...scopeReturn, authorityDigest: `sha256:${'b'.repeat(64)}` } }),
   (error) => error.code === 'SCOPE_RETURN_INVALID');
   assert.deepEqual(durableSnapshot(changePath), beforeForeignReturn,
     'foreign same-HEAD return authority cannot advance state, sidecars, transitions, or events');
+  for (const inventory of [
+    { ...scopeReturn.inventory, paths: ['first.txt'] },
+    { ...scopeReturn.inventory, validation: ['node --test unrepresented.test.mjs'] },
+  ]) {
+    assert.throws(() => resumeScopeReturn({ cwd, expectedRevision: state.revision,
+      activeHandoffAuthority, scopeReturn: { ...scopeReturn, inventory } }),
+    (error) => error.code === 'SCOPE_RETURN_INVALID');
+    assert.deepEqual(durableSnapshot(changePath), beforeForeignReturn,
+      'unowned or unrepresented resumed authority fails before durable mutation');
+  }
   state = resumeScopeReturn({ cwd, expectedRevision: state.revision, activeHandoffAuthority, scopeReturn });
   assert.equal(state.phase, 'integrated');
   assert.equal(state.scope.status, 'assessment-required');
@@ -2359,10 +2501,97 @@ test('receipt-backed minor and trim remediation alone may revisit terminal owner
       && error.message.includes('complete set of newly introduced tasks'));
     assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), before,
       `${verdict} unrelated overlap is rejected without durable mutation`);
+    const closureDirectory = join(changeDirectory(fixture.cwd, state.changeId), 'scope', 'minimal-closure');
+    const priorClosure = readdirSync(closureDirectory).filter((name) => name.endsWith('.json'))
+      .map((name) => JSON.parse(readFileSync(join(closureDirectory, name), 'utf8')))
+      .find((candidate) => digestJson(candidate) === state.scope.closureDigest);
+    const exactClosure = testMinimalClosure(state, resultingPlan, {
+      revision: priorClosure.revision + 1, previousContractDigest: state.scope.closureDigest,
+      operatorDecisionDigests: [...state.scope.decisionDigests],
+      authorizedShape: verdict === 'trim-required'
+        ? priorClosure.authorizedShape.filter((mechanism) => mechanism !== mapping.mechanism)
+        : [...priorClosure.authorizedShape],
+      unauthorizedExpansion: [...priorClosure.unauthorizedExpansion],
+      deferredFollowups: [...priorClosure.deferredFollowups],
+    });
+    for (const tamperedClosure of [
+      { ...exactClosure, outcome: 'Rewrite an unrelated preserved closure field.' },
+      { ...exactClosure, authorizedShape: [...exactClosure.authorizedShape, 'unrelated-authority'] },
+      { ...exactClosure, unauthorizedExpansion: [...exactClosure.unauthorizedExpansion, 'unrelated-unauthorized'] },
+      { ...exactClosure, deferredFollowups: [...exactClosure.deferredFollowups,
+        { id: 'unrelated-followup', text: 'Unrelated follow-up.' }] },
+    ]) {
+      const closureBefore = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
+      assert.throws(() => amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision,
+        amendment, resultingPlan, minimalClosure: tamperedClosure }),
+      (error) => error.code === 'SCOPE_AMENDMENT_INVALID');
+      assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), closureBefore,
+        `${verdict} preserves unrelated closure semantics atomically`);
+    }
+    const reservedBefore = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
+    assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+      amendment: { ...amendment, delta: { ...amendment.delta, scopeRemediation: { forged: true } } },
+      resultingPlan }),
+    (error) => error.code === 'INVALID_AMENDMENT' && /reserved canonical/u.test(error.message));
+    assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), reservedBefore,
+      `${verdict} rejects caller-supplied scopeRemediation atomically`);
     state = amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision, amendment, resultingPlan });
     assert.equal(state.execution.tasks.find(({ id }) => id === taskId).status, 'unbound');
     assert.equal(state.execution.tasks.find(({ id }) => id === 'state-task').status, 'integrated');
+    const stored = JSON.parse(readFileSync(join(changeDirectory(fixture.cwd, state.changeId),
+      'plan', 'amendments', '0001.json'), 'utf8'));
+    assert.equal(stored.delta.scopeRemediation.verdict, verdict);
+    assert.equal(stored.delta.scopeRemediation.evidenceDigest, trigger);
+    assert.deepEqual(stored.delta.scopeRemediation.unnecessaryWork,
+      verdict === 'trim-required' ? [mapping.mechanism] : []);
+    assert.deepEqual(stored.delta.scopeRemediation.scopeDelta, evidence.result.scopeDelta);
+    assert.equal(stored.delta.scopeRemediation.smallerSufficientAlternative,
+      evidence.result.smallerSufficientAlternative);
   }
+});
+
+test('interrupted nonmaterial amendment recovery revalidates its canonical projection', async () => {
+  const fixture = await integratedSingleTaskFixture('nonmaterial projection recovery');
+  let state = fixture.state;
+  const evidence = integratedScopeEvidenceFor({ cwd: fixture.cwd, changeId: state.changeId });
+  const mapping = evidence.result.coverage[0];
+  evidence.result = { ...evidence.result, verdict: 'trim-required',
+    coverage: [{ ...mapping, sourceCriterionIds: [], acceptedCriterionIds: [],
+      classification: 'speculative', rationale: 'Remove the exact unnecessary mechanism.' }],
+    unnecessaryWork: [mapping.mechanism],
+    smallerSufficientAlternative: 'Use only the bounded simplification task.' };
+  evidence.resultDigest = digestJson(evidence.result);
+  state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
+    expectedRevision: state.revision });
+  const directory = changeDirectory(fixture.cwd, state.changeId);
+  const original = JSON.parse(readFileSync(join(directory, 'plan', 'plan.json'), 'utf8'));
+  const resultingPlan = structuredClone(original); resultingPlan.planRevision = 2;
+  resultingPlan.criteria.push({ id: 'trim-recovery', description: 'Remove the exact unnecessary mechanism.',
+    disposition: 'owned', ownerTaskId: 'trim-recovery-task', deferredReason: null });
+  resultingPlan.tasks.push({ ...original.tasks[0], id: 'trim-recovery-task', title: 'Apply exact trim',
+    objective: 'Apply only the assessment-bound simplification.', criterionIds: ['trim-recovery'],
+    checklistItemIds: [], dependsOn: ['state-task'], anticipatedPaths: ['first.txt'] });
+  const amendment = { id: 'trim-recovery-amendment', reason: 'Apply the exact trim assessment.',
+    authorization: 'scope-review', trigger: digestJson(evidence),
+    delta: { addedTaskIds: ['trim-recovery-task'] }, invalidatedEvidence: [digestJson(evidence)] };
+  assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+    amendment, resultingPlan,
+    crashStep(step) { if (step === 'after-intent') throw new Error('pause nonmaterial recovery'); } }),
+  /pause nonmaterial recovery/u);
+  const transition = join(directory, 'transitions', String(state.revision + 1).padStart(8, '0'));
+  const intentPath = join(transition, 'intent.json');
+  const intent = JSON.parse(readFileSync(intentPath, 'utf8'));
+  const record = intent.authoritativeEvidence.amendmentDigest;
+  record.value.delta.scopeRemediation.unnecessaryWork = [];
+  record.digest = digestJson(record.value);
+  intent.evidence.amendmentDigest = record.digest;
+  writeReceiptJson(intentPath, intent);
+  const before = durableSnapshot(directory);
+  assert.throws(() => recoverState({ cwd: fixture.cwd }),
+    (error) => error.code === 'RECOVERY_EVIDENCE_INVALID'
+      && /assessment-bound remediation projection/u.test(error.message));
+  assert.deepEqual(durableSnapshot(directory), before,
+    'tampered nonmaterial recovery fails before sidecars, state, events, or completion mutate');
 });
 
 test('scope-blocked amendments require the exact active evidence trigger atomically', async () => {

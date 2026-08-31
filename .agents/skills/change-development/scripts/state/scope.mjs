@@ -85,7 +85,17 @@ function criterionFromPlan({ id, description }) {
   return { id, text: description };
 }
 
-export function validateAdmissionScopeSemantics(evidence, { effectivePlan, minimalClosure }) {
+export function scopeAuthorityDecisionProjection(decisionReceipts) {
+  return decisionReceipts.map(({ digest, value }) => ({
+    id: value.decisionId,
+    digest,
+    disposition: value.disposition,
+    authorizedShape: [...value.approvedShape],
+  }));
+}
+
+export function validateAdmissionScopeSemantics(evidence, { effectivePlan, minimalClosure,
+  authorityDecisions = [] }) {
   const errors = [];
   const expectedSourceScope = {
     objective: effectivePlan?.objective,
@@ -103,6 +113,7 @@ export function validateAdmissionScopeSemantics(evidence, { effectivePlan, minim
     authorizedShape: minimalClosure?.authorizedShape,
     unauthorizedShape: minimalClosure?.unauthorizedExpansion,
     deferredShape: (minimalClosure?.deferredFollowups ?? []).map(({ id }) => id),
+    ...(authorityDecisions.length > 0 ? { authorityDecisions } : {}),
   };
   if (!isDeepStrictEqual(evidence?.packet?.sourceScope, expectedSourceScope)) {
     errors.push('$ packet.sourceScope does not equal the canonical source and minimal-closure projection');
@@ -115,6 +126,83 @@ export function validateAdmissionScopeSemantics(evidence, { effectivePlan, minim
     errors.push('$ packet.acceptedScope does not equal the exact effective-plan and minimal-closure projection');
   }
   return errors;
+}
+
+const PRESERVED_CLOSURE_FIELDS = Object.freeze([
+  'outcome',
+  'requiredCriteria',
+  'invariants',
+  'nonGoals',
+  'mandatoryConstraints',
+  'optionalGuidance',
+]);
+
+function withoutIdentities(values, removed, identity = (value) => value) {
+  return values.filter((value) => !removed.has(identity(value)));
+}
+
+export function projectNonmaterialScopeRemediation({ evidence, priorClosure, minimalClosure }) {
+  const errors = [];
+  const verdict = evidence?.result?.verdict;
+  if (!['minor-amendment-required', 'trim-required'].includes(verdict)) {
+    return { errors: ['current evidence does not authorize a nonmaterial scope amendment'], remediation: null };
+  }
+  for (const field of PRESERVED_CLOSURE_FIELDS) {
+    if (!isDeepStrictEqual(minimalClosure?.[field], priorClosure?.[field])) {
+      errors.push(`$ ${verdict} amendment must preserve prior ${field} exactly`);
+    }
+  }
+  const necessaryMechanisms = evidence.result.coverage
+    .filter(({ classification }) => classification === 'necessary-minor-expansion')
+    .map(({ mechanism }) => mechanism);
+  const unnecessaryWork = [...evidence.result.unnecessaryWork];
+  const necessary = new Set(necessaryMechanisms);
+  const unnecessary = new Set(unnecessaryWork);
+  const expected = verdict === 'minor-amendment-required'
+    ? {
+      authorizedShape: [...withoutIdentities(priorClosure.authorizedShape, unnecessary),
+        ...necessaryMechanisms.filter((mechanism) => !priorClosure.authorizedShape.includes(mechanism))],
+      unauthorizedExpansion: withoutIdentities(priorClosure.unauthorizedExpansion, necessary),
+      deferredFollowups: withoutIdentities(priorClosure.deferredFollowups, necessary, ({ id }) => id),
+    }
+    : {
+      authorizedShape: withoutIdentities(priorClosure.authorizedShape, unnecessary),
+      unauthorizedExpansion: [...priorClosure.unauthorizedExpansion],
+      deferredFollowups: [...priorClosure.deferredFollowups],
+    };
+  for (const [field, value] of Object.entries(expected)) {
+    if (!isDeepStrictEqual(minimalClosure?.[field], value)) {
+      errors.push(`$ ${verdict} amendment must apply the exact assessed ${field} transformation`);
+    }
+  }
+  if (verdict === 'minor-amendment-required') {
+    if (necessaryMechanisms.length === 0) {
+      errors.push('$ minor amendment assessment must name at least one necessary-minor-expansion mechanism');
+    }
+    if (evidence.result.scopeDelta === null) {
+      errors.push('$ minor amendment must bind the exact assessed scope delta');
+    }
+  } else {
+    if (necessaryMechanisms.length > 0) errors.push('$ trim amendment cannot add authority');
+    if (unnecessaryWork.length === 0 || evidence.result.scopeDelta !== null
+        || typeof evidence.result.smallerSufficientAlternative !== 'string') {
+      errors.push('$ trim amendment must bind exact unnecessary work and one smaller sufficient alternative');
+    }
+  }
+  return {
+    errors: [...new Set(errors)].sort(),
+    remediation: {
+      schemaVersion: 1,
+      verdict,
+      evidenceDigest: scopeContractDigest(evidence),
+      necessaryMechanisms,
+      unnecessaryWork,
+      scopeDelta: evidence.result.scopeDelta,
+      smallerSufficientAlternative: evidence.result.smallerSufficientAlternative,
+      priorClosureDigest: scopeContractDigest(priorClosure),
+      resultingClosureDigest: scopeContractDigest(minimalClosure),
+    },
+  };
 }
 
 export function scopeGateForVerdict(verdict) {
