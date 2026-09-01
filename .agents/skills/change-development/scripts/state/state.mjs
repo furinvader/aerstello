@@ -2106,7 +2106,15 @@ function nonTaskBlockers(cwd, state) {
       && discoveryTrigger?.startsWith(`worker-scope-discovery:${task.id}:`));
     if (stillBlockedDiscovery && state.phase === 'blocked') {
       const pendingDecision = pendingMaterialDecisionForClosure(cwd, state, currentScope);
-      if (pendingDecision && pendingDecision.value.disposition !== 'abandon-replan') {
+      const verdict = currentScope.value.result?.verdict;
+      let pendingNonmaterialAmendment = false;
+      if (['minor-amendment-required', 'trim-required'].includes(verdict)) {
+        const scopeGate = scopeGateForVerdict(verdict);
+        pendingNonmaterialAmendment = state.scope.status === scopeGate.status
+          && state.blockedReasons.filter((reason) => reason === scopeGate.blocker).length === 1;
+      }
+      if ((pendingDecision && pendingDecision.value.disposition !== 'abandon-replan')
+          || pendingNonmaterialAmendment) {
         const discovery = workerDiscoveryAssessmentIdentity(cwd, state);
         const binding = currentScope.value.packet.binding;
         if (currentScope.value.cadence.boundary === 'task'

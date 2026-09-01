@@ -218,6 +218,50 @@ function workerDiscoveryMaterialScopeEvidence(state, plan, closure, packet, bloc
   return evidence;
 }
 
+function workerDiscoveryNonmaterialScopeEvidence(state, plan, closure, packet, blocked, scopeDiscovery, verdict) {
+  const taskPacketDigest = implementationTaskDigest(packet);
+  const resultDigest = digestJson(blocked);
+  const discoveryDigest = digestJson(scopeDiscovery);
+  const subjectDigest = digestJson({ taskPacketDigest, resultDigest, discoveryDigest });
+  const trigger = `worker-scope-discovery:${packet.taskId}:${resultDigest}:${discoveryDigest}`;
+  const evidence = testScopeEvidence(state, plan, closure, { boundary: 'task', subjectDigest,
+    subjectSha: packet.taskBaseSha, taskPacketDigest, trigger });
+  const mapping = {
+    mechanism: 'unowned-lifecycle-path',
+    sourceCriterionIds: verdict === 'minor-amendment-required' ? [plan.criteria[0].id] : [],
+    acceptedCriterionIds: verdict === 'minor-amendment-required' ? [plan.criteria[0].id] : [],
+    invariantIds: [],
+    nonGoalIds: [], guidanceIds: [],
+    rationale: 'The worker discovery requires an exact bounded scope disposition.',
+  };
+  evidence.packet.changeInventory.paths.push('unowned/lifecycle.json');
+  evidence.packet.changeInventory.mappings.push(mapping);
+  evidence.result = verdict === 'minor-amendment-required'
+    ? { ...evidence.result, binding: evidence.packet.binding, verdict,
+      summary: 'The discovery requires one bounded adjacent lifecycle path.',
+      coverage: [...evidence.result.coverage, { ...mapping, classification: 'necessary-minor-expansion' }],
+      scopeDelta: { description: 'Add only the discovered lifecycle path.',
+        sourceCriterionIds: [plan.criteria[0].id], acceptedCriterionIds: [plan.criteria[0].id],
+        invariantIds: [], materialSurfaces: [] } }
+    : { ...evidence.result, binding: evidence.packet.binding, verdict,
+      summary: verdict === 'trim-required'
+        ? 'The discovered lifecycle path is unnecessary.'
+        : 'The discovery assessment lacks sufficient exact evidence.',
+      coverage: verdict === 'trim-required'
+        ? [...evidence.result.coverage, { ...mapping, classification: 'speculative' }]
+        : evidence.packet.changeInventory.mappings.map((entry) => ({
+          ...entry, classification: 'insufficient-evidence',
+        })),
+      unnecessaryWork: verdict === 'trim-required' ? [mapping.mechanism] : [],
+      smallerSufficientAlternative: verdict === 'trim-required'
+        ? 'Replace the task without the unnecessary lifecycle path.' : null,
+      missingEvidence: verdict === 'insufficient-evidence'
+        ? ['Exact evidence for the discovered lifecycle path is missing.'] : [] };
+  evidence.packetDigest = digestJson(evidence.packet);
+  evidence.resultDigest = digestJson(evidence.result);
+  return evidence;
+}
+
 function planningMaterialScopeEvidence(state, plan, closure, mechanism = 'material-alpha') {
   const evidence = testScopeEvidence(state, plan, closure);
   const mapping = {
@@ -982,6 +1026,132 @@ test('material decision supersedes only its exact discovery blocker before rejec
   (error) => error.code === 'TASK_RESULT_MISMATCH');
   assert.deepEqual(durableSnapshot(abandonedDirectory), beforeAbandonedRejection,
     'task rejection cannot move terminal abandonment back to blocked');
+});
+
+test('minor and trim assessments supersede only their exact discovery blocker through rejection and amendment', async () => {
+  async function discoveryFixture(name, verdict, withFailedSibling = false) {
+    const fixture = repository(name);
+    const planning = await initializeState({ cwd: fixture.cwd, changeId: name, mode: 'implement',
+      baseBranch: 'main', planningRef: fixture.sha, source: descriptor });
+    const plan = withFailedSibling ? executionPlanFor(planning) : planFor(planning);
+    const closure = testMinimalClosure(planning, plan);
+    let state = acceptPlanWithScope({ cwd: fixture.cwd, plan, minimalClosure: closure,
+      scopeEvidence: testScopeEvidence(planning, plan, closure), expectedRevision: planning.revision });
+    const packet = packetFor(state, plan, 'state-task');
+    state = bindTaskWithScope({ cwd: fixture.cwd, packet, expectedRevision: state.revision });
+    const worker = createWorkerFixture(fixture.cwd, state, packet);
+    let sibling = null;
+    let siblingWorker = null;
+    if (withFailedSibling) {
+      sibling = packetFor(state, plan, 'second-task');
+      state = bindTaskWithScope({ cwd: fixture.cwd, packet: sibling, expectedRevision: state.revision });
+      siblingWorker = createWorkerFixture(fixture.cwd, state, sibling);
+    }
+    state = scheduleWave({ cwd: fixture.cwd, expectedRevision: state.revision });
+    state = startTask({ cwd: fixture.cwd, taskId: packet.taskId, workerId: `${name}-discovery-worker`,
+      expectedRevision: state.revision });
+    if (sibling) {
+      state = startTask({ cwd: fixture.cwd, taskId: sibling.taskId, workerId: `${name}-sibling-worker`,
+        expectedRevision: state.revision });
+      state = acceptResult({ cwd: fixture.cwd, workerCwd: siblingWorker.path,
+        expectedRevision: state.revision, result: { ...resultFor(sibling, 'failed'),
+          validation: sibling.requiredValidation.unit.map(({ command }) => ({ command, result: 'failed',
+            summary: 'Sibling validation failed.' })), unexpectedDependencies: [],
+          summary: 'Sibling worker failed independently.' } });
+    }
+    const scopeDiscovery = {
+      schemaVersion: 1,
+      summary: 'The worker found one unowned lifecycle path.',
+      evidence: [{ kind: 'state-path', identity: 'unowned/lifecycle.json',
+        detail: 'The immutable task cannot complete without additional path authority.' }],
+      triggeredTripwireIds: ['test-task-paths'],
+      requestedAuthority: [{ field: 'paths', values: ['unowned/lifecycle.json'] }],
+    };
+    const blocked = { ...resultFor(packet, 'blocked'), unexpectedDependencies: [scopeDiscovery.summary],
+      scopeDiscovery, summary: scopeDiscovery.summary };
+    state = acceptResult({ cwd: fixture.cwd, result: blocked, workerCwd: worker.path,
+      expectedRevision: state.revision });
+    const evidence = workerDiscoveryNonmaterialScopeEvidence(
+      state, plan, closure, packet, blocked, scopeDiscovery, verdict,
+    );
+    state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
+      expectedRevision: state.revision });
+    return { ...fixture, state, plan, closure, packet };
+  }
+
+  const blockers = {
+    'minor-amendment-required': 'Scope assessment requires a bounded minor amendment before implementation can continue.',
+    'trim-required': 'Scope assessment requires bounded removal or simplification of unnecessary machinery.',
+  };
+  for (const verdict of ['minor-amendment-required', 'trim-required']) {
+    const fixture = await discoveryFixture(`discovery-${verdict}`, verdict);
+    let state = fixture.state;
+    assert.deepEqual(state.blockedReasons, [blockers[verdict]]);
+    assert.equal(validateState({ cwd: fixture.cwd }).valid, true,
+      `${verdict} supersedes its exact receipt-matched discovery blocker`);
+    state = rejectTask({ cwd: fixture.cwd, taskId: fixture.packet.taskId,
+      reason: `Replace the ${verdict} discovery task.`, expectedRevision: state.revision });
+    assert.deepEqual(state.blockedReasons, [blockers[verdict],
+      `Task state-task was explicitly rejected: Replace the ${verdict} discovery task.`]);
+    assert.equal(validateState({ cwd: fixture.cwd }).valid, true,
+      `${verdict} rejection restores only the new receipt-backed task blocker`);
+    removeTaskWorktree({ cwd: fixture.cwd, changeId: state.changeId, taskId: fixture.packet.taskId });
+
+    const resultingPlan = structuredClone(fixture.plan);
+    resultingPlan.planRevision = 2;
+    const verdictLabel = verdict === 'minor-amendment-required' ? 'minor' : 'trim';
+    const replacementTaskId = `${verdictLabel}-replacement`;
+    const replacementCriterionId = `${verdictLabel}-replacement-criterion`;
+    resultingPlan.criteria[0].ownerTaskId = replacementTaskId;
+    resultingPlan.criteria.push({ id: replacementCriterionId,
+      description: 'Apply the exact bounded worker-discovery remediation.', disposition: 'owned',
+      ownerTaskId: replacementTaskId, deferredReason: null });
+    resultingPlan.tasks[0] = { ...resultingPlan.tasks[0], id: replacementTaskId,
+      title: 'Apply bounded discovery remediation',
+      objective: 'Replace only the exact rejected worker-discovery task.',
+      criterionIds: [resultingPlan.criteria[0].id, replacementCriterionId] };
+    resultingPlan.checklistMappings[0].taskIds = [replacementTaskId];
+    const minimalClosure = { ...structuredClone(fixture.closure), revision: 2,
+      previousContractDigest: state.scope.closureDigest, planDigest: digestJson(resultingPlan),
+      authorizedShape: verdict === 'minor-amendment-required'
+        ? [...fixture.closure.authorizedShape, 'unowned-lifecycle-path']
+        : [...fixture.closure.authorizedShape] };
+    const trigger = state.scope.currentEvidenceDigest;
+    const suffix = `${fixture.packet.taskId}/0001.json`;
+    state = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision, resultingPlan,
+      minimalClosure, amendment: { id: `${verdictLabel}-replacement-amendment`,
+        reason: 'Apply the exact nonmaterial remediation.', authorization: 'scope-review',
+        trigger, delta: { addedTaskIds: [replacementTaskId] }, invalidatedEvidence: [trigger,
+          `implementation/tasks/${suffix}`, `implementation/provenance/${suffix}`,
+          `implementation/planning-signals/${suffix}`, `implementation/specialist-routes/${suffix}`,
+          `implementation/results/${suffix}`] } });
+    assert.deepEqual(state.execution.tasks.map(({ id, status }) => ({ id, status })),
+      [{ id: replacementTaskId, status: 'unbound' }],
+      `${verdict} cleanup permits progress only under a new task ID`);
+  }
+
+  const sibling = await discoveryFixture('nonmaterial-discovery-sibling-near-miss', 'trim-required', true);
+  const siblingDirectory = changeDirectory(sibling.cwd, sibling.state.changeId);
+  const beforeSiblingRejection = durableSnapshot(siblingDirectory);
+  assert.throws(() => validateState({ cwd: sibling.cwd }),
+    (error) => error.code === 'TASK_RESULT_MISMATCH');
+  assert.throws(() => rejectTask({ cwd: sibling.cwd, taskId: sibling.packet.taskId,
+    reason: 'Do not absorb the missing sibling blocker.', expectedRevision: sibling.state.revision }),
+  (error) => error.code === 'TASK_RESULT_MISMATCH');
+  assert.deepEqual(durableSnapshot(siblingDirectory), beforeSiblingRejection,
+    'an exact assessment cannot supersede a sibling task blocker');
+
+  const insufficient = await discoveryFixture('nonmaterial-discovery-insufficient-near-miss', 'insufficient-evidence');
+  const insufficientDirectory = changeDirectory(insufficient.cwd, insufficient.state.changeId);
+  const beforeInsufficientRejection = durableSnapshot(insufficientDirectory);
+  assert.throws(() => validateState({ cwd: insufficient.cwd }),
+    (error) => error.code === 'TASK_RESULT_MISMATCH');
+  assert.throws(() => rejectTask({ cwd: insufficient.cwd, taskId: insufficient.packet.taskId,
+    reason: 'Do not treat insufficient evidence as amendment authority.',
+    expectedRevision: insufficient.state.revision }),
+  (error) => error.code === 'TASK_RESULT_MISMATCH');
+  assert.deepEqual(durableSnapshot(insufficientDirectory), beforeInsufficientRejection,
+    'insufficient-evidence prose cannot supersede receipt-backed discovery evidence');
 });
 
 test('accepted material approval remains blocked until its exact approved shape is amended', async () => {
