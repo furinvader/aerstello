@@ -1029,11 +1029,11 @@ test('material decision supersedes only its exact discovery blocker before rejec
 });
 
 test('minor and trim assessments supersede only their exact discovery blocker through rejection and amendment', async () => {
-  async function discoveryFixture(name, verdict, withFailedSibling = false) {
+  async function discoveryFixture(name, verdict, siblingOutcome = null, crashAssessment = false) {
     const fixture = repository(name);
     const planning = await initializeState({ cwd: fixture.cwd, changeId: name, mode: 'implement',
       baseBranch: 'main', planningRef: fixture.sha, source: descriptor });
-    const plan = withFailedSibling ? executionPlanFor(planning) : planFor(planning);
+    const plan = siblingOutcome ? executionPlanFor(planning) : planFor(planning);
     const closure = testMinimalClosure(planning, plan);
     let state = acceptPlanWithScope({ cwd: fixture.cwd, plan, minimalClosure: closure,
       scopeEvidence: testScopeEvidence(planning, plan, closure), expectedRevision: planning.revision });
@@ -1042,7 +1042,7 @@ test('minor and trim assessments supersede only their exact discovery blocker th
     const worker = createWorkerFixture(fixture.cwd, state, packet);
     let sibling = null;
     let siblingWorker = null;
-    if (withFailedSibling) {
+    if (siblingOutcome) {
       sibling = packetFor(state, plan, 'second-task');
       state = bindTaskWithScope({ cwd: fixture.cwd, packet: sibling, expectedRevision: state.revision });
       siblingWorker = createWorkerFixture(fixture.cwd, state, sibling);
@@ -1053,11 +1053,20 @@ test('minor and trim assessments supersede only their exact discovery blocker th
     if (sibling) {
       state = startTask({ cwd: fixture.cwd, taskId: sibling.taskId, workerId: `${name}-sibling-worker`,
         expectedRevision: state.revision });
-      state = acceptResult({ cwd: fixture.cwd, workerCwd: siblingWorker.path,
-        expectedRevision: state.revision, result: { ...resultFor(sibling, 'failed'),
-          validation: sibling.requiredValidation.unit.map(({ command }) => ({ command, result: 'failed',
-            summary: 'Sibling validation failed.' })), unexpectedDependencies: [],
-          summary: 'Sibling worker failed independently.' } });
+      if (siblingOutcome === 'failed') {
+        state = acceptResult({ cwd: fixture.cwd, workerCwd: siblingWorker.path,
+          expectedRevision: state.revision, result: { ...resultFor(sibling, 'failed'),
+            validation: sibling.requiredValidation.unit.map(({ command }) => ({ command, result: 'failed',
+              summary: 'Sibling validation failed.' })), unexpectedDependencies: [],
+            summary: 'Sibling worker failed independently.' } });
+      } else if (siblingOutcome === 'accepted') {
+        writeFileSync(join(siblingWorker.path, 'second.txt'), 'accepted nonmaterial sibling\n');
+        git(siblingWorker.path, 'add', 'second.txt');
+        git(siblingWorker.path, 'commit', '-m', 'test: accepted nonmaterial sibling');
+        state = acceptResult({ cwd: fixture.cwd, workerCwd: siblingWorker.path,
+          expectedRevision: state.revision,
+          result: resultFor(sibling, 'implemented', git(siblingWorker.path, 'rev-parse', 'HEAD'), ['second.txt']) });
+      }
     }
     const scopeDiscovery = {
       schemaVersion: 1,
@@ -1074,9 +1083,17 @@ test('minor and trim assessments supersede only their exact discovery blocker th
     const evidence = workerDiscoveryNonmaterialScopeEvidence(
       state, plan, closure, packet, blocked, scopeDiscovery, verdict,
     );
-    state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
-      expectedRevision: state.revision });
-    return { ...fixture, state, plan, closure, packet };
+    if (crashAssessment) {
+      assert.throws(() => assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
+        expectedRevision: state.revision,
+        crashStep(step) { if (step === 'after-intent') throw new Error('pause nonmaterial assessment'); } }),
+      /pause nonmaterial assessment/u);
+      state = recoverState({ cwd: fixture.cwd }).state;
+    } else {
+      state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
+        expectedRevision: state.revision });
+    }
+    return { ...fixture, state, plan, closure, packet, sibling };
   }
 
   const blockers = {
@@ -1087,6 +1104,7 @@ test('minor and trim assessments supersede only their exact discovery blocker th
     const fixture = await discoveryFixture(`discovery-${verdict}`, verdict);
     let state = fixture.state;
     assert.deepEqual(state.blockedReasons, [blockers[verdict]]);
+    assert.match(state.nextAction, new RegExp(`reject-task.*${fixture.packet.taskId}.*clean up.*amend-plan`, 'u'));
     assert.equal(validateState({ cwd: fixture.cwd }).valid, true,
       `${verdict} supersedes its exact receipt-matched discovery blocker`);
     state = rejectTask({ cwd: fixture.cwd, taskId: fixture.packet.taskId,
@@ -1130,7 +1148,7 @@ test('minor and trim assessments supersede only their exact discovery blocker th
       `${verdict} cleanup permits progress only under a new task ID`);
   }
 
-  const sibling = await discoveryFixture('nonmaterial-discovery-sibling-near-miss', 'trim-required', true);
+  const sibling = await discoveryFixture('nonmaterial-discovery-sibling-near-miss', 'trim-required', 'failed');
   const siblingDirectory = changeDirectory(sibling.cwd, sibling.state.changeId);
   const beforeSiblingRejection = durableSnapshot(siblingDirectory);
   assert.throws(() => validateState({ cwd: sibling.cwd }),
@@ -1140,6 +1158,42 @@ test('minor and trim assessments supersede only their exact discovery blocker th
   (error) => error.code === 'TASK_RESULT_MISMATCH');
   assert.deepEqual(durableSnapshot(siblingDirectory), beforeSiblingRejection,
     'an exact assessment cannot supersede a sibling task blocker');
+
+  const acceptedSibling = await discoveryFixture(
+    'nonmaterial-discovery-accepted-sibling', 'trim-required', 'accepted',
+  );
+  let acceptedState = acceptedSibling.state;
+  assert.equal(acceptedState.execution.tasks.find(({ id }) => id === acceptedSibling.sibling.taskId).status, 'accepted');
+  acceptedState = integrateTask({ cwd: acceptedSibling.cwd, taskId: acceptedSibling.sibling.taskId,
+    expectedRevision: acceptedState.revision });
+  assert.equal(acceptedState.execution.tasks.find(({ id }) => id === acceptedSibling.sibling.taskId).status, 'integrated');
+  assert.equal(acceptedState.execution.tasks.find(({ id }) => id === acceptedSibling.packet.taskId).status, 'blocked');
+  assert.deepEqual(acceptedState.blockedReasons, [blockers['trim-required']],
+    'receipt-backed sibling integration preserves the exact nonmaterial amendment gate');
+  assert.match(acceptedState.nextAction,
+    new RegExp(`reject-task.*${acceptedSibling.packet.taskId}.*clean up.*amend-plan`, 'u'));
+  assert.equal(validateState({ cwd: acceptedSibling.cwd }).valid, true);
+
+  const rejectedSibling = await discoveryFixture(
+    'nonmaterial-discovery-rejected-sibling', 'minor-amendment-required', 'accepted',
+  );
+  const rejectedSiblingDirectory = changeDirectory(rejectedSibling.cwd, rejectedSibling.state.changeId);
+  const beforeRejectedSibling = durableSnapshot(rejectedSiblingDirectory);
+  assert.throws(() => rejectTask({ cwd: rejectedSibling.cwd, taskId: rejectedSibling.sibling.taskId,
+    reason: 'Do not supersede the assessed task with a sibling rejection.',
+    expectedRevision: rejectedSibling.state.revision }),
+  (error) => error.code === 'TASK_RESULT_MISMATCH');
+  assert.deepEqual(durableSnapshot(rejectedSiblingDirectory), beforeRejectedSibling,
+    'sibling rejection leaves the assessed blocker and task unchanged');
+  assert.equal(validateState({ cwd: rejectedSibling.cwd }).valid, true);
+
+  const recovered = await discoveryFixture(
+    'nonmaterial-discovery-instruction-recovery', 'minor-amendment-required', null, true,
+  );
+  assert.match(recovered.state.nextAction,
+    new RegExp(`reject-task.*${recovered.packet.taskId}.*clean up.*amend-plan`, 'u'),
+    'recovery reproduces the exact assessed-task cleanup sequence');
+  assert.equal(validateState({ cwd: recovered.cwd }).valid, true);
 
   const insufficient = await discoveryFixture('nonmaterial-discovery-insufficient-near-miss', 'insufficient-evidence');
   const insufficientDirectory = changeDirectory(insufficient.cwd, insufficient.state.changeId);

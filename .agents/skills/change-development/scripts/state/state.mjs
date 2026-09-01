@@ -597,9 +597,13 @@ export function nextActionFor(state) {
     : state.blockedReasons?.some((reason) => reason.includes('Recorded material scope decision'))
       ? 'Run change:state amend-plan from the exact current material decision and assessment; implementation authority remains blocked.'
     : state.blockedReasons?.some((reason) => reason.includes('bounded minor amendment'))
-      ? 'Run change:state amend-plan from the exact minor scope evidence, invalidate that evidence, then reassess the next authority boundary.'
+      ? state.execution?.tasks.filter((task) => task.status === 'blocked').length === 1
+        ? `Run change:state reject-task for the exact assessed discovery task ${state.execution.tasks.find((task) => task.status === 'blocked').id}, clean up its worktree, then run change:state amend-plan from the exact minor scope evidence and reassess the next authority boundary.`
+        : 'Run change:state amend-plan from the exact minor scope evidence, invalidate that evidence, then reassess the next authority boundary.'
       : state.blockedReasons?.some((reason) => reason.includes('removal or simplification'))
-        ? 'Run change:state amend-plan from the exact trim-required evidence with one bounded removal or simplification task.'
+        ? state.execution?.tasks.filter((task) => task.status === 'blocked').length === 1
+          ? `Run change:state reject-task for the exact assessed discovery task ${state.execution.tasks.find((task) => task.status === 'blocked').id}, clean up its worktree, then run change:state amend-plan from the exact trim-required evidence with one bounded removal or simplification task.`
+          : 'Run change:state amend-plan from the exact trim-required evidence with one bounded removal or simplification task.'
         : state.blockedReasons?.some((reason) => reason.includes('insufficient evidence'))
           ? 'Run change:state assess-scope again with sufficient exact evidence for the unchanged authority.'
     : state.scope?.status === 'assessment-required'
@@ -2096,7 +2100,7 @@ function canonicalTaskBlockers(cwd, state, execution, inFlight = null) {
   });
 }
 
-function nonTaskBlockers(cwd, state) {
+function nonTaskBlockers(cwd, state, { supersedingDiscoveryTaskId = null } = {}) {
   let supersededDiscoveryBlocker = null;
   if (state.scope?.currentEvidenceDigest) {
     const currentScope = findScopeReceipt(cwd, state, 'evidence', state.scope.currentEvidenceDigest,
@@ -2117,7 +2121,8 @@ function nonTaskBlockers(cwd, state) {
           || pendingNonmaterialAmendment) {
         const discovery = workerDiscoveryAssessmentIdentity(cwd, state);
         const binding = currentScope.value.packet.binding;
-        if (currentScope.value.cadence.boundary === 'task'
+        if ((supersedingDiscoveryTaskId === null || supersedingDiscoveryTaskId === discovery.taskId)
+            && currentScope.value.cadence.boundary === 'task'
             && currentScope.value.cadence.trigger === discovery.trigger
             && binding.taskPacketDigest === discovery.taskPacketDigest
             && binding.subject.digest === discovery.subjectDigest
@@ -2147,6 +2152,22 @@ function nonTaskBlockers(cwd, state) {
     throw new StateError('Blocked state is missing receipt-backed task blocker evidence', 'TASK_RESULT_MISMATCH');
   }
   return preserved;
+}
+
+function nonmaterialDiscoveryGate(cwd, state) {
+  if (!state.scope?.currentEvidenceDigest || !['blocked', 'integrating'].includes(state.phase)) return null;
+  const currentScope = findScopeReceipt(cwd, state, 'evidence', state.scope.currentEvidenceDigest,
+    'current nonmaterial scope evidence');
+  const verdict = currentScope.value.result?.verdict;
+  if (!['minor-amendment-required', 'trim-required'].includes(verdict)) return null;
+  const discovery = workerDiscoveryAssessmentIdentity(cwd, state);
+  const binding = currentScope.value.packet.binding;
+  if (currentScope.value.cadence.boundary !== 'task'
+      || currentScope.value.cadence.trigger !== discovery.trigger
+      || binding.taskPacketDigest !== discovery.taskPacketDigest
+      || binding.subject.digest !== discovery.subjectDigest
+      || binding.subject.sha !== discovery.subjectSha) return null;
+  return { discovery, blocker: scopeGateForVerdict(verdict).blocker };
 }
 
 export function acceptResult({ cwd = process.cwd(), changeId, result, workerCwd, expectedRevision, clock, crashStep, lockOptions } = {}) {
@@ -2216,7 +2237,15 @@ function prepareIntegration({ root, selected, taskId, expectedRevision, clock, c
       throw new StateError(`Task ${taskId} dependencies are not integrated`, 'DEPENDENCY_NOT_INTEGRATED');
     }
     const taskBlockers = canonicalTaskBlockers(root, state, state.execution);
-    if (state.phase === 'blocked' && serialized(taskBlockers) !== serialized(state.blockedReasons)) {
+    const nonmaterial = state.phase === 'blocked' ? nonmaterialDiscoveryGate(root, state) : null;
+    const assessedBlocker = nonmaterial
+      ? canonicalTaskBlockers(root, state, { ...state.execution,
+        tasks: [executionTask(state, nonmaterial.discovery.taskId)] })[0]
+      : null;
+    const expectedBlockedReasons = nonmaterial && taskId !== nonmaterial.discovery.taskId
+      ? [nonmaterial.blocker, ...taskBlockers.filter((reason) => reason !== assessedBlocker)]
+      : taskBlockers;
+    if (state.phase === 'blocked' && serialized(expectedBlockedReasons) !== serialized(state.blockedReasons)) {
       throw new StateError('Integration from blocked state is limited to an accepted sibling of exact receipt-backed task blockers', 'INVALID_PHASE');
     }
     const current = gitObservation(root, clock);
@@ -2248,8 +2277,16 @@ function reconcileIntegrationLocked({ root, selected, expectedRevision, clock, c
     }
     const execution = replaceExecutionTask(state, task.id, { status: 'integrated', integratedCommit: current.headSha }, { integrationIntent: null });
     const taskBlockers = canonicalTaskBlockers(root, state, execution);
-    const next = revised(state, { phase: taskBlockers.length ? 'blocked' : 'implementing', execution, git: current,
-      blockedReasons: taskBlockers }, clock);
+    const nonmaterial = nonmaterialDiscoveryGate(root, state);
+    const assessedBlocker = nonmaterial
+      ? canonicalTaskBlockers(root, state, { ...execution,
+        tasks: [executionTask({ ...state, execution }, nonmaterial.discovery.taskId)] })[0]
+      : null;
+    const blockedReasons = nonmaterial
+      ? [nonmaterial.blocker, ...taskBlockers.filter((reason) => reason !== assessedBlocker)]
+      : taskBlockers;
+    const next = revised(state, { phase: blockedReasons.length ? 'blocked' : 'implementing', execution, git: current,
+      blockedReasons }, clock);
     return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'task-integrated',
       summary: `Reconciled integrated task ${task.id} at ${current.headSha}`, crashStep });
   }, lockOptions);
@@ -3904,7 +3941,8 @@ export function rejectTask({ cwd = process.cwd(), changeId, taskId, reason, expe
       // exact receipt-backed task blockers, then deliberately clears the
       // mutable blocker list. Rejection of that intent owner regenerates those
       // blockers from receipts instead of treating the cleared list as loss.
-      const preservedBlockers = state.execution.integrationIntent ? [] : nonTaskBlockers(root, state);
+      const preservedBlockers = state.execution.integrationIntent ? []
+        : nonTaskBlockers(root, state, { supersedingDiscoveryTaskId: taskId });
       const execution = replaceExecutionTask(state, taskId, { status: 'rejected' }, { activeWave: state.execution.activeWave.filter((id) => id !== taskId), integrationIntent: null });
       const timestamp = now(clock);
       const rejection = { schemaVersion: 1, changeId: state.changeId, taskId, binding: task.binding, reason, rejectedAt: timestamp };
