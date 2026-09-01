@@ -175,7 +175,10 @@ test('documentation links resolve and defines invocation and authority boundarie
   assert.match(contract, /independent workstream, new criterion, non-goal reversal, sensitive policy/u);
   assert.match(contract, /without authorizing either/u);
   assert.match(contract, /receipt-protected `approve-material-amendment` decision/u);
-  assert.match(contract, /`taskPacketDigest` is the canonical change-development\s+`taskSetDigest`/u);
+  assert.match(contract, /evidence produced by change development, or imported from\s+its receipt-valid handoff, `taskPacketDigest` is the canonical terminal\s+`taskSetDigest`/u);
+  assert.match(contract, /import preserves\s+that development authority unchanged; it does not permit substitution of an\s+arbitrary worker packet digest/u);
+  assert.match(contract, /standalone PR-review `integrated-head` evidence, `taskPacketDigest` instead\s+retains the exact immutable remediation packet identity for the classified\s+root/u);
+  assert.match(contract, /exact-head manifest supplies the aggregate proof by binding\s+the complete ordered scope journal and current integration HEAD\. It must not\s+invent development tasks or substitute a different remediation packet/u);
   assert.match(contract, /both the\s+authoritative source and accepted scope provide that exact authority/u);
   assert.match(contract, /must cite positive\s+authority through a source-required criterion, accepted criterion, invariant,\s+or exact approved decision/u);
   assert.match(contract, /same\s+authority field of that mechanism's `changeInventory\.mappings` row/u);

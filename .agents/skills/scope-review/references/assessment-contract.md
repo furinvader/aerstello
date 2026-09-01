@@ -81,11 +81,19 @@ admissible relaxed lower bound also exceeds the result envelope.
 
 Materiality triggers are closed and complete: a new subsystem, new dependency, public surface, persistent surface, cross-capability work, policy change, repository-wide enforcement, independent workstream, new criterion, non-goal reversal, sensitive policy, replacement of the accepted approach, or repeated expansion. A tripwire can request closer inspection but cannot select or exclude any verdict. A material inventory surface has affirmative authority only when accepted shape authorizes it and either an exact source-required criterion or a receipt-protected `approve-material-amendment` decision names that same shape.
 
-For `integrated-head`, `taskPacketDigest` is the canonical change-development
+For `integrated-head` evidence produced by change development, or imported from
+its receipt-valid handoff, `taskPacketDigest` is the canonical terminal
 `taskSetDigest`: the digest of the ordered receipt-valid task identity projection
 containing task ID, binding, packet, result, provenance, terminal status,
-integrated commit, and integration-receipt identities. It is not one arbitrary
-worker packet digest.
+integrated commit, and integration-receipt identities. The import preserves
+that development authority unchanged; it does not permit substitution of an
+arbitrary worker packet digest.
+
+For standalone PR-review `integrated-head` evidence, `taskPacketDigest` instead
+retains the exact immutable remediation packet identity for the classified
+root. The PR-review exact-head manifest supplies the aggregate proof by binding
+the complete ordered scope journal and current integration HEAD. It must not
+invent development tasks or substitute a different remediation packet.
 
 Apply authority before materiality and materiality before trimming. First
 determine whether the named material surface is explicitly required by the
