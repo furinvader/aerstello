@@ -2104,18 +2104,20 @@ function nonTaskBlockers(cwd, state) {
     const discoveryTrigger = currentScope.value.cadence.trigger;
     const stillBlockedDiscovery = state.execution.tasks.some((task) => task.status === 'blocked'
       && discoveryTrigger?.startsWith(`worker-scope-discovery:${task.id}:`));
-    if (stillBlockedDiscovery
-        && pendingMaterialDecisionForClosure(cwd, state, currentScope)) {
-      const discovery = workerDiscoveryAssessmentIdentity(cwd, state);
-      const binding = currentScope.value.packet.binding;
-      if (currentScope.value.cadence.boundary === 'task'
-          && currentScope.value.cadence.trigger === discovery.trigger
-          && binding.taskPacketDigest === discovery.taskPacketDigest
-          && binding.subject.digest === discovery.subjectDigest
-          && binding.subject.sha === discovery.subjectSha) {
-        const task = executionTask(state, discovery.taskId);
-        [supersededDiscoveryBlocker] = canonicalTaskBlockers(cwd, state,
-          { ...state.execution, tasks: [task] });
+    if (stillBlockedDiscovery && state.phase === 'blocked') {
+      const pendingDecision = pendingMaterialDecisionForClosure(cwd, state, currentScope);
+      if (pendingDecision && pendingDecision.value.disposition !== 'abandon-replan') {
+        const discovery = workerDiscoveryAssessmentIdentity(cwd, state);
+        const binding = currentScope.value.packet.binding;
+        if (currentScope.value.cadence.boundary === 'task'
+            && currentScope.value.cadence.trigger === discovery.trigger
+            && binding.taskPacketDigest === discovery.taskPacketDigest
+            && binding.subject.digest === discovery.subjectDigest
+            && binding.subject.sha === discovery.subjectSha) {
+          const task = executionTask(state, discovery.taskId);
+          [supersededDiscoveryBlocker] = canonicalTaskBlockers(cwd, state,
+            { ...state.execution, tasks: [task] });
+        }
       }
     }
   }

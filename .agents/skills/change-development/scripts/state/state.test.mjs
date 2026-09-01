@@ -876,7 +876,7 @@ test('structured worker discovery invalidates task scope and admits only its exa
 });
 
 test('material decision supersedes only its exact discovery blocker before rejection and amendment', async () => {
-  async function discoveryFixture(name, withFailedSibling = false) {
+  async function discoveryFixture(name, withFailedSibling = false, disposition = 'reject-use-narrow') {
     const fixture = repository(name);
     const planning = await initializeState({ cwd: fixture.cwd, changeId: name, mode: 'implement',
       baseBranch: 'main', planningRef: fixture.sha, source: descriptor });
@@ -922,7 +922,7 @@ test('material decision supersedes only its exact discovery blocker before rejec
     state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
       expectedRevision: state.revision });
     state = recordScopeDecision({ cwd: fixture.cwd, expectedRevision: state.revision,
-      decision: materialScopeDecision(state, evidence, 'reject-use-narrow', [], `${name}-use-narrow`) });
+      decision: materialScopeDecision(state, evidence, disposition, [], `${name}-decision`) });
     return { ...fixture, state, plan, closure, packet };
   }
 
@@ -970,6 +970,18 @@ test('material decision supersedes only its exact discovery blocker before rejec
   (error) => error.code === 'TASK_RESULT_MISMATCH');
   assert.deepEqual(durableSnapshot(directory), before,
     'an unrelated missing sibling blocker fails atomically without durable mutation');
+
+  const abandoned = await discoveryFixture('material-discovery-abandonment', false, 'abandon-replan');
+  assert.equal(abandoned.state.phase, 'abandoned');
+  assert.equal(validateState({ cwd: abandoned.cwd }).valid, true,
+    'the exact abandonment receipt remains valid in its terminal phase');
+  const abandonedDirectory = changeDirectory(abandoned.cwd, abandoned.state.changeId);
+  const beforeAbandonedRejection = durableSnapshot(abandonedDirectory);
+  assert.throws(() => rejectTask({ cwd: abandoned.cwd, taskId: abandoned.packet.taskId,
+    reason: 'Do not reopen terminal abandonment.', expectedRevision: abandoned.state.revision }),
+  (error) => error.code === 'TASK_RESULT_MISMATCH');
+  assert.deepEqual(durableSnapshot(abandonedDirectory), beforeAbandonedRejection,
+    'task rejection cannot move terminal abandonment back to blocked');
 });
 
 test('accepted material approval remains blocked until its exact approved shape is amended', async () => {
