@@ -1,0 +1,4 @@
+interface:
+  display_name: "Issue Scope Planning"
+  short_description: "Review and split broad Aerstello issues"
+  default_prompt: "Use $issue-scope-planning to review this exact Aerstello issue and produce the smallest coherent delivery plan."
