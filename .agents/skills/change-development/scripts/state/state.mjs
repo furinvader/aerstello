@@ -631,6 +631,7 @@ function workerDiscoveryAssessmentIdentity(cwd, state) {
     if (packet.digest !== task.packetDigest) return [];
     const discoveryDigest = objectDigest(result.scopeDiscovery);
     return [{
+      taskId: task.id,
       taskPacketDigest: packet.digest,
       subjectDigest: objectDigest({ taskPacketDigest: packet.digest,
         resultDigest: task.resultDigest, discoveryDigest }),
@@ -2096,6 +2097,30 @@ function canonicalTaskBlockers(cwd, state, execution, inFlight = null) {
 }
 
 function nonTaskBlockers(cwd, state) {
+  let supersededDiscoveryBlocker = null;
+  if (state.scope?.currentEvidenceDigest) {
+    const currentScope = findScopeReceipt(cwd, state, 'evidence', state.scope.currentEvidenceDigest,
+      'current scope evidence');
+    const discoveryTrigger = currentScope.value.cadence.trigger;
+    const stillBlockedDiscovery = state.execution.tasks.some((task) => task.status === 'blocked'
+      && discoveryTrigger?.startsWith(`worker-scope-discovery:${task.id}:`));
+    if (stillBlockedDiscovery && state.phase === 'blocked') {
+      const pendingDecision = pendingMaterialDecisionForClosure(cwd, state, currentScope);
+      if (pendingDecision && pendingDecision.value.disposition !== 'abandon-replan') {
+        const discovery = workerDiscoveryAssessmentIdentity(cwd, state);
+        const binding = currentScope.value.packet.binding;
+        if (currentScope.value.cadence.boundary === 'task'
+            && currentScope.value.cadence.trigger === discovery.trigger
+            && binding.taskPacketDigest === discovery.taskPacketDigest
+            && binding.subject.digest === discovery.subjectDigest
+            && binding.subject.sha === discovery.subjectSha) {
+          const task = executionTask(state, discovery.taskId);
+          [supersededDiscoveryBlocker] = canonicalTaskBlockers(cwd, state,
+            { ...state.execution, tasks: [task] });
+        }
+      }
+    }
+  }
   const taskBlockers = new Map();
   for (const reason of canonicalTaskBlockers(cwd, state, state.execution)) {
     taskBlockers.set(reason, (taskBlockers.get(reason) ?? 0) + 1);
@@ -2105,6 +2130,10 @@ function nonTaskBlockers(cwd, state) {
     const remaining = taskBlockers.get(reason) ?? 0;
     if (remaining > 0) taskBlockers.set(reason, remaining - 1);
     else preserved.push(reason);
+  }
+  if (supersededDiscoveryBlocker !== null) {
+    const remaining = taskBlockers.get(supersededDiscoveryBlocker) ?? 0;
+    if (remaining > 0) taskBlockers.set(supersededDiscoveryBlocker, remaining - 1);
   }
   if ([...taskBlockers.values()].some((remaining) => remaining !== 0)) {
     throw new StateError('Blocked state is missing receipt-backed task blocker evidence', 'TASK_RESULT_MISMATCH');
