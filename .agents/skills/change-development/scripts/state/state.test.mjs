@@ -1159,20 +1159,38 @@ test('minor and trim assessments supersede only their exact discovery blocker th
   assert.deepEqual(durableSnapshot(siblingDirectory), beforeSiblingRejection,
     'an exact assessment cannot supersede a sibling task blocker');
 
-  const acceptedSibling = await discoveryFixture(
-    'nonmaterial-discovery-accepted-sibling', 'trim-required', 'accepted',
-  );
-  let acceptedState = acceptedSibling.state;
-  assert.equal(acceptedState.execution.tasks.find(({ id }) => id === acceptedSibling.sibling.taskId).status, 'accepted');
-  acceptedState = integrateTask({ cwd: acceptedSibling.cwd, taskId: acceptedSibling.sibling.taskId,
-    expectedRevision: acceptedState.revision });
-  assert.equal(acceptedState.execution.tasks.find(({ id }) => id === acceptedSibling.sibling.taskId).status, 'integrated');
-  assert.equal(acceptedState.execution.tasks.find(({ id }) => id === acceptedSibling.packet.taskId).status, 'blocked');
-  assert.deepEqual(acceptedState.blockedReasons, [blockers['trim-required']],
-    'receipt-backed sibling integration preserves the exact nonmaterial amendment gate');
-  assert.match(acceptedState.nextAction,
-    new RegExp(`reject-task.*${acceptedSibling.packet.taskId}.*clean up.*amend-plan`, 'u'));
-  assert.equal(validateState({ cwd: acceptedSibling.cwd }).valid, true);
+  for (const verdict of ['minor-amendment-required', 'trim-required']) {
+    const acceptedSibling = await discoveryFixture(
+      `nonmaterial-discovery-accepted-sibling-${verdict}`, verdict, 'accepted',
+    );
+    let acceptedState = acceptedSibling.state;
+    assert.equal(acceptedState.execution.tasks.find(({ id }) => id === acceptedSibling.sibling.taskId).status,
+      'accepted');
+    assert.match(acceptedState.nextAction,
+      new RegExp(`Integrate.*${acceptedSibling.sibling.taskId}.*before resolving`, 'u'),
+      `${verdict} prioritizes the dependency-ready accepted sibling`);
+    assert.doesNotMatch(acceptedState.nextAction, /reject-task/u,
+      `${verdict} does not advertise premature discovery rejection`);
+    const acceptedDirectory = changeDirectory(acceptedSibling.cwd, acceptedState.changeId);
+    const beforeAssessedRejection = durableSnapshot(acceptedDirectory);
+    assert.throws(() => rejectTask({ cwd: acceptedSibling.cwd, taskId: acceptedSibling.packet.taskId,
+      reason: 'Do not reject the discovery before integrating its accepted sibling.',
+      expectedRevision: acceptedState.revision }),
+    (error) => error.code === 'TASK_STATE_CONFLICT');
+    assert.deepEqual(durableSnapshot(acceptedDirectory), beforeAssessedRejection,
+      `${verdict} rejects premature discovery cleanup atomically`);
+    acceptedState = integrateTask({ cwd: acceptedSibling.cwd, taskId: acceptedSibling.sibling.taskId,
+      expectedRevision: acceptedState.revision });
+    assert.equal(acceptedState.execution.tasks.find(({ id }) => id === acceptedSibling.sibling.taskId).status,
+      'integrated');
+    assert.equal(acceptedState.execution.tasks.find(({ id }) => id === acceptedSibling.packet.taskId).status,
+      'blocked');
+    assert.deepEqual(acceptedState.blockedReasons, [blockers[verdict]],
+      'receipt-backed sibling integration preserves the exact nonmaterial amendment gate');
+    assert.match(acceptedState.nextAction,
+      new RegExp(`reject-task.*${acceptedSibling.packet.taskId}.*clean up.*amend-plan`, 'u'));
+    assert.equal(validateState({ cwd: acceptedSibling.cwd }).valid, true);
+  }
 
   const rejectedSibling = await discoveryFixture(
     'nonmaterial-discovery-rejected-sibling', 'minor-amendment-required', 'accepted',
@@ -1187,13 +1205,20 @@ test('minor and trim assessments supersede only their exact discovery blocker th
     'sibling rejection leaves the assessed blocker and task unchanged');
   assert.equal(validateState({ cwd: rejectedSibling.cwd }).valid, true);
 
-  const recovered = await discoveryFixture(
-    'nonmaterial-discovery-instruction-recovery', 'minor-amendment-required', null, true,
-  );
-  assert.match(recovered.state.nextAction,
-    new RegExp(`reject-task.*${recovered.packet.taskId}.*clean up.*amend-plan`, 'u'),
-    'recovery reproduces the exact assessed-task cleanup sequence');
-  assert.equal(validateState({ cwd: recovered.cwd }).valid, true);
+  for (const verdict of ['minor-amendment-required', 'trim-required']) {
+    const recovered = await discoveryFixture(
+      `nonmaterial-discovery-instruction-recovery-${verdict}`, verdict, 'accepted', true,
+    );
+    assert.match(recovered.state.nextAction,
+      new RegExp(`Integrate.*${recovered.sibling.taskId}.*before resolving`, 'u'),
+      `${verdict} recovery reproduces the accepted-sibling integration instruction`);
+    let recoveredState = integrateTask({ cwd: recovered.cwd, taskId: recovered.sibling.taskId,
+      expectedRevision: recovered.state.revision });
+    assert.match(recoveredState.nextAction,
+      new RegExp(`reject-task.*${recovered.packet.taskId}.*clean up.*amend-plan`, 'u'),
+      `${verdict} recovery reaches the exact assessed-task cleanup sequence after integration`);
+    assert.equal(validateState({ cwd: recovered.cwd }).valid, true);
+  }
 
   const insufficient = await discoveryFixture('nonmaterial-discovery-insufficient-near-miss', 'insufficient-evidence');
   const insufficientDirectory = changeDirectory(insufficient.cwd, insufficient.state.changeId);

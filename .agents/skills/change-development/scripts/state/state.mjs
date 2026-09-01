@@ -594,6 +594,15 @@ export function nextActionFor(state) {
   if (state.phase === 'recovering') return 'Run change:state recover to finish the exact interrupted transition.';
   if (state.phase === 'blocked') return state.execution?.activeWave.length
     ? 'Resolve the listed blocking evidence by accepting or finishing every active-wave task result, then reject/replan.'
+    : state.execution?.tasks.filter((task) => task.status === 'blocked').length === 1
+      && state.blockedReasons?.some((reason) => reason.includes('bounded minor amendment')
+        || reason.includes('removal or simplification'))
+      && state.execution.tasks.some((task) => task.status === 'accepted'
+        && task.dependsOn.every((id) => ['integrated', 'no-change']
+          .includes(state.execution.tasks.find((candidate) => candidate.id === id)?.status)))
+      ? `Integrate the dependency-ready accepted sibling task ${state.execution.tasks.find((task) => task.status === 'accepted'
+        && task.dependsOn.every((id) => ['integrated', 'no-change']
+          .includes(state.execution.tasks.find((candidate) => candidate.id === id)?.status))).id} before resolving the assessed discovery task.`
     : state.blockedReasons?.some((reason) => reason.includes('Recorded material scope decision'))
       ? 'Run change:state amend-plan from the exact current material decision and assessment; implementation authority remains blocked.'
     : state.blockedReasons?.some((reason) => reason.includes('bounded minor amendment'))
@@ -3926,6 +3935,12 @@ export function rejectTask({ cwd = process.cwd(), changeId, taskId, reason, expe
       validateState({ cwd: root, changeId: selected }); const task = executionTask(state, taskId);
       if (!nonemptyString(reason)) throw new StateError('Task rejection requires a reason', 'INVALID_REJECTION');
       if (!['bound', 'scheduled', 'running', 'accepted', 'integration-pending', 'blocked', 'failed'].includes(task.status)) throw new StateError(`Task ${taskId} cannot be rejected from ${task.status}`, 'TASK_STATE_CONFLICT');
+      const nonmaterial = state.phase === 'blocked' ? nonmaterialDiscoveryGate(root, state) : null;
+      if (nonmaterial?.discovery.taskId === taskId
+          && state.execution.tasks.some((candidate) => candidate.id !== taskId && candidate.status === 'accepted')) {
+        throw new StateError('The assessed discovery task cannot be rejected while an accepted sibling remains to integrate',
+          'TASK_STATE_CONFLICT');
+      }
       const sequencer = runGit(['rev-parse', '--verify', '--quiet', 'CHERRY_PICK_HEAD'], { cwd: root, allowFailure: true });
       if (sequencer.status === 0) throw new StateError('Rejecting work requires explicit cherry-pick abort or skip cleanup first', 'CHERRY_PICK_IN_PROGRESS');
       if (sequencer.status !== 1) throw new StateError('Unable to inspect cherry-pick sequencer state', 'CENTRAL_GIT_MISMATCH');
