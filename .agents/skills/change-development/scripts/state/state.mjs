@@ -4017,7 +4017,7 @@ export function rejectTask({ cwd = process.cwd(), changeId, taskId, reason, expe
       const nonmaterialBlockers = nonmaterial
         ? nonmaterialBlockerProjection(root, state, execution, { taskId, rejection })
         : null;
-      const preservedBlockers = nonmaterialBlockers ? []
+      const preservedBlockers = nonmaterialBlockers || state.execution.integrationIntent ? []
         : nonTaskBlockers(root, state, { supersedingDiscoveryTaskId: taskId });
       const taskBlockers = nonmaterialBlockers ?? canonicalTaskBlockers(root, state, execution,
         { taskId, rejection });
