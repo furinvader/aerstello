@@ -7,6 +7,7 @@ import {
   validateScopeDecision,
   validateScopeEvidence,
 } from '../scope/contracts.mjs';
+import { pathMatchesOwnership } from '../implementation/contracts.mjs';
 import {
   scopeAuthorityDigest,
   scopeReturnResumeIdentity,
@@ -113,7 +114,7 @@ export function validateAdmissionScopeSemantics(evidence, { effectivePlan, minim
     authorizedShape: minimalClosure?.authorizedShape,
     unauthorizedShape: minimalClosure?.unauthorizedExpansion,
     deferredShape: (minimalClosure?.deferredFollowups ?? []).map(({ id }) => id),
-    ...(authorityDecisions.length > 0 ? { authorityDecisions } : {}),
+    authorityDecisions,
   };
   if (!isDeepStrictEqual(evidence?.packet?.sourceScope, expectedSourceScope)) {
     errors.push('$ packet.sourceScope does not equal the canonical source and minimal-closure projection');
@@ -121,11 +122,102 @@ export function validateAdmissionScopeSemantics(evidence, { effectivePlan, minim
   const actualAcceptedScope = evidence?.packet?.acceptedScope;
   const actualProjection = actualAcceptedScope === null || typeof actualAcceptedScope !== 'object'
     ? actualAcceptedScope
-    : Object.fromEntries(Object.keys(expectedAcceptedScope).map((key) => [key, actualAcceptedScope[key]]));
+    : Object.fromEntries(Object.keys(expectedAcceptedScope).map((key) => [key,
+      key === 'authorityDecisions' ? actualAcceptedScope[key] ?? [] : actualAcceptedScope[key]]));
   if (!isDeepStrictEqual(actualProjection, expectedAcceptedScope)) {
     errors.push('$ packet.acceptedScope does not equal the exact effective-plan and minimal-closure projection');
   }
   return errors;
+}
+
+function remediationResponsibility(evidence) {
+  return evidence?.result?.verdict === 'minor-amendment-required'
+    ? evidence.result.scopeDelta?.description
+    : evidence?.result?.verdict === 'trim-required'
+      ? evidence.result.smallerSufficientAlternative
+      : null;
+}
+
+function applicableRemediationMappings(evidence) {
+  const mechanisms = new Set(evidence?.result?.verdict === 'minor-amendment-required'
+    ? evidence.result.coverage
+      .filter(({ classification }) => classification === 'necessary-minor-expansion')
+      .map(({ mechanism }) => mechanism)
+    : evidence?.result?.verdict === 'trim-required'
+      ? evidence.result.unnecessaryWork
+      : []);
+  return (evidence?.packet?.changeInventory?.mappings ?? [])
+    .filter(({ mechanism }) => mechanisms.has(mechanism));
+}
+
+export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan, resultingPlan,
+  addedTaskIds }) {
+  const errors = [];
+  const responsibility = remediationResponsibility(evidence);
+  if (typeof responsibility !== 'string') {
+    return ['current evidence does not define an exact nonmaterial remediation responsibility'];
+  }
+  const priorTaskIds = new Set((priorPlan?.tasks ?? []).map(({ id }) => id));
+  const priorCriterionIds = new Set((priorPlan?.criteria ?? []).map(({ id }) => id));
+  const addedTasks = (resultingPlan?.tasks ?? []).filter(({ id }) => !priorTaskIds.has(id));
+  const addedCriteria = (resultingPlan?.criteria ?? []).filter(({ id }) => !priorCriterionIds.has(id));
+  const addedCriteriaByOwner = new Map();
+  for (const criterion of addedCriteria) {
+    const owned = addedCriteriaByOwner.get(criterion.ownerTaskId) ?? [];
+    owned.push(criterion);
+    addedCriteriaByOwner.set(criterion.ownerTaskId, owned);
+  }
+  const declaredTaskIds = new Set(addedTaskIds ?? []);
+  if (declaredTaskIds.size !== addedTasks.length
+      || addedTasks.some(({ id }) => !declaredTaskIds.has(id))) {
+    errors.push('$ nonmaterial amendment addedTaskIds must equal the complete new task set');
+  }
+  const mappings = applicableRemediationMappings(evidence);
+  const responsibleCriterionIds = new Set(mappings.flatMap(({ acceptedCriterionIds }) => acceptedCriterionIds));
+  const responsibleTaskIds = new Set((priorPlan?.criteria ?? [])
+    .filter(({ id }) => responsibleCriterionIds.has(id))
+    .map(({ ownerTaskId }) => ownerTaskId));
+  const discoveryTaskId = /^worker-scope-discovery:([a-z0-9]+(?:-[a-z0-9]+)*):/u
+    .exec(evidence?.cadence?.trigger ?? '')?.[1];
+  if (discoveryTaskId) responsibleTaskIds.add(discoveryTaskId);
+  const assessedPaths = new Set(evidence?.packet?.changeInventory?.paths ?? []);
+  const discoveryPaths = new Set((priorPlan?.tasks ?? [])
+    .find(({ id }) => id === discoveryTaskId)?.anticipatedPaths ?? []);
+  for (const task of addedTasks) {
+    const ownedCriteria = addedCriteriaByOwner.get(task.id) ?? [];
+    if (ownedCriteria.length === 0 || ownedCriteria.some(({ id, description }) =>
+      !task.criterionIds.includes(id) || description !== responsibility)) {
+      errors.push(`$ nonmaterial remediation task ${task.id} must own a new criterion with the exact assessed responsibility`);
+    }
+    if (task.objective !== responsibility) {
+      errors.push(`$ nonmaterial remediation task ${task.id} objective must equal the exact assessed responsibility`);
+    }
+    const carriesResponsibility = task.criterionIds.some((id) => responsibleCriterionIds.has(id))
+      || task.dependsOn.some((id) => responsibleTaskIds.has(id))
+      || (discoveryPaths.size > 0 && task.anticipatedPaths.length === discoveryPaths.size
+        && task.anticipatedPaths.every((path) => discoveryPaths.has(path)));
+    if (responsibleCriterionIds.size > 0 && !carriesResponsibility) {
+      errors.push(`$ nonmaterial remediation task ${task.id} is not linked to the assessed accepted criteria`);
+    }
+    const inheritedPaths = new Set((priorPlan?.tasks ?? [])
+      .filter(({ id }) => responsibleTaskIds.has(id) || task.criterionIds.some((criterionId) =>
+        id === (priorPlan.criteria.find((criterion) => criterion.id === criterionId)?.ownerTaskId)))
+      .flatMap(({ anticipatedPaths }) => anticipatedPaths));
+    if (task.anticipatedPaths.length === 0 || task.anticipatedPaths.some((path) =>
+      !assessedPaths.has(path) && !inheritedPaths.has(path))) {
+      errors.push(`$ nonmaterial remediation task ${task.id} anticipatedPaths exceed the exact assessed or inherited responsibility`);
+    }
+  }
+  return [...new Set(errors)].sort();
+}
+
+export function resumedPathHasCompleteTaskAuthority(path, terminal, validationCommands) {
+  const represented = new Set(validationCommands);
+  return terminal.some(({ packet }) =>
+    packet.allowedPaths.some((pattern) => pathMatchesOwnership(path, pattern))
+    && !packet.forbiddenPaths.some((pattern) => pathMatchesOwnership(path, pattern))
+    && [...packet.requiredValidation.unit, ...packet.requiredValidation.system]
+      .every(({ command }) => represented.has(command)));
 }
 
 const PRESERVED_CLOSURE_FIELDS = Object.freeze([

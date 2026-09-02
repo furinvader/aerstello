@@ -61,6 +61,8 @@ import {
   validateAdmissionScopeSemantics,
   validateMinorAmendmentAuthority,
   projectNonmaterialScopeRemediation,
+  resumedPathHasCompleteTaskAuthority,
+  validateNonmaterialAmendmentTaskAuthority,
   scopeAuthorityDecisionProjection,
   validateActiveHandoffAuthority,
   validateScopeReturnResume,
@@ -1110,15 +1112,18 @@ function validateResumedHeadAuthority(cwd, state, scopeReturn, currentHeadSha) {
     errors.push('$ scope return inventory.paths must exactly equal the resumed PR-head changed paths');
   }
   const terminal = terminalTaskEvidence(cwd, state);
+  const representedValidation = new Set(scopeReturn.inventory.validation);
   for (const path of changedPaths) {
     const matchingOwners = terminal.filter(({ packet }) =>
       packet.allowedPaths.some((pattern) => pathMatchesOwnership(path, pattern)));
-    const owned = matchingOwners.some(({ packet }) =>
+    const eligibleOwners = matchingOwners.filter(({ packet }) =>
       !packet.forbiddenPaths.some((pattern) => pathMatchesOwnership(path, pattern)));
     if (matchingOwners.length === 0) {
       errors.push(`$ resumed PR-head changed path is unowned by terminal task authority: ${path}`);
-    } else if (!owned) {
+    } else if (eligibleOwners.length === 0) {
       errors.push(`$ resumed PR-head changed path is forbidden by every matching terminal task authority: ${path}`);
+    } else if (!resumedPathHasCompleteTaskAuthority(path, eligibleOwners, representedValidation)) {
+      errors.push(`$ resumed PR-head changed path lacks complete validation from the same eligible terminal task authority: ${path}`);
     }
   }
   const authorizedCommands = new Set(terminal.flatMap(({ packet }) => [
@@ -4414,6 +4419,13 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
         if (declaredTaskIds.some((id) => !authorizedTaskIds.has(id))) {
           throw new StateError('Scope-driven remediation tasks must be new and linked to genuinely new owned criteria', 'INVALID_AMENDMENT');
         }
+        const authorityErrors = validateNonmaterialAmendmentTaskAuthority({
+          evidence, priorPlan: prior, resultingPlan, addedTaskIds: declaredTaskIds,
+        });
+        if (authorityErrors.length > 0) {
+          throw new StateError(`Scope-driven remediation tasks lack exact assessment authority:\n- ${authorityErrors.join('\n- ')}`,
+            'INVALID_AMENDMENT');
+        }
         scopeOverlapAuthority = new Set(declaredTaskIds);
       }
     }
@@ -5415,12 +5427,17 @@ function amendmentForRecovery(cwd, intent, predecessor) {
       }
     } else if (['minor-amendment-required', 'trim-required'].includes(evidence.result.verdict)) {
       const nonmaterial = projectNonmaterialScopeRemediation({ evidence, priorClosure, minimalClosure });
+      const priorPlan = readEffectivePlan(cwd, predecessor);
+      const taskAuthorityErrors = validateNonmaterialAmendmentTaskAuthority({
+        evidence, priorPlan, resultingPlan: record.resultingPlan,
+        addedTaskIds: record.delta.addedTaskIds,
+      });
       const authorityErrors = evidence.result.verdict === 'minor-amendment-required'
         ? validateMinorAmendmentAuthority({ evidence, amendment: record })
         : record.trigger === predecessor.scope.currentEvidenceDigest
           && record.invalidatedEvidence.includes(predecessor.scope.currentEvidenceDigest)
           ? [] : ['$ recovered trim amendment lacks its exact assessment trigger'];
-      if (nonmaterial.errors.length > 0 || authorityErrors.length > 0
+      if (nonmaterial.errors.length > 0 || authorityErrors.length > 0 || taskAuthorityErrors.length > 0
           || serialized(record.delta.scopeRemediation) !== serialized(nonmaterial.remediation)) {
         throw new StateError('Interrupted nonmaterial amendment lacks its exact assessment-bound remediation projection',
           'RECOVERY_EVIDENCE_INVALID');

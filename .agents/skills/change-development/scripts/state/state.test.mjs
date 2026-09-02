@@ -63,7 +63,7 @@ import {
   withIntegrationOperationLock,
   changeRoot,
 } from './state.mjs';
-import { projectNonmaterialScopeRemediation } from './scope.mjs';
+import { projectNonmaterialScopeRemediation, resumedPathHasCompleteTaskAuthority } from './scope.mjs';
 
 test('mixed minor remediation removes exact speculative work and adds only necessary authority', () => {
   const priorClosure = {
@@ -101,6 +101,27 @@ test('mixed minor remediation removes exact speculative work and adds only neces
   assert.ok(tampered.errors.some((error) => /exact assessed authorizedShape transformation/u.test(error)));
 });
 
+test('resumed path authority keeps same-packet validation existential across overlapping owners', () => {
+  const packet = (allowedPaths, forbiddenPaths, commands) => ({
+    allowedPaths, forbiddenPaths,
+    requiredValidation: { unit: commands.map((command) => ({ command })), system: [] },
+  });
+  const terminal = [
+    { packet: packet(['shared.txt'], [], ['validate-owner-a', 'validate-shared']) },
+    { packet: packet(['shared.txt'], [], ['validate-owner-b']) },
+    { packet: packet(['other.txt'], [], ['validate-unrelated']) },
+  ];
+  assert.equal(resumedPathHasCompleteTaskAuthority('shared.txt', terminal,
+    ['validate-owner-a', 'validate-unrelated']), false,
+  'partial owner validation plus an unrelated packet cannot be borrowed');
+  assert.equal(resumedPathHasCompleteTaskAuthority('shared.txt', terminal,
+    ['validate-owner-b']), true,
+  'one overlapping eligible owner with its complete validation is sufficient');
+  assert.equal(resumedPathHasCompleteTaskAuthority('shared.txt', [
+    { packet: packet(['shared.txt'], ['shared.txt'], ['validate-owner-b']) },
+  ], ['validate-owner-b']), false, 'forbidden matching ownership remains ineligible');
+});
+
 function testMinimalClosure(state, plan, overrides = {}) {
   const planDigest = digestJson(plan);
   return {
@@ -135,7 +156,7 @@ function testScopeEvidence(state, plan, closure, { boundary = 'admission', subje
       invariants: [...closure.invariants, ...closure.mandatoryConstraints],
       minimalClosure: closure.outcome, authorizedShape: [...closure.authorizedShape],
       unauthorizedShape: [...closure.unauthorizedExpansion], deferredShape: closure.deferredFollowups.map(({ id }) => id),
-      ...(authorityDecisions.length > 0 ? { authorityDecisions } : {}) },
+      authorityDecisions },
     changeInventory: { summary: 'Exercise one durable test mechanism.', paths: [], dependencies: [],
       publicSurfaces: [], persistentSurfaces: [], subsystems: [], mappings: [mapping] }, tripwires: [] };
   const result = { schemaVersion: 1, binding, verdict: 'within-scope', summary: 'The test mechanism is within scope.',
@@ -633,6 +654,22 @@ test('plan admission rejects every contradictory scope semantic projection witho
     && /exact ordered durable scope decision digests/u.test(error.message));
   assert.deepEqual(durableSnapshot(directory), before,
     'admission rejects foreign closure decision authority without durable mutation');
+  const injectedAuthority = structuredClone(exact);
+  const injectedDigest = `sha256:${'e'.repeat(64)}`;
+  injectedAuthority.packet.binding.decisionDigests = [injectedDigest];
+  injectedAuthority.packet.acceptedScope.authorityDecisions = [{
+    id: 'injected-admission-authority', digest: injectedDigest,
+    disposition: 'approve-material-amendment', authorizedShape: ['injected-shape'],
+  }];
+  injectedAuthority.result.binding = structuredClone(injectedAuthority.packet.binding);
+  injectedAuthority.packetDigest = digestJson(injectedAuthority.packet);
+  injectedAuthority.resultDigest = digestJson(injectedAuthority.result);
+  assert.throws(() => acceptPlanWithScope({ cwd: fixture.cwd, plan, minimalClosure: closure,
+    scopeEvidence: injectedAuthority, expectedRevision: planning.revision }),
+  (error) => error.code === 'PLAN_SCOPE_INVALID'
+    && /exact effective-plan and minimal-closure projection/u.test(error.message));
+  assert.deepEqual(durableSnapshot(directory), before,
+    'admission rejects injected authority against the exact empty decision projection atomically');
   for (const mutate of mutations) {
     const contradictory = structuredClone(exact);
     mutate(contradictory.packet);
@@ -1135,7 +1172,7 @@ test('minor and trim assessments supersede only their exact discovery blocker th
       state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
         expectedRevision: state.revision });
     }
-    return { ...fixture, state, plan, closure, packet, sibling, siblingWorker };
+    return { ...fixture, state, plan, closure, packet, sibling, siblingWorker, evidence };
   }
 
   const blockers = {
@@ -1406,16 +1443,17 @@ test('minor and trim assessments supersede only their exact discovery blocker th
     taskId: unbound.packet.taskId });
   const unboundReplacementId = 'unbound-discovery-replacement';
   const unboundReplacementCriterionId = 'unbound-discovery-replacement-criterion';
+  const unboundResponsibility = unbound.evidence.result.scopeDelta.description;
   const unboundPlan = structuredClone(unbound.plan);
   unboundPlan.planRevision = 2;
   unboundPlan.criteria = unboundPlan.criteria.map((criterion) => criterion.ownerTaskId === unbound.packet.taskId
     ? { ...criterion, ownerTaskId: unboundReplacementId } : criterion);
   unboundPlan.criteria.push({ id: unboundReplacementCriterionId,
-    description: 'Replace only the assessed discovery task.', disposition: 'owned',
+    description: unboundResponsibility, disposition: 'owned',
     ownerTaskId: unboundReplacementId, deferredReason: null });
   unboundPlan.tasks = unboundPlan.tasks.map((task) => task.id === unbound.packet.taskId
     ? { ...task, id: unboundReplacementId,
-      criterionIds: [...task.criterionIds, unboundReplacementCriterionId] }
+      objective: unboundResponsibility, criterionIds: [...task.criterionIds, unboundReplacementCriterionId] }
     : task);
   unboundPlan.checklistMappings = unboundPlan.checklistMappings.map((mapping) => ({
     ...mapping,
@@ -1500,15 +1538,18 @@ test('minor and trim assessments supersede only their exact discovery blocker th
     const resultingPlan = structuredClone(fixture.plan);
     resultingPlan.planRevision = 2;
     const verdictLabel = verdict === 'minor-amendment-required' ? 'minor' : 'trim';
+    const responsibility = verdict === 'minor-amendment-required'
+      ? fixture.evidence.result.scopeDelta.description
+      : fixture.evidence.result.smallerSufficientAlternative;
     const replacementTaskId = `${verdictLabel}-replacement`;
     const replacementCriterionId = `${verdictLabel}-replacement-criterion`;
     resultingPlan.criteria[0].ownerTaskId = replacementTaskId;
     resultingPlan.criteria.push({ id: replacementCriterionId,
-      description: 'Apply the exact bounded worker-discovery remediation.', disposition: 'owned',
+      description: responsibility, disposition: 'owned',
       ownerTaskId: replacementTaskId, deferredReason: null });
     resultingPlan.tasks[0] = { ...resultingPlan.tasks[0], id: replacementTaskId,
       title: 'Apply bounded discovery remediation',
-      objective: 'Replace only the exact rejected worker-discovery task.',
+      objective: responsibility,
       criterionIds: [resultingPlan.criteria[0].id, replacementCriterionId] };
     resultingPlan.checklistMappings[0].taskIds = [replacementTaskId];
     const minimalClosure = { ...structuredClone(fixture.closure), revision: 2,
@@ -1622,6 +1663,9 @@ test('minor and trim assessments supersede only their exact discovery blocker th
       taskId: lateSibling.sibling.taskId });
 
     const verdictLabel = verdict === 'minor-amendment-required' ? 'minor' : 'trim';
+    const responsibility = verdict === 'minor-amendment-required'
+      ? lateSibling.evidence.result.scopeDelta.description
+      : lateSibling.evidence.result.smallerSufficientAlternative;
     const discoveryReplacementId = `${verdictLabel}-discovery-replacement`;
     const siblingReplacementId = `${verdictLabel}-sibling-replacement`;
     const discoveryCriterionId = `${verdictLabel}-discovery-transition-replacement`;
@@ -1634,16 +1678,16 @@ test('minor and trim assessments supersede only their exact discovery blocker th
         ? discoveryReplacementId : siblingReplacementId,
     }));
     resultingPlan.criteria.push({ id: discoveryCriterionId,
-      description: 'Apply the exact bounded discovery remediation.', disposition: 'owned',
+      description: responsibility, disposition: 'owned',
       ownerTaskId: discoveryReplacementId, deferredReason: null },
     { id: siblingCriterionId,
-      description: 'Apply the exact bounded sibling remediation.', disposition: 'owned',
+      description: responsibility, disposition: 'owned',
       ownerTaskId: siblingReplacementId, deferredReason: null });
     resultingPlan.tasks = resultingPlan.tasks.map((task) => task.id === lateSibling.packet.taskId
       ? { ...task, id: discoveryReplacementId,
-        criterionIds: [...task.criterionIds, discoveryCriterionId] }
+        objective: responsibility, criterionIds: [...task.criterionIds, discoveryCriterionId] }
       : { ...task, id: siblingReplacementId,
-        criterionIds: [...task.criterionIds, siblingCriterionId] });
+        objective: responsibility, criterionIds: [...task.criterionIds, siblingCriterionId] });
     resultingPlan.checklistMappings = resultingPlan.checklistMappings.map((mapping) => ({
       ...mapping,
       taskIds: mapping.taskIds.map((id) => id === lateSibling.packet.taskId
@@ -3016,6 +3060,8 @@ test('two same-base workers integrate by delta, resume intent-only integration, 
   const secondPacket = packetFor(state, plan, 'second-task');
   secondPacket.allowedPaths = ['second.txt', 'review/**'];
   secondPacket.forbiddenPaths = ['review/forbidden.txt'];
+  secondPacket.requiredValidation.unit = [{ command: 'node --test second.test.mjs',
+    reason: 'Exercise the second task independently.' }];
   state = bindTask({ cwd, packet: secondPacket, expectedRevision: state.revision });
   const secondWorktree = createWorkerFixture(cwd, state, secondPacket);
   state = scheduleWave({ cwd, expectedRevision: state.revision });
@@ -3186,7 +3232,8 @@ test('two same-base workers integrate by delta, resume intent-only integration, 
     inventory: {
       paths: ['first.txt', 'second.txt'], dependencies: [], publicSurfaces: [],
       persistentSurfaces: [],
-      validation: ['node --test .agents/skills/change-development/scripts/state/state.test.mjs'],
+      validation: ['node --test .agents/skills/change-development/scripts/state/state.test.mjs',
+        'node --test second.test.mjs'],
     },
     priorDecisionIds: [],
     createdAt: '2026-08-18T12:31:00.000Z',
@@ -3240,6 +3287,7 @@ test('two same-base workers integrate by delta, resume intent-only integration, 
   for (const inventory of [
     { ...scopeReturn.inventory, paths: ['first.txt'] },
     { ...scopeReturn.inventory, validation: ['node --test unrepresented.test.mjs'] },
+    { ...scopeReturn.inventory, paths: ['first.txt'], validation: ['node --test second.test.mjs'] },
   ]) {
     assert.throws(() => resumeScopeReturn({ cwd, expectedRevision: state.revision,
       activeHandoffAuthority, scopeReturn: { ...scopeReturn, inventory } }),
@@ -3520,14 +3568,36 @@ test('receipt-backed minor and trim remediation alone may revisit terminal owner
     const original = JSON.parse(readFileSync(join(changeDirectory(fixture.cwd, state.changeId), 'plan', 'plan.json'), 'utf8'));
     const resultingPlan = structuredClone(original); resultingPlan.planRevision = 2;
     const criterionId = `${verdict}-criterion`; const taskId = `${verdict}-task`;
-    resultingPlan.criteria.push({ id: criterionId, description: 'Perform the exact bounded scope remediation.',
+    const responsibility = verdict === 'minor-amendment-required'
+      ? evidence.result.scopeDelta.description : evidence.result.smallerSufficientAlternative;
+    resultingPlan.criteria.push({ id: criterionId, description: responsibility,
       disposition: 'owned', ownerTaskId: taskId, deferredReason: null });
     resultingPlan.tasks.push({ ...original.tasks[0], id: taskId, title: 'Apply bounded scope remediation',
-      objective: 'Apply only the receipt-backed adjacent correction.', criterionIds: [criterionId], checklistItemIds: [],
+      objective: responsibility, criterionIds: [criterionId], checklistItemIds: [],
       dependsOn: ['state-task'], anticipatedPaths: ['first.txt'] });
     const trigger = digestJson(evidence);
     const amendment = { id: `${verdict}-amendment`, reason: 'Apply the exact receipt-backed scope verdict.',
       authorization: 'scope-review', trigger, delta: { addedTaskIds: [taskId] }, invalidatedEvidence: [trigger] };
+
+    const unrelatedOnly = structuredClone(original);
+    unrelatedOnly.planRevision = 2;
+    const unrelatedOnlyCriterionId = `${verdict}-sole-unrelated-criterion`;
+    const unrelatedOnlyTaskId = `${verdict}-sole-unrelated-task`;
+    unrelatedOnly.criteria.push({ id: unrelatedOnlyCriterionId,
+      description: 'Invent unrelated nonmaterial authority.', disposition: 'owned',
+      ownerTaskId: unrelatedOnlyTaskId, deferredReason: null });
+    unrelatedOnly.tasks.push({ ...original.tasks[0], id: unrelatedOnlyTaskId,
+      title: 'Attempt unrelated nonmaterial work', objective: 'Perform unrelated work.',
+      criterionIds: [unrelatedOnlyCriterionId], checklistItemIds: [], dependsOn: ['state-task'],
+      anticipatedPaths: ['first.txt'] });
+    const unrelatedOnlyBefore = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
+    assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+      amendment: { ...amendment, delta: { addedTaskIds: [unrelatedOnlyTaskId] } },
+      resultingPlan: unrelatedOnly }),
+    (error) => error.code === 'INVALID_AMENDMENT'
+      && /lack exact assessment authority/u.test(error.message));
+    assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), unrelatedOnlyBefore,
+      `${verdict} rejects a sole unrelated task and invented criterion atomically`);
 
     const missingIdsBefore = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
     assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
@@ -3640,10 +3710,11 @@ test('interrupted nonmaterial amendment recovery revalidates its canonical proje
   const directory = changeDirectory(fixture.cwd, state.changeId);
   const original = JSON.parse(readFileSync(join(directory, 'plan', 'plan.json'), 'utf8'));
   const resultingPlan = structuredClone(original); resultingPlan.planRevision = 2;
-  resultingPlan.criteria.push({ id: 'trim-recovery', description: 'Remove the exact unnecessary mechanism.',
+  const responsibility = evidence.result.smallerSufficientAlternative;
+  resultingPlan.criteria.push({ id: 'trim-recovery', description: responsibility,
     disposition: 'owned', ownerTaskId: 'trim-recovery-task', deferredReason: null });
   resultingPlan.tasks.push({ ...original.tasks[0], id: 'trim-recovery-task', title: 'Apply exact trim',
-    objective: 'Apply only the assessment-bound simplification.', criterionIds: ['trim-recovery'],
+    objective: responsibility, criterionIds: ['trim-recovery'],
     checklistItemIds: [], dependsOn: ['state-task'], anticipatedPaths: ['first.txt'] });
   const amendment = { id: 'trim-recovery-amendment', reason: 'Apply the exact trim assessment.',
     authorization: 'scope-review', trigger: digestJson(evidence),
