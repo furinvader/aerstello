@@ -1719,6 +1719,61 @@ test('minor and trim assessments supersede only their exact discovery blocker th
       `${verdict} never treats a no-change sibling as a cleanup target`);
   }
 
+  for (const verdict of ['minor-amendment-required', 'trim-required']) {
+    const competing = await discoveryFixture(
+      `nonmaterial-competing-discovery-${verdict}`, verdict, 'running',
+    );
+    const secondDiscovery = {
+      schemaVersion: 1,
+      summary: 'The sibling independently found another unowned lifecycle path.',
+      evidence: [{ kind: 'state-path', identity: 'unowned/second-lifecycle.json',
+        detail: 'The sibling cannot complete without separate path authority.' }],
+      triggeredTripwireIds: ['test-task-paths'],
+      requestedAuthority: [{ field: 'paths', values: ['unowned/second-lifecycle.json'] }],
+    };
+    const secondResult = { ...resultFor(competing.sibling, 'blocked'),
+      unexpectedDependencies: [secondDiscovery.summary], scopeDiscovery: secondDiscovery,
+      summary: secondDiscovery.summary };
+    const directory = changeDirectory(competing.cwd, competing.state.changeId);
+    const before = durableSnapshot(directory);
+    assert.throws(() => acceptResult({ cwd: competing.cwd, workerCwd: competing.siblingWorker.path,
+      expectedRevision: competing.state.revision, result: secondResult }),
+    (error) => error.code === 'TASK_STATE_CONFLICT');
+    assert.deepEqual(durableSnapshot(directory), before,
+      `${verdict} competing discovery rejection is atomic across every durable artifact`);
+    assert.equal(competing.state.execution.tasks.find(({ id }) => id === competing.packet.taskId).status,
+      'blocked');
+    assert.equal(competing.state.execution.tasks.find(({ id }) => id === competing.sibling.taskId).status,
+      'running');
+    assert.equal(validateState({ cwd: competing.cwd }).valid, true);
+
+    assert.throws(() => rejectTask({ cwd: competing.cwd, taskId: competing.sibling.taskId,
+      reason: 'Settle the competing discovery before amending assessed authority.',
+      expectedRevision: competing.state.revision,
+      crashStep(step) {
+        if (step === 'after-intent') throw new Error('pause competing discovery rejection');
+      } }), /pause competing discovery rejection/u);
+    let recovered = recoverState({ cwd: competing.cwd }).state;
+    assert.equal(recovered.execution.tasks.find(({ id }) => id === competing.sibling.taskId).status,
+      'rejected', `${verdict} recovery commits the explicitly rejected sibling`);
+    assert.match(recovered.nextAction,
+      new RegExp(`reject-task.*${competing.packet.taskId}.*clean up.*${competing.sibling.taskId}.*amend-plan`, 'u'));
+    recovered = rejectTask({ cwd: competing.cwd, taskId: competing.packet.taskId,
+      reason: 'Replace the exact assessed discovery after sibling settlement.',
+      expectedRevision: recovered.revision });
+    assert.deepEqual(recovered.execution.tasks.map(({ id, status }) => ({ id, status })), [
+      { id: competing.packet.taskId, status: 'rejected' },
+      { id: competing.sibling.taskId, status: 'rejected' },
+    ]);
+    assert.match(recovered.nextAction,
+      new RegExp(`clean up.*${competing.packet.taskId}.*${competing.sibling.taskId}.*amend-plan`, 'u'));
+    assert.equal(validateState({ cwd: competing.cwd }).valid, true);
+    removeTaskWorktree({ cwd: competing.cwd, changeId: recovered.changeId,
+      taskId: competing.packet.taskId });
+    removeTaskWorktree({ cwd: competing.cwd, changeId: recovered.changeId,
+      taskId: competing.sibling.taskId });
+  }
+
   const maximumIdState = structuredClone((await discoveryFixture(
     'nonmaterial-maximum-next-action', 'minor-amendment-required', 'accepted'
   )).state);
@@ -1800,6 +1855,62 @@ test('ordinary accepted tasks remain explicitly rejectable outside a nonmaterial
   assert.deepEqual(state.blockedReasons,
     ['Task state-task was explicitly rejected: Reject the ordinary accepted task.']);
   assert.equal(validateState({ cwd: fixture.cwd }).valid, true);
+});
+
+test('nonmaterial task-tripwire and integrated-head assessments retain direct amendment guidance', async () => {
+  function withNonmaterialVerdict(evidence, verdict) {
+    const mapping = evidence.result.coverage[0];
+    evidence.result = verdict === 'minor-amendment-required'
+      ? { ...evidence.result, verdict,
+        coverage: [{ ...mapping, classification: 'necessary-minor-expansion',
+          rationale: 'The exact assessment requires one bounded adjacent correction.' }],
+        scopeDelta: { description: 'Add only the bounded adjacent correction.',
+          sourceCriterionIds: [...mapping.sourceCriterionIds],
+          acceptedCriterionIds: [...mapping.acceptedCriterionIds], invariantIds: [],
+          materialSurfaces: [] } }
+      : { ...evidence.result, verdict,
+        coverage: [{ ...mapping, sourceCriterionIds: [], acceptedCriterionIds: [],
+          classification: 'speculative', rationale: 'The exact mechanism is unnecessary.' }],
+        unnecessaryWork: [mapping.mechanism],
+        smallerSufficientAlternative: 'Remove only the unnecessary mechanism.' };
+    evidence.resultDigest = digestJson(evidence.result);
+    return evidence;
+  }
+
+  for (const verdict of ['minor-amendment-required', 'trim-required']) {
+    const tripwire = repository(`direct task tripwire ${verdict}`);
+    const planning = await initializeState({ cwd: tripwire.cwd,
+      changeId: `direct-task-tripwire-${verdict}`, mode: 'implement', baseBranch: 'main',
+      planningRef: tripwire.sha, source: descriptor });
+    const plan = planFor(planning);
+    const closure = testMinimalClosure(planning, plan);
+    let state = acceptPlan({ cwd: tripwire.cwd, plan, expectedRevision: planning.revision });
+    const packet = packetFor(state, plan, 'state-task');
+    packet.minimalityAuthority.tripwires[0].observedInventory = ['changed-path'];
+    const packetDigest = implementationTaskDigest(packet);
+    const evidence = withNonmaterialVerdict(testScopeEvidence(state, plan, closure, {
+      boundary: 'task', subjectDigest: packetDigest, subjectSha: packet.taskBaseSha,
+      taskPacketDigest: packetDigest, trigger: 'task-tripwires:test-task-paths',
+    }), verdict);
+    state = assessScope({ cwd: tripwire.cwd, scopeEvidence: evidence,
+      expectedRevision: state.revision });
+    assert.equal(validateState({ cwd: tripwire.cwd }).valid, true);
+    assert.match(state.nextAction, new RegExp(`^Run change:state amend-plan from the exact ${verdict}`, 'u'));
+    assert.doesNotMatch(state.nextAction, /reject-task|clean up|worktree/u,
+      `${verdict} task-tripwire guidance does not invent discovery cleanup`);
+
+    const integrated = await integratedSingleTaskFixture(`direct integrated head ${verdict}`);
+    const integratedEvidence = withNonmaterialVerdict(
+      integratedScopeEvidenceFor({ cwd: integrated.cwd, changeId: integrated.state.changeId }), verdict,
+    );
+    const integratedState = assessScope({ cwd: integrated.cwd, scopeEvidence: integratedEvidence,
+      expectedRevision: integrated.state.revision });
+    assert.equal(validateState({ cwd: integrated.cwd }).valid, true);
+    assert.match(integratedState.nextAction,
+      new RegExp(`^Run change:state amend-plan from the exact ${verdict}`, 'u'));
+    assert.doesNotMatch(integratedState.nextAction, /reject-task|clean up|worktree/u,
+      `${verdict} integrated-head guidance does not invent discovery cleanup`);
+  }
 });
 
 test('accepted material approval remains blocked until its exact approved shape is amended', async () => {

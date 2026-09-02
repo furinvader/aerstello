@@ -570,27 +570,36 @@ const NONMATERIAL_SCOPE_ACTIONS = {
 
 function nonmaterialNextActionGate(state) {
   if (state.phase !== 'blocked' || state.scope?.status !== 'assessment-required'
-      || state.scope.currentBoundary !== 'task' || !nonemptyString(state.scope.currentEvidenceDigest)
+      || !['task', 'integrated-head'].includes(state.scope.currentBoundary)
+      || !nonemptyString(state.scope.currentEvidenceDigest)
       || !nonemptyString(state.scope.currentSubjectSha)) return null;
   const matches = Object.entries(NONMATERIAL_SCOPE_ACTIONS).filter(([verdict]) => {
     const blocker = scopeGateForVerdict(verdict).blocker;
     return state.blockedReasons?.filter((reason) => reason === blocker).length === 1;
   });
   if (matches.length !== 1) return null;
-  const discoveryTasks = state.execution?.tasks.filter((task) => task.status === 'blocked'
-    && !state.blockedReasons.some((reason) => reason.startsWith(`Task ${task.id} reported `))) ?? [];
+  const discoveryTasks = state.scope.currentBoundary === 'task'
+    ? state.execution?.tasks.filter((task) => task.status === 'blocked'
+      && !state.blockedReasons.some((reason) => reason.startsWith(`Task ${task.id} reported `))) ?? []
+    : [];
   if (discoveryTasks.length > 1) return null;
   const discoveryTask = discoveryTasks[0] ?? null;
-  const settlementTask = state.execution?.tasks.find((task) => task.id !== discoveryTask?.id
-    && ['bound', 'blocked', 'failed'].includes(task.status)) ?? null;
-  const cleanupTaskIds = state.execution?.tasks.filter((task) => task.status === 'rejected'
-    || task.id === discoveryTask?.id).map((task) => task.id) ?? [];
-  if (cleanupTaskIds.length === 0) return null;
+  const settlementTask = discoveryTask
+    ? state.execution?.tasks.find((task) => task.id !== discoveryTask.id
+      && ['bound', 'blocked', 'failed'].includes(task.status)) ?? null
+    : null;
+  const cleanupTaskIds = state.scope.currentBoundary === 'task'
+    ? state.execution?.tasks.filter((task) => task.status === 'rejected'
+      || task.id === discoveryTask?.id).map((task) => task.id) ?? []
+    : [];
   const [verdict, action] = matches[0];
   return { verdict, ...action, discoveryTask, settlementTask, cleanupTaskIds };
 }
 
 function nonmaterialNextAction(gate) {
+  if (!gate.discoveryTask && gate.cleanupTaskIds.length === 0) {
+    return `${gate.amendment[0].toUpperCase()}${gate.amendment.slice(1)}.`;
+  }
   const rejectDiscovery = gate.discoveryTask
     ? `Run change:state reject-task for the exact assessed discovery task ${gate.discoveryTask.id}; then `
     : '';
@@ -2248,6 +2257,11 @@ export function acceptResult({ cwd = process.cwd(), changeId, result, workerCwd,
     if (shapeErrors.length) throw new StateError(`Invalid implementation result:\n- ${shapeErrors.join('\n- ')}`, 'INVALID_IMPLEMENTATION_RESULT');
     const task = executionTask(state, result.taskId);
     if (task.status !== 'running') throw new StateError(`Task ${task.id} is not running`, 'TASK_STATE_CONFLICT');
+    const assessedDiscovery = result.scopeDiscovery ? nonmaterialDiscoveryGate(root, state) : null;
+    if (assessedDiscovery && assessedDiscovery.discovery.taskId !== task.id) {
+      throw new StateError('A second worker scope discovery cannot supersede the exact assessed nonmaterial discovery task',
+        'TASK_STATE_CONFLICT');
+    }
     const packetReceipt = verifyReceipt(implementationTaskPacketPath(root, state.changeId, task.id, task.binding), `task packet ${task.id}`);
     if (packetReceipt.digest !== task.packetDigest) throw new StateError('Task summary packet digest does not match canonical receipt', 'TASK_PACKET_MISMATCH');
     const packet = packetReceipt.value;
