@@ -3548,18 +3548,28 @@ test('receipt-backed minor and trim remediation alone may revisit terminal owner
     let state = fixture.state;
     const evidence = integratedScopeEvidenceFor({ cwd: fixture.cwd, changeId: state.changeId });
     const mapping = evidence.result.coverage[0];
+    const unrelatedAssessedMapping = {
+      mechanism: 'unrelated-assessed.txt', sourceCriterionIds: [...mapping.sourceCriterionIds],
+      acceptedCriterionIds: [...mapping.acceptedCriterionIds], invariantIds: [], nonGoalIds: [],
+      guidanceIds: [], rationale: 'This separately assessed path remains required without remediation.',
+    };
+    evidence.packet.changeInventory.paths.push(unrelatedAssessedMapping.mechanism);
+    evidence.packet.changeInventory.mappings.push(unrelatedAssessedMapping);
     evidence.result = verdict === 'minor-amendment-required'
       ? { ...evidence.result, verdict,
         coverage: [{ ...mapping, classification: 'necessary-minor-expansion',
-          rationale: 'The adjacent remediation is necessary for the existing criterion.' }],
+          rationale: 'The adjacent remediation is necessary for the existing criterion.' },
+        { ...unrelatedAssessedMapping, classification: 'required' }],
         scopeDelta: { description: 'Add the exact adjacent remediation.',
           sourceCriterionIds: [...mapping.sourceCriterionIds], acceptedCriterionIds: [...mapping.acceptedCriterionIds],
           invariantIds: [], materialSurfaces: [] } }
       : { ...evidence.result, verdict,
         coverage: [{ mechanism: mapping.mechanism, sourceCriterionIds: [], acceptedCriterionIds: [],
           invariantIds: [], nonGoalIds: [], guidanceIds: [], classification: 'speculative',
-          rationale: 'The exact machinery must be simplified.' }],
+          rationale: 'The exact machinery must be simplified.' },
+        { ...unrelatedAssessedMapping, classification: 'required' }],
         unnecessaryWork: [mapping.mechanism], smallerSufficientAlternative: 'Use the bounded simplification task.' };
+    evidence.packetDigest = digestJson(evidence.packet);
     evidence.resultDigest = digestJson(evidence.result);
     state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
       expectedRevision: state.revision });
@@ -3598,6 +3608,25 @@ test('receipt-backed minor and trim remediation alone may revisit terminal owner
       && /lack exact assessment authority/u.test(error.message));
     assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), unrelatedOnlyBefore,
       `${verdict} rejects a sole unrelated task and invented criterion atomically`);
+
+    const unrelatedPathPlan = structuredClone(original);
+    unrelatedPathPlan.planRevision = 2;
+    const unrelatedPathCriterionId = `${verdict}-unrelated-path-criterion`;
+    const unrelatedPathTaskId = `${verdict}-unrelated-path-task`;
+    unrelatedPathPlan.criteria.push({ id: unrelatedPathCriterionId, description: responsibility,
+      disposition: 'owned', ownerTaskId: unrelatedPathTaskId, deferredReason: null });
+    unrelatedPathPlan.tasks.push({ ...original.tasks[0], id: unrelatedPathTaskId,
+      title: 'Attempt unrelated assessed path', objective: responsibility,
+      criterionIds: [unrelatedPathCriterionId], checklistItemIds: [], dependsOn: ['state-task'],
+      anticipatedPaths: [unrelatedAssessedMapping.mechanism] });
+    const unrelatedPathBefore = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
+    assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+      amendment: { ...amendment, delta: { addedTaskIds: [unrelatedPathTaskId] } },
+      resultingPlan: unrelatedPathPlan }),
+    (error) => error.code === 'INVALID_AMENDMENT'
+      && /anticipatedPaths exceed the exact assessed or inherited responsibility/u.test(error.message));
+    assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), unrelatedPathBefore,
+      `${verdict} rejects copied remediation prose on another assessed inventory path atomically`);
 
     const missingIdsBefore = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
     assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,

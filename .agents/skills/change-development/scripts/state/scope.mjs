@@ -181,6 +181,9 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
     .exec(evidence?.cadence?.trigger ?? '')?.[1];
   if (discoveryTaskId) responsibleTaskIds.add(discoveryTaskId);
   const assessedPaths = new Set(evidence?.packet?.changeInventory?.paths ?? []);
+  const applicableMappedPaths = new Set(mappings
+    .map(({ mechanism }) => mechanism)
+    .filter((mechanism) => assessedPaths.has(mechanism)));
   const discoveryPaths = new Set((priorPlan?.tasks ?? [])
     .find(({ id }) => id === discoveryTaskId)?.anticipatedPaths ?? []);
   for (const task of addedTasks) {
@@ -204,7 +207,7 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
         id === (priorPlan.criteria.find((criterion) => criterion.id === criterionId)?.ownerTaskId)))
       .flatMap(({ anticipatedPaths }) => anticipatedPaths));
     if (task.anticipatedPaths.length === 0 || task.anticipatedPaths.some((path) =>
-      !assessedPaths.has(path) && !inheritedPaths.has(path))) {
+      !applicableMappedPaths.has(path) && !inheritedPaths.has(path))) {
       errors.push(`$ nonmaterial remediation task ${task.id} anticipatedPaths exceed the exact assessed or inherited responsibility`);
     }
   }
