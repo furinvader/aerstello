@@ -150,6 +150,20 @@ function applicableRemediationMappings(evidence) {
     .filter(({ mechanism }) => mechanisms.has(mechanism));
 }
 
+function applicableRemediationCoverage(evidence) {
+  return evidence?.result?.verdict === 'minor-amendment-required'
+    ? evidence.result.coverage.filter(({ classification }) => classification === 'necessary-minor-expansion')
+    : evidence?.result?.verdict === 'trim-required'
+      ? evidence.result.coverage.filter(({ mechanism }) => evidence.result.unnecessaryWork.includes(mechanism))
+      : [];
+}
+
+function positiveCitationFree(mapping) {
+  return mapping.sourceCriterionIds.length === 0
+    && mapping.acceptedCriterionIds.length === 0
+    && mapping.invariantIds.length === 0;
+}
+
 function setsIntersect(left, right) {
   return left.some((value) => right.has(value));
 }
@@ -181,7 +195,12 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
     errors.push('$ nonmaterial amendment addedTaskIds must equal the complete new task set');
   }
   const mappings = applicableRemediationMappings(evidence);
-  const responsibleCriterionIds = new Set(mappings.flatMap(({ acceptedCriterionIds }) => acceptedCriterionIds));
+  const coverage = applicableRemediationCoverage(evidence);
+  const deltaAcceptedCriterionIds = new Set(evidence?.result?.scopeDelta?.acceptedCriterionIds ?? []);
+  const responsibleCriterionIds = new Set(coverage
+    .flatMap(({ acceptedCriterionIds }) => acceptedCriterionIds)
+    .filter((id) => evidence.result.verdict !== 'minor-amendment-required'
+      || deltaAcceptedCriterionIds.has(id)));
   const responsibleTaskIds = new Set((priorPlan?.criteria ?? [])
     .filter(({ id }) => responsibleCriterionIds.has(id))
     .map(({ ownerTaskId }) => ownerTaskId));
@@ -189,9 +208,16 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
     .exec(evidence?.cadence?.trigger ?? '')?.[1];
   if (discoveryTaskId) responsibleTaskIds.add(discoveryTaskId);
   const assessedPaths = new Set(evidence?.packet?.changeInventory?.paths ?? []);
+  const citationFreeTrimMechanisms = new Set(evidence?.result?.verdict === 'trim-required'
+    ? coverage.filter(positiveCitationFree).map(({ mechanism }) => mechanism)
+    : []);
+  const citationFreeTrimPaths = citationFreeTrimMechanisms.size > 0
+    ? new Set(assessedPaths)
+    : new Set();
   const applicableMappedPaths = new Set(mappings
     .map(({ mechanism }) => mechanism)
-    .filter((mechanism) => assessedPaths.has(mechanism)));
+    .filter((mechanism) => assessedPaths.has(mechanism)
+      && !citationFreeTrimMechanisms.has(mechanism)));
   if (evidence?.result?.verdict === 'minor-amendment-required') {
     const deltaSourceCriterionIds = new Set(evidence.result.scopeDelta?.sourceCriterionIds ?? []);
     const deltaInvariantIds = new Set(evidence.result.scopeDelta?.invariantIds ?? []);
@@ -213,6 +239,15 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
   }
   const discoveryPaths = new Set((priorPlan?.tasks ?? [])
     .find(({ id }) => id === discoveryTaskId)?.anticipatedPaths ?? []);
+  const addedTasksById = new Map(addedTasks.map((task) => [task.id, task]));
+  const resultingTaskIds = new Set((resultingPlan?.tasks ?? []).map(({ id }) => id));
+  for (const criterion of addedCriteria) {
+    const owner = addedTasksById.get(criterion.ownerTaskId);
+    if (criterion.disposition !== 'owned' || !declaredTaskIds.has(criterion.ownerTaskId)
+        || !owner?.criterionIds.includes(criterion.id)) {
+      errors.push(`$ nonmaterial amendment criterion ${criterion.id} must be owned and referenced by one declared new remediation task`);
+    }
+  }
   for (const task of addedTasks) {
     const ownedCriteria = addedCriteriaByOwner.get(task.id) ?? [];
     if (ownedCriteria.length === 0 || ownedCriteria.some(({ id, description }) =>
@@ -229,13 +264,24 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
     if (responsibleCriterionIds.size > 0 && !carriesResponsibility) {
       errors.push(`$ nonmaterial remediation task ${task.id} is not linked to the assessed accepted criteria`);
     }
+    const transferredTrimOwnerIds = new Set(evidence.result.verdict === 'trim-required'
+      ? (priorPlan?.criteria ?? [])
+        .filter(({ id }) => task.criterionIds.includes(id)
+          && resultingPlan.criteria.find((criterion) => criterion.id === id)?.ownerTaskId === task.id)
+        .filter(({ ownerTaskId }) => !resultingTaskIds.has(ownerTaskId))
+        .map(({ ownerTaskId }) => ownerTaskId)
+      : []);
     const inheritedPaths = new Set((priorPlan?.tasks ?? [])
-      .filter(({ id }) => responsibleTaskIds.has(id) || task.criterionIds.some((criterionId) =>
-        id === (priorPlan.criteria.find((criterion) => criterion.id === criterionId)?.ownerTaskId)))
+      .filter(({ id }) => responsibleTaskIds.has(id) || transferredTrimOwnerIds.has(id))
+      .flatMap(({ anticipatedPaths }) => anticipatedPaths));
+    const dependencyPaths = new Set((priorPlan?.tasks ?? [])
+      .filter(({ id }) => task.dependsOn.includes(id))
       .flatMap(({ anticipatedPaths }) => anticipatedPaths));
     if (task.anticipatedPaths.length === 0 || task.anticipatedPaths.some((path) =>
       !applicableMappedPaths.has(path)
-      && ![...inheritedPaths].some((inheritedPath) => sameOrDescendantPath(path, inheritedPath)))) {
+      && ![...inheritedPaths].some((inheritedPath) => sameOrDescendantPath(path, inheritedPath))
+      && !(citationFreeTrimPaths.has(path) && [...dependencyPaths]
+        .some((dependencyPath) => sameOrDescendantPath(path, dependencyPath))))) {
       errors.push(`$ nonmaterial remediation task ${task.id} anticipatedPaths exceed the exact assessed or inherited responsibility`);
     }
   }

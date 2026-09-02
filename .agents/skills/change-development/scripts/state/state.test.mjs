@@ -63,7 +63,11 @@ import {
   withIntegrationOperationLock,
   changeRoot,
 } from './state.mjs';
-import { projectNonmaterialScopeRemediation, resumedPathHasCompleteTaskAuthority } from './scope.mjs';
+import {
+  projectNonmaterialScopeRemediation,
+  resumedPathHasCompleteTaskAuthority,
+  validateNonmaterialAmendmentTaskAuthority,
+} from './scope.mjs';
 
 test('mixed minor remediation removes exact speculative work and adds only necessary authority', () => {
   const priorClosure = {
@@ -120,6 +124,33 @@ test('resumed path authority keeps same-packet validation existential across ove
   assert.equal(resumedPathHasCompleteTaskAuthority('shared.txt', [
     { packet: packet(['shared.txt'], ['shared.txt'], ['validate-owner-b']) },
   ], ['validate-owner-b']), false, 'forbidden matching ownership remains ineligible');
+});
+
+test('trim ownership transfer requires removal of the prior owner task', () => {
+  const responsibility = 'Apply only the bounded trim.';
+  const evidence = {
+    result: { verdict: 'trim-required', unnecessaryWork: ['logical-trim'],
+      smallerSufficientAlternative: responsibility,
+      coverage: [{ mechanism: 'logical-trim', sourceCriterionIds: [], acceptedCriterionIds: [],
+        invariantIds: [], classification: 'speculative' }] },
+    packet: { changeInventory: { paths: [], mappings: [{ mechanism: 'logical-trim',
+      sourceCriterionIds: [], acceptedCriterionIds: [], invariantIds: [] }] } },
+    cadence: { trigger: null },
+  };
+  const priorPlan = { criteria: [{ id: 'existing', ownerTaskId: 'existing-owner' }],
+    tasks: [{ id: 'existing-owner', anticipatedPaths: ['owned/path'] }] };
+  const resultingPlan = {
+    criteria: [{ id: 'existing', ownerTaskId: 'replacement' },
+      { id: 'remediation', description: responsibility, disposition: 'owned',
+        ownerTaskId: 'replacement' }],
+    tasks: [{ id: 'existing-owner', anticipatedPaths: ['owned/path'] },
+      { id: 'replacement', objective: responsibility, criterionIds: ['existing', 'remediation'],
+        dependsOn: [], anticipatedPaths: ['owned/path'] }],
+  };
+  assert.ok(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan, resultingPlan,
+    addedTaskIds: ['replacement'] }).some((error) =>
+    /anticipatedPaths exceed the exact assessed or inherited responsibility/u.test(error)),
+  'reassignment cannot borrow paths while the prior owner task remains in the resulting plan');
 });
 
 function testMinimalClosure(state, plan, overrides = {}) {
@@ -3564,7 +3595,8 @@ test('receipt-backed minor and trim remediation alone may revisit terminal owner
           sourceCriterionIds: [...mapping.sourceCriterionIds], acceptedCriterionIds: [...mapping.acceptedCriterionIds],
           invariantIds: [], materialSurfaces: [] } }
       : { ...evidence.result, verdict,
-        coverage: [{ mechanism: mapping.mechanism, sourceCriterionIds: [], acceptedCriterionIds: [],
+        coverage: [{ mechanism: mapping.mechanism, sourceCriterionIds: [],
+          acceptedCriterionIds: [...mapping.acceptedCriterionIds],
           invariantIds: [], nonGoalIds: [], guidanceIds: [], classification: 'speculative',
           rationale: 'The exact machinery must be simplified.' },
         { ...unrelatedAssessedMapping, classification: 'required' }],
@@ -3627,6 +3659,23 @@ test('receipt-backed minor and trim remediation alone may revisit terminal owner
       && /anticipatedPaths exceed the exact assessed or inherited responsibility/u.test(error.message));
     assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), unrelatedPathBefore,
       `${verdict} rejects copied remediation prose on another assessed inventory path atomically`);
+
+    for (const orphanCriterion of [
+      { id: `${verdict}-deferred-orphan`, description: 'Defer an unrelated criterion.',
+        disposition: 'deferred', ownerTaskId: null, deferredReason: 'This is not remediation work.' },
+      { id: `${verdict}-unreferenced-orphan`, description: responsibility,
+        disposition: 'owned', ownerTaskId: taskId, deferredReason: null },
+    ]) {
+      const orphanPlan = structuredClone(resultingPlan);
+      orphanPlan.criteria.push(orphanCriterion);
+      const orphanBefore = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
+      assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+        amendment, resultingPlan: orphanPlan }),
+      (error) => error.code === 'INVALID_AMENDMENT'
+        && /must be owned and referenced by one declared new remediation task/u.test(error.message));
+      assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), orphanBefore,
+        `${verdict} rejects ${orphanCriterion.id} without durable mutation`);
+    }
 
     const missingIdsBefore = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
     assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
@@ -3793,6 +3842,123 @@ test('receipt-backed minor remediation derives paths from exact source and invar
   }
 });
 
+test('minor remediation inherits only accepted criteria cited by coverage and scope delta', async () => {
+  const fixture = await integratedTwoTaskFixture('minor strict accepted criterion authority');
+  let state = fixture.state;
+  const evidence = integratedScopeEvidenceFor({ cwd: fixture.cwd, changeId: state.changeId });
+  const inventoryMapping = evidence.packet.changeInventory.mappings[0];
+  evidence.packet.changeInventory.mappings[0] = { ...inventoryMapping,
+    acceptedCriterionIds: ['durable-state', 'second-change'] };
+  evidence.result = { ...evidence.result, verdict: 'minor-amendment-required',
+    coverage: [{ ...evidence.result.coverage[0], classification: 'necessary-minor-expansion',
+      acceptedCriterionIds: ['durable-state'], rationale: 'Only the first accepted criterion needs remediation.' }],
+    scopeDelta: { description: 'Apply only the first criterion remediation.',
+      sourceCriterionIds: [...inventoryMapping.sourceCriterionIds], acceptedCriterionIds: ['durable-state'],
+      invariantIds: [], materialSurfaces: [] } };
+  evidence.packetDigest = digestJson(evidence.packet);
+  evidence.resultDigest = digestJson(evidence.result);
+  state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
+    expectedRevision: state.revision });
+
+  const original = JSON.parse(readFileSync(join(changeDirectory(fixture.cwd, state.changeId), 'plan', 'plan.json'), 'utf8'));
+  const responsibility = evidence.result.scopeDelta.description;
+  const planForOwner = (ownerTaskId, path, suffix) => {
+    const plan = structuredClone(original); plan.planRevision = 2;
+    const criterionId = `strict-${suffix}-criterion`; const taskId = `strict-${suffix}-task`;
+    plan.criteria.push({ id: criterionId, description: responsibility,
+      disposition: 'owned', ownerTaskId: taskId, deferredReason: null });
+    plan.tasks.push({ ...original.tasks[0], id: taskId, title: 'Apply strict criterion remediation',
+      objective: responsibility, criterionIds: [criterionId], checklistItemIds: [],
+      dependsOn: [ownerTaskId], anticipatedPaths: [path] });
+    return { plan, taskId };
+  };
+  const trigger = digestJson(evidence);
+  const amendmentFor = (taskId) => ({ id: `${taskId}-amendment`, reason: 'Use only cited accepted authority.',
+    authorization: 'scope-review', trigger, delta: { addedTaskIds: [taskId] }, invalidatedEvidence: [trigger] });
+  const rejected = planForOwner('second-task', 'second.txt', 'uncited');
+  const before = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
+  assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+    amendment: amendmentFor(rejected.taskId), resultingPlan: rejected.plan }),
+  (error) => error.code === 'INVALID_AMENDMENT'
+    && /is not linked to the assessed accepted criteria/u.test(error.message));
+  assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), before,
+    'an inventory-only accepted criterion cannot over-inherit its terminal owner path');
+
+  const accepted = planForOwner('state-task', 'first.txt', 'cited');
+  state = amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+    amendment: amendmentFor(accepted.taskId), resultingPlan: accepted.plan });
+  assert.equal(state.execution.tasks.find(({ id }) => id === accepted.taskId).status, 'unbound');
+});
+
+test('citation-free trim paths require assessed inventory and an explicit owning dependency', async () => {
+  const ownerPath = 'owned/subtree'; const otherOwnerPath = 'other/subtree';
+  const trimPath = `${ownerPath}/nested.txt`;
+  const reversedPath = 'owned';
+  const prefixCollisionPath = 'owned/subtree-other/nested.txt';
+  const unrelatedOwnerPath = `${otherOwnerPath}/nested.txt`;
+  const fixture = await integratedTwoTaskFixture('citation free trim path authority',
+    [ownerPath, otherOwnerPath]);
+  let state = fixture.state;
+  const evidence = integratedScopeEvidenceFor({ cwd: fixture.cwd, changeId: state.changeId });
+  const trimMechanism = 'generic-checker';
+  const inventoryMapping = { ...evidence.packet.changeInventory.mappings[0], mechanism: trimMechanism };
+  const assessedMappings = [
+    { path: trimPath, criterionId: 'durable-state' },
+    { path: reversedPath, criterionId: 'durable-state' },
+    { path: prefixCollisionPath, criterionId: 'durable-state' },
+    { path: unrelatedOwnerPath, criterionId: 'second-change' },
+  ].map(({ path, criterionId }) => ({ ...inventoryMapping, mechanism: path, sourceCriterionIds: [],
+    acceptedCriterionIds: [criterionId], rationale: `${path} remains separately assessed.` }));
+  evidence.packet.changeInventory.paths = assessedMappings.map(({ mechanism }) => mechanism);
+  evidence.packet.changeInventory.mappings = [inventoryMapping, ...assessedMappings];
+  evidence.result = { ...evidence.result, verdict: 'trim-required',
+    coverage: [{ ...inventoryMapping, sourceCriterionIds: [], acceptedCriterionIds: [], invariantIds: [],
+      classification: 'speculative', rationale: 'Remove the citation-free logical mechanism.' },
+    ...assessedMappings.map((mapping) => ({ ...mapping, classification: 'required' }))],
+    unnecessaryWork: [trimMechanism], smallerSufficientAlternative: 'Remove only the assessed nested path.' };
+  evidence.packetDigest = digestJson(evidence.packet);
+  evidence.resultDigest = digestJson(evidence.result);
+  state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
+    expectedRevision: state.revision });
+
+  const original = JSON.parse(readFileSync(join(changeDirectory(fixture.cwd, state.changeId), 'plan', 'plan.json'), 'utf8'));
+  const responsibility = evidence.result.smallerSufficientAlternative;
+  const planForPath = (path, dependsOn, suffix) => {
+    const plan = structuredClone(original); plan.planRevision = 2;
+    const criterionId = `trim-${suffix}-criterion`; const taskId = `trim-${suffix}-task`;
+    plan.criteria.push({ id: criterionId, description: responsibility,
+      disposition: 'owned', ownerTaskId: taskId, deferredReason: null });
+    plan.tasks.push({ ...original.tasks[0], id: taskId, title: 'Apply citation-free trim',
+      objective: responsibility, criterionIds: [criterionId], checklistItemIds: [],
+      dependsOn, anticipatedPaths: [path] });
+    return { plan, taskId };
+  };
+  const trigger = digestJson(evidence);
+  const amendmentFor = (taskId) => ({ id: `${taskId}-amendment`, reason: 'Trim only the assessed owned path.',
+    authorization: 'scope-review', trigger, delta: { addedTaskIds: [taskId] }, invalidatedEvidence: [trigger] });
+  for (const [suffix, path, dependsOn] of [
+    ['missing-owner', trimPath, []],
+    ['unassessed', `${ownerPath}/other.txt`, ['state-task']],
+    ['reversed', reversedPath, ['state-task']],
+    ['prefix-collision', prefixCollisionPath, ['state-task']],
+    ['unrelated-owner', unrelatedOwnerPath, ['state-task']],
+  ]) {
+    const rejected = planForPath(path, dependsOn, suffix);
+    const before = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
+    assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+      amendment: amendmentFor(rejected.taskId), resultingPlan: rejected.plan }),
+    (error) => error.code === 'INVALID_AMENDMENT'
+      && /anticipatedPaths exceed the exact assessed or inherited responsibility/u.test(error.message));
+    assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), before,
+      `${suffix} citation-free trim authority is rejected atomically`);
+  }
+
+  const accepted = planForPath(trimPath, ['state-task'], 'owned');
+  state = amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+    amendment: amendmentFor(accepted.taskId), resultingPlan: accepted.plan });
+  assert.equal(state.execution.tasks.find(({ id }) => id === accepted.taskId).status, 'unbound');
+});
+
 test('receipt-backed inherited remediation paths are directional and segment bounded', async () => {
   const inheritedPath = 'owned/subtree';
   const fixture = await integratedSingleTaskFixture('minor inherited path containment', specialization(),
@@ -3854,7 +4020,8 @@ test('interrupted nonmaterial amendment recovery revalidates its canonical proje
   const evidence = integratedScopeEvidenceFor({ cwd: fixture.cwd, changeId: state.changeId });
   const mapping = evidence.result.coverage[0];
   evidence.result = { ...evidence.result, verdict: 'trim-required',
-    coverage: [{ ...mapping, sourceCriterionIds: [], acceptedCriterionIds: [],
+    coverage: [{ ...mapping, sourceCriterionIds: [],
+      acceptedCriterionIds: [...mapping.acceptedCriterionIds],
       classification: 'speculative', rationale: 'Remove the exact unnecessary mechanism.' }],
     unnecessaryWork: [mapping.mechanism],
     smallerSufficientAlternative: 'Use only the bounded simplification task.' };
@@ -5755,6 +5922,40 @@ async function integratedSingleTaskFixture(label, specialize = specialization(),
     state = integrateTask({ cwd, taskId: 'state-task', expectedRevision: state.revision });
   }
   removeTaskWorktree({ cwd, changeId: state.changeId, taskId: 'state-task' });
+  state = finalizeIntegration({ cwd, expectedRevision: state.revision });
+  return { cwd, state };
+}
+
+async function integratedTwoTaskFixture(label, ownedPaths = ['first.txt', 'second.txt']) {
+  const { cwd, sha } = repository(label);
+  const planning = await initializeState({ cwd, changeId: label.replaceAll(' ', '-'), mode: 'implement',
+    baseBranch: 'main', planningRef: sha, source: descriptor });
+  const plan = executionPlanFor(planning);
+  for (let index = 0; index < plan.tasks.length; index += 1) {
+    plan.tasks[index].anticipatedPaths = [ownedPaths[index]];
+  }
+  let state = acceptPlan({ cwd, plan, expectedRevision: planning.revision });
+  const packets = plan.tasks.map((task) => packetFor(state, plan, task.id));
+  for (const packet of packets) state = bindTask({ cwd, packet, expectedRevision: state.revision });
+  const workers = packets.map((packet) => createWorkerFixture(cwd, state, packet));
+  state = scheduleWave({ cwd, expectedRevision: state.revision });
+  for (const packet of packets) {
+    state = startTask({ cwd, taskId: packet.taskId, workerId: `${packet.taskId}-worker`,
+      expectedRevision: state.revision });
+  }
+  for (let index = 0; index < packets.length; index += 1) {
+    const packet = packets[index]; const worker = workers[index]; const path = packet.allowedPaths[0];
+    mkdirSync(dirname(join(worker.path, path)), { recursive: true });
+    writeFileSync(join(worker.path, path), `${packet.taskId}\n`);
+    git(worker.path, 'add', path); git(worker.path, 'commit', '-m', `test: ${packet.taskId} worker`);
+    state = acceptResult({ cwd,
+      result: resultFor(packet, 'implemented', git(worker.path, 'rev-parse', 'HEAD'), [path]),
+      workerCwd: worker.path, expectedRevision: state.revision });
+  }
+  for (const packet of packets) {
+    state = integrateTask({ cwd, taskId: packet.taskId, expectedRevision: state.revision });
+    removeTaskWorktree({ cwd, changeId: state.changeId, taskId: packet.taskId });
+  }
   state = finalizeIntegration({ cwd, expectedRevision: state.revision });
   return { cwd, state };
 }
