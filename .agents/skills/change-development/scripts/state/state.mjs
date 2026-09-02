@@ -577,24 +577,27 @@ function nonmaterialNextActionGate(state) {
     return state.blockedReasons?.filter((reason) => reason === blocker).length === 1;
   });
   if (matches.length !== 1) return null;
-  const blockedTasks = state.execution?.tasks.filter((task) => task.status === 'blocked') ?? [];
-  if (blockedTasks.length > 1) return null;
-  const discoveryTask = blockedTasks[0] ?? null;
+  const discoveryTasks = state.execution?.tasks.filter((task) => task.status === 'blocked'
+    && !state.blockedReasons.some((reason) => reason.startsWith(`Task ${task.id} reported `))) ?? [];
+  if (discoveryTasks.length > 1) return null;
+  const discoveryTask = discoveryTasks[0] ?? null;
+  const settlementTask = state.execution?.tasks.find((task) => task.id !== discoveryTask?.id
+    && ['bound', 'blocked', 'failed'].includes(task.status)) ?? null;
   const cleanupTaskIds = state.execution?.tasks.filter((task) => task.status === 'rejected'
     || task.id === discoveryTask?.id).map((task) => task.id) ?? [];
-  // Active waves contain at most three tasks. Refuse malformed projections so
-  // the persisted operator instruction remains inside the state schema limit.
-  if (cleanupTaskIds.length === 0 || cleanupTaskIds.length > 3) return null;
+  if (cleanupTaskIds.length === 0) return null;
   const [verdict, action] = matches[0];
-  return { verdict, ...action, discoveryTask, cleanupTaskIds };
+  return { verdict, ...action, discoveryTask, settlementTask, cleanupTaskIds };
 }
 
 function nonmaterialNextAction(gate) {
   const rejectDiscovery = gate.discoveryTask
     ? `Run change:state reject-task for the exact assessed discovery task ${gate.discoveryTask.id}; then `
     : '';
-  const taskList = gate.cleanupTaskIds.join(', ');
-  return `${rejectDiscovery}clean up every rejected-task worktree (${taskList}); replace every rejected task with a new task ID and invalidate its task packet, provenance, planning signals, specialist route, any behavior-mapper evidence, and result evidence; then ${gate.amendment}.`;
+  const cleanupTarget = gate.cleanupTaskIds.length <= 3
+    ? `(${gate.cleanupTaskIds.join(', ')})`
+    : `(all ${gate.cleanupTaskIds.length} from the complete execution task set whose status is rejected, in accepted-plan order)`;
+  return `${rejectDiscovery}clean up every rejected-task worktree ${cleanupTarget}; replace every rejected task with a new task ID and invalidate its task packet, provenance, planning signals, specialist route, any behavior-mapper evidence, and result evidence; then ${gate.amendment}.`;
 }
 
 export function nextActionFor(state) {
@@ -641,6 +644,8 @@ export function nextActionFor(state) {
       ? `Integrate the dependency-ready accepted sibling task ${state.execution.tasks.find((task) => task.status === 'accepted'
         && task.dependsOn.every((id) => ['integrated', 'no-change']
           .includes(state.execution.tasks.find((candidate) => candidate.id === id)?.status))).id} before resolving the assessed discovery task.`
+    : nonmaterialGate?.settlementTask
+      ? `Run change:state reject-task for the sibling task ${nonmaterialGate.settlementTask.id} before resolving the exact assessed discovery task.`
     : nonmaterialGate
       ? nonmaterialNextAction(nonmaterialGate)
     : state.blockedReasons?.some((reason) => reason.includes('Recorded material scope decision'))
@@ -1431,6 +1436,7 @@ export function assessScope({ cwd = process.cwd(), changeId, scopeEvidence, expe
     let subjectDigest = scopeEvidence.packet?.binding?.subject?.digest;
     let subjectSha = scopeEvidence.packet?.binding?.subject?.sha;
     let integratedHeadReassessment = false;
+    let assessedDiscoveryTaskId = null;
     if (boundary === 'integrated-head') {
       const insufficientEvidenceBlocker = scopeGateForVerdict('insufficient-evidence').blocker;
       const blockedRetryCandidate = state.phase === 'blocked'
@@ -1464,6 +1470,7 @@ export function assessScope({ cwd = process.cwd(), changeId, scopeEvidence, expe
       }
     } else if (state.phase === 'blocked') {
       const discovery = workerDiscoveryAssessmentIdentity(root, state);
+      assessedDiscoveryTaskId = discovery.taskId;
       taskPacketDigest = discovery.taskPacketDigest;
       subjectDigest = discovery.subjectDigest;
       subjectSha = discovery.subjectSha;
@@ -1488,8 +1495,14 @@ export function assessScope({ cwd = process.cwd(), changeId, scopeEvidence, expe
     const scope = { ...state.scope, status: gate.status, candidatePlanDigest: null,
       currentEvidenceDigest: evidenceDigest, currentBoundary: boundary, currentSubjectSha: subjectSha };
     const phase = gate.phase ?? (integratedHeadReassessment ? 'integrated' : state.phase);
+    const nonmaterialTaskAssessment = boundary === 'task'
+      && ['minor-amendment-required', 'trim-required'].includes(scopeEvidence.result.verdict);
     const blockedReasons = phase === 'blocked'
-      ? gate.blocker ? [gate.blocker] : state.blockedReasons
+      ? gate.blocker ? [gate.blocker, ...(nonmaterialTaskAssessment
+        ? canonicalTaskBlockers(root, state, {
+          ...state.execution,
+          tasks: state.execution.tasks.filter((task) => task.id !== assessedDiscoveryTaskId),
+        }) : [])] : state.blockedReasons
       : [];
     const next = revised(state, { phase, scope, blockedReasons }, clock);
     return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'scope-assessed',
@@ -2217,7 +2230,7 @@ function nonmaterialBlockerProjection(cwd, state, execution, inFlight = null) {
   if (!gate) return null;
   const taskBlockers = canonicalTaskBlockers(cwd, state, {
     ...execution,
-    tasks: execution.tasks.filter((task) => task.id !== gate.discovery.taskId),
+    tasks: execution.tasks.filter((task) => task.id !== gate.discovery.taskId || task.status !== 'blocked'),
   }, inFlight);
   if (state.phase === 'integrating') return [gate.blocker, ...taskBlockers];
   const preservedBlockers = nonTaskBlockers(cwd, state, {
@@ -3973,8 +3986,14 @@ export function rejectTask({ cwd = process.cwd(), changeId, taskId, reason, expe
       if (!['bound', 'scheduled', 'running', 'accepted', 'integration-pending', 'blocked', 'failed'].includes(task.status)) throw new StateError(`Task ${taskId} cannot be rejected from ${task.status}`, 'TASK_STATE_CONFLICT');
       const nonmaterial = nonmaterialDiscoveryGate(root, state);
       if (nonmaterial?.discovery.taskId === taskId
-          && state.execution.tasks.some((candidate) => candidate.id !== taskId && candidate.status === 'accepted')) {
-        throw new StateError('The assessed discovery task cannot be rejected while an accepted sibling remains to integrate',
+          && state.execution.tasks.some((candidate) => candidate.id !== taskId
+            && ['bound', 'scheduled', 'running', 'accepted', 'integration-pending', 'blocked', 'failed']
+              .includes(candidate.status))) {
+        throw new StateError('The assessed discovery task cannot be rejected while a sibling remains unsettled',
+          'TASK_STATE_CONFLICT');
+      }
+      if (nonmaterial && nonmaterial.discovery.taskId !== taskId && task.status === 'accepted') {
+        throw new StateError('An accepted sibling of the assessed discovery task must be integrated before rejection',
           'TASK_STATE_CONFLICT');
       }
       const sequencer = runGit(['rev-parse', '--verify', '--quiet', 'CHERRY_PICK_HEAD'], { cwd: root, allowFailure: true });
@@ -3995,10 +4014,10 @@ export function rejectTask({ cwd = process.cwd(), changeId, taskId, reason, expe
       const execution = replaceExecutionTask(state, taskId, { status: 'rejected' }, { activeWave: state.execution.activeWave.filter((id) => id !== taskId), integrationIntent: null });
       const timestamp = now(clock);
       const rejection = { schemaVersion: 1, changeId: state.changeId, taskId, binding: task.binding, reason, rejectedAt: timestamp };
-      const nonmaterialBlockers = state.execution.integrationIntent
+      const nonmaterialBlockers = nonmaterial
         ? nonmaterialBlockerProjection(root, state, execution, { taskId, rejection })
         : null;
-      const preservedBlockers = state.execution.integrationIntent ? []
+      const preservedBlockers = nonmaterialBlockers ? []
         : nonTaskBlockers(root, state, { supersedingDiscoveryTaskId: taskId });
       const taskBlockers = nonmaterialBlockers ?? canonicalTaskBlockers(root, state, execution,
         { taskId, rejection });

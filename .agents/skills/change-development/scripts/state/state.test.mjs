@@ -1035,6 +1035,16 @@ test('minor and trim assessments supersede only their exact discovery blocker th
     const planning = await initializeState({ cwd: fixture.cwd, changeId: name, mode: 'implement',
       baseBranch: 'main', planningRef: fixture.sha, source: descriptor });
     const plan = siblingOutcome ? executionPlanFor(planning) : planFor(planning);
+    if (siblingOutcome === 'bound') {
+      for (const [ordinal, taskId] of [['third', 'third-task'], ['fourth', 'fourth-task']]) {
+        const criterionId = `${ordinal}-change`;
+        plan.criteria.push({ id: criterionId, description: `${ordinal} task remains independent.`,
+          disposition: 'owned', ownerTaskId: taskId, deferredReason: null });
+        plan.tasks.push({ ...plan.tasks[0], id: taskId, title: `Implement ${ordinal}`,
+          objective: `Persist ${ordinal} file.`, criterionIds: [criterionId], checklistItemIds: [],
+          anticipatedPaths: [`${ordinal}.txt`] });
+      }
+    }
     const closure = testMinimalClosure(planning, plan);
     let state = acceptPlanWithScope({ cwd: fixture.cwd, plan, minimalClosure: closure,
       scopeEvidence: testScopeEvidence(planning, plan, closure), expectedRevision: planning.revision });
@@ -1043,16 +1053,33 @@ test('minor and trim assessments supersede only their exact discovery blocker th
     const worker = createWorkerFixture(fixture.cwd, state, packet);
     let sibling = null;
     let siblingWorker = null;
+    const fillerWorkers = [];
     if (siblingOutcome) {
-      const siblingTaskId = discoveryTaskId === 'state-task' ? 'second-task' : 'state-task';
+      if (siblingOutcome === 'bound') {
+        for (const fillerTaskId of ['second-task', 'third-task']) {
+          const filler = packetFor(state, plan, fillerTaskId);
+          state = bindTaskWithScope({ cwd: fixture.cwd, packet: filler, expectedRevision: state.revision });
+          fillerWorkers.push({ packet: filler, worker: createWorkerFixture(fixture.cwd, state, filler) });
+        }
+      }
+      const siblingTaskId = siblingOutcome === 'bound' ? 'fourth-task'
+        : discoveryTaskId === 'state-task' ? 'second-task' : 'state-task';
       sibling = packetFor(state, plan, siblingTaskId);
-      state = bindTaskWithScope({ cwd: fixture.cwd, packet: sibling, expectedRevision: state.revision });
-      siblingWorker = createWorkerFixture(fixture.cwd, state, sibling);
+      if (siblingOutcome !== 'unbound') {
+        state = bindTaskWithScope({ cwd: fixture.cwd, packet: sibling, expectedRevision: state.revision });
+        siblingWorker = createWorkerFixture(fixture.cwd, state, sibling);
+      }
     }
     state = scheduleWave({ cwd: fixture.cwd, expectedRevision: state.revision });
     state = startTask({ cwd: fixture.cwd, taskId: packet.taskId, workerId: `${name}-discovery-worker`,
       expectedRevision: state.revision });
-    if (sibling) {
+    for (const { packet: filler, worker: fillerWorker } of fillerWorkers) {
+      state = startTask({ cwd: fixture.cwd, taskId: filler.taskId,
+        workerId: `${name}-${filler.taskId}-worker`, expectedRevision: state.revision });
+      state = acceptResult({ cwd: fixture.cwd, workerCwd: fillerWorker.path,
+        expectedRevision: state.revision, result: resultFor(filler, 'no-change') });
+    }
+    if (sibling && !['unbound', 'bound', 'scheduled'].includes(siblingOutcome)) {
       state = startTask({ cwd: fixture.cwd, taskId: sibling.taskId, workerId: `${name}-sibling-worker`,
         expectedRevision: state.revision });
       if (siblingOutcome === 'failed') {
@@ -1061,6 +1088,12 @@ test('minor and trim assessments supersede only their exact discovery blocker th
             validation: sibling.requiredValidation.unit.map(({ command }) => ({ command, result: 'failed',
               summary: 'Sibling validation failed.' })), unexpectedDependencies: [],
             summary: 'Sibling worker failed independently.' } });
+      } else if (siblingOutcome === 'blocked') {
+        state = acceptResult({ cwd: fixture.cwd, workerCwd: siblingWorker.path,
+          expectedRevision: state.revision, result: {
+            ...resultFor(sibling, 'blocked'),
+            summary: 'Sibling worker is blocked independently.',
+          } });
       } else if (siblingOutcome === 'accepted') {
         const [siblingPath] = sibling.allowedPaths;
         writeFileSync(join(siblingWorker.path, siblingPath), 'accepted nonmaterial sibling\n');
@@ -1109,6 +1142,305 @@ test('minor and trim assessments supersede only their exact discovery blocker th
     'minor-amendment-required': 'Scope assessment requires a bounded minor amendment before implementation can continue.',
     'trim-required': 'Scope assessment requires bounded removal or simplification of unnecessary machinery.',
   };
+
+  const unsettledStatuses = ['bound', 'scheduled', 'running', 'accepted',
+    'integration-pending', 'blocked', 'failed'];
+  const amendmentCompatibleStatuses = ['unbound', 'rejected', 'integrated', 'no-change'];
+  for (const verdict of ['minor-amendment-required', 'trim-required']) {
+    for (const targetStatus of [...unsettledStatuses, ...amendmentCompatibleStatuses]) {
+      const initialStatus = ['integration-pending', 'integrated'].includes(targetStatus)
+        ? 'accepted' : targetStatus === 'rejected' ? 'running' : targetStatus;
+      const fixture = await discoveryFixture(
+        `nonmaterial-${verdict}-${targetStatus}-sibling`, verdict, initialStatus,
+      );
+      let state = fixture.state;
+      if (targetStatus === 'integration-pending') {
+        assert.throws(() => integrateTask({ cwd: fixture.cwd, taskId: fixture.sibling.taskId,
+          expectedRevision: state.revision,
+          crashStep(step) {
+            if (step === 'integration-operation-after-intent') throw new Error('pause matrix integration');
+          } }), /pause matrix integration/u);
+        state = recoverState({ cwd: fixture.cwd }).state;
+      } else if (targetStatus === 'integrated') {
+        state = integrateTask({ cwd: fixture.cwd, taskId: fixture.sibling.taskId,
+          expectedRevision: state.revision });
+      } else if (targetStatus === 'rejected') {
+        state = rejectTask({ cwd: fixture.cwd, taskId: fixture.sibling.taskId,
+          reason: 'Reject the matrix sibling before discovery cleanup.', expectedRevision: state.revision });
+      }
+      assert.equal(state.execution.tasks.find(({ id }) => id === fixture.sibling.taskId).status,
+        targetStatus, `${verdict} constructs receipt-valid ${targetStatus} sibling state`);
+      assert.equal(validateState({ cwd: fixture.cwd }).valid, true,
+        `${verdict} ${targetStatus} sibling state is receipt-valid`);
+
+      const directory = changeDirectory(fixture.cwd, state.changeId);
+      if (unsettledStatuses.includes(targetStatus)) {
+        const before = durableSnapshot(directory);
+        if (verdict === 'minor-amendment-required' && targetStatus === 'bound') {
+          writeFileSync(join(fixture.cwd, 'dirty-before-discovery-rejection.txt'), 'dirty\n');
+        }
+        assert.throws(() => rejectTask({ cwd: fixture.cwd, taskId: fixture.packet.taskId,
+          reason: `Do not reject discovery with ${targetStatus} sibling.`, expectedRevision: state.revision }),
+        (error) => error.code === 'TASK_STATE_CONFLICT');
+        if (verdict === 'minor-amendment-required' && targetStatus === 'bound') {
+          unlinkSync(join(fixture.cwd, 'dirty-before-discovery-rejection.txt'));
+        }
+        assert.deepEqual(durableSnapshot(directory), before,
+          `${verdict} ${targetStatus} guard is atomic before receipts or state mutate`);
+
+        if (['scheduled', 'running'].includes(targetStatus)) {
+          assert.match(state.nextAction, /active-wave task result/u,
+            `${verdict} ${targetStatus} sibling retains active-wave priority`);
+          state = rejectTask({ cwd: fixture.cwd, taskId: fixture.sibling.taskId,
+            reason: `Settle the ${targetStatus} sibling.`, expectedRevision: state.revision });
+        } else if (targetStatus === 'accepted') {
+          assert.match(state.nextAction, new RegExp(`Integrate.*${fixture.sibling.taskId}`, 'u'));
+          assert.throws(() => rejectTask({ cwd: fixture.cwd, taskId: fixture.sibling.taskId,
+            reason: 'Accepted siblings integrate first.', expectedRevision: state.revision }),
+          (error) => error.code === 'TASK_STATE_CONFLICT');
+          state = integrateTask({ cwd: fixture.cwd, taskId: fixture.sibling.taskId,
+            expectedRevision: state.revision });
+        } else if (targetStatus === 'integration-pending') {
+          assert.match(state.nextAction, /reconcile-integration/u);
+          state = rejectTask({ cwd: fixture.cwd, taskId: fixture.sibling.taskId,
+            reason: 'Reject the persisted sibling integration intent.', expectedRevision: state.revision });
+        } else {
+          assert.match(state.nextAction,
+            new RegExp(`reject-task.*sibling task ${fixture.sibling.taskId}`, 'u'),
+            `${verdict} ${targetStatus} sibling receives an executable rejection instruction`);
+          if (verdict === 'trim-required' && targetStatus === 'failed') {
+            assert.throws(() => rejectTask({ cwd: fixture.cwd, taskId: fixture.sibling.taskId,
+              reason: `Settle the ${targetStatus} sibling.`, expectedRevision: state.revision,
+              crashStep(step) {
+                if (step === 'after-intent') throw new Error('pause sibling rejection');
+              } }), /pause sibling rejection/u);
+            state = recoverState({ cwd: fixture.cwd }).state;
+            assert.match(state.nextAction,
+              new RegExp(`reject-task.*${fixture.packet.taskId}.*clean up.*amend-plan`, 'u'),
+            'recovery reproduces the post-settlement discovery instruction');
+          } else {
+            state = rejectTask({ cwd: fixture.cwd, taskId: fixture.sibling.taskId,
+              reason: `Settle the ${targetStatus} sibling.`, expectedRevision: state.revision });
+          }
+        }
+        if (targetStatus !== 'accepted') {
+          const reason = targetStatus === 'integration-pending'
+            ? 'Reject the persisted sibling integration intent.' : `Settle the ${targetStatus} sibling.`;
+          assert.equal(state.execution.tasks.find(({ id }) => id === fixture.sibling.taskId).status, 'rejected');
+          assert.deepEqual(state.blockedReasons, [blockers[verdict],
+            `Task ${fixture.sibling.taskId} was explicitly rejected: ${reason}`],
+          `${verdict} ${targetStatus} settlement preserves only gate and canonical rejection`);
+        }
+        assert.equal(validateState({ cwd: fixture.cwd }).valid, true);
+      }
+
+      state = rejectTask({ cwd: fixture.cwd, taskId: fixture.packet.taskId,
+        reason: `Reject discovery after ${targetStatus} sibling disposition.`, expectedRevision: state.revision });
+      assert.equal(state.execution.tasks.find(({ id }) => id === fixture.packet.taskId).status, 'rejected');
+      assert.equal(validateState({ cwd: fixture.cwd }).valid, true,
+        `${verdict} ${targetStatus} sibling permits discovery rejection only when terminal-compatible`);
+    }
+  }
+
+  const recoveredBound = await discoveryFixture(
+    'nonmaterial-bound-sibling-assessment-recovery', 'trim-required', 'bound', true,
+  );
+  assert.match(recoveredBound.state.nextAction,
+    new RegExp(`reject-task.*sibling task ${recoveredBound.sibling.taskId}`, 'u'),
+  'assessment recovery reproduces the exact bound-sibling settlement instruction');
+  assert.equal(validateState({ cwd: recoveredBound.cwd }).valid, true);
+
+  {
+    const fixture = repository('nonmaterial multi sibling plan order');
+    const planning = await initializeState({ cwd: fixture.cwd,
+      changeId: 'nonmaterial-multi-sibling-plan-order', mode: 'implement', baseBranch: 'main',
+      planningRef: fixture.sha, source: descriptor });
+    const plan = executionPlanFor(planning);
+    plan.criteria.push({ id: 'third-change', description: 'Third task owns discovery.',
+      disposition: 'owned', ownerTaskId: 'third-task', deferredReason: null });
+    plan.tasks.push({ ...plan.tasks[0], id: 'third-task', title: 'Discover third',
+      objective: 'Discover exact third-task scope.', criterionIds: ['third-change'], checklistItemIds: [],
+      anticipatedPaths: ['third.txt'] });
+    const closure = testMinimalClosure(planning, plan);
+    let state = acceptPlanWithScope({ cwd: fixture.cwd, plan, minimalClosure: closure,
+      scopeEvidence: testScopeEvidence(planning, plan, closure), expectedRevision: planning.revision });
+    const packets = plan.tasks.map(({ id }) => packetFor(state, plan, id));
+    const workers = new Map();
+    for (const packet of packets) {
+      state = bindTaskWithScope({ cwd: fixture.cwd, packet, expectedRevision: state.revision });
+      workers.set(packet.taskId, createWorkerFixture(fixture.cwd, state, packet));
+    }
+    state = scheduleWave({ cwd: fixture.cwd, expectedRevision: state.revision });
+    for (const packet of packets) {
+      state = startTask({ cwd: fixture.cwd, taskId: packet.taskId,
+        workerId: `${packet.taskId}-worker`, expectedRevision: state.revision });
+    }
+    state = acceptResult({ cwd: fixture.cwd, workerCwd: workers.get('state-task').path,
+      expectedRevision: state.revision, result: {
+        ...resultFor(packets[0], 'failed'),
+        validation: packets[0].requiredValidation.unit.map(({ command }) => ({
+          command, result: 'failed', summary: 'First sibling validation failed.',
+        })),
+        summary: 'First sibling failed.',
+      } });
+    state = acceptResult({ cwd: fixture.cwd, workerCwd: workers.get('second-task').path,
+      expectedRevision: state.revision,
+      result: { ...resultFor(packets[1], 'blocked'), summary: 'Second sibling blocked.' } });
+    const discovery = packets[2];
+    const scopeDiscovery = { schemaVersion: 1, summary: 'Third task found unowned lifecycle work.',
+      evidence: [{ kind: 'state-path', identity: 'unowned/lifecycle.json',
+        detail: 'Third task requires a bounded scope assessment.' }],
+      triggeredTripwireIds: ['test-task-paths'],
+      requestedAuthority: [{ field: 'paths', values: ['unowned/lifecycle.json'] }] };
+    const discoveryResult = { ...resultFor(discovery, 'blocked'),
+      unexpectedDependencies: [scopeDiscovery.summary], scopeDiscovery, summary: scopeDiscovery.summary };
+    state = acceptResult({ cwd: fixture.cwd, workerCwd: workers.get('third-task').path,
+      expectedRevision: state.revision, result: discoveryResult });
+    const evidence = workerDiscoveryNonmaterialScopeEvidence(
+      state, plan, closure, discovery, discoveryResult, scopeDiscovery, 'trim-required',
+    );
+    state = assessScope({ cwd: fixture.cwd, scopeEvidence: evidence,
+      expectedRevision: state.revision });
+    assert.deepEqual(state.blockedReasons, [blockers['trim-required'],
+      'Task state-task reported failed: First sibling failed.',
+      'Task second-task reported blocked: Second sibling blocked.']);
+    assert.match(state.nextAction, /reject-task.*sibling task state-task/u,
+      'the first plan-order unsettled sibling is selected ahead of a later sibling and discovery');
+    state = rejectTask({ cwd: fixture.cwd, taskId: 'state-task',
+      reason: 'Settle first plan-order sibling.', expectedRevision: state.revision });
+    assert.match(state.nextAction, /reject-task.*sibling task second-task/u,
+      'the next plan-order sibling is selected after the first settles');
+    assert.equal(validateState({ cwd: fixture.cwd }).valid, true);
+  }
+
+  {
+    const fixture = repository('nonmaterial capacity spanning cleanup');
+    const planning = await initializeState({ cwd: fixture.cwd,
+      changeId: 'nonmaterial-capacity-spanning-cleanup', mode: 'implement', baseBranch: 'main',
+      planningRef: fixture.sha, source: descriptor });
+    const plan = executionPlanFor(planning);
+    for (const [ordinal, taskId] of [['third', 'third-task'], ['fourth', 'fourth-task'],
+      ['fifth', 'fifth-task']]) {
+      const criterionId = `${ordinal}-change`;
+      plan.criteria.push({ id: criterionId, description: `${ordinal} task remains independent.`,
+        disposition: 'owned', ownerTaskId: taskId, deferredReason: null });
+      plan.tasks.push({ ...plan.tasks[0], id: taskId, title: `Implement ${ordinal}`,
+        objective: `Persist ${ordinal} file.`, criterionIds: [criterionId], checklistItemIds: [],
+        anticipatedPaths: [`${ordinal}.txt`] });
+    }
+    const closure = testMinimalClosure(planning, plan);
+    let state = acceptPlanWithScope({ cwd: fixture.cwd, plan, minimalClosure: closure,
+      scopeEvidence: testScopeEvidence(planning, plan, closure), expectedRevision: planning.revision });
+    const packets = plan.tasks.map(({ id }) => packetFor(state, plan, id));
+    const workers = new Map();
+    for (const packet of packets) {
+      state = bindTaskWithScope({ cwd: fixture.cwd, packet, expectedRevision: state.revision });
+      workers.set(packet.taskId, createWorkerFixture(fixture.cwd, state, packet));
+    }
+    state = scheduleWave({ cwd: fixture.cwd, expectedRevision: state.revision });
+    for (const taskId of ['state-task', 'second-task', 'third-task']) {
+      state = startTask({ cwd: fixture.cwd, taskId, workerId: `${taskId}-worker`,
+        expectedRevision: state.revision });
+    }
+    for (const taskId of ['second-task', 'third-task']) {
+      state = rejectTask({ cwd: fixture.cwd, taskId,
+        reason: `Settle active-wave sibling ${taskId}.`, expectedRevision: state.revision });
+      assert.equal(validateState({ cwd: fixture.cwd }).valid, true);
+    }
+    const discovery = packets[0];
+    const scopeDiscovery = { schemaVersion: 1, summary: 'First task found bounded lifecycle work.',
+      evidence: [{ kind: 'state-path', identity: 'unowned/lifecycle.json',
+        detail: 'First task requires a bounded scope assessment.' }],
+      triggeredTripwireIds: ['test-task-paths'],
+      requestedAuthority: [{ field: 'paths', values: ['unowned/lifecycle.json'] }] };
+    const discoveryResult = { ...resultFor(discovery, 'blocked'),
+      unexpectedDependencies: [scopeDiscovery.summary], scopeDiscovery, summary: scopeDiscovery.summary };
+    state = acceptResult({ cwd: fixture.cwd, workerCwd: workers.get(discovery.taskId).path,
+      expectedRevision: state.revision, result: discoveryResult });
+    state = assessScope({ cwd: fixture.cwd,
+      scopeEvidence: workerDiscoveryNonmaterialScopeEvidence(
+        state, plan, closure, discovery, discoveryResult, scopeDiscovery, 'trim-required'),
+      expectedRevision: state.revision });
+    assert.match(state.nextAction, /reject-task.*sibling task fourth-task/u,
+      'capacity-spanning settlement selects the first remaining bound sibling');
+    for (const taskId of ['fourth-task', 'fifth-task']) {
+      if (taskId === 'fourth-task') {
+        assert.throws(() => rejectTask({ cwd: fixture.cwd, taskId,
+          reason: `Settle serial sibling ${taskId}.`, expectedRevision: state.revision,
+          crashStep(step) {
+            if (step === 'after-intent') throw new Error('pause capacity-spanning settlement');
+          } }), /pause capacity-spanning settlement/u);
+        state = recoverState({ cwd: fixture.cwd }).state;
+        assert.match(state.nextAction, /reject-task.*sibling task fifth-task/u);
+      } else {
+        state = rejectTask({ cwd: fixture.cwd, taskId,
+          reason: `Settle serial sibling ${taskId}.`, expectedRevision: state.revision });
+      }
+      assert.equal(validateState({ cwd: fixture.cwd }).valid, true);
+    }
+    assert.match(state.nextAction, /reject-task.*state-task.*clean up every rejected-task worktree/u);
+    assert.match(state.nextAction,
+      /all 5 from the complete execution task set whose status is rejected, in accepted-plan order/u,
+      'more than three cleanup targets retain one bounded complete-state selector');
+    assert.match(state.nextAction, /replace every rejected task.*amend-plan/u);
+    assert.ok(state.nextAction.length <= 1000);
+    state = rejectTask({ cwd: fixture.cwd, taskId: discovery.taskId,
+      reason: 'Settle discovery after all capacity-spanning siblings.', expectedRevision: state.revision });
+    assert.doesNotMatch(state.nextAction, /change:state reject-task/u);
+    assert.match(state.nextAction,
+      /all 5 from the complete execution task set whose status is rejected, in accepted-plan order/u);
+    assert.deepEqual(state.execution.tasks.map(({ id, status }) => ({ id, status })),
+      ['state-task', 'second-task', 'third-task', 'fourth-task', 'fifth-task']
+        .map((id) => ({ id, status: 'rejected' })),
+    'all five cleanup targets remain explicit in execution-plan order');
+    assert.equal(validateState({ cwd: fixture.cwd }).valid, true);
+  }
+
+  const unbound = await discoveryFixture(
+    'nonmaterial-unbound-retaining-amendment', 'minor-amendment-required', 'unbound',
+  );
+  let unboundState = rejectTask({ cwd: unbound.cwd, taskId: unbound.packet.taskId,
+    reason: 'Replace the assessed discovery while retaining its unbound sibling.',
+    expectedRevision: unbound.state.revision });
+  removeTaskWorktree({ cwd: unbound.cwd, changeId: unboundState.changeId,
+    taskId: unbound.packet.taskId });
+  const unboundReplacementId = 'unbound-discovery-replacement';
+  const unboundReplacementCriterionId = 'unbound-discovery-replacement-criterion';
+  const unboundPlan = structuredClone(unbound.plan);
+  unboundPlan.planRevision = 2;
+  unboundPlan.criteria = unboundPlan.criteria.map((criterion) => criterion.ownerTaskId === unbound.packet.taskId
+    ? { ...criterion, ownerTaskId: unboundReplacementId } : criterion);
+  unboundPlan.criteria.push({ id: unboundReplacementCriterionId,
+    description: 'Replace only the assessed discovery task.', disposition: 'owned',
+    ownerTaskId: unboundReplacementId, deferredReason: null });
+  unboundPlan.tasks = unboundPlan.tasks.map((task) => task.id === unbound.packet.taskId
+    ? { ...task, id: unboundReplacementId,
+      criterionIds: [...task.criterionIds, unboundReplacementCriterionId] }
+    : task);
+  unboundPlan.checklistMappings = unboundPlan.checklistMappings.map((mapping) => ({
+    ...mapping,
+    taskIds: mapping.taskIds.map((id) => id === unbound.packet.taskId ? unboundReplacementId : id),
+  }));
+  const unboundClosure = { ...structuredClone(unbound.closure), revision: 2,
+    previousContractDigest: unboundState.scope.closureDigest, planDigest: digestJson(unboundPlan),
+    authorizedShape: [...unbound.closure.authorizedShape, 'unowned-lifecycle-path'] };
+  const unboundTrigger = unboundState.scope.currentEvidenceDigest;
+  const unboundSuffix = `${unbound.packet.taskId}/0001.json`;
+  unboundState = amendPlanWithScope({ cwd: unbound.cwd, expectedRevision: unboundState.revision,
+    resultingPlan: unboundPlan, minimalClosure: unboundClosure,
+    amendment: { id: 'retain-unbound-sibling-amendment',
+      reason: 'Replace the rejected discovery without disturbing unbound sibling authority.',
+      authorization: 'scope-review', trigger: unboundTrigger,
+      delta: { addedTaskIds: [unboundReplacementId] }, invalidatedEvidence: [unboundTrigger,
+        `implementation/tasks/${unboundSuffix}`, `implementation/provenance/${unboundSuffix}`,
+        `implementation/planning-signals/${unboundSuffix}`,
+        `implementation/specialist-routes/${unboundSuffix}`,
+        `implementation/results/${unboundSuffix}`] } });
+  assert.deepEqual(unboundState.execution.tasks.map(({ id, status }) => ({ id, status })), [
+    { id: unboundReplacementId, status: 'unbound' },
+    { id: unbound.sibling.taskId, status: 'unbound' },
+  ], 'a real amendment replaces discovery while retaining an untouched unbound sibling');
+
   for (const verdict of ['minor-amendment-required', 'trim-required']) {
     const ordinary = repository(`ordinary-${verdict}-summary`);
     const ordinaryPlanning = await initializeState({ cwd: ordinary.cwd,
@@ -1197,17 +1529,6 @@ test('minor and trim assessments supersede only their exact discovery blocker th
       [{ id: replacementTaskId, status: 'unbound' }],
       `${verdict} cleanup permits progress only under a new task ID`);
   }
-
-  const sibling = await discoveryFixture('nonmaterial-discovery-sibling-near-miss', 'trim-required', 'failed');
-  const siblingDirectory = changeDirectory(sibling.cwd, sibling.state.changeId);
-  const beforeSiblingRejection = durableSnapshot(siblingDirectory);
-  assert.throws(() => validateState({ cwd: sibling.cwd }),
-    (error) => error.code === 'TASK_RESULT_MISMATCH');
-  assert.throws(() => rejectTask({ cwd: sibling.cwd, taskId: sibling.packet.taskId,
-    reason: 'Do not absorb the missing sibling blocker.', expectedRevision: sibling.state.revision }),
-  (error) => error.code === 'TASK_RESULT_MISMATCH');
-  assert.deepEqual(durableSnapshot(siblingDirectory), beforeSiblingRejection,
-    'an exact assessment cannot supersede a sibling task blocker');
 
   const identical = await discoveryFixture(
     'nonmaterial-discovery-identical-blocker-near-miss', 'trim-required', 'running',
@@ -1419,9 +1740,9 @@ test('minor and trim assessments supersede only their exact discovery blocker th
   assert.throws(() => rejectTask({ cwd: rejectedSibling.cwd, taskId: rejectedSibling.sibling.taskId,
     reason: 'Do not supersede the assessed task with a sibling rejection.',
     expectedRevision: rejectedSibling.state.revision }),
-  (error) => error.code === 'TASK_RESULT_MISMATCH');
+  (error) => error.code === 'TASK_STATE_CONFLICT');
   assert.deepEqual(durableSnapshot(rejectedSiblingDirectory), beforeRejectedSibling,
-    'sibling rejection leaves the assessed blocker and task unchanged');
+    'accepted sibling rejection leaves the assessed blocker and task unchanged');
   assert.equal(validateState({ cwd: rejectedSibling.cwd }).valid, true);
 
   for (const verdict of ['minor-amendment-required', 'trim-required']) {
@@ -1450,6 +1771,35 @@ test('minor and trim assessments supersede only their exact discovery blocker th
   (error) => error.code === 'TASK_RESULT_MISMATCH');
   assert.deepEqual(durableSnapshot(insufficientDirectory), beforeInsufficientRejection,
     'insufficient-evidence prose cannot supersede receipt-backed discovery evidence');
+});
+
+test('ordinary accepted tasks remain explicitly rejectable outside a nonmaterial discovery gate', async () => {
+  const fixture = repository('ordinary accepted rejection');
+  const planning = await initializeState({ cwd: fixture.cwd, changeId: 'ordinary-accepted-rejection',
+    mode: 'implement', baseBranch: 'main', planningRef: fixture.sha, source: descriptor });
+  const plan = planFor(planning);
+  plan.tasks[0].anticipatedPaths = ['ordinary-accepted.txt'];
+  const closure = testMinimalClosure(planning, plan);
+  let state = acceptPlanWithScope({ cwd: fixture.cwd, plan, minimalClosure: closure,
+    scopeEvidence: testScopeEvidence(planning, plan, closure), expectedRevision: planning.revision });
+  const packet = packetFor(state, plan, 'state-task');
+  state = bindTaskWithScope({ cwd: fixture.cwd, packet, expectedRevision: state.revision });
+  const worker = createWorkerFixture(fixture.cwd, state, packet);
+  state = scheduleWave({ cwd: fixture.cwd, expectedRevision: state.revision });
+  state = startTask({ cwd: fixture.cwd, taskId: packet.taskId,
+    workerId: 'ordinary-accepted-worker', expectedRevision: state.revision });
+  const [changedPath] = packet.allowedPaths;
+  writeFileSync(join(worker.path, changedPath), 'ordinary accepted result\n');
+  git(worker.path, 'add', changedPath);
+  git(worker.path, 'commit', '-m', 'test: preserve ordinary accepted rejection');
+  state = acceptResult({ cwd: fixture.cwd, workerCwd: worker.path,
+    result: resultFor(packet, 'implemented', git(worker.path, 'rev-parse', 'HEAD'), [changedPath]),
+    expectedRevision: state.revision });
+  state = rejectTask({ cwd: fixture.cwd, taskId: packet.taskId,
+    reason: 'Reject the ordinary accepted task.', expectedRevision: state.revision });
+  assert.deepEqual(state.blockedReasons,
+    ['Task state-task was explicitly rejected: Reject the ordinary accepted task.']);
+  assert.equal(validateState({ cwd: fixture.cwd }).valid, true);
 });
 
 test('accepted material approval remains blocked until its exact approved shape is amended', async () => {
