@@ -3553,7 +3553,7 @@ test('receipt-backed minor and trim remediation alone may revisit terminal owner
       acceptedCriterionIds: [...mapping.acceptedCriterionIds], invariantIds: [], nonGoalIds: [],
       guidanceIds: [], rationale: 'This separately assessed path remains required without remediation.',
     };
-    evidence.packet.changeInventory.paths.push(unrelatedAssessedMapping.mechanism);
+    evidence.packet.changeInventory.paths.push(mapping.mechanism, unrelatedAssessedMapping.mechanism);
     evidence.packet.changeInventory.mappings.push(unrelatedAssessedMapping);
     evidence.result = verdict === 'minor-amendment-required'
       ? { ...evidence.result, verdict,
@@ -3721,6 +3721,131 @@ test('receipt-backed minor and trim remediation alone may revisit terminal owner
     assert.equal(stored.delta.scopeRemediation.smallerSufficientAlternative,
       evidence.result.smallerSufficientAlternative);
   }
+});
+
+test('receipt-backed minor remediation derives paths from exact source and invariant authority', async () => {
+  for (const grounding of ['source', 'invariant']) {
+    const fixture = await integratedSingleTaskFixture(`minor ${grounding} mapped path authority`);
+    let state = fixture.state;
+    const evidence = integratedScopeEvidenceFor({ cwd: fixture.cwd, changeId: state.changeId });
+    const originalMapping = evidence.packet.changeInventory.mappings[0];
+    const authorityId = grounding === 'source' ? originalMapping.sourceCriterionIds[0] : 'exact-test-authority';
+    const groundingFields = grounding === 'source'
+      ? { sourceCriterionIds: [authorityId], invariantIds: [] }
+      : { sourceCriterionIds: [], invariantIds: [authorityId] };
+    const necessaryMapping = { ...originalMapping, ...groundingFields };
+    const eligibleMapping = { ...necessaryMapping,
+      mechanism: `${grounding}-grounded-remediation.txt`,
+      rationale: `This assessed path shares the exact ${grounding} authority.` };
+    const unrelatedMapping = { ...originalMapping,
+      mechanism: `${grounding}-accepted-only-remediation.txt`, sourceCriterionIds: [], invariantIds: [],
+      rationale: 'Accepted-criterion overlap alone does not authorize this assessed path.' };
+    evidence.packet.changeInventory.paths.push(eligibleMapping.mechanism, unrelatedMapping.mechanism);
+    evidence.packet.changeInventory.mappings = [necessaryMapping, eligibleMapping, unrelatedMapping];
+    evidence.result = { ...evidence.result, verdict: 'minor-amendment-required',
+      coverage: [
+        { ...necessaryMapping, classification: 'necessary-minor-expansion',
+          rationale: `The adjacent mechanism is necessary under the exact ${grounding} authority.` },
+        { ...eligibleMapping, classification: 'required' },
+        { ...unrelatedMapping, classification: 'required' },
+      ],
+      scopeDelta: { description: `Add the exact ${grounding}-grounded remediation.`,
+        sourceCriterionIds: grounding === 'source' ? [authorityId] : [],
+        acceptedCriterionIds: [...originalMapping.acceptedCriterionIds],
+        invariantIds: grounding === 'invariant' ? [authorityId] : [], materialSurfaces: [] } };
+    evidence.packetDigest = digestJson(evidence.packet);
+    evidence.resultDigest = digestJson(evidence.result);
+    state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
+      expectedRevision: state.revision });
+    assert.equal(state.phase, 'blocked');
+
+    const original = JSON.parse(readFileSync(join(changeDirectory(fixture.cwd, state.changeId), 'plan', 'plan.json'), 'utf8'));
+    const responsibility = evidence.result.scopeDelta.description;
+    const planForPath = (path, suffix) => {
+      const plan = structuredClone(original); plan.planRevision = 2;
+      const criterionId = `${grounding}-${suffix}-criterion`; const taskId = `${grounding}-${suffix}-task`;
+      plan.criteria.push({ id: criterionId, description: responsibility,
+        disposition: 'owned', ownerTaskId: taskId, deferredReason: null });
+      plan.tasks.push({ ...original.tasks[0], id: taskId, title: 'Apply grounded remediation',
+        objective: responsibility, criterionIds: [criterionId], checklistItemIds: [],
+        dependsOn: ['state-task'], anticipatedPaths: [path] });
+      return { plan, taskId };
+    };
+    const trigger = digestJson(evidence);
+    const amendmentFor = (taskId) => ({ id: `${taskId}-amendment`,
+      reason: `Apply only the exact ${grounding}-grounded path authority.`,
+      authorization: 'scope-review', trigger, delta: { addedTaskIds: [taskId] },
+      invalidatedEvidence: [trigger] });
+
+    const rejected = planForPath(unrelatedMapping.mechanism, 'accepted-only');
+    const before = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
+    assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+      amendment: amendmentFor(rejected.taskId), resultingPlan: rejected.plan }),
+    (error) => error.code === 'INVALID_AMENDMENT'
+      && /anticipatedPaths exceed the exact assessed or inherited responsibility/u.test(error.message));
+    assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), before,
+      `${grounding} grounding rejects accepted-criterion overlap without durable mutation`);
+
+    const accepted = planForPath(eligibleMapping.mechanism, 'eligible');
+    state = amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+      amendment: amendmentFor(accepted.taskId), resultingPlan: accepted.plan });
+    assert.equal(state.execution.tasks.find(({ id }) => id === accepted.taskId).status, 'unbound');
+  }
+});
+
+test('receipt-backed inherited remediation paths are directional and segment bounded', async () => {
+  const inheritedPath = 'owned/subtree';
+  const fixture = await integratedSingleTaskFixture('minor inherited path containment', specialization(),
+    { ownedPath: inheritedPath });
+  let state = fixture.state;
+  const evidence = integratedScopeEvidenceFor({ cwd: fixture.cwd, changeId: state.changeId });
+  const mapping = evidence.result.coverage[0];
+  evidence.packet.changeInventory.paths.push(mapping.mechanism);
+  evidence.result = { ...evidence.result, verdict: 'minor-amendment-required',
+    coverage: [{ ...mapping, classification: 'necessary-minor-expansion',
+      rationale: 'The exact adjacent remediation is necessary.' }],
+    scopeDelta: { description: 'Apply the exact inherited path remediation.',
+      sourceCriterionIds: [...mapping.sourceCriterionIds],
+      acceptedCriterionIds: [...mapping.acceptedCriterionIds], invariantIds: [], materialSurfaces: [] } };
+  evidence.packetDigest = digestJson(evidence.packet);
+  evidence.resultDigest = digestJson(evidence.result);
+  state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
+    expectedRevision: state.revision });
+
+  const original = JSON.parse(readFileSync(join(changeDirectory(fixture.cwd, state.changeId), 'plan', 'plan.json'), 'utf8'));
+  const responsibility = evidence.result.scopeDelta.description;
+  const planForPath = (path, suffix) => {
+    const plan = structuredClone(original); plan.planRevision = 2;
+    const criterionId = `inherited-${suffix}-criterion`; const taskId = `inherited-${suffix}-task`;
+    plan.criteria.push({ id: criterionId, description: responsibility,
+      disposition: 'owned', ownerTaskId: taskId, deferredReason: null });
+    plan.tasks.push({ ...original.tasks[0], id: taskId, title: 'Apply inherited remediation',
+      objective: responsibility, criterionIds: [criterionId], checklistItemIds: [],
+      dependsOn: ['state-task'], anticipatedPaths: [path] });
+    return { plan, taskId };
+  };
+  const trigger = digestJson(evidence);
+  const amendmentFor = (taskId) => ({ id: `${taskId}-amendment`, reason: 'Use only inherited path authority.',
+    authorization: 'scope-review', trigger, delta: { addedTaskIds: [taskId] }, invalidatedEvidence: [trigger] });
+  for (const [suffix, path] of [
+    ['reversed', 'owned'],
+    ['prefix-collision', 'owned/subtree-sibling/file.txt'],
+    ['unrelated', 'elsewhere/file.txt'],
+  ]) {
+    const rejected = planForPath(path, suffix);
+    const before = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
+    assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+      amendment: amendmentFor(rejected.taskId), resultingPlan: rejected.plan }),
+    (error) => error.code === 'INVALID_AMENDMENT'
+      && /anticipatedPaths exceed the exact assessed or inherited responsibility/u.test(error.message));
+    assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), before,
+      `${suffix} inherited path authority is rejected atomically`);
+  }
+
+  const accepted = planForPath(`${inheritedPath}/nested/file.txt`, 'descendant');
+  state = amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+    amendment: amendmentFor(accepted.taskId), resultingPlan: accepted.plan });
+  assert.equal(state.execution.tasks.find(({ id }) => id === accepted.taskId).status, 'unbound');
 });
 
 test('interrupted nonmaterial amendment recovery revalidates its canonical projection', async () => {
@@ -5601,13 +5726,14 @@ async function integratedSingleTaskFixture(label, specialize = specialization(),
   validationCommand = 'node --test .agents/skills/change-development/scripts/state/state.test.mjs',
   workerContent = 'first\n',
   noChange = false,
+  ownedPath = 'first.txt',
 } = {}) {
   const { cwd, sha } = repository(label);
   const planning = await initializeState({ cwd, changeId: label.replaceAll(' ', '-'), mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
   const plan = planFor(planning);
   plan.specialization = specialize;
   plan.tasks[0].specialization = specialize;
-  plan.tasks[0].anticipatedPaths = ['first.txt'];
+  plan.tasks[0].anticipatedPaths = [ownedPath];
   const planningEvidence = specialize.browserVisible ? [mapperEvidence(planning.planningSha, plan.planRevision,
     'Accepted behavior coverage is mapped.')] : [];
   let state = acceptPlan({ cwd, plan, expectedRevision: planning.revision, planningEvidence });
@@ -5622,8 +5748,9 @@ async function integratedSingleTaskFixture(label, specialize = specialization(),
     state = acceptResult({ cwd, result: resultFor(packet, 'no-change'),
       workerCwd: worker.path, expectedRevision: state.revision });
   } else {
-    writeFileSync(join(worker.path, 'first.txt'), workerContent); git(worker.path, 'add', 'first.txt'); git(worker.path, 'commit', '-m', 'test: lifecycle worker');
-    state = acceptResult({ cwd, result: resultFor(packet, 'implemented', git(worker.path, 'rev-parse', 'HEAD'), ['first.txt']),
+    mkdirSync(dirname(join(worker.path, ownedPath)), { recursive: true });
+    writeFileSync(join(worker.path, ownedPath), workerContent); git(worker.path, 'add', ownedPath); git(worker.path, 'commit', '-m', 'test: lifecycle worker');
+    state = acceptResult({ cwd, result: resultFor(packet, 'implemented', git(worker.path, 'rev-parse', 'HEAD'), [ownedPath]),
       workerCwd: worker.path, expectedRevision: state.revision });
     state = integrateTask({ cwd, taskId: 'state-task', expectedRevision: state.revision });
   }

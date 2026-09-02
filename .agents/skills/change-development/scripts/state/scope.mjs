@@ -150,6 +150,14 @@ function applicableRemediationMappings(evidence) {
     .filter(({ mechanism }) => mechanisms.has(mechanism));
 }
 
+function setsIntersect(left, right) {
+  return left.some((value) => right.has(value));
+}
+
+function sameOrDescendantPath(path, inheritedPath) {
+  return path === inheritedPath || path.startsWith(`${inheritedPath}/`);
+}
+
 export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan, resultingPlan,
   addedTaskIds }) {
   const errors = [];
@@ -184,6 +192,25 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
   const applicableMappedPaths = new Set(mappings
     .map(({ mechanism }) => mechanism)
     .filter((mechanism) => assessedPaths.has(mechanism)));
+  if (evidence?.result?.verdict === 'minor-amendment-required') {
+    const deltaSourceCriterionIds = new Set(evidence.result.scopeDelta?.sourceCriterionIds ?? []);
+    const deltaInvariantIds = new Set(evidence.result.scopeDelta?.invariantIds ?? []);
+    const sourceCriterionAnchors = new Set(mappings
+      .filter(({ mechanism }) => !assessedPaths.has(mechanism))
+      .flatMap(({ sourceCriterionIds }) => sourceCriterionIds)
+      .filter((id) => deltaSourceCriterionIds.has(id)));
+    const invariantAnchors = new Set(mappings
+      .filter(({ mechanism }) => !assessedPaths.has(mechanism))
+      .flatMap(({ invariantIds }) => invariantIds)
+      .filter((id) => deltaInvariantIds.has(id)));
+    for (const mapping of evidence?.packet?.changeInventory?.mappings ?? []) {
+      if (!assessedPaths.has(mapping.mechanism)) continue;
+      if (setsIntersect(mapping.sourceCriterionIds, sourceCriterionAnchors)
+          || setsIntersect(mapping.invariantIds, invariantAnchors)) {
+        applicableMappedPaths.add(mapping.mechanism);
+      }
+    }
+  }
   const discoveryPaths = new Set((priorPlan?.tasks ?? [])
     .find(({ id }) => id === discoveryTaskId)?.anticipatedPaths ?? []);
   for (const task of addedTasks) {
@@ -207,7 +234,8 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
         id === (priorPlan.criteria.find((criterion) => criterion.id === criterionId)?.ownerTaskId)))
       .flatMap(({ anticipatedPaths }) => anticipatedPaths));
     if (task.anticipatedPaths.length === 0 || task.anticipatedPaths.some((path) =>
-      !applicableMappedPaths.has(path) && !inheritedPaths.has(path))) {
+      !applicableMappedPaths.has(path)
+      && ![...inheritedPaths].some((inheritedPath) => sameOrDescendantPath(path, inheritedPath)))) {
       errors.push(`$ nonmaterial remediation task ${task.id} anticipatedPaths exceed the exact assessed or inherited responsibility`);
     }
   }
