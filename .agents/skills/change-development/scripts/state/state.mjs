@@ -559,6 +559,44 @@ function planningChecklist(previousObservation, observation, comparison) {
     .map((item) => currentStableItemIds.has(item.id) ? latest.get(item.id) : item);
 }
 
+const NONMATERIAL_SCOPE_ACTIONS = {
+  'minor-amendment-required': {
+    amendment: 'run change:state amend-plan from the exact minor-amendment-required scope evidence and reassess the next authority boundary',
+  },
+  'trim-required': {
+    amendment: 'run change:state amend-plan from the exact trim-required scope evidence with one bounded removal or simplification task',
+  },
+};
+
+function nonmaterialNextActionGate(state) {
+  if (state.phase !== 'blocked' || state.scope?.status !== 'assessment-required'
+      || state.scope.currentBoundary !== 'task' || !nonemptyString(state.scope.currentEvidenceDigest)
+      || !nonemptyString(state.scope.currentSubjectSha)) return null;
+  const matches = Object.entries(NONMATERIAL_SCOPE_ACTIONS).filter(([verdict]) => {
+    const blocker = scopeGateForVerdict(verdict).blocker;
+    return state.blockedReasons?.filter((reason) => reason === blocker).length === 1;
+  });
+  if (matches.length !== 1) return null;
+  const blockedTasks = state.execution?.tasks.filter((task) => task.status === 'blocked') ?? [];
+  if (blockedTasks.length > 1) return null;
+  const discoveryTask = blockedTasks[0] ?? null;
+  const cleanupTaskIds = state.execution?.tasks.filter((task) => task.status === 'rejected'
+    || task.id === discoveryTask?.id).map((task) => task.id) ?? [];
+  // Active waves contain at most three tasks. Refuse malformed projections so
+  // the persisted operator instruction remains inside the state schema limit.
+  if (cleanupTaskIds.length === 0 || cleanupTaskIds.length > 3) return null;
+  const [verdict, action] = matches[0];
+  return { verdict, ...action, discoveryTask, cleanupTaskIds };
+}
+
+function nonmaterialNextAction(gate) {
+  const rejectDiscovery = gate.discoveryTask
+    ? `Run change:state reject-task for the exact assessed discovery task ${gate.discoveryTask.id}; then `
+    : '';
+  const taskList = gate.cleanupTaskIds.join(', ');
+  return `${rejectDiscovery}clean up every rejected-task worktree (${taskList}); replace every rejected task with a new task ID and invalidate its task packet, provenance, planning signals, specialist route, any behavior-mapper evidence, and result evidence; then ${gate.amendment}.`;
+}
+
 export function nextActionFor(state) {
   if (state.phase === 'initializing') return 'Complete source capture and enter planning.';
   if (state.phase === 'planning') return state.unresolvedDecisionIds.length > 0
@@ -592,27 +630,21 @@ export function nextActionFor(state) {
     ? 'Resolve findings or run change:state finalize-development.' : 'Generate verifier-context and record the final verifier result.';
   if (state.phase === 'development-ready') return 'Hand off the exact local HEAD to the separate PR preparation workflow.';
   if (state.phase === 'recovering') return 'Run change:state recover to finish the exact interrupted transition.';
-  if (state.phase === 'blocked') return state.execution?.activeWave.length
+  if (state.phase === 'blocked') {
+    const nonmaterialGate = nonmaterialNextActionGate(state);
+    return state.execution?.activeWave.length
     ? 'Resolve the listed blocking evidence by accepting or finishing every active-wave task result, then reject/replan.'
-    : state.execution?.tasks.filter((task) => task.status === 'blocked').length === 1
-      && state.blockedReasons?.some((reason) => reason.includes('bounded minor amendment')
-        || reason.includes('removal or simplification'))
+    : nonmaterialGate?.discoveryTask
       && state.execution.tasks.some((task) => task.status === 'accepted'
         && task.dependsOn.every((id) => ['integrated', 'no-change']
           .includes(state.execution.tasks.find((candidate) => candidate.id === id)?.status)))
       ? `Integrate the dependency-ready accepted sibling task ${state.execution.tasks.find((task) => task.status === 'accepted'
         && task.dependsOn.every((id) => ['integrated', 'no-change']
           .includes(state.execution.tasks.find((candidate) => candidate.id === id)?.status))).id} before resolving the assessed discovery task.`
+    : nonmaterialGate
+      ? nonmaterialNextAction(nonmaterialGate)
     : state.blockedReasons?.some((reason) => reason.includes('Recorded material scope decision'))
       ? 'Run change:state amend-plan from the exact current material decision and assessment; implementation authority remains blocked.'
-    : state.blockedReasons?.some((reason) => reason.includes('bounded minor amendment'))
-      ? state.execution?.tasks.filter((task) => task.status === 'blocked').length === 1
-        ? `Run change:state reject-task for the exact assessed discovery task ${state.execution.tasks.find((task) => task.status === 'blocked').id}, clean up its worktree, then run change:state amend-plan from the exact minor scope evidence and reassess the next authority boundary.`
-        : 'Run change:state amend-plan from the exact minor scope evidence, invalidate that evidence, then reassess the next authority boundary.'
-      : state.blockedReasons?.some((reason) => reason.includes('removal or simplification'))
-        ? state.execution?.tasks.filter((task) => task.status === 'blocked').length === 1
-          ? `Run change:state reject-task for the exact assessed discovery task ${state.execution.tasks.find((task) => task.status === 'blocked').id}, clean up its worktree, then run change:state amend-plan from the exact trim-required evidence with one bounded removal or simplification task.`
-          : 'Run change:state amend-plan from the exact trim-required evidence with one bounded removal or simplification task.'
         : state.blockedReasons?.some((reason) => reason.includes('insufficient evidence'))
           ? 'Run change:state assess-scope again with sufficient exact evidence for the unchanged authority.'
     : state.scope?.status === 'assessment-required'
@@ -625,6 +657,7 @@ export function nextActionFor(state) {
           ? 'Record durable human authorization for the repeated verification finding before disposition or replanning.'
           : 'Disposition every exact-source verification finding, then amend the plan for all actionable findings or resume verification.'
         : 'Resolve the listed blocking evidence by rejecting/replanning the blocked work, or explicitly abandon the change.';
+  }
   if (state.phase === 'abandoned') return 'Archive the explicitly abandoned change.';
   return 'Inspect durable state.';
 }
