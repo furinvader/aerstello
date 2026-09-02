@@ -1093,7 +1093,7 @@ test('minor and trim assessments supersede only their exact discovery blocker th
       state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
         expectedRevision: state.revision });
     }
-    return { ...fixture, state, plan, closure, packet, sibling };
+    return { ...fixture, state, plan, closure, packet, sibling, siblingWorker };
   }
 
   const blockers = {
@@ -1159,7 +1159,61 @@ test('minor and trim assessments supersede only their exact discovery blocker th
   assert.deepEqual(durableSnapshot(siblingDirectory), beforeSiblingRejection,
     'an exact assessment cannot supersede a sibling task blocker');
 
+  const identical = await discoveryFixture(
+    'nonmaterial-discovery-identical-blocker-near-miss', 'trim-required', 'running',
+  );
+  const identicalDirectory = changeDirectory(identical.cwd, identical.state.changeId);
+  const duplicatedState = structuredClone(identical.state);
+  duplicatedState.blockedReasons.push(blockers['trim-required']);
+  duplicatedState.nextAction = nextActionFor(duplicatedState);
+  const transitionDirectory = join(identicalDirectory, 'transitions',
+    String(duplicatedState.revision).padStart(8, '0'));
+  const duplicatedIntent = JSON.parse(readFileSync(join(transitionDirectory, 'intent.json'), 'utf8'));
+  duplicatedIntent.nextState = duplicatedState;
+  duplicatedIntent.nextStateDigest = digestJson(duplicatedState);
+  writeCompleteTransitionFixture(transitionDirectory, duplicatedIntent);
+  writeFileSync(join(identicalDirectory, 'state.json'), `${JSON.stringify(duplicatedState)}\n`);
+  const beforeIdenticalAcceptance = durableSnapshot(identicalDirectory);
+  assert.throws(() => acceptResult({ cwd: identical.cwd, workerCwd: identical.siblingWorker.path,
+    expectedRevision: duplicatedState.revision, result: resultFor(identical.sibling, 'no-change') }),
+  (error) => error instanceof StateError);
+  assert.deepEqual(durableSnapshot(identicalDirectory), beforeIdenticalAcceptance,
+    'identical blocker text cannot stand in for one exact receipt-bound assessment identity');
+
   for (const verdict of ['minor-amendment-required', 'trim-required']) {
+    const lateSibling = await discoveryFixture(
+      `nonmaterial-discovery-late-sibling-${verdict}`, verdict, 'running',
+    );
+    writeFileSync(join(lateSibling.siblingWorker.path, 'second.txt'), 'late accepted nonmaterial sibling\n');
+    git(lateSibling.siblingWorker.path, 'add', 'second.txt');
+    git(lateSibling.siblingWorker.path, 'commit', '-m', 'test: late accepted nonmaterial sibling');
+    let lateState = acceptResult({ cwd: lateSibling.cwd, workerCwd: lateSibling.siblingWorker.path,
+      expectedRevision: lateSibling.state.revision,
+      result: resultFor(lateSibling.sibling, 'implemented',
+        git(lateSibling.siblingWorker.path, 'rev-parse', 'HEAD'), ['second.txt']) });
+    assert.deepEqual(lateState.blockedReasons, [blockers[verdict]],
+      `${verdict} late sibling acceptance preserves only the receipt-bound nonmaterial gate`);
+    assert.match(lateState.nextAction,
+      new RegExp(`Integrate.*${lateSibling.sibling.taskId}.*before resolving`, 'u'));
+    assert.equal(validateState({ cwd: lateSibling.cwd }).valid, true);
+    assert.throws(() => integrateTask({ cwd: lateSibling.cwd, taskId: lateSibling.sibling.taskId,
+      expectedRevision: lateState.revision,
+      crashStep(step) {
+        if (step === 'integration-operation-after-intent') throw new Error('pause sibling integration');
+      } }), /pause sibling integration/u);
+    lateState = recoverState({ cwd: lateSibling.cwd }).state;
+    assert.equal(lateState.phase, 'integrating');
+    assert.equal(lateState.execution.integrationIntent.taskId, lateSibling.sibling.taskId);
+    const rejectionReason = `Replace the aborted ${verdict} sibling integration.`;
+    lateState = rejectTask({ cwd: lateSibling.cwd, taskId: lateSibling.sibling.taskId,
+      reason: rejectionReason, expectedRevision: lateState.revision });
+    assert.deepEqual(lateState.blockedReasons, [blockers[verdict],
+      `Task second-task was explicitly rejected: ${rejectionReason}`],
+      `${verdict} intent rejection restores the scope gate and exact sibling rejection evidence`);
+    assert.match(lateState.nextAction,
+      new RegExp(`reject-task.*${lateSibling.packet.taskId}.*clean up.*amend-plan`, 'u'));
+    assert.equal(validateState({ cwd: lateSibling.cwd }).valid, true);
+
     const acceptedSibling = await discoveryFixture(
       `nonmaterial-discovery-accepted-sibling-${verdict}`, verdict, 'accepted',
     );

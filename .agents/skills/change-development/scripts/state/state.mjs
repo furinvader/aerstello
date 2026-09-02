@@ -2179,6 +2179,20 @@ function nonmaterialDiscoveryGate(cwd, state) {
   return { discovery, blocker: scopeGateForVerdict(verdict).blocker };
 }
 
+function nonmaterialBlockerProjection(cwd, state, execution, inFlight = null) {
+  const gate = nonmaterialDiscoveryGate(cwd, state);
+  if (!gate) return null;
+  const taskBlockers = canonicalTaskBlockers(cwd, state, {
+    ...execution,
+    tasks: execution.tasks.filter((task) => task.id !== gate.discovery.taskId),
+  }, inFlight);
+  if (state.phase === 'integrating') return [gate.blocker, ...taskBlockers];
+  const preservedBlockers = nonTaskBlockers(cwd, state, {
+    supersedingDiscoveryTaskId: gate.discovery.taskId,
+  });
+  return [...preservedBlockers, ...taskBlockers];
+}
+
 export function acceptResult({ cwd = process.cwd(), changeId, result, workerCwd, expectedRevision, clock, crashStep, lockOptions } = {}) {
   const root = repositoryRoot(cwd); const selected = selectedChangeId(root, changeId);
   return withChangeLock(root, selected, () => {
@@ -2220,11 +2234,14 @@ export function acceptResult({ cwd = process.cwd(), changeId, result, workerCwd,
     const errors = validateImplementationResultAgainstTask(packet, result, actualPaths);
     if (errors.length) throw new StateError(`Implementation result does not match its packet/Git evidence:\n- ${errors.join('\n- ')}`, 'INVALID_IMPLEMENTATION_RESULT');
     assertStateVerifierCapacity(root, state, { result });
-    const preservedBlockers = nonTaskBlockers(root, state);
     const terminal = result.status === 'implemented' ? 'accepted' : result.status;
     const activeWave = state.execution.activeWave.filter((id) => id !== task.id);
     const execution = replaceExecutionTask(state, task.id, { status: terminal, resultDigest: objectDigest(result), workerCommit: result.workerCommit }, { activeWave });
-    const taskBlockers = canonicalTaskBlockers(root, state, execution, { taskId: task.id, result });
+    const nonmaterialBlockers = nonmaterialBlockerProjection(root, state, execution,
+      { taskId: task.id, result });
+    const preservedBlockers = nonmaterialBlockers ? [] : nonTaskBlockers(root, state);
+    const taskBlockers = nonmaterialBlockers ?? canonicalTaskBlockers(root, state, execution,
+      { taskId: task.id, result });
     const blockedReasons = [...preservedBlockers, ...taskBlockers];
     const nextPhase = blockedReasons.length ? 'blocked' : 'implementing';
     const scope = result.scopeDiscovery ? { ...state.scope, status: 'assessment-required',
@@ -2245,15 +2262,8 @@ function prepareIntegration({ root, selected, taskId, expectedRevision, clock, c
     if (!task.dependsOn.every((id) => ['integrated', 'no-change'].includes(executionTask(state, id).status))) {
       throw new StateError(`Task ${taskId} dependencies are not integrated`, 'DEPENDENCY_NOT_INTEGRATED');
     }
-    const taskBlockers = canonicalTaskBlockers(root, state, state.execution);
-    const nonmaterial = state.phase === 'blocked' ? nonmaterialDiscoveryGate(root, state) : null;
-    const assessedBlocker = nonmaterial
-      ? canonicalTaskBlockers(root, state, { ...state.execution,
-        tasks: [executionTask(state, nonmaterial.discovery.taskId)] })[0]
-      : null;
-    const expectedBlockedReasons = nonmaterial && taskId !== nonmaterial.discovery.taskId
-      ? [nonmaterial.blocker, ...taskBlockers.filter((reason) => reason !== assessedBlocker)]
-      : taskBlockers;
+    const expectedBlockedReasons = nonmaterialBlockerProjection(root, state, state.execution)
+      ?? canonicalTaskBlockers(root, state, state.execution);
     if (state.phase === 'blocked' && serialized(expectedBlockedReasons) !== serialized(state.blockedReasons)) {
       throw new StateError('Integration from blocked state is limited to an accepted sibling of exact receipt-backed task blockers', 'INVALID_PHASE');
     }
@@ -2285,15 +2295,8 @@ function reconcileIntegrationLocked({ root, selected, expectedRevision, clock, c
       throw new StateError('Central HEAD contains unrelated or non-equivalent work for the persisted integration intent', 'INTEGRATION_HEAD_MISMATCH');
     }
     const execution = replaceExecutionTask(state, task.id, { status: 'integrated', integratedCommit: current.headSha }, { integrationIntent: null });
-    const taskBlockers = canonicalTaskBlockers(root, state, execution);
-    const nonmaterial = nonmaterialDiscoveryGate(root, state);
-    const assessedBlocker = nonmaterial
-      ? canonicalTaskBlockers(root, state, { ...execution,
-        tasks: [executionTask({ ...state, execution }, nonmaterial.discovery.taskId)] })[0]
-      : null;
-    const blockedReasons = nonmaterial
-      ? [nonmaterial.blocker, ...taskBlockers.filter((reason) => reason !== assessedBlocker)]
-      : taskBlockers;
+    const blockedReasons = nonmaterialBlockerProjection(root, state, execution)
+      ?? canonicalTaskBlockers(root, state, execution);
     const next = revised(state, { phase: blockedReasons.length ? 'blocked' : 'implementing', execution, git: current,
       blockedReasons }, clock);
     return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'task-integrated',
@@ -3935,7 +3938,7 @@ export function rejectTask({ cwd = process.cwd(), changeId, taskId, reason, expe
       validateState({ cwd: root, changeId: selected }); const task = executionTask(state, taskId);
       if (!nonemptyString(reason)) throw new StateError('Task rejection requires a reason', 'INVALID_REJECTION');
       if (!['bound', 'scheduled', 'running', 'accepted', 'integration-pending', 'blocked', 'failed'].includes(task.status)) throw new StateError(`Task ${taskId} cannot be rejected from ${task.status}`, 'TASK_STATE_CONFLICT');
-      const nonmaterial = state.phase === 'blocked' ? nonmaterialDiscoveryGate(root, state) : null;
+      const nonmaterial = nonmaterialDiscoveryGate(root, state);
       if (nonmaterial?.discovery.taskId === taskId
           && state.execution.tasks.some((candidate) => candidate.id !== taskId && candidate.status === 'accepted')) {
         throw new StateError('The assessed discovery task cannot be rejected while an accepted sibling remains to integrate',
@@ -3956,12 +3959,16 @@ export function rejectTask({ cwd = process.cwd(), changeId, taskId, reason, expe
       // exact receipt-backed task blockers, then deliberately clears the
       // mutable blocker list. Rejection of that intent owner regenerates those
       // blockers from receipts instead of treating the cleared list as loss.
-      const preservedBlockers = state.execution.integrationIntent ? []
-        : nonTaskBlockers(root, state, { supersedingDiscoveryTaskId: taskId });
       const execution = replaceExecutionTask(state, taskId, { status: 'rejected' }, { activeWave: state.execution.activeWave.filter((id) => id !== taskId), integrationIntent: null });
       const timestamp = now(clock);
       const rejection = { schemaVersion: 1, changeId: state.changeId, taskId, binding: task.binding, reason, rejectedAt: timestamp };
-      const taskBlockers = canonicalTaskBlockers(root, state, execution, { taskId, rejection });
+      const nonmaterialBlockers = state.execution.integrationIntent
+        ? nonmaterialBlockerProjection(root, state, execution, { taskId, rejection })
+        : null;
+      const preservedBlockers = state.execution.integrationIntent ? []
+        : nonTaskBlockers(root, state, { supersedingDiscoveryTaskId: taskId });
+      const taskBlockers = nonmaterialBlockers ?? canonicalTaskBlockers(root, state, execution,
+        { taskId, rejection });
       const next = revised(state, { phase: 'blocked', execution, git: current,
         blockedReasons: [...preservedBlockers, ...taskBlockers] }, () => new Date(timestamp));
       return commitTransition({ cwd: root, previousState: state, nextState: next, type: 'task-rejected', summary: `Rejected implementation task ${taskId}`, crashStep,
