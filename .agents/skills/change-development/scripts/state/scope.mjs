@@ -443,10 +443,10 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
   for (const task of addedTasks) {
     if (continuityTaskIds.has(task.id)) continue;
     const ownedCriteria = addedCriteriaByOwner.get(task.id) ?? [];
-    const matching = branches.map((branch, branchIndex) => {
+    const matchingBranches = branches.map((branch, branchIndex) => {
       if (task.objective !== branch.responsibility || ownedCriteria.length === 0
           || ownedCriteria.some(({ id, description }) =>
-            !task.criterionIds.includes(id) || description !== branch.responsibility)) return [];
+            !task.criterionIds.includes(id) || description !== branch.responsibility)) return null;
       const replacedAssessedOwners = [...replacementByPriorOwner]
         .filter(([ownerId, replacementId]) => replacementId === task.id
           && assessedPriorOwners.has(ownerId)).map(([ownerId]) => ownerId);
@@ -454,7 +454,7 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
         .filter(({ id }) => task.dependsOn.includes(substitution(id))
           && !continuityTaskIds.has(substitution(id)))
         .flatMap(({ anticipatedPaths }) => anticipatedPaths));
-      return branch.authorities.map((authority, authorityIndex) => {
+      const authorities = branch.authorities.map((authority, authorityIndex) => {
         const carries = task.criterionIds.some((id) => authority.responsibleCriterionIds.has(id))
           || [...authority.responsibleTaskIds]
             .some((id) => task.dependsOn.includes(substitution(id)))
@@ -481,7 +481,10 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
         return task.anticipatedPaths.some(eligible)
           ? { key: `${branchIndex}:${authorityIndex}`, eligible, authority } : null;
       }).filter(Boolean);
-    }).flat();
+      return task.anticipatedPaths.every((path) =>
+        authorities.some(({ eligible }) => eligible(path))) ? authorities : null;
+    }).filter(Boolean);
+    const matching = matchingBranches.flat();
     if (matching.length === 0 || task.anticipatedPaths.length === 0
         || task.anticipatedPaths.some((path) => !matching.some(({ eligible }) => eligible(path)))) {
       if (branches.some((branch) => task.objective === branch.responsibility
@@ -573,12 +576,14 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
   const mechanismByWitness = new Map();
   const representedMechanisms = new Set();
   const assignWitness = (key, seen) => {
+    const branchIndex = key.slice(0, key.indexOf(':'));
     for (const witness of mechanismWitnesses.get(key) ?? []) {
       if (seen.has(witness)) continue;
       seen.add(witness);
-      const priorKey = mechanismByWitness.get(witness);
+      const branchWitness = `${branchIndex}:${witness}`;
+      const priorKey = mechanismByWitness.get(branchWitness);
       if (priorKey === undefined || assignWitness(priorKey, seen)) {
-        mechanismByWitness.set(witness, key);
+        mechanismByWitness.set(branchWitness, key);
         representedMechanisms.add(key);
         return true;
       }

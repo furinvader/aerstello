@@ -1007,9 +1007,9 @@ test('necessary-minor path anchors intersect the exact coverage row and scope de
   `${label} path cannot borrow necessary-minor authority`);
 });
 
-test('mixed minor task authority is branch-local and preserves unrelated plan ownership', () => {
-  const necessary = 'Add only the assessed correction.';
-  const removal = 'Remove only the assessed speculative path.';
+test('same-responsibility mixed minor authority stays branch-local', () => {
+  const necessary = 'Apply only the exact assessed correction.';
+  const removal = necessary;
   const task = (id, objective, criterionIds, anticipatedPaths, dependsOn = []) => ({
     id, title: `Task ${id}`, objective, rationale: `${id} remains bounded.`,
     specialization: specialization(), criterionIds, decisionIds: [], scenarioIds: [],
@@ -1199,6 +1199,56 @@ test('mixed minor task authority is branch-local and preserves unrelated plan ow
       addedTaskIds: ['necessary-remediation', 'removal-remediation'] }).length > 0,
     `mixed citation-free removal rejects ${path}`);
   }
+});
+
+test('same-responsibility independently complete branches may share one task', () => {
+  const responsibility = 'Apply only the exact assessed correction.';
+  const paths = ['first/exact.mjs', 'second/exact.mjs'];
+  const priorPlan = {
+    specialization: specialization(),
+    criteria: paths.map((path, index) => ({ id: `owned-${index}`, description: `Own ${path}.`,
+      disposition: 'owned', ownerTaskId: `owner-${index}`, deferredReason: null })),
+    tasks: paths.map((path, index) => ({ id: `owner-${index}`, specialization: specialization(),
+      criterionIds: [`owned-${index}`], anticipatedPaths: [path.split('/')[0]], dependsOn: [],
+      produces: [], consumes: [], unsplittable: null })),
+    checklistMappings: [], decisions: [],
+  };
+  const necessaryRows = paths.map((path, index) => ({ mechanism: `necessary-${index}`,
+    sourceCriterionIds: [`source-${index}`], acceptedCriterionIds: [`owned-${index}`],
+    invariantIds: [], decisionIds: [] }));
+  const removalRows = paths.map((mechanism) => ({ mechanism, sourceCriterionIds: [],
+    acceptedCriterionIds: [], invariantIds: [], decisionIds: [] }));
+  const mappings = [...necessaryRows, ...paths.map((mechanism, index) => ({ mechanism,
+    sourceCriterionIds: [`source-${index}`], acceptedCriterionIds: [`owned-${index}`],
+    invariantIds: [], decisionIds: [] })), ...removalRows];
+  const evidence = { result: { verdict: 'minor-amendment-required',
+    unnecessaryWork: paths, smallerSufficientAlternative: responsibility,
+    scopeDelta: { description: responsibility,
+      sourceCriterionIds: necessaryRows.flatMap(({ sourceCriterionIds }) => sourceCriterionIds),
+      acceptedCriterionIds: necessaryRows.flatMap(({ acceptedCriterionIds }) => acceptedCriterionIds),
+      invariantIds: [], materialSurfaces: [] },
+    coverage: [...necessaryRows.map((row) => ({ ...row,
+      classification: 'necessary-minor-expansion' })),
+    ...removalRows.map((row) => ({ ...row, classification: 'speculative' }))] },
+  packet: { changeInventory: { paths, mappings } }, cadence: { trigger: null } };
+  const resultingPlan = structuredClone(priorPlan);
+  resultingPlan.criteria.push({ id: 'remediation-criterion', description: responsibility,
+    disposition: 'owned', ownerTaskId: 'remediation', deferredReason: null });
+  resultingPlan.tasks.push({ id: 'remediation', specialization: specialization(),
+    objective: responsibility, criterionIds: ['remediation-criterion'], decisionIds: [],
+    checklistItemIds: [], anticipatedPaths: paths, dependsOn: ['owner-0', 'owner-1'],
+    produces: [], consumes: [], unsplittable: null });
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan, addedTaskIds: ['remediation'] }), [],
+  'two independently complete branches may authorize the same complete task');
+
+  const directory = mkdtempSync(join(tmpdir(), 'complete-branch-authority '));
+  const receiptPath = join(directory, 'authority.json');
+  writeReceiptJson(receiptPath, { evidence, priorPlan, resultingPlan,
+    addedTaskIds: ['remediation'] });
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority(
+    JSON.parse(readFileSync(receiptPath, 'utf8'))), [],
+  'receipt-backed independently complete branches retain their shared representation');
 });
 
 function testMinimalClosure(state, plan, overrides = {}) {
@@ -4850,7 +4900,7 @@ test('receipt-backed minor and trim remediation alone may revisit terminal owner
   }
 });
 
-test('receipt-backed mixed minor amendments require exact disjoint remediation branches', async () => {
+test('receipt-backed same-responsibility mixed minor amendments require complete branches', async () => {
   const fixture = await integratedTwoTaskFixture('mixed minor disjoint branch authority');
   let state = fixture.state;
   const evidence = integratedScopeEvidenceFor({ cwd: fixture.cwd, changeId: state.changeId });
@@ -4863,8 +4913,8 @@ test('receipt-backed mixed minor amendments require exact disjoint remediation b
   const speculativeMapping = { ...baseMapping, mechanism: speculativeMechanism,
     sourceCriterionIds: [], acceptedCriterionIds: [], invariantIds: [],
     rationale: 'The citation-free mechanism is unnecessary.' };
-  const necessaryResponsibility = 'Apply only the assessed necessary correction.';
-  const removalResponsibility = 'Remove only the assessed speculative mechanism.';
+  const necessaryResponsibility = 'Apply only the exact assessed correction.';
+  const removalResponsibility = necessaryResponsibility;
   evidence.packet.changeInventory.paths = [necessaryPath, removalPath];
   evidence.packet.changeInventory.mappings = [necessaryMapping, necessaryPathMapping, speculativeMapping];
   evidence.result = { ...evidence.result, verdict: 'minor-amendment-required',
@@ -4943,6 +4993,85 @@ test('receipt-backed mixed minor amendments require exact disjoint remediation b
     amendment: amendmentFor('disjoint', exact.addedTaskIds), resultingPlan: exact.plan });
   assert.deepEqual(state.execution.tasks.filter(({ id }) => exact.addedTaskIds.includes(id))
     .map(({ id, status }) => ({ id, status })), exact.addedTaskIds.map((id) => ({ id, status: 'unbound' })));
+});
+
+test('interrupted recovery rejects pooled same-responsibility branch authority', async () => {
+  const fixture = await integratedTwoTaskFixture('mixed branch recovery authority');
+  let state = fixture.state;
+  const evidence = integratedScopeEvidenceFor({ cwd: fixture.cwd, changeId: state.changeId });
+  const base = evidence.packet.changeInventory.mappings[0];
+  const necessaryPath = 'first.txt'; const removalPath = 'second.txt/nested-removal.txt';
+  const responsibility = 'Apply only the exact assessed correction.';
+  const necessaryMapping = { ...base };
+  const necessaryPathMapping = { ...base, mechanism: necessaryPath,
+    rationale: 'The assessed necessary path shares exact source authority.' };
+  const removalMapping = { ...base, mechanism: removalPath, sourceCriterionIds: [],
+    acceptedCriterionIds: [], invariantIds: [],
+    rationale: 'The citation-free mechanism is unnecessary.' };
+  evidence.packet.changeInventory.paths = [necessaryPath, removalPath];
+  evidence.packet.changeInventory.mappings = [necessaryMapping, necessaryPathMapping, removalMapping];
+  evidence.result = { ...evidence.result, verdict: 'minor-amendment-required',
+    coverage: [{ ...necessaryMapping, classification: 'necessary-minor-expansion' },
+      { ...necessaryPathMapping, classification: 'required' },
+      { ...removalMapping, classification: 'speculative' }],
+    unnecessaryWork: [removalPath], smallerSufficientAlternative: responsibility,
+    scopeDelta: { description: responsibility,
+      sourceCriterionIds: [...base.sourceCriterionIds],
+      acceptedCriterionIds: [...base.acceptedCriterionIds], invariantIds: [], materialSurfaces: [] } };
+  evidence.packetDigest = digestJson(evidence.packet);
+  evidence.resultDigest = digestJson(evidence.result);
+  state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
+    expectedRevision: state.revision });
+  const directory = changeDirectory(fixture.cwd, state.changeId);
+  const original = JSON.parse(readFileSync(join(directory, 'plan', 'plan.json'), 'utf8'));
+  const resultingPlan = structuredClone(original); resultingPlan.planRevision = 2;
+  resultingPlan.criteria.push({ id: 'recovery-necessary-criterion', description: responsibility,
+    disposition: 'owned', ownerTaskId: 'recovery-necessary-task', deferredReason: null },
+  { id: 'recovery-removal-criterion', description: responsibility,
+    disposition: 'owned', ownerTaskId: 'recovery-removal-task', deferredReason: null });
+  resultingPlan.tasks.push({ ...original.tasks[0], id: 'recovery-necessary-task',
+    title: 'Apply necessary recovery branch', objective: responsibility,
+    criterionIds: ['recovery-necessary-criterion'], decisionIds: [], checklistItemIds: [],
+    dependsOn: ['state-task'], anticipatedPaths: [necessaryPath], produces: [], consumes: [] },
+  { ...original.tasks[1], id: 'recovery-removal-task', title: 'Apply removal recovery branch',
+    objective: responsibility, criterionIds: ['recovery-removal-criterion'], decisionIds: [],
+    checklistItemIds: [], dependsOn: ['second-task'], anticipatedPaths: [removalPath],
+    produces: [], consumes: [] });
+  const trigger = digestJson(evidence);
+  const amendment = { id: 'mixed-branch-recovery-amendment',
+    reason: 'Apply the exact complete assessment branches.', authorization: 'scope-review', trigger,
+    delta: { addedTaskIds: ['recovery-necessary-task', 'recovery-removal-task'] },
+    invalidatedEvidence: [trigger] };
+  assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+    amendment, resultingPlan,
+    crashStep(step) { if (step === 'after-intent') throw new Error('pause mixed branch recovery'); } }),
+  /pause mixed branch recovery/u);
+
+  const transition = join(directory, 'transitions', String(state.revision + 1).padStart(8, '0'));
+  const intentPath = join(transition, 'intent.json');
+  const intent = JSON.parse(readFileSync(intentPath, 'utf8'));
+  const record = intent.authoritativeEvidence.amendmentDigest;
+  const pooled = record.value.resultingPlan;
+  pooled.criteria.find(({ id }) => id === 'recovery-removal-criterion').ownerTaskId =
+    'recovery-necessary-task';
+  const pooledTask = pooled.tasks.find(({ id }) => id === 'recovery-necessary-task');
+  pooledTask.criterionIds.push('recovery-removal-criterion');
+  pooledTask.anticipatedPaths.push(removalPath);
+  pooledTask.dependsOn.push('second-task');
+  pooled.tasks = pooled.tasks.filter(({ id }) => id !== 'recovery-removal-task');
+  record.value.delta.addedTaskIds = ['recovery-necessary-task'];
+  record.value.newDigest = digestJson(pooled); record.digest = digestJson(record.value);
+  intent.evidence.amendmentDigest = record.digest;
+  const closure = intent.authoritativeEvidence.minimalClosureDigest;
+  closure.value.planDigest = record.value.newDigest; closure.digest = digestJson(closure.value);
+  intent.evidence.minimalClosureDigest = closure.digest;
+  writeReceiptJson(intentPath, intent);
+  const before = durableSnapshot(directory);
+  assert.throws(() => recoverState({ cwd: fixture.cwd }),
+    (error) => error.code === 'RECOVERY_EVIDENCE_INVALID'
+      && /assessment-bound remediation projection/u.test(error.message));
+  assert.deepEqual(durableSnapshot(directory), before,
+    'pooled same-responsibility recovery fails before durable mutation');
 });
 
 test('receipt-backed amendments require every row-local trim and minor mechanism', async () => {
