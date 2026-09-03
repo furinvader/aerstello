@@ -135,8 +135,9 @@ may finish only one uniquely proven receipt-new/document-old update whose old
 document matches the compact projection and whose receipt matches the exact
 retried candidate. A receipt-only create is recoverable only when the compact
 projection proves no prior document. Ordinary reads never repair evidence;
-foreign, malformed, orphaned, stale, or ambiguous pairs fail closed. Scope
-documents retain the 256 KiB limit and receipts the 128-byte limit.
+foreign, malformed, orphaned, stale, or ambiguous pairs fail closed. The
+append-only scope journal retains a 16 MiB limit; authority snapshots and return
+envelopes retain the 256 KiB limit, and receipts retain the 128-byte limit.
 
 New cycles have no configured review-request count cap. To start with a finite
 total limit, pass `--review-limit <positive-safe-integer>` to `review:state init`.
