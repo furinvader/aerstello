@@ -133,7 +133,8 @@ export function validateAdmissionScopeSemantics(evidence, { effectivePlan, minim
 function positiveCitationFree(mapping) {
   return mapping.sourceCriterionIds.length === 0
     && mapping.acceptedCriterionIds.length === 0
-    && mapping.invariantIds.length === 0;
+    && mapping.invariantIds.length === 0
+    && (mapping.decisionIds ?? []).length === 0;
 }
 
 function setsIntersect(left, right) {
@@ -171,13 +172,17 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
       .filter((mechanism) => assessedPaths.has(mechanism)
         && !(citationFree && coverage.some((row) => row.mechanism === mechanism
           && positiveCitationFree(row)))));
-    if (kind === 'necessary') {
-      const deltaSources = new Set(evidence.result.scopeDelta?.sourceCriterionIds ?? []);
-      const deltaInvariants = new Set(evidence.result.scopeDelta?.invariantIds ?? []);
-      const sourceAnchors = new Set(mappings.filter(({ mechanism }) => !assessedPaths.has(mechanism))
-        .flatMap(({ sourceCriterionIds }) => sourceCriterionIds).filter((id) => deltaSources.has(id)));
-      const invariantAnchors = new Set(mappings.filter(({ mechanism }) => !assessedPaths.has(mechanism))
-        .flatMap(({ invariantIds }) => invariantIds).filter((id) => deltaInvariants.has(id)));
+    if (kind === 'necessary' || kind === 'removal') {
+      const deltaSources = kind === 'necessary'
+        ? new Set(evidence.result.scopeDelta?.sourceCriterionIds ?? []) : null;
+      const deltaInvariants = kind === 'necessary'
+        ? new Set(evidence.result.scopeDelta?.invariantIds ?? []) : null;
+      const anchorRows = (kind === 'necessary' ? mappings : coverage)
+        .filter(({ mechanism }) => !assessedPaths.has(mechanism));
+      const sourceAnchors = new Set(anchorRows.flatMap(({ sourceCriterionIds }) => sourceCriterionIds)
+        .filter((id) => deltaSources === null || deltaSources.has(id)));
+      const invariantAnchors = new Set(anchorRows.flatMap(({ invariantIds }) => invariantIds)
+        .filter((id) => deltaInvariants === null || deltaInvariants.has(id)));
       for (const mapping of inventoryMappings) {
         if (assessedPaths.has(mapping.mechanism)
             && (setsIntersect(mapping.sourceCriterionIds, sourceAnchors)
@@ -275,6 +280,9 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
   if (!isDeepStrictEqual(resultingPlan?.checklistMappings ?? [], expectedChecklistMappings)) {
     errors.push('$ nonmaterial amendment checklist mappings must preserve exact replacement substitutions');
   }
+  if (!isDeepStrictEqual(resultingPlan?.decisions ?? [], priorPlan?.decisions ?? [])) {
+    errors.push('$ nonmaterial amendment decisions must preserve the exact ordered prior array');
+  }
   for (const criterion of addedCriteria) {
     const owner = addedTasksById.get(criterion.ownerTaskId);
     if (criterion.disposition !== 'owned' || !declaredTaskIds.has(criterion.ownerTaskId)
@@ -349,10 +357,10 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
         && branch.responsibleTaskIds.has(discoveryTaskId);
       return task.anticipatedPaths.length > 0 && task.anticipatedPaths.every((path) =>
         branch.mappedPaths.has(path)
-        || ((!branch.citationFree || assessedPaths.has(path))
+        || ((!branch.citationFree || branch.citationFreePaths.has(path))
           && [...inheritedPaths].some((ownerPath) => sameOrDescendantPath(path, ownerPath)))
         || (branch.citationFree && replacesAssessedDiscovery && branch.citationFreePaths.has(path))
-        || (branch.citationFree && assessedPaths.has(path) && [...dependencyPaths]
+        || (branch.citationFree && branch.citationFreePaths.has(path) && [...dependencyPaths]
           .some((ownerPath) => sameOrDescendantPath(path, ownerPath))));
     });
     if (matching.length === 0) {
