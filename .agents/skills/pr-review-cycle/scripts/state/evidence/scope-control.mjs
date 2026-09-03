@@ -20,6 +20,7 @@ import {
 } from '../locations.mjs';
 
 const EVIDENCE_LIMIT_BYTES = 256 * 1024;
+const SCOPE_JOURNAL_LIMIT_BYTES = 16 * 1024 * 1024;
 const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 
 function digest(value) {
@@ -30,6 +31,13 @@ function assertValid(value, validate, label) {
   const errors = validate(value);
   if (errors.length > 0) {
     throw new StateError(`Invalid ${label}:\n- ${errors.join('\n- ')}`, 'INVALID_SCOPE_EVIDENCE');
+  }
+}
+
+function assertWithinEvidenceLimit(value, label, limitBytes, limitLabel) {
+  const serializedBytes = Buffer.byteLength(JSON.stringify(value), 'utf8') + 1;
+  if (serializedBytes > limitBytes) {
+    throw new StateError(`${label} exceeds ${limitLabel}`, 'SCOPE_EVIDENCE_TOO_LARGE');
   }
 }
 
@@ -51,13 +59,13 @@ function persistEvidence({
   previousDigest,
   label,
   replace = false,
+  limitBytes = EVIDENCE_LIMIT_BYTES,
+  limitLabel = '256 KiB',
 }) {
+  assertWithinEvidenceLimit(value, label, limitBytes, limitLabel);
   const serialized = canonicalSerializedJson(value);
-  if (Buffer.byteLength(serialized, 'utf8') > EVIDENCE_LIMIT_BYTES) {
-    throw new StateError(`${label} exceeds 256 KiB`, 'SCOPE_EVIDENCE_TOO_LARGE');
-  }
   if (existsSync(documentPath)) {
-    const existing = readJsonSidecar(documentPath, label, EVIDENCE_LIMIT_BYTES);
+    const existing = readJsonSidecar(documentPath, label, limitBytes);
     if (canonicalSerializedJson(existing) === serialized) {
       if (readReceipt(receiptPath, label) !== expectedDigest) {
         throw new StateError(`${label} receipt is stale or altered`, 'INVALID_SCOPE_EVIDENCE');
@@ -91,8 +99,9 @@ function persistEvidence({
 
 function readEvidenceForUpdate({
   documentPath, receiptPath, validate, expectedDigest, previousDigest, label,
+  limitBytes = EVIDENCE_LIMIT_BYTES,
 }) {
-  const value = readJsonSidecar(documentPath, label, EVIDENCE_LIMIT_BYTES);
+  const value = readJsonSidecar(documentPath, label, limitBytes);
   assertValid(value, validate, label);
   const documentDigest = expectedDigest(value);
   const receiptDigest = readReceipt(receiptPath, label);
@@ -108,8 +117,11 @@ function readEvidenceForUpdate({
   return { value, digest: documentDigest, receiptDigest };
 }
 
-function readEvidence({ documentPath, receiptPath, validate, expectedDigest, label }) {
-  const value = readJsonSidecar(documentPath, label, EVIDENCE_LIMIT_BYTES);
+function readEvidence({
+  documentPath, receiptPath, validate, expectedDigest, label,
+  limitBytes = EVIDENCE_LIMIT_BYTES,
+}) {
+  const value = readJsonSidecar(documentPath, label, limitBytes);
   assertValid(value, validate, label);
   const actual = readReceipt(receiptPath, label);
   const expected = expectedDigest(value);
@@ -152,6 +164,12 @@ export function persistScopeJournal(cwd, state, journal, {
 } = {}) {
   const authority = readScopeAuthority(cwd, state).value;
   assertValid(journal, (value) => validateScopeControlJournal(value, authority), 'scope control journal');
+  assertWithinEvidenceLimit(
+    journal,
+    'scope control journal',
+    SCOPE_JOURNAL_LIMIT_BYTES,
+    '16 MiB',
+  );
   persistEvidence({
     documentPath: scopeControlJournalPath(cwd, state.prNumber),
     receiptPath: scopeControlJournalReceiptPath(cwd, state.prNumber),
@@ -161,6 +179,8 @@ export function persistScopeJournal(cwd, state, journal, {
     previousDigest,
     label: 'scope control journal',
     replace: true,
+    limitBytes: SCOPE_JOURNAL_LIMIT_BYTES,
+    limitLabel: '16 MiB',
   });
 }
 
@@ -173,6 +193,7 @@ export function readScopeJournalForUpdate(cwd, state) {
     expectedDigest: scopeControlJournalDigest,
     previousDigest: state.scopeControl?.journalDigest ?? null,
     label: 'scope control journal',
+    limitBytes: SCOPE_JOURNAL_LIMIT_BYTES,
   });
 }
 
@@ -184,6 +205,7 @@ export function readScopeJournal(cwd, state) {
     validate: (value) => validateScopeControlJournal(value, authority),
     expectedDigest: scopeControlJournalDigest,
     label: 'scope control journal',
+    limitBytes: SCOPE_JOURNAL_LIMIT_BYTES,
   });
 }
 

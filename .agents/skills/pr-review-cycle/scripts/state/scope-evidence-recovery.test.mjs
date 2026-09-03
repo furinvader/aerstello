@@ -5,6 +5,8 @@ import test from 'node:test';
 
 import * as harness from './test-support/state-harness.mjs';
 import {
+  persistScopeAuthority,
+  persistScopeJournal,
   persistScopeReturn,
   readScopeAuthority,
   readScopeJournal,
@@ -12,6 +14,7 @@ import {
   scopeReturnDigest,
 } from './evidence/scope-control.mjs';
 import { canonicalSerializedJson } from './atomic-io.mjs';
+import { scopeControlJournalDigest } from '../contracts/contracts.mjs';
 import {
   scopeAuthorityPath,
   scopeAuthorityReceiptPath,
@@ -115,6 +118,53 @@ function classificationInput(fixture, verdict = 'within-scope') {
     remediationShapeDigest: `sha256:${harness.taskPacketDigest(fixture.packet)}`,
     tripwires: [],
   };
+}
+
+function journalLargerThan(fixture, minimumBytes) {
+  const template = classificationInput(fixture);
+  const findingIds = Array.from(
+    { length: 256 },
+    (_, index) => `historical-finding-${index}-${'\u0000'.repeat(200)}`,
+  );
+  const findingFingerprints = Array.from(
+    { length: 256 },
+    (_, index) => `historical-fingerprint-${index}-${'\u0000'.repeat(200)}`,
+  );
+  const journal = {
+    schemaVersion: 1,
+    prNumber: fixture.adopted.prNumber,
+    authorityDigest: fixture.adopted.scopeControl.authorityDigest,
+    entries: [],
+  };
+  const entryCount = minimumBytes >= 16 * 1024 * 1024 ? 28 : 1;
+  for (let sequence = 1; sequence <= entryCount; sequence += 1) {
+    journal.entries.push({
+      ...template,
+      schemaVersion: 1,
+      sequence,
+      entryId: `historical-classification-${sequence}`,
+      kind: 'classification',
+      authorityDigest: journal.authorityDigest,
+      rootCauseId: `historical-root-${sequence}`,
+      findingIds,
+      findingFingerprints,
+    });
+  }
+  assert.ok(Buffer.byteLength(canonicalSerializedJson(journal), 'utf8') > minimumBytes);
+  return journal;
+}
+
+function installJournalProjection(cwd, state, journal) {
+  persistScopeJournal(cwd, state, journal);
+  const projected = {
+    ...state,
+    scopeControl: {
+      ...state.scopeControl,
+      journalDigest: scopeControlJournalDigest(journal),
+    },
+  };
+  writeFileSync(harness.statePath(cwd, state.prNumber), `${canonicalSerializedJson(projected)}\n`);
+  return projected;
 }
 
 function decisionInput(rootCauseId = 'scope-root') {
@@ -423,12 +473,76 @@ test('reclassification retains return identity and a second-root return retry re
   assert.equal(readScopeReturn(cwd, recovered).digest, recovered.scopeControl.returnDigest);
 });
 
+test('above-256-KiB journal reads and exact classification retry preserve complete evidence', () => {
+  const cwd = harness.repo();
+  const fixture = proposedFixture(cwd, 'large-journal-recovery-task');
+  const largeJournal = journalLargerThan(fixture, 256 * 1024);
+  assert.ok(Buffer.byteLength(canonicalSerializedJson(largeJournal), 'utf8') <= 16 * 1024 * 1024);
+  const projected = installJournalProjection(cwd, fixture.adopted, largeJournal);
+  const documentPath = scopeControlJournalPath(cwd, 17);
+  const receiptPath = scopeControlJournalReceiptPath(cwd, 17);
+  const documentBeforeRead = readFileSync(documentPath);
+  const receiptBeforeRead = readFileSync(receiptPath);
+
+  assert.equal(readScopeJournal(cwd, projected).digest, projected.scopeControl.journalDigest);
+  assert.deepEqual(readFileSync(documentPath), documentBeforeRead);
+  assert.deepEqual(readFileSync(receiptPath), receiptBeforeRead);
+
+  const classification = classificationInput(fixture);
+  const oldDocument = readFileSync(documentPath);
+  assert.throws(() => checkpointScopeClassification({
+    cwd, classification, expectedRevision: projected.revision, event: INVALID_EVENT,
+  }), { code: 'INVALID_EVENT' });
+  writeFileSync(documentPath, oldDocument);
+  const pendingReceipt = readFileSync(receiptPath);
+
+  const recovered = checkpointScopeClassification({
+    cwd, classification, expectedRevision: projected.revision,
+  });
+  assert.equal(recovered.scopeControl.gate, 'ready');
+  assert.equal(scopeStatus({ cwd }).journal.value.entries.at(-1).entryId, classification.entryId);
+  assert.notDeepEqual(readFileSync(documentPath), oldDocument);
+  assert.deepEqual(readFileSync(receiptPath), pendingReceipt);
+});
+
+test('scope-control journal rejects valid evidence larger than 16 MiB before persistence', () => {
+  const cwd = harness.repo();
+  const fixture = proposedFixture(cwd, 'oversized-journal-task');
+  const oversized = journalLargerThan(fixture, 16 * 1024 * 1024);
+  const documentPath = scopeControlJournalPath(cwd, 17);
+  const receiptPath = scopeControlJournalReceiptPath(cwd, 17);
+  const documentBefore = readFileSync(documentPath);
+  const receiptBefore = readFileSync(receiptPath);
+
+  assert.throws(
+    () => persistScopeJournal(cwd, fixture.adopted, oversized),
+    { code: 'SCOPE_EVIDENCE_TOO_LARGE', message: /scope control journal exceeds 16 MiB/u },
+  );
+  assert.deepEqual(readFileSync(documentPath), documentBefore);
+  assert.deepEqual(readFileSync(receiptPath), receiptBefore);
+});
+
 function returnedHead(fixture) {
   return fixture.packet.reviewedHeadSha;
 }
 
-test('scope readers preserve the 256 KiB evidence bound above active-state size', () => {
+test('authority and return evidence preserve the 256 KiB bound above active-state size', () => {
   const { cwd, state } = fixture();
+  const oversizedAuthority = authority(state.currentIntegrationHeadSha);
+  oversizedAuthority.deferredFollowUps = Array.from(
+    { length: 256 },
+    (_, index) => ({ id: `follow-up-${index}`, reference: 'z'.repeat(4000) }),
+  );
+  const authorityDocumentBefore = readFileSync(scopeAuthorityPath(cwd, 17));
+  const authorityReceiptBefore = readFileSync(scopeAuthorityReceiptPath(cwd, 17));
+  assert.ok(Buffer.byteLength(canonicalSerializedJson(oversizedAuthority), 'utf8') > 256 * 1024);
+  assert.throws(
+    () => persistScopeAuthority(cwd, state, oversizedAuthority),
+    { code: 'SCOPE_EVIDENCE_TOO_LARGE', message: /scope authority exceeds 256 KiB/u },
+  );
+  assert.deepEqual(readFileSync(scopeAuthorityPath(cwd, 17)), authorityDocumentBefore);
+  assert.deepEqual(readFileSync(scopeAuthorityReceiptPath(cwd, 17)), authorityReceiptBefore);
+
   unlinkSync(scopeReturnPath(cwd, 17));
   unlinkSync(scopeReturnReceiptPath(cwd, 17));
   const large = scopeReturn(state);
