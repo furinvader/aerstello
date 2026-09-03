@@ -254,6 +254,247 @@ test('removal branches project exact grounded paths without widening citation-fr
   'an unrelated assessed sibling beneath the same owner cannot borrow citation-free authority');
 });
 
+test('mixed removal authority remains local to each exact mechanism', () => {
+  const responsibility = 'Remove both assessed mechanisms.';
+  const cited = 'owned/cited.mjs'; const citationFree = 'owned/exact.json';
+  const row = (mechanism, acceptedCriterionIds = []) => ({ mechanism, sourceCriterionIds: [],
+    acceptedCriterionIds, invariantIds: [] });
+  const priorTask = { id: 'owner', objective: 'Own the retained area.', criterionIds: ['owned'],
+    anticipatedPaths: ['owned'], dependsOn: [], produces: [], consumes: [] };
+  const priorPlan = { criteria: [{ id: 'owned', description: 'Own the retained area.',
+    disposition: 'owned', ownerTaskId: 'owner', deferredReason: null }], tasks: [priorTask],
+  checklistMappings: [], decisions: [] };
+  const evidence = { result: { verdict: 'trim-required', unnecessaryWork: [cited, citationFree],
+    smallerSufficientAlternative: responsibility, coverage: [
+      { ...row(cited, ['owned']), classification: 'speculative' },
+      { ...row(citationFree), classification: 'speculative' },
+    ] }, packet: { changeInventory: { paths: [cited, citationFree], mappings: [
+      row(cited, ['owned']), row(citationFree),
+    ] } }, cadence: { trigger: null } };
+  const plan = (paths) => ({ ...structuredClone(priorPlan), criteria: [...priorPlan.criteria,
+    { id: 'remove', description: responsibility, disposition: 'owned',
+      ownerTaskId: 'remediation', deferredReason: null }], tasks: [priorTask,
+    { id: 'remediation', objective: responsibility, criterionIds: ['remove'],
+      anticipatedPaths: paths, dependsOn: ['owner'], produces: [], consumes: [] }] });
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: plan([cited, citationFree]), addedTaskIds: ['remediation'] }), [],
+  'one task may cover both mechanisms only through each mechanism-local authority');
+  assert.ok(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: plan([cited]), addedTaskIds: ['remediation'] })
+    .some((error) => /complete removal remediation branch/u.test(error)),
+  'covering the cited mechanism does not silently represent its citation-free sibling');
+  assert.ok(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: plan(['outside/cited.mjs']), addedTaskIds: ['remediation'] }).length > 0,
+  'a cited mechanism cannot inherit a path from an unrelated owner');
+});
+
+test('minor expansion requires every exact mechanism to be represented', () => {
+  const responsibility = 'Add both bounded corrections.';
+  const task = (id, criterionId, path, dependency) => ({ id, objective: responsibility,
+    criterionIds: [criterionId], anticipatedPaths: [path], dependsOn: [dependency],
+    produces: [], consumes: [] });
+  const priorPlan = { criteria: ['first', 'second'].map((id) => ({ id,
+    description: `${id} authority.`, disposition: 'owned', ownerTaskId: `${id}-owner`,
+    deferredReason: null })), tasks: ['first', 'second'].map((id) => ({ id: `${id}-owner`,
+    objective: `${id} authority.`, criterionIds: [id], anticipatedPaths: [`${id}/owned`],
+    dependsOn: [], produces: [], consumes: [] })), checklistMappings: [], decisions: [] };
+  const rows = ['first', 'second'].map((id) => ({ mechanism: `${id}/correction.mjs`,
+    classification: 'necessary-minor-expansion', sourceCriterionIds: ['source'],
+    acceptedCriterionIds: [id], invariantIds: [] }));
+  const evidence = { result: { verdict: 'minor-amendment-required', coverage: rows,
+    unnecessaryWork: [], smallerSufficientAlternative: null,
+    scopeDelta: { description: responsibility, sourceCriterionIds: ['source'],
+      acceptedCriterionIds: ['first', 'second'], invariantIds: [], materialSurfaces: [] } },
+  packet: { changeInventory: { paths: rows.map(({ mechanism }) => mechanism), mappings: rows } },
+  cadence: { trigger: null } };
+  const complete = structuredClone(priorPlan);
+  complete.criteria.push(...['first', 'second'].map((id) => ({ id: `${id}-new`,
+    description: responsibility, disposition: 'owned', ownerTaskId: `${id}-remediation`,
+    deferredReason: null })));
+  complete.tasks.push(task('first-remediation', 'first-new', rows[0].mechanism, 'first-owner'),
+    task('second-remediation', 'second-new', rows[1].mechanism, 'second-owner'));
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: complete, addedTaskIds: ['first-remediation', 'second-remediation'] }), []);
+  const omitted = structuredClone(complete);
+  omitted.criteria.pop(); omitted.tasks.pop();
+  assert.ok(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: omitted, addedTaskIds: ['first-remediation'] })
+    .some((error) => /complete necessary remediation branch/u.test(error)),
+  'one covered minor mechanism cannot complete its disjoint sibling');
+});
+
+test('assessment-grounded replacements may update edges while continuity replacements may not', () => {
+  const responsibility = 'Apply the assessed remediation.';
+  const task = (id, objective, criterionIds, anticipatedPaths, dependsOn = []) => ({ id, objective,
+    criterionIds, anticipatedPaths, dependsOn, produces: [], consumes: [] });
+  const priorPlan = { criteria: [
+    { id: 'assessed', description: 'Assessed.', disposition: 'owned',
+      ownerTaskId: 'assessed-owner', deferredReason: null },
+    { id: 'dependency', description: 'Dependency.', disposition: 'owned',
+      ownerTaskId: 'dependency-owner', deferredReason: null },
+  ], tasks: [task('assessed-owner', 'Prior assessed.', ['assessed'], ['assessed']),
+    task('dependency-owner', 'Dependency.', ['dependency'], ['dependency'])],
+  checklistMappings: [], decisions: [] };
+  const mapping = { mechanism: 'assessed/new.mjs', sourceCriterionIds: [],
+    acceptedCriterionIds: ['assessed'], invariantIds: [] };
+  const evidence = { result: { verdict: 'trim-required', unnecessaryWork: [mapping.mechanism],
+    smallerSufficientAlternative: responsibility,
+    coverage: [{ ...mapping, classification: 'speculative' }] },
+  packet: { changeInventory: { paths: [mapping.mechanism], mappings: [mapping] } },
+  cadence: { trigger: null } };
+  const resultingPlan = structuredClone(priorPlan);
+  resultingPlan.tasks = resultingPlan.tasks.filter(({ id }) => id !== 'assessed-owner');
+  resultingPlan.criteria[0].ownerTaskId = 'remediation';
+  resultingPlan.criteria.push({ id: 'new-remediation', description: responsibility,
+    disposition: 'owned', ownerTaskId: 'remediation', deferredReason: null });
+  resultingPlan.tasks.push(task('remediation', responsibility, ['assessed', 'new-remediation'],
+    [mapping.mechanism], ['dependency-owner']));
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan, addedTaskIds: ['remediation'] }), [],
+  'an assessed replacement may introduce its validated dependency edge');
+  const continuity = structuredClone(resultingPlan);
+  continuity.tasks = continuity.tasks.filter(({ id }) => id !== 'dependency-owner');
+  continuity.criteria[1].ownerTaskId = 'dependency-replacement';
+  continuity.criteria.push({ ...priorPlan.criteria[1], id: 'dependency-copy',
+    ownerTaskId: 'dependency-replacement' });
+  continuity.tasks.push(task('dependency-replacement', 'Dependency.',
+    ['dependency', 'dependency-copy'], ['dependency'], ['remediation']));
+  assert.ok(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: continuity, addedTaskIds: ['remediation', 'dependency-replacement'] })
+    .some((error) => /must preserve dependency edges/u.test(error)),
+  'an unrelated continuity replacement cannot change dependency edges');
+});
+
+test('assessed replacements preserve substituted prior edges while admitting assessed additions', () => {
+  const responsibility = 'Replace both assessed owners.';
+  const task = (id, criterionIds, path, dependsOn = [], produces = [], consumes = []) => ({
+    id, objective: id, criterionIds, anticipatedPaths: [path], dependsOn, produces, consumes });
+  const priorPlan = { criteria: ['a', 'b', 'extra'].map((id) => ({ id,
+    description: `${id} authority.`, disposition: 'owned', ownerTaskId: `${id}-owner`,
+    deferredReason: null })), tasks: [
+      task('a-owner', ['a'], 'a', [], ['artifact']),
+      task('b-owner', ['b'], 'b', ['extra-owner', 'a-owner'], [],
+        [{ artifactId: 'artifact', producerTaskId: 'a-owner' }]),
+      task('extra-owner', ['extra'], 'extra'),
+    ], checklistMappings: [], decisions: [] };
+  const rows = ['a', 'b'].map((id) => ({ mechanism: `${id}/assessed.mjs`,
+    sourceCriterionIds: [], acceptedCriterionIds: [id], invariantIds: [] }));
+  const evidence = { result: { verdict: 'trim-required', unnecessaryWork: rows
+    .map(({ mechanism }) => mechanism), smallerSufficientAlternative: responsibility,
+  coverage: rows.map((row) => ({ ...row, classification: 'speculative' })) },
+  packet: { changeInventory: { paths: rows.map(({ mechanism }) => mechanism), mappings: rows } },
+  cadence: { trigger: null } };
+  const exact = () => ({ criteria: [
+    { ...priorPlan.criteria[0], ownerTaskId: 'a-replacement' },
+    { ...priorPlan.criteria[1], ownerTaskId: 'b-replacement' }, priorPlan.criteria[2],
+    { id: 'a-new', description: responsibility, disposition: 'owned',
+      ownerTaskId: 'a-replacement', deferredReason: null },
+    { id: 'b-new', description: responsibility, disposition: 'owned',
+      ownerTaskId: 'b-replacement', deferredReason: null },
+  ], tasks: [priorPlan.tasks[2],
+    { ...task('a-replacement', ['a', 'a-new'], rows[0].mechanism, [], ['artifact']),
+      objective: responsibility },
+    { ...task('b-replacement', ['b', 'b-new'], rows[1].mechanism, ['a-replacement'], [],
+      [{ artifactId: 'artifact', producerTaskId: 'a-replacement' }]), objective: responsibility },
+  ], checklistMappings: [], decisions: [] });
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: exact(), addedTaskIds: ['a-replacement', 'b-replacement'] }), []);
+  // The retained-owner edge may change; only edges whose target owner is replaced are immutable.
+  const extra = exact(); extra.tasks.at(-1).dependsOn.push('extra-owner');
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: extra, addedTaskIds: ['a-replacement', 'b-replacement'] }), [],
+  'an assessed replacement may add a valid edge while retaining the substituted prior edge');
+  const droppedDependency = exact(); droppedDependency.tasks.at(-1).dependsOn = [];
+  assert.ok(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: droppedDependency, addedTaskIds: ['a-replacement', 'b-replacement'] })
+    .some((error) => /must preserve prior dependency edges/u.test(error)));
+  const droppedConsume = exact(); droppedConsume.tasks.at(-1).consumes = [];
+  assert.ok(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: droppedConsume, addedTaskIds: ['a-replacement', 'b-replacement'] })
+    .some((error) => /must preserve prior consume edges/u.test(error)));
+});
+
+test('criterionless discovery replacement is exact, unique, and cadence-bound', () => {
+  const responsibility = 'Replace the criterionless discovery.';
+  const path = 'discovery/exact.json';
+  const mapping = { mechanism: path, sourceCriterionIds: [], acceptedCriterionIds: [],
+    invariantIds: [] };
+  const discovery = { id: 'discovery-task', objective: 'Discover scope.', criterionIds: [],
+    anticipatedPaths: ['discovery'], dependsOn: [], produces: ['discovery-artifact'], consumes: [] };
+  const dependent = { id: 'dependent', objective: 'Use discovery.', criterionIds: ['dependent'],
+    anticipatedPaths: ['dependent'], dependsOn: ['discovery-task'], produces: [],
+    consumes: [{ artifactId: 'discovery-artifact', producerTaskId: 'discovery-task' }] };
+  const priorPlan = { criteria: [{ id: 'dependent', description: 'Use discovery.',
+    disposition: 'owned', ownerTaskId: 'dependent', deferredReason: null }],
+  tasks: [discovery, dependent], checklistMappings: [{ id: 'check', taskIds: ['discovery-task'] }],
+  decisions: [] };
+  const evidence = { result: { verdict: 'trim-required', unnecessaryWork: [path],
+    smallerSufficientAlternative: responsibility,
+    coverage: [{ ...mapping, classification: 'speculative' }] },
+  packet: { changeInventory: { paths: [path], mappings: [mapping] } },
+  cadence: { trigger: 'worker-scope-discovery:discovery-task:result:criterionless' } };
+  const replacement = (id) => ({ id, objective: responsibility, criterionIds: [`criterion-${id}`],
+    anticipatedPaths: [path], dependsOn: [], produces: ['discovery-artifact'], consumes: [] });
+  const plan = (candidateIds = ['replacement'], selected = 'replacement') => ({
+    criteria: [priorPlan.criteria[0], ...candidateIds.map((id) => ({ id: `criterion-${id}`,
+      description: responsibility, disposition: 'owned', ownerTaskId: id, deferredReason: null }))],
+    tasks: [{ ...dependent, dependsOn: [selected],
+      consumes: [{ ...dependent.consumes[0], producerTaskId: selected }] },
+    ...candidateIds.map(replacement)], checklistMappings: [{ id: 'check', taskIds: [selected] }],
+    decisions: [],
+  });
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: plan(), addedTaskIds: ['replacement'] }), [],
+  'the unique graph- and checklist-preserving candidate replaces the criterionless discovery');
+  const graphSelected = plan(['replacement', 'other'], 'replacement');
+  graphSelected.tasks.find(({ id }) => id === 'other').dependsOn = ['replacement'];
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: graphSelected, addedTaskIds: ['replacement', 'other'] }), [],
+  'incoming graph and checklist substitutions select one of multiple semantic candidates');
+  const graphPrior = structuredClone(priorPlan); graphPrior.checklistMappings = [];
+  const graphOnly = structuredClone(graphSelected); graphOnly.checklistMappings = [];
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan: graphPrior,
+    resultingPlan: graphOnly, addedTaskIds: ['replacement', 'other'] }), [],
+  'incoming graph substitution independently selects the unique candidate');
+  const checklistPrior = structuredClone(priorPlan);
+  checklistPrior.tasks[1].dependsOn = []; checklistPrior.tasks[1].consumes = [];
+  const checklistOnly = structuredClone(graphSelected);
+  checklistOnly.tasks[0].dependsOn = []; checklistOnly.tasks[0].consumes = [];
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan: checklistPrior,
+    resultingPlan: checklistOnly, addedTaskIds: ['replacement', 'other'] }), [],
+  'checklist substitution independently selects the unique candidate');
+  const noIncomingPlan = structuredClone(priorPlan);
+  noIncomingPlan.tasks = [discovery]; noIncomingPlan.criteria = [];
+  noIncomingPlan.checklistMappings = [];
+  const ambiguousPlan = { criteria: ['first', 'second'].map((id) => ({ id: `criterion-${id}`,
+    description: responsibility, disposition: 'owned', ownerTaskId: id, deferredReason: null })),
+    tasks: ['first', 'second'].map(replacement), checklistMappings: [], decisions: [] };
+  assert.ok(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan: noIncomingPlan,
+    resultingPlan: ambiguousPlan, addedTaskIds: ['first', 'second'] })
+    .some((error) => /replacement is ambiguous/u.test(error)),
+  'multiple equally exact candidates fail explicitly');
+  const absent = plan();
+  absent.tasks.find(({ id }) => id === 'replacement').produces = [];
+  assert.ok(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: absent, addedTaskIds: ['replacement'] })
+    .some((error) => /lacks one exact replacement/u.test(error)),
+  'zero exact candidates retain the normal missing-replacement rejection');
+  for (const changedEvidence of [{ ...evidence, cadence: { trigger: null } },
+    { ...evidence, cadence: { trigger: 'worker-scope-discovery:other-task:result:wrong' } }]) {
+    assert.ok(validateNonmaterialAmendmentTaskAuthority({ evidence: changedEvidence, priorPlan,
+      resultingPlan: plan(), addedTaskIds: ['replacement'] })
+      .some((error) => /lacks one exact replacement/u.test(error)),
+    'absent or wrong cadence cannot authorize criterionless replacement');
+  }
+  const unrelatedPlan = structuredClone(priorPlan);
+  unrelatedPlan.tasks.push({ id: 'unrelated-ownerless', objective: 'Unrelated.', criterionIds: [],
+    anticipatedPaths: ['unrelated'], dependsOn: [], produces: [], consumes: [] });
+  assert.ok(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan: unrelatedPlan,
+    resultingPlan: plan(), addedTaskIds: ['replacement'] })
+    .some((error) => /removed task unrelated-ownerless lacks one exact replacement/u.test(error)),
+  'the fallback never absorbs an unrelated ownerless task');
+});
+
 test('nonmaterial amendments preserve the exact ordered prior decision array', () => {
   const responsibility = 'Remove the exact path.'; const exactPath = 'owned/exact.mjs';
   const decisions = [
@@ -4224,6 +4465,86 @@ test('receipt-backed mixed minor amendments require exact disjoint remediation b
     .map(({ id, status }) => ({ id, status })), exact.addedTaskIds.map((id) => ({ id, status: 'unbound' })));
 });
 
+test('receipt-backed amendments require every row-local trim and minor mechanism', async () => {
+  for (const verdict of ['trim-required', 'minor-amendment-required']) {
+    const fixture = await integratedTwoTaskFixture(`row-local durable ${verdict}`);
+    let state = fixture.state;
+    const evidence = integratedScopeEvidenceFor({ cwd: fixture.cwd, changeId: state.changeId });
+    const base = evidence.packet.changeInventory.mappings[0];
+    const responsibility = verdict === 'trim-required'
+      ? 'Remove both exact row-local mechanisms.' : 'Add both exact row-local mechanisms.';
+    const rows = [
+      { ...base, mechanism: 'first.txt/row-local.mjs', acceptedCriterionIds: ['durable-state'],
+        rationale: 'The first mechanism is grounded by its accepted owner.' },
+      { ...base, mechanism: 'second.txt/row-local.mjs',
+        sourceCriterionIds: verdict === 'trim-required' ? [] : [...base.sourceCriterionIds],
+        acceptedCriterionIds: verdict === 'trim-required' ? [] : ['second-change'],
+        invariantIds: [], rationale: 'The second mechanism has exact row-local authority.' },
+    ];
+    evidence.packet.changeInventory.paths = rows.map(({ mechanism }) => mechanism);
+    evidence.packet.changeInventory.mappings = rows;
+    evidence.result = { ...evidence.result, verdict,
+      coverage: rows.map((row) => ({ ...row,
+        classification: verdict === 'trim-required' ? 'speculative' : 'necessary-minor-expansion' })),
+      unnecessaryWork: verdict === 'trim-required' ? rows.map(({ mechanism }) => mechanism) : [],
+      smallerSufficientAlternative: verdict === 'trim-required' ? responsibility : null,
+      scopeDelta: verdict === 'minor-amendment-required' ? { description: responsibility,
+        sourceCriterionIds: [...base.sourceCriterionIds],
+        acceptedCriterionIds: ['durable-state', 'second-change'], invariantIds: [],
+        materialSurfaces: [] } : null };
+    evidence.packetDigest = digestJson(evidence.packet);
+    evidence.resultDigest = digestJson(evidence.result);
+    state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
+      expectedRevision: state.revision });
+    const directory = changeDirectory(fixture.cwd, state.changeId);
+    const original = JSON.parse(readFileSync(join(directory, 'plan', 'plan.json'), 'utf8'));
+    const candidate = (count) => {
+      const plan = structuredClone(original); plan.planRevision = 2;
+      const addedTaskIds = [];
+      for (let index = 0; index < count; index += 1) {
+        const taskId = `row-local-${verdict}-${index}`; const criterionId = `${taskId}-criterion`;
+        plan.criteria.push({ id: criterionId, description: responsibility, disposition: 'owned',
+          ownerTaskId: taskId, deferredReason: null });
+        plan.tasks.push({ ...original.tasks[index], id: taskId, title: `Apply row ${index + 1}`,
+          objective: responsibility, criterionIds: [criterionId], decisionIds: [], checklistItemIds: [],
+          dependsOn: [original.tasks[index].id], anticipatedPaths: [rows[index].mechanism],
+          produces: [], consumes: [] });
+        addedTaskIds.push(taskId);
+      }
+      return { plan, addedTaskIds };
+    };
+    const trigger = digestJson(evidence);
+    const amendment = (suffix, addedTaskIds) => ({ id: `row-local-${verdict}-${suffix}`,
+      reason: 'Apply every exact mechanism-local remediation.', authorization: 'scope-review', trigger,
+      delta: { addedTaskIds }, invalidatedEvidence: [trigger] });
+    const omitted = candidate(1); const before = durableSnapshot(directory);
+    assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+      amendment: amendment('omitted', omitted.addedTaskIds), resultingPlan: omitted.plan }),
+    (error) => error.code === 'INVALID_AMENDMENT');
+    assert.deepEqual(durableSnapshot(directory), before,
+      `${verdict} omission fails before receipt-backed durable mutation`);
+    if (verdict === 'trim-required') {
+      const borrowed = candidate(2);
+      borrowed.plan.tasks.find(({ id }) => id === `row-local-${verdict}-0`).dependsOn =
+        ['second-task'];
+      borrowed.plan.tasks.find(({ id }) => id === `row-local-${verdict}-0`).anticipatedPaths =
+        ['second.txt/unrelated-borrow.mjs'];
+      const borrowingBefore = durableSnapshot(directory);
+      assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+        amendment: amendment('wrong-owner-borrow', borrowed.addedTaskIds),
+        resultingPlan: borrowed.plan }), (error) => error.code === 'INVALID_AMENDMENT'
+          && /not linked to the assessed accepted criteria/u.test(error.message));
+      assert.deepEqual(durableSnapshot(directory), borrowingBefore,
+        'a citation-free sibling cannot let a cited row borrow an unrelated owner path');
+    }
+    const complete = candidate(2);
+    state = amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+      amendment: amendment('complete', complete.addedTaskIds), resultingPlan: complete.plan });
+    assert.deepEqual(state.execution.tasks.filter(({ id }) => complete.addedTaskIds.includes(id))
+      .map(({ status }) => status), ['unbound', 'unbound']);
+  }
+});
+
 test('receipt-backed remediation replacement substitutes dependent task and producer references', async () => {
   const fixture = repository('nonmaterial dependency substitution');
   const planning = await initializeState({ cwd: fixture.cwd, changeId: 'nonmaterial-dependency-substitution',
@@ -4232,6 +4553,11 @@ test('receipt-backed remediation replacement substitutes dependent task and prod
   plan.tasks[0].anticipatedPaths = ['first.txt']; plan.tasks[0].produces = ['state-artifact'];
   plan.tasks[1].anticipatedPaths = ['second.txt']; plan.tasks[1].dependsOn = ['state-task'];
   plan.tasks[1].consumes = [{ artifactId: 'state-artifact', producerTaskId: 'state-task' }];
+  plan.criteria.push({ id: 'dependency-change', description: 'Dependency remains independent.',
+    disposition: 'owned', ownerTaskId: 'dependency-task', deferredReason: null });
+  plan.tasks.push({ ...plan.tasks[0], id: 'dependency-task', title: 'Keep dependency',
+    objective: 'Keep the independent dependency.', criterionIds: ['dependency-change'],
+    checklistItemIds: [], anticipatedPaths: ['dependency.txt'], produces: [] });
   const closure = testMinimalClosure(planning, plan);
   let state = acceptPlanWithScope({ cwd: fixture.cwd, plan, minimalClosure: closure,
     scopeEvidence: testScopeEvidence(planning, plan, closure), expectedRevision: planning.revision });
@@ -4263,7 +4589,7 @@ test('receipt-backed remediation replacement substitutes dependent task and prod
     disposition: 'owned', ownerTaskId: replacementId, deferredReason: null });
   resultingPlan.tasks[0] = { ...resultingPlan.tasks[0], id: replacementId,
     objective: evidence.result.scopeDelta.description,
-    criterionIds: ['durable-state', newCriterionId] };
+    criterionIds: ['durable-state', newCriterionId], dependsOn: ['dependency-task'] };
   resultingPlan.tasks[1].dependsOn = [replacementId];
   resultingPlan.tasks[1].consumes[0].producerTaskId = replacementId;
   resultingPlan.checklistMappings[0].taskIds = [replacementId];
@@ -4272,6 +4598,31 @@ test('receipt-backed remediation replacement substitutes dependent task and prod
     authorizedShape: [...closure.authorizedShape, 'unowned-lifecycle-path'] };
   const trigger = state.scope.currentEvidenceDigest;
   const suffix = `${packet.taskId}/0001.json`;
+  const continuityPlan = structuredClone(resultingPlan);
+  const continuityId = 'dependency-continuity';
+  continuityPlan.tasks = continuityPlan.tasks.filter(({ id }) => id !== 'dependency-task');
+  continuityPlan.criteria.find(({ id }) => id === 'dependency-change').ownerTaskId = continuityId;
+  continuityPlan.criteria.push({ ...plan.criteria.find(({ id }) => id === 'dependency-change'),
+    id: 'dependency-change-copy', ownerTaskId: continuityId });
+  continuityPlan.tasks.find(({ id }) => id === replacementId).dependsOn = [continuityId];
+  continuityPlan.tasks.push({ ...plan.tasks.find(({ id }) => id === 'dependency-task'),
+    id: continuityId, criterionIds: ['dependency-change', 'dependency-change-copy'],
+    dependsOn: [replacementId] });
+  const continuityBefore = durableSnapshot(changeDirectory(fixture.cwd, state.changeId));
+  assert.throws(() => amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision,
+    resultingPlan: continuityPlan, minimalClosure: { ...structuredClone(closure), revision: 2,
+      previousContractDigest: state.scope.closureDigest, planDigest: digestJson(continuityPlan),
+      authorizedShape: [...closure.authorizedShape, 'unowned-lifecycle-path'] },
+    amendment: { id: 'changed-continuity-edge-amendment',
+      reason: 'Continuity cannot invent a dependency edge.', authorization: 'scope-review', trigger,
+      delta: { addedTaskIds: [replacementId, continuityId] }, invalidatedEvidence: [trigger,
+        `implementation/tasks/${suffix}`, `implementation/provenance/${suffix}`,
+        `implementation/planning-signals/${suffix}`, `implementation/specialist-routes/${suffix}`,
+        `implementation/results/${suffix}`] } }),
+  (error) => error.code === 'INVALID_AMENDMENT'
+    && /must preserve dependency edges/u.test(error.message));
+  assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), continuityBefore,
+    'a continuity edge change fails before durable receipts or state mutate');
   state = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision,
     resultingPlan, minimalClosure, amendment: { id: 'dependency-substitution-amendment',
       reason: 'Replace the assessed owner while preserving dependent graph references.',
@@ -4281,6 +4632,203 @@ test('receipt-backed remediation replacement substitutes dependent task and prod
         `implementation/specialist-routes/${suffix}`, `implementation/results/${suffix}`] } });
   assert.equal(state.execution.tasks.find(({ id }) => id === 'second-task').status, 'unbound');
   assert.equal(state.execution.tasks.find(({ id }) => id === replacementId).status, 'unbound');
+});
+
+test('durable assessed replacements preserve substituted edges and recovery revalidates them', async () => {
+  const fixture = repository('durable assessed replacement edges');
+  const planning = await initializeState({ cwd: fixture.cwd,
+    changeId: 'durable-assessed-replacement-edges', mode: 'implement', baseBranch: 'main',
+    planningRef: fixture.sha, source: descriptor });
+  const plan = executionPlanFor(planning);
+  plan.tasks[0].anticipatedPaths = ['first.txt']; plan.tasks[0].produces = ['artifact'];
+  plan.tasks[1].anticipatedPaths = ['second.txt']; plan.tasks[1].dependsOn = ['state-task'];
+  plan.tasks[1].consumes = [{ artifactId: 'artifact', producerTaskId: 'state-task' }];
+  plan.criteria.push({ id: 'extra-change', description: 'Extra task remains independent.',
+    disposition: 'owned', ownerTaskId: 'extra-task', deferredReason: null });
+  plan.tasks.push({ ...plan.tasks[0], id: 'extra-task', title: 'Keep extra task',
+    objective: 'Keep the extra task.', criterionIds: ['extra-change'], checklistItemIds: [],
+    anticipatedPaths: ['extra.txt'], produces: [] });
+  let state = acceptPlan({ cwd: fixture.cwd, plan, expectedRevision: planning.revision });
+  const packet = packetFor(state, plan, 'state-task');
+  state = bindTask({ cwd: fixture.cwd, packet, expectedRevision: state.revision });
+  const worker = createWorkerFixture(fixture.cwd, state, packet);
+  state = scheduleWave({ cwd: fixture.cwd, expectedRevision: state.revision });
+  state = startTask({ cwd: fixture.cwd, taskId: packet.taskId,
+    workerId: 'assessed-edge-discovery-worker', expectedRevision: state.revision });
+  const scopeDiscovery = { schemaVersion: 1, summary: 'The graph owner found bounded remediation.',
+    evidence: [{ kind: 'state-path', identity: 'first.txt/assessed.mjs',
+      detail: 'Both adjacent graph owners require exact assessed replacement.' }],
+    triggeredTripwireIds: ['test-task-paths'],
+    requestedAuthority: [{ field: 'paths', values: ['first.txt/assessed.mjs'] }] };
+  const blocked = { ...resultFor(packet, 'blocked'), unexpectedDependencies: [scopeDiscovery.summary],
+    scopeDiscovery, summary: scopeDiscovery.summary };
+  state = acceptResult({ cwd: fixture.cwd, workerCwd: worker.path,
+    expectedRevision: state.revision, result: blocked });
+  const evidence = workerDiscoveryNonmaterialScopeEvidence(
+    state, plan, testMinimalClosure(planning, plan), packet, blocked, scopeDiscovery, 'trim-required');
+  const base = evidence.packet.changeInventory.mappings.at(-1);
+  const responsibility = 'Replace both assessed graph owners.';
+  const rows = [
+    { ...base, mechanism: 'first.txt/assessed.mjs', acceptedCriterionIds: ['durable-state'] },
+    { ...base, mechanism: 'second.txt/assessed.mjs', acceptedCriterionIds: ['second-change'] },
+  ];
+  evidence.packet.changeInventory.paths = rows.map(({ mechanism }) => mechanism);
+  evidence.packet.changeInventory.mappings = rows;
+  evidence.result = { ...evidence.result, verdict: 'trim-required',
+    coverage: rows.map((row) => ({ ...row, classification: 'speculative' })),
+    unnecessaryWork: rows.map(({ mechanism }) => mechanism),
+    smallerSufficientAlternative: responsibility, scopeDelta: null };
+  evidence.packetDigest = digestJson(evidence.packet); evidence.resultDigest = digestJson(evidence.result);
+  state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
+    expectedRevision: state.revision });
+  state = rejectTask({ cwd: fixture.cwd, taskId: packet.taskId,
+    reason: 'Replace both assessed graph owners.', expectedRevision: state.revision });
+  removeTaskWorktree({ cwd: fixture.cwd, changeId: state.changeId, taskId: packet.taskId });
+  const exact = () => {
+    const result = structuredClone(plan); result.planRevision = 2;
+    result.tasks = result.tasks.filter(({ id }) => !['state-task', 'second-task'].includes(id));
+    result.criteria.find(({ id }) => id === 'durable-state').ownerTaskId = 'first-replacement';
+    result.criteria.find(({ id }) => id === 'second-change').ownerTaskId = 'second-replacement';
+    result.criteria.push({ id: 'first-replacement-new', description: responsibility,
+      disposition: 'owned', ownerTaskId: 'first-replacement', deferredReason: null },
+    { id: 'second-replacement-new', description: responsibility,
+      disposition: 'owned', ownerTaskId: 'second-replacement', deferredReason: null });
+    result.tasks.push({ ...plan.tasks[0], id: 'first-replacement', objective: responsibility,
+      criterionIds: ['durable-state', 'first-replacement-new'],
+      checklistItemIds: [...plan.tasks[0].checklistItemIds],
+      anticipatedPaths: [rows[0].mechanism], dependsOn: ['extra-task'] },
+    { ...plan.tasks[1], id: 'second-replacement', objective: responsibility,
+      criterionIds: ['second-change', 'second-replacement-new'], checklistItemIds: [],
+      anticipatedPaths: [rows[1].mechanism], dependsOn: ['first-replacement'],
+      consumes: [{ artifactId: 'artifact', producerTaskId: 'first-replacement' }] });
+    result.checklistMappings[0].taskIds = ['first-replacement'];
+    return result;
+  };
+  const trigger = digestJson(evidence);
+  const suffix = `${packet.taskId}/0001.json`;
+  const invalidatedEvidence = [trigger, `implementation/tasks/${suffix}`,
+    `implementation/provenance/${suffix}`, `implementation/planning-signals/${suffix}`,
+    `implementation/specialist-routes/${suffix}`, `implementation/results/${suffix}`];
+  const amendmentFor = (id) => ({ id, reason: 'Replace both assessed owners exactly.',
+    authorization: 'scope-review', trigger,
+    delta: { addedTaskIds: ['first-replacement', 'second-replacement'] }, invalidatedEvidence });
+  for (const [label, mutate, pattern] of [
+    ['dependency', (candidate) => { candidate.tasks.at(-1).dependsOn = []; },
+      /must preserve prior dependency edges/u],
+    ['consume', (candidate) => { candidate.tasks.at(-1).consumes = []; },
+      /must preserve prior consume edges/u],
+  ]) {
+    const candidate = exact(); mutate(candidate); const before = durableSnapshot(
+      changeDirectory(fixture.cwd, state.changeId));
+    assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+      amendment: amendmentFor(`drop-assessed-${label}`), resultingPlan: candidate }),
+    (error) => error.code === 'INVALID_AMENDMENT' && pattern.test(error.message));
+    assert.deepEqual(durableSnapshot(changeDirectory(fixture.cwd, state.changeId)), before,
+      `dropping the substituted ${label} edge fails before durable mutation`);
+  }
+  const accepted = exact();
+  assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+    amendment: amendmentFor('preserve-assessed-edges'), resultingPlan: accepted,
+    crashStep(step) { if (step === 'after-intent') throw new Error('pause assessed edge recovery'); } }),
+  /pause assessed edge recovery/u,
+  'preserved substituted edges plus one extra unrelated assessed edge pass durable admission');
+  const directory = changeDirectory(fixture.cwd, state.changeId);
+  const transition = join(directory, 'transitions', String(state.revision + 1).padStart(8, '0'));
+  const intentPath = join(transition, 'intent.json');
+  const intent = JSON.parse(readFileSync(intentPath, 'utf8'));
+  const record = intent.authoritativeEvidence.amendmentDigest;
+  record.value.resultingPlan.tasks.find(({ id }) => id === 'second-replacement').consumes = [];
+  record.value.newDigest = digestJson(record.value.resultingPlan); record.digest = digestJson(record.value);
+  intent.evidence.amendmentDigest = record.digest;
+  const closure = intent.authoritativeEvidence.minimalClosureDigest;
+  closure.value.planDigest = record.value.newDigest; closure.digest = digestJson(closure.value);
+  intent.evidence.minimalClosureDigest = closure.digest; writeReceiptJson(intentPath, intent);
+  const beforeRecovery = durableSnapshot(directory);
+  assert.throws(() => recoverState({ cwd: fixture.cwd }),
+    (error) => error.code === 'RECOVERY_EVIDENCE_INVALID'
+      && /assessment-bound remediation projection/u.test(error.message));
+  assert.deepEqual(durableSnapshot(directory), beforeRecovery,
+    'recovery rejects receipt-consistent assessed consume-edge removal atomically');
+});
+
+// Current packet binding requires at least one acceptance criterion, so a fresh worker discovery
+// cannot originate this historical zero-owned-criterion plan shape. Receipt-bound validator evidence
+// keeps its recovery semantics covered without pretending this is a current full lifecycle fixture.
+test('receipt-backed criterionless replacement preserves exact durable selection evidence', () => {
+  const responsibility = 'Replace the criterionless discovery.';
+  const path = 'discovery/exact.json';
+  const mapping = { mechanism: path, sourceCriterionIds: [], acceptedCriterionIds: [],
+    invariantIds: [] };
+  const discovery = { id: 'discovery-task', objective: 'Discover scope.', criterionIds: [],
+    anticipatedPaths: ['discovery'], dependsOn: [], produces: ['artifact'], consumes: [] };
+  const dependent = { id: 'dependent', objective: 'Use discovery.', criterionIds: ['dependent'],
+    anticipatedPaths: ['dependent'], dependsOn: ['discovery-task'], produces: [],
+    consumes: [{ artifactId: 'artifact', producerTaskId: 'discovery-task' }] };
+  const priorPlan = { criteria: [{ id: 'dependent', description: 'Use discovery.',
+    disposition: 'owned', ownerTaskId: 'dependent', deferredReason: null }],
+  tasks: [discovery, dependent], checklistMappings: [{ id: 'check', taskIds: ['discovery-task'] }],
+  decisions: [] };
+  const evidence = { result: { verdict: 'trim-required', unnecessaryWork: [path],
+    smallerSufficientAlternative: responsibility,
+    coverage: [{ ...mapping, classification: 'speculative' }] },
+  packet: { changeInventory: { paths: [path], mappings: [mapping] } },
+  cadence: { trigger: 'worker-scope-discovery:discovery-task:result:receipt' } };
+  const replacement = (id) => ({ id, objective: responsibility, criterionIds: [`${id}-criterion`],
+    anticipatedPaths: [path], dependsOn: [], produces: ['artifact'], consumes: [] });
+  const plan = (ids, selected = ids[0], { graph = true, checklist = true } = {}) => ({
+    criteria: [priorPlan.criteria[0], ...ids.map((id) => ({ id: `${id}-criterion`,
+      description: responsibility, disposition: 'owned', ownerTaskId: id, deferredReason: null }))],
+    tasks: [{ ...dependent, dependsOn: graph ? [selected] : [],
+      consumes: graph ? [{ artifactId: 'artifact', producerTaskId: selected }] : [] },
+    ...ids.map(replacement)], checklistMappings: checklist ? [{ id: 'check', taskIds: [selected] }] : [],
+    decisions: [],
+  });
+  const graph = plan(['graph', 'graph-near']); graph.tasks[2].dependsOn = ['graph'];
+  const checklistPrior = structuredClone(priorPlan);
+  checklistPrior.tasks[1].dependsOn = []; checklistPrior.tasks[1].consumes = [];
+  const checklist = plan(['checklist', 'checklist-near'], 'checklist', { graph: false });
+  checklist.tasks[2].dependsOn = ['checklist'];
+  const noIncomingPrior = { ...structuredClone(priorPlan), tasks: [discovery],
+    criteria: [], checklistMappings: [] };
+  const ambiguous = { criteria: ['first', 'second'].map((id) => ({ id: `${id}-criterion`,
+    description: responsibility, disposition: 'owned', ownerTaskId: id, deferredReason: null })),
+    tasks: ['first', 'second'].map(replacement), checklistMappings: [], decisions: [] };
+  const absent = plan(['absent']); absent.tasks[1].produces = [];
+  const unrelatedPrior = structuredClone(priorPlan);
+  unrelatedPrior.tasks.push({ id: 'unrelated-ownerless', objective: 'Unrelated.',
+    criterionIds: [], anticipatedPaths: ['unrelated'], dependsOn: [], produces: [], consumes: [] });
+  const rows = [
+    ['unique', evidence, priorPlan, plan(['unique']), ['unique'], null],
+    ['absent', evidence, priorPlan, absent, ['absent'], /lacks one exact replacement/u],
+    ['wrong-cadence', { ...evidence, cadence: { trigger:
+      'worker-scope-discovery:wrong-task:result:wrong' } }, priorPlan, plan(['wrong-cadence']),
+    ['wrong-cadence'], /lacks one exact replacement/u],
+    ['unrelated', evidence, unrelatedPrior, plan(['unique']), ['unique'],
+      /removed task unrelated-ownerless lacks one exact replacement/u],
+    ['ambiguous', evidence, noIncomingPrior, ambiguous, ['first', 'second'],
+      /replacement is ambiguous/u],
+    ['graph-selected', evidence, priorPlan, graph, ['graph', 'graph-near'], null],
+    ['checklist-selected', evidence, checklistPrior, checklist,
+      ['checklist', 'checklist-near'], null],
+  ];
+  const directory = mkdtempSync(join(tmpdir(), 'criterionless-receipts '));
+  for (const [label, rowEvidence, rowPrior, resultingPlan, addedTaskIds, expected] of rows) {
+    const value = { evidence: rowEvidence, priorPlan: rowPrior, resultingPlan, addedTaskIds };
+    const pathName = join(directory, `${label}.json`);
+    writeReceiptJson(pathName, value);
+    const stored = JSON.parse(readFileSync(pathName, 'utf8'));
+    assert.equal(readFileSync(pathName.slice(0, -5) + '.sha256', 'utf8').trim(),
+      digestJson(stored), `${label} fixture retains exact receipt identity`);
+    const errors = validateNonmaterialAmendmentTaskAuthority(stored);
+    if (expected === null) assert.deepEqual(errors, [], `${label} receipt is admitted`);
+    else assert.match(errors.join('\n'), expected, `${label} receipt fails closed`);
+  }
+  const tamperedPath = join(directory, 'unique.json');
+  const tampered = JSON.parse(readFileSync(tamperedPath, 'utf8'));
+  tampered.resultingPlan.checklistMappings[0].taskIds = ['missing'];
+  writeFileSync(tamperedPath, `${JSON.stringify(tampered)}\n`);
+  assert.notEqual(readFileSync(tamperedPath.slice(0, -5) + '.sha256', 'utf8').trim(),
+    digestJson(tampered), 'receipt-consistent recovery cannot adopt tampered selection evidence');
 });
 
 test('receipt-backed minor remediation derives paths from exact source and invariant authority', async () => {
@@ -4594,13 +5142,20 @@ test('interrupted nonmaterial amendment recovery revalidates its canonical proje
   const fixture = await integratedSingleTaskFixture('nonmaterial projection recovery');
   let state = fixture.state;
   const evidence = integratedScopeEvidenceFor({ cwd: fixture.cwd, changeId: state.changeId });
-  const mapping = evidence.result.coverage[0];
+  const mapping = evidence.packet.changeInventory.mappings[0];
+  const secondPath = 'first.txt/second-mechanism.mjs';
+  const secondMapping = { ...mapping, mechanism: secondPath,
+    rationale: 'The second exact mechanism has the same grounded owner authority.' };
+  evidence.packet.changeInventory.paths.push(secondPath);
+  evidence.packet.changeInventory.mappings.push(secondMapping);
   evidence.result = { ...evidence.result, verdict: 'trim-required',
     coverage: [{ ...mapping, sourceCriterionIds: [],
       acceptedCriterionIds: [...mapping.acceptedCriterionIds],
-      classification: 'speculative', rationale: 'Remove the exact unnecessary mechanism.' }],
-    unnecessaryWork: [mapping.mechanism],
+      classification: 'speculative', rationale: 'Remove the exact unnecessary mechanism.' },
+    { ...secondMapping, classification: 'speculative' }],
+    unnecessaryWork: [mapping.mechanism, secondPath],
     smallerSufficientAlternative: 'Use only the bounded simplification task.' };
+  evidence.packetDigest = digestJson(evidence.packet);
   evidence.resultDigest = digestJson(evidence.result);
   state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
     expectedRevision: state.revision });
@@ -4612,7 +5167,7 @@ test('interrupted nonmaterial amendment recovery revalidates its canonical proje
     disposition: 'owned', ownerTaskId: 'trim-recovery-task', deferredReason: null });
   resultingPlan.tasks.push({ ...original.tasks[0], id: 'trim-recovery-task', title: 'Apply exact trim',
     objective: responsibility, criterionIds: ['trim-recovery'],
-    checklistItemIds: [], dependsOn: ['state-task'], anticipatedPaths: ['first.txt'] });
+    checklistItemIds: [], dependsOn: ['state-task'], anticipatedPaths: ['first.txt', secondPath] });
   const amendment = { id: 'trim-recovery-amendment', reason: 'Apply the exact trim assessment.',
     authorization: 'scope-review', trigger: digestJson(evidence),
     delta: { addedTaskIds: ['trim-recovery-task'] }, invalidatedEvidence: [digestJson(evidence)] };
@@ -4624,7 +5179,8 @@ test('interrupted nonmaterial amendment recovery revalidates its canonical proje
   const intentPath = join(transition, 'intent.json');
   const intent = JSON.parse(readFileSync(intentPath, 'utf8'));
   const record = intent.authoritativeEvidence.amendmentDigest;
-  record.value.resultingPlan.decisions[0].resolution = 'Mutate a prior decision during recovery.';
+  record.value.resultingPlan.tasks.find(({ id }) => id === 'trim-recovery-task')
+    .anticipatedPaths = ['first.txt'];
   record.value.newDigest = digestJson(record.value.resultingPlan);
   record.digest = digestJson(record.value);
   intent.evidence.amendmentDigest = record.digest;
@@ -4638,7 +5194,7 @@ test('interrupted nonmaterial amendment recovery revalidates its canonical proje
     (error) => error.code === 'RECOVERY_EVIDENCE_INVALID'
       && /assessment-bound remediation projection/u.test(error.message));
   assert.deepEqual(durableSnapshot(directory), before,
-    'closed-world decision tampering fails before sidecars, state, events, or completion mutate');
+    'omitting one exact mechanism during recovery fails before sidecars, state, events, or completion mutate');
 });
 
 test('scope-blocked amendments require the exact active evidence trigger atomically', async () => {

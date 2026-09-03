@@ -145,6 +145,14 @@ function sameOrDescendantPath(path, inheritedPath) {
   return path === inheritedPath || path.startsWith(`${inheritedPath}/`);
 }
 
+function containsOrdered(actual, expected, equal = (left, right) => left === right) {
+  let offset = 0;
+  for (const value of actual) {
+    if (offset < expected.length && equal(value, expected[offset])) offset += 1;
+  }
+  return offset === expected.length;
+}
+
 export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan, resultingPlan,
   addedTaskIds }) {
   const errors = [];
@@ -157,27 +165,25 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
   const discoveryTaskId = /^worker-scope-discovery:([a-z0-9]+(?:-[a-z0-9]+)*):/u
     .exec(evidence?.cadence?.trigger ?? '')?.[1];
   const branchFor = (kind, responsibility, coverage) => {
-    const mechanisms = new Set(coverage.map(({ mechanism }) => mechanism));
-    const mappings = inventoryMappings.filter(({ mechanism }) => mechanisms.has(mechanism));
     const deltaAccepted = new Set(evidence.result.scopeDelta?.acceptedCriterionIds ?? []);
-    const responsibleCriterionIds = new Set(coverage.flatMap(({ acceptedCriterionIds }) =>
-      acceptedCriterionIds).filter((id) => kind !== 'necessary' || deltaAccepted.has(id)));
-    const responsibleTaskIds = new Set((priorPlan?.criteria ?? [])
-      .filter(({ id }) => responsibleCriterionIds.has(id)).map(({ ownerTaskId }) => ownerTaskId));
-    if (discoveryTaskId) responsibleTaskIds.add(discoveryTaskId);
-    const citationFree = kind === 'removal' && coverage.some(positiveCitationFree);
-    const citationFreePaths = new Set(coverage.filter((row) => positiveCitationFree(row)
-      && assessedPaths.has(row.mechanism)).map(({ mechanism }) => mechanism));
-    const mappedPaths = new Set(mappings.map(({ mechanism }) => mechanism)
-      .filter((mechanism) => assessedPaths.has(mechanism)
-        && !(citationFree && coverage.some((row) => row.mechanism === mechanism
-          && positiveCitationFree(row)))));
-    if (kind === 'necessary' || kind === 'removal') {
+    const authorities = coverage.map((row) => {
+      const mappings = inventoryMappings.filter(({ mechanism }) => mechanism === row.mechanism);
+      const responsibleCriterionIds = new Set(row.acceptedCriterionIds
+        .filter((id) => kind !== 'necessary' || deltaAccepted.has(id)));
+      const groundedTaskIds = new Set((priorPlan?.criteria ?? [])
+        .filter(({ id }) => responsibleCriterionIds.has(id)).map(({ ownerTaskId }) => ownerTaskId));
+      const responsibleTaskIds = new Set(groundedTaskIds);
+      if (discoveryTaskId) responsibleTaskIds.add(discoveryTaskId);
+      const citationFree = kind === 'removal' && positiveCitationFree(row);
+      const citationFreePaths = new Set(citationFree && assessedPaths.has(row.mechanism)
+        ? [row.mechanism] : []);
+      const mappedPaths = new Set(mappings.map(({ mechanism }) => mechanism)
+        .filter((mechanism) => assessedPaths.has(mechanism) && !citationFree));
       const deltaSources = kind === 'necessary'
         ? new Set(evidence.result.scopeDelta?.sourceCriterionIds ?? []) : null;
       const deltaInvariants = kind === 'necessary'
         ? new Set(evidence.result.scopeDelta?.invariantIds ?? []) : null;
-      const anchorRows = (kind === 'necessary' ? mappings : coverage)
+      const anchorRows = (kind === 'necessary' ? mappings : [row])
         .filter(({ mechanism }) => !assessedPaths.has(mechanism));
       const sourceAnchors = new Set(anchorRows.flatMap(({ sourceCriterionIds }) => sourceCriterionIds)
         .filter((id) => deltaSources === null || deltaSources.has(id)));
@@ -190,9 +196,15 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
           mappedPaths.add(mapping.mechanism);
         }
       }
-    }
+      return { row, responsibleCriterionIds, responsibleTaskIds, groundedTaskIds, mappedPaths,
+        citationFree, citationFreePaths };
+    });
+    const responsibleCriterionIds = new Set(authorities
+      .flatMap(({ responsibleCriterionIds: ids }) => [...ids]));
+    const responsibleTaskIds = new Set(authorities
+      .flatMap(({ responsibleTaskIds: ids }) => [...ids]));
     return { kind, responsibility, coverage, responsibleCriterionIds, responsibleTaskIds,
-      mappedPaths, citationFree, citationFreePaths };
+      authorities };
   };
   const branches = [];
   if (verdict === 'minor-amendment-required') {
@@ -242,6 +254,57 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
       replacementByPriorOwner.set(priorTask.id, replacementId);
       const owners = priorOwnersByReplacement.get(replacementId) ?? [];
       owners.push(priorTask.id); priorOwnersByReplacement.set(replacementId, owners);
+    }
+  }
+  if (discoveryTaskId) {
+    const discoveryTask = removedTasks.find(({ id }) => id === discoveryTaskId);
+    const owned = (priorPlan?.criteria ?? [])
+      .filter(({ ownerTaskId }) => ownerTaskId === discoveryTaskId);
+    if (discoveryTask && owned.length === 0 && !replacementByPriorOwner.has(discoveryTaskId)) {
+      const candidateIds = addedTasks.filter((task) => !priorOwnersByReplacement.has(task.id)
+          && branches.some((branch) => task.objective === branch.responsibility)
+          && (addedCriteriaByOwner.get(task.id) ?? []).length > 0
+          && (addedCriteriaByOwner.get(task.id) ?? []).every(({ id, description }) =>
+            task.criterionIds.includes(id)
+              && branches.some((branch) => task.objective === branch.responsibility
+                && description === branch.responsibility)))
+        .filter((task) => {
+          const hypothetical = new Map(replacementByPriorOwner);
+          hypothetical.set(discoveryTaskId, task.id);
+          const substitute = (id) => hypothetical.get(id) ?? id;
+          const expectedOutgoing = {
+            dependsOn: (discoveryTask.dependsOn ?? []).map(substitute),
+            produces: discoveryTask.produces ?? [],
+            consumes: (discoveryTask.consumes ?? []).map((consumption) => ({ ...consumption,
+              producerTaskId: substitute(consumption.producerTaskId) })),
+          };
+          if (!isDeepStrictEqual({ dependsOn: task.dependsOn ?? [], produces: task.produces ?? [],
+            consumes: task.consumes ?? [] }, expectedOutgoing)) return false;
+          for (const prior of priorPlan?.tasks ?? []) {
+            if (prior.id === discoveryTaskId
+                || (!(prior.dependsOn ?? []).includes(discoveryTaskId)
+                  && !(prior.consumes ?? [])
+                    .some(({ producerTaskId }) => producerTaskId === discoveryTaskId))) continue;
+            const resultingId = substitute(prior.id);
+            const resulting = (resultingPlan?.tasks ?? []).find(({ id }) => id === resultingId);
+            if (!resulting
+                || !isDeepStrictEqual(resulting.dependsOn ?? [],
+                  (prior.dependsOn ?? []).map(substitute))
+                || !isDeepStrictEqual(resulting.consumes ?? [],
+                  (prior.consumes ?? []).map((consumption) => ({ ...consumption,
+                    producerTaskId: substitute(consumption.producerTaskId) })))) return false;
+          }
+          const expectedMappings = (priorPlan?.checklistMappings ?? []).map((mapping) => ({
+            ...mapping, taskIds: mapping.taskIds.map(substitute),
+          }));
+          return isDeepStrictEqual(resultingPlan?.checklistMappings ?? [], expectedMappings);
+        }).map(({ id }) => id);
+      if (candidateIds.length === 1) {
+        replacementByPriorOwner.set(discoveryTaskId, candidateIds[0]);
+        priorOwnersByReplacement.set(candidateIds[0], [discoveryTaskId]);
+      } else if (candidateIds.length > 1) {
+        errors.push(`$ nonmaterial criterionless discovery task ${discoveryTaskId} replacement is ambiguous`);
+      }
     }
   }
   const assessedPriorOwners = new Set(branches.flatMap(({ responsibleTaskIds }) =>
@@ -300,12 +363,26 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
     const priorTask = (priorPlan?.tasks ?? []).find(({ id }) => id === priorOwnerId);
     const replacement = addedTasksById.get(replacementId);
     const expectedReferences = substitutedTaskReferences(priorTask);
+    if (assessedPriorOwners.has(priorOwnerId)) {
+      const replacedDependencies = (priorTask.dependsOn ?? [])
+        .filter((id) => replacementByPriorOwner.has(id)).map(substitution);
+      const replacedConsumptions = (priorTask.consumes ?? [])
+        .filter(({ producerTaskId }) => replacementByPriorOwner.has(producerTaskId))
+        .map((consumption) => ({ ...consumption,
+          producerTaskId: substitution(consumption.producerTaskId) }));
+      if (!containsOrdered(replacement?.dependsOn ?? [], replacedDependencies)) {
+        errors.push(`$ nonmaterial assessed replacement task ${replacementId} must preserve prior dependency edges`);
+      }
+      if (!containsOrdered(replacement?.consumes ?? [], replacedConsumptions, isDeepStrictEqual)) {
+        errors.push(`$ nonmaterial assessed replacement task ${replacementId} must preserve prior consume edges`);
+      }
+      continue;
+    }
+    continuityTaskIds.add(replacementId);
     if (!isDeepStrictEqual(replacement?.dependsOn, expectedReferences.dependsOn)
         || !isDeepStrictEqual(replacement?.consumes, expectedReferences.consumes)) {
       errors.push(`$ nonmaterial replacement task ${replacementId} must preserve dependency edges`);
     }
-    if (assessedPriorOwners.has(priorOwnerId)) continue;
-    continuityTaskIds.add(replacementId);
     const expectedTask = { ...substitutedTaskReferences(priorTask), id: replacementId,
       criterionIds: replacement?.criterionIds };
     if (!isDeepStrictEqual(replacement, expectedTask)) {
@@ -326,44 +403,51 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
       errors.push(`$ nonmaterial continuity task ${replacementId} must add one exact duplicate owned criterion`);
     }
   }
-  const representedBranches = new Set();
+  const representedMechanisms = new Set();
   for (const task of addedTasks) {
     if (continuityTaskIds.has(task.id)) continue;
     const ownedCriteria = addedCriteriaByOwner.get(task.id) ?? [];
-    const matching = branches.filter((branch) => {
+    const matching = branches.map((branch, branchIndex) => {
       if (task.objective !== branch.responsibility || ownedCriteria.length === 0
           || ownedCriteria.some(({ id, description }) =>
-            !task.criterionIds.includes(id) || description !== branch.responsibility)) return false;
+            !task.criterionIds.includes(id) || description !== branch.responsibility)) return [];
       const replacedAssessedOwners = [...replacementByPriorOwner]
         .filter(([ownerId, replacementId]) => replacementId === task.id
           && assessedPriorOwners.has(ownerId)).map(([ownerId]) => ownerId);
-      const carries = task.criterionIds.some((id) => branch.responsibleCriterionIds.has(id))
-        || [...branch.responsibleTaskIds].some((id) => task.dependsOn.includes(substitution(id)))
-        || replacedAssessedOwners.some((ownerId) => branch.responsibleTaskIds.has(ownerId));
-      if (branch.responsibleCriterionIds.size > 0 && !carries) return false;
-      if (replacedAssessedOwners.some((ownerId) => !branch.responsibleTaskIds.has(ownerId))) return false;
-      const transferredOwnerIds = new Set([...replacementByPriorOwner]
-        .filter(([ownerId, replacementId]) => replacementId === task.id
-          && branch.responsibleTaskIds.has(ownerId)).map(([ownerId]) => ownerId));
-      const inheritedPaths = new Set((priorPlan?.tasks ?? [])
-        .filter(({ id }) => branch.responsibleTaskIds.has(id) || transferredOwnerIds.has(id))
-        .flatMap(({ anticipatedPaths }) => anticipatedPaths));
       const dependencyPaths = new Set((priorPlan?.tasks ?? [])
         .filter(({ id }) => task.dependsOn.includes(substitution(id))
           && !continuityTaskIds.has(substitution(id)))
         .flatMap(({ anticipatedPaths }) => anticipatedPaths));
-      const replacesAssessedDiscovery = discoveryTaskId !== undefined
-        && replacementByPriorOwner.get(discoveryTaskId) === task.id
-        && branch.responsibleTaskIds.has(discoveryTaskId);
-      return task.anticipatedPaths.length > 0 && task.anticipatedPaths.every((path) =>
-        branch.mappedPaths.has(path)
-        || ((!branch.citationFree || branch.citationFreePaths.has(path))
-          && [...inheritedPaths].some((ownerPath) => sameOrDescendantPath(path, ownerPath)))
-        || (branch.citationFree && replacesAssessedDiscovery && branch.citationFreePaths.has(path))
-        || (branch.citationFree && branch.citationFreePaths.has(path) && [...dependencyPaths]
-          .some((ownerPath) => sameOrDescendantPath(path, ownerPath))));
-    });
-    if (matching.length === 0) {
+      return branch.authorities.map((authority, authorityIndex) => {
+        const carries = task.criterionIds.some((id) => authority.responsibleCriterionIds.has(id))
+          || [...authority.responsibleTaskIds]
+            .some((id) => task.dependsOn.includes(substitution(id)))
+          || replacedAssessedOwners.some((ownerId) => authority.responsibleTaskIds.has(ownerId));
+        if (authority.responsibleCriterionIds.size > 0 && !carries) return null;
+        if (replacedAssessedOwners.some((ownerId) =>
+          !authority.responsibleTaskIds.has(ownerId))) return null;
+        const transferredOwnerIds = new Set([...replacementByPriorOwner]
+          .filter(([ownerId, replacementId]) => replacementId === task.id
+            && authority.groundedTaskIds.has(ownerId)).map(([ownerId]) => ownerId));
+        const inheritedPaths = new Set((priorPlan?.tasks ?? [])
+          .filter(({ id }) => authority.groundedTaskIds.has(id) || transferredOwnerIds.has(id))
+          .flatMap(({ anticipatedPaths }) => anticipatedPaths));
+        const replacesAssessedDiscovery = discoveryTaskId !== undefined
+          && replacementByPriorOwner.get(discoveryTaskId) === task.id
+          && authority.responsibleTaskIds.has(discoveryTaskId);
+        const eligible = (path) => authority.mappedPaths.has(path)
+          || (!authority.citationFree && [...inheritedPaths]
+            .some((ownerPath) => sameOrDescendantPath(path, ownerPath)))
+          || (authority.citationFree && replacesAssessedDiscovery
+            && authority.citationFreePaths.has(path))
+          || (authority.citationFree && authority.citationFreePaths.has(path)
+            && [...dependencyPaths].some((ownerPath) => sameOrDescendantPath(path, ownerPath)));
+        return task.anticipatedPaths.some(eligible)
+          ? { key: `${branchIndex}:${authorityIndex}`, eligible } : null;
+      }).filter(Boolean);
+    }).flat();
+    if (matching.length === 0 || task.anticipatedPaths.length === 0
+        || task.anticipatedPaths.some((path) => !matching.some(({ eligible }) => eligible(path)))) {
       if (branches.some((branch) => task.objective === branch.responsibility
           && branch.responsibleCriterionIds.size > 0
           && !task.criterionIds.some((id) => branch.responsibleCriterionIds.has(id))
@@ -373,11 +457,14 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
       errors.push(`$ nonmaterial remediation task ${task.id} must match one exact assessed branch`);
       errors.push(`$ nonmaterial remediation task ${task.id} anticipatedPaths exceed the exact assessed or inherited responsibility`);
     } else {
-      for (const branch of matching) representedBranches.add(branch);
+      for (const { key } of matching) representedMechanisms.add(key);
     }
   }
-  for (const branch of branches) if (!representedBranches.has(branch)) {
-    errors.push(`$ nonmaterial amendment must represent the complete ${branch.kind} remediation branch`);
+  for (const [branchIndex, branch] of branches.entries()) {
+    if (branch.authorities.some((unused, authorityIndex) =>
+      !representedMechanisms.has(`${branchIndex}:${authorityIndex}`))) {
+      errors.push(`$ nonmaterial amendment must represent the complete ${branch.kind} remediation branch`);
+    }
   }
   return [...new Set(errors)].sort();
 }
