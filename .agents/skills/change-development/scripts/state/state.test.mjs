@@ -813,6 +813,8 @@ test('fresh nonreplacement remediation tasks retain only exact row-local authori
   const exactPath = 'owned/exact.mjs';
   const ownerSpecialization = specialization();
   const otherSpecialization = behaviorSpecialization();
+  const ownerUnsplittable = { reason: 'Keep the exact owner authority serialized.',
+    serializedDomains: ['workflow'], highestRiskSpecialization: 'ops-workflow' };
   const priorPlan = {
     specialization: ownerSpecialization,
     criteria: [
@@ -823,7 +825,8 @@ test('fresh nonreplacement remediation tasks retain only exact row-local authori
     ],
     tasks: [
       { id: 'owner', specialization: ownerSpecialization, criterionIds: ['owned'],
-        anticipatedPaths: ['owned'], dependsOn: [], produces: [], consumes: [] },
+        anticipatedPaths: ['owned'], dependsOn: [], produces: [], consumes: [],
+        unsplittable: ownerUnsplittable },
       { id: 'other-owner', specialization: otherSpecialization, criterionIds: ['other'],
         anticipatedPaths: ['other'], dependsOn: [], produces: ['other-artifact'], consumes: [] },
     ],
@@ -844,7 +847,7 @@ test('fresh nonreplacement remediation tasks retain only exact row-local authori
     tasks: [...priorPlan.tasks, { id: 'remediation', specialization: ownerSpecialization,
       objective: responsibility, criterionIds: ['remediation-criterion'], decisionIds: [],
       checklistItemIds: [], anticipatedPaths: [exactPath], dependsOn: ['owner'],
-      produces: [], consumes: [] }] });
+      produces: [], consumes: [], unsplittable: ownerUnsplittable }] });
   assert.deepEqual(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
     resultingPlan: exact(), addedTaskIds: ['remediation'] }), [],
   'the exact grounded owner dependency and specialization remain valid');
@@ -862,6 +865,8 @@ test('fresh nonreplacement remediation tasks retain only exact row-local authori
       (task) => { task.checklistItemIds.push('unrelated-check'); }],
     ['specialization', /specialization must equal its exact row-local authority/u,
       (task) => { task.specialization = otherSpecialization; }],
+    ['unsplittable', /unsplittable must equal its exact row-local owner authority/u,
+      (task) => { task.unsplittable = { ...ownerUnsplittable, reason: 'Invent different authority.' }; }],
   ]) {
     const candidate = exact(); mutate(candidate.tasks.at(-1));
     const directErrors = validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
@@ -875,6 +880,84 @@ test('fresh nonreplacement remediation tasks retain only exact row-local authori
       JSON.parse(readFileSync(receiptPath, 'utf8'))).join('\n'), pattern,
     `${label} authority is rejected from receipt-backed evidence`);
   }
+});
+
+test('fresh remediation unsplittable authority requires exact agreeing row-local owners', () => {
+  const responsibility = 'Apply the exact shared correction.';
+  const paths = ['first/exact.mjs', 'second/exact.mjs'];
+  const witness = { reason: 'Keep the shared owner authority serialized.',
+    serializedDomains: ['workflow'], highestRiskSpecialization: 'ops-workflow' };
+  const owner = (id, criterionId, path, unsplittable) => ({ id, criterionIds: [criterionId],
+    anticipatedPaths: [path.split('/')[0]], dependsOn: [], produces: [], consumes: [], unsplittable });
+  const priorPlan = {
+    criteria: paths.map((path, index) => ({ id: `owned-${index}`, description: `Own ${path}.`,
+      disposition: 'owned', ownerTaskId: `owner-${index}`, deferredReason: null })),
+    tasks: paths.map((path, index) => owner(`owner-${index}`, `owned-${index}`, path, witness)),
+    checklistMappings: [], decisions: [],
+  };
+  const rows = paths.map((mechanism, index) => ({ mechanism, sourceCriterionIds: ['source'],
+    acceptedCriterionIds: [`owned-${index}`], invariantIds: [] }));
+  const evidence = { result: { verdict: 'minor-amendment-required', unnecessaryWork: [],
+    smallerSufficientAlternative: null,
+    coverage: rows.map((row) => ({ ...row, classification: 'necessary-minor-expansion' })),
+    scopeDelta: { description: responsibility, sourceCriterionIds: ['source'],
+      acceptedCriterionIds: ['owned-0', 'owned-1'], invariantIds: [], materialSurfaces: [] } },
+  packet: { changeInventory: { paths, mappings: rows } }, cadence: { trigger: null } };
+  const planFor = (unsplittable = witness) => ({ ...structuredClone(priorPlan),
+    criteria: [...priorPlan.criteria, { id: 'remediation-criterion', description: responsibility,
+      disposition: 'owned', ownerTaskId: 'remediation', deferredReason: null }],
+    tasks: [...priorPlan.tasks, { id: 'remediation', objective: responsibility,
+      criterionIds: ['remediation-criterion'], decisionIds: [], checklistItemIds: [],
+      anticipatedPaths: paths, dependsOn: ['owner-0', 'owner-1'], produces: [], consumes: [],
+      unsplittable }] });
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: planFor(), addedTaskIds: ['remediation'] }), [],
+  'deep-equal owner witnesses authorize their exact shared value');
+  const directory = mkdtempSync(join(tmpdir(), 'fresh-unsplittable-owner-authority '));
+  const receiptPath = join(directory, 'authority.json');
+  writeReceiptJson(receiptPath, { evidence, priorPlan, resultingPlan: planFor(),
+    addedTaskIds: ['remediation'] });
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority(
+    JSON.parse(readFileSync(receiptPath, 'utf8'))), [],
+  'receipt-backed deep-equal owner witnesses authorize their exact shared value');
+
+  const conflicting = planFor();
+  conflicting.tasks.find(({ id }) => id === 'owner-1').unsplittable =
+    { ...witness, reason: 'Conflicting owner authority.' };
+  const pattern = /unsplittable must equal its exact row-local owner authority/u;
+  assert.match(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: conflicting, addedTaskIds: ['remediation'] }).join('\n'), pattern,
+  'conflicting owners fail closed instead of selecting one witness');
+  writeReceiptJson(receiptPath, { evidence, priorPlan, resultingPlan: conflicting,
+    addedTaskIds: ['remediation'] });
+  assert.match(validateNonmaterialAmendmentTaskAuthority(
+    JSON.parse(readFileSync(receiptPath, 'utf8'))).join('\n'), pattern,
+  'receipt-backed conflicting owner authority fails closed');
+
+  const ownerlessPlan = planFor(null);
+  ownerlessPlan.tasks.at(-1).dependsOn = [];
+  const ownerlessEvidence = structuredClone(evidence);
+  ownerlessEvidence.result.coverage = ownerlessEvidence.result.coverage.map((row) =>
+    ({ ...row, acceptedCriterionIds: [] }));
+  ownerlessEvidence.packet.changeInventory.mappings = ownerlessEvidence.packet.changeInventory.mappings
+    .map((row) => ({ ...row, acceptedCriterionIds: [] }));
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority({ evidence: ownerlessEvidence,
+    priorPlan, resultingPlan: ownerlessPlan, addedTaskIds: ['remediation'] }), [],
+  'ownerless fresh remediation requires null authority');
+  writeReceiptJson(receiptPath, { evidence: ownerlessEvidence, priorPlan,
+    resultingPlan: ownerlessPlan, addedTaskIds: ['remediation'] });
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority(
+    JSON.parse(readFileSync(receiptPath, 'utf8'))), [],
+  'receipt-backed ownerless fresh remediation requires null authority');
+  ownerlessPlan.tasks.at(-1).unsplittable = witness;
+  assert.match(validateNonmaterialAmendmentTaskAuthority({ evidence: ownerlessEvidence,
+    priorPlan, resultingPlan: ownerlessPlan, addedTaskIds: ['remediation'] }).join('\n'), pattern,
+  'ownerless fresh remediation cannot invent unsplittable authority');
+  writeReceiptJson(receiptPath, { evidence: ownerlessEvidence, priorPlan,
+    resultingPlan: ownerlessPlan, addedTaskIds: ['remediation'] });
+  assert.match(validateNonmaterialAmendmentTaskAuthority(
+    JSON.parse(readFileSync(receiptPath, 'utf8'))).join('\n'), pattern,
+  'receipt-backed ownerless fresh remediation cannot invent unsplittable authority');
 });
 
 test('necessary-minor path anchors intersect the exact coverage row and scope delta', () => {
@@ -5648,6 +5731,12 @@ test('interrupted nonmaterial amendment recovery revalidates its canonical proje
     ['fresh specialization authority', (plan) => {
       plan.tasks.find(({ id }) => id === 'trim-recovery-first-task').specialization =
         behaviorSpecialization();
+    }],
+    ['fresh unsplittable authority', (plan) => {
+      plan.tasks.find(({ id }) => id === 'trim-recovery-first-task').unsplittable = {
+        reason: 'Invent cross-domain serialization during recovery.',
+        serializedDomains: ['workflow'], highestRiskSpecialization: 'ops-workflow',
+      };
     }],
     ['retained foreign criterion ownership', (plan) => {
       plan.tasks.find(({ id }) => id === 'trim-recovery-first-task').criterionIds.push('durable-state');

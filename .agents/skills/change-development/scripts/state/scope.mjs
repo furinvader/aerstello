@@ -547,6 +547,19 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
             errors.push(`$ nonmaterial fresh remediation task ${task.id} specialization must equal its exact row-local authority`);
           }
         }
+        const ownerUnsplittableAuthorities = [...requiredOwnerIds]
+          .map((id) => (resultingPlan?.tasks ?? []).find((candidate) => candidate.id === id)
+            ?.unsplittable ?? null);
+        const distinctUnsplittableAuthorities = ownerUnsplittableAuthorities
+          .filter((value, index, values) =>
+            values.findIndex((candidate) => isDeepStrictEqual(candidate, value)) === index);
+        const expectedUnsplittable = requiredOwnerIds.size === 0
+          ? null : distinctUnsplittableAuthorities.length === 1
+            ? distinctUnsplittableAuthorities[0] : undefined;
+        if (expectedUnsplittable === undefined
+            || !isDeepStrictEqual(task.unsplittable ?? null, expectedUnsplittable)) {
+          errors.push(`$ nonmaterial fresh remediation task ${task.id} unsplittable must equal its exact row-local owner authority`);
+        }
       }
       for (const { key, eligible } of matching) {
         const witnesses = mechanismWitnesses.get(key) ?? [];
