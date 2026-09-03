@@ -153,6 +153,246 @@ test('trim ownership transfer requires removal of the prior owner task', () => {
   'reassignment cannot borrow paths while the prior owner task remains in the resulting plan');
 });
 
+test('citation-free discovery replacement retains only its exact assessed removal path', () => {
+  const responsibility = 'Remove only the discovered path.';
+  const discoveredPath = 'discovered/path.json'; const unrelatedPath = 'other/required.json';
+  const row = (mechanism, acceptedCriterionIds = []) => ({ mechanism, sourceCriterionIds: [],
+    acceptedCriterionIds, invariantIds: [] });
+  const evidence = { result: { verdict: 'trim-required', unnecessaryWork: [discoveredPath],
+    smallerSufficientAlternative: responsibility,
+    coverage: [{ ...row(discoveredPath), classification: 'speculative' },
+      { ...row(unrelatedPath, ['unrelated']), classification: 'required' }] },
+    packet: { changeInventory: { paths: [discoveredPath, unrelatedPath],
+      mappings: [row(discoveredPath), row(unrelatedPath, ['unrelated'])] } },
+    cadence: { trigger: 'worker-scope-discovery:discovery-owner:result:discovery' } };
+  const priorPlan = { criteria: [
+    { id: 'discovery', description: 'Prior discovery.', disposition: 'owned',
+      ownerTaskId: 'discovery-owner', deferredReason: null },
+    { id: 'unrelated', description: 'Unrelated.', disposition: 'owned',
+      ownerTaskId: 'unrelated-owner', deferredReason: null }],
+    tasks: [
+      { id: 'discovery-owner', anticipatedPaths: ['prior/path'], dependsOn: [], consumes: [] },
+      { id: 'unrelated-owner', anticipatedPaths: ['other'], dependsOn: [], consumes: [] }],
+    checklistMappings: [] };
+  const resultFor = (path) => ({ criteria: [
+    { ...priorPlan.criteria[0], ownerTaskId: 'replacement' }, priorPlan.criteria[1],
+    { id: 'remediation', description: responsibility, disposition: 'owned',
+      ownerTaskId: 'replacement', deferredReason: null }],
+    tasks: [priorPlan.tasks[1], { id: 'replacement', objective: responsibility,
+      criterionIds: ['discovery', 'remediation'], anticipatedPaths: [path], dependsOn: [], consumes: [] }],
+    checklistMappings: [] });
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: resultFor(discoveredPath), addedTaskIds: ['replacement'] }), []);
+  for (const [label, changedEvidence, path] of [
+    ['unrelated assessed', evidence, unrelatedPath],
+    ['unassessed', evidence, 'unassessed/path.json'],
+    ['missing cadence', { ...evidence, cadence: { trigger: null } }, discoveredPath],
+    ['wrong replacement owner', { ...evidence,
+      cadence: { trigger: 'worker-scope-discovery:unrelated-owner:result:discovery' } }, discoveredPath],
+  ]) assert.ok(validateNonmaterialAmendmentTaskAuthority({ evidence: changedEvidence, priorPlan,
+    resultingPlan: resultFor(path), addedTaskIds: ['replacement'] }).length > 0,
+  `${label} cannot borrow exact discovery replacement authority`);
+});
+
+test('mixed minor task authority is branch-local and preserves unrelated plan ownership', () => {
+  const necessary = 'Add only the assessed correction.';
+  const removal = 'Remove only the assessed speculative path.';
+  const task = (id, objective, criterionIds, anticipatedPaths, dependsOn = []) => ({
+    id, title: `Task ${id}`, objective, rationale: `${id} remains bounded.`,
+    specialization: specialization(), criterionIds, decisionIds: [], scenarioIds: [],
+    checklistItemIds: [], dependsOn, anticipatedPaths, produces: [], consumes: [],
+    validationIntent: [`Validate ${id}.`], unsplittable: null,
+  });
+  const priorPlan = {
+    criteria: [
+      { id: 'necessary-owned', description: 'Necessary owner.', disposition: 'owned',
+        ownerTaskId: 'necessary-owner', deferredReason: null },
+      { id: 'removal-owned', description: 'Removal owner.', disposition: 'owned',
+        ownerTaskId: 'removal-owner', deferredReason: null },
+      { id: 'sibling-owned', description: 'Sibling remains independent.', disposition: 'owned',
+        ownerTaskId: 'sibling-owner', deferredReason: null },
+      { id: 'sibling-owned-too', description: 'Sibling retains complete ownership.', disposition: 'owned',
+        ownerTaskId: 'sibling-owner', deferredReason: null },
+    ],
+    tasks: [
+      task('necessary-owner', 'Prior necessary work.', ['necessary-owned'], ['necessary/path']),
+      task('removal-owner', 'Prior removal work.', ['removal-owned'], ['removal/path']),
+      task('sibling-owner', 'Preserve the sibling.', ['sibling-owned', 'sibling-owned-too'],
+        ['sibling/path'], ['necessary-owner']),
+    ],
+    checklistMappings: [{ id: 'check', taskIds: ['necessary-owner', 'sibling-owner'] }],
+  };
+  priorPlan.tasks[0].produces = ['necessary-artifact'];
+  priorPlan.tasks[2].consumes = [{ artifactId: 'necessary-artifact', producerTaskId: 'necessary-owner' }];
+  const evidence = {
+    result: {
+      verdict: 'minor-amendment-required', unnecessaryWork: ['speculative-check', 'removal-owned-check'],
+      smallerSufficientAlternative: removal,
+      scopeDelta: { description: necessary, sourceCriterionIds: ['source'],
+        acceptedCriterionIds: ['necessary-owned'], invariantIds: [], materialSurfaces: [] },
+      coverage: [
+        { mechanism: 'necessary-check', classification: 'necessary-minor-expansion',
+          sourceCriterionIds: ['source'], acceptedCriterionIds: ['necessary-owned'], invariantIds: [] },
+        { mechanism: 'speculative-check', classification: 'speculative',
+          sourceCriterionIds: [], acceptedCriterionIds: [], invariantIds: [] },
+        { mechanism: 'removal-owned-check', classification: 'speculative',
+          sourceCriterionIds: [], acceptedCriterionIds: ['removal-owned'], invariantIds: [] },
+      ],
+    },
+    packet: { changeInventory: {
+      paths: ['necessary/path', 'removal/path/nested.txt'],
+      mappings: [
+        { mechanism: 'necessary-check', sourceCriterionIds: ['source'],
+          acceptedCriterionIds: ['necessary-owned'], invariantIds: [] },
+        { mechanism: 'necessary/path', sourceCriterionIds: ['source'],
+          acceptedCriterionIds: ['necessary-owned'], invariantIds: [] },
+        { mechanism: 'speculative-check', sourceCriterionIds: [], acceptedCriterionIds: [], invariantIds: [] },
+        { mechanism: 'removal-owned-check', sourceCriterionIds: [],
+          acceptedCriterionIds: ['removal-owned'], invariantIds: [] },
+        { mechanism: 'removal/path/nested.txt', sourceCriterionIds: [],
+          acceptedCriterionIds: ['removal-owned'], invariantIds: [] },
+      ],
+    } },
+    cadence: { trigger: null },
+  };
+  const criterion = (id, description, ownerTaskId) => ({ id, description, disposition: 'owned',
+    ownerTaskId, deferredReason: null });
+  const exactPlan = () => {
+    const plan = structuredClone(priorPlan);
+    plan.criteria.push(criterion('necessary-new', necessary, 'necessary-remediation'),
+      criterion('removal-new', removal, 'removal-remediation'));
+    plan.tasks.push(task('necessary-remediation', necessary, ['necessary-new'], ['necessary/path'],
+      ['necessary-owner']),
+    task('removal-remediation', removal, ['removal-new'], ['removal/path/nested.txt'],
+      ['removal-owner']));
+    return plan;
+  };
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: exactPlan(), addedTaskIds: ['necessary-remediation', 'removal-remediation'] }), [],
+  'two disjoint mixed-minor branches are accepted');
+
+  const onlyNecessary = exactPlan();
+  onlyNecessary.criteria.pop(); onlyNecessary.tasks.pop();
+  assert.ok(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: onlyNecessary, addedTaskIds: ['necessary-remediation'] })
+    .some((error) => /complete removal remediation branch/u.test(error)));
+
+  const onlyRemoval = exactPlan();
+  onlyRemoval.criteria.splice(-2, 1); onlyRemoval.tasks.splice(-2, 1);
+  assert.ok(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: onlyRemoval, addedTaskIds: ['removal-remediation'] })
+    .some((error) => /complete necessary remediation branch/u.test(error)));
+
+  const union = exactPlan();
+  union.criteria = union.criteria.filter(({ id }) => id !== 'removal-new');
+  union.tasks = union.tasks.filter(({ id }) => id !== 'removal-remediation');
+  union.criteria.push(criterion('union-removal', removal, 'necessary-remediation'));
+  union.tasks.at(-1).criterionIds.push('union-removal');
+  union.tasks.at(-1).anticipatedPaths.push('removal/path/nested.txt');
+  assert.ok(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: union, addedTaskIds: ['necessary-remediation'] })
+    .some((error) => /match one exact assessed branch/u.test(error)));
+
+  const continuity = exactPlan();
+  continuity.tasks = continuity.tasks.filter(({ id }) => id !== 'sibling-owner');
+  continuity.criteria = continuity.criteria.map((row) => row.id === 'sibling-owned'
+    || row.id === 'sibling-owned-too' ? { ...row, ownerTaskId: 'sibling-replacement' } : row);
+  continuity.criteria.push(criterion('sibling-duplicate', 'Sibling remains independent.',
+    'sibling-replacement'));
+  continuity.tasks.push({ ...priorPlan.tasks[2], id: 'sibling-replacement',
+    criterionIds: ['sibling-owned', 'sibling-owned-too', 'sibling-duplicate'] });
+  continuity.checklistMappings[0].taskIds = ['necessary-owner', 'sibling-replacement'];
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: continuity,
+    addedTaskIds: ['necessary-remediation', 'removal-remediation', 'sibling-replacement'] }), [],
+  'one exact unrelated continuity replacement remains accepted beside both remediation branches');
+  const insertedDuplicate = structuredClone(continuity);
+  insertedDuplicate.tasks.find(({ id }) => id === 'sibling-replacement').criterionIds =
+    ['sibling-owned', 'sibling-duplicate', 'sibling-owned-too'];
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: insertedDuplicate,
+    addedTaskIds: ['necessary-remediation', 'removal-remediation', 'sibling-replacement'] }), [],
+  'the sole continuity duplicate may be inserted without reordering the complete prior IDs');
+
+  const substitutedGraph = structuredClone(continuity);
+  substitutedGraph.tasks = substitutedGraph.tasks.filter(({ id }) => id !== 'necessary-owner');
+  substitutedGraph.criteria.find(({ id }) => id === 'necessary-owned').ownerTaskId = 'necessary-remediation';
+  const assessedReplacement = substitutedGraph.tasks
+    .find(({ id }) => id === 'necessary-remediation');
+  assessedReplacement.criterionIds.unshift('necessary-owned');
+  assessedReplacement.dependsOn = [];
+  assessedReplacement.produces = ['necessary-artifact'];
+  substitutedGraph.tasks.find(({ id }) => id === 'sibling-replacement').dependsOn = ['necessary-remediation'];
+  substitutedGraph.tasks.find(({ id }) => id === 'sibling-replacement').consumes[0].producerTaskId =
+    'necessary-remediation';
+  substitutedGraph.checklistMappings[0].taskIds = ['necessary-remediation', 'sibling-replacement'];
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: substitutedGraph,
+    addedTaskIds: ['necessary-remediation', 'removal-remediation', 'sibling-replacement'] }), [],
+  'dependency and checklist references substitute both exact owner replacements');
+
+  const substitutedRemovalDependency = exactPlan();
+  substitutedRemovalDependency.tasks = substitutedRemovalDependency.tasks
+    .filter(({ id }) => id !== 'removal-owner');
+  substitutedRemovalDependency.criteria
+    .find(({ id }) => id === 'removal-owned').ownerTaskId = 'removal-owner-remediation';
+  substitutedRemovalDependency.criteria.push(criterion('removal-owner-new', removal,
+    'removal-owner-remediation'));
+  substitutedRemovalDependency.tasks.push(task('removal-owner-remediation', removal,
+    ['removal-owned', 'removal-owner-new'], ['removal/path/nested.txt']));
+  substitutedRemovalDependency.tasks
+    .find(({ id }) => id === 'removal-remediation').dependsOn = ['removal-owner-remediation'];
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: substitutedRemovalDependency,
+    addedTaskIds: ['necessary-remediation', 'removal-remediation', 'removal-owner-remediation'] }), [],
+  'citation-free mixed removal follows a validated owner replacement dependency');
+
+  const mutated = exactPlan();
+  mutated.tasks[2].title = 'Rewrite retained sibling';
+  mutated.criteria[2].description = 'Rewrite retained criterion.';
+  const mutationErrors = validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: mutated, addedTaskIds: ['necessary-remediation', 'removal-remediation'] });
+  assert.ok(mutationErrors.some((error) => /retained task sibling-owner must remain exact/u.test(error)));
+  assert.ok(mutationErrors.some((error) => /criterion sibling-owned may change only/u.test(error)));
+
+  const absorbed = exactPlan();
+  absorbed.tasks = absorbed.tasks.filter(({ id }) => id !== 'sibling-owner');
+  absorbed.criteria = absorbed.criteria.map((row) => row.id === 'sibling-owned'
+    || row.id === 'sibling-owned-too' ? { ...row, ownerTaskId: 'necessary-remediation' } : row);
+  absorbed.tasks.at(-2).criterionIds.push('sibling-owned', 'sibling-owned-too');
+  absorbed.checklistMappings[0].taskIds = ['necessary-owner', 'necessary-remediation'];
+  assert.ok(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: absorbed, addedTaskIds: ['necessary-remediation', 'removal-remediation'] }).length > 0,
+  'an unrelated removed owner cannot be absorbed into assessed remediation');
+
+  const crossBranchTransfer = exactPlan();
+  crossBranchTransfer.tasks = crossBranchTransfer.tasks.filter(({ id }) => id !== 'necessary-owner');
+  crossBranchTransfer.criteria.find(({ id }) => id === 'necessary-owned').ownerTaskId = 'removal-remediation';
+  const removalTask = crossBranchTransfer.tasks.find(({ id }) => id === 'removal-remediation');
+  removalTask.criterionIds.unshift('necessary-owned'); removalTask.dependsOn = [];
+  crossBranchTransfer.checklistMappings[0].taskIds[0] = 'removal-remediation';
+  assert.ok(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: crossBranchTransfer,
+    addedTaskIds: ['necessary-remediation', 'removal-remediation'] }).length > 0,
+  'a necessary owner cannot transfer its authority into the independent removal branch');
+
+  const partial = structuredClone(continuity);
+  partial.criteria.find(({ id }) => id === 'sibling-owned-too').ownerTaskId = 'sibling-owner';
+  assert.ok(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: partial,
+    addedTaskIds: ['necessary-remediation', 'removal-remediation', 'sibling-replacement'] }).length > 0,
+  'a removed owner cannot split or partially transfer its complete criterion set');
+
+  for (const path of ['removal/path/other.txt', 'removal', 'removal/path-sibling/file.txt']) {
+    const rejectedPath = exactPlan();
+    rejectedPath.tasks.at(-1).anticipatedPaths = [path];
+    assert.ok(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+      resultingPlan: rejectedPath,
+      addedTaskIds: ['necessary-remediation', 'removal-remediation'] }).length > 0,
+    `mixed citation-free removal rejects ${path}`);
+  }
+});
+
 function testMinimalClosure(state, plan, overrides = {}) {
   const planDigest = digestJson(plan);
   return {
@@ -278,10 +518,13 @@ function workerDiscoveryNonmaterialScopeEvidence(state, plan, closure, packet, b
   const trigger = `worker-scope-discovery:${packet.taskId}:${resultDigest}:${discoveryDigest}`;
   const evidence = testScopeEvidence(state, plan, closure, { boundary: 'task', subjectDigest,
     subjectSha: packet.taskBaseSha, taskPacketDigest, trigger });
+  const discoveryCriterionId = plan.criteria.find(({ ownerTaskId }) => ownerTaskId === packet.taskId).id;
   const mapping = {
-    mechanism: 'unowned-lifecycle-path',
+    mechanism: verdict === 'trim-required'
+      ? scopeDiscovery.requestedAuthority.find(({ field }) => field === 'paths').values[0]
+      : 'unowned-lifecycle-path',
     sourceCriterionIds: verdict === 'minor-amendment-required' ? [plan.criteria[0].id] : [],
-    acceptedCriterionIds: verdict === 'minor-amendment-required' ? [plan.criteria[0].id] : [],
+    acceptedCriterionIds: verdict === 'minor-amendment-required' ? [discoveryCriterionId] : [],
     invariantIds: [],
     nonGoalIds: [], guidanceIds: [],
     rationale: 'The worker discovery requires an exact bounded scope disposition.',
@@ -293,7 +536,7 @@ function workerDiscoveryNonmaterialScopeEvidence(state, plan, closure, packet, b
       summary: 'The discovery requires one bounded adjacent lifecycle path.',
       coverage: [...evidence.result.coverage, { ...mapping, classification: 'necessary-minor-expansion' }],
       scopeDelta: { description: 'Add only the discovered lifecycle path.',
-        sourceCriterionIds: [plan.criteria[0].id], acceptedCriterionIds: [plan.criteria[0].id],
+        sourceCriterionIds: [plan.criteria[0].id], acceptedCriterionIds: [discoveryCriterionId],
         invariantIds: [], materialSurfaces: [] } }
     : { ...evidence.result, binding: evidence.packet.binding, verdict,
       summary: verdict === 'trim-required'
@@ -1581,7 +1824,9 @@ test('minor and trim assessments supersede only their exact discovery blocker th
     resultingPlan.tasks[0] = { ...resultingPlan.tasks[0], id: replacementTaskId,
       title: 'Apply bounded discovery remediation',
       objective: responsibility,
-      criterionIds: [resultingPlan.criteria[0].id, replacementCriterionId] };
+      criterionIds: [resultingPlan.criteria[0].id, replacementCriterionId],
+      anticipatedPaths: verdict === 'trim-required'
+        ? ['unowned/lifecycle.json'] : resultingPlan.tasks[0].anticipatedPaths };
     resultingPlan.checklistMappings[0].taskIds = [replacementTaskId];
     const minimalClosure = { ...structuredClone(fixture.closure), revision: 2,
       previousContractDigest: state.scope.closureDigest, planDigest: digestJson(resultingPlan),
@@ -1701,6 +1946,8 @@ test('minor and trim assessments supersede only their exact discovery blocker th
     const siblingReplacementId = `${verdictLabel}-sibling-replacement`;
     const discoveryCriterionId = `${verdictLabel}-discovery-transition-replacement`;
     const siblingCriterionId = `${verdictLabel}-sibling-transition-replacement`;
+    const siblingPriorCriterion = lateSibling.plan.criteria
+      .find(({ ownerTaskId }) => ownerTaskId === lateSibling.sibling.taskId);
     const resultingPlan = structuredClone(lateSibling.plan);
     resultingPlan.planRevision = 2;
     resultingPlan.criteria = resultingPlan.criteria.map((criterion) => ({
@@ -1711,14 +1958,14 @@ test('minor and trim assessments supersede only their exact discovery blocker th
     resultingPlan.criteria.push({ id: discoveryCriterionId,
       description: responsibility, disposition: 'owned',
       ownerTaskId: discoveryReplacementId, deferredReason: null },
-    { id: siblingCriterionId,
-      description: responsibility, disposition: 'owned',
-      ownerTaskId: siblingReplacementId, deferredReason: null });
+    { ...siblingPriorCriterion, id: siblingCriterionId, ownerTaskId: siblingReplacementId });
     resultingPlan.tasks = resultingPlan.tasks.map((task) => task.id === lateSibling.packet.taskId
       ? { ...task, id: discoveryReplacementId,
-        objective: responsibility, criterionIds: [...task.criterionIds, discoveryCriterionId] }
+        objective: responsibility, criterionIds: [...task.criterionIds, discoveryCriterionId],
+        anticipatedPaths: verdict === 'trim-required'
+          ? ['unowned/lifecycle.json'] : task.anticipatedPaths }
       : { ...task, id: siblingReplacementId,
-        objective: responsibility, criterionIds: [...task.criterionIds, siblingCriterionId] });
+        criterionIds: [...task.criterionIds, siblingCriterionId] });
     resultingPlan.checklistMappings = resultingPlan.checklistMappings.map((mapping) => ({
       ...mapping,
       taskIds: mapping.taskIds.map((id) => id === lateSibling.packet.taskId
@@ -1739,6 +1986,29 @@ test('minor and trim assessments supersede only their exact discovery blocker th
         `implementation/specialist-routes/${suffix}`,
         `implementation/results/${suffix}`);
     }
+    const absorbedPlan = structuredClone(resultingPlan);
+    const absorbedSiblingCriterionIds = absorbedPlan.criteria
+      .filter(({ ownerTaskId }) => ownerTaskId === siblingReplacementId).map(({ id }) => id);
+    absorbedPlan.criteria = absorbedPlan.criteria.map((criterion) =>
+      absorbedSiblingCriterionIds.includes(criterion.id)
+        ? { ...criterion, ownerTaskId: discoveryReplacementId } : criterion);
+    absorbedPlan.tasks = absorbedPlan.tasks.filter(({ id }) => id !== siblingReplacementId);
+    absorbedPlan.tasks.find(({ id }) => id === discoveryReplacementId).criterionIds
+      .push(...absorbedSiblingCriterionIds);
+    absorbedPlan.checklistMappings = absorbedPlan.checklistMappings.map((mapping) => ({ ...mapping,
+      taskIds: mapping.taskIds.map((id) => id === siblingReplacementId ? discoveryReplacementId : id),
+    }));
+    const absorbedClosure = { ...minimalClosure, planDigest: digestJson(absorbedPlan) };
+    const absorptionBefore = durableSnapshot(changeDirectory(lateSibling.cwd, lateState.changeId));
+    assert.throws(() => amendPlanWithScope({ cwd: lateSibling.cwd,
+      expectedRevision: lateState.revision, resultingPlan: absorbedPlan, minimalClosure: absorbedClosure,
+      amendment: { id: `${verdictLabel}-absorbed-transition-amendment`,
+        reason: 'Do not absorb an unrelated rejected sibling into assessment remediation.',
+        authorization: 'scope-review', trigger,
+        delta: { addedTaskIds: [discoveryReplacementId] }, invalidatedEvidence,
+      } }), (error) => error.code === 'INVALID_AMENDMENT');
+    assert.deepEqual(durableSnapshot(changeDirectory(lateSibling.cwd, lateState.changeId)),
+      absorptionBefore, `${verdict} unrelated sibling absorption is rejected atomically`);
     lateState = amendPlanWithScope({ cwd: lateSibling.cwd, expectedRevision: lateState.revision,
       resultingPlan, minimalClosure, amendment: {
         id: `${verdictLabel}-transition-amendment`,
@@ -3772,6 +4042,160 @@ test('receipt-backed minor and trim remediation alone may revisit terminal owner
   }
 });
 
+test('receipt-backed mixed minor amendments require exact disjoint remediation branches', async () => {
+  const fixture = await integratedTwoTaskFixture('mixed minor disjoint branch authority');
+  let state = fixture.state;
+  const evidence = integratedScopeEvidenceFor({ cwd: fixture.cwd, changeId: state.changeId });
+  const baseMapping = evidence.packet.changeInventory.mappings[0];
+  const necessaryPath = 'first.txt'; const removalPath = 'second.txt/nested-removal.txt';
+  const speculativeMechanism = 'speculative-check';
+  const necessaryMapping = { ...baseMapping };
+  const necessaryPathMapping = { ...baseMapping, mechanism: necessaryPath,
+    rationale: 'The assessed necessary path shares exact source authority.' };
+  const speculativeMapping = { ...baseMapping, mechanism: speculativeMechanism,
+    sourceCriterionIds: [], acceptedCriterionIds: [], invariantIds: [],
+    rationale: 'The citation-free mechanism is unnecessary.' };
+  const removalPathMapping = { ...baseMapping, mechanism: removalPath,
+    sourceCriterionIds: [], acceptedCriterionIds: ['second-change'], invariantIds: [],
+    rationale: 'The nested removal path is explicitly assessed.' };
+  const necessaryResponsibility = 'Apply only the assessed necessary correction.';
+  const removalResponsibility = 'Remove only the assessed speculative mechanism.';
+  evidence.packet.changeInventory.paths = [necessaryPath, removalPath];
+  evidence.packet.changeInventory.mappings = [necessaryMapping, necessaryPathMapping,
+    speculativeMapping, removalPathMapping];
+  evidence.result = { ...evidence.result, verdict: 'minor-amendment-required',
+    coverage: [
+      { ...necessaryMapping, classification: 'necessary-minor-expansion' },
+      { ...necessaryPathMapping, classification: 'required' },
+      { ...speculativeMapping, classification: 'speculative' },
+      { ...removalPathMapping, classification: 'required' },
+    ],
+    unnecessaryWork: [speculativeMechanism], smallerSufficientAlternative: removalResponsibility,
+    scopeDelta: { description: necessaryResponsibility,
+      sourceCriterionIds: [...baseMapping.sourceCriterionIds],
+      acceptedCriterionIds: [...baseMapping.acceptedCriterionIds], invariantIds: [], materialSurfaces: [] } };
+  evidence.packetDigest = digestJson(evidence.packet);
+  evidence.resultDigest = digestJson(evidence.result);
+  state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
+    expectedRevision: state.revision });
+  const directory = changeDirectory(fixture.cwd, state.changeId);
+  const original = JSON.parse(readFileSync(join(directory, 'plan', 'plan.json'), 'utf8'));
+  const planFor = (includeNecessary, includeRemoval, union = false) => {
+    const plan = structuredClone(original); plan.planRevision = 2;
+    const addedTaskIds = [];
+    if (includeNecessary) {
+      plan.criteria.push({ id: 'mixed-necessary-criterion', description: necessaryResponsibility,
+        disposition: 'owned', ownerTaskId: 'mixed-necessary-task', deferredReason: null });
+      plan.tasks.push({ ...original.tasks[0], id: 'mixed-necessary-task', title: 'Apply necessary branch',
+        objective: necessaryResponsibility, criterionIds: ['mixed-necessary-criterion'],
+        decisionIds: [], checklistItemIds: [], dependsOn: ['state-task'],
+        anticipatedPaths: [necessaryPath], produces: [], consumes: [] });
+      addedTaskIds.push('mixed-necessary-task');
+    }
+    if (includeRemoval) {
+      const ownerTaskId = union ? 'mixed-necessary-task' : 'mixed-removal-task';
+      plan.criteria.push({ id: 'mixed-removal-criterion', description: removalResponsibility,
+        disposition: 'owned', ownerTaskId, deferredReason: null });
+      if (union) {
+        plan.tasks.at(-1).criterionIds.push('mixed-removal-criterion');
+        plan.tasks.at(-1).anticipatedPaths.push(removalPath);
+      } else {
+        plan.tasks.push({ ...original.tasks[1], id: ownerTaskId, title: 'Apply removal branch',
+          objective: removalResponsibility, criterionIds: ['mixed-removal-criterion'],
+          decisionIds: [], checklistItemIds: [], dependsOn: ['second-task'],
+          anticipatedPaths: [removalPath], produces: [], consumes: [] });
+        addedTaskIds.push(ownerTaskId);
+      }
+    }
+    return { plan, addedTaskIds };
+  };
+  const trigger = digestJson(evidence);
+  const amendmentFor = (suffix, addedTaskIds) => ({ id: `mixed-${suffix}-amendment`,
+    reason: 'Apply the exact mixed-minor assessment branches.', authorization: 'scope-review', trigger,
+    delta: { addedTaskIds }, invalidatedEvidence: [trigger] });
+  for (const [suffix, candidate] of [
+    ['necessary-only', planFor(true, false)],
+    ['removal-only', planFor(false, true)],
+    ['cross-branch', planFor(true, true, true)],
+    ['retained-criterion-mutation', (() => {
+      const candidate = planFor(true, true);
+      candidate.plan.criteria[0].description = 'Mutate a retained criterion.';
+      return candidate;
+    })()],
+  ]) {
+    const before = durableSnapshot(directory);
+    assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+      amendment: amendmentFor(suffix, candidate.addedTaskIds), resultingPlan: candidate.plan }),
+    (error) => error.code === 'INVALID_AMENDMENT');
+    assert.deepEqual(durableSnapshot(directory), before,
+      `${suffix} mixed-minor authority is rejected atomically`);
+  }
+  const exact = planFor(true, true);
+  state = amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+    amendment: amendmentFor('disjoint', exact.addedTaskIds), resultingPlan: exact.plan });
+  assert.deepEqual(state.execution.tasks.filter(({ id }) => exact.addedTaskIds.includes(id))
+    .map(({ id, status }) => ({ id, status })), exact.addedTaskIds.map((id) => ({ id, status: 'unbound' })));
+});
+
+test('receipt-backed remediation replacement substitutes dependent task and producer references', async () => {
+  const fixture = repository('nonmaterial dependency substitution');
+  const planning = await initializeState({ cwd: fixture.cwd, changeId: 'nonmaterial-dependency-substitution',
+    mode: 'implement', baseBranch: 'main', planningRef: fixture.sha, source: descriptor });
+  const plan = executionPlanFor(planning);
+  plan.tasks[0].anticipatedPaths = ['first.txt']; plan.tasks[0].produces = ['state-artifact'];
+  plan.tasks[1].anticipatedPaths = ['second.txt']; plan.tasks[1].dependsOn = ['state-task'];
+  plan.tasks[1].consumes = [{ artifactId: 'state-artifact', producerTaskId: 'state-task' }];
+  const closure = testMinimalClosure(planning, plan);
+  let state = acceptPlanWithScope({ cwd: fixture.cwd, plan, minimalClosure: closure,
+    scopeEvidence: testScopeEvidence(planning, plan, closure), expectedRevision: planning.revision });
+  const packet = packetFor(state, plan, 'state-task');
+  state = bindTaskWithScope({ cwd: fixture.cwd, packet, expectedRevision: state.revision });
+  const worker = createWorkerFixture(fixture.cwd, state, packet);
+  state = scheduleWave({ cwd: fixture.cwd, expectedRevision: state.revision });
+  state = startTask({ cwd: fixture.cwd, taskId: packet.taskId, workerId: 'dependency-discovery-worker',
+    expectedRevision: state.revision });
+  const scopeDiscovery = { schemaVersion: 1, summary: 'The task found one bounded lifecycle dependency.',
+    evidence: [{ kind: 'state-path', identity: 'unowned/lifecycle.json',
+      detail: 'The task needs one assessed adjacent path.' }], triggeredTripwireIds: ['test-task-paths'],
+    requestedAuthority: [{ field: 'paths', values: ['unowned/lifecycle.json'] }] };
+  const blocked = { ...resultFor(packet, 'blocked'), unexpectedDependencies: [scopeDiscovery.summary],
+    scopeDiscovery, summary: scopeDiscovery.summary };
+  state = acceptResult({ cwd: fixture.cwd, workerCwd: worker.path, expectedRevision: state.revision,
+    result: blocked });
+  const evidence = workerDiscoveryNonmaterialScopeEvidence(
+    state, plan, closure, packet, blocked, scopeDiscovery, 'minor-amendment-required');
+  state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
+    expectedRevision: state.revision });
+  state = rejectTask({ cwd: fixture.cwd, taskId: packet.taskId,
+    reason: 'Replace the assessed dependency owner.', expectedRevision: state.revision });
+  removeTaskWorktree({ cwd: fixture.cwd, changeId: state.changeId, taskId: packet.taskId });
+  const replacementId = 'state-task-remediation'; const newCriterionId = 'state-remediation-criterion';
+  const resultingPlan = structuredClone(plan); resultingPlan.planRevision = 2;
+  resultingPlan.criteria[0].ownerTaskId = replacementId;
+  resultingPlan.criteria.push({ id: newCriterionId, description: evidence.result.scopeDelta.description,
+    disposition: 'owned', ownerTaskId: replacementId, deferredReason: null });
+  resultingPlan.tasks[0] = { ...resultingPlan.tasks[0], id: replacementId,
+    objective: evidence.result.scopeDelta.description,
+    criterionIds: ['durable-state', newCriterionId] };
+  resultingPlan.tasks[1].dependsOn = [replacementId];
+  resultingPlan.tasks[1].consumes[0].producerTaskId = replacementId;
+  resultingPlan.checklistMappings[0].taskIds = [replacementId];
+  const minimalClosure = { ...structuredClone(closure), revision: 2,
+    previousContractDigest: state.scope.closureDigest, planDigest: digestJson(resultingPlan),
+    authorizedShape: [...closure.authorizedShape, 'unowned-lifecycle-path'] };
+  const trigger = state.scope.currentEvidenceDigest;
+  const suffix = `${packet.taskId}/0001.json`;
+  state = amendPlanWithScope({ cwd: fixture.cwd, expectedRevision: state.revision,
+    resultingPlan, minimalClosure, amendment: { id: 'dependency-substitution-amendment',
+      reason: 'Replace the assessed owner while preserving dependent graph references.',
+      authorization: 'scope-review', trigger, delta: { addedTaskIds: [replacementId] },
+      invalidatedEvidence: [trigger, `implementation/tasks/${suffix}`,
+        `implementation/provenance/${suffix}`, `implementation/planning-signals/${suffix}`,
+        `implementation/specialist-routes/${suffix}`, `implementation/results/${suffix}`] } });
+  assert.equal(state.execution.tasks.find(({ id }) => id === 'second-task').status, 'unbound');
+  assert.equal(state.execution.tasks.find(({ id }) => id === replacementId).status, 'unbound');
+});
+
 test('receipt-backed minor remediation derives paths from exact source and invariant authority', async () => {
   for (const grounding of ['source', 'invariant']) {
     const fixture = await integratedSingleTaskFixture(`minor ${grounding} mapped path authority`);
@@ -4048,16 +4472,21 @@ test('interrupted nonmaterial amendment recovery revalidates its canonical proje
   const intentPath = join(transition, 'intent.json');
   const intent = JSON.parse(readFileSync(intentPath, 'utf8'));
   const record = intent.authoritativeEvidence.amendmentDigest;
-  record.value.delta.scopeRemediation.unnecessaryWork = [];
+  record.value.resultingPlan.tasks[0].title = 'Mutate retained task during recovery';
+  record.value.newDigest = digestJson(record.value.resultingPlan);
   record.digest = digestJson(record.value);
   intent.evidence.amendmentDigest = record.digest;
+  const closure = intent.authoritativeEvidence.minimalClosureDigest;
+  closure.value.planDigest = record.value.newDigest;
+  closure.digest = digestJson(closure.value);
+  intent.evidence.minimalClosureDigest = closure.digest;
   writeReceiptJson(intentPath, intent);
   const before = durableSnapshot(directory);
   assert.throws(() => recoverState({ cwd: fixture.cwd }),
     (error) => error.code === 'RECOVERY_EVIDENCE_INVALID'
       && /assessment-bound remediation projection/u.test(error.message));
   assert.deepEqual(durableSnapshot(directory), before,
-    'tampered nonmaterial recovery fails before sidecars, state, events, or completion mutate');
+    'closed-world resulting-plan tampering fails before sidecars, state, events, or completion mutate');
 });
 
 test('scope-blocked amendments require the exact active evidence trigger atomically', async () => {
