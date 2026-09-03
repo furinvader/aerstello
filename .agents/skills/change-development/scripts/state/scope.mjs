@@ -496,29 +496,35 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
       errors.push(`$ nonmaterial remediation task ${task.id} must match one exact assessed branch`);
       errors.push(`$ nonmaterial remediation task ${task.id} anticipatedPaths exceed the exact assessed or inherited responsibility`);
     } else {
-      if (!priorOwnersByReplacement.has(task.id)) {
-        const matchedAuthorities = matching.filter(({ eligible }) =>
-          task.anticipatedPaths.some(eligible));
-        const requiredOwnerIds = new Set();
-        for (const { authority, eligible } of matchedAuthorities) {
-          for (const ownerId of authority.groundedTaskIds) requiredOwnerIds.add(substitution(ownerId));
-          if (discoveryTaskId && authority.responsibleTaskIds.has(discoveryTaskId)) {
-            const discoveryTask = (priorPlan?.tasks ?? []).find(({ id }) => id === discoveryTaskId);
-            const matchedPaths = task.anticipatedPaths.filter(eligible);
-            if ((discoveryTask?.anticipatedPaths ?? []).some((ownerPath) =>
-              matchedPaths.some((path) => sameOrDescendantPath(path, ownerPath)))) {
-              requiredOwnerIds.add(substitution(discoveryTaskId));
-            }
-          }
-          if (!authority.citationFree || authority.groundedTaskIds.size > 0) continue;
+      const matchedAuthorities = matching.filter(({ eligible }) =>
+        task.anticipatedPaths.some(eligible));
+      const originalOwnerIds = new Set();
+      for (const { authority, eligible } of matchedAuthorities) {
+        for (const ownerId of authority.groundedTaskIds) originalOwnerIds.add(ownerId);
+        if (discoveryTaskId && authority.responsibleTaskIds.has(discoveryTaskId)) {
+          const discoveryTask = (priorPlan?.tasks ?? []).find(({ id }) => id === discoveryTaskId);
           const matchedPaths = task.anticipatedPaths.filter(eligible);
-          for (const priorTask of priorPlan?.tasks ?? []) {
-            if ((priorTask.anticipatedPaths ?? []).some((ownerPath) =>
-              matchedPaths.some((path) => sameOrDescendantPath(path, ownerPath)))) {
-              requiredOwnerIds.add(substitution(priorTask.id));
-            }
+          if ((discoveryTask?.anticipatedPaths ?? []).some((ownerPath) =>
+            matchedPaths.some((path) => sameOrDescendantPath(path, ownerPath)))) {
+            originalOwnerIds.add(discoveryTaskId);
           }
         }
+        if (!authority.citationFree || authority.groundedTaskIds.size > 0) continue;
+        const matchedPaths = task.anticipatedPaths.filter(eligible);
+        for (const priorTask of priorPlan?.tasks ?? []) {
+          if ((priorTask.anticipatedPaths ?? []).some((ownerPath) =>
+            matchedPaths.some((path) => sameOrDescendantPath(path, ownerPath)))) {
+            originalOwnerIds.add(priorTask.id);
+          }
+        }
+      }
+      const isReplacement = priorOwnersByReplacement.has(task.id);
+      if (isReplacement) {
+        for (const ownerId of priorOwnersByReplacement.get(task.id)) originalOwnerIds.add(ownerId);
+      }
+      const requiredOwnerIds = new Set([...originalOwnerIds].map((id) =>
+        isReplacement ? id : substitution(id)));
+      if (!isReplacement) {
         const expectedDependencies = (priorPlan?.tasks ?? []).map(({ id }) => substitution(id))
           .filter((id, index, values) => requiredOwnerIds.has(id) && values.indexOf(id) === index);
         if (!isDeepStrictEqual(task.dependsOn ?? [], expectedDependencies)) {
@@ -527,42 +533,41 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
         if ((task.produces ?? []).length > 0 || (task.consumes ?? []).length > 0) {
           errors.push(`$ nonmaterial fresh remediation task ${task.id} cannot introduce artifact authority`);
         }
-        const allowedDecisionIds = new Set(matchedAuthorities.flatMap(({ authority }) =>
-          authority.row.decisionIds ?? []));
-        if ((task.decisionIds ?? []).some((id) => !allowedDecisionIds.has(id))) {
-          errors.push(`$ nonmaterial fresh remediation task ${task.id} decisionIds exceed its exact assessed rows`);
-        }
         if ((task.checklistItemIds ?? []).length > 0) {
           errors.push(`$ nonmaterial fresh remediation task ${task.id} cannot introduce checklist authority`);
         }
-        if (task.specialization !== undefined) {
-          const ownerSpecializations = [...requiredOwnerIds]
-            .map((id) => (resultingPlan?.tasks ?? []).find((candidate) => candidate.id === id)
-              ?.specialization)
-            .filter((value) => value !== undefined);
-          const specializationAuthorities = ownerSpecializations.length > 0
-            ? ownerSpecializations : priorPlan?.specialization === undefined
-              ? [] : [priorPlan.specialization];
-          const distinctAuthorities = specializationAuthorities.filter((value, index, values) =>
-            values.findIndex((candidate) => isDeepStrictEqual(candidate, value)) === index);
-          if (distinctAuthorities.length !== 1
-              || !isDeepStrictEqual(task.specialization, distinctAuthorities[0])) {
-            errors.push(`$ nonmaterial fresh remediation task ${task.id} specialization must equal its exact row-local authority`);
-          }
+      }
+      const allowedDecisionIds = new Set(matchedAuthorities.flatMap(({ authority }) =>
+        authority.row.decisionIds ?? []));
+      if ((task.decisionIds ?? []).some((id) => !allowedDecisionIds.has(id))) {
+        errors.push(`$ nonmaterial remediation task ${task.id} decisionIds exceed its exact assessed rows`);
+      }
+      const ownerTasks = isReplacement ? priorPlan?.tasks ?? [] : resultingPlan?.tasks ?? [];
+      if (task.specialization !== undefined) {
+        const ownerSpecializations = [...requiredOwnerIds]
+          .map((id) => ownerTasks.find((candidate) => candidate.id === id)?.specialization)
+          .filter((value) => value !== undefined);
+        const specializationAuthorities = ownerSpecializations.length > 0
+          ? ownerSpecializations : priorPlan?.specialization === undefined
+            ? [] : [priorPlan.specialization];
+        const distinctAuthorities = specializationAuthorities.filter((value, index, values) =>
+          values.findIndex((candidate) => isDeepStrictEqual(candidate, value)) === index);
+        if (distinctAuthorities.length !== 1
+            || !isDeepStrictEqual(task.specialization, distinctAuthorities[0])) {
+          errors.push(`$ nonmaterial remediation task ${task.id} specialization must equal its exact row-local authority`);
         }
-        const ownerUnsplittableAuthorities = [...requiredOwnerIds]
-          .map((id) => (resultingPlan?.tasks ?? []).find((candidate) => candidate.id === id)
-            ?.unsplittable ?? null);
-        const distinctUnsplittableAuthorities = ownerUnsplittableAuthorities
-          .filter((value, index, values) =>
-            values.findIndex((candidate) => isDeepStrictEqual(candidate, value)) === index);
-        const expectedUnsplittable = requiredOwnerIds.size === 0
-          ? null : distinctUnsplittableAuthorities.length === 1
-            ? distinctUnsplittableAuthorities[0] : undefined;
-        if (expectedUnsplittable === undefined
-            || !isDeepStrictEqual(task.unsplittable ?? null, expectedUnsplittable)) {
-          errors.push(`$ nonmaterial fresh remediation task ${task.id} unsplittable must equal its exact row-local owner authority`);
-        }
+      }
+      const ownerUnsplittableAuthorities = [...requiredOwnerIds]
+        .map((id) => ownerTasks.find((candidate) => candidate.id === id)?.unsplittable ?? null);
+      const distinctUnsplittableAuthorities = ownerUnsplittableAuthorities
+        .filter((value, index, values) =>
+          values.findIndex((candidate) => isDeepStrictEqual(candidate, value)) === index);
+      const expectedUnsplittable = requiredOwnerIds.size === 0
+        ? null : distinctUnsplittableAuthorities.length === 1
+          ? distinctUnsplittableAuthorities[0] : undefined;
+      if (expectedUnsplittable === undefined
+          || !isDeepStrictEqual(task.unsplittable ?? null, expectedUnsplittable)) {
+        errors.push(`$ nonmaterial remediation task ${task.id} unsplittable must equal its exact row-local owner authority`);
       }
       for (const { key, eligible } of matching) {
         const witnesses = mechanismWitnesses.get(key) ?? [];
