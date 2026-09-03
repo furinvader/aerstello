@@ -118,9 +118,10 @@ compact projection proves no prior document. Pair-complete/state-old suffix
 recovery remains unchanged. Status and other ordinary reads are strictly
 read-only. Missing or oversized documents, malformed or foreign receipts,
 divergent suffixes, stale return identity, orphan sidecars, ambiguous
-candidates, or HEAD drift fail closed. Scope documents remain bounded at 256
-KiB—including valid evidence larger than the 64 KiB active-state limit—and
-receipts remain bounded at 128 bytes.
+candidates, or HEAD drift fail closed. The append-only scope journal remains
+bounded at 16 MiB. Authority snapshots and return envelopes remain bounded at
+256 KiB—including valid evidence larger than the 64 KiB active-state
+limit—and receipts remain bounded at 128 bytes.
 
 Non-replacing classifications and decisions retain the last validated return
 identity; only persistence of an exact replacement return envelope may change it.
