@@ -340,6 +340,15 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
   const assessedPriorOwners = new Set(branches.flatMap(({ responsibleTaskIds }) =>
     [...responsibleTaskIds]));
   const substitution = (id) => replacementByPriorOwner.get(id) ?? id;
+  const priorTaskOrder = (priorPlan?.tasks ?? []).map(({ id }) => id);
+  const projectedTaskOrder = (resultingPlan?.tasks ?? []).flatMap(({ id }) => {
+    if (priorTaskIds.has(id)) return [id];
+    const owners = priorOwnersByReplacement.get(id) ?? [];
+    return owners.length === 1 ? owners : [];
+  });
+  if (!isDeepStrictEqual(projectedTaskOrder, priorTaskOrder)) {
+    errors.push('$ nonmaterial amendment must preserve the exact prior task-order backbone through replacements');
+  }
   const substitutedTaskReferences = (task) => ({ ...task,
     dependsOn: (task.dependsOn ?? []).map(substitution),
     consumes: (task.consumes ?? []).map((consumption) => ({ ...consumption,
@@ -539,7 +548,21 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
       }
       const allowedDecisionIds = new Set(matchedAuthorities.flatMap(({ authority }) =>
         authority.row.decisionIds ?? []));
-      if ((task.decisionIds ?? []).some((id) => !allowedDecisionIds.has(id))) {
+      const taskDecisionIds = task.decisionIds ?? [];
+      const inheritedDecisionIds = isReplacement
+        ? (priorPlan?.tasks ?? []).find(({ id }) =>
+          priorOwnersByReplacement.get(task.id).includes(id))?.decisionIds ?? []
+        : [];
+      const inheritedDecisionIdSet = new Set(inheritedDecisionIds);
+      const inheritedDecisionProjection = taskDecisionIds
+        .filter((id) => inheritedDecisionIdSet.has(id));
+      const addedDecisionIds = taskDecisionIds
+        .filter((id) => !inheritedDecisionIdSet.has(id));
+      if (isReplacement && (new Set(taskDecisionIds).size !== taskDecisionIds.length
+          || !isDeepStrictEqual(inheritedDecisionProjection, inheritedDecisionIds))) {
+        errors.push(`$ nonmaterial assessed replacement task ${task.id} must retain complete exact ordered inherited decisionIds without duplicates`);
+      }
+      if (addedDecisionIds.some((id) => !allowedDecisionIds.has(id))) {
         errors.push(`$ nonmaterial remediation task ${task.id} decisionIds exceed its exact assessed rows`);
       }
       const ownerTasks = isReplacement ? priorPlan?.tasks ?? [] : resultingPlan?.tasks ?? [];
