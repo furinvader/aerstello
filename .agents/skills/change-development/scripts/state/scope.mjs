@@ -189,13 +189,10 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
         .filter((id) => deltaSources === null || deltaSources.has(id)));
       const invariantAnchors = new Set(anchorRows.flatMap(({ invariantIds }) => invariantIds)
         .filter((id) => deltaInvariants === null || deltaInvariants.has(id)));
-      const acceptedAnchors = new Set(anchorRows.flatMap(({ acceptedCriterionIds }) =>
-        acceptedCriterionIds).filter((id) => kind !== 'necessary' || deltaAccepted.has(id)));
       const decisionAnchors = new Set(anchorRows.flatMap(({ decisionIds = [] }) => decisionIds));
       for (const mapping of inventoryMappings) {
         if (assessedPaths.has(mapping.mechanism)
             && (setsIntersect(mapping.sourceCriterionIds, sourceAnchors)
-              || setsIntersect(mapping.acceptedCriterionIds, acceptedAnchors)
               || setsIntersect(mapping.invariantIds, invariantAnchors)
               || setsIntersect(mapping.decisionIds ?? [], decisionAnchors))) {
           mappedPaths.add(mapping.mechanism);

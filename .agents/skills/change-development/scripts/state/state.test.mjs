@@ -314,7 +314,7 @@ test('each nonmaterial mechanism requires its own eligible anticipated-path witn
   const responsibility = 'Remove both shared-authority mechanisms.';
   const logical = ['logical-first', 'logical-second'];
   const paths = ['owned/first.mjs', 'owned/second.mjs'];
-  const mapping = (mechanism) => ({ mechanism, sourceCriterionIds: [],
+  const mapping = (mechanism) => ({ mechanism, sourceCriterionIds: ['shared-source'],
     acceptedCriterionIds: ['owned'], invariantIds: [] });
   const priorTask = { id: 'owner', objective: 'Own paths.', criterionIds: ['owned'],
     anticipatedPaths: ['owned'], dependsOn: [], produces: [], consumes: [] };
@@ -395,6 +395,7 @@ test('each nonmaterial mechanism requires its own eligible anticipated-path witn
 test('deferred-only grounding is representable while mixed grounding retains its owned carry', () => {
   const responsibility = 'Add the assessed deferred remediation.';
   const path = 'owned/deferred.mjs';
+  const siblingPath = 'owned/deferred-sibling.mjs';
   const priorTask = { id: 'owner', objective: 'Own the retained path.', criterionIds: ['owned'],
     anticipatedPaths: ['owned'], dependsOn: [], produces: [], consumes: [] };
   const priorPlan = { criteria: [
@@ -404,29 +405,37 @@ test('deferred-only grounding is representable while mixed grounding retains its
       ownerTaskId: 'owner', deferredReason: null },
   ], tasks: [priorTask], checklistMappings: [], decisions: [] };
   const evidenceFor = (acceptedCriterionIds) => {
-    const mapping = { mechanism: 'deferred-logical-mechanism', sourceCriterionIds: [],
+    const mapping = { mechanism: path, sourceCriterionIds: [],
       acceptedCriterionIds,
       invariantIds: [] };
-    const pathMapping = { ...mapping, mechanism: path };
+    const siblingMapping = { ...mapping, mechanism: siblingPath };
     return { result: { verdict: 'minor-amendment-required', unnecessaryWork: [],
       smallerSufficientAlternative: null,
       coverage: [{ ...mapping, classification: 'necessary-minor-expansion' },
-        { ...pathMapping, classification: 'required' }],
+        { ...siblingMapping, classification: 'required' }],
       scopeDelta: { description: responsibility, sourceCriterionIds: [], acceptedCriterionIds,
         invariantIds: [], materialSurfaces: [] } },
-    packet: { changeInventory: { paths: [path], mappings: [mapping, pathMapping] } },
+    packet: { changeInventory: { paths: [path, siblingPath], mappings: [mapping, siblingMapping] } },
     cadence: { trigger: null } };
   };
-  const planFor = (dependsOn) => ({ ...structuredClone(priorPlan),
+  const planFor = (dependsOn, anticipatedPath = path) => ({ ...structuredClone(priorPlan),
     criteria: [...priorPlan.criteria, { id: 'remediation-criterion', description: responsibility,
       disposition: 'owned', ownerTaskId: 'remediation', deferredReason: null }],
     tasks: [priorTask, { id: 'remediation', objective: responsibility,
-      criterionIds: ['remediation-criterion'], anticipatedPaths: [path], dependsOn,
+      criterionIds: ['remediation-criterion'], anticipatedPaths: [anticipatedPath], dependsOn,
       produces: [], consumes: [] }] });
   assert.deepEqual(validateNonmaterialAmendmentTaskAuthority({
     evidence: evidenceFor(['deferred']), priorPlan, resultingPlan: planFor([]),
     addedTaskIds: ['remediation'] }), [],
   'ownerless deferred grounding is represented by a new owned criterion and assessed path');
+  for (const [label, rejectedPath] of [
+    ['accepted-criterion sibling', siblingPath],
+    ['unassessed path', 'owned/deferred-unassessed.mjs'],
+  ]) assert.ok(validateNonmaterialAmendmentTaskAuthority({
+    evidence: evidenceFor(['deferred']), priorPlan, resultingPlan: planFor([], rejectedPath),
+    addedTaskIds: ['remediation'] }).some((error) =>
+    /anticipatedPaths exceed the exact assessed or inherited responsibility/u.test(error)),
+  `${label} cannot borrow deferred-only path authority`);
   const deferredBorrow = planFor([]);
   deferredBorrow.tasks.at(-1).criterionIds.push('deferred');
   assert.ok(validateNonmaterialAmendmentTaskAuthority({
@@ -448,6 +457,12 @@ test('deferred-only grounding is representable while mixed grounding retains its
   assert.deepEqual(validateNonmaterialAmendmentTaskAuthority(
     JSON.parse(readFileSync(receiptPath, 'utf8'))), [],
   'receipt-backed deferred-only grounding remains representable');
+  writeReceiptJson(receiptPath, { evidence: evidenceFor(['deferred']), priorPlan,
+    resultingPlan: planFor([], siblingPath), addedTaskIds: ['remediation'] });
+  assert.match(validateNonmaterialAmendmentTaskAuthority(
+    JSON.parse(readFileSync(receiptPath, 'utf8'))).join('\n'),
+  /anticipatedPaths exceed the exact assessed or inherited responsibility/u,
+  'receipt-backed accepted-criterion sibling borrowing fails closed');
   writeReceiptJson(receiptPath, { evidence: evidenceFor(['deferred']), priorPlan,
     resultingPlan: deferredBorrow, addedTaskIds: ['remediation'] });
   assert.match(validateNonmaterialAmendmentTaskAuthority(
@@ -5436,28 +5451,21 @@ test('interrupted nonmaterial amendment recovery revalidates its canonical proje
   let state = fixture.state;
   const evidence = integratedScopeEvidenceFor({ cwd: fixture.cwd, changeId: state.changeId });
   const mapping = evidence.packet.changeInventory.mappings[0];
-  const firstMechanism = 'logical-first-mechanism';
-  const secondMechanism = 'logical-second-mechanism';
   const firstPath = 'first.txt/first-mechanism.mjs';
   const secondPath = 'first.txt/second-mechanism.mjs';
-  const firstMapping = { ...mapping, mechanism: firstMechanism, sourceCriterionIds: [],
+  const firstMapping = { ...mapping, mechanism: firstPath, sourceCriterionIds: [],
     acceptedCriterionIds: ['deferred-recovery'], invariantIds: [], decisionIds: [],
-    rationale: 'The first logical mechanism has the grounded owner authority.' };
-  const secondMapping = { ...mapping, mechanism: secondMechanism,
-    rationale: 'The second exact mechanism has the same grounded owner authority.' };
-  const firstPathMapping = { ...firstMapping, mechanism: firstPath };
-  const secondPathMapping = { ...mapping, mechanism: secondPath };
+    rationale: 'The exact deferred-only assessed path carries its own authority.' };
+  const secondMapping = { ...firstMapping, mechanism: secondPath,
+    rationale: 'The assessed sibling shares only the deferred accepted criterion.' };
   evidence.packet.changeInventory.paths = [firstPath, secondPath];
-  evidence.packet.changeInventory.mappings = [firstMapping, secondMapping,
-    firstPathMapping, secondPathMapping];
+  evidence.packet.changeInventory.mappings = [firstMapping, secondMapping];
   evidence.result = { ...evidence.result, verdict: 'trim-required',
     coverage: [{ ...firstMapping, sourceCriterionIds: [],
       acceptedCriterionIds: [...firstMapping.acceptedCriterionIds],
       classification: 'speculative', rationale: 'Remove the exact unnecessary mechanism.' },
-    { ...secondMapping, classification: 'speculative' },
-    { ...firstPathMapping, classification: 'required' },
-    { ...secondPathMapping, classification: 'required' }],
-    unnecessaryWork: [firstMechanism, secondMechanism],
+    { ...secondMapping, classification: 'required' }],
+    unnecessaryWork: [firstPath],
     smallerSufficientAlternative: 'Use only the bounded simplification task.' };
   evidence.packetDigest = digestJson(evidence.packet);
   evidence.resultDigest = digestJson(evidence.result);
@@ -5467,17 +5475,15 @@ test('interrupted nonmaterial amendment recovery revalidates its canonical proje
   const original = JSON.parse(readFileSync(join(directory, 'plan', 'plan.json'), 'utf8'));
   const resultingPlan = structuredClone(original); resultingPlan.planRevision = 2;
   const responsibility = evidence.result.smallerSufficientAlternative;
-  resultingPlan.criteria.push(...['first', 'second'].map((id) => ({ id: `trim-recovery-${id}`,
-    description: responsibility, disposition: 'owned', ownerTaskId: `trim-recovery-${id}-task`,
-    deferredReason: null })));
-  resultingPlan.tasks.push(...[['first', firstPath], ['second', secondPath]].map(([id, path]) => ({
-    ...original.tasks[0], id: `trim-recovery-${id}-task`, title: `Apply exact ${id} trim`,
-    objective: responsibility, criterionIds: [`trim-recovery-${id}`], checklistItemIds: [],
-    dependsOn: id === 'first' ? [] : ['state-task'], anticipatedPaths: [path],
-  })));
+  resultingPlan.criteria.push({ id: 'trim-recovery-first', description: responsibility,
+    disposition: 'owned', ownerTaskId: 'trim-recovery-first-task', deferredReason: null });
+  resultingPlan.tasks.push({ ...original.tasks[0], id: 'trim-recovery-first-task',
+    title: 'Apply exact deferred-only trim', objective: responsibility,
+    criterionIds: ['trim-recovery-first'], checklistItemIds: [], dependsOn: [],
+    anticipatedPaths: [firstPath] });
   const amendment = { id: 'trim-recovery-amendment', reason: 'Apply the exact trim assessment.',
     authorization: 'scope-review', trigger: digestJson(evidence),
-    delta: { addedTaskIds: ['trim-recovery-first-task', 'trim-recovery-second-task'] },
+    delta: { addedTaskIds: ['trim-recovery-first-task'] },
     invalidatedEvidence: [digestJson(evidence)] };
   assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
     amendment, resultingPlan,
@@ -5487,16 +5493,16 @@ test('interrupted nonmaterial amendment recovery revalidates its canonical proje
   const intentPath = join(transition, 'intent.json');
   const pristineIntent = JSON.parse(readFileSync(intentPath, 'utf8'));
   for (const [label, mutate] of [
-    ['mechanism witness', (plan) => {
-      plan.tasks.find(({ id }) => id === 'trim-recovery-second-task').anticipatedPaths =
-        ['outside/unassessed.mjs'];
+    ['accepted-criterion sibling', (plan) => {
+      plan.tasks.find(({ id }) => id === 'trim-recovery-first-task').anticipatedPaths = [secondPath];
     }],
-    ['duplicate mechanism witness', (plan) => {
-      plan.tasks.find(({ id }) => id === 'trim-recovery-second-task').anticipatedPaths = [firstPath];
+    ['mechanism witness', (plan) => {
+      plan.tasks.find(({ id }) => id === 'trim-recovery-first-task').anticipatedPaths =
+        ['outside/unassessed.mjs'];
     }],
     ['plan authority', (plan) => { plan.title = `${plan.title} changed`; }],
     ['mixed grounding carry', (plan) => {
-      plan.tasks.find(({ id }) => id === 'trim-recovery-second-task').dependsOn = [];
+      plan.tasks.find(({ id }) => id === 'trim-recovery-first-task').dependsOn = ['state-task'];
     }],
     ['retained foreign criterion ownership', (plan) => {
       plan.tasks.find(({ id }) => id === 'trim-recovery-first-task').criterionIds.push('durable-state');
