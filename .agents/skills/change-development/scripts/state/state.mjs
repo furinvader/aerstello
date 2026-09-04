@@ -4421,6 +4421,8 @@ export function amendPlan({ cwd = process.cwd(), changeId, amendment, resultingP
         }
         const authorityErrors = validateNonmaterialAmendmentTaskAuthority({
           evidence, priorPlan: prior, resultingPlan, addedTaskIds: declaredTaskIds,
+          terminalTaskIds: state.execution.tasks
+            .filter(({ status }) => ['integrated', 'no-change'].includes(status)).map(({ id }) => id),
         });
         if (authorityErrors.length > 0) {
           throw new StateError(`Scope-driven remediation tasks lack exact assessment authority:\n- ${authorityErrors.join('\n- ')}`,
@@ -5431,6 +5433,8 @@ function amendmentForRecovery(cwd, intent, predecessor) {
       const taskAuthorityErrors = validateNonmaterialAmendmentTaskAuthority({
         evidence, priorPlan, resultingPlan: record.resultingPlan,
         addedTaskIds: record.delta.addedTaskIds,
+        terminalTaskIds: predecessor.execution.tasks
+          .filter(({ status }) => ['integrated', 'no-change'].includes(status)).map(({ id }) => id),
       });
       const authorityErrors = evidence.result.verdict === 'minor-amendment-required'
         ? validateMinorAmendmentAuthority({ evidence, amendment: record })

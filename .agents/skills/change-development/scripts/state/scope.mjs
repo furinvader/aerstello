@@ -152,7 +152,7 @@ function planAuthorityProjection(plan) {
 }
 
 export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan, resultingPlan,
-  addedTaskIds }) {
+  addedTaskIds, terminalTaskIds = [] }) {
   const errors = [];
   const verdict = evidence?.result?.verdict;
   if (!['minor-amendment-required', 'trim-required'].includes(verdict)) {
@@ -189,11 +189,16 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
         .filter((id) => deltaSources === null || deltaSources.has(id)));
       const invariantAnchors = new Set(anchorRows.flatMap(({ invariantIds }) => invariantIds)
         .filter((id) => deltaInvariants === null || deltaInvariants.has(id)));
+      const acceptedCriterionAnchors = new Set(kind === 'necessary'
+        ? anchorRows.flatMap(({ acceptedCriterionIds }) => acceptedCriterionIds)
+          .filter((id) => deltaAccepted.has(id))
+        : []);
       const decisionAnchors = new Set(kind === 'necessary' ? []
         : anchorRows.flatMap(({ decisionIds = [] }) => decisionIds));
       for (const mapping of inventoryMappings) {
         if (assessedPaths.has(mapping.mechanism)
             && (setsIntersect(mapping.sourceCriterionIds, sourceAnchors)
+              || setsIntersect(mapping.acceptedCriterionIds, acceptedCriterionAnchors)
               || setsIntersect(mapping.invariantIds, invariantAnchors)
               || setsIntersect(mapping.decisionIds ?? [], decisionAnchors))) {
           mappedPaths.add(mapping.mechanism);
@@ -257,6 +262,12 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
   const resultingTaskIds = new Set((resultingPlan?.tasks ?? []).map(({ id }) => id));
   const resultingCriteriaById = new Map((resultingPlan?.criteria ?? []).map((row) => [row.id, row]));
   const removedTasks = (priorPlan?.tasks ?? []).filter(({ id }) => !resultingTaskIds.has(id));
+  const terminalTaskIdSet = new Set(terminalTaskIds);
+  for (const task of removedTasks) {
+    if (terminalTaskIdSet.has(task.id)) {
+      errors.push(`$ nonmaterial amendment cannot remove or replace terminal task ${task.id}`);
+    }
+  }
   const replacementByPriorOwner = new Map();
   const priorOwnersByReplacement = new Map();
   for (const priorTask of removedTasks) {
@@ -378,6 +389,9 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
           const inheritedScenarioIds = discoveryTask.scenarioIds ?? [];
           const inheritedScenarioIdSet = new Set(inheritedScenarioIds);
           const taskScenarioIds = task.scenarioIds ?? [];
+          if (!isDeepStrictEqual(task.validationIntent, discoveryTask.validationIntent)) {
+            rejectBranch(`$ nonmaterial assessed replacement task ${task.id} must retain complete exact ordered inherited validationIntent`);
+          }
           const allowedScenarioIds = new Set([...ownerIds].flatMap((id) =>
             (priorPlan?.tasks ?? []).find((candidate) => candidate.id === id)?.scenarioIds ?? []));
           if (new Set(taskScenarioIds).size !== taskScenarioIds.length
@@ -520,6 +534,9 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
     const replacement = addedTasksById.get(replacementId);
     const expectedReferences = substitutedTaskReferences(priorTask);
     if (assessedPriorOwners.has(priorOwnerId)) {
+      if (!isDeepStrictEqual(replacement?.validationIntent, priorTask?.validationIntent)) {
+        errors.push(`$ nonmaterial assessed replacement task ${replacementId} must preserve exact ordered validationIntent`);
+      }
       if (!isDeepStrictEqual(replacement?.dependsOn ?? [], expectedReferences.dependsOn ?? [])) {
         errors.push(`$ nonmaterial assessed replacement task ${replacementId} must preserve prior dependency edges`);
       }
