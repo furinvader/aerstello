@@ -280,7 +280,7 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
       errors.push(`$ nonmaterial criterionless discovery task ${discoveryTaskId} must be removed and replaced exactly`);
     }
     if (discoveryTask && owned.length === 0 && !replacementByPriorOwner.has(discoveryTaskId)) {
-      const candidates = addedTasks.filter((task) => !priorOwnersByReplacement.has(task.id)
+      const preliminaryCandidates = addedTasks.filter((task) => !priorOwnersByReplacement.has(task.id)
           && branches.some((branch) => task.objective === branch.responsibility)
           && (addedCriteriaByOwner.get(task.id) ?? []).length > 0
           && (addedCriteriaByOwner.get(task.id) ?? []).every(({ id, description }) =>
@@ -326,6 +326,92 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
           }));
           return isDeepStrictEqual(resultingPlan?.checklistMappings ?? [], expectedMappings);
         });
+      const candidateDiagnostics = [];
+      const candidates = preliminaryCandidates.filter((task) => {
+        let exact = true;
+        const reject = (message) => { candidateDiagnostics.push(message); exact = false; };
+        const hypothetical = new Map(replacementByPriorOwner);
+        hypothetical.set(discoveryTaskId, task.id);
+        const reverse = new Map(priorOwnersByReplacement);
+        reverse.set(task.id, [discoveryTaskId]);
+        const substitute = (id) => hypothetical.get(id) ?? id;
+        const projectedOrder = (resultingPlan?.tasks ?? []).flatMap(({ id }) => {
+          if (priorTaskIds.has(id)) return [id];
+          const owners = reverse.get(id) ?? [];
+          return owners.length === 1 ? owners : [];
+        });
+        if (!isDeepStrictEqual(projectedOrder, (priorPlan?.tasks ?? []).map(({ id }) => id))) {
+          reject('$ nonmaterial amendment must preserve the exact prior task-order backbone through replacements');
+        }
+        const ownedCriteria = addedCriteriaByOwner.get(task.id) ?? [];
+        const ownedCriterionIds = ownedCriteria.map(({ id }) => id);
+        if (ownedCriteria.some(({ disposition, ownerTaskId }) =>
+          disposition !== 'owned' || ownerTaskId !== task.id)
+            || task.criterionIds.length !== ownedCriterionIds.length
+            || task.criterionIds.some((id) => !ownedCriterionIds.includes(id))
+            || ownedCriterionIds.some((id) => !task.criterionIds.includes(id))) {
+          reject(`$ nonmaterial remediation task ${task.id} criterionIds must equal its exact resulting owned criteria`);
+        }
+        if (!isDeepStrictEqual(task.checklistItemIds ?? [], discoveryTask.checklistItemIds ?? [])) {
+          reject(`$ nonmaterial assessed replacement task ${task.id} must retain complete exact ordered inherited checklistItemIds`);
+        }
+        const matching = branches.flatMap((branch) => branch.responsibility !== task.objective ? []
+          : branch.authorities.filter((authority) => authority.responsibleTaskIds.has(discoveryTaskId)
+            && task.anticipatedPaths.length > 0
+            && task.anticipatedPaths.every((path) => authority.mappedPaths.has(path)
+              || authority.citationFreePaths.has(path))));
+        if (matching.length === 0) return false;
+        const ownerIds = new Set([discoveryTaskId, ...matching.flatMap(({ groundedTaskIds }) =>
+          [...groundedTaskIds])]);
+        const inheritedScenarioIds = discoveryTask.scenarioIds ?? [];
+        const inheritedScenarioIdSet = new Set(inheritedScenarioIds);
+        const taskScenarioIds = task.scenarioIds ?? [];
+        const allowedScenarioIds = new Set([...ownerIds].flatMap((id) =>
+          (priorPlan?.tasks ?? []).find((candidate) => candidate.id === id)?.scenarioIds ?? []));
+        if (new Set(taskScenarioIds).size !== taskScenarioIds.length
+            || !isDeepStrictEqual(taskScenarioIds.filter((id) => inheritedScenarioIdSet.has(id)),
+              inheritedScenarioIds)) {
+          reject(`$ nonmaterial assessed replacement task ${task.id} must retain complete exact ordered inherited scenarioIds without duplicates`);
+        }
+        if (taskScenarioIds.some((id) => !inheritedScenarioIdSet.has(id)
+            && !allowedScenarioIds.has(id))) {
+          reject(`$ nonmaterial assessed replacement task ${task.id} scenarioIds exceed its exact row-local owner authority`);
+        }
+        const inheritedDecisionIds = discoveryTask.decisionIds ?? [];
+        const inheritedDecisionIdSet = new Set(inheritedDecisionIds);
+        const taskDecisionIds = task.decisionIds ?? [];
+        const allowedDecisionIds = new Set(matching.flatMap(({ row }) => row.decisionIds ?? []));
+        if (new Set(taskDecisionIds).size !== taskDecisionIds.length
+            || !isDeepStrictEqual(taskDecisionIds.filter((id) => inheritedDecisionIdSet.has(id)),
+              inheritedDecisionIds)) {
+          reject(`$ nonmaterial assessed replacement task ${task.id} must retain complete exact ordered inherited decisionIds without duplicates`);
+        }
+        if (taskDecisionIds.some((id) => !inheritedDecisionIdSet.has(id)
+            && !allowedDecisionIds.has(id))) {
+          reject(`$ nonmaterial remediation task ${task.id} decisionIds exceed its exact assessed rows`);
+        }
+        if (task.specialization !== undefined) {
+          const ownerSpecializations = [...ownerIds].map((id) => (priorPlan?.tasks ?? [])
+            .find((candidate) => candidate.id === id)?.specialization)
+            .filter((value) => value !== undefined);
+          const authorities = ownerSpecializations.length > 0 ? ownerSpecializations
+            : priorPlan?.specialization === undefined ? [] : [priorPlan.specialization];
+          const distinct = authorities.filter((value, index, values) =>
+            values.findIndex((candidate) => isDeepStrictEqual(candidate, value)) === index);
+          if (distinct.length !== 1 || !isDeepStrictEqual(task.specialization, distinct[0])) {
+            reject(`$ nonmaterial remediation task ${task.id} specialization must equal its exact row-local authority`);
+          }
+        }
+        const unsplittable = [...ownerIds].map((id) => (priorPlan?.tasks ?? [])
+          .find((candidate) => candidate.id === id)?.unsplittable ?? null);
+        const distinctUnsplittable = unsplittable.filter((value, index, values) =>
+          values.findIndex((candidate) => isDeepStrictEqual(candidate, value)) === index);
+        if (distinctUnsplittable.length !== 1
+            || !isDeepStrictEqual(task.unsplittable ?? null, distinctUnsplittable[0])) {
+          reject(`$ nonmaterial remediation task ${task.id} unsplittable must equal its exact row-local owner authority`);
+        }
+        return exact;
+      });
       const priorPaths = discoveryTask.anticipatedPaths ?? [];
       const preferredCandidates = candidates.filter((task) => task.anticipatedPaths.every((path) =>
         priorPaths.some((priorPath) => sameOrDescendantPath(path, priorPath))));
@@ -337,6 +423,8 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
         priorOwnersByReplacement.set(selectedCandidate.id, [discoveryTaskId]);
       } else if (candidates.length > 1) {
         errors.push(`$ nonmaterial criterionless discovery task ${discoveryTaskId} replacement is ambiguous`);
+      } else {
+        errors.push(...candidateDiagnostics);
       }
     }
   }
@@ -568,6 +656,11 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
         }
         if (addedScenarioIds.some((id) => !allowedScenarioIds.has(id))) {
           errors.push(`$ nonmaterial assessed replacement task ${task.id} scenarioIds exceed its exact row-local owner authority`);
+        }
+        const inheritedChecklistItemIds = (priorPlan?.tasks ?? []).find(({ id }) =>
+          priorOwnersByReplacement.get(task.id).includes(id))?.checklistItemIds ?? [];
+        if (!isDeepStrictEqual(task.checklistItemIds ?? [], inheritedChecklistItemIds)) {
+          errors.push(`$ nonmaterial assessed replacement task ${task.id} must retain complete exact ordered inherited checklistItemIds`);
         }
       }
       const allowedDecisionIds = new Set(matchedAuthorities.flatMap(({ authority }) =>
