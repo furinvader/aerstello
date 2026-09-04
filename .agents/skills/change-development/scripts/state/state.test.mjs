@@ -780,6 +780,160 @@ test('criterionless discovery replacement is exact, unique, and cadence-bound', 
   'prior anticipated-path ownership uniquely selects the discovery replacement');
 });
 
+test('criterionless discovery replacement uses complete branch-local collective authority', () => {
+  const responsibility = 'Replace the collectively assessed discovery.';
+  const paths = ['collective/first.mjs', 'collective/second.mjs', 'collective/unused.mjs'];
+  const ownerSpecialization = specialization();
+  const witness = { reason: 'Keep collective workflow authority serialized.',
+    serializedDomains: ['workflow'], highestRiskSpecialization: 'ops-workflow' };
+  const discovery = { id: 'collective-discovery', objective: 'Discover collective scope.',
+    criterionIds: [], decisionIds: ['inherited-decision-a', 'inherited-decision-b'],
+    scenarioIds: ['inherited-scenario-a', 'inherited-scenario-b'],
+    checklistItemIds: ['inherited-check-a', 'inherited-check-b'], anticipatedPaths: ['collective'],
+    dependsOn: [], produces: [], consumes: [], specialization: ownerSpecialization,
+    unsplittable: witness };
+  const owners = paths.map((path, index) => ({ id: `collective-owner-${index}`,
+    objective: `Own collective path ${index}.`, criterionIds: [`collective-owned-${index}`],
+    decisionIds: [], scenarioIds: [`collective-scenario-${index}`], checklistItemIds: [],
+    anticipatedPaths: [path], dependsOn: [], produces: [], consumes: [],
+    specialization: ownerSpecialization, unsplittable: witness }));
+  const priorPlan = { specialization: ownerSpecialization,
+    criteria: owners.map((owner, index) => ({ id: `collective-owned-${index}`,
+      description: owner.objective, disposition: 'owned', ownerTaskId: owner.id,
+      deferredReason: null })),
+    tasks: [discovery, ...owners],
+    checklistMappings: [{ id: 'collective-check', taskIds: ['collective-discovery'] }],
+    decisions: [] };
+  const rows = paths.map((mechanism, index) => ({ mechanism,
+    sourceCriterionIds: [`collective-source-${index}`],
+    acceptedCriterionIds: [`collective-owned-${index}`], invariantIds: [],
+    decisionIds: [`collective-decision-${index}`] }));
+  const evidence = { result: { verdict: 'minor-amendment-required', unnecessaryWork: [],
+    smallerSufficientAlternative: null,
+    coverage: rows.map((row) => ({ ...row, classification: 'necessary-minor-expansion' })),
+    scopeDelta: { description: responsibility,
+      sourceCriterionIds: rows.flatMap(({ sourceCriterionIds }) => sourceCriterionIds),
+      acceptedCriterionIds: rows.flatMap(({ acceptedCriterionIds }) => acceptedCriterionIds),
+      invariantIds: [], materialSurfaces: [] } },
+  packet: { changeInventory: { paths, mappings: rows } },
+  cadence: { trigger: 'worker-scope-discovery:collective-discovery:result:collective' } };
+  const replacement = { id: 'collective-replacement', objective: responsibility,
+    criterionIds: ['collective-replacement-criterion'],
+    decisionIds: ['inherited-decision-a', 'inherited-decision-b',
+      'collective-decision-0', 'collective-decision-1'],
+    scenarioIds: ['inherited-scenario-a', 'inherited-scenario-b',
+      'collective-scenario-0', 'collective-scenario-1'],
+    checklistItemIds: ['inherited-check-a', 'inherited-check-b'],
+    anticipatedPaths: paths.slice(0, 2), dependsOn: [], produces: [], consumes: [],
+    specialization: ownerSpecialization, unsplittable: witness };
+  const exactPlan = () => ({ ...structuredClone(priorPlan),
+    criteria: [...priorPlan.criteria, { id: 'collective-replacement-criterion',
+      description: responsibility, disposition: 'owned', ownerTaskId: 'collective-replacement',
+      deferredReason: null }, { id: 'collective-unused-criterion', description: responsibility,
+      disposition: 'owned', ownerTaskId: 'collective-unused-remediation', deferredReason: null }],
+    tasks: [structuredClone(replacement), ...structuredClone(owners), {
+      id: 'collective-unused-remediation', objective: responsibility,
+      criterionIds: ['collective-unused-criterion'], decisionIds: ['collective-decision-2'],
+      scenarioIds: ['collective-scenario-2'], checklistItemIds: [], anticipatedPaths: [paths[2]],
+      dependsOn: ['collective-replacement', 'collective-owner-2'], produces: [], consumes: [],
+      specialization: ownerSpecialization, unsplittable: witness }],
+    checklistMappings: [{ id: 'collective-check', taskIds: ['collective-replacement'] }] });
+  const value = (plan = exactPlan(), rowEvidence = evidence) => ({ evidence: rowEvidence, priorPlan,
+    resultingPlan: plan,
+    addedTaskIds: ['collective-replacement', 'collective-unused-remediation'] });
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority(value()), [],
+    'two participating rows in one complete branch collectively authorize the replacement');
+  const directory = mkdtempSync(join(tmpdir(), 'criterionless-collective-authority '));
+  const receiptPath = join(directory, 'authority.json');
+  const validateReceipt = (label, candidate, expectedErrors) => {
+    const pathName = join(directory, `${label.replaceAll(' ', '-')}.json`);
+    writeReceiptJson(pathName, candidate);
+    assert.deepEqual(validateNonmaterialAmendmentTaskAuthority(
+      JSON.parse(readFileSync(pathName, 'utf8'))), expectedErrors,
+    `${label} retains the exact receipt-backed result`);
+  };
+  writeReceiptJson(receiptPath, value());
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority(
+    JSON.parse(readFileSync(receiptPath, 'utf8'))), [],
+  'receipt-backed collective same-branch authority is admitted');
+
+  const crossBranchEvidence = structuredClone(evidence);
+  crossBranchEvidence.result.coverage[1].classification = 'speculative';
+  crossBranchEvidence.result.unnecessaryWork = [paths[1]];
+  crossBranchEvidence.result.smallerSufficientAlternative = responsibility;
+  const crossBranchValue = value(exactPlan(), crossBranchEvidence);
+  const crossBranchErrors = validateNonmaterialAmendmentTaskAuthority(crossBranchValue);
+  assert.match(crossBranchErrors.join('\n'),
+    /must match one complete exact assessed branch|lacks one exact replacement/u,
+  'partial coverage from separate same-responsibility branches never combines');
+  validateReceipt('cross branch', crossBranchValue, crossBranchErrors);
+
+  for (const [label, mutate, pattern] of [
+    ['missing inherited scenario', (task) => { task.scenarioIds.shift(); },
+      /retain complete exact ordered inherited scenarioIds/u],
+    ['reordered inherited scenario', (task) => { task.scenarioIds.reverse(); },
+      /retain complete exact ordered inherited scenarioIds/u],
+    ['foreign scenario', (task) => { task.scenarioIds.push('collective-scenario-2'); },
+      /scenarioIds exceed its exact row-local owner authority/u],
+    ['missing inherited decision', (task) => { task.decisionIds.shift(); },
+      /retain complete exact ordered inherited decisionIds/u],
+    ['reordered inherited decision', (task) => { task.decisionIds.reverse(); },
+      /retain complete exact ordered inherited decisionIds/u],
+    ['foreign decision', (task) => { task.decisionIds.push('collective-decision-2'); },
+      /decisionIds exceed its exact assessed rows/u],
+    ['reordered checklist', (task) => { task.checklistItemIds.reverse(); },
+      /retain complete exact ordered inherited checklistItemIds/u],
+  ]) {
+    const plan = exactPlan(); mutate(plan.tasks[0]);
+    const candidate = value(plan);
+    const metadataErrors = validateNonmaterialAmendmentTaskAuthority(candidate);
+    assert.match(metadataErrors.join('\n'), pattern, label);
+    validateReceipt(label, candidate, metadataErrors);
+  }
+  for (const [label, field, changed, pattern] of [
+    ['conflicting specialization', 'specialization', behaviorSpecialization(),
+      /specialization must equal its exact row-local authority/u],
+    ['conflicting unsplittable', 'unsplittable', { ...witness, reason: 'Conflicting authority.' },
+      /unsplittable must equal its exact row-local owner authority/u],
+  ]) {
+    const conflictingPrior = structuredClone(priorPlan);
+    conflictingPrior.tasks.find(({ id }) => id === 'collective-owner-1')[field] = changed;
+    const plan = exactPlan();
+    plan.tasks.find(({ id }) => id === 'collective-owner-1')[field] = changed;
+    const candidate = { ...value(plan), priorPlan: conflictingPrior };
+    const conflictErrors = validateNonmaterialAmendmentTaskAuthority(candidate);
+    assert.match(conflictErrors.join('\n'), pattern, label);
+    validateReceipt(label, candidate, conflictErrors);
+  }
+
+  const prefixPath = 'collective/prefix.mjs';
+  const competingEvidence = structuredClone(evidence);
+  const prefixRow = { ...rows[0], mechanism: prefixPath,
+    acceptedCriterionIds: [], decisionIds: [] };
+  competingEvidence.packet.changeInventory.paths.push(prefixPath);
+  competingEvidence.packet.changeInventory.mappings.push(prefixRow);
+  competingEvidence.result.coverage.push({ ...prefixRow, classification: 'speculative' });
+  competingEvidence.result.unnecessaryWork = [prefixPath];
+  competingEvidence.result.smallerSufficientAlternative = responsibility;
+  const competingPlan = exactPlan();
+  competingPlan.criteria.push({ id: 'prefix-criterion', description: responsibility,
+    disposition: 'owned', ownerTaskId: 'prefix-candidate', deferredReason: null });
+  competingPlan.tasks.splice(1, 0, { ...structuredClone(replacement), id: 'prefix-candidate',
+    criterionIds: ['prefix-criterion'], anticipatedPaths: [prefixPath],
+    scenarioIds: [], decisionIds: [] });
+  const competingErrors = validateNonmaterialAmendmentTaskAuthority({ evidence: competingEvidence,
+    priorPlan, resultingPlan: competingPlan,
+    addedTaskIds: ['collective-replacement', 'prefix-candidate', 'collective-unused-remediation'] });
+  assert.doesNotMatch(competingErrors.join('\n'), /lacks one exact replacement|replacement is ambiguous/u,
+    'prefix preference runs only after collective branch and metadata exactness');
+  assert.match(competingErrors.join('\n'), /fresh remediation task prefix-candidate/u,
+    'the rejected prefix candidate remains subject to ordinary fresh-task authority');
+  validateReceipt('prefix after collective exactness', { evidence: competingEvidence, priorPlan,
+    resultingPlan: competingPlan,
+    addedTaskIds: ['collective-replacement', 'prefix-candidate',
+      'collective-unused-remediation'] }, competingErrors);
+});
+
 test('nonmaterial amendments preserve the exact ordered prior decision array', () => {
   const responsibility = 'Remove the exact path.'; const exactPath = 'owned/exact.mjs';
   const decisions = [
@@ -6143,18 +6297,22 @@ test('historical interrupted criterionless plan amendment recovery revalidates a
     const directory = changeDirectory(fixture.cwd, state.changeId);
     const priorClosure = JSON.parse(readFileSync(join(directory, 'scope', 'minimal-closure', '0001.json'), 'utf8'));
     const responsibility = 'Replace the historical criterionless discovery.';
-    const assessedPath = 'newly-assessed/recovery.json';
-    const assessmentIdentity = digestJson({ historical: state.changeId, assessedPath });
+    const assessedPaths = ['newly-assessed/recovery-first.json',
+      'newly-assessed/recovery-second.json'];
+    const assessmentIdentity = digestJson({ historical: state.changeId, assessedPaths });
     const evidence = testScopeEvidence(state, priorPlan, priorClosure, { boundary: 'task',
       subjectDigest: assessmentIdentity, subjectSha: state.git.headSha,
       taskPacketDigest: assessmentIdentity,
       trigger: `worker-scope-discovery:historical-discovery:result:${assessmentIdentity}` });
-    const mapping = { ...evidence.packet.changeInventory.mappings[0], mechanism: assessedPath,
-      sourceCriterionIds: [], acceptedCriterionIds: [], invariantIds: [], decisionIds: [] };
-    evidence.packet.changeInventory.paths = [assessedPath];
-    evidence.packet.changeInventory.mappings = [mapping];
+    const mappings = assessedPaths.map((mechanism) => ({
+      ...evidence.packet.changeInventory.mappings[0], mechanism,
+      sourceCriterionIds: [], acceptedCriterionIds: [], invariantIds: [], decisionIds: [],
+    }));
+    evidence.packet.changeInventory.paths = assessedPaths;
+    evidence.packet.changeInventory.mappings = mappings;
     evidence.result = { ...evidence.result, verdict: 'trim-required',
-      coverage: [{ ...mapping, classification: 'speculative' }], unnecessaryWork: [assessedPath],
+      coverage: mappings.map((mapping) => ({ ...mapping, classification: 'speculative' })),
+      unnecessaryWork: assessedPaths,
       smallerSufficientAlternative: responsibility, scopeDelta: null };
     evidence.packetDigest = digestJson(evidence.packet); evidence.resultDigest = digestJson(evidence.result);
     state = assessScope({ cwd: fixture.cwd, scopeEvidence: evidence, expectedRevision: state.revision });
@@ -6164,7 +6322,7 @@ test('historical interrupted criterionless plan amendment recovery revalidates a
       disposition: 'owned', ownerTaskId: 'historical-replacement', deferredReason: null });
     resultingPlan.tasks.push({ ...priorPlan.tasks.find(({ id }) => id === 'historical-discovery'),
       id: 'historical-replacement', title: 'Replace historical discovery', objective: responsibility,
-      criterionIds: ['historical-replacement-criterion'], anticipatedPaths: [assessedPath] });
+      criterionIds: ['historical-replacement-criterion'], anticipatedPaths: assessedPaths });
     const amendment = { id: 'historical-criterionless-replacement',
       reason: 'Apply the exact assessed historical replacement.', authorization: 'scope-review',
       trigger: digestJson(evidence), delta: { addedTaskIds: ['historical-replacement'] },
@@ -6175,6 +6333,75 @@ test('historical interrupted criterionless plan amendment recovery revalidates a
     /pause historical amendment/u);
     const transition = join(directory, 'transitions', String(state.revision + 1).padStart(8, '0'));
     return { ...fixture, state, directory, resultingPlan, intentPath: join(transition, 'intent.json') };
+  };
+  const createCrossBranchInterrupted = async () => {
+    const fixture = repository('historical criterionless cross branch');
+    const planning = await initializeState({ cwd: fixture.cwd,
+      changeId: 'historical-criterionless-cross-branch', mode: 'implement', baseBranch: 'main',
+      planningRef: fixture.sha, source: descriptor });
+    const priorPlan = planFor(planning);
+    priorPlan.tasks.push({ ...priorPlan.tasks[0], id: 'cross-branch-discovery',
+      title: 'Cross-branch criterionless discovery', objective: 'Discover cross-branch scope.',
+      criterionIds: [], decisionIds: [], scenarioIds: [], checklistItemIds: [],
+      anticipatedPaths: ['cross-branch'], produces: [], unsplittable: null });
+    let state = acceptPlan({ cwd: fixture.cwd, plan: priorPlan,
+      expectedRevision: planning.revision });
+    const directory = changeDirectory(fixture.cwd, state.changeId);
+    const priorClosure = JSON.parse(readFileSync(
+      join(directory, 'scope', 'minimal-closure', '0001.json'), 'utf8'));
+    const responsibility = 'Replace the cross-branch criterionless discovery.';
+    const necessaryPath = 'cross-branch/necessary.json';
+    const removalPath = 'cross-branch/removal.json';
+    const assessmentIdentity = digestJson({ historical: state.changeId,
+      necessaryPath, removalPath });
+    const evidence = testScopeEvidence(state, priorPlan, priorClosure, { boundary: 'task',
+      subjectDigest: assessmentIdentity, subjectSha: state.git.headSha,
+      taskPacketDigest: assessmentIdentity,
+      trigger: `worker-scope-discovery:cross-branch-discovery:result:${assessmentIdentity}` });
+    const baseMapping = evidence.packet.changeInventory.mappings[0];
+    const sourceCriterionId = evidence.packet.sourceScope.requiredCriteria[0].id;
+    const necessaryMapping = { ...baseMapping, mechanism: necessaryPath,
+      sourceCriterionIds: [sourceCriterionId], acceptedCriterionIds: [], invariantIds: [],
+      decisionIds: [] };
+    const removalMapping = { ...baseMapping, mechanism: removalPath,
+      sourceCriterionIds: [], acceptedCriterionIds: [], invariantIds: [], decisionIds: [] };
+    evidence.packet.changeInventory.paths = [necessaryPath, removalPath];
+    evidence.packet.changeInventory.mappings = [necessaryMapping, removalMapping];
+    evidence.result = { ...evidence.result, verdict: 'minor-amendment-required',
+      coverage: [{ ...necessaryMapping, classification: 'necessary-minor-expansion' },
+        { ...removalMapping, classification: 'speculative' }],
+      unnecessaryWork: [removalPath], smallerSufficientAlternative: responsibility,
+      scopeDelta: { description: responsibility, sourceCriterionIds: [sourceCriterionId],
+        acceptedCriterionIds: [], invariantIds: [], materialSurfaces: [] } };
+    evidence.packetDigest = digestJson(evidence.packet);
+    evidence.resultDigest = digestJson(evidence.result);
+    state = assessScope({ cwd: fixture.cwd, scopeEvidence: evidence,
+      expectedRevision: state.revision });
+    const resultingPlan = structuredClone(priorPlan); resultingPlan.planRevision = 2;
+    resultingPlan.tasks = resultingPlan.tasks.filter(({ id }) => id !== 'cross-branch-discovery');
+    resultingPlan.criteria.push({ id: 'cross-branch-replacement-criterion',
+      description: responsibility, disposition: 'owned', ownerTaskId: 'cross-branch-replacement',
+      deferredReason: null }, { id: 'cross-branch-removal-criterion', description: responsibility,
+      disposition: 'owned', ownerTaskId: 'cross-branch-removal', deferredReason: null });
+    const discovery = priorPlan.tasks.find(({ id }) => id === 'cross-branch-discovery');
+    resultingPlan.tasks.push({ ...discovery, id: 'cross-branch-replacement',
+      title: 'Replace cross-branch discovery', objective: responsibility,
+      criterionIds: ['cross-branch-replacement-criterion'], anticipatedPaths: [necessaryPath] },
+    { ...discovery, id: 'cross-branch-removal', title: 'Remove cross-branch mechanism',
+      objective: responsibility, criterionIds: ['cross-branch-removal-criterion'],
+      anticipatedPaths: [removalPath], dependsOn: ['cross-branch-replacement'] });
+    const amendment = { id: 'historical-cross-branch-replacement',
+      reason: 'Represent each exact same-responsibility assessment branch independently.',
+      authorization: 'scope-review', trigger: digestJson(evidence),
+      delta: { addedTaskIds: ['cross-branch-replacement', 'cross-branch-removal'] },
+      invalidatedEvidence: [digestJson(evidence)] };
+    assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+      amendment, resultingPlan,
+      crashStep(step) { if (step === 'after-intent') throw new Error('pause cross-branch amendment'); } }),
+    /pause cross-branch amendment/u);
+    const transition = join(directory, 'transitions', String(state.revision + 1).padStart(8, '0'));
+    return { ...fixture, directory, necessaryPath, removalPath,
+      intentPath: join(transition, 'intent.json') };
   };
 
   const replay = await createInterrupted('historical criterionless replay');
@@ -6202,7 +6429,41 @@ test('historical interrupted criterionless plan amendment recovery revalidates a
     (error) => error.code === 'RECOVERY_EVIDENCE_INVALID'
       && /assessment-bound remediation projection/u.test(error.message));
   assert.deepEqual(durableSnapshot(tampered.directory), before,
-    'receipt-consistent unassessed-path recovery fails before any durable mutation');
+    'receipt-consistent foreign-authority recovery fails before any durable mutation');
+
+  const crossBranch = await createCrossBranchInterrupted();
+  const crossBranchIntent = JSON.parse(readFileSync(crossBranch.intentPath, 'utf8'));
+  const amendmentRecord = crossBranchIntent.authoritativeEvidence.amendmentDigest;
+  const amendmentValue = amendmentRecord.value;
+  amendmentValue.delta.addedTaskIds = ['cross-branch-replacement'];
+  const crossBranchPlan = amendmentValue.resultingPlan;
+  crossBranchPlan.criteria = crossBranchPlan.criteria
+    .filter(({ id }) => id !== 'cross-branch-removal-criterion');
+  crossBranchPlan.tasks = crossBranchPlan.tasks.filter(({ id }) => id !== 'cross-branch-removal');
+  crossBranchPlan.tasks.find(({ id }) => id === 'cross-branch-replacement').anticipatedPaths =
+    [crossBranch.necessaryPath, crossBranch.removalPath];
+  amendmentValue.newDigest = digestJson(crossBranchPlan);
+  amendmentRecord.digest = digestJson(amendmentValue);
+  crossBranchIntent.evidence.amendmentDigest = amendmentRecord.digest;
+  const crossBranchClosure = crossBranchIntent.authoritativeEvidence.minimalClosureDigest;
+  crossBranchClosure.value.planDigest = amendmentValue.newDigest;
+  crossBranchClosure.digest = digestJson(crossBranchClosure.value);
+  crossBranchIntent.evidence.minimalClosureDigest = crossBranchClosure.digest;
+  crossBranchIntent.nextState.execution.tasks = crossBranchIntent.nextState.execution.tasks
+    .filter(({ id }) => id !== 'cross-branch-removal');
+  crossBranchIntent.nextState.execution.tasks
+    .find(({ id }) => id === 'cross-branch-replacement').anticipatedPaths =
+      [crossBranch.necessaryPath, crossBranch.removalPath];
+  crossBranchIntent.nextState.execution.planDigest = amendmentValue.newDigest;
+  crossBranchIntent.nextState.plan.effectiveDigest = amendmentValue.newDigest;
+  crossBranchIntent.nextStateDigest = digestJson(crossBranchIntent.nextState);
+  writeReceiptJson(crossBranch.intentPath, crossBranchIntent);
+  const crossBranchBefore = durableSnapshot(crossBranch.directory);
+  assert.throws(() => recoverState({ cwd: crossBranch.cwd }),
+    (error) => error.code === 'RECOVERY_EVIDENCE_INVALID'
+      && /assessment-bound remediation projection/u.test(error.message));
+  assert.deepEqual(durableSnapshot(crossBranch.directory), crossBranchBefore,
+    'receipt-consistent cross-branch union recovery fails before any durable mutation');
 });
 
 test('receipt-backed minor remediation derives paths from exact source and invariant authority', async () => {
