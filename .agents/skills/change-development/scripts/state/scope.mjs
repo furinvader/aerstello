@@ -539,6 +539,11 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
         if (!isDeepStrictEqual(task.dependsOn ?? [], expectedDependencies)) {
           errors.push(`$ nonmaterial fresh remediation task ${task.id} dependencies must equal its exact row-local owner carry`);
         }
+        const allowedScenarioIds = new Set([...originalOwnerIds].flatMap((id) =>
+          (priorPlan?.tasks ?? []).find((candidate) => candidate.id === id)?.scenarioIds ?? []));
+        if ((task.scenarioIds ?? []).some((id) => !allowedScenarioIds.has(id))) {
+          errors.push(`$ nonmaterial fresh remediation task ${task.id} scenarioIds exceed its exact row-local owner authority`);
+        }
         if ((task.produces ?? []).length > 0 || (task.consumes ?? []).length > 0) {
           errors.push(`$ nonmaterial fresh remediation task ${task.id} cannot introduce artifact authority`);
         }

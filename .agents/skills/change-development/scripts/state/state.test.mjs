@@ -1201,6 +1201,71 @@ test('fresh remediation unsplittable authority requires exact agreeing row-local
   'receipt-backed ownerless fresh remediation cannot invent unsplittable authority');
 });
 
+test('fresh remediation scenario authority is limited to exact row-local original owners', () => {
+  const responsibility = 'Apply the exact scenario correction.';
+  const paths = ['first/exact.mjs', 'second/exact.mjs'];
+  const priorPlan = {
+    criteria: paths.map((path, index) => ({ id: `owned-${index}`, description: `Own ${path}.`,
+      disposition: 'owned', ownerTaskId: `owner-${index}`, deferredReason: null })),
+    tasks: paths.map((path, index) => ({ id: `owner-${index}`, criterionIds: [`owned-${index}`],
+      decisionIds: [], scenarioIds: [`scenario-${index}`], checklistItemIds: [],
+      anticipatedPaths: [path.split('/')[0]], dependsOn: [], produces: [], consumes: [],
+      unsplittable: null })),
+    checklistMappings: [], decisions: [],
+  };
+  const rows = paths.map((mechanism, index) => ({ mechanism,
+    sourceCriterionIds: [`source-${index}`], acceptedCriterionIds: [`owned-${index}`],
+    invariantIds: [], decisionIds: [] }));
+  const evidence = { result: { verdict: 'minor-amendment-required', unnecessaryWork: [],
+    smallerSufficientAlternative: null,
+    coverage: rows.map((row) => ({ ...row, classification: 'necessary-minor-expansion' })),
+    scopeDelta: { description: responsibility,
+      sourceCriterionIds: rows.flatMap(({ sourceCriterionIds }) => sourceCriterionIds),
+      acceptedCriterionIds: rows.flatMap(({ acceptedCriterionIds }) => acceptedCriterionIds),
+      invariantIds: [], materialSurfaces: [] } },
+  packet: { changeInventory: { paths, mappings: rows } }, cadence: { trigger: null } };
+  const planFor = (anticipatedPaths, dependsOn, scenarioIds) => ({ ...structuredClone(priorPlan),
+    criteria: [...priorPlan.criteria, { id: 'remediation-criterion', description: responsibility,
+      disposition: 'owned', ownerTaskId: 'remediation', deferredReason: null }],
+    tasks: [...priorPlan.tasks, { id: 'remediation', objective: responsibility,
+      criterionIds: ['remediation-criterion'], decisionIds: [], scenarioIds, checklistItemIds: [],
+      anticipatedPaths, dependsOn, produces: [], consumes: [], unsplittable: null }] });
+  const validate = (plan) => validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
+    resultingPlan: plan, addedTaskIds: ['remediation'] });
+  const firstEvidence = structuredClone(evidence);
+  firstEvidence.result.coverage = [firstEvidence.result.coverage[0]];
+  firstEvidence.result.scopeDelta.sourceCriterionIds = ['source-0'];
+  firstEvidence.result.scopeDelta.acceptedCriterionIds = ['owned-0'];
+  const validateFirst = (plan) => validateNonmaterialAmendmentTaskAuthority({
+    evidence: firstEvidence, priorPlan, resultingPlan: plan, addedTaskIds: ['remediation'],
+  });
+
+  for (const scenarioIds of [[], ['scenario-0']]) {
+    assert.deepEqual(validateFirst(planFor([paths[0]], ['owner-0'], scenarioIds)), [],
+      'an empty or exact owner-local scenario subset is accepted');
+  }
+  assert.deepEqual(validate(planFor(paths, ['owner-0', 'owner-1'], ['scenario-0', 'scenario-1'])), [],
+    'independently complete row-local owners grant only their scenario union');
+  const pattern = /scenarioIds exceed its exact row-local owner authority/u;
+  assert.match(validateFirst(planFor([paths[0]], ['owner-0'], ['scenario-1'])).join('\n'), pattern,
+    'a fresh task cannot borrow an unrelated owner scenario');
+
+  const ownerlessEvidence = structuredClone(firstEvidence);
+  ownerlessEvidence.result.coverage[0].acceptedCriterionIds = [];
+  ownerlessEvidence.packet.changeInventory.mappings[0].acceptedCriterionIds = [];
+  ownerlessEvidence.packet.changeInventory.paths = [paths[0]];
+  ownerlessEvidence.packet.changeInventory.mappings = [ownerlessEvidence.packet.changeInventory.mappings[0]];
+  ownerlessEvidence.result.scopeDelta.acceptedCriterionIds = [];
+  const ownerlessPlan = planFor([paths[0]], [], []);
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority({ evidence: ownerlessEvidence, priorPlan,
+    resultingPlan: ownerlessPlan, addedTaskIds: ['remediation'] }), [],
+  'an ownerless exact row permits an empty scenario subset');
+  ownerlessPlan.tasks.at(-1).scenarioIds = ['scenario-0'];
+  assert.match(validateNonmaterialAmendmentTaskAuthority({ evidence: ownerlessEvidence, priorPlan,
+    resultingPlan: ownerlessPlan, addedTaskIds: ['remediation'] }).join('\n'), pattern,
+  'an ownerless row cannot invent scenario authority');
+});
+
 test('necessary-minor path anchors intersect the exact coverage row and scope delta', () => {
   const responsibility = 'Apply the exact necessary correction.';
   const exactSourcePath = 'paths/exact-source.mjs';
@@ -5241,6 +5306,75 @@ test('receipt-backed same-responsibility mixed minor amendments require complete
     .map(({ id, status }) => ({ id, status })), exact.addedTaskIds.map((id) => ({ id, status: 'unbound' })));
 });
 
+test('receipt-backed minor and trim admission reject foreign scenario authority atomically', async () => {
+  for (const verdict of ['minor-amendment-required', 'trim-required']) {
+    const fixture = await integratedTwoTaskFixture(`scenario authority ${verdict}`,
+      ['first.txt', 'second.txt'], { configurePlan(plan) {
+        plan.scenarios = [
+          { id: 'owner-scenario', feature: 'specs/features/state.feature',
+            scenario: 'Durable planning scenario' },
+          { id: 'foreign-scenario', feature: 'specs/features/state.feature',
+            scenario: 'Durable planning scenario' },
+        ];
+        plan.productScenarioDisposition = { disposition: 'mapped',
+          scenarioIds: ['owner-scenario', 'foreign-scenario'],
+          rationale: 'Both existing owner scenarios remain mapped.' };
+        plan.tasks[0].scenarioIds = ['owner-scenario'];
+        plan.tasks[1].scenarioIds = ['foreign-scenario'];
+      } });
+    let state = fixture.state;
+    const evidence = integratedScopeEvidenceFor({ cwd: fixture.cwd, changeId: state.changeId });
+    const mapping = evidence.packet.changeInventory.mappings[0];
+    const responsibility = verdict === 'minor-amendment-required'
+      ? 'Apply the exact owner-local scenario correction.'
+      : 'Use only the owner-local scenario simplification.';
+    evidence.packet.changeInventory.paths.push(mapping.mechanism);
+    evidence.result = verdict === 'minor-amendment-required'
+      ? { ...evidence.result, verdict,
+        coverage: [{ ...mapping, classification: 'necessary-minor-expansion' }],
+        scopeDelta: { description: responsibility,
+          sourceCriterionIds: [...mapping.sourceCriterionIds],
+          acceptedCriterionIds: [...mapping.acceptedCriterionIds], invariantIds: [],
+          materialSurfaces: [] } }
+      : { ...evidence.result, verdict,
+        coverage: [{ ...mapping, classification: 'speculative' }],
+        unnecessaryWork: [mapping.mechanism], smallerSufficientAlternative: responsibility };
+    evidence.packetDigest = digestJson(evidence.packet);
+    evidence.resultDigest = digestJson(evidence.result);
+    state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
+      expectedRevision: state.revision });
+    const directory = changeDirectory(fixture.cwd, state.changeId);
+    const original = JSON.parse(readFileSync(join(directory, 'plan', 'plan.json'), 'utf8'));
+    const resultingPlan = structuredClone(original); resultingPlan.planRevision = 2;
+    const criterionId = `${verdict}-scenario-criterion`;
+    const taskId = `${verdict}-scenario-task`;
+    resultingPlan.criteria.push({ id: criterionId, description: responsibility,
+      disposition: 'owned', ownerTaskId: taskId, deferredReason: null });
+    resultingPlan.tasks.push({ ...original.tasks[0], id: taskId,
+      title: 'Apply owner-local scenario remediation', objective: responsibility,
+      criterionIds: [criterionId], decisionIds: [], scenarioIds: ['foreign-scenario'],
+      checklistItemIds: [], dependsOn: ['state-task'], anticipatedPaths: ['first.txt'],
+      produces: [], consumes: [] });
+    const trigger = digestJson(evidence);
+    const amendment = { id: `${verdict}-scenario-amendment`,
+      reason: 'Apply only the exact receipt-backed scenario remediation.',
+      authorization: 'scope-review', trigger, delta: { addedTaskIds: [taskId] },
+      invalidatedEvidence: [trigger] };
+    const before = durableSnapshot(directory);
+    assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+      amendment, resultingPlan }),
+    (error) => error.code === 'INVALID_AMENDMENT'
+      && /scenarioIds exceed its exact row-local owner authority/u.test(error.message));
+    assert.deepEqual(durableSnapshot(directory), before,
+      `${verdict} rejects unrelated-owner scenario authority before durable mutation`);
+
+    resultingPlan.tasks.at(-1).scenarioIds = ['owner-scenario'];
+    state = amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
+      amendment, resultingPlan });
+    assert.equal(state.execution.tasks.find(({ id }) => id === taskId).status, 'unbound');
+  }
+});
+
 test('interrupted recovery rejects pooled same-responsibility branch authority', async () => {
   const fixture = await integratedTwoTaskFixture('mixed branch recovery authority');
   let state = fixture.state;
@@ -6072,6 +6206,18 @@ test('interrupted nonmaterial amendment recovery revalidates its canonical proje
   const fixture = await integratedSingleTaskFixture('nonmaterial projection recovery', specialization(), {
     deferredCriterion: { id: 'deferred-recovery', description: 'Deferred recovery authority.',
       disposition: 'deferred', ownerTaskId: null, deferredReason: 'Await separate implementation.' },
+    configurePlan(plan) {
+      plan.scenarios = [
+        { id: 'owner-recovery-scenario', feature: 'specs/features/state.feature',
+          scenario: 'Durable planning scenario' },
+        { id: 'foreign-recovery-scenario', feature: 'specs/features/state.feature',
+          scenario: 'Durable planning scenario' },
+      ];
+      plan.productScenarioDisposition = { disposition: 'mapped',
+        scenarioIds: ['owner-recovery-scenario', 'foreign-recovery-scenario'],
+        rationale: 'Existing recovery scenarios remain mapped.' };
+      plan.tasks[0].scenarioIds = ['owner-recovery-scenario', 'foreign-recovery-scenario'];
+    },
   });
   let state = fixture.state;
   const evidence = integratedScopeEvidenceFor({ cwd: fixture.cwd, changeId: state.changeId });
@@ -6104,7 +6250,8 @@ test('interrupted nonmaterial amendment recovery revalidates its canonical proje
     disposition: 'owned', ownerTaskId: 'trim-recovery-first-task', deferredReason: null });
   resultingPlan.tasks.push({ ...original.tasks[0], id: 'trim-recovery-first-task',
     title: 'Apply exact deferred-only trim', objective: responsibility,
-    criterionIds: ['trim-recovery-first'], decisionIds: [], checklistItemIds: [], dependsOn: [],
+    criterionIds: ['trim-recovery-first'], decisionIds: [], scenarioIds: [],
+    checklistItemIds: [], dependsOn: [],
     anticipatedPaths: [firstPath] });
   const amendment = { id: 'trim-recovery-amendment', reason: 'Apply the exact trim assessment.',
     authorization: 'scope-review', trigger: digestJson(evidence),
@@ -6146,6 +6293,10 @@ test('interrupted nonmaterial amendment recovery revalidates its canonical proje
       const task = plan.tasks.find(({ id }) => id === 'trim-recovery-first-task');
       task.checklistItemIds = [plan.checklistMappings[0].id];
       plan.checklistMappings[0].taskIds.push(task.id);
+    }],
+    ['fresh foreign scenario authority', (plan) => {
+      plan.tasks.find(({ id }) => id === 'trim-recovery-first-task').scenarioIds =
+        ['foreign-recovery-scenario'];
     }],
     ['fresh specialization authority', (plan) => {
       plan.tasks.find(({ id }) => id === 'trim-recovery-first-task').specialization =
@@ -8032,6 +8183,7 @@ async function integratedSingleTaskFixture(label, specialize = specialization(),
   noChange = false,
   ownedPath = 'first.txt',
   deferredCriterion = null,
+  configurePlan = null,
 } = {}) {
   const { cwd, sha } = repository(label);
   const planning = await initializeState({ cwd, changeId: label.replaceAll(' ', '-'), mode: 'implement', baseBranch: 'main', planningRef: sha, source: descriptor });
@@ -8040,6 +8192,7 @@ async function integratedSingleTaskFixture(label, specialize = specialization(),
   plan.tasks[0].specialization = specialize;
   plan.tasks[0].anticipatedPaths = [ownedPath];
   if (deferredCriterion !== null) plan.criteria.push(deferredCriterion);
+  if (configurePlan !== null) configurePlan(plan);
   const planningEvidence = specialize.browserVisible ? [mapperEvidence(planning.planningSha, plan.planRevision,
     'Accepted behavior coverage is mapped.')] : [];
   let state = acceptPlan({ cwd, plan, expectedRevision: planning.revision, planningEvidence });
@@ -8065,7 +8218,9 @@ async function integratedSingleTaskFixture(label, specialize = specialization(),
   return { cwd, state };
 }
 
-async function integratedTwoTaskFixture(label, ownedPaths = ['first.txt', 'second.txt']) {
+async function integratedTwoTaskFixture(label, ownedPaths = ['first.txt', 'second.txt'], {
+  configurePlan = null,
+} = {}) {
   const { cwd, sha } = repository(label);
   const planning = await initializeState({ cwd, changeId: label.replaceAll(' ', '-'), mode: 'implement',
     baseBranch: 'main', planningRef: sha, source: descriptor });
@@ -8073,6 +8228,7 @@ async function integratedTwoTaskFixture(label, ownedPaths = ['first.txt', 'secon
   for (let index = 0; index < plan.tasks.length; index += 1) {
     plan.tasks[index].anticipatedPaths = [ownedPaths[index]];
   }
+  if (configurePlan !== null) configurePlan(plan);
   let state = acceptPlan({ cwd, plan, expectedRevision: planning.revision });
   const packets = plan.tasks.map((task) => packetFor(state, plan, task.id));
   for (const packet of packets) state = bindTask({ cwd, packet, expectedRevision: state.revision });
