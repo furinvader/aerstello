@@ -280,7 +280,7 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
       errors.push(`$ nonmaterial criterionless discovery task ${discoveryTaskId} must be removed and replaced exactly`);
     }
     if (discoveryTask && owned.length === 0 && !replacementByPriorOwner.has(discoveryTaskId)) {
-      const candidateIds = addedTasks.filter((task) => !priorOwnersByReplacement.has(task.id)
+      const candidates = addedTasks.filter((task) => !priorOwnersByReplacement.has(task.id)
           && branches.some((branch) => task.objective === branch.responsibility)
           && (addedCriteriaByOwner.get(task.id) ?? []).length > 0
           && (addedCriteriaByOwner.get(task.id) ?? []).every(({ id, description }) =>
@@ -288,13 +288,10 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
               && branches.some((branch) => task.objective === branch.responsibility
                 && description === branch.responsibility)))
         .filter((task) => {
-          const priorPaths = discoveryTask.anticipatedPaths ?? [];
           const matchingAuthorities = branches
             .filter((branch) => task.objective === branch.responsibility)
             .flatMap(({ authorities }) => authorities);
-          const eligible = (path) => priorPaths
-            .some((priorPath) => sameOrDescendantPath(path, priorPath))
-            && matchingAuthorities.some((authority) => authority.mappedPaths.has(path)
+          const eligible = (path) => matchingAuthorities.some((authority) => authority.mappedPaths.has(path)
               || authority.citationFreePaths.has(path));
           return task.anticipatedPaths.length > 0 && task.anticipatedPaths.every(eligible);
         })
@@ -328,11 +325,17 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
             ...mapping, taskIds: mapping.taskIds.map(substitute),
           }));
           return isDeepStrictEqual(resultingPlan?.checklistMappings ?? [], expectedMappings);
-        }).map(({ id }) => id);
-      if (candidateIds.length === 1) {
-        replacementByPriorOwner.set(discoveryTaskId, candidateIds[0]);
-        priorOwnersByReplacement.set(candidateIds[0], [discoveryTaskId]);
-      } else if (candidateIds.length > 1) {
+        });
+      const priorPaths = discoveryTask.anticipatedPaths ?? [];
+      const preferredCandidates = candidates.filter((task) => task.anticipatedPaths.every((path) =>
+        priorPaths.some((priorPath) => sameOrDescendantPath(path, priorPath))));
+      const selectedCandidate = candidates.length === 1
+        ? candidates[0] : preferredCandidates.length === 1
+          ? preferredCandidates[0] : null;
+      if (selectedCandidate) {
+        replacementByPriorOwner.set(discoveryTaskId, selectedCandidate.id);
+        priorOwnersByReplacement.set(selectedCandidate.id, [discoveryTaskId]);
+      } else if (candidates.length > 1) {
         errors.push(`$ nonmaterial criterionless discovery task ${discoveryTaskId} replacement is ambiguous`);
       }
     }

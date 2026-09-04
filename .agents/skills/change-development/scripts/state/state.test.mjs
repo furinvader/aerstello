@@ -641,6 +641,25 @@ test('criterionless discovery replacement is exact, unique, and cadence-bound', 
   assert.deepEqual(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
     resultingPlan: plan(), addedTaskIds: ['replacement'] }), [],
   'the unique graph- and checklist-preserving candidate replaces the criterionless discovery');
+  const outsidePath = 'newly-assessed/exact.json';
+  const outsideMapping = { ...mapping, mechanism: outsidePath, sourceCriterionIds: ['source'] };
+  const outsideEvidence = structuredClone(evidence);
+  outsideEvidence.packet.changeInventory.paths = [outsidePath];
+  outsideEvidence.packet.changeInventory.mappings = [outsideMapping];
+  outsideEvidence.result.coverage = [{ ...outsideMapping, classification: 'speculative' }];
+  outsideEvidence.result.unnecessaryWork = [outsidePath];
+  const outsidePlan = plan();
+  outsidePlan.tasks.find(({ id }) => id === 'replacement').anticipatedPaths = [outsidePath];
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority({ evidence: outsideEvidence, priorPlan,
+    resultingPlan: outsidePlan, addedTaskIds: ['replacement'] }), [],
+  'one exact newly assessed candidate replaces the discovery outside its prior path prefix');
+  const unassessedOutsidePlan = structuredClone(outsidePlan);
+  unassessedOutsidePlan.tasks.find(({ id }) => id === 'replacement').anticipatedPaths =
+    ['newly-assessed/unassessed.json'];
+  assert.ok(validateNonmaterialAmendmentTaskAuthority({ evidence: outsideEvidence, priorPlan,
+    resultingPlan: unassessedOutsidePlan, addedTaskIds: ['replacement'] })
+    .some((error) => /lacks one exact replacement/u.test(error)),
+  'a prior path relationship never substitutes for exact assessed path authority');
   const foreignCriterion = plan();
   foreignCriterion.tasks.find(({ id }) => id === 'replacement').criterionIds.push('dependent');
   assert.ok(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
@@ -684,6 +703,34 @@ test('criterionless discovery replacement is exact, unique, and cadence-bound', 
     resultingPlan: ambiguousPlan, addedTaskIds: ['first', 'second'] })
     .some((error) => /replacement is ambiguous/u.test(error)),
   'multiple equally exact candidates fail explicitly');
+  const tieEvidence = structuredClone(evidence);
+  tieEvidence.packet.changeInventory.paths.push(outsidePath);
+  tieEvidence.packet.changeInventory.mappings.push(outsideMapping);
+  tieEvidence.result.coverage.push({ ...outsideMapping, classification: 'speculative' });
+  tieEvidence.result.unnecessaryWork.push(outsidePath);
+  const tiePrior = structuredClone(noIncomingPlan);
+  tiePrior.tasks[0].produces = [];
+  const tiePlan = structuredClone(ambiguousPlan);
+  tiePlan.tasks[0].produces = [];
+  tiePlan.tasks[1].produces = [];
+  tiePlan.tasks[1].anticipatedPaths = [outsidePath];
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority({ evidence: tieEvidence,
+    priorPlan: tiePrior, resultingPlan: tiePlan, addedTaskIds: ['first', 'second'] }), [],
+  'complete prior-prefix correspondence uniquely breaks an otherwise exact candidate tie');
+  const secondOutsidePath = 'newly-assessed/second.json';
+  const noPreferredEvidence = structuredClone(tieEvidence);
+  const secondOutsideMapping = { ...outsideMapping, mechanism: secondOutsidePath };
+  noPreferredEvidence.packet.changeInventory.paths.push(secondOutsidePath);
+  noPreferredEvidence.packet.changeInventory.mappings.push(secondOutsideMapping);
+  noPreferredEvidence.result.coverage.push({ ...secondOutsideMapping, classification: 'speculative' });
+  noPreferredEvidence.result.unnecessaryWork.push(secondOutsidePath);
+  const noPreferredPlan = structuredClone(tiePlan);
+  noPreferredPlan.tasks[0].anticipatedPaths = [outsidePath];
+  noPreferredPlan.tasks[1].anticipatedPaths = [secondOutsidePath];
+  assert.ok(validateNonmaterialAmendmentTaskAuthority({ evidence: noPreferredEvidence,
+    priorPlan: tiePrior, resultingPlan: noPreferredPlan, addedTaskIds: ['first', 'second'] })
+    .some((error) => /replacement is ambiguous/u.test(error)),
+  'multiple exact candidates remain ambiguous when none has complete prior-prefix correspondence');
   const absent = plan();
   absent.tasks.find(({ id }) => id === 'replacement').produces = [];
   assert.ok(validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
@@ -5937,6 +5984,29 @@ test('receipt-backed criterionless replacement preserves exact durable selection
     { ...replacement('separate-remediation'), anticipatedPaths: [separatePath] }],
   checklistMappings: [], decisions: [] };
   separated.tasks[1].produces = [];
+  const outsidePath = 'newly-assessed/exact.json';
+  const outsideMapping = { ...mapping, mechanism: outsidePath, sourceCriterionIds: ['source'] };
+  const outsideEvidence = structuredClone(evidence);
+  outsideEvidence.packet.changeInventory.paths = [outsidePath];
+  outsideEvidence.packet.changeInventory.mappings = [outsideMapping];
+  outsideEvidence.result.coverage = [{ ...outsideMapping, classification: 'speculative' }];
+  outsideEvidence.result.unnecessaryWork = [outsidePath];
+  const outside = plan(['outside']);
+  outside.tasks.find(({ id }) => id === 'outside').anticipatedPaths = [outsidePath];
+  const unassessedOutside = structuredClone(outside);
+  unassessedOutside.tasks.find(({ id }) => id === 'outside').anticipatedPaths =
+    ['newly-assessed/unassessed.json'];
+  const tieEvidence = structuredClone(evidence);
+  tieEvidence.packet.changeInventory.paths.push(outsidePath);
+  tieEvidence.packet.changeInventory.mappings.push(outsideMapping);
+  tieEvidence.result.coverage.push({ ...outsideMapping, classification: 'speculative' });
+  tieEvidence.result.unnecessaryWork.push(outsidePath);
+  const tiePrior = structuredClone(noIncomingPrior);
+  tiePrior.tasks[0].produces = [];
+  const tie = structuredClone(ambiguous);
+  tie.tasks[0].produces = [];
+  tie.tasks[1].produces = [];
+  tie.tasks[1].anticipatedPaths = [outsidePath];
   const absent = plan(['absent']); absent.tasks.find(({ id }) => id === 'absent').produces = [];
   const foreignCriterion = plan(['foreign-owner']);
   foreignCriterion.tasks.find(({ id }) => id === 'foreign-owner').criterionIds.push('dependent');
@@ -5949,6 +6019,10 @@ test('receipt-backed criterionless replacement preserves exact durable selection
     criterionIds: [], anticipatedPaths: ['unrelated'], dependsOn: [], produces: [], consumes: [] });
   const rows = [
     ['unique', evidence, priorPlan, plan(['unique']), ['unique'], null],
+    ['outside-prefix', outsideEvidence, priorPlan, outside, ['outside'], null],
+    ['unassessed-outside-prefix', outsideEvidence, priorPlan, unassessedOutside, ['outside'],
+      /lacks one exact replacement/u],
+    ['prior-prefix-tie-break', tieEvidence, tiePrior, tie, ['first', 'second'], null],
     ['absent', evidence, priorPlan, absent, ['absent'], /lacks one exact replacement/u],
     ['foreign-owner', evidence, priorPlan, foreignCriterion, ['foreign-owner'],
       /criterionIds must equal its exact resulting owned criteria/u],
@@ -5985,6 +6059,54 @@ test('receipt-backed criterionless replacement preserves exact durable selection
   writeFileSync(tamperedPath, `${JSON.stringify(tampered)}\n`);
   assert.notEqual(readFileSync(tamperedPath.slice(0, -5) + '.sha256', 'utf8').trim(),
     digestJson(tampered), 'receipt-consistent recovery cannot adopt tampered selection evidence');
+});
+
+// Current packet binding cannot originate a zero-owned-criterion task. This historical recovery
+// fixture therefore replays the exact receipt-bound amendment projection that recovery validates.
+test('interrupted criterionless amendment recovery replays assessed outside-prefix authority atomically', () => {
+  const responsibility = 'Replace the historical criterionless discovery.';
+  const assessedPath = 'newly-assessed/recovery.json';
+  const mapping = { mechanism: assessedPath, sourceCriterionIds: [], acceptedCriterionIds: [],
+    invariantIds: [] };
+  const priorPlan = { criteria: [], tasks: [{ id: 'historical-discovery', objective: 'Discover scope.',
+    criterionIds: [], anticipatedPaths: ['historical-prefix'], dependsOn: [], produces: [], consumes: [] }],
+  checklistMappings: [], decisions: [] };
+  const evidence = { result: { verdict: 'trim-required', unnecessaryWork: [assessedPath],
+    smallerSufficientAlternative: responsibility,
+    coverage: [{ ...mapping, classification: 'speculative' }] },
+  packet: { changeInventory: { paths: [assessedPath], mappings: [mapping] } },
+  cadence: { trigger: 'worker-scope-discovery:historical-discovery:result:recovery' } };
+  const resultingPlan = { criteria: [{ id: 'replacement-criterion', description: responsibility,
+    disposition: 'owned', ownerTaskId: 'replacement', deferredReason: null }],
+  tasks: [{ id: 'replacement', objective: responsibility, criterionIds: ['replacement-criterion'],
+    anticipatedPaths: [assessedPath], dependsOn: [], produces: [], consumes: [] }],
+  checklistMappings: [], decisions: [] };
+  const directory = mkdtempSync(join(tmpdir(), 'criterionless-recovery '));
+  mkdirSync(join(directory, 'scope'), { recursive: true });
+  mkdirSync(join(directory, 'sidecars'), { recursive: true });
+  writeFileSync(join(directory, 'state.json'), '{"phase":"planning"}\n');
+  writeFileSync(join(directory, 'scope', 'evidence.json'), '{"receipt":"preserved"}\n');
+  writeFileSync(join(directory, 'events.jsonl'), '{"event":"intent-persisted"}\n');
+  writeFileSync(join(directory, 'sidecars', 'existing.json'), '{"preserved":true}\n');
+  const intentPath = join(directory, 'intent.json');
+  writeReceiptJson(intentPath, { evidence, priorPlan, resultingPlan,
+    addedTaskIds: ['replacement'] });
+  const replay = JSON.parse(readFileSync(intentPath, 'utf8'));
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority(replay), [],
+    'recovery replays the exact newly assessed replacement outside the immutable prior prefix');
+
+  replay.resultingPlan.tasks[0].anticipatedPaths = ['newly-assessed/unassessed.json'];
+  writeReceiptJson(intentPath, replay);
+  assert.equal(readFileSync(intentPath.slice(0, -5) + '.sha256', 'utf8').trim(), digestJson(replay),
+    'the tampered recovery intent remains internally receipt-consistent');
+  const before = durableSnapshot(directory);
+  assert.ok(validateNonmaterialAmendmentTaskAuthority(
+    JSON.parse(readFileSync(intentPath, 'utf8')))
+    .some((error) => /lacks one exact replacement/u.test(error)),
+  'receipt consistency cannot authorize an unassessed replacement path');
+  assert.deepEqual(durableSnapshot(directory), before,
+    'failed recovery validation mutates no state, scope evidence, receipts, events, sidecars, or completion');
+  assert.equal(existsSync(join(directory, 'completion.json')), false);
 });
 
 test('receipt-backed minor remediation derives paths from exact source and invariant authority', async () => {
