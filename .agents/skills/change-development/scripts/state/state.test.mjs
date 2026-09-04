@@ -915,21 +915,29 @@ test('assessed replacements retain only complete row-local metadata authority', 
         ownerTaskId: 'owner', deferredReason: null },
       { id: 'other', description: 'Remain unrelated.', disposition: 'owned',
         ownerTaskId: 'other-owner', deferredReason: null },
+      { id: 'row-authorized', description: 'Authorize the matched row.', disposition: 'owned',
+        ownerTaskId: 'row-owner', deferredReason: null },
     ],
     tasks: [
       { id: 'owner', specialization: ownerSpecialization, criterionIds: ['owned'],
         decisionIds: ['allowed-decision', 'inherited-only-decision'], anticipatedPaths: ['owned'], dependsOn: [],
-        produces: ['owned-artifact'], consumes: [], unsplittable: ownerUnsplittable },
+        produces: ['owned-artifact'], consumes: [], scenarioIds: ['owner-first', 'owner-second'],
+        unsplittable: ownerUnsplittable },
       { id: 'other-owner', specialization: foreignSpecialization, criterionIds: ['other'],
         decisionIds: [], anticipatedPaths: ['other'], dependsOn: [], produces: [], consumes: [],
+        scenarioIds: ['foreign-scenario'],
         unsplittable: { ...ownerUnsplittable, reason: 'Conflicting owner authority.' } },
+      { id: 'row-owner', specialization: ownerSpecialization, criterionIds: ['row-authorized'],
+        decisionIds: [], anticipatedPaths: ['owned'], dependsOn: [], produces: [], consumes: [],
+        scenarioIds: ['row-scenario'], unsplittable: ownerUnsplittable },
     ],
     checklistMappings: [{ id: 'owned-check', taskIds: ['owner'] }],
     decisions: [{ id: 'allowed-decision' }, { id: 'inherited-only-decision' },
       { id: 'row-added-decision' }, { id: 'unrelated-decision' }],
   };
   const row = { mechanism: path, sourceCriterionIds: ['source'],
-    acceptedCriterionIds: ['owned'], invariantIds: [], decisionIds: ['row-added-decision'] };
+    acceptedCriterionIds: ['owned', 'row-authorized'], invariantIds: [],
+    decisionIds: ['row-added-decision'] };
   const evidence = { result: { verdict: 'trim-required', unnecessaryWork: [path],
     smallerSufficientAlternative: responsibility,
     coverage: [{ ...row, classification: 'speculative' }] },
@@ -955,6 +963,30 @@ test('assessed replacements retain only complete row-local metadata authority', 
   assert.deepEqual(validateNonmaterialAmendmentTaskAuthority(
     JSON.parse(readFileSync(receiptPath, 'utf8'))), [],
   'receipt-backed exact original-owner metadata remains valid');
+  const authorizedScenarioAddition = exact();
+  authorizedScenarioAddition.tasks[0].scenarioIds.splice(1, 0, 'row-scenario');
+  assert.deepEqual(validate(authorizedScenarioAddition), [],
+  'a complete matched row may add its original owner scenario between inherited scenarios');
+  writeReceiptJson(receiptPath, { evidence, priorPlan, resultingPlan: authorizedScenarioAddition,
+    addedTaskIds: ['replacement'] });
+  assert.deepEqual(validateNonmaterialAmendmentTaskAuthority(
+    JSON.parse(readFileSync(receiptPath, 'utf8'))), [],
+  'receipt-backed complete rows may interleave an authorized owner-local scenario');
+  for (const [label, scenarioIds] of [
+    ['missing', ['owner-first']],
+    ['reordered', ['owner-second', 'owner-first']],
+    ['duplicated', ['owner-first', 'owner-second', 'owner-first']],
+  ]) {
+    const candidate = exact(); candidate.tasks[0].scenarioIds = scenarioIds;
+    const pattern = /retain complete exact ordered inherited scenarioIds without duplicates/u;
+    assert.match(validate(candidate).join('\n'), pattern,
+      `${label} inherited scenario authority is rejected directly`);
+    writeReceiptJson(receiptPath, { evidence, priorPlan, resultingPlan: candidate,
+      addedTaskIds: ['replacement'] });
+    assert.match(validateNonmaterialAmendmentTaskAuthority(
+      JSON.parse(readFileSync(receiptPath, 'utf8'))).join('\n'), pattern,
+    `${label} inherited scenario authority is rejected from receipt-backed evidence`);
+  }
   const authorizedAddition = exact();
   authorizedAddition.tasks[0].decisionIds.splice(1, 0, 'row-added-decision');
   assert.deepEqual(validate(authorizedAddition), [],
@@ -980,6 +1012,8 @@ test('assessed replacements retain only complete row-local metadata authority', 
     `${label} inherited decision authority is rejected from receipt-backed evidence`);
   }
   for (const [label, pattern, mutate] of [
+    ['scenario', /scenarioIds exceed its exact row-local owner authority/u,
+      (task) => { task.scenarioIds = [...task.scenarioIds, 'foreign-scenario']; }],
     ['decision', /decisionIds exceed its exact assessed rows/u,
       (task) => { task.decisionIds = [...task.decisionIds, 'unrelated-decision']; }],
     ['specialization', /specialization must equal its exact row-local authority/u,
@@ -5306,29 +5340,50 @@ test('receipt-backed same-responsibility mixed minor amendments require complete
     .map(({ id, status }) => ({ id, status })), exact.addedTaskIds.map((id) => ({ id, status: 'unbound' })));
 });
 
-test('receipt-backed minor and trim admission reject foreign scenario authority atomically', async () => {
+test('receipt-backed minor and trim replacement admission preserves scenario authority atomically', async () => {
   for (const verdict of ['minor-amendment-required', 'trim-required']) {
-    const fixture = await integratedTwoTaskFixture(`scenario authority ${verdict}`,
-      ['first.txt', 'second.txt'], { configurePlan(plan) {
-        plan.scenarios = [
-          { id: 'owner-scenario', feature: 'specs/features/state.feature',
-            scenario: 'Durable planning scenario' },
-          { id: 'foreign-scenario', feature: 'specs/features/state.feature',
-            scenario: 'Durable planning scenario' },
-        ];
-        plan.productScenarioDisposition = { disposition: 'mapped',
-          scenarioIds: ['owner-scenario', 'foreign-scenario'],
-          rationale: 'Both existing owner scenarios remain mapped.' };
-        plan.tasks[0].scenarioIds = ['owner-scenario'];
-        plan.tasks[1].scenarioIds = ['foreign-scenario'];
-      } });
-    let state = fixture.state;
-    const evidence = integratedScopeEvidenceFor({ cwd: fixture.cwd, changeId: state.changeId });
-    const mapping = evidence.packet.changeInventory.mappings[0];
+    const fixture = repository(`scenario authority ${verdict}`);
+    const planning = await initializeState({ cwd: fixture.cwd,
+      changeId: `scenario-authority-${verdict}`, mode: 'implement', baseBranch: 'main',
+      planningRef: fixture.sha, source: descriptor });
+    const original = executionPlanFor(planning);
+    original.scenarios = [
+      { id: 'owner-scenario', feature: 'specs/features/state.feature',
+        scenario: 'Durable planning scenario' },
+      { id: 'foreign-scenario', feature: 'specs/features/state.feature',
+        scenario: 'Durable planning scenario' },
+    ];
+    original.productScenarioDisposition = { disposition: 'mapped',
+      scenarioIds: ['owner-scenario', 'foreign-scenario'],
+      rationale: 'Both existing owner scenarios remain mapped.' };
+    original.tasks[0].scenarioIds = ['owner-scenario'];
+    original.tasks[1].scenarioIds = ['foreign-scenario'];
+    let state = acceptPlan({ cwd: fixture.cwd, plan: original,
+      expectedRevision: planning.revision });
+    const packet = packetFor(state, original, 'state-task');
+    state = bindTask({ cwd: fixture.cwd, packet, expectedRevision: state.revision });
+    const worker = createWorkerFixture(fixture.cwd, state, packet);
+    state = scheduleWave({ cwd: fixture.cwd, expectedRevision: state.revision });
+    state = startTask({ cwd: fixture.cwd, taskId: packet.taskId,
+      workerId: `${verdict}-scenario-worker`, expectedRevision: state.revision });
+    const scopeDiscovery = { schemaVersion: 1,
+      summary: 'The scenario owner requires one exact assessed replacement.',
+      evidence: [{ kind: 'state-path', identity: 'first.txt/scenario-authority.mjs',
+        detail: 'The owner-local scenario projection must survive replacement.' }],
+      triggeredTripwireIds: ['test-task-paths'],
+      requestedAuthority: [{ field: 'paths', values: ['first.txt/scenario-authority.mjs'] }] };
+    const blocked = { ...resultFor(packet, 'blocked'), unexpectedDependencies: [scopeDiscovery.summary],
+      scopeDiscovery, summary: scopeDiscovery.summary };
+    state = acceptResult({ cwd: fixture.cwd, workerCwd: worker.path,
+      expectedRevision: state.revision, result: blocked });
+    const evidence = workerDiscoveryNonmaterialScopeEvidence(state, original,
+      testMinimalClosure(planning, original), packet, blocked, scopeDiscovery, verdict);
+    const mapping = evidence.packet.changeInventory.mappings.at(-1);
     const responsibility = verdict === 'minor-amendment-required'
       ? 'Apply the exact owner-local scenario correction.'
       : 'Use only the owner-local scenario simplification.';
-    evidence.packet.changeInventory.paths.push(mapping.mechanism);
+    evidence.packet.changeInventory.paths = [mapping.mechanism];
+    evidence.packet.changeInventory.mappings = [mapping];
     evidence.result = verdict === 'minor-amendment-required'
       ? { ...evidence.result, verdict,
         coverage: [{ ...mapping, classification: 'necessary-minor-expansion' }],
@@ -5343,32 +5398,41 @@ test('receipt-backed minor and trim admission reject foreign scenario authority 
     evidence.resultDigest = digestJson(evidence.result);
     state = assessScope({ cwd: fixture.cwd, changeId: state.changeId, scopeEvidence: evidence,
       expectedRevision: state.revision });
+    state = rejectTask({ cwd: fixture.cwd, taskId: packet.taskId,
+      reason: responsibility, expectedRevision: state.revision });
+    removeTaskWorktree({ cwd: fixture.cwd, changeId: state.changeId, taskId: packet.taskId });
     const directory = changeDirectory(fixture.cwd, state.changeId);
-    const original = JSON.parse(readFileSync(join(directory, 'plan', 'plan.json'), 'utf8'));
     const resultingPlan = structuredClone(original); resultingPlan.planRevision = 2;
     const criterionId = `${verdict}-scenario-criterion`;
-    const taskId = `${verdict}-scenario-task`;
+    const taskId = `${verdict}-scenario-replacement`;
+    resultingPlan.criteria[0].ownerTaskId = taskId;
     resultingPlan.criteria.push({ id: criterionId, description: responsibility,
       disposition: 'owned', ownerTaskId: taskId, deferredReason: null });
-    resultingPlan.tasks.push({ ...original.tasks[0], id: taskId,
+    resultingPlan.tasks[0] = { ...original.tasks[0], id: taskId,
       title: 'Apply owner-local scenario remediation', objective: responsibility,
-      criterionIds: [criterionId], decisionIds: [], scenarioIds: ['foreign-scenario'],
-      checklistItemIds: [], dependsOn: ['state-task'], anticipatedPaths: ['first.txt'],
-      produces: [], consumes: [] });
+      criterionIds: [...original.tasks[0].criterionIds, criterionId],
+      scenarioIds: ['owner-scenario', 'foreign-scenario'],
+      anticipatedPaths: [mapping.mechanism] };
+    resultingPlan.checklistMappings = resultingPlan.checklistMappings.map((mapping) => ({
+      ...mapping, taskIds: mapping.taskIds.map((id) => id === 'state-task' ? taskId : id),
+    }));
     const trigger = digestJson(evidence);
+    const suffix = `${packet.taskId}/0001.json`;
     const amendment = { id: `${verdict}-scenario-amendment`,
       reason: 'Apply only the exact receipt-backed scenario remediation.',
       authorization: 'scope-review', trigger, delta: { addedTaskIds: [taskId] },
-      invalidatedEvidence: [trigger] };
+      invalidatedEvidence: [trigger, `implementation/tasks/${suffix}`,
+        `implementation/provenance/${suffix}`, `implementation/planning-signals/${suffix}`,
+        `implementation/specialist-routes/${suffix}`, `implementation/results/${suffix}`] };
     const before = durableSnapshot(directory);
     assert.throws(() => amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
       amendment, resultingPlan }),
     (error) => error.code === 'INVALID_AMENDMENT'
       && /scenarioIds exceed its exact row-local owner authority/u.test(error.message));
     assert.deepEqual(durableSnapshot(directory), before,
-      `${verdict} rejects unrelated-owner scenario authority before durable mutation`);
+      `${verdict} replacement rejects unrelated-owner scenario authority before durable mutation`);
 
-    resultingPlan.tasks.at(-1).scenarioIds = ['owner-scenario'];
+    resultingPlan.tasks[0].scenarioIds = ['owner-scenario'];
     state = amendPlan({ cwd: fixture.cwd, expectedRevision: state.revision,
       amendment, resultingPlan });
     assert.equal(state.execution.tasks.find(({ id }) => id === taskId).status, 'unbound');
@@ -5630,6 +5694,21 @@ test('durable assessed replacements preserve substituted edges and recovery reva
     changeId: 'durable-assessed-replacement-edges', mode: 'implement', baseBranch: 'main',
     planningRef: fixture.sha, source: descriptor });
   const plan = executionPlanFor(planning);
+  plan.scenarios = [
+    { id: 'first-owner-scenario', feature: 'specs/features/state.feature',
+      scenario: 'Durable planning scenario' },
+    { id: 'second-owner-first', feature: 'specs/features/state.feature',
+      scenario: 'Durable planning scenario' },
+    { id: 'second-owner-second', feature: 'specs/features/state.feature',
+      scenario: 'Durable planning scenario' },
+    { id: 'row-authorized-scenario', feature: 'specs/features/state.feature',
+      scenario: 'Durable planning scenario' },
+  ];
+  plan.productScenarioDisposition = { disposition: 'mapped',
+    scenarioIds: plan.scenarios.map(({ id }) => id),
+    rationale: 'Every durable assessed replacement scenario remains mapped.' };
+  plan.tasks[0].scenarioIds = ['first-owner-scenario'];
+  plan.tasks[1].scenarioIds = ['second-owner-first', 'second-owner-second'];
   plan.decisions.push({ id: 'unrelated-decision', question: 'Unrelated?',
     rationale: 'Remain outside the assessed rows.', status: 'resolved', resolution: 'No.' });
   plan.tasks[0].anticipatedPaths = ['first.txt']; plan.tasks[0].produces = ['artifact'];
@@ -5639,7 +5718,8 @@ test('durable assessed replacements preserve substituted edges and recovery reva
     disposition: 'owned', ownerTaskId: 'extra-task', deferredReason: null });
   plan.tasks.push({ ...plan.tasks[0], id: 'extra-task', title: 'Keep extra task',
     objective: 'Keep the extra task.', criterionIds: ['extra-change'], checklistItemIds: [],
-    decisionIds: ['unrelated-decision'], anticipatedPaths: ['extra.txt'], produces: [] });
+    decisionIds: ['unrelated-decision'], scenarioIds: ['row-authorized-scenario'],
+    anticipatedPaths: ['extra.txt'], produces: [] });
   let state = acceptPlan({ cwd: fixture.cwd, plan, expectedRevision: planning.revision });
   const packet = packetFor(state, plan, 'state-task');
   state = bindTask({ cwd: fixture.cwd, packet, expectedRevision: state.revision });
@@ -5662,7 +5742,8 @@ test('durable assessed replacements preserve substituted edges and recovery reva
   const responsibility = 'Replace both assessed graph owners.';
   const rows = [
     { ...base, mechanism: 'first.txt/assessed.mjs', acceptedCriterionIds: ['durable-state'] },
-    { ...base, mechanism: 'second.txt/assessed.mjs', acceptedCriterionIds: ['second-change'] },
+    { ...base, mechanism: 'second.txt/assessed.mjs',
+      acceptedCriterionIds: ['second-change', 'extra-change'] },
   ];
   evidence.packet.changeInventory.paths = rows.map(({ mechanism }) => mechanism);
   evidence.packet.changeInventory.mappings = rows;
@@ -5691,6 +5772,7 @@ test('durable assessed replacements preserve substituted edges and recovery reva
     result.tasks[1] = { ...plan.tasks[1], id: 'second-replacement', objective: responsibility,
       criterionIds: ['second-change', 'second-replacement-new'], checklistItemIds: [],
       anticipatedPaths: [rows[1].mechanism], decisionIds: [...plan.tasks[1].decisionIds],
+      scenarioIds: ['second-owner-first', 'row-authorized-scenario', 'second-owner-second'],
       dependsOn: ['first-replacement'],
       consumes: [{ artifactId: 'artifact', producerTaskId: 'first-replacement' }] };
     result.checklistMappings[0].taskIds = ['first-replacement'];
@@ -5723,6 +5805,14 @@ test('durable assessed replacements preserve substituted edges and recovery reva
       const task = candidate.tasks.find(({ id }) => id === 'second-replacement');
       task.decisionIds = [...task.decisionIds, 'unrelated-decision'];
     }, /decisionIds exceed its exact assessed rows/u],
+    ['inherited-scenario', (candidate) => {
+      candidate.tasks.find(({ id }) => id === 'second-replacement').scenarioIds =
+        ['second-owner-first', 'row-authorized-scenario'];
+    }, /retain complete exact ordered inherited scenarioIds without duplicates/u],
+    ['foreign-scenario', (candidate) => {
+      candidate.tasks.find(({ id }) => id === 'second-replacement').scenarioIds.push(
+        'first-owner-scenario');
+    }, /scenarioIds exceed its exact row-local owner authority/u],
     ['specialization', (candidate) => {
       candidate.tasks.find(({ id }) => id === 'second-replacement').specialization =
         behaviorSpecialization();
@@ -5758,6 +5848,11 @@ test('durable assessed replacements preserve substituted edges and recovery reva
     }],
     ['consume-edge removal', (task) => { task.consumes = []; }],
     ['unrelated decision', (task) => { task.decisionIds.push('unrelated-decision'); }],
+    ['inherited scenario reordering', (task) => {
+      task.scenarioIds = ['second-owner-second', 'row-authorized-scenario', 'second-owner-first'];
+    }],
+    ['duplicated inherited scenario', (task) => { task.scenarioIds.push('second-owner-first'); }],
+    ['foreign scenario', (task) => { task.scenarioIds.push('first-owner-scenario'); }],
     ['foreign specialization', (task) => { task.specialization = behaviorSpecialization(); }],
     ['invented unsplittable authority', (task) => {
       task.unsplittable = { reason: 'Invent assessed recovery authority.',

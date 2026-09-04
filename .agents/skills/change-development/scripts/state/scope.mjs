@@ -533,14 +533,14 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
       }
       const requiredOwnerIds = new Set([...originalOwnerIds].map((id) =>
         isReplacement ? id : substitution(id)));
+      const allowedScenarioIds = new Set([...originalOwnerIds].flatMap((id) =>
+        (priorPlan?.tasks ?? []).find((candidate) => candidate.id === id)?.scenarioIds ?? []));
       if (!isReplacement) {
         const expectedDependencies = (priorPlan?.tasks ?? []).map(({ id }) => substitution(id))
           .filter((id, index, values) => requiredOwnerIds.has(id) && values.indexOf(id) === index);
         if (!isDeepStrictEqual(task.dependsOn ?? [], expectedDependencies)) {
           errors.push(`$ nonmaterial fresh remediation task ${task.id} dependencies must equal its exact row-local owner carry`);
         }
-        const allowedScenarioIds = new Set([...originalOwnerIds].flatMap((id) =>
-          (priorPlan?.tasks ?? []).find((candidate) => candidate.id === id)?.scenarioIds ?? []));
         if ((task.scenarioIds ?? []).some((id) => !allowedScenarioIds.has(id))) {
           errors.push(`$ nonmaterial fresh remediation task ${task.id} scenarioIds exceed its exact row-local owner authority`);
         }
@@ -549,6 +549,22 @@ export function validateNonmaterialAmendmentTaskAuthority({ evidence, priorPlan,
         }
         if ((task.checklistItemIds ?? []).length > 0) {
           errors.push(`$ nonmaterial fresh remediation task ${task.id} cannot introduce checklist authority`);
+        }
+      } else {
+        const inheritedScenarioIds = (priorPlan?.tasks ?? []).find(({ id }) =>
+          priorOwnersByReplacement.get(task.id).includes(id))?.scenarioIds ?? [];
+        const inheritedScenarioIdSet = new Set(inheritedScenarioIds);
+        const taskScenarioIds = task.scenarioIds ?? [];
+        const inheritedScenarioProjection = taskScenarioIds
+          .filter((id) => inheritedScenarioIdSet.has(id));
+        const addedScenarioIds = taskScenarioIds
+          .filter((id) => !inheritedScenarioIdSet.has(id));
+        if (new Set(taskScenarioIds).size !== taskScenarioIds.length
+            || !isDeepStrictEqual(inheritedScenarioProjection, inheritedScenarioIds)) {
+          errors.push(`$ nonmaterial assessed replacement task ${task.id} must retain complete exact ordered inherited scenarioIds without duplicates`);
+        }
+        if (addedScenarioIds.some((id) => !allowedScenarioIds.has(id))) {
+          errors.push(`$ nonmaterial assessed replacement task ${task.id} scenarioIds exceed its exact row-local owner authority`);
         }
       }
       const allowedDecisionIds = new Set(matchedAuthorities.flatMap(({ authority }) =>
